@@ -7,10 +7,10 @@ import (
 
 	"github.com/shady2k/nocx/internal/agentcapture"
 	"github.com/shady2k/nocx/internal/agentdriver"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
 )
 
-func classify(t *testing.T, f panegrid.Frame) agentdriver.State {
+func classify(t *testing.T, f paneview.Frame) agentdriver.State {
 	t.Helper()
 	return agentdriver.Claude().Classify(f)
 }
@@ -62,7 +62,7 @@ func TestAPrintedTrustMenuIsNotAPermissionChoice(t *testing.T) {
 // verdict may not move: all of them are content, and every anchor is a
 // position.
 func TestTextTheAgentPrintedCannotForgeAnyVerdict(t *testing.T) {
-	r := replayer(t, "claude-idle", 11000)
+	r := newReplayer(t, "claude-idle", 11000)
 	// ESC 7 / ESC 8 around the writes, because the TUI owns the cursor and
 	// puts it back in the input box after every repaint. An agent's output
 	// cannot take the cursor, and that is one of the two markers.
@@ -88,7 +88,7 @@ func TestTextTheAgentPrintedCannotForgeAnyVerdict(t *testing.T) {
 // ── the set is closed, and it refuses to guess ────────────────────────────
 
 func TestAFrameWithNoChromeAtAllIsUnknown(t *testing.T) {
-	if got := classify(t, panegrid.Frame{}); got != agentdriver.StateUnknown {
+	if got := classify(t, paneview.Frame{}); got != agentdriver.StateUnknown {
 		t.Errorf("zero frame = %q, want %q", got, agentdriver.StateUnknown)
 	}
 }
@@ -412,7 +412,7 @@ func TestAnOverlayWithNoTurnAboveItIsNotWorking(t *testing.T) {
 // pre-fix rule's Contains check matched "·" and "●" respectively wherever
 // they sat in the row.
 func TestAToolCallBulletEndingInAnEllipsisWithAMidRowDotIsNotWorking(t *testing.T) {
-	r := replayer(t, "claude-2.1.266-turn", 36000)
+	r := newReplayer(t, "claude-2.1.266-turn", 36000)
 	forged := "\x1b7\x1b[35;1H\x1b[2K● step 1 · reading…\x1b8"
 	if err := r.Feed([]agentcapture.Chunk{{Data: forged}}); err != nil {
 		t.Fatalf("feed forged text: %v", err)
@@ -427,7 +427,7 @@ func TestAToolCallBulletEndingInAnEllipsisWithAMidRowDotIsNotWorking(t *testing.
 }
 
 func TestAToolCallBulletNamingTheAPIWaitWithAMidRowDotIsNotError(t *testing.T) {
-	r := replayer(t, "claude-2.1.266-turn", 36000)
+	r := newReplayer(t, "claude-2.1.266-turn", 36000)
 	forged := "\x1b7\x1b[35;1H\x1b[2K● Waiting for API response · …\x1b8"
 	if err := r.Feed([]agentcapture.Chunk{{Data: forged}}); err != nil {
 		t.Fatalf("feed forged text: %v", err)
@@ -552,7 +552,7 @@ func TestATimedSpinnerLineBeyondABlankRowIsKeptOutByStopAtBlank(t *testing.T) {
 // agent printed into its own transcript exactly as well as a row a real
 // spinner opened.
 func TestARetryPhraseWithNoRealSpinnerGlyphIsNotError(t *testing.T) {
-	r := replayer(t, "claude-2.1.266-turn", 36000)
+	r := newReplayer(t, "claude-2.1.266-turn", 36000)
 	forged := "\x1b7\x1b[35;1H\x1b[2K· Retrying in 5s\x1b8"
 	if err := r.Feed([]agentcapture.Chunk{{Data: forged}}); err != nil {
 		t.Fatalf("feed forged text: %v", err)
@@ -567,7 +567,7 @@ func TestARetryPhraseWithNoRealSpinnerGlyphIsNotError(t *testing.T) {
 }
 
 func TestATimedSpinnerPhraseWithNoRealSpinnerGlyphIsNotWorking(t *testing.T) {
-	r := replayer(t, "claude-2.1.266-turn", 36000)
+	r := newReplayer(t, "claude-2.1.266-turn", 36000)
 	forged := "\x1b7\x1b[35;1H\x1b[2KReading… (12s)\x1b8"
 	if err := r.Feed([]agentcapture.Chunk{{Data: forged}}); err != nil {
 		t.Fatalf("feed forged text: %v", err)

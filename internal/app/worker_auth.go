@@ -26,7 +26,7 @@ type workerAuthSessions interface {
 // agent_withdraw. The pane grid is lifecycle-owned, so a session that is no
 // longer watched cannot remain an admitting principal.
 type workerAuthEnrolments interface {
-	Enrolled(paneID string) bool
+	Watched(paneID string) bool
 }
 
 // workerAuthParticipants answers whether the admitted session is a WORKER's.
@@ -196,7 +196,7 @@ func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, sessi
 	var admittedSession session.Session
 	for _, sess := range a.sessions.List() {
 		sid := sess.ID()
-		if sid == "" || !a.enrolments.Enrolled(string(sid)) {
+		if sid == "" || !a.enrolments.Watched(string(sid)) {
 			continue
 		}
 		rootPID, known := a.sessions.OwnedProcessPID(sid)

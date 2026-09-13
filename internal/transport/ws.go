@@ -40,7 +40,6 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/notify"
-	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
@@ -304,10 +303,12 @@ type WSServer struct {
 	// Structured backup capability and native file saver. The operation is
 	// constructed after all options so it shares the current config gate.
 	backupService *backup.Service
-	// paneGrid is the backend's VT grid for ENROLLED panes (nocx-szb40.2,
-	// the AD-6 amendment). Nil is the normal state: a session without one
-	// runs exactly as it did before, and the byte path never depends on it.
-	paneGrid panegrid.Observer
+	// paneScreens is the store a watched pane's frame is read from
+	// (ADR-0066): the coordinator holds no emulator, so this is a question
+	// asked of the helper that owns the pane. Nil is the normal state: a
+	// session nobody watches runs exactly as it did before, and the byte path
+	// never depends on it.
+	paneScreens paneScreens
 	// paneObserver classifies an enrolled pane's grid and reports the
 	// changes (nocx-szb40.3). Nil when unwired, like paneGrid above.
 	paneObserver paneObserver
@@ -332,7 +333,7 @@ type WSServer struct {
 	agentTypist agentTypist
 	// sweepDone closes at Stop and is the coalescer's second end;
 	// sweepExited closes when the coalescer has actually returned, so Stop
-	// can be sure nothing is still sweeping. Same shape as panegrid's own
+	// can be sure nothing is still sweeping. Same shape as the watcher's own
 	// drain handshake: asking a goroutine to stop is not the same as it
 	// having stopped, and an interval whose close nobody waits for is an
 	// interval with one end.
@@ -3286,8 +3287,10 @@ func (s *WSServer) pumpToRing(ctx context.Context, sess session.Session, ring *o
 	// first attach. It ends itself when the ring closes.
 	go s.recordSessionOutput(ctx, sess.ID(), ring)
 
+	// The bytes go to the recording and to nothing else: a frame is read from
+	// the runtime that owns the terminal (ADR-0066), never derived here from a
+	// stream whose middle the helper's bounded window may have reclaimed.
 	err := sess.StartOutput(ctx, func(data []byte) error {
-		s.feedPaneGrid(sess.ID(), data)
 		return ring.write(data)
 	})
 	// THE INTERVAL'S SECOND END IS NOT HERE, and it was, which made it no end
@@ -3445,13 +3448,13 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	<-sess.Done()
 
-	// The pane's backend grid closes here, first, because everything below
-	// this line tears down the things a frame could still be about. A session
-	// that is done can produce no further frame, which is what the AD-6
-	// amendment means by the interval's second end — and this is the end that
-	// covers an enrolment whose own withdrawal never came, because the shell
-	// holding it was killed rather than returning (nocx-szb40.5).
-	s.withdrawPaneGrid(sess.ID())
+	// The pane's observation closes here, first, because everything below this
+	// line tears down the things a frame could still be about. A session that
+	// is done can produce no further frame, which is what the AD-6 amendment
+	// means by the interval's second end — and this is the end that covers an
+	// enrolment whose own withdrawal never came, because the shell holding it
+	// was killed rather than returning (nocx-szb40.5).
+	s.unwatchPane(sess.ID())
 
 	// The session died on its own: the close gate is terminal here too, so
 	// a resize in flight on a dead channel is cancelled and nothing new is

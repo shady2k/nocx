@@ -133,6 +133,14 @@ func (c *Client) Call(ctx context.Context, service, op string, params, out any) 
 	if err != nil {
 		return fmt.Errorf("helper: request: %w", err)
 	}
+	// A REQUEST IS NOT CHUNKED (D14 chunking is a response path), so a payload
+	// above one frame is refused rather than handed to EncodeFrame, which
+	// panics on it. The op that can actually reach this is the replay: its
+	// params carry a capture's bytes, and a capture is a file a person may have
+	// written.
+	if len(payload) > proto.MaxFrameBytes {
+		return fmt.Errorf("%w: %d bytes for %s.%s", ErrRequestTooLarge, len(payload), service, op)
+	}
 
 	ch := make(chan proto.Response, 1)
 	c.mu.Lock()

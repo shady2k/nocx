@@ -12,6 +12,7 @@ package agentdriver_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,8 +22,8 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/agentcapture"
+	"github.com/shady2k/nocx/internal/agentcapture/replaylocal"
 	"github.com/shady2k/nocx/internal/agentdriver"
-	"github.com/shady2k/nocx/internal/log"
 )
 
 const manifestPath = "testdata/captures/manifest.json"
@@ -159,7 +160,7 @@ func checkManifest(m manifest, dir string, reg *agentdriver.Registry) []error {
 		for i, e := range entries {
 			marks[i] = *e.AtMs
 		}
-		moments, err := agentcapture.Frames(log.NewSlogAdapter(nil), header, chunks, marks)
+		moments, err := agentcapture.Frames(context.Background(), replaylocal.Replayer{}, header, chunks, marks)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("replay %s: %w", name, err))
 			continue

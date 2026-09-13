@@ -41,13 +41,14 @@
 package agentcalib
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/agentcapture"
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
 )
 
 // Label names a screen a person can be asked to produce. It is the design's
@@ -149,7 +150,7 @@ const (
 // Screens is the seam onto the pane's live grid (AD-8). One method, because
 // calibration may read a frame and may not enrol, withdraw, classify or type.
 type Screens interface {
-	Frame(paneID string) (panegrid.Frame, error)
+	Frame(paneID string) (paneview.Frame, error)
 }
 
 // Calibrations holds the walks in flight and writes the sets they produce.
@@ -162,6 +163,12 @@ type Calibrations struct {
 	log     log.Logger
 	screens Screens
 	store   Store
+	// replay is the emulator a stored set is re-read through (AD-8). It is the
+	// helper's, because this process holds none: verification is what authorises
+	// typing (agenttyping reads Verdict.MayType), and a rule checked against a
+	// screen another emulator would have produced is checked against a screen
+	// the product never makes.
+	replay agentcapture.Replay
 	// rules is what a set is verified AGAINST. The concrete registry rather
 	// than a second interface over it, for the same reason internal/paneobserve
 	// takes it: the registry is already the composition root's decision about
@@ -174,8 +181,8 @@ type Calibrations struct {
 }
 
 // New wires the calibration seam at the composition root.
-func New(lg log.Logger, screens Screens, store Store, rules *agentdriver.Registry) *Calibrations {
-	return &Calibrations{log: lg, screens: screens, store: store, rules: rules, walks: map[string]*walk{}}
+func New(lg log.Logger, screens Screens, store Store, rules *agentdriver.Registry, replay agentcapture.Replay) *Calibrations {
+	return &Calibrations{log: lg, screens: screens, store: store, rules: rules, replay: replay, walks: map[string]*walk{}}
 }
 
 // walk is one calibration in progress: the pane it is being driven on, the
@@ -232,7 +239,7 @@ type StoredStatus struct {
 // The pane must have a live grid: a calibration on a pane nocx is not watching
 // could label nothing, and finding that out at the first capture would be
 // finding it out after the person had driven their agent somewhere.
-func (c *Calibrations) Begin(pane, agent string) (Status, error) {
+func (c *Calibrations) Begin(ctx context.Context, pane, agent string) (Status, error) {
 	if pane == "" {
 		return Status{}, fmt.Errorf("agentcalib: a calibration needs a pane to be driven on")
 	}
@@ -253,7 +260,7 @@ func (c *Calibrations) Begin(pane, agent string) (Status, error) {
 	}
 	c.mu.Unlock()
 	c.log.Info("calibration begun", "pane_id", pane, "agent", agent, "cols", f.Cols, "rows", f.Rows)
-	return c.Status(pane, agent)
+	return c.Status(ctx, pane, agent)
 }
 
 // Abandon drops a walk in progress. Nothing is written, so the set that was
@@ -274,7 +281,7 @@ func (c *Calibrations) Abandon(pane string) {
 // pending one. It is a staleness guard and never a selector: the label written
 // comes from the walk's own pending step either way, so a surface that redrew
 // late is refused rather than answered into the wrong label.
-func (c *Calibrations) Answer(pane string, step int, answer Answer) (Status, error) {
+func (c *Calibrations) Answer(ctx context.Context, pane string, step int, answer Answer) (Status, error) {
 	c.mu.Lock()
 	w, ok := c.walks[pane]
 	c.mu.Unlock()
@@ -307,7 +314,7 @@ func (c *Calibrations) Answer(pane string, step int, answer Answer) (Status, err
 			return Status{}, err
 		}
 	}
-	return c.Status(pane, w.agent)
+	return c.Status(ctx, pane, w.agent)
 }
 
 // capture reads the pane's screen NOW and labels it with the pending step.
@@ -392,7 +399,7 @@ func (c *Calibrations) finish(w *walk) error {
 // Status answers the walk in progress on a pane, if any, and what is on disk
 // for the agent. Both, in one answer, because a surface draws them together
 // and a second round trip would let them disagree.
-func (c *Calibrations) Status(pane, agent string) (Status, error) {
+func (c *Calibrations) Status(ctx context.Context, pane, agent string) (Status, error) {
 	if err := validAgent(agent); err != nil {
 		return Status{}, err
 	}
@@ -410,6 +417,6 @@ func (c *Calibrations) Status(pane, agent string) (Status, error) {
 	if found {
 		out.Stored = &StoredStatus{Complete: set.Complete(), Labels: set.Labels}
 	}
-	out.Verification = c.Verify(agent)
+	out.Verification = c.Verify(ctx, agent)
 	return out, nil
 }

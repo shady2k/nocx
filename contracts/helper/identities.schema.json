@@ -178,6 +178,61 @@
         }
       }
     },
+    "screenCell": {
+      "description": "One column of a screen frame. Width is the load-bearing field and the reason a cell is not just a character: a double-width cluster occupies two columns, its first carries the grapheme at width 2 and its second is a continuation at width 0. A consumer that wants TEXT skips the width-0 cells; a consumer that wants a POSITION — which is what a chrome anchor is — reads the column index directly, and collapsing the two loses the second reading.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "width"],
+      "properties": {
+        "text": {
+          "description": "The whole grapheme cluster, and empty for a blank cell or a continuation. Text is a string and carries no position: a caller that needs to know where it sits reads its cell index.",
+          "type": "string"
+        },
+        "width": {
+          "description": "0 for a continuation or spacer column, 1 for a narrow cell, 2 for a wide cluster. Nothing else: a value outside the set is a shape this ABI does not have.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        }
+      }
+    },
+    "screenFrame": {
+      "description": "One screen as the emulator holds it: a rectangle of cells, the caret, and which buffer it is. The rows are a RECTANGLE and not trimmed text — lines is rows long and every line is cols long — because a consumer that reads a position must be able to index a column without knowing where a program stopped writing. This is the shape both readers of this ABI speak: a live session's screen and one screen of a replay.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cols", "rows", "cursorX", "cursorY", "cursorVisible", "altScreen", "lines"],
+      "properties": {
+        "cols": { "type": "integer", "minimum": 0 },
+        "rows": { "type": "integer", "minimum": 0 },
+        "cursorX": {
+          "description": "Cursor column, zero-indexed from the left of the active area. Zero-indexed while the sequences a program sends (CUP and friends) are one-indexed: an adapter that passed the program's own numbers through would be wrong by one on both axes.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "cursorY": { "type": "integer", "minimum": 0 },
+        "cursorVisible": {
+          "description": "DECTCEM (DEC mode 25). A program composing a frame hides the caret, and a renderer that painted one there would show the person something the program deliberately withdrew.",
+          "type": "boolean"
+        },
+        "altScreen": {
+          "description": "Whether the active buffer is the alternate screen. An OBSERVATION and never a decision: ADR-0024 decision 1 forbids it to open or complete an execution attempt.",
+          "type": "boolean"
+        },
+        "lines": {
+          "description": "One array per row, each cols cells long, in row-major order.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/screenCell" }
+          }
+        }
+      }
+    },
+    "completeness": {
+      "description": "What a runtime can honestly claim about the stream it holds. A closed set, spelled once here because both ends of this socket are the same Go package. An unrecognised spelling is NOT a claim a reader may strengthen: it decodes to `unknown`, where the write gate refuses.",
+      "type": "string",
+      "enum": ["unknown", "complete", "lostIngest", "noFence", "evicted"]
+    },
     "attachmentId": {
       "description": "One coordinator-to-helper connection and its lease. DISPOSABLE: it dies with the connection, it is what detach names, and it appears NOWHERE in the ledger — a durable row keyed by it would tie surviving work to a pipe.",
       "type": "string",

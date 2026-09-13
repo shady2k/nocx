@@ -17,7 +17,7 @@ import (
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview/paneviewtest"
 	"github.com/shady2k/nocx/internal/peerpin"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
@@ -83,7 +83,7 @@ func TestNewToolAuthorizerRejectsMissingApproval(t *testing.T) {
 	}
 }
 
-func openWorkerAuthSession(t *testing.T) (*session.Reg, session.Session, *panegrid.Store) {
+func openWorkerAuthSession(t *testing.T) (*session.Reg, session.Session, *paneviewtest.Views) {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	reg := session.New(logger, workerAuthPTYFactory{log: logger})
@@ -92,7 +92,7 @@ func openWorkerAuthSession(t *testing.T) (*session.Reg, session.Session, *panegr
 		t.Fatalf("open session: %v", err)
 	}
 	t.Cleanup(func() { _ = reg.Close(sess.ID()) })
-	grid := panegrid.New(logger)
+	grid := paneviewtest.NewViews(logger)
 	t.Cleanup(func() { grid.Withdraw(string(sess.ID())) })
 	return reg, sess, grid
 }
@@ -124,7 +124,7 @@ func TestToolAuthorizerAdmitsEnrolledOwnedTreeThroughRealWorkerRecord(t *testing
 	if err := reg.RecordOwnedProcessPID(sess.ID(), ownedPID); err != nil {
 		t.Fatalf("record owned process pid: %v", err)
 	}
-	if err := grid.Enrol(string(sess.ID()), 80, 24); err != nil {
+	if err := grid.Watch(string(sess.ID()), 80, 24); err != nil {
 		t.Fatalf("enrol session grid: %v", err)
 	}
 
@@ -219,7 +219,7 @@ func TestToolAuthorizerRefusesCallerOutsideEveryEnrolledTree(t *testing.T) {
 	if err := reg.RecordOwnedProcessPID(sess.ID(), ownedPID); err != nil {
 		t.Fatalf("record owned process pid: %v", err)
 	}
-	if err := grid.Enrol(string(sess.ID()), 80, 24); err != nil {
+	if err := grid.Watch(string(sess.ID()), 80, 24); err != nil {
 		t.Fatalf("enrol session grid: %v", err)
 	}
 
@@ -240,7 +240,7 @@ func TestToolAuthorizerWithdrawClosesAdmissionInterval(t *testing.T) {
 	if err := reg.RecordOwnedProcessPID(sess.ID(), ownedPID); err != nil {
 		t.Fatalf("record owned process pid: %v", err)
 	}
-	if err := grid.Enrol(string(sess.ID()), 80, 24); err != nil {
+	if err := grid.Watch(string(sess.ID()), 80, 24); err != nil {
 		t.Fatalf("enrol session grid: %v", err)
 	}
 
@@ -273,7 +273,7 @@ func TestWorkerToolCallAfterLifecycleLossIsRefusedWithoutParticipant(t *testing.
 	if err := reg.RecordOwnedProcessPID(sess.ID(), ownedPID); err != nil {
 		t.Fatalf("record owned process pid: %v", err)
 	}
-	if err := grid.Enrol(string(sess.ID()), 80, 24); err != nil {
+	if err := grid.Watch(string(sess.ID()), 80, 24); err != nil {
 		t.Fatalf("enrol session grid: %v", err)
 	}
 
@@ -376,7 +376,7 @@ func TestWorkerToolCallAfterLifecycleLossIsRefusedWithoutParticipant(t *testing.
 
 func TestToolAuthorizerRefusesEnrolledSessionWithoutOwnedProcess(t *testing.T) {
 	reg, sess, grid := openWorkerAuthSession(t)
-	if err := grid.Enrol(string(sess.ID()), 80, 24); err != nil {
+	if err := grid.Watch(string(sess.ID()), 80, 24); err != nil {
 		t.Fatalf("enrol session grid: %v", err)
 	}
 	pinner := &workerAuthPinner{
@@ -397,7 +397,7 @@ func TestToolAuthorizerRefusesRemoteSessionWithoutOwnedProcess(t *testing.T) {
 		kind:    session.KindRemote,
 		host:    "build.example.com",
 	}
-	if err := grid.Enrol(string(remote.ID()), 80, 24); err != nil {
+	if err := grid.Watch(string(remote.ID()), 80, 24); err != nil {
 		t.Fatalf("enrol session grid: %v", err)
 	}
 	sessions := workerAuthSessionSet{
@@ -451,7 +451,7 @@ func TestToolDispatcherRefusesSpawnOutsideCoordinatorEnvironment(t *testing.T) {
 
 func TestRefusedToolInvocationOffersNoWorkerTools(t *testing.T) {
 	reg, sess, grid := openWorkerAuthSession(t)
-	if err := grid.Enrol(string(sess.ID()), 80, 24); err != nil {
+	if err := grid.Watch(string(sess.ID()), 80, 24); err != nil {
 		t.Fatalf("enrol session grid: %v", err)
 	}
 	pinner := &workerAuthPinner{

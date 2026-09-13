@@ -32,7 +32,6 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/notify"
-	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/paneobserve"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport"
@@ -944,7 +943,7 @@ func (s *workerSpawner) deliverTask(ctx context.Context, paneID, task string) (w
 		s.owed.mark(session.ID(paneID))
 		return workers.TaskDelivery{WaitingOn: string(state)}, nil
 	}
-	res := s.typist.Submit(paneID, task)
+	res := s.typist.Submit(ctx, paneID, task)
 	if res.Outcome == agenttyping.OutcomeSubmitted {
 		return workers.TaskDelivery{Typed: true}, nil
 	}
@@ -1277,21 +1276,21 @@ func (c *workerCloser) Close(_ context.Context, p workers.Participant) error {
 // (nocx-f545a.6): the grid a participant's pane is kept in, and the watcher
 // that says what nocx reads it as.
 //
-// The rows are panegrid.Frame.Text, right-trimmed — the one row renderer the
+// The rows are paneview.Frame.Text, right-trimmed — the one row renderer the
 // grid already offers and the one a rule's predicates read rows through — so
 // a coordinator is shown the rows nocx itself reasons about, not a second
 // rendering of them (ADR-0064 §2).
 type workerScreener struct {
-	grid  panegrid.Observer
-	watch paneReadiness
+	screens paneScreens
+	watch   paneReadiness
 }
 
 func (s *workerScreener) ReadScreen(_ context.Context, p workers.Participant) (workers.PaneScreen, error) {
 	sid := p.Liveness.SessionID
-	if sid == "" || s.grid == nil {
+	if sid == "" || s.screens == nil {
 		return workers.PaneScreen{}, nil
 	}
-	f, err := s.grid.Frame(sid)
+	f, err := s.screens.Frame(sid)
 	if err != nil {
 		// The observation closed, or never opened: no reading, and an answer
 		// that says so rather than an error, exactly as agent.emitting
@@ -1316,7 +1315,7 @@ func (s *workerScreener) ReadScreen(_ context.Context, p workers.Participant) (w
 // than a second method on it, so every double that only ever submitted text
 // goes on satisfying what it satisfied.
 type paneChooser interface {
-	Choose(paneID, option string) agenttyping.Result
+	Choose(ctx context.Context, paneID, option string) agenttyping.Result
 }
 
 // workerAnswerer is the composition root's half of workers.answer
@@ -1337,8 +1336,8 @@ type paneChooser interface {
 // confirms, on the live grid and the live classification, that the menu has
 // been standing still for menuSettle. See awaitMenuSettled.
 type workerAnswerer struct {
-	grid   panegrid.Observer
-	typist paneChooser
+	screens paneScreens
+	typist  paneChooser
 	// owed and typing are what pays a task this participant's spawn left
 	// owed, once THIS answer is the one that confirms the question it was
 	// waiting on (nocx-f545a.7). classify is the third: nil on all of them
@@ -1377,22 +1376,22 @@ type workerAnswerer struct {
 
 func (a *workerAnswerer) Answer(ctx context.Context, p workers.Participant, option string) (workers.PaneAnswer, error) {
 	sid := p.Liveness.SessionID
-	if sid == "" || a.grid == nil || a.typist == nil {
+	if sid == "" || a.screens == nil || a.typist == nil {
 		return workers.PaneAnswer{}, errors.New("worker answer: this participant has no pane nocx can answer")
 	}
 	if err := a.awaitMenuSettled(ctx, sid, option); err != nil {
 		return workers.PaneAnswer{}, fmt.Errorf(
 			"worker answer: waiting for the menu to settle before its first key: %w", err)
 	}
-	res := a.typist.Choose(sid, option)
+	res := a.typist.Choose(ctx, sid, option)
 	if res.Outcome != agenttyping.OutcomeTyped {
 		return a.withOwedTask(ctx, p, option, res), nil
 	}
-	if err := awaitSelectionOn(ctx, a.grid, sid, option); err != nil {
+	if err := awaitSelectionOn(ctx, a.screens, sid, option); err != nil {
 		res.Reason = "the selection was moved and the menu never showed it on that option, so nothing was confirmed (" + err.Error() + ")"
 		return paneAnswerOf(res), nil
 	}
-	return a.withOwedTask(ctx, p, option, a.typist.Choose(sid, option)), nil
+	return a.withOwedTask(ctx, p, option, a.typist.Choose(ctx, sid, option)), nil
 }
 
 // menuSettle is the minimum time a menu must have been shown, continuously
@@ -1457,7 +1456,7 @@ var menuSettle = 1 * time.Second
 // asking this question, so Answer proceeds exactly as it did before this
 // bead rather than hanging on one.
 func (a *workerAnswerer) awaitMenuSettled(ctx context.Context, sid, option string) error {
-	if a.classify == nil || a.grid == nil {
+	if a.classify == nil || a.screens == nil {
 		return nil
 	}
 	now := a.now
@@ -1514,7 +1513,7 @@ func (a *workerAnswerer) menuOffersOption(sid, option string) (offers bool, opti
 	if !ok || (o.State != agentdriver.StatePermissionChoice && o.State != agentdriver.StateModalChoice) {
 		return false, ""
 	}
-	f, err := a.grid.Frame(sid)
+	f, err := a.screens.Frame(sid)
 	if err != nil {
 		return false, ""
 	}
@@ -1589,7 +1588,7 @@ func (a *workerAnswerer) typeOwedTask(ctx context.Context, sid session.ID, optio
 	subCtx, cancel := context.WithTimeout(ctx, answerTaskBudget)
 	defer cancel()
 
-	if err := awaitMenuLeftScreen(subCtx, a.grid, string(sid), option); err != nil {
+	if err := awaitMenuLeftScreen(subCtx, a.screens, string(sid), option); err != nil {
 		// The sub-budget ran out with the confirmed menu still on screen —
 		// a slow repaint, or a screen nocx cannot read at all. Either way
 		// this is an answer, not a failure: whatever Classify says right now
@@ -1618,7 +1617,7 @@ func (a *workerAnswerer) typeOwedTask(ctx context.Context, sid session.ID, optio
 		a.owed.restore(sid)
 		return &workers.TaskOutcome{Delivery: "waiting", State: string(state)}
 	}
-	res := a.typing.Submit(string(sid), task)
+	res := a.typing.Submit(ctx, string(sid), task)
 	if res.Outcome == agenttyping.OutcomeSubmitted {
 		return &workers.TaskOutcome{Delivery: "typed"}
 	}
@@ -1637,8 +1636,8 @@ func (a *workerAnswerer) typeOwedTask(ctx context.Context, sid session.ID, optio
 // still showing must be what the screen shows right now. Shared by
 // awaitSelectionOn and awaitMenuLeftScreen so "is the menu on this option"
 // is decided once rather than twice.
-func menuSelectedOn(grid panegrid.Observer, paneID, option string) bool {
-	f, err := grid.Frame(paneID)
+func menuSelectedOn(screens paneScreens, paneID, option string) bool {
+	f, err := screens.Frame(paneID)
 	if err != nil {
 		return false
 	}
@@ -1649,8 +1648,8 @@ func menuSelectedOn(grid panegrid.Observer, paneID, option string) bool {
 
 // awaitSelectionOn blocks until paneID's screen shows a menu whose selection is
 // on option, or until ctx ends.
-func awaitSelectionOn(ctx context.Context, grid panegrid.Observer, paneID, option string) error {
-	if menuSelectedOn(grid, paneID, option) {
+func awaitSelectionOn(ctx context.Context, screens paneScreens, paneID, option string) error {
+	if menuSelectedOn(screens, paneID, option) {
 		return nil
 	}
 	ticker := time.NewTicker(deliveryPoll)
@@ -1660,7 +1659,7 @@ func awaitSelectionOn(ctx context.Context, grid panegrid.Observer, paneID, optio
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if menuSelectedOn(grid, paneID, option) {
+			if menuSelectedOn(screens, paneID, option) {
 				return nil
 			}
 		}
@@ -1674,8 +1673,8 @@ func awaitSelectionOn(ctx context.Context, grid panegrid.Observer, paneID, optio
 // false, which is the first of the two facts typeOwedTask establishes
 // freshness from (nocx-f545a.7) — the confirmed menu has actually left the
 // screen, rather than the wait merely having let some time pass.
-func awaitMenuLeftScreen(ctx context.Context, grid panegrid.Observer, paneID, option string) error {
-	if !menuSelectedOn(grid, paneID, option) {
+func awaitMenuLeftScreen(ctx context.Context, screens paneScreens, paneID, option string) error {
+	if !menuSelectedOn(screens, paneID, option) {
 		return nil
 	}
 	ticker := time.NewTicker(deliveryPoll)
@@ -1685,7 +1684,7 @@ func awaitMenuLeftScreen(ctx context.Context, grid panegrid.Observer, paneID, op
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if !menuSelectedOn(grid, paneID, option) {
+			if !menuSelectedOn(screens, paneID, option) {
 				return nil
 			}
 		}
@@ -1738,7 +1737,7 @@ func (c classifyingReadiness) Snapshot(paneID string) (paneobserve.Observation, 
 // one act — and deliberately NOT Type, which leaves text in an input region
 // without starting the turn the wake exists to start.
 type paneTypist interface {
-	Submit(paneID, text string) agenttyping.Result
+	Submit(ctx context.Context, paneID, text string) agenttyping.Result
 }
 
 // workerWaker types into the coordinator's pane.
@@ -1766,14 +1765,14 @@ type workerWaker struct {
 // unsent line, which starts no turn — so it is reported as a refusal carrying
 // the reason the submit failed. Calling that a delivery is exactly the
 // "reported as sent" the bead refuses.
-func (w *workerWaker) Wake(_ context.Context, coordinatorSession, text string) workers.WakeOutcome {
+func (w *workerWaker) Wake(ctx context.Context, coordinatorSession, text string) workers.WakeOutcome {
 	if coordinatorSession == "" {
 		return workers.WakeOutcome{Reason: "this worker records no coordinator session to type into"}
 	}
 	if w.typist == nil {
 		return workers.WakeOutcome{Reason: "this backend has no way to type into a pane"}
 	}
-	res := w.typist.Submit(coordinatorSession, text)
+	res := w.typist.Submit(ctx, coordinatorSession, text)
 	switch res.Outcome {
 	case agenttyping.OutcomeSubmitted:
 		return workers.WakeOutcome{Delivered: true}

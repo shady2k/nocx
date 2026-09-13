@@ -1,13 +1,14 @@
 package transport
 
 import (
+	"context"
 	"encoding/json"
 	"path/filepath"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/agentcapture"
+	"github.com/shady2k/nocx/internal/agentcapture/replaylocal"
 	"github.com/shady2k/nocx/internal/agentdriver"
-	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/paneobserve"
 )
 
@@ -26,18 +27,11 @@ func recordedChrome(t *testing.T, capture string, atMs int64) string {
 	if err != nil {
 		t.Fatalf("read capture %s: %v", capture, err)
 	}
-	r, err := agentcapture.NewReplayer(log.NewSlogAdapter(nil), header)
+	moments, err := agentcapture.Frames(context.Background(), replaylocal.Replayer{}, header, chunks, []int64{atMs})
 	if err != nil {
-		t.Fatalf("replayer for %s: %v", capture, err)
+		t.Fatalf("replay %s to %dms: %v", capture, atMs, err)
 	}
-	defer r.Close()
-	if err = r.Feed(chunks[:agentcapture.ChunksThrough(chunks, atMs, 0)]); err != nil {
-		t.Fatalf("feed %s to %dms: %v", capture, atMs, err)
-	}
-	f, err := r.Frame()
-	if err != nil {
-		t.Fatalf("frame %s@%dms: %v", capture, atMs, err)
-	}
+	f := moments[0].Frame
 	return string(agentcapture.Paint(f))
 }
 
@@ -69,7 +63,7 @@ func TestAnObservedPaneReportsEachStateItsScreenShows(t *testing.T) {
 	ws, store, watch, term := newObservedWS(t, paneobserve.Config{})
 	conn := connectWS(t, ws)
 	sid := openSessionOnConn(t, ws, conn, 1)
-	if err := store.Enrol(sid, 120, 40); err != nil {
+	if err := store.Watch(sid, 120, 40); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
 	watch.Watch(sid, "claude")

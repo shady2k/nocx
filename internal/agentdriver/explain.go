@@ -6,7 +6,7 @@ package agentdriver
 //
 // The configuration design (2026-08-27, §5) is explicit that the emitting view
 // is not optional: "a rule the user must write blind is a dead rule." Half of
-// that view is the screen, which panegrid already answers. This file is the
+// that view is the screen, which paneview already answers. This file is the
 // other half, and it is the half that is easy to forget — a view that shows
 // only the screen is a screen, and the person already has one of those.
 //
@@ -39,7 +39,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
 )
 
 // Explanation is one rule's whole reading of one frame.
@@ -180,7 +180,7 @@ type RowSpan struct{ From, To int }
 // implement it, and a caller that only wants the verdict never looks for it.
 type Explainer interface {
 	Driver
-	Explain(f panegrid.Frame) Explanation
+	Explain(f paneview.Frame) Explanation
 }
 
 // Explain is the failing-open form for a READ-OUT, which is the opposite
@@ -188,7 +188,7 @@ type Explainer interface {
 // wrong here: refusing to say anything about an agent with no rule leaves the
 // person who has to WRITE that rule looking at nothing. The frame is reported
 // either way and HasRule says which case they are in.
-func (r *Registry) Explain(agent string, f panegrid.Frame) Explanation {
+func (r *Registry) Explain(agent string, f paneview.Frame) Explanation {
 	d, ok := r.For(agent)
 	if !ok {
 		return Explanation{Agent: agent, State: StateUnknown, Default: StateUnknown, Matched: -1, Rows: readRows(f)}
@@ -209,7 +209,7 @@ func (r *Registry) Explain(agent string, f panegrid.Frame) Explanation {
 }
 
 // Explain evaluates the document and records the walk.
-func (d documentDriver) Explain(f panegrid.Frame) Explanation {
+func (d documentDriver) Explain(f paneview.Frame) Explanation {
 	ex := Explanation{
 		Agent: d.doc.Agent, HasRule: true,
 		Default: d.doc.Default, Matched: -1, Rows: readRows(f),
@@ -244,7 +244,7 @@ func (d documentDriver) readAnchors(anchors bound) []AnchorReading {
 // column carrying the same cell — read here without a glyph to look for,
 // because the point of the view is to show what the row IS rather than to
 // confirm what somebody guessed.
-func readRows(f panegrid.Frame) []RowReading {
+func readRows(f paneview.Frame) []RowReading {
 	if f.Rows <= 0 {
 		return nil
 	}
@@ -267,7 +267,7 @@ func readRows(f panegrid.Frame) []RowReading {
 // trace is the recorder threaded through decide. Every method is nil-safe,
 // because nil is what the product passes and the walk must be identical.
 type trace struct {
-	frame    panegrid.Frame
+	frame    paneview.Frame
 	anchors  bound
 	branches []BranchReading
 	matched  int
@@ -276,7 +276,7 @@ type trace struct {
 // conjunction evaluates one branch's predicates and records each answer. It
 // returns exactly what allHold returns, and on a nil recorder it IS allHold —
 // so the product's walk has no recorder-shaped branch in it.
-func (t *trace) conjunction(i int, b Branch, f panegrid.Frame, anchors bound) bool {
+func (t *trace) conjunction(i int, b Branch, f paneview.Frame, anchors bound) bool {
 	if t == nil {
 		return allHold(f, anchors, b.When)
 	}
@@ -389,7 +389,7 @@ func regionDetail(r RegionSpec) string {
 // clamped to the frame. Nil for a predicate that searches no region and for
 // one whose anchor did not bind — in both cases there is no span, and drawing
 // one anyway would put a highlight on rows nothing looked at.
-func predRegion(f panegrid.Frame, anchors bound, p Pred) *RowSpan {
+func predRegion(f paneview.Frame, anchors bound, p Pred) *RowSpan {
 	if p.Kind != "regionAny" || p.MaxRows <= 0 {
 		return nil
 	}
@@ -406,7 +406,7 @@ func predRegion(f panegrid.Frame, anchors bound, p Pred) *RowSpan {
 // The yield comes from extract(), the same call Observe makes, so the view
 // cannot show a person a reading the product did not take — the identity that
 // makes the branch walk trustworthy applied to the other half of the grammar.
-func (d documentDriver) readExtractors(f panegrid.Frame, anchors bound) []ExtractorReading {
+func (d documentDriver) readExtractors(f paneview.Frame, anchors bound) []ExtractorReading {
 	if len(d.extractors) == 0 {
 		return nil
 	}
@@ -429,7 +429,7 @@ func (d documentDriver) readExtractors(f panegrid.Frame, anchors bound) []Extrac
 // from its anchor, starting one row off it, and the frame's own edge is the
 // other bound — the same two bounds region.eachRow enforces, read rather than
 // re-decided.
-func spanOf(f panegrid.Frame, r RegionSpec, anchor int) *RowSpan {
+func spanOf(f paneview.Frame, r RegionSpec, anchor int) *RowSpan {
 	first, last := anchor+1, anchor+r.MaxRows
 	if r.Up {
 		first, last = anchor-r.MaxRows, anchor-1

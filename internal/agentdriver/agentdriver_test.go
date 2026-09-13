@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/agentdriver"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
 )
 
 // The ordinary case: an agent we ship a driver for is driven by it.
@@ -33,7 +33,7 @@ func TestTheRegistryFailsClosedForAnAgentItDoesNotKnow(t *testing.T) {
 	if d, ok := r.For("codex"); ok {
 		t.Fatalf("the registry invented a %q driver for an agent nothing was written for", d.Agent())
 	}
-	if got := r.Classify("codex", panegrid.Frame{}); got != agentdriver.StateUnknown {
+	if got := r.Classify("codex", paneview.Frame{}); got != agentdriver.StateUnknown {
 		t.Errorf("Classify for an unregistered agent = %q, want %q", got, agentdriver.StateUnknown)
 	}
 }
@@ -45,7 +45,7 @@ func TestTheRegistryFailsClosedForAnAgentItDoesNotKnow(t *testing.T) {
 type namelessDriver struct{}
 
 func (namelessDriver) Agent() string                             { return "" }
-func (namelessDriver) Classify(panegrid.Frame) agentdriver.State { return agentdriver.StateUnknown }
+func (namelessDriver) Classify(paneview.Frame) agentdriver.State { return agentdriver.StateUnknown }
 
 func TestADriverThatCannotNameItsAgentIsRefused(t *testing.T) {
 	if _, err := agentdriver.NewRegistry(namelessDriver{}); err == nil {

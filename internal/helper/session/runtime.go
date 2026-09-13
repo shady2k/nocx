@@ -7,6 +7,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/emulator/ghostty"
+	"github.com/shady2k/nocx/internal/paneview"
 	"github.com/shady2k/nocx/internal/sessionruntime"
 )
 
@@ -34,12 +35,17 @@ import (
 // (ADR-0065 chooses which emulator; this is the seam the choice is reached
 // from).
 //
+// It is an ALIAS of paneview.ScreenFactory and not a second declaration of the
+// same signature: the replay op builds its terminal over the same seam, and two
+// named function types with one signature would be two vocabularies for one
+// choice — the shape AD-8 forbids, one step away from two emulators.
+//
 // [Options.Screen] is nil in production and [defaultScreen] is what that
 // means, so the choice is named exactly once. A test replaces it when it needs
 // a screen whose behaviour it can read back — the same shape as Options.Now
 // and Options.NewID, and the reason the seam exists rather than a direct call
 // to the adapter at the use site.
-type ScreenFactory func(g emulator.Geometry) (emulator.Terminal, error)
+type ScreenFactory = paneview.ScreenFactory
 
 // defaultScreen is ADR-0065's adapter behind ADR-0066's placement.
 var defaultScreen ScreenFactory = ghostty.New

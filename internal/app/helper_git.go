@@ -662,6 +662,20 @@ func (f *firstByteReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// hostFor answers which helper holds a session, for the ONE caller that needs
+// it without a sessionFactory: the pane screen read (nocx-ygxjv.3).
+//
+// It is the registry's own map and not a second one, because that map is
+// already the record of which helper holds which session — the hosted open
+// writes it, the readopt pass writes it — and a parallel map would be a second
+// answer that agrees until one of the two is forgotten.
+func (r *helperRegistry) hostFor(sid session.ID) (*hostHelper, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	h, ok := r.hosts[sid]
+	return h, ok
+}
+
 func (r *helperRegistry) helper(f *sessionFactory) *hostHelper {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -912,6 +926,27 @@ type hostHelper struct {
 // connectLocked returns the existing carrier or establishes a new bridge to
 // the helper daemon. A lost carrier is disposable; the daemon's endpoint and
 // session state live on the host and are reached again through a fresh lane.
+// screenClient is the route a remote pane's screen is read through: this
+// helper's carrier, and the handle it knows the session by.
+//
+// The generation is the one the daemon answers to — f.expectHash, the same
+// value an inventory row carries and the same one the session-close path
+// compares against — because a handle addressed to another generation names
+// nothing there and the helper refuses it.
+func (h *hostHelper) screenClient(ctx context.Context, sid string) (*client.Client, client.HostSessionID, error) {
+	h.mu.Lock()
+	c, outcome, err := h.connectLocked(ctx)
+	generation := h.f.expectHash
+	h.mu.Unlock()
+	switch {
+	case err != nil:
+		return nil, client.HostSessionID{}, err
+	case outcome.State != "":
+		return nil, client.HostSessionID{}, fmt.Errorf("helper for this pane: %s", outcome.Message)
+	}
+	return c, client.HostSessionID{Generation: generation, Session: sid}, nil
+}
+
 func (h *hostHelper) connectLocked(ctx context.Context) (*client.Client, git.OpenOutcome, error) {
 	if h.client != nil && !h.dead {
 		select {

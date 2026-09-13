@@ -31,7 +31,7 @@ import (
 // assertion rather than "nocx tried and was stopped".
 type mustNotTypeTypist struct{ t *testing.T }
 
-func (m mustNotTypeTypist) Submit(pane, text string) agenttyping.Result {
+func (m mustNotTypeTypist) Submit(ctx context.Context, pane, text string) agenttyping.Result {
 	m.t.Errorf("Submit(%q, %q) was called on a pane that is asking a question", pane, text)
 	return agenttyping.Result{PaneID: pane, Outcome: agenttyping.OutcomeRefused, Reason: "test: must not type"}
 }

@@ -22,7 +22,7 @@
 // participant's state (D9), beside what we launched it with. Process exit is
 // ours because nocx owns the PTY; the declaration arrives over the
 // authenticated channel of ADR-0024 decision 2. The backend's live grid
-// (internal/panegrid) is a fourth source and is deliberately NOT one of these:
+// (internal/paneview) is a fourth source and is deliberately NOT one of these:
 // it decides whether nocx may type into a pane and what the indicator shows,
 // and nothing else. Nothing in this package reads a frame, and it imports no
 // grid.

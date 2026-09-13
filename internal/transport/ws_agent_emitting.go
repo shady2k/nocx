@@ -40,7 +40,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/agentdriver"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
 	"github.com/shady2k/nocx/internal/session"
 )
 
@@ -48,7 +48,7 @@ import (
 // because the transport may ask what a rule reads on a frame and may not
 // classify, enrol, or edit a rule.
 type agentRules interface {
-	Explain(agent string, f panegrid.Frame) agentdriver.Explanation
+	Explain(agent string, f paneview.Frame) agentdriver.Explanation
 }
 
 // WithAgentRules attaches the driver registry the emitting view reads through.
@@ -215,7 +215,7 @@ func (s *WSServer) handleAgentEmitting(_ context.Context, req jsonrpcRequest, r 
 // through that moment finds out one answer later rather than being told off
 // for asking.
 func (s *WSServer) readEmittingPane(sid session.ID, agent string) *agentEmittingRead {
-	f, err := s.paneGrid.Frame(string(sid))
+	f, err := s.paneScreens.Frame(string(sid))
 	if err != nil {
 		return nil
 	}
@@ -249,7 +249,7 @@ func (s *WSServer) readEmittingPane(sid session.ID, agent string) *agentEmitting
 // of each row beside it. The two are one object per row because they are one
 // reading of one row and a caller drawing them from two arrays would have to
 // keep the indices in step.
-func emittingFrame(f panegrid.Frame, rows []agentdriver.RowReading) agentEmittingFrame {
+func emittingFrame(f paneview.Frame, rows []agentdriver.RowReading) agentEmittingFrame {
 	out := agentEmittingFrame{
 		Cols: f.Cols, Rows: f.Rows,
 		CursorX: f.CursorX, CursorY: f.CursorY, AltScreen: f.AltScreen,
@@ -348,10 +348,10 @@ func emittingSpan(s *agentdriver.RowSpan) *agentEmittingSpan {
 }
 
 // emittingAvailable gates the method on the whole chain being wired. All three
-// or none: a grid with no rules answers a screen and no reading, which is the
+// or none: a store with no rules answers a screen and no reading, which is the
 // half of the view the design says may not be missing.
 func (s *WSServer) emittingAvailable() bool {
-	return s.paneGrid != nil && s.paneObserver != nil && s.agentRules != nil
+	return s.paneScreens != nil && s.paneObserver != nil && s.agentRules != nil
 }
 
 // agentEmittingSpecs registers the method. On the ORDINARY lane, not on a

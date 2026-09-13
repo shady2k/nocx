@@ -17,14 +17,16 @@ package agenttyping_test
 // everything.
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/agentcalib"
+	"github.com/shady2k/nocx/internal/agentcapture/replaylocal"
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/agenttyping"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
 )
 
 const (
@@ -39,15 +41,15 @@ const (
 // of what a staleness window is. changeAfter(n, f) makes the n-th read the last
 // one to see the screen it had.
 type screens struct {
-	frame panegrid.Frame
+	frame paneview.Frame
 	err   error
 	reads int
-	then  map[int]panegrid.Frame
+	then  map[int]paneview.Frame
 }
 
-func (s *screens) Frame(string) (panegrid.Frame, error) {
+func (s *screens) Frame(string) (paneview.Frame, error) {
 	if s.err != nil {
-		return panegrid.Frame{}, s.err
+		return paneview.Frame{}, s.err
 	}
 	f := s.frame
 	s.reads++
@@ -57,9 +59,9 @@ func (s *screens) Frame(string) (panegrid.Frame, error) {
 	return f, nil
 }
 
-func (s *screens) changeAfter(n int, f panegrid.Frame) {
+func (s *screens) changeAfter(n int, f paneview.Frame) {
 	if s.then == nil {
-		s.then = map[int]panegrid.Frame{}
+		s.then = map[int]paneview.Frame{}
 	}
 	s.then[n] = f
 }
@@ -102,7 +104,7 @@ func (q *queue) all() string {
 // thing a caller outside that package can build.
 type unverified struct{}
 
-func (unverified) Verify(string) agentcalib.Verdict { return agentcalib.Verdict{} }
+func (unverified) Verify(context.Context, string) agentcalib.Verdict { return agentcalib.Verdict{} }
 
 // ── the wiring, as the composition root assembles it ──────────────────────
 
@@ -116,7 +118,7 @@ func rulesOf(t *testing.T) *agentdriver.Registry {
 }
 
 // typistOn builds the production wiring with one screen in front of it.
-func typistOn(t *testing.T, f panegrid.Frame, auth agenttyping.Authority) (*agenttyping.Typist, *screens, *queue) {
+func typistOn(t *testing.T, f paneview.Frame, auth agenttyping.Authority) (*agenttyping.Typist, *screens, *queue) {
 	t.Helper()
 	sc := &screens{frame: f}
 	q := &queue{}
@@ -157,7 +159,7 @@ func TestEveryStateThatIsNotFreeTextReceivesNothing(t *testing.T) {
 				t.Fatalf("the corpus classifies as %q, and this case is written for %q", got, tc.want)
 			}
 			ty, _, q := typistOn(t, f, verifiedFor(t))
-			got := ty.Submit(pane, "wake up")
+			got := ty.Submit(context.Background(), pane, "wake up")
 			if got.Outcome != agenttyping.OutcomeRefused {
 				t.Fatalf("outcome = %q, want %q", got.Outcome, agenttyping.OutcomeRefused)
 			}
@@ -182,7 +184,7 @@ func TestEveryStateThatIsNotFreeTextReceivesNothing(t *testing.T) {
 func TestAVerifiedRuleOnAFreeTextPaneReceivesTheTextAndASeparateSubmitKey(t *testing.T) {
 	ty, _, q := typistOn(t, replay(t, "claude-idle", 11000), verifiedFor(t))
 
-	got := ty.Submit(pane, "wake up")
+	got := ty.Submit(context.Background(), pane, "wake up")
 	if got.Outcome != agenttyping.OutcomeSubmitted {
 		t.Fatalf("outcome = %q (%s), want %q", got.Outcome, got.Reason, agenttyping.OutcomeSubmitted)
 	}
@@ -206,7 +208,7 @@ func TestAVerifiedRuleOnAFreeTextPaneReceivesTheTextAndASeparateSubmitKey(t *tes
 func TestTypeWithoutSubmitSendsNoSubmitKey(t *testing.T) {
 	ty, _, q := typistOn(t, replay(t, "claude-idle", 11000), verifiedFor(t))
 
-	got := ty.Type(pane, "wake up")
+	got := ty.Type(context.Background(), pane, "wake up")
 	if got.Outcome != agenttyping.OutcomeTyped {
 		t.Fatalf("outcome = %q (%s), want %q", got.Outcome, got.Reason, agenttyping.OutcomeTyped)
 	}
@@ -226,7 +228,7 @@ func TestAnUnverifiedRuleTypesNothingIntoAPaneItReadsAsFreeText(t *testing.T) {
 	}
 	ty, _, q := typistOn(t, f, unverified{})
 
-	got := ty.Submit(pane, "wake up")
+	got := ty.Submit(context.Background(), pane, "wake up")
 	if got.Outcome != agenttyping.OutcomeRefused {
 		t.Fatalf("outcome = %q, want %q — an unverified rule may light a dot and may not type",
 			got.Outcome, agenttyping.OutcomeRefused)
@@ -253,7 +255,7 @@ func TestAScreenThatChangesAfterTheTextStopsTheSubmitKey(t *testing.T) {
 	// answer it.
 	sc.changeAfter(2, replay(t, "claude-permission", 49000))
 
-	got := ty.Submit(pane, "wake up")
+	got := ty.Submit(context.Background(), pane, "wake up")
 	if got.Outcome != agenttyping.OutcomeTyped {
 		t.Fatalf("outcome = %q, want %q — the text landed and the submit key must not",
 			got.Outcome, agenttyping.OutcomeTyped)
@@ -274,7 +276,7 @@ func TestAScreenThatChangesBeforeTheFirstWriteSendsNothing(t *testing.T) {
 	// the first write.
 	sc.changeAfter(1, replay(t, "claude-permission", 49000))
 
-	got := ty.Submit(pane, "wake up")
+	got := ty.Submit(context.Background(), pane, "wake up")
 	if got.Outcome != agenttyping.OutcomeRefused {
 		t.Fatalf("outcome = %q, want %q", got.Outcome, agenttyping.OutcomeRefused)
 	}
@@ -291,7 +293,7 @@ func TestAScreenThatChangesBeforeTheFirstWriteSendsNothing(t *testing.T) {
 func TestAPaneNocxIsNotWatchingReceivesNothing(t *testing.T) {
 	ty, _, q := typistOn(t, replay(t, "claude-idle", 11000), verifiedFor(t))
 
-	got := ty.Submit("ffffffffffffffffffffffffffffffff", "wake up")
+	got := ty.Submit(context.Background(), "ffffffffffffffffffffffffffffffff", "wake up")
 	if got.Outcome != agenttyping.OutcomeRefused {
 		t.Fatalf("outcome = %q, want %q", got.Outcome, agenttyping.OutcomeRefused)
 	}
@@ -307,9 +309,9 @@ func TestAPaneNocxIsNotWatchingReceivesNothing(t *testing.T) {
 // session ending — receives nothing rather than a guess.
 func TestAPaneWithNoLiveScreenReceivesNothing(t *testing.T) {
 	ty, sc, q := typistOn(t, replay(t, "claude-idle", 11000), verifiedFor(t))
-	sc.err = panegrid.ErrNotEnrolled
+	sc.err = paneview.ErrNotWatched
 
-	got := ty.Submit(pane, "wake up")
+	got := ty.Submit(context.Background(), pane, "wake up")
 	if got.Outcome != agenttyping.OutcomeRefused {
 		t.Fatalf("outcome = %q, want %q", got.Outcome, agenttyping.OutcomeRefused)
 	}
@@ -329,7 +331,7 @@ func TestTextCarryingAControlCharacterIsRefusedWhole(t *testing.T) {
 	// byte 0x1b appearing anywhere in the text.
 	for _, bad := range []string{"wake\x1b[201~ up", "wake\x00up", "wake\x07up", "wake\u009b201~up"} {
 		ty, _, q := typistOn(t, replay(t, "claude-idle", 11000), verifiedFor(t))
-		got := ty.Submit(pane, bad)
+		got := ty.Submit(context.Background(), pane, bad)
 		if got.Outcome != agenttyping.OutcomeRefused {
 			t.Fatalf("%q: outcome = %q, want %q", bad, got.Outcome, agenttyping.OutcomeRefused)
 		}
@@ -341,7 +343,7 @@ func TestTextCarryingAControlCharacterIsRefusedWhole(t *testing.T) {
 
 func TestEmptyTextIsRefused(t *testing.T) {
 	ty, _, q := typistOn(t, replay(t, "claude-idle", 11000), verifiedFor(t))
-	if got := ty.Submit(pane, "   "); got.Outcome != agenttyping.OutcomeRefused {
+	if got := ty.Submit(context.Background(), pane, "   "); got.Outcome != agenttyping.OutcomeRefused {
 		t.Fatalf("outcome = %q, want %q", got.Outcome, agenttyping.OutcomeRefused)
 	}
 	if len(q.jobs) != 0 {
@@ -351,7 +353,7 @@ func TestEmptyTextIsRefused(t *testing.T) {
 
 func TestTextBeyondTheBoundIsRefused(t *testing.T) {
 	ty, _, q := typistOn(t, replay(t, "claude-idle", 11000), verifiedFor(t))
-	got := ty.Submit(pane, strings.Repeat("a", agenttyping.MaxText+1))
+	got := ty.Submit(context.Background(), pane, strings.Repeat("a", agenttyping.MaxText+1))
 	if got.Outcome != agenttyping.OutcomeRefused {
 		t.Fatalf("outcome = %q, want %q", got.Outcome, agenttyping.OutcomeRefused)
 	}
@@ -368,7 +370,7 @@ func TestTextBeyondTheBoundIsRefused(t *testing.T) {
 func TestAQueueThatRefusesIsReportedAsARefusal(t *testing.T) {
 	ty, _, q := typistOn(t, replay(t, "claude-idle", 11000), verifiedFor(t))
 	q.refuse = true
-	if got := ty.Submit(pane, "wake up"); got.Outcome != agenttyping.OutcomeRefused {
+	if got := ty.Submit(context.Background(), pane, "wake up"); got.Outcome != agenttyping.OutcomeRefused {
 		t.Fatalf("outcome = %q, want %q", got.Outcome, agenttyping.OutcomeRefused)
 	}
 }
@@ -384,15 +386,15 @@ func verifiedFor(t *testing.T) agenttyping.Authority {
 	t.Helper()
 	// One frame per read: Begin, then the three required captures. The
 	// optional three are declined, and a decline reads nothing.
-	walkScreens := &stepScreens{frames: []panegrid.Frame{
+	walkScreens := &stepScreens{frames: []paneview.Frame{
 		replay(t, "claude-idle", 11000),       // Begin: the geometry
 		replay(t, "claude-idle", 11000),       // idle     → free_text
 		replay(t, "claude-working", 17000),    // working  → working
 		replay(t, "claude-permission", 49000), // asks-you → permission_choice
 	}}
 	calib := agentcalib.New(log.NewSlogAdapter(nil), walkScreens,
-		mustFileStore(t, t.TempDir()), rulesOf(t))
-	if _, err := calib.Begin(pane, agent); err != nil {
+		mustFileStore(t, t.TempDir()), rulesOf(t), replaylocal.Replayer{})
+	if _, err := calib.Begin(context.Background(), pane, agent); err != nil {
 		t.Fatalf("begin calibration: %v", err)
 	}
 	for i, step := range agentcalib.Steps() {
@@ -400,11 +402,11 @@ func verifiedFor(t *testing.T) agenttyping.Authority {
 		if !step.Required {
 			answer = agentcalib.AnswerSkip
 		}
-		if _, err := calib.Answer(pane, i, answer); err != nil {
+		if _, err := calib.Answer(context.Background(), pane, i, answer); err != nil {
 			t.Fatalf("answer step %d (%s): %v", i, step.Label, err)
 		}
 	}
-	if v := calib.Verify(agent); !v.MayType() {
+	if v := calib.Verify(context.Background(), agent); !v.MayType() {
 		t.Fatalf("the shipped rule did not verify against the corpus it was written from: %+v", v)
 	}
 	return calib
@@ -423,11 +425,11 @@ func mustFileStore(t *testing.T, root string) agentcalib.Store {
 // first (which is where the header's geometry comes from), and each capture
 // reads the next.
 type stepScreens struct {
-	frames []panegrid.Frame
+	frames []paneview.Frame
 	at     int
 }
 
-func (s *stepScreens) Frame(string) (panegrid.Frame, error) {
+func (s *stepScreens) Frame(string) (paneview.Frame, error) {
 	f := s.frames[s.at]
 	if s.at < len(s.frames)-1 {
 		s.at++

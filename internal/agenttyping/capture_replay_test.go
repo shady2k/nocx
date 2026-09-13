@@ -13,22 +13,23 @@ package agenttyping_test
 // are frames the product makes.
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/agentcapture"
-	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/agentcapture/replaylocal"
+	"github.com/shady2k/nocx/internal/paneview"
 )
 
-func replay(t *testing.T, name string, atMs int64) panegrid.Frame {
+func replay(t *testing.T, name string, atMs int64) paneview.Frame {
 	t.Helper()
 	path := filepath.Join("..", "agentdriver", "testdata", "captures", name+".jsonl")
 	header, chunks, err := agentcapture.Read(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	moments, err := agentcapture.Frames(log.NewSlogAdapter(nil), header, chunks, []int64{atMs})
+	moments, err := agentcapture.Frames(context.Background(), replaylocal.Replayer{}, header, chunks, []int64{atMs})
 	if err != nil {
 		t.Fatalf("replay %s to %dms: %v", path, atMs, err)
 	}

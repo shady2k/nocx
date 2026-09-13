@@ -19,8 +19,8 @@ import (
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/agentrule"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/paneobserve"
+	"github.com/shady2k/nocx/internal/paneview/paneviewtest"
 )
 
 type agentRulesEnv struct {
@@ -32,7 +32,7 @@ type agentRulesEnv struct {
 func newAgentRulesEnv(t *testing.T) *agentRulesEnv {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
-	grid := panegrid.New(logger)
+	grid := paneviewtest.NewViews(logger)
 	rules, err := agentdriver.NewRegistry(agentdriver.Claude())
 	if err != nil {
 		t.Fatalf("registry: %v", err)
@@ -48,11 +48,11 @@ func newAgentRulesEnv(t *testing.T) *agentRulesEnv {
 	rules.SetRuleSource(store)
 	watcher := paneobserve.New(logger, grid, rules, paneobserve.Config{})
 	env := newLifecycleTestEnv(t,
-		WithPaneGrid(grid), WithPaneObserver(watcher), WithAgentRules(rules),
+		WithPaneScreens(grid.Store), WithPaneObserver(watcher), WithAgentRules(rules),
 		WithAgentRuleStore(store))
 	watcher.SetEmitter(env.ws.EmitPaneObservation)
 	sid := env.openSession(t, 1)
-	if err := grid.Enrol(sid, 40, 14); err != nil {
+	if err := grid.Watch(sid, 40, 14); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
 	t.Cleanup(func() { grid.Withdraw(sid) })

@@ -15,11 +15,13 @@ package agentdriver_test
 // classifying correctly through that round trip is what says it does.
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/agentcalib"
 	"github.com/shady2k/nocx/internal/agentcapture"
+	"github.com/shady2k/nocx/internal/agentcapture/replaylocal"
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/log"
 )
@@ -95,7 +97,7 @@ func corpusVerdict(t *testing.T, set agentcalib.Set) agentcalib.Verdict {
 	}
 	// Screens is nil deliberately: verification reads a stored set and never a
 	// live pane, and passing one would suggest it could.
-	return agentcalib.New(log.NewSlogAdapter(nil), nil, store, rules).Verify("claude")
+	return agentcalib.New(log.NewSlogAdapter(nil), nil, store, rules, replaylocal.Replayer{}).Verify(context.Background(), "claude")
 }
 
 // TestTheShippedClaudeRuleEarnsItsTypingAuthority is the happy path of the
@@ -147,7 +149,7 @@ func TestPaintingAndReplayingAFrameDoesNotMoveTheVerdict(t *testing.T) {
 		t.Run(fmt.Sprintf("%s@%d", m.capture, m.atMs), func(t *testing.T) {
 			live := replay(t, m.capture, m.atMs)
 			set := corpusSet(t, []corpusMoment{m})
-			frames, err := set.Frames(log.NewSlogAdapter(nil))
+			frames, err := set.Frames(context.Background(), replaylocal.Replayer{})
 			if err != nil {
 				t.Fatalf("replay the painted set: %v", err)
 			}

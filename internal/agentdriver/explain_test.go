@@ -14,7 +14,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/agentdriver"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
 )
 
 // TestExplainAgreesWithClassifyOverTheCorpus is the identity, and it is the
@@ -288,4 +288,4 @@ func registry(t *testing.T) *agentdriver.Registry {
 	return reg
 }
 
-var _ = panegrid.Frame{}
+var _ = paneview.Frame{}

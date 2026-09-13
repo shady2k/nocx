@@ -358,7 +358,7 @@ func (s *WSServer) laneFor(sid session.ID, sess session.Session) *sessionLane {
 	if l, ok := s.lanes[sid]; ok {
 		return l
 	}
-	l := newSessionLane(sid, sess, s.log, func(cols, rows uint16) { s.resizePaneGrid(sid, cols, rows) })
+	l := newSessionLane(sid, sess, s.log, nil)
 	s.lanes[sid] = l
 	return l
 }

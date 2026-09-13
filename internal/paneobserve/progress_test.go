@@ -32,8 +32,9 @@ import (
 	"github.com/shady2k/nocx/internal/agentcapture"
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/paneobserve"
+	"github.com/shady2k/nocx/internal/paneview"
+	"github.com/shady2k/nocx/internal/paneview/paneviewtest"
 )
 
 // stallAfter is the threshold every test below states, and it is deliberately
@@ -67,16 +68,16 @@ func newClock() *clock { return &clock{now: time.Unix(1_700_000_000, 0)} }
 // threshold. The grid is returned too: these tests read frames off it directly
 // to prove the CASE they are about — that the chrome moved while the transcript
 // did not — rather than asserting it in a comment.
-func watcher(t *testing.T, c *clock) (*paneobserve.Watcher, *panegrid.Store, *recorder) {
+func watcher(t *testing.T, c *clock) (*paneobserve.Watcher, *paneviewtest.Views, *recorder) {
 	t.Helper()
 	lg := log.NewSlogAdapter(nil)
-	grid := panegrid.New(lg)
+	grid := paneviewtest.NewViews(lg)
 	reg, err := agentdriver.NewRegistry(agentdriver.Claude())
 	if err != nil {
 		t.Fatalf("registry: %v", err)
 	}
 	rec := &recorder{}
-	w := paneobserve.New(lg, grid, reg, paneobserve.Config{
+	w := paneobserve.New(lg, grid.Store, reg, paneobserve.Config{
 		Now:        c.Now,
 		StallAfter: stallAfter,
 	})
@@ -87,19 +88,19 @@ func watcher(t *testing.T, c *clock) (*paneobserve.Watcher, *panegrid.Store, *re
 // feeder replays a committed capture into a real grid the way a pane does: from
 // byte zero, one mark at a time. Each call advances the pane to atMs and
 // returns the frame it is showing there, so a test can compare two of them.
-func feeder(t *testing.T, grid *panegrid.Store, pane, capture string) func(atMs int64) panegrid.Frame {
+func feeder(t *testing.T, grid *paneviewtest.Views, pane, capture string) func(atMs int64) paneview.Frame {
 	t.Helper()
 	path := filepath.Join("..", "agentdriver", "testdata", "captures", capture+".jsonl")
 	header, chunks, err := agentcapture.Read(path)
 	if err != nil {
 		t.Fatalf("read capture %s: %v", capture, err)
 	}
-	if err := grid.Enrol(pane, header.Cols, header.Rows); err != nil {
+	if err := grid.Watch(pane, header.Cols, header.Rows); err != nil {
 		t.Fatalf("enrol %s: %v", pane, err)
 	}
 	t.Cleanup(func() { grid.Withdraw(pane) })
 	fed := 0
-	return func(atMs int64) panegrid.Frame {
+	return func(atMs int64) paneview.Frame {
 		through := agentcapture.ChunksThrough(chunks, atMs, fed)
 		for _, c := range chunks[fed:through] {
 			grid.Feed(pane, []byte(c.Data))
@@ -116,7 +117,7 @@ func feeder(t *testing.T, grid *panegrid.Store, pane, capture string) func(atMs 
 // screenText renders a frame whole, so a test can state that two frames DIFFER.
 // That is the case this whole facet exists for, and asserting it is what keeps
 // the tests below from passing against a rule that compared frames.
-func screenText(f panegrid.Frame) string {
+func screenText(f paneview.Frame) string {
 	var b strings.Builder
 	for y := range f.Rows {
 		b.WriteString(f.Text(y))
@@ -364,7 +365,7 @@ func TestAPaneWithNoMeasurableTranscriptIsNeverCalledStalled(t *testing.T) {
 	// An agent nothing was written for answers unknown for its whole life, and
 	// unknown is not a working state: the facet has nothing to say about it.
 	w.Watch("p2", "no-such-agent")
-	if err := grid.Enrol("p2", 40, 14); err != nil {
+	if err := grid.Watch("p2", 40, 14); err != nil {
 		t.Fatalf("enrol p2: %v", err)
 	}
 	t.Cleanup(func() { grid.Withdraw("p2") })

@@ -1041,6 +1041,11 @@ func TestTheServiceIsNamedAfterTheReservedNameAndTakesNoArgv(t *testing.T) {
 		proto.OpAck: true, proto.OpDetach: true, proto.OpResize: true,
 		proto.OpCloseSession: true, proto.OpSignal: true,
 		proto.OpAdoptLifecycle: true,
+		// The screen reads (nocx-ygxjv.3): one asks a session's runtime for
+		// the frame it holds, the other feeds a capture to a PTY-less
+		// emulator. Both take scalars and a session handle, so neither
+		// carries a free-form []string past the registration rule below.
+		proto.OpScreen: true, proto.OpReplay: true,
 	}
 	for _, op := range svc.Ops() {
 		if !want[op] {

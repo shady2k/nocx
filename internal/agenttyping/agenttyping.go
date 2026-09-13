@@ -117,6 +117,7 @@
 package agenttyping
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"unicode"
@@ -125,7 +126,7 @@ import (
 	"github.com/shady2k/nocx/internal/agentcalib"
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
 )
 
 // MaxText bounds one submission, in bytes. A wake carries a sentence and a
@@ -158,14 +159,14 @@ const maxMenuRows = 16
 // Screens is the seam onto a pane's live grid (AD-8). One method, because
 // typing may READ a screen and may not enrol, withdraw, resize or classify one.
 type Screens interface {
-	Frame(paneID string) (panegrid.Frame, error)
+	Frame(paneID string) (paneview.Frame, error)
 }
 
 // Rules classifies one frame under one agent's rule. The concrete registry
 // satisfies it; the seam exists so this package depends on the abstraction and
 // not on the registry's other powers.
 type Rules interface {
-	Classify(agent string, f panegrid.Frame) agentdriver.State
+	Classify(agent string, f paneview.Frame) agentdriver.State
 }
 
 // Authority answers what an agent's rule has EARNED against the frames a person
@@ -176,7 +177,7 @@ type Rules interface {
 // other way a Verdict can come about — a struct literal, a zero value, a failed
 // lookup — denies typing without anybody having remembered to check.
 type Authority interface {
-	Verify(agent string) agentcalib.Verdict
+	Verify(ctx context.Context, agent string) agentcalib.Verdict
 }
 
 // Enrolment answers which agent a pane was enrolled under.
@@ -261,27 +262,31 @@ func New(lg log.Logger, screens Screens, rules Rules, calib Authority, enrolled 
 
 // Submit puts text into a pane's input and then presses the submit key, as two
 // separate writes each gated on its own frame.
-func (t *Typist) Submit(paneID, text string) Result { return t.put(paneID, text, true) }
+func (t *Typist) Submit(ctx context.Context, paneID, text string) Result {
+	return t.put(ctx, paneID, text, true)
+}
 
 // Type puts text into a pane's input and presses nothing. It is the same
 // primitive with the second segment left off: the text appears in the input
 // region and answers nothing, which is what a person confirming that a rule
 // they just calibrated actually works needs, and what a caller composing a
 // submission a human will send needs.
-func (t *Typist) Type(paneID, text string) Result { return t.put(paneID, text, false) }
+func (t *Typist) Type(ctx context.Context, paneID, text string) Result {
+	return t.put(ctx, paneID, text, false)
+}
 
-func (t *Typist) put(paneID, text string, submit bool) Result {
+func (t *Typist) put(ctx context.Context, paneID, text string, submit bool) Result {
 	body, err := bodyOf(text)
 	if err != nil {
 		// Before the grant, because a submission nocx cannot send is not a
 		// question about the screen. There is no agent to name yet either.
 		return *t.refuse(paneID, "", agentdriver.StateUnknown, err.Error())
 	}
-	p, refusal := t.grant(paneID)
+	p, refusal := t.grant(ctx, paneID)
 	if refusal != nil {
 		return *refusal
 	}
-	if r := p.write([]byte(pasteStart + body + pasteEnd)); r != nil {
+	if r := p.write(ctx, []byte(pasteStart+body+pasteEnd)); r != nil {
 		return *r
 	}
 	typed := Result{
@@ -292,7 +297,7 @@ func (t *Typist) put(paneID, text string, submit bool) Result {
 		t.log.Info("nocx typed into a pane", "pane_id", p.pane, "agent", p.agent, "bytes", len(body))
 		return typed
 	}
-	if r := p.write([]byte(submitKey)); r != nil {
+	if r := p.write(ctx, []byte(submitKey)); r != nil {
 		// The one partial state this has, and it is named rather than folded
 		// into either neighbour: the text is in the input region and nothing
 		// answered anything. Better than the alternative by exactly the margin
@@ -329,8 +334,8 @@ type permit struct {
 // act on — so an unverified rule refuses at StateUnknown, which is the honest
 // answer (without a verified rule nocx does not know what the pane is) and is
 // what every other consumer already treats as busy.
-func (t *Typist) grant(paneID string) (permit, *Result) {
-	agent, refusal := t.authority(paneID)
+func (t *Typist) grant(ctx context.Context, paneID string) (permit, *Result) {
+	agent, refusal := t.authority(ctx, paneID)
 	if refusal != nil {
 		return permit{}, refusal
 	}
@@ -346,13 +351,13 @@ func (t *Typist) grant(paneID string) (permit, *Result) {
 // is enrolled, and its agent's rule has earned the right to be believed. One
 // derivation for text and for a menu, because a second would drift from the
 // first on the agent nobody tried.
-func (t *Typist) authority(paneID string) (string, *Result) {
+func (t *Typist) authority(ctx context.Context, paneID string) (string, *Result) {
 	agent, watched := t.enrolled.AgentOn(paneID)
 	if !watched {
 		return "", t.refuse(paneID, "", agentdriver.StateUnknown,
 			"nocx is not watching that pane, so there is no rule to ask about it")
 	}
-	if v := t.calib.Verify(agent); !v.MayType() {
+	if v := t.calib.Verify(ctx, agent); !v.MayType() {
 		reason := v.Reason
 		if reason == "" {
 			reason = fmt.Sprintf("%s's rule has not earned the right to be typed against", agent)
@@ -386,7 +391,7 @@ func (t *Typist) look(paneID, agent string) (agentdriver.State, *Result) {
 // write re-takes the decision from a frame read HERE and writes b only if that
 // frame still says free_text. Nothing stands between the read and the queue
 // call: b was built before the permit was asked for.
-func (p permit) write(b []byte) *Result {
+func (p permit) write(_ context.Context, b []byte) *Result {
 	if p.by == nil {
 		// The zero permit. Unreachable while grant is the only constructor,
 		// and stated anyway: an invariant held only by a caller's good
@@ -437,7 +442,7 @@ func (m Menu) Index(option string) int {
 // to the caller (the package doc says why), and a caller that waits for "the
 // selection is on the option" must ask the SAME reading Choose confirms
 // against, not a second one written beside it.
-func ReadMenu(f panegrid.Frame) Menu {
+func ReadMenu(f paneview.Frame) Menu {
 	y := f.CursorY
 	if y < 0 || y >= len(f.Lines) || strings.TrimSpace(f.Text(y)) == "" {
 		return Menu{Selected: -1}
@@ -484,24 +489,24 @@ func optionText(row string) string {
 // accepted; typed — the selection was moved toward the option and nothing was
 // confirmed, so the caller waits for the screen to show it and chooses again;
 // refused — nothing at all was written.
-func (t *Typist) Choose(paneID, option string) Result {
+func (t *Typist) Choose(ctx context.Context, paneID, option string) Result {
 	want := strings.TrimSpace(option)
 	if want == "" {
 		return *t.refuse(paneID, "", agentdriver.StateUnknown,
 			"name the option to choose, exactly as the menu shows it")
 	}
-	agent, refusal := t.authority(paneID)
+	agent, refusal := t.authority(ctx, paneID)
 	if refusal != nil {
 		return *refusal
 	}
 	p := menuPermit{by: t, pane: paneID, agent: agent}
-	m, state, refusal := p.menu(want)
+	m, state, refusal := p.menu(ctx, want)
 	if refusal != nil {
 		return *refusal
 	}
 	target := m.Index(want)
 	if target == m.Selected {
-		if r := p.confirm(want); r != nil {
+		if r := p.confirm(ctx, want); r != nil {
 			return *r
 		}
 		t.log.Info("nocx answered a menu in a pane", "pane_id", paneID, "agent", agent, "state", string(state))
@@ -516,7 +521,7 @@ func (t *Typist) Choose(paneID, option string) Result {
 		key, steps = keyUp, -steps
 	}
 	for i := 0; i < steps; i++ {
-		if r := p.move(key, want); r != nil {
+		if r := p.move(ctx, key, want); r != nil {
 			if i > 0 {
 				r.Outcome = OutcomeTyped
 			}
@@ -541,7 +546,7 @@ type menuPermit struct {
 
 // menu reads the pane NOW and answers whether it is still a positively
 // identified menu offering want.
-func (p menuPermit) menu(want string) (Menu, agentdriver.State, *Result) {
+func (p menuPermit) menu(_ context.Context, want string) (Menu, agentdriver.State, *Result) {
 	f, err := p.by.screens.Frame(p.pane)
 	if err != nil {
 		return Menu{}, agentdriver.StateUnknown, p.by.refuse(p.pane, p.agent, agentdriver.StateUnknown,
@@ -562,8 +567,8 @@ func (p menuPermit) menu(want string) (Menu, agentdriver.State, *Result) {
 
 // move writes one movement key, gated on a frame read here that still shows the
 // menu offering want.
-func (p menuPermit) move(key, want string) *Result {
-	_, state, refusal := p.menu(want)
+func (p menuPermit) move(ctx context.Context, key, want string) *Result {
+	_, state, refusal := p.menu(ctx, want)
 	if refusal != nil {
 		return refusal
 	}
@@ -576,8 +581,8 @@ func (p menuPermit) move(key, want string) *Result {
 
 // confirm writes the confirm key, gated on a frame read here that shows the
 // selection ON want — never on the belief that earlier keys landed.
-func (p menuPermit) confirm(want string) *Result {
-	m, state, refusal := p.menu(want)
+func (p menuPermit) confirm(ctx context.Context, want string) *Result {
+	m, state, refusal := p.menu(ctx, want)
 	if refusal != nil {
 		return refusal
 	}

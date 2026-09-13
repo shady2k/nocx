@@ -51,8 +51,8 @@ import (
 // the key that submits it, and may not classify a screen, verify a rule, or
 // reach a pane's input any other way.
 type agentTypist interface {
-	Type(paneID, text string) agenttyping.Result
-	Submit(paneID, text string) agenttyping.Result
+	Type(ctx context.Context, paneID, text string) agenttyping.Result
+	Submit(ctx context.Context, paneID, text string) agenttyping.Result
 }
 
 // WithAgentTypist attaches the typing primitive. Unwired, the method answers
@@ -105,7 +105,7 @@ func validateAgentTypeRaw(raw json.RawMessage) string {
 	return ""
 }
 
-func (s *WSServer) handleAgentType(_ context.Context, state *connState, req jsonrpcRequest, r Responder) {
+func (s *WSServer) handleAgentType(ctx context.Context, state *connState, req jsonrpcRequest, r Responder) {
 	var p agentTypeParams
 	if msg := decodeParamsStrict(req.Params, &p); msg != "" {
 		_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
@@ -129,9 +129,9 @@ func (s *WSServer) handleAgentType(_ context.Context, state *connState, req json
 	// caught by counting the writes that arrived.
 	var out agenttyping.Result
 	if p.Submit {
-		out = s.agentTypist.Submit(p.SessionID, p.Text)
+		out = s.agentTypist.Submit(ctx, p.SessionID, p.Text)
 	} else {
-		out = s.agentTypist.Type(p.SessionID, p.Text)
+		out = s.agentTypist.Type(ctx, p.SessionID, p.Text)
 	}
 	_ = r.TryResult(req.ID, mustMarshal(agentTypeResult{
 		SessionID: p.SessionID,

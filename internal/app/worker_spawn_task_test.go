@@ -24,8 +24,8 @@ import (
 	"github.com/shady2k/nocx/internal/agenttyping"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/paneobserve"
+	"github.com/shady2k/nocx/internal/paneview/paneviewtest"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/waittest"
 	"github.com/shady2k/nocx/internal/workers"
@@ -41,7 +41,7 @@ type taskDeliveryStand struct {
 	ptys    *workerTestPTYFactory
 	tabs    *fakeAxisTabs
 	opener  *fakeAxisOpener
-	grid    *panegrid.Store
+	grid    *paneviewtest.Views
 	rules   *agentdriver.Registry
 	watch   *paneobserve.Watcher
 	enrol   *workerEnrolments
@@ -67,18 +67,18 @@ func newTaskDeliveryStand(t *testing.T) *taskDeliveryStand {
 	})
 	tabs := &fakeAxisTabs{}
 	opener := &fakeAxisOpener{reg: reg}
-	grid := panegrid.New(logger)
+	grid := paneviewtest.NewViews(logger)
 	rules, err := agentdriver.NewRegistry(agentdriver.Claude())
 	if err != nil {
 		t.Fatalf("driver registry: %v", err)
 	}
-	watch := paneobserve.New(logger, grid, rules, paneobserve.Config{})
+	watch := paneobserve.New(logger, grid.Store, rules, paneobserve.Config{})
 	// A sweep does nothing at all until an emitter exists (paneobserve's own
 	// doc on SetEmitter) — production binds the transport here; this stand's
 	// tests read Snapshot directly, so a recording emitter is enough to make
 	// Sweep commit a classification.
 	watch.SetEmitter(func(paneobserve.Observation) {})
-	typist := newPaneTypist(logger, grid, rules, verifiedClaude(t), watch, reg)
+	typist := newPaneTypist(logger, grid.Store, rules, verifiedClaude(t), watch, reg)
 	enrol := newWorkerEnrolments(logger, reg)
 	owed := newOwedTasks()
 	sup := &workerSupervisor{sessions: reg, owed: owed, log: logger}
@@ -130,7 +130,7 @@ func (s *taskDeliveryStand) answerer(t *testing.T) *workerAnswerer {
 	t.Helper()
 	typist := s.realTypist(t)
 	return &workerAnswerer{
-		grid: s.grid, typist: typist,
+		screens: s.grid.Store, typist: typist,
 		owed: s.owed, classify: s.watch, typing: typist, log: s.log,
 		now: settledClock(),
 	}
@@ -176,7 +176,7 @@ func spawnStuckOnQuestion(t *testing.T, stand *taskDeliveryStand, participant wo
 // act, in that order.
 func (s *taskDeliveryStand) enrolWorkerPane(t *testing.T, sid session.ID) {
 	t.Helper()
-	if err := s.grid.Enrol(string(sid), participantCols, participantRows); err != nil {
+	if err := s.grid.Watch(string(sid), participantCols, participantRows); err != nil {
 		t.Fatalf("enrol the worker's pane: %v", err)
 	}
 	t.Cleanup(func() { s.grid.Withdraw(string(sid)) })
@@ -227,7 +227,7 @@ func (s *taskDeliveryStand) feedCapture(t *testing.T, sid session.ID, name strin
 func (s *taskDeliveryStand) repaintAsIdle(t *testing.T, sid session.ID) {
 	t.Helper()
 	s.grid.Withdraw(string(sid))
-	if err := s.grid.Enrol(string(sid), participantCols, participantRows); err != nil {
+	if err := s.grid.Watch(string(sid), participantCols, participantRows); err != nil {
 		t.Fatalf("re-enrol the worker's pane: %v", err)
 	}
 	s.feedCapture(t, sid, "claude-idle", 11000)
@@ -268,7 +268,7 @@ func (f fakePaneReadiness) Snapshot(string) (paneobserve.Observation, bool) {
 // produce it.
 type fixedOutcomeTypist struct{ res agenttyping.Result }
 
-func (f fixedOutcomeTypist) Submit(string, string) agenttyping.Result { return f.res }
+func (f fixedOutcomeTypist) Submit(ctx context.Context, _, _ string) agenttyping.Result { return f.res }
 
 // fixedStateReadiness answers every Snapshot with the SAME state, forever —
 // what a pane looks like when nocx is reading it just fine and it simply

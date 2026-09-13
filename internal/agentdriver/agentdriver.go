@@ -45,7 +45,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
 )
 
 // State is what a pane's screen is inviting. The set is closed; see the
@@ -177,7 +177,7 @@ type Driver interface {
 	// Classify answers from the closed set, and never returns StateExited.
 	// It reads only the frame it is given: a driver holds no state between
 	// frames, because a rule that remembers is a rule that can be stuck.
-	Classify(f panegrid.Frame) State
+	Classify(f paneview.Frame) State
 }
 
 // Observer is the richer half of Driver: a driver whose rule can read VALUES
@@ -193,7 +193,7 @@ type Observer interface {
 	// Observe answers the whole observation for one frame. Its State is the
 	// same value Classify returns, and its Extras are whatever the rule
 	// could extract; the same no-memory contract applies.
-	Observe(f panegrid.Frame) Observation
+	Observe(f paneview.Frame) Observation
 }
 
 // Registry maps an agent name to its driver, and fails closed.
@@ -276,7 +276,7 @@ func (r *Registry) For(agent string) (Driver, bool) {
 // to handle. A driver that is not an Observer answers the same way it always
 // did, lifted — which is the whole of what "extras are optional" means at this
 // seam.
-func (r *Registry) Observe(agent string, f panegrid.Frame) Observation {
+func (r *Registry) Observe(agent string, f paneview.Frame) Observation {
 	d, ok := r.For(agent)
 	if !ok {
 		return Observation{State: StateUnknown}
@@ -290,7 +290,7 @@ func (r *Registry) Observe(agent string, f panegrid.Frame) Observation {
 // Classify is the scalar projection of Observe, and it is written as one so
 // there is a single evaluation behind both. Two paths answering one question
 // is how the two come to disagree on the frame nobody tried.
-func (r *Registry) Classify(agent string, f panegrid.Frame) State {
+func (r *Registry) Classify(agent string, f paneview.Frame) State {
 	return r.Observe(agent, f).State
 }
 

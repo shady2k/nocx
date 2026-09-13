@@ -22,7 +22,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	coordsock "github.com/shady2k/nocx/internal/coordinator"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview/paneviewtest"
 	"github.com/shady2k/nocx/internal/peerpin"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/toolendpoint"
@@ -399,7 +399,7 @@ func prepareGroupCaller(t *testing.T) (*session.Reg, session.Session, workerAuth
 	if err := reg.RecordOwnedProcessPID(sess.ID(), os.Getpid()); err != nil {
 		t.Fatalf("record owned process pid: %v", err)
 	}
-	if err := grid.Enrol(string(sess.ID()), 80, 24); err != nil {
+	if err := grid.Watch(string(sess.ID()), 80, 24); err != nil {
 		t.Fatalf("enrol session grid: %v", err)
 	}
 	return reg, sess, grid
@@ -604,7 +604,7 @@ func prepareGroupWorkerSetup(t *testing.T) workerWorkerSetup {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	reg := session.New(logger, workerAuthPTYFactory{log: logger})
-	grid := panegrid.New(logger)
+	grid := paneviewtest.NewViews(logger)
 
 	// The coordinator's session exists and is deliberately NOT enrolled: it
 	// reaches the record in process, and enrolling it would make the peer's
@@ -623,7 +623,7 @@ func prepareGroupWorkerSetup(t *testing.T) workerWorkerSetup {
 	if pidErr := reg.RecordOwnedProcessPID(worker.ID(), os.Getpid()); pidErr != nil {
 		t.Fatalf("record worker owned pid: %v", pidErr)
 	}
-	if enrolErr := grid.Enrol(string(worker.ID()), 80, 24); enrolErr != nil {
+	if enrolErr := grid.Watch(string(worker.ID()), 80, 24); enrolErr != nil {
 		t.Fatalf("enrol worker pane: %v", enrolErr)
 	}
 	t.Cleanup(func() { grid.Withdraw(string(worker.ID())) })

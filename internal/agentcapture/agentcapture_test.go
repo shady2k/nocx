@@ -13,26 +13,28 @@ package agentcapture_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/agentcapture"
+	"github.com/shady2k/nocx/internal/agentcapture/replaylocal"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
+	"github.com/shady2k/nocx/internal/paneview/paneviewtest"
 )
 
 // paint builds a frame the way the product builds one — through a real
 // panegrid Store fed real bytes — because a frame assembled by hand is a frame
 // the product never makes.
-func liveFrame(t *testing.T, cols, rows int, bytes string) panegrid.Frame {
+func liveFrame(t *testing.T, cols, rows int, bytes string) paneview.Frame {
 	t.Helper()
-	store := panegrid.New(log.NewSlogAdapter(nil))
+	store := paneviewtest.NewViews(log.NewSlogAdapter(nil))
 	const pane = "probe"
-	if err := store.Enrol(pane, cols, rows); err != nil {
+	if err := store.Watch(pane, cols, rows); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
 	t.Cleanup(func() { store.Withdraw(pane) })
@@ -81,7 +83,7 @@ func TestPaintReplaysToTheSameFrame(t *testing.T) {
 				Cols: want.Cols, Rows: want.Rows,
 			}
 			chunks := []agentcapture.Chunk{{AtMs: 0, Offset: 0, Data: string(agentcapture.Paint(want))}}
-			moments, err := agentcapture.Frames(log.NewSlogAdapter(nil), header, chunks, []int64{0})
+			moments, err := agentcapture.Frames(context.Background(), replaylocal.Replayer{}, header, chunks, []int64{0})
 			if err != nil {
 				t.Fatalf("frames: %v", err)
 			}
@@ -98,7 +100,7 @@ func TestPaintReplaysToTheSameFrame(t *testing.T) {
 // frameDiff names the first thing that differs, in the vocabulary a person
 // reading the failure has: a cursor cell, a geometry, or a row. Printing two
 // whole frames as structs prints four thousand cells and says nothing.
-func frameDiff(got, want panegrid.Frame) string {
+func frameDiff(got, want paneview.Frame) string {
 	if got.Cols != want.Cols || got.Rows != want.Rows {
 		return fmt.Sprintf("geometry %dx%d, want %dx%d", got.Cols, got.Rows, want.Cols, want.Rows)
 	}
@@ -110,12 +112,12 @@ func frameDiff(got, want panegrid.Frame) string {
 	}
 	var out strings.Builder
 	for y := range want.Lines {
-		if reflect.DeepEqual(got.Lines[y], want.Lines[y]) {
+		if sameRow(got.Lines[y], want.Lines[y]) {
 			continue
 		}
 		fmt.Fprintf(&out, "row %d:\n got %q\nwant %q\n", y, got.Text(y), want.Text(y))
 		for x := range want.Lines[y] {
-			if got.Lines[y][x] != want.Lines[y][x] {
+			if !sameCell(got.Lines[y][x], want.Lines[y][x]) {
 				fmt.Fprintf(&out, "  first differing column %d: got %+v, want %+v\n",
 					x, got.Lines[y][x], want.Lines[y][x])
 				break
@@ -123,6 +125,44 @@ func frameDiff(got, want panegrid.Frame) string {
 		}
 	}
 	return out.String()
+}
+
+// sameRow compares two rows under the same rule, so a row that differs only in
+// how its blanks are spelled is not reported as a difference.
+func sameRow(a, b []paneview.Cell) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !sameCell(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// sameCell compares two cells as the frame's own reader does.
+//
+// A blank column is blank whether it spells its emptiness as "" or as " ": Paint
+// writes a space for every cell it draws and trims only the trailing run, so a
+// replayed screen carries spaces where the painted one carried nothing, and
+// Frame.Text renders both as one space. Asserting on the spelling would make
+// this test fail on a difference no consumer can observe.
+func sameCell(a, b paneview.Cell) bool {
+	if a.Width != b.Width {
+		return false
+	}
+	if a.Width == 0 {
+		return true
+	}
+	at, bt := a.Text, b.Text
+	if at == " " {
+		at = ""
+	}
+	if bt == " " {
+		bt = ""
+	}
+	return at == bt
 }
 
 func TestCaptureJSONLRoundTrip(t *testing.T) {

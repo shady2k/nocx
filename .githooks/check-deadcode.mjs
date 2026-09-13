@@ -41,8 +41,9 @@
  * escape hatch the CSS checkers use for their fixture gates.
  */
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -85,6 +86,301 @@ const UNREACHABLE_RE = /^(.+?):\d+:\d+: unreachable func: (.+)$/
 // so is legitimately absent from the baseline; do not read that absence as
 // the exclusion having swallowed it.
 const TEST_SUPPORT_PKG_RE = /(^|\/)[a-z0-9]*test\/[^/]+\.go:\d+:\d+: unreachable func:/
+
+// ─── cgo `//export` callbacks are roots ───────────────────────────────────
+//
+// A function marked `//export` is called from C, and RTA cannot see a C-to-Go
+// call because there is no Go call site to see. So deadcode reports the
+// callback dead — and with it everything ONLY the callback reaches, which is
+// the half that matters: internal/emulator/ghostty's copyBorrowed and lookup
+// are called by the six `//export`ed nocxGo* callbacks and by nothing else
+// (nocx-ygxjv.16).
+//
+// Three answers that do not work, and why, because each looks reasonable:
+//
+//   - Baseline them. The baseline is a list of functions nobody has wired
+//     yet, and its whole value is that a NEW name in it is a finding. Six
+//     callbacks in it would mean the gate could not tell the seventh — the one
+//     whose C side nobody wrote — from a callback that C calls every keystroke.
+//     The helpers would need entries of their own, and those go stale the
+//     moment a callback stops or starts using one.
+//   - Suppress the callback's own report. The helper it reaches is still
+//     reported, so the gate stays red and the suppression bought a shorter red.
+//   - Compute the reachability here, from the package's source. That is a
+//     second answer to the question deadcode already answers, and it can only
+//     be wrong in the direction that matters: an edge that looks like a call
+//     and is not — a shadowing local, a method name on another type — marks a
+//     dead function live, and the report disappears. A gate that hides one
+//     dead function to fix a false positive is the wrong trade.
+//
+// So the roots are SUPPLIED to the analyser and the analyser does the rest.
+// deadcode's roots are the main packages' init and main functions, loaded
+// through `go list`, which honours -overlay. For every file that declares an
+// `//export`ed callback this script renders a file in the SAME package — same
+// build constraints and same cgo preamble, so it compiles under exactly the
+// conditions the callback's own file does — whose init() calls each callback.
+// The rendered files are virtual: written outside the tree and reached through
+// an overlay, so they are never committed, never compiled into the product,
+// and never seen by gofmt, golangci-lint or a person reading the package.
+//
+// What this can and cannot hide is exact, which is the whole reason for doing
+// it this way. A function the callbacks reach is a function C reaches, and
+// reporting it is the false positive being fixed. A function they do NOT reach
+// is untouched: the synthetic init adds call edges and nothing else, so a dead
+// function in a cgo package is still reported, and so is a `//export` comment
+// in a file that does not import "C" — cgo honours no directive there, so it
+// is not a root here either. The test that holds both halves is
+// frontend/lint-fixtures/check-deadcode.test.mjs, over the cgo fixture module
+// beside it.
+
+/** A directory the go tool does not walk: dot/underscore prefixes, node_modules. */
+const INVISIBLE_DIR_RE = /^(?:[._]|node_modules$)/
+
+/** `//export Name` — the directive cgo requires immediately above the function. */
+const EXPORT_DIRECTIVE_RE = /^\/\/export[ \t]+([A-Za-z_]\w*)[ \t]*$/
+
+/** The import that makes a file a cgo file: `import "C"`, or `"C"` in an import block. */
+const CGO_IMPORT_RE = /^[ \t]*(?:import[ \t]+)?"C"[ \t]*(?:\/\/.*)?$/
+
+/** The first line of a top-level declaration; the cgo import cannot come after one. */
+const TOP_LEVEL_DECL_RE = /^(?:func|var|const|type)\b/
+
+/** A cgo `//export`ed callback: the name and its parameter list, as written. */
+const EXPORT_FUNC_RE = /^func[ \t]+([A-Za-z_]\w*)[ \t]*\(([^)]*)\)/
+
+/** Every non-test Go file under root, paths sorted for a deterministic render. */
+function goSources(root) {
+  const files = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (INVISIBLE_DIR_RE.test(entry.name)) continue
+        // A nested module (third_party/libghostty-vt/linkprobe) is not part of
+        // the program `go list ./...` loads here, and neither is its overlay.
+        if (existsSync(join(path, 'go.mod'))) continue
+        walk(path)
+      } else if (entry.isFile() && entry.name.endsWith('.go') && !entry.name.endsWith('_test.go')) {
+        files.push(path)
+      }
+    }
+  }
+  walk(root)
+  return files.sort()
+}
+
+/**
+ * Every callback under root: the file, its `//export`ed names, the parameter
+ * list of each, and the pieces of the file the renderer has to copy (build
+ * constraints, package clause, cgo preamble).
+ *
+ * A directive whose function declaration cannot be read on ONE line is an
+ * error rather than a skip: the script renders that call's arguments from the
+ * parameters, and a root it silently dropped would put the callback back in
+ * the report as a violation nobody could explain.
+ */
+export function findCgoExportCallbacks(root) {
+  const found = []
+  for (const file of goSources(root)) {
+    const lines = readFileSync(file, 'utf8').split('\n')
+
+    // The `"C"` import, and only in the file header: `import "C"` and the
+    // block form are both accepted, and a `"C"` string in a function body is
+    // not an import.
+    let importIndex = -1
+    for (let i = 0; i < lines.length; i++) {
+      if (TOP_LEVEL_DECL_RE.test(lines[i])) break
+      if (CGO_IMPORT_RE.test(lines[i])) {
+        importIndex = i
+        break
+      }
+    }
+    if (importIndex < 0) continue
+
+    const names = []
+    let inBlockComment = false
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]
+      if (inBlockComment) {
+        if (line.includes('*/')) inBlockComment = false
+        continue
+      }
+      if (line.includes('/*')) {
+        // An example of the directive written inside a comment is not one.
+        if (!line.includes('*/')) inBlockComment = true
+        continue
+      }
+      const directive = EXPORT_DIRECTIVE_RE.exec(line)
+      if (!directive) continue
+      const decl = EXPORT_FUNC_RE.exec(lines[i + 1] ?? '')
+      if (!decl || decl[1] !== directive[1]) {
+        throw new Error(
+          `${relative(root, file)}:${i + 1}: //export ${directive[1]} is not immediately above ` +
+            `"func ${directive[1]}(…)" on one line, so this script cannot render its call`,
+        )
+      }
+      names.push({ name: directive[1], params: decl[2] })
+    }
+    if (names.length === 0) continue
+
+    found.push({
+      root,
+      file,
+      rel: relative(root, file),
+      names,
+      constraints: buildConstraints(lines),
+      pkg: packageName(lines, file),
+      preamble: cgoPreamble(lines, importIndex),
+    })
+  }
+  return found
+}
+
+/** The `//go:build` / `// +build` lines of a file, in order, constraints only. */
+function buildConstraints(lines) {
+  const out = []
+  for (const line of lines) {
+    if (line.startsWith('package ')) break
+    if (/^\/\/go:build[ \t]/.test(line) || /^\/\/[ \t]*\+build[ \t]/.test(line)) out.push(line)
+  }
+  return out
+}
+
+function packageName(lines, file) {
+  const clause = lines.find((line) => line.startsWith('package '))
+  const name = clause && /^package[ \t]+([A-Za-z_]\w*)/.exec(clause)?.[1]
+  if (!name) throw new Error(`${file}: no package clause`)
+  return name
+}
+
+/** The comment cgo reads as the file's C preamble: the one above `import "C"`. */
+function cgoPreamble(lines, importIndex) {
+  let i = importIndex - 1
+  while (i >= 0 && lines[i].trim() === '') i--
+  if (i < 0) return []
+  const last = lines[i].trim()
+  if (last.endsWith('*/')) {
+    let start = i
+    while (start >= 0 && !lines[start].includes('/*')) start--
+    return start < 0 ? [] : lines.slice(start, i + 1)
+  }
+  if (last.startsWith('//')) {
+    let start = i
+    while (start - 1 >= 0 && lines[start - 1].trim().startsWith('//')) start--
+    return lines.slice(start, i + 1)
+  }
+  return []
+}
+
+/**
+ * The name a rendered root takes for a source file. It carries the source's
+ * trailing `_GOOS` / `_GOARCH` components — `effects.go` renders
+ * `zz_deadcode_cgo_roots_effects.go`, `gated_darwin.go` renders
+ * `…_gated_darwin.go` — because go infers an implicit build constraint from the
+ * file NAME as well as from its `//go:build` line, and a root that leaked onto
+ * every platform would make a platform-gated callback live in an analysis that
+ * never compiles its file.
+ */
+export function rootsFileName(sourceFile) {
+  return `zz_deadcode_cgo_roots_${basename(sourceFile)}`
+}
+
+/**
+ * The synthetic file rendered for one callback-bearing source file: the whole
+ * declaration, because it is compiled as if it were in the package.
+ */
+export function renderCgoRootsFile(callback) {
+  const { constraints, pkg, preamble, names, file } = callback
+  const calls = names.map(({ name, params }) => `${name}(${zeroValueArgs(params, file, name)})`)
+  const out = []
+  if (constraints.length > 0) out.push(...constraints, '')
+  out.push(`package ${pkg}`, '')
+  if (preamble.length > 0) out.push(...preamble)
+  out.push('import "C"', '')
+  out.push(
+    '// Rendered by .githooks/check-deadcode.mjs, in an overlay: never written to',
+    '// this tree, never compiled into the product. See that script for why the',
+    '// cgo callbacks below are roots a Go call graph cannot see.',
+    'func init() {',
+    ...calls.map((call) => `\t${call}`),
+    '}',
+  )
+  return `${out.join('\n')}\n`
+}
+
+/**
+ * One zero-valued argument per parameter, as `*new(T)`: the expression is valid
+ * for every type a cgo callback can take, including pointers and function
+ * types, and needs no knowledge of the type beyond its name.
+ *
+ * Parameters are all named or all unnamed within one list (Go's rule), which is
+ * what makes `a, b int` readable without a parser: a lone identifier belongs to
+ * a group whose type is on a later part, and in a list where no part carries a
+ * type at all, every part IS the type.
+ */
+function zeroValueArgs(params, file, name) {
+  const parts = splitTopLevel(params, ',')
+  if (parts.length === 1 && parts[0].trim() === '') return ''
+  const named = parts.some((part) => part.trim().split(/\s+/).length > 1)
+  const args = []
+  let pending = 0
+  for (const part of parts) {
+    const tokens = part.trim().split(/\s+/)
+    if (named && tokens.length === 1) {
+      pending++
+      continue
+    }
+    const type = named ? tokens[tokens.length - 1] : tokens.join(' ')
+    for (let i = 0; i <= pending; i++) args.push(zeroValue(type))
+    pending = 0
+  }
+  if (pending > 0) {
+    throw new Error(`${file}: ${name} has a parameter list this script cannot read: (${params})`)
+  }
+  return args.join(', ')
+}
+
+function zeroValue(type) {
+  // A variadic parameter is callable with one value of the element type.
+  return `*new(${type.startsWith('...') ? type.slice(3) : type})`
+}
+
+/** Split on a separator at nesting depth 0, so `map[string]int, error` stays two. */
+function splitTopLevel(text, sep) {
+  const parts = []
+  let depth = 0
+  let current = ''
+  for (const ch of text) {
+    if (ch === '(' || ch === '[' || ch === '{') depth++
+    if (ch === ')' || ch === ']' || ch === '}') depth--
+    if (ch === sep && depth === 0) {
+      parts.push(current)
+      current = ''
+      continue
+    }
+    current += ch
+  }
+  parts.push(current)
+  return parts
+}
+
+/**
+ * Write the rendered files into a temp directory and the overlay that maps
+ * each into its package. Returns the directory to remove and the overlay path
+ * to hand the go command; nothing is written inside the repository.
+ */
+function writeCgoRootsOverlay(callbacks) {
+  const dir = mkdtempSync(join(tmpdir(), 'nocx-deadcode-cgo-roots-'))
+  const replace = {}
+  callbacks.forEach((callback, n) => {
+    const solid = join(dir, `${n}-${basename(callback.file)}`)
+    writeFileSync(solid, renderCgoRootsFile(callback))
+    replace[join(dirname(callback.file), rootsFileName(callback.file))] = solid
+  })
+  const overlay = join(dir, 'overlay.json')
+  writeFileSync(overlay, `${JSON.stringify({ Replace: replace }, null, 2)}\n`)
+  return { dir, overlay }
+}
 
 /**
  * ONE PLATFORM PER RUN — the host's, and that is a change with a history.
@@ -184,12 +480,26 @@ export function hostPlatform() {
  * beside it, so on a small machine the OOM killer takes it (measured
  * 2026-08-14). Say so, and say to re-run rather than to edit anything.
  */
-function runDeadcode(platform, tags) {
-  const proc = spawnSync(DEADCODE_CMD, [...(tags ? ['-tags', tags] : []), './...'], {
-    cwd: PROJECT_ROOT,
+function runDeadcode(
+  platform,
+  tags,
+  { root = PROJECT_ROOT, deadcodeCmd = DEADCODE_CMD, overlay } = {},
+) {
+  // The overlay is how the cgo roots reach the analyser: `go list` (which
+  // deadcode loads through) honours it, and GOFLAGS is the only channel to a
+  // subprocess this script does not otherwise control. An existing GOFLAGS is
+  // kept — it is the developer's, and GOFLAGS is a space-separated list.
+  const goflags = [process.env.GOFLAGS, overlay && `-overlay=${overlay}`].filter(Boolean).join(' ')
+  const proc = spawnSync(deadcodeCmd, [...(tags ? ['-tags', tags] : []), './...'], {
+    cwd: root,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
-    env: { ...process.env, ...platform, CGO_ENABLED: '1' },
+    env: {
+      ...process.env,
+      ...platform,
+      CGO_ENABLED: '1',
+      ...(goflags ? { GOFLAGS: goflags } : {}),
+    },
   })
 
   if (proc.signal) {
@@ -212,20 +522,49 @@ function runDeadcode(platform, tags) {
 }
 
 /**
+ * The analysis for one platform: its violations, and the cgo callbacks that
+ * were supplied to it as roots.
+ *
+ * `opts.root` and `opts.deadcodeCmd` exist for the fixture test in
+ * frontend/lint-fixtures, which analyses a fixture module with a model of
+ * deadcode beside it: ci-frontend has no Go toolchain, so the real analyser
+ * cannot run there, and the real one is what the ratchet itself runs in
+ * ci-mac / ci-linux.
+ */
+export function analyzeModule(platform, tags, opts = {}) {
+  const root = opts.root ?? PROJECT_ROOT
+  const callbacks = findCgoExportCallbacks(root)
+  const overlay = callbacks.length > 0 ? writeCgoRootsOverlay(callbacks) : null
+
+  let stdout
+  try {
+    stdout = runDeadcode(platform, tags, {
+      ...opts,
+      root,
+      overlay: overlay?.overlay,
+    })
+  } finally {
+    if (overlay) rmSync(overlay.dir, { recursive: true, force: true })
+  }
+
+  const seen = new Map()
+  for (const v of parseDeadcodeOutput(stdout)) {
+    seen.set(violationKey(v), v)
+  }
+  const violations = [...seen.values()]
+  violations.sort((a, b) => `${a.file}:${a.func}`.localeCompare(`${b.file}:${b.func}`))
+  return { violations, roots: callbacks }
+}
+
+/**
  * Return the normalized violation list for ONE platform, deduplicated and
  * sorted. Deterministic for a given platform — keys sorted, and any output
  * line the parser does not understand fails loudly rather than silently
  * passing (a format change in a newer deadcode must not look like a clean
  * tree).
  */
-export function collectDeadcodeViolations(platform, tags) {
-  const seen = new Map()
-  for (const v of parseDeadcodeOutput(runDeadcode(platform, tags))) {
-    seen.set(violationKey(v), v)
-  }
-  const violations = [...seen.values()]
-  violations.sort((a, b) => `${a.file}:${a.func}`.localeCompare(`${b.file}:${b.func}`))
-  return violations
+export function collectDeadcodeViolations(platform, tags, opts = {}) {
+  return analyzeModule(platform, tags, opts).violations
 }
 
 function parseDeadcodeOutput(stdout) {
@@ -268,7 +607,7 @@ function loadBaseline() {
 
 // ─── CLI entry point ──────────────────────────────────────────────────────
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  let violations
+  let analysis
   let platform
   try {
     const host = hostPlatform()
@@ -278,11 +617,24 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       `DEADCODE RATCHET: analysing ${platform.GOOS}/${platform.GOARCH}` +
         `${tags ? ` -tags ${tags}` : ''}, CGO_ENABLED=1.`,
     )
-    violations = collectDeadcodeViolations(platform, tags)
+    analysis = analyzeModule(platform, tags)
+    // Say what was added as a root, because it is the difference between this
+    // run and `deadcode ./...` run by hand — a reader comparing the two is
+    // otherwise looking at six violations that are in one and not the other.
+    if (analysis.roots.length > 0) {
+      const files = analysis.roots.map((c) => c.rel).join(', ')
+      console.error(
+        `DEADCODE RATCHET: ${analysis.roots.length} cgo ` +
+          `${analysis.roots.length === 1 ? 'file' : 'files'} with //export callbacks supplied ` +
+          `as roots (${files}).`,
+      )
+    }
   } catch (err) {
     console.error(`DEADCODE RATCHET: ${err.message}`)
     process.exit(1)
   }
+
+  const violations = analysis.violations
 
   const useBaseline = process.env.NOCX_BASELINE_UPDATE !== '1'
   const baselineMap = useBaseline ? loadBaseline() : new Map()

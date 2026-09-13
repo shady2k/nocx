@@ -140,6 +140,33 @@ type remoteEnd interface {
 	Close() error
 }
 
+// exitReported is the optional half of a remoteEnd whose far end is a
+// PROCESS rather than a stream, and a lane is the only one this generation
+// has. It is asked exactly once, from the reader pump after the read loop has
+// ended — never from finish's other callers, where the far end is still
+// serving and waiting for it would park a close that a person asked for.
+type exitReported interface {
+	exitStatus() (int, bool)
+}
+
+// channelExit asks a channel's far end how it exited, for the closed event.
+// A channel that is not a process reports none, and that absence is a fact on
+// the wire rather than a zero: an sftp subsystem has no exit status at all.
+func channelExit(end remoteEnd) *int32 {
+	reported, ok := end.(exitReported)
+	if !ok {
+		return nil
+	}
+	code, ok := reported.exitStatus()
+	if !ok {
+		return nil
+	}
+	// The range is enforced where the status is READ (laneEnd.exitStatus), so
+	// this conversion is total; gosec cannot see across the interface.
+	exit := int32(code) // #nosec G115 -- bounded by maxExitStatus at the source
+	return &exit
+}
+
 // subsystemEnd is a session channel carrying a subsystem.
 type subsystemEnd struct {
 	sess   *gossh.Session
@@ -307,7 +334,9 @@ func openSubsystemStream(pool *ssh.PooledConn, subsystem string) (*subsystemEnd,
 
 // ResponseWritten starts the channel's reader pump, or a listener's accept
 // loop, once the open's or the forward's answer is on the wire
-// (host.ResponseObserver).
+// (host.ResponseObserver). It is the same edge for a LANE: a lane's bytes are
+// keyed by the id its open answered with, so a pump started in the handler
+// could write about a stream the caller cannot address yet.
 //
 // Both are deferred starts for the SAME reason, and it is worth saying once
 // where both are dispatched: what either writes about is keyed by an id the
@@ -317,7 +346,7 @@ func openSubsystemStream(pool *ssh.PooledConn, subsystem string) (*subsystemEnd,
 // hang, and for a forwarded connection a stream nobody can read.
 func (s *Service) ResponseWritten(_ context.Context, op string, result any) {
 	switch op {
-	case proto.OpOpen:
+	case proto.OpOpen, proto.OpLane:
 		res, ok := result.(proto.OpenChannelResult)
 		if !ok {
 			return
@@ -369,7 +398,7 @@ func (c *openChannel) pumpToCoordinator(log *slog.Logger) {
 			break
 		}
 	}
-	c.finish(cause)
+	c.finish(cause, channelExit(c.end))
 }
 
 // ChannelData routes bytes the coordinator wrote to one channel. An id this
@@ -389,7 +418,7 @@ func (s *Service) ChannelData(_ context.Context, f proto.ChannelFrame) {
 		// holds one connection for many channels, and a stream the remote
 		// end closed says nothing about the others.
 		s.log.Info("ssh: channel write failed", "channel", f.Channel.String(), "error", err)
-		ch.finish(err.Error())
+		ch.finish(err.Error(), nil)
 	}
 }
 
@@ -411,7 +440,11 @@ func (s *Service) closeChannel(id proto.ChannelID) (proto.CloseChannelResult, er
 		s.log.Debug("ssh: close for an unknown channel", "channel", id.String(), "err", errNoSuchChannel)
 		return proto.CloseChannelResult{}, nil
 	}
-	ch.finish("")
+	// A close the COORDINATOR asked for carries no exit status, and that is
+	// not an omission: asking for the far process's status here would wait for
+	// a bridge that is still serving somebody, because nothing has ended it
+	// yet — the close itself is what ends it.
+	ch.finish("", nil)
 	return proto.CloseChannelResult{}, nil
 }
 
@@ -421,7 +454,7 @@ func (s *Service) closeChannel(id proto.ChannelID) (proto.CloseChannelResult, er
 //
 // cause is the helper's sentence for an end nobody asked for, empty for an
 // ordinary one.
-func (c *openChannel) finish(cause string) {
+func (c *openChannel) finish(cause string, exit *int32) {
 	c.closeOnce.Do(func() {
 		// Announced on BOTH ways of ending, and the coordinator tolerates the
 		// redundant one: a notification for an id it has already forgotten is
@@ -434,7 +467,7 @@ func (c *openChannel) finish(cause string) {
 		_ = c.conn.SendNotification(proto.Notification{
 			Service: proto.ServiceSSH,
 			Event:   proto.EventChannelClosed,
-			Params:  proto.ChannelClosedEvent{Channel: c.id, Error: cause},
+			Params:  proto.ChannelClosedEvent{Channel: c.id, Error: cause, Exit: exit},
 		})
 		_ = c.end.Close()
 		// nil for a forwarded channel: the listener holds the reference (see

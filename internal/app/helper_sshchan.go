@@ -14,12 +14,19 @@ package app
 //
 // # Which consumers are here, and which are still the coordinator's
 //
-// The install/uninstall lease, and only it. The other consumers of the same
-// epic (files and the bundle publish, forwards and the remote lifecycle tunnel,
-// discovery's probes, the git lane, the settings probe) still dial from this
-// process and are moved one per task; a consumer is moved WHOLLY or not at all,
-// which is why this file's leaseRoutes names each of them out loud rather than
-// pretending the migration is finished.
+// The install/uninstall lease, the git lane and the settings probe (the last
+// two since nocx-50w7p.10). The other consumers of the same epic (files and the
+// bundle publish, forwards and the remote lifecycle tunnel, discovery's probes)
+// still dial from this process and are moved one per task; a consumer is moved
+// WHOLLY or not at all, which is why this file's leaseRoutes names each of them
+// out loud rather than pretending the migration is finished.
+//
+// The two that moved here are the two whose carrier was not a channel anybody
+// else wanted: a lane is an exec session on the pooled connection, and a probe
+// is a dial that leaves nothing behind. Both are one helper op each
+// (internal/helper/sshsvc), and neither leaves a coordinator dial behind — the
+// probe's old path was RealClient.ProbeConfig, which is deleted with the lane's
+// ssh.HelperConn.
 //
 // # Why the destination is resolved here and not by the helper
 //
@@ -35,10 +42,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/vault"
 )
 
 // sshOverHelper opens ssh channels on this machine's helper.
@@ -63,6 +73,229 @@ type sshOverHelper struct {
 // can move independently without either pretending to be the other.
 type installLeaseProvider interface {
 	HelperInstallConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.HelperInstallConn, error)
+}
+
+// laneProvider is the exec lane a helper rides to a remote helper's bridge
+// (design D19), and since nocx-50w7p.10 it is THIS MACHINE'S HELPER that owns
+// it: the coordinator no longer opens an ssh exec session at all, so the
+// interface is a seam over the helper op rather than over RealClient.HelperConn
+// (deleted).
+type laneProvider interface {
+	// LaneConn opens one exec lane on the helper's pooled connection for host,
+	// running the installed helper of generation under machine's install
+	// identity in its bridge subcommand, and answers the carrier the helper
+	// client rides.
+	LaneConn(ctx context.Context, host string, machine proto.Machine, generation proto.GenerationID, opts ...ssh.ConnectOption) (helperclient.HelperConn, error)
+}
+
+// LaneConn opens the exec lane a remote helper's bridge rides.
+//
+// The command is not built here and does not cross: the helper derives it from
+// the machine and the generation (proto.LaneParams, D3), which is also why this
+// method takes those two facts rather than the command path the install knows.
+func (h *sshOverHelper) LaneConn(ctx context.Context, host string, machine proto.Machine, generation proto.GenerationID, opts ...ssh.ConnectOption) (helperclient.HelperConn, error) {
+	local, _, err := h.local.connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	target, err := h.resolve.ResolveTarget(ctx, host, opts...)
+	if err != nil {
+		return nil, err
+	}
+	lane, err := local.OpenLane(ctx, proto.LaneParams{
+		Destination: destinationOf(target),
+		Machine:     machine,
+		Generation:  generation,
+	})
+	if err != nil {
+		return nil, h.translate(host, err)
+	}
+	return lane, nil
+}
+
+// ProbeWithResult asks this machine's helper whether a credential works
+// against a host, and answers the host-key fingerprint the handshake saw
+// (empty when it never reached one).
+//
+// It is the settings surface's connection test, and it is a DIAL: under the
+// owner's invariant dials are the helper's, so this is the same question
+// RealClient.ProbeConfig used to answer from this process (deleted with the
+// lane's HelperConn). What is NOT the helper's is the host-key DECISION: the
+// helper asks, this coordinator answers from its own known_hosts through the
+// reverse registry (helper_reverse.go), and the verdict travels back
+// (internal/helper/sshsvc).
+func (h *sshOverHelper) ProbeWithResult(ctx context.Context, host string, cfg *ssh.ConnectConfig) (string, error) {
+	local, _, err := h.local.connect(ctx)
+	if err != nil {
+		return "", err
+	}
+	// The resolved profile becomes connect options and is resolved again by the
+	// SAME resolver the coordinator's own dial used (ResolveTarget) — alias
+	// through ~/.ssh/config, the credential's authorization against the
+	// endpoint its profile names, and the destination the helper is handed.
+	// The options are the resolver's own conversion (session.SSHOptionsFromConfig),
+	// so a field this path forgets is a field that path forgot.
+	target, err := h.resolve.ResolveTarget(ctx, host, session.SSHOptionsFromConfig(cfg)...)
+	if err != nil {
+		return "", fmt.Errorf("probe config: %w", err)
+	}
+	var result proto.ProbeResult
+	if err := local.Call(ctx, proto.ServiceSSH, proto.OpProbe, proto.ProbeParams{
+		Host: target.Host, Port: target.Port, User: target.User,
+		Identity: identityOf(target),
+		// FALSE, and it is the same decision the coordinator's own probe made:
+		// it never accepted a key on trust. First contact is answered as
+		// host-key-unknown with the evidence, the accept sheet is raised from
+		// that evidence, and the WRITE happens in the separate
+		// connections.trustHostKey act.
+		AcceptOnTrust: false,
+	}, &result); err != nil {
+		return "", h.translateProbe(target, err)
+	}
+	return probeAnswer(target, result)
+}
+
+// translateProbe re-types a helper refusal into the error this coordinator's
+// probe callers already classify.
+//
+// It translates a REFUSAL and never an outcome, and the line between the two is
+// the whole of it: a refusal means the probe did not happen (bad params, no
+// coordinator to ask, this helper's own machinery), while a probe that DID
+// happen answers a classified result — rejected, unreachable, needs-interactive
+// — which probeAnswer reconstructs. Rebuilding those from a refusal would be a
+// second classifier beside the one that already exists (AD-8).
+//
+// The two host-key codes are here because they are the SERVICE's vocabulary for
+// one fact rather than the probe's: a refused channel ends in them with the same
+// evidence, and an unknown or changed key has to reach the accept sheet as the
+// type that sheet switches on whichever op met it.
+func (h *sshOverHelper) translateProbe(target ssh.DialTarget, err error) error {
+	var refusal *helperclient.RefusalError
+	if !errors.As(err, &refusal) {
+		return fmt.Errorf("probe: %w", err)
+	}
+	switch refusal.Code {
+	case string(proto.ProbeHostKeyUnknown):
+		if ev, ok := decodeHostKeyEvidence(refusal.Details); ok {
+			return &ssh.ErrUnknownHostKey{
+				Addr: ev.Addr, KnownHostsAddr: ev.KnownHostsAddr, KeyAlgo: ev.Algorithm,
+				Fingerprint: ev.Fingerprint, Key: ev.Key,
+			}
+		}
+	case string(proto.ProbeHostKeyChanged):
+		if ev, ok := decodeHostKeyEvidence(refusal.Details); ok {
+			return &ssh.ErrHostKeyMismatch{
+				Addr: ev.Addr, KnownHostsAddr: ev.KnownHostsAddr, KeyAlgo: ev.Algorithm,
+				Fingerprint: ev.Fingerprint, Expected: ev.Expected, Key: ev.Key,
+			}
+		}
+	case proto.ErrCodeVaultSealed:
+		// The material could not be read because the vault is sealed. The
+		// helper's code is its own spelling; what every surface above this one
+		// switches on is this package's vault sentinel — rpcErrorFor builds the
+		// `data.reason` the renderer turns into an unlock dialog out of it — so
+		// it is REBUILT rather than left to a message a normalizer would have to
+		// fingerprint.
+		return fmt.Errorf("probe %s: %w", target.User+"@"+target.Host, vault.ErrVaultSealed)
+	}
+	// Everything else keeps the helper's own code and sentence, prefixed with
+	// the act and the destination: a sealed vault reaches the renderer as the
+	// reason it can act on (the message the normalizer fingerprints carries the
+	// vault's own sentence), and a protocol mistake stays this coordinator's
+	// failure rather than being folded into a probe outcome.
+	return fmt.Errorf("probe %s: %w", target.User+"@"+target.Host, err)
+}
+
+// probeAnswer turns the helper's classified result into the pair the transport
+// classifies and the fingerprint it stores.
+//
+// The result is RECONSTRUCTED as the typed error the coordinator's own probe
+// would have returned, field for field, and that is not ceremony: the transport
+// classifies an ERROR (ssh.ClassifyProbeError), the renderer's host-key sheet is
+// built from the two host-key error TYPES, and a classified outcome carried
+// across as a value would be a second classifier beside the one that already
+// exists (AD-8).
+func probeAnswer(target ssh.DialTarget, result proto.ProbeResult) (string, error) {
+	switch result.Outcome {
+	case proto.ProbeAccepted:
+		return result.Fingerprint, nil
+	case proto.ProbeHostKeyUnknown:
+		if ev := result.HostKey; ev != nil {
+			return result.Fingerprint, &ssh.ErrUnknownHostKey{
+				Addr: ev.Addr, KnownHostsAddr: ev.KnownHostsAddr, KeyAlgo: ev.Algorithm,
+				Fingerprint: ev.Fingerprint, Key: ev.Key,
+			}
+		}
+		return result.Fingerprint, fmt.Errorf("probe: %s", result.Detail)
+	case proto.ProbeHostKeyChanged:
+		if ev := result.HostKey; ev != nil {
+			return result.Fingerprint, &ssh.ErrHostKeyMismatch{
+				Addr: ev.Addr, KnownHostsAddr: ev.KnownHostsAddr, KeyAlgo: ev.Algorithm,
+				Fingerprint: ev.Fingerprint, Expected: ev.Expected, Key: ev.Key,
+			}
+		}
+		return result.Fingerprint, fmt.Errorf("probe: %s", result.Detail)
+	case proto.ProbeRejected:
+		// A refused credential is an ANSWER (the server said no), so it is
+		// rebuilt as the type ssh.ClassifyProbeError reads as `rejected` rather
+		// than being reported as the probe not having run.
+		return result.Fingerprint, &ssh.ErrAuthFailed{User: target.User, Host: target.Host, Err: errors.New(result.Detail)}
+	case proto.ProbeNeedsInteractive:
+		return result.Fingerprint, &ssh.ErrEncryptedKey{Path: result.Detail}
+	case proto.ProbeUnreachable:
+		return result.Fingerprint, unreachableError(target.Host, result.Detail)
+	}
+	// An outcome no generation has defined: refused rather than folded into
+	// `rejected`, for the reason the helper refuses an unknown verdict.
+	return result.Fingerprint, fmt.Errorf("probe: outcome %q is not one this coordinator knows", string(result.Outcome))
+}
+
+// unreachableError rebuilds the error the transport classifies as
+// `unreachable` — a *net.OpError — around the sentence the helper's own dial
+// produced.
+//
+// The type is what matters and it is the honest one: *net.OpError is what the
+// coordinator's own probe returned when the host did not answer, and the
+// sentence inside it is the helper's, verbatim, so a person reading the detail
+// sees what the dial said rather than a description of it.
+func unreachableError(host, detail string) error {
+	return &net.OpError{
+		Op:   "dial",
+		Net:  "tcp",
+		Addr: addrString(host),
+		Err:  errors.New(detail),
+	}
+}
+
+// addrString is a net.Addr for an address that arrived as a string.
+type addrString string
+
+func (a addrString) Network() string { return "tcp" }
+func (a addrString) String() string  { return string(a) }
+
+// destinationOf is the ONE conversion from a resolved target to the wire's
+// destination: alias resolution and authorization are the resolver's
+// (ResolveTarget), and everything that opens something on a host names what it
+// resolved the same way.
+func destinationOf(t ssh.DialTarget) proto.SSHDestination {
+	return proto.SSHDestination{
+		Host:     t.Host,
+		Port:     t.Port,
+		User:     t.User,
+		Identity: identityOf(t),
+	}
+}
+
+// identityOf is the credential half of the same conversion.
+func identityOf(t ssh.DialTarget) proto.SSHIdentity {
+	return proto.SSHIdentity{
+		Credential: proto.SSHCredential{
+			Ref:           string(t.Credential),
+			PassphraseRef: string(t.Passphrase),
+		},
+		Auth:      proto.SSHAuthKind(t.Auth),
+		PublicKey: t.PublicKey,
+	}
 }
 
 // HelperInstallConn acquires the write-capable install lease over an SFTP
@@ -120,20 +353,8 @@ func (h *sshOverHelper) openChannel(ctx context.Context, kind proto.ChannelKind,
 		return nil, err
 	}
 	stream, err := client.OpenChannel(ctx, proto.OpenChannelParams{
-		Destination: proto.SSHDestination{
-			Host: target.Host,
-			Port: target.Port,
-			User: target.User,
-			Identity: proto.SSHIdentity{
-				Credential: proto.SSHCredential{
-					Ref:           string(target.Credential),
-					PassphraseRef: string(target.Passphrase),
-				},
-				Auth:      proto.SSHAuthKind(target.Auth),
-				PublicKey: target.PublicKey,
-			},
-		},
-		Kind: kind,
+		Destination: destinationOf(target),
+		Kind:        kind,
 		// FALSE, and it is not a default: a channel open has no caller that
 		// can answer the accept flow (that flow belongs to a pane open, where
 		// a person is watching). An unknown host key therefore comes back as
@@ -221,29 +442,39 @@ func decodeHostKeyEvidence(raw json.RawMessage) (proto.HostKeyEvidence, bool) {
 // lease", for the factory that needs three of them.
 //
 // It is a DISPATCH and not a policy, exactly like hostedOpeners: each method is
-// one lease and each lease has exactly one owner. The install lease is this
-// machine's helper's; the git lane and the platform probe are still the
-// coordinator's OWN dials, which is the state of the epic rather than a
-// preference — they are separate consumers and each moves in its own task. A
-// reader looking for "which leases still dial" gets the answer from this
-// struct's two fields and nothing else.
+// one lease and each lease has exactly one owner. The install lease, the git
+// lane and the settings probe are this machine's helper's; the platform probe
+// is still the coordinator's OWN dial, which is the state of the epic rather
+// than a preference — it is a separate consumer and it moves in its own task
+// (nocx-50w7p.9). A reader looking for "which leases still dial" gets the
+// answer from this struct's two fields and nothing else.
 type installLeaseRoutes struct {
-	direct   directLanes          // the lanes whose dial is still the coordinator's
-	viaLocal installLeaseProvider // the install lease, opened by this machine's helper
+	direct   directLanes // the leases whose dial is still the coordinator's
+	viaLocal localLanes  // what this machine's helper answers
+}
+
+// localLanes is what this machine's helper serves for the install path: the
+// write-capable install lease and the exec lane a remote helper's bridge rides.
+type localLanes interface {
+	laneProvider
+	installLeaseProvider
 }
 
 // directLanes is what the coordinator's own client still answers here. It is
 // declared as its own interface rather than reusing helperInstallProvider so
-// that the install method cannot be satisfied by BOTH halves: a type that
+// that a helper-answered method cannot be satisfied by BOTH halves: a type that
 // filled in this field and implemented HelperInstallConn too would compile, and
 // the second dial path would be invisible.
+//
+// HelperConn is deliberately absent: it was this interface's own member until
+// nocx-50w7p.10, when the git lane moved to the helper and
+// ssh.RealClient.HelperConn was deleted.
 type directLanes interface {
-	helperLaneProvider
 	DiscoveryConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.DiscoveryConn, error)
 }
 
-func (r installLeaseRoutes) HelperConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.HelperConn, error) {
-	return r.direct.HelperConn(ctx, host, opts...)
+func (r installLeaseRoutes) LaneConn(ctx context.Context, host string, machine proto.Machine, generation proto.GenerationID, opts ...ssh.ConnectOption) (helperclient.HelperConn, error) {
+	return r.viaLocal.LaneConn(ctx, host, machine, generation, opts...)
 }
 
 func (r installLeaseRoutes) DiscoveryConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.DiscoveryConn, error) {

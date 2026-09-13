@@ -34,6 +34,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"path"
 	"time"
 
 	"github.com/shady2k/nocx/internal/content"
@@ -249,10 +250,20 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 		}
 	}
 
+	// The install is rebuilt from the two facts the durable route KEPT —
+	// the binary's path and the generation — and the directory is the path's
+	// parent, which is the install's own identity in this level
+	// (consent.Install.Path records the same directory). Nothing here
+	// re-derives the install layout: a lane is opened with the directory the
+	// helper was installed into, whatever a later layout calls it.
 	f := &sessionFactory{
 		reg: rp.registry, sid: session.ID(p.SessionID), host: p.Host,
 		account: p.Account, opts: opts,
-		command: p.HelperCommand, expectHash: p.Generation,
+		install: installedHelper{
+			dir:        path.Dir(p.HelperCommand),
+			generation: p.Generation,
+			command:    p.HelperCommand,
+		},
 	}
 	h := &hostHelper{f: f, lanes: rp.registry.lanes, log: rp.registry.log}
 	h.mu.Lock()

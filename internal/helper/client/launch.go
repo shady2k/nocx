@@ -73,6 +73,7 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 		attachments:    make(map[[16]byte]*AttachedSession),
 		channels:       make(map[proto.ChannelID]*ChannelStream),
 		parkedChannels: make(map[proto.ChannelID][][]byte),
+		parkedEnds:     make(map[proto.ChannelID]parkedEnd),
 		forwards:       make(map[proto.ForwardID]*Forward),
 		parkedForwards: make(map[proto.ForwardID][]proto.ForwardedTCPIPEvent),
 		done:           make(chan struct{}),
@@ -212,6 +213,17 @@ func (c *Client) pump() {
 				// status. EOF implies the process ended, and the channel
 				// close that ended our read is what unblocks Wait.
 				r := <-c.waitCh
+				if r.err != nil {
+					// The lane ended with no exit status at all: nothing said
+					// how it ended, which is what a transport that went looks
+					// like. Classified as loss rather than as "not our helper"
+					// — and it is the SAME answer the other producer reaches
+					// (the lane's Done, which the select above watches), so a
+					// caller cannot get one of two sentences depending on
+					// which of them fired first.
+					c.handshakeDone(fmt.Errorf("%w: %v", ErrLost, r.err))
+					return
+				}
 				if r.code == exitVersionMismatch {
 					c.handshakeDone(ErrVersionMismatch)
 					return

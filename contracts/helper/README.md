@@ -352,3 +352,60 @@ the entry change safe: no reader of the new shape was built without it.
 
 The schemas are frozen from here like every sibling's: a new op degrades (an older
 helper answers `unknown_op`), and a new FIELD on one of these shapes does not.
+
+## What landed with `nocx-50w7p.10`, and why `Version` moved to 7
+
+The **exec lane**: the `lane` op, which is how the git-over-a-remote-helper
+bridge rides a connection the HELPER dialed, plus the two shape changes the same
+migration needed.
+
+Until this generation the coordinator opened that lane itself — an ssh exec
+session running `nocx-helper bridge <generation>` — over `internal/ssh`'s
+`HelperConn`, and under the owner's invariant of 2026-09-13 no ssh connection
+exists without a helper. So the lane becomes this service's op, and the
+coordinator's own dial is deleted with `HelperConn`. The remote helper's own ABI
+is untouched: what rides a lane is the frame protocol, and what is on the far end
+is the same bridge subcommand the coordinator used to start.
+
+Three decisions in these shapes are worth naming rather than leaving to a reader:
+
+- **A lane names an install and a generation and never a command.** Its params
+  carry the machine's install DIRECTORY and the generation, and the helper turns
+  those into the one invocation it is allowed to run — `deploy.InstalledBinary` +
+  `endpoint.BridgeInvocation`, the same derivations the installer uses, in one
+  place. That is D3 at the only op whose payload is a program: `host.Register`
+  refuses a free-form argv, and the directory is the narrowest identity that
+  still determines a binary, so the only thing a caller can point a lane at is a
+  directory holding a helper. A command would have been a caller-chosen
+  executable on somebody else's machine.
+- **The directory is the fact both paths already hold.** An install is
+  content-addressed and the coordinator records the directory it wrote
+  (`consent.Install.Path`), and a session re-adopted after a coordinator restart
+  carries the installed binary's path in its durable route. Home and platform
+  would have had to be recovered from a path — a second derivation of the install
+  layout, and the regression AD-8 names.
+- **`ssh.channel-closed` grew `exit`, and a lane is why.** A lane's far end is a
+  PROCESS, and the coordinator's own classification reads the status: the
+  bridge's 43 is "no helper is serving that generation", whose sentence and whose
+  recovery differ from every other pre-sentinel ending. Folded into a lost
+  transport it becomes a connection error and a retry, and a person is told
+  something untrue. The field is a pointer so absence stays a fact: an sftp
+  subsystem and a direct-tcpip connection have no exit status at all, and `0` is
+  an ordinary way for a process to end.
+- **`ssh.probe` grew `fingerprint` and `hostKey`.** The settings surface's
+  connection test moved onto this op with the same migration, and the probe's
+  answer had to keep two things it used to return in-process: the offered key's
+  fingerprint, which the surface STORES as the machine's identity on first
+  contact, and the evidence the accept sheet and the mismatch warning are built
+  from. Nothing carries a Go value across this socket, so the coordinator
+  rebuilds `ssh.ErrUnknownHostKey` / `ssh.ErrHostKeyMismatch` from these fields —
+  the same shape a refused channel has carried since generation 4.
+
+The version moved because the shapes moved: a generation speaking 6 accepts only
+what it was built with (`additionalProperties: false`), so a probe result or a
+closed event carrying these fields is a payload it rejects rather than tolerates.
+Two peers that disagree refuse each other at hello in both directions.
+
+The schemas are frozen from here like every sibling's: the new op degrades (an
+older helper answers `unknown_op`, which a coordinator reads as "this machine's
+helper is older than this app"), and a new FIELD on one of these shapes does not.

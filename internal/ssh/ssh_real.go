@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/shady2k/nocx/internal/log"
 	gossh "golang.org/x/crypto/ssh"
@@ -212,71 +211,12 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 	return ch, nil
 }
 
-// BYPASSING the connection pool. It verifies the host key, authenticates
-// (sending exactly one auth method — the caller's responsibility to restrict),
-// and closes immediately without launching a shell or running a command.
-//
-// This is the primitive for credential validation where MaxAuthTries is
-// finite: sending several passwords against one host causes account lockouts
-// and is indistinguishable from password spraying. The caller MUST supply
-// exactly ONE auth method per Probe call.
-//
-// Host key verification runs before authentication, via the standard
-// known_hosts callback. If the host is unknown or the key has changed,
-// Probe returns the appropriate error (ErrUnknownHostKey or
-// ErrHostKeyMismatch) without attempting authentication.
-func (rc *RealClient) Probe(ctx context.Context, host string, authMethod gossh.AuthMethod, opts ...ConnectOption) error {
-	cfg := &ConnectConfig{}
-	for _, o := range opts {
-		o(cfg)
-	}
-
-	resolved, err := rc.resolveConfig(ctx, host, cfg)
-	if err != nil {
-		return fmt.Errorf("probe: resolve config: %w", err)
-	}
-
-	hostKeyCB, err := rc.hostKeyCallback()
-	if err != nil {
-		return fmt.Errorf("probe: host key callback: %w", err)
-	}
-
-	addr := net.JoinHostPort(resolved.hostName, fmt.Sprintf("%d", resolved.port))
-	timeout := cfg.ReadyTimeout
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-
-	// Only one auth method — the caller decides which single method to send.
-	gcfg := &gossh.ClientConfig{
-		User:            resolved.user,
-		Auth:            []gossh.AuthMethod{authMethod},
-		HostKeyCallback: hostKeyCB,
-		Timeout:         timeout,
-	}
-
-	d := &dialer{client: rc}
-	// Use dialDirect (bypasses pool) to establish and authenticate.
-	gclient, err := d.dialDirect(ctx, addr, gcfg, host, resolved.user)
-	if err != nil {
-		return fmt.Errorf("probe: %w", err)
-	}
-	// Authenticated successfully — close immediately, no shell.
-	_ = gclient.Close()
-	return nil
-}
-
 // Close implements SSH.Close. It closes every pooled connection regardless
 // of refcount — used during shutdown. Ordinary tab closure releases a
 // single handle via the channel's closeCb and never reaches here.
 func (rc *RealClient) Close() error {
 	rc.pool.CloseAll()
 	return nil
-}
-
-// hostKeyCallback builds a direct-route HostKeyCallback from known_hosts.
-func (rc *RealClient) hostKeyCallback() (gossh.HostKeyCallback, error) {
-	return rc.hostKeyCallbackFor("")
 }
 
 // hostKeyCallbackFor builds a HostKeyCallback whose lookup identity may differ

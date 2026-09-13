@@ -79,11 +79,6 @@ func newProbeTestServerWithProber(t *testing.T, prober Prober, resolver ProfileR
 	return srv
 }
 
-func (p *probeCallRecorder) Probe(ctx context.Context, host string, cfg *ssh.ConnectConfig) error {
-	_, err := p.ProbeWithResult(ctx, host, cfg)
-	return err
-}
-
 func probeResolver() *fakeResolver {
 	return &fakeResolver{
 		resolveFn: func(profileID string) (string, *ssh.ConnectConfig, error) {
@@ -467,11 +462,6 @@ func (p *neverReturningProber) ProbeWithResult(ctx context.Context, _ string, _ 
 	close(p.started)
 	<-p.release
 	return "", ctx.Err()
-}
-
-func (p *neverReturningProber) Probe(ctx context.Context, host string, cfg *ssh.ConnectConfig) error {
-	_, err := p.ProbeWithResult(ctx, host, cfg)
-	return err
 }
 
 // Stop must terminate within the documented maximum even when an in-flight

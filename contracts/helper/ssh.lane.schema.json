@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.lane.schema.json",
+  "title": "HelperSSHLaneResult",
+  "description": "The lane's answer, which is a CHANNEL ID and not a second identity: what the helper opened is an ordinary channel — its bytes are keyed by that id, it is ended by `close`, and its end arrives as `ssh.channel-closed`. The one thing a lane adds to that plane is the exit status its far end reports, which is a field of the closed event and not of this result.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["channel"],
+  "properties": {
+    "channel": {
+      "description": "The channel the lane's bytes are keyed by, minted by the helper — the end that owns the channel — and echoed back verbatim on every frame and on the close.",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/channelId"
+    }
+  }
+}

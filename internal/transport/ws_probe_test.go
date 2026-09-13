@@ -135,10 +135,6 @@ type fakeProber struct {
 	probeWithResultFn func(ctx context.Context, host string, cfg *ssh.ConnectConfig) (string, error)
 }
 
-func (f *fakeProber) Probe(ctx context.Context, host string, cfg *ssh.ConnectConfig) error {
-	return f.probeFn(ctx, host, cfg)
-}
-
 func (f *fakeProber) ProbeWithResult(ctx context.Context, host string, cfg *ssh.ConnectConfig) (string, error) {
 	if f.probeWithResultFn != nil {
 		return f.probeWithResultFn(ctx, host, cfg)

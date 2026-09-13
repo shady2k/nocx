@@ -82,6 +82,16 @@ type Client struct {
 	// names it. Bounded (channels.go), and emptied by the claim or by the
 	// loss. Distinct from pending above, which is the response waiters.
 	parkedChannels map[proto.ChannelID][][]byte
+	// parkedEnds parks the END of a channel whose open has not returned yet —
+	// the same window parkedChannels covers, one notification over. It is not a
+	// tidiness: a lane's bridge can fail in the microseconds between the
+	// helper's open answer and this side claiming the id, and a dropped end is
+	// a stream that never ends — the caller's read parks for ever and its dial
+	// reports a sentinel timeout for a fact that was already on the wire
+	// (nocx-50w7p.10 measured it: the same lane test, the same tree, red under
+	// load). Bounded by parkedChannelFrames, emptied by the claim or by the
+	// loss.
+	parkedEnds map[proto.ChannelID]parkedEnd
 	// forwards holds the remote listeners this coordinator asked for, keyed by
 	// the id the helper minted (forward.go). A listener's accepted connections
 	// are ordinary channels and live in the map above; this one owns the
@@ -314,10 +324,17 @@ func (c *Client) lose(reason error) {
 		// gone, and a payload retained by a dead transport is a leak with a
 		// caller's name on it.
 		c.parkedChannels = make(map[proto.ChannelID][][]byte)
+		// The parked ends go with them, for the same reason: nothing can claim
+		// a stream on a wire that is gone.
+		c.parkedEnds = make(map[proto.ChannelID]parkedEnd)
 		c.mu.Unlock()
 		close(c.done)
 		for _, s := range channels {
-			s.finish(fmt.Errorf("%w: %v", ErrLost, reason))
+			// The transport died, so these streams are gone rather than
+			// exited: no end of theirs was this side's act and no process
+			// reported a status, which is exactly what a lane's Done
+			// reports (channels.go's endOfStream).
+			s.finish(fmt.Errorf("%w: %v", ErrLost, reason), endOfStream{})
 		}
 		for _, a := range matched {
 			a.finish()

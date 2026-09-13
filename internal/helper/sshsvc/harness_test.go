@@ -31,6 +31,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -137,6 +139,23 @@ type fixture struct {
 	forwards      map[string]net.Listener
 	forwardBinds  []forwardBind
 	directTargets []string
+	// the exec plane (nocx-50w7p.10): the commands a LANE was asked to run, in
+	// order, and the program each lane channel runs. The program is the far
+	// side of the bridge — a function over the channel's bytes that answers an
+	// exit status — because what this fixture must be able to produce is a
+	// process, not a stream.
+	execs    []string
+	execPeer func(in io.Reader, out io.Writer) int
+	// execRun, when set, runs the lane's command FOR REAL — the process's
+	// stdin and stdout are the channel's — and answers its exit status. It is
+	// how the end-to-end case runs the SHIPPED bridge binary instead of a
+	// scripted echo, which is the difference between asserting the command and
+	// asserting that the command reaches a helper.
+	execRun bool
+	execEnv []string
+	// noExit drops the exit-status request, which is what an sshd does for a
+	// channel that dies rather than one that exits.
+	noExit bool
 }
 
 func newFixture(t *testing.T, password string, acceptedKey gossh.Signer) *fixture {
@@ -453,6 +472,14 @@ func (p *forwardPayloadReader) u32() (uint32, bool) {
 // wrong subsystem fails where it asked instead of hanging.
 func (f *fixture) serveChannel(ch gossh.Channel, reqs <-chan *gossh.Request) {
 	for req := range reqs {
+		// The lane's request comes FIRST, before the subsystem guard below: an
+		// exec is not a subsystem, so a fixture that reached that guard first
+		// would refuse every lane with "not a subsystem" — which is how this
+		// branch was written the first time.
+		if req.Type == "exec" {
+			f.serveExec(ch, req)
+			return
+		}
 		if req.Type != "subsystem" {
 			if req.WantReply {
 				_ = req.Reply(false, nil)
@@ -493,6 +520,101 @@ func (f *fixture) serveChannel(ch gossh.Channel, reqs <-chan *gossh.Request) {
 		return
 	}
 	_ = ch.Close()
+}
+
+// serveExec runs ONE command on a channel — the far side of a lane — and
+// answers its exit status.
+//
+// The command is recorded BEFORE the reply, for the reason the subsystem
+// record is: the reply is what the helper synchronizes on, so a record written
+// after it is a record an assertion can outrun.
+func (f *fixture) serveExec(ch gossh.Channel, req *gossh.Request) {
+	var payload struct {
+		Command string
+	}
+	if err := gossh.Unmarshal(req.Payload, &payload); err != nil {
+		if req.WantReply {
+			_ = req.Reply(false, nil)
+		}
+		_ = ch.Close()
+		return
+	}
+	f.mu.Lock()
+	f.execs = append(f.execs, payload.Command)
+	peer, noExit, run, env := f.execPeer, f.noExit, f.execRun, append([]string(nil), f.execEnv...)
+	f.mu.Unlock()
+	if req.WantReply {
+		_ = req.Reply(true, nil)
+	}
+	code := 0
+	switch {
+	case run:
+		code = runExecCommand(ch, payload.Command, env)
+	case peer != nil:
+		code = peer(ch, ch)
+	}
+	if !noExit {
+		_, _ = ch.SendRequest("exit-status", false,
+			gossh.Marshal(struct{ Status uint32 }{Status: uint32(code)})) // #nosec G115 -- an exit status is 0-255
+	}
+	_ = ch.Close()
+}
+
+// runExecCommand runs one command line as sshd would, with the channel as its
+// terminal-less stdin and stdout, and reports the exit status.
+//
+// The line is split on spaces rather than handed to a shell, and that is a
+// deliberate simplification with a named reason: the command this op builds is
+// three space-separated words with no quoting and no expansion (the install
+// directory, the bridge subcommand and the generation), so a shell would add
+// nothing a test could not see — while making the fixture depend on a POSIX
+// shell being present, which a NixOS box does not promise and which would make
+// the case skip exactly where it is needed. The command STRING is asserted
+// separately, byte for byte.
+func runExecCommand(ch gossh.Channel, command string, env []string) int {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return 127
+	}
+	cmd := exec.Command(fields[0], fields[1:]...) // #nosec G204 — this test's own build output and its own argv
+	cmd.Env = append(os.Environ(), env...)
+	// The child's stdin is OUR pipe, pumped from the channel by a goroutine,
+	// and not the channel itself. Handing the channel to exec would make
+	// Wait() block on exec's own stdin copier, which parks on a channel the
+	// caller has not written to yet: the fixture then never reports an exit
+	// status, and a lane whose bridge failed in milliseconds is reported as a
+	// sentinel timeout ten seconds later (measured — this is how the first
+	// version of the refusal case below read).
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return 127
+	}
+	cmd.Stdout = ch
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return 127
+	}
+	go func() {
+		_, _ = io.Copy(stdin, ch)
+		_ = stdin.Close()
+	}()
+	if err := cmd.Wait(); err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return exit.ExitCode()
+		}
+		return 127
+	}
+	return 0
+}
+
+// execsSeen reports the commands this fixture was asked to run, in order: the
+// assertion that a lane runs the bridge this repository installs and nothing
+// else.
+func (f *fixture) execsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.execs...)
 }
 
 // subsystemsSeen reports the subsystem names this fixture was asked for, in

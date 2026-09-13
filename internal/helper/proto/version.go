@@ -78,4 +78,20 @@ package proto
 // is the half that makes it honest: a 4-helper answers `unknown_op`, which a
 // coordinator reads as "this machine's helper is older than this app"
 // (nocx-50w7p.2's rationale, two generations on).
-const Version = "6"
+//
+// This is 7 rather than 6 because the wire grew the EXEC LANE: the `lane` op,
+// which is how the git-over-a-remote-helper bridge rides a connection the
+// helper dialed (nocx-50w7p.10), and two shape changes that ride with it. The
+// op is the half that degrades: a 6-helper answers `unknown_op`, which the
+// coordinator reads as "this machine's helper is older than this app" — the
+// same sentence, one generation on. The shapes are the half that does not: a
+// lane's far end is a PROCESS, so `ssh.channel-closed` grew the `exit` field
+// the coordinator's own exec lane read to tell "no helper is serving that
+// generation" from "the host did not answer with our helper", and
+// `ssh.probe`'s result grew the fingerprint and the host-key evidence the
+// settings surface stores and the accept sheet renders — neither of which a
+// 6-reader would reject politely, since `additionalProperties: false` means it
+// accepts only what it was built with. Two peers that disagree refuse each
+// other at hello in both directions, which is what makes the number the whole
+// of the compatibility story.
+const Version = "7"

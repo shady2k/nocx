@@ -309,23 +309,43 @@ func TestReAdoptingAnSSHPaneKeepsItsDestinationAndAnswersItsScreen(t *testing.T)
 // would route a pane to this daemon for a terminal that is gone, and the
 // refusal a person sees would name the wrong thing.
 func TestReAdoptingABindingTheDaemonNoLongerHoldsIsALossNotAnOwnership(t *testing.T) {
+	home := storagetest.IsolateWithHome(t)
+	src := fakeArtifacts{payload: syntheticPayload}
+	gen := src.hash()
+	// A daemon that is running and holds NOTHING: the answered-empty case, as
+	// opposed to the different one where nobody could be asked at all.
+	_ = startFakeLocalEndpoint(t, endpoint.Dir(home), gen)
+
 	logger := log.NewSlogAdapter(discardLogger())
 	lg := discardLogger()
 	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
-	opener := &localHelperOpener{log: lg, registry: reg}
+	rc, rerr := ssh.NewReal(logger, ssh.WithKnownHostsFile(home+"/known_hosts"))
+	if rerr != nil {
+		t.Fatalf("ssh.NewReal: %v", rerr)
+	}
+	// THE REAL OPENER, because the assertion is about ITS set: a double that
+	// panics on the carrier half could not be asked whether a stale entry was
+	// dropped, and a fake holds nothing to begin with.
+	opener := &localHelperOpener{
+		log: lg, registry: reg, dir: endpoint.Dir(home), sshTargets: rc,
+		installed: helperlocal.Installed{
+			Binary: "/nonexistent/nocx-helper", Generation: proto.GenerationID(gen),
+		},
+	}
+	// A session this coordinator came to believe the daemon was holding.
+	opener.noteHeld("sess-gone")
 
-	// The daemon answered, and this session was not in its answer.
 	rp := &readoptPass{
 		registry: &helperRegistry{registry: reg, log: lg},
 		adopter:  &stubAdopter{},
-		local:    &countingLocalRoute{entries: nil},
+		local:    opener,
 		routes:   &stubRoutes{host: "host.example", cfg: &ssh.ConnectConfig{User: "dev"}},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if _, rerr := rp.readoptLocal(ctx, content.PendingSession{
-		SessionID: "sess-gone", Generation: "gen-1", PaneID: "pane-1",
+		SessionID: "sess-gone", Generation: gen, PaneID: "pane-1",
 		Host: "host.example", Account: "dev", ProfileID: "ssh:1",
 	}); rerr != nil {
 		t.Fatalf("a binding the daemon does not hold answered an error (%v), want the loss the callers "+

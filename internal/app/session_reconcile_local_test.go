@@ -279,6 +279,11 @@ func (r *countingLocalRoute) noteHeld(session.ID) {
 	panic("the local carrier was asked to record ownership for a binding that is not this machine's")
 }
 
+// forgetHeld is deliberately NOT a panic, unlike its neighbours: dropping a
+// session that is not in the set is idempotent, and it is reached on the loss
+// path these tests do exercise — a daemon that answered without the session.
+func (r *countingLocalRoute) forgetHeld(session.ID) {}
+
 // ── the verdict ─────────────────────────────────────────────────────────
 
 // ONE durable input, TWO endpoint states, and the same pass both times. The

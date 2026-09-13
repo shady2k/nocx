@@ -108,6 +108,11 @@ type localHelperRoute interface {
 	// pane this daemon is holding, and the scan the screen read does must say
 	// so.
 	noteHeld(sid session.ID)
+	// forgetHeld is the other end of the same interval, for the outcome where
+	// the daemon answered and does not hold the session: it is the only path to
+	// `absent`, and a pane that leaves this set must leave it here or the owner
+	// would keep routing to a terminal that is gone.
+	forgetHeld(sid session.ID)
 }
 
 // hostedCarrier is the connection a re-attachment is made over: it takes the
@@ -429,6 +434,13 @@ func (rp *readoptPass) readoptLocal(ctx context.Context, p content.PendingSessio
 		if asked[i].HostSessionID.Session == p.SessionID {
 			mine = &asked[i]
 		}
+	}
+	if mine == nil {
+		// THE DAEMON ANSWERED AND DOES NOT HOLD IT — the one path to `absent`.
+		// A pane that leaves this daemon leaves its set HERE, or the owner
+		// would go on routing the pane to a terminal that is gone and the
+		// refusal a person reads would name the wrong helper.
+		rp.local.forgetHeld(session.ID(p.SessionID))
 	}
 	if mine == nil || rp.adopter == nil || rp.registry == nil || rp.registry.registry == nil {
 		// Either the daemon answered and does not hold it — the one path to

@@ -371,6 +371,17 @@ func (o *localHelperOpener) noteHeld(sid session.ID) {
 	o.held[sid] = struct{}{}
 }
 
+// forgetHeld drops a session this opener no longer holds, for the one case
+// Release cannot cover: the daemon ANSWERED and the session was not in its
+// answer, so there is no connection of ours to give up. A stale entry is worse
+// than a missing one — the owner would route the pane here for a terminal that
+// is gone, and the refusal a person reads would name the wrong helper.
+func (o *localHelperOpener) forgetHeld(sid session.ID) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	delete(o.held, sid)
+}
+
 // holds answers whether this machine's daemon holds a session. It is what
 // paneScreen.owner asks before it asks the remote registry, and it is the only
 // question that routes an ssh pane whose destination is remote.

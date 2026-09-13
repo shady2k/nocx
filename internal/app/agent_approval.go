@@ -66,6 +66,10 @@ type agentApprovalService struct {
 	mu       sync.Mutex
 	enrolled map[session.ID]enrolledAgent
 	next     toolendpoint.AdmissionEpoch
+	// spawnTokens is where a pane's launch-minted bearer waits for the interval
+	// that binds it (nocx-50w7p.16). Nil means this coordinator opened no panes
+	// of its own, and every interval then mints its own bearer.
+	spawnTokens spawnTokenSource
 	// Identities with a question on screen, and every enrolment waiting on
 	// it. Starting the agent again while the person is still reading must not
 	// put a second copy of the question in the queue — it is the same
@@ -165,6 +169,41 @@ func (s *agentApprovalService) IntervalToken(sid session.ID, scope string) (tool
 		return 0, "", false
 	}
 	return enrolled.epoch, enrolled.token, true
+}
+
+// spawnTokenSource is the bearer an opener minted for the pane it launched, or
+// nothing when this coordinator did not launch one (nocx-50w7p.16).
+//
+// The interval BINDS that bearer rather than minting its own, and the reason is
+// an order rather than a preference: the launch carried the bearer to the far
+// shell before the pane had a session id, and the interval is created later,
+// when the pane's agent enrols and a person answers. A bearer minted at approval
+// would be one the staged configuration could never have learned.
+type spawnTokenSource interface {
+	SpawnToken(sid session.ID) (string, bool)
+}
+
+// bearerFor answers which bearer this interval admits with: the pane's own, when
+// its launch was minted here, and otherwise a fresh one. The fresh one is not a
+// fallback for a bug — a pane opened without a tool surface has no agent to
+// admit, and nothing presents it — it is what keeps every interval holding a
+// bearer rather than becoming one nobody can use.
+func (s *agentApprovalService) bearerFor(sid session.ID) string {
+	if s.spawnTokens != nil {
+		if token, ok := s.spawnTokens.SpawnToken(sid); ok {
+			return token
+		}
+	}
+	return mintToolToken()
+}
+
+// SetSpawnTokens wires where a pane's launch-minted bearer waits. Called once at
+// the composition root; leaving it nil means every interval mints its own,
+// which is what a coordinator that opens no panes of its own does.
+func (s *agentApprovalService) SetSpawnTokens(source spawnTokenSource) {
+	s.mu.Lock()
+	s.spawnTokens = source
+	s.mu.Unlock()
 }
 
 // mintToolToken mints the per-pane bearer: 32 random bytes, lower-case hex —
@@ -337,7 +376,7 @@ func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agen
 		// under the interval that ended.
 		s.enrolled[sid] = enrolledAgent{
 			executable: executable, domain: domain,
-			epoch: s.mintEpoch(sid), token: mintToolToken(),
+			epoch: s.mintEpoch(sid), token: s.bearerFor(sid),
 		}
 		s.mu.Unlock()
 		return nil

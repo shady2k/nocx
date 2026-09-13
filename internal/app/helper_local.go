@@ -244,9 +244,63 @@ func refuseLocalHelperNotInstalled(cause error) error {
 // connection's end is not.
 
 // localHelperOpener opens a pane on this machine's helper.
+// spawnTokens is the bearer each pane this opener spawned was launched with,
+// kept until the interval that admits it takes it (nocx-50w7p.16).
+//
+// It exists because of an ORDER, and the order is the whole reason this type is
+// not a field on the session: the launch has to carry a bearer BEFORE the
+// coordinator knows which session it is for — the helper mints the session id
+// and reports it in the spawn's result — while the interval that gives the
+// bearer its meaning is created later still, when the pane's agent enrols and a
+// person answers. So the bearer is minted with the launch and BOUND when the
+// interval opens, and this is where it waits in between.
+//
+// The residue is named rather than hidden: a pane opened and never enrolled
+// leaves one 64-byte string here for the life of the coordinator. The seam that
+// would drop it is the registry's session-end observation, which this opener
+// already receives for other reasons and which this does not yet use.
+type spawnTokens struct {
+	mu   sync.Mutex
+	byID map[session.ID]string
+}
+
+func (b *spawnTokens) record(sid session.ID, token string) {
+	if b == nil || sid == "" || token == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.byID == nil {
+		b.byID = make(map[session.ID]string)
+	}
+	b.byID[sid] = token
+}
+
+// take is the read the interval opens with: it CONSUMES what the spawn left,
+// because an interval holds the bearer itself from then on and a second reader
+// would be a second owner.
+func (b *spawnTokens) take(sid session.ID) (string, bool) {
+	if b == nil || sid == "" {
+		return "", false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	token, ok := b.byID[sid]
+	delete(b.byID, sid)
+	return token, ok && token != ""
+}
+
+// SpawnToken is the seam the approval service reads: the bearer this opener
+// launched the pane with, consumed on the read.
+func (b *spawnTokens) SpawnToken(sid session.ID) (string, bool) { return b.take(sid) }
+
 type localHelperOpener struct {
 	log      *slog.Logger
 	registry *session.Reg
+	// spawnTokens holds the bearer of each pane this opener launched, until the
+	// interval that admits it takes it. Nil is a legitimate wiring for a test
+	// that builds an opener without one, and then the approval mints its own.
+	spawnTokens *spawnTokens
 	// kernel and lifecycleLoss are the authenticated-channel seams, the same
 	// two the remote hosted route uses. Nil is a legitimate wiring and makes
 	// a conventional session, never a failure.
@@ -737,11 +791,26 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		// far-side forward yet, so the honest request is the one that asks for no
 		// tool surface at all.
 		AgentToolEndpoint: o.toolEndpoint(),
+		// THE PANE'S BEARER, MINTED WITH THE LAUNCH (nocx-50w7p.16). It has to
+		// travel with the spawn because the far launcher renders it into the
+		// frame the shell reads — and the shell is running before a person has
+		// answered anything about this pane, which is why the interval that
+		// gives it meaning cannot be what mints it.
+		AgentToolToken: mintToolToken(),
 	}
-	return spawn.run(ctx, cfg, func(ctx context.Context, life *proto.LifecycleLaunch) (helperclient.SessionEntry, error) {
+	res, err := spawn.run(ctx, cfg, func(ctx context.Context, life *proto.LifecycleLaunch) (helperclient.SessionEntry, error) {
 		params.Lifecycle = life
 		return spawn.client.SpawnSSH(ctx, params)
 	})
+	if err != nil {
+		return res, err
+	}
+	// BOUND TO THE SESSION THE HELPER REPORTED, which is the id the interval
+	// will be created under when this pane's agent enrols and a person answers.
+	// The launch carried the bearer; this is the only place that learns which
+	// session it was for.
+	o.spawnTokens.record(res.Session.ID(), params.AgentToolToken)
+	return res, nil
 }
 
 // localIntegrationStatus is what this open already knows about the pane's

@@ -293,6 +293,13 @@ func (h *helperReverse) prompt(ctx context.Context, raw json.RawMessage) (any, e
 	if p.Host == "" || p.User == "" {
 		return nil, badReverseParams("the prompts name no host or account")
 	}
+	// The port is checked like every other endpoint on this wire: it is display
+	// data for the ask ("which connection is this"), and a renderer shown a
+	// port of 0 has been handed a fact nobody resolved. The schema says the
+	// same thing; this is the running coordinator saying it.
+	if p.Port <= 0 || p.Port > 65535 {
+		return nil, badReverseParams(fmt.Sprintf("the prompts name port %d", p.Port))
+	}
 	if h.prompts == nil {
 		return nil, &proto.Refusal{
 			Code:    proto.ErrCodeNoAuthChannel,

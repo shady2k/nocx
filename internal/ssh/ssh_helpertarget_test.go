@@ -77,11 +77,11 @@ func TestResolveTargetAnswersTheResolvedAddressAndTheReference(t *testing.T) {
 // destination a helper dials carries the hops it passes through, in dial order,
 // each with its own account and its own credential reference.
 //
-// It replaces a test that asserted the OPPOSITE (a routed destination was
-// refused by name, ssh.ErrRoutedDial), and the shape of the replacement is the
-// point: a route is no longer a refusal, it is a list of endpoints, and what a
-// helper must be able to see is which account and which credential belongs to
-// each one.
+// It replaces a test that asserted the OPPOSITE — that a routed destination was
+// REFUSED, by a sentinel this change deleted — and the shape of the replacement
+// is the point: a route is no longer a refusal, it is a list of endpoints, and
+// what a helper must be able to see is which account and which credential
+// belongs to each one.
 func TestResolveTargetResolvesARouteIntoOrderedHops(t *testing.T) {
 	rc := targetTestClient(t)
 

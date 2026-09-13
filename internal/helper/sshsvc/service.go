@@ -689,13 +689,19 @@ func (s *Service) askInteractive(ctx context.Context, conn *host.Host, ep dialEn
 	if len(questions) == 0 {
 		return nil, internalRefusal("the server asked a keyboard-interactive challenge with no questions")
 	}
+	if len(echos) != len(questions) {
+		// The protocol pairs them — x/crypto builds both lists from the
+		// server's own request — so a mismatch is this process's bug rather
+		// than a hostile peer's. It is refused as this helper's own failure
+		// rather than answered with a default, because "which questions are
+		// secret" is exactly the fact a default gets silently wrong: it either
+		// hides an answer a person needs to read, or prints one they do not.
+		return nil, internalRefusal(
+			"the server asked %d question(s) with %d echo flag(s)", len(questions), len(echos))
+	}
 	prompts := make([]proto.Prompt, len(questions))
 	for i, q := range questions {
-		echo := false
-		if i < len(echos) {
-			echo = echos[i]
-		}
-		prompts[i] = proto.Prompt{Prompt: q, Echo: echo}
+		prompts[i] = proto.Prompt{Prompt: q, Echo: echos[i]}
 	}
 	var out proto.PromptResult
 	if err := conn.Ask(ctx, proto.ServiceSSH, proto.OpPrompt, proto.PromptParams{

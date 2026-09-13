@@ -643,6 +643,35 @@ func TestThePromptHandlerRefusesWhatItCannotAnswerItself(t *testing.T) {
 			t.Fatalf("code = %q, want %q", got, proto.ErrCodeBadParams)
 		}
 	})
+
+	// A request that is not an ENDPOINT is refused before it reaches the ask:
+	// the question's host, account and port are what the dialog names the
+	// connection by, and a renderer shown "someone@:0" has been handed a fact
+	// nobody resolved.
+	malformed := []struct {
+		name string
+		p    proto.PromptParams
+	}{
+		{"no host", proto.PromptParams{Port: 22, User: "deploy", Prompts: []proto.Prompt{{Prompt: "Password: "}}}},
+		{"no account", proto.PromptParams{Host: "prod.example.com", Port: 22, Prompts: []proto.Prompt{{Prompt: "Password: "}}}},
+		{"no port", proto.PromptParams{Host: "prod.example.com", User: "deploy", Prompts: []proto.Prompt{{Prompt: "Password: "}}}},
+		{"an impossible port", proto.PromptParams{Host: "prod.example.com", Port: 70000, User: "deploy", Prompts: []proto.Prompt{{Prompt: "Password: "}}}},
+	}
+	for _, tc := range malformed {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newReverseFixture(t, nil)
+			asker := &promptAsker{answer: "x"}
+			f.handlers.prompts = &helperPrompt{asker: asker, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+			_, err := f.handlers.prompt(context.Background(), params(t, tc.p))
+			if got := reverseRefusalCode(t, err); got != proto.ErrCodeBadParams {
+				t.Fatalf("code = %q, want %q", got, proto.ErrCodeBadParams)
+			}
+			if asked := asker.questions(); len(asked) != 0 {
+				t.Fatalf("a person was asked %+v by a request that names no endpoint", asked)
+			}
+		})
+	}
 }
 
 // promptRequest is one ordinary keyboard-interactive challenge.

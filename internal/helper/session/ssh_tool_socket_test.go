@@ -58,7 +58,7 @@ func TestAFarSideAgentReachesTheCoordinatorsToolSocketThroughThePaneForward(t *t
 	stand := newSSHStand(t, f, &sshCoordinator{
 		password: "pw", verdict: proto.HostKeyTrusted, fingerprint: f.fingerprint(),
 	})
-	endpoint := serveToolEndpoint(t, stand.toolSocket)
+	endpoint := serveToolEndpoint(t, stand.toolSocket, true)
 
 	// The far host's path, named by the coordinator. It does not exist yet: the
 	// far side's sshd creates it, and a fixture-owned directory stands in for
@@ -69,7 +69,7 @@ func TestAFarSideAgentReachesTheCoordinatorsToolSocketThroughThePaneForward(t *t
 	params := stand.spawnParams(t, proto.SSHModeAuto)
 	params.AgentToolSocketPath = farPath
 	params.AgentHelperPath = farHelper
-	stand.mustSpawn(t, params)
+	pane := stand.mustSpawn(t, params)
 
 	// The far host granted the path (its own record), so the path exists there.
 	f.waitForwardGranted(t)
@@ -84,7 +84,15 @@ func TestAFarSideAgentReachesTheCoordinatorsToolSocketThroughThePaneForward(t *t
 		t.Fatalf("the agent could not write to the forwarded path: %v", writeErr)
 	}
 
-	// The coordinator's endpoint saw it...
+	// The coordinator's endpoint saw the PANE first (nocx-50w7p.16): the
+	// record the helper writes ahead of the far agent's bytes names the session
+	// whose pane this connection arrived on, which is the only thing that can
+	// tell the coordinator which pane it is answering — a far agent has no pid
+	// here to be matched against a process tree.
+	if got := endpoint.waitRecord(t); got != pane.HostSessionID.Session {
+		t.Fatalf("the connection announced pane %q, want the session the helper opened (%q)", got, pane.HostSessionID.Session)
+	}
+	// ...and then the far agent's own bytes, intact and unmoved.
 	if got := endpoint.waitLine(t); got != "tools/list" {
 		t.Fatalf("the coordinator's tool endpoint was sent %q, want the far agent's own line", got)
 	}
@@ -162,7 +170,7 @@ func TestAnUnforwardedToolSocketPathIsRefusedByTheFarSide(t *testing.T) {
 	stand := newSSHStand(t, f, &sshCoordinator{
 		password: "pw", verdict: proto.HostKeyTrusted, fingerprint: f.fingerprint(),
 	})
-	_ = serveToolEndpoint(t, stand.toolSocket)
+	_ = serveToolEndpoint(t, stand.toolSocket, true)
 
 	farPath := filepath.Join(t.TempDir(), "nocx-tool.sock")
 	params := stand.spawnParams(t, proto.SSHModeAuto)

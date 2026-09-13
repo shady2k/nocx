@@ -52,6 +52,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
+	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
 )
 
 // toolEndpointStand is one coordinator's tool endpoint as these tests need it:
@@ -69,17 +70,33 @@ type toolEndpointStand struct {
 	// and a slice would have the test reading a field its own goroutine is
 	// still writing.
 	seen chan string
+	// record carries the SESSION each connection announced before its own
+	// bytes, in the order the connections arrived (nocx-50w7p.16). It is the
+	// same kind of fact as seen, one layer down: which pane these bytes are
+	// for, said by the helper that accepted them.
+	record chan string
 }
 
 // serveToolEndpoint binds one coordinator's tool socket and answers every
-// connection with one line per line.
-func serveToolEndpoint(t *testing.T, path string) *toolEndpointStand {
+// connection with one line per line. forwarded is which of the two routes into
+// this socket is being stood in for, and it is an argument rather than two
+// named wrappers on purpose: the callers of the forwarded one are build-tagged,
+// so a wrapper only they use is a function the untagged analysis cannot see a
+// caller for (golangci's `unused` said so).
+//
+// It is true for a FORWARDED pane: a helper accepted those connections on the
+// pane's far listener, so each announces which pane it is for before its own
+// bytes (nocx-50w7p.16). And false for a pane whose agent dials the socket
+// ITSELF — a local pane, whose agent is a process inside the tree nocx
+// launched, so the endpoint answers "which pane" from the kernel and no helper
+// is in the path to write a record.
+func serveToolEndpoint(t *testing.T, path string, forwarded bool) *toolEndpointStand {
 	t.Helper()
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatalf("the coordinator's tool endpoint could not listen at %s: %v", path, err)
 	}
-	e := &toolEndpointStand{listener: ln, seen: make(chan string, 8)}
+	e := &toolEndpointStand{listener: ln, seen: make(chan string, 8), record: make(chan string, 8)}
 	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		for {
@@ -90,6 +107,21 @@ func serveToolEndpoint(t *testing.T, path string) *toolEndpointStand {
 			go func(conn net.Conn) {
 				defer func() { _ = conn.Close() }()
 				r := bufio.NewReader(conn)
+				// THE PANE RECORD COMES FIRST (nocx-50w7p.16). Every connection
+				// a helper forwards announces the session whose pane it arrived
+				// on, before the far agent's own bytes — so an endpoint that
+				// read these bytes as an ordinary request line would be
+				// answering a pane it never learned the name of. A stand that
+				// skipped the record would not notice that, and a connection
+				// that cannot say which pane it is for is refused here exactly
+				// as the real endpoint refuses it.
+				if forwarded {
+					session, rerr := panebind.Read(r)
+					if rerr != nil {
+						return
+					}
+					e.record <- session
+				}
 				for {
 					line, err := r.ReadString('\n')
 					if line != "" {
@@ -231,8 +263,8 @@ func TestEachCoordinatorsLocalPaneIsToldItsOwnToolEndpoint(t *testing.T) {
 
 	dir := t.TempDir()
 	coordA, coordB := filepath.Join(dir, "coord-a.sock"), filepath.Join(dir, "coord-b.sock")
-	endpointA := serveToolEndpoint(t, coordA)
-	endpointB := serveToolEndpoint(t, coordB)
+	endpointA := serveToolEndpoint(t, coordA, false)
+	endpointB := serveToolEndpoint(t, coordB, false)
 
 	printedA := mustPrintItsOwnToolEndpoint(t, first, coordA, "11111111111111111111111111111111")
 	if printedA != coordA {

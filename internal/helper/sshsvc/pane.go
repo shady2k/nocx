@@ -62,6 +62,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/sshdial"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
 )
 
 // lifecycleBindHost is the far-side address the lifecycle listener is bound
@@ -98,6 +99,12 @@ var (
 	// that believes it is getting something (channel.go's own rule for a
 	// target on an sftp open), not a no-op.
 	errNoPaneListeners = errors.New("no far-side listener was asked for")
+	// errNoPaneSession is a tool socket asked for with no session for its
+	// connections to name. It is named because the alternative is a pane whose
+	// every far agent is refused with a sentence about a mismatch, which sends
+	// whoever reads it looking at the endpoint rather than at the request that
+	// left it out.
+	errNoPaneSession = errors.New("a far-side tool socket was asked for with no session to name, so its connections could identify no pane")
 	// errBadPaneSpec is a pane's listeners asked for with an incomplete
 	// destination. It is refused before anything is dialed, for the reason
 	// validateShellSpec's errors are.
@@ -125,6 +132,17 @@ type PaneSpec struct {
 	// reach the coordinator's tool endpoint. Empty means this pane offers
 	// none.
 	ToolSocketPath string
+	// Session is the coordinator's session id for the pane these listeners
+	// belong to, and it is what every connection arriving on the tool socket
+	// ANNOUNCES before its own bytes (nocx-50w7p.16). The helper is the only
+	// party that knows it: its listener is per pane, so the pane a connection
+	// belongs to is not a claim anybody makes — it is the listener the helper
+	// accepted on, reported to the coordinator that asked for it.
+	//
+	// Required exactly when ToolSocketPath is set: a tool socket whose
+	// connections name no session is a socket the coordinator can only refuse
+	// (validatePaneSpec says so by name, before anything is dialed).
+	Session string
 	// ToolSocketTarget is the LOCAL socket each accepted connection is piped
 	// into: the tool endpoint of the coordinator that ASKED FOR THIS PANE, on
 	// the machine this helper runs on. It is the request's value and never the
@@ -159,6 +177,9 @@ type PaneListeners struct {
 	toolLn     net.Listener
 	toolPath   string
 	toolTarget string
+	// session is the session id every connection on toolLn announces before
+	// its own bytes, or empty when this pane has no tool socket.
+	session string
 
 	mu       sync.Mutex
 	claimed  bool
@@ -190,6 +211,7 @@ func (s *Service) OpenPaneListeners(ctx context.Context, spec PaneSpec) (*PaneLi
 	p := &PaneListeners{
 		toolPath:   spec.ToolSocketPath,
 		toolTarget: spec.ToolSocketTarget,
+		session:    spec.Session,
 		log:        s.log,
 	}
 	pool, err := s.acquirePooled(ctx, conn, spec.Destination, spec.AcceptOnTrust, spec.HostKeyFingerprint)
@@ -361,6 +383,26 @@ func (p *PaneListeners) forwardTool(far net.Conn) {
 		return
 	}
 	defer func() { _ = local.Close() }()
+
+	// THE PANE RECORD GOES FIRST, before a single far byte, and it is the
+	// helper's whole contribution to admission (nocx-50w7p.16): the endpoint
+	// decides nothing about a forwarded connection without it, and a helper
+	// that cannot say which pane this is must not hand the connection over at
+	// all. Refused here rather than written short: a connection the endpoint
+	// would refuse on a malformed record is a connection whose far agent gets
+	// an MCP error about nocx rather than about its pane.
+	record, err := panebind.Encode(p.session)
+	if err != nil {
+		p.log.Warn("ssh: refusing a far-side tool connection: this pane cannot name its session",
+			"path", p.toolTarget, "error", err)
+		return
+	}
+	if _, err := local.Write(record); err != nil {
+		p.log.Warn("ssh: refusing a far-side tool connection: the pane record did not reach the endpoint",
+			"path", p.toolTarget, "error", err)
+		return
+	}
+
 	done := make(chan struct{}, 2)
 	go func() { _, _ = io.Copy(local, far); done <- struct{}{} }()
 	go func() { _, _ = io.Copy(far, local); done <- struct{}{} }()
@@ -433,6 +475,13 @@ func validatePaneSpec(spec PaneSpec) error {
 	}
 	if spec.ToolSocketPath != "" && spec.ToolSocketTarget == "" {
 		return fmt.Errorf("%w: %s", errNoToolSocket, spec.ToolSocketPath)
+	}
+	if spec.ToolSocketPath != "" && spec.Session == "" {
+		// A tool socket whose connections name no pane is a socket the
+		// coordinator can only refuse, so the pane is refused instead — before
+		// a connection is dialed, which is the rule every refusal in this
+		// function follows.
+		return fmt.Errorf("%w: %s", errNoPaneSession, spec.ToolSocketPath)
 	}
 	switch {
 	case spec.Destination.Host == "":

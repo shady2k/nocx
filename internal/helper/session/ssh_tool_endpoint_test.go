@@ -86,6 +86,21 @@ func (s *sshStand) paneParams(t *testing.T, farPath, endpoint string) proto.SSHS
 // distinct paths on the fixture's "far host", so a pane forwarded to the wrong
 // endpoint is visible as a line arriving at the wrong socket — which is what
 // the mutation this bead fixes produced, for every pane but the first.
+// waitRecord waits for the pane record a forwarded connection announces, and
+// answers the session it names. It is separate from waitLine because the two
+// are different facts: the record says WHICH pane the connection is for, the
+// line says what the far agent asked.
+func (e *toolEndpointStand) waitRecord(t *testing.T) string {
+	t.Helper()
+	select {
+	case session := <-e.record:
+		return session
+	case <-time.After(toolEndpointWait):
+		t.Fatalf("no pane record reached this coordinator's tool endpoint, so the connection named no pane")
+		return ""
+	}
+}
+
 func TestEachCoordinatorsPaneForwardsToItsOwnToolEndpoint(t *testing.T) {
 	f := newSSHFixture(t, "pw", "printf 'ALIVE\n'; cat")
 	stand := newSSHStand(t, f, &sshCoordinator{
@@ -97,14 +112,16 @@ func TestEachCoordinatorsPaneForwardsToItsOwnToolEndpoint(t *testing.T) {
 	dir := t.TempDir()
 	farA, farB := filepath.Join(dir, "far-a.sock"), filepath.Join(dir, "far-b.sock")
 	coordA, coordB := filepath.Join(dir, "coord-a.sock"), filepath.Join(dir, "coord-b.sock")
-	endpointA := serveToolEndpoint(t, coordA)
-	endpointB := serveToolEndpoint(t, coordB)
+	endpointA := serveToolEndpoint(t, coordA, true)
+	endpointB := serveToolEndpoint(t, coordB, true)
 
-	if _, err := first.SpawnSSH(context.Background(), stand.paneParams(t, farA, coordA)); err != nil {
+	entryA, err := first.SpawnSSH(context.Background(), stand.paneParams(t, farA, coordA))
+	if err != nil {
 		t.Fatalf("the first coordinator's spawn-ssh: %v", err)
 	}
 	f.waitForwardGranted(t)
-	if _, err := second.SpawnSSH(context.Background(), stand.paneParams(t, farB, coordB)); err != nil {
+	entryB, err := second.SpawnSSH(context.Background(), stand.paneParams(t, farB, coordB))
+	if err != nil {
 		t.Fatalf("the second coordinator's spawn-ssh: %v", err)
 	}
 	f.waitForwardGranted(t)
@@ -120,6 +137,20 @@ func TestEachCoordinatorsPaneForwardsToItsOwnToolEndpoint(t *testing.T) {
 		t.Fatalf("the second pane's far agent could not write: %v", err)
 	}
 
+	// EACH ENDPOINT IS TOLD WHICH PANE ITS CONNECTION IS FOR before the bytes
+	// arrive, and it is told the pane of the coordinator that ASKED (nocx-50w7p.16
+	// over nocx-50w7p.18's per-request target): the two panes are the same
+	// helper, the same daemon and the same account, and the only thing telling
+	// them apart is this record.
+	if got := endpointA.waitRecord(t); got != entryA.HostSessionID.Session {
+		t.Fatalf("the first endpoint's connection announced pane %q, want its own pane %q", got, entryA.HostSessionID.Session)
+	}
+	if got := endpointB.waitRecord(t); got != entryB.HostSessionID.Session {
+		t.Fatalf("the second endpoint's connection announced pane %q, want its own pane %q", got, entryB.HostSessionID.Session)
+	}
+	if entryA.HostSessionID.Session == entryB.HostSessionID.Session {
+		t.Fatal("the two panes were given one session, so this test could not tell them apart")
+	}
 	if got := endpointA.waitLine(t); got != "a-tools" {
 		t.Fatalf("the first coordinator's endpoint was sent %q, want its own pane's line", got)
 	}
@@ -183,7 +214,7 @@ func TestAPaneWhoseCoordinatorHasGoneIsRefusedAndNotReRouted(t *testing.T) {
 	})
 	second := stand.addCoordinator(t)
 	// The coordinator that started this daemon, still running.
-	alive := serveToolEndpoint(t, stand.toolSocket)
+	alive := serveToolEndpoint(t, stand.toolSocket, true)
 
 	dir := t.TempDir()
 	farPath := filepath.Join(dir, "far.sock")

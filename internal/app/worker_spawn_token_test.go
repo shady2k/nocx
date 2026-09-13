@@ -17,22 +17,58 @@ import (
 	"testing"
 )
 
-func TestASpawnMintedBearerIsTakenOnceAndOnlyOnce(t *testing.T) {
+// TestALaunchsBearerSurvivesEveryApprovalOfItsSession — the book PEEKS rather
+// than takes, and re-approval is why: a session can hold two intervals with
+// identical approval (withdrawn and enrolled again) and both belong to the same
+// launch. The far shell staged one value and cannot learn a second, so an
+// interval that rotated the bearer would refuse the pane's own agent for
+// presenting the value that was correct when it was written.
+func TestALaunchsBearerSurvivesEveryApprovalOfItsSession(t *testing.T) {
 	book := &spawnTokens{}
-	book.record("0f9b4d7159d38afee9648a843654516f", "aa")
+	book.record(farPaneP, "aa")
 
-	token, ok := book.SpawnToken("0f9b4d7159d38afee9648a843654516f")
-	if !ok || token != "aa" {
+	if token, ok := book.SpawnToken(farPaneP); !ok || token != "aa" {
 		t.Fatalf("the book answered %q, %v, want the bearer the launch was given", token, ok)
 	}
-	// CONSUMED ON THE READ: from here the interval holds it, and a second reader
-	// would be a second owner of one bearer.
-	if token, ok := book.SpawnToken("0f9b4d7159d38afee9648a843654516f"); ok {
-		t.Fatalf("the book handed %q to a second reader", token)
+	if token, ok := book.SpawnToken(farPaneP); !ok || token != "aa" {
+		t.Fatalf("a second interval was answered %q, %v, want the SAME launch's bearer", token, ok)
 	}
-	// And it invents nothing: a session nothing launched has no bearer here.
 	if token, ok := book.SpawnToken("11111111111111111111111111111111"); ok {
 		t.Fatalf("the book produced %q for a session nobody launched", token)
+	}
+
+	// WHAT RETIRES IT IS THE SESSION ENDING, which is the one event that makes
+	// the far pane and its staged configuration gone together.
+	book.Forget(farPaneP)
+	if token, ok := book.SpawnToken(farPaneP); ok {
+		t.Fatalf("the book still holds %q after the session ended", token)
+	}
+}
+
+// TestAReApprovalKeepsTheLaunchesBearer — the same property over a real
+// endpoint: approve, withdraw, approve again, and the interval still admits with
+// the value the launch staged.
+func TestAReApprovalKeepsTheLaunchesBearer(t *testing.T) {
+	stand := newFarStand(t, remoteSession(farPaneP, "build.example.com", "deploy", "SHA256:key-a"))
+	launched := strings.Repeat("cd", 32)
+	book := &spawnTokens{}
+	book.record(farPaneP, launched)
+	stand.approval.SetSpawnTokens(book)
+
+	stand.enrol(t, farPaneP, "claude")
+	if got := stand.paneToken(t, string(farPaneP)); got != launched {
+		t.Fatalf("the first interval holds %q, want the launch's bearer", got)
+	}
+
+	// WITHDRAWN, as a revocation is: the interval ends, the launch does not.
+	stand.approval.Forget(farPaneP)
+	stand.enrol(t, farPaneP, "claude")
+
+	if got := stand.paneToken(t, string(farPaneP)); got != launched {
+		t.Fatalf("after re-approval the interval holds %q, want the SAME launch's bearer", got)
+	}
+	if env := stand.callOverWithToken(t, string(farPaneP), launched); env.Error != nil {
+		t.Fatalf("the pane's staged bearer was refused after re-approval: %+v", env.Error)
 	}
 }
 
@@ -59,8 +95,23 @@ func TestTheIntervalAdmitsWithTheBearerItsLaunchCarried(t *testing.T) {
 	if env := stand.callOverWithToken(t, string(farPaneP), launched); env.Error != nil {
 		t.Fatalf("the launch's own bearer was refused: %+v", env.Error)
 	}
-	// The book is spent, and the interval is what holds the bearer now.
-	if _, ok := book.SpawnToken(farPaneP); ok {
-		t.Fatal("the launch's bearer stayed in the book after the interval took it")
+}
+
+// TestASessionEndingDropsWhatItsLaunchLeft — the cleanup through the REAL
+// wiring, not through the book's own method: the approval service is what sees a
+// session end, and a pane nobody enrolled would otherwise keep its entry for the
+// life of the coordinator.
+func TestASessionEndingDropsWhatItsLaunchLeft(t *testing.T) {
+	stand := newFarStand(t, remoteSession(farPaneP, "build.example.com", "deploy", "SHA256:key-a"))
+	launched := strings.Repeat("ef", 32)
+	book := &spawnTokens{}
+	book.record(farPaneP, launched)
+	stand.approval.SetSpawnTokens(book)
+	stand.enrol(t, farPaneP, "claude")
+
+	stand.approval.SessionEnded(string(farPaneP))
+
+	if token, ok := book.SpawnToken(farPaneP); ok {
+		t.Fatalf("the session's end left %q behind", token)
 	}
 }

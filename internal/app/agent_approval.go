@@ -181,6 +181,8 @@ func (s *agentApprovalService) IntervalToken(sid session.ID, scope string) (tool
 // would be one the staged configuration could never have learned.
 type spawnTokenSource interface {
 	SpawnToken(sid session.ID) (string, bool)
+	// Forget drops what a launch left, when the session it was for ends.
+	Forget(sid session.ID)
 }
 
 // bearerFor answers which bearer this interval admits with: the pane's own, when
@@ -281,6 +283,11 @@ func (s *agentApprovalService) SessionEnded(sessionID string) {
 		return
 	}
 	s.Forget(session.ID(sessionID))
+	// AND WHAT THE LAUNCH LEFT GOES WITH IT: the pane is gone, so no interval
+	// will bind that bearer again and nothing else would ever drop it.
+	if s.spawnTokens != nil {
+		s.spawnTokens.Forget(session.ID(sessionID))
+	}
 }
 
 // BindAuthorityEnded takes what closes the tool-endpoint connections admitted

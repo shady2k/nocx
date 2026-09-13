@@ -255,10 +255,11 @@ func refuseLocalHelperNotInstalled(cause error) error {
 // person answers. So the bearer is minted with the launch and BOUND when the
 // interval opens, and this is where it waits in between.
 //
-// The residue is named rather than hidden: a pane opened and never enrolled
-// leaves one 64-byte string here for the life of the coordinator. The seam that
-// would drop it is the registry's session-end observation, which this opener
-// already receives for other reasons and which this does not yet use.
+// An entry lives from the successful spawn until the session ends: a pane that
+// is never enrolled keeps one 64-byte string until then, and a pane whose
+// session ends drops it with the interval that was holding it — which is why
+// SpawnToken peeks rather than consumes (see its comment) and why forget exists
+// at all.
 type spawnTokens struct {
 	mu   sync.Mutex
 	byID map[session.ID]string
@@ -276,23 +277,37 @@ func (b *spawnTokens) record(sid session.ID, token string) {
 	b.byID[sid] = token
 }
 
-// take is the read the interval opens with: it CONSUMES what the spawn left,
-// because an interval holds the bearer itself from then on and a second reader
-// would be a second owner.
-func (b *spawnTokens) take(sid session.ID) (string, bool) {
+// SpawnToken is the seam the approval service reads: the bearer this opener
+// launched the pane with.
+//
+// IT IS A PEEK AND NOT A TAKE, and re-approval is why. A session can hold two
+// intervals with identical approval — withdrawn and enrolled again — and both
+// belong to the SAME launch: the far shell staged one bearer and cannot learn a
+// second, so an interval that rotated it would refuse the pane's own agent for
+// presenting the value that was correct when it was written. What retires a
+// bearer is the interval ending (session end, withdrawal), which is where the
+// entry is dropped, not the first reader.
+func (b *spawnTokens) SpawnToken(sid session.ID) (string, bool) {
 	if b == nil || sid == "" {
 		return "", false
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	token, ok := b.byID[sid]
-	delete(b.byID, sid)
 	return token, ok && token != ""
 }
 
-// SpawnToken is the seam the approval service reads: the bearer this opener
-// launched the pane with, consumed on the read.
-func (b *spawnTokens) SpawnToken(sid session.ID) (string, bool) { return b.take(sid) }
+// Forget drops what a launch left, when the session it was for ends. Called by
+// the approval service, which is the party that sees that event and is also the
+// party that stopped holding the bearer.
+func (b *spawnTokens) Forget(sid session.ID) {
+	if b == nil || sid == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.byID, sid)
+}
 
 type localHelperOpener struct {
 	log      *slog.Logger

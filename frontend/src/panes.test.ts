@@ -20,7 +20,7 @@ import {
   type RendererMock,
 } from './test-support/panes-fixtures'
 import { isUuidv7 } from './layout/uuid7'
-import { Dispatcher } from './dispatcher'
+import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
 import { WSClient } from './ipc'
 import { LOCAL_BACKEND_ID, Pane, PaneManager } from './panes'
@@ -1535,6 +1535,74 @@ describe('PaneManager', () => {
     const errorNotice = pane!.querySelector('.pane-error')
     expect(errorNotice).not.toBeNull()
     expect(errorNotice!.textContent).toContain('session failed')
+  })
+
+  // A REFUSAL FROM THE BACKEND IS SHOWN IN FULL WHERE THE PANE DIED
+  // (nocx-ie23r.4, ADR-0057). There is no local fallback, so a helper that
+  // cannot be installed, started or handshaken means no pane — and what the
+  // person gets instead is the backend's own sentence, in the pane: what
+  // failed, why, and what to do. The Go side asserts the frame over the real
+  // socket; this is the renderer's half of the same contract, and it is
+  // asserted as three separate parts because a surface that showed only one of
+  // them would still satisfy a test that looked for one substring.
+  it('shows a helper refusal, all three of its parts, where the pane failed', async () => {
+    // The refusal an unreachable helper produces, verbatim: the message the
+    // backend renders (internal/transport/session_open_helper_refusal.go) with
+    // the two closed-set values beside it.
+    const refusal = new RpcError(
+      "Nocx installed this machine's helper and it did not start: " +
+        'fork/exec /home/dev/.nocx/helper/nocx-helper: permission denied. ' +
+        'Reinstall or update nocx — the helper ships inside the application, so a fresh copy is what ' +
+        'repairs it — then open the pane again.',
+      -32603,
+      { reason: 'start', action: 'reinstall-nocx' },
+    )
+    const client = makeClient({
+      openSession: vi.fn(() => Promise.reject(refusal)),
+    })
+
+    const { bar, panes } = setupTabBarDOM()
+    const clipboard = makeClipboard()
+    const gate = new ClipboardGate()
+    const banner = makeBanner()
+
+    const { PaneManager } = await import('./panes')
+    const { HorizontalTabStrip } = await import('./tab-strip')
+    const tabStrip = new HorizontalTabStrip()
+    const profileClient = {
+      list: () => Promise.resolve([]),
+      get: () => Promise.resolve(null),
+      create: () => Promise.resolve(''),
+      update: () => Promise.resolve(),
+      delete: () => Promise.resolve(),
+      connect: () => Promise.resolve(''),
+    } as unknown as import('./profiles').ProfileClient
+    const manager = new PaneManager(
+      bar,
+      bar,
+      panes,
+      client as unknown as import('./ipc').WSClient,
+      clipboard,
+      gate,
+      banner,
+      profileClient,
+      tabStrip,
+      makeLayoutStore().store,
+      makeUIStateBackend().newClient(),
+    )
+    void manager.openInitialPane()
+    await expect(manager.initialPaneReady).rejects.toThrow('initial pane failed to start')
+
+    const notice = panes.querySelector('.pane')?.querySelector('.pane-error')
+    expect(notice).not.toBeNull()
+    const text = notice!.textContent ?? ''
+
+    // What failed.
+    expect(text).toContain('did not start')
+    // Why — the concrete error, not the category.
+    expect(text).toContain('permission denied')
+    // What to do, which is the part a refusal is most likely to lose.
+    expect(text).toContain('Reinstall or update nocx')
   })
 
   it('Tab.ready resolves true for a genuinely started tab', async () => {

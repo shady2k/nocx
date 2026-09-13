@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -72,6 +73,80 @@ func TestClosingAPaneEndsTheForwardsItIsCarrying(t *testing.T) {
 		t.Fatal("a forward outlived the pane that was carrying it")
 	case errors.Is(err, os.ErrDeadlineExceeded):
 		t.Fatal("the connection was still open after its pane closed: the read waited out its deadline instead of ending")
+	}
+}
+
+// TestClosingAPaneEndsAForwardParkedOnTheEndpoint — the LIFETIME half, and the
+// one a pump can defeat.
+//
+// A forward is two pumps, and ending the far side ends only the one reading from
+// it. The other one writes INTO the endpoint, and if the endpoint is not reading
+// — a coordinator that has stopped draining, a socket whose reader is elsewhere
+// — that pump parks in Write and stays there. Closing only the far connection
+// leaves it parked, and with it this connection and this pane's work.
+//
+// The endpoint here accepts and reads nothing, so the pump parks by
+// construction rather than by timing: the far agent cannot finish writing
+// either, because its own writer is behind the same pump. Both are checked for
+// being still in flight, and that is an absence — the one shape a duration may
+// bound, because nothing has to ARRIVE for it to be true.
+func TestClosingAPaneEndsAForwardParkedOnTheEndpoint(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "endpoint.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err == nil {
+			accepted <- conn
+		}
+	}()
+
+	pane := testPaneListeners()
+	pane.toolTarget = path
+
+	far, agent := net.Pipe()
+	defer func() { _ = agent.Close() }()
+	if !pane.trackForward(far) {
+		t.Fatal("an open pane refused to carry a connection")
+	}
+
+	returned := make(chan struct{})
+	go func() { pane.forwardTool(far); close(returned) }()
+
+	var endpoint net.Conn
+	select {
+	case endpoint = <-accepted:
+		defer func() { _ = endpoint.Close() }()
+	case <-time.After(10 * time.Second):
+		t.Fatal("the forward never reached the endpoint")
+	}
+
+	// The far agent writes more than any buffer holds, and nothing reads it.
+	written := make(chan int, 1)
+	go func() {
+		n, _ := agent.Write(make([]byte, 8<<20))
+		written <- n
+	}()
+	select {
+	case n := <-written:
+		t.Fatalf("the far agent finished writing %d bytes: the endpoint-side pump was not parked", n)
+	case <-time.After(300 * time.Millisecond):
+		// Still in flight: the pump is parked in its write, which is the state
+		// this test needs and the reason the duration is here at all.
+	}
+
+	if err := pane.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	select {
+	case <-returned:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the forward did not end: a pump parked on the endpoint outlived its pane")
 	}
 }
 

@@ -16,9 +16,14 @@ import (
 
 // workerAuthSessions is the launch-record view needed by the authorizer. The
 // session registry is the only source of a root pid: a peer's pid is used only
-// as the child to check after the backend-owned root has been pinned.
+// as the child to check after the backend-owned root has been pinned. Get is
+// here for the other fact the registry owns — the session itself, which is
+// what an approval's trust domain is derived from (agent_approval.go's
+// sessionDomain): the machine an answer is keyed to is the session's own
+// route, and nothing but the registry holds it.
 type workerAuthSessions interface {
 	List() []session.Session
+	Get(session.ID) (session.Session, error)
 	OwnedProcessPID(session.ID) (int, bool)
 }
 

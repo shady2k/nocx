@@ -59,7 +59,7 @@ func admittedWorkerEndpoint(t *testing.T) (*agentApprovalService, *toolendpoint.
 	// The state a finished enrolment leaves behind, reached the way the
 	// enrolment reaches it: the answer in the durable store, and then the
 	// enrolment that reads it, which is what mints the interval's epoch.
-	if recordErr := approval.store.Record(executable, approval.scope, agentapproval.Granted); recordErr != nil {
+	if recordErr := approval.store.Record(executable, agentapproval.LocalDomain(), approval.scope, agentapproval.Granted); recordErr != nil {
 		t.Fatalf("record the answer: %v", recordErr)
 	}
 	if enrolErr := approval.Approve(context.Background(), sess.ID(), agent); enrolErr != nil {
@@ -184,7 +184,7 @@ func TestRevokingAgentApprovalClosesTheAdmittedEndpointConnection(t *testing.T) 
 		t.Fatal("the session has no approved executable to revoke")
 	}
 
-	forgotten, err := approval.ForgetAgentAccess(executable.Path, executable.SHA256, workerTestWorkspace)
+	forgotten, err := approval.ForgetAgentAccess(executable.Path, executable.SHA256, workerTestWorkspace, localMachineFacts())
 	if err != nil || !forgotten {
 		t.Fatalf("revoke: forgotten=%v err=%v", forgotten, err)
 	}
@@ -265,7 +265,7 @@ func TestRevokingOneAgentLeavesAnotherAgentsSessionAdmitted(t *testing.T) {
 		if idErr != nil {
 			t.Fatalf("identify %s: %v", agent, idErr)
 		}
-		if recordErr := approval.store.Record(executable, approval.scope, agentapproval.Granted); recordErr != nil {
+		if recordErr := approval.store.Record(executable, agentapproval.LocalDomain(), approval.scope, agentapproval.Granted); recordErr != nil {
 			t.Fatalf("record the answer for %s: %v", sid, recordErr)
 		}
 		if enrolErr := approval.Approve(ctx, sid, agent); enrolErr != nil {
@@ -326,7 +326,7 @@ func TestRevokingOneAgentLeavesAnotherAgentsSessionAdmitted(t *testing.T) {
 	if idErr != nil {
 		t.Fatalf("identify the revoked agent: %v", idErr)
 	}
-	forgotten, revokeErr := approval.ForgetAgentAccess(revoked.Path, revoked.SHA256, workerTestWorkspace)
+	forgotten, revokeErr := approval.ForgetAgentAccess(revoked.Path, revoked.SHA256, workerTestWorkspace, localMachineFacts())
 	if revokeErr != nil || !forgotten {
 		t.Fatalf("revoke: forgotten=%v err=%v", forgotten, revokeErr)
 	}

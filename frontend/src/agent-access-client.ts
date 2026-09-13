@@ -27,7 +27,10 @@ export class AgentAccessClient {
   }
 
   /**
-   * Unmake one answer, addressed by the facts that identify it.
+   * Unmake one answer, addressed by the facts that identify it — INCLUDING the
+   * machine it was given for (nocx-50w7p.16). Two machines' answers for one
+   * executable are two rows, so a request without the machine would name no
+   * row at all.
    *
    * `forgotten: false` is a success and not a failure — the answer was
    * already not there, which is what forgetting asked for. The caller
@@ -39,6 +42,7 @@ export class AgentAccessClient {
       executable: answer.executable,
       digest: answer.digest,
       workspace: answer.workspace,
+      machine: answer.machine,
     })
   }
 }

@@ -103,7 +103,7 @@ func newSessionEndStand(t *testing.T, dispatch assistant.ToolDispatcher) *sessio
 	if err != nil {
 		t.Fatalf("identify agent: %v", err)
 	}
-	if recordErr := approval.store.Record(executable, approval.scope, agentapproval.Granted); recordErr != nil {
+	if recordErr := approval.store.Record(executable, agentapproval.LocalDomain(), approval.scope, agentapproval.Granted); recordErr != nil {
 		t.Fatalf("record the answer: %v", recordErr)
 	}
 	if enrolErr := approval.Approve(ctx, sid, agent); enrolErr != nil {

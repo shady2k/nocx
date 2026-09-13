@@ -21,6 +21,7 @@ import (
 	"github.com/shady2k/nocx/internal/peerpin"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/toolendpoint"
 	"github.com/shady2k/nocx/internal/workers"
 )
@@ -114,14 +115,23 @@ func openWorkerAuthSession(t *testing.T) (*session.Reg, session.Session, *panevi
 	return reg, sess, grid
 }
 
+// workerAuthSessionOverride is the app tests' one hand-made session: a real
+// session with ONE or TWO of its route facts replaced, which is what a test
+// about a machine needs (the domain is derived from exactly these).
 type workerAuthSessionOverride struct {
 	session.Session
-	kind session.Kind
-	host string
+	kind        session.Kind
+	host        string
+	sshOpts     []ssh.ConnectOption
+	fingerprint string
 }
 
 func (s workerAuthSessionOverride) Kind() session.Kind { return s.kind }
 func (s workerAuthSessionOverride) Host() string       { return s.host }
+
+func (s workerAuthSessionOverride) SSHOptions() []ssh.ConnectOption { return s.sshOpts }
+
+func (s workerAuthSessionOverride) HostKeyFingerprint() string { return s.fingerprint }
 
 type workerAuthSessionSet struct {
 	sessions []session.Session
@@ -129,6 +139,18 @@ type workerAuthSessionSet struct {
 }
 
 func (s workerAuthSessionSet) List() []session.Session { return s.sessions }
+
+// Get answers the session by id from the set, which is what the domain
+// derivation asks for. A set that does not hold the id refuses, as the real
+// registry does.
+func (s workerAuthSessionSet) Get(id session.ID) (session.Session, error) {
+	for _, sess := range s.sessions {
+		if sess.ID() == id {
+			return sess, nil
+		}
+	}
+	return nil, errors.New("no such session")
+}
 
 func (s workerAuthSessionSet) OwnedProcessPID(id session.ID) (int, bool) {
 	pid, ok := s.owned[id]

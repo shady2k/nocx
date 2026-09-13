@@ -26,6 +26,7 @@
  * next tool call refused and goes on running without nocx's tools.
  */
 import { createSignal, For, onMount, Show } from 'solid-js'
+import { machineKey, machineLabel } from './agent-machine'
 import type { AgentAccessAnswer, AgentAccessClient } from './agent-access-client'
 import { Button } from './ui/button'
 import { PageSection } from './ui/page-section'
@@ -106,7 +107,7 @@ export function AgentAccessSection(props: AgentAccessSectionProps) {
             <div data-agent-access={key(answer)}>
               <RecordRow
                 title={answer.executable}
-                meta={`Every tab in the ${answer.workspace} workspace · ${answer.digest}`}
+                meta={`On ${machineLabel(answer.machine)} · Every tab in the ${answer.workspace} workspace · ${answer.digest}`}
                 status={
                   answer.answer === 'granted'
                     ? { tone: 'ok' as const, text: 'Allowed' }
@@ -132,9 +133,12 @@ export function AgentAccessSection(props: AgentAccessSectionProps) {
   )
 }
 
-/** A row's identity: the same three facts the answer is keyed by. */
+/** A row's identity: the same four facts the answer is keyed by, machine
+ *  included — two machines' answers for one executable are two rows, and a
+ *  `For` key that could not tell them apart would let one row's button act on
+ *  the other (nocx-50w7p.16). */
 function key(answer: AgentAccessAnswer): string {
-  return `${answer.executable}|${answer.digest}|${answer.workspace}`
+  return `${answer.executable}|${answer.digest}|${answer.workspace}|${machineKey(answer.machine)}`
 }
 
 function message(err: unknown): string {

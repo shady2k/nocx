@@ -69,7 +69,12 @@ type agentApprovalService struct {
 	// put a second copy of the question in the queue — it is the same
 	// decision, and a stack of identical dialogs is how a person clicks one
 	// without reading it — so a second start joins the first one's wait.
-	asking map[string][]chan string
+	//
+	// The same executable on two MACHINES is two questions, which is why the
+	// key carries the domain: joining one machine's question to another's
+	// would show a person a dialog about the wrong host and record their
+	// answer under it.
+	asking map[askingKey][]chan string
 
 	// authorityEnded is called whenever an answer stops holding — a revoke, a
 	// withdrawn enrolment — with the session and the EPOCH that ended, so the
@@ -80,10 +85,18 @@ type agentApprovalService struct {
 }
 
 // enrolledAgent is what one live enrolment holds: the identity the person
-// answered about, and the interval that answer opened.
+// answered about, the MACHINE that answer was given for, and the interval it
+// opened.
 type enrolledAgent struct {
 	executable agentapproval.Executable
-	epoch      toolendpoint.AdmissionEpoch
+	// domain is captured when the interval opens and read back with it. The
+	// store is consulted with THIS domain rather than a freshly derived one:
+	// the answer that opened the interval is the answer the interval holds
+	// under, and a route fact that moved afterwards (a re-dial meeting a
+	// different host key) must not silently re-point a live interval at
+	// another machine's answer.
+	domain agentapproval.Domain
+	epoch  toolendpoint.AdmissionEpoch
 }
 
 func newAgentApprovalService(sessions workerAuthSessions, store *agentapproval.Store, scope string) *agentApprovalService {
@@ -92,7 +105,7 @@ func newAgentApprovalService(sessions workerAuthSessions, store *agentapproval.S
 		scope:     agentToolEndpointScopePrefix + scope,
 		workspace: scope,
 		enrolled:  map[session.ID]enrolledAgent{},
-		asking:    map[string][]chan string{},
+		asking:    map[askingKey][]chan string{},
 	}
 }
 
@@ -118,7 +131,7 @@ func (s *agentApprovalService) Interval(sid session.ID, scope string) (toolendpo
 	if !known {
 		return 0, false
 	}
-	answer, ok := s.store.Lookup(enrolled.executable, scope)
+	answer, ok := s.store.Lookup(enrolled.executable, enrolled.domain, scope)
 	if !ok || answer != agentapproval.Granted {
 		return 0, false
 	}
@@ -223,6 +236,15 @@ func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agen
 	if _, ok := s.sessions.OwnedProcessPID(sid); !ok {
 		return errors.New("nocx cannot identify the enrolled agent executable")
 	}
+	// WHICH MACHINE, from the session's own route and nothing else. A session
+	// the registry does not know, or an ssh one whose host key was never
+	// observed, has no machine this answer could be keyed to — and it is
+	// refused rather than keyed on a partial fact, because an answer that
+	// cannot name its machine is an answer for whichever machine asks next.
+	domain, err := sessionDomain(s.sessions, sid)
+	if err != nil {
+		return err
+	}
 	executable, err := agentapproval.IdentityForExecutable(agent)
 	if err != nil {
 		return err
@@ -250,7 +272,7 @@ func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agen
 	// question the person had just answered back on screen. The ask records
 	// before it settles, so under the lock the store is never behind.
 	s.mu.Lock()
-	answer, found := s.store.Lookup(executable, s.scope)
+	answer, found := s.store.Lookup(executable, domain, s.scope)
 	switch {
 	case found && answer == agentapproval.Granted:
 		// THE EPOCH IS MINTED WHERE THE INTERVAL OPENS, and only there. An
@@ -259,7 +281,7 @@ func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agen
 		// and a session whose interval ended gets a new one, which is what
 		// lets the next admission be told apart from a connection admitted
 		// under the interval that ended.
-		s.enrolled[sid] = enrolledAgent{executable: executable, epoch: s.mintEpoch(sid)}
+		s.enrolled[sid] = enrolledAgent{executable: executable, domain: domain, epoch: s.mintEpoch(sid)}
 		s.mu.Unlock()
 		return nil
 	case found:
@@ -269,13 +291,13 @@ func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agen
 		s.mu.Unlock()
 		return errors.New("nocx has no client to ask for agent approval")
 	}
-	k := askingKey(executable)
+	k := askingKey{executable: executable, domain: domain}
 	waiters, up := s.asking[k]
 	settled := make(chan string, 1)
 	s.asking[k] = append(waiters, settled)
 	s.mu.Unlock()
 	if !up {
-		go s.ask(executable, agent)
+		go s.ask(executable, agent, domain)
 	}
 	return &lifecyclepub.EnrolmentPending{
 		Reason:  fmt.Sprintf("nocx is asking whether %s may use its tools", agent),
@@ -290,12 +312,13 @@ func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agen
 // Its own context, for the same reason. The enrolment's is finished by the
 // time anybody clicks, and cancelling the question with it would take the
 // dialog off the screen mid-read.
-func (s *agentApprovalService) ask(executable agentapproval.Executable, agent string) {
+func (s *agentApprovalService) ask(executable agentapproval.Executable, agent string, domain agentapproval.Domain) {
 	response, err := s.requester.RequestHost(context.Background(), transport.HostAsk{
 		Capability: transport.HostCapAgentApproval,
 		Executable: executable.Path,
 		Digest:     executable.SHA256,
 		Workspace:  s.workspace,
+		Machine:    machineFacts(domain),
 	})
 	if err != nil {
 		// Nothing is recorded. An unanswerable question — no client, a window
@@ -304,27 +327,33 @@ func (s *agentApprovalService) ask(executable agentapproval.Executable, agent st
 		// permanent (nocx-6jbad). It closes WITH A SENTENCE, so the pane
 		// starts the agent without tools and says why, rather than enrolling
 		// again into a question that cannot appear.
-		s.settle(executable, fmt.Sprintf("nocx could not ask whether %s may use its tools: %v", agent, err))
+		s.settle(executable, domain, fmt.Sprintf("nocx could not ask whether %s may use its tools: %v", agent, err))
 		return
 	}
 	decision := agentapproval.Denied
 	if response.Approved {
 		decision = agentapproval.Granted
 	}
-	if err := s.store.Record(executable, s.scope, decision); err != nil {
+	if err := s.store.Record(executable, domain, s.scope, decision); err != nil {
 		// A sentence here too. Closed as answered, the shell would enrol, find
 		// nothing stored, and put the question the person just answered back
 		// on screen.
-		s.settle(executable, fmt.Sprintf("nocx could not keep your answer about %s: %v", agent, err))
+		s.settle(executable, domain, fmt.Sprintf("nocx could not keep your answer about %s: %v", agent, err))
 		return
 	}
-	s.settle(executable, "")
+	s.settle(executable, domain, "")
 }
 
 // ListAgentAccess is the answers a person gave, in the terms the surface
-// speaks: the three facts they were shown, and the store's own answer. The
-// durable scope key does not travel — this is where it is composed, so this
-// is where it is taken apart, and the transport never learns its grammar.
+// speaks: the facts they were shown — the executable, its digest, the
+// workspace, AND the machine the answer was given for — and the store's own
+// answer. The durable scope key does not travel — this is where it is
+// composed, so this is where it is taken apart, and the transport never learns
+// its grammar.
+//
+// The machine travels because a list that showed two machines' answers alike
+// could not offer to unmake one of them: the row is what a person clicks, and
+// the row is the whole identity now (nocx-50w7p.16).
 //
 // Answers under some other scope are dropped rather than shown. This backend
 // composes exactly one, and a row a person cannot address is a row they
@@ -343,6 +372,7 @@ func (s *agentApprovalService) ListAgentAccess() []transport.AgentAccessRecord {
 			Digest:     record.Executable.SHA256,
 			Workspace:  s.workspace,
 			Answer:     string(record.Answer),
+			Machine:    machineFacts(record.Domain),
 		})
 	}
 	return records
@@ -371,15 +401,25 @@ func (s *agentApprovalService) ListAgentAccess() []transport.AgentAccessRecord {
 // A workspace this backend does not answer for is refused rather than
 // composed into a key that would match nothing: silently forgetting nothing
 // and reporting success is how a person comes to believe a revocation landed.
-func (s *agentApprovalService) ForgetAgentAccess(executable, digest, workspace string) (bool, error) {
+//
+// The MACHINE comes from the caller here, and that is not a hole in "the
+// domain is the backend's": this path does not mint or admit anything. It
+// names a row the backend itself listed (agentAccess.list), and the only thing
+// it can do with that name is remove an answer. An unrecognised or incomplete
+// machine matches no key, so the call forgets nothing and says so.
+func (s *agentApprovalService) ForgetAgentAccess(executable, digest, workspace string, machine transport.MachineFacts) (bool, error) {
 	if s == nil || s.store == nil {
 		return false, errors.New("nocx has no record of admitted agents")
 	}
 	if workspace != s.workspace {
 		return false, fmt.Errorf("nocx does not hold answers for workspace %q", workspace)
 	}
+	domain := domainFromFacts(machine)
+	if !domain.Valid() {
+		return false, errors.New("nocx cannot tell which machine that answer was for")
+	}
 	revoked := agentapproval.Executable{Path: executable, SHA256: digest}
-	forgotten, err := s.store.Forget(revoked, s.scope)
+	forgotten, err := s.store.Forget(revoked, domain, s.scope)
 	if err != nil {
 		return forgotten, err
 	}
@@ -393,22 +433,27 @@ func (s *agentApprovalService) ForgetAgentAccess(executable, digest, workspace s
 	// AFTER the Forget and never before: before it, the answer still reads as
 	// granted, and a re-enrolment racing this could mint its epoch against an
 	// answer that had not stopped holding.
-	for _, sid := range s.enrolledAs(revoked) {
+	for _, sid := range s.enrolledAs(revoked, domain) {
 		s.Forget(sid)
 	}
 	return true, nil
 }
 
-// enrolledAs names the sessions currently enrolled as one agent. It is a
-// snapshot, taken under the lock the enrolment mutates, so it can only miss a
-// session that enrolled as this agent AFTER the revocation — and that
+// enrolledAs names the sessions currently enrolled as one agent ON ONE MACHINE.
+// It is a snapshot, taken under the lock the enrolment mutates, so it can only
+// miss a session that enrolled as this agent AFTER the revocation — and that
 // enrolment is refused by the store, because the answer is already gone.
-func (s *agentApprovalService) enrolledAs(executable agentapproval.Executable) []session.ID {
+//
+// The domain is part of the match: a revocation is one machine's answer going,
+// and an interval enrolled under another machine's answer is not the interval
+// this call ends. Without it, revoking an agent here would close a colleague
+// host's live interval.
+func (s *agentApprovalService) enrolledAs(executable agentapproval.Executable, domain agentapproval.Domain) []session.ID {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	held := make([]session.ID, 0, len(s.enrolled))
 	for sid, enrolled := range s.enrolled {
-		if enrolled.executable == executable {
+		if enrolled.executable == executable && enrolled.domain == domain {
 			held = append(held, sid)
 		}
 	}
@@ -420,9 +465,9 @@ func (s *agentApprovalService) enrolledAs(executable agentapproval.Executable) [
 // identity, answered or not: a question nobody could deliver must be askable
 // again. Each channel is buffered and settled exactly once, so a pane that
 // stopped waiting costs nothing.
-func (s *agentApprovalService) settle(executable agentapproval.Executable, reason string) {
+func (s *agentApprovalService) settle(executable agentapproval.Executable, domain agentapproval.Domain, reason string) {
 	s.mu.Lock()
-	k := askingKey(executable)
+	k := askingKey{executable: executable, domain: domain}
 	waiters := s.asking[k]
 	delete(s.asking, k)
 	s.mu.Unlock()
@@ -431,8 +476,65 @@ func (s *agentApprovalService) settle(executable agentapproval.Executable, reaso
 	}
 }
 
-func askingKey(executable agentapproval.Executable) string {
-	return executable.Path + "\x00" + executable.SHA256
+// askingKey names one question on screen. The machine is part of it because the
+// same executable on two hosts is two questions, and a person may answer them
+// differently.
+type askingKey struct {
+	executable agentapproval.Executable
+	domain     agentapproval.Domain
+}
+
+// sessionDomain derives the trust domain of a session from the session's OWN
+// route: its kind, its host, the account its connection authenticated as, and
+// the host key that connection was accepted under. Nothing else may supply
+// these — a probe, a caller or the agent itself would be a value the admitted
+// party chooses, and the whole point of the domain is that the backend knows
+// which machine it is talking to.
+//
+// It refuses rather than guesses. A session the registry does not hold, or an
+// ssh session whose host key was never observed, has no machine an answer could
+// be keyed to; keying one on a partial fact is how two machines come to share
+// an answer.
+func sessionDomain(sessions workerAuthSessions, sid session.ID) (agentapproval.Domain, error) {
+	sess, err := sessions.Get(sid)
+	if err != nil {
+		return agentapproval.Domain{}, fmt.Errorf("nocx does not know this pane's machine: %w", err)
+	}
+	if sess.Kind() != session.KindRemote {
+		return agentapproval.LocalDomain(), nil
+	}
+	host := sess.Host()
+	account := accountFromOptions(sess.SSHOptions())
+	hostKey := sess.HostKeyFingerprint()
+	if host == "" || account == "" || hostKey == "" {
+		return agentapproval.Domain{}, errors.New(
+			"nocx does not know which machine this pane's agent would run on, so it cannot remember an answer about one")
+	}
+	return agentapproval.Domain{Kind: agentapproval.DomainSSH, Host: host, Account: account, HostKey: hostKey}, nil
+}
+
+// machineFacts renders a domain as the wire's four facts. The renderer words
+// them; a composed sentence would be the transport parsing a key's grammar,
+// which is the one thing this boundary must not do.
+func machineFacts(domain agentapproval.Domain) transport.MachineFacts {
+	return transport.MachineFacts{
+		Kind:    string(domain.Kind),
+		Host:    domain.Host,
+		Account: domain.Account,
+		HostKey: domain.HostKey,
+	}
+}
+
+// domainFromFacts is machineFacts read back, for the ONE path that addresses a
+// row the backend itself listed (ForgetAgentAccess). It validates, so a caller
+// cannot name a domain the backend would never derive.
+func domainFromFacts(facts transport.MachineFacts) agentapproval.Domain {
+	return agentapproval.Domain{
+		Kind:    agentapproval.DomainKind(facts.Kind),
+		Host:    facts.Host,
+		Account: facts.Account,
+		HostKey: facts.HostKey,
+	}
 }
 
 var _ agentApproval = (*agentApprovalService)(nil)

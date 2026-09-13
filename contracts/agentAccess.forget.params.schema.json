@@ -2,13 +2,41 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/agentAccess.forget.params.schema.json",
   "title": "AgentAccessForgetParams",
-  "description": "Params for agentAccess.forget: the ONE answer to unmake, addressed by the three facts that identify it. The durable scope key is not sent — the backend composes it from the workspace, so its grammar keeps one owner.",
+  "description": "Params for agentAccess.forget: the ONE answer to unmake, addressed by the four facts that identify it — including the machine it was given for (nocx-50w7p.16), because two machines' answers for one executable are two rows. The durable scope key is not sent — the backend composes it from the workspace, so its grammar keeps one owner.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["executable", "digest", "workspace"],
+  "required": ["executable", "digest", "workspace", "machine"],
   "properties": {
     "executable": { "type": "string", "minLength": 1, "maxLength": 4096 },
     "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-    "workspace": { "type": "string", "minLength": 1, "maxLength": 256 }
+    "workspace": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "machine": {
+      "type": "object",
+      "description": "The MACHINE this answer is about (nocx-50w7p.16). A person's yes admits an executable ON ONE MACHINE: the same path and the same bytes on two hosts, or under two accounts on one host, is a different answer to give, so the machine is part of what the durable answer is keyed by. DERIVED BY THE BACKEND from the session's own route — its kind, its host, the account the connection authenticated as, and the host key it was accepted under — and never from a probe, a caller, or anything the agent says about itself. Four facts rather than one composed string, because the renderer is what words them: a composed value would make every surface parse a key whose grammar has one owner in the backend, the same rule this contract already states for `workspace`. The exact same object is declared in host.request.schema.json and in both agentAccess schemas; internal/transport's TestTheMachineShapeIsDeclaredOnce holds the three copies byte-identical.",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["local", "ssh"],
+          "description": "Which machine: `local` is the machine the coordinator runs on, `ssh` one reached over a connection the backend authenticated. A closed set the backend derives; a client never invents one, and only the revoke path may echo one back."
+        },
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "description": "ssh only: the host as dialed. Required exactly when kind is ssh — a machine nobody can name is an answer for no machine, so the backend refuses to key one."
+        },
+        "account": {
+          "type": "string",
+          "minLength": 1,
+          "description": "ssh only: the account the connection authenticated as. Two accounts on one host are two machines, because the agent being admitted runs as one of them."
+        },
+        "hostKey": {
+          "type": "string",
+          "minLength": 1,
+          "description": "ssh only: the SHA-256 fingerprint of the host key the connection was accepted under, in the spelling every host-key error and every known_hosts line carries. It is IN the answer's identity for the reason ADR-0023 gives for helper consent: a machine whose key changed is a different answer to give, so the stored yes stops matching and the question is asked again."
+        }
+      }
+    }
   }
 }

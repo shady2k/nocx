@@ -28,6 +28,7 @@ import {
   HostOpenUrl,
 } from '../bindings/github.com/shady2k/nocx/wailsapp'
 import { bindingReachable } from './wails-runtime'
+import type { MachineFacts } from './agent-machine'
 import type { Dispatcher } from './dispatcher'
 import type { HostAttentionActivated } from './generated/host.attentionActivated'
 import type { HostRequest } from './generated/host.request'
@@ -61,10 +62,13 @@ export interface HostBindings {
 export type ApprovalSurface = (facts: ApprovalFacts) => Promise<boolean>
 
 /** What the person is being asked to admit, one fact per member. The wire
- *  carries three because the surface words them: a path and a digest glued
+ *  carries them because the surface words them: a path and a digest glued
  *  into one string cannot be given a row each, and a durable scope key
  *  ("tool-endpoint:workspace:default") is an identifier this renderer must
- *  not parse to find a word for a person (nocx-fu18z). */
+ *  not parse to find a word for a person (nocx-fu18z). The MACHINE is the
+ *  fourth fact and not a fifth string: a yes admits an agent on ONE machine,
+ *  so a surface that did not say which would be collecting a decision about a
+ *  place nobody named (nocx-50w7p.16). */
 export interface ApprovalFacts {
   /** The agent's absolute path. */
   executable: string
@@ -72,6 +76,10 @@ export interface ApprovalFacts {
   digest: string
   /** The workspace the answer covers, by name. */
   workspace: string
+  /** The machine the answer would be given for. The backend sets one on every
+   *  approval ask; it is optional here only because this capability's params
+   *  are shared with the six that carry none. */
+  machine?: MachineFacts
 }
 
 /** The one binding name the reachability probe is asked about. All seven live
@@ -259,6 +267,7 @@ async function perform(
           executable: p.executable ?? '',
           digest: p.digest ?? '',
           workspace: p.workspace ?? '',
+          machine: p.machine,
         }),
       }
     default:

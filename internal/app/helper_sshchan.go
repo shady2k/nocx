@@ -306,9 +306,10 @@ func (r installLeaseRoutes) HelperInstallConn(ctx context.Context, host string, 
 	return r.viaLocal.HelperInstallConn(ctx, host, opts...)
 }
 
-// FSConn is the file panel's lease, and it is the helper's now (nocx-50w7p.12).
-// Its sibling above is the install lease; the git lane and the platform probe
-// are still `direct`, which is the state of the epic rather than a preference.
+// FSConn is the file panel's lease, and it is the helper's now (nocx-50w7p.12) —
+// the same `viaLocal` half HelperInstallConn uses, because one value answering
+// for two leases of the same owner is one answer rather than two that agree
+// today. The git lane is the only method left on `direct`.
 func (r installLeaseRoutes) FSConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.FSConn, error) {
 	return r.viaLocal.FSConn(ctx, host, opts...)
 }

@@ -326,6 +326,37 @@ func (s *Session) Snapshot() Snapshot {
 	}
 }
 
+// ReadScreen lends the emulator this runtime directs for the duration of ONE
+// read, and answers the revision and the completeness that read was taken at.
+//
+// It exists because a FRAME is several reads of one terminal — the geometry,
+// which buffer is active, the caret, and every row — and the port orders none
+// of them against an ingest ("an ingest concurrent with a read may or may not
+// be reflected in it", emulator.Terminal). A caller composing those reads
+// unguarded answers a screen the terminal was never in: the pump ingests on its
+// own goroutine, so a chunk landing between the caret read and the rows leaves
+// a frame whose rows carry text the caret it reports has not reached.
+//
+// Holding this runtime's lock for the whole read is what makes the frame an
+// instant rather than a span. It costs what the contract already says a read
+// costs — it waits behind an ingest in flight, which itself waits behind a
+// reply write — and it is on the SESSION rather than on the Runtime contract
+// because it lends state the contract deliberately does not expose: the
+// contract's own consistent read is [Snapshot], whose Screen is text and
+// carries neither cells nor a caret (design §6.11).
+//
+// A read that fails answers no revision and no completeness: the caller has
+// nothing to compose and a value from either side would be a claim about a
+// screen nobody read.
+func (s *Session) ReadScreen(read func(emulator.Terminal) error) (Revision, Completeness, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := read(s.emulator); err != nil {
+		return 0, CompletenessUnknown, err
+	}
+	return s.rev, s.completeness, nil
+}
+
 // screenTextLocked reads the ACTIVE screen out of the emulator, as text.
 //
 // The format is this runtime's stand-in until the client's frame protocol

@@ -12,7 +12,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,6 +58,151 @@ func TestTheScreenOpAnswersTheFrameTheRuntimeHolds(t *testing.T) {
 	if res.Completeness != proto.CompletenessComplete {
 		t.Errorf("completeness = %q, want %q: this runtime was created before the first byte was read",
 			res.Completeness, proto.CompletenessComplete)
+	}
+}
+
+// TestTheScreenOpAnswersOneInstantOfTheScreen is the property the read owes and
+// the one a green suite cannot see: WHAT the frame says is the subject above,
+// and WHEN it says it is this one's.
+//
+// A frame is several reads of one terminal, and the emulator's own port orders
+// none of them against the pump — so a chunk ingested between the caret read
+// and the rows answers a screen the terminal was never in: rows carrying text
+// the caret beside them has not reached, with a revision taken later still. The
+// program below draws that mixture in a way a reader can NAME: every write
+// clears the screen and writes the epoch it is drawing at two rows, leaving the
+// caret at a column that belongs to that epoch, and the runtime counts one
+// revision per write. So a frame is one state of the screen exactly when its
+// two markers agree, its caret is that epoch's caret, and its revision is the
+// base plus that epoch.
+//
+// Nothing here waits on a duration, and nothing depends on which of the two
+// goroutines the scheduler favours: the PROGRAM's end is the reader's decision,
+// so the stream is still arriving at every read rather than racing to finish
+// before the first one.
+func TestTheScreenOpAnswersOneInstantOfTheScreen(t *testing.T) {
+	spawner := &fakeSpawner{}
+	svc := newService(t, newSink(), spawner, session.Limits{})
+	entry := spawnOne(t, svc)
+	proc := procOf(t, spawner, 0)
+
+	// The revision with nothing ingested: captured before the program draws,
+	// so the arithmetic below is about the stream and nothing else.
+	base := call[proto.ScreenResult](t, svc, proto.OpScreen, proto.ScreenParams{Session: entry.Session}).Revision
+
+	stop := make(chan struct{})
+	drawing := make(chan struct{})
+	var drawn atomic.Uint64
+	go func() {
+		defer close(drawing)
+		for k := uint64(1); ; k++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, err := proc.produce.Write(epochChunk(k)); err != nil {
+				return
+			}
+			drawn.Store(k)
+		}
+	}()
+
+	// The program's first write reaching the screen is what makes every read
+	// below a read of a screen being DRAWN ON rather than of a still one, and
+	// the frame it arrives in is checked like the others. It is waited for as a
+	// STATE, and the program's end is this function's own decision — so the
+	// stream cannot run out before the loop does.
+	assertOneInstantOfTheScreen(t, waitForScreen(t, svc, entry, "EPOCH-"), base)
+	for range framesRead {
+		res := call[proto.ScreenResult](t, svc, proto.OpScreen, proto.ScreenParams{Session: entry.Session})
+		assertOneInstantOfTheScreen(t, res, base)
+	}
+	close(stop)
+	<-drawing
+	t.Logf("checked %d frames over %d writes", framesRead+1, drawn.Load())
+}
+
+// framesRead is how many frames are checked: every one of them is read while
+// the program is still drawing, because the program's end is this loop's own.
+const framesRead = 40
+
+// epochColumns is the width epochChunk leaves the caret within: one column per
+// epoch, wrapping at the frame's own width, so two epochs in a row never share
+// a column and a caret from the write before a frame's rows stands on an empty
+// cell.
+const epochColumns = 80
+
+// caretMark is what a write leaves at the column it moves the caret to, so the
+// caret a frame reports can be checked against the DRAWING rather than against
+// a number this test would have to compute.
+const caretMark = "^"
+
+// epochChunk is one program write: the screen cleared, the epoch written at two
+// rows, and the caret left on a mark of its own at a column that belongs to
+// that epoch — so no two writes can be mistaken for one another by a reader,
+// and a caret from the write before a frame's rows has nothing under it.
+func epochChunk(k uint64) []byte {
+	mark := fmt.Sprintf("EPOCH-%d", k)
+	column := k%epochColumns + 1
+	return []byte(fmt.Sprintf(
+		"\x1b[2J\x1b[2;1H%s\x1b[4;1H%s\x1b[3;%dH%s\x1b[3;%dH",
+		mark, mark, column, caretMark, column))
+}
+
+// epochOf reads the epoch a row was drawn at, and false for a row that carries
+// none — the screen before the program's first write.
+func epochOf(row []proto.ScreenCell) (uint64, bool) {
+	const prefix = "EPOCH-"
+	text := strings.TrimSpace(rowText(row))
+	if !strings.HasPrefix(text, prefix) {
+		return 0, false
+	}
+	k, err := strconv.ParseUint(strings.TrimSpace(text[len(prefix):]), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return k, true
+}
+
+// assertOneInstantOfTheScreen fails with what disagreed when a frame is not one
+// state of the screen.
+func assertOneInstantOfTheScreen(t *testing.T, res proto.ScreenResult, base uint64) {
+	t.Helper()
+	if len(res.Frame.Lines) != res.Frame.Rows || res.Frame.Rows < 5 {
+		t.Fatalf("the frame carries %d rows for %d, and the marks below live on rows 2 to 4: a frame is a rectangle",
+			len(res.Frame.Lines), res.Frame.Rows)
+	}
+	upper, upperDrawn := epochOf(res.Frame.Lines[1])
+	lower, lowerDrawn := epochOf(res.Frame.Lines[3])
+	if !upperDrawn && !lowerDrawn {
+		// Nothing the program drew has reached the screen yet: the frame is
+		// the one the session was spawned with, and the caret with it.
+		if res.Revision != base || res.Frame.CursorX != 0 || res.Frame.CursorY != 0 {
+			t.Fatalf("the frame carries no epoch yet reports revision %d and caret (%d,%d), want revision %d and an empty caret",
+				res.Revision, res.Frame.CursorX, res.Frame.CursorY, base)
+		}
+		return
+	}
+	if !upperDrawn || !lowerDrawn || upper != lower {
+		t.Fatalf("the frame's own rows disagree about which write they came from: rows 2 and 4 draw epochs %d and %d (present %v/%v) — a write landed inside the read",
+			upper, lower, upperDrawn, lowerDrawn)
+	}
+	if want := base + upper; res.Revision != want {
+		t.Fatalf("the frame draws epoch %d and reports revision %d, want %d: the revision does not belong to the frame, so a write landed between them",
+			upper, res.Revision, want)
+	}
+	// The caret stands where THIS write left it: on the mark drawn at its
+	// column. A frame whose rows came from one write and whose caret came from
+	// the one before has an empty cell under it, which is the tear the frame
+	// read used to answer with.
+	if res.Frame.CursorY != 2 || res.Frame.CursorX < 0 || res.Frame.CursorX >= res.Frame.Cols {
+		t.Fatalf("the frame draws epoch %d and puts its caret at (%d,%d), which is not a column of row 3",
+			upper, res.Frame.CursorX, res.Frame.CursorY)
+	}
+	if got := res.Frame.Lines[2][res.Frame.CursorX].Text; got != caretMark {
+		t.Fatalf("the frame draws epoch %d and its caret stands at (%d,%d), where the cell holds %q rather than the mark its own write left: the caret belongs to another write",
+			upper, res.Frame.CursorX, res.Frame.CursorY, got)
 	}
 }
 

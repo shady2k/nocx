@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package app
 
 // The coordinator's half of the helper's ssh connection, tested against the

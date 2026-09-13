@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package ssh
 
 // A network that can be made to misbehave on cue.

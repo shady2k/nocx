@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package ssh
 
 import (
@@ -1053,7 +1055,7 @@ func TestPoolConnectionSharing(t *testing.T) {
 		t.Fatalf("Connect 2: %v", err)
 	}
 
-	if got := client.pool.Count(); got != 1 {
+	if got := client.dial.pool.Count(); got != 1 {
 		t.Fatalf("after 2 connects to same host, pool.Count()=%d, want 1 (shared)", got)
 	}
 
@@ -1087,7 +1089,7 @@ func TestPoolConnectionSharing(t *testing.T) {
 	if err := ch1.Close(); err != nil {
 		t.Fatalf("ch1.Close: %v", err)
 	}
-	if got := client.pool.Count(); got != 1 {
+	if got := client.dial.pool.Count(); got != 1 {
 		t.Fatalf("after 1 close, pool.Count()=%d, want 1 (still shared)", got)
 	}
 
@@ -1095,7 +1097,7 @@ func TestPoolConnectionSharing(t *testing.T) {
 	if err := ch2.Close(); err != nil {
 		t.Fatalf("ch2.Close: %v", err)
 	}
-	if got := client.pool.Count(); got != 0 {
+	if got := client.dial.pool.Count(); got != 0 {
 		t.Fatalf("after all closed, pool.Count()=%d, want 0", got)
 	}
 }

@@ -646,11 +646,22 @@ OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
 # conveniences (one `go test ./...`, one `golangci-lint run ./...`), they stand
 # for no job, and the tagged pass costs a measured 221 s on internal/app — not a
 # price for a target somebody types by hand.
+#
+# internal/ssh joined the list with nocx-50w7p.5, and it is the one entry that is
+# not a helper package: it is the COORDINATOR's own package, split in place
+# because the dial half cannot move out (internal/ssh/helper_seams.go forbids
+# handing a *gossh.ClientConfig or a gossh.HostKeyCallback across). Its untagged
+# half is what cmd/nocx-server links — resolution, credential binding, the
+# known_hosts decision — and its tagged half is the pool and the dial, which the
+# local helper links and the coordinator never does. So it must run in BOTH
+# passes: without the tag its untagged tests (resolution, host keys, the key
+# queue) are the coordinator's own, and with it the dial tests, which would
+# otherwise run in no job at all.
 LOCAL_SSH_TAG := nocx_local_ssh
 LOCAL_SSH_RE := ^//go:build.*nocx_local_ssh
 LOCAL_SSH_PKG_DIRS := cmd/nocx-helper internal/app internal/helper/session \
                       internal/helper/sshdial internal/helper/sshsvc \
-                      internal/helper/tunnelchan
+                      internal/helper/tunnelchan internal/ssh
 LOCAL_SSH_PKGS := $(addprefix ./,$(addsuffix /...,$(LOCAL_SSH_PKG_DIRS)))
 LOCAL_SSH_OS_PKGS := $(addprefix ./,$(addsuffix /...,$(filter $(OS_PKG_DIRS),$(LOCAL_SSH_PKG_DIRS))))
 LOCAL_SSH_PORTABLE_PKGS := $(filter-out $(LOCAL_SSH_OS_PKGS),$(LOCAL_SSH_PKGS))

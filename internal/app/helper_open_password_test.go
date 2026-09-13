@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package app
 
 // The connection password reaches authentication exactly once per open.
@@ -587,7 +589,7 @@ func openPasswordStack(t *testing.T, srv *pwSSHServer, probes probeHelperSource)
 	t.Cleanup(func() { _ = client.Close() })
 
 	reg := session.New(logger, &openPasswordPTYFactory{stub: pty.NewStub(logger)}).
-		WithSSHFactory(&sshFactoryAdapter{client: client})
+		WithSSHFactory(&coordinatorDialFactory{client: client})
 
 	consentStore := consent.NewStore(logger, storage.NewDocumentStore(t.TempDir()), "consent.json")
 	installStore := consent.NewInstallStore(logger, storage.NewDocumentStore(t.TempDir()), "installs.json")

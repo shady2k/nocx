@@ -102,11 +102,11 @@ func TestASessionsScreenOutlivesTheCoordinatorThatOpenedIt(t *testing.T) {
 	//     session, not an unclaimed one, and calling it the known gap would
 	//     hide exactly the defect this test exists to find.
 	//   * The helper still holds it and the coordinator did not take it back →
-	//     SKIP, naming the bead that owns the route (nocx-ie23r.2).
+	//     SKIP, naming the bead that owns the route (nocx-ie23r.5).
 	//
 	// The distinction is the whole value: a bare skip would pass on all three.
 	if tookBack := coordinatorHolds(second, sid, reattachWindow); tookBack {
-		t.Fatalf("stale: the replacing coordinator took session %s back, so nocx-ie23r.2 has landed — "+
+		t.Fatalf("stale: the replacing coordinator took session %s back, so nocx-ie23r.5 has landed — "+
 			"delete this gap and keep the assertions below", sid)
 	}
 	if !helperHolds(t, second, sid) {
@@ -115,11 +115,21 @@ func TestASessionsScreenOutlivesTheCoordinatorThatOpenedIt(t *testing.T) {
 			"session rather than leaving it unclaimed. That is a different defect from the one this "+
 			"gap names, and it must not be skipped over.", sid)
 	}
-	t.Skip("known gap (nocx-ie23r.2): a local pane's session is not re-adopted after a coordinator " +
-		"restart — readoptPass.Readopt refuses a route without a ProfileID/Host/Generation " +
-		"(session_readopt.go:134-137), so the daemon still holds the PTY and the new coordinator " +
-		"never takes it back. The first coordinator's read of the marker is asserted above; the " +
-		"resolution below is the criterion that is waiting on that bead.")
+	// WHAT CHANGED, AND WHAT DID NOT (nocx-ie23r.2 has since landed). The
+	// session is no longer unjudged: the replacing coordinator now ASKS this
+	// machine's daemon — over the endpoint, by dialling the generation the
+	// binding names — and records the verdict `live` for it, which is the
+	// claim the ledger and the notice are built on. What it still does not do
+	// is ATTACH, and that is the whole of what this gap is now: a judged
+	// session with no pane, rather than an unjudged one. Taking it back needs
+	// a second attach against a live local session and the pane it was the
+	// pipe of, which is nocx-ie23r.5's.
+	t.Skip("known gap (nocx-ie23r.5): a local pane's session is re-adopted into the registry — and so " +
+		"into a restored pane — by nobody yet. readoptPass.readoptLocal asks the generation the " +
+		"binding names and judges it (session_readopt.go), and it deliberately stops there: " +
+		"attaching to a live local session is the next bead. So the daemon still holds the PTY, the " +
+		"verdict says `live`, and no pane owns it. The first coordinator's read of the marker is " +
+		"asserted above; the resolution below is the criterion that is waiting on that bead.")
 
 	// The same watch is opened over the same session, in the NEW process.
 	if err := second.paneViews.Enrol(string(sid)); err != nil {

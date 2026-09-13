@@ -58,6 +58,148 @@ import (
 var errNoLocalGeneration = errors.New(
 	"this machine's nocx helper is not installed, so there is nothing to open the pane on")
 
+// errLocalEndpointUnreachable is the state a carried-over LOCAL session is
+// judged `unknown` out of: this machine's daemon did not answer the one
+// question reconciliation asks it (nocx-ie23r.2).
+//
+// It is a SENTINEL rather than prose because the cause the renderer picks its
+// sentence from is decided in ONE place (causeFor), and that function can only
+// tell a local failure from a remote one by what the error carries. Every
+// failure of the dial, the handshake and the ask is wrapped in it, because
+// locally there is no second thing that could have gone wrong: there is no
+// credential to seal, no host key to consent to and no ssh route to resolve,
+// so "nobody answered" is the whole of what the ask can fail with.
+var errLocalEndpointUnreachable = errors.New(
+	"this machine's helper could not be asked")
+
+// localInventoryRoute asks THIS machine's own daemon what it holds, for one
+// generation (nocx-ie23r.2 — L5's missing local inventory).
+//
+// # What it is for
+//
+// A local pane used to be a PTY the backend forked, so it died with the
+// backend and a carried-over local session was certainly gone. It is a session
+// on this machine's daemon now (helper_local.go's header), which means it can
+// OUTLIVE the coordinator — and the one thing reconciliation must then do is
+// the thing it does for a remote host: ask. Without this, a local session is
+// `noInventory` for ever, and the notice a person reads tells them the session
+// "may still be running", which for a command that is certainly over is the
+// kind of falsehood that makes the whole third state untrustworthy.
+//
+// # It dials the generation the BINDING names, not the one that is installed
+//
+// The socket's name carries the generation (endpoint.Path), and the binding
+// carries the generation its session was spawned by. Those two are the same
+// only while the build has not changed — and the case that matters is exactly
+// the one where it has: a person updates nocx, the OLD daemon is still holding
+// their shells, and the generation to ask about is the old one. Asking the
+// installed generation instead would report every surviving session as
+// unreachable the first time somebody updated, which is the same lie this file
+// exists to end, told about the other half of the users.
+//
+// # It never STARTS a daemon, and that is not an optimisation
+//
+// helperlocal.Open starts the installed binary when nothing is serving — which
+// is right for an open, where a pane has been asked for, and wrong here. A
+// probe that spawned a helper would turn "was this session still there" into a
+// process somebody did not ask for, and would make the answer to the question
+// depend on the act of asking it. So the Binary is EMPTY: this caller may not
+// start one, which is a state helperlocal.Config names in its own words, and a
+// machine with nothing serving answers with endpoint.ErrNoEndpoint instead. A
+// failure, and therefore `unknown` — never `absent`, because nothing said the
+// session was gone.
+//
+// # One connection per carried-over session, and it is closed after the ask
+//
+// The same shape the remote re-adoption has and for the same stated reason: an
+// answer is not reused for the next session, so two sessions on one generation
+// are two asks rather than one ask and one session judged on somebody else's
+// evidence. The connection is released as soon as the ask returns (see
+// localSessionInventory.LiveSessions) because nothing in this bead attaches to
+// what it finds: re-attaching a local session is nocx-ie23r.5's, and holding a
+// helper connection open for a session no pane claims would be the coordinator
+// leasing a shell it does not use.
+type localInventoryRoute struct {
+	// dir is the endpoint directory — endpoint.Dir(home). Empty is a route
+	// that cannot reach anything, and it answers nil rather than dialling a
+	// path built out of nothing.
+	dir string
+	log *slog.Logger
+}
+
+// LocalInventory reaches this machine's daemon for one generation. It is the
+// sessionReadopter-adjacent seam's whole implementation — see session_readopt.go
+// for how the answer becomes a verdict.
+func (r *localInventoryRoute) LocalInventory(ctx context.Context, generation string) (sessionInventory, error) {
+	if r == nil || r.dir == "" || generation == "" {
+		return nil, nil
+	}
+	c, err := helperlocal.Open(ctx, helperlocal.Config{
+		Dir:        r.dir,
+		Generation: proto.GenerationID(generation),
+		// EMPTY: this caller may not start a helper. See the type's own doc —
+		// a probe is not a spawn, and a probe that spawned would answer its
+		// own question.
+		Binary: "",
+		Log:    r.log,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errLocalEndpointUnreachable, err)
+	}
+	return &localSessionInventory{client: c, generation: generation}, nil
+}
+
+// localSessionInventory answers, for this machine's daemon, which sessions the
+// generation a binding names still holds.
+//
+// Generation is the id-space owner, exactly as helperSessionInventory's is:
+// the daemon answers about every generation it serves, and only the ids of the
+// one the binding named may be judged. Host and Account are deliberately NOT
+// implemented — a local binding has neither, and satisfying
+// targetOwnedInventory with this machine's name would invent a route the
+// remote readopt pass would then try to resolve as a saved connection.
+type localSessionInventory struct {
+	client     *helperclient.Client
+	generation string
+	released   sync.Once
+}
+
+func (i *localSessionInventory) Generation() string { return i.generation }
+
+func (i *localSessionInventory) Owns(_ string) bool { return i.generation != "" }
+
+// LiveSessions asks once and releases the connection, whatever the answer.
+//
+// The release is deferred rather than left to a caller because there is no
+// caller that wants the connection afterwards: the verdict is the whole
+// product of the ask (nocx-ie23r.5 is what will need the connection, and it
+// will open its own). A connection held past the ask would be a socket, a
+// goroutine and a lease on this machine's daemon per carried-over session,
+// kept for nobody.
+func (i *localSessionInventory) LiveSessions(ctx context.Context) (map[string]struct{}, error) {
+	defer i.released.Do(func() { _ = i.client.Close() })
+	entries, err := i.client.Sessions(ctx)
+	if err != nil {
+		// WRAPPED IN THE SAME SENTINEL, and this half is the one that is easy
+		// to miss: a handshake that completed and a connection that then went
+		// away reports a loss, not a dial failure, and an unwrapped one would
+		// fall through to causeFor's generic branches and be described as a
+		// host that refused or timed out. It is still this machine's helper
+		// that did not answer the question.
+		return nil, fmt.Errorf("%w: %w", errLocalEndpointUnreachable, err)
+	}
+	live := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if entry.HostSessionID.Generation != i.generation {
+			continue
+		}
+		live[entry.HostSessionID.Session] = struct{}{}
+	}
+	return live, nil
+}
+
+var _ sessionInventory = (*localSessionInventory)(nil)
+
 // localHelperOpener opens a pane on this machine's helper.
 type localHelperOpener struct {
 	log      *slog.Logger

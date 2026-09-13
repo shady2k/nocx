@@ -41,6 +41,7 @@ export type UnreconciledCause =
   | 'timedOut'
   | 'hostUnreachable'
   | 'vaultSealed'
+  | 'localEndpointUnreachable'
 
 /** The sentence for each cause, keyed on the closed enum rather than on any
  *  prose the backend sent — a reworded Go error must never change what a user
@@ -59,6 +60,13 @@ const SENTENCES: Record<UnreconciledCause, string> = {
   hostUnreachable: 'this host has not been reachable since nocx restarted.',
   vaultSealed:
     'the vault is locked, so the credential for this host could not be used to check it.',
+  // THE SUBJECT IS THIS MACHINE, and it is named (nocx-ie23r.2). Every other
+  // sentence on this list is about a host somebody else runs; this one is
+  // about the helper on the computer the person is sitting at, whose sessions
+  // are behind a socket in their own home. Saying "this host" here would send
+  // them looking for a network problem that does not exist.
+  localEndpointUnreachable:
+    "this machine's own helper could not be asked, so its sessions could not be checked.",
 }
 
 /** What one pane's restored page says about its unreconciled blocks, or null

@@ -12,6 +12,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -940,6 +941,119 @@ func seedPaneChain(t *testing.T, db content.ContentDB, paneA, paneB string) {
 		content.Pane{ID: paneB, TabID: tabB, Cwd: "/srv", Kind: content.PaneLocal, SizeShare: 1},
 	); err != nil {
 		t.Fatalf("CreateTab: %v", err)
+	}
+}
+
+// ── the eighth cause, off the socket ─────────────────────────────────────
+
+// A row whose session this machine's helper could not be asked about carries
+// the cause to the renderer THROUGH THE REAL RESULT (nocx-ie23r.2), and the
+// contract accepts it.
+//
+// The cause is the whole of what the third state says, and its vocabulary is
+// closed so the renderer owns the sentence (frontend/src/unreconciled-notice.tsx).
+// Adding a member to that vocabulary is therefore two things that must move
+// together: the Go value and the schema. This asserts the pair the way the
+// repository requires — a real server, a real store, the real result, read off
+// the socket and validated against the schema — rather than a DTO the test
+// built for itself.
+//
+// THE VERDICT IS APPLIED DIRECTLY, and that is deliberate: the local ASK is
+// asserted in internal/app (which owns the route), and what this test is about
+// is what the WIRE carries once a verdict exists. Reaching a verdict here would
+// mean standing up a helper endpoint to prove something this file's subject
+// does not include.
+func TestLedgerQuery_TheLocalEndpointCauseReachesTheWire(t *testing.T) {
+	const (
+		generation = "0123456789abcdef0123456789abcdef"
+		sessionID  = "session-this-machine-could-not-be-asked-about"
+		paneID     = "0198f2b0-0000-7000-8000-00000000c001"
+		entryID    = "00000000-0000-7000-8000-0000000000aa"
+		wsID       = "0198f2b0-0000-7000-8000-00000000c002"
+		tabID      = "0198f2b0-0000-7000-8000-00000000c003"
+	)
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "content.db")
+
+	// What a PREVIOUS incarnation left: a local binding and the block anchored
+	// to the pane it ran in. Written by a store of its own and then closed,
+	// because the carried-over set is computed at Open and is exact only when
+	// nothing this incarnation wrote exists yet.
+	seed := newLedgerStoreAt(t, path)
+	if _, err := seed.Layout().CreateWorkspace(ctx,
+		content.Workspace{ID: wsID, Name: "local"},
+		content.Tab{ID: tabID, WorkspaceID: wsID, Layout: content.LayoutRow},
+		content.Pane{ID: paneID, TabID: tabID, Cwd: "/repo", Kind: content.PaneLocal, SizeShare: 1},
+	); err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	if err := seed.Ledger().CreateSession(ctx, content.Session{
+		ID: sessionID, WorkspaceID: wsID, Generation: generation, PaneID: paneID,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close the previous incarnation's store: %v", err)
+	}
+
+	db := newLedgerStoreAt(t, path)
+	// The verdict the local inventory reaches when nothing answers its socket.
+	if err := db.Reconcile().Apply(ctx, content.SessionJudgement{
+		SessionID: sessionID, Verdict: content.VerdictUnknown,
+		Cause: content.CauseLocalEndpointUnreachable,
+	}); err != nil {
+		t.Fatalf("Apply(unknown/localEndpointUnreachable): %v", err)
+	}
+	if err := db.Ledger().EnsureEnvironment(ctx, content.Environment{
+		ID: "local", Kind: content.EnvLocal,
+	}); err != nil {
+		t.Fatalf("EnsureEnvironment: %v", err)
+	}
+	if _, err := db.Ledger().Submit(ctx, content.SubmitEntry{
+		ID: entryID, Client: "test-client", EnvironmentID: "local",
+		PaneID: new(paneID), SessionID: new(sessionID),
+		Cwd: "/repo", Kind: content.EntryShell, Source: content.SourceUser,
+		Intent: "make watch", Payload: "{}",
+	}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	ws, stop := newLedgerWSServer(t, log.NewSlogAdapter(nil), db)
+	defer stop()
+	conn := connectWS(t, ws)
+
+	resp := vaultCall(t, conn, "ledger.query", map[string]any{"scope": "everywhere"}, 2)
+	if resp.Error != nil {
+		t.Fatalf("ledger.query: %+v", resp.Error)
+	}
+	// The real result, validated by the contract. additionalProperties:false
+	// plus the explicit required is what makes this exact, and the enum on
+	// unreconciled is what would refuse a value this build invented.
+	validateJSON(t, loadSchema(t, "ledger.query.schema.json"), resp.Result,
+		"ledger.query result carrying the local endpoint cause")
+
+	var page struct {
+		Entries []struct {
+			ID           string  `json:"id"`
+			Unreconciled *string `json:"unreconciled"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(resp.Result, &page); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(page.Entries) != 1 {
+		t.Fatalf("page = %+v, want the one carried-over block", page.Entries)
+	}
+	got := page.Entries[0]
+	if got.ID != entryID {
+		t.Fatalf("entry = %q, want %q", got.ID, entryID)
+	}
+	if got.Unreconciled == nil {
+		t.Fatal("the row does not say nobody could be asked, so the renderer draws it as running — " +
+			"the same lie the forced close told from the other end")
+	}
+	if *got.Unreconciled != string(content.CauseLocalEndpointUnreachable) {
+		t.Fatalf("unreconciled = %q, want %q", *got.Unreconciled, content.CauseLocalEndpointUnreachable)
 	}
 }
 

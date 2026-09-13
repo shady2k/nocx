@@ -225,10 +225,21 @@ func reconcileSessions(
 // The default is `hostUnreachable` rather than anything more specific: an
 // error this build cannot classify is still an error, and an unclassified
 // failure must not fall through to something that reads as an answer.
+//
+// THE LOCAL BRANCH IS FIRST AND IT OUTRANKS THE REST (nocx-ie23r.2). Asking
+// this machine is a different act from asking a host: the failure it can
+// produce is a missing, stale or silent socket in the person's own home, and
+// every generic branch below would describe it as somebody else's problem —
+// `connectionRefused` most of all, since a dial to a socket nothing serves is
+// refused by the kernel. The marker is attached at the one place that dials,
+// so an error that carries it is an error about the local endpoint by
+// construction rather than by inspection.
 func causeFor(err error) content.UnreconciledCause {
 	switch {
 	case err == nil:
 		return content.CauseNotYetAsked
+	case errors.Is(err, errLocalEndpointUnreachable):
+		return content.CauseLocalEndpointUnreachable
 	case errors.Is(err, vault.ErrVaultSealed), errors.Is(err, vault.ErrVaultUninitialized),
 		errors.Is(err, vault.ErrNoUnlockClient), errors.Is(err, vault.ErrUnlockSuspended):
 		return content.CauseVaultSealed

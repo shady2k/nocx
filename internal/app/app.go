@@ -46,6 +46,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
 	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
+	"github.com/shady2k/nocx/internal/helper/endpoint"
 	helperlocal "github.com/shady2k/nocx/internal/helper/local"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
@@ -2157,9 +2158,20 @@ func New(opts ...Option) (*App, error) {
 		_, err := workerRecord.Declared(ctx, id, l, d)
 		return err
 	}
+	// THIS MACHINE IS ONE OF THE GENERATIONS ASKED (nocx-ie23r.2). The
+	// endpoint directory comes off the same home this function already read
+	// for the ssh config, and the GENERATION comes off each binding rather
+	// than from here — a session is judged by the daemon it was spawned by,
+	// and the install that would name the current one has not run yet at this
+	// line anyway (Start does it). So the route is a directory and nothing
+	// else: no binary, because probing must never start a daemon, and no
+	// expected generation, because the binding supplies it.
 	reconcileSessions(ctx, contentDB.Reconcile(),
 		helperReg.inventories(),
-		&readoptPass{registry: helperReg, routes: resolver, adopter: tp},
+		&readoptPass{
+			registry: helperReg, routes: resolver, adopter: tp,
+			local: &localInventoryRoute{dir: endpoint.Dir(home), log: slogger},
+		},
 		content.DefaultUnreconciledRetention, slogger)
 
 	app := &App{

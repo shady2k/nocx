@@ -883,7 +883,15 @@ func New(opts ...Option) (*App, error) {
 	// both the factory's per-session helpers and the uninstall surface's
 	// close-before-remove, so a machine's channels are closed by the same
 	// bookkeeping that started them.
-	helperFactory, helperReg := helperGitFactory(sshClient, helperartifacts.DefaultSource, helperConsent, helperInstalls, slogger)
+	// The ssh transport this coordinator uses for each lease (nocx-50w7p.3).
+	// overHelper opens channels on THIS MACHINE'S HELPER, which is the owner's
+	// invariant made real for one consumer: the install lease no longer dials
+	// from this process. The git lane and the platform probe still do, and
+	// installLeaseRoutes names that split in one place rather than hiding it.
+	overHelper := &sshOverHelper{local: localOpener, resolve: sshClient, log: slogger}
+	helperFactory, helperReg := helperGitFactory(
+		installLeaseRoutes{direct: sshClient, viaLocal: overHelper},
+		helperartifacts.DefaultSource, helperConsent, helperInstalls, slogger)
 	helperReg.registry = sess
 	localOpener.registry = sess
 	// The one seam the transport asks for every destination. hostedOpeners is
@@ -1404,7 +1412,7 @@ func New(opts ...Option) (*App, error) {
 		// capability owns the dial-and-remove (acquire the write-capable
 		// install lease, discover the remote home, run deploy.Uninstall
 		// over SFTP); the raw SSH client never leaves internal/ssh.
-		transport.WithRemoteHelperUninstaller(sshClient),
+		transport.WithRemoteHelperUninstaller(overHelper),
 		// The file-manager reveal (nocx-ngf3u): the OS-specific revealer
 		// behind the interface that already exists (FilesRevealer, one
 		// method). This is the same per-OS problem internal/contentkey

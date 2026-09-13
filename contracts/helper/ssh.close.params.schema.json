@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.close.params.schema.json",
+  "title": "HelperSSHCloseChannelParams",
+  "description": "End one proxied channel and release the pooled reference the helper held for it. An id the helper does not hold is answered as closed rather than refused: the ordinary caller is a process shutting down, and making an idempotent act look like a failure is how a shutdown path starts logging errors nobody can act on.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["channel"],
+  "properties": {
+    "channel": {
+      "description": "The channel to end, as 32 hex characters.",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/channelId"
+    }
+  }
+}

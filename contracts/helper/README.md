@@ -181,3 +181,50 @@ Three decisions in these shapes are worth naming rather than leaving to a reader
 
 The schemas are frozen from here like every sibling's: a new op degrades (an older helper
 answers `unknown_service`), and a new FIELD on one of these shapes does not.
+
+## What landed with `nocx-50w7p.3`, and why `Version` moved to 4
+
+The **proxied-channel plane**, and with it the last thing the owner's invariant
+needed before consumers could move: a connection the helper dials has to be one a
+caller can put a CHANNEL on, or it is a resource nothing uses.
+
+Two forward ops — `open` and `close` — plus a frame type, `TypeChannelData`. The
+frame type is the half that makes the bump unavoidable rather than tidy: the
+decoder treats an unknown type byte as garbage and rescans one byte at a time, so
+a generation speaking 3 would resync **through** a live sftp stream instead of
+dropping one frame.
+
+Four decisions in these shapes are worth naming rather than leaving to a reader:
+
+- **A proxied channel has its own identity and its own layout.** `ChannelID` is
+  16 raw bytes and the frame after them is `[channel-id][payload]` — not the
+  frozen session layout with a different meaning. Reusing `TypeSessionData` would
+  have been the quiet version of wrong: a channel id in the `Session` field
+  decodes perfectly, routes to the session service, and is dropped against an
+  inventory that has never heard of it. A frame that decodes into the wrong
+  router is worse than one that does not decode.
+- **The end of a stream is said, never inferred.** A payload exactly the header's
+  length is a legitimate write of no bytes, so `ssh.channel-closed` is a
+  notification and not a zero-length frame. Ordering is what makes it sufficient:
+  a `TypeNotify` rides the same wire as the data frames, so every byte written
+  before it has already been written.
+- **The helper opens the kind, the caller never names a command.** `kind` is a
+  member of a closed set (`sftp` today) and not an argv: D3 refuses a free-form
+  string list, and a caller that wants another channel adds a member in a
+  generation, with a bump and a test.
+- **The refusal codes an open ends in are `probeOutcome`'s own spellings.**
+  `unreachable`, `rejected`, `needs-interactive`, `host-key-unknown`,
+  `host-key-changed` — one vocabulary for one set of facts, because the
+  coordinator already switches on it. The two host-key codes carry
+  `hostKeyEvidence` in their details, so the coordinator can rebuild its own
+  typed error: nothing carries a Go value across this socket, and an accept sheet
+  without the fingerprint is a sheet nobody can answer.
+
+`channel_refused` is the one code of its own, and it is deliberately ONE code for
+two refusal points — the session and the subsystem request. A caller cannot act
+differently on them (either way this host will not serve that channel) and the
+sentence keeps the distinction.
+
+The schemas are frozen from here like every sibling's: a new op degrades (an older
+helper answers `unknown_op`, which a coordinator reads as "this machine's helper
+is older than this app"), and a new FIELD on one of these shapes does not.

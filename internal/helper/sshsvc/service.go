@@ -52,6 +52,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/shady2k/nocx/internal/helper/host"
@@ -60,16 +61,29 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 )
 
-// Dialer is the one thing this service needs from the daemon's ssh client:
-// dial and authenticate with a caller-supplied configuration.
+// Client is the daemon's ssh client, as this service uses it: dial a
+// throwaway connection for a probe, and acquire a REF-COUNTED POOLED
+// connection for a channel.
+//
+// Two methods rather than one because the two ops genuinely differ — a probe
+// leaves nothing behind by design, a channel holds a pooled reference for its
+// whole life — and one seam rather than two because both are the same
+// question ("this machine's ssh client") asked of the same object. A helper
+// given two seams could be wired with two clients, which is two pools for one
+// host and the state AD-4 exists to prevent.
 //
 // It is an interface rather than the concrete *ssh.RealClient for the reason
 // every seam in this repository is one — a test can then drive the service
 // without a network — but NOT to hide the ssh package: the classification of a
-// probe failure is ssh.ClassifyProbeError's, on purpose, because a second
-// vocabulary for one fact is what AD-8 exists to prevent.
-type Dialer interface {
+// probe failure is ssh.ClassifyProbeError's, and the pool is ssh.RealClient's,
+// on purpose, because a second vocabulary or a second pool for one fact is
+// what AD-8 exists to prevent.
+type Client interface {
 	DialAuth(ctx context.Context, addr, host, user string, cfg *gossh.ClientConfig) (*gossh.Client, error)
+	// AcquirePooled borrows a reference to the pooled connection for a
+	// resolved destination, dialing it if this is the first reference. The
+	// caller owns the reference and must Close it.
+	AcquirePooled(ctx context.Context, spec ssh.PooledSpec) (*ssh.PooledConn, error)
 }
 
 // ProbeTimeout bounds one probe's handshake. It is the same number the
@@ -101,8 +115,16 @@ var (
 // the sessions), which is why it holds no per-connection state: what a request
 // needs from its connection is carried on the request's context, not here.
 type Service struct {
-	dial Dialer
-	log  *slog.Logger
+	client Client
+	log    *slog.Logger
+
+	// mu guards channels: the proxied channels this daemon holds, across every
+	// connection it serves. The service is process-scoped (one per daemon,
+	// beside the sessions) while the ssh connections are per-COORDINATOR, so
+	// the registry is one map and the identity of a channel is its random
+	// 128-bit id rather than anything derived from a connection.
+	mu       sync.Mutex
+	channels map[proto.ChannelID]*openChannel
 }
 
 // Compile-time proof that this satisfies the host's registerable service and
@@ -113,11 +135,11 @@ var (
 )
 
 // New builds the service over the daemon's ssh client.
-func New(dial Dialer, log *slog.Logger) *Service {
+func New(client Client, log *slog.Logger) *Service {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Service{dial: dial, log: log}
+	return &Service{client: client, log: log}
 }
 
 // Name is the service name the coordinator addresses (proto.ServiceSSH).
@@ -128,14 +150,21 @@ func (s *Service) Name() string { return proto.ServiceSSH }
 // host.Register refuses a service that declares an op with no params type, and
 // a helper that claimed to answer `sign` would be claiming to hold key
 // material it does not have.
-func (s *Service) Ops() []string { return []string{proto.OpProbe} }
+func (s *Service) Ops() []string {
+	return append([]string{proto.OpProbe}, s.channelOps()...)
+}
 
 // ParamsSchema declares the shape of each op. D3 is enforced off this table:
 // no field here may be a free-form string list, and none is — a probe takes a
 // host, a port, a user and a credential reference.
 func (s *Service) ParamsSchema(op string) *host.Schema {
-	if op == proto.OpProbe {
+	switch op {
+	case proto.OpProbe:
 		return host.SchemaFor(proto.ProbeParams{})
+	case proto.OpOpen:
+		return host.SchemaFor(proto.OpenChannelParams{})
+	case proto.OpClose:
+		return host.SchemaFor(proto.CloseChannelParams{})
 	}
 	return nil
 }
@@ -158,7 +187,7 @@ func (s *Service) Refusal(err error) (string, json.RawMessage) {
 	switch {
 	case errors.Is(err, errNoAuthChannel):
 		return proto.ErrCodeNoAuthChannel, nil
-	case errors.Is(err, errBadProbeParams):
+	case errors.Is(err, errBadProbeParams), errors.Is(err, errBadChannelParams):
 		return proto.ErrCodeBadParams, nil
 	}
 	return "", nil
@@ -166,16 +195,33 @@ func (s *Service) Refusal(err error) (string, json.RawMessage) {
 
 // Call dispatches one op.
 func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (any, error) {
-	if op != proto.OpProbe {
-		return nil, fmt.Errorf("ssh: no op %q on this service", op)
-	}
-	var p proto.ProbeParams
-	if len(params) > 0 {
-		if err := json.Unmarshal(params, &p); err != nil {
-			return nil, fmt.Errorf("%w: %w", errBadProbeParams, err)
+	switch op {
+	case proto.OpProbe:
+		var p proto.ProbeParams
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, fmt.Errorf("%w: %w", errBadProbeParams, err)
+			}
 		}
+		return s.probe(ctx, p)
+	case proto.OpOpen:
+		var p proto.OpenChannelParams
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, fmt.Errorf("%w: %w", errBadChannelParams, err)
+			}
+		}
+		return s.openChannel(ctx, p)
+	case proto.OpClose:
+		var p proto.CloseChannelParams
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, fmt.Errorf("%w: %w", errBadChannelParams, err)
+			}
+		}
+		return s.closeChannel(p.Channel)
 	}
-	return s.probe(ctx, p)
+	return nil, fmt.Errorf("ssh: no op %q on this service", op)
 }
 
 // probe dials one host, authenticates with the credential the coordinator
@@ -205,11 +251,11 @@ func (s *Service) probe(ctx context.Context, p proto.ProbeParams) (proto.ProbeRe
 		// second attempt against one host is indistinguishable from password
 		// spraying, and MaxAuthTries is finite.
 		Auth:            []gossh.AuthMethod{auth},
-		HostKeyCallback: s.hostKeyCallback(ctx, conn, p),
+		HostKeyCallback: s.hostKeyCallback(ctx, conn, p.AcceptOnTrust),
 		Timeout:         ProbeTimeout,
 	}
 
-	client, err := s.dial.DialAuth(ctx, addr, p.Host, p.User, gcfg)
+	client, err := s.client.DialAuth(ctx, addr, p.Host, p.User, gcfg)
 	if err != nil {
 		// A refusal the COORDINATOR answered is separated FIRST, and that order
 		// is the whole point of this branch rather than a detail of it.
@@ -368,9 +414,9 @@ func (s *reverseSigner) Sign(_ io.Reader, data []byte) (*gossh.Signature, error)
 // whole reason the classification still works one process away: ssh's own
 // ClassifyProbeError reads those two types, so the outcome a coordinator sees
 // from a helper's probe is the outcome it saw when it dialed itself.
-func (s *Service) hostKeyCallback(ctx context.Context, conn *host.Host, p proto.ProbeParams) gossh.HostKeyCallback {
+func (s *Service) hostKeyCallback(ctx context.Context, conn *host.Host, acceptOnTrust bool) gossh.HostKeyCallback {
 	return func(addr string, _ net.Addr, key gossh.PublicKey) error {
-		return s.verifyHostKey(ctx, conn, p, addr, key)
+		return s.verifyHostKey(ctx, conn, acceptOnTrust, addr, key)
 	}
 }
 
@@ -383,7 +429,7 @@ func (s *Service) hostKeyCallback(ctx context.Context, conn *host.Host, p proto.
 // AND the caller that started this probe said it may be accepted; a `changed`
 // verdict never reaches it, whatever the caller asked for, because a changed
 // key is the one signature of a machine in the middle.
-func (s *Service) verifyHostKey(ctx context.Context, conn *host.Host, p proto.ProbeParams, addr string, key gossh.PublicKey) error {
+func (s *Service) verifyHostKey(ctx context.Context, conn *host.Host, acceptOnTrust bool, addr string, key gossh.PublicKey) error {
 	blob := key.Marshal()
 	var out proto.VerifyHostKeyResult
 	err := conn.Ask(ctx, proto.ServiceSSH, proto.OpVerifyHostKey, proto.VerifyHostKeyParams{
@@ -404,7 +450,7 @@ func (s *Service) verifyHostKey(ctx context.Context, conn *host.Host, p proto.Pr
 			Fingerprint: out.Fingerprint, Expected: out.Expected, Key: blob,
 		}
 	case proto.HostKeyUnknown:
-		if !p.AcceptOnTrust {
+		if !acceptOnTrust {
 			return &ssh.ErrUnknownHostKey{
 				Addr: addr, KnownHostsAddr: addr, KeyAlgo: key.Type(),
 				Fingerprint: out.Fingerprint, Key: blob,

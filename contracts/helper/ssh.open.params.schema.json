@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.open.params.schema.json",
+  "title": "HelperSSHOpenChannelParams",
+  "description": "One PROXIED CHANNEL to open on a pooled connection: the destination resolved by the coordinator, the kind of channel, and the caller's answer to whether a host key it has never seen may be recorded. It is a separate op from `probe` because the two differ in what they leave behind — a probe holds nothing, a channel is held until its caller closes it — and no flag can make one op mean both. Host, port and user are RESOLVED values, exactly as in probe.params: alias resolution, ~/.ssh/config merging and the credential's authorization against an endpoint stay in the coordinator.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["destination", "kind", "acceptOnTrust"],
+  "properties": {
+    "destination": {
+      "description": "What to connect to and what to authenticate as.",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/destination"
+    },
+    "kind": {
+      "description": "Which channel to open. A KIND and not a command: the helper refuses a free-form argv (host.Register refuses a bare []string), so a caller that wants a new channel adds a member to this closed set in a generation, with a protocol bump.",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/channelKind"
+    },
+    "acceptOnTrust": {
+      "description": "The coordinator's answer to 'may a host key this host has never presented be recorded', carried here for the same reason probe carries it: the helper may not decide that for itself, and the decision travels with the call that started the handshake. A `changed` verdict never reaches the write whatever this says.",
+      "type": "boolean"
+    }
+  }
+}

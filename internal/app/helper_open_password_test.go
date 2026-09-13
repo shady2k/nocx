@@ -356,9 +356,27 @@ func openPasswordStack(t *testing.T, srv *pwSSHServer) (*session.Reg, *helperReg
 
 	consentStore := consent.NewStore(logger, storage.NewDocumentStore(t.TempDir()), "consent.json")
 	installStore := consent.NewInstallStore(logger, storage.NewDocumentStore(t.TempDir()), "installs.json")
-	_, helperReg := helperGitFactory(client, refusingArtifactSource{}, consentStore, installStore, discardLogger())
+	// The install lease is this machine's helper's now (nocx-50w7p.3) and this
+	// stack has no local daemon, so the route is built with the direct client
+	// for BOTH halves. Nothing in this test's path acquires the install lease
+	// — it drives the AUTH ladder of a pane open — so the substitution is
+	// unreachable code with a name rather than a weakened assertion.
+	lanes := installLeaseRoutes{direct: client, viaLocal: noLocalHelperLease{t: t}}
+	_, helperReg := helperGitFactory(lanes, refusingArtifactSource{}, consentStore, installStore, discardLogger())
 	helperReg.registry = reg
 	return reg, helperReg
+}
+
+// noLocalHelperLease is the local half of the install route for a stack that
+// has no local daemon. It FAILS the test if it is ever reached, which is the
+// honest shape: a stand-in that answered would hide the day the pane-open path
+// starts needing an install lease, and this test's subject is the auth ladder,
+// not the install.
+type noLocalHelperLease struct{ t *testing.T }
+
+func (n noLocalHelperLease) HelperInstallConn(context.Context, string, ...ssh.ConnectOption) (ssh.HelperInstallConn, error) {
+	n.t.Error("this stack has no local helper, so no install lease can be acquired")
+	return nil, errors.New("no local helper in this stack")
 }
 
 func openPasswordConfig(srv *pwSSHServer, remote *ssh.ConnectConfig) session.Config {

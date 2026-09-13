@@ -54,9 +54,13 @@ type helperLaneProvider interface {
 // needs to bring a helper up on a host: the exec lane the helper rides
 // (D19), the write-capable install lease the deploy package installs
 // through (D7), and the bounded one-shot exec the platform probe uses
-// (D20). *ssh.RealClient satisfies all three; the interface exists so the
-// factory is testable against doubles without a live connection. The
-// registry itself keeps the narrow helperLaneProvider — install is a
+// (D20). The interface exists so the factory is testable against doubles
+// without a live connection, and since nocx-50w7p.3 no SINGLE type satisfies
+// all three in production: the composition root wires installLeaseRoutes,
+// whose install lease is this machine's helper's and whose other two are
+// still this process's own dials.
+//
+// The registry itself keeps the narrow helperLaneProvider — install is a
 // selection-time concern, not a per-session one.
 type helperInstallProvider interface {
 	helperLaneProvider

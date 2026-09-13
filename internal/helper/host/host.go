@@ -255,6 +255,8 @@ func (h *Host) frame(ctx context.Context, ty proto.FrameType, payload []byte) {
 		h.sessionData(ctx, payload)
 	case proto.TypeLifecycleData:
 		h.lifecycleData(ctx, payload)
+	case proto.TypeChannelData:
+		h.channelData(ctx, payload)
 	default:
 		h.log.Warn("unexpected frame", "type", ty)
 	}
@@ -327,6 +329,41 @@ func (h *Host) SendSessionData(f proto.SessionFrame) error {
 // remains the sole semantic owner.
 func (h *Host) SendLifecycleData(f proto.SessionFrame) error {
 	return h.write(proto.TypeLifecycleData, proto.EncodeSessionFrame(f))
+}
+
+// channelData handles an inbound proxied-channel frame: it is routed to the
+// ssh service — the one service that can hold such a channel — and DROPPED
+// when this generation has none.
+//
+// The drop path is the same one the session plane has, and for the same
+// reason: a generation built without the ssh service (every deployed artifact,
+// by build tag) can still be sent these frames by a coordinator, and an
+// unknown type byte is garbage the decoder resyncs through — one byte at a
+// time, through whatever follows, which for a proxied channel is a live sftp
+// stream. Recognising the frame turns that into one dropped write.
+func (h *Host) channelData(ctx context.Context, payload []byte) {
+	f, err := proto.DecodeChannelFrame(payload)
+	if err != nil {
+		h.log.Warn("malformed channel data frame", "err", err, "bytes", len(payload))
+		return
+	}
+	if svc := h.serviceByName(proto.ServiceSSH); svc != nil {
+		if plane, ok := svc.(ChannelDataPlane); ok {
+			plane.ChannelData(WithConnection(ctx, h), f)
+			return
+		}
+	}
+	h.log.Warn("channel data frame dropped: no ssh service in this generation",
+		"channel", f.Channel.String(), "bytes", len(f.Payload))
+}
+
+// SendChannelData writes one proxied-channel frame to the wire: the helper's
+// own read of a channel, on its way to the coordinator that opened it. It is
+// the outbound half of ChannelDataPlane and lives on the host for the reason
+// SendSessionData does — the wire and its writer mutex are the host's, and a
+// second writer would interleave mid-frame.
+func (h *Host) SendChannelData(f proto.ChannelFrame) error {
+	return h.write(proto.TypeChannelData, proto.EncodeChannelFrame(f))
 }
 
 // SendNotification writes one unsolicited fact: a live reset, an exit. It
@@ -422,6 +459,13 @@ func (h *Host) request(ctx context.Context, req proto.Request) {
 	resp.Result = raw
 	end(nil)
 	h.respond(resp)
+	// AFTER the write, and that is the whole of this hook's contract
+	// (ResponseObserver): a service whose handler deferred a pump gets to
+	// start it knowing the caller's answer is already on the wire, so the
+	// caller has a chance to register what the pump will write about.
+	if observer, ok := svc.(ResponseObserver); ok {
+		observer.ResponseWritten(reqCtx, req.Op, result)
+	}
 }
 
 // connKey carries the connection a request arrived on into the request's

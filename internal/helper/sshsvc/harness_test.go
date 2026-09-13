@@ -34,6 +34,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pkg/sftp"
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
@@ -118,9 +119,14 @@ type fixture struct {
 	// is produced without asking the helper to lie about anything.
 	userSigner gossh.Signer
 
-	mu        sync.Mutex
-	passwords []string
-	keys      []string
+	// rootDir is what an sftp subsystem serves: a real directory this test
+	// seeds and reads back.
+	rootDir string
+
+	mu         sync.Mutex
+	passwords  []string
+	keys       []string
+	subsystems []string
 }
 
 func newFixture(t *testing.T, password string, acceptedKey gossh.Signer) *fixture {
@@ -128,6 +134,7 @@ func newFixture(t *testing.T, password string, acceptedKey gossh.Signer) *fixtur
 	f := &fixture{
 		hostSigner: newSigner(t),
 		userSigner: acceptedKey,
+		rootDir:    t.TempDir(),
 	}
 	config := &gossh.ServerConfig{
 		PasswordCallback: func(_ gossh.ConnMetadata, pw []byte) (*gossh.Permissions, error) {
@@ -172,7 +179,7 @@ func newFixture(t *testing.T, password string, acceptedKey gossh.Signer) *fixtur
 
 // serve runs one connection to the end. A probe never opens a channel — it
 // authenticates and closes — so the session loop exists to keep a client that
-// asks for one from hanging, and it accepts and drops.
+// asks for one from hanging; a CHANNEL request, since nocx-50w7p.3, is served.
 func (f *fixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 	defer func() { _ = conn.Close() }()
 	sconn, chans, reqs, err := gossh.NewServerConn(conn, config)
@@ -186,9 +193,61 @@ func (f *fixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 		if aerr != nil {
 			continue
 		}
-		go gossh.DiscardRequests(chReqs)
-		_ = ch.Close()
+		go f.serveChannel(ch, chReqs)
 	}
+}
+
+// serveChannel answers a session channel's requests. The `sftp` subsystem is
+// served by pkg/sftp's own SERVER over the channel, which is what makes a
+// channel test here a real sftp session and not an echo: the coordinator side
+// of the test speaks the real protocol to a real server through the helper's
+// proxied bytes.
+//
+// Anything else is refused rather than dropped, so a test that asks for the
+// wrong subsystem fails where it asked instead of hanging.
+func (f *fixture) serveChannel(ch gossh.Channel, reqs <-chan *gossh.Request) {
+	for req := range reqs {
+		if req.Type != "subsystem" {
+			if req.WantReply {
+				_ = req.Reply(false, nil)
+			}
+			continue
+		}
+		var payload struct {
+			Name string
+		}
+		if err := gossh.Unmarshal(req.Payload, &payload); err != nil || payload.Name != "sftp" {
+			if req.WantReply {
+				_ = req.Reply(false, nil)
+			}
+			continue
+		}
+		if req.WantReply {
+			_ = req.Reply(true, nil)
+		}
+		f.mu.Lock()
+		f.subsystems = append(f.subsystems, payload.Name)
+		f.mu.Unlock()
+		server, err := sftp.NewServer(ch, sftp.WithServerWorkingDirectory(f.rootDir))
+		if err != nil {
+			_ = ch.Close()
+			return
+		}
+		_ = server.Serve()
+		_ = server.Close()
+		_ = ch.Close()
+		return
+	}
+	_ = ch.Close()
+}
+
+// subsystemsSeen reports the subsystem names this fixture was asked for, in
+// order: the assertion that the helper opened the channel the caller asked for
+// and not a shell.
+func (f *fixture) subsystemsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.subsystems...)
 }
 
 func (f *fixture) hostPort(t *testing.T) (string, int) {

@@ -26,6 +26,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pkg/sftp"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
@@ -320,4 +321,145 @@ func decodeResponse(t *testing.T, payload []byte) proto.Response {
 		t.Fatalf("decode response from the wire: %v", err)
 	}
 	return resp
+}
+
+// TestTheChannelOpsConformToTheirContractsOverTheWire is the same check for the
+// ops nocx-50w7p.3 added, driven the same way: a real open and a real close over
+// the real framing, with every params and every result validated as it was
+// actually sent rather than as a test built it.
+//
+// It is a test of its own and not another arm of the probe test because the two
+// ops are the other half of this service's forward direction: `probe` is
+// answered and forgotten, and `open` leaves a channel behind that `close` is
+// what ends — so the flow has to be open, close, in that order, or the result
+// under test is the answer to a question nobody asked.
+func TestTheChannelOpsConformToTheirContractsOverTheWire(t *testing.T) {
+	key := newTestKey(t)
+	f := newFixture(t, "pw", key.signer)
+	coord := &coordinator{
+		password: "pw", signer: key.signer,
+		verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+	}
+	stand := newStand(t, coord)
+	t.Cleanup(stand.stop)
+
+	stream, err := stand.openChannel(t, sftpParams(t, f))
+	if err != nil {
+		t.Fatalf("open an sftp channel: %v", err)
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatalf("close the channel: %v", err)
+	}
+
+	params := map[string]*jsonschema.Schema{
+		proto.OpOpen:  loadHelperSchema(t, "ssh.open.params.schema.json"),
+		proto.OpClose: loadHelperSchema(t, "ssh.close.params.schema.json"),
+	}
+	results := map[string]*jsonschema.Schema{
+		proto.OpOpen:  loadHelperSchema(t, "ssh.open.schema.json"),
+		proto.OpClose: loadHelperSchema(t, "ssh.close.schema.json"),
+	}
+
+	// ── what the COORDINATOR sent ──────────────────────────────────────
+	opByID := map[uint64]string{}
+	sent := map[string]bool{}
+	for _, payload := range framesOf(t, stand.toCoord.bytes(), proto.TypeRequest) {
+		req := decodeRequest(t, payload)
+		if req.Service != proto.ServiceSSH {
+			t.Fatalf("the coordinator sent %s.%s, want the ssh service", req.Service, req.Op)
+		}
+		schema, ok := params[req.Op]
+		if !ok {
+			t.Fatalf("the coordinator sent %s.%s, which is not one of this generation's channel ops", req.Service, req.Op)
+		}
+		if err := validateHelperJSON(schema, req.Params); err != nil {
+			t.Errorf("%s params off the wire do not satisfy their contract:\n%v\n\npayload was:\n%s", req.Op, err, req.Params)
+		}
+		opByID[req.ID] = req.Op
+		sent[req.Op] = true
+	}
+	for op := range params {
+		if !sent[op] {
+			t.Errorf("no %s request was recorded, so its contract was never checked on the wire", op)
+		}
+	}
+
+	// ── what the HELPER answered ───────────────────────────────────────
+	answered := map[string]bool{}
+	for _, payload := range framesOf(t, stand.toHelper.bytes(), proto.TypeResponse) {
+		resp := decodeResponse(t, payload)
+		op, ok := opByID[resp.ID]
+		if !ok {
+			t.Fatalf("the helper answered request %d, which the coordinator never sent", resp.ID)
+		}
+		if resp.Error != nil {
+			t.Fatalf("%s was refused: %s", op, resp.Error.Message)
+		}
+		if err := validateHelperJSON(results[op], resp.Result); err != nil {
+			t.Errorf("%s result off the wire does not satisfy its contract:\n%v\n\npayload was:\n%s", op, err, resp.Result)
+		}
+		answered[op] = true
+	}
+	for op := range results {
+		if !answered[op] {
+			t.Errorf("no %s result was recorded, so its contract was never checked on the wire", op)
+		}
+	}
+}
+
+// TestTheChannelDataPlaneIsOnItsOwnFrameType is the wire-level half of the
+// identity decision: the bytes of a proxied channel must NOT arrive as session
+// data, because the session service would decode them cleanly and then drop
+// them against an inventory that has never heard of that id — a frame that
+// decodes into the wrong router being worse than one that does not decode.
+func TestTheChannelDataPlaneIsOnItsOwnFrameType(t *testing.T) {
+	key := newTestKey(t)
+	f := newFixture(t, "pw", key.signer)
+	coord := &coordinator{
+		password: "pw", signer: key.signer,
+		verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+	}
+	stand := newStand(t, coord)
+	t.Cleanup(stand.stop)
+
+	stream, err := stand.openChannel(t, sftpParams(t, f))
+	if err != nil {
+		t.Fatalf("open an sftp channel: %v", err)
+	}
+	defer func() { _ = stream.Close() }()
+
+	// A REAL sftp client writes the INIT, so the bytes on the wire are a valid
+	// protocol's rather than a string this test invented: a fixture is free to
+	// close a channel whose bytes it cannot parse, and a race between that
+	// close and the assertion would make this test flaky about something it is
+	// not asking.
+	cl, err := sftp.NewClientPipe(stream, stream)
+	if err != nil {
+		t.Fatalf("sftp over the proxied stream: %v", err)
+	}
+	defer func() { _ = cl.Close() }()
+
+	var sawChannel, sawSession bool
+	dec := proto.NewDecoder(func(ty proto.FrameType, _, _ uint32, payload []byte) {
+		switch ty {
+		case proto.TypeChannelData:
+			sawChannel = true
+			if _, err := proto.DecodeChannelFrame(payload); err != nil {
+				t.Errorf("a channel frame does not decode as one: %v", err)
+			}
+		case proto.TypeSessionData:
+			sawSession = true
+		}
+	}, func(int) {})
+	// toCoord records what THIS side (the coordinator) wrote — the direction a
+	// keystroke takes — which is where the write above has to appear.
+	if err := dec.Feed(stand.toCoord.bytes()); err != nil {
+		t.Fatalf("decode the recorded wire: %v", err)
+	}
+	if !sawChannel {
+		t.Fatal("no TypeChannelData frame was recorded: the channel's bytes went somewhere else")
+	}
+	if sawSession {
+		t.Fatal("the channel's bytes arrived as TypeSessionData, which is the session service's identity and not a channel's")
+	}
 }

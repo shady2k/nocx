@@ -214,6 +214,25 @@ const maxDimension = 1<<16 - 1
 // only what cannot cross.
 const maxPixel = 1<<32 - 1
 
+// Cursor is the caret: where the program left it on the active screen, and
+// whether the program has left it visible at all.
+//
+// Position alone is not the caret a renderer draws. DECTCEM (mode 25) lets a
+// program hide the cursor while it composes a frame, and a terminal that
+// painted a visible one there would show the person a caret the program
+// deliberately withdrew, over the repaint it was in the middle of. The two
+// facts are one read for that reason: a position from one moment and a
+// visibility from another describe a caret that never existed.
+//
+// The position is counted from the top-left of the ACTIVE AREA — the same grid
+// [Terminal.Row] and [Terminal.Cell] read, not the scrollback and not a
+// viewport somebody has scrolled — and it is zero-indexed, so the home
+// position is (0, 0).
+type Cursor struct {
+	X, Y    int
+	Visible bool
+}
+
 // Terminal is the port: one terminal instance, and everything a session runtime
 // does to it and reads from it.
 //
@@ -279,6 +298,20 @@ type Terminal interface {
 	// emulator could not report is one nobody read, and reporting it as primary
 	// would be a claim about the screen a client is being sent.
 	Screen() (Screen, error)
+
+	// Cursor reports where the program left the caret, on whichever buffer
+	// [Terminal.Screen] names.
+	//
+	// It is the half of a frame that cells cannot supply: the rows say what is
+	// drawn and this says where the program will go on drawing, and whether it
+	// is showing a caret at all. A position without the visibility is a caret
+	// a program had hidden, which is a thing the person would see and the
+	// program did not ask for.
+	//
+	// A closed terminal has no cursor, so this reports [ErrClosed] rather than
+	// the last position it held — exactly as Geometry does, and for the same
+	// reason: a position nobody can act on is not an answer.
+	Cursor() (Cursor, error)
 
 	// EncodeKey encodes one key event into the bytes to write to the PTY,
 	// DRIVEN FROM THE TERMINAL'S OWN STATE. A program that turned on

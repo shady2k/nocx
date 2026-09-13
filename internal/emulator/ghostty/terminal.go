@@ -331,6 +331,43 @@ func (t *terminal) Screen() (emulator.Screen, error) {
 	}
 }
 
+// Cursor reads the caret out of the terminal: its column, its row within the
+// active area, and whether the program is showing it.
+//
+// Three reads and not one because the library reports three fields, and they
+// are taken under this adapter's own lock — the same lock every mutating call
+// holds — so the three describe one moment. A caller reading the position and
+// the visibility from two separate calls could otherwise be handed a caret
+// that never existed, which is the same defect the port's Cursor type exists to
+// prevent between a position and a visibility.
+//
+// No bridge shim is needed for any of them: all three are plain scalars, which
+// cgo can address directly, exactly as Screen's active buffer is read. The
+// shims in bridge.c are for the calls a cgo call cannot express — a callback, a
+// struct with a field to initialise, a union to flatten.
+func (t *terminal) Cursor() (emulator.Cursor, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.t == nil {
+		return emulator.Cursor{}, emulator.ErrClosed
+	}
+	var x, y C.uint16_t
+	if r := C.ghostty_terminal_get(t.t, C.GHOSTTY_TERMINAL_DATA_CURSOR_X,
+		unsafe.Pointer(&x)); r != C.GHOSTTY_SUCCESS {
+		return emulator.Cursor{}, resultError("cursor_x", r)
+	}
+	if r := C.ghostty_terminal_get(t.t, C.GHOSTTY_TERMINAL_DATA_CURSOR_Y,
+		unsafe.Pointer(&y)); r != C.GHOSTTY_SUCCESS {
+		return emulator.Cursor{}, resultError("cursor_y", r)
+	}
+	var visible C.bool
+	if r := C.ghostty_terminal_get(t.t, C.GHOSTTY_TERMINAL_DATA_CURSOR_VISIBLE,
+		unsafe.Pointer(&visible)); r != C.GHOSTTY_SUCCESS {
+		return emulator.Cursor{}, resultError("cursor_visible", r)
+	}
+	return emulator.Cursor{X: int(x), Y: int(y), Visible: bool(visible)}, nil
+}
+
 func (t *terminal) Row(y int) (emulator.Row, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

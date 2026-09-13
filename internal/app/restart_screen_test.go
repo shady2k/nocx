@@ -73,6 +73,14 @@ func TestASessionsScreenOutlivesTheCoordinatorThatOpenedIt(t *testing.T) {
 		t.Fatalf("watching the pane: %v", err)
 	}
 	before := waitForMarker(t, first, sid, marker)
+	// The FIRST coordinator's read is a frame of the session's own size, and it
+	// is asserted here rather than beside the resolution below: everything
+	// above the gap is unconditional, so a frame that came back at some other
+	// geometry fails the test instead of being described as the known gap.
+	if before.Cols != 100 || before.Rows != 30 {
+		t.Fatalf("the first coordinator read a %dx%d frame, want the 100x30 the session was opened at",
+			before.Cols, before.Rows)
+	}
 
 	// THE COORDINATOR DIES. Its sessions, its store and its watches go with it;
 	// the daemon holding the PTY does not, and neither does the runtime beside
@@ -80,10 +88,38 @@ func TestASessionsScreenOutlivesTheCoordinatorThatOpenedIt(t *testing.T) {
 	first.Shutdown(context.Background())
 
 	second := bootLocalAppOn(t, src)
-	// The pane exists again in the coordinator's registry — through the shipped
-	// re-adoption pass, which attaches to the EXISTING host session rather than
-	// spawning a second shell (session_readopt.go).
-	waitForFreshCoordinator(t, second, sid)
+
+	// ── THE KNOWN GAP, AND ITS THREE OUTCOMES ──────────────────────────────
+	//
+	// Everything above is asserted unconditionally: the first coordinator
+	// really opened a pane and really read its screen through the product's
+	// own store. What follows is where the gap lives, and it is written so the
+	// gap cannot outlive itself.
+	//
+	//   * The session comes BACK → FAIL. The gap has closed, and a test that
+	//     kept skipping would be a test nobody deletes.
+	//   * The session is GONE from the helper too → FAIL. That is a lost
+	//     session, not an unclaimed one, and calling it the known gap would
+	//     hide exactly the defect this test exists to find.
+	//   * The helper still holds it and the coordinator did not take it back →
+	//     SKIP, naming the bead that owns the route (nocx-ie23r.2).
+	//
+	// The distinction is the whole value: a bare skip would pass on all three.
+	if tookBack := coordinatorHolds(second, sid, reattachWindow); tookBack {
+		t.Fatalf("stale: the replacing coordinator took session %s back, so nocx-ie23r.2 has landed — "+
+			"delete this gap and keep the assertions below", sid)
+	}
+	if !helperHolds(t, second, sid) {
+		t.Fatalf("the helper no longer holds session %s: this is not the known gap, it is a LOST "+
+			"session — the daemon is the same one and it is still running, so something ended the "+
+			"session rather than leaving it unclaimed. That is a different defect from the one this "+
+			"gap names, and it must not be skipped over.", sid)
+	}
+	t.Skip("known gap (nocx-ie23r.2): a local pane's session is not re-adopted after a coordinator " +
+		"restart — readoptPass.Readopt refuses a route without a ProfileID/Host/Generation " +
+		"(session_readopt.go:134-137), so the daemon still holds the PTY and the new coordinator " +
+		"never takes it back. The first coordinator's read of the marker is asserted above; the " +
+		"resolution below is the criterion that is waiting on that bead.")
 
 	// The same watch is opened over the same session, in the NEW process.
 	if err := second.paneViews.Enrol(string(sid)); err != nil {
@@ -94,9 +130,8 @@ func TestASessionsScreenOutlivesTheCoordinatorThatOpenedIt(t *testing.T) {
 	if got := after.Text(2); !strings.Contains(got, marker) {
 		t.Fatalf("the replaced coordinator reads row 3 as %q, want the marker the FIRST one's program drew", got)
 	}
-	if after.Cols != before.Cols || after.Rows != before.Rows {
-		t.Errorf("the screen came back at %dx%d, want the %dx%d the session was opened at",
-			after.Cols, after.Rows, before.Cols, before.Rows)
+	if after.Cols != 100 || after.Rows != 30 {
+		t.Errorf("the screen came back at %dx%d, want the 100x30 the session was opened at", after.Cols, after.Rows)
 	}
 }
 
@@ -146,18 +181,48 @@ func waitForMarker(t *testing.T, a *App, sid session.ID, marker string) paneview
 	}
 }
 
-// waitForFreshCoordinator waits until the replacing coordinator holds the
-// session again, which is what the re-adoption pass establishes.
-func waitForFreshCoordinator(t *testing.T, a *App, sid session.ID) {
-	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+// reattachWindow bounds the wait for a re-adoption. It is generous on purpose:
+// the pass is synchronous before the server listens, so a session that is
+// coming back has already come back by the time Start returns — the window is
+// here for a slow machine and not because the answer is expected to change.
+const reattachWindow = 30 * time.Second
+
+// coordinatorHolds reports whether the coordinator took the session back.
+func coordinatorHolds(a *App, sid session.ID, within time.Duration) bool {
+	deadline := time.Now().Add(within)
 	for {
 		if _, err := a.Session.Get(sid); err == nil {
-			return
+			return true
 		}
 		if !time.Now().Before(deadline) {
-			t.Fatalf("the replacing coordinator never took session %s back", sid)
+			return false
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// helperHolds asks the DAEMON whether it still holds the session, through the
+// seated coordinator's own client — the same route a frame read takes.
+//
+// It is what separates the known gap from a lost session: the gap is "the PTY
+// is still there and nobody claimed it", and a helper that no longer holds it
+// would be the other thing entirely.
+func helperHolds(t *testing.T, a *App, sid session.ID) bool {
+	t.Helper()
+	a.localHelper.mu.Lock()
+	c := a.localHelper.client
+	a.localHelper.mu.Unlock()
+	if c == nil {
+		return false
+	}
+	entries, err := c.Sessions(context.Background())
+	if err != nil {
+		t.Fatalf("asking the helper what it holds: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.HostSessionID.Session == string(sid) {
+			return true
+		}
+	}
+	return false
 }

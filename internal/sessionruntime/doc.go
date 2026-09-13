@@ -30,10 +30,15 @@
 //     instead of being wrapped in a second declaration that would drop the
 //     replies a program's in-band size report consists of.
 //
-// What is deliberately NOT here: placing the runtime beside the helper's PTY,
-// and switching the renderer's own reply path off. Those are the next step and
-// depend on this constructor — so this package has no production caller yet and
-// says so rather than inventing one.
+// PLACED, AND IN PRODUCTION, SINCE nocx-ygxjv.12 — this paragraph used to say
+// the opposite and was left standing two rounds too long. The runtime is built
+// beside the helper's PTY by internal/helper/session (newSessionRuntime, called
+// from spawn before the first byte of output is read) and destroyed when the
+// session ends, and a coordinator reads its screen across the helper wire
+// (proto.OpScreen, nocx-ygxjv.3). What is STILL not here is the renderer's own
+// reply path: a mounted pane answering the program's questions from the
+// browser is a client-epic change (design §6.5), and until it lands the two
+// answerers ADR-0066 names both exist.
 //
 // The MODEL — a reference implementation of [Runtime] over the test's own
 // terminal, emulator and consumers, with no I/O behind any of them — and the

@@ -13,10 +13,11 @@ import (
 )
 
 // paneEnroller answers the agent_enrol / agent_withdraw pair by opening and
-// closing a pane's backend grid (protocol doc §15, and the AD-6 amendment's
+// opening and closing the observation of a pane (protocol doc §15, and the
+// AD-6 amendment's
 // INTERVAL constraint). It is the composition root's, because it is the only
 // place that holds both halves of the answer: the lane→session map the child
-// grant builder already uses, and the grid store the transport feeds.
+// grant builder already uses, and the store every frame read goes through.
 //
 // It decides nothing about what is on the screen and could not: what it hands
 // out is a grid, and what a grid answers is a Frame. The two decisions the
@@ -25,7 +26,7 @@ import (
 type paneEnroller struct {
 	log      log.Logger
 	sessions *sessionRegistry
-	screens  *paneview.Store
+	screens  paneWatchStore
 	// watch is the OBSERVATION's end of the same act. It opens and closes
 	// with the grid and never before or after it: a pane nocx reports a
 	// state for but declined to watch would be a claim with no evidence
@@ -39,6 +40,20 @@ type paneEnroller struct {
 	// most enrolments are a person running an agent in their own tab and
 	// belong to no workers.
 	onEnrol func(sessionID, lane string)
+}
+
+// paneWatchStore is the enroller's narrow view of the pane store (AD-8): it
+// opens an interval and closes one, and may do nothing else with it.
+//
+// It is an interface and not the store itself because opening an interval is
+// the ONE thing this file does with a pane's screen. The store is the
+// composition root's object — it is also what the observation sweeps, what the
+// typing gate reads and what the authorizer asks about — and an enroller that
+// held it could reach every one of those, which is how one behaviour acquires
+// a second owner.
+type paneWatchStore interface {
+	Enrol(paneID string) error
+	Withdraw(paneID string)
 }
 
 // paneWatcher is the enroller's narrow view of the observation (AD-8): open
@@ -59,7 +74,7 @@ type agentApproval interface {
 func newPaneEnroller(
 	lg log.Logger,
 	sessions *sessionRegistry,
-	screens *paneview.Store,
+	screens paneWatchStore,
 	watch paneWatcher,
 	approval agentApproval,
 ) (*paneEnroller, error) {

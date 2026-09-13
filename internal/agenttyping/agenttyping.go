@@ -127,6 +127,7 @@ import (
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/paneview"
+	"github.com/shady2k/nocx/internal/sessionruntime"
 )
 
 // MaxText bounds one submission, in bytes. A wake carries a sentence and a
@@ -375,10 +376,13 @@ func (t *Typist) authority(ctx context.Context, paneID string) (string, *Result)
 func (t *Typist) look(paneID, agent string) (agentdriver.State, *Result) {
 	f, err := t.screens.Frame(paneID)
 	if err != nil {
-		// The ordinary race: the session ended and the grid was withdrawn. A
-		// pane with no screen is not a pane with an idle screen.
+		// The ordinary race: the session ended and the watch closed. A pane
+		// with no screen is not a pane with an idle screen.
 		return agentdriver.StateUnknown, t.refuse(paneID, agent, agentdriver.StateUnknown,
 			"nocx has no live screen for that pane, so it cannot see what typing would answer")
+	}
+	if refusal := t.vouched(paneID, agent, f); refusal != nil {
+		return agentdriver.StateUnknown, refusal
 	}
 	state := t.rules.Classify(agent, f)
 	if state != agentdriver.StateFreeText {
@@ -386,6 +390,49 @@ func (t *Typist) look(paneID, agent string) (agentdriver.State, *Result) {
 			fmt.Sprintf("that pane is %s, and nocx types only into a pane that is waiting for input", said(state)))
 	}
 	return state, nil
+}
+
+// vouched is the completeness gate: the reading a write is decided on must be
+// one the runtime can vouch for.
+//
+// It sits beside every read a WRITE is decided from, and not on the reads an
+// OBSERVATION is, because the two answer different questions. An indicator
+// drawn from a screen with a hole is a hint that may be wrong; a keystroke sent
+// on such a screen is an answer to a question nobody can prove is on it — and
+// the hole is precisely the case where the cells no longer describe the
+// program's state (design §6.7: "while it is unknown the write gate refuses and
+// the attach says so").
+//
+// A replay is Complete by construction and a byte-zero session runtime says so
+// too, so this refuses nothing an ordinary pane can produce.
+func (t *Typist) vouched(paneID, agent string, f paneview.Frame) *Result {
+	if f.Completeness == sessionruntime.CompletenessComplete {
+		return nil
+	}
+	return t.refuse(paneID, agent, agentdriver.StateUnknown, fmt.Sprintf(
+		"nocx cannot vouch for what this pane's screen holds (%s), so nothing was written",
+		saidCompleteness(f.Completeness)))
+}
+
+// saidCompleteness names what a runtime claims, in words a person reading a
+// refusal can act on. Every value is named rather than only the ones this
+// build expects: a claim that arrived from a newer helper must not be described
+// as the thing it is not.
+func saidCompleteness(c sessionruntime.Completeness) string {
+	switch c {
+	case sessionruntime.CompletenessUnknown:
+		return "the runtime cannot say whether it saw the whole stream"
+	case sessionruntime.CompletenessLostIngest:
+		return "output was lost before the screen was built"
+	case sessionruntime.CompletenessNoFence:
+		return "the interval has no authenticated boundary"
+	case sessionruntime.CompletenessEvicted:
+		return "retention deliberately kept less than the whole"
+	case sessionruntime.CompletenessComplete:
+		return "the whole stream reached the screen"
+	default:
+		return "the runtime reported a completeness this build does not know"
+	}
 }
 
 // write re-takes the decision from a frame read HERE and writes b only if that
@@ -551,6 +598,9 @@ func (p menuPermit) menu(_ context.Context, want string) (Menu, agentdriver.Stat
 	if err != nil {
 		return Menu{}, agentdriver.StateUnknown, p.by.refuse(p.pane, p.agent, agentdriver.StateUnknown,
 			"nocx has no live screen for that pane, so it cannot see what an answer would choose")
+	}
+	if refusal := p.by.vouched(p.pane, p.agent, f); refusal != nil {
+		return Menu{}, agentdriver.StateUnknown, refusal
 	}
 	state := p.by.rules.Classify(p.agent, f)
 	if state != agentdriver.StatePermissionChoice && state != agentdriver.StateModalChoice {

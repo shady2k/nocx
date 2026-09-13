@@ -26,7 +26,7 @@ package agentdriver
 //
 // # It decides nothing, which is why it is not a third power
 //
-// The AD-6 amendment grants an enrolled pane's grid exactly two powers —
+// The AD-6 amendment grants a watched pane's screen exactly two powers —
 // whether nocx may write into the pane, and what its indicator shows — and
 // says the list is exhaustive. Nothing in this file decides either, and
 // nothing decides anything else: an Explanation is a read-out handed to the

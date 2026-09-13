@@ -22,14 +22,14 @@ package transport
 //
 // # Why it is not a third power
 //
-// The AD-6 amendment grants an enrolled pane's grid exactly two powers —
+// The AD-6 amendment grants a watched pane's screen exactly two powers —
 // whether nocx may write into the pane, and what its indicator shows — and says
 // the list is exhaustive. This method exercises neither and adds no third,
 // because a power is a power to DECIDE and this decides nothing: it creates no
 // enrolment, moves no state, reaches no network destination, and is not shown
 // to the user as their terminal or persisted as their history. It hands the
 // pane's own operator a read-out of a screen they own and are already looking
-// at, through the same window the grid already exists in. Enrolment stays an
+// at, through the same interval the watch already opens. Enrolment stays an
 // act performed on the authenticated channel; asking about a pane that was
 // never enrolled produces nothing at all.
 
@@ -245,7 +245,7 @@ func (s *WSServer) readEmittingPane(sid session.ID, agent string) *agentEmitting
 	return read
 }
 
-// emittingFrame renders the grid column by column, and the rule's own reading
+// emittingFrame renders the screen column by column, and the rule's own reading
 // of each row beside it. The two are one object per row because they are one
 // reading of one row and a caller drawing them from two arrays would have to
 // keep the indices in step.
@@ -355,7 +355,7 @@ func (s *WSServer) emittingAvailable() bool {
 }
 
 // agentEmittingSpecs registers the method. On the ORDINARY lane, not on a
-// queue of its own: the handler copies one grid and evaluates one document, it
+// queue of its own: the handler reads one frame and evaluates one document, it
 // touches no store and blocks on nothing, and a person watching a live view
 // gets a stale screen the moment it is made to queue behind the domain that
 // happens to be busy.

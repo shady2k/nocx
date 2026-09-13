@@ -7,7 +7,7 @@ package transport
 //
 // A pane, some text, and whether the submit key is pressed. NOT the agent, and
 // not the state: both are read on this side, from the enrolment act and from
-// the pane's own live grid, at the instant the request is handled. A caller
+// the pane's own live screen, at the instant the request is handled. A caller
 // that could name the agent could name one whose rule verifies while the pane
 // runs something else, and the frame would then be read by a rule that was
 // never about it — the same shape as the calibration's missing `label`, and
@@ -31,7 +31,7 @@ package transport
 //
 // # It is not a third power
 //
-// The AD-6 amendment grants an enrolled pane's grid exactly two powers, and
+// The AD-6 amendment grants a watched pane's screen exactly two powers, and
 // this exercises the first of them by name: whether nocx may write into this
 // pane. It opens no enrolment, moves no worker state, lights no indicator, and
 // decides nothing here — the decision is internal/agenttyping's, twice, on two

@@ -253,7 +253,7 @@ type Replay interface {
 //
 // # What survives, and why that is everything a rule can read
 //
-// A Frame is text, width and cursor — panegrid answers nothing else, on
+// A Frame is text, width and cursor — paneview answers nothing else, on
 // purpose, because both powers the AD-6 amendment grants are positional. So
 // colour and attributes are not lost here; they were never in the frame. Each
 // row is written from its first column so a double-width grapheme lands where

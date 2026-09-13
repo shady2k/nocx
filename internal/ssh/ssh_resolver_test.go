@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -806,4 +807,105 @@ exit 0
 		t.Fatalf("chmod fake ssh: %v", err)
 	}
 	return sshPath, configPath
+}
+
+func TestParseSSHGOutput_IdentitiesOnly(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{"yes", "identitiesonly yes\n", true},
+		// OpenSSH >= 10 spells booleans true/false where older versions print
+		// yes/no, exactly as requesttty and controlmaster do — and the
+		// coordinator offers different keys for the two answers, so a version
+		// that spelled this one differently would change which keys a person's
+		// own configuration lets through.
+		{"true_normalized", "identitiesonly true\n", true},
+		{"no", "identitiesonly no\n", false},
+		{"false_normalized", "identitiesonly false\n", false},
+		{"absent", "hostname myhost\n", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := parseSSHGOutput(tt.line, "myhost")
+			if err != nil {
+				t.Fatalf("parseSSHGOutput: %v", err)
+			}
+			if cfg.IdentitiesOnly != tt.want {
+				t.Errorf("IdentitiesOnly = %v, want %v", cfg.IdentitiesOnly, tt.want)
+			}
+		})
+	}
+}
+
+// TestConfigFileArgTreatsOnlyAbsenceAsAbsence: the null device is for a config
+// file that is NOT THERE, and for nothing else.
+//
+// A stat that failed for another reason is a config file that exists and cannot
+// be read. Answering about the null device would silently ignore it — every
+// directive the person wrote would vanish, and nothing would say a file was
+// there — so that path goes to ssh, whose own failure the resolver already
+// reports as a degraded answer with the reason attached.
+func TestConfigFileArgTreatsOnlyAbsenceAsAbsence(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", file, err)
+	}
+
+	// A path whose parent is a regular FILE: os.Stat answers ENOTDIR, which is
+	// a real failure and not an absence.
+	unreadable := filepath.Join(file, "config")
+	resolver := NewSSHConfigResolver(log.NewSlogAdapter(nil), unreadable, "")
+	concrete, ok := resolver.(*sshConfigResolver)
+	if !ok {
+		t.Fatalf("NewSSHConfigResolver answered %T, want *sshConfigResolver", resolver)
+	}
+	if got := concrete.configFileArg(); got != unreadable {
+		t.Fatalf("configFileArg = %q, want %q: an unreadable config is not an absent one", got, unreadable)
+	}
+
+	absent := filepath.Join(dir, "missing")
+	absentResolver, ok := NewSSHConfigResolver(log.NewSlogAdapter(nil), absent, "").(*sshConfigResolver)
+	if !ok {
+		t.Fatalf("NewSSHConfigResolver answered %T, want *sshConfigResolver", absentResolver)
+	}
+	if got := absentResolver.configFileArg(); got != os.DevNull {
+		t.Fatalf("configFileArg = %q, want %q for a path that is not there", got, os.DevNull)
+	}
+}
+
+// TestSSHConfigResolverAnswersWhenThereIsNoConfigFile is the regression for the
+// machine that has never written one, which is most of them.
+//
+// ssh -F <path> with a missing path is FATAL ("Can't open user config file",
+// exit 255), so a resolver that always passed the configured path got NO oracle
+// answer at all — every directive degraded, including the default identity-file
+// list ssh itself would have answered with, on exactly the machines least likely
+// to have a config. The null device keeps the "this file only" semantics and lets
+// ssh answer what it always would have.
+func TestSSHConfigResolverAnswersWhenThereIsNoConfigFile(t *testing.T) {
+	// The home is the TEST's: the paths below are expanded from it, and nothing
+	// here may read a developer's own ~/.ssh.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	resolver := NewSSHConfigResolver(log.NewSlogAdapter(nil), filepath.Join(home, ".ssh", "config"), "")
+	cfg, err := resolver.ResolveConfig(context.Background(), "definitely-not-a-real-host.invalid")
+	if err != nil {
+		t.Fatalf("ResolveConfig with no config file: %v", err)
+	}
+	if len(cfg.IdentityFiles) == 0 {
+		t.Fatal("no identity files: ssh always answers with its own default list, and this resolver asked it")
+	}
+	sshDir := filepath.Join(home, ".ssh") + string(filepath.Separator)
+	for _, path := range cfg.IdentityFiles {
+		if !strings.HasPrefix(path, sshDir) {
+			t.Errorf("IdentityFiles carries %q, want a path under the HOME this test set (%s)", path, sshDir)
+		}
+	}
+	if cfg.IdentitiesOnly {
+		t.Error("IdentitiesOnly = true, want false: no config file names the directive")
+	}
 }

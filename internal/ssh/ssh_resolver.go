@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -446,8 +447,8 @@ func (r *sshConfigResolver) runSSHG(ctx context.Context, host string) (*HostConf
 	return r.execSSHG(ctx, []string{"-F", r.configFileArg(), "-G", host}, host)
 }
 
-// configFileArg is the file -F names: the configured path when it exists, and
-// the null device when it does not.
+// configFileArg is the file -F names: the configured path when it is THERE, and
+// the null device when it is not.
 //
 // The null device is not a special case invented here, it is the SAME question
 // asked of a file that is empty: -F suppresses the system-wide config
@@ -455,11 +456,19 @@ func (r *sshConfigResolver) runSSHG(ctx context.Context, host string) (*HostConf
 // "this file and nothing else", and an absent file answers what an empty one
 // would — ssh's own defaults, which is a real answer where exit 255 with
 // "Can't open user config file" was not.
+//
+// ONLY ABSENCE IS ABSENCE. A stat that failed for another reason — a permission
+// bit, an I/O error, a path whose parent is not a directory — is a config file
+// that EXISTS and cannot be read, and answering about the null device would
+// silently ignore it: the person's directives would vanish and every one of them
+// would degrade with no sign that a file was there. So that path is passed to
+// ssh, whose own failure is then reported through ErrSSHConfigFailed, which is
+// the resolver's existing degraded-error behaviour and names what happened.
 func (r *sshConfigResolver) configFileArg() string {
 	if r.configPath == "" {
 		return os.DevNull
 	}
-	if _, err := os.Stat(r.configPath); err != nil {
+	if _, err := os.Stat(r.configPath); errors.Is(err, fs.ErrNotExist) {
 		return os.DevNull
 	}
 	return r.configPath

@@ -56,6 +56,11 @@ Host tty-test
     HostName 192.0.2.20
     RemoteCommand top -d 1
     RequestTTY yes
+
+Host order-test
+    HostName 192.0.2.30
+    IdentityFile ~/.ssh/second_key
+    IdentityFile ~/.ssh/first_key
 `
 	if err := os.WriteFile(configPath, []byte(configContent), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -169,6 +174,28 @@ Host tty-test
 			}
 			if !strings.Contains(path, string(filepath.Separator)+".ssh"+string(filepath.Separator)) {
 				t.Errorf("IdentityFiles carries %q, want a path under ~/.ssh", path)
+			}
+		}
+	})
+
+	// Test 4c: a config that names TWO keys answers with them in the order it
+	// wrote them, which is the order ssh offers them in — and the reason this
+	// list is the oracle's answer rather than one this package assembles. A
+	// resolver that sorted, deduplicated or re-derived a default order would
+	// change which key a host sees first.
+	t.Run("identity_file_order_is_the_configs", func(t *testing.T) {
+		resolver := NewSSHConfigResolver(logger, configPath, "")
+		cfg, err := resolver.ResolveConfig(context.Background(), "order-test")
+		if err != nil {
+			t.Fatalf("ResolveConfig order-test: %v", err)
+		}
+		want := []string{expandPath("~/.ssh/second_key"), expandPath("~/.ssh/first_key")}
+		if len(cfg.IdentityFiles) != len(want) {
+			t.Fatalf("IdentityFiles = %q, want %q", cfg.IdentityFiles, want)
+		}
+		for i := range want {
+			if cfg.IdentityFiles[i] != want[i] {
+				t.Errorf("IdentityFiles[%d] = %q, want %q", i, cfg.IdentityFiles[i], want[i])
 			}
 		}
 	})

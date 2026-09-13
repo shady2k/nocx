@@ -192,26 +192,30 @@ func TestAuthChainLateBindCredential(t *testing.T) {
 }
 
 // TestAuthChainOffersEveryResolvedIdentityFile is the coordinator's own half of
-// default key discovery: the chain offers the identity files the resolver
-// answered with, in the order it answered them, and it does not invent a list of
-// its own.
+// default key discovery: the chain turns EVERY identity file the resolver
+// answered with into a public-key rung, skips the ones it cannot read, and
+// invents no list of its own.
 //
-// That last part is the whole point of the test. The chain used to append a
-// hard-coded `~/.ssh/id_ed25519, id_rsa, id_ecdsa` after the resolved file, so
-// this machine's keys were decided in two places that disagreed — on the order,
-// on the key types ssh 10 knows, and on every config that names its own files.
-// The list now comes from the resolver (which asks the oracle), so what is
-// asserted here is the CHAIN's use of it: every loadable file becomes a public
-// key rung, an unloadable one is skipped rather than fatal, and the prompt rung
-// stays last.
+// That last part is the point of the test. The chain used to append a hard-coded
+// `~/.ssh/id_ed25519, id_rsa, id_ecdsa` after the resolved file, so this
+// machine's keys were decided in two places that disagreed — on the order, on
+// the key types ssh 10 knows, and on every configuration that names its own
+// files. The list is the resolver's now, which is why the ORDER is asserted
+// where the resolution is (TestResolveTargetDiscoversTheDefaultKeysInTheResolvers
+// Order and the conformance test against ssh -G): a chain entry carries an
+// auth METHOD, and this package can no more read the key back out of one than
+// ssh can.
 func TestAuthChainOffersEveryResolvedIdentityFile(t *testing.T) {
 	rc := newTestRealClient(t)
 	ctx := context.Background()
 
-	dir := t.TempDir()
-	first := writeTestKey(t, dir)
-	second := writeTestKey(t, dir)
-	missing := filepath.Join(dir, "id_rsa") // the fixture's home has no such key
+	// Three DISTINCT paths: writeTestKey names its file the same thing every
+	// time, so one directory would make the "two files" below one file written
+	// twice — and a count of two would then prove nothing about the list.
+	first := writeTestKey(t, t.TempDir())
+	secondDir := t.TempDir()
+	second := writeTestKey(t, secondDir)
+	missing := filepath.Join(secondDir, "id_rsa") // this fixture's home has no such key
 
 	resolved := &resolvedConfig{
 		identityFiles: []string{missing, first, second},

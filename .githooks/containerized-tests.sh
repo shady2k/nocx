@@ -145,6 +145,24 @@ go_test_containerized() {
     # Build before every run: the layer cache makes a warm build ~0.3s
     # (measured 2026-08-04) and keeps the Dockerfile the source of truth.
     docker build -q -t "$GO_TEST_IMAGE" "$GO_TEST_IMAGE_DIR" >/dev/null || return 1
+    # The packages whose tests exist ONLY under nocx_local_ssh (nocx-xk1di):
+    # this machine's helper, the variant with the ssh client linked in. They are
+    # absent from `go list ./...` — a package whose Go files all carry the tag
+    # does not appear in that list at all — so the run below never compiled
+    # them, let alone ran them. The list is the Makefile's, derived there from
+    # the build constraints and checked by `make ci-local-ssh-split`, and it is
+    # asked over `make -s` for the reason ci.yml asks it for the two halves of
+    # the suite: a second copy is a second list.
+    if ! command -v make >/dev/null 2>&1; then
+        printf 'FAIL: make is required to ask for the nocx_local_ssh package list.\n' >&2
+        return 1
+    fi
+    _local_ssh_pkgs="$(cd "$PWD" && make -s print-local-ssh-pkgs)" || return 1
+    if [ -z "$_local_ssh_pkgs" ]; then
+        printf 'FAIL: the nocx_local_ssh package list is empty — refusing to run a suite that\n' >&2
+        printf '      would silently skip this machine'"'"'s helper.\n' >&2
+        return 1
+    fi
     # --cpu-shares is a weight, not a cap; see CPU_SHARES above. Quoted, so it
     # is always exactly one word — nothing here can word-split it away.
     docker run --rm --cpu-shares="$CPU_SHARES" \
@@ -155,6 +173,7 @@ go_test_containerized() {
         -e HOME=/tmp \
         -e GOCACHE=/cache/gobuild \
         -e GOMODCACHE=/cache/gomod \
+        -e LOCAL_SSH_PKGS="$_local_ssh_pkgs" \
         -w /src \
         "$GO_TEST_IMAGE" \
         sh -euc '
@@ -165,8 +184,13 @@ go_test_containerized() {
             # entry with a login shell. Idempotent and scoped to this run.
             groupadd --gid "$RUN_GID" nocx-sshtest 2>/dev/null || true
             useradd -M -u "$RUN_UID" -g "$RUN_GID" -s /bin/bash -d /tmp/nocx-sshd-home nocx-sshtest 2>/dev/null || true
+            # TWO PASSES: the untagged build, and then the packages that exist
+            # only under the tag. One tagged run over ./... would not be the
+            # union of the two — the tag also EXCLUDES the `!nocx_local_ssh`
+            # pair in cmd/nocx-helper, which is the assertion that the shipped
+            # artifact registers no ssh service at all.
             exec setpriv --reuid="$RUN_UID" --regid="$RUN_GID" --clear-groups \
-                go test -race -tags gtk3 ./...
+                sh -euc "go test -race -tags gtk3 ./... ; go test -race -tags gtk3,nocx_local_ssh $LOCAL_SSH_PKGS"
         '
 }
 
@@ -204,4 +228,18 @@ vitest_containerized() {
 # --- one containerized gate at a time, machine-wide --------------------------
 # Shared with scripts/ci-linux.sh, scripts/ci-frontend.sh and
 # e2e/run-in-container.sh; see scripts/gate-lock.sh for why it is shared.
-. "$(dirname "$0")/../scripts/gate-lock.sh"
+#
+# THE PATH IS RESOLVED IN TWO STEPS because `$0` is the CALLER's name, not this
+# file's. Under the documented invocation — `sh -c '. ./.githooks/…; go_test_containerized'`
+# — that name is "sh", so `dirname "$0"` is "." and the old single path resolved
+# to `./../scripts/gate-lock.sh`: the parent of the repo, where there is nothing.
+# The file was then never loaded, and the run died on the missing lock instead of
+# on anything it was measuring (found while verifying nocx-xk1di, 2026-09-13).
+# The repo root is tried first (that is where the documented invocation runs
+# from, so `$PWD` is the repository), then the caller's own directory, which is
+# how scripts/test-gate-lock.sh sources this file by path.
+if [ -f "$PWD/scripts/gate-lock.sh" ]; then
+    . "$PWD/scripts/gate-lock.sh"
+else
+    . "$(dirname "$0")/../scripts/gate-lock.sh"
+fi

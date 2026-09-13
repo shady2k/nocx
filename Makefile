@@ -1,7 +1,9 @@
 .PHONY: all init build build-server dev dev-web lint format test clean hooks ci ci-full \
-        ci-backend ci-linux ci-mac ci-os-split ci-frontend ci-e2e helpers helper-local \
+        ci-backend ci-linux ci-mac ci-os-split ci-local-ssh-split ci-frontend ci-e2e \
+        helpers helper-local \
         require-local-helper \
-        print-os-pkgs print-portable-pkgs \
+        print-os-pkgs print-portable-pkgs print-local-ssh-pkgs \
+        print-os-local-ssh-pkgs print-portable-local-ssh-pkgs \
         lint-ci test-ci build-ci root-ci frontend-ci
 
 GO ?= go
@@ -489,7 +491,10 @@ ci: lint-ci test-ci build-ci root-ci frontend-ci
 #
 # ci-os-split runs FIRST and costs seconds: it re-derives the OS package list
 # from the build constraints, so the partition below cannot drift silently
-# into dropping a package from both halves.
+# into dropping a package from both halves. ci-local-ssh-split runs beside it
+# for the other constraint the suite is partitioned by — the packages that
+# exist only under nocx_local_ssh, whose tagged tests ran in no job at all
+# before nocx-xk1di.
 #
 # ci-mac IS in this list now. It used to be excluded on the grounds that no CI
 # job corresponded to it — macos-latest ran the whole suite as `backend` — and
@@ -506,7 +511,7 @@ ci: lint-ci test-ci build-ci root-ci frontend-ci
 #
 # Order is cheapest-first: the drift check in seconds, the host gates next,
 # the Linux containers in minutes, e2e last because it is the longest.
-ci-full: ci-os-split ci ci-mac ci-backend ci-linux ci-frontend ci-e2e
+ci-full: ci-os-split ci-local-ssh-split ci ci-mac ci-backend ci-linux ci-frontend ci-e2e
 	@echo ""
 	@echo "=== every CI job green locally ==="
 
@@ -577,6 +582,93 @@ CLAUDE_CONFORMANCE_PKG := internal/claudeconformance
 PORTABLE_EXEMPT_RE := (internal/claudeconformance)
 OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
 
+# --- the tests that exist only under nocx_local_ssh (nocx-xk1di) -------------
+#
+# THE GAP THIS CLOSES. The product ships its helper in two variants
+# (nocx-50w7p.1): the deployable artifact, built with NO tags, and this
+# machine's own — the same sources with nocx_local_ssh, which `make helper-local`
+# builds and a running app installs for itself. Everything that dials ssh lives
+# in the second: internal/helper/sshsvc and internal/helper/sshdial are files
+# that exist only under the tag, and internal/helper/session's spawn_ssh,
+# cmd/nocx-helper's client half and internal/app's acceptance test are the same
+# tag applied to packages that exist either way.
+#
+# Every Go target in this file passed `-tags gtk3` and nothing else, so that
+# half of the repository was compiled and tested by NOTHING — and not merely by
+# omission: a package whose Go files all carry the tag does not appear in
+# `go list ./...` at all, so it sat outside every package set the OS/portable
+# split hands to go test. The dead-code ratchet already adds the tag, for its
+# own reason (.githooks/check-deadcode.mjs: without it, every symbol whose
+# caller is the ssh service reads as unreachable). The tests did not.
+#
+# WHY AN ADDITIONAL PASS RATHER THAN THE TAG ON THE EXISTING ONE. Adding
+# nocx_local_ssh to the run already there would DELETE the untagged build from
+# CI instead of extending it: cmd/nocx-helper/sshclient_absent.go and its paired
+# sshservice_absent_test.go carry `!nocx_local_ssh`, and they are the assertion
+# that the artifact written to a host nobody here controls registers no ssh
+# service at all — the property plan §1 rests on, and the one a forgotten flag
+# would break. So the untagged run stays exactly as it is and this is a second
+# pass, scoped to the packages where a tagged file exists: those are the only
+# ones the tag can change, and running ./... twice would pay for the whole suite
+# a second time for nothing.
+#
+# What the untagged pass still proves, from two sides: cmd/nocx-helper's
+# absent-file test asserts the refusal a build with no client answers with, and
+# internal/helper/deploy/dependency_test.go asks `go list` for the real
+# dependency graph under each tag set — reaching no golang.org/x/crypto/ssh
+# without the tag, and reaching it with one. deploy/ is deliberately NOT in the
+# list below: it carries no tagged file, and its contract is the artifact
+# `make helpers` produces.
+#
+# The tagged pass re-runs the untagged tests of internal/app and
+# internal/helper/session too, because Go has no per-file test selection and
+# both packages hold tagged and untagged tests together. That is the cost of
+# package-level scoping, and it is the honest one: filtering by test name would
+# be a list that goes stale silently the first time a tagged test is added.
+#
+# THE HALVES. A tagged package is owned by the job that owns the package, by the
+# rule the suite already uses (ci-os-split): internal/app and
+# internal/helper/session are in OS_PKG_DIRS and so run in ci-mac and ci-linux,
+# while the rest are portable and run in ci-backend. The print targets below hand
+# each job its own half, and ci-local-ssh-split re-derives the whole set from the
+# build constraints, so this list cannot drift into a package whose tagged tests
+# then run nowhere — which is the defect being fixed.
+#
+# WHICH TARGETS TAKE THE PASS, and which deliberately do not. Every target that
+# stands for a CI job does: `test-ci` and `lint-ci` (what `make ci` runs), the
+# two local runners (scripts/ci-linux.sh, .githooks/containerized-tests.sh), and
+# every test step plus the Lint step in ci.yml — one step in ci-mac, and both
+# keyring legs in each of ci-backend and ci-linux. The release-tag storage run is
+# the one test step with no tagged counterpart, because internal/storage carries
+# no file behind the tag.
+#
+# `make test` and `make lint` stay single-pass on purpose: they are the raw
+# conveniences (one `go test ./...`, one `golangci-lint run ./...`), they stand
+# for no job, and the tagged pass costs a measured 221 s on internal/app — not a
+# price for a target somebody types by hand.
+LOCAL_SSH_TAG := nocx_local_ssh
+LOCAL_SSH_RE := ^//go:build.*nocx_local_ssh
+LOCAL_SSH_PKG_DIRS := cmd/nocx-helper internal/app internal/helper/session \
+                      internal/helper/sshdial internal/helper/sshsvc \
+                      internal/helper/tunnelchan
+LOCAL_SSH_PKGS := $(addprefix ./,$(addsuffix /...,$(LOCAL_SSH_PKG_DIRS)))
+LOCAL_SSH_OS_PKGS := $(addprefix ./,$(addsuffix /...,$(filter $(OS_PKG_DIRS),$(LOCAL_SSH_PKG_DIRS))))
+LOCAL_SSH_PORTABLE_PKGS := $(filter-out $(LOCAL_SSH_OS_PKGS),$(LOCAL_SSH_PKGS))
+
+# The tag list every tagged pass passes, spelled once so a test pass and a lint
+# pass cannot disagree about what "the tagged build" is. Comma-joined: that is
+# the form `go help build` documents, and the form .githooks/check-deadcode.mjs
+# derives its own with. gtk3 is in it only where this host needs it
+# (WAILS_PLATFORM_TAGS); `comma` is the make idiom for a separator that cannot
+# be written literally inside a function call.
+comma := ,
+LOCAL_SSH_TAGS := $(LOCAL_SSH_TAG)$(if $(WAILS_PLATFORM_TAGS),$(comma)$(WAILS_PLATFORM_TAGS))
+
+# golangci-lint's type-checker IS the Go compiler: without the tag it does not
+# see a file that lives behind one, and the packages below are exactly those
+# whose files do. The lint pass gets the same composition the test pass does.
+GOLANGCI_LOCAL_SSH_TAGS := --build-tags=$(LOCAL_SSH_TAGS)
+
 # BOTH keyring variants here too, and the comment above already said so —
 # "both variants run over the whole partition" — while the recipe passed
 # --no-keyring and ran the portable half once. CI's backend-linux runs
@@ -586,11 +678,13 @@ OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
 # keyring is a fixture dimension that crosses both (nocx-aruz).
 ci-backend:
 	@echo "=== ci-backend: the portable half of ci.yml's backend-linux job ==="
-	./scripts/ci-linux.sh -- $$($(MAKE) -s print-portable-pkgs)
+	NOCX_LOCAL_SSH_PKGS='$(LOCAL_SSH_PORTABLE_PKGS)' \
+	  ./scripts/ci-linux.sh -- $$($(MAKE) -s print-portable-pkgs)
 
 ci-linux:
 	@echo "=== ci-linux: the OS-specific half of ci.yml's backend-linux job ==="
-	./scripts/ci-linux.sh -- $(OS_PKGS)
+	NOCX_LOCAL_SSH_PKGS='$(LOCAL_SSH_OS_PKGS)' \
+	  ./scripts/ci-linux.sh -- $(OS_PKGS)
 
 # ci-os-split re-derives the OS package list from the build constraints and
 # fails when OS_PKG_DIRS has drifted from it. Without this the list is a
@@ -638,6 +732,19 @@ print-os-pkgs:
 print-portable-pkgs:
 	@$(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)' | grep -vE 'nocx/$(PORTABLE_EXEMPT_RE)(/|$$)'
 
+# The tagged set (nocx-xk1di), by the same rule: ci.yml's jobs ask for the half
+# they own rather than carrying a copy. print-local-ssh-pkgs is the whole set,
+# for the places with no half to attribute — ci-mac's lint pass and a host's
+# test-ci run it at once.
+print-local-ssh-pkgs:
+	@echo '$(LOCAL_SSH_PKGS)'
+
+print-os-local-ssh-pkgs:
+	@echo '$(LOCAL_SSH_OS_PKGS)'
+
+print-portable-local-ssh-pkgs:
+	@echo '$(LOCAL_SSH_PORTABLE_PKGS)'
+
 ci-os-split:
 	@echo "=== the OS split is derived from the build constraints, not remembered ==="
 	@derived=$$(grep -rlE '^//go:build.*$(GOOS_RE)' --include='*.go' \
@@ -659,6 +766,44 @@ ci-os-split:
 	  echo "FAIL: names a GOOS but is not in OS_PKG_DIRS:$$missing"; rc=1; fi; \
 	if [ -n "$$extra" ]; then \
 	  echo "FAIL: in OS_PKG_DIRS, names no GOOS, and is not in OS_EXEMPT:$$extra"; rc=1; fi; \
+	if [ $$rc = 0 ]; then echo "ok"; fi; \
+	exit $$rc
+
+# ci-local-ssh-split is the same check for the OTHER build constraint this file
+# is partitioned by (nocx-xk1di), and it exists for the same reason:
+# LOCAL_SSH_PKG_DIRS is a hand-kept copy of a fact the compiler already knows,
+# and a package that grows its first tagged file must not be able to leave its
+# tagged tests running in no CI job — which is exactly the defect being fixed
+# here, reached by omission rather than by a wrong list.
+#
+# Two differences from ci-os-split, both deliberate. It does NOT skip _test.go
+# files: internal/app and internal/helper/tunnelchan are packages whose only
+# tagged file is a test, and they are the whole reason the list exists. And it
+# also asserts the partition is not degenerate — a set that landed entirely in
+# one half would leave one job running an empty package list, which reads as a
+# pass while measuring nothing.
+ci-local-ssh-split:
+	@echo "=== the packages carrying $(LOCAL_SSH_TAG) are derived from the build constraints, not remembered ==="
+	@derived=$$(grep -rlE '$(LOCAL_SSH_RE)' --include='*.go' \
+	  --exclude-dir=node_modules --exclude-dir=worktrees . \
+	  | xargs -n1 dirname | sed 's|^\./||' | sort -u | tr '\n' ' '); \
+	listed="$(strip $(LOCAL_SSH_PKG_DIRS))"; \
+	missing=""; \
+	for d in $$derived; do \
+	  case " $$listed " in *" $$d "*) ;; *) missing="$$missing $$d";; esac; \
+	done; \
+	extra=""; \
+	for d in $$listed; do \
+	  case " $$derived " in *" $$d "*) ;; *) extra="$$extra $$d";; esac; \
+	done; \
+	rc=0; \
+	if [ -n "$$missing" ]; then \
+	  echo "FAIL: carries $(LOCAL_SSH_TAG) but is not in LOCAL_SSH_PKG_DIRS:$$missing"; \
+	  echo "      its tagged tests would run in no CI job"; rc=1; fi; \
+	if [ -n "$$extra" ]; then \
+	  echo "FAIL: in LOCAL_SSH_PKG_DIRS and carries no $(LOCAL_SSH_TAG) file:$$extra"; rc=1; fi; \
+	if [ -z "$(strip $(LOCAL_SSH_OS_PKGS))" ] || [ -z "$(strip $(LOCAL_SSH_PORTABLE_PKGS))" ]; then \
+	  echo "FAIL: the tagged set is entirely in one half, so one job would run an empty package list"; rc=1; fi; \
 	if [ $$rc = 0 ]; then echo "ok"; fi; \
 	exit $$rc
 
@@ -767,6 +912,16 @@ lint-ci:
 	@# the gate AGENTS.md names -- out entirely for anyone not on macOS.
 	@# Empty on macOS, so that runner keeps running exactly `run ./...`.
 	$(GOLANGCI_LINT) run $(GOLANGCI_BUILD_TAGS) ./...
+	@echo ""
+	@echo "=== golangci-lint (the packages that exist only under $(LOCAL_SSH_TAG)) ==="
+	@# A SECOND pass, because the tag and the absence of the tag select different
+	@# files. The pass above lints the untagged half — and is the only one that
+	@# ever sees cmd/nocx-helper's `!nocx_local_ssh` pair — while this one lints
+	@# the tagged files, which no lint pass in this repository had ever seen
+	@# (nocx-xk1di). Scoped to the packages that carry one, because the tag can
+	@# change no other package, and golangci-lint over ./... twice is minutes
+	@# spent to lint the same files again.
+	$(GOLANGCI_LINT) run $(GOLANGCI_LOCAL_SSH_TAGS) $(LOCAL_SSH_PKGS)
 
 # THE ONE PACKAGE A HOST IS NOT REQUIRED TO BE ABLE TO RUN, and why this
 # target is no longer a bare `go test ./...`.
@@ -862,6 +1017,16 @@ test-ci:
 	@# `backend` job runs this; this target did not, which is exactly the kind
 	@# of gap that makes a green local gate mean nothing.
 	$(GO) test -race -count=1 -tags release ./internal/storage/...
+	@echo ""
+	@echo "=== go test -race -tags $(LOCAL_SSH_TAGS) (this machine's helper, the one with the ssh client) ==="
+	@# The other build constraint the suite is partitioned by, and the second
+	@# pass it needs (nocx-xk1di): the run above is the UNTAGGED build — the
+	@# artifact `make helpers` ships — and these are the packages whose files
+	@# exist only under $(LOCAL_SSH_TAG). A package all of whose Go files carry
+	@# the tag does not appear in `go list ./...`, so no pass here ever compiled
+	@# it, let alone ran its tests. LOCAL_SSH_PKGS is derived and checked by
+	@# `make ci-local-ssh-split` — one list, asked for by ci.yml's jobs too.
+	$(GO) test -race -count=1 -tags "$(LOCAL_SSH_TAGS)" $(LOCAL_SSH_PKGS)
 
 build-ci:
 	@echo "=== go build ./... ==="

@@ -38,10 +38,14 @@ A static archive's libc is baked into its objects. Built naively for
 `x86_64-linux` (glibc) and linked into a Go program, the result is **dynamic** —
 `PT_INTERP` plus `libc.so.6`, `libpthread.so.0`, `librt.so.1`; the same code
 against the `-musl` build is **0 and 0**. The helper that runs on an unknown
-remote host must be the second kind. But the ordinary native build —
-`go build -tags gtk3 ./...`, `go test -race`, CI's Linux jobs — is glibc, and
-cannot link a musl archive. So both exist, and neither is a fallback for the
-other:
+remote host must be the second kind. The ordinary native build —
+`go build -tags gtk3 ./...`, `go test -race`, CI's Linux jobs — is glibc. So
+both exist, and neither is a fallback for the other. The pair is a statement
+about the host a binary is FOR, not a workaround for a link that fails: measured
+on 2026-09-13 while wiring the adapter (`nocx-ygxjv.2`), each archive does still
+link under the other's compiler — what the choice fixes is which libc the linked
+objects were built against, and `make helpers` is what makes it, with `-tags
+vtmusl` for its Linux targets:
 
 | target            | Zig triple           | libc   | who links it                                  |
 | ----------------- | -------------------- | ------ | --------------------------------------------- |
@@ -69,16 +73,26 @@ build/libghostty-vt/vendor/<target>/include/ghostty/vt.h
 build/libghostty-vt/vendor/<target>/include/ghostty/vt/*.h
 ```
 
-so from `internal/emulator/ghostty/` a link file reaches its archive as
+so a link file inside the repo reaches its archive by resolving `${SRCDIR}` —
+three directories up from `internal/emulator/ghostty/` — and choosing the target
+by build constraint. The adapter's own lines in
+`internal/emulator/ghostty/terminal.go` are the authority; this is their shape:
 
 ```go
-//go:build linux && amd64 && !gnu
-#cgo CFLAGS: -I${SRCDIR}/../../../build/libghostty-vt/vendor/linux-amd64/include
-#cgo LDFLAGS: ${SRCDIR}/../../../build/libghostty-vt/vendor/linux-amd64/libghostty-vt.a -lm -lpthread
+#cgo linux,amd64,!vtmusl CFLAGS: -I${SRCDIR}/../../../build/libghostty-vt/vendor/linux-amd64-gnu/include
+#cgo linux,amd64,!vtmusl LDFLAGS: ${SRCDIR}/../../../build/libghostty-vt/vendor/linux-amd64-gnu/libghostty-vt.a -lm -lpthread
+#cgo linux,amd64,vtmusl CFLAGS: -I${SRCDIR}/../../../build/libghostty-vt/vendor/linux-amd64/include
+#cgo linux,amd64,vtmusl LDFLAGS: ${SRCDIR}/../../../build/libghostty-vt/vendor/linux-amd64/libghostty-vt.a -lm -lpthread
 ```
 
-`linkprobe/` spells those paths today, so the contract is exercised rather than
-described. The directory is under `build/` because git, eslint and prettier
+`vtmusl` is what selects the musl pair, and glibc is deliberately the untagged
+default so the many ordinary builds here get the archive their compiler is
+configured for. `linkprobe/` spells the same PATHS with the opposite tag — its
+`!gnu` files are the musl probe and its `gnu` files the glibc one — because a
+probe is built BOTH ways by `scripts/verify-link.sh`, while the adapter is built
+once per target.
+
+The directory is under `build/` because git, eslint and prettier
 already ignore it: a downloaded artifact is build output, and teaching three
 walkers about a fourth directory is how a directory ends up in a commit.
 

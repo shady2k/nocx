@@ -48,6 +48,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/procwatch"
+	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -779,6 +780,45 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	if err != nil {
 		return hostedSpawnResult{}, fmt.Errorf("resolve the ssh pane's destination: %w", err)
 	}
+	// THE GENERATION THE LAUNCH NAMES HAS TO BE ON THE FAR SIDE BEFORE THE
+	// LAUNCH IS ASKED FOR (nocx-50w7p.21).
+	//
+	// A helper-hosted ssh pane runs the SCRIPT carrier: the daemon builds
+	// stage-1 and a start command that execs `$HOME/.nocx/launch`, and the far
+	// shell's own first check is `[ -x "$HOME/.nocx/launch" ]` — which is a
+	// fact only a PUBLISH creates. Until this line nothing published for this
+	// route: the trigger lived in RealClient.Connect's startPublish, and that
+	// whole dial half is compiled out of a coordinator built without
+	// nocx_local_ssh (ssh_real_dial.go). So the bundle was never written, the
+	// far side refused the generation, and the pane degraded to a conventional
+	// terminal with a hello-timeout — the defect measured by the epic's e2e
+	// (nocx-50w7p.21).
+	//
+	// IT IS SEQUENCED BEFORE THE SPAWN, NOT CONCURRENT WITH IT, and the
+	// ordering is the design's rather than a preference: §6.1's barrier (steps
+	// 4-5) exists so stage-1 cannot re-prove a generation while the write is
+	// still in flight, and the party that would wait here is the DAEMON, which
+	// has no gate to wait on — spawn_ssh.go says exactly that where it builds
+	// its bootstrap plan with `Ordered` nil. What this call does is make that
+	// honest: by the time the spawn op is sent, the publish has reached its
+	// terminal outcome. The cost is on a wall-clock that only starts when the
+	// shell exists, so it takes nothing from the far side's bootstrap budget.
+	//
+	// The FAILURE IS NOT A REFUSAL (design §6.1 step 5, §6.4): a publish that
+	// could not commit leaves any generation already there byte-identical, so
+	// the pane still opens and the far side decides for itself. It is logged
+	// with its own cause rather than reported as this open's error, because
+	// ADR-0004 makes an ordinary usable terminal the one thing no failure path
+	// may suppress.
+	if perr := o.publishForPane(ctx, cfg); perr != nil {
+		// THE LOGGER IS OPTIONAL and the failure is not: a test that wires an
+		// opener without one must still get the fail-open behaviour below
+		// rather than a panic, so the log line is guarded rather than assumed.
+		if o.log != nil {
+			o.log.Warn("ssh pane: the shell integration bundle could not be published; the far side may find no generation",
+				"host", cfg.Host, "error", perr)
+		}
+	}
 	params := proto.SSHSpawnParams{
 		Destination: ssh.WireDestination(target),
 		// The two facts the far launcher is built for, read off the config the
@@ -826,6 +866,47 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	// session it was for.
 	o.spawnTokens.record(res.Session.ID(), params.AgentToolToken)
 	return res, nil
+}
+
+// publishForPane writes the shell-integration bundle onto the destination an
+// ssh open is about to dial, through THIS MACHINE'S HELPER, when this pane's
+// mode asks for the script carrier (nocx-50w7p.21).
+//
+// # It asks the value that already knows, and it asks twice for nothing
+//
+// `cfg.Remote.RemoteInstaller` is the installer the open was built with —
+// stamped by the connection resolver for a saved profile and by the transport
+// for a direct host (nocx-mlm7 P8) — and it is the SAME value
+// internal/ssh's startPublish handed to this publish before this route
+// existed. So there is no second publisher and no new seam: this file calls
+// the carrier the config already carries, which is also what keeps one
+// destination one authentication (helper_publish.go's pool key is the
+// resolved destination).
+//
+// The MODE GATE is asked of the axis (`profile.DesiredMode.DeliversScripts`),
+// the one owner of "does this destination integrate" (AD-8), and it is asked
+// with the same input the daemon asks it with — the mode that is about to
+// travel in the spawn params. A `raw` pane publishes nothing, and a nil
+// installer publishes nothing, which is not a refusal: a build wiring no
+// installer is a build that integrates nothing, and the open proceeds to the
+// same plain shell either way.
+func (o *localHelperOpener) publishForPane(ctx context.Context, cfg session.Config) error {
+	remote := cfg.Remote
+	if remote == nil || remote.RemoteInstaller == nil {
+		return nil
+	}
+	if !profile.DesiredMode(remote.DesiredMode).DeliversScripts() {
+		return nil
+	}
+	// The destination is named the way the pane names it — the host and the
+	// options this open is about to resolve with — so the publish's lease and
+	// the pane's channel land on ONE pooled connection rather than costing two
+	// authentications for one machine.
+	if err := remote.RemoteInstaller.EnsureInstalledRemote(
+		ctx, cfg.Host, session.SSHOptionsFromConfig(remote)...); err != nil {
+		return fmt.Errorf("publish the shell integration bundle on %s: %w", cfg.Host, err)
+	}
+	return nil
 }
 
 // localIntegrationStatus is what this open already knows about the pane's

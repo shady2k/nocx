@@ -83,6 +83,26 @@ type pwSSHServer struct {
 	// refuseSubsystem answers the sftp request false, which is what a host
 	// with no sftp-server does.
 	refuseSubsystem bool
+	// acceptLaunchExec makes this host RUN a command that is not one of the
+	// named probes — which on this fixture is the pane's own launch carrier,
+	// the string a helper-hosted ssh pane starts its far shell with
+	// (nocx-50w7p.21). It is a knob rather than the default because every
+	// fixture that predates it is asking about a probe or a subsystem, and a
+	// host that silently accepted arbitrary commands would answer a question
+	// nobody put.
+	//
+	// What it buys is the far half of the publish's ordering claim: the command
+	// is recorded, and `events` keeps it in the order the host saw it, so a
+	// test can say the bundle was written BEFORE the launch that looks for it
+	// was started.
+	acceptLaunchExec bool
+	// launchExecs is every launch command this host was asked to run, in order.
+	launchExecs []string
+	// events is what this host was asked to do, in the order it was asked:
+	// `exec:<command>` for a probe, `subsystem:<name>` for a subsystem, and
+	// `launch:<command>` for a launch. One list rather than three, because the
+	// fact worth asserting across them is their ORDER.
+	events []string
 	// conns counts the connections that finished AUTHENTICATION, and
 	// subsystems records the subsystem names asked for in order. They are the
 	// server's own view — "how many times did somebody authenticate" is not a
@@ -290,6 +310,7 @@ func (s *pwSSHServer) handleSession(ch gossh.Channel, reqs <-chan *gossh.Request
 			}
 			s.mu.Lock()
 			s.subsystems = append(s.subsystems, m.Subsystem)
+			s.events = append(s.events, "subsystem:"+m.Subsystem)
 			s.mu.Unlock()
 			_ = req.Reply(true, nil)
 			s.serveSFTP(ch)
@@ -301,9 +322,30 @@ func (s *pwSSHServer) handleSession(ch gossh.Channel, reqs <-chan *gossh.Request
 				_ = req.Reply(false, nil)
 				return
 			}
+			// A command this host does not recognise is the pane's own launch
+			// carrier, which the fixture runs only when a test asked it to
+			// (acceptLaunchExec). Everything the launch then does with its
+			// stdin is drained and kept, so the channel stays open and a reader
+			// on the other side is never blocked by a host that stopped
+			// reading.
+			if m.Command != remoteprobe.UnameCommand &&
+				m.Command != remoteprobe.HomeCommand && m.Command != remoteprobe.HomeFallbackCommand {
+				if !s.acceptLaunchExec {
+					_ = req.Reply(false, nil)
+					return
+				}
+				s.mu.Lock()
+				s.launchExecs = append(s.launchExecs, m.Command)
+				s.events = append(s.events, "launch:"+m.Command)
+				s.mu.Unlock()
+				_ = req.Reply(true, nil)
+				s.drainCh(ch)
+				return
+			}
 			s.mu.Lock()
 			s.execs++
 			s.execSeen = append(s.execSeen, m.Command)
+			s.events = append(s.events, "exec:"+m.Command)
 			s.mu.Unlock()
 			// The exec surface is COMMAND-AWARE, and it has to be: this
 			// fixture now stands behind the helper's named probes, and the
@@ -348,6 +390,36 @@ func (s *pwSSHServer) echoLoop(ch gossh.Channel) {
 			return
 		}
 	}
+}
+
+// drainCh reads and discards whatever a launched command's stdin carries, so
+// the host keeps the channel open and never blocks the side that is writing.
+// It is the launch counterpart of echoLoop: echoing would put the pane's own
+// frame back on the stream to be read as a line, which is a conversation this
+// fixture is not simulating.
+func (s *pwSSHServer) drainCh(ch gossh.Channel) {
+	buf := make([]byte, 4096)
+	for {
+		if _, err := ch.Read(buf); err != nil {
+			return
+		}
+	}
+}
+
+// launchCommands is every launch this host was asked to run, in order.
+func (s *pwSSHServer) launchCommands() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.launchExecs...)
+}
+
+// eventLog is what this host was asked to do, in the order it was asked — the
+// observable for "was the bundle written before the launch that looks for it
+// was started".
+func (s *pwSSHServer) eventLog() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.events...)
 }
 
 // serveSFTP serves the root directory over the channel, which is the far side

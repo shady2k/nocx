@@ -2,14 +2,15 @@ package transport
 
 // In-process SSH server for the tunnel.* transport tests, modeled on the
 // server internal/ssh tests use (ssh_real_test.go). It supports only what
-// a forward needs: the handshake and direct-tcpip channels. The tunnel path
-// never opens a session channel — RealClient.TunnelConn acquires the pooled
+// a forward needs: the handshake and direct-tcpip channels. A tunnel path
+// never opens a session channel — the connector acquires the pooled
 // connection and the lease dials direct-tcpip channels — so a session
 // handler is deliberately absent: a test that opened one would fail loudly
 // instead of silently passing.
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/tunnel"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -178,7 +180,26 @@ func tunnelTestSigner(t *testing.T) gossh.Signer {
 
 // tunnelTestClient builds a RealClient pointed at the test server, trusting
 // its host key, cleaned up with the test.
-func tunnelTestClient(t *testing.T, srv *tunnelTestSSHServer) *ssh.RealClient {
+// tunnelTestConnector is the transport tests' tunnel.Connector: one lease per
+// call over a pooled connection to the in-process SSH server, carrying a real
+// ssh channel per dial and a real remote listener per -R.
+//
+// # Why a stand, and what it stands for
+//
+// The connector a caller hands `WithTunnelConnector` in production is
+// internal/helper/tunnelchan's — every forward rides a channel on THIS
+// MACHINE'S HELPER (nocx-50w7p.8) — and a helper daemon is not something a
+// transport test can install. What these tests are about is the TRANSPORT:
+// which config it resolves and hands over, what it records in the ledger, and
+// what the wire says about a forward's port and its stop reason. So the
+// connector is real in every respect that matters to them — a real connection,
+// real channels, a real remote listener — and stands in for the one hop they
+// do not assert.
+//
+// The resolved options ARE honoured, deliberately: the transport copies the
+// profile's whole config into them, and a stand that ignored them could not
+// tell a transport that passed the right user from one that passed none.
+func tunnelTestConnector(t *testing.T, srv *tunnelTestSSHServer) tunnel.Connector {
 	t.Helper()
 	line := knownhosts.Line([]string{srv.addr}, srv.hostSigner.PublicKey())
 	dir := t.TempDir()
@@ -191,8 +212,73 @@ func tunnelTestClient(t *testing.T, srv *tunnelTestSSHServer) *ssh.RealClient {
 		t.Fatalf("NewReal: %v", err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
-	return client
+	return &transportTestConnector{t: t, client: client, srv: srv}
 }
+
+type transportTestConnector struct {
+	t      *testing.T
+	client *ssh.RealClient
+	srv    *tunnelTestSSHServer
+}
+
+func (c *transportTestConnector) TunnelConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.TunnelConn, error) {
+	c.t.Helper()
+	cfg := &ssh.ConnectConfig{}
+	for _, o := range opts {
+		o(cfg)
+	}
+	h, portStr, err := net.SplitHostPort(host)
+	if err != nil {
+		return nil, fmt.Errorf("connector: split %q: %w", host, err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("connector: port %q: %w", portStr, err)
+	}
+	pool, err := c.client.AcquirePooled(ctx, ssh.PooledSpec{
+		Host: h,
+		Port: port,
+		User: cfg.User,
+		// A key of its own: this stand's connection is never shared with a
+		// session's, so "which reference closed it" is not a question these
+		// tests have to answer.
+		Identity: "transport-test",
+		Config: &gossh.ClientConfig{
+			User:            cfg.User,
+			Auth:            cfg.AuthMethods,
+			HostKeyCallback: gossh.FixedHostKey(c.srv.hostSigner.PublicKey()),
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &transportTestLease{pool: pool, client: pool.Client()}, nil
+}
+
+// transportTestLease is the lease that connector answers with: the four
+// methods a forward drives, over the pooled connection's own client.
+type transportTestLease struct {
+	pool   *ssh.PooledConn
+	client *gossh.Client
+}
+
+func (l *transportTestLease) Dial(addr string) (net.Conn, error) { return l.client.Dial("tcp", addr) }
+
+func (l *transportTestLease) Listen(addr string) (net.Listener, error) {
+	return l.client.Listen("tcp", addr)
+}
+
+// Done is never closed: this stand has no loss watcher, and a transport test
+// that wants a loss scripts the connection dying at the server (the tunnel
+// strategy's own loss path is internal/tunnel's and internal/helper/
+// tunnelchan's subject, not this harness's).
+func (l *transportTestLease) Done() <-chan struct{} { return closedNever }
+
+func (l *transportTestLease) LostErr() error { return nil }
+
+func (l *transportTestLease) Close() error { return l.pool.Close() }
+
+var closedNever = make(chan struct{})
 
 // tunnelResolveConfig is the ConnectConfig a forward to the test server
 // needs: user test, public-key auth with the server's user key. The

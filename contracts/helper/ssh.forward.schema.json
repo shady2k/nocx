@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.forward.schema.json",
+  "title": "HelperSSHForwardResult",
+  "description": "The listener's identity and the address the server BOUND. `bind.port` is the port the server allocated — a requested 0 is resolved there and never reported as 0 — and `bind.host` is the transport's answer rather than a verified bind (the remote strategy's own caveat has always disclosed this, and the wire does not improve on the protocol).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["forward", "bind"],
+  "properties": {
+    "forward": {
+      "description": "The listener id, as 32 hex characters. Minted by the helper — the end that owns the listener — and echoed verbatim by the coordinator on the unforward and in every announcement about it. It is a DIFFERENT identity from a channel id: a channel is a stream somebody holds and a listener is what streams arrive on, and the two are ended by different ops.",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/forwardId"
+    },
+    "bind": {
+      "description": "The address the server bound. The port is the allocated one; the host is whatever the reply carried, which for a hostname bind is an all-interfaces answer rather than proof of what was bound.",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/channelTarget"
+    }
+  }
+}

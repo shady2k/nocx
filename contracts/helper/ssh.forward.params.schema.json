@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.forward.params.schema.json",
+  "title": "HelperSSHForwardParams",
+  "description": "Ask the far side for a LISTENER: the tcpip-forward request of a remote forward (-R) and the transport the remote lifecycle channel rides (ADR-0024). It is its own op rather than a `kind` of `open` because the two leave different things behind and are ended by different ops — a channel is one stream a caller holds, a listener is a stream FACTORY whose accepted connections arrive as channels nobody asked for by name (nocx-50w7p.8).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["destination", "bind", "acceptOnTrust"],
+  "properties": {
+    "destination": {
+      "description": "The connection the listener is requested on, and what to authenticate as: the same resolved triple `open` takes, resolved by the coordinator for the same reason (alias resolution, ~/.ssh/config merging and the credential's authorization against an endpoint stay there).",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/destination"
+    },
+    "bind": {
+      "description": "The address to listen on, on the FAR side. Port 0 asks the server to allocate, which is the ordinary request: a fixed port is a policy question (PermitListen) and an allocation is not. The host is a request and not a promise — a server may rebind a non-loopback bind to loopback (GatewayPorts) without a word to the client — so what was bound is reported back rather than assumed.",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/channelTarget"
+    },
+    "acceptOnTrust": {
+      "description": "The coordinator's answer to 'may a host key this host has never presented be recorded', carried here for the same reason probe and open carry it: this op may be the first contact with a host, and the helper may not decide that for itself.",
+      "type": "boolean"
+    }
+  }
+}

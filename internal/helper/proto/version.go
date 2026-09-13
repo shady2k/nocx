@@ -52,4 +52,17 @@ package proto
 // channel answers `unknown_op`, which a coordinator would have to read as
 // "this machine's helper is older than this app" (nocx-50w7p.2's rationale,
 // one generation on).
-const Version = "4"
+//
+// This is 5 rather than 4 because the wire grew the FORWARD plane: the
+// `direct-tcpip` channel kind (with the `target` a direct channel needs),
+// the `forward` and `unforward` ops for a listener on the far side, and the
+// two notifications that carry a forwarded connection and the end of the
+// listener it arrived on (nocx-50w7p.8). One op added would have been
+// answerable as `unknown_op`, which is a sentence a coordinator can act on;
+// the `target` FIELD on `open` is not — an older helper builds its params
+// schema from the same struct this one does, accepts the field, and ignores
+// it, so a direct-tcpip open would be answered as a subsystem one and the
+// caller would have a channel to the wrong thing. That is the half that makes
+// this a bump rather than an addition, and the two new ops are the half that
+// makes it honest.
+const Version = "5"

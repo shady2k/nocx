@@ -73,6 +73,8 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 		attachments:    make(map[[16]byte]*AttachedSession),
 		channels:       make(map[proto.ChannelID]*ChannelStream),
 		parkedChannels: make(map[proto.ChannelID][][]byte),
+		forwards:       make(map[proto.ForwardID]*Forward),
+		parkedForwards: make(map[proto.ForwardID][]proto.ForwardedTCPIPEvent),
 		done:           make(chan struct{}),
 		hsCh:           make(chan error, 1),
 	}

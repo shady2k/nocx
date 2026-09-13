@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.unforward.params.schema.json",
+  "title": "HelperSSHUnforwardParams",
+  "description": "End one listener: cancel the remote listen and end the accepted channels still riding it. Like `close` it is idempotent — an id this helper does not hold is answered as done, because the ordinary caller is a lease being released and a second release is not a disagreement about state.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["forward"],
+  "properties": {
+    "forward": {
+      "description": "The listener to end, as 32 hex characters.",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/forwardId"
+    }
+  }
+}

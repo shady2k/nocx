@@ -100,6 +100,25 @@ const OpOpen = "open"
 // process shutting down and a second close is not a disagreement about state.
 const OpClose = "close"
 
+// OpForward asks the helper for a LISTENER on the far side: the tcpip-forward
+// request of a remote forward (-R), and the transport the remote lifecycle
+// channel rides (ADR-0024). It answers the identity the listener will be
+// announced under and the address the server actually bound.
+//
+// It is its own op rather than a `kind` of `open` because the two leave
+// different things behind and are ended by different ops: a channel is one
+// stream a caller holds, and a listener is a stream FACTORY whose accepted
+// connections arrive as channels nobody asked for by name. Folding them
+// together would make "accept on the far side" a mode of "open one stream",
+// and the two would then have to agree about who announces what.
+const OpForward = "forward"
+
+// OpUnforward ends one listener and the accepted channels still riding it.
+// Like `close` it is idempotent: an id this helper does not hold is answered
+// as done, because the ordinary caller is a lease being released and a second
+// release is not a disagreement about state.
+const OpUnforward = "unforward"
+
 // EventChannelClosed is the notification a helper sends when a channel's
 // REMOTE end is gone: the server closed it, the stream errored, or the
 // connection died under it.
@@ -111,6 +130,24 @@ const OpClose = "close"
 // so every byte the helper wrote before the close has already been written to
 // it, and a reader that sees this event has seen all of them.
 const EventChannelClosed = "channel-closed"
+
+// EventForwardedTCPIP is the notification a helper sends when a connection
+// arrives on a listener a `forward` op created: the far side accepted
+// somebody, and the bytes of that connection are a channel like any other.
+//
+// It is an announcement rather than a result because nobody asked: the
+// coordinator holds a listener, and the connection is the far side's act.
+// Ordering is the same edge the channel plane relies on — a notification
+// rides the same wire as the data frames — so the id is on the wire before
+// the first byte of the stream it names is.
+const EventForwardedTCPIP = "forwarded-tcpip"
+
+// EventForwardClosed is the notification that a listener is gone: the
+// coordinator asked (unforward), the far side's connection died under it, or
+// the listener was closed by the server. The cause is carried, because a
+// coordinator holding an Accept that will never return has to be able to say
+// whether it stopped waiting because it asked to or because the transport did.
+const EventForwardClosed = "forward-closed"
 
 // The REVERSE ops. Each is asked by the helper and answered by the coordinator.
 const (
@@ -418,12 +455,49 @@ const (
 	// and pkg/sftp stays in the coordinator, where the file code that
 	// consumes it already lives.
 	ChannelSFTP ChannelKind = "sftp"
+	// ChannelDirectTCPIP is a `direct-tcpip` channel to the Target the params
+	// name: the far side connects to that address on ITS network and the
+	// helper carries the bytes. It is the outbound half of a forward (-L, and
+	// every SOCKS CONNECT), and the address resolves at the far end — which is
+	// the whole point of both, since a target that only exists behind the
+	// remote host is what a forward is for.
+	ChannelDirectTCPIP ChannelKind = "direct-tcpip"
 )
+
+// ChannelTarget is one address a channel is opened to, TYPED.
+//
+// Host and Port are two fields and never one "host:port" string, for the
+// reason SSHDestination is three: a spelling would have to be parsed again on
+// the far side by something that is not allowed to guess, and the one caller
+// that legitimately carries a name rather than an address — a SOCKS CONNECT —
+// still carries a NAME and a PORT, not a sentence. An IPv6 literal therefore
+// crosses without brackets and is joined there, rather than being assembled
+// here in a form the far side would have to un-pick.
+type ChannelTarget struct {
+	// Host is the address or name to connect to, resolved on the FAR side.
+	Host string `json:"host"`
+	// Port is the port, 1-65535. It is never 0: a caller asking for an
+	// ephemeral port on the far side has asked for something that is not a
+	// forward (the forwarded LISTENER is the one that may request 0).
+	Port int `json:"port"`
+}
 
 // OpenChannelParams asks the helper for one proxied channel.
 type OpenChannelParams struct {
 	Destination SSHDestination `json:"destination"`
 	Kind        ChannelKind    `json:"kind"`
+	// Target is where a direct-tcpip channel connects, on the far side's
+	// network. Required for ChannelDirectTCPIP and absent for every other
+	// kind, which the helper checks rather than tolerates: a target on an
+	// sftp open is a caller that believes it is getting something else.
+	//
+	// It is a POINTER so that "absent" is a fact on the wire and not a
+	// zero-valued struct: encoding/json's omitempty does not omit a struct,
+	// and an sftp open would then carry {"target":{"host":"","port":0}} —
+	// which the frozen schema for that op must either accept (as noise) or
+	// reject, while a nil target is simply not there. The schema requires it
+	// exactly when the kind does (ssh.open.params, if/then).
+	Target *ChannelTarget `json:"target,omitempty"`
 	// AcceptOnTrust is the same caller's decision ProbeParams carries, and it
 	// is here for the same reason: a channel's handshake may meet a host key
 	// nobody has recorded, and the helper may not decide that for itself.
@@ -456,6 +530,87 @@ type CloseChannelResult struct{}
 // it for control flow that belongs to the read path.
 type ChannelClosedEvent struct {
 	Channel ChannelID `json:"channel"`
+	Error   string    `json:"error,omitempty"`
+}
+
+// ForwardID identifies one listener the helper holds for the life of the
+// connection that asked for it. Like ChannelID it is minted by the HELPER —
+// the end that owns the listener — echoed verbatim by the coordinator, and
+// opaque in both directions.
+//
+// It is its own type rather than a second use of ChannelID because the two
+// name different things and are ended by different ops: a channel is a stream
+// somebody holds, a listener is the thing streams arrive on, and an id that
+// could be either would make `close` and `unforward` interchangeable at the
+// type level while meaning different things on the wire.
+//
+// The type and its codec live in forward_id.go: it has no data plane of its
+// own (the connections it produces are ordinary channels), so it does not
+// belong in the file that lays out a channel frame.
+
+// ForwardParams asks for a listener on the far side.
+//
+// The destination is the same resolved triple `open` takes — the connection
+// the listener is requested on — and the bind is the address to listen on
+// THERE. Port 0 asks the server to allocate, which is the ordinary request:
+// a fixed port is a policy question (PermitListen) and an allocation is not.
+type ForwardParams struct {
+	Destination SSHDestination `json:"destination"`
+	// Bind is the requested listen address on the far side. The HOST is the
+	// server's business as much as the client's — a non-loopback bind is
+	// rebindable by policy (GatewayPorts) without a word to the client — so
+	// it is reported back rather than promised, exactly as the coordinator's
+	// own -R strategy already treats it.
+	Bind ChannelTarget `json:"bind"`
+	// AcceptOnTrust is the caller's host-key decision, carried for the reason
+	// `open` carries it: this op may be the first contact with a host.
+	AcceptOnTrust bool `json:"acceptOnTrust"`
+}
+
+// ForwardResult names the listener and the address the server bound.
+//
+// Bind is the transport's answer: the PORT is the one the server allocated (a
+// requested 0 is resolved there and never reported as 0), and the HOST is
+// whatever the reply carried — which for a hostname bind is an all-interfaces
+// answer rather than proof of what was bound. The coordinator's own remote
+// strategy has always disclosed exactly this; the wire does not improve on it.
+type ForwardResult struct {
+	Forward ForwardID     `json:"forward"`
+	Bind    ChannelTarget `json:"bind"`
+}
+
+// UnforwardParams ends one listener.
+type UnforwardParams struct {
+	Forward ForwardID `json:"forward"`
+}
+
+// UnforwardResult is the empty answer an idempotent unforward gives.
+type UnforwardResult struct{}
+
+// ForwardedTCPIPEvent is the notification payload for EventForwardedTCPIP: a
+// connection arrived on a listener, and this is the channel its bytes will be
+// keyed by.
+//
+// Peer is the accepted connection's remote address as the FAR side reported
+// it — a fact about somebody else's machine, passed through for the log and
+// for the local end's RemoteAddr. It is not authenticated and nothing acts on
+// it: the capability of a lifecycle candidate is what authenticates, and this
+// is deliberately not a second, weaker way to.
+type ForwardedTCPIPEvent struct {
+	Forward ForwardID `json:"forward"`
+	Channel ChannelID `json:"channel"`
+	Peer    string    `json:"peer,omitempty"`
+}
+
+// ForwardClosedEvent is the notification payload for EventForwardClosed.
+//
+// Error is empty when the coordinator itself asked (its own `unforward`), and
+// the helper's sentence when the listener ended for a reason nobody here
+// chose — the far side's connection dying under it is the case a -R forward
+// and the remote lifecycle channel both have to hear about, because both hold
+// an Accept that would otherwise wait for ever.
+type ForwardClosedEvent struct {
+	Forward ForwardID `json:"forward"`
 	Error   string    `json:"error,omitempty"`
 }
 

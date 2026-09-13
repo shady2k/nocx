@@ -23,6 +23,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -30,6 +31,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -127,14 +130,23 @@ type fixture struct {
 	passwords  []string
 	keys       []string
 	subsystems []string
+	// the forward plane (nocx-50w7p.8): the policy the server applies, the
+	// listeners it bound, and the direct-tcpip targets it was asked to reach.
+	allowForward  bool
+	permitListen  func(host string, port int) bool
+	forwards      map[string]net.Listener
+	forwardBinds  []forwardBind
+	directTargets []string
 }
 
 func newFixture(t *testing.T, password string, acceptedKey gossh.Signer) *fixture {
 	t.Helper()
 	f := &fixture{
-		hostSigner: newSigner(t),
-		userSigner: acceptedKey,
-		rootDir:    t.TempDir(),
+		hostSigner:   newSigner(t),
+		userSigner:   acceptedKey,
+		rootDir:      t.TempDir(),
+		allowForward: true,
+		forwards:     map[string]net.Listener{},
 	}
 	config := &gossh.ServerConfig{
 		PasswordCallback: func(_ gossh.ConnMetadata, pw []byte) (*gossh.Permissions, error) {
@@ -163,7 +175,14 @@ func newFixture(t *testing.T, password string, acceptedKey gossh.Signer) *fixtur
 		t.Fatalf("listen: %v", err)
 	}
 	f.addr = ln.Addr().String()
-	t.Cleanup(func() { _ = ln.Close() })
+	t.Cleanup(func() {
+		_ = ln.Close()
+		f.mu.Lock()
+		for _, fl := range f.forwards {
+			_ = fl.Close()
+		}
+		f.mu.Unlock()
+	})
 
 	go func() {
 		for {
@@ -179,7 +198,11 @@ func newFixture(t *testing.T, password string, acceptedKey gossh.Signer) *fixtur
 
 // serve runs one connection to the end. A probe never opens a channel — it
 // authenticates and closes — so the session loop exists to keep a client that
-// asks for one from hanging; a CHANNEL request, since nocx-50w7p.3, is served.
+// asks for one from hanging; a CHANNEL request, since nocx-50w7p.3, is served,
+// and since nocx-50w7p.8 so are the two shapes a FORWARD needs: a direct-tcpip
+// channel (which is a channel, but one that names a target rather than a
+// subsystem) and the tcpip-forward global request (which is not a channel at
+// all and is answered out of band).
 func (f *fixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 	defer func() { _ = conn.Close() }()
 	sconn, chans, reqs, err := gossh.NewServerConn(conn, config)
@@ -187,14 +210,237 @@ func (f *fixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 		return
 	}
 	defer func() { _ = sconn.Close() }()
-	go gossh.DiscardRequests(reqs)
+	go f.serveGlobalRequests(sconn, reqs)
 	for newChan := range chans {
+		if newChan.ChannelType() == "direct-tcpip" {
+			f.serveDirectTCPIP(newChan, newChan.ExtraData())
+			continue
+		}
 		ch, chReqs, aerr := newChan.Accept()
 		if aerr != nil {
 			continue
 		}
 		go f.serveChannel(ch, chReqs)
 	}
+}
+
+// serveGlobalRequests answers the forwarding requests a remote listener needs.
+// tcpip-forward binds a real loopback listener and replies with the allocated
+// port (for a port-0 request); cancel-tcpip-forward drops it. Everything else
+// is refused, so a test that asks for something this fixture does not implement
+// fails where it asked instead of hanging on a reply that never comes.
+//
+// The forwarding payloads are decoded by hand: the protocol writes them as
+// string/uint32 sequences (RFC 4254 §7) with lowercase field names, and
+// gossh's Unmarshal cannot set an external struct's unexported fields.
+func (f *fixture) serveGlobalRequests(sconn *gossh.ServerConn, reqs <-chan *gossh.Request) {
+	for req := range reqs {
+		switch req.Type {
+		case "tcpip-forward":
+			f.handleForward(sconn, req)
+		case "cancel-tcpip-forward":
+			f.cancelForward(req)
+		default:
+			_ = req.Reply(false, nil)
+		}
+	}
+}
+
+// forwardBind is one successful tcpip-forward bind: what was requested and what
+// the server actually bound (a requested port 0 is resolved here, so the reply
+// has to carry this number).
+type forwardBind struct {
+	requestedHost string
+	requestedPort int
+	allocatedPort int
+}
+
+// lastForwardBind is the most recent successful bind.
+func (f *fixture) lastForwardBind() (string, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.forwardBinds) == 0 {
+		return "", 0
+	}
+	b := f.forwardBinds[len(f.forwardBinds)-1]
+	return b.requestedHost, b.allocatedPort
+}
+
+func (f *fixture) handleForward(sconn *gossh.ServerConn, req *gossh.Request) {
+	p := newForwardPayloadReader(req.Payload)
+	addr, ok := p.str()
+	rport, okPort := p.u32()
+	if !ok || !okPort {
+		_ = req.Reply(false, nil)
+		return
+	}
+	f.mu.Lock()
+	allow := f.allowForward && (f.permitListen == nil || f.permitListen(addr, int(rport)))
+	f.mu.Unlock()
+	if !allow {
+		_ = req.Reply(false, nil)
+		return
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort(addr, strconv.Itoa(int(rport))))
+	if err != nil {
+		_ = req.Reply(false, nil)
+		return
+	}
+	tcpAddr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		_ = ln.Close()
+		_ = req.Reply(false, nil)
+		return
+	}
+	f.mu.Lock()
+	if f.forwards == nil {
+		f.forwards = map[string]net.Listener{}
+	}
+	f.forwards[net.JoinHostPort(addr, strconv.Itoa(tcpAddr.Port))] = ln
+	f.forwardBinds = append(f.forwardBinds, forwardBind{requestedHost: addr, requestedPort: int(rport), allocatedPort: tcpAddr.Port})
+	f.mu.Unlock()
+
+	if rport == 0 {
+		_ = req.Reply(true, gossh.Marshal(struct{ Port uint32 }{uint32(tcpAddr.Port)})) //nolint:gosec // SSH protocol values fit uint32
+	} else {
+		_ = req.Reply(true, nil)
+	}
+	go func() {
+		for {
+			c, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			f.relayForwarded(sconn, addr, tcpAddr.Port, c)
+		}
+	}()
+}
+
+// cancelForward ends the listener the cancel names. The payload is the same
+// bind address the request carried.
+func (f *fixture) cancelForward(req *gossh.Request) {
+	p := newForwardPayloadReader(req.Payload)
+	addr, ok := p.str()
+	rport, okPort := p.u32()
+	if !ok || !okPort {
+		_ = req.Reply(false, nil)
+		return
+	}
+	f.mu.Lock()
+	for key, ln := range f.forwards {
+		if strings.HasPrefix(key, net.JoinHostPort(addr, strconv.Itoa(int(rport)))+":") ||
+			key == net.JoinHostPort(addr, strconv.Itoa(int(rport))) {
+			_ = ln.Close()
+			delete(f.forwards, key)
+		}
+	}
+	f.mu.Unlock()
+	_ = req.Reply(true, nil)
+}
+
+// relayForwarded delivers one accepted connection to the client as a
+// forwarded-tcpip channel — the exact -R data path OpenSSH provides.
+func (f *fixture) relayForwarded(sconn *gossh.ServerConn, requestedHost string, allocatedPort int, c net.Conn) {
+	defer func() { _ = c.Close() }()
+	originHost, originPortStr, err := net.SplitHostPort(c.RemoteAddr().String())
+	if err != nil {
+		return
+	}
+	originPort, err := strconv.Atoi(originPortStr)
+	if err != nil {
+		return
+	}
+	payload := gossh.Marshal(struct {
+		Addr       string
+		Port       uint32
+		OriginAddr string
+		OriginPort uint32
+	}{
+		Addr:       requestedHost,
+		Port:       uint32(allocatedPort), //nolint:gosec // SSH protocol values fit uint32
+		OriginAddr: originHost,
+		OriginPort: uint32(originPort), //nolint:gosec // SSH protocol values fit uint32
+	})
+	ch, chReqs, err := sconn.OpenChannel("forwarded-tcpip", payload)
+	if err != nil {
+		return
+	}
+	defer func() { _ = ch.Close() }()
+	go gossh.DiscardRequests(chReqs)
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(c, ch); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(ch, c); done <- struct{}{} }()
+	<-done
+}
+
+// serveDirectTCPIP connects to the target the channel names and proxies it. The
+// dial happens BEFORE the channel is accepted, so a refused target rejects the
+// open itself — which is the refusal the coordinator's dial sees.
+func (f *fixture) serveDirectTCPIP(newChan gossh.NewChannel, extraData []byte) {
+	p := newForwardPayloadReader(extraData)
+	raddr, ok := p.str()
+	rport, okPort := p.u32()
+	if _, okOrigin := p.str(); !ok || !okPort || !okOrigin {
+		_ = newChan.Reject(gossh.ConnectionFailed, "connect failed: malformed direct-tcpip payload")
+		return
+	}
+	f.mu.Lock()
+	f.directTargets = append(f.directTargets, net.JoinHostPort(raddr, strconv.Itoa(int(rport))))
+	f.mu.Unlock()
+	targetConn, err := net.DialTimeout("tcp", net.JoinHostPort(raddr, strconv.Itoa(int(rport))), 5*time.Second)
+	if err != nil {
+		_ = newChan.Reject(gossh.ConnectionFailed, "connect failed: "+err.Error())
+		return
+	}
+	defer func() { _ = targetConn.Close() }()
+	ch, chReqs, err := newChan.Accept()
+	if err != nil {
+		return
+	}
+	defer func() { _ = ch.Close() }()
+	go gossh.DiscardRequests(chReqs)
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(targetConn, ch); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(ch, targetConn); done <- struct{}{} }()
+	<-done
+}
+
+// directTargetsSeen reports the direct-tcpip targets this fixture was asked to
+// connect to, in order.
+func (f *fixture) directTargetsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.directTargets...)
+}
+
+// forwardPayloadReader decodes the forwarding payloads the protocol puts on the
+// wire as string/uint32 sequences (RFC 4254 §7): gossh's Marshal writes
+// lowercase field names, and its Unmarshal cannot set an external package's
+// unexported fields.
+type forwardPayloadReader struct{ r *bytes.Reader }
+
+func newForwardPayloadReader(b []byte) *forwardPayloadReader {
+	return &forwardPayloadReader{r: bytes.NewReader(b)}
+}
+
+func (p *forwardPayloadReader) str() (string, bool) {
+	var l uint32
+	if err := binary.Read(p.r, binary.BigEndian, &l); err != nil {
+		return "", false
+	}
+	b := make([]byte, l)
+	if _, err := io.ReadFull(p.r, b); err != nil {
+		return "", false
+	}
+	return string(b), true
+}
+
+func (p *forwardPayloadReader) u32() (uint32, bool) {
+	var v uint32
+	if err := binary.Read(p.r, binary.BigEndian, &v); err != nil {
+		return 0, false
+	}
+	return v, true
 }
 
 // serveChannel answers a session channel's requests. The `sftp` subsystem is

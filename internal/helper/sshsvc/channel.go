@@ -53,10 +53,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"strconv"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/helper/sshdial"
 	"github.com/shady2k/nocx/internal/ssh"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -101,16 +104,52 @@ func mintChannelID() (proto.ChannelID, error) {
 type openChannel struct {
 	id   proto.ChannelID
 	conn *host.Host
+	// pool is the pooled reference this channel holds, released when the
+	// channel ends. It is nil for a channel a FORWARD accepted: that
+	// connection arrived on a listener, the listener holds the reference that
+	// keeps the transport alive, and taking a second one per accepted
+	// connection would make the listener's death and a stream's death two
+	// states where the caller has one.
 	pool *ssh.PooledConn
-	// sess is the ssh session channel carrying the subsystem. Closing it is
-	// the close-to-cancel mechanism for a write wedged against a server that
-	// has stopped reading.
-	sess   *gossh.Session
-	stdin  io.WriteCloser
-	stdout io.Reader
+	// end is the far side of this channel: a subsystem's stream, or a
+	// connection dialed for a direct-tcpip open, or an accepted forwarded
+	// connection. Whichever it is, the bytes on it move the same way.
+	end remoteEnd
+	// owner is the listener this channel arrived on, nil for a channel an op
+	// opened. A forwarded channel is registered in the same table an op-opened
+	// one is — bytes are routed by id and close is close — and the owner is
+	// what lets the listener end the streams it produced.
+	owner *openForward
 
 	closeOnce sync.Once
 }
+
+// remoteEnd is the far side of one proxied channel: where its bytes come from
+// and go to, and how it is ended.
+//
+// It is an interface rather than x/crypto/ssh's Session because the two kinds
+// this generation opens have nothing in common below the bytes. A subsystem
+// arrives as two pipes on a session (and closing the SESSION is what unblocks a
+// write wedged against a server that stopped reading); a direct-tcpip channel
+// and a forwarded connection are both a net.Conn. The channel machinery —
+// registration, the reader pump, the write path, the close — is identical for
+// all three, which is exactly why it is written once against this.
+type remoteEnd interface {
+	io.Reader
+	io.Writer
+	Close() error
+}
+
+// subsystemEnd is a session channel carrying a subsystem.
+type subsystemEnd struct {
+	sess   *gossh.Session
+	stdin  io.WriteCloser
+	stdout io.Reader
+}
+
+func (e *subsystemEnd) Read(p []byte) (int, error)  { return e.stdout.Read(p) }
+func (e *subsystemEnd) Write(p []byte) (int, error) { return e.stdin.Write(p) }
+func (e *subsystemEnd) Close() error                { return e.sess.Close() }
 
 // Ops adds the two channel ops to the service's own.
 func (s *Service) channelOps() []string { return []string{proto.OpOpen, proto.OpClose} }
@@ -130,34 +169,24 @@ func (s *Service) openChannel(ctx context.Context, p proto.OpenChannelParams) (p
 		return proto.OpenChannelResult{}, err
 	}
 
-	pool, sess, stdin, stdout, err := s.dialChannel(ctx, conn, p)
+	pool, end, err := s.dialChannel(ctx, conn, p)
 	if err != nil {
 		return proto.OpenChannelResult{}, err
 	}
 
 	id, err := mintChannelID()
 	if err != nil {
-		_ = sess.Close()
+		_ = end.Close()
 		_ = pool.Close()
 		return proto.OpenChannelResult{}, internalRefusal("mint a channel id: %v", err)
 	}
-	ch := &openChannel{id: id, conn: conn, pool: pool, sess: sess, stdin: stdin, stdout: stdout}
+	ch := &openChannel{id: id, conn: conn, pool: pool, end: end}
 
-	s.mu.Lock()
-	if s.channels == nil {
-		s.channels = make(map[proto.ChannelID]*openChannel)
-	}
-	if _, exists := s.channels[id]; exists {
-		// Astronomically unlikely with 128 random bits, and refused rather
-		// than overwritten anyway: two channels under one id is a stream
-		// whose bytes go somewhere nobody can predict.
-		s.mu.Unlock()
-		_ = sess.Close()
+	if err := s.registerChannel(ch); err != nil {
+		_ = end.Close()
 		_ = pool.Close()
-		return proto.OpenChannelResult{}, internalRefusal("channel id collision")
+		return proto.OpenChannelResult{}, err
 	}
-	s.channels[id] = ch
-	s.mu.Unlock()
 
 	s.log.Info("ssh: channel opened",
 		"channel", id.String(), "kind", string(p.Kind),
@@ -165,87 +194,142 @@ func (s *Service) openChannel(ctx context.Context, p proto.OpenChannelParams) (p
 	return proto.OpenChannelResult{Channel: id}, nil
 }
 
+// registerChannel puts one channel in the table bytes, closes and the reader
+// pump are routed through. An id the helper already holds is refused rather
+// than overwritten — two channels under one id is a stream whose bytes go
+// somewhere nobody can predict — and with 128 random bits that is a bug in
+// this process rather than a collision anybody will meet.
+func (s *Service) registerChannel(ch *openChannel) error {
+	s.mu.Lock()
+	if s.channels == nil {
+		s.channels = make(map[proto.ChannelID]*openChannel)
+	}
+	if _, exists := s.channels[ch.id]; exists {
+		s.mu.Unlock()
+		return internalRefusal("channel id collision")
+	}
+	s.channels[ch.id] = ch
+	s.mu.Unlock()
+	return nil
+}
+
+// takeChannel removes one channel from the table and returns it, or nil when
+// this helper does not hold that id.
+func (s *Service) takeChannel(id proto.ChannelID) *openChannel {
+	s.mu.Lock()
+	ch := s.channels[id]
+	delete(s.channels, id)
+	s.mu.Unlock()
+	return ch
+}
+
 // dialChannel acquires the pooled connection and opens the requested kind of
 // channel on it. On any failure the pooled reference is released before
 // returning, so a refused subsystem does not leave a pool entry behind that
 // nothing owns.
-func (s *Service) dialChannel(ctx context.Context, conn *host.Host, p proto.OpenChannelParams) (*ssh.PooledConn, *gossh.Session, io.WriteCloser, io.Reader, error) {
-	auth, err := s.authMethod(ctx, conn, p.Destination.Identity)
+func (s *Service) dialChannel(ctx context.Context, conn *host.Host, p proto.OpenChannelParams) (*ssh.PooledConn, remoteEnd, error) {
+	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, err
 	}
-	timeout := ProbeTimeout
-	cfg := &gossh.ClientConfig{
-		User: p.Destination.User,
-		// Exactly one method, for the reason the probe path gives: a second
-		// attempt against one host is indistinguishable from password
-		// spraying, and MaxAuthTries is finite.
-		Auth:            []gossh.AuthMethod{auth},
-		HostKeyCallback: s.hostKeyCallback(ctx, conn, p.AcceptOnTrust),
-		Timeout:         timeout,
+
+	switch p.Kind {
+	case proto.ChannelSFTP:
+		end, err := openSubsystemStream(pool, "sftp")
+		if err != nil {
+			_ = pool.Close()
+			return nil, nil, classifyChannelError(err)
+		}
+		return pool, end, nil
+	case proto.ChannelDirectTCPIP:
+		c, err := sshdial.DialDirectTCP(pool.Client(), net.JoinHostPort(p.Target.Host, strconv.Itoa(p.Target.Port)))
+		if err != nil {
+			_ = pool.Close()
+			return nil, nil, classifyChannelError(err)
+		}
+		return pool, c, nil
+	default:
+		// validateDestination has already refused this, so reaching it means
+		// the two disagree — which is a bug in this process and not a caller's
+		// mistake, and saying so is cheaper than a silently refused channel.
+		_ = pool.Close()
+		return nil, nil, fmt.Errorf("%w: kind %q", errBadChannelParams, p.Kind)
+	}
+}
+
+// acquirePooled dials or reuses the one pooled connection for a destination,
+// with the client configuration this helper authenticates under.
+func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SSHDestination, acceptOnTrust bool) (*ssh.PooledConn, error) {
+	cfg, err := s.clientConfig(ctx, conn, d.User, d.Identity, acceptOnTrust)
+	if err != nil {
+		return nil, err
 	}
 	pool, err := s.client.AcquirePooled(ctx, ssh.PooledSpec{
-		Host:     p.Destination.Host,
-		Port:     p.Destination.Port,
-		User:     p.Destination.User,
-		Identity: identityKey(p.Destination.Identity),
+		Host:     d.Host,
+		Port:     d.Port,
+		User:     d.User,
+		Identity: identityKey(d.Identity),
 		Config:   cfg,
 	})
 	if err != nil {
-		return nil, nil, nil, nil, classifyChannelError(err)
+		return nil, classifyChannelError(err)
 	}
+	return pool, nil
+}
 
+// openSubsystemStream opens a session channel and starts one subsystem on it.
+//
+// The order matters and is the reason this is a function rather than four lines
+// in the switch: the session is left open until the subsystem request is
+// answered, because closing it while the request is in flight would turn a
+// refusal into a transport error.
+func openSubsystemStream(pool *ssh.PooledConn, subsystem string) (*subsystemEnd, error) {
 	sess, err := pool.Client().NewSession()
 	if err != nil {
-		_ = pool.Close()
-		return nil, nil, nil, nil, classifyChannelError(err)
+		return nil, err
 	}
-	// WRITE YOUR OWN REFUSAL, and the order matters: the session is left open
-	// until the subsystem request is answered, because closing it while the
-	// request is in flight would turn a refusal into a transport error.
-	switch p.Kind {
-	case proto.ChannelSFTP:
-		if subErr := sess.RequestSubsystem("sftp"); subErr != nil {
-			_ = sess.Close()
-			_ = pool.Close()
-			return nil, nil, nil, nil, classifyChannelError(subErr)
-		}
-	default:
+	if subErr := sess.RequestSubsystem(subsystem); subErr != nil {
 		_ = sess.Close()
-		_ = pool.Close()
-		return nil, nil, nil, nil, fmt.Errorf("%w: kind %q", errBadChannelParams, p.Kind)
+		return nil, subErr
 	}
-
 	stdin, err := sess.StdinPipe()
 	if err != nil {
 		_ = sess.Close()
-		_ = pool.Close()
-		return nil, nil, nil, nil, classifyChannelError(err)
+		return nil, err
 	}
 	stdout, err := sess.StdoutPipe()
 	if err != nil {
 		_ = sess.Close()
-		_ = pool.Close()
-		return nil, nil, nil, nil, classifyChannelError(err)
+		return nil, err
 	}
-	return pool, sess, stdin, stdout, nil
+	return &subsystemEnd{sess: sess, stdin: stdin, stdout: stdout}, nil
 }
 
-// ResponseWritten starts the channel's reader pump, once the open's answer is
-// on the wire (host.ResponseObserver).
+// ResponseWritten starts the channel's reader pump, or a listener's accept
+// loop, once the open's or the forward's answer is on the wire
+// (host.ResponseObserver).
+//
+// Both are deferred starts for the SAME reason, and it is worth saying once
+// where both are dispatched: what either writes about is keyed by an id the
+// coordinator learns FROM the response, so a pump or a loop started in the
+// handler could put a frame on the wire describing something the caller cannot
+// address yet — bytes dropped as orphaned, for the sftp handshake that is a
+// hang, and for a forwarded connection a stream nobody can read.
 func (s *Service) ResponseWritten(_ context.Context, op string, result any) {
-	if op != proto.OpOpen {
-		return
-	}
-	res, ok := result.(proto.OpenChannelResult)
-	if !ok {
-		return
-	}
-	s.mu.Lock()
-	ch := s.channels[res.Channel]
-	s.mu.Unlock()
-	if ch != nil {
-		go ch.pumpToCoordinator(s.log)
+	switch op {
+	case proto.OpOpen:
+		res, ok := result.(proto.OpenChannelResult)
+		if !ok {
+			return
+		}
+		s.mu.Lock()
+		ch := s.channels[res.Channel]
+		s.mu.Unlock()
+		if ch != nil {
+			go ch.pumpToCoordinator(s.log)
+		}
+	case proto.OpForward:
+		s.forwardResponseWritten(result)
 	}
 }
 
@@ -261,7 +345,7 @@ func (c *openChannel) pumpToCoordinator(log *slog.Logger) {
 	buf := make([]byte, channelReadBuf)
 	var cause string
 	for {
-		n, err := c.stdout.Read(buf)
+		n, err := c.end.Read(buf)
 		if n > 0 {
 			// No copy: SendChannelData frames the bytes before it returns,
 			// under the host's writer mutex.
@@ -271,6 +355,14 @@ func (c *openChannel) pumpToCoordinator(log *slog.Logger) {
 			}
 		}
 		if err != nil {
+			// io.EOF leaves the cause EMPTY, and that is parity rather than a
+			// gap: x/crypto/ssh reports a channel's end — including one whose
+			// transport died under it — as io.EOF, and the coordinator's own
+			// pooled lease read that same signal through this same library
+			// before the dial moved here. What names a LOST TRANSPORT is a
+			// watcher, and both of them are where they belong: the forward's
+			// own (forward.go's pool.Wait) and the helper connection's (the
+			// coordinator's lease).
 			if !errors.Is(err, io.EOF) {
 				cause = err.Error()
 			}
@@ -292,7 +384,7 @@ func (s *Service) ChannelData(_ context.Context, f proto.ChannelFrame) {
 		s.log.Warn("channel data dropped: no such channel", "channel", f.Channel.String(), "bytes", len(f.Payload))
 		return
 	}
-	if _, err := ch.stdin.Write(f.Payload); err != nil {
+	if _, err := ch.end.Write(f.Payload); err != nil {
 		// A write that fails ends THIS channel and nothing else: the pool
 		// holds one connection for many channels, and a stream the remote
 		// end closed says nothing about the others.
@@ -301,9 +393,9 @@ func (s *Service) ChannelData(_ context.Context, f proto.ChannelFrame) {
 	}
 }
 
-// closeChannel ends one channel: the ssh session is closed first — which is
-// what unblocks a read or write wedged against a server that stopped talking —
-// and the pooled reference is released after it.
+// closeChannel ends one channel: the far end is closed first — which is what
+// unblocks a read or write wedged against a server that stopped talking — and
+// the pooled reference is released after it.
 //
 // An id this helper does not hold is answered as CLOSED rather than refused.
 // The caller is ordinarily a process shutting down, and a second close is not
@@ -314,10 +406,7 @@ func (s *Service) closeChannel(id proto.ChannelID) (proto.CloseChannelResult, er
 	if id.IsZero() {
 		return proto.CloseChannelResult{}, fmt.Errorf("%w: no channel id", errBadChannelParams)
 	}
-	s.mu.Lock()
-	ch := s.channels[id]
-	delete(s.channels, id)
-	s.mu.Unlock()
+	ch := s.takeChannel(id)
 	if ch == nil {
 		s.log.Debug("ssh: close for an unknown channel", "channel", id.String(), "err", errNoSuchChannel)
 		return proto.CloseChannelResult{}, nil
@@ -327,7 +416,7 @@ func (s *Service) closeChannel(id proto.ChannelID) (proto.CloseChannelResult, er
 }
 
 // finish ends a channel once: it tells the coordinator the stream is over
-// (unless the coordinator is the one that ended it), closes the ssh session and
+// (unless the coordinator is the one that ended it), closes the far end and
 // releases the pooled reference.
 //
 // cause is the helper's sentence for an end nobody asked for, empty for an
@@ -347,31 +436,69 @@ func (c *openChannel) finish(cause string) {
 			Event:   proto.EventChannelClosed,
 			Params:  proto.ChannelClosedEvent{Channel: c.id, Error: cause},
 		})
-		_ = c.sess.Close()
+		_ = c.end.Close()
+		// nil for a forwarded channel: the listener holds the reference (see
+		// the field's own doc), and PooledConn.Close is nil-safe anyway.
 		_ = c.pool.Close()
+		if c.owner != nil {
+			c.owner.forget(c.id)
+		}
 	})
 }
 
 // validateDestination refuses an open that cannot be performed before anything
-// is dialed. It mirrors validateProbe field for field and adds the kind,
-// because the two ops take the same destination and a difference between them
-// would be a second answer to "is this dialable".
+// is dialed. It mirrors validateProbe field for field and adds the kind and
+// its target, because the ops take the same destination and a difference
+// between them would be a second answer to "is this dialable".
 func validateDestination(p proto.OpenChannelParams) error {
-	switch {
-	case p.Destination.Host == "":
-		return fmt.Errorf("%w: no host", errBadChannelParams)
-	case p.Destination.Port <= 0 || p.Destination.Port > 65535:
-		return fmt.Errorf("%w: port %d", errBadChannelParams, p.Destination.Port)
-	case p.Destination.User == "":
-		return fmt.Errorf("%w: no user", errBadChannelParams)
-	}
-	if err := validateIdentity(p.Destination.Identity); err != nil {
+	if err := validateDestinationAddress(p.Destination); err != nil {
 		return err
 	}
 	switch p.Kind {
 	case proto.ChannelSFTP:
+		if p.Target != nil {
+			// A target on a subsystem open is a caller that believes it is
+			// getting something else, and the failure it would otherwise meet
+			// is a working channel to the wrong thing.
+			return fmt.Errorf("%w: kind %q takes no target", errBadChannelParams, p.Kind)
+		}
+	case proto.ChannelDirectTCPIP:
+		if p.Target == nil {
+			return fmt.Errorf("%w: kind %q needs a target", errBadChannelParams, p.Kind)
+		}
+		if err := validateTarget(*p.Target); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("%w: kind %q is not one this helper opens", errBadChannelParams, p.Kind)
+	}
+	return nil
+}
+
+// validateDestinationAddress is the half of an open's validation that every op
+// taking a destination shares.
+func validateDestinationAddress(d proto.SSHDestination) error {
+	switch {
+	case d.Host == "":
+		return fmt.Errorf("%w: no host", errBadChannelParams)
+	case d.Port <= 0 || d.Port > 65535:
+		return fmt.Errorf("%w: port %d", errBadChannelParams, d.Port)
+	case d.User == "":
+		return fmt.Errorf("%w: no user", errBadChannelParams)
+	}
+	return validateIdentity(d.Identity)
+}
+
+// validateTarget refuses an address this helper will not connect to, before
+// anything is dialed. A port of 0 is refused rather than passed on: the far
+// side would answer a connection to port 0 with a refusal of its own, and "the
+// server refused" is a worse sentence for a caller's own mistake than this one.
+func validateTarget(t proto.ChannelTarget) error {
+	switch {
+	case t.Host == "":
+		return fmt.Errorf("%w: no target host", errBadChannelParams)
+	case t.Port <= 0 || t.Port > 65535:
+		return fmt.Errorf("%w: target port %d", errBadChannelParams, t.Port)
 	}
 	return nil
 }

@@ -792,6 +792,14 @@ func New(opts ...Option) (*App, error) {
 		return nil, fmt.Errorf("ssh client: %w", err)
 	}
 	sess = sess.WithSSHFactory(&sshFactoryAdapter{client: sshClient})
+	// The tunnel transport (nocx-50w7p.8): every forward, every remote
+	// listener and every routed API request rides a channel on THIS MACHINE'S
+	// HELPER. The ssh client above is still what RESOLVES and AUTHORIZES a
+	// destination — that is the coordinator's job and stays here — but it no
+	// longer dials for these tenants. It is built here, beside the client it
+	// resolves through, because the three wiring sites below are spread across
+	// this function and one value feeds all of them.
+	tunnelChans := helperTunnelConnector(localOpener, sshClient, slogger)
 
 	// Vault (ADR-0011 as amended): owns provider routing, key material and
 	// the seal lifecycle. Two providers are compiled on every platform:
@@ -841,7 +849,13 @@ func New(opts ...Option) (*App, error) {
 	// for stored credential material (design §8.1), so it cannot be
 	// constructed before the store that holds the values.
 	apiCollections := apicoll.NewCollections(paths)
-	apiRoutes := &apiRouteLeaser{client: sshClient}
+	// The route lease rides this machine's helper (nocx-50w7p.8): a send
+	// through a connection opens a direct-tcpip channel on the helper, which
+	// dials the profile's destination. The lease is still pool-keyed and
+	// authorized like a tab — resolution and the credential's authorization
+	// against the endpoint happen here (ssh.RealClient.ResolveTarget) before
+	// the helper is asked for anything.
+	apiRoutes := &apiRouteLeaser{tunnels: tunnelChans}
 	// The import's URL entrance gets the SAME route table the sender has,
 	// so "through prod-bastion" means one thing in this product: a fetch
 	// and a send that name one connection lease the same pooled SSH
@@ -1321,14 +1335,15 @@ func New(opts ...Option) (*App, error) {
 		// never leaves internal/ssh. Wired beside the installer P8 added:
 		// a saved connection that publishes can also remove.
 		transport.WithRemoteUninstaller(sshClient),
-		// The tunnel connector (nocx-8gix): *ssh.RealClient satisfies
-		// tunnel.Connector without an adapter — the signatures are
-		// identical — so a forward acquires its OWN pooled connection
-		// lease through the same client a tab uses, authorized and
-		// pool-keyed exactly like a tab (spec §7.3, AD-4). Before this
-		// line the whole forward model was reachable from its own tests
-		// and nowhere else (AGENTS.md check 5).
-		transport.WithTunnelConnector(sshClient),
+		// The tunnel connector (nocx-8gix, moved by nocx-50w7p.8): a forward
+		// acquires a lease on this machine's helper, which opens a
+		// direct-tcpip channel per connection and a remote listener for -R.
+		// The destination is resolved and authorized HERE, by the party that
+		// reads ~/.ssh/config and holds the credential binding, and the
+		// helper dials exactly what it is told. Before this line the whole
+		// forward model was reachable from its own tests and nowhere else
+		// (AGENTS.md check 5).
+		transport.WithTunnelConnector(tunnelChans),
 		// Port discovery (nocx-wzc4.2): the scheduler owns the cadence
 		// (settle sample, prompt debounce, hidden-tab pause, one-in-flight
 		// — spec §4) and acquires its OWN pooled discovery lease per
@@ -1548,13 +1563,15 @@ func New(opts ...Option) (*App, error) {
 	// remote, but lifecycle facts still follow the coordinator's session route.
 	helperReg.lifecycle = lifecyclePub
 	// The remote lifecycle transport (ADR-0024 decision 2 "Over SSH",
-	// bead nocx-u7uh.4): the composition root implements the ssh layer's
-	// RemoteLifecycle seam with the lifecycle kernel and the ssh client —
-	// the channel rides the SAME pooled connection the session uses
-	// (AD-4), and refusal (the remote sshd will not forward) leaves the
-	// session conventional. Before this line the remote adapter was
-	// reachable from its own tests and nowhere else (AGENTS.md check 5).
-	remoteLifecycle := &remoteLifecycleProvider{client: sshClient, kernel: lifecyclePub, logger: logger, transports: childTransports}
+	// bead nocx-u7uh.4; moved onto this machine's helper by nocx-50w7p.8):
+	// the composition root implements the ssh layer's RemoteLifecycle seam
+	// with the lifecycle kernel and the tunnel lease — the listener on the
+	// far side is a `forward` on this helper, and the shell's connection
+	// back arrives as a forwarded channel over it. Refusal (the remote sshd
+	// will not forward) leaves the session conventional. Before this line
+	// the remote adapter was reachable from its own tests and nowhere else
+	// (AGENTS.md check 5).
+	remoteLifecycle := &remoteLifecycleProvider{tunnels: tunnelChans, kernel: lifecyclePub, logger: logger, transports: childTransports}
 	// The answers a person gave about which agents may use nocx's tools, so a
 	// settings surface can read them back and unmake one. Appended here
 	// rather than in the literal above because the service is built with the
@@ -3065,9 +3082,15 @@ func bootstrapProductReason(lg log.Logger, o shellintegration.Outcome, publishEr
 // remoteLifecycleProvider implements ssh.RemoteLifecycle with the lifecycle
 // kernel and the ssh client (ADR-0024 decision 2 "Over SSH"; bead
 type remoteLifecycleProvider struct {
-	client *ssh.RealClient
-	kernel lifecyclechannel.Kernel
-	logger log.Logger
+	// tunnels is the transport the far side's loopback listener is asked for
+	// through: a `forward` on THIS MACHINE'S HELPER (nocx-50w7p.8). It was the
+	// coordinator's own ssh client until the owner's invariant moved the dial
+	// (plan §3), and the channel's semantics are unchanged — the lease still
+	// resolves to a pooled connection per destination, and the shell's
+	// connection back still arrives as a channel over it.
+	tunnels sshTunnelLeaser
+	kernel  lifecyclechannel.Kernel
+	logger  log.Logger
 	// reportLoss carries the remote adapter's §6.2 loss cause to the session
 	// integration axis, keyed by the adapter's own lane. Wired at the
 	// composition root once the server exists; nil reports nowhere, which is
@@ -3088,7 +3111,7 @@ type remoteLifecycleProvider struct {
 
 // Establish implements ssh.RemoteLifecycle.
 func (p *remoteLifecycleProvider) Establish(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.RemoteLifecycleLaunch, io.Closer, error) {
-	tc, err := p.client.TunnelConn(ctx, host, opts...)
+	tc, err := p.tunnels.TunnelConn(ctx, host, opts...)
 	if err != nil {
 		return ssh.RemoteLifecycleLaunch{}, nil, fmt.Errorf("lifecycle tunnel lease: %w", err)
 	}
@@ -3162,7 +3185,13 @@ func (p *remoteLifecycleProvider) Establish(ctx context.Context, host string, op
 // after one send would drop a pool reference other tabs and forwards are
 // counting on, and would cost every send a new authentication.
 type apiRouteLeaser struct {
-	client *ssh.RealClient
+	// tunnels leases the connection a routed send rides: a direct-tcpip
+	// channel on THIS MACHINE'S HELPER (nocx-50w7p.8), resolved and
+	// authorized by this process before the helper is asked. It was
+	// *ssh.RealClient until the dial moved (plan §3), and the lease is still
+	// pool-keyed by the resolved destination, so a send through a connection
+	// reaches the same host through the same connection a tab does.
+	tunnels sshTunnelLeaser
 
 	// mu guards the resolver, which is set after construction. The
 	// transport's own resolverHolder has the same shape for the same
@@ -3199,8 +3228,9 @@ func (l *apiRouteLeaser) LeaseForProfile(ctx context.Context, profileID string) 
 	}
 	// The WHOLE resolved config rides one option, exactly as a forward's
 	// does (ws_tunnel.go): credentials, jump route and authorized endpoints
-	// together, so the lease is pool-keyed and authorized like a tab.
-	return l.client.TunnelConn(ctx, host, func(dst *ssh.ConnectConfig) { *dst = *cfg })
+	// together, so the lease is resolved and authorized like a tab and the
+	// helper holds one pooled connection per resolved destination (AD-4).
+	return l.tunnels.TunnelConn(ctx, host, func(dst *ssh.ConnectConfig) { *dst = *cfg })
 }
 
 // apiSecretMaterial is the composition root's join between the capability's

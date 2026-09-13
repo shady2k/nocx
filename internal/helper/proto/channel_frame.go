@@ -83,7 +83,7 @@ type ChannelID [16]byte
 
 // String is the 32-hex form: what a log line, a JSON document and a test
 // vector all show.
-func (c ChannelID) String() string { return hex.EncodeToString(c[:]) }
+func (c ChannelID) String() string { return formatID(c[:]) }
 
 // IsZero reports whether the id was never minted. A zero id is refused at
 // every boundary rather than looked up: an unset field that resolves to "some
@@ -96,15 +96,7 @@ func (c ChannelID) IsZero() bool {
 // ParseChannelID reads the 32-hex form back.
 func ParseChannelID(s string) (ChannelID, error) {
 	var id ChannelID
-	if len(s) != hex.EncodedLen(len(id)) {
-		return id, fmt.Errorf("proto: channel id %q is not 32 hex characters", s)
-	}
-	raw, err := hex.DecodeString(s)
-	if err != nil {
-		return id, fmt.Errorf("proto: channel id %q: %w", s, err)
-	}
-	copy(id[:], raw)
-	return id, nil
+	return id, parseID("channel id", s, id[:])
 }
 
 // MarshalJSON writes the hex form. The wire's identity is a string on every
@@ -125,6 +117,28 @@ func (c *ChannelID) UnmarshalJSON(b []byte) error {
 		return err
 	}
 	*c = id
+	return nil
+}
+
+// formatID renders sixteen raw bytes in the wire's 32-hex form.
+//
+// It is shared with ForwardID rather than written twice: both identities are
+// minted by the helper, echoed verbatim by the coordinator, and shown to a
+// person in exactly this spelling, and two encoders for one identity would be
+// the second vocabulary AD-8 refuses — agreeing until one of them gains a
+// prefix.
+func formatID(raw []byte) string { return hex.EncodeToString(raw) }
+
+// parseID reads the 32-hex form into dst, naming what it was reading.
+func parseID(kind, s string, dst []byte) error {
+	if len(s) != hex.EncodedLen(len(dst)) {
+		return fmt.Errorf("proto: %s %q is not 32 hex characters", kind, s)
+	}
+	raw, err := hex.DecodeString(s)
+	if err != nil {
+		return fmt.Errorf("proto: %s %q: %w", kind, s, err)
+	}
+	copy(dst, raw)
 	return nil
 }
 

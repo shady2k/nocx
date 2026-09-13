@@ -2544,7 +2544,7 @@ func newReplayHarness(t *testing.T, forwards []profile.ForwardSpec) *replayHarne
 
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), reg,
-		WithTunnelConnector(tunnelTestClient(t, srv)),
+		WithTunnelConnector(tunnelTestConnector(t, srv)),
 		WithProfileResolver(&fixedProfileResolver{host: srv.addr, cfg: tunnelResolveConfig(srv)}),
 		WithProfileRepository(ps),
 	)

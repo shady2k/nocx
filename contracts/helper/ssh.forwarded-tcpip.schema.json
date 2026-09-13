@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.forwarded-tcpip.schema.json",
+  "title": "HelperSSHForwardedTCPIPEvent",
+  "description": "The announcement that a connection arrived on a listener the coordinator asked for. It is an announcement and not a result because nobody here asked: the coordinator holds a listener, and the connection is the far side's act — so there is no request to answer, and this notification is the only place the channel's id can come from. Ordering is what makes that sufficient: it rides the same wire as the data frames, and the helper writes it under the writer mutex it writes the first byte with (nocx-50w7p.8).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["forward", "channel"],
+  "properties": {
+    "forward": {
+      "description": "The listener the connection arrived on. An id the coordinator does not hold is answered by closing the channel: the announcement both creates and names the stream, so there is no window to park one in.",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/forwardId"
+    },
+    "channel": {
+      "description": "The channel the connection's bytes are keyed by — an ORDINARY channel from here on: the same data frames, the same close, the same end-of-stream notification as a channel an open produced.",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/channelId"
+    },
+    "peer": {
+      "description": "The accepted connection's remote address as the far side reported it, for the log and for the local end's RemoteAddr. It is somebody else's machine's claim and never an authentication: the lifecycle capability is what authenticates a candidate connection, and this is deliberately not a second, weaker way to.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

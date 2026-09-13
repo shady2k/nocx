@@ -31,7 +31,7 @@ func TestTheLocalHelperServesTheSSHService(t *testing.T) {
 
 	c := standUpHelper(t, seam)
 	ref := proto.SSHIdentity{
-		Credential: proto.SSHCredential{Ref: "cred"},
+		Credential: &proto.SSHCredential{Ref: "cred"},
 		Auth:       proto.SSHAuthPassword,
 	}
 
@@ -39,7 +39,7 @@ func TestTheLocalHelperServesTheSSHService(t *testing.T) {
 	// produce: no host.
 	var out proto.ProbeResult
 	err = c.Call(context.Background(), proto.ServiceSSH, proto.OpProbe, proto.ProbeParams{
-		Port: 22, User: "nobody", Identity: ref,
+		Destination: proto.SSHDestination{Port: 22, User: "nobody", Identity: ref},
 	}, &out)
 	var refusal *client.RefusalError
 	if !errors.As(err, &refusal) {
@@ -52,7 +52,9 @@ func TestTheLocalHelperServesTheSSHService(t *testing.T) {
 	// A probe that really dials, through the daemon's own ssh client: the
 	// classified outcome can only come from the dial seam this build links.
 	err = c.Call(context.Background(), proto.ServiceSSH, proto.OpProbe, proto.ProbeParams{
-		Host: "127.0.0.1", Port: 1, User: "nobody", Identity: ref,
+		Destination: proto.SSHDestination{
+			Host: "127.0.0.1", Port: 1, User: "nobody", Identity: ref,
+		},
 	}, &out)
 	if err != nil {
 		t.Fatalf("probe to a closed port: %v", err)

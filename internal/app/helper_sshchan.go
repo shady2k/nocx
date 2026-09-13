@@ -103,7 +103,7 @@ func (h *sshOverHelper) LaneConn(ctx context.Context, host string, machine proto
 		return nil, err
 	}
 	lane, err := local.OpenLane(ctx, proto.LaneParams{
-		Destination: destinationOf(target),
+		Destination: ssh.WireDestination(target),
 		Machine:     machine,
 		Generation:  generation,
 	})
@@ -135,14 +135,26 @@ func (h *sshOverHelper) ProbeWithResult(ctx context.Context, host string, cfg *s
 	// endpoint its profile names, and the destination the helper is handed.
 	// The options are the resolver's own conversion (session.SSHOptionsFromConfig),
 	// so a field this path forgets is a field that path forgot.
-	target, err := h.resolve.ResolveTarget(ctx, host, session.SSHOptionsFromConfig(cfg)...)
+	//
+	// WithoutPasswordPrompt is appended LAST and that is the boundary this op
+	// draws: a probe answers a question the product asked itself, so it may not
+	// stop and ask a person. A connection whose only credential is the
+	// interactive rung therefore declines at resolution (ssh.ErrNoAuthMethod)
+	// instead of raising a prompt nobody asked for — and every other rung, a
+	// key file, an agent or a stored password, still authenticates silently.
+	opts := append(session.SSHOptionsFromConfig(cfg), ssh.WithoutPasswordPrompt())
+	target, err := h.resolve.ResolveTarget(ctx, host, opts...)
 	if err != nil {
 		return "", fmt.Errorf("probe config: %w", err)
 	}
 	var result proto.ProbeResult
 	if err := local.Call(ctx, proto.ServiceSSH, proto.OpProbe, proto.ProbeParams{
-		Host: target.Host, Port: target.Port, User: target.User,
-		Identity: identityOf(target),
+		// The resolved destination in full — address, account, credential and
+		// route — because a probe of a bastioned host is a probe of the host
+		// the person named: a direct dial to an address that is only reachable
+		// through a bastion fails as "unreachable" and reads as a network
+		// problem.
+		Destination: ssh.WireDestination(target),
 		// FALSE, and it is the same decision the coordinator's own probe made:
 		// it never accepted a key on trust. First contact is answered as
 		// host-key-unknown with the evidence, the accept sheet is raised from
@@ -273,30 +285,11 @@ type addrString string
 func (a addrString) Network() string { return "tcp" }
 func (a addrString) String() string  { return string(a) }
 
-// destinationOf is the ONE conversion from a resolved target to the wire's
-// destination: alias resolution and authorization are the resolver's
-// (ResolveTarget), and everything that opens something on a host names what it
-// resolved the same way.
-func destinationOf(t ssh.DialTarget) proto.SSHDestination {
-	return proto.SSHDestination{
-		Host:     t.Host,
-		Port:     t.Port,
-		User:     t.User,
-		Identity: identityOf(t),
-	}
-}
-
-// identityOf is the credential half of the same conversion.
-func identityOf(t ssh.DialTarget) proto.SSHIdentity {
-	return proto.SSHIdentity{
-		Credential: proto.SSHCredential{
-			Ref:           string(t.Credential),
-			PassphraseRef: string(t.Passphrase),
-		},
-		Auth:      proto.SSHAuthKind(t.Auth),
-		PublicKey: t.PublicKey,
-	}
-}
+// The conversion from a resolved target to the wire's destination lives in
+// internal/ssh (ssh.WireDestination), because the tunnel transport converts the
+// same value and a route with a hop missing is a connection that dials directly
+// to a host the profile said is unreachable except through a bastion. Two
+// copies of that conversion would be two chances to drop one.
 
 // filesLeaseProvider is the narrow surface the file panel's factory needs, the
 // same way installLeaseProvider is the installer's. *ssh.RealClient used to
@@ -388,7 +381,7 @@ func (h *sshOverHelper) openChannel(ctx context.Context, kind proto.ChannelKind,
 		return nil, err
 	}
 	stream, err := client.OpenChannel(ctx, proto.OpenChannelParams{
-		Destination: destinationOf(target),
+		Destination: ssh.WireDestination(target),
 		Kind:        kind,
 		// FALSE, and it is not a default: a channel open has no caller that
 		// can answer the accept flow (that flow belongs to a pane open, where

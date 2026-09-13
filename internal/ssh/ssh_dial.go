@@ -402,8 +402,44 @@ func (d *dialer) dialViaJumpHost(ctx context.Context, cfg *ConnectConfig, resolv
 		return nil, fmt.Errorf("dial target %s through jump: %w", targetAddr, err)
 	}
 
-	// gossh.NewClientConn has no context-aware form. Same watchdog pattern
-	// as dialDirect: close conn on ctx.Done() to unblock the handshake.
+	target, err := d.handshakeOver(ctx, conn, targetAddr, targetCfg)
+	if err != nil {
+		d.client.pool.Release(jumpHandle)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("ssh client conn through jump: %w", err)
+	}
+	// The target's Close closes the gossh.Client AND releases the bastion
+	// handle. When the last target through this bastion closes, the bastion's
+	// refcount drops to zero and the bastion connection closes. The bastion
+	// handle is released exactly once because pooledSSHConn.Close is guarded
+	// by its own sync.Once.
+	// Same ownership rule as the direct dial above, and it matters more
+	// here: this wrapper's Close is what releases the bastion's own pool
+	// handle, so a prober closing the raw target would strand the jump
+	// connection for the life of the process.
+	pconn := &pooledSSHConn{
+		client:  target,
+		release: func() { d.client.pool.Release(jumpHandle) },
+	}
+	stop, _ := startKeepalive(pconn, cfg.KeepaliveInterval, cfg.KeepaliveCountMax, cfg.Liveness)
+	pconn.setKeepaliveStop(stop)
+	return pconn, nil
+}
+
+// handshakeOver runs the client handshake on an ALREADY-OPEN connection: the
+// step a route takes once the hop before it has dialed the next address, and
+// the one x/crypto/ssh has no context-aware form for. The watchdog is what
+// makes cancellation real — closing the connection unblocks NewClientConn —
+// and the goroutine is drain-safe because the buffered channel (size 1) means
+// its send always succeeds.
+//
+// It is extracted from dialViaJumpHost rather than written a second time for
+// the helper's routed dial: two watchdogs are two chances to leave one of them
+// without the drain, and the failure mode of a watchdog without a drain is a
+// leaked goroutine per cancelled connection.
+func (d *dialer) handshakeOver(ctx context.Context, conn net.Conn, addr string, cfg *gossh.ClientConfig) (*gossh.Client, error) {
 	type hsResult struct {
 		clientConn gossh.Conn
 		chans      <-chan gossh.NewChannel
@@ -412,7 +448,7 @@ func (d *dialer) dialViaJumpHost(ctx context.Context, cfg *ConnectConfig, resolv
 	}
 	ch := make(chan hsResult, 1)
 	go func() {
-		cc, chans, reqs, err := gossh.NewClientConn(conn, targetAddr, targetCfg)
+		cc, chans, reqs, err := gossh.NewClientConn(conn, addr, cfg)
 		ch <- hsResult{cc, chans, reqs, err}
 	}()
 
@@ -420,31 +456,38 @@ func (d *dialer) dialViaJumpHost(ctx context.Context, cfg *ConnectConfig, resolv
 	case <-ctx.Done():
 		_ = conn.Close() // unblocks NewClientConn
 		<-ch             // drain goroutine
-		d.client.pool.Release(jumpHandle)
 		return nil, ctx.Err()
 	case r := <-ch:
 		if r.err != nil {
 			_ = conn.Close()
-			d.client.pool.Release(jumpHandle)
-			return nil, fmt.Errorf("ssh client conn through jump: %w", r.err)
+			return nil, r.err
 		}
-		target := gossh.NewClient(r.clientConn, r.chans, r.reqs)
-		// The target's Close closes the gossh.Client AND releases the bastion
-		// handle. When the last target through this bastion closes, the bastion's
-		// refcount drops to zero and the bastion connection closes. The bastion
-		// handle is released exactly once because pooledSSHConn.Close is guarded
-		// by its own sync.Once.
-		// Same ownership rule as the direct dial above, and it matters more
-		// here: this wrapper's Close is what releases the bastion's own pool
-		// handle, so a prober closing the raw target would strand the jump
-		// connection for the life of the process.
-		pconn := &pooledSSHConn{
-			client:  target,
-			release: func() { d.client.pool.Release(jumpHandle) },
-		}
-		stop, _ := startKeepalive(pconn, cfg.KeepaliveInterval, cfg.KeepaliveCountMax, cfg.Liveness)
-		pconn.setKeepaliveStop(stop)
-		return pconn, nil
+		return gossh.NewClient(r.clientConn, r.chans, r.reqs), nil
+	}
+}
+
+// jumpConnectConfig answers the ConnectConfig one hop is resolved and dialed
+// with.
+//
+// A route reaches this package in two shapes and they mean the same thing: the
+// recursive JumpConfig the connection resolver builds for a chain of profiles,
+// and the flat Jump* fields a single-hop profile sets. This is the ONE place
+// that reading happens — acquireJumpHost dials through it and ResolveTarget
+// resolves through it — because two readings would eventually disagree about
+// the one hop that matters, and a helper would then dial a different account
+// or a different credential than the coordinator's own path would have.
+func jumpConnectConfig(parent *ConnectConfig) *ConnectConfig {
+	if parent.JumpConfig != nil {
+		return parent.JumpConfig
+	}
+	return &ConnectConfig{
+		User:               parent.JumpUser,
+		Port:               parent.JumpPort,
+		KeyFile:            parent.JumpKeyFile,
+		AuthMode:           parent.JumpAuthMode,
+		Secrets:            parent.JumpSecrets,
+		SecretID:           parent.JumpSecretID,
+		PassphraseSecretID: parent.JumpPassphraseSecretID,
 	}
 }
 
@@ -460,19 +503,7 @@ func (d *dialer) dialViaJumpHost(ctx context.Context, cfg *ConnectConfig, resolv
 // nested JumpConfig and dials through the next hop when present.
 func (d *dialer) acquireJumpHost(ctx context.Context, cfg *ConnectConfig) (*poolHandle, *gossh.Client, error) {
 	// Prefer JumpConfig (set by the resolver for multi-hop) over flat fields.
-	jumpCfg := cfg.JumpConfig
-	if jumpCfg == nil {
-		jumpCfg = &ConnectConfig{
-			User:               cfg.JumpUser,
-			Port:               cfg.JumpPort,
-			KeyFile:            cfg.JumpKeyFile,
-			AuthMode:           cfg.JumpAuthMode,
-			JumpHost:           "",
-			Secrets:            cfg.JumpSecrets,
-			SecretID:           cfg.JumpSecretID,
-			PassphraseSecretID: cfg.JumpPassphraseSecretID,
-		}
-	}
+	jumpCfg := jumpConnectConfig(cfg)
 
 	jumpResolved, err := d.client.resolveConfig(ctx, cfg.JumpHost, jumpCfg)
 	if err != nil {

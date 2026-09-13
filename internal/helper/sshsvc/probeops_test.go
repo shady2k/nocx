@@ -30,10 +30,7 @@ func leaseParams(t *testing.T, f *fixture, acceptOnTrust bool) proto.LeaseParams
 	t.Helper()
 	probe := passwordProbeParams(t, f)
 	return proto.LeaseParams{
-		Destination: proto.SSHDestination{
-			Host: probe.Host, Port: probe.Port, User: probe.User,
-			Identity: probe.Identity,
-		},
+		Destination:   probe.Destination,
 		AcceptOnTrust: acceptOnTrust,
 	}
 }

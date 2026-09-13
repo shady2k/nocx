@@ -273,10 +273,12 @@ func TestAProbeWithNoCoordinatorConnectionIsRefusedByName(t *testing.T) {
 	svc := sshsvc.New(realClient, discardLogger())
 
 	params := proto.ProbeParams{
-		Host: "127.0.0.1", Port: 1, User: "test",
-		Identity: proto.SSHIdentity{
-			Credential: proto.SSHCredential{Ref: wantRef},
-			Auth:       proto.SSHAuthPassword,
+		Destination: proto.SSHDestination{
+			Host: "127.0.0.1", Port: 1, User: "test",
+			Identity: proto.SSHIdentity{
+				Credential: &proto.SSHCredential{Ref: wantRef},
+				Auth:       proto.SSHAuthPassword,
+			},
 		},
 	}
 	// A context with NO connection on it: no host served this call, so there is
@@ -354,4 +356,116 @@ func contains(haystack []string, needle string) bool {
 
 func gosshFingerprint(key testKey) string {
 	return gossh.FingerprintSHA256(key.signer.PublicKey())
+}
+
+// TestAProbeAnswersAServersKeyboardInteractiveChallengeFromTheCoordinator is the
+// prompt rung's success: the server asks its own question, the helper relays it
+// to the coordinator, and the answer somebody gave is what authenticates.
+//
+// The evidence is the far side's own record of what it RECEIVED. A helper that
+// answered from nothing — an empty string, a stored secret it happened to have —
+// would fail here, and so would one that invented a question: the text the
+// coordinator was asked for is asserted from the request that crossed.
+func TestAProbeAnswersAServersKeyboardInteractiveChallengeFromTheCoordinator(t *testing.T) {
+	f := newFixture(t, "", nil)
+	f.kbdPassword = "s3cret-answer"
+
+	coord := &coordinator{
+		verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+		promptAnswers: []string{"s3cret-answer"},
+	}
+	stand := newStand(t, coord)
+
+	result, err := stand.probe(t, interactiveProbeParams(t, f))
+	if err != nil {
+		t.Fatalf("probe with a keyboard-interactive credential: %v", err)
+	}
+	if result.Outcome != proto.ProbeAccepted {
+		t.Fatalf("outcome = %q (%s), want accepted", result.Outcome, result.Detail)
+	}
+	if got := f.kbdAnswersSeen(); len(got) != 1 || got[0] != "s3cret-answer" {
+		t.Fatalf("the server received %q, want the answer the coordinator gave", got)
+	}
+	asked := coord.promptsAsked()
+	if len(asked) != 1 {
+		t.Fatalf("the coordinator was asked %d challenge(s), want 1", len(asked))
+	}
+	if len(asked[0].Prompts) != 1 || asked[0].Prompts[0].Prompt != "Password: " {
+		t.Fatalf("the coordinator was asked %+v, want the server's own question verbatim", asked[0].Prompts)
+	}
+	if asked[0].Prompts[0].Echo {
+		t.Fatal("the question was relayed as echoed; a password prompt must not be")
+	}
+	if asked[0].Host == "" || asked[0].User == "" {
+		t.Fatalf("the ask names no connection: %+v", asked[0])
+	}
+	// Nothing was read from a store: the person is the credential.
+	if ops := coord.asked(); contains(ops, proto.OpSecret) || contains(ops, proto.OpSign) {
+		t.Fatalf("a keyboard-interactive probe asked for stored material: it asked %v", ops)
+	}
+}
+
+// TestAPromptACoordinatorCannotAnswerIsRefusedByName is the paired refusal, in
+// its two real shapes: the person dismissed the question, and the coordinator
+// has nobody attached to ask. They are DIFFERENT codes because they are
+// different facts — one is a decision, the other is a missing surface — and
+// neither may be answered with an empty string, which a server reads as a wrong
+// password and reports as a rejected credential.
+func TestAPromptACoordinatorCannotAnswerIsRefusedByName(t *testing.T) {
+	cases := []struct {
+		name    string
+		code    string
+		message string
+	}{
+		{name: "the person dismissed it", code: proto.ErrCodePromptCancelled, message: "the prompt was cancelled"},
+		{name: "no renderer is attached", code: proto.ErrCodeNoAuthChannel, message: "no renderer is attached"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, "", nil)
+			f.kbdPassword = "s3cret-answer"
+			coord := &coordinator{
+				verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+				promptRefusal: &proto.Refusal{Code: tc.code, Message: tc.message},
+			}
+			stand := newStand(t, coord)
+
+			_, err := stand.probe(t, interactiveProbeParams(t, f))
+			if got := refusalCode(err); got != tc.code {
+				t.Fatalf("the refusal code is %q (err %v), want %q", got, err, tc.code)
+			}
+			// The refusal reached the server as NO answer: the challenge was
+			// never answered, so nothing was tried against it.
+			if got := f.kbdAnswersSeen(); len(got) != 0 {
+				t.Fatalf("the server received %q, want nothing: the coordinator could not answer", got)
+			}
+		})
+	}
+}
+
+// TestAKeyboardInteractiveProbeWithNoCoordinatorConnectionIsRefusedByName is the
+// rung's own version of the no-coordinator state: a request that arrived with no
+// connection on it has nobody to ask, and it is refused by NAME before anything
+// is dialed rather than answered from a fallback that does not exist.
+func TestAKeyboardInteractiveProbeWithNoCoordinatorConnectionIsRefusedByName(t *testing.T) {
+	realClient, err := ssh.NewReal(log.NewSlogAdapter(nil))
+	if err != nil {
+		t.Fatalf("ssh.NewReal: %v", err)
+	}
+	t.Cleanup(func() { _ = realClient.Close() })
+	svc := sshsvc.New(realClient, discardLogger())
+
+	params := proto.ProbeParams{
+		Destination: proto.SSHDestination{
+			Host: "127.0.0.1", Port: 1, User: "test",
+			Identity: proto.SSHIdentity{Auth: proto.SSHAuthInteractive},
+		},
+	}
+	_, err = svc.Call(context.Background(), proto.OpProbe, mustJSON(t, params))
+	if err == nil {
+		t.Fatal("a keyboard-interactive probe with no coordinator connection succeeded")
+	}
+	if code, _ := svc.Refusal(err); code != proto.ErrCodeNoAuthChannel {
+		t.Fatalf("refusal code = %q (err %v), want %q", code, err, proto.ErrCodeNoAuthChannel)
+	}
 }

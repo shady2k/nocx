@@ -80,27 +80,11 @@ func (rc *RealClient) CheckHostKey(addr string, keyBlob []byte) error {
 	return cb(addr, addrString(addr), key)
 }
 
-// DialAuth dials addr, performs the handshake with a CALLER-SUPPLIED
-// configuration, and answers the authenticated client. The client owns the
-// connection and must close it.
-//
-// cfg is the caller's in full — its Auth and its HostKeyCallback in particular
-// — because this is the seam a caller that decides both uses: the helper's
-// probe has no known_hosts to consult and no stored credential to build a
-// chain from, and it must not be given either. What this method contributes is
-// the DIAL itself: context cancellation that actually ends a handshake
-// (x/crypto/ssh has no context-aware form, so the watchdog is what makes
-// cancellation real), and the classification of an authentication refusal as
-// *ErrAuthFailed — which is what makes an auth failure one fact instead of two
-// processes' worth of string matching.
-//
-// host and user are what a refusal is reported AGAINST, and nothing else: they
-// do not select, resolve or authorize anything. Resolution and authorization
-// stay with the caller (plan §3), so the address this dials is exactly the
-// address it was given.
-func (rc *RealClient) DialAuth(ctx context.Context, addr, host, user string, cfg *gossh.ClientConfig) (*gossh.Client, error) {
-	return (&dialer{client: rc}).dialDirect(ctx, addr, cfg, host, user)
-}
+// DialAuth dials a resolved destination ONCE, through its route when it has
+// one, and answers the authenticated client. It is declared in ssh_pooled.go,
+// beside the pool it deliberately does not use: a probe dials, authenticates
+// and closes, and the connection it left behind would be one whose lifetime
+// nothing owns.
 
 // SignWithStoredKey signs challenge with the private key a config's
 // KeySecretID names, answering the signature in the wire encoding of an ssh

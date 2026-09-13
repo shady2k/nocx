@@ -273,8 +273,8 @@ func probeHelperPlatformAt(ctx context.Context, host string, opts []ssh.ConnectO
 	// because it is a rule this codebase already has: a probe answers a
 	// question the product asked itself and may not stop a person to do it
 	// (ssh.WithoutPasswordPrompt, which is what un-wires the rung; a prompt
-	// credential reaches the settings probe as ssh.ErrNoHelperIdentity instead,
-	// refused before any dial). Every
+	// credential reaches this probe as ssh.ErrNoAuthMethod instead, refused
+	// before any dial). Every
 	// silent credential still applies, so a key, an agent or a remembered
 	// password probes exactly as before; only the destination that would have
 	// to interrupt someone declines — and declining degrades to the plain

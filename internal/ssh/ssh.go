@@ -768,14 +768,14 @@ func WithPasswordRequester(r ConnectionPasswordRequester) ConnectOption {
 // WithoutPasswordPrompt takes the prompt rung back off a dial that has
 // inherited it. It exists for PROBES: a probe answers a question the product
 // asked itself, so it may not stop and ask a person. It is the ONE mechanism
-// that draws that boundary now — the coordinator's own connectivity probe
+// that draws that boundary — the coordinator's own connectivity probe
 // (RealClient.ProbeConfig, and with it firstAuthMethod) went with the dials
-// when every dial became the helper's (nocx-50w7p.10) — and the settings
-// probe's own boundary is a different one: a credential a helper cannot be
-// handed — the agent, an inline key file, this very rung — is refused by name at
-// resolution (ssh.ErrNoHelperIdentity, pinned by
-// TestResolveTargetRefusesACredentialItCannotHandOver), so no ask is raised
-// there either.
+// when every dial became the helper's (nocx-50w7p.10) — and the settings probe
+// and the install path's probe both append it (sshOverHelper.ProbeWithResult,
+// helper_git.go's platform probe), so a profile whose only credential is the
+// interactive rung declines at resolution
+// (ErrNoAuthMethod, from ResolveTarget's own ladder) rather than raising a
+// dialog nobody asked for.
 //
 // It is an option rather than a flag on the requester because the probe's
 // options are the SESSION's options: they are built once, for the destination,

@@ -79,7 +79,10 @@ import (
 // on purpose, because a second vocabulary or a second pool for one fact is
 // what AD-8 exists to prevent.
 type Client interface {
-	DialAuth(ctx context.Context, addr, host, user string, cfg *gossh.ClientConfig) (*gossh.Client, error)
+	// DialAuth dials one RESOLVED destination — through its route when it has
+	// one — and answers a borrowed connection the caller must close. It is the
+	// probe's dial: nothing is pooled, so closing it closes the hops too.
+	DialAuth(ctx context.Context, spec ssh.PooledSpec) (*ssh.PooledConn, error)
 	// AcquirePooled borrows a reference to the pooled connection for a
 	// resolved destination, dialing it if this is the first reference. The
 	// caller owns the reference and must Close it.
@@ -348,9 +351,12 @@ func (s *Service) probe(ctx context.Context, p proto.ProbeParams) (proto.ProbeRe
 	if err := validateProbe(p); err != nil {
 		return proto.ProbeResult{}, err
 	}
-
-	addr := net.JoinHostPort(p.Host, strconv.Itoa(p.Port))
-	gcfg, err := s.clientConfig(ctx, conn, p.User, p.Identity, p.AcceptOnTrust)
+	ep := endpointOf(p.Destination)
+	route, err := s.routeOf(ctx, conn, p.Destination, p.AcceptOnTrust)
+	if err != nil {
+		return proto.ProbeResult{}, err
+	}
+	gcfg, err := s.clientConfig(ctx, conn, ep, p.AcceptOnTrust)
 	if err != nil {
 		return proto.ProbeResult{}, err
 	}
@@ -363,7 +369,17 @@ func (s *Service) probe(ctx context.Context, p proto.ProbeParams) (proto.ProbeRe
 	seen := &seenHostKey{}
 	gcfg.HostKeyCallback = observeHostKey(gcfg.HostKeyCallback, seen)
 
-	client, err := s.client.DialAuth(ctx, addr, p.Host, p.User, gcfg)
+	// The probe dials the whole ROUTE — every hop and the destination — and
+	// pools none of it: what it answers is whether this credential works here,
+	// and a connection it left behind (a bastion's included) would be one whose
+	// lifetime nothing owns. The hops' keys are verified by the coordinator
+	// through the same asks the destination's is.
+	pool, err := s.client.DialAuth(ctx, ssh.PooledSpec{
+		Host: ep.Host, Port: ep.Port, User: ep.User,
+		Identity: identityKey(p.Destination.Identity),
+		Config:   gcfg,
+		Route:    route,
+	})
 	if err != nil {
 		// A refusal the COORDINATOR answered is separated FIRST, and that order
 		// is the whole point of this branch rather than a detail of it.
@@ -402,7 +418,7 @@ func (s *Service) probe(ctx context.Context, p proto.ProbeParams) (proto.ProbeRe
 			HostKey:     hostKeyEvidenceOf(err),
 		}, nil
 	}
-	_ = client.Close()
+	_ = pool.Close()
 	return proto.ProbeResult{Outcome: proto.ProbeAccepted, Detail: "ok", Fingerprint: seen.fingerprint}, nil
 }
 
@@ -463,35 +479,129 @@ func hostKeyEvidenceOf(err error) *proto.HostKeyEvidence {
 // the running helper checks, and the reason both exist is that a schema is a
 // document and this is a decision.
 func validateProbe(p proto.ProbeParams) error {
-	switch {
-	case p.Host == "":
-		return fmt.Errorf("%w: no host", errBadProbeParams)
-	case p.Port <= 0 || p.Port > 65535:
-		return fmt.Errorf("%w: port %d", errBadProbeParams, p.Port)
-	case p.User == "":
-		return fmt.Errorf("%w: no user", errBadProbeParams)
+	if err := validateDestinationAddress(p.Destination); err != nil {
+		return fmt.Errorf("%w (probe)", err)
 	}
-	return validateIdentity(p.Identity)
+	return nil
 }
 
+// validateIdentity refuses an identity this helper could not offer.
+//
+// It is one switch over the CLOSED SET of auth kinds, and each arm states what
+// its kind needs rather than sharing a rule the kinds do not share: a password
+// names material, a key names material AND the public half it must declare
+// before it is asked to sign, and an interactive rung names NOTHING — the
+// person is the credential, and a reference there would name something that
+// does not exist.
 func validateIdentity(id proto.SSHIdentity) error {
-	if id.Credential.Ref == "" {
-		return fmt.Errorf("%w: no credential reference", errBadProbeParams)
-	}
 	switch id.Auth {
-	case proto.SSHAuthPassword:
+	case proto.SSHAuthInteractive:
+		if id.Credential != nil || len(id.PublicKey) != 0 {
+			// An interactive rung that carries material is a caller that
+			// believes it is sending a credential, and answering it as a
+			// prompt would ask a person for something already in hand.
+			return fmt.Errorf("%w: interactive auth carries no credential", errBadProbeParams)
+		}
 		return nil
-	case proto.SSHAuthKey:
-		if len(id.PublicKey) == 0 {
+	case proto.SSHAuthPassword, proto.SSHAuthKey:
+		if id.Credential == nil || id.Credential.Ref == "" {
+			return fmt.Errorf("%w: no credential reference", errBadProbeParams)
+		}
+		if id.Auth == proto.SSHAuthKey && len(id.PublicKey) == 0 {
 			// A key credential with no public half cannot be offered: the
 			// helper would have to learn the key from somewhere, and the only
 			// somewhere is the coordinator, whose answer to "which key" is the
 			// identity the caller already built.
 			return fmt.Errorf("%w: key auth with no public key", errBadProbeParams)
 		}
+		if len(id.PublicKey) != 0 && id.Auth == proto.SSHAuthPassword {
+			// Defensive: a public key on a password identity is a caller that
+			// assembled the two halves of two credentials.
+			return fmt.Errorf("%w: password auth carries no public key", errBadProbeParams)
+		}
 		return nil
 	}
 	return fmt.Errorf("%w: auth %q is not one this helper knows", errBadProbeParams, id.Auth)
+}
+
+// dialEndpoint is one endpoint this helper is about to dial, in the shape the
+// client configuration and the coordinator's asks need it: the address, the
+// account, the identity, and the address this endpoint's host key is stored
+// under.
+//
+// It exists because a destination and a hop are the same thing to every caller
+// below this line — each is dialed, each is authenticated through the reverse
+// channel and each has its key verified by the coordinator — and two parameter
+// lists that agree by convention would eventually agree about the wrong one.
+type dialEndpoint struct {
+	Host string
+	Port int
+	User string
+	// Identity is what to authenticate with here: this hop's own credential,
+	// never the destination's.
+	Identity proto.SSHIdentity
+	// KnownHostsAddr is the storage identity the coordinator gave for this
+	// endpoint; empty means the dial address.
+	KnownHostsAddr string
+}
+
+// addr is the dial address of one endpoint.
+func (e dialEndpoint) addr() string { return net.JoinHostPort(e.Host, strconv.Itoa(e.Port)) }
+
+// storageAddr is the address the coordinator looks this endpoint's host key up
+// under: what it sent, or the dial address when it sent nothing — which is what
+// a direct connection's storage identity is, and the only one a hop can have.
+func (e dialEndpoint) storageAddr() string {
+	if e.KnownHostsAddr != "" {
+		return e.KnownHostsAddr
+	}
+	return e.addr()
+}
+
+// endpointOf is the destination half of the conversion.
+func endpointOf(d proto.SSHDestination) dialEndpoint {
+	return dialEndpoint{
+		Host: d.Host, Port: d.Port, User: d.User,
+		Identity: d.Identity, KnownHostsAddr: d.KnownHostsAddr,
+	}
+}
+
+// hopEndpointOf is the hop half. A hop carries the same five facts, because a
+// route is a chain of ordinary handshakes rather than one longer address.
+func hopEndpointOf(h proto.SSHHop) dialEndpoint {
+	return dialEndpoint{
+		Host: h.Host, Port: h.Port, User: h.User,
+		Identity: h.Identity, KnownHostsAddr: h.KnownHostsAddr,
+	}
+}
+
+// routeOf builds the hops a dial passes through, each with the client
+// configuration the coordinator's own answers produce: the identity's one auth
+// method, and the host-key callback that asks the coordinator about THIS hop's
+// key.
+//
+// The order is the wire's, which is the coordinator's: Jumps[0] is dialed from
+// this machine and each next hop through the one before it. Nothing is
+// re-ordered or re-derived here — a helper that sorted or de-duplicated a route
+// would be deciding which machines a connection passes through.
+func (s *Service) routeOf(ctx context.Context, conn *host.Host, d proto.SSHDestination, acceptOnTrust bool) ([]ssh.PooledHop, error) {
+	if len(d.Jumps) == 0 {
+		return nil, nil
+	}
+	route := make([]ssh.PooledHop, 0, len(d.Jumps))
+	for i, hop := range d.Jumps {
+		ep := hopEndpointOf(hop)
+		cfg, err := s.clientConfig(ctx, conn, ep, acceptOnTrust)
+		if err != nil {
+			return nil, fmt.Errorf("route hop %d: %w", i, err)
+		}
+		route = append(route, ssh.PooledHop{
+			Host: hop.Host, Port: hop.Port, User: hop.User,
+			Identity: identityKey(hop.Identity),
+			Config:   cfg,
+		})
+	}
+	return route, nil
 }
 
 // clientConfig builds the ONE client configuration this helper dials with.
@@ -502,35 +612,36 @@ func validateIdentity(id proto.SSHIdentity) error {
 // a config with more than one method is password spraying against somebody
 // else's host, and a config with no host-key callback is one that trusts
 // whatever answers.
-func (s *Service) clientConfig(ctx context.Context, conn *host.Host, user string, id proto.SSHIdentity, acceptOnTrust bool) (*gossh.ClientConfig, error) {
-	auth, err := s.authMethod(ctx, conn, id)
+func (s *Service) clientConfig(ctx context.Context, conn *host.Host, ep dialEndpoint, acceptOnTrust bool) (*gossh.ClientConfig, error) {
+	auth, err := s.authMethod(ctx, conn, ep)
 	if err != nil {
 		return nil, err
 	}
 	return &gossh.ClientConfig{
-		User: user,
+		User: ep.User,
 		// Exactly one method, as the coordinator's own probe path insists: a
 		// second attempt against one host is indistinguishable from password
 		// spraying, and MaxAuthTries is finite.
 		Auth:            []gossh.AuthMethod{auth},
-		HostKeyCallback: s.hostKeyCallback(ctx, conn, acceptOnTrust),
+		HostKeyCallback: s.hostKeyCallback(ctx, conn, acceptOnTrust, ep.storageAddr()),
 		Timeout:         ProbeTimeout,
 	}, nil
 }
 
-// authMethod builds the ONE method this probe will send.
+// authMethod builds the ONE method this dial will send.
 //
-// Both arms are LAZY on purpose. A password is asked for at the moment the
-// server challenges for it rather than when the probe is built, so it lives in
-// this process for the duration of a callback and not for the duration of a
-// dial — the same discipline the coordinator's own chain keeps, one hop out.
-func (s *Service) authMethod(ctx context.Context, conn *host.Host, id proto.SSHIdentity) (gossh.AuthMethod, error) {
-	switch id.Auth {
+// The password and key arms are LAZY on purpose. A password is asked for at the
+// moment the server challenges for it rather than when the probe is built, so
+// it lives in this process for the duration of a callback and not for the
+// duration of a dial — the same discipline the coordinator's own chain keeps,
+// one hop out.
+func (s *Service) authMethod(ctx context.Context, conn *host.Host, ep dialEndpoint) (gossh.AuthMethod, error) {
+	switch ep.Identity.Auth {
 	case proto.SSHAuthPassword:
 		return gossh.PasswordCallback(func() (string, error) {
 			var out proto.SecretResult
 			err := conn.Ask(ctx, proto.ServiceSSH, proto.OpSecret, proto.SecretParams{
-				Credential: id.Credential,
+				Credential: ep.Identity.CredentialOf(),
 				Purpose:    proto.PurposePassword,
 			}, &out)
 			if err != nil {
@@ -539,17 +650,65 @@ func (s *Service) authMethod(ctx context.Context, conn *host.Host, id proto.SSHI
 			return string(out.Secret), nil
 		}), nil
 
+	case proto.SSHAuthInteractive:
+		// The rung a PERSON answers. The server's own questions travel to the
+		// coordinator, which raises them and returns the answers in order; this
+		// process never invents a question and never stores an answer.
+		//
+		// It is keyboard-interactive rather than a password callback because
+		// the question is the server's: a password callback carries none, and a
+		// person asked "Password:" and a person asked "Verification code:" are
+		// two different people's jobs to answer.
+		return gossh.KeyboardInteractive(func(_, _ string, questions []string, echos []bool) ([]string, error) {
+			return s.askInteractive(ctx, conn, ep, questions, echos)
+		}), nil
+
 	case proto.SSHAuthKey:
-		pub, err := gossh.ParsePublicKey(id.PublicKey)
+		pub, err := gossh.ParsePublicKey(ep.Identity.PublicKey)
 		if err != nil {
 			return nil, fmt.Errorf("%w: public key: %w", errBadProbeParams, err)
 		}
-		return gossh.PublicKeys(&reverseSigner{ctx: ctx, conn: conn, cred: id.Credential, pub: pub}), nil
+		return gossh.PublicKeys(&reverseSigner{ctx: ctx, conn: conn, cred: ep.Identity.CredentialOf(), pub: pub}), nil
 	}
 	// validateIdentity has already refused every other value; this arm exists
 	// so a kind added to the wire without a method here is a refusal and not a
 	// nil method the handshake would send.
-	return nil, fmt.Errorf("%w: auth %q is not one this helper knows", errBadProbeParams, id.Auth)
+	return nil, fmt.Errorf("%w: auth %q is not one this helper knows", errBadProbeParams, ep.Identity.Auth)
+}
+
+// askInteractive relays one keyboard-interactive challenge to the coordinator
+// and answers what a person said.
+//
+// The order and the count are the protocol's: the answers go back in the order
+// the questions arrived, one per question. A coordinator that answers a
+// different number of them has answered a different question, which is a
+// refusal and not something to pad — a handshake that sent a short list would
+// have the library answer the missing ones with empty strings, i.e. try an
+// empty password.
+func (s *Service) askInteractive(ctx context.Context, conn *host.Host, ep dialEndpoint, questions []string, echos []bool) ([]string, error) {
+	if len(questions) == 0 {
+		return nil, internalRefusal("the server asked a keyboard-interactive challenge with no questions")
+	}
+	prompts := make([]proto.Prompt, len(questions))
+	for i, q := range questions {
+		echo := false
+		if i < len(echos) {
+			echo = echos[i]
+		}
+		prompts[i] = proto.Prompt{Prompt: q, Echo: echo}
+	}
+	var out proto.PromptResult
+	if err := conn.Ask(ctx, proto.ServiceSSH, proto.OpPrompt, proto.PromptParams{
+		Host: ep.Host, Port: ep.Port, User: ep.User,
+		Prompts: prompts,
+	}, &out); err != nil {
+		return nil, askRefusal(err)
+	}
+	if len(out.Answers) != len(prompts) {
+		return nil, internalRefusal(
+			"the coordinator answered %d of %d prompts", len(out.Answers), len(prompts))
+	}
+	return out.Answers, nil
 }
 
 // reverseSigner is a gossh.Signer whose private half is the coordinator's.
@@ -603,9 +762,15 @@ func (s *reverseSigner) Sign(_ io.Reader, data []byte) (*gossh.Signature, error)
 // whole reason the classification still works one process away: ssh's own
 // ClassifyProbeError reads those two types, so the outcome a coordinator sees
 // from a helper's probe is the outcome it saw when it dialed itself.
-func (s *Service) hostKeyCallback(ctx context.Context, conn *host.Host, acceptOnTrust bool) gossh.HostKeyCallback {
+//
+// knownHostsAddr is the STORAGE identity the coordinator resolved for this
+// endpoint, and it is passed through rather than derived: for a host reached
+// through a jump it is a route digest only the coordinator can compute, and a
+// helper that used the dial address instead would look for a line nobody ever
+// wrote.
+func (s *Service) hostKeyCallback(ctx context.Context, conn *host.Host, acceptOnTrust bool, knownHostsAddr string) gossh.HostKeyCallback {
 	return func(addr string, _ net.Addr, key gossh.PublicKey) error {
-		return s.verifyHostKey(ctx, conn, acceptOnTrust, addr, key)
+		return s.verifyHostKey(ctx, conn, acceptOnTrust, addr, knownHostsAddr, key)
 	}
 }
 
@@ -618,13 +783,14 @@ func (s *Service) hostKeyCallback(ctx context.Context, conn *host.Host, acceptOn
 // AND the caller that started this probe said it may be accepted; a `changed`
 // verdict never reaches it, whatever the caller asked for, because a changed
 // key is the one signature of a machine in the middle.
-func (s *Service) verifyHostKey(ctx context.Context, conn *host.Host, acceptOnTrust bool, addr string, key gossh.PublicKey) error {
+func (s *Service) verifyHostKey(ctx context.Context, conn *host.Host, acceptOnTrust bool, addr, knownHostsAddr string, key gossh.PublicKey) error {
 	blob := key.Marshal()
 	var out proto.VerifyHostKeyResult
 	err := conn.Ask(ctx, proto.ServiceSSH, proto.OpVerifyHostKey, proto.VerifyHostKeyParams{
-		Host:      addr,
-		Algorithm: key.Type(),
-		Key:       blob,
+		Host:           addr,
+		KnownHostsAddr: knownHostsAddr,
+		Algorithm:      key.Type(),
+		Key:            blob,
 	}, &out)
 	if err != nil {
 		return err
@@ -635,13 +801,13 @@ func (s *Service) verifyHostKey(ctx context.Context, conn *host.Host, acceptOnTr
 		return nil
 	case proto.HostKeyChanged:
 		return &ssh.ErrHostKeyMismatch{
-			Addr: addr, KnownHostsAddr: addr, KeyAlgo: key.Type(),
+			Addr: addr, KnownHostsAddr: knownHostsAddr, KeyAlgo: key.Type(),
 			Fingerprint: out.Fingerprint, Expected: out.Expected, Key: blob,
 		}
 	case proto.HostKeyUnknown:
 		if !acceptOnTrust {
 			return &ssh.ErrUnknownHostKey{
-				Addr: addr, KnownHostsAddr: addr, KeyAlgo: key.Type(),
+				Addr: addr, KnownHostsAddr: knownHostsAddr, KeyAlgo: key.Type(),
 				Fingerprint: out.Fingerprint, Key: blob,
 			}
 		}
@@ -650,9 +816,13 @@ func (s *Service) verifyHostKey(ctx context.Context, conn *host.Host, acceptOnTr
 		// its answer IS the trust: the key is recorded, so the handshake
 		// proceeds. Asking again would be a second round trip whose only
 		// possible outcome is the answer just given.
+		//
+		// The write names the STORAGE identity, not the offered address: that
+		// is the line the next connection will look for, and writing the dial
+		// address instead would record a host nobody verifies against.
 		var trusted proto.TrustHostKeyResult
 		if terr := conn.Ask(ctx, proto.ServiceSSH, proto.OpTrustHostKey, proto.TrustHostKeyParams{
-			Host:      addr,
+			Host:      knownHostsAddr,
 			Algorithm: key.Type(),
 			Key:       blob,
 		}, &trusted); terr != nil {

@@ -95,15 +95,21 @@ func framesOf(t *testing.T, raw []byte, want proto.FrameType) [][]byte {
 }
 
 // TestTheSSHServiceOpsConformToTheirContractsOverTheWire drives one password
-// probe and one key probe — between them every op this generation added — and
-// validates every params and every result that crossed, in both directions.
+// probe, one key probe and one keyboard-interactive probe — between them every
+// op this generation added, forward and reverse — and validates every params and
+// every result that crossed, in both directions.
 func TestTheSSHServiceOpsConformToTheirContractsOverTheWire(t *testing.T) {
 	key := newTestKey(t)
 	f := newFixture(t, "pw", key.signer)
+	// The fixture offers the keyboard-interactive rung too, so the `prompt`
+	// reverse op is exercised on the wire rather than merely declared: an op
+	// whose contract is never checked is an op nobody would notice changing.
+	f.kbdPassword = "pw"
 	coord := &coordinator{
 		password: "pw", signer: key.signer,
 		verdict: proto.HostKeyUnknown, fingerprint: f.hostKeyFingerprint(),
-		expected: "SHA256:stored",
+		expected:      "SHA256:stored",
+		promptAnswers: []string{"pw"},
 	}
 	stand := newStand(t, coord)
 
@@ -121,6 +127,13 @@ func TestTheSSHServiceOpsConformToTheirContractsOverTheWire(t *testing.T) {
 	if _, err := stand.probe(t, withKey); err != nil {
 		t.Fatalf("key probe: %v", err)
 	}
+	// The interactive rung last, and it is the only one that carries no
+	// credential at all: its identity is the shape the `prompt` op answers.
+	withPrompt := interactiveProbeParams(t, f)
+	withPrompt.AcceptOnTrust = true
+	if _, err := stand.probe(t, withPrompt); err != nil {
+		t.Fatalf("keyboard-interactive probe: %v", err)
+	}
 
 	// ── what the COORDINATOR sent ──────────────────────────────────────
 	probeParams := loadHelperSchema(t, "ssh.probe.params.schema.json")
@@ -135,8 +148,8 @@ func TestTheSSHServiceOpsConformToTheirContractsOverTheWire(t *testing.T) {
 		}
 		probes++
 	}
-	if probes != 2 {
-		t.Fatalf("recorded %d probe requests, want 2", probes)
+	if probes != 3 {
+		t.Fatalf("recorded %d probe requests, want 3 (password, key, keyboard-interactive)", probes)
 	}
 
 	// ── what the HELPER answered, forward direction ────────────────────
@@ -149,8 +162,8 @@ func TestTheSSHServiceOpsConformToTheirContractsOverTheWire(t *testing.T) {
 		}
 		results++
 	}
-	if results != 2 {
-		t.Fatalf("recorded %d probe results, want 2", results)
+	if results != 3 {
+		t.Fatalf("recorded %d probe results, want 3 (password, key, keyboard-interactive)", results)
 	}
 
 	// ── what the HELPER asked, reverse direction ───────────────────────
@@ -162,12 +175,14 @@ func TestTheSSHServiceOpsConformToTheirContractsOverTheWire(t *testing.T) {
 		proto.OpSign:          loadHelperSchema(t, "ssh.sign.params.schema.json"),
 		proto.OpVerifyHostKey: loadHelperSchema(t, "ssh.verify-host-key.params.schema.json"),
 		proto.OpTrustHostKey:  loadHelperSchema(t, "ssh.trust-host-key.params.schema.json"),
+		proto.OpPrompt:        loadHelperSchema(t, "ssh.prompt.params.schema.json"),
 	}
 	reverseResults := map[string]*jsonschema.Schema{
 		proto.OpSecret:        loadHelperSchema(t, "ssh.secret.schema.json"),
 		proto.OpSign:          loadHelperSchema(t, "ssh.sign.schema.json"),
 		proto.OpVerifyHostKey: loadHelperSchema(t, "ssh.verify-host-key.schema.json"),
 		proto.OpTrustHostKey:  loadHelperSchema(t, "ssh.trust-host-key.schema.json"),
+		proto.OpPrompt:        loadHelperSchema(t, "ssh.prompt.schema.json"),
 	}
 	opByID := map[uint64]string{}
 	asked := map[string]bool{}
@@ -285,12 +300,14 @@ func TestAProbeToAPortNothingListensOnIsUnreachable(t *testing.T) {
 	stand := newStand(t, coord)
 
 	params := proto.ProbeParams{
-		// Reserved port 1 on loopback: nothing listens there, and the failure
-		// is a refused connection rather than a timeout.
-		Host: "127.0.0.1", Port: 1, User: "test",
-		Identity: proto.SSHIdentity{
-			Credential: proto.SSHCredential{Ref: wantRef},
-			Auth:       proto.SSHAuthPassword,
+		Destination: proto.SSHDestination{
+			// Reserved port 1 on loopback: nothing listens there, and the
+			// failure is a refused connection rather than a timeout.
+			Host: "127.0.0.1", Port: 1, User: "test",
+			Identity: proto.SSHIdentity{
+				Credential: &proto.SSHCredential{Ref: wantRef},
+				Auth:       proto.SSHAuthPassword,
+			},
 		},
 	}
 	result, err := stand.probe(t, params)

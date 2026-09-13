@@ -133,19 +133,13 @@ func (p *helperProbes) acquire(ctx context.Context, host string, opts ...ssh.Con
 		return nil, err
 	}
 	lease, err := helper.AcquireProbeLease(ctx, proto.LeaseParams{
-		Destination: proto.SSHDestination{
-			Host: target.Host,
-			Port: target.Port,
-			User: target.User,
-			Identity: proto.SSHIdentity{
-				Credential: proto.SSHCredential{
-					Ref:           string(target.Credential),
-					PassphraseRef: string(target.Passphrase),
-				},
-				Auth:      proto.SSHAuthKind(target.Auth),
-				PublicKey: target.PublicKey,
-			},
-		},
+		// The resolved destination, converted by the ONE conversion
+		// (ssh.WireDestination): the address, the account, the credential
+		// reference and the ROUTE. A probe of a host behind a jump host runs
+		// on that route like every other op's dial — a discovery lease that
+		// dropped the hops would dial an address that is only reachable
+		// through them.
+		Destination: ssh.WireDestination(target),
 		// FALSE, and it is not a default: a probe can raise no accept sheet —
 		// the question "may this host key be recorded" belongs to an act a
 		// person is watching, and discovery, completion and the install

@@ -59,6 +59,13 @@ const sshTestHash = "ssh-test-hash"
 // which is what makes an arbitrary value the right one here.
 const sshTestRef = "ssh-cred-1"
 
+// sshTestJumpRef is the reference a JUMP hop's request carries. It is a
+// different opaque value from the destination's on purpose: a route is a chain
+// of separate authentications, and each hop names the credential IT presents —
+// a helper that spent one reference on every hop would be spending a credential
+// the coordinator did not name there.
+const sshTestJumpRef = "ssh-jump-cred-1"
+
 // paneWait bounds one observable wait. It is a DEADLINE on a state change and
 // never an assertion about duration: every wait below returns the moment the
 // thing it waits for happens, and this is only what turns a hang into a failure
@@ -118,6 +125,11 @@ type sshFixture struct {
 	// keyed by the resolved destination), and this is how a test asserts that
 	// rather than trusting the pool's key.
 	conns int
+	// directTargets is the addresses this host was asked to connect to on a
+	// `direct-tcpip` channel, in order. It is what makes this fixture usable as
+	// a BASTION: a jump hop's only job is to reach an address on its own
+	// network, so a route through it shows up here as the next hop's address.
+	directTargets []string
 	// tcpForwards and unixForwards are the listeners this host granted, keyed
 	// by the address or path the client named them with — which is how a
 	// cancel finds them, and how the client's own forward list matches an
@@ -225,6 +237,14 @@ func (f *sshFixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 	f.mu.Unlock()
 	go f.serveGlobalRequests(sconn, reqs)
 	for newChan := range chans {
+		// A `direct-tcpip` channel is what a BASTION serves: the far side
+		// connects to an address on ITS network and carries the bytes. The
+		// fixture proxies it for real, which is what lets the same server stand
+		// as a jump hop and as the destination behind one.
+		if newChan.ChannelType() == "direct-tcpip" {
+			go f.serveDirectTCPIP(newChan)
+			continue
+		}
 		ch, chReqs, aerr := newChan.Accept()
 		if aerr != nil {
 			continue
@@ -235,6 +255,54 @@ func (f *sshFixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 		}
 		go f.serveSession(ch, chReqs)
 	}
+}
+
+// serveDirectTCPIP connects to the target the channel names and proxies it: the
+// whole of what a jump host does, and the reason a route through this fixture
+// is a real one rather than a shortcut. The dial happens BEFORE the channel is
+// accepted, so a refused target rejects the open itself — which is the refusal
+// the client's dial sees.
+func (f *sshFixture) serveDirectTCPIP(newChan gossh.NewChannel) {
+	var p struct {
+		Host       string
+		Port       uint32
+		OriginHost string
+		OriginPort uint32
+	}
+	if err := gossh.Unmarshal(newChan.ExtraData(), &p); err != nil {
+		_ = newChan.Reject(gossh.ConnectionFailed, "malformed direct-tcpip payload")
+		return
+	}
+	target := net.JoinHostPort(p.Host, strconv.Itoa(int(p.Port)))
+	f.mu.Lock()
+	f.directTargets = append(f.directTargets, target)
+	f.mu.Unlock()
+
+	conn, err := net.DialTimeout("tcp", target, paneWait)
+	if err != nil {
+		_ = newChan.Reject(gossh.ConnectionFailed, err.Error())
+		return
+	}
+	ch, chReqs, err := newChan.Accept()
+	if err != nil {
+		_ = conn.Close()
+		return
+	}
+	go gossh.DiscardRequests(chReqs)
+	go func() {
+		defer func() { _ = ch.Close() }()
+		defer func() { _ = conn.Close() }()
+		_, _ = io.Copy(ch, conn)
+	}()
+	_, _ = io.Copy(conn, ch)
+}
+
+// directTargetsSeen reports the addresses this host was asked to reach, in
+// order.
+func (f *sshFixture) directTargetsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.directTargets...)
 }
 
 // ── remote forward (-R) and streamlocal listener requests ───────────────
@@ -1233,7 +1301,7 @@ func (s *sshStand) spawnParams(t *testing.T, mode proto.SSHMode) proto.SSHSpawnP
 		Destination: proto.SSHDestination{
 			Host: host, Port: port, User: "test",
 			Identity: proto.SSHIdentity{
-				Credential: proto.SSHCredential{Ref: sshTestRef},
+				Credential: &proto.SSHCredential{Ref: sshTestRef},
 				Auth:       proto.SSHAuthPassword,
 			},
 		},

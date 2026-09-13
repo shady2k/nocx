@@ -2,13 +2,18 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/helper/ssh.verify-host-key.params.schema.json",
   "title": "HelperSSHVerifyHostKeyParams",
-  "description": "The helper asking what to make of a host key it was just offered. It has no other way to find out: the helper links no knownhosts — a forbidden import in the deployed artifact (internal/helper/deploy/dependency_test.go) — and it must not decide for itself whether an unseen key may be accepted, because that decision is a question for a person.",
+  "description": "The helper asking what to make of a host key it was just offered. It has no other way to find out: the helper links no knownhosts \u2014 a forbidden import in the deployed artifact (internal/helper/deploy/dependency_test.go) \u2014 and it must not decide for itself whether an unseen key may be accepted, because that decision is a question for a person. It carries TWO addresses because the key is offered for one and STORED under another: a host reached through a jump host is recorded under an opaque digest the coordinator computes, and the offered address is what a person is shown.",
   "type": "object",
   "additionalProperties": false,
   "required": ["host", "algorithm", "key"],
   "properties": {
     "host": {
-      "description": "The STORAGE identity the coordinator looks the key up under, not the dial address. A direct route records its key under its own address; a route through a jump host records it under an opaque digest that only the coordinator can compute (ssh_real.go's knownHostsTargetAddr), so the value is the coordinator's and a helper that derived one would write a line the next connection would not find.",
+      "description": "The address the key was OFFERED for: the address this helper dialed. It is what the verdict's error and its evidence name, and what the accept sheet shows a person.",
+      "type": "string",
+      "minLength": 1
+    },
+    "knownHostsAddr": {
+      "description": "The STORAGE identity the coordinator looks the key up under, when it differs from the offered address. A direct route records its key under its own address, and this is empty there; a route through a jump host records it under an opaque digest that only the coordinator can compute (ssh_real.go's knownHostsTargetAddr), so the value is the coordinator's \u2014 the helper echoes what the destination carried \u2014 and a helper that derived one would look for a line the next connection would not find.",
       "type": "string",
       "minLength": 1
     },
@@ -18,7 +23,7 @@
       "minLength": 1
     },
     "key": {
-      "description": "The wire-format public key blob the peer presented (RFC 4253 §6.6), base64. Public material: it is what the peer sends on the first packet of every handshake.",
+      "description": "The wire-format public key blob the peer presented (RFC 4253 \u00a76.6), base64. Public material: it is what the peer sends on the first packet of every handshake.",
       "type": "string",
       "minLength": 1
     }

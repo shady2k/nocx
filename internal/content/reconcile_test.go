@@ -230,8 +230,8 @@ func TestAVerdictOnASessionNobodyCarriedOverIsRefused(t *testing.T) {
 }
 
 // Assertion 5, per failure mode: a refused connection, a timeout, a sealed
-// vault and an unreachable host each leave the session pending, and none of
-// them is a verdict.
+// vault, an unreachable host and this machine's own helper going unanswered
+// each leave the session pending, and none of them is a verdict.
 func TestNoFailureModeProducesAbsent(t *testing.T) {
 	const sessionID = "session-on-a-host-nobody-could-reach"
 	const entryID = "00000000-0000-7000-8000-00000000e004"
@@ -250,6 +250,11 @@ func TestNoFailureModeProducesAbsent(t *testing.T) {
 		content.CauseTimedOut,
 		content.CauseVaultSealed,
 		content.CauseHostUnreachable,
+		// The eighth, and it is here for the same reason the four above are:
+		// the machine somebody is sitting at is still an endpoint that can
+		// fail to answer, and a local session's recording is not a cheaper
+		// thing to delete than a remote one's (nocx-ie23r.2).
+		content.CauseLocalEndpointUnreachable,
 	} {
 		if err := rec.Apply(ctx, content.SessionJudgement{
 			SessionID: sessionID, Verdict: content.VerdictUnknown,

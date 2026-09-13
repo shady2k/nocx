@@ -74,6 +74,17 @@ type hostRouteResolver interface {
 	Resolve(profileID string) (host string, cfg *ssh.ConnectConfig, err error)
 }
 
+// localInventorySource reaches THIS machine's own daemon for one generation
+// (nocx-ie23r.2). It is a seam of its own rather than a second method on
+// hostRouteResolver because the two have nothing in common but the generation:
+// a remote route is a saved connection and an ssh dial, a local one is a
+// socket in the person's own home, and folding one into the other would put a
+// profile lookup on a path that has no profile. helper_local.go's
+// localInventoryRoute is the only implementation.
+type localInventorySource interface {
+	LocalInventory(ctx context.Context, generation string) (sessionInventory, error)
+}
+
 // sessionAdopter installs the transport-owned half of a re-adopted session:
 // the replay ring at the offset the recording ends at, the hole observer, the
 // output pump and the exit monitor. *transport.WSServer satisfies it; the
@@ -90,6 +101,14 @@ type readoptPass struct {
 	registry *helperRegistry
 	routes   hostRouteResolver
 	adopter  sessionAdopter
+	// local is this machine's own route (nocx-ie23r.2). It is a separate
+	// collaborator because it needs neither of the two above: a local
+	// binding names no saved connection, so there is nothing to resolve, and
+	// this bead does not attach to what it finds, so there is nothing to
+	// adopt. Nil is a legitimate wiring — a composition root that has no
+	// endpoint directory — and makes a local binding answer exactly as it did
+	// before this existed: `noInventory`.
+	local localInventorySource
 	// timeout bounds one attempt; zero means readoptAttemptTimeout. It is a
 	// field rather than only a constant so the bound can be DRIVEN — a guard
 	// whose failure path no test can reach is a guard nobody has seen work.
@@ -117,7 +136,23 @@ const readoptAttemptTimeout = 15 * time.Second
 
 // Readopt is one attempt for one carried-over session.
 func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (sessionInventory, error) {
-	if rp == nil || rp.registry == nil || rp.routes == nil || rp.adopter == nil {
+	if rp == nil {
+		return nil, nil
+	}
+	// THIS MACHINE'S OWN SESSIONS ARE ASKED OVER A SOCKET (nocx-ie23r.2), and
+	// the branch comes FIRST because everything below it would refuse this
+	// binding for the wrong reason. The route requirements further down —
+	// Host, ProfileID, HelperCommand — are what an ssh exec lane needs, and a
+	// local session has none of them by design: its daemon is reached by
+	// dialling a socket named after its generation, and its route back is a
+	// generation plus the pane it was the pipe of (helper_local.go's
+	// OpenHosted says so at the field it leaves empty). Falling through would
+	// keep answering `noInventory` for every local session, which is the
+	// false "may still be running" this bead was filed to end.
+	if isLocalBinding(p) {
+		return rp.readoptLocal(ctx, p)
+	}
+	if rp.registry == nil || rp.routes == nil || rp.adopter == nil {
 		return nil, nil
 	}
 	bound := rp.timeout
@@ -254,6 +289,68 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 		h.mu.Unlock()
 	}
 	return inv, nil
+}
+
+// readoptLocal is the local half of the same step: ask this machine's daemon
+// the ONE question, and hand its answer to the caller's judging rule.
+//
+// IT DOES NOT ATTACH, and that is the bead boundary rather than an omission
+// (nocx-ie23r.2 makes a session askable and its verdict true; taking a live
+// local session back into a pane is nocx-ie23r.5). What it must not do is
+// pretend otherwise: the inventory it returns carries the generation and the
+// ids the daemon reported, which is exactly what `live` and `absent` are
+// decided from, and nothing here claims a pane has been given its shell back.
+//
+// EVERY FAILURE IS AN ERROR, so every failure is `unknown` with a cause. There
+// is no branch of this function that can produce `absent`: that verdict needs
+// an ACCOUNT that was asked and did not report the session, and a machine
+// whose helper did not answer has told nobody anything.
+func (rp *readoptPass) readoptLocal(ctx context.Context, p content.PendingSession) (sessionInventory, error) {
+	if rp.local == nil {
+		// No local route is wired. The caller's own `noInventory` stands, and
+		// the session is not deleted on the strength of a missing collaborator.
+		return nil, nil
+	}
+	bound := rp.timeout
+	if bound <= 0 {
+		bound = readoptAttemptTimeout
+	}
+	// The bound is the same one the remote attempt carries and for the same
+	// reason: a daemon that accepts a connection and then stops talking must
+	// cost a start this much and not a start that never finishes. The pass is
+	// SYNCHRONOUS before the server listens, so an unbounded ask here is a
+	// backend that never serves.
+	ctx, cancel := context.WithTimeout(ctx, bound)
+	defer cancel()
+	inv, err := rp.local.LocalInventory(ctx, p.Generation)
+	if err != nil {
+		return nil, fmt.Errorf("ask this machine's helper what it holds: %w", err)
+	}
+	return inv, nil
+}
+
+// isLocalBinding answers whether a carried-over binding names THIS machine's
+// daemon rather than a host reached over ssh — the discriminator the local
+// route is chosen by (nocx-ie23r.2).
+//
+// IT IS THE BINDING'S SHAPE, and the shape is the statement. A local
+// HostedSessionOpen carries a generation and NOTHING ELSE (helper_local.go,
+// at the fields it deliberately leaves empty): there is no host to resolve and
+// no helper command to exec, because the route is a socket whose name is
+// derived from the generation. A remote one carries a host, always — it is
+// what the ssh lane connects to — and the two readopt routes are therefore
+// told apart by the field that exists rather than by a field that is merely
+// empty.
+//
+// The three empties are checked together because each of them is enough to
+// send the binding down a route that cannot work: a host with no profile
+// would be refused for a partial route, a profile with no host would resolve
+// a connection to nowhere, and a helper command with no host would exec a
+// binary on this machine over an ssh lane that does not exist. Requiring all
+// three keeps the predicate one question — "does this name any half of an ssh
+// route?" — instead of four.
+func isLocalBinding(p content.PendingSession) bool {
+	return p.Generation != "" && p.Host == "" && p.ProfileID == "" && p.HelperCommand == ""
 }
 
 // readopt is the attach-and-adopt half, and it is deliberately the same half

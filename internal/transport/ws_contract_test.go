@@ -6653,6 +6653,22 @@ func TestLedgerReads_DTOsConformToContract(t *testing.T) {
 			Entries: []ledgerEntryWire{}, Scope: "everywhere",
 			Exhausted: true, HasRows: false, Coverage: nil,
 		},
+		// THE EIGHTH CAUSE, through the DTO (nocx-ie23r.2). It is the value
+		// the local inventory produces when this machine's own helper cannot
+		// be asked, and the schema is what decides whether the renderer can
+		// ever be handed it: a Go string this build sends and the contract
+		// refuses would be a refusal at the far end of a socket, which is the
+		// failure the contract directory exists to make impossible.
+		"a row nobody could ask about, on this machine": {
+			Entries: []ledgerEntryWire{{
+				ID: "01924f9c-0000-7000-8000-000000000003", Seq: 9,
+				EnvID: "local", Host: nil, Cwd: "/repo", Kind: "shell", Source: "user",
+				Intent: "make watch", Phase: "open", Status: "pending",
+				SubmittedAt: started, MaskedKinds: []string{}, Redactions: []redactionWire{},
+				Unreconciled: new(string(content.CauseLocalEndpointUnreachable)),
+			}},
+			Scope: "everywhere", Exhausted: true, HasRows: true, Coverage: nil,
+		},
 	}
 	querySchema := loadSchema(t, "ledger.query.schema.json")
 	for name, dto := range queryCases {

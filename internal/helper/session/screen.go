@@ -37,22 +37,36 @@ func (s *Service) readScreen(p proto.ScreenParams) (proto.ScreenResult, error) {
 }
 
 // readFrame reads the session's screen, the runtime's revision and what the
-// runtime can claim about the stream.
+// runtime can claim about the stream — ALL THREE AT ONE INSTANT.
+//
+// That instant is the whole of [sessionruntime.Session.ReadScreen]'s reason for
+// existing. A frame is several reads of one terminal and the emulator's own
+// port orders none of them against the pump: a chunk ingested between the caret
+// read and the rows is a frame whose rows carry text the caret it reports has
+// not reached, and a revision read after the frame is a revision the frame does
+// not describe. Held under the runtime's lock there is no such instant to land
+// in, and what a caller may therefore rely on is exactly this: the frame, its
+// revision and its completeness describe one state of that session's screen.
 //
 // IT TAKES NO LOCK OF THE HOST SESSION, and that is load-bearing rather than a
 // shortcut. hostSession.write holds s.mu from lease validation through the
 // return of proc.Write, so a frame read that waited on that mutex would park
 // behind a program that has stopped reading — the same deadlock the pump's own
-// doc names, arriving from the other side. It does not need the lock: the
-// emulator serialises its own access (the port's contract), and a runtime that
-// has been ended answers [emulator.ErrClosed] rather than a screen, which is
-// the honest answer for a session nobody can read any more.
+// doc names, arriving from the other side. It does not need that lock: the lock
+// it takes is the runtime's, which is the one the ingest path takes, and a
+// runtime that has been ended answers [emulator.ErrClosed] rather than a
+// screen, which is the honest answer for a session nobody can read any more.
 func (hs *hostSession) readFrame() (paneview.Frame, uint64, sessionruntime.Completeness, error) {
-	frame, err := paneview.From(hs.screen)
+	var frame paneview.Frame
+	rev, completeness, err := hs.runtime.ReadScreen(func(term emulator.Terminal) error {
+		f, ferr := paneview.From(term)
+		frame = f
+		return ferr
+	})
 	if err != nil {
 		return paneview.Frame{}, 0, sessionruntime.CompletenessUnknown, err
 	}
-	return frame, uint64(hs.runtime.Revision()), hs.runtime.Completeness(), nil
+	return frame, uint64(rev), completeness, nil
 }
 
 // replay feeds a capture's bytes to a fresh terminal and answers one frame per

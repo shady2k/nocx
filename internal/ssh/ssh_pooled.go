@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package ssh
 
 // The pool as a seam for a caller that is NOT this package's dial path: the
@@ -253,7 +255,7 @@ func (rc *RealClient) AcquirePooled(ctx context.Context, spec PooledSpec) (*Pool
 		return conn, nil
 	}
 
-	handle, err := rc.pool.AcquireDial(ctx, key, dial)
+	handle, err := rc.dial.pool.AcquireDial(ctx, key, dial)
 	if err != nil {
 		return nil, err
 	}
@@ -380,7 +382,7 @@ func (rc *RealClient) acquireHop(ctx context.Context, route []PooledHop) (*Poole
 	dial := func(poolKey) (sshClientConn, error) {
 		return rc.dialRoute(ctx, route[:len(route)-1], hopEndpoint)
 	}
-	handle, err := rc.pool.AcquireDial(ctx, key, dial)
+	handle, err := rc.dial.pool.AcquireDial(ctx, key, dial)
 	if err != nil {
 		return nil, err
 	}
@@ -444,17 +446,17 @@ func (rc *RealClient) dialEndpoint(ctx context.Context, upstream *gossh.Client, 
 func (rc *RealClient) borrowPooled(handle *poolHandle) (*PooledConn, error) {
 	client, ok := handle.conn.(*pooledSSHConn)
 	if !ok {
-		rc.pool.Release(handle)
+		rc.dial.pool.Release(handle)
 		return nil, fmt.Errorf("ssh: pooled connection: unexpected connection type %T", handle.conn)
 	}
 	gclient, ok := client.client.(*gossh.Client)
 	if !ok {
-		rc.pool.Release(handle)
+		rc.dial.pool.Release(handle)
 		return nil, fmt.Errorf("ssh: pooled connection: unexpected client type %T", client.client)
 	}
 	return &PooledConn{
 		client:      gclient,
 		fingerprint: client.HostKeyFingerprint(),
-		release:     func() { rc.pool.Release(handle) },
+		release:     func() { rc.dial.pool.Release(handle) },
 	}, nil
 }

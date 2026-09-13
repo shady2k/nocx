@@ -786,12 +786,30 @@ func New(opts ...Option) (*App, error) {
 		probes:   defaultMasterProbes,
 	}
 
-	// SSH client (AD-4): real client on x/crypto/ssh, honors ~/.ssh/config.
+	// This is the SSH resolver and trust client, not a connection: it holds no
+	// gossh.Client, opens no channel and dials nothing, because
+	// cmd/nocx-server is built without nocx_local_ssh and that is the build in
+	// which the dial half does not exist (internal/ssh/ssh_real.go). What it
+	// does is what the coordinator owes: resolve a destination through
+	// ~/.ssh/config, bind and authorize the credential, decide a host key from
+	// this process's known_hosts, and answer the two seams a caller with no
+	// connection asks (CheckHostKey, SignWithStoredKey).
+	//
+	// THE SESSION REGISTRY IS DELIBERATELY LEFT WITHOUT A FACTORY. It used to
+	// be handed one here (`WithSSHFactory`, over this same client), and that
+	// wiring was the last thing in this process that could have dialed a far
+	// host: `session.Reg.Open`'s remote arm calls it (session.go), and the
+	// transport's own check that an ssh destination is a helper's
+	// (session_open.go) is what made the arm unreachable rather than what
+	// removed it. nocx-50w7p.5 removes it from the composition root, so no
+	// shipped wiring can reach `r.ssh.Connect` at all; the seam itself stays
+	// in internal/session, where the transport's stands legitimately stand in
+	// a channel for a session without a pty (ADR-0057's reasoning: a factory
+	// is a seam, and nothing shipped supplies one).
 	sshClient, err := ssh.NewReal(logger, ssh.WithConfigResolver(sshCfgResolver))
 	if err != nil {
 		return nil, fmt.Errorf("ssh client: %w", err)
 	}
-	sess = sess.WithSSHFactory(&sshFactoryAdapter{client: sshClient})
 	// The tunnel transport (nocx-50w7p.8): every forward, every remote
 	// listener and every routed API request rides a channel on THIS MACHINE'S
 	// HELPER. The ssh client above is still what RESOLVES and AUTHORIZES a
@@ -2780,15 +2798,6 @@ func (a *App) Shutdown(ctx context.Context) {
 	if a.logFile != nil {
 		_ = a.logFile.Close()
 	}
-}
-
-// sshFactoryAdapter adapts ssh.SSH to session.SSHFactory.
-type sshFactoryAdapter struct {
-	client ssh.SSH
-}
-
-func (a *sshFactoryAdapter) Connect(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.Channel, error) {
-	return a.client.Connect(ctx, host, opts...)
 }
 
 // proberAdapter answers transport.Prober through THIS MACHINE'S HELPER and

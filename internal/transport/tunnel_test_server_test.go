@@ -17,17 +17,13 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
 
-	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/tunnel"
 	gossh "golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 type tunnelTestSSHServer struct {
@@ -178,11 +174,9 @@ func tunnelTestSigner(t *testing.T) gossh.Signer {
 	return signer
 }
 
-// tunnelTestClient builds a RealClient pointed at the test server, trusting
-// its host key, cleaned up with the test.
-// tunnelTestConnector is the transport tests' tunnel.Connector: one lease per
-// call over a pooled connection to the in-process SSH server, carrying a real
-// ssh channel per dial and a real remote listener per -R.
+// tunnelTestConnector is the transport tests' tunnel.Connector: one connection
+// per call to the in-process SSH server, carrying a real ssh channel per dial
+// and a real remote listener per -R.
 //
 // # Why a stand, and what it stands for
 //
@@ -196,29 +190,34 @@ func tunnelTestSigner(t *testing.T) gossh.Signer {
 // real channels, a real remote listener — and stands in for the one hop they
 // do not assert.
 //
+// # It dials with the library, and since nocx-50w7p.5 it must
+//
+// This stand used to dial through ssh.RealClient, because that was the only
+// client there was to dial with. It cannot any more, and that is the split
+// itself rather than an inconvenience of it: RealClient's dial half — the
+// pool, AcquirePooled, DialAuth, Close — is compiled only into the helper's
+// build (nocx_local_ssh), and this package's test binary is the coordinator's,
+// the build that links no dialer at all.
+//
+// The alternative was the build tag, and it was refused: the tag would have to
+// go on this file AND on its consumers, and `ws_test.go` holds the helpers
+// nearly every transport test shares — so a package-level tag would have put
+// the whole suite behind nocx_local_ssh. What this stand stands in for is a
+// HELPER's connection in any case, so a dial of its own is the honest shape
+// rather than a substitute for one: a stand inside a test may dial; the
+// shipped program the test belongs to may not.
+//
 // The resolved options ARE honoured, deliberately: the transport copies the
 // profile's whole config into them, and a stand that ignored them could not
 // tell a transport that passed the right user from one that passed none.
 func tunnelTestConnector(t *testing.T, srv *tunnelTestSSHServer) tunnel.Connector {
 	t.Helper()
-	line := knownhosts.Line([]string{srv.addr}, srv.hostSigner.PublicKey())
-	dir := t.TempDir()
-	path := filepath.Join(dir, "known_hosts")
-	if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
-		t.Fatalf("write known_hosts: %v", err)
-	}
-	client, err := ssh.NewReal(log.NewSlogAdapter(nil), ssh.WithKnownHostsFile(path))
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	t.Cleanup(func() { _ = client.Close() })
-	return &transportTestConnector{t: t, client: client, srv: srv}
+	return &transportTestConnector{t: t, srv: srv}
 }
 
 type transportTestConnector struct {
-	t      *testing.T
-	client *ssh.RealClient
-	srv    *tunnelTestSSHServer
+	t   *testing.T
+	srv *tunnelTestSSHServer
 }
 
 func (c *transportTestConnector) TunnelConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.TunnelConn, error) {
@@ -227,38 +226,28 @@ func (c *transportTestConnector) TunnelConn(ctx context.Context, host string, op
 	for _, o := range opts {
 		o(cfg)
 	}
-	h, portStr, err := net.SplitHostPort(host)
-	if err != nil {
-		return nil, fmt.Errorf("connector: split %q: %w", host, err)
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		return nil, fmt.Errorf("connector: port %q: %w", portStr, err)
-	}
-	pool, err := c.client.AcquirePooled(ctx, ssh.PooledSpec{
-		Host: h,
-		Port: port,
-		User: cfg.User,
-		// A key of its own: this stand's connection is never shared with a
-		// session's, so "which reference closed it" is not a question these
-		// tests have to answer.
-		Identity: "transport-test",
-		Config: &gossh.ClientConfig{
-			User:            cfg.User,
-			Auth:            cfg.AuthMethods,
-			HostKeyCallback: gossh.FixedHostKey(c.srv.hostSigner.PublicKey()),
-		},
-	})
+	// host is the destination the transport already resolved — "host:port" —
+	// so the two halves are not split and rejoined here, and the address the
+	// connection reports is the one the caller named.
+	raw, err := (&net.Dialer{}).DialContext(ctx, "tcp", host)
 	if err != nil {
 		return nil, err
 	}
-	return &transportTestLease{pool: pool, client: pool.Client()}, nil
+	clientConn, chans, reqs, err := gossh.NewClientConn(raw, host, &gossh.ClientConfig{
+		User:            cfg.User,
+		Auth:            cfg.AuthMethods,
+		HostKeyCallback: gossh.FixedHostKey(c.srv.hostSigner.PublicKey()),
+	})
+	if err != nil {
+		_ = raw.Close()
+		return nil, err
+	}
+	return &transportTestLease{client: gossh.NewClient(clientConn, chans, reqs)}, nil
 }
 
 // transportTestLease is the lease that connector answers with: the four
-// methods a forward drives, over the pooled connection's own client.
+// methods a forward drives, over the connection this call opened.
 type transportTestLease struct {
-	pool   *ssh.PooledConn
 	client *gossh.Client
 }
 
@@ -276,7 +265,7 @@ func (l *transportTestLease) Done() <-chan struct{} { return closedNever }
 
 func (l *transportTestLease) LostErr() error { return nil }
 
-func (l *transportTestLease) Close() error { return l.pool.Close() }
+func (l *transportTestLease) Close() error { return l.client.Close() }
 
 var closedNever = make(chan struct{})
 

@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package ssh
 
 // The helper-uninstall capability (remote-helper design D25) tested against

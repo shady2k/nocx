@@ -1,3 +1,13 @@
+//go:build nocx_local_ssh
+
+// This file dials: it builds the per-target gossh.ClientConfig, resolves a
+// route through a possible jump host, and performs the network dial. It is
+// nocx_local_ssh-gated because the coordinator makes no ssh connection at all
+// — cmd/nocx-server is never built with the tag, and the local helper is
+// (plan 2026-09-13 §1, §3). What is left untagged in this package is
+// resolution and the host-key decision, which a build with no client still
+// owns.
+
 package ssh
 
 import (
@@ -395,7 +405,7 @@ func (d *dialer) dialViaJumpHost(ctx context.Context, cfg *ConnectConfig, resolv
 	// DialContext respects ctx cancellation — no watchdog needed for this step.
 	conn, err := jumpClient.DialContext(ctx, "tcp", targetAddr)
 	if err != nil {
-		d.client.pool.Release(jumpHandle)
+		d.client.dial.pool.Release(jumpHandle)
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -404,7 +414,7 @@ func (d *dialer) dialViaJumpHost(ctx context.Context, cfg *ConnectConfig, resolv
 
 	target, err := d.handshakeOver(ctx, conn, targetAddr, targetCfg)
 	if err != nil {
-		d.client.pool.Release(jumpHandle)
+		d.client.dial.pool.Release(jumpHandle)
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -421,7 +431,7 @@ func (d *dialer) dialViaJumpHost(ctx context.Context, cfg *ConnectConfig, resolv
 	// connection for the life of the process.
 	pconn := &pooledSSHConn{
 		client:  target,
-		release: func() { d.client.pool.Release(jumpHandle) },
+		release: func() { d.client.dial.pool.Release(jumpHandle) },
 	}
 	stop, _ := startKeepalive(pconn, cfg.KeepaliveInterval, cfg.KeepaliveCountMax, cfg.Liveness)
 	pconn.setKeepaliveStop(stop)
@@ -466,31 +476,6 @@ func (d *dialer) handshakeOver(ctx context.Context, conn net.Conn, addr string, 
 	}
 }
 
-// jumpConnectConfig answers the ConnectConfig one hop is resolved and dialed
-// with.
-//
-// A route reaches this package in two shapes and they mean the same thing: the
-// recursive JumpConfig the connection resolver builds for a chain of profiles,
-// and the flat Jump* fields a single-hop profile sets. This is the ONE place
-// that reading happens — acquireJumpHost dials through it and ResolveTarget
-// resolves through it — because two readings would eventually disagree about
-// the one hop that matters, and a helper would then dial a different account
-// or a different credential than the coordinator's own path would have.
-func jumpConnectConfig(parent *ConnectConfig) *ConnectConfig {
-	if parent.JumpConfig != nil {
-		return parent.JumpConfig
-	}
-	return &ConnectConfig{
-		User:               parent.JumpUser,
-		Port:               parent.JumpPort,
-		KeyFile:            parent.JumpKeyFile,
-		AuthMode:           parent.JumpAuthMode,
-		Secrets:            parent.JumpSecrets,
-		SecretID:           parent.JumpSecretID,
-		PassphraseSecretID: parent.JumpPassphraseSecretID,
-	}
-}
-
 // acquireJumpHost resolves the jump host's config, enforces the jump
 // credential's binding, and Acquires the bastion from the pool — so the
 // bastion is shared across tabs and released with the last target. Returns
@@ -527,18 +512,18 @@ func (d *dialer) acquireJumpHost(ctx context.Context, cfg *ConnectConfig) (*pool
 	}
 
 	jumpKey := d.client.poolKeyFor(ctx, jumpResolved, jumpCfg)
-	handle, err := d.client.pool.AcquireDial(ctx, jumpKey, d.client.dialJumpForConnect(ctx, cfg.JumpHost, jumpResolved, jumpCfg))
+	handle, err := d.client.dial.pool.AcquireDial(ctx, jumpKey, d.client.dialJumpForConnect(ctx, cfg.JumpHost, jumpResolved, jumpCfg))
 	if err != nil {
 		return nil, nil, err
 	}
 	pconn, ok := handle.conn.(*pooledSSHConn)
 	if !ok {
-		d.client.pool.Release(handle)
+		d.client.dial.pool.Release(handle)
 		return nil, nil, fmt.Errorf("internal: jump pool entry is not *pooledSSHConn (%T)", handle.conn)
 	}
 	jumpClient, ok := pconn.client.(*gossh.Client)
 	if !ok {
-		d.client.pool.Release(handle)
+		d.client.dial.pool.Release(handle)
 		return nil, nil, fmt.Errorf("internal: jump client is not *gossh.Client (%T)", pconn.client)
 	}
 	return handle, jumpClient, nil

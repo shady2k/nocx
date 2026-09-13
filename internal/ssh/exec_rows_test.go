@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package ssh
 
 // §6.4's three `exec` rows, in the product (design §6.4 amendment A,

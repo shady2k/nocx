@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package ssh
 
 import (
@@ -10,11 +12,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/credential"
-	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/zalando/go-keyring"
 	gossh "golang.org/x/crypto/ssh"
@@ -340,21 +340,6 @@ func TestLoadKeyWithStoredPassphrase(t *testing.T) {
 	}
 }
 
-// newTestRealClient builds a RealClient with test-safe defaults.
-func newTestRealClient(t *testing.T) *RealClient {
-	t.Helper()
-	dir := t.TempDir()
-	rc, err := NewReal(
-		log.NewSlogAdapter(nil), // nil handler → slog falls back
-		WithKnownHostsFile(filepath.Join(dir, "known_hosts")),
-		WithConfigResolver(NewStubConfigResolver()),
-	)
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	return rc
-}
-
 // writeTestKey writes an ed25519 private key to dir/key and returns its path.
 func writeTestKey(t *testing.T, dir string) string {
 	t.Helper()
@@ -394,63 +379,6 @@ func TestConnectConfigNewFields(t *testing.T) {
 }
 
 // memSecretStore is an in-memory credential.SecretStore for tests.
-type memSecretStore struct {
-	mu   sync.Mutex
-	m    map[credential.SecretID]credential.Secret
-	next int
-}
-
-func (s *memSecretStore) Create(_ context.Context, value credential.Secret) (credential.SecretID, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.next++
-	id := credential.SecretID(fmt.Sprintf("mem-%d", s.next))
-	if s.m == nil {
-		s.m = make(map[credential.SecretID]credential.Secret)
-	}
-	s.m[id] = value
-	return id, nil
-}
-
-func (s *memSecretStore) Get(_ context.Context, id credential.SecretID) (credential.Secret, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	v, ok := s.m[id]
-	if !ok {
-		return credential.Secret{}, nil
-	}
-	return v, nil
-}
-
-func (s *memSecretStore) Resolve(ctx context.Context, id credential.SecretID, why credential.Stance) (credential.Secret, error) {
-	return credential.NewResolver(s, nil, nil).Resolve(ctx, id, why)
-}
-
-func (s *memSecretStore) Delete(_ context.Context, id credential.SecretID) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.m, id)
-	return nil
-}
-
-func (s *memSecretStore) Exists(_ context.Context, id credential.SecretID) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, ok := s.m[id]
-	return ok, nil
-}
-
-var testSecretCounter int
-
-func newTestStore() *memSecretStore {
-	return &memSecretStore{}
-}
-
-func newTestSecretID() credential.SecretID {
-	testSecretCounter++
-	return credential.SecretID(fmt.Sprintf("test-secret-id-%d", testSecretCounter))
-}
-
 // sealedStore returns vault.ErrVaultSealed on every Get, simulating a
 // locked vault at connect time.
 type sealedStore struct{}
@@ -766,4 +694,11 @@ func TestNoAuthMaterial_JumpDialSaysWhichMethodHasNothing(t *testing.T) {
 	if strings.Contains(err.Error(), "no supported methods remain") {
 		t.Fatalf("the handshake message leaked into the user's answer: %v", err)
 	}
+}
+
+var testSecretCounter int
+
+func newTestSecretID() credential.SecretID {
+	testSecretCounter++
+	return credential.SecretID(fmt.Sprintf("test-secret-id-%d", testSecretCounter))
 }

@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package ssh
 
 import (
@@ -613,7 +615,7 @@ func TestDialCancel_JumpHandshake(t *testing.T) {
 	}
 
 	// Bastion pool entry must be released — no leaked handles.
-	if got := client.pool.Count(); got != 0 {
+	if got := client.dial.pool.Count(); got != 0 {
 		t.Fatalf("pool.Count()=%d after cancelled jump dial, want 0 (bastion handle released)", got)
 	}
 

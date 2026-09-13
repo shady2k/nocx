@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package app
 
 // The typed path's terminal outcome, asserted where the product reads it: the

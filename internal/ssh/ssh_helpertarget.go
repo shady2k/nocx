@@ -611,6 +611,31 @@ func WireIdentity(ep DialEndpoint) proto.SSHIdentity {
 	return id
 }
 
+// jumpConnectConfig answers the ConnectConfig one hop is resolved and dialed
+// with.
+//
+// A route reaches this package in two shapes and they mean the same thing: the
+// recursive JumpConfig the connection resolver builds for a chain of profiles,
+// and the flat Jump* fields a single-hop profile sets. This is the ONE place
+// that reading happens — acquireJumpHost dials through it and ResolveTarget
+// resolves through it — because two readings would eventually disagree about
+// the one hop that matters, and a helper would then dial a different account
+// or a different credential than the coordinator's own path would have.
+func jumpConnectConfig(parent *ConnectConfig) *ConnectConfig {
+	if parent.JumpConfig != nil {
+		return parent.JumpConfig
+	}
+	return &ConnectConfig{
+		User:               parent.JumpUser,
+		Port:               parent.JumpPort,
+		KeyFile:            parent.JumpKeyFile,
+		AuthMode:           parent.JumpAuthMode,
+		Secrets:            parent.JumpSecrets,
+		SecretID:           parent.JumpSecretID,
+		PassphraseSecretID: parent.JumpPassphraseSecretID,
+	}
+}
+
 // resolveRoute flattens the jump chain into the ordered hops a helper dials.
 //
 // It walks the same chain acquireJumpHost walks, in the same order and with the

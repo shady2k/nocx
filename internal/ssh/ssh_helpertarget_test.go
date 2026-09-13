@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package ssh
 
 // The destination a helper dials, resolved by the coordinator (nocx-50w7p.3,

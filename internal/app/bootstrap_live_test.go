@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package app
 
 // The bootstrap end to end, against the real OpenSSH server the live-sshd

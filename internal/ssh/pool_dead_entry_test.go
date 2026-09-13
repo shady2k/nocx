@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package ssh
 
 // A pooled connection that is already closed must never be handed to a new

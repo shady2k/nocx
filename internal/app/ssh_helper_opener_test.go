@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package app
 
 // The app suite's stand-in helper route for an ssh pane (nocx-50w7p.5).

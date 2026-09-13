@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package app
 
 import (
@@ -281,7 +283,7 @@ func reachStack(t *testing.T, srv *reachSSHServer, launcher ssh.RemoteLauncher) 
 	t.Cleanup(func() { _ = client.Close() })
 
 	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
-	reg = reg.WithSSHFactory(&sshFactoryAdapter{client: client})
+	reg = reg.WithSSHFactory(&coordinatorDialFactory{client: client})
 
 	opts := []transport.WSServerOption{
 		transport.WithProfileResolver(&reachProfileResolver{host: srv.addr, keyFile: reachWriteKeyFile(t, srv.userKey)}),
@@ -301,12 +303,6 @@ func reachStack(t *testing.T, srv *reachSSHServer, launcher ssh.RemoteLauncher) 
 	}
 	t.Cleanup(func() { _ = ws.Stop(ctx) })
 	return ws, reachConnectWS(t, ws)
-}
-
-type reachPTYFactory struct{ stub *pty.Stub }
-
-func (f *reachPTYFactory) NewPTY(_ context.Context, _ pty.Config) (pty.Pty, error) {
-	return f.stub, nil
 }
 
 func reachConnectWS(t *testing.T, ws *transport.WSServer) *websocket.Conn {

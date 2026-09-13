@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package ssh
 
 import (
@@ -11,25 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/log"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
-
-// newTrustClient builds a RealClient whose known_hosts lives at the given
-// path (which may not exist yet).
-func newTrustClient(t *testing.T, khPath string) *RealClient {
-	t.Helper()
-	client, err := NewReal(
-		log.NewSlogAdapter(nil),
-		WithKnownHostsFile(khPath),
-	)
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	t.Cleanup(func() { _ = client.Close() })
-	return client
-}
 
 // probeOnce is one connection attempt that authenticates with exactly ONE
 // method and closes: the shape of a probe, built from the seams this package

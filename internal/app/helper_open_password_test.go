@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package app
 
 // The connection password reaches authentication exactly once per open.
@@ -32,7 +34,6 @@ import (
 	"time"
 
 	pkgsftp "github.com/pkg/sftp"
-	"github.com/shady2k/nocx/internal/credential"
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
@@ -47,8 +48,6 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
-
-const openPasswordFixturePassword = "e2e-password-42"
 
 // ---------------------------------------------------------------------------
 // A password-only SSH server: the destination shape the connection-password
@@ -559,14 +558,6 @@ func TestOpenPath_ProbeStillRunsOnARememberedPassword(t *testing.T) {
 	}
 }
 
-// rememberedPassword is the stored-secret half of ADR-0017: the material a
-// remembered connection password resolves to, with no person in the loop.
-type rememberedPassword struct{ value string }
-
-func (r rememberedPassword) Resolve(context.Context, credential.SecretID, credential.Stance) (credential.Secret, error) {
-	return credential.NewSecret(r.value), nil
-}
-
 // openPasswordStack builds the real composition the open path runs through —
 // the session registry over a real ssh.RealClient, and the helper registry
 // whose selection runs before it. The only double is the artifact source.
@@ -587,7 +578,7 @@ func openPasswordStack(t *testing.T, srv *pwSSHServer, probes probeHelperSource)
 	t.Cleanup(func() { _ = client.Close() })
 
 	reg := session.New(logger, &openPasswordPTYFactory{stub: pty.NewStub(logger)}).
-		WithSSHFactory(&sshFactoryAdapter{client: client})
+		WithSSHFactory(&coordinatorDialFactory{client: client})
 
 	consentStore := consent.NewStore(logger, storage.NewDocumentStore(t.TempDir()), "consent.json")
 	installStore := consent.NewInstallStore(logger, storage.NewDocumentStore(t.TempDir()), "installs.json")

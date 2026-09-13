@@ -32,8 +32,12 @@ package transport
 
 import (
 	"context"
+	"strings"
+	"testing"
 
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // stubHelperOpener answers a remote destination the way this machine's helper
@@ -81,4 +85,48 @@ func remoteUser(cfg session.Config) string {
 // "this server has a helper" rather than repeating the opener's construction.
 func sshHelperOpt(reg *session.Reg) WSServerOption {
 	return WithHelperSessionOpener(&stubHelperOpener{reg: reg})
+}
+
+// TestAnSSHOpenWithNoHelperOpenerIsANamedRefusal is the OTHER END of the rule
+// this file's fixture serves, and it is the assertion the epic turns on: a
+// remote destination no helper claims is REFUSED BY NAME rather than dialed
+// from this process (nocx-50w7p.5, ADR-0057's "no Tier A fallback").
+//
+// THE SSH FACTORY IS WIRED ON PURPOSE. The refusal must come from the ROUTE
+// being gone, not from there being nothing to dial with — so this registry can
+// dial, and the test would fail if the deleted fallback came back, because the
+// open would then succeed and this assertion would have nothing to match.
+func TestAnSSHOpenWithNoHelperOpenerIsANamedRefusal(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
+			return ssh.NewStubChannel(logger), nil
+		},
+	})
+	// No WithHelperSessionOpener: this machine has no helper, and that is the
+	// condition under test.
+	ws := NewWSServer(logger, reg, WithProfileResolver(&fakeResolver{
+		resolveFn: func(string) (string, *ssh.ConnectConfig, error) {
+			return "host.example.com", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+		},
+	}))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	resp := jsonrpcCall(t, conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "kind": "ssh", "profileId": "ssh:test:1",
+	})
+	got := string(resp)
+	if !strings.Contains(got, "no helper opener is wired") {
+		t.Fatalf("a remote open with no helper opener answered %s, want the refusal that names the helper — a silent dial from this process is what this asserts against", got)
+	}
+	if !strings.Contains(got, "-32603") {
+		t.Errorf("the refusal's code is not -32603, so the renderer cannot classify it: %s", got)
+	}
 }

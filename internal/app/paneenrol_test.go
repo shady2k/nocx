@@ -55,10 +55,25 @@ func newEnrollerWithWatcher(t *testing.T) (*paneEnroller, *paneviewtest.Views, *
 }
 
 // The ordinary case, and every refusal below is paired against it: a lane that
-// belongs to a session gets a grid at the geometry it named.
+// belongs to a session gets a grid.
+//
+// THE PANE IS DECLARED IN THE SOURCE FIRST, and that is the runtime's own
+// state rather than a fixture convenience: a pane whose session exists has a
+// screen from the moment it does, and Source.Available is the question
+// enrolment asks before it opens a watch (paneview's Source says why the two
+// methods are not redundant). A fixture that skipped the declaration was
+// asking to watch a pane its own source had never heard of.
+//
+// THE DECLARED GEOMETRY IS NOT THE ENROLMENT'S, deliberately. cols and rows
+// arrive from the shell's own report and the enroller does not pass them on —
+// the runtime beside the PTY already holds the size the program is running at
+// (nocx-ygxjv.3, at Enrol). A fixture whose frame came back at the reported
+// 120x40 would be asserting that the report had been believed, which is the
+// behaviour that decision removed.
 func TestEnrolmentOpensTheGridForTheLanesSession(t *testing.T) {
 	e, grid, sessions := newEnroller(t)
 	sessions.register("lane-1", "sess-1")
+	grid.Size("sess-1", 200, 50)
 
 	if err := e.Enrol("lane-1", "claude", 120, 40); err != nil {
 		t.Fatalf("enrol: %v", err)
@@ -70,8 +85,9 @@ func TestEnrolmentOpensTheGridForTheLanesSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("frame: %v", err)
 	}
-	if f.Cols != 120 || f.Rows != 40 {
-		t.Errorf("grid size = %dx%d, want the enrolment's 120x40", f.Cols, f.Rows)
+	if f.Cols != 200 || f.Rows != 50 {
+		t.Errorf("grid size = %dx%d, want the runtime's 200x50 — the enrolment's 120x40 is a "+
+			"shell's report and resizes nothing", f.Cols, f.Rows)
 	}
 
 	e.Withdraw("lane-1")
@@ -100,8 +116,9 @@ func TestAnUnplaceableLaneIsRefused(t *testing.T) {
 // Restarting would discard the grid built so far, and with it the byte-zero
 // guarantee that is the only reason to trust a frame at all.
 func TestAWatchedPaneIsNotReEnrolled(t *testing.T) {
-	e, _, sessions := newEnroller(t)
+	e, grid, sessions := newEnroller(t)
 	sessions.register("lane-1", "sess-1")
+	grid.Size("sess-1", 120, 40)
 
 	if err := e.Enrol("lane-1", "claude", 120, 40); err != nil {
 		t.Fatalf("first enrol: %v", err)
@@ -124,6 +141,7 @@ func TestTheWatchBoundIsRefusedByName(t *testing.T) {
 		lane := lifecycle.LaneID("lane-" + string(rune('a'+i%26)) + string(rune('a'+i/26)))
 		sid := "sess-" + string(rune('a'+i%26)) + string(rune('a'+i/26))
 		sessions.register(lane, sid)
+		grid.Size(sid, 80, 24)
 		if err := e.Enrol(lane, "claude", 80, 24); err != nil {
 			t.Fatalf("enrol %d: %v", i, err)
 		}
@@ -132,6 +150,7 @@ func TestTheWatchBoundIsRefusedByName(t *testing.T) {
 		t.Fatalf("opened %d grids, want %d", grid.Count(), paneview.MaxWatched)
 	}
 	sessions.register("lane-over", "sess-over")
+	grid.Size("sess-over", 80, 24)
 	err := e.Enrol("lane-over", "claude", 80, 24)
 	if err == nil {
 		t.Fatal("the watch bound was exceeded")
@@ -172,6 +191,9 @@ func TestPaneEnrollerRefusalsAreErrorsThePublisherCanShow(t *testing.T) {
 func TestEnrolmentOpensTheObservationAndTheFirstSweepReportsThePane(t *testing.T) {
 	e, grid, sessions, watch := newEnrollerWithWatcher(t)
 	sessions.register("lane-1", "sess-1")
+	// Declared at the geometry the frame below is drawn at: the rule spans the
+	// pane's width, so the source and the bytes have to agree about it.
+	grid.Size("sess-1", 40, 14)
 	var got []paneobserve.Observation
 	watch.SetEmitter(func(o paneobserve.Observation) { got = append(got, o) })
 
@@ -194,8 +216,9 @@ func TestEnrolmentOpensTheObservationAndTheFirstSweepReportsThePane(t *testing.T
 // And closes it. The interval has both ends here too: a withdrawn pane is not
 // observed, and the observation does not outlive the grid it reads.
 func TestWithdrawalClosesTheObservationWithTheGrid(t *testing.T) {
-	e, _, sessions, watch := newEnrollerWithWatcher(t)
+	e, grid, sessions, watch := newEnrollerWithWatcher(t)
 	sessions.register("lane-1", "sess-1")
+	grid.Size("sess-1", 40, 14)
 	var got []paneobserve.Observation
 	watch.SetEmitter(func(o paneobserve.Observation) { got = append(got, o) })
 

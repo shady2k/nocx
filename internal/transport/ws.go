@@ -312,6 +312,11 @@ type WSServer struct {
 	// paneObserver classifies an enrolled pane's grid and reports the
 	// changes (nocx-szb40.3). Nil when unwired, like paneGrid above.
 	paneObserver paneObserver
+	// paneAdmissions is the end of the ADMISSION INTERVAL a session's
+	// enrolment opened (ADR-0058, nocx-9mn6z). Nil when unwired: a session's
+	// end then closes the watch and the frame and leaves any admitted tool
+	// connection alone, which is what this server did before the seam existed.
+	paneAdmissions paneAdmissions
 	// agentRules is what a pane's rule READS on its frame, for the emitting
 	// view (nocx-02uci). Nil when unwired, and agent.emitting then answers
 	// that it is not available rather than a screen with no reading beside

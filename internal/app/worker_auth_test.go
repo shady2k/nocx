@@ -64,9 +64,26 @@ func emptyWorkerRecord() *workers.Registrar {
 	return workers.NewRegistrar(workers.NewMemoryStore(), nil, nil, nil)
 }
 
+// allowWorkerApproval is the answer seam at its most permissive: every session
+// is in an interval, and the interval never moves. It is what a test uses when
+// the approval is not the thing under test.
 type allowWorkerApproval struct{}
 
-func (allowWorkerApproval) Approved(session.ID, string) bool { return true }
+func (allowWorkerApproval) Interval(session.ID, string) (toolendpoint.AdmissionEpoch, bool) {
+	return 1, true
+}
+
+// publishForTest stands in for the endpoint's admission record, for the tests
+// that drive the authorizer's DECISION without standing a socket up.
+//
+// It answers true — the record accepted the connection — and it refuses to
+// accept a decision that names no interval, so a test cannot pass while the
+// authorizer publishes something no retirement could ever close. What happens
+// when the record refuses is asserted where the record lives, in
+// internal/toolendpoint.
+func publishForTest(session string, epoch toolendpoint.AdmissionEpoch) bool {
+	return session != "" && epoch != 0
+}
 
 func mustToolAuthorizer(t *testing.T, pinner peerpin.Pinner, sessions workerAuthSessions, enrolments workerAuthEnrolments, participants workerAuthParticipants, workspace string, approval workerAuthApproval) toolendpoint.Authorizer {
 	t.Helper()
@@ -132,7 +149,7 @@ func TestToolAuthorizerAdmitsEnrolledOwnedTreeThroughRealWorkerRecord(t *testing
 	pinner := &workerAuthPinner{root: root, member: map[int]bool{9001: true}}
 	auth := mustToolAuthorizer(t, pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace, allowWorkerApproval{})
 
-	inv, _, err := auth.Admit(toolendpoint.Peer{UID: 1000, PID: 9001})
+	inv, _, err := auth.Admit(toolendpoint.Peer{UID: 1000, PID: 9001}, publishForTest)
 	if err != nil {
 		t.Fatalf("admit enrolled tree: %v", err)
 	}
@@ -228,7 +245,7 @@ func TestToolAuthorizerRefusesCallerOutsideEveryEnrolledTree(t *testing.T) {
 		member: map[int]bool{9001: false},
 	}
 	auth := mustToolAuthorizer(t, pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace, allowWorkerApproval{})
-	_, _, err := auth.Admit(toolendpoint.Peer{UID: 1000, PID: 9001})
+	_, _, err := auth.Admit(toolendpoint.Peer{UID: 1000, PID: 9001}, publishForTest)
 	if !errors.Is(err, toolendpoint.ErrNotEnrolled) {
 		t.Fatalf("outside-tree admission error = %v, want ErrNotEnrolled", err)
 	}
@@ -249,11 +266,11 @@ func TestToolAuthorizerWithdrawClosesAdmissionInterval(t *testing.T) {
 		member: map[int]bool{9001: true},
 	}
 	auth := mustToolAuthorizer(t, pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace, allowWorkerApproval{})
-	if _, _, err := auth.Admit(toolendpoint.Peer{UID: 1000, PID: 9001}); err != nil {
+	if _, _, err := auth.Admit(toolendpoint.Peer{UID: 1000, PID: 9001}, publishForTest); err != nil {
 		t.Fatalf("admit before withdrawal: %v", err)
 	}
 	grid.Withdraw(string(sess.ID()))
-	if _, _, err := auth.Admit(toolendpoint.Peer{UID: 1000, PID: 9001}); !errors.Is(err, toolendpoint.ErrNotEnrolled) {
+	if _, _, err := auth.Admit(toolendpoint.Peer{UID: 1000, PID: 9001}, publishForTest); !errors.Is(err, toolendpoint.ErrNotEnrolled) {
 		t.Fatalf("admit after withdrawal error = %v, want ErrNotEnrolled", err)
 	}
 }
@@ -384,7 +401,7 @@ func TestToolAuthorizerRefusesEnrolledSessionWithoutOwnedProcess(t *testing.T) {
 		member: map[int]bool{9001: true},
 	}
 	auth := mustToolAuthorizer(t, pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace, allowWorkerApproval{})
-	_, _, err := auth.Admit(toolendpoint.Peer{UID: 1000, PID: 9001})
+	_, _, err := auth.Admit(toolendpoint.Peer{UID: 1000, PID: 9001}, publishForTest)
 	if !errors.Is(err, toolendpoint.ErrNotEnrolled) {
 		t.Fatalf("unknown-owned-pid admission error = %v, want ErrNotEnrolled", err)
 	}
@@ -409,7 +426,7 @@ func TestToolAuthorizerRefusesRemoteSessionWithoutOwnedProcess(t *testing.T) {
 		member: map[int]bool{9001: true},
 	}
 	auth := mustToolAuthorizer(t, pinner, sessions, grid, emptyWorkerRecord(), workerTestWorkspace, allowWorkerApproval{})
-	_, _, err := auth.Admit(toolendpoint.Peer{UID: 1000, PID: 9001})
+	_, _, err := auth.Admit(toolendpoint.Peer{UID: 1000, PID: 9001}, publishForTest)
 	if !errors.Is(err, toolendpoint.ErrNotEnrolled) {
 		t.Fatalf("remote session admission error = %v, want ErrNotEnrolled", err)
 	}
@@ -459,7 +476,7 @@ func TestRefusedToolInvocationOffersNoWorkerTools(t *testing.T) {
 		member: map[int]bool{9001: true},
 	}
 	auth := mustToolAuthorizer(t, pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace, allowWorkerApproval{})
-	inv, _, err := auth.Admit(toolendpoint.Peer{UID: 1000, PID: 9001})
+	inv, _, err := auth.Admit(toolendpoint.Peer{UID: 1000, PID: 9001}, publishForTest)
 	if !errors.Is(err, toolendpoint.ErrNotEnrolled) {
 		t.Fatalf("unadmitted peer error = %v, want ErrNotEnrolled", err)
 	}

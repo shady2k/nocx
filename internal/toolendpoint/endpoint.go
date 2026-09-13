@@ -35,6 +35,11 @@ const (
 var (
 	errOversizedEnvelope  = errors.New("toolendpoint: request envelope exceeds the size bound")
 	errIncompleteEnvelope = errors.New("toolendpoint: request did not end with a newline")
+	// errUnpublishedAdmission is an authorizer returning a grant without
+	// having published the admission through the callback it was handed. The
+	// connection it describes is one no interval can close, so it is refused
+	// rather than served.
+	errUnpublishedAdmission = errors.New("toolendpoint: authorizer admitted a peer without publishing the admission")
 )
 
 const (
@@ -113,12 +118,24 @@ type Endpoint struct {
 	closed   bool
 	conns    map[*net.UnixConn]struct{}
 	// admitted is the same set keyed by the session each connection was
-	// admitted for. ADR-0058 makes the admission interval the unit of
-	// authority and names its closing events; a connection outlives a single
-	// call, so the interval has to be closable by session or a withdrawn
-	// answer keeps working until the socket happens to end.
-	admitted map[string]map[*net.UnixConn]struct{}
-	wait     sync.WaitGroup
+	// admitted for, carrying the EPOCH it was admitted under. ADR-0058 makes
+	// the admission interval the unit of authority and names its closing
+	// events; a connection outlives a single call, so the interval has to be
+	// closable by session or a withdrawn answer keeps working until the socket
+	// happens to end. The epoch is what makes the closing exact: a session can
+	// hold two intervals with identical approval, and only the epoch says which
+	// of them a live connection belongs to.
+	admitted map[string]map[*net.UnixConn]AdmissionEpoch
+	// retired is the highest epoch per session whose interval has ENDED, and
+	// it only ever moves forward. A publication naming an epoch at or below it
+	// is refused: the interval that decided the admission is over, so a
+	// connection arriving late from it must not be recorded. It is the one
+	// piece of state that makes the publication and the retirement
+	// linearizable — both take the lock below, so the two orders that exist
+	// are "published then retired", which closes the connection, and "retired
+	// then published", which refuses it.
+	retired map[string]AdmissionEpoch
+	wait    sync.WaitGroup
 }
 
 // New validates the endpoint configuration and computes its socket path. It
@@ -154,7 +171,8 @@ func New(cfg Config) (*Endpoint, error) {
 		cfg:      cfg,
 		socket:   filepath.Join(cfg.Dir, toolSocketName),
 		conns:    make(map[*net.UnixConn]struct{}),
-		admitted: make(map[string]map[*net.UnixConn]struct{}),
+		admitted: make(map[string]map[*net.UnixConn]AdmissionEpoch),
+		retired:  make(map[string]AdmissionEpoch),
 	}
 	// An authorizer whose own authority can end while a connection is open
 	// takes the endpoint's admissions here, at construction, rather than
@@ -168,17 +186,20 @@ func New(cfg Config) (*Endpoint, error) {
 }
 
 // SessionAdmissions is the endpoint's view of what it has admitted, handed to
-// an authorizer that needs to end an interval early: which sessions hold a live
-// connection, and the way to close one session's connections.
+// an authorizer that needs to end an interval early: the epoch of one session's
+// authority, and the way to retire it.
 type SessionAdmissions interface {
-	// AdmittedSessions names the sessions with at least one live admitted
-	// connection.
-	AdmittedSessions() []string
-	// CloseAdmitted closes every live connection admitted for a session,
-	// returning how many it closed. The session's caller slot is released as
-	// each serve loop ends, and a client that dials again is admitted afresh —
-	// which is where a revoked answer is refused.
-	CloseAdmitted(session string) int
+	// RetireAdmissions ends the authority an interval carried. Every live
+	// connection admitted for the session under an epoch at or before epoch is
+	// closed — which cancels the request contexts in flight on it — and every
+	// later publication naming one of those epochs is refused. It returns how
+	// many connections it closed.
+	//
+	// It is idempotent in the sense that matters: retiring an epoch that was
+	// already retired closes nothing and refuses everything it refused before.
+	// A session's epochs only move forward, so a retirement is never undone
+	// and a later interval is never caught by an earlier retirement.
+	RetireAdmissions(session string, epoch AdmissionEpoch) int
 }
 
 // SessionAdmissionBinder is implemented by an Authorizer that owns authority
@@ -200,18 +221,34 @@ func (e *Endpoint) AdmittedSessions() []string {
 	return sessions
 }
 
-// CloseAdmitted closes every live connection admitted for a session. It is the
+// RetireAdmissions ends the authority of a session's interval. It is the
 // closing event ADR-0058 names for a shared connection: the interval's grant is
 // immutable, so ending the interval is the only way a withdrawal takes effect
 // before the session itself ends.
-func (e *Endpoint) CloseAdmitted(session string) int {
-	if session == "" {
+//
+// The epoch is what makes it exact rather than approximate. A session can hold
+// two intervals the approval cannot tell apart — withdrawn and enrolled again —
+// and a retirement that closed "whatever is live for this session" would take
+// the new interval's connection with the old one's. Only the connections whose
+// epoch has ENDED are closed here; the higher floor left behind is what refuses
+// the late publication of a decision taken under the ended epoch.
+func (e *Endpoint) RetireAdmissions(session string, epoch AdmissionEpoch) int {
+	if session == "" || epoch == 0 {
 		return 0
 	}
 	e.mu.Lock()
-	connections := make([]*net.UnixConn, 0, len(e.admitted[session]))
-	for conn := range e.admitted[session] {
-		connections = append(connections, conn)
+	if epoch > e.retired[session] {
+		e.retired[session] = epoch
+	}
+	// The floor, not the argument, decides what is closed: an epoch retired
+	// earlier has already been refused, and a connection stamped with it
+	// cannot exist. Reading it back keeps the two in one place.
+	floor := e.retired[session]
+	var connections []*net.UnixConn
+	for conn, admitted := range e.admitted[session] {
+		if admitted <= floor {
+			connections = append(connections, conn)
+		}
 	}
 	e.mu.Unlock()
 	for _, conn := range connections {
@@ -370,23 +407,41 @@ func (e *Endpoint) untrack(conn *net.UnixConn) {
 	e.mu.Unlock()
 }
 
-// admitSession remembers which session this connection was admitted for, so the
-// interval can be closed by session later (ADR-0058's withdraw, and a revoked
-// approval). It is populated after Admit succeeds and removed with the
-// connection.
-func (e *Endpoint) admitSession(session string, conn *net.UnixConn) {
-	if session == "" {
-		return
+// publishAdmission records which session — and which INTERVAL of it — this
+// connection was admitted for. It is called BY the authorizer from inside the
+// decision that admitted the connection, never by the endpoint after that
+// decision returned, so a retirement ordered between the two cannot miss it:
+// both take this mutex, and the two orders that exist are "published then
+// retired", where the retirement finds this connection and closes it, and
+// "retired then published", where the epoch is at or below the floor and this
+// returns false.
+//
+// The record is removed by the serve loop that owns the connection, or — when
+// the decision published and then failed — by the refusal path that owns that
+// failure. Either way a record and a live serve loop are the same thing.
+func (e *Endpoint) publishAdmission(session string, epoch AdmissionEpoch, conn *net.UnixConn) bool {
+	if session == "" || epoch == 0 {
+		return false
 	}
 	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return false
+	}
+	if epoch <= e.retired[session] {
+		// The interval this decision was taken under has ended. A connection
+		// admitted from it now would carry a grant nobody holds, which is the
+		// state the epoch exists to make impossible.
+		return false
+	}
 	if e.admitted == nil {
-		e.admitted = make(map[string]map[*net.UnixConn]struct{})
+		e.admitted = make(map[string]map[*net.UnixConn]AdmissionEpoch)
 	}
 	if e.admitted[session] == nil {
-		e.admitted[session] = make(map[*net.UnixConn]struct{})
+		e.admitted[session] = make(map[*net.UnixConn]AdmissionEpoch)
 	}
-	e.admitted[session][conn] = struct{}{}
-	e.mu.Unlock()
+	e.admitted[session][conn] = epoch
+	return true
 }
 
 func (e *Endpoint) forgetSession(session string, conn *net.UnixConn) {
@@ -421,8 +476,33 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer) {
 	defer e.untrack(conn)
 	defer func() { _ = conn.Close() }()
 
-	invocation, release, err := e.cfg.Auth.Admit(peer)
+	// published records that the authorizer admitted this connection through
+	// the callback below, and under which session. The endpoint grants nothing
+	// it did not publish: an authorizer that returns a grant without publishing
+	// has produced a connection the interval cannot close, which is refused
+	// rather than served.
+	published := false
+	publishedSession := ""
+	invocation, release, err := e.cfg.Auth.Admit(peer, func(session string, epoch AdmissionEpoch) bool {
+		if !e.publishAdmission(session, epoch, conn) {
+			return false
+		}
+		published = true
+		publishedSession = session
+		return true
+	})
+	if err == nil && !published {
+		err = errUnpublishedAdmission
+	}
 	if err != nil {
+		// A DECISION THAT PUBLISHED AND THEN FAILED LEAVES NOTHING BEHIND. The
+		// record is not conditional on the decision succeeding: this serve loop
+		// never starts, so nothing else would remove it, and the endpoint would
+		// report a session as admitted with no connection behind it until some
+		// later retirement closed an interval that has nothing to close.
+		if published {
+			e.forgetSession(publishedSession, conn)
+		}
 		code, message, reason := rpcErrorFor(err)
 		e.observePeerRefusal(peer, reason)
 		e.writeError(conn, nil, code, message, reason)
@@ -432,9 +512,11 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer) {
 	if base == nil {
 		base = context.Background()
 	}
-	session := invocation.RunContext.Session
-	e.admitSession(session, conn)
-	defer e.forgetSession(session, conn)
+	// The book is keyed by what the endpoint RECORDED and not by what the
+	// invocation says: a connection is forgotten from exactly where it was
+	// admitted, so an authorizer whose two answers disagree cannot leave an
+	// entry nothing removes.
+	defer e.forgetSession(publishedSession, conn)
 	e.observe(Observation{
 		SessionID: invocation.RunContext.Session,
 		Kind:      ObservationAdmitted,
@@ -779,6 +861,13 @@ func rpcErrorFor(err error) (code int, message, reason string) {
 	case errors.Is(err, ErrNotEnrolled):
 		return rpcPeerRefused, "worker caller refused",
 			"this process is not in a pane nocx has enrolled, so it has no worker tools. Nothing you can call will change that; tell the person their pane is not orchestrated."
+	case errors.Is(err, errUnpublishedAdmission):
+		// THE ONE ADMISSION THAT IS NOCX'S OWN FAULT. The authorizer granted
+		// and did not record, so the connection would have served under an
+		// interval nothing can close. Refused rather than retried: the same
+		// dial reaches the same authorizer.
+		return rpcPeerRefused, "worker caller refused",
+			"nocx decided to admit this caller and could not record the admission, so nothing was granted and no call was made. This is a fault in how this pane's tools are wired, not in what you sent; reconnecting will fail the same way, so tell the person their pane is not orchestrated."
 	case errors.Is(err, context.Canceled):
 		// THE CALLER STOPPED WAITING; NOTHING FAILED INSIDE NOCX. This is
 		// what a dispatch reports when its own context ends before it

@@ -34,6 +34,7 @@ func TestEveryRefusalTellsTheCallerWhatToDoNext(t *testing.T) {
 		workers.ErrTaskSubmitRefused,
 		ErrSessionCallerActive,
 		ErrNotEnrolled,
+		errUnpublishedAdmission,
 		context.Canceled,
 		context.DeadlineExceeded,
 		errors.New("something nobody has classified"),

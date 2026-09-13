@@ -2,12 +2,14 @@ package app
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -49,20 +51,21 @@ func admittedWorkerEndpoint(t *testing.T) (*agentApprovalService, *toolendpoint.
 	}
 
 	approval := approvalServiceForTest(t, nil)
-	executable, err := agentapproval.IdentityForPath(fakeAgent(t, "revoked-agent"))
+	agent := fakeAgent(t, "revoked-agent")
+	executable, err := agentapproval.IdentityForPath(agent)
 	if err != nil {
 		t.Fatalf("identify agent: %v", err)
 	}
-	// The state a finished enrolment leaves behind, written the way the
-	// enrolment writes it: the identity this session was approved AS, and the
-	// answer in the durable store. Approved reads both.
-	approval.mu.Lock()
-	approval.enrolled[sess.ID()] = executable
-	approval.mu.Unlock()
+	// The state a finished enrolment leaves behind, reached the way the
+	// enrolment reaches it: the answer in the durable store, and then the
+	// enrolment that reads it, which is what mints the interval's epoch.
 	if recordErr := approval.store.Record(executable, approval.scope, agentapproval.Granted); recordErr != nil {
 		t.Fatalf("record the answer: %v", recordErr)
 	}
-	if !approval.Approved(sess.ID(), approval.scope) {
+	if enrolErr := approval.Approve(context.Background(), sess.ID(), agent); enrolErr != nil {
+		t.Fatalf("enrol the agent: %v", enrolErr)
+	}
+	if _, live := approval.Interval(sess.ID(), approval.scope); !live {
 		t.Fatal("the approval this test is about to revoke was never in force")
 	}
 
@@ -219,14 +222,173 @@ func admittedSession(t *testing.T, endpoint *toolendpoint.Endpoint) session.ID {
 	return session.ID(admitted[0])
 }
 
+// A REVOKE ENDS THE SESSIONS THAT ANSWER HELD, AND NOBODY ELSE'S.
+//
+// The revocation names an executable and a digest, and the sessions it holds
+// are the ones still enrolled as that agent. Ending them is the fix; ending
+// MORE than them is a defect of its own — one person turning off one agent must
+// not drop a colleague's work in flight — which is why the sessions are read
+// from the live enrolments rather than from a scan of everything the endpoint
+// has admitted (nocx-9mn6z).
+func TestRevokingOneAgentLeavesAnotherAgentsSessionAdmitted(t *testing.T) {
+	ctx := context.Background()
+	reg, first, grid := openWorkerAuthSession(t)
+	second, err := reg.Open(ctx, session.Config{Kind: session.KindLocal, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("open the second session: %v", err)
+	}
+	t.Cleanup(func() { _ = reg.Close(second.ID()) })
+
+	const (
+		firstRoot  = 4242
+		secondRoot = 4243
+		firstPeer  = 9001
+		secondPeer = 9002
+		nextPeer   = 9003
+	)
+	for _, pair := range []struct {
+		sid  session.ID
+		root int
+	}{{first.ID(), firstRoot}, {second.ID(), secondRoot}} {
+		if pidErr := reg.RecordOwnedProcessPID(pair.sid, pair.root); pidErr != nil {
+			t.Fatalf("record owned process pid for %s: %v", pair.sid, pidErr)
+		}
+		if watchErr := grid.Watch(string(pair.sid), 80, 24); watchErr != nil {
+			t.Fatalf("enrol %s: %v", pair.sid, watchErr)
+		}
+	}
+
+	approval := approvalServiceForTest(t, nil)
+	agents := map[session.ID]string{first.ID(): fakeAgent(t, "agent-one"), second.ID(): fakeAgent(t, "agent-two")}
+	for sid, agent := range agents {
+		executable, idErr := agentapproval.IdentityForPath(agent)
+		if idErr != nil {
+			t.Fatalf("identify %s: %v", agent, idErr)
+		}
+		if recordErr := approval.store.Record(executable, approval.scope, agentapproval.Granted); recordErr != nil {
+			t.Fatalf("record the answer for %s: %v", sid, recordErr)
+		}
+		if enrolErr := approval.Approve(ctx, sid, agent); enrolErr != nil {
+			t.Fatalf("enrol %s: %v", sid, enrolErr)
+		}
+	}
+
+	// Two callers, one per pane: the peer pid is what binds a connection to a
+	// session, so the pids are handed out in dial order and the pinner answers
+	// which root each belongs to.
+	peers := &dialOrderedPeers{pids: []int{firstPeer, secondPeer, nextPeer}}
+	pinner := &multiRootPinner{
+		roots: map[int]peerpin.Root{
+			firstRoot:  {PID: firstRoot, StartTime: time.Unix(123, 0)},
+			secondRoot: {PID: secondRoot, StartTime: time.Unix(123, 0)},
+		},
+		members: map[int]int{firstPeer: firstRoot, secondPeer: secondRoot, nextPeer: firstRoot},
+	}
+	auth := mustToolAuthorizer(t, pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace, approval)
+	endpoint, err := toolendpoint.New(toolendpoint.Config{
+		Dir:      shortWorkerSocketDir(t),
+		Peers:    peers,
+		Owner:    workerAuthEndpointOwner{},
+		SelfUID:  1000,
+		Auth:     auth,
+		Dispatch: newSharedToolDispatcher(t, emptyWorkerRecord()),
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("new tool endpoint: %v", err)
+	}
+	if startErr := endpoint.Start(); startErr != nil {
+		t.Fatalf("start tool endpoint: %v", startErr)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+
+	firstConn, err := net.Dial("unix", endpoint.SocketPath())
+	if err != nil {
+		t.Fatalf("dial the first caller: %v", err)
+	}
+	t.Cleanup(func() { _ = firstConn.Close() })
+	callOverEndpoint(t, firstConn, "first-agent")
+
+	secondConn, err := net.Dial("unix", endpoint.SocketPath())
+	if err != nil {
+		t.Fatalf("dial the second caller: %v", err)
+	}
+	t.Cleanup(func() { _ = secondConn.Close() })
+	callOverEndpoint(t, secondConn, "second-agent")
+
+	both := endpoint.AdmittedSessions()
+	if len(both) != 2 {
+		t.Fatalf("admitted sessions = %v, want both panes", both)
+	}
+
+	// The person turns ONE agent off.
+	revoked, idErr := agentapproval.IdentityForPath(agents[first.ID()])
+	if idErr != nil {
+		t.Fatalf("identify the revoked agent: %v", idErr)
+	}
+	forgotten, revokeErr := approval.ForgetAgentAccess(revoked.Path, revoked.SHA256, workerTestWorkspace)
+	if revokeErr != nil || !forgotten {
+		t.Fatalf("revoke: forgotten=%v err=%v", forgotten, revokeErr)
+	}
+
+	expectClosed(t, firstConn, "the revoked agent's connection")
+	// AND THE OTHER AGENT'S WORK IS UNTOUCHED: its connection was not closed,
+	// its interval is intact, and it goes on being served.
+	callOverEndpoint(t, secondConn, "still-working")
+	if got := endpoint.AdmittedSessions(); len(got) != 1 || got[0] != string(second.ID()) {
+		t.Fatalf("admitted sessions after the revoke = %v, want only %s", got, second.ID())
+	}
+}
+
+// multiRootPinner pins more than one root, which the single-root fixture cannot:
+// a test about one revocation sparing another agent's session needs two sessions
+// admitted at once.
+type multiRootPinner struct {
+	roots   map[int]peerpin.Root
+	members map[int]int
+}
+
+func (p *multiRootPinner) Pin(pid int) (peerpin.Root, error) {
+	root, ok := p.roots[pid]
+	if !ok {
+		return peerpin.Root{}, peerpin.ErrGone
+	}
+	return root, nil
+}
+
+func (p *multiRootPinner) Member(child int, root peerpin.Root) (bool, error) {
+	return p.members[child] == root.PID, nil
+}
+
+// dialOrderedPeers hands each accepted connection the next pid in a list, so a
+// test can say which pane a connection belongs to.
+type dialOrderedPeers struct {
+	mu   sync.Mutex
+	pids []int
+	next int
+}
+
+func (p *dialOrderedPeers) PeerUID(*net.UnixConn) (uint32, error) { return 1000, nil }
+
+func (p *dialOrderedPeers) PeerPID(*net.UnixConn) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.next >= len(p.pids) {
+		return 0, errors.New("the test ran out of peer pids")
+	}
+	pid := p.pids[p.next]
+	p.next++
+	return pid, nil
+}
+
 // enrolledExecutable is what this session is currently approved as, read the
 // way the service reads it.
 func (s *agentApprovalService) enrolledExecutable(t *testing.T) (agentapproval.Executable, bool) {
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, executable := range s.enrolled {
-		return executable, true
+	for _, enrolled := range s.enrolled {
+		return enrolled.executable, true
 	}
 	return agentapproval.Executable{}, false
 }

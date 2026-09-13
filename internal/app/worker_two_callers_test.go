@@ -414,7 +414,21 @@ func toolRegistry(t *testing.T) agenttools.Registry {
 	return registry
 }
 
-func newSharedToolDispatcher(t *testing.T, record assistant.WorkerRecord) assistant.ToolDispatcher {
+// dispatchingCatalogue is what the endpoint composes: a tool surface AND the
+// catalogue it enumerates itself from. toolendpoint.New refuses a dispatcher that
+// cannot enumerate (its implementsCatalogue check), so a stand that handed over
+// only the dispatch half would be composed differently from the product's own —
+// and a wrapper that advertised a catalogue its inner surface does not have
+// would turn that refusal into an empty one.
+type dispatchingCatalogue interface {
+	assistant.ToolDispatcher
+	assistant.ToolCatalogue
+}
+
+// newSharedToolDispatcher returns BOTH halves, which is the fact every caller
+// here already depends on: the endpoint it is handed to will not compose without
+// a catalogue.
+func newSharedToolDispatcher(t *testing.T, record assistant.WorkerRecord) dispatchingCatalogue {
 	t.Helper()
 	dispatcher, err := assistant.NewToolDispatcher(
 		toolRegistry(t), record, content.EnvironmentIDFor(content.EnvLocal, ""),
@@ -422,7 +436,15 @@ func newSharedToolDispatcher(t *testing.T, record assistant.WorkerRecord) assist
 	if err != nil {
 		t.Fatalf("new worker dispatcher: %v", err)
 	}
-	return dispatcher
+	cataloguer, ok := dispatcher.(dispatchingCatalogue)
+	if !ok {
+		// toolendpoint.New would refuse this dispatcher at composition, and a
+		// stand that cannot compose is a malformed fixture rather than a subject
+		// under test: failing here names it once instead of letting every test
+		// that uses the stand report the refusal as its own subject's failure.
+		t.Fatal("the assembled dispatcher cannot enumerate the tools a grant admits")
+	}
+	return cataloguer
 }
 
 // TestGroupExternalCallerMutationIsTheInProcessCallersRow is the epic's happy

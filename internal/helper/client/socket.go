@@ -13,6 +13,12 @@ import (
 	"io"
 	"net"
 	"sync"
+
+	// The kernel's own answer about a socket's peer (SO_PEERCRED and its
+	// darwin equivalent). It is this repository's ONE reader of that fact, and
+	// PeerPID below is a second caller of it rather than a second copy of the
+	// getsockopt.
+	"github.com/shady2k/nocx/internal/coordinator"
 )
 
 // ErrNoCommandOnASocket is a socket carrier handed a command to launch. It is
@@ -53,6 +59,28 @@ func NewSocketConn(conn net.Conn) *SocketConn {
 // this is the same connection Stdout reads — which is exactly what the exec
 // lane's two pipes add up to.
 func (c *SocketConn) Stdin() io.WriteCloser { return writeHalf{c} }
+
+// PeerPID answers the pid of the process at the other end of this socket, as
+// the kernel stamped it when the coordinator dialed it.
+//
+// It exists because a peer is what tells one process apart from another on this
+// machine, and the coordinator needs exactly that to know WHICH process its
+// helper is (nocx-50w7p.16: the lane whose connections may name a pane).
+//
+// False for a carrier with no socket at its other end — an exec lane's peer is
+// a process on somebody else's machine, and the kernel here knows nothing about
+// it. A caller that needs the fact refuses rather than guessing.
+func (c *SocketConn) PeerPID() (int, bool) {
+	unix, ok := c.conn.(*net.UnixConn)
+	if !ok {
+		return 0, false
+	}
+	pid, err := coordinator.SystemPeerCredentials{}.PeerPID(unix)
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	return pid, true
+}
 
 // Stdout is the wire.
 func (c *SocketConn) Stdout() io.Reader { return readHalf{c} }

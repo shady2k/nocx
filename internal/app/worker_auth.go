@@ -196,7 +196,19 @@ func (a *toolAuthorizer) retire(sid session.ID, epoch toolendpoint.AdmissionEpoc
 }
 
 func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, session.Session, toolendpoint.AdmissionEpoch, bool) {
-	if a == nil || a.pinner == nil || a.sessions == nil || a.enrolments == nil || peer.PID <= 0 {
+	if a == nil || a.pinner == nil || a.sessions == nil || a.enrolments == nil {
+		return "", nil, 0, false
+	}
+	// THE ASSERTED PANE, and it is a different answer rather than a shortcut
+	// through the local one (nocx-50w7p.16). A far agent has no pid here: what
+	// its connection carries is the pane the helper accepted it on, and the
+	// helper is the only party that knows it. The peer's pid is not consulted
+	// on this arm at all — it is the HELPER's, and matching it against a
+	// process tree would admit whatever tree the helper happens to be in.
+	if peer.Pane != "" {
+		return a.admittedPane(peer.Pane)
+	}
+	if peer.PID <= 0 {
 		return "", nil, 0, false
 	}
 	var admitted session.ID
@@ -236,6 +248,48 @@ func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, sessi
 		admittedEpoch = epoch
 	}
 	return admitted, admittedSession, admittedEpoch, admitted != ""
+}
+
+// admittedPane decides authority for a connection this machine's helper
+// forwarded, from the pane the helper named (nocx-50w7p.16).
+//
+// Three facts, and each refuses a different accident:
+//
+//   - the session is one THIS coordinator holds. A helper's record names a
+//     session; a session this coordinator does not have is not a pane it may
+//     answer for, so a name that belongs to another coordinator's pane
+//     resolves to nothing here.
+//   - it is a REMOTE session, and this is the fact that keeps the arm from
+//     becoming a way to claim a LOCAL pane. An agent in a local pane can dial
+//     the endpoint itself and prefix a record naming its own session; what
+//     answers for it is the kernel pin, and what makes that unambiguous is
+//     that a record is never honoured for a local pane. So the two rules never
+//     both apply to one session.
+//   - it is enrolled and its answer is live. The epoch comes from the same
+//     Interval read the local arm makes, so a far agent's admission opens and
+//     closes with the approval interval exactly as a local one's does — and
+//     the publication below is the same publication, into the same record the
+//     session's end retires.
+func (a *toolAuthorizer) admittedPane(pane string) (session.ID, session.Session, toolendpoint.AdmissionEpoch, bool) {
+	sid := session.ID(pane)
+	if sid == "" {
+		return "", nil, 0, false
+	}
+	sess, err := a.sessions.Get(sid)
+	if err != nil || sess == nil {
+		return "", nil, 0, false
+	}
+	if sess.Kind() != session.KindRemote {
+		return "", nil, 0, false
+	}
+	if !a.enrolments.Watched(pane) {
+		return "", nil, 0, false
+	}
+	epoch, live := a.approval.Interval(sid, agentToolEndpointScopePrefix+a.workspace)
+	if !live {
+		return "", nil, 0, false
+	}
+	return sid, sess, epoch, true
 }
 
 func (a *toolAuthorizer) SessionForPeer(peer toolendpoint.Peer) (string, bool) {

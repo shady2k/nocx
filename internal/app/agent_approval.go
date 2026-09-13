@@ -228,12 +228,24 @@ func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agen
 	if s == nil || s.sessions == nil || s.store == nil {
 		return errors.New("nocx cannot ask for agent approval")
 	}
-	// Not for the identity — for the provenance. A session with no
-	// backend-owned process is not a tree nocx launched (an ssh pane, a
-	// session the helper did not start), and the authorizer refuses one at
-	// admit time; minting a durable workspace answer from it would record a
-	// yes that nothing could ever use.
-	if _, ok := s.sessions.OwnedProcessPID(sid); !ok {
+	// Not for the identity — for the provenance, and this is now the TWO
+	// provenances one fact each.
+	//
+	// A local pane's process is a tree nocx launched on THIS machine, and the
+	// owned root pid is what says so. A remote pane's process is a shell
+	// channel on somebody else's machine: there is no pid here to own, and
+	// what replaces it is the route — the session is one THIS coordinator
+	// opened, in this registry, and its kind says the process is remote. What
+	// was refused before was minting a durable answer nothing could ever use;
+	// a far pane's agent can use one now (worker_auth.go's admittedPane), so
+	// the refusal that exists to prevent a useless record no longer applies to
+	// it.
+	//
+	// The stronger form of the route — that this session rides a helper lane
+	// of this coordinator — belongs with the spawn path that creates it
+	// (nocx-50w7p.5), which does not exist yet. Until then the facts here are
+	// the ones the registry itself holds.
+	if !s.canEnrol(sid) {
 		return errors.New("nocx cannot identify the enrolled agent executable")
 	}
 	// WHICH MACHINE, from the session's own route and nothing else. A session
@@ -482,6 +494,27 @@ func (s *agentApprovalService) settle(executable agentapproval.Executable, domai
 type askingKey struct {
 	executable agentapproval.Executable
 	domain     agentapproval.Domain
+}
+
+// canEnrol answers whether this session's process is one nocx can name: a tree
+// it launched here, or a remote session this coordinator opened.
+//
+// It is a predicate and not an inline check because the two provenances are
+// different questions with one shape — "did nocx start this" — and a second
+// inline copy of that question is how the two answers drift apart.
+func (s *agentApprovalService) canEnrol(sid session.ID) bool {
+	if _, owned := s.sessions.OwnedProcessPID(sid); owned {
+		return true
+	}
+	sess, err := s.sessions.Get(sid)
+	if err != nil || sess == nil {
+		return false
+	}
+	// Remote, and therefore a process this machine holds no pid for. The
+	// answer is kept for the machine its route names, which sessionDomain
+	// derives next: a remote session whose host key was never observed is
+	// refused there rather than enrolled here.
+	return sess.Kind() == session.KindRemote
 }
 
 // sessionDomain derives the trust domain of a session from the session's OWN

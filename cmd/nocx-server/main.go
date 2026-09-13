@@ -186,6 +186,11 @@ func startToolEndpoint(a *app.App, dir string, peers coordinator.PeerCredentials
 		Dispatch: a.ToolDispatcher,
 		Observer: a.ToolSurfaceObserver,
 		Logger:   logger,
+		// THE LANE: the process whose forwarded connections may name a pane.
+		// Asked of the app rather than decided here because the answer is
+		// which process this coordinator dialed its helper as, and the app is
+		// what holds that connection (nocx-50w7p.16).
+		Lane: a.ToolLane,
 	})
 	if err != nil {
 		return nil, err

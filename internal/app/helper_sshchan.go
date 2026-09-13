@@ -65,6 +65,14 @@ type installLeaseProvider interface {
 	HelperInstallConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.HelperInstallConn, error)
 }
 
+// filesLeaseProvider is the narrow surface the file panel's factory needs, the
+// same way installLeaseProvider is the installer's. *ssh.RealClient used to
+// satisfy it; this machine's helper does now, which is the whole of
+// nocx-50w7p.12's Files half.
+type filesLeaseProvider interface {
+	FSConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.FSConn, error)
+}
+
 // HelperInstallConn acquires the write-capable install lease over an SFTP
 // stream this machine's helper opened.
 //
@@ -86,6 +94,33 @@ func (h *sshOverHelper) HelperInstallConn(ctx context.Context, host string, opts
 		return nil, fmt.Errorf("helper install lease for %s: %w", host, err)
 	}
 	return conn, nil
+}
+
+// FSConn acquires the file manager's SFTP lease over a channel this machine's
+// helper opened (nocx-50w7p.12).
+//
+// The lease is the SAME lease the panel has always held — one bounded lane, a
+// hard timeout, close-to-cancel, the typed error ladder (ssh.NewFSConn) — and
+// that is deliberate: what moved is the transport, not the consumer. What the
+// helper adds is the connection it rides. One pooled connection per
+// (destination, identity) carries the pane's shell channel AND this sftp
+// channel, so the file panel and the terminal it belongs to authenticate once
+// (AD-4), and the reference is the helper's: closing this lease closes the
+// channel (`ssh.close`), and the connection lives on for whoever asks next.
+func (h *sshOverHelper) FSConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.FSConn, error) {
+	stream, err := h.openChannel(ctx, proto.ChannelSFTP, host, opts)
+	if err != nil {
+		return nil, err
+	}
+	lease, err := ssh.NewFSConn(ctx, stream)
+	if err != nil {
+		// The stream is released whichever way this fails: an open channel
+		// nobody holds is a pooled reference the helper keeps for a caller
+		// that has given up.
+		_ = stream.Close()
+		return nil, fmt.Errorf("sftp provider for %s: %w", host, err)
+	}
+	return lease, nil
 }
 
 // UninstallHelper removes the helper install tree from a host, over the same
@@ -228,8 +263,17 @@ func decodeHostKeyEvidence(raw json.RawMessage) (proto.HostKeyEvidence, bool) {
 // reader looking for "which leases still dial" gets the answer from this
 // struct's two fields and nothing else.
 type installLeaseRoutes struct {
-	direct   directLanes          // the lanes whose dial is still the coordinator's
-	viaLocal installLeaseProvider // the install lease, opened by this machine's helper
+	direct   directLanes  // the lanes whose dial is still the coordinator's
+	viaLocal helperLeases // the leases this machine's helper answers
+}
+
+// helperLeases is what this machine's helper answers through this dispatch: the
+// install lease and the file panel's, each acquired as one channel on its
+// pooled connection. It is a composite of the two narrow surfaces rather than a
+// wider method set, so a consumer still declares exactly the one it needs.
+type helperLeases interface {
+	installLeaseProvider
+	filesLeaseProvider
 }
 
 // directLanes is what the coordinator's own client still answers here. It is
@@ -254,9 +298,19 @@ func (r installLeaseRoutes) HelperInstallConn(ctx context.Context, host string, 
 	return r.viaLocal.HelperInstallConn(ctx, host, opts...)
 }
 
-// The one assertion worth writing here: the dispatch above must satisfy the
-// interface the git factory takes, or the wiring line stops compiling — which
-// is the check, and it is why there is no second assertion for the uninstaller
-// (that one is satisfied at its own wiring line, where transport names the
-// interface).
-var _ helperInstallProvider = installLeaseRoutes{}
+// FSConn is the file panel's lease, and it is the helper's now (nocx-50w7p.12).
+// Its sibling above is the install lease; the git lane and the platform probe
+// are still `direct`, which is the state of the epic rather than a preference.
+func (r installLeaseRoutes) FSConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.FSConn, error) {
+	return r.viaLocal.FSConn(ctx, host, opts...)
+}
+
+// The two assertions worth writing here: the dispatch must satisfy the
+// interface the git factory takes and the one the file-panel factory takes, or
+// a wiring line stops compiling — which is the check, and it is why there is no
+// assertion for the uninstaller (that one is satisfied at its own wiring line,
+// where transport names the interface).
+var (
+	_ helperInstallProvider = installLeaseRoutes{}
+	_ filesLeaseProvider    = installLeaseRoutes{}
+)

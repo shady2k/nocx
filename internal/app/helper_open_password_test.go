@@ -29,12 +29,14 @@ import (
 	"testing"
 	"time"
 
+	pkgsftp "github.com/pkg/sftp"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
+
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
 	gossh "golang.org/x/crypto/ssh"
@@ -54,12 +56,38 @@ type pwSSHServer struct {
 	listener   net.Listener
 	addr       string
 
+	// rootDir is what an `sftp` subsystem serves, and EMPTY means this fixture
+	// serves none (every test that predates nocx-50w7p.12 asks for no
+	// subsystem, and a fixture that answered one would be answering a question
+	// nobody put).
+	rootDir string
+	// refuseSubsystem answers the sftp request false, which is what a host
+	// with no sftp-server does.
+	refuseSubsystem bool
+	// conns counts the connections that finished AUTHENTICATION, and
+	// subsystems records the subsystem names asked for in order. They are the
+	// server's own view — "how many times did somebody authenticate" is not a
+	// fact a client can report about itself.
+	conns      int
+	subsystems []string
+
 	mu        sync.Mutex
 	passwords []string
 	execs     int
+
+	liveMu sync.Mutex
+	live   map[*gossh.ServerConn]struct{}
 }
 
 func startPasswordSSHServer(t *testing.T) *pwSSHServer {
+	t.Helper()
+	return startPasswordSFTPSSHServer(t, "")
+}
+
+// startPasswordSFTPSSHServer is the same fixture with an `sftp` subsystem over
+// root (empty root = no subsystem), which is the destination shape the Files
+// panel and the bundle publish need.
+func startPasswordSFTPSSHServer(t *testing.T, root string) *pwSSHServer {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -73,7 +101,10 @@ func startPasswordSSHServer(t *testing.T) *pwSSHServer {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	s := &pwSSHServer{hostSigner: hostSigner, listener: listener, addr: listener.Addr().String()}
+	s := &pwSSHServer{
+		hostSigner: hostSigner, listener: listener, addr: listener.Addr().String(),
+		rootDir: root, live: make(map[*gossh.ServerConn]struct{}),
+	}
 
 	config := &gossh.ServerConfig{
 		PasswordCallback: func(_ gossh.ConnMetadata, password []byte) (*gossh.Permissions, error) {
@@ -108,6 +139,20 @@ func (s *pwSSHServer) serveConn(conn net.Conn, config *gossh.ServerConfig) {
 		_ = conn.Close()
 		return
 	}
+	// A connection that reaches here has AUTHENTICATED: NewServerConn returns
+	// only after the handshake and the auth exchange are done. That is the
+	// counter the Files acceptance reads.
+	s.mu.Lock()
+	s.conns++
+	s.mu.Unlock()
+	s.liveMu.Lock()
+	s.live[sshConn] = struct{}{}
+	s.liveMu.Unlock()
+	defer func() {
+		s.liveMu.Lock()
+		delete(s.live, sshConn)
+		s.liveMu.Unlock()
+	}()
 	go gossh.DiscardRequests(reqs)
 	for newChan := range chans {
 		if newChan.ChannelType() != "session" {
@@ -123,30 +168,57 @@ func (s *pwSSHServer) serveConn(conn net.Conn, config *gossh.ServerConfig) {
 	_ = sshConn.Close()
 }
 
-// handleSession answers what the two callers of this fixture ask of a far
-// side: the platform probe's pty-less exec, and the session's own shell.
+// handleSession answers what the callers of this fixture ask of a far side: the
+// platform probe's pty-less exec, the session's own shell, and — since
+// nocx-50w7p.12 — the `sftp` subsystem the Files panel's lease runs on.
+//
+// The requests are handled in THIS goroutine rather than beside the echo loop,
+// because a session serves one of the three and the choice is only known once
+// the request arrives: an echo loop reading the same channel as an sftp server
+// is two readers on one byte stream, and the first sftp INIT would be echoed
+// back as text.
 func (s *pwSSHServer) handleSession(ch gossh.Channel, reqs <-chan *gossh.Request) {
-	go func() {
-		for req := range reqs {
-			switch req.Type {
-			case "pty-req", "shell":
-				_ = req.Reply(true, nil)
-			case "exec":
-				_ = req.Reply(true, nil)
-				s.mu.Lock()
-				s.execs++
-				s.mu.Unlock()
-				// The probe reads one line and expects a platform triple;
-				// anything else fails the probe, which is a legitimate
-				// outcome for this test and never the thing it measures.
-				_, _ = ch.Write([]byte("Linux x86_64\n"))
-				_, _ = ch.SendRequest("exit-status", false, gossh.Marshal(struct{ Status uint32 }{Status: 0}))
-				_ = ch.Close()
-			default:
+	for req := range reqs {
+		switch req.Type {
+		case "pty-req":
+			_ = req.Reply(true, nil)
+		case "shell":
+			_ = req.Reply(true, nil)
+			s.echoLoop(ch)
+			return
+		case "subsystem":
+			var m struct{ Subsystem string }
+			if err := gossh.Unmarshal(req.Payload, &m); err != nil || m.Subsystem != "sftp" || s.rootDir == "" || s.refuseSubsystem {
 				_ = req.Reply(false, nil)
+				continue
 			}
+			s.mu.Lock()
+			s.subsystems = append(s.subsystems, m.Subsystem)
+			s.mu.Unlock()
+			_ = req.Reply(true, nil)
+			s.serveSFTP(ch)
+			return
+		case "exec":
+			_ = req.Reply(true, nil)
+			s.mu.Lock()
+			s.execs++
+			s.mu.Unlock()
+			// The probe reads one line and expects a platform triple;
+			// anything else fails the probe, which is a legitimate
+			// outcome for this test and never the thing it measures.
+			_, _ = ch.Write([]byte("Linux x86_64\n"))
+			_, _ = ch.SendRequest("exit-status", false, gossh.Marshal(struct{ Status uint32 }{Status: 0}))
+			_ = ch.Close()
+			return
+		default:
+			_ = req.Reply(false, nil)
 		}
-	}()
+	}
+}
+
+// echoLoop mirrors the interactive session: whatever is written comes back
+// unchanged, which is all the pane-open tests ask of the far side.
+func (s *pwSSHServer) echoLoop(ch gossh.Channel) {
 	buf := make([]byte, 4096)
 	for {
 		n, err := ch.Read(buf)
@@ -157,6 +229,18 @@ func (s *pwSSHServer) handleSession(ch gossh.Channel, reqs <-chan *gossh.Request
 			return
 		}
 	}
+}
+
+// serveSFTP serves the root directory over the channel, which is the far side
+// the Files panel's lease speaks to.
+func (s *pwSSHServer) serveSFTP(ch gossh.Channel) {
+	server, err := pkgsftp.NewServer(ch, pkgsftp.WithServerWorkingDirectory(s.rootDir))
+	if err != nil {
+		_ = ch.Close()
+		return
+	}
+	_ = server.Serve()
+	_ = server.Close()
 }
 
 func (s *pwSSHServer) authAttempts() []string {
@@ -367,15 +451,20 @@ func openPasswordStack(t *testing.T, srv *pwSSHServer) (*session.Reg, *helperReg
 	return reg, helperReg
 }
 
-// noLocalHelperLease is the local half of the install route for a stack that
+// noLocalHelperLease is the local half of the lease routes for a stack that
 // has no local daemon. It FAILS the test if it is ever reached, which is the
 // honest shape: a stand-in that answered would hide the day the pane-open path
-// starts needing an install lease, and this test's subject is the auth ladder,
-// not the install.
+// starts needing a helper lease, and this test's subject is the auth ladder,
+// not the file panel or the install.
 type noLocalHelperLease struct{ t *testing.T }
 
 func (n noLocalHelperLease) HelperInstallConn(context.Context, string, ...ssh.ConnectOption) (ssh.HelperInstallConn, error) {
 	n.t.Error("this stack has no local helper, so no install lease can be acquired")
+	return nil, errors.New("no local helper in this stack")
+}
+
+func (n noLocalHelperLease) FSConn(context.Context, string, ...ssh.ConnectOption) (ssh.FSConn, error) {
+	n.t.Error("this stack has no local helper, so no sftp lease can be acquired")
 	return nil, errors.New("no local helper in this stack")
 }
 

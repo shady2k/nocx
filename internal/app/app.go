@@ -903,9 +903,12 @@ func New(opts ...Option) (*App, error) {
 	// from this process. The git lane and the platform probe still do, and
 	// installLeaseRoutes names that split in one place rather than hiding it.
 	overHelper := &sshOverHelper{local: localOpener, resolve: sshClient, log: slogger}
+	// ONE value for "who serves which lease", read twice: the git factory takes
+	// it and so does the file panel's factory below. Two literals would be two
+	// answers to one question, and the second would be the one that drifts.
+	sshLeases := installLeaseRoutes{direct: sshClient, viaLocal: overHelper}
 	helperFactory, helperReg := helperGitFactory(
-		installLeaseRoutes{direct: sshClient, viaLocal: overHelper},
-		helperartifacts.DefaultSource, helperConsent, helperInstalls, slogger)
+		sshLeases, helperartifacts.DefaultSource, helperConsent, helperInstalls, slogger)
 	helperReg.registry = sess
 	localOpener.registry = sess
 	// The one seam the transport asks for every destination. hostedOpeners is
@@ -1394,7 +1397,10 @@ func New(opts ...Option) (*App, error) {
 		// factory is the caller that makes the package reachable from
 		// main() (AGENTS.md check 5).
 		transport.WithFilesystemRegistry(filesystem.New()),
-		transport.WithFilesystemProviderFactory(filesystemProviderFactory(sshClient)),
+		// The lease is this machine's helper's since nocx-50w7p.12: the sftp
+		// channel rides the same pooled connection the pane does, so a terminal
+		// and its Files panel authenticate once (AD-4, plan §3).
+		transport.WithFilesystemProviderFactory(filesystemProviderFactory(sshLeases)),
 		// Git (spec §5.1). The registry is the only route to a bound
 		// repository; the factory is the local one, and it is what makes
 		// internal/git reachable from main() at all — until this line

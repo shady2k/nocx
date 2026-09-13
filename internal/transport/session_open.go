@@ -290,6 +290,7 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (OpenedSession,
 		hosted *HostedSessionOpen
 	)
 	if err := o.op.Dial(ctx, func(ctx context.Context, svc capability.OpenService) error {
+		// THE HELPER IS ASKED FIRST, for both kinds of destination.
 		if o.helper != nil {
 			openedHosted, selected, oerr := o.helper.OpenHosted(ctx, cfg, claim)
 			if selected {
@@ -307,6 +308,29 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (OpenedSession,
 				return oerr
 			}
 		}
+		// AN SSH DESTINATION IS A HELPER'S, OR IT IS A REFUSAL. There is no
+		// fallback below this line for one: this used to dial the far host FROM
+		// THIS PROCESS whenever no helper claimed the destination, and that is
+		// the Tier A route ADR-0057 refuses by name (nocx-50w7p.5). The sentence
+		// is the point rather than a nicety — reaching the old fallback was
+		// indistinguishable to a user from a local copy of nocx behaving
+		// differently.
+		//
+		// The kind check is what enforces it, and it is HERE rather than inside
+		// the registry because the registry is a general one: its local arm
+		// forks a process and is a seam tests legitimately use, while its remote
+		// arm connects to a host and is the thing this bead deleted. One check
+		// separates them, so a future caller cannot reach `r.ssh.Connect` by
+		// arriving with the wrong config.
+		if cfg.Kind == session.KindRemote {
+			if o.helper == nil {
+				return refuse(-32603, "SSH sessions are opened by this machine's helper (no helper opener is wired)")
+			}
+			return refuse(-32603, "SSH sessions are opened by this machine's helper, and no helper claimed this destination")
+		}
+		// A LOCAL destination in a build that wired no helper opener — the local
+		// PTY seam (see OpenService.Open's own doc). It forks a process; it does
+		// not connect to a host.
 		var oerr error
 		sess, oerr = svc.Open(ctx, cfg)
 		return oerr

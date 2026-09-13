@@ -37,6 +37,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -165,6 +166,22 @@ func (s *bundleStand) publish(t *testing.T) error {
 	return s.carrier.EnsureInstalledRemote(ctx, s.srv.addr, s.opts...)
 }
 
+// uninstall runs the product's removal for the fixture's destination — the
+// exact call the transport's shell.footprint.uninstall handler makes, through
+// the composition root's own carrier.
+//
+// It goes through the CARRIER and not through helperBundlePublisher, because
+// the thing this file now has to prove is that the capability the transport
+// holds is the helper-backed one: a test that called the publisher directly
+// would keep passing if the wiring were reverted to the dial that
+// internal/ssh used to own (nocx-50w7p.5).
+func (s *bundleStand) uninstall(t *testing.T) (removed, conflicts []string, err error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.carrier.UninstallIntegration(ctx, s.srv.addr, s.opts...)
+}
+
 // execCommands is every exec the fixture was asked to run, in order — the
 // observable for "did the home probe run, and before the sftp channel". It
 // lives with the acceptance that asks it: the fixture is shared, and a method
@@ -246,6 +263,95 @@ func TestTheBundlePublishRidesThisMachinesHelperToTheSessionHome(t *testing.T) {
 	}
 	t.Logf("MEASURED publish through the helper: home=%s sftpRoot=%s authentications=%d subsystems=%v execs=%v",
 		home, sftpRoot, srv.connCount(), srv.subsystemsSeen(), srv.execCommands())
+}
+
+// TestTheBundleUninstallRidesThisMachinesHelperToTheSessionHome is the removal
+// half of the acceptance above, and it is the assertion that replaced
+// internal/ssh's own uninstall tests when the capability moved here
+// (nocx-50w7p.5).
+//
+// What it must show is not merely that a removal works: it is that the removal
+// runs over THIS MACHINE'S HELPER — the same lease and the same pooled
+// connection the publish uses, so one destination still costs one
+// authentication — because the property that closed the epic is that the
+// coordinator no longer holds a client to run it on. A removal that dialed for
+// itself would leave the fixture authenticating twice, which is what the
+// connection count below measures.
+//
+// The three behaviours internal/ssh's deleted tests asserted are carried over
+// one for one: the carrier's two lists are the answer (`TestUninstallIntegration
+// _OwnsTheDialAndCall`), the far side's own refusal reaches the caller with its
+// cause (`..._CarrierRefusalIsReported`), and a run with no route refuses by
+// name rather than reporting a success it did not have (`..._NoInstallerRefuses`,
+// asserted as TestTheRemovalRefusesWithoutAHelper below).
+func TestTheBundleUninstallRidesThisMachinesHelperToTheSessionHome(t *testing.T) {
+	srv, _, home := newBundleFixture(t)
+	stand := startBundleStand(t, srv, &askRecorder{value: openPasswordFixturePassword})
+
+	// A removal needs something to remove, and it is published through the same
+	// carrier so the fixture's state is the product's own.
+	if err := stand.publish(t); err != nil {
+		t.Fatalf("the publish through this machine's helper: %v", err)
+	}
+	if _, err := os.Stat(bundleManifest(home)); err != nil {
+		t.Fatalf("the fixture has no bundle to remove, so the removal below would pass vacuously: %v", err)
+	}
+
+	removed, _, err := stand.uninstall(t)
+	if err != nil {
+		t.Fatalf("the removal through this machine's helper: %v", err)
+	}
+
+	// The manifest is GONE, and that is asserted from the far side's own
+	// filesystem rather than from the carrier's return value: a carrier that
+	// reported `removed` and wrote nothing would pass the second check alone.
+	if _, err := os.Stat(bundleManifest(home)); !os.IsNotExist(err) {
+		t.Errorf("the integration manifest is still under the session $HOME after a reported removal: stat err = %v", err)
+	}
+	if len(removed) == 0 {
+		t.Error("the removal reported nothing removed, yet the bundle had been published into this home")
+	}
+
+	// THE ROUTE, and it is asserted as three facts rather than as a connection
+	// count — because the count across two SEQUENTIAL calls is legitimately 2,
+	// and asserting 1 here would be asserting something false (measured, not
+	// assumed: the run that produced this test logged `authentications=2`).
+	// AD-4 closes the connection with the last reference, and the publish
+	// releases its lease before returning, so the removal is a fresh dial on the
+	// same route — which is exactly the shape "one destination costs one
+	// authentication" describes WITHIN a call, and the property
+	// TestOneDestinationCostsOneAuthentication measures with both halves live.
+	//
+	// What must hold either way is that the dial was the HELPER's and not this
+	// process's: the far side was asked for the sftp subsystem (the channel came
+	// from the helper's ssh service), and the home was asked by the named probe
+	// rather than composed here. A removal dialing for itself from the
+	// coordinator would still show the subsystem, so the probe's presence in the
+	// helper's own exec log is the half that discriminates.
+	if seen := srv.subsystemsSeen(); !slices.Contains(seen, "sftp") {
+		t.Errorf("the fixture was asked for subsystems %v, want sftp among them — the removal must ride an sftp channel the helper opened", seen)
+	}
+	execs := srv.execCommands()
+	if len(execs) != 2 || execs[0] != remoteprobe.HomeCommand || execs[1] != remoteprobe.HomeCommand {
+		t.Errorf("the fixture's exec requests are %v, want the home probe (%q) once per half — the bundle's location is decided by a question, never by a command a caller composed", execs, remoteprobe.HomeCommand)
+	}
+	t.Logf("MEASURED removal through the helper: home=%s removed=%d authentications=%d (one per call: the pool releases with the publish's lease) subsystems=%v execs=%v",
+		home, len(removed), srv.connCount(), srv.subsystemsSeen(), execs)
+}
+
+// TestTheRemovalRefusesWithoutAHelper is the carried-over refusal assertion: a
+// build or a test with no helper wired must say so at the act rather than
+// removing nothing and reporting success, which would leave a bundle on
+// somebody's host while reporting it gone.
+func TestTheRemovalRefusesWithoutAHelper(t *testing.T) {
+	carrier := &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))}
+	_, _, err := carrier.UninstallIntegration(context.Background(), "host.example")
+	if err == nil {
+		t.Fatal("a removal with no helper wired succeeded")
+	}
+	if !strings.Contains(err.Error(), "no helper is wired") {
+		t.Errorf("the refusal is %q, want it to name the missing helper so a person can act on it", err)
+	}
 }
 
 // TestOneDestinationCostsOneAuthentication: a second consumer of the same

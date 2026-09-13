@@ -465,7 +465,7 @@ func TestOpenPath_PasswordAskFiresOncePerOpen(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if _, selected, err := helperReg.OpenHosted(ctx, cfg); selected {
+	if _, selected, err := helperReg.OpenHosted(ctx, cfg, ""); selected {
 		t.Fatalf("the helper selected a destination it ships no artifact for")
 	} else if err != nil {
 		t.Fatalf("OpenHosted declined with an error: %v", err)
@@ -532,7 +532,7 @@ func TestOpenPath_ProbeStillRunsOnARememberedPassword(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if _, selected, err := helperReg.OpenHosted(ctx, cfg); selected {
+	if _, selected, err := helperReg.OpenHosted(ctx, cfg, ""); selected {
 		t.Fatalf("the helper selected a destination it ships no artifact for")
 	} else if err != nil {
 		t.Fatalf("OpenHosted declined with an error: %v", err)

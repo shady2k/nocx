@@ -134,11 +134,17 @@ func stallServer(t *testing.T, channels ...ssh.Channel) *WSServer {
 			return ch, nil
 		},
 	})
-	ws := NewWSServer(logger, reg, WithProfileResolver(&fakeResolver{
-		resolveFn: func(string) (string, *ssh.ConnectConfig, error) {
-			return "host.example.com", &ssh.ConnectConfig{User: "test", Port: 22}, nil
-		},
-	}))
+	ws := NewWSServer(logger, reg,
+		// The ssh panes every test on this stand opens are this machine's
+		// helper's (nocx-50w7p.5). These tests measure resize admission, close
+		// lanes and input flow — all downstream of the pane existing — so the
+		// pane is given the route it has in production.
+		sshHelperOpt(reg),
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(string) (string, *ssh.ConnectConfig, error) {
+				return "host.example.com", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)

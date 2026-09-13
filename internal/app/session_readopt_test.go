@@ -104,6 +104,30 @@ func (s *scriptedSpawner) Spawn(req helpersession.SpawnRequest) (helpersession.P
 	return p, nil
 }
 
+// SpawnSSH is the ssh half of the same script: the daemon holds a shell
+// CHANNEL on a connection it dialed, which is what an ssh pane is now that
+// THIS machine's helper opens one (nocx-50w7p.5).
+//
+// The process it hands back is the same idle one the local half returns, and
+// deliberately so: the tests built on this endpoint are about WHICH helper
+// holds a session and what that helper answers, not about what runs inside it.
+// Nothing here dials — the real spawner would, and replacing it is the whole
+// reason this seam is scripted.
+//
+// THE PID IS A SCRIPTING ARTEFACT. A real ssh session has no pid on this
+// machine at all (the launch union carries none for that branch); the id here
+// is only what the idle process needs to be addressable in these tests, and
+// nothing in them reads a remote session's pid.
+func (s *scriptedSpawner) SpawnSSH(_ context.Context, req helpersession.SSHSpawnRequest) (helpersession.Process, error) {
+	s.mu.Lock()
+	s.spawned++
+	pid := 4000 + s.spawned
+	p := &idleProcess{done: make(chan struct{}), pid: pid, id: req.SessionID}
+	s.procs = append(s.procs, p)
+	s.mu.Unlock()
+	return p, nil
+}
+
 // exitWith ends the one process this spawner started, with a status the helper
 // will record — the shell finishing while nobody is watching.
 func (s *scriptedSpawner) exitWith(t *testing.T, code int) {
@@ -334,7 +358,7 @@ func openHostedFixture(t *testing.T, c *coordinator, paneID string) content.Pend
 		Kind: session.KindRemote, Host: "host.example", Cwd: t.TempDir(),
 		PaneID: paneID, ProfileID: "profile-1",
 		Remote: helperConnection("u"),
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("open a helper-hosted session: %v", err)
 	}

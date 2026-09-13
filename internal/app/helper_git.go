@@ -474,7 +474,15 @@ type helperRegistry struct {
 // OpenHosted applies the same helper resolver used by git.open, then spawns
 // and attaches through the helper ABI. The returned session id is the helper's
 // id; the coordinator never mints a replacement.
-func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config) (transport.HostedSessionOpen, bool, error) {
+//
+// claim is L7's idempotency key, and it is the caller's rather than this
+// function's because the DURABLE part of it — the row written before the first
+// irreversible effect — belongs to the session-open path above both openers.
+// Carrying it here is what makes a repeat after a coordinator died between the
+// spawn and that row answer with the session the first attempt made instead of
+// forking a second shell on somebody else's machine (nocx-50w7p.5). Empty means
+// no claim was written and this spawn is owed no such promise.
+func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config, claim string) (transport.HostedSessionOpen, bool, error) {
 	if cfg.Kind != session.KindRemote || cfg.Remote == nil || r.install == nil || r.registry == nil {
 		return transport.HostedSessionOpen{}, false, nil
 	}
@@ -536,6 +544,13 @@ func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config) (tr
 	}
 	entry, err := c.Spawn(ctx, proto.SpawnParams{
 		Cwd: cfg.Cwd, Cols: cfg.Cols, Rows: cfg.Rows, Lifecycle: lifecycleLaunch,
+		// THE CLAIM RIDES THE SPAWN, and it is the L7 interval's opening half
+		// rather than a duplicate of the row the open path already wrote
+		// (nocx-50w7p.5). Without it, a coordinator that died between this
+		// spawn and that row leaves a far shell nothing recorded, and the
+		// repeat forks a SECOND one on somebody else's machine. Empty is the
+		// honest value when the caller wrote no claim.
+		IdempotencyKey: claim,
 		// No agentToolEndpoint, and that is the honest answer rather than an
 		// omission (nocx-50w7p.18): the endpoint a pane's tools belong to is a
 		// socket on the machine the HELPER runs on, and this session's helper

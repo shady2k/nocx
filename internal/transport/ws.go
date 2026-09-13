@@ -407,10 +407,13 @@ type WSServer struct {
 	installedFactMu   sync.Mutex
 	installedFactSeen map[string]struct{}
 
-	// remoteUninstaller removes the integration bundle on a remote host,
-	// owning the dial-and-call (P10). Wired through WithRemoteUninstaller;
-	// when nil, shell.footprint.uninstall answers an error and removes
-	// nothing — the status surface never offers the button without it.
+	// remoteUninstaller removes the integration bundle on a remote host. It no
+	// longer owns a dial of its own (nocx-50w7p.5): the carrier rides THIS
+	// MACHINE'S HELPER's probe lease and sftp channel, so what the transport
+	// holds is a capability whose transport is the helper's and whose only
+	// client is that lease. Wired through WithRemoteUninstaller; when nil,
+	// shell.footprint.uninstall answers an error and removes nothing — the
+	// status surface never offers the button without it.
 	remoteUninstaller RemoteUninstaller
 
 	// helperUninstaller removes a helper install tree on a remote host,

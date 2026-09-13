@@ -305,6 +305,10 @@ func TestLedgerQuery_HostRungExcludesTheOtherMachine(t *testing.T) {
 		},
 	})
 	ws := NewWSServer(logger, reg,
+		// The ssh pane is a helper's now (nocx-50w7p.5); this test's subject is
+		// the ledger's host rung, not the route, so the pane gets the helper
+		// route it has in production.
+		sshHelperOpt(reg),
 		WithContentDB(db),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(string) (string, *ssh.ConnectConfig, error) {

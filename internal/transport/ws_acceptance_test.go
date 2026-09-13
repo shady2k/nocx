@@ -857,6 +857,11 @@ func TestDialInFlightRefusesNothing(t *testing.T) {
 
 	ps := profile.NewJSONStore(t.TempDir() + "/p.json")
 	srv := NewWSServer(logger, reg,
+		// The ssh panes this test opens are this machine's helper's
+		// (nocx-50w7p.5). Its subject is that a second open reaches its own
+		// dial while the first is in flight — downstream of the pane existing,
+		// and about the DIAL LANE rather than how the dial was reached.
+		sshHelperOpt(reg),
 		WithProfileRepository(ps),
 		WithGroupRepository(ps),
 		WithProfileResolver(&fakeResolver{

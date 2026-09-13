@@ -59,6 +59,11 @@ func cancelRig(t *testing.T) (*websocket.Conn, *cancelWatchingCompleter, string)
 	ws := NewWSServer(
 		logger,
 		reg,
+		// The ssh pane this stand opens is this machine's helper's
+		// (nocx-50w7p.5). All three cases below measure request CANCELLATION,
+		// which is downstream of the pane existing, so the pane is given the
+		// route it has in production.
+		sshHelperOpt(reg),
 		WithCompleters(completion.NewLocal(), remote),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {

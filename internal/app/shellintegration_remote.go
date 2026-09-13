@@ -5,29 +5,34 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
 	pkgsftp "github.com/pkg/sftp"
-	gossh "golang.org/x/crypto/ssh"
 
-	"github.com/shady2k/nocx/internal/remoteprobe"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // remoteInstallerAdapter is the composition-root carrier for the remote
 // shell-integration publisher. shellintegration owns the publish protocol and
-// accepts FS; this adapter owns the transport, and the transport of each half
-// moved separately:
+// accepts FS; this adapter owns the transport, and both halves of it are now
+// this machine's helper's:
 //
-//   - the PUBLISH is this machine's helper's since nocx-50w7p.15. `bundle` is
-//     the helper-backed route (helper_publish.go), which asks the account's
-//     home on a pooled lease and opens the sftp channel the bundle rides on
-//     the same connection. This adapter's own job is to hand the destination
-//     over unchanged.
-//   - the REMOVAL still rides the connection internal/ssh acquired
-//     (UninstallIntegration), so it keeps the raw client and asks the home
-//     over it. It moves the same way when its own task lands.
+//   - the PUBLISH has been since nocx-50w7p.15. `bundle` is the helper-backed
+//     route (helper_publish.go), which asks the account's home on a pooled
+//     lease and opens the sftp channel the bundle rides on the same
+//     connection. This adapter's own job is to hand the destination over
+//     unchanged.
+//   - the REMOVAL joined it in nocx-50w7p.5, and that is what closed the epic:
+//     it used to ride the connection internal/ssh acquired for this process
+//     (`UninstallIntegration`), holding a raw *gossh.Client and asking the home
+//     over it — the last dial and the last client the coordinator had. It is
+//     the same method signature on this carrier now, so the transport and its
+//     handler were untouched; only the party behind it changed.
+//
+// A GAP REMAINS AND IS NAMED: EnsureInstalledOverPipe (the script-mode
+// carrier's half) still takes a stream from its caller rather than acquiring
+// one, so it is a seam for a transport that is not this file's. Nothing in
+// this file holds a client any more.
 //
 // It is absent from binaries such as cmd/nocx-helper: the publish protocol
 // rides the coordinator, and pkg/sftp with it.
@@ -67,24 +72,26 @@ func (a *remoteInstallerAdapter) EnsureInstalledRemote(ctx context.Context, host
 	return a.bundle.PublishBundle(ctx, host, opts...)
 }
 
-// UninstallRemote removes the committed bundle, asking the far side where its
-// home is over the connection internal/ssh handed it.
+// UninstallIntegration removes the committed bundle through this machine's
+// helper — the transport shell.footprint.uninstall rides (nocx-50w7p.5).
 //
-// The home travels with the transport and not with the caller (see
-// ssh.RemoteInstaller): the commands are internal/remoteprobe's, so this is
-// the party that may name them, and the answer is the same `$HOME` the publish
-// writes under.
-func (a *remoteInstallerAdapter) UninstallRemote(ctx context.Context, client *gossh.Client) ([]string, []string, error) {
-	home, err := a.inner.GetRemoteHome(remoteHomeOver{client: client})
-	if err != nil {
-		return nil, nil, err
+// It is the SAME method the capability has always called, on a different party.
+// internal/ssh used to own the dial-and-call and called back into this carrier
+// with a live *gossh.Client, which made the removal the last connection the
+// coordinator made and the last raw client it held. The carrier now owns the
+// route — the helper's probe lease and its sftp channel — so the signature is
+// what moved and every caller is untouched, which is why the transport needs no
+// change to keep the capability it already had.
+//
+// A build or a test that wired no helper is a REFUSAL at the act rather than a
+// fallback, the same shape EnsureInstalledRemote has: there is no second
+// transport to remove over, and quietly removing nothing would report success
+// for a bundle still sitting in somebody's home.
+func (a *remoteInstallerAdapter) UninstallIntegration(ctx context.Context, host string, opts ...ssh.ConnectOption) (removed, conflicts []string, err error) {
+	if a.bundle == nil {
+		return nil, nil, fmt.Errorf("ssh: no helper is wired to remove the shell integration bundle from %s", host)
 	}
-	clientSFTP, err := pkgsftp.NewClient(client)
-	if err != nil {
-		return nil, nil, fmt.Errorf("shellintegration: sftp client: %w", err)
-	}
-	defer func() { _ = clientSFTP.Close() }()
-	return a.inner.UninstallRemote(ctx, shellIntegrationSFTPFS{SFTPFS: ssh.NewSFTPFS(clientSFTP)}, home)
+	return a.bundle.UninstallBundle(ctx, host, opts...)
 }
 
 func (a *remoteInstallerAdapter) EnsureInstalledOverPipe(ctx context.Context, rw io.ReadWriteCloser, home string) error {
@@ -96,32 +103,9 @@ func (a *remoteInstallerAdapter) EnsureInstalledOverPipe(ctx context.Context, rw
 	return a.inner.EnsureInstalledOverPipe(ctx, shellIntegrationSFTPFS{SFTPFS: ssh.NewSFTPFS(clientSFTP)}, home)
 }
 
-// remoteHomeOver answers the home question over the client this path dials
-// with.
-//
-// The transport is this path's own and moves with its own task (the script-mode
-// carrier); what this type must not do is COMPOSE a command, and it does not:
-// the commands are internal/remoteprobe's list, in its order, and the only
-// decision here is "trim the answer and try the next one when it is empty" —
-// the same rule the helper applies on the other transport.
-type remoteHomeOver struct {
-	client *gossh.Client
-}
-
-func (r remoteHomeOver) Home() (string, error) {
-	for _, command := range remoteprobe.HomeCommands {
-		sess, err := r.client.NewSession()
-		if err != nil {
-			return "", err
-		}
-		out, err := sess.Output(command)
-		_ = sess.Close()
-		if err != nil {
-			return "", err
-		}
-		if home := strings.TrimSpace(string(out)); home != "" {
-			return home, nil
-		}
-	}
-	return "", nil
-}
+// The home question is no longer asked here. It used to be: this type held the
+// *gossh.Client the coordinator had dialed and ran internal/remoteprobe's
+// commands over it, which is exactly the arrangement nocx-50w7p.5 deletes. The
+// helper asks it now, over the lease its own connection already holds
+// (helperBundlePublisher.PublishBundle and .UninstallBundle), so this file
+// composes no command and holds no client.

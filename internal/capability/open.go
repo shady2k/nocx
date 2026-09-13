@@ -18,9 +18,28 @@ type ProfileResolver interface {
 	Resolve(profileID string) (host string, cfg *ssh.ConnectConfig, err error)
 }
 
-// OpenService is the session-open surface: resolve the profile, open the
-// session, and clean up on failure. It is what an OpenOperation hands its
-// callback.
+// OpenService is the session-open surface: resolve the profile, and clean up on
+// failure. It is what an OpenOperation hands its callback.
+//
+// IT NO LONGER OPENS AN SSH SESSION, and that distinction is the whole of
+// nocx-50w7p.5's change to this file. `Open` used to reach the session registry,
+// which then dialed an ssh destination FROM THIS PROCESS whenever no helper
+// claimed it — the Tier A fallback ADR-0057 refuses. An ssh pane is opened by a
+// helper now (this machine's, or the far host's own when it has one), and
+// session_open.go refuses by name rather than reaching for this method, so no
+// caller can drive the coordinator's dial through it.
+//
+// What it still reaches is the registry's LOCAL arm, which forks a process
+// rather than connecting to a host, and which the registry itself documents as a
+// seam for a test that legitimately supplies a channel. That is why this method
+// survived the deletion that removed its sibling on SessionService: deleting it
+// too took out a local PTY seam the test suite depends on, and a suite that
+// cannot open a pane has nothing to assert about panes. The two are separated by
+// the destination kind, and that separation is enforced at the call site rather
+// than here.
+//
+// What remains alongside it is the half that must stay: resolving a profile is a
+// store and vault read, and it is the half the gates below were refined around.
 //
 // The grain is REFINED (the refinement open.go's own comment used to defer):
 // the resolve runs under the [config, session] gates and the dial runs under
@@ -35,6 +54,16 @@ type ProfileResolver interface {
 // that is the part worth excluding, and it is now the only part that is.
 type OpenService interface {
 	Resolve(profileID string) (host string, cfg *ssh.ConnectConfig, err error)
+	// Open reaches the session registry, and since nocx-50w7p.5 its ONLY caller
+	// is a LOCAL destination in a build that wired no helper opener — the local
+	// PTY seam this repository keeps for tests (see the registry's own KindLocal
+	// arm, which refuses in production and says so).
+	//
+	// It is NOT the ssh route any more: an ssh destination is opened by a helper
+	// or refused by name, so no caller of this method can reach the coordinator's
+	// dial. That is the distinction the epic turns on, and it is why this method
+	// survived the deletion that removed its sibling on SessionService: a seam
+	// that forks a local process is not a seam that connects to a host.
 	Open(ctx context.Context, cfg session.Config) (session.Session, error)
 	Close(id session.ID) error
 }

@@ -37,14 +37,19 @@ const paneScreenTimeout = 5 * time.Second
 // this refuses is one a shell asked for, and the answer reaches that shell's own
 // pane (D4 — "no enrolment, no orchestration, and the pane says so").
 //
-// THE END OF THIS REFUSAL IS nocx-ygxjv.13. Today the PTY of a pane with no
-// helper is held by the coordinator itself (a direct-channel SSH pane), and
-// there is no runtime beside it to read. .13 puts that PTY under THIS MACHINE'S
-// helper — the owner's decision of 2026-09-13: every session's PTY or channel is
-// owned by a helper, never by the coordinator — at which point the pane resolves
-// through the local route like every other and this error stops being reachable.
-// The predicate that raises it is owner() below, and .13 deletes it in one
-// place.
+// WHAT RAISES IT NOW (nocx-50w7p.5). The predicate is owner() below, and it
+// raises this for a session that is neither this machine's opener's nor a
+// remote registry's — a pane no helper holds, which is exactly what the
+// sentence says. Before this bead the same predicate also caught a pane whose
+// terminal WAS held: an ssh pane opened by this machine's helper has a remote
+// destination, and an owner that routed by kind sent it looking for a far
+// helper's registry entry it could never have. The doc's old claim — that
+// nocx-ygxjv.13 would make this unreachable by moving every PTY under a helper
+// — was right about the direction and wrong about the trigger: the panes became
+// the helper's in 08e90002, and the refusal stayed reachable because the
+// predicate was still asking the wrong question. It asks the opener now, so
+// what is left here is the honest case, and this error is genuinely "no helper
+// holds it" and nothing else.
 var errNoPaneRuntime = errors.New(
 	"nocx cannot watch this pane: no helper is holding its terminal, so there is no screen to read")
 
@@ -102,21 +107,39 @@ func (p *paneScreen) Screen(paneID string) (paneview.Frame, error) {
 // owner finds the helper that holds a pane's terminal, and the handle that
 // helper knows it by.
 //
-// THE ORDER OF THE TWO ROUTES IS THE TWO FACTS. A local session is this
-// machine's daemon's — ADR-0057 refuses a fallback there, so asking anything
-// else would be a second route to one pane. Everything else is a helper-hosted
-// remote session if the registry holds a host for it, and a pane with NEITHER
-// is the case nocx-ygxjv.13 ends.
+// THE QUESTION IS "WHICH HELPER HOLDS IT", AND THE OPENER THAT OPENED IT IS
+// WHERE THAT FACT LIVES (nocx-50w7p.5). It is NOT the session's kind: kind says
+// where the DESTINATION is, and since this machine's daemon opens ssh panes the
+// two stopped coinciding — an ssh pane has a remote destination and the local
+// carrier, so a kind-led owner sent it to the far-helper registry, which knows
+// only panes IT opened, and then refused a pane whose terminal is very much
+// being held. The backend answers every session; that one it could not answer
+// at all.
+//
+// ASKING THE OPENER FIRST IS NOT A PREFERENCE, it is the same order the
+// composition root already uses to OPEN a pane: this machine's opener claims
+// what is its own, and the remote registry answers for a helper that is not
+// here. A session is in exactly one of the two, which is what keeps ADR-0057's
+// no-fallback property: the local route cannot answer for a far helper's id
+// space any more than that helper can answer for this daemon's.
+//
+// THE SESSION'S KIND IS NOT CONSULTED AT ALL, and that absence is the fix.
+// Kind says where the destination is; this question is about the carrier, and
+// the two stopped coinciding the moment this machine's daemon could open an ssh
+// pane. Keeping kind as a second, fallback answer — "local if the kind says
+// local" — would be two derivations of one fact (AD-8), and the one that
+// disagrees would be the one that runs. A local pane is covered without it:
+// this opener notes every session it opens or re-adopts, and a local pane is
+// one of those.
 func (p *paneScreen) owner(ctx context.Context, paneID string) (*helperclient.Client, helperclient.HostSessionID, error) {
 	sid := session.ID(paneID)
-	sess, err := p.registry.Get(sid)
-	if err != nil {
+	if _, err := p.registry.Get(sid); err != nil {
 		// The session is gone. It is the same refusal as "no helper holds it",
 		// because the answer a caller acts on is the same: there is no screen
 		// to read, and there will not be one.
 		return nil, helperclient.HostSessionID{}, fmt.Errorf("%w: %s", errNoPaneRuntime, paneID)
 	}
-	if sess.Kind() == session.KindLocal {
+	if p.local != nil && p.local.holds(sid) {
 		return p.local.screenClient(ctx, paneID)
 	}
 	if h, ok := p.remote.hostFor(sid); ok {

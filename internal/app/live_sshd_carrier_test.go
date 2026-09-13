@@ -27,14 +27,15 @@ package app
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
 	pkgsftp "github.com/pkg/sftp"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/remoteprobe"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
 	gossh "golang.org/x/crypto/ssh"
@@ -72,15 +73,49 @@ func (fx *liveSshd) rawClient(t *testing.T) *gossh.Client {
 
 // fixtureBundleCarrier publishes over the fixture's own dial: the account's
 // home over an exec channel, the bundle over an sftp client.
+//
+// It is a TEST-OWNED transport and deliberately not the product's: it predates
+// the helper-backed route and exists to drive the publish protocol against a
+// real sshd without a helper daemon. It borrows nothing from the production
+// carrier, which is why the home probe below is its own copy rather than the
+// production one that used to be exported to it — that helper was deleted with
+// the coordinator's dial (nocx-50w7p.5), and a test that needed it back would
+// be a test keeping the code the epic removed.
 type fixtureBundleCarrier struct {
 	t  *testing.T
 	fx *liveSshd
 }
 
+// fixtureHomeOver asks the fixture's host where its home is, over the client
+// this fixture dialed. The commands are internal/remoteprobe's list and in its
+// order — the same rule the production paths follow: nothing here composes
+// shell text.
+type fixtureHomeOver struct {
+	client *gossh.Client
+}
+
+func (f fixtureHomeOver) Home() (string, error) {
+	for _, command := range remoteprobe.HomeCommands {
+		sess, err := f.client.NewSession()
+		if err != nil {
+			return "", err
+		}
+		out, err := sess.Output(command)
+		_ = sess.Close()
+		if err != nil {
+			return "", err
+		}
+		if home := strings.TrimSpace(string(out)); home != "" {
+			return home, nil
+		}
+	}
+	return "", nil
+}
+
 func (c *fixtureBundleCarrier) EnsureInstalledRemote(ctx context.Context, _ string, _ ...ssh.ConnectOption) error {
 	impl := shellintegration.New(log.NewSlogAdapter(nil))
 	client := c.fx.rawClient(c.t)
-	home, err := impl.GetRemoteHome(remoteHomeOver{client: client})
+	home, err := impl.GetRemoteHome(fixtureHomeOver{client: client})
 	if err != nil {
 		return err
 	}
@@ -90,8 +125,4 @@ func (c *fixtureBundleCarrier) EnsureInstalledRemote(ctx context.Context, _ stri
 	}
 	defer func() { _ = clientSFTP.Close() }()
 	return impl.EnsureInstalledRemote(ctx, shellIntegrationSFTPFS{SFTPFS: ssh.NewSFTPFS(clientSFTP)}, home)
-}
-
-func (c *fixtureBundleCarrier) UninstallRemote(context.Context, *gossh.Client) ([]string, []string, error) {
-	return nil, nil, errors.New("the live-sshd fixture carrier does not uninstall anything")
 }

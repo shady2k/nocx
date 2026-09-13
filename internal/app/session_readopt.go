@@ -101,6 +101,18 @@ type localHelperRoute interface {
 	// another one holds, and a socket per refusal kept until the process ends
 	// is a cost nobody would choose.
 	Release(sid string)
+	// noteHeld records that this daemon holds a session, which is the fact
+	// paneScreen.owner routes by (nocx-50w7p.5). A RE-ADOPTION is one of the
+	// two moments a session enters that set — the other is OpenHosted — so it
+	// is here rather than left to a caller to remember: a pane taken back is a
+	// pane this daemon is holding, and the scan the screen read does must say
+	// so.
+	noteHeld(sid session.ID)
+	// forgetHeld is the other end of the same interval, for the outcome where
+	// the daemon answered and does not hold the session: it is the only path to
+	// `absent`, and a pane that leaves this set must leave it here or the owner
+	// would keep routing to a terminal that is gone.
+	forgetHeld(sid session.ID)
 }
 
 // hostedCarrier is the connection a re-attachment is made over: it takes the
@@ -423,6 +435,13 @@ func (rp *readoptPass) readoptLocal(ctx context.Context, p content.PendingSessio
 			mine = &asked[i]
 		}
 	}
+	if mine == nil {
+		// THE DAEMON ANSWERED AND DOES NOT HOLD IT — the one path to `absent`.
+		// A pane that leaves this daemon leaves its set HERE, or the owner
+		// would go on routing the pane to a terminal that is gone and the
+		// refusal a person reads would name the wrong helper.
+		rp.local.forgetHeld(session.ID(p.SessionID))
+	}
 	if mine == nil || rp.adopter == nil || rp.registry == nil || rp.registry.registry == nil {
 		// Either the daemon answered and does not hold it — the one path to
 		// `absent`, which is the caller's to apply — or this coordinator has
@@ -431,18 +450,53 @@ func (rp *readoptPass) readoptLocal(ctx context.Context, p content.PendingSessio
 		// nothing here that could be left holding a socket.
 		return inv, nil
 	}
-	if err := rp.readopt(ctx, p, session.Config{
+	// THE CONFIG CARRIES THE DESTINATION, WHICH IS NOT ALWAYS LOCAL
+	// (nocx-50w7p.5). Being routed here says the CARRIER is this machine's
+	// daemon; it says nothing about where the session's shell runs, and a pane
+	// this bead moved onto the local daemon has a shell on somebody else's
+	// host. The destination therefore comes off the BINDING, and the carrier
+	// stays rp.local whatever it says: the attachment is this daemon's.
+	cfg := session.Config{
 		Kind: session.KindLocal,
 		// The cwd is the HELPER's, exactly as on the remote route: the launch
 		// record the daemon has kept since the shell started, not the pane's
 		// stored cwd, which is where the pane was opened.
 		Cwd:    mine.Launch.Cwd,
 		PaneID: p.PaneID,
-		// No Host, no ProfileID, no Remote: a local binding names none of
-		// them (helper_local.go's OpenHosted leaves them empty), and the
-		// registry's Kind is what routes the pane's screen read back to this
-		// machine's daemon.
-	}, nil, rp.local, *mine); err != nil {
+	}
+	if p.Host != "" {
+		// A remote destination, carried locally. Its remote half resolves the
+		// way the remote route resolves one, because the registry adopts a
+		// KindRemote session against a ConnectConfig.
+		if rp.routes == nil {
+			return nil, fmt.Errorf("re-adopt the session on %s: no route resolver is wired", p.Host)
+		}
+		host, resolved, rerr := rp.routes.Resolve(p.ProfileID)
+		if rerr != nil {
+			return nil, fmt.Errorf("resolve the connection this session was opened on: %w", rerr)
+		}
+		// THE RESOLVED DESTINATION MUST BE THE ONE THE BINDING NAMES. A profile
+		// edited between two runs resolves to a different host, and adopting
+		// the pane against it would bind this session to a machine nobody
+		// recorded — the inference nocx-k6p18.15 exists to forbid. The remote
+		// route checks the same pair before it opens consent or a channel, and
+		// a local carrier is no reason to trust the resolver more.
+		if host != p.Host {
+			return nil, fmt.Errorf(
+				"re-adopt the session on %s: the saved connection now resolves to %s — refusing to adopt it against a destination nobody recorded",
+				p.Host, host)
+		}
+		if resolved != nil && p.Account != "" && resolved.User != p.Account {
+			return nil, fmt.Errorf(
+				"re-adopt the session on %s: the saved connection now resolves to account %q and the binding names %q — refusing to adopt it against a destination nobody recorded",
+				p.Host, resolved.User, p.Account)
+		}
+		cfg.Kind = session.KindRemote
+		cfg.Host = host
+		cfg.Remote = resolved
+		cfg.ProfileID = p.ProfileID
+	}
+	if err := rp.readopt(ctx, p, cfg, nil, rp.local, *mine); err != nil {
 		// The session is LIVE and this coordinator could not take it. Said out
 		// loud, because the pane will otherwise open a second shell beside the
 		// one still running, and the only trace of it would be the absence of
@@ -450,32 +504,41 @@ func (rp *readoptPass) readoptLocal(ctx context.Context, p content.PendingSessio
 		rp.registry.log.Warn("a local session that is still running could not be taken back; its pane will open a new shell instead",
 			"session_id", p.SessionID, "error", err)
 		rp.local.Release(p.SessionID)
+	} else {
+		// THE SESSION ENTERS THIS DAEMON'S SET ON RE-ADOPTION TOO
+		// (nocx-50w7p.5), and it is the same interval open uses: taken back is
+		// held. Without this a pane recovered after a restart would be in no
+		// helper's set, and the screen read — which asks the opener rather
+		// than the session's kind — would refuse a terminal this daemon is
+		// holding.
+		rp.local.noteHeld(session.ID(p.SessionID))
 	}
 	return inv, nil
 }
 
-// isLocalBinding answers whether a carried-over binding names THIS machine's
-// daemon rather than a host reached over ssh — the discriminator the local
-// route is chosen by (nocx-ie23r.2).
+// isLocalBinding reports whether this session's CARRIER is this machine's
+// daemon — a different question from where its DESTINATION is (nocx-50w7p.5).
 //
-// IT IS THE BINDING'S SHAPE, and the shape is the statement. A local
-// HostedSessionOpen carries a generation and NOTHING ELSE (helper_local.go,
-// at the fields it deliberately leaves empty): there is no host to resolve and
-// no helper command to exec, because the route is a socket whose name is
-// derived from the generation. A remote one carries a host, always — it is
-// what the ssh lane connects to — and the two readopt routes are therefore
-// told apart by the field that exists rather than by a field that is merely
-// empty.
+// The two were one question until a remote destination could be carried by the
+// local daemon. A pane whose shell lives on somebody else's host, opened as a
+// channel by the daemon on THIS machine, carries Host and ProfileID; the old
+// test — "Host and ProfileID are empty" — therefore answered "remote" for it
+// and sent it down the route that demands a far-host HelperCommand it does not
+// have, so every such pane stayed unadopted across a restart.
 //
-// The three empties are checked together because each of them is enough to
-// send the binding down a route that cannot work: a host with no profile
-// would be refused for a partial route, a profile with no host would resolve
-// a connection to nowhere, and a helper command with no host would exec a
-// binary on this machine over an ssh lane that does not exist. Requiring all
-// three keeps the predicate one question — "does this name any half of an ssh
-// route?" — instead of four.
+// The discriminator is HelperCommand, and it is not a proxy for the carrier: it
+// is where the helper BINARY lives on the far host, which the bridge on that
+// host execs. A daemon reached over a socket on this machine has no such path,
+// and the remote route refuses to proceed without one (its own required-field
+// check above). So an empty value means the carrier is local as a matter of
+// what the value IS, not of what it happens to be empty of — the difference
+// between reading a fact the tree already carries and inventing a second field
+// to say it again.
+//
+// An id space no generation qualifies is still nobody's: a row without one is
+// refused here and left to a route that cannot judge it either.
 func isLocalBinding(p content.PendingSession) bool {
-	return p.Generation != "" && p.Host == "" && p.ProfileID == "" && p.HelperCommand == ""
+	return p.Generation != "" && p.HelperCommand == ""
 }
 
 // readopt is the attach-and-adopt half, and it is deliberately the same half

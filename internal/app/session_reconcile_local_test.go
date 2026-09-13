@@ -55,6 +55,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	helpersession "github.com/shady2k/nocx/internal/helper/session"
+	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/storage/storagetest"
 	"github.com/shady2k/nocx/internal/transport"
 )
@@ -104,6 +105,11 @@ func startFakeLocalEndpoint(t *testing.T, dir, generation string) *fakeLocalEndp
 	svc := helpersession.New(helpersession.Options{
 		Generation: proto.GenerationID(generation),
 		Spawner:    spawner,
+		// The ssh half of the same script (nocx-50w7p.5): without it a
+		// `spawn-ssh` on this endpoint is refused as unavailable, so no test
+		// built here can open an ssh pane for this machine's daemon to hold —
+		// which is the shape the pane-screen owner must answer for.
+		SSHSpawner: spawner,
 		Log:        discardLogger(),
 	})
 	ep := &fakeLocalEndpoint{generation: generation, dir: dir, ln: ln, svc: svc, spawner: spawner}
@@ -264,6 +270,19 @@ func (r *countingLocalRoute) AdoptLifecycle(context.Context, client.HostSessionI
 func (r *countingLocalRoute) Release(string) {
 	panic("the local carrier was asked to release a connection for a binding that is not this machine's")
 }
+
+// noteHeld is the other half of the same seam (nocx-50w7p.5): a re-adoption
+// records that this daemon holds the session. Unreachable here for the reason
+// Release is — a binding that never reaches the local route is never adopted —
+// and a call to it would be the same bug.
+func (r *countingLocalRoute) noteHeld(session.ID) {
+	panic("the local carrier was asked to record ownership for a binding that is not this machine's")
+}
+
+// forgetHeld is deliberately NOT a panic, unlike its neighbours: dropping a
+// session that is not in the set is idempotent, and it is reached on the loss
+// path these tests do exercise — a daemon that answered without the session.
+func (r *countingLocalRoute) forgetHeld(session.ID) {}
 
 // ── the verdict ─────────────────────────────────────────────────────────
 

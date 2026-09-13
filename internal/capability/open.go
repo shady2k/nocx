@@ -18,9 +18,20 @@ type ProfileResolver interface {
 	Resolve(profileID string) (host string, cfg *ssh.ConnectConfig, err error)
 }
 
-// OpenService is the session-open surface: resolve the profile, open the
-// session, and clean up on failure. It is what an OpenOperation hands its
-// callback.
+// OpenService is the session-open surface: resolve the profile, and clean up on
+// failure. It is what an OpenOperation hands its callback.
+//
+// IT NO LONGER OPENS A SESSION, and that is nocx-50w7p.5's change rather than an
+// oversight. `Open` used to reach the session registry, which then dialed an ssh
+// destination FROM THIS PROCESS whenever no helper claimed it — the Tier A
+// fallback ADR-0057 refuses. An ssh pane is opened by a helper now (this
+// machine's, or the far host's own when it has one), so the method had no
+// production caller left, and removing it is what closes the coordinator's last
+// session-shaped route to a dialer. The compiler proved the absence: the tree
+// builds with the method gone.
+//
+// What remains is the half that must stay here: resolving a profile is a store
+// and vault read, and it is the half the gates below were refined around.
 //
 // The grain is REFINED (the refinement open.go's own comment used to defer):
 // the resolve runs under the [config, session] gates and the dial runs under
@@ -35,7 +46,6 @@ type ProfileResolver interface {
 // that is the part worth excluding, and it is now the only part that is.
 type OpenService interface {
 	Resolve(profileID string) (host string, cfg *ssh.ConnectConfig, err error)
-	Open(ctx context.Context, cfg session.Config) (session.Session, error)
 	Close(id session.ID) error
 }
 
@@ -117,13 +127,6 @@ func (s *openService) Resolve(profileID string) (string, *ssh.ConnectConfig, err
 		return "", nil, err
 	}
 	return s.resolver.Resolve(profileID)
-}
-
-func (s *openService) Open(ctx context.Context, cfg session.Config) (session.Session, error) {
-	if err := s.guard.check(); err != nil {
-		return nil, err
-	}
-	return s.registry.Open(ctx, cfg)
 }
 
 func (s *openService) Close(id session.ID) error {

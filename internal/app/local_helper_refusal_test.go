@@ -154,12 +154,33 @@ func servedBySomeoneElse(t *testing.T, home string, gen proto.GenerationID, answ
 		t.Fatalf("listen on %s: %v", path, err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
+	// Every accepted connection is HELD until the test ends, and that is not
+	// hygiene: an unreferenced net.Conn is finalized by the garbage collector,
+	// and finalizing a socket CLOSES it. The silent case below therefore used
+	// to present as "connection reset by peer" — a peer that answered by
+	// hanging up — whenever the collector happened to run inside the
+	// handshake's budget, which is the one thing this case exists to
+	// distinguish from a timeout (nocx-50w7p.10 measured it: the same test,
+	// the same tree, red once and green twice with nothing changed in
+	// between).
+	var mu sync.Mutex
+	var held []net.Conn
+	t.Cleanup(func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range held {
+			_ = c.Close()
+		}
+	})
 	go func() {
 		for {
 			conn, aerr := ln.Accept()
 			if aerr != nil {
 				return
 			}
+			mu.Lock()
+			held = append(held, conn)
+			mu.Unlock()
 			if answer == nil {
 				// Held open and never answered: the endpoint is being served
 				// and says nothing, which is exactly what the handshake's

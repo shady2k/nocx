@@ -179,7 +179,11 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 	opener.client = peer
 
 	over := &sshOverHelper{local: opener, resolve: rc, log: logger}
-	routes := installLeaseRoutes{direct: rc, viaLocal: over}
+	// Both halves of the dispatch, as the composition root builds it: this
+	// test's factory asks for the FILE lease (viaLocal), and the probe half is
+	// filled in so the value under test has the shape production has rather
+	// than a nil leg that would panic the day something else asks.
+	routes := installLeaseRoutes{viaLocal: over, probes: &helperProbes{local: opener, resolve: rc}}
 
 	return &filesStand{
 		srv:     srv,

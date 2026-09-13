@@ -119,6 +119,26 @@ const OpForward = "forward"
 // release is not a disagreement about state.
 const OpUnforward = "unforward"
 
+// OpLane is the forward op that opens one pty-less EXEC LANE on a pooled
+// connection: the installed helper of a named GENERATION, run in its bridge
+// subcommand, with the lane's bytes carried as an ordinary channel.
+//
+// It is what the git-over-a-remote-helper bridge rides once the coordinator
+// holds no ssh client (plan §3's `ssh.lane(machine, generation)`), and the
+// reason it is an op of its own rather than a `kind` of `open` is D3. The
+// command a lane runs is the one thing a caller may never name: an argv
+// reaching a command line on somebody else's machine is the capability this
+// whole level exists to not hand out. So the caller names FACTS — which
+// machine's install, which generation of it — and the helper turns them into
+// the single command it is allowed to run (deploy.InstalledBinary +
+// endpoint.BridgeInvocation), which is also why a lane carries an exit status
+// where every other channel carries none.
+//
+// The remote helper's own ABI is unchanged by this: a lane ends at the bridge
+// subcommand, exactly as the coordinator's own exec lane did, and the frame
+// protocol on it is the one that was always there.
+const OpLane = "lane"
+
 // EventChannelClosed is the notification a helper sends when a channel's
 // REMOTE end is gone: the server closed it, the stream errored, or the
 // connection died under it.
@@ -291,6 +311,26 @@ const (
 type ProbeResult struct {
 	Outcome ProbeOutcome `json:"outcome"`
 	Detail  string       `json:"detail"`
+	// Fingerprint is the offered host key's SHA256 fingerprint, present
+	// whenever the handshake reached a key at all.
+	//
+	// It is here because the coordinator's own probe returned it beside its
+	// error (ProbeConfigWithResult) and the settings surface STORES it — the
+	// `host-key-unknown` outcome is first contact with a machine, and a probe
+	// that could not say which key it saw would make the user's next
+	// connections indistinguishable from each other (internal/transport's
+	// ProbeResultIdentity.HostKeyFingerprint).
+	Fingerprint string `json:"fingerprint,omitempty"`
+	// HostKey is the evidence for the two host-key outcomes: the offered
+	// key's wire bytes, its algorithm, and the recorded fingerprint when the
+	// answer is `changed`.
+	//
+	// It is the SAME $def the channel plane's refusals carry (HostKeyEvidence)
+	// — one shape for one fact — and it exists for the same reason: nothing
+	// carries a Go value across this socket, so the coordinator REBUILDS
+	// ssh.ErrUnknownHostKey / ssh.ErrHostKeyMismatch from it, which is what
+	// keeps the accept sheet and the mismatch warning working unchanged.
+	HostKey *HostKeyEvidence `json:"hostKey,omitempty"`
 }
 
 // SecretPurpose is what the asked-for material is FOR, in a closed set.
@@ -511,6 +551,51 @@ type OpenChannelResult struct {
 	Channel ChannelID `json:"channel"`
 }
 
+// Machine is the identity of the installed helper a lane runs, and it is the
+// "machine" half of a lane's name.
+//
+// It is the install DIRECTORY and nothing else, and that is the narrowest
+// honest shape rather than a path somebody let through. A helper install is
+// content-addressed and immutable (D7): deploy.Ensure writes
+// <home>/.nocx/helper/<version>-<goos>-<goarch>-<hash>/nocx-helper, the
+// coordinator records that directory as the install's own identity
+// (consent.Install.Path, and the route a reopened session already carries), and
+// what a lane needs is exactly which of those to run.
+//
+// The alternative — home and platform, so the helper re-derives the path — was
+// rejected for a concrete reason rather than for taste: a session re-adopted
+// after a coordinator restart has the recorded DIRECTORY and no home or
+// platform to speak of, and recovering them would be a second derivation of the
+// install layout, which is the regression AD-8 names. The directory is the fact
+// both paths already hold.
+//
+// What a caller still cannot do is name a COMMAND: the helper appends the
+// binary's name and the bridge subcommand itself, from its own install layout,
+// so the only thing a lane can be pointed at is a directory holding a helper.
+type Machine struct {
+	// Dir is the absolute install directory the coordinator installed into —
+	// the directory deploy.Ensure keys by generation and writes the
+	// .install-complete marker in.
+	Dir string `json:"dir"`
+}
+
+// LaneParams asks this machine's helper for one exec lane to a remote helper's
+// bridge: WHICH destination (resolved exactly as every other op's), WHICH
+// installed helper of it (Machine), and WHICH build (the generation).
+//
+// There is no command and no argv in it, and that absence is the op's point
+// rather than a tidy omission — see OpLane.
+type LaneParams struct {
+	Destination SSHDestination `json:"destination"`
+	Machine     Machine        `json:"machine"`
+	// Generation is the content hash the installer wrote (D7, D21): the
+	// install is content-addressed and the generation IS the build, so naming
+	// it is what stops a lane from reaching a DIFFERENT generation's sessions
+	// and what lets two generations coexist on one host while an old one still
+	// holds somebody's shell (D4).
+	Generation GenerationID `json:"generation"`
+}
+
 // CloseChannelParams ends one proxied channel.
 type CloseChannelParams struct {
 	Channel ChannelID `json:"channel"`
@@ -531,6 +616,20 @@ type CloseChannelResult struct{}
 type ChannelClosedEvent struct {
 	Channel ChannelID `json:"channel"`
 	Error   string    `json:"error,omitempty"`
+	// Exit is the status the far end's PROCESS exited with, present exactly
+	// when the channel WAS one: a lane (OpLane) whose remote helper ended.
+	//
+	// It crosses because the coordinator's own exec lane read it, and what it
+	// classifies is not a detail — a bridge that ends before the handshake's
+	// sentinel is read by its exit status, where `exitNoEndpoint` means "no
+	// helper is serving that generation" and any other code means "the host
+	// did not answer with our helper" (internal/helper/client's pump). Losing
+	// it would collapse two facts a person acts on differently into one.
+	//
+	// A POINTER so absence is a fact rather than a zero: an sftp subsystem and
+	// a direct-tcpip connection have no exit status at all, and `0` is a
+	// perfectly ordinary way for a process to end.
+	Exit *int32 `json:"exit,omitempty"`
 }
 
 // ForwardID identifies one listener the helper holds for the life of the

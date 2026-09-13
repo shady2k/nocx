@@ -910,7 +910,7 @@ func New(opts ...Option) (*App, error) {
 	// ONE value for "who serves which lease", read twice: the git factory takes
 	// it and so does the file panel's factory below. Two literals would be two
 	// answers to one question, and the second would be the one that drifts.
-	sshLeases := installLeaseRoutes{direct: sshClient, viaLocal: overHelper, probes: probes}
+	sshLeases := installLeaseRoutes{viaLocal: overHelper, probes: probes}
 	helperFactory, helperReg := helperGitFactory(
 		sshLeases, helperartifacts.DefaultSource, helperConsent, helperInstalls, slogger)
 	helperReg.registry = sess
@@ -1299,7 +1299,7 @@ func New(opts ...Option) (*App, error) {
 		// nothing and says so, and history.status carries the consequence.
 		transport.WithSessionOutputRecorder(contentDB.SessionOutput()),
 		transport.WithHistoryStatus(historyStatus),
-		transport.WithProber(&proberAdapter{client: sshClient}),
+		transport.WithProber(&proberAdapter{helper: overHelper, client: sshClient}),
 		transport.WithProfileService(profileSvc),
 		transport.WithSnippets(snippetSvc),
 		transport.WithNotes(noteSvc),
@@ -2745,18 +2745,26 @@ func (a *sshFactoryAdapter) Connect(ctx context.Context, host string, opts ...ss
 	return a.client.Connect(ctx, host, opts...)
 }
 
-// proberAdapter adapts ssh.RealClient to transport.Prober and
-// transport.HostKeyTruster (the same client owns known_hosts for both).
+// proberAdapter answers transport.Prober through THIS MACHINE'S HELPER and
+// transport.HostKeyTruster through this process's own ssh client, and the split
+// between the two fields is the whole of what it is.
+//
+// A probe is a DIAL, and dials are the helper's (the owner's invariant of
+// 2026-09-13, plan §3): sshOverHelper asks it, the helper authenticates with
+// material the coordinator hands over the reverse channel, and the verdict on a
+// host key the helper has never seen comes back here to be decided from this
+// process's known_hosts. What is NOT the helper's is the WRITE: accepting a key
+// is a change to ~/.ssh/known_hosts, that file is this process's, and the
+// helper links no knownhosts at all (a forbidden import in the artifact
+// deployed to somebody else's host). So the two methods of one wiring point
+// have two owners, named here rather than blurred.
 type proberAdapter struct {
+	helper *sshOverHelper
 	client *ssh.RealClient
 }
 
-func (a *proberAdapter) Probe(ctx context.Context, host string, cfg *ssh.ConnectConfig) error {
-	return a.client.ProbeConfig(ctx, host, cfg)
-}
-
 func (a *proberAdapter) ProbeWithResult(ctx context.Context, host string, cfg *ssh.ConnectConfig) (string, error) {
-	return a.client.ProbeConfigWithResult(ctx, host, cfg)
+	return a.helper.ProbeWithResult(ctx, host, cfg)
 }
 
 func (a *proberAdapter) TrustHostKey(ctx context.Context, addr string, key []byte) (string, error) {

@@ -31,7 +31,6 @@ import (
 	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
 	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
-	"github.com/shady2k/nocx/internal/helper/endpoint"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
@@ -42,28 +41,21 @@ import (
 	"github.com/shady2k/nocx/internal/transport"
 )
 
-// helperLaneProvider acquires the pty-less exec lane a helper rides on one
-// host (design D19). *ssh.RealClient satisfies it; the interface exists so
-// the factory is testable against a double without a live connection — the
-// same reason internal/filesystem/sftp declares its own narrow fsConn seam.
-type helperLaneProvider interface {
-	HelperConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.HelperConn, error)
-}
-
 // helperInstallProvider is the full composition-root surface the factory
 // needs to bring a helper up on a host: the exec lane the helper rides
-// (D19), the write-capable install lease the deploy package installs
-// through (D7), and the bounded one-shot exec the platform probe uses
-// (D20). The interface exists so the factory is testable against doubles
-// without a live connection, and since nocx-50w7p.3 no SINGLE type satisfies
-// all three in production: the composition root wires installLeaseRoutes,
-// whose install lease is this machine's helper's and whose other two are
-// still this process's own dials.
+// (nocx-50w7p.10), the write-capable install lease the deploy package installs
+// through (D7), and the bounded one-shot exec the platform probe uses (D20).
+// The interface exists so the factory is testable against doubles without a
+// live connection — and since nocx-50w7p.9 the composition root wires
+// installLeaseRoutes, where ALL THREE are this machine's helper's: the lane as
+// a channel it opened, the install lease as the sftp channel it opened, and the
+// platform probe as a named op on a probe lease. No field of that dispatch is
+// the coordinator's own dial any more.
 //
-// The registry itself keeps the narrow helperLaneProvider — install is a
+// The registry itself keeps the narrow laneProvider — install is a
 // selection-time concern, not a per-session one.
 type helperInstallProvider interface {
-	helperLaneProvider
+	laneProvider
 	HelperInstallConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.HelperInstallConn, error)
 	DiscoveryConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.DiscoveryConn, error)
 }
@@ -124,7 +116,7 @@ func helperGitFactory(lanes helperInstallProvider, source deploy.ArtifactSource,
 					"host", sess.Host(), "error", perr)
 				return helperProbeRefusal(platform, perr)
 			}
-			command, hash, err := installHelperFor(sess, lanes, source, platform)
+			installed, err := installHelperFor(sess, lanes, source, platform)
 			if err != nil {
 				// The upload or install failed (D7). The failure is a
 				// fact about the host or the build, carried by the
@@ -149,8 +141,8 @@ func helperGitFactory(lanes helperInstallProvider, source deploy.ArtifactSource,
 				if rerr := installs.Record(consent.Install{
 					Fingerprint: fp,
 					Identity:    destinationIdentityFor(sess),
-					Path:        path.Dir(command),
-					Hash:        hash,
+					Path:        path.Dir(installed.command),
+					Hash:        installed.generation,
 					InstalledAt: time.Now().UTC(),
 				}); rerr != nil {
 					log.Warn("helper installed but the footprint observation was not recorded",
@@ -158,14 +150,13 @@ func helperGitFactory(lanes helperInstallProvider, source deploy.ArtifactSource,
 				}
 			}
 			return transport.GitOpenSelection{Factory: &sessionFactory{
-				reg:        reg,
-				sid:        sess.ID(),
-				host:       sess.Host(),
-				account:    accountFromOptions(sess.SSHOptions()),
-				fp:         sess.HostKeyFingerprint(),
-				opts:       sess.SSHOptions(),
-				command:    command,
-				expectHash: hash,
+				reg:     reg,
+				sid:     sess.ID(),
+				host:    sess.Host(),
+				account: accountFromOptions(sess.SSHOptions()),
+				fp:      sess.HostKeyFingerprint(),
+				opts:    sess.SSHOptions(),
+				install: installed,
 			}}
 		case ConsentRequired:
 			// The ask is a RESULT state, never an install: nothing was
@@ -281,10 +272,12 @@ func probeHelperPlatformAt(ctx context.Context, host string, opts []ssh.ConnectO
 	// Suppressing the ask rather than sharing the connection is the choice
 	// because it is a rule this codebase already has: a probe answers a
 	// question the product asked itself and may not stop a person to do it
-	// (internal/ssh, TestPromptRung_ProbeNeverFiresTheAsk). Every silent
-	// credential still applies, so a key, an agent or a remembered password
-	// probes exactly as before; only the destination that would have to
-	// interrupt someone declines — and declining degrades to the plain
+	// (ssh.WithoutPasswordPrompt, which is what un-wires the rung; a prompt
+	// credential reaches the settings probe as ssh.ErrNoHelperIdentity instead,
+	// refused before any dial). Every
+	// silent credential still applies, so a key, an agent or a remembered
+	// password probes exactly as before; only the destination that would have
+	// to interrupt someone declines — and declining degrades to the plain
 	// terminal, which is the direction §4.2 requires.
 	//
 	// The option list is COPIED before the suppression is appended: the
@@ -314,36 +307,61 @@ func probeHelperPlatformAt(ctx context.Context, host string, opts []ssh.ConnectO
 }
 
 // installHelperFor installs the helper artifact on sess's host for the
-// already-probed platform and returns the absolute command path and the
-// content hash to expect from it (D7, D21): the deploy wiring, replacing
-// the env-configuration the factory used to read. The context is
-// background — the selection has no caller context — and the install
-// lease's own hard timeout is what bounds the acquisition (the
+// already-probed platform and returns the install (D7, D21): the deploy
+// wiring, replacing the env-configuration the factory used to read. The
+// context is background — the selection has no caller context — and the
+// install lease's own hard timeout is what bounds the acquisition (the
 // filesystemProviderFactory precedent).
-func installHelperFor(sess session.Session, lanes helperInstallProvider, source deploy.ArtifactSource, platform deploy.Platform) (command, hash string, err error) {
+func installHelperFor(sess session.Session, lanes helperInstallProvider, source deploy.ArtifactSource, platform deploy.Platform) (installedHelper, error) {
 	return installHelperAt(context.Background(), sess.Host(), sess.SSHOptions(), lanes, source, platform)
 }
 
-func installHelperAt(ctx context.Context, host string, opts []ssh.ConnectOption, lanes helperInstallProvider, source deploy.ArtifactSource, platform deploy.Platform) (command, hash string, err error) {
+func installHelperAt(ctx context.Context, host string, opts []ssh.ConnectOption, lanes helperInstallProvider, source deploy.ArtifactSource, platform deploy.Platform) (installedHelper, error) {
 	conn, err := lanes.HelperInstallConn(ctx, host, opts...)
 	if err != nil {
-		return "", "", fmt.Errorf("install lease for %s: %w", host, err)
+		return installedHelper{}, fmt.Errorf("install lease for %s: %w", host, err)
 	}
 	defer func() { _ = conn.Close() }()
 	home, err := conn.Home()
 	if err != nil {
-		return "", "", fmt.Errorf("remote home for %s: %w", host, err)
+		return installedHelper{}, fmt.Errorf("remote home for %s: %w", host, err)
 	}
 	fsys := installFS{conn}
-	command, hash, err = deploy.Ensure(ctx, fsys, source, home, platform)
+	command, hash, err := deploy.Ensure(ctx, fsys, source, home, platform)
 	if err != nil {
-		return "", "", err
+		return installedHelper{}, err
 	}
 	if err := deploy.Prune(ctx, fsys, home, path.Base(path.Dir(command))); err != nil {
-		return "", "", fmt.Errorf("prune for %s: %w", host, err)
+		return installedHelper{}, fmt.Errorf("prune for %s: %w", host, err)
 	}
-	return command, hash, nil
+	return installedHelper{dir: path.Dir(command), generation: hash, command: command}, nil
 }
+
+// installedHelper is a COMPLETED install of the helper artifact on one host, in
+// the facts a lane names it by (D7, D21): WHERE it is (the install directory,
+// which is the machine's identity as this level records it — consent.Install
+// stores the same directory) and WHICH build it is (the generation, i.e. the
+// content hash).
+//
+// Those are the two things the coordinator sends in proto.LaneParams, and the
+// reason they travel as facts rather than as the command they determine is D3:
+// the helper builds the invocation from its own install layout
+// (deploy.InstalledBinary), so no caller ever reaches an argv on somebody
+// else's machine (nocx-50w7p.10).
+type installedHelper struct {
+	dir        string
+	generation string
+	// command is the installed binary's absolute path — dir joined with the
+	// install layout's binary name. It is NOT sent to the helper (the lane
+	// names the directory and the helper appends the name and the subcommand)
+	// and it is kept for the two readers that need a file rather than a
+	// directory: the footprint record's Path (its parent) and the hosted-open
+	// answer that reports which binary serves a session.
+	command string
+}
+
+// machine is the typed identity a lane is opened with.
+func (i installedHelper) machine() proto.Machine { return proto.Machine{Dir: i.dir} }
 
 // effectiveModeFor re-derives the session's resolved desired mode from the
 // connect options the session was opened with (session.Reg stamps the
@@ -433,7 +451,7 @@ func (a installFS) ReadFile(p string) ([]byte, error)       { return a.conn.Read
 // exposed, and sharing a helper across principals would be an
 // authorization error. Cross-session sharing waits for that seam.
 type helperRegistry struct {
-	lanes     helperLaneProvider
+	lanes     laneProvider
 	install   helperInstallProvider
 	source    deploy.ArtifactSource
 	log       *slog.Logger
@@ -473,11 +491,11 @@ func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config) (tr
 	if resolver.Resolve(Machine{Fingerprint: fingerprint, Mode: profile.DesiredMode(cfg.Remote.DesiredMode)}) != DesiredHelper {
 		return transport.HostedSessionOpen{}, false, nil
 	}
-	command, generation, err := installHelperAt(ctx, cfg.Host, opts, r.install, r.source, platform)
+	installed, err := installHelperAt(ctx, cfg.Host, opts, r.install, r.source, platform)
 	if err != nil {
 		return transport.HostedSessionOpen{}, true, err
 	}
-	f := &sessionFactory{reg: r, sid: session.NewID(), host: cfg.Host, account: accountFromOptions(opts), opts: opts, command: command, expectHash: generation}
+	f := &sessionFactory{reg: r, sid: session.NewID(), host: cfg.Host, account: accountFromOptions(opts), opts: opts, install: installed}
 	h := &hostHelper{f: f, lanes: r.lanes, log: r.log}
 	h.mu.Lock()
 	c, outcome, err := h.connectLocked(ctx)
@@ -582,8 +600,8 @@ func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config) (tr
 		}
 	}
 	return transport.HostedSessionOpen{
-		Session: sess, Host: cfg.Host, Account: f.account, Generation: generation,
-		HelperCommand: command, Fingerprint: fingerprint,
+		Session: sess, Host: cfg.Host, Account: f.account, Generation: installed.generation,
+		HelperCommand: installed.command, Fingerprint: fingerprint,
 		LifecycleLane: lifecycleLane, StartLifecycle: startLifecycle,
 		AbortLifecycle: abortLifecycle,
 		// The two ends of one fact meet here and nowhere else: the
@@ -721,7 +739,7 @@ func (r *helperRegistry) inventories() []sessionInventory {
 	out := make([]sessionInventory, 0, len(helpers))
 	for _, h := range helpers {
 		h.mu.Lock()
-		c, generation := h.client, h.f.expectHash
+		c, generation := h.client, h.f.install.generation
 		host, account := h.f.host, h.f.account
 		h.mu.Unlock()
 		if c != nil && generation != "" {
@@ -836,7 +854,7 @@ func (h *hostHelper) closeSessions(ctx context.Context) error {
 		return nil
 	}
 	c, outcome, err := h.connectLocked(ctx)
-	generation := h.f.expectHash
+	generation := h.f.install.generation
 	h.mu.Unlock()
 	ok := false
 	defer func() {
@@ -882,10 +900,12 @@ type sessionFactory struct {
 	// fp is the machine's host public-key fingerprint — the consent key —
 	// captured at selection time so the registry can close every live
 	// helper channel on a machine without holding a session (D25).
-	fp         string
-	opts       []ssh.ConnectOption
-	command    string
-	expectHash string
+	fp   string
+	opts []ssh.ConnectOption
+	// install is the completed install this session's git rides: the machine
+	// identity and the generation the lane names, and the installed binary's
+	// path for the two readers that need a path rather than a lane.
+	install installedHelper
 }
 
 func (f *sessionFactory) Open(ctx context.Context, cwd string) (git.Repo, git.OpenOutcome, error) {
@@ -916,7 +936,7 @@ func (f *sessionFactory) Open(ctx context.Context, cwd string) (git.Repo, git.Op
 // event.
 type hostHelper struct {
 	f     *sessionFactory
-	lanes helperLaneProvider
+	lanes laneProvider
 	log   *slog.Logger
 
 	mu      sync.Mutex
@@ -933,14 +953,15 @@ type hostHelper struct {
 // screenClient is the route a remote pane's screen is read through: this
 // helper's carrier, and the handle it knows the session by.
 //
-// The generation is the one the daemon answers to — f.expectHash, the same
+// The generation is the one the daemon answers to — f.install.generation, the
+// same
 // value an inventory row carries and the same one the session-close path
 // compares against — because a handle addressed to another generation names
 // nothing there and the helper refuses it.
 func (h *hostHelper) screenClient(ctx context.Context, sid string) (*client.Client, client.HostSessionID, error) {
 	h.mu.Lock()
 	c, outcome, err := h.connectLocked(ctx)
-	generation := h.f.expectHash
+	generation := h.f.install.generation
 	h.mu.Unlock()
 	switch {
 	case err != nil:
@@ -962,14 +983,19 @@ func (h *hostHelper) connectLocked(ctx context.Context) (*client.Client, git.Ope
 			return h.client, git.OpenOutcome{}, nil
 		}
 	}
-	lane, err := h.lanes.HelperConn(ctx, h.f.host, h.f.opts...)
+	lane, err := h.lanes.LaneConn(ctx, h.f.host, h.f.install.machine(),
+		proto.GenerationID(h.f.install.generation), h.f.opts...)
 	if err != nil {
 		return nil, git.OpenOutcome{}, fmt.Errorf("helper lane for %s: %w", h.f.host, err)
 	}
+	// No Command: the lane's carrier refuses one (client.ErrNoCommandOnALane),
+	// because the helper already started the bridge from the machine and the
+	// generation above. What is left for this process to state is the
+	// generation it EXPECTS the far helper to be, which the handshake verifies
+	// (D21).
 	c, err := client.Dial(ctx, client.Config{
 		Exec:       lane,
-		Command:    bridgeCommand(h.f.command, h.f.expectHash),
-		ExpectHash: h.f.expectHash,
+		ExpectHash: h.f.install.generation,
 		Log:        h.log,
 	})
 	if err != nil {
@@ -1028,14 +1054,14 @@ func (h *hostHelper) open(ctx context.Context, cwd string) (git.Repo, git.OpenOu
 		return nil, git.OpenOutcome{}, errors.New("helper is closing for uninstall")
 	}
 	if h.dead || h.factory == nil {
-		lane, err := h.lanes.HelperConn(ctx, h.f.host, h.f.opts...)
+		lane, err := h.lanes.LaneConn(ctx, h.f.host, h.f.install.machine(),
+			proto.GenerationID(h.f.install.generation), h.f.opts...)
 		if err != nil {
 			return nil, git.OpenOutcome{}, fmt.Errorf("helper lane for %s: %w", h.f.host, err)
 		}
 		c, err := client.Dial(ctx, client.Config{
 			Exec:       lane,
-			Command:    bridgeCommand(h.f.command, h.f.expectHash),
-			ExpectHash: h.f.expectHash,
+			ExpectHash: h.f.install.generation,
 			Log:        h.log,
 		})
 		if err != nil {
@@ -1072,29 +1098,6 @@ func (h *hostHelper) open(ctx context.Context, cwd string) (git.Repo, git.OpenOu
 	}
 	h.refs++
 	return &refRepo{Repo: repo, released: h.released}, outcome, nil
-}
-
-// bridgeCommand is what the exec lane runs on the remote host: the installed
-// helper, asked to BRIDGE to the endpoint of the generation we installed
-// (level-1 design §5, D11).
-//
-// It is not the helper serving over this channel's stdin and stdout any more,
-// and that is the point. The authoritative endpoint is a private Unix socket
-// on the host; the bridge connects to it and copies bytes, holding no session,
-// no window and no lock. So the sessions live in a process that outlives this
-// channel, this coordinator and this nocx — which is what makes a session
-// survive a coordinator being replaced (D1) — while what rides the ssh channel
-// is exactly what rode it before: the frame protocol, unchanged.
-//
-// The generation is the content hash the installer wrote (D7, D21), because a
-// helper install is content-addressed and the generation IS the build: naming
-// it here is what stops a bridge from reaching a DIFFERENT generation's
-// sessions, and what lets two generations coexist on one host while an old one
-// still holds somebody's shell (D4).
-//
-// No port forwarding is configured and none is required: nothing is forwarded.
-func bridgeCommand(command, generation string) string {
-	return command + " " + endpoint.BridgeCommand + " " + generation
 }
 
 // dialFailure maps a helper dial error onto the §6 open outcome it is,

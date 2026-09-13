@@ -41,18 +41,19 @@ const (
 // ConnectConfig — the probe must use exactly the parameters Connect would
 // (same user, port, timeout, secret references, authorized endpoint).
 //
-// The single implementation wraps ssh.RealClient.ProbeConfig.
+// The single implementation asks THIS MACHINE'S HELPER (app.sshOverHelper,
+// nocx-50w7p.10: every dial is the helper's, and the coordinator's own probe —
+// ssh.RealClient.ProbeConfig — was deleted with the dials). It always answers
+// the observed fingerprint, which is why there is one method and not two: the
+// leg that dropped it had no caller, and a seam with an unused half is a seam
+// that hides which questions are actually being asked.
+//
 // Defined here (consumer package) per the repo's DI convention.
 type Prober interface {
-	// Probe validates credentials without recording the observed
-	// host-key fingerprint. Prefer ProbeWithResult when the caller
-	// needs the fingerprint for storage or identity matching.
-	Probe(ctx context.Context, host string, cfg *ssh.ConnectConfig) error
-
-	// ProbeWithResult is identical to Probe but also returns the
-	// host-key fingerprint observed during the SSH handshake.
-	// The fingerprint is empty when the handshake fails before host
-	// key verification (e.g. unreachable host).
+	// ProbeWithResult validates the credentials and answers the host-key
+	// fingerprint observed during the SSH handshake. The fingerprint is empty
+	// when the handshake fails before host key verification (e.g. unreachable
+	// host).
 	ProbeWithResult(ctx context.Context, host string, cfg *ssh.ConnectConfig) (fingerprint string, err error)
 }
 

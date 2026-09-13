@@ -73,10 +73,22 @@ type ChannelStream struct {
 
 	data *stream
 	done chan struct{}
+	// gone closes when the stream ended for a reason nobody HERE asked for and
+	// no process reported an exit status: the transport the stream rode died
+	// under it. It is what a lane's HelperConn.Done reports, and the reason it
+	// is not simply `done` is the remote PROCESS: a bridge that exits has an
+	// exit status, and the coordinator classifies THAT (D5's exit 43 is "no
+	// helper is serving that generation") while a transport that died has to
+	// stay distinguishable from it.
+	gone     chan struct{}
+	goneOnce sync.Once
 
-	mu        sync.Mutex
-	lost      error
-	closed    bool
+	mu      sync.Mutex
+	closed  bool
+	lost    error
+	exit    int
+	hasExit bool
+
 	closeOnce sync.Once
 }
 
@@ -146,6 +158,7 @@ func (c *Client) claimChannel(id proto.ChannelID) (*ChannelStream, error) {
 		id:     id,
 		data:   newStream(),
 		done:   make(chan struct{}),
+		gone:   make(chan struct{}),
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -162,6 +175,15 @@ func (c *Client) claimChannel(id proto.ChannelID) (*ChannelStream, error) {
 			s.data.push(inbound{payload: payload})
 		}
 	}
+	// And an END that arrived in the same window ends this stream now. It is
+	// the same fact one notification over: a lane whose bridge failed between
+	// the helper's answer and this claim would otherwise hand back a stream
+	// nothing will ever end, which parks its reader for ever — the caller's own
+	// read and the handshake's sentinel both wait on it.
+	if end, ok := c.parkedEnds[id]; ok {
+		delete(c.parkedEnds, id)
+		s.finish(end.cause, endOfStream{exit: end.exit})
+	}
 	return s, nil
 }
 
@@ -173,7 +195,7 @@ func (c *Client) CloseChannel(ctx context.Context, id proto.ChannelID) error {
 	if id.IsZero() {
 		return errors.New("helper: close channel: no channel id")
 	}
-	c.forgetChannel(id, ErrChannelClosed)
+	c.forgetChannel(id, ErrChannelClosed, endOfStream{local: true})
 	return c.Call(ctx, proto.ServiceSSH, proto.OpClose, proto.CloseChannelParams{Channel: id}, nil)
 }
 
@@ -250,7 +272,7 @@ func (s *ChannelStream) Close() error {
 		// The local half first, and unconditionally: forgetChannel unblocks
 		// every reader here, so the stream is over before the helper is asked
 		// anything.
-		s.client.forgetChannel(s.id, ErrChannelClosed)
+		s.client.forgetChannel(s.id, ErrChannelClosed, endOfStream{local: true})
 		ctx, cancel := context.WithTimeout(context.Background(), channelCloseTimeout)
 		defer cancel()
 		err = s.client.tellHelperChannelClosed(ctx, s.id)
@@ -359,34 +381,86 @@ func (c *Client) channelNotify(raw json.RawMessage) {
 	if ev.Error != "" {
 		cause = fmt.Errorf("helper: channel closed: %s", ev.Error)
 	}
-	c.forgetChannel(ev.Channel, cause)
+	if ev.Channel.IsZero() {
+		// A zero id names no channel — ChannelID's own contract is that the
+		// zero value resolves to nothing — so there is nothing to park it for
+		// and nothing to look up.
+		c.log.Warn("channel-closed notification names no channel")
+		return
+	}
+	c.mu.Lock()
+	_, claimed := c.channels[ev.Channel]
+	parkable := !claimed && len(c.parkedEnds) < parkedChannelFrames
+	if parkable {
+		// The end of a channel this side has not claimed yet: PARKED, exactly
+		// as that channel's bytes are (channelData), because the window is the
+		// same one open's answer and the caller's registration straddle.
+		c.parkedEnds[ev.Channel] = parkedEnd{cause: cause, exit: ev.Exit}
+	}
+	c.mu.Unlock()
+	if parkable {
+		return
+	}
+	if !claimed {
+		// The park is full, which covers the same window as the bytes' park and
+		// is bounded for the same reason: a caller that never comes back for an
+		// id must not be able to grow this client's memory. Said rather than
+		// silent, because what it costs is that stream's reader.
+		c.log.Warn("channel-closed dropped: nothing has claimed this channel and the park is full",
+			"channel", ev.Channel.String())
+	}
+	c.forgetChannel(ev.Channel, cause, endOfStream{exit: ev.Exit})
+}
+
+// endOfStream is how a stream ended, beyond the cause: the status a PROCESS
+// reported as it went (nil when the far end is not a process) and whether the
+// end was THIS side's act. Both are facts about the end that only the caller
+// knows, which is why they are passed in rather than inferred here.
+type endOfStream struct {
+	exit  *int32
+	local bool
+}
+
+// parkedEnd is the END of a channel whose open has not returned: what to tell
+// its readers, and what a process said as it went.
+type parkedEnd struct {
+	cause error
+	exit  *int32
 }
 
 // forgetChannel ends a stream from this side: it drops the registration and
 // closes the stream, which unblocks its readers. The queue is NOT cleared —
 // Read drains what was already written before it reports the end.
-func (c *Client) forgetChannel(id proto.ChannelID, cause error) {
+func (c *Client) forgetChannel(id proto.ChannelID, cause error, end endOfStream) {
 	c.mu.Lock()
 	s := c.channels[id]
 	delete(c.channels, id)
 	// A channel that has ended is not going to be claimed: bytes parked for it
 	// are bytes nobody will ever read, and holding them would be a leak with a
-	// caller's name on it.
+	// caller's name on it. The parked END is dropped for the same reason.
 	delete(c.parkedChannels, id)
+	delete(c.parkedEnds, id)
 	c.mu.Unlock()
 	if s == nil {
 		return
 	}
-	s.finish(cause)
+	s.finish(cause, end)
 }
 
-// finish closes the stream once, recording why.
-func (s *ChannelStream) finish(cause error) {
+// finish closes the stream once, recording why and how.
+func (s *ChannelStream) finish(cause error, end endOfStream) {
 	s.mu.Lock()
 	if !s.closed {
 		s.closed = true
 		s.lost = cause
+		if end.exit != nil {
+			s.exit, s.hasExit = int(*end.exit), true
+		}
 		close(s.done)
 	}
 	s.mu.Unlock()
+	if end.exit == nil && !end.local {
+		// The transport went: nobody here asked, and no process said it ended.
+		s.goneOnce.Do(func() { close(s.gone) })
+	}
 }

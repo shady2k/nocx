@@ -159,7 +159,8 @@ func (s *Service) Name() string { return proto.ServiceSSH }
 // a helper that claimed to answer `sign` would be claiming to hold key
 // material it does not have.
 func (s *Service) Ops() []string {
-	return append(append(append([]string{proto.OpProbe}, s.channelOps()...), s.forwardOps()...), s.probeOps()...)
+	ops := append(append(append([]string{proto.OpProbe}, s.channelOps()...), s.forwardOps()...), s.probeOps()...)
+	return append(ops, s.laneOps()...)
 }
 
 // ParamsSchema declares the shape of each op. D3 is enforced off this table:
@@ -191,6 +192,8 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.CompletionParams{})
 	case proto.OpCommandNames:
 		return host.SchemaFor(proto.CommandNamesParams{})
+	case proto.OpLane:
+		return host.SchemaFor(proto.LaneParams{})
 	}
 	return nil
 }
@@ -213,7 +216,8 @@ func (s *Service) Refusal(err error) (string, json.RawMessage) {
 	switch {
 	case errors.Is(err, errNoAuthChannel):
 		return proto.ErrCodeNoAuthChannel, nil
-	case errors.Is(err, errBadProbeParams), errors.Is(err, errBadChannelParams), errors.Is(err, errBadLeaseParams):
+	case errors.Is(err, errBadProbeParams), errors.Is(err, errBadChannelParams),
+		errors.Is(err, errBadLeaseParams), errors.Is(err, errBadLaneParams):
 		return proto.ErrCodeBadParams, nil
 	}
 	return "", nil
@@ -318,6 +322,14 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			}
 		}
 		return s.commandNames(ctx, p)
+	case proto.OpLane:
+		var p proto.LaneParams
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, fmt.Errorf("%w: %w", errBadLaneParams, err)
+			}
+		}
+		return s.openLane(ctx, p)
 	}
 	return nil, fmt.Errorf("ssh: no op %q on this service", op)
 }
@@ -342,6 +354,14 @@ func (s *Service) probe(ctx context.Context, p proto.ProbeParams) (proto.ProbeRe
 	if err != nil {
 		return proto.ProbeResult{}, err
 	}
+	// The probe is the ONE op that must report WHICH host key it met, because
+	// the coordinator stores it: `host-key-unknown` is first contact with a
+	// machine, and a probe that could not say which key it saw would make two
+	// machines indistinguishable in the settings surface's own record. So the
+	// callback is wrapped — the verdict is still the coordinator's, and this
+	// only watches what the verdict was about.
+	seen := &seenHostKey{}
+	gcfg.HostKeyCallback = observeHostKey(gcfg.HostKeyCallback, seen)
 
 	client, err := s.client.DialAuth(ctx, addr, p.Host, p.User, gcfg)
 	if err != nil {
@@ -375,10 +395,67 @@ func (s *Service) probe(ctx context.Context, p proto.ProbeParams) (proto.ProbeRe
 			// would send a person to look at the host.
 			return proto.ProbeResult{}, fmt.Errorf("probe: %w", unclassified)
 		}
-		return proto.ProbeResult{Outcome: proto.ProbeOutcome(outcome), Detail: detail}, nil
+		return proto.ProbeResult{
+			Outcome:     proto.ProbeOutcome(outcome),
+			Detail:      detail,
+			Fingerprint: seen.fingerprint,
+			HostKey:     hostKeyEvidenceOf(err),
+		}, nil
 	}
 	_ = client.Close()
-	return proto.ProbeResult{Outcome: proto.ProbeAccepted, Detail: "ok"}, nil
+	return proto.ProbeResult{Outcome: proto.ProbeAccepted, Detail: "ok", Fingerprint: seen.fingerprint}, nil
+}
+
+// seenHostKey is what one handshake saw of the key it was offered, whether the
+// verdict accepted it or refused it.
+type seenHostKey struct {
+	addr        string
+	algorithm   string
+	fingerprint string
+	key         []byte
+}
+
+// observeHostKey wraps a host-key callback so the offered key is recorded
+// before the verdict is decided.
+//
+// It watches and does not decide: the callback underneath is still the one
+// that asks the coordinator, and an offer this process never answers still
+// leaves the evidence behind — which is the case that matters, because a
+// refused key is exactly the one a person is shown.
+func observeHostKey(inner gossh.HostKeyCallback, seen *seenHostKey) gossh.HostKeyCallback {
+	return func(addr string, remote net.Addr, key gossh.PublicKey) error {
+		seen.addr = addr
+		seen.algorithm = key.Type()
+		seen.fingerprint = gossh.FingerprintSHA256(key)
+		seen.key = key.Marshal()
+		return inner(addr, remote, key)
+	}
+}
+
+// hostKeyEvidenceOf is the evidence a host-key outcome carries, taken from the
+// TYPED error the callback raised rather than rebuilt from what this function
+// happened to see: the error is where the coordinator's verdict landed, and it
+// is the only place the recorded fingerprint of a `changed` key exists.
+//
+// Nil for every other failure, and nil for success: an `accepted` probe carries
+// a fingerprint and no evidence, because there is nothing to decide.
+func hostKeyEvidenceOf(err error) *proto.HostKeyEvidence {
+	var unknown *ssh.ErrUnknownHostKey
+	if errors.As(err, &unknown) {
+		return &proto.HostKeyEvidence{
+			Addr: unknown.Addr, KnownHostsAddr: unknown.KnownHostsAddr,
+			Algorithm: unknown.KeyAlgo, Key: unknown.Key, Fingerprint: unknown.Fingerprint,
+		}
+	}
+	var changed *ssh.ErrHostKeyMismatch
+	if errors.As(err, &changed) {
+		return &proto.HostKeyEvidence{
+			Addr: changed.Addr, KnownHostsAddr: changed.KnownHostsAddr,
+			Algorithm: changed.KeyAlgo, Key: changed.Key,
+			Fingerprint: changed.Fingerprint, Expected: changed.Expected,
+		}
+	}
+	return nil
 }
 
 // validateProbe refuses a probe that cannot be dialed before anything is

@@ -221,27 +221,3 @@ func TestPromptRung_CancelPropagates(t *testing.T) {
 		t.Fatalf("callback error = %v, want the cancellation error", err)
 	}
 }
-
-// TestPromptRung_ProbeNeverFiresTheAsk pins the probe boundary: a probe
-// must not block on user input, so firstAuthMethod reports the prompt rung
-// as needing interaction (ErrEncryptedKey) no matter how live it is.
-func TestPromptRung_ProbeNeverFiresTheAsk(t *testing.T) {
-	rc := newTestRealClient(t)
-	ctx := context.Background()
-	resolved := &resolvedConfig{user: "alice", hostName: "h"}
-
-	asker := &fakePasswordRequester{ans: PasswordAnswer{Password: "pw"}}
-	cfg := &ConnectConfig{AuthMode: "password", PasswordRequester: asker}
-	chain, err := rc.buildAuthChain(ctx, resolved, cfg)
-	if err != nil {
-		t.Fatalf("buildAuthChain: %v", err)
-	}
-	_, err = firstAuthMethod(chain)
-	var encKey *ErrEncryptedKey
-	if !errors.As(err, &encKey) {
-		t.Fatalf("firstAuthMethod = %v, want ErrEncryptedKey", err)
-	}
-	if len(asker.reqs) != 0 {
-		t.Fatalf("probe fired the ask %d times — probes must never prompt", len(asker.reqs))
-	}
-}

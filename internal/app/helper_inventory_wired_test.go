@@ -80,7 +80,8 @@ func TestHelperSessionInventoryIsWiredAtTheCompositionRoot(t *testing.T) {
 
 	f := &sessionFactory{
 		reg: a.helperRegistry, sid: coresession.ID("inventory-session"),
-		host: "build.example.com", account: "deploy", expectHash: "generation-a",
+		host: "build.example.com", account: "deploy",
+		install: installedHelper{generation: "generation-a"},
 	}
 	a.helperRegistry.mu.Lock()
 	a.helperRegistry.hosts[f.sid] = &hostHelper{f: f, client: c}

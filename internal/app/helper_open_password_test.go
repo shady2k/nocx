@@ -13,9 +13,8 @@ package app
 // The invariant is an interval, not a moment: from the first dial of an open
 // until the session exists, exactly one ask is raised and the password it
 // returns is the one the server authenticates. internal/ssh already states
-// half of it — TestPromptRung_ProbeNeverFiresTheAsk pins that a probe must
-// not block on user input — and this is the same rule at the seam the helper
-// selection added.
+// half of it — WithoutPasswordPrompt is what takes the rung off a probe's dial
+// — and this is the same rule at the seam the helper selection added.
 
 import (
 	"context"
@@ -32,6 +31,7 @@ import (
 
 	pkgsftp "github.com/pkg/sftp"
 	"github.com/shady2k/nocx/internal/credential"
+	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
 	"github.com/shady2k/nocx/internal/helper/proto"
@@ -439,13 +439,12 @@ func openPasswordStack(t *testing.T, srv *pwSSHServer, probes probeHelperSource)
 
 	consentStore := consent.NewStore(logger, storage.NewDocumentStore(t.TempDir()), "consent.json")
 	installStore := consent.NewInstallStore(logger, storage.NewDocumentStore(t.TempDir()), "installs.json")
-	// The install lease is this machine's helper's now (nocx-50w7p.3) and this
-	// stack has no local daemon, so the route is built with the direct client
-	// for BOTH halves. Nothing in this test's path acquires the install lease
-	// — it drives the AUTH ladder of a pane open — so the substitution is
-	// unreachable code with a name rather than a weakened assertion.
+	// Every lease this dispatch serves is this machine's helper's, and this
+	// stack has no local daemon — so the lease half is the failing double
+	// above. Nothing in this test's path opens one (it drives the AUTH ladder
+	// of a pane open), which is what makes the substitution unreachable code
+	// with a name rather than a weakened assertion.
 	lanes := installLeaseRoutes{
-		direct:   client,
 		viaLocal: noLocalHelperLease{t: t},
 		// The platform probe is this machine's helper's now (nocx-50w7p.9).
 		// This stack has no daemon, so the route is the caller's: a test that
@@ -458,11 +457,12 @@ func openPasswordStack(t *testing.T, srv *pwSSHServer, probes probeHelperSource)
 	return reg, helperReg
 }
 
-// noLocalHelperLease is the local half of the lease routes for a stack that
-// has no local daemon. It FAILS the test if it is ever reached, which is the
-// honest shape: a stand-in that answered would hide the day the pane-open path
-// starts needing a helper lease, and this test's subject is the auth ladder,
-// not the file panel or the install.
+// noLocalHelperLease is this machine's helper for a stack that has none: the
+// install lease, the file panel's and the git factory's exec lane. It FAILS the
+// test if it is ever reached, which is the honest shape — a stand-in that
+// answered would hide the day the pane-open path starts needing a helper lease,
+// and this test's subject is the auth ladder, not the install, the files or the
+// lane.
 type noLocalHelperLease struct{ t *testing.T }
 
 func (n noLocalHelperLease) HelperInstallConn(context.Context, string, ...ssh.ConnectOption) (ssh.HelperInstallConn, error) {
@@ -472,6 +472,11 @@ func (n noLocalHelperLease) HelperInstallConn(context.Context, string, ...ssh.Co
 
 func (n noLocalHelperLease) FSConn(context.Context, string, ...ssh.ConnectOption) (ssh.FSConn, error) {
 	n.t.Error("this stack has no local helper, so no sftp lease can be acquired")
+	return nil, errors.New("no local helper in this stack")
+}
+
+func (n noLocalHelperLease) LaneConn(context.Context, string, proto.Machine, proto.GenerationID, ...ssh.ConnectOption) (helperclient.HelperConn, error) {
+	n.t.Error("this stack has no local helper, so no lane can be opened")
 	return nil, errors.New("no local helper in this stack")
 }
 

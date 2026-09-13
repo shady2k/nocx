@@ -31,6 +31,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -137,13 +139,27 @@ type fixture struct {
 	forwards      map[string]net.Listener
 	forwardBinds  []forwardBind
 	directTargets []string
-
-	// the probe plane (nocx-50w7p.9): what this host's shell answers to an
-	// exec, and how many sessions it will give. execHandler nil means this
-	// fixture serves no exec at all — the probe-only tests never open a
-	// session, and a test that asks for one then fails where it asked.
-	execHandler    func(cmd string) (stdout, stderr string, exit int, refuse bool)
-	execs          []string
+	// the exec plane (nocx-50w7p.9 and nocx-50w7p.10): the commands this host
+	// was asked to run, in order, and the three ways a fixture answers one —
+	// three rather than one because two planes ask and each has its own
+	// subject.
+	execs []string
+	// execHandler scripts an exec's streams and status as STRINGS: the probe
+	// plane, whose subject is which named probe ran and what it answered. Nil
+	// means this fixture runs no handler of that kind.
+	execHandler func(cmd string) (stdout, stderr string, exit int, refuse bool)
+	// execPeer hands the channel to a function that answers an exit status: the
+	// lane's byte-level cases, where what matters is that the frame protocol
+	// crosses unchanged.
+	execPeer func(in io.Reader, out io.Writer) int
+	// execRun runs the command FOR REAL, with the channel as its stdio: the
+	// lane's end-to-end case, which runs the shipped bridge binary instead of a
+	// scripted far side.
+	execRun bool
+	execEnv []string
+	// noExit drops the exit-status request, which is what an sshd does for a
+	// channel that dies rather than one that exits.
+	noExit         bool
 	refuseSessions bool
 	// dials counts how many connections this host accepted. The probes run on a
 	// POOLED connection, so the number is what says whether a lease kept one or
@@ -158,7 +174,10 @@ func (f *fixture) connections() int {
 	return f.dials
 }
 
-// ran is the list of commands this host's shell was asked to run.
+// ran is the list of commands this host's shell was asked to run, in order —
+// the assertion that a NAMED PROBE ran and not a command the coordinator
+// composed (nocx-50w7p.9), and that a lane runs the bridge this repository
+// installs and nothing else (nocx-50w7p.10).
 func (f *fixture) ran() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -273,37 +292,6 @@ func (f *fixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 		}
 		go f.serveChannel(ch, chReqs)
 	}
-}
-
-// serveExec answers one exec request the way a host's shell would: run it,
-// report its status, close. A handler that returns refuse=true answers the exec
-// request's own false reply, which is what a restricted shell or a ForceCommand
-// policy does.
-func (f *fixture) serveExec(ch gossh.Channel, req *gossh.Request) {
-	var m struct{ Command string }
-	if err := gossh.Unmarshal(req.Payload, &m); err != nil {
-		_ = req.Reply(false, nil)
-		return
-	}
-	f.mu.Lock()
-	handler := f.execHandler
-	f.execs = append(f.execs, m.Command)
-	f.mu.Unlock()
-	if handler == nil {
-		_ = req.Reply(false, nil)
-		return
-	}
-	stdout, stderr, exit, refuse := handler(m.Command)
-	if refuse {
-		_ = req.Reply(false, nil)
-		return
-	}
-	_ = req.Reply(true, nil)
-	_, _ = ch.Write([]byte(stdout))
-	_, _ = ch.Stderr().Write([]byte(stderr))
-	//nolint:gosec // SSH exit statuses are 0-255 as far as this fixture is concerned
-	_, _ = ch.SendRequest("exit-status", false, gossh.Marshal(struct{ Status uint32 }{uint32(exit)}))
-	_ = ch.Close()
 }
 
 // serveGlobalRequests answers the forwarding requests a remote listener needs.
@@ -535,6 +523,10 @@ func (p *forwardPayloadReader) u32() (uint32, bool) {
 // wrong subsystem fails where it asked instead of hanging.
 func (f *fixture) serveChannel(ch gossh.Channel, reqs <-chan *gossh.Request) {
 	for req := range reqs {
+		// The lane's request comes FIRST, before the subsystem guard below: an
+		// exec is not a subsystem, so a fixture that reached that guard first
+		// would refuse every lane with "not a subsystem" — which is how this
+		// branch was written the first time.
 		if req.Type == "exec" {
 			f.serveExec(ch, req)
 			return
@@ -579,6 +571,127 @@ func (f *fixture) serveChannel(ch gossh.Channel, reqs <-chan *gossh.Request) {
 		return
 	}
 	_ = ch.Close()
+}
+
+// serveExec answers one exec request the way a host's shell would: run it,
+// report its status, close.
+//
+// THREE ways to answer, because two planes in this package ask for an exec and
+// need different things from one. `execHandler` scripts the streams and the
+// status as STRINGS (the probe plane, nocx-50w7p.9: which named probe ran, and
+// what it answered). `execPeer` hands the channel to a function that answers an
+// exit status, and `execRun` runs the command FOR REAL with the channel as its
+// stdio (the lane plane, nocx-50w7p.10: that the bridge invocation crosses, and
+// that it reaches a helper). A fixture with none of the three set serves no
+// exec at all and refuses the request, which is what a restricted shell or a
+// ForceCommand policy does — and the honest default: a test that asks for a
+// program this fixture cannot run fails where it asked instead of reading an
+// empty success.
+//
+// The command is recorded BEFORE the reply, for the reason the subsystem record
+// is: the reply is what a caller synchronizes on, so a record written after it
+// is a record an assertion can outrun.
+func (f *fixture) serveExec(ch gossh.Channel, req *gossh.Request) {
+	var m struct{ Command string }
+	if err := gossh.Unmarshal(req.Payload, &m); err != nil {
+		if req.WantReply {
+			_ = req.Reply(false, nil)
+		}
+		_ = ch.Close()
+		return
+	}
+	f.mu.Lock()
+	handler, peer, run := f.execHandler, f.execPeer, f.execRun
+	env, noExit := append([]string(nil), f.execEnv...), f.noExit
+	f.execs = append(f.execs, m.Command)
+	f.mu.Unlock()
+
+	reply := func(ok bool) {
+		if req.WantReply {
+			_ = req.Reply(ok, nil)
+		}
+	}
+	status := func(code int) {
+		if noExit {
+			return
+		}
+		_, _ = ch.SendRequest("exit-status", false,
+			gossh.Marshal(struct{ Status uint32 }{Status: uint32(code)})) // #nosec G115 -- an exit status is 0-255
+	}
+
+	switch {
+	case handler != nil:
+		stdout, stderr, exit, refuse := handler(m.Command)
+		if refuse {
+			reply(false)
+			return
+		}
+		reply(true)
+		_, _ = ch.Write([]byte(stdout))
+		_, _ = ch.Stderr().Write([]byte(stderr))
+		status(exit)
+	case run, peer != nil:
+		reply(true)
+		code := 0
+		if run {
+			code = runExecCommand(ch, m.Command, env)
+		} else {
+			code = peer(ch, ch)
+		}
+		status(code)
+	default:
+		reply(false)
+		return
+	}
+	_ = ch.Close()
+}
+
+// runExecCommand runs one command line as sshd would, with the channel as its
+// terminal-less stdin and stdout, and reports the exit status.
+//
+// The line is split on spaces rather than handed to a shell, and that is a
+// deliberate simplification with a named reason: the command this op builds is
+// three space-separated words with no quoting and no expansion (the install
+// directory, the bridge subcommand and the generation), so a shell would add
+// nothing a test could not see — while making the fixture depend on a POSIX
+// shell being present, which a NixOS box does not promise and which would make
+// the case skip exactly where it is needed. The command STRING is asserted
+// separately, byte for byte.
+func runExecCommand(ch gossh.Channel, command string, env []string) int {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return 127
+	}
+	cmd := exec.Command(fields[0], fields[1:]...) // #nosec G204 — this test's own build output and its own argv
+	cmd.Env = append(os.Environ(), env...)
+	// The child's stdin is OUR pipe, pumped from the channel by a goroutine,
+	// and not the channel itself. Handing the channel to exec would make
+	// Wait() block on exec's own stdin copier, which parks on a channel the
+	// caller has not written to yet: the fixture then never reports an exit
+	// status, and a lane whose bridge failed in milliseconds is reported as a
+	// sentinel timeout ten seconds later (measured — this is how the first
+	// version of the refusal case below read).
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return 127
+	}
+	cmd.Stdout = ch
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return 127
+	}
+	go func() {
+		_, _ = io.Copy(stdin, ch)
+		_ = stdin.Close()
+	}()
+	if err := cmd.Wait(); err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return exit.ExitCode()
+		}
+		return 127
+	}
+	return 0
 }
 
 // subsystemsSeen reports the subsystem names this fixture was asked for, in

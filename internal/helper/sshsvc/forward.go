@@ -294,7 +294,7 @@ func (f *openForward) finish(s *Service, cause string) {
 		f.mu.Unlock()
 		for _, id := range live {
 			if ch := s.takeChannel(id); ch != nil {
-				ch.finish(cause)
+				ch.finish(cause, nil)
 			}
 		}
 		_ = f.pool.Close()

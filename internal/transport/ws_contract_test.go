@@ -2038,6 +2038,7 @@ func TestOpen_OverTheWireConformsToContract(t *testing.T) {
 
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), reg,
+		sshHelperOpt(reg),
 		WithProfileResolver(&openProfileResolver{host: "host.example.com"}),
 		WithRemoteLauncher(&fakeRemoteLauncher{}),
 	)
@@ -3184,6 +3185,7 @@ func TestShellFootprintConsent_OverTheWireConformsToContract(t *testing.T) {
 		},
 	})
 	ws := NewWSServer(logger, reg,
+		sshHelperOpt(reg),
 		WithHelperConsentStore(consents),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
@@ -3228,6 +3230,7 @@ func TestShellFootprintConsent_OwnershipAndKeyRefusals(t *testing.T) {
 		},
 	})
 	ws := NewWSServer(logger, reg,
+		sshHelperOpt(reg),
 		WithHelperConsentStore(consents),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
@@ -3267,6 +3270,7 @@ func TestShellFootprintConsent_UnwiredStoreRefuses(t *testing.T) {
 		},
 	})
 	ws := NewWSServer(logger, reg,
+		sshHelperOpt(reg),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
 				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
@@ -4650,6 +4654,7 @@ func TestGitOpen_OverTheWireConformsToContract_SSHHelper(t *testing.T) {
 	})
 	helper := newStubGitFactory()
 	ws := NewWSServer(logger, reg,
+		sshHelperOpt(reg),
 		WithGitRegistry(registry.New()),
 		WithGitRepoFactory(newStubGitFactory()),
 		WithGitHelperFactory(func(session.Session) GitOpenSelection {

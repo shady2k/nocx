@@ -1,8 +1,40 @@
 package ghostty
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/.vendor/ghostty/zig-out/include -DGHOSTTY_STATIC
-#cgo LDFLAGS: ${SRCDIR}/.vendor/ghostty/zig-out/lib/libghostty-vt.a -lm -lpthread
+#cgo CFLAGS: -DGHOSTTY_STATIC
+
+// The archive per target, chosen by build constraint — the layout cmd/vtfetch
+// publishes (build/libghostty-vt/vendor/<target>), which is gitignored build
+// output and is materialised by `make vt-archives` before anything links it.
+//
+// ONE TARGET HAS TWO ARCHIVES, selected by build constraint because the target
+// a helper is FOR is not something a compiler can be asked: the shipped helper
+// runs on a host nobody knows and is cross-compiled with the pinned Zig's musl
+// triple by `make helpers`, while every ordinary build here — go test,
+// golangci-lint, CI — is the host's glibc compiler. Each links the archive the
+// manifest names for that target. The musl side is the OPT-IN, `vtmusl`, so the
+// many untagged builds are the ones the native toolchain builds for, and the
+// helper states the target it is being made for where it is made.
+//
+// Measured rather than assumed (2026-09-13, this tree): untagged and native
+// links vendor/linux-amd64-gnu, and `make helpers` with -tags vtmusl links
+// vendor/linux-amd64. The gnu archive does still link under the musl triple
+// today, so the constraint is not a workaround for a link that fails — it is
+// what keeps the helper on the bytes pinned for the host it will run on, and
+// what gives the musl archives in the manifest a consumer at all.
+#cgo linux,amd64,vtmusl CFLAGS: -I${SRCDIR}/../../../build/libghostty-vt/vendor/linux-amd64/include
+#cgo linux,amd64,vtmusl LDFLAGS: ${SRCDIR}/../../../build/libghostty-vt/vendor/linux-amd64/libghostty-vt.a -lm -lpthread
+#cgo linux,arm64,vtmusl CFLAGS: -I${SRCDIR}/../../../build/libghostty-vt/vendor/linux-arm64/include
+#cgo linux,arm64,vtmusl LDFLAGS: ${SRCDIR}/../../../build/libghostty-vt/vendor/linux-arm64/libghostty-vt.a -lm -lpthread
+#cgo linux,amd64,!vtmusl CFLAGS: -I${SRCDIR}/../../../build/libghostty-vt/vendor/linux-amd64-gnu/include
+#cgo linux,amd64,!vtmusl LDFLAGS: ${SRCDIR}/../../../build/libghostty-vt/vendor/linux-amd64-gnu/libghostty-vt.a -lm -lpthread
+#cgo linux,arm64,!vtmusl CFLAGS: -I${SRCDIR}/../../../build/libghostty-vt/vendor/linux-arm64-gnu/include
+#cgo linux,arm64,!vtmusl LDFLAGS: ${SRCDIR}/../../../build/libghostty-vt/vendor/linux-arm64-gnu/libghostty-vt.a -lm -lpthread
+#cgo darwin,amd64 CFLAGS: -I${SRCDIR}/../../../build/libghostty-vt/vendor/darwin-amd64/include
+#cgo darwin,amd64 LDFLAGS: ${SRCDIR}/../../../build/libghostty-vt/vendor/darwin-amd64/libghostty-vt.a
+#cgo darwin,arm64 CFLAGS: -I${SRCDIR}/../../../build/libghostty-vt/vendor/darwin-arm64/include
+#cgo darwin,arm64 LDFLAGS: ${SRCDIR}/../../../build/libghostty-vt/vendor/darwin-arm64/libghostty-vt.a
+
 #include <stdlib.h>
 #include "bridge.h"
 */

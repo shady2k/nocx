@@ -169,6 +169,11 @@ vt-verify-link:
 vt-helper-size:
 	@third_party/libghostty-vt/scripts/measure-helper-size.sh
 
+# The four helper targets, cross-compiled with the pinned Zig. The linux ones
+# get -tags vtmusl, which is what selects the manifest's musl archive: the
+# helper runs on a host nobody knows and must be static, and the archive's libc
+# is baked into its objects. internal/emulator/ghostty's cgo constraints name
+# both sides and say which build gets which.
 .PHONY: helpers
 helpers: vt-archives
 	@mkdir -p $(HELPER_ARTIFACT_DIR)
@@ -176,8 +181,9 @@ helpers: vt-archives
 	for t in $(HELPER_TARGETS); do \
 	  os=$${t%/*}; arch=$${t#*/}; \
 	  cc="$$($(GO) run ./cmd/vtfetch cc --target $$t --zig "$$zig" --manifest $(VT_MANIFEST))" || exit 1; \
+	  tags=""; if [ "$$os" = linux ]; then tags="-tags vtmusl"; fi; \
 	  CGO_ENABLED=1 GOOS=$$os GOARCH=$$arch CC="$$cc" \
-	    $(GO) build -trimpath -ldflags="-s -w -linkmode=external" \
+	    $(GO) build -trimpath -ldflags="-s -w -linkmode=external" $$tags \
 	    -o $(HELPER_ARTIFACT_DIR)/nocx-helper-$$os-$$arch ./cmd/nocx-helper || exit 1; \
 	  case "$$os" in \
 	    linux) $(GO) run ./cmd/vtfetch inspect --require-static \

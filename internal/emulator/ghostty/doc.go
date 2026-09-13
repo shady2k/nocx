@@ -21,37 +21,41 @@
 //
 // # The pinned build, and where the archive lives
 //
-// The CGo directives in terminal.go point at .vendor/ghostty/zig-out, which is
-// GITIGNORED and is reproduced by:
+// The CGo directives in terminal.go point at build/libghostty-vt/vendor, the
+// layout `make vt-archives` materialises from the release
+// third_party/libghostty-vt/MANIFEST.json pins:
 //
-//	cd internal/emulator/ghostty/.vendor
-//	git init ghostty
-//	git -C ghostty remote add origin https://github.com/ghostty-org/ghostty.git
-//	git -C ghostty fetch --depth 1 origin e2e53f861482e080bf45054ba49ef471f9849937
-//	git -C ghostty checkout -q --detach FETCH_HEAD
-//	cd ghostty
-//	nix shell nixpkgs#zig -c zig build -Demit-lib-vt=true -Doptimize=ReleaseFast
+//	build/libghostty-vt/vendor/<target>/libghostty-vt.a
+//	build/libghostty-vt/vendor/<target>/include/ghostty/vt.h
 //
-// That is ADR-0065 point 1's pin — source commit, toolchain and flags together:
-// ghostty e2e53f861482e080bf45054ba49ef471f9849937 (2026-09-11), Zig 0.16.0,
-// which is the minimum_zig_version in that commit's build.zig.zon, and
-// ReleaseFast. The archive it produces is
-// .vendor/ghostty/zig-out/lib/libghostty-vt.a with its headers beside it at
-// .vendor/ghostty/zig-out/include.
+// It is gitignored build output, so nothing here links until `make vt-archives`
+// has verified those bytes against the manifest and put them there. NOTHING
+// BUILDS THE ARCHIVE LOCALLY ANY MORE: these directives used to name a
+// `.vendor/ghostty/zig-out` checkout built by hand from upstream source, which
+// made the linked bytes depend on whoever last ran the build, and a ghostty
+// source checkout inside the repository breaks the root eslint run because
+// ghostty's own tree contains JavaScript. The pin — source commit, toolchain
+// and flags together: ghostty e2e53f861482e080bf45054ba49ef471f9849937,
+// Zig 0.16.0 and ReleaseFast — lives in the manifest now, and the bytes that
+// reach the linker are the ones published against it.
 //
-// THE ARCHIVE IS A LOCAL STOPGAP, NOT THE DECISION. How nocx holds it in CI, in
-// the e2e stand and in a release — vendored bytes with a content hash, a
-// controlled mirror, a per-target build in the pipeline — is a separate bead's
-// decision and is deliberately not made here. The build bead replaces the two
-// #cgo lines above and the directory they point at; nothing else in this
-// package depends on where the archive came from.
+// TWO ARCHIVES FOR EACH LINUX TARGET, chosen by the `vtmusl` build tag. An
+// archive's libc is baked into its objects, so which of the pair a build links
+// is a statement about the host the binary is for and cannot be inferred from
+// the compiler: the shipped helper runs on a machine nobody knows and is
+// cross-compiled with the pinned Zig's musl triple by `make helpers`, while
+// every ordinary build here — go test, golangci-lint, CI's Linux jobs — is the
+// host's own glibc compiler. So glibc is the DEFAULT and `vtmusl` is what the
+// helper build passes: the many untagged builds stay on the archive their
+// toolchain was configured for, and the one build whose target is not its host
+// says so where it is made. Measured on this tree, 2026-09-13: untagged native
+// links vendor/linux-amd64-gnu and `make helpers` links vendor/linux-amd64.
+// Both directions happen to LINK today, so what the constraint settles is
+// which pinned bytes each target is built from — not whether a link succeeds.
 //
-// Two facts about the link that the build bead will need, both measured in
-// .internal/spikes/buildmatrix/README.md: on Linux the static property is kept
-// only by the musl triple, since a glibc archive links dynamically; and macOS
-// arms never had it, because Go's own darwin runtime loads libSystem and
-// libresolv whatever the helper does. This checkout builds for its own host,
-// which is what the verification commands for this bead run on.
+// On macOS there is one archive per architecture and no static property to
+// keep, because Go's own darwin runtime loads libSystem and libresolv whatever
+// the helper does.
 //
 // # What answers a program, and what does not
 //

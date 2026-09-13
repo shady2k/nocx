@@ -822,8 +822,22 @@ func TestEpicE2E_MaxSessions1LeavesAWorkingUnintegratedPrompt(t *testing.T) {
 		}
 		t.Logf("MEASURED the auxiliary channel under one slot: %v", auxErr)
 
-		if n := fx.authCount(); n != 1 {
-			t.Errorf("the server accepted %d authentications, want exactly 1", n)
+		// TWO AUTHENTICATIONS, AND NEITHER IS THE REFUSED CALL. That is the
+		// whole of D3: a refused session must never buy a second credential
+		// use. One login is the pane's own session. The other is this
+		// HARNESS's lifecycle transport lease, which takes its own pool
+		// identity by construction (liveSshd.tunnelLease says why) and so its
+		// own connection — this assertion read "want exactly 1" until the
+		// tunnel moved onto that lease in nocx-50w7p.8, and it had been red
+		// since (reproduced at 2a70029a, the merge before nocx-50w7p.12's work).
+		// What must NOT appear is a third: the publish's auxiliary channel was
+		// refused on the session's own connection, so it can authenticate
+		// nothing — and the assertions above fix that it was refused rather
+		// than skipped.
+		if n := fx.authCount(); n != 2 {
+			t.Errorf("the server accepted %d authentications, want 2 — the pane's session and this "+
+				"harness's lifecycle transport. A third would be a refused auxiliary call buying a "+
+				"credential, which D3 forbids", n)
 		}
 		t.Logf("MEASURED a saved connection under MaxSessions 1: %d authentication(s)", fx.authCount())
 

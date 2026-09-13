@@ -57,6 +57,30 @@ func (s *subsystemStream) Close() error                { return s.closer.Close()
 // as a stream.
 func helperStreamTo(t *testing.T, rc *RealClient, srv *fsTestServer) io.ReadWriteCloser {
 	t.Helper()
+	stream, dialed := helperStreamWithClient(t, rc, srv)
+	// The caller that wants only the stream still ends the connection with the
+	// test: a dialed transport nobody closes is a goroutine and a socket that
+	// outlive the lease built over it (measured: it kept the fixture's session
+	// count non-zero, which a leak check then read as a lease goroutine).
+	t.Cleanup(func() { _ = dialed.Close() })
+	return stream
+}
+
+// helperStreamWithClient is helperStreamTo with the connection carrying the
+// subsystem, because a caller that opens more than one stream — or that wants
+// the fixture to stop holding a connection at all — has to be able to end it.
+func helperStreamWithClient(t *testing.T, rc *RealClient, srv *fsTestServer) (io.ReadWriteCloser, *gossh.Client) {
+	t.Helper()
+	gclient := dialFSFixture(t, rc, srv)
+	return sftpStreamOver(t, gclient, srv), gclient
+}
+
+// dialFSFixture opens one connection to the fixture and ends it with the test.
+// A test that wants two channels on ONE connection dials once and calls
+// sftpStreamOver twice, which is the shape production has: the helper pools the
+// connection and every consumer rides a channel on it (AD-4).
+func dialFSFixture(t *testing.T, rc *RealClient, srv *fsTestServer) *gossh.Client {
+	t.Helper()
 	gcfg := &gossh.ClientConfig{
 		User:            "test",
 		Auth:            []gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)},
@@ -66,6 +90,14 @@ func helperStreamTo(t *testing.T, rc *RealClient, srv *fsTestServer) io.ReadWrit
 	if err != nil {
 		t.Fatalf("dial the fixture: %v", err)
 	}
+	t.Cleanup(func() { _ = gclient.Close() })
+	return gclient
+}
+
+// sftpStreamOver opens one more sftp subsystem on an already-dialed connection
+// and answers it as a stream.
+func sftpStreamOver(t *testing.T, gclient *gossh.Client, srv *fsTestServer) io.ReadWriteCloser {
+	t.Helper()
 	sess, err := gclient.NewSession()
 	if err != nil {
 		t.Fatalf("new session: %v", err)

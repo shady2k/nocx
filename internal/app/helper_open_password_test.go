@@ -367,15 +367,20 @@ func openPasswordStack(t *testing.T, srv *pwSSHServer) (*session.Reg, *helperReg
 	return reg, helperReg
 }
 
-// noLocalHelperLease is the local half of the install route for a stack that
+// noLocalHelperLease is the local half of the lease routes for a stack that
 // has no local daemon. It FAILS the test if it is ever reached, which is the
 // honest shape: a stand-in that answered would hide the day the pane-open path
-// starts needing an install lease, and this test's subject is the auth ladder,
-// not the install.
+// starts needing a helper lease, and this test's subject is the auth ladder,
+// not the file panel or the install.
 type noLocalHelperLease struct{ t *testing.T }
 
 func (n noLocalHelperLease) HelperInstallConn(context.Context, string, ...ssh.ConnectOption) (ssh.HelperInstallConn, error) {
 	n.t.Error("this stack has no local helper, so no install lease can be acquired")
+	return nil, errors.New("no local helper in this stack")
+}
+
+func (n noLocalHelperLease) FSConn(context.Context, string, ...ssh.ConnectOption) (ssh.FSConn, error) {
+	n.t.Error("this stack has no local helper, so no sftp lease can be acquired")
 	return nil, errors.New("no local helper in this stack")
 }
 

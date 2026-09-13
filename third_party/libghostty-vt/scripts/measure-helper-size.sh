@@ -9,8 +9,8 @@
 #
 # WHY IT EXISTS. Linking libghostty-vt into the helper is not a small change:
 # the spike measured +12.4 MB per Linux helper and +1.6 MB on darwin/arm64
-# (.internal/spikes/buildmatrix/README.md §4), against today's 4.2–4.5 MB
-# helpers and a 5 MiB ceiling. The ceiling must be re-derived from a real
+# (.internal/spikes/buildmatrix/README.md §4), against the 4.2–4.5 MB helpers
+# and the 5 MiB ceiling of the time. The ceiling must be re-derived from a real
 # helper with the archive linked — not bumped mechanically, and not guessed
 # from the spike's probe, whose -s flag interaction was left unexplained there.
 #

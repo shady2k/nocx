@@ -285,6 +285,11 @@ func reachStack(t *testing.T, srv *reachSSHServer, launcher ssh.RemoteLauncher) 
 
 	opts := []transport.WSServerOption{
 		transport.WithProfileResolver(&reachProfileResolver{host: srv.addr, keyFile: reachWriteKeyFile(t, srv.userKey)}),
+		// THE PANE IS A HELPER'S (nocx-50w7p.5). This stack's subject is the
+		// launcher and what the far side answers, not the route that got there —
+		// so it is given the helper route rather than measuring the named refusal
+		// that a remote destination with no opener now produces.
+		standHelperOpt(reg),
 	}
 	if launcher != nil {
 		opts = append(opts, transport.WithRemoteLauncher(launcher))

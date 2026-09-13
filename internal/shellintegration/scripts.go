@@ -244,7 +244,7 @@ var (
 // Ctrl+C cancels the launch (nocx-cyhfw). Every installed copy must be
 // rewritten: a shell still sourcing 49 reads a pending answer as a refusal and
 // starts the agent before the person has answered.
-const version = "50"
+const version = "51"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

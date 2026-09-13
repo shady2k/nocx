@@ -152,13 +152,20 @@ import (
 // changed size, not the work. B = 256 KiB still holds, and the new maximum
 // leaves 3.00x headroom.
 //
+// AND THEY DID NOT MOVE AGAIN when the pane's tool token was staged
+// (nocx-50w7p.16): 63 calls on the worst path, exactly as before. What grew is
+// the BUNDLE — nocx.bash and nocx.zsh each gained the staging of the bearer into
+// the launch directory's mcp.json, 87233 -> 88591 bytes, +1358 for two shells'
+// worth of a JSON-escape, a conditional field and an unset — and the bundle is
+// what a publish writes. The bound is unchanged, still 2.96x.
+//
 // REPORT-p3-measure.md, which the failure messages below tell you to update
 // alongside these constants, HAS NEVER EXISTED in this repository — checked
 // across every ref. Whoever restores it, or removes the instruction, owns
 // nocx-uxuwu.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 87233
+	measuredMaxPublishBytes = 88591
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

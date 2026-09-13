@@ -205,6 +205,7 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// (nocx-cyhfw). A shell still sourcing 49 reads the wait as a refusal
 		// and starts the agent before anybody has answered.
 		"50": "cfc9be48045ec8c8d505d4bd3446f406e3652c10463857c1ec359269d833e1c4",
+		"51": "d3faeae6c421c4cddf7989289b47ed704a1f8138e25044d798d63acb8ed19a65",
 	}
 
 	h := sha256.New()

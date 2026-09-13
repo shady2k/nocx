@@ -118,7 +118,7 @@ export function AgentAccessSection(props: AgentAccessSectionProps) {
                     variant="ghost"
                     size="sm"
                     disabled={busy() !== ''}
-                    ariaLabel={`Forget the answer for ${answer.executable}`}
+                    ariaLabel={`Forget the answer for ${answer.executable} on ${machineLabel(answer.machine)}`}
                     onClick={() => void forget(answer)}
                   >
                     {busy() === key(answer) ? 'Forgetting…' : 'Forget'}

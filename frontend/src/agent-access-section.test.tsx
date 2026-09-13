@@ -87,6 +87,10 @@ describe('AgentAccessSection', () => {
     expect(sshRow).toBeTruthy()
     const button = (sshRow as HTMLElement).querySelector('button')
     expect(button).toBeTruthy()
+    // The button's own name says which machine it revokes: two rows for one
+    // executable are otherwise two identical buttons to anybody who cannot see
+    // which row they are in.
+    expect(button?.getAttribute('aria-label')).toContain('deploy@build.example.com')
     fireEvent.click(button as HTMLElement)
 
     await waitFor(() => expect(forget).toHaveBeenCalledWith(CLAUDE_ON_SSH))

@@ -22,16 +22,12 @@ export type MachineFacts = NonNullable<HostRequest['machine']>
 
 /** The machine as a person reads it, in a sentence: where the agent would run. */
 export function machineLabel(machine: MachineFacts): string {
-  if (machine.kind === 'ssh') {
-    // Both are required by the schema for an ssh machine, but a surface must
-    // not draw "undefined@undefined" if a build ever sends less: the fallback
-    // says what is known rather than assembling nonsense from nothing.
-    if (machine.host && machine.account) {
-      return `${machine.account}@${machine.host}`
-    }
-    return 'another machine'
-  }
-  return 'this machine'
+  // No fallback for a half-named ssh machine, because the contract does not
+  // admit one: the ssh branch REQUIRES host, account and hostKey (and the
+  // backend refuses an ask that lacks them), so the fields below are always
+  // there. A surface that had to invent wording here would be describing a
+  // place nobody named, which is the thing this field exists to prevent.
+  return machine.kind === 'ssh' ? `${machine.account}@${machine.host}` : 'this machine'
 }
 
 /**
@@ -40,8 +36,7 @@ export function machineLabel(machine: MachineFacts): string {
  * button act on the other.
  */
 export function machineKey(machine: MachineFacts): string {
-  if (machine.kind === 'ssh') {
-    return `ssh:${machine.host ?? ''}:${machine.account ?? ''}:${machine.hostKey ?? ''}`
-  }
-  return 'local'
+  return machine.kind === 'ssh'
+    ? `ssh:${machine.host}:${machine.account}:${machine.hostKey}`
+    : 'local'
 }

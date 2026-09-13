@@ -296,18 +296,108 @@ func TestTheMachineShapeIsDeclaredOnce(t *testing.T) {
 				declarations[i].file, declarations[0].file, canonical[0], canonical[i])
 		}
 	}
-	// And the shape is a machine and not an empty object: a test that compared
+	// And the shape is a MACHINE and not an empty object: a test that compared
 	// three absences would pass over a wire that carried no machine at all.
+	// Both branches are checked, because they are what makes the contract
+	// exact — a local machine carries nothing else, an ssh one carries all
+	// three — and a copied union with the requirements dropped from one branch
+	// would still compare identical to itself.
 	var machine map[string]any
 	if err := json.Unmarshal([]byte(canonical[0]), &machine); err != nil {
 		t.Fatalf("machine shape: %v", err)
 	}
-	props, ok := machine["properties"].(map[string]any)
-	if !ok {
-		t.Fatalf("the declared machine has no properties: %s", canonical[0])
+	branches, ok := machine["oneOf"].([]any)
+	if !ok || len(branches) != 2 {
+		t.Fatalf("the machine is not a two-branch union: %s", canonical[0])
 	}
-	if _, ok := props["kind"]; !ok {
-		t.Fatalf("the declared machine has no kind: %s", canonical[0])
+	requiredBy := map[string][]string{}
+	for _, raw := range branches {
+		branch, isObject := raw.(map[string]any)
+		if !isObject {
+			t.Fatalf("a machine branch is not an object: %v", raw)
+		}
+		props, isObject := branch["properties"].(map[string]any)
+		if !isObject {
+			t.Fatalf("a machine branch has no properties: %v", branch)
+		}
+		kind, isObject := props["kind"].(map[string]any)
+		if !isObject {
+			t.Fatalf("a machine branch has no kind: %v", branch)
+		}
+		constant, isString := kind["const"].(string)
+		if !isString {
+			t.Fatalf("a machine branch's kind is not a constant: %v", kind)
+		}
+		required, _ := branch["required"].([]any)
+		for _, entry := range required {
+			name, isString := entry.(string)
+			if !isString {
+				t.Fatalf("a required entry is not a string: %v", entry)
+			}
+			requiredBy[constant] = append(requiredBy[constant], name)
+		}
+	}
+	local, hasLocal := requiredBy["local"]
+	ssh, hasSSH := requiredBy["ssh"]
+	if !hasLocal || !hasSSH {
+		t.Fatalf("the machine's branches are not local and ssh: %v", requiredBy)
+	}
+	if len(local) != 1 || local[0] != "kind" {
+		t.Fatalf("a local machine requires %v, want kind alone", local)
+	}
+	want := map[string]bool{"kind": true, "host": true, "account": true, "hostKey": true}
+	if len(ssh) != len(want) {
+		t.Fatalf("an ssh machine requires %v, want all four facts", ssh)
+	}
+	for _, name := range ssh {
+		if !want[name] {
+			t.Fatalf("an ssh machine requires %q, which is not one of its four facts", name)
+		}
+	}
+}
+
+// The machine contract is EXACT, and this is the half the Go validator cannot
+// hold: a local machine may not carry a host, and an ssh one may not omit one.
+// Without it the schema would accept `{"kind":"ssh"}` while
+// validateMachineFacts refuses it — two sources of truth disagreeing about the
+// same payload, and a renderer whose generated type promises narrowing the
+// wire does not guarantee (nocx-50w7p.16). The validator's own half is
+// TestAgentAccessForget_RefusesAMachineThatCannotBeDerived, over the same
+// cases.
+func TestTheMachineContractIsExact(t *testing.T) {
+	schema := loadSchema(t, "agentAccess.forget.params.schema.json")
+	const head = `{"executable":"/usr/bin/claude","digest":"` + "55640c4f3b8769e625c91e6aeaac3032c713a8bd0b83e04c9265772d7cb40825" + `","workspace":"default"`
+	cases := []struct {
+		name    string
+		machine string
+		valid   bool
+	}{
+		{"the machine this backend runs on", `{"kind":"local"}`, true},
+		{"an ssh machine with all three facts", `{"kind":"ssh","host":"build.example.com","account":"deploy","hostKey":"SHA256:key-a"}`, true},
+		{"no machine at all", ``, false},
+		{"a kind nobody derives", `{"kind":"container"}`, false},
+		{"an empty kind", `{"kind":""}`, false},
+		{"an ssh machine with no host", `{"kind":"ssh","account":"deploy","hostKey":"SHA256:k"}`, false},
+		{"an ssh machine with no account", `{"kind":"ssh","host":"build.example.com","hostKey":"SHA256:k"}`, false},
+		{"an ssh machine with no host key", `{"kind":"ssh","host":"build.example.com","account":"deploy"}`, false},
+		{"a local machine carrying a host", `{"kind":"local","host":"build.example.com"}`, false},
+		{"a machine with a field nobody declared", `{"kind":"local","fingerprint":"SHA256:k"}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			params := head
+			if tc.machine != "" {
+				params += `,"machine":` + tc.machine
+			}
+			params += `}`
+			err := validateJSONErr(schema, []byte(params))
+			if tc.valid && err != nil {
+				t.Fatalf("the schema refused a valid machine: %v", err)
+			}
+			if !tc.valid && err == nil {
+				t.Fatalf("the schema accepted %s", params)
+			}
+		})
 	}
 }
 

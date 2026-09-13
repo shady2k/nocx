@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -56,7 +57,15 @@ func TestMCPBridgeProcess(t *testing.T) {
 			t.Fatalf("write failure marker: %v", writeErr)
 		}
 	}
-	if err := mcpstdio.Serve(context.Background(), os.Stdin, os.Stdout, socket); err != nil {
+	// THE BRIDGE'S DIAGNOSTICS GO TO STDERR, and this process is what makes
+	// that a rule rather than a preference: it is the MCP wire on stdout, so a
+	// log line written there would be a byte the agent's client reads as
+	// protocol. It is the same split cmd/nocx-helper's own `mcp` entry point
+	// makes, for the same reason, and the bearer this child presents is
+	// whatever the staged config put in its environment — which this logger
+	// never sees (nocx-50w7p.16).
+	bridgeLog := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	if err := mcpstdio.Serve(context.Background(), os.Stdin, os.Stdout, socket, bridgeLog); err != nil {
 		t.Fatalf("MCP bridge: %v", err)
 	}
 }

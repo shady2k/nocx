@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -61,7 +62,21 @@ type Config struct {
 	Token         string
 	ServerName    string
 	ServerVersion string
+	// Logger receives this bridge's LIFECYCLE diagnostics and never its
+	// payloads — and, above all, never the bearer (nocx-50w7p.16). It is a
+	// seam rather than a write to the process's own stderr because this
+	// process is the one place the pane's bearer exists in the clear: the
+	// agent's MCP client hands it in through the environment, so the log this
+	// bridge writes is a file a person may paste into an issue.
+	//
+	// Nil logs nowhere. A bridge handed no logger has nowhere to write, and a
+	// default that reached for stderr would put a caller's diagnostics on a
+	// stream it did not choose.
+	Logger *slog.Logger
 }
+
+// discardLogger is where a bridge with no logger writes: nowhere, deliberately.
+var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 // Server translates MCP messages from Input and writes MCP messages to Output.
 type Server struct {
@@ -70,6 +85,7 @@ type Server struct {
 	token         string
 	serverName    string
 	serverVersion string
+	logger        *slog.Logger
 }
 
 // New validates configuration and constructs an adapter.
@@ -86,22 +102,31 @@ func New(cfg Config) (*Server, error) {
 	if cfg.ServerVersion == "" {
 		cfg.ServerVersion = "1"
 	}
+	if cfg.Logger == nil {
+		cfg.Logger = discardLogger
+	}
 	return &Server{
 		socket:        cfg.Socket,
 		dialer:        cfg.Dialer,
 		token:         cfg.Token,
 		serverName:    cfg.ServerName,
 		serverVersion: cfg.ServerVersion,
+		logger:        cfg.Logger,
 	}, nil
 }
 
 // Serve runs an adapter until Input reaches EOF or ctx is canceled.
-func Serve(ctx context.Context, input io.Reader, output io.Writer, socket string) error {
+//
+// The logger is a parameter rather than read from the environment for the same
+// reason the bearer is read from it and nowhere else: the two values that reach
+// this process from outside travel by exactly one route each, and this is the
+// route for the diagnostics (nocx-50w7p.16).
+func Serve(ctx context.Context, input io.Reader, output io.Writer, socket string, logger *slog.Logger) error {
 	// THE PANE'S BEARER, read from this process's own environment and from
 	// nowhere else (nocx-50w7p.16). The agent's MCP client passes it from the
 	// staged config, so it is this process alone that holds it — never a
 	// sibling, never a child, never a log line.
-	server, err := New(Config{Socket: socket, Token: os.Getenv(shellintegration.AgentToolTokenEnvVar)})
+	server, err := New(Config{Socket: socket, Token: os.Getenv(shellintegration.AgentToolTokenEnvVar), Logger: logger})
 	if err != nil {
 		return err
 	}
@@ -121,6 +146,13 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) e
 	go readMessages(input, lines)
 	writer := &lineWriter{output: output}
 	active := newCalls()
+	// THE SESSION'S TWO EDGES, logged and nothing else. What is worth a line
+	// here is that the bridge came up, whether it holds a bearer to present,
+	// and that it stopped — and the bearer itself is NOT among them: whether
+	// one was handed in is a boolean, the value is what admits into a pane, and
+	// this is the one process that holds it in the clear (nocx-50w7p.16).
+	s.logger.Info("mcp bridge serving", "socket", s.socket, "bearer_presented", s.token != "")
+	defer s.logger.Info("mcp bridge stopped", "socket", s.socket)
 	// ONE ENDPOINT CONNECTION FOR THE LIFE OF THIS SESSION. A connection IS
 	// the endpoint's admission interval (ADR-0058): toolendpoint's serve calls
 	// Auth.Admit exactly once per connection, and the composition root hands
@@ -132,7 +164,7 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) e
 	// words as a problem with the caller, though the peer was never in
 	// question. One shared connection is that interval expressed literally,
 	// and the endpoint already serves concurrent requests on it.
-	link := newEndpointLink(s.socket, s.dialer, s.token)
+	link := newEndpointLink(s.socket, s.dialer, s.token, s.logger)
 	var requests sync.WaitGroup
 	defer func() {
 		// Cancel first, then close, then wait. Cancelling is what every
@@ -667,6 +699,10 @@ type endpointLink struct {
 	// that arrived first would be refused for a bearer that was about to be
 	// said.
 	token string
+	// logger receives this link's own diagnostics: a dial that failed and a
+	// connection that was made. Never the bearer, and never a request — the
+	// payloads this link carries are the agent's calls (nocx-50w7p.16).
+	logger *slog.Logger
 
 	mu      sync.Mutex
 	conn    *endpointConn
@@ -674,8 +710,11 @@ type endpointLink struct {
 	stopped bool
 }
 
-func newEndpointLink(socket string, dialer Dialer, token string) *endpointLink {
-	return &endpointLink{socket: socket, dialer: dialer, token: token}
+func newEndpointLink(socket string, dialer Dialer, token string, logger *slog.Logger) *endpointLink {
+	if logger == nil {
+		logger = discardLogger
+	}
+	return &endpointLink{socket: socket, dialer: dialer, token: token, logger: logger}
 }
 
 // close releases the shared connection when the stdio session ends. The
@@ -710,8 +749,10 @@ func (l *endpointLink) attach(ctx context.Context) (*endpointConn, int64, error)
 		}
 		raw, err := l.dialer.DialContext(ctx, "unix", l.socket)
 		if err != nil {
+			l.logger.Warn("mcp tool endpoint unreachable", "socket", l.socket, "err", err)
 			return nil, 0, err
 		}
+		l.logger.Debug("mcp tool endpoint connected", "socket", l.socket)
 		// THE BEARER GOES FIRST, on the one connection this bridge holds for
 		// its whole session (ADR-0058: a connection IS the admission interval).
 		// Only when there is one: a local agent's connection is not on the

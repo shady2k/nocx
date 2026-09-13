@@ -254,11 +254,36 @@ func (s *farStand) callOver(t *testing.T, pane string) rpcEnvelope {
 
 func (s *farStand) callOverWithToken(t *testing.T, pane, token string) rpcEnvelope {
 	t.Helper()
+	conn := s.dialWithToken(t, pane, token)
+	t.Cleanup(func() { _ = conn.Close() })
+	return s.answerFrom(t, conn)
+}
+
+// callOnce is the same call with the connection CLOSED before it returns.
+//
+// It exists because a session admits ONE caller at a time, and a connection
+// holds that slot until its serve loop ends — so a test that makes a second
+// call about the same session, after the first one was ADMITTED, has to give
+// the slot back first or it is measuring the slot rather than the rule it
+// wrote. callOverWithToken keeps its connection open on purpose: the tests
+// about a live connection being closed by a retirement need exactly that.
+func (s *farStand) callOnce(t *testing.T, pane, token string) rpcEnvelope {
+	t.Helper()
+	conn := s.dialWithToken(t, pane, token)
+	defer func() { _ = conn.Close() }()
+	return s.answerFrom(t, conn)
+}
+
+// dialWithToken opens one connection, writes the pane record and the bearer the
+// caller supplied, and sends one request. NOTHING is cleaned up here: the caller
+// owns the connection, which is what lets the one-connection-per-call tests hold
+// theirs open and the closed-again ones let it go.
+func (s *farStand) dialWithToken(t *testing.T, pane, token string) net.Conn {
+	t.Helper()
 	conn, err := net.Dial("unix", s.endpoint.SocketPath())
 	if err != nil {
 		t.Fatalf("dial endpoint: %v", err)
 	}
-	t.Cleanup(func() { _ = conn.Close() })
 	if pane != "" {
 		record, encErr := panebind.Encode(pane)
 		if encErr != nil {
@@ -286,6 +311,12 @@ func (s *farStand) callOverWithToken(t *testing.T, pane, token string) rpcEnvelo
 		// the read below is what reports it.
 		_ = werr
 	}
+	return conn
+}
+
+// answerFrom reads the one answer the endpoint owes for the request above.
+func (s *farStand) answerFrom(t *testing.T, conn net.Conn) rpcEnvelope {
+	t.Helper()
 	if derr := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); derr != nil {
 		t.Fatalf("set deadline: %v", derr)
 	}
@@ -454,13 +485,13 @@ func TestAFarPaneIsAdmittedWithoutAProcessPinner(t *testing.T) {
 		t.Fatalf("newToolAuthorizer: %v", err)
 	}
 
-	if _, _, _, ok := unpinnable.admittedPeer(toolendpoint.Peer{
+	if _, _, _, err := unpinnable.admittedPeer(toolendpoint.Peer{
 		Pane: string(farPaneP), Token: stand.paneToken(t, string(farPaneP)),
-	}); !ok {
-		t.Fatal("a far pane was refused because this coordinator cannot pin processes")
+	}); err != nil {
+		t.Fatalf("a far pane was refused because this coordinator cannot pin processes: %v", err)
 	}
-	if _, _, _, ok := unpinnable.admittedPeer(toolendpoint.Peer{PID: farOwnedPID}); ok {
-		t.Fatal("a pid was admitted with no pinner to check it against")
+	if _, _, _, err := unpinnable.admittedPeer(toolendpoint.Peer{PID: farOwnedPID}); !errors.Is(err, toolendpoint.ErrNotEnrolled) {
+		t.Fatalf("a pid was admitted with no pinner to check it against: err = %v", err)
 	}
 }
 

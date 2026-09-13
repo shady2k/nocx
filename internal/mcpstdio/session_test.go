@@ -59,7 +59,7 @@ func startStdio(t *testing.T, socket string) *stdioDriver {
 		ended: make(chan error, 1),
 	}
 	go func() {
-		err := Serve(context.Background(), input, outputWriter, socket)
+		err := Serve(context.Background(), input, outputWriter, socket, discardLogger)
 		_ = outputWriter.Close()
 		driver.ended <- err
 	}()
@@ -459,7 +459,7 @@ func TestTheNextCallRedialsWhenTheEndpointClosedTheIdleConnection(t *testing.T) 
 // A DIAL THAT GENUINELY FAILS IS NAMED, and it is the same answer the wire has
 // always carried for it.
 func TestADialThatFailsIsNamedEndpointUnavailable(t *testing.T) {
-	link := newEndpointLink(filepath.Join(t.TempDir(), "missing.sock"), &net.Dialer{}, "")
+	link := newEndpointLink(filepath.Join(t.TempDir(), "missing.sock"), &net.Dialer{}, "", discardLogger)
 	_, _, err := link.call(context.Background(), "alpha.first", json.RawMessage(`{}`))
 	if !errors.Is(err, ErrEndpointUnavailable) {
 		t.Fatalf("call error = %v, want %v", err, ErrEndpointUnavailable)
@@ -505,7 +505,7 @@ func TestACallWhoseWriteFailsRedialsRatherThanLosingTheCall(t *testing.T) {
 		writeJSONLine(t, conn, rpcEnvelope{JSONRPC: "2.0", ID: request.ID, Result: json.RawMessage(`{"after":true}`)})
 	})
 	dialer := &firstWriteFailsDialer{inner: &net.Dialer{}}
-	link := newEndpointLink(endpoint.socket(), dialer, "")
+	link := newEndpointLink(endpoint.socket(), dialer, "", discardLogger)
 	t.Cleanup(link.close)
 
 	result, upstream, err := link.call(context.Background(), "alpha.first", json.RawMessage(`{}`))
@@ -587,7 +587,7 @@ func TestACancelledWriterDoesNotOpenItsTurn(t *testing.T) {
 // either way, because nothing is connected.
 func TestACancelledCallIsNeverSentToTheEndpoint(t *testing.T) {
 	dialer := &countingDialer{conn: newDeliveringFailureConn()}
-	link := newEndpointLink("ignored.sock", dialer, "")
+	link := newEndpointLink("ignored.sock", dialer, "", discardLogger)
 	t.Cleanup(link.close)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -675,7 +675,7 @@ func (d fixedDialer) DialContext(context.Context, string, string) (net.Conn, err
 // the difference is every other writer behind the same descriptor.
 func TestAnInterruptedWriteDoesNotParkTheCaller(t *testing.T) {
 	conn := newStuckConn()
-	link := newEndpointLink("stuck.sock", fixedDialer{conn: conn}, "")
+	link := newEndpointLink("stuck.sock", fixedDialer{conn: conn}, "", discardLogger)
 	t.Cleanup(link.close)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -858,7 +858,7 @@ func (d *countingDialer) count() int {
 // write itself reported.
 func TestAWriteThatDeliveredTheWholeFrameIsNotRetried(t *testing.T) {
 	dialer := &countingDialer{conn: newDeliveringFailureConn()}
-	link := newEndpointLink("ambiguous.sock", dialer, "")
+	link := newEndpointLink("ambiguous.sock", dialer, "", discardLogger)
 	t.Cleanup(link.close)
 
 	_, _, err := link.call(context.Background(), "alpha.first", json.RawMessage(`{}`))

@@ -51,7 +51,7 @@ type slotAuthorizer struct {
 	held bool
 }
 
-func (a *slotAuthorizer) Admit(toolendpoint.Peer) (assistant.ToolInvocation, func(), error) {
+func (a *slotAuthorizer) Admit(_ toolendpoint.Peer, publish func(session string, epoch toolendpoint.AdmissionEpoch) bool) (assistant.ToolInvocation, func(), error) {
 	a.mu.Lock()
 	if a.held {
 		a.mu.Unlock()
@@ -67,6 +67,10 @@ func (a *slotAuthorizer) Admit(toolendpoint.Peer) (assistant.ToolInvocation, fun
 			a.held = false
 			a.mu.Unlock()
 		})
+	}
+	if !publish("session", 1) {
+		release()
+		return assistant.ToolInvocation{}, nil, toolendpoint.ErrNotEnrolled
 	}
 	return assistant.ToolInvocation{
 		Context:    context.Background(),
@@ -158,7 +162,7 @@ func toolRefusal(t *testing.T, envelope map[string]json.RawMessage) string {
 // slot.
 type refusingAuthorizer struct{ refusal error }
 
-func (a refusingAuthorizer) Admit(toolendpoint.Peer) (assistant.ToolInvocation, func(), error) {
+func (a refusingAuthorizer) Admit(toolendpoint.Peer, func(string, toolendpoint.AdmissionEpoch) bool) (assistant.ToolInvocation, func(), error) {
 	return assistant.ToolInvocation{}, nil, a.refusal
 }
 

@@ -3,6 +3,7 @@ package ssh
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -11,37 +12,29 @@ import (
 )
 
 // recordingInstaller is the smallest ssh.RemoteInstaller double that records
-// what the capability hands it: the live *gossh.Client and the remote home.
-// The SFTP behaviour itself is shellintegration's fixture; here the contract
-// under test is that the capability OWNS the dial-and-call — the client
-// never leaves internal/ssh.
+// what the capability hands it: the live *gossh.Client. The SFTP behaviour
+// itself is shellintegration's fixture; here the contract under test is that
+// the capability OWNS the dial-and-call — the client never leaves internal/ssh.
+//
+// It is handed no remote home, and that is the point of the shape: the home
+// question travels with the transport (ssh.RemoteInstaller), so the party that
+// asks it is the one holding the client — which is what this double stands in
+// for.
 type recordingInstaller struct {
-	mu            sync.Mutex
-	homes         []string
-	clientSeen    *gossh.Client
-	uninstallHome string
-	removed       []string
-	conflicts     []string
+	mu         sync.Mutex
+	clientSeen *gossh.Client
+	removed    []string
+	conflicts  []string
 }
 
-func (r *recordingInstaller) EnsureInstalledRemote(context.Context, *gossh.Client, string) error {
+func (r *recordingInstaller) EnsureInstalledRemote(context.Context, string, ...ConnectOption) error {
 	return nil
 }
 
-func (r *recordingInstaller) RemoteStartCommand() string { return "" }
-
-func (r *recordingInstaller) GetRemoteHome(c *gossh.Client) (string, error) {
+func (r *recordingInstaller) UninstallRemote(_ context.Context, c *gossh.Client) ([]string, []string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.clientSeen = c
-	r.homes = append(r.homes, "remote-home")
-	return "remote-home", nil
-}
-
-func (r *recordingInstaller) UninstallRemote(_ context.Context, c *gossh.Client, home string) ([]string, []string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.uninstallHome = home
 	return r.removed, r.conflicts, nil
 }
 
@@ -71,9 +64,9 @@ func newUninstallClient(t *testing.T, srv *testSSHServer) *RealClient {
 }
 
 // TestUninstallIntegration_OwnsTheDialAndCall: the capability acquires a
-// pooled connection the way Connect does, asks the carrier for the remote
-// home, delegates UninstallRemote to it, and returns the two lists — the
-// recording double proves the carrier saw a live connection and the home.
+// pooled connection the way Connect does, hands the live connection to the
+// carrier, and returns the two lists it answered with — the recording double
+// proves the carrier saw a live client and nothing else.
 func TestUninstallIntegration_OwnsTheDialAndCall(t *testing.T) {
 	srv := startTestSSHServer(t)
 	rc := newUninstallClient(t, srv)
@@ -92,11 +85,10 @@ func TestUninstallIntegration_OwnsTheDialAndCall(t *testing.T) {
 		t.Errorf("conflicts = %v, want [integration/v10/nocx.bash]", conflicts)
 	}
 	rec.mu.Lock()
-	live := len(rec.homes) == 1 && rec.clientSeen != nil && rec.uninstallHome == "remote-home"
+	live := rec.clientSeen != nil
 	rec.mu.Unlock()
 	if !live {
-		t.Errorf("carrier did not receive one live client + the remote home (homes=%d clientSeen=%v uninstallHome=%q)",
-			len(rec.homes), rec.clientSeen != nil, rec.uninstallHome)
+		t.Error("the carrier was not handed a live pooled client, so the removal had no connection to run on")
 	}
 }
 
@@ -113,43 +105,39 @@ func TestUninstallIntegration_NoInstallerRefuses(t *testing.T) {
 	}
 }
 
-// TestUninstallIntegration_HomeFailureStopsBeforeUninstall: a carrier that
-// cannot determine the remote home means nothing is removed — UninstallRemote
-// must not be reached with a guess.
-func TestUninstallIntegration_HomeFailureStopsBeforeUninstall(t *testing.T) {
+// TestUninstallIntegration_CarrierRefusalIsReported: a carrier that cannot
+// complete the removal reports it, and the capability neither swallows it nor
+// answers with an empty success. The home question lives inside the carrier
+// now (it is the party holding the client, and the commands are
+// internal/remoteprobe's), so this is the failure that used to be a failed
+// home read — same contract, one interface narrower.
+func TestUninstallIntegration_CarrierRefusalIsReported(t *testing.T) {
 	srv := startTestSSHServer(t)
 	rc := newUninstallClient(t, srv)
 
-	rec := &recordingInstaller{}
-	failing := &failingHomeInstaller{rec: rec}
+	refusing := &refusingUninstaller{err: errors.New("the far side would not read the home directory")}
 
-	_, _, err := rc.UninstallIntegration(context.Background(), srv.addr, append(uninstallConnectOpts(t, srv), WithRemoteInstaller(failing))...)
+	removed, conflicts, err := rc.UninstallIntegration(context.Background(), srv.addr, append(uninstallConnectOpts(t, srv), WithRemoteInstaller(refusing))...)
 	if err == nil {
-		t.Fatal("UninstallIntegration with an unreachable home succeeded")
+		t.Fatal("UninstallIntegration with a refusing carrier succeeded")
 	}
-	rec.mu.Lock()
-	called := rec.uninstallHome != ""
-	rec.mu.Unlock()
-	if called {
-		t.Error("UninstallRemote was called although GetRemoteHome failed")
+	if removed != nil || conflicts != nil {
+		t.Errorf("a refused removal answered with lists (removed=%v conflicts=%v), want none", removed, conflicts)
+	}
+	if !strings.Contains(err.Error(), "the far side would not read the home directory") {
+		t.Errorf("the refusal is %q, want the carrier's own cause in it — a failure nobody can read is a failure nobody can act on", err)
 	}
 }
 
-// failingHomeInstaller fails GetRemoteHome and delegates everything else.
-type failingHomeInstaller struct {
-	rec *recordingInstaller
+// refusingUninstaller is a carrier whose removal fails.
+type refusingUninstaller struct {
+	err error
 }
 
-func (f *failingHomeInstaller) EnsureInstalledRemote(context.Context, *gossh.Client, string) error {
+func (f *refusingUninstaller) EnsureInstalledRemote(context.Context, string, ...ConnectOption) error {
 	return nil
 }
 
-func (f *failingHomeInstaller) RemoteStartCommand() string { return "" }
-
-func (f *failingHomeInstaller) GetRemoteHome(*gossh.Client) (string, error) {
-	return "", errors.New("no home")
-}
-
-func (f *failingHomeInstaller) UninstallRemote(ctx context.Context, c *gossh.Client, home string) ([]string, []string, error) {
-	return f.rec.UninstallRemote(ctx, c, home)
+func (f *refusingUninstaller) UninstallRemote(context.Context, *gossh.Client) ([]string, []string, error) {
+	return nil, nil, f.err
 }

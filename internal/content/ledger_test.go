@@ -678,6 +678,100 @@ func entrySession(e *content.LedgerEntry) any {
 	return *e.SessionID
 }
 
+// An entry NAMES the pipe it ran in, and one whose pipe the ledger has no row
+// for is still recorded (nocx-ie23r.6).
+//
+// The two halves are one behaviour — how `session_id`, a real foreign key into
+// `sessions`, is written — so they are asserted together against one store.
+// The first half is what the unreconciled third state is derived from
+// (reconcile_sqlite.go's unreconciledCause reads exactly this column, and
+// nothing else, to decide whether anybody could be asked about the block's
+// pipe). The second half is what makes the stamp safe to write at all: a
+// writer that names a session does not own the row it names — the binding
+// lifecycle writes it, at the open — so the column is bound through the table
+// rather than taken on the caller's word.
+func TestAnEntryNamesASessionTheLedgerHoldsAndIsRecordedWithoutOne(t *testing.T) {
+	db, led, path := newLedgerAt(t)
+	ctx := context.Background()
+
+	// The workspace is LayoutRepository's (nocx-isoph.1); the ledger only
+	// references it.
+	if _, err := db.Layout().CreateWorkspace(ctx, content.Workspace{ID: "ws-1", Name: "work"},
+		aTab("tab-1", "ws-1"), aPane("pane-1", "tab-1", "/srv")); err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	const bound = "session-the-pane-is-the-pipe-of"
+	if err := led.CreateSession(ctx, content.Session{ID: bound, WorkspaceID: "ws-1"}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	envReady(t, led, "local")
+
+	const namedID = "00000000-0000-7000-8000-0000000000e1"
+	const unboundID = "00000000-0000-7000-8000-0000000000e2"
+	for _, in := range []content.SubmitEntry{
+		{
+			ID: namedID, Client: "c", EnvironmentID: "local", Cwd: "/repo",
+			Kind: content.EntryShell, Intent: "make watch", SessionID: new(bound),
+		},
+		{
+			ID: unboundID, Client: "c", EnvironmentID: "local", Cwd: "/repo",
+			Kind: content.EntryShell, Intent: "make watch",
+			SessionID: new("session-the-ledger-was-never-told-about"),
+		},
+	} {
+		if _, err := led.Submit(ctx, in); err != nil {
+			t.Fatalf("Submit(%s) naming session %q: %v — a command is not lost because a row its "+
+				"writer does not own is missing", in.ID, *in.SessionID, err)
+		}
+	}
+
+	e, err := led.Entry(ctx, namedID)
+	if err != nil || e == nil {
+		t.Fatalf("Entry(%s): %v (nil=%v)", namedID, err, e == nil)
+	}
+	if e.SessionID == nil || *e.SessionID != bound {
+		t.Fatalf("the entry's session = %v, want %q — the row it ran in is where a restored block "+
+			"reads whether anybody could be asked about it", entrySession(e), bound)
+	}
+
+	// The other half, and it is not a failure mode of the first: the command
+	// is RECORDED, unnamed, because provenance for a pipe the ledger has no
+	// row for is the honest absence.
+	e, err = led.Entry(ctx, unboundID)
+	if err != nil || e == nil {
+		t.Fatalf("Entry(%s): %v (nil=%v) — the command was not recorded at all", unboundID, err, e == nil)
+	}
+	if e.SessionID != nil {
+		t.Fatalf("session_id = %q, want NULL: nothing names that pipe, and a stamp would be a claim "+
+			"about a session that does not exist", *e.SessionID)
+	}
+	if e.Intent != "make watch" || e.Phase != content.PhaseOpen {
+		t.Fatalf("the unnamed entry = %q/%s, want the command itself, mid-lifecycle", e.Intent, e.Phase)
+	}
+
+	// AND NO SESSION ROW WAS MINTED to make the stamp possible, which is the
+	// half that keeps reconciliation honest: the carried-over set is built
+	// from that table, so a row invented here would hand the next start a
+	// session no inventory can judge. A fresh incarnation over the same file
+	// is the reader, exactly as the reconciliation tests read it.
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("close: %v", closeErr)
+	}
+	again, err := reopenStore(t, path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = again.Close() }()
+	pending, err := again.Reconcile().Pending(ctx)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if len(pending) != 1 || pending[0].SessionID != bound {
+		t.Fatalf("carried over = %+v, want only %q — the store invented a session for a pipe "+
+			"nothing bound, and reconciliation would be asked to judge it", pending, bound)
+	}
+}
+
 // A session needs its workspace; the FK is the check.
 func TestCreateSessionRequiresWorkspace(t *testing.T) {
 	db, led := newLedger(t)

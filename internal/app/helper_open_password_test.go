@@ -39,6 +39,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/remoteprobe"
 	"github.com/shady2k/nocx/internal/session"
 
 	"github.com/shady2k/nocx/internal/ssh"
@@ -65,6 +66,21 @@ type pwSSHServer struct {
 	// subsystem, and a fixture that answered one would be answering a question
 	// nobody put).
 	rootDir string
+	// home is what the `home` probe answers — the account's $HOME, which is
+	// deliberately NOT rootDir in the tests that use it: the whole point of
+	// nocx-50w7p.15 is that a session activates under the former and an sftp
+	// subsystem starts in the latter. Empty means the fixture answers nothing,
+	// which is the "the host could not say" refusal.
+	home string
+	// refuseExec answers every exec request false, which is what a host with
+	// ForceCommand or a restricted shell does: the home probe cannot run, and
+	// the publish must refuse rather than guess.
+	refuseExec bool
+	// closeOnSFTPWrite closes the whole connection the moment the sftp
+	// subsystem's first packet arrives — a transport lost MID-PUBLISH, and
+	// deterministic: the subsystem handshake has already succeeded, so the
+	// failure lands on the bytes rather than on the open.
+	closeOnSFTPWrite bool
 	// refuseSubsystem answers the sftp request false, which is what a host
 	// with no sftp-server does.
 	refuseSubsystem bool
@@ -92,6 +108,7 @@ type pwSSHServer struct {
 	// authenticated" from "something did".
 	acceptedKey     gossh.PublicKey
 	keyFingerprints []string
+	execSeen        []string
 
 	liveMu sync.Mutex
 	live   map[*gossh.ServerConn]struct{}
@@ -279,14 +296,37 @@ func (s *pwSSHServer) handleSession(ch gossh.Channel, reqs <-chan *gossh.Request
 			s.serveSFTP(ch)
 			return
 		case "exec":
-			_ = req.Reply(true, nil)
+			var m struct{ Command string }
+			_ = gossh.Unmarshal(req.Payload, &m)
+			if s.refuseExec {
+				_ = req.Reply(false, nil)
+				return
+			}
 			s.mu.Lock()
 			s.execs++
+			s.execSeen = append(s.execSeen, m.Command)
 			s.mu.Unlock()
-			// The probe reads one line and expects a platform triple;
-			// anything else fails the probe, which is a legitimate
-			// outcome for this test and never the thing it measures.
-			_, _ = ch.Write([]byte("Linux x86_64\n"))
+			// The exec surface is COMMAND-AWARE, and it has to be: this
+			// fixture now stands behind the helper's named probes, and the
+			// home probe (`echo $HOME`) is a different question with a
+			// different answer from the platform one. Answering every
+			// command with a platform triple would make `ProbeLease.Home`
+			// return "Linux x86_64" and the publisher write the bundle into
+			// a directory nobody named.
+			switch m.Command {
+			case remoteprobe.UnameCommand:
+				_ = req.Reply(true, nil)
+				_, _ = ch.Write([]byte("Linux x86_64\n"))
+			case remoteprobe.HomeCommand, remoteprobe.HomeFallbackCommand:
+				_ = req.Reply(true, nil)
+				// The trailing newline is the shell's, and the probe trims.
+				_, _ = ch.Write([]byte(s.home + "\n"))
+			default:
+				// A command this fixture does not answer is refused rather
+				// than satisfied with a plausible-looking line.
+				_ = req.Reply(false, nil)
+				return
+			}
 			_, _ = ch.SendRequest("exit-status", false, gossh.Marshal(struct{ Status uint32 }{Status: 0}))
 			_ = ch.Close()
 			return
@@ -313,7 +353,22 @@ func (s *pwSSHServer) echoLoop(ch gossh.Channel) {
 
 // serveSFTP serves the root directory over the channel, which is the far side
 // the Files panel's lease speaks to.
+//
+// `closeOnSFTPWrite` is the transport-lost-mid-publish knob: the subsystem
+// handshake has already succeeded by the time this runs, so closing the
+// connection here drops the transport UNDER the bytes rather than refusing the
+// open. It is a separate fact from `refuseSubsystem` on purpose — "the host has
+// no sftp-server" and "the sftp-server went away while you were writing" are
+// answered by different code paths, and a test that conflated them would prove
+// neither.
 func (s *pwSSHServer) serveSFTP(ch gossh.Channel) {
+	if s.closeOnSFTPWrite {
+		buf := make([]byte, 4096)
+		_, _ = ch.Read(buf)
+		s.killConns()
+		_ = ch.Close()
+		return
+	}
 	server, err := pkgsftp.NewServer(ch, pkgsftp.WithServerWorkingDirectory(s.rootDir))
 	if err != nil {
 		_ = ch.Close()
@@ -327,6 +382,25 @@ func (s *pwSSHServer) authAttempts() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.passwords...)
+}
+
+// killConns closes every established server-side connection, which is the
+// fixture's way of losing the transport under a lease that is mid-conversation.
+//
+// It lives here rather than in the suite that first needed it (the Files
+// acceptance) because it is the fixture's own instrument: the bundle publish's
+// mid-write loss needs exactly this, in a build where the Files acceptance's
+// file is not compiled.
+func (s *pwSSHServer) killConns() {
+	s.liveMu.Lock()
+	conns := make([]*gossh.ServerConn, 0, len(s.live))
+	for c := range s.live {
+		conns = append(conns, c)
+	}
+	s.liveMu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
 }
 
 // ---------------------------------------------------------------------------

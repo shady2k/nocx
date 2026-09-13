@@ -533,8 +533,23 @@ func (s *WSServer) handleLifecycleSubmitAttempt(ctx context.Context, wconn *wsCo
 					Client:        fmt.Sprintf("%d", wconn.id),
 					EnvironmentID: env.ID,
 					PaneID:        panePtr(sess.PaneID()),
-					Cwd:           att.Cwd,
-					Kind:          content.EntryShell,
+					// THE SESSION THIS COMMAND RAN IN (nocx-ie23r.6), from the
+					// same owner the pane above comes from: this handler
+					// already resolved `sess` from the connection's own state
+					// (state.get(sid)), so the column is the backend's fact and
+					// not the request's claim.
+					//
+					// This is the writer that matters most, because it is the
+					// one that CREATES the row for an ordinary command: the
+					// renderer sends this at Enter, ledger.bind then ADVANCES
+					// the row it created, and history.record closes it. A row
+					// created here with no session would keep no session for
+					// the rest of its life, and content's unreconciledCause
+					// reads exactly this column to decide whether a restored
+					// block can be told nobody was asked about its pipe.
+					SessionID: sessionPtr(sess.ID()),
+					Cwd:       att.Cwd,
+					Kind:      content.EntryShell,
 					// The submitting target's own word, never derived here
 					// from the lane or the run state (design §3.1): a person
 					// typing while the assistant works is the person's

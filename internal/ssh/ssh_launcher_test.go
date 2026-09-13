@@ -156,12 +156,17 @@ func (f *fakeLauncher) lastCall() (ShellKind, LaunchOptions) {
 // publish happens under script and never under raw/helper, and can be told
 // to fail the publish so a test can prove the command does not depend on
 // the outcome.
+//
+// It records the DESTINATION it was handed and not a remote home, because
+// that is the whole of what internal/ssh says to a carrier now: the home
+// question belongs to the transport the carrier owns (nocx-50w7p.15), and a
+// double that still answered it here would be asserting a contract the
+// package no longer has.
 type recordInstaller struct {
 	mu           sync.Mutex
-	homeCalls    int
 	publishCalls int
+	hosts        []string
 	publishErr   error
-	home         string
 	// published is closed by the first publish. The publish runs
 	// CONCURRENTLY with the loader now (design §6.1 step 2, §7's parallel
 	// schedule), so "did it publish" is a question a test answers by waiting
@@ -191,17 +196,11 @@ func (f *recordInstaller) waitPublished(t *testing.T) {
 	}
 }
 
-func (f *recordInstaller) GetRemoteHome(_ *gossh.Client) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.homeCalls++
-	return f.home, nil
-}
-
-func (f *recordInstaller) EnsureInstalledRemote(_ context.Context, _ *gossh.Client, _ string) error {
+func (f *recordInstaller) EnsureInstalledRemote(_ context.Context, host string, _ ...ConnectOption) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.publishCalls++
+	f.hosts = append(f.hosts, host)
 	if f.published == nil {
 		f.published = make(chan struct{})
 	}
@@ -219,14 +218,20 @@ func (f *recordInstaller) publishCount() int {
 	return f.publishCalls
 }
 
-// counts is the pair, read together under one lock.
-func (f *recordInstaller) counts() (home, publish int) {
+// publishedHost is the destination the last publish named, which must be the
+// address the pane itself dialed: the helper's pool is keyed by what the
+// destination resolves to, and a second spelling of it is a second
+// authentication.
+func (f *recordInstaller) publishedHost() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.homeCalls, f.publishCalls
+	if len(f.hosts) == 0 {
+		return ""
+	}
+	return f.hosts[len(f.hosts)-1]
 }
 
-func (f *recordInstaller) UninstallRemote(_ context.Context, _ *gossh.Client, _ string) ([]string, []string, error) {
+func (f *recordInstaller) UninstallRemote(_ context.Context, _ *gossh.Client) ([]string, []string, error) {
 	return nil, nil, nil
 }
 
@@ -377,7 +382,7 @@ func TestConnect_DesiredModeRaw_OpensPlainShell(t *testing.T) {
 	defer srv.close()
 
 	launcher := &fakeLauncher{cmd: "exec bash -i", reason: ReasonNone, ok: true}
-	installer := &recordInstaller{home: "/home/test"}
+	installer := &recordInstaller{}
 
 	ch := launcherConnect(
 		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
@@ -393,9 +398,8 @@ func TestConnect_DesiredModeRaw_OpensPlainShell(t *testing.T) {
 	if n := launcher.callCount(); n != 0 {
 		t.Fatalf("launcher consulted %d times under raw, want 0 (plain shell at open)", n)
 	}
-	if h, p := installer.counts(); h != 0 || p != 0 {
-		t.Fatalf("installer consulted under raw (home=%d publish=%d), want 0 — raw publishes nothing",
-			h, p)
+	if p := installer.publishCount(); p != 0 {
+		t.Fatalf("installer consulted under raw (publish=%d), want 0 — raw publishes nothing", p)
 	}
 	if got := srv.lastExecCommand(); got != "" {
 		t.Errorf("session.Start received %q under raw, want a plain shell request", got)
@@ -425,7 +429,7 @@ func TestConnect_DesiredModeHelper_IntegratesLikeScript(t *testing.T) {
 	defer srv.close()
 
 	launcher := &fakeLauncher{cmd: "exec bash -i", reason: ReasonNone, ok: true}
-	installer := &recordInstaller{home: "/home/test"}
+	installer := &recordInstaller{}
 
 	ch := launcherConnect(
 		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
@@ -444,10 +448,10 @@ func TestConnect_DesiredModeHelper_IntegratesLikeScript(t *testing.T) {
 	// a question answered by waiting on the event rather than by reading a
 	// counter at a moment of this test's choosing.
 	installer.waitPublished(t)
-	if h, p := installer.counts(); h == 0 || p == 0 {
-		t.Fatalf("installer not consulted under helper (home=%d publish=%d), want both — "+
+	if p := installer.publishCount(); p == 0 {
+		t.Fatalf("installer not consulted under helper (publish=%d), want it consulted — "+
 			"the bundle must publish for helper exactly as it does for script",
-			h, p)
+			p)
 	}
 	if got := ch.ShellIntegrationReason(); got != ReasonNone {
 		t.Errorf("ShellIntegrationReason = %q, want %q (integration was attempted and not refused)", got, ReasonNone)
@@ -542,7 +546,7 @@ func TestConnect_RemoteCommand_LauncherNeverCalled(t *testing.T) {
 	defer srv.close()
 
 	launcher := &fakeLauncher{cmd: "must not run", reason: ReasonNone, ok: true}
-	installer := &recordInstaller{home: "/home/test"}
+	installer := &recordInstaller{}
 	stub := NewStubConfigResolver()
 	stub.AddEntry(hostPortOnly(srv.addr), HostConfig{User: "test", RemoteCommand: "tmux attach -t work"})
 
@@ -559,9 +563,8 @@ func TestConnect_RemoteCommand_LauncherNeverCalled(t *testing.T) {
 	if n := launcher.callCount(); n != 0 {
 		t.Fatalf("launcher called %d times with a RemoteCommand configured, want 0", n)
 	}
-	if h, p := installer.counts(); h != 0 || p != 0 {
-		t.Fatalf("installer consulted with a RemoteCommand configured (home=%d publish=%d), want 0 — the configured command wins outright",
-			h, p)
+	if p := installer.publishCount(); p != 0 {
+		t.Fatalf("installer consulted with a RemoteCommand configured (publish=%d), want 0 — the configured command wins outright", p)
 	}
 	if got := srv.waitExecCommand(t); got != "tmux attach -t work" {
 		t.Errorf("session.Start received %q, want the configured RemoteCommand", got)
@@ -650,7 +653,7 @@ func TestConnect_DesiredModeScript_PublishesThenLaunches(t *testing.T) {
 
 	wantCmd := "exec bash -i"
 	launcher := &fakeLauncher{cmd: wantCmd, reason: ReasonNone, ok: true}
-	installer := &recordInstaller{home: "/home/test"}
+	installer := &recordInstaller{}
 
 	ch := launcherConnect(
 		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
@@ -665,9 +668,14 @@ func TestConnect_DesiredModeScript_PublishesThenLaunches(t *testing.T) {
 		t.Fatalf("launcher consulted %d times under script, want 1", n)
 	}
 	installer.waitPublished(t)
-	if h, p := installer.counts(); h != 1 || p != 1 {
-		t.Errorf("publish under script: home=%d publish=%d, want 1 each",
-			h, p)
+	if p := installer.publishCount(); p != 1 {
+		t.Errorf("publish under script: %d, want exactly 1", p)
+	}
+	// The destination the carrier is handed must be the one the PANE dialed:
+	// the helper keys its pool by what that resolves to, and a second spelling
+	// of one machine would be a second authentication for it (nocx-50w7p.15).
+	if got := installer.publishedHost(); got != srv.addr {
+		t.Errorf("the publish was handed destination %q, want the address the pane dialed (%q)", got, srv.addr)
 	}
 	if got := srv.waitExecCommand(t); got != wantCmd {
 		t.Errorf("session.Start received %q, want the launcher command %q", got, wantCmd)
@@ -710,8 +718,8 @@ func TestConnect_SameCarrierWhateverThePublishDid(t *testing.T) {
 		name      string
 		installer *recordInstaller
 	}{
-		{"publish succeeded", &recordInstaller{home: "/home/test"}},
-		{"publish failed", &recordInstaller{home: "/home/test", publishErr: errors.New("sftp refused")}},
+		{"publish succeeded", &recordInstaller{}},
+		{"publish failed", &recordInstaller{publishErr: errors.New("sftp refused")}},
 		{"publish not attempted", nil},
 	}
 
@@ -784,7 +792,7 @@ func TestConnect_InstallerAloneRunsNoCommand(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()
 
-	installer := &recordInstaller{home: "/home/test"}
+	installer := &recordInstaller{}
 	ch := launcherConnect(
 		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
 		WithRemoteInstaller(installer),

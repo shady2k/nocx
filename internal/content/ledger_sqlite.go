@@ -248,11 +248,34 @@ func (s *sqliteContent) Submit(ctx context.Context, in SubmitEntry) (SubmitResul
 		if in.Kind == EntryText {
 			phase, status = PhaseClosed, EntrySuccess
 		}
+		// session_id is PROVENANCE — which pipe this ran in — and the column
+		// is a real foreign key into the ledger's own sessions table, which
+		// every connection enforces (sqlite.go sets foreign_keys=ON at open).
+		// So it is BOUND THROUGH THE TABLE rather than taken on the caller's
+		// word: the subquery yields the id when a row names it and NULL when
+		// none does, which is one statement doing both the check and the
+		// write.
+		//
+		// REFUSING WAS THE OTHER CANDIDATE, and it is the wrong one for a
+		// reason no caller can repair: a writer that names a session does not
+		// own the row it names — the binding lifecycle writes it, at the
+		// open — so a refusal here would delete a command from the history
+		// because something this caller never had is missing. Minting the row
+		// instead (what ensureLedgerContext does for an agent capture) was
+		// rejected for ws_ledger.go's own stated reason: the binding owns
+		// that table, and a synthetic child of the fallback workspace would
+		// enter the carried-over set as a session no inventory can judge,
+		// which is reconciliation work about a pipe that never existed.
+		//
+		// Nullable is the schema's own answer for "the pipe is gone"
+		// (ON DELETE SET NULL, ADR-0019 §5); a session the ledger was never
+		// told about is the same column carrying the same fact one step
+		// earlier.
 		if _, err := tx.ExecContext(ctx, `INSERT INTO entries
 			(id, ingest_seq, client, digest, environment_id, pane_id, session_id, parent_id, pos,
 			 cwd, kind, source, intent, phase, status, submitted_at, started_at, ended_at,
 			 duration_ms, sensitivity, payload)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			VALUES (?, ?, ?, ?, ?, ?, (SELECT id FROM sessions WHERE id = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			in.ID, next, in.Client, digest, in.EnvironmentID, in.PaneID, in.SessionID,
 			in.ParentID, in.Pos, in.Cwd, string(in.Kind), string(in.Source), in.Intent,
 			string(phase), string(status), submittedAt, in.StartedAt, in.EndedAt, in.DurationMs,

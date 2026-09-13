@@ -66,7 +66,6 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/vault"
-	gossh "golang.org/x/crypto/ssh"
 )
 
 const (
@@ -381,20 +380,6 @@ func TestFilesNamesASealedVaultOnTheHelpersQuestion(t *testing.T) {
 }
 
 // ── the stand's own pieces ────────────────────────────────────────────────
-
-// killConns closes every established server-side connection, which is the
-// fixture's way of losing the transport under a lease that is mid-conversation.
-func (s *pwSSHServer) killConns() {
-	s.liveMu.Lock()
-	conns := make([]*gossh.ServerConn, 0, len(s.live))
-	for c := range s.live {
-		conns = append(conns, c)
-	}
-	s.liveMu.Unlock()
-	for _, c := range conns {
-		_ = c.Close()
-	}
-}
 
 // connCount is how many connections authenticated, and subsystemsSeen is the
 // subsystem names asked for in order.

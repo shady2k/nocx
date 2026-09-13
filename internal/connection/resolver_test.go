@@ -8,6 +8,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/vault"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -769,12 +770,11 @@ func TestResolver_SavedProfileCarriesRemoteInstaller(t *testing.T) {
 // resolver only stores the value, it never calls it.
 type recordingRemoteInstaller struct{}
 
-func (*recordingRemoteInstaller) GetRemoteHome(*gossh.Client) (string, error) { return "", nil }
-func (*recordingRemoteInstaller) EnsureInstalledRemote(context.Context, *gossh.Client, string) error {
+func (*recordingRemoteInstaller) EnsureInstalledRemote(context.Context, string, ...ssh.ConnectOption) error {
 	return nil
 }
-func (*recordingRemoteInstaller) RemoteStartCommand() string { return "" }
-func (*recordingRemoteInstaller) UninstallRemote(context.Context, *gossh.Client, string) ([]string, []string, error) {
+
+func (*recordingRemoteInstaller) UninstallRemote(context.Context, *gossh.Client) ([]string, []string, error) {
 	return nil, nil, nil
 }
 

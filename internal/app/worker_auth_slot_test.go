@@ -25,11 +25,11 @@ func TestToolAuthorizerRefusesASecondLiveCallerForTheSameSession(t *testing.T) {
 	}
 	auth := mustToolAuthorizer(t, pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace, allowWorkerApproval{})
 	peer := toolendpoint.Peer{UID: 1000, PID: 9001}
-	if _, _, err := auth.Admit(peer); err != nil {
+	if _, _, err := auth.Admit(peer, publishForTest); err != nil {
 		t.Fatalf("first caller admission: %v", err)
 	}
 
-	if _, _, err := auth.Admit(peer); err == nil {
+	if _, _, err := auth.Admit(peer, publishForTest); err == nil {
 		t.Fatal("second live caller admitted")
 	} else if got, want := err.Error(), "session already has a worker caller"; got != want {
 		t.Fatalf("second caller error = %q, want %q", got, want)
@@ -52,7 +52,7 @@ func TestToolAuthorizerReleasesSlotAfterConnectionAndInFlightCallSettle(t *testi
 	}
 	auth := mustToolAuthorizer(t, pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace, allowWorkerApproval{})
 	peer := toolendpoint.Peer{UID: 1000, PID: 9001}
-	first, release, err := auth.Admit(peer)
+	first, release, err := auth.Admit(peer, publishForTest)
 	if err != nil {
 		t.Fatalf("first caller admission: %v", err)
 	}
@@ -66,14 +66,14 @@ func TestToolAuthorizerReleasesSlotAfterConnectionAndInFlightCallSettle(t *testi
 		close(requestStopped)
 	}()
 
-	if _, _, admitErr := auth.Admit(peer); admitErr == nil {
+	if _, _, admitErr := auth.Admit(peer, publishForTest); admitErr == nil {
 		t.Fatal("replacement admitted while first caller was live")
 	} else if got, want := admitErr.Error(), "session already has a worker caller"; got != want {
 		t.Fatalf("live caller refusal = %q, want %q", got, want)
 	}
 
 	closeConnection()
-	if _, _, admitErr := auth.Admit(peer); admitErr == nil {
+	if _, _, admitErr := auth.Admit(peer, publishForTest); admitErr == nil {
 		t.Fatal("replacement admitted before the in-flight call settled")
 	} else if got, want := admitErr.Error(), "session already has a worker caller"; got != want {
 		t.Fatalf("early replacement error = %q, want %q", got, want)
@@ -87,7 +87,7 @@ func TestToolAuthorizerReleasesSlotAfterConnectionAndInFlightCallSettle(t *testi
 	}
 	release()
 
-	replacement, replacementRelease, err := auth.Admit(peer)
+	replacement, replacementRelease, err := auth.Admit(peer, publishForTest)
 	if err != nil {
 		t.Fatalf("replacement admission after connection close: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestToolAuthorizerReleasesSlotAfterConnectionAndInFlightCallSettle(t *testi
 		t.Fatalf("replacement session = %q, want %q", replacement.RunContext.Session, sess.ID())
 	}
 	release()
-	if _, _, err := auth.Admit(peer); err == nil {
+	if _, _, err := auth.Admit(peer, publishForTest); err == nil {
 		t.Fatal("an old admission release freed the replacement slot")
 	}
 }

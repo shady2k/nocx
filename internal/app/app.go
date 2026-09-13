@@ -907,6 +907,16 @@ func New(opts ...Option) (*App, error) {
 	// the same resolver: what each consumer asks for is a LEASE on a
 	// destination, and the helper is what dials it (nocx-50w7p.9).
 	probes := &helperProbes{local: localOpener, resolve: sshClient}
+	// The script-mode bundle publish, over the same two halves (nocx-50w7p.15):
+	// the home is a named probe on a lease, the bundle rides an sftp channel,
+	// and both name the destination the pane's own open named so the helper's
+	// pool hands them ONE authenticated connection. It is assigned onto the
+	// carrier HERE rather than at its construction, because the helper halves
+	// did not exist then — and before either option list below captures the
+	// carrier, which is what makes the assignment visible to both.
+	remoteInstaller.bundle = &helperBundlePublisher{
+		probes: probes, channels: overHelper, publish: shint, log: slogger,
+	}
 	// ONE value for "who serves which lease", read twice: the git factory takes
 	// it and so does the file panel's factory below. Two literals would be two
 	// answers to one question, and the second would be the one that drifts.
@@ -1900,7 +1910,14 @@ func New(opts ...Option) (*App, error) {
 		transport.WithPaneObserver(paneWatch), transport.WithAgentRules(paneDrivers),
 		transport.WithAgentRuleStore(ruleStore),
 		transport.WithAgentCalibration(paneCalibration),
-		transport.WithAgentTypist(paneTyping))
+		transport.WithAgentTypist(paneTyping),
+		// The third end of a session's enrolment (nocx-9mn6z): the watch and
+		// the frame are closed by the two above, and the ANSWER that admitted
+		// the pane's agent's tool connection is closed by this one. The
+		// approval service owns that answer, so it is what is wired — the
+		// enroller closes the same interval by lane on the shell's own
+		// withdrawal, and both call Forget.
+		transport.WithPaneAdmissions(agentApprovalService))
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 	// The prompt seam a helper's keyboard-interactive challenge needs is the
 	// transport's own connection-password ask — the same one the coordinator's

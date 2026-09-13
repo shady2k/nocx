@@ -458,14 +458,24 @@ func (h ledgerHandlers) command(e ledgerEnvelopeWire, target content.Phase) (led
 			// — the ordinary state until every tab mints one — which costs
 			// the restore hint and no recall.
 			PaneID: panePtr(sess.PaneID()),
-			// SessionID stays nil: entries.session_id is a foreign key into
-			// the ledger's own sessions table, and nothing creates a row
-			// there yet (a session row needs a workspace — nocx-49d4 owns
-			// that question). The column is nullable by design — an entry
-			// outlives its session (ADR-0019 §5) and sessionId is never a
-			// recall key (design §3.1) — and from nocx-rtg0.28 the store
-			// actively nulls it at every start, because the pipe it names
-			// died with the backend that opened it.
+			// SessionID IS THE PIPE THIS COMMAND RAN IN (nocx-ie23r.6), and
+			// it is derived from `sess` rather than taken from the envelope:
+			// the envelope's sessionId is how this handler FOUND the session
+			// (the two refusals above), while AD-7 makes what that session IS
+			// the backend's own. The environment and the pane above come from
+			// the same owner, for the same reason.
+			//
+			// WHY IT STOPPED BEING NULL. content's unreconciledCause derives
+			// the third state — "nobody could be asked whether this block's
+			// pipe still exists" — from exactly this column, so an entry
+			// naming no session is restored as RUNNING, which is the same lie
+			// the forced close told from the other end. It was NULL because
+			// the column is a foreign key into the ledger's sessions table
+			// and a session the ledger had not been told about would have
+			// been refused outright; Submit now binds the column through that
+			// table, so the stamp costs nothing where the binding exists and
+			// still refuses nothing where it does not.
+			SessionID:   sessionPtr(sess.ID()),
 			Cwd:         e.Cwd,
 			Kind:        content.EntryKind(e.Kind),
 			Intent:      masked,
@@ -485,6 +495,15 @@ func panePtr(paneID string) *string {
 		return nil
 	}
 	return &paneID
+}
+
+// sessionPtr is panePtr's sibling for the OTHER nullable anchor every entry
+// carries, and it exists for the same reason: a session id the store is asked
+// to record either names a session or is null, and "no session" must reach the
+// column as NULL rather than as an empty string naming nothing.
+func sessionPtr(id session.ID) *string {
+	s := string(id)
+	return &s
 }
 
 // apply is the whole of §6.3, in one place because the four rules are one

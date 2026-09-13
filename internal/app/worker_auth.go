@@ -42,7 +42,11 @@ type workerAuthParticipants interface {
 }
 
 type workerAuthApproval interface {
-	Approved(sid session.ID, scope string) bool
+	// Interval answers whether the session's answer still holds, and names the
+	// EPOCH of the interval it holds in. One call and not two, because the two
+	// facts are one read: a verdict from one interval and an epoch from the
+	// next is the gap the epoch exists to close.
+	Interval(sid session.ID, scope string) (toolendpoint.AdmissionEpoch, bool)
 }
 
 // workerAuthAuthorityEnding is implemented by an approval seam whose answers
@@ -50,8 +54,14 @@ type workerAuthApproval interface {
 // authorizer binds its closer here, where both are in hand, rather than leaving
 // a composition root — or a test that builds these two by hand — a second
 // wiring step to remember.
+//
+// It names the interval that ended. A revocation can end several sessions'
+// intervals at once, and a withdrawal can race the enrolment that reopens the
+// same session under a NEW epoch: a closer that took only the session would
+// have to ask which interval had ended, and the answer a moment later is the
+// one that replaced it.
 type workerAuthAuthorityEnding interface {
-	BindAuthorityEnded(ended func())
+	BindAuthorityEnded(ended func(session.ID, toolendpoint.AdmissionEpoch))
 }
 
 // The slot is the coordinator seat, not a conversation gate. M1 makes talk
@@ -131,31 +141,6 @@ func (a *toolAuthorizer) BindSessionAdmissions(admissions toolendpoint.SessionAd
 	a.admissions = admissions
 }
 
-// CloseUnapproved closes the admitted connections whose session no longer
-// holds an approval, and reports how many it closed.
-//
-// It re-asks the approval rather than taking an instruction to close a
-// particular session, because the two ways an answer ends reach this from
-// different places and neither carries the connection's identity: a revoke
-// names an executable and a digest, a withdraw names a lane. What they have in
-// common is the fact that matters — the answer these connections were admitted
-// under has stopped holding — and the approval seam is the only thing that can
-// answer it. Approvals that still hold are left alone, so one person revoking
-// one agent does not drop another's work in flight.
-func (a *toolAuthorizer) CloseUnapproved() int {
-	if a == nil || a.admissions == nil {
-		return 0
-	}
-	closed := 0
-	for _, sid := range a.admissions.AdmittedSessions() {
-		if a.approval != nil && a.approval.Approved(session.ID(sid), agentToolEndpointScopePrefix+a.workspace) {
-			continue
-		}
-		closed += a.admissions.CloseAdmitted(sid)
-	}
-	return closed
-}
-
 // newToolAuthorizer builds the one external caller authorizer. It binds a
 // peer only to a session whose pane is currently enrolled and whose root pid
 // came from a process nocx opened itself. The peer's uid and pid never supply
@@ -182,18 +167,36 @@ func newToolAuthorizer(
 		participants: participants, approval: approval, workspace: workspace,
 	}
 	if binder, ok := approval.(workerAuthAuthorityEnding); ok {
-		// The count is for whoever wants to log it; this seam is a notice.
-		binder.BindAuthorityEnded(func() { _ = authorizer.CloseUnapproved() })
+		binder.BindAuthorityEnded(authorizer.retire)
 	}
 	return authorizer, nil
 }
 
-func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, session.Session, bool) {
+// retire ends the authority one interval carried: nothing may be published into
+// it again, and every connection already published into it is closed — which
+// cancels the calls in flight on it.
+//
+// It takes the epoch and not only the session because a revocation can end
+// several sessions' intervals and a withdrawal can race the re-enrolment that
+// reopens the same session: a closer that knew only the session would have to
+// ask which interval had ended, and the answer a moment later is the one that
+// replaced it. With the epoch in hand, the connection admitted under the ended
+// interval is closed and the one admitted under its successor is not
+// (nocx-9mn6z).
+func (a *toolAuthorizer) retire(sid session.ID, epoch toolendpoint.AdmissionEpoch) {
+	if a == nil || a.admissions == nil || sid == "" || epoch == 0 {
+		return
+	}
+	_ = a.admissions.RetireAdmissions(string(sid), epoch)
+}
+
+func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, session.Session, toolendpoint.AdmissionEpoch, bool) {
 	if a == nil || a.pinner == nil || a.sessions == nil || a.enrolments == nil || peer.PID <= 0 {
-		return "", nil, false
+		return "", nil, 0, false
 	}
 	var admitted session.ID
 	var admittedSession session.Session
+	var admittedEpoch toolendpoint.AdmissionEpoch
 	for _, sess := range a.sessions.List() {
 		sid := sess.ID()
 		if sid == "" || !a.enrolments.Watched(string(sid)) {
@@ -214,27 +217,45 @@ func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, sessi
 		if err != nil || !member {
 			continue
 		}
-		if !a.approval.Approved(sid, agentToolEndpointScopePrefix+a.workspace) {
+		epoch, live := a.approval.Interval(sid, agentToolEndpointScopePrefix+a.workspace)
+		if !live {
 			continue
 		}
 		if admitted != "" {
 			// A peer matching two live enrolled roots has no unambiguous
 			// session authority. Refuse rather than selecting map order.
-			return "", nil, false
+			return "", nil, 0, false
 		}
 		admitted = sid
 		admittedSession = sess
+		admittedEpoch = epoch
 	}
-	return admitted, admittedSession, admitted != ""
+	return admitted, admittedSession, admittedEpoch, admitted != ""
 }
 
 func (a *toolAuthorizer) SessionForPeer(peer toolendpoint.Peer) (string, bool) {
-	admitted, _, ok := a.admittedPeer(peer)
+	admitted, _, _, ok := a.admittedPeer(peer)
 	return string(admitted), ok
 }
 
-func (a *toolAuthorizer) Admit(peer toolendpoint.Peer) (assistant.ToolInvocation, func(), error) {
-	admitted, admittedSession, ok := a.admittedPeer(peer)
+// Admit decides authority for one connection, and PUBLISHES the decision
+// through the endpoint's callback before it returns.
+//
+// THE PUBLICATION IS THE LAST STEP OF THE DECISION and not a bookkeeping step
+// after it (nocx-9mn6z). The epoch and the verdict are read together, the whole
+// invocation is built from them, and only then is the connection recorded under
+// that epoch — so the two events a withdrawal can interleave with are one: the
+// interval's end either lands before this read, where the verdict comes back
+// not-live and nothing is admitted, or after this publication, where the
+// retirement finds the connection and closes it. There is no window in which a
+// decision taken in an interval that has ended is recorded as a live admission.
+//
+// publish answering false is that race seen from this side: the interval ended
+// while this decision was being taken. The connection was refused by the
+// endpoint, so this grants nothing and the caller is told what a peer outside
+// an enrolled pane is told — because that is now the fact.
+func (a *toolAuthorizer) Admit(peer toolendpoint.Peer, publish func(session string, epoch toolendpoint.AdmissionEpoch) bool) (assistant.ToolInvocation, func(), error) {
+	admitted, admittedSession, epoch, ok := a.admittedPeer(peer)
 	if !ok {
 		return assistant.ToolInvocation{}, nil, toolendpoint.ErrNotEnrolled
 	}
@@ -249,8 +270,14 @@ func (a *toolAuthorizer) Admit(peer toolendpoint.Peer) (assistant.ToolInvocation
 	// coordinator calling about its workers. The two get disjoint grants, so the
 	// separation is what Registry.ForGrant offers rather than a check inside
 	// a shared tool.
-	if participant, err := a.participantOf(admitted); err == nil {
-		return assistant.ToolInvocation{
+	//
+	// The whole invocation is composed BEFORE the publication below, which is
+	// the last thing this decision does: a connection is never recorded while
+	// the grant inside it is still being built.
+	participant, participantErr := a.participantOf(admitted)
+	var invocation assistant.ToolInvocation
+	if participantErr == nil {
+		invocation = assistant.ToolInvocation{
 			Context: context.Background(),
 			RunContext: agenttools.RunContext{
 				Session:     string(admitted),
@@ -258,23 +285,30 @@ func (a *toolAuthorizer) Admit(peer toolendpoint.Peer) (assistant.ToolInvocation
 				Workspace:   a.workspace,
 			},
 			Grant: participantGrant(a.workspace),
-		}, release, nil
+		}
+	} else {
+		// The workspace travels on BOTH invocations, and it is not an
+		// authority: the coordinator's pane is in this workspace too, and
+		// naming it is what lets a participant call resolve its resource and
+		// then be refused by the GRANT, which carries no workspace scope.
+		// Leaving it empty here would make the same refusal arrive as "invalid
+		// params" from a resolver that could not name a resource — true of the
+		// resolver, misleading about the call, and it would put an authority
+		// answer in the parameter layer.
+		invocation = assistant.ToolInvocation{
+			Context: context.Background(),
+			RunContext: agenttools.RunContext{
+				Session:   string(admitted),
+				Workspace: a.workspace,
+			},
+			Grant: callerGrant(admitted, workerEnvironmentForSession(admittedSession)),
+		}
 	}
-	// The workspace travels on BOTH invocations, and it is not an authority:
-	// the coordinator's pane is in this workspace too, and naming it is what
-	// lets a participant call resolve its resource and then be refused by the
-	// GRANT, which carries no workspace scope. Leaving it empty here would
-	// make the same refusal arrive as "invalid params" from a resolver that
-	// could not name a resource — true of the resolver, misleading about the
-	// call, and it would put an authority answer in the parameter layer.
-	return assistant.ToolInvocation{
-		Context: context.Background(),
-		RunContext: agenttools.RunContext{
-			Session:   string(admitted),
-			Workspace: a.workspace,
-		},
-		Grant: callerGrant(admitted, workerEnvironmentForSession(admittedSession)),
-	}, release, nil
+	if !publish(string(admitted), epoch) {
+		release()
+		return assistant.ToolInvocation{}, nil, toolendpoint.ErrNotEnrolled
+	}
+	return invocation, release, nil
 }
 
 // participantOf asks the record whether this session is a worker's. An

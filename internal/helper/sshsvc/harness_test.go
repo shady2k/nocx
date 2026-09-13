@@ -468,12 +468,20 @@ func (f *fixture) serveChannel(ch gossh.Channel, reqs <-chan *gossh.Request) {
 			}
 			continue
 		}
-		if req.WantReply {
-			_ = req.Reply(true, nil)
-		}
+		// The record goes BEFORE the reply, and the order is load-bearing
+		// rather than cosmetic. The reply is what an assertion synchronizes
+		// on: the helper returns from RequestSubsystem on it and answers the
+		// open after that, so a record written once the reply is on the wire
+		// is a record an assertion can outrun — which is what it did, in 15
+		// of 300 repetitions under load, with the open already answered and an
+		// empty list beside it. Written first, the reply carries the record
+		// with it: whoever saw the answer saw the append.
 		f.mu.Lock()
 		f.subsystems = append(f.subsystems, payload.Name)
 		f.mu.Unlock()
+		if req.WantReply {
+			_ = req.Reply(true, nil)
+		}
 		server, err := sftp.NewServer(ch, sftp.WithServerWorkingDirectory(f.rootDir))
 		if err != nil {
 			_ = ch.Close()

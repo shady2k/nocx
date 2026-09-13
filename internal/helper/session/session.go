@@ -134,6 +134,12 @@ type SSHSpawnRequest struct {
 	// Empty means this caller runs no endpoint, and a far socket path with
 	// nothing behind it is then refused by name before anything is dialed.
 	AgentToolEndpoint string
+	// AgentToolToken is the bearer that admits this pane's far agent, minted by
+	// the coordinator that opened the pane and handed to the far launcher for
+	// the frame it reads into a non-exported variable (nocx-50w7p.16). It is a
+	// secret and this struct is not a place it rests: it goes into the launch
+	// options, which render it into the descriptor, and nowhere else.
+	AgentToolToken string
 	// Cols and Rows are the channel's pty size.
 	Cols uint16
 	Rows uint16

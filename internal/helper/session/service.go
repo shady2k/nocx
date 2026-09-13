@@ -666,6 +666,12 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		Cols:      cols,
 		Rows:      rows,
 		Lifecycle: p.Lifecycle,
+		// The pane's tool endpoint is THIS request's and never this daemon's:
+		// the endpoint socket is keyed by the generation, so several
+		// coordinators ride one daemon (D12) and the caller that opened the
+		// pane is the only party that knows which endpoint its tools belong
+		// to (nocx-50w7p.18).
+		AgentToolEndpoint: p.AgentToolEndpoint,
 	})
 	if err != nil {
 		s.mu.Lock()
@@ -793,9 +799,14 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 		Mode:                p.DesiredMode,
 		AgentHelperPath:     p.AgentHelperPath,
 		AgentToolSocketPath: p.AgentToolSocketPath,
-		Cols:                cols,
-		Rows:                rows,
-		Lifecycle:           p.Lifecycle,
+		// Per request, for the same reason `spawn`'s is (nocx-50w7p.18):
+		// what arrives on the far-side tool socket is FOR the coordinator
+		// that opened this pane, and only that coordinator can name its own
+		// endpoint on this machine.
+		AgentToolEndpoint: p.AgentToolEndpoint,
+		Cols:              cols,
+		Rows:              rows,
+		Lifecycle:         p.Lifecycle,
 	})
 	if err != nil {
 		s.mu.Lock()

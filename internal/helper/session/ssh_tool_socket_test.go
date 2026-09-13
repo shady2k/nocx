@@ -41,77 +41,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/shellintegration"
 )
-
-// toolEndpointStand is the coordinator's tool endpoint as this test needs it: a
-// Unix socket at the path the helper was told, answering one line per line.
-//
-// It is deliberately a plain socket and not toolendpoint.Endpoint: the endpoint
-// is the admission half (see this file's header), and what is under test here
-// is whether the far side's bytes arrive at the socket its coordinator owns.
-type toolEndpointStand struct {
-	listener net.Listener
-	// seen carries every line the endpoint was sent, in order, on a channel
-	// rather than in a slice: the assertion is an EVENT the endpoint produced,
-	// and a slice would have the test reading a field its own goroutine is
-	// still writing.
-	seen chan string
-}
-
-// serveToolEndpoint binds the coordinator's tool socket and answers every
-// connection with one line per line.
-func serveToolEndpoint(t *testing.T, path string) *toolEndpointStand {
-	t.Helper()
-	ln, err := net.Listen("unix", path)
-	if err != nil {
-		t.Fatalf("the coordinator's tool endpoint could not listen at %s: %v", path, err)
-	}
-	e := &toolEndpointStand{listener: ln, seen: make(chan string, 8)}
-	t.Cleanup(func() { _ = ln.Close() })
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func(conn net.Conn) {
-				defer func() { _ = conn.Close() }()
-				r := bufio.NewReader(conn)
-				for {
-					line, err := r.ReadString('\n')
-					if line != "" {
-						e.seen <- strings.TrimSuffix(line, "\n")
-						if _, werr := conn.Write([]byte("tools-ok\n")); werr != nil {
-							return
-						}
-					}
-					if err != nil {
-						return
-					}
-				}
-			}(conn)
-		}
-	}()
-	return e
-}
-
-// waitLine waits for the endpoint to be SENT a line, which is the event that
-// says the far side's bytes arrived — and that they arrived intact — rather
-// than a duration that says they may have. It answers what it was sent.
-func (e *toolEndpointStand) waitLine(t *testing.T) string {
-	t.Helper()
-	select {
-	case line := <-e.seen:
-		return line
-	case <-time.After(paneWait):
-		t.Fatalf("no line reached the coordinator's tool endpoint; the far side's bytes never arrived")
-		return ""
-	}
-}
 
 // TestAFarSideAgentReachesTheCoordinatorsToolSocketThroughThePaneForward is
 // this bead's second acceptance criterion's positive half.

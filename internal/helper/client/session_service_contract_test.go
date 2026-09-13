@@ -36,7 +36,7 @@ func hostedSessions(t *testing.T) *client.Client {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := session.New(session.Options{
 		Generation: "testhash",
-		Spawner:    session.NewLocalSpawner(log, session.Shell{Path: "/bin/sh"}, "", ""),
+		Spawner:    session.NewLocalSpawner(log, session.Shell{Path: "/bin/sh"}, ""),
 		Inspector:  session.NewInspector(),
 		Log:        log,
 		Limits:     session.DefaultLimits(),
@@ -197,7 +197,7 @@ func TestSessionInventorySurvivesCarrierLossUsesFreshDaemonHandshake(t *testing.
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := session.New(session.Options{
 		Generation: "testhash",
-		Spawner:    session.NewLocalSpawner(log, session.Shell{Path: "/bin/sh"}, "", ""),
+		Spawner:    session.NewLocalSpawner(log, session.Shell{Path: "/bin/sh"}, ""),
 		Log:        log,
 		Limits:     session.DefaultLimits(),
 	})
@@ -264,6 +264,41 @@ func TestAnEmptyInventoryOffTheSocketIsAnEmptyArray(t *testing.T) {
 	}
 	if err := validateHelperJSON(loadHelperSchema(t, "session.sessions.schema.json"), raw); err != nil {
 		t.Fatalf("the empty inventory does not satisfy its contract: %v", err)
+	}
+}
+
+// TestTheSpawnParamsACoordinatorSendsNameItsOwnToolEndpoint is
+// nocx-50w7p.18's check on the LOCAL op's params, and it is the third of
+// contracts/README.md's three checks applied to a field a caller must be able
+// to set.
+//
+// A pane's tool endpoint is a fact about the coordinator that asked for the
+// pane, so it travels on the request. Three things must hold at once, and each
+// fails differently:
+//
+//   - the payload a coordinator actually sends satisfies the committed
+//     contract — which is what catches a JSON name that disagrees with the
+//     schema's property, because the shape is `additionalProperties: false`;
+//   - the helper's OWN params schema knows the field, since host.Register
+//     builds it from the same struct, so a helper that was not taught it
+//     answers `bad_params` to a well-formed request;
+//   - the spawn then SUCCEEDS off the real socket, which is the only form of
+//     the check that a test building its own payload cannot make.
+func TestTheSpawnParamsACoordinatorSendsNameItsOwnToolEndpoint(t *testing.T) {
+	c := hostedSessions(t)
+
+	const endpoint = "/run/user/1000/nocx/tool.sock"
+	in := proto.SpawnParams{Cwd: "/", Cols: 80, Rows: 24, WindowBytes: 1 << 20, AgentToolEndpoint: endpoint}
+	if err := validateHelperJSON(loadHelperSchema(t, "session.spawn.params.schema.json"), mustMarshal(t, in)); err != nil {
+		t.Fatalf("the spawn params naming a tool endpoint do not satisfy the contract: %v", err)
+	}
+
+	var raw json.RawMessage
+	if err := c.Call(context.Background(), proto.ServiceSession, proto.OpSpawn, in, &raw); err != nil {
+		t.Fatalf("the helper refused a spawn whose params name the pane's own tool endpoint: %v", err)
+	}
+	if err := validateHelperJSON(loadHelperSchema(t, "session.spawn.schema.json"), raw); err != nil {
+		t.Fatalf("the spawn result off the socket does not satisfy its contract:\n%v\n\npayload was:\n%s", err, raw)
 	}
 }
 

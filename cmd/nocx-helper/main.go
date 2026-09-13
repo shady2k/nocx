@@ -46,7 +46,6 @@ import (
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/session"
 	"github.com/shady2k/nocx/internal/mcpstdio"
-	"github.com/shady2k/nocx/internal/shellintegration"
 )
 
 func main() {
@@ -187,25 +186,24 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 	// division is the whole of D1 in code: a connection ending releases that
 	// connection's reader and its write capability, and every session, window
 	// and process survives it.
-	// NOCX_TOOL_SOCKET, read here rather than derived: this process is not
-	// the coordinator and has no way to compute a coordinator's tool.sock
-	// path itself (internal/toolendpoint owns that name, AD-8) — it is
-	// only ever a fact the coordinator that forked this daemon already
-	// knew and handed down as this process's own environment (Ensure, in
-	// internal/helper/endpoint/bridge.go, is the one place that sets it;
-	// on the remote/bridge path nothing sets it, which is the honest
-	// answer there — nocx-2tesu). Read once, at composition, and carried
-	// for the daemon's whole life: it is a property of which coordinator
-	// started this generation, never of one spawn request.
-	agentToolSocketPath := os.Getenv(shellintegration.ToolSocketEnvVar)
-	// What a pane's shell must exec to reach this generation's MCP adapter:
-	// THIS binary. Read here, once, for the same reason the socket above is —
-	// it is a property of the daemon and not of one spawn request — and taken
-	// from os.Executable() rather than handed down, because a path from the
-	// coordinator could name a different generation than the one that forks
-	// the shell. Unreadable is not fatal: the wrapper's PATH fallback stands
-	// and the pane says its tool surface is unavailable, which is the honest
-	// degrade rather than a daemon that refuses to serve (nocx-o36tr).
+	// A pane's tool endpoint is NOT read here, and that is the fix rather than
+	// an omission (nocx-50w7p.18). This process's environment is the one of
+	// whichever coordinator happened to start this generation, and this
+	// daemon's endpoint socket is keyed by the GENERATION rather than by a
+	// coordinator — so several coordinators ride one daemon (D12), and a value
+	// read here once described only the first of them. A pane opened by any
+	// other coordinator then carried that coordinator's tool socket, reaching
+	// an endpoint whose owner never asked for the pane. The endpoint travels
+	// on each spawn instead (proto.SpawnParams.AgentToolEndpoint), named by
+	// the only party that knows it.
+	//
+	// What a pane's shell must exec to reach this generation's MCP adapter IS
+	// this daemon's own fact: THIS binary. Taken from os.Executable() rather
+	// than handed down, because a path from the coordinator could name a
+	// different generation than the one that forks the shell. Unreadable is
+	// not fatal: the wrapper's PATH fallback stands and the pane says its tool
+	// surface is unavailable, which is the honest degrade rather than a daemon
+	// that refuses to serve (nocx-o36tr).
 	agentHelperPath, err := os.Executable()
 	if err != nil {
 		log.Warn("nocx-helper: cannot name its own executable for a pane's agent", "error", err)
@@ -231,7 +229,7 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 	// artifact `make helpers` produces, which is what reaches a host nobody
 	// here controls — returns a seam that registers nothing, so every ssh op is
 	// answered `unknown_service`.
-	sshCap, err := holdSSHClient(log, agentToolSocketPath)
+	sshCap, err := holdSSHClient(log)
 	if err != nil {
 		log.Error("ssh client", "err", err)
 		return 1
@@ -240,7 +238,7 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 
 	sessions := session.New(session.Options{
 		Generation: generation,
-		Spawner:    session.NewLocalSpawner(log, session.Shell{}, agentToolSocketPath, agentHelperPath),
+		Spawner:    session.NewLocalSpawner(log, session.Shell{}, agentHelperPath),
 		SSHSpawner: sshCap.sessionSpawner,
 		Inspector:  session.NewInspector(),
 		Log:        log,
@@ -327,11 +325,7 @@ func alreadyServing(ctx context.Context, log *slog.Logger, dir string, generatio
 // required becoming the account (D12). A non-ssh carrier must supply one; that
 // is the carrier's problem, not this protocol's.
 func bridge(ctx context.Context, log *slog.Logger, dir string, want, generation proto.GenerationID, exe string) int {
-	// No extra environment: this generation is being reached over the ssh
-	// exec lane, on a machine with no local tool.sock of the caller's to
-	// relay (nocx-2tesu) — that concept exists only for the coordinator's
-	// own machine, in internal/helper/local's reach().
-	conn, err := endpoint.Ensure(ctx, dir, want, generation, exe, nil)
+	conn, err := endpoint.Ensure(ctx, dir, want, generation, exe)
 	if err != nil {
 		log.Error("bridge", "generation", want, "err", err)
 		if errors.Is(err, endpoint.ErrNoEndpoint) {

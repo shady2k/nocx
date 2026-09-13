@@ -107,4 +107,23 @@ package proto
 // accepts only what it was built with. Two peers that disagree refuse each
 // other at hello in both directions, which is what makes the number the whole
 // of the compatibility story.
-const Version = "8"
+//
+// This is 9 rather than 8 because the wire grew a FIELD on two frozen ops, and
+// a field is the half that cannot be added: `session.spawn.params` and
+// `session.spawn-ssh.params` gained `agentToolEndpoint` — the caller's own
+// tool endpoint on this machine, which the pane's tool connections belong to
+// (nocx-50w7p.18). It replaces a value the daemon read once from the
+// environment of whichever coordinator started it, which was wrong the moment
+// a second coordinator rode the same generation (D12): the daemon is keyed by
+// generation, its callers are not, and a pane's tool connections belong to the
+// coordinator that OPENED the pane.
+//
+// The reason is the freeze's own rule and not tidiness. Both shapes are
+// `additionalProperties: false`, so an 8-helper builds its params schema from
+// the same struct this one does, REJECTS the payload carrying the field, and
+// answers `bad_params` — a sentence about the request, which is a lie: the
+// request is well-formed and the helper is old. Bumping makes the two peers
+// refuse each other at hello in both directions, which is the honest reading,
+// and installs the new generation beside the old one (D7) so a session still
+// holding the old binary keeps it.
+const Version = "9"

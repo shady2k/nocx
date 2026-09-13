@@ -292,6 +292,15 @@ type localHelperOpener struct {
 	// opened while it is empty carries no NOCX_TOOL_SOCKET, which is the
 	// soft degrade staying soft — the shell's own refusal text is what a
 	// user sees, never a pane pointed at an empty path.
+	//
+	// It travels on each SPAWN REQUEST and never in the daemon's environment
+	// (nocx-50w7p.18). The daemon's endpoint socket is keyed by the
+	// generation rather than by a coordinator, so one account's daemon serves
+	// several coordinators (D12), and a value handed to it once at its start
+	// describes only whichever coordinator started it — a pane opened by
+	// another one would reach a backend that never asked for that pane. This
+	// process's OWN endpoint is a fact this process knows and the daemon
+	// cannot, so it says it per pane.
 	toolSocketPath string
 	// client is the one connection to the local daemon. Held across panes,
 	// dropped when it is lost so the next open redials.
@@ -376,15 +385,19 @@ func (o *localHelperOpener) setToolSocketPath(path string) {
 	o.toolSocketPath = path
 }
 
-// toolSocketEnv turns this backend's tool socket path into the one extra
-// environment entry a freshly spawned local helper needs to find it — or
-// into nothing, when there is none, which is what keeps the soft degrade
-// soft: an empty path adds no entry rather than exporting an empty one.
-func toolSocketEnv(path string) []string {
-	if path == "" {
-		return nil
-	}
-	return []string{shellintegration.ToolSocketEnvVar + "=" + path}
+// toolEndpoint answers the tool socket this backend runs, for the pane about
+// to be spawned on it — or empty, which is the state a backend with no tool
+// surface is in and not "not configured yet".
+//
+// It is read under the opener's own lock, and it is read PER PANE on purpose
+// (nocx-50w7p.18): the endpoint belongs to the coordinator that opens the
+// pane, and this opener serves several panes at once. Handing it to the daemon
+// once — which is what a `NOCX_TOOL_SOCKET` in the daemon's own environment
+// was — made it a fact about whichever coordinator started that daemon.
+func (o *localHelperOpener) toolEndpoint() string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.toolSocketPath
 }
 
 // OpenHosted opens a local pane on this machine's helper.
@@ -422,6 +435,12 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 	res, err := spawn.run(ctx, cfg, proto.SpawnParams{
 		Cwd: cfg.Cwd, Cols: cfg.Cols, Rows: cfg.Rows,
 		IdempotencyKey: claim,
+		// THIS backend's own tool endpoint, carried per pane (nocx-50w7p.18):
+		// the pane's tools belong to the coordinator that opened it, and the
+		// daemon cannot know which of its callers that is. Empty when this
+		// backend runs none, and the pane then renders no NOCX_TOOL_SOCKET at
+		// all — the soft degrade, stated above.
+		AgentToolEndpoint: o.toolEndpoint(),
 	})
 	if err != nil {
 		o.dropIfLost(c)
@@ -590,7 +609,7 @@ func (o *localHelperOpener) reattachedConn(sid session.ID) (localSessionConn, bo
 
 func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, string, error) {
 	o.mu.Lock()
-	installed, dir, existing, toolSocketPath, reverse := o.installed, o.dir, o.client, o.toolSocketPath, o.reverse
+	installed, dir, existing, reverse := o.installed, o.dir, o.client, o.reverse
 	installFailure := o.installFailure
 	o.mu.Unlock()
 
@@ -608,7 +627,7 @@ func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, 
 	}
 	c, err := helperlocal.Open(ctx, helperlocal.Config{
 		Dir: dir, Generation: installed.Generation, Binary: installed.Binary,
-		Log: o.log, Env: toolSocketEnv(toolSocketPath),
+		Log: o.log,
 		// The answers this coordinator gives the helper when it dials
 		// (helper_reverse.go). Read under the lock with everything else the
 		// connection is built from, so a connection is opened with ONE view of

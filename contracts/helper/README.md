@@ -452,3 +452,54 @@ Two peers that disagree refuse each other at hello in both directions.
 The schemas are frozen from here like every sibling's: the new op degrades (an
 older helper answers `unknown_op`, which a coordinator reads as "this machine's
 helper is older than this app"), and a new FIELD on one of these shapes does not.
+
+## What landed with `nocx-50w7p.18`, and why `Version` moved to 9
+
+One field, on two ops: `agentToolEndpoint` on `session.spawn.params` and
+`session.spawn-ssh.params` — the tool endpoint **on the helper's own machine**
+that a pane's tool connections belong to, which is the CALLER's own socket.
+
+It replaces a value the daemon read once from its own start environment
+(`NOCX_TOOL_SOCKET`), and the defect that value produced is the reason this is a
+wire change rather than a local one. A helper endpoint socket is keyed by the
+GENERATION, and its directory is derived from the account's home and nothing else
+(`internal/helper/endpoint.Dir`) — one daemon per generation per account, serving
+**several coordinators at once** (D12). A daemon that takes its tool target from
+the environment of whichever coordinator happened to start it therefore has a fact
+about that coordinator, and every later caller inherits it: a pane opened by
+coordinator B had its far agent's tool connections forwarded to coordinator A's
+endpoint, and a local pane B started carried A's `NOCX_TOOL_SOCKET` into its
+shell. Both are the same mistake at two hops — the pane's tool connections belong
+to the coordinator that OPENED THE PANE, and only that coordinator knows the
+value. So it travels on the spawn request, empty meaning "I run no endpoint",
+which is the state `cmd/nocx-server` already has when it publishes no tool
+surface.
+
+Three things about the field are worth naming rather than leaving to a reader:
+
+- **It is a second field beside `agentToolSocketPath`, not a rename of it.** They
+  name the same concept on two different machines: that one is a path on the FAR
+  host, this one is an endpoint on the machine the helper runs on. Folding them
+  would have made one field mean two things depending on which op it arrived on,
+  which is exactly the kind of shape a later generation reads wrongly.
+- **A far socket path with no endpoint is refused by name, before anything is
+  dialed.** The refusal exists already (`sshsvc`'s `errNoToolSocket`, raised in
+  `validatePaneSpec` before the connection is acquired); what changed is that the
+  emptiness is now the request's rather than the daemon's, so a caller that runs
+  no endpoint costs a far host nothing.
+- **A pane whose coordinator has gone is refused, never re-routed.** The target is
+  the one the request named, so an endpoint that no longer answers ends that
+  connection with the path in the helper's own account of it — there is no second
+  endpoint the daemon could fall back to, because there is no longer a daemon-held
+  one to fall back TO.
+
+The bump is the freeze's own rule and not tidiness: both shapes carry
+`additionalProperties: false`, so a helper speaking 8 builds its params schema
+from the same struct this one does and REJECTS a payload carrying the field,
+answering `bad_params` — a sentence about a request that is well-formed. Two
+peers that disagree refuse each other at hello in both directions, each
+generation installs beside the other (D7), and a session still holding the old
+binary keeps it.
+
+The schemas are frozen from here like every sibling's: a new op degrades, and a
+new FIELD on one of these shapes does not.

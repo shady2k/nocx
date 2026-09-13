@@ -21,7 +21,7 @@ import (
 // able to. What a coordinator gets instead is `unknown_service` from the
 // dispatcher, which is a sentence about this build rather than a failure it has
 // to guess at (cmd/nocx-helper/sshservice.go).
-func holdSSHClient(*slog.Logger, string) (sshSeam, error) {
+func holdSSHClient(*slog.Logger) (sshSeam, error) {
 	return sshSeam{
 		register: func(*host.Host) {},
 		release:  func() {},

@@ -22,7 +22,7 @@ import (
 )
 
 func TestTheDeployedHelperHasNoSSHService(t *testing.T) {
-	seam, err := holdSSHClient(discardLog(), "")
+	seam, err := holdSSHClient(discardLog())
 	if err != nil {
 		t.Fatalf("holdSSHClient: %v", err)
 	}

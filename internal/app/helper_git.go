@@ -536,6 +536,13 @@ func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config) (tr
 	}
 	entry, err := c.Spawn(ctx, proto.SpawnParams{
 		Cwd: cfg.Cwd, Cols: cfg.Cols, Rows: cfg.Rows, Lifecycle: lifecycleLaunch,
+		// No agentToolEndpoint, and that is the honest answer rather than an
+		// omission (nocx-50w7p.18): the endpoint a pane's tools belong to is a
+		// socket on the machine the HELPER runs on, and this session's helper
+		// is on the far host (the guard above admits KindRemote only) — a path
+		// from this backend is not reachable from that host's shell. The pane
+		// carries no tool surface here, exactly as it did before the field
+		// existed.
 	})
 	if err != nil {
 		if lifecycleAdapter != nil {

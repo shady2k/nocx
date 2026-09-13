@@ -1039,9 +1039,11 @@ type sshStand struct {
 	coord     *sshCoordinator
 	inspector *recordingInspector
 	exits     *exitWatcher
-	// toolSocket is the coordinator's own tool endpoint, as the helper was
-	// told at construction (NOCX_TOOL_SOCKET). Empty is a coordinator that runs
-	// none.
+	// toolSocket is the coordinator this stand's client IS: the tool endpoint
+	// it names on every spawn it makes, which is what that pane's tool
+	// connections belong to (nocx-50w7p.18). Empty is a coordinator that runs
+	// none — a real state, and the one that makes a request for a far-side tool
+	// socket impossible to honour.
 	toolSocket string
 	toHelper   *wireRecorder
 	toCoord    *wireRecorder
@@ -1112,9 +1114,9 @@ func newSSHStand(t *testing.T, f *sshFixture, coord *sshCoordinator) *sshStand {
 }
 
 // newSSHStandWithoutToolEndpoint is the same stand with a coordinator that runs
-// NO tool endpoint: its helper was started without NOCX_TOOL_SOCKET, which is a
-// real state (cmd/nocx-server answers nil, nil when it has no tool surface) and
-// the one that makes a request for a far-side tool socket impossible to honour.
+// NO tool endpoint: it names none on its spawn requests, which is a real state
+// (cmd/nocx-server answers nil, nil when it has no tool surface) and the one
+// that makes a request for a far-side tool socket impossible to honour.
 func newSSHStandWithoutToolEndpoint(t *testing.T, f *sshFixture, coord *sshCoordinator) *sshStand {
 	t.Helper()
 	return newSSHStandFull(t, f, coord, true, "")
@@ -1163,14 +1165,14 @@ func newSSHStandFull(t *testing.T, f *sshFixture, coord *sshCoordinator, withSSH
 	s.sshsvc = sshsvc.New(realClient, standLog())
 	var sshSpawner session.SSHSpawner
 	if withSSHSpawner {
-		sshSpawner = session.NewSSHSpawner(s.sshsvc, toolSocket, standLog())
+		sshSpawner = session.NewSSHSpawner(s.sshsvc, standLog())
 	}
 	s.sessions = session.New(session.Options{
 		Generation: "gen-under-test",
 		// No local spawner: these tests are about the ssh half, and a local
 		// spawn that could run beside them would only make a failure here
 		// ambiguous.
-		Spawner:    session.NewLocalSpawner(standLog(), session.Shell{}, "", ""),
+		Spawner:    session.NewLocalSpawner(standLog(), session.Shell{}, ""),
 		SSHSpawner: sshSpawner,
 		Inspector:  s.inspector,
 		Log:        standLog(),
@@ -1224,8 +1226,10 @@ func (s *sshStand) stop() {
 }
 
 // spawnParams is the ordinary request: the fixture's address, the password
-// identity the scripted coordinator answers for, and the pinned fingerprint of
-// the host key the fixture presents.
+// identity the scripted coordinator answers for, the pinned fingerprint of the
+// host key the fixture presents, and THIS coordinator's own tool endpoint —
+// which is what the pane's tool connections belong to (nocx-50w7p.18) and is
+// therefore named by the request rather than held by the daemon.
 func (s *sshStand) spawnParams(t *testing.T, mode proto.SSHMode) proto.SSHSpawnParams {
 	t.Helper()
 	host, port := s.fixture.hostPort(t)
@@ -1242,6 +1246,7 @@ func (s *sshStand) spawnParams(t *testing.T, mode proto.SSHMode) proto.SSHSpawnP
 		Cols:               80,
 		Rows:               24,
 		DesiredMode:        mode,
+		AgentToolEndpoint:  s.toolSocket,
 	}
 }
 

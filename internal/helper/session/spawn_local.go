@@ -40,28 +40,24 @@ type LocalSpawner struct {
 	// be told what to start over an API would be a second answer to the
 	// question the doc comment above says only the composition root may ask.
 	openPTY func(log.Logger, pty.Config) (localPTY, error)
-	// agentToolSocketPath is THIS backend's tool endpoint socket, if it is
-	// running one — a fact about this daemon's whole life (set once at
-	// NewLocalSpawner, from the composition root, never per-request) and
-	// never re-derived here: internal/toolendpoint is the one owner of the
-	// socket's file name (AD-8), and this field is simply what the
-	// composition root read off Endpoint.SocketPath(). Empty means no
-	// endpoint was started (nocx-2tesu's soft degrade): every enhanced launch below
-	// renders no NOCX_TOOL_SOCKET at all, and the shell's own refusal text
-	// is what a user sees, rather than a pane pointed at an empty path.
-	agentToolSocketPath string
 	// agentHelperPath is the executable a pane's shell should exec to reach
-	// this generation's MCP adapter. It is a path and never a bare name: the
-	// wrapper's own fallback is `${NOCX_AGENT_HELPER_PATH:-nocx-helper}`, and
-	// nothing in this product puts a `nocx-helper` on PATH — `make helpers`
-	// writes gzipped per-platform artifacts for deployment to a remote host.
-	// Unset, that fallback stands and an agent's MCP server fails to start
-	// with every other fact about it correct (nocx-o36tr).
+	// this generation's MCP adapter, and it is DAEMON-scoped on purpose: it is
+	// a property of this binary rather than of any caller, and there is
+	// exactly one such binary per daemon. The pane's tool ENDPOINT is the
+	// opposite case and is therefore not here — see
+	// SpawnRequest.AgentToolEndpoint.
 	//
-	// The DAEMON'S OWN executable, so the pane execs the generation that owns
-	// it. Nothing else in this process knows a better answer, and a path
-	// handed down from the coordinator could name a different generation than
-	// the one that forked the shell.
+	// It is a path and never a bare name: the wrapper's own fallback is
+	// `${NOCX_AGENT_HELPER_PATH:-nocx-helper}`, and nothing in this product
+	// puts a `nocx-helper` on PATH — `make helpers` writes gzipped
+	// per-platform artifacts for deployment to a remote host. Unset, that
+	// fallback stands and an agent's MCP server fails to start with every
+	// other fact about it correct (nocx-o36tr).
+	//
+	// The path is the DAEMON'S OWN executable, so the pane execs the
+	// generation that owns it: nothing else in this process knows a better
+	// answer, and a path handed down from the coordinator could name a
+	// different generation than the one that forked the shell.
 	agentHelperPath string
 }
 
@@ -96,17 +92,17 @@ type Shell struct {
 	Args []string
 }
 
-// NewLocalSpawner builds the spawner. Production passes a zero Shell and,
-// when this daemon's process carried NOCX_TOOL_SOCKET at its own start
-// (cmd/nocx-helper's composition, inherited from the coordinator that
-// spawned it), that path as agentToolSocketPath — see the field's doc for
-// why it is a constructor argument rather than a per-Spawn one.
-func NewLocalSpawner(logger *slog.Logger, shell Shell, agentToolSocketPath, agentHelperPath string) *LocalSpawner {
+// NewLocalSpawner builds the spawner. Production passes a zero Shell and this
+// daemon's own executable as agentHelperPath — the two facts that ARE the
+// daemon's. It deliberately takes no tool endpoint: that is a fact about the
+// coordinator that asked for a pane, so it arrives on each SpawnRequest
+// (nocx-50w7p.18), where a constructor argument would have frozen it to
+// whichever coordinator started this process.
+func NewLocalSpawner(logger *slog.Logger, shell Shell, agentHelperPath string) *LocalSpawner {
 	return &LocalSpawner{
-		log:                 log.NewSlogAdapter(logger),
-		shell:               shell,
-		agentToolSocketPath: agentToolSocketPath,
-		agentHelperPath:     agentHelperPath,
+		log:             log.NewSlogAdapter(logger),
+		shell:           shell,
+		agentHelperPath: agentHelperPath,
 		openPTY: func(l log.Logger, cfg pty.Config) (localPTY, error) {
 			// Returned through the named nil rather than as one expression:
 			// a (*pty.LocalPty)(nil) handed back as an interface is not nil,
@@ -198,6 +194,7 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 		"shell_kind", string(launchKind),
 		"enhanced", enhanced,
 		"explicit_shell_args", len(shellArgs),
+		"tool_endpoint", req.AgentToolEndpoint,
 		"lifecycle_requested", req.Lifecycle != nil)
 
 	if req.SessionID != "" && len(shellArgs) == 0 {
@@ -211,9 +208,14 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 				}
 			}
 			opts := shellintegration.LaunchOptions{
-				SessionID:           req.SessionID,
-				Enhanced:            true,
-				AgentToolSocketPath: s.agentToolSocketPath,
+				SessionID: req.SessionID,
+				Enhanced:  true,
+				// The REQUEST's endpoint, and nothing else's: this is the
+				// coordinator that opened this pane, which is the only party
+				// that knows which endpoint the pane's tools belong to
+				// (nocx-50w7p.18). Empty renders no NOCX_TOOL_SOCKET at all,
+				// which is the soft degrade for a caller that runs none.
+				AgentToolSocketPath: req.AgentToolEndpoint,
 				AgentHelperPath:     s.agentHelperPath,
 			}
 			if req.Lifecycle != nil {

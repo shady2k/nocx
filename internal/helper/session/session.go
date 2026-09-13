@@ -72,6 +72,15 @@ type SpawnRequest struct {
 	Cols      uint16
 	Rows      uint16
 	Lifecycle *proto.LifecycleLaunch
+	// AgentToolEndpoint is THIS request's own tool endpoint on the helper's
+	// machine — the caller's socket, which the launch renders as the shell's
+	// NOCX_TOOL_SOCKET. It is carried per request rather than held by the
+	// spawner, because the daemon outlives its callers and serves several of
+	// them: a value fixed at the daemon's start describes whichever
+	// coordinator started it, and a pane opened by another one would carry
+	// it (nocx-50w7p.18). Empty means this caller runs no endpoint, and the
+	// launch then renders no NOCX_TOOL_SOCKET at all.
+	AgentToolEndpoint string
 }
 
 // Spawner starts a shell under a PTY. One implementation reaches internal/pty;
@@ -115,6 +124,16 @@ type SSHSpawnRequest struct {
 	// nocx's tool surface, or empty — see proto.SSHSpawnParams.
 	AgentHelperPath     string
 	AgentToolSocketPath string
+	// AgentToolEndpoint is THIS request's own tool endpoint on the helper's
+	// machine: what every connection arriving on the far-side tool socket is
+	// forwarded into. It is a second value beside AgentToolSocketPath because
+	// it is a second machine — that one is a path on the far host, this one is
+	// a socket here — and it travels per request for the reason SpawnRequest's
+	// does: the daemon serves several coordinators, and a pane's tool
+	// connections belong to the one that opened the pane (nocx-50w7p.18).
+	// Empty means this caller runs no endpoint, and a far socket path with
+	// nothing behind it is then refused by name before anything is dialed.
+	AgentToolEndpoint string
 	// Cols and Rows are the channel's pty size.
 	Cols uint16
 	Rows uint16

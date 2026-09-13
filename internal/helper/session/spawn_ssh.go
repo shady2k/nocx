@@ -77,24 +77,26 @@ type ShellOpener interface {
 }
 
 // sshSpawner is the SSHSpawner this build wires into the session service.
+//
+// It holds no tool endpoint, and that absence is a decision rather than a gap
+// (nocx-50w7p.18): the socket a pane's far tool connections are forwarded into
+// belongs to the coordinator that opened that pane, so it arrives on each
+// SSHSpawnRequest. A value held here would have been the one read from this
+// daemon's own start environment, which is a fact about whichever coordinator
+// started the daemon — and the daemon's socket is keyed by the generation, so
+// several coordinators ride one of them (D12).
 type sshSpawner struct {
 	opener ShellOpener
-	// toolSocket is THIS coordinator's tool endpoint, when it runs one — the
-	// value cmd/nocx-helper read once from its own environment, exactly as the
-	// local spawner holds it. Empty is a real state (no endpoint), and a
-	// request for a far-side tool socket is then refused by name rather than
-	// answered with a path nothing answers.
-	toolSocket string
-	log        *slog.Logger
+	log    *slog.Logger
 }
 
 // NewSSHSpawner builds the ssh spawner over this daemon's ssh service. It is
 // called by the composition root in the build that has one.
-func NewSSHSpawner(opener ShellOpener, toolSocket string, logger *slog.Logger) SSHSpawner {
+func NewSSHSpawner(opener ShellOpener, logger *slog.Logger) SSHSpawner {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &sshSpawner{opener: opener, toolSocket: toolSocket, log: logger}
+	return &sshSpawner{opener: opener, log: logger}
 }
 
 // SpawnSSH opens one shell channel, brings the launcher and its stage-1 up on
@@ -283,7 +285,12 @@ func (p *sshSpawner) openPaneListeners(ctx context.Context, req SSHSpawnRequest)
 		HostKeyFingerprint: req.HostKeyFingerprint,
 		Lifecycle:          req.Lifecycle != nil,
 		ToolSocketPath:     req.AgentToolSocketPath,
-		ToolSocketTarget:   p.toolSocket,
+		// The REQUEST's endpoint, and never a value this daemon holds: the
+		// far side's bytes are FOR the coordinator that opened this pane, so
+		// the target is that coordinator's own socket on this machine
+		// (nocx-50w7p.18). Empty is refused by name in validatePaneSpec,
+		// before anything is dialed.
+		ToolSocketTarget: req.AgentToolEndpoint,
 	}
 	if !spec.Lifecycle && spec.ToolSocketPath == "" {
 		return nil, nil

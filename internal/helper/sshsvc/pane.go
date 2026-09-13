@@ -73,14 +73,26 @@ const lifecycleBindHost = "127.0.0.1"
 
 var (
 	// errNoToolSocket is what a request naming a far-host tool socket path is
-	// refused with when this helper has nothing to forward it to: no
-	// coordinator of this daemon runs a tool endpoint, so the path would be a
-	// path nothing answers — the silent degrade a launch must never carry.
+	// refused with when the caller that asked for the pane named no endpoint
+	// on this machine for it: the path would be a path nothing answers — the
+	// silent degrade a launch must never carry.
 	//
 	// It is a NAMED refusal rather than a log line because the alternative is
 	// a pane whose agent finds a socket that accepts nothing, which reads as a
 	// broken agent rather than as a missing endpoint.
-	errNoToolSocket = errors.New("this helper's coordinator runs no tool endpoint, so a far-side tool socket has nothing to forward to")
+	errNoToolSocket = errors.New("this pane's coordinator declared no tool endpoint, so a far-side tool socket has nothing to forward to")
+	// errPaneToolEndpointUnreachable is what a far-side tool connection is
+	// refused with when the pane's OWN coordinator endpoint cannot be reached
+	// — the coordinator has exited, or its socket is gone.
+	//
+	// It is named, and it is what keeps two situations apart that a bare dial
+	// error merges: "the endpoint that owns this pane is not there" and "the
+	// request was wrong". Neither is repairable by forwarding somewhere else,
+	// and there is deliberately nowhere else to forward to: the target is the
+	// one the REQUEST named (nocx-50w7p.18), so a daemon- or sibling-held
+	// endpoint — another coordinator of the same account — can no longer be
+	// reached even by accident.
+	errPaneToolEndpointUnreachable = errors.New("this pane's coordinator endpoint is not reachable, so the tool connection is refused rather than forwarded to another coordinator")
 	// errNoPaneListeners is a listener set asked for with nothing to listen
 	// for: neither the lifecycle channel nor a tool socket. It is a caller
 	// that believes it is getting something (channel.go's own rule for a
@@ -114,11 +126,14 @@ type PaneSpec struct {
 	// none.
 	ToolSocketPath string
 	// ToolSocketTarget is the LOCAL socket each accepted connection is piped
-	// into: the coordinator's tool endpoint, a fact of the daemon's
-	// construction (cmd/nocx-helper reads NOCX_TOOL_SOCKET once, exactly as
-	// the local spawner does). Empty is a real state — a daemon whose
-	// coordinator runs no endpoint — and a request naming a far path is then
-	// refused by name (errNoToolSocket) rather than half-answered.
+	// into: the tool endpoint of the coordinator that ASKED FOR THIS PANE, on
+	// the machine this helper runs on. It is the request's value and never the
+	// daemon's (nocx-50w7p.18) — one account's daemon serves several
+	// coordinators (D12), so a target held at the daemon's start would forward
+	// a pane's far agent to a coordinator that never asked for that pane.
+	// Empty is a real state — the caller runs no endpoint — and a request
+	// naming a far path is then refused by name (errNoToolSocket) rather than
+	// half-answered.
 	ToolSocketTarget string
 }
 
@@ -325,6 +340,13 @@ func (p *PaneListeners) acceptTool() {
 // the endpoint admits exactly once per connection and holds one caller slot
 // for its life), so two agent processes must never share one.
 //
+// The endpoint is THIS PANE's: the one the coordinator that asked for the pane
+// named on the spawn request, kept for the pane's whole life (nocx-50w7p.18).
+// A coordinator that has gone is therefore a named refusal — and never a
+// re-route: there is no second endpoint here to fall back to, which is the
+// defect this replaced (a daemon-held target sent a pane opened by one
+// coordinator to whichever coordinator had started the daemon).
+//
 // A dial that fails closes that connection and nothing else: the pane, its
 // shell and its lifecycle channel are unaffected by an endpoint that is not
 // running, which is the same soft degrade the local path has when there is no
@@ -333,7 +355,8 @@ func (p *PaneListeners) forwardTool(far net.Conn) {
 	defer func() { _ = far.Close() }()
 	local, err := net.Dial("unix", p.toolTarget)
 	if err != nil {
-		p.log.Warn("ssh: a far-side agent reached the pane's tool socket and the coordinator's endpoint could not be reached",
+		p.log.Warn("ssh: refusing a far-side tool connection",
+			"refusal", errPaneToolEndpointUnreachable.Error(),
 			"path", p.toolTarget, "error", err)
 		return
 	}

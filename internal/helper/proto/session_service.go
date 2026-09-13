@@ -249,6 +249,27 @@ type SpawnParams struct {
 	// parses it, and it is never a name a person typed — the helper owns no
 	// policy and persists no human-authored name (D3).
 	IdempotencyKey string `json:"idempotencyKey,omitempty"`
+	// AgentToolEndpoint is the tool endpoint ON THIS HELPER'S MACHINE that
+	// the pane this op starts belongs to: the CALLER's own tool socket
+	// (internal/toolendpoint's), which is what the shell's NOCX_TOOL_SOCKET
+	// names when the caller has one.
+	//
+	// It is a fact about the REQUEST and never about the daemon, and that is
+	// the whole of why it is here (nocx-50w7p.18). A helper generation's
+	// endpoint socket is keyed by the generation and not by a coordinator: one
+	// account's daemon serves several coordinators at once (D12), so a value
+	// this process read once from the environment of whichever coordinator
+	// started it is a value about THAT coordinator — and a pane opened by
+	// another one would carry it, reaching an endpoint that never asked for
+	// that pane. The pane's owner is the party that knows, so the pane's
+	// owner says it, per spawn.
+	//
+	// Empty is a real state rather than "not set yet": a coordinator that runs
+	// no tool endpoint has none to name (cmd/nocx-server answers nil, nil when
+	// it has no tool surface), and the pane then renders no NOCX_TOOL_SOCKET
+	// at all — the shell's own refusal text is what a user sees, which is the
+	// soft degrade nocx-2tesu exists to keep soft.
+	AgentToolEndpoint string `json:"agentToolEndpoint,omitempty"`
 }
 
 // MaxIdempotencyKey bounds the key a caller may mint. The helper keeps one
@@ -418,6 +439,27 @@ type SSHSpawnParams struct {
 	// answers.
 	AgentHelperPath     string `json:"agentHelperPath,omitempty"`
 	AgentToolSocketPath string `json:"agentToolSocketPath,omitempty"`
+	// AgentToolEndpoint is the LOCAL socket every connection arriving on the
+	// far-side tool socket is piped into: this pane's own coordinator's tool
+	// endpoint on THIS machine, which is the one that asked for the pane.
+	//
+	// It is the second half of the pair above and it is deliberately a second
+	// field: AgentToolSocketPath names a path on the FAR host, and this names
+	// the endpoint on the machine the helper runs on. They are different
+	// machines and different values, and one field could only have held the
+	// first (nocx-50w7p.14).
+	//
+	// It travels PER SPAWN for the reason SpawnParams.AgentToolEndpoint does,
+	// and it is the same defect one hop out (nocx-50w7p.18): a helper daemon
+	// serves several coordinators of one account (D12), so an endpoint fixed
+	// at the daemon's own start is a fact about whichever coordinator started
+	// it — and a pane opened by another one would have its far agent's tool
+	// connections forwarded to a coordinator that never asked for that pane.
+	//
+	// A far socket path with no endpoint here is REFUSED BY NAME before
+	// anything is dialed: a forward to nothing is the silent degrade a launch
+	// must never carry.
+	AgentToolEndpoint string `json:"agentToolEndpoint,omitempty"`
 	// IdempotencyKey is the caller's name for the spawn, on exactly the terms
 	// SpawnParams states: a repeat answers with the session the first one made
 	// rather than forking a second remote shell.

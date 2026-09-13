@@ -132,12 +132,17 @@ func mustFailSpawn(t *testing.T, s *LocalSpawner, req SpawnRequest) {
 	}
 }
 
-// TestLocalSpawner_CarriesTheConfiguredToolSocketIntoTheLaunchScript is
-// nocx-2tesu's acceptance criterion 1, at the seam LocalSpawner actually
-// owns: given this backend told the spawner its tool endpoint's socket path
-// (agentToolSocketPath, set once at NewLocalSpawner — a property of this
-// daemon's whole life, never of one request), every enhanced local pane it
-// starts carries NOCX_TOOL_SOCKET.
+// TestLocalSpawner_CarriesEachSpawnsOwnToolEndpointIntoItsLaunchScript is
+// nocx-2tesu's rendering half, re-shaped by nocx-50w7p.18: every enhanced
+// local pane carries ITS OWN request's tool endpoint as NOCX_TOOL_SOCKET, and
+// the pane's endpoint is never a value this spawner holds.
+//
+// The script is read twice from ONE spawner, and that repetition IS the
+// assertion — it is what the daemon-scoped field could not satisfy. A helper
+// endpoint socket is keyed by the generation rather than by a caller, so one
+// account's daemon serves several coordinators at once (D12); a value held
+// once (the old constructor argument, fed from this process's own environment)
+// rendered the first coordinator's socket into a pane another one asked for.
 //
 // The assertion reads the rendered launch SCRIPT rather than the process
 // environment: for the in-memory local tier the variable travels as an
@@ -145,13 +150,19 @@ func mustFailSpawn(t *testing.T, s *LocalSpawner, req SpawnRequest) {
 // (LaunchOptions.AgentToolSocketPath -> launcherEnvBlock), exactly like the
 // remote tier's carrier already does — never as a second, ad hoc route
 // through the raw exec environment.
-func TestLocalSpawner_CarriesTheConfiguredToolSocketIntoTheLaunchScript(t *testing.T) {
-	const sock = "/run/nocx/tool.sock"
+func TestLocalSpawner_CarriesEachSpawnsOwnToolEndpointIntoItsLaunchScript(t *testing.T) {
+	cases := []struct {
+		name     string
+		session  string
+		endpoint string
+	}{
+		{"the app that started the daemon", "sess-tool-socket-a", "/run/user/1000/nocx/tool.sock"},
+		{"another coordinator of the same account on the same daemon", "sess-tool-socket-b", "/run/user/1000/nocx-dev/tool.sock"},
+	}
 	var script string
 	s := &LocalSpawner{
-		log:                 log.NewSlogAdapter(nil),
-		shell:               Shell{Path: "/bin/bash"},
-		agentToolSocketPath: sock,
+		log:   log.NewSlogAdapter(nil),
+		shell: Shell{Path: "/bin/bash"},
 		openPTY: func(l log.Logger, cfg pty.Config) (localPTY, error) {
 			if len(cfg.ExtraFiles) == 0 {
 				t.Fatal("no script pipe was attached for the enhanced launch")
@@ -164,21 +175,27 @@ func TestLocalSpawner_CarriesTheConfiguredToolSocketIntoTheLaunchScript(t *testi
 			return &stubPTY{}, nil
 		},
 	}
-	req := SpawnRequest{SessionID: "sess-tool-socket", Cols: 80, Rows: 24}
-	if _, err := s.Spawn(req); err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
-	if !strings.Contains(script, "NOCX_TOOL_SOCKET='"+sock+"'") {
-		t.Fatalf("the launch script did not export the configured tool socket: %q", script)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			script = ""
+			req := SpawnRequest{SessionID: tc.session, Cols: 80, Rows: 24, AgentToolEndpoint: tc.endpoint}
+			if _, err := s.Spawn(req); err != nil {
+				t.Fatalf("Spawn: %v", err)
+			}
+			if !strings.Contains(script, "NOCX_TOOL_SOCKET='"+tc.endpoint+"'") {
+				t.Fatalf("the launch script did not export this spawn's own tool endpoint %s: %q", tc.endpoint, script)
+			}
+		})
 	}
 }
 
-// TestLocalSpawner_OmitsToolSocketWhenNoneIsConfigured is criterion 2's
-// half that belongs to this seam: a spawner nobody told a socket path (the
-// zero value — startToolEndpoint answered nil, nil) renders a script that
-// asks for nothing, so the shell's own refusal text is what a user sees,
-// rather than a pane silently pointed at an empty path.
-func TestLocalSpawner_OmitsToolSocketWhenNoneIsConfigured(t *testing.T) {
+// TestLocalSpawner_OmitsToolSocketWhenTheRequestNamesNone is criterion 2's
+// half that belongs to this seam: a request that names no endpoint (the
+// zero value — the coordinator that asked runs no tool endpoint, which
+// cmd/nocx-server answers nil, nil for) renders a script that asks for
+// nothing, so the shell's own refusal text is what a user sees, rather than a
+// pane silently pointed at an empty path.
+func TestLocalSpawner_OmitsToolSocketWhenTheRequestNamesNone(t *testing.T) {
 	var script string
 	s := &LocalSpawner{
 		log:   log.NewSlogAdapter(nil),
@@ -206,7 +223,7 @@ func TestLocalSpawner_OmitsToolSocketWhenNoneIsConfigured(t *testing.T) {
 	// check for the name would fail on the script's own logic rather than on
 	// what this spawner rendered.
 	if strings.Contains(script, "NOCX_TOOL_SOCKET=") {
-		t.Fatalf("the launch script exported a tool socket nobody configured: %q", script)
+		t.Fatalf("the launch script exported a tool socket no request named: %q", script)
 	}
 }
 
@@ -245,10 +262,9 @@ func TestLocalSpawner_CarriesTheHelperPathIntoTheLaunchScript(t *testing.T) {
 	const helper = "/home/dev/.nocx/helper/2-linux-amd64-abc/nocx-helper"
 	var script string
 	s := &LocalSpawner{
-		log:                 log.NewSlogAdapter(nil),
-		shell:               Shell{Path: "/bin/bash"},
-		agentToolSocketPath: "/run/nocx/tool.sock",
-		agentHelperPath:     helper,
+		log:             log.NewSlogAdapter(nil),
+		shell:           Shell{Path: "/bin/bash"},
+		agentHelperPath: helper,
 		openPTY: func(l log.Logger, cfg pty.Config) (localPTY, error) {
 			if len(cfg.ExtraFiles) == 0 {
 				t.Fatal("no script pipe was attached for the enhanced launch")
@@ -275,9 +291,8 @@ func TestLocalSpawner_CarriesTheHelperPathIntoTheLaunchScript(t *testing.T) {
 func TestLocalSpawner_OmitsTheHelperPathWhenNoneIsConfigured(t *testing.T) {
 	var script string
 	s := &LocalSpawner{
-		log:                 log.NewSlogAdapter(nil),
-		shell:               Shell{Path: "/bin/bash"},
-		agentToolSocketPath: "/run/nocx/tool.sock",
+		log:   log.NewSlogAdapter(nil),
+		shell: Shell{Path: "/bin/bash"},
 		openPTY: func(l log.Logger, cfg pty.Config) (localPTY, error) {
 			data, err := io.ReadAll(cfg.ExtraFiles[0])
 			if err != nil {

@@ -12,7 +12,29 @@ import (
 type Peer struct {
 	UID uint32
 	PID int
+	// Pane is the session whose pane this connection arrived on, as reported
+	// by the helper on a connection that came in on the lane below
+	// (nocx-50w7p.16). It is EMPTY for every caller that dialed this socket
+	// itself, which is every local agent, and the authorizer decides what an
+	// asserted pane may stand for — the endpoint only establishes that the
+	// report was made by the process allowed to make it.
+	Pane string
 }
+
+// Lane is the identity of the one process whose connections may name a pane:
+// this machine's helper daemon, as the coordinator observed it on its OWN end
+// of the helper connection (nocx-50w7p.16). It is a LANE and not a session:
+// the daemon is one process for every pane it serves, so "which pane" is never
+// answered by this fact — that is what the pane record is for, and why both
+// are needed. The lane says WHO may report a pane; the record says WHICH one
+// arrived.
+//
+// The endpoint keeps the shape and the composition root keeps the knowledge:
+// Config.Lane is a predicate over a Peer rather than a value, because deciding
+// whether a pid IS the helper means reading that process's start time from
+// /proc and comparing it with the pid the coordinator observed on its own end
+// of the helper connection — two facts that live with whoever holds the helper
+// connection, not with a socket that only ever sees peers.
 
 // AdmissionEpoch names ONE INTERVAL OF AUTHORITY of one session (ADR-0058).
 // The interval opens when a person's answer admits an agent in a session and

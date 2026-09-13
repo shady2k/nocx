@@ -285,6 +285,12 @@ func (p *sshSpawner) openPaneListeners(ctx context.Context, req SSHSpawnRequest)
 		HostKeyFingerprint: req.HostKeyFingerprint,
 		Lifecycle:          req.Lifecycle != nil,
 		ToolSocketPath:     req.AgentToolSocketPath,
+		// The session this pane IS. Every connection on the far-side tool
+		// socket announces it before its own bytes, which is how the
+		// coordinator learns which pane a far agent arrived on
+		// (nocx-50w7p.16) — the helper's listener is per pane, so this is a
+		// fact of the acceptance rather than a claim the far side makes.
+		Session: req.SessionID,
 		// The REQUEST's endpoint, and never a value this daemon holds: the
 		// far side's bytes are FOR the coordinator that opened this pane, so
 		// the target is that coordinator's own socket on this machine

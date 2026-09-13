@@ -145,6 +145,27 @@ type chunkStream struct {
 // (D15): recorded and unused, reserved for a later reattach.
 func (c *Client) InstanceID() string { return c.instanceID }
 
+// PeerProcess is a carrier that can name the process at its other end. Only a
+// socket can: it was dialed, so the kernel stamped the peer, while an exec
+// lane's peer is a process on another machine.
+type PeerProcess interface {
+	PeerPID() (int, bool)
+}
+
+// PeerPID answers the pid of this client's helper, when its carrier is a socket
+// and the kernel can name one.
+//
+// The coordinator uses it to learn which process on this machine is the helper
+// whose forwarded connections may name a pane (nocx-50w7p.16) — and it is read
+// from the LIVE connection rather than remembered, so a helper that died and
+// was replaced is a different answer rather than the same stale one.
+func (c *Client) PeerPID() (int, bool) {
+	if carrier, ok := c.conn.(PeerProcess); ok {
+		return carrier.PeerPID()
+	}
+	return 0, false
+}
+
 // Done closes when the transport is lost: connection loss, server close,
 // keepalive failure. It does not close on Close.
 func (c *Client) Done() <-chan struct{} { return c.done }

@@ -23,6 +23,7 @@ import (
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/coordinator"
 	nocxlog "github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
 	"github.com/shady2k/nocx/internal/workers"
 )
 
@@ -40,7 +41,21 @@ var (
 	// connection it describes is one no interval can close, so it is refused
 	// rather than served.
 	errUnpublishedAdmission = errors.New("toolendpoint: authorizer admitted a peer without publishing the admission")
+	// errPaneRecordRequired is a connection on the helper's lane that did not
+	// carry a pane record at all — a helper older than this build, or the pid
+	// of one reused by something else. Either way it names no pane, and a
+	// connection on that lane is never guessed at: guessing would be exactly
+	// the "some enrolled session" answer the record exists to replace.
+	errPaneRecordRequired = errors.New("toolendpoint: a connection on the helper's lane carried no pane record")
 )
+
+// paneRecordTimeout bounds the wait for a pane record before the connection is
+// refused. It is a HANG LIMIT and not a deadline anything waits for: the helper
+// writes the record before it pipes a single far byte, so the read has already
+// returned by the time the file descriptor is readable at all. A peer that
+// connects on this lane and then says nothing is not a helper mid-write, and it
+// must not hold a serve goroutine open for the connection's whole life.
+const paneRecordTimeout = 5 * time.Second
 
 const (
 	rpcParseError     = -32700
@@ -99,6 +114,17 @@ type Config struct {
 	SelfUID uint32
 	// Auth binds an accepted peer to a session, grant and run context.
 	Auth Authorizer
+	// Lane answers whether an accepted peer is this machine's helper daemon —
+	// the one process whose connections may name a pane (nocx-50w7p.16). The
+	// composition root owns it because the answer is a comparison between the
+	// process the coordinator dialed its helper as and the start time that pid
+	// has now; the endpoint only asks.
+	//
+	// NIL MEANS NO LANE, and then NO connection may name a pane: a record
+	// arriving anywhere else is not read, not honoured, and not a fallback the
+	// endpoint invents. That is the fail-closed direction — a coordinator with
+	// no helper admits no far agent, which is exactly today's behaviour.
+	Lane func(Peer) bool
 	// Dispatch runs the common worker declaration and executor pipeline.
 	Dispatch assistant.ToolDispatcher
 	// Observer receives admission, refusal and catalogue observations for the
@@ -365,9 +391,15 @@ func (e *Endpoint) accept(listener *net.UnixListener) {
 			_ = conn.Close()
 			return
 		}
+		// WHETHER THIS PEER MAY NAME A PANE, decided here and not in the serve
+		// goroutine: it is a comparison against a fact the coordinator recorded,
+		// it never touches the peer's bytes, and a connection that is NOT the
+		// lane must be served exactly as it was before this bead — no record
+		// read, no preamble, the same JSON ahead of it.
+		onLane := e.cfg.Lane != nil && e.cfg.Lane(peer)
 		go func() {
 			defer e.wait.Done()
-			e.serve(conn, peer)
+			e.serve(conn, peer, onLane)
 		}()
 	}
 }
@@ -472,9 +504,54 @@ func (e *Endpoint) observePeerRefusal(peer Peer, reason string) {
 	e.observe(observation)
 }
 
-func (e *Endpoint) serve(conn *net.UnixConn, peer Peer) {
+// readPaneRecord reads the one frame a helper writes ahead of a far agent's
+// own bytes: which pane the connection arrived on (nocx-50w7p.16).
+//
+// The deadline is set and CLEARED around this read rather than left on the
+// connection. What follows it is a long-lived request loop, and a read deadline
+// that outlived the record would end every idle connection a helper holds —
+// which is every far agent that is thinking rather than calling.
+func (e *Endpoint) readPaneRecord(conn *net.UnixConn) (string, error) {
+	if err := conn.SetReadDeadline(time.Now().Add(paneRecordTimeout)); err != nil {
+		return "", err
+	}
+	pane, err := panebind.Read(conn)
+	// Cleared whether or not the read worked: on failure the connection is
+	// closed, and on success the request loop below must be able to wait.
+	_ = conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		return "", err
+	}
+	if pane == "" {
+		// Unreachable through panebind.Read, which refuses an empty session.
+		// Answered rather than assumed, because a reader that could return ""
+		// would hand the authorizer an empty pane, and "" is the spelling of
+		// "this connection named no pane" — the opposite fact.
+		return "", errPaneRecordRequired
+	}
+	return pane, nil
+}
+
+func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 	defer e.untrack(conn)
 	defer func() { _ = conn.Close() }()
+
+	// THE PANE RECORD, and it is read FIRST: before the decision, before any
+	// request byte, and only on the lane. A far agent's connection is the
+	// helper's, so the helper's report of which pane it arrived on is what the
+	// authorizer decides on — and a failure to produce one is a refusal with a
+	// sentence, never a fall back to the local rule (which would admit the
+	// connection as whatever tree the kernel happened to match).
+	if onLane {
+		pane, err := e.readPaneRecord(conn)
+		if err != nil {
+			code, message, reason := rpcErrorFor(err)
+			e.observePeerRefusal(peer, reason)
+			e.writeError(conn, nil, code, message, reason)
+			return
+		}
+		peer.Pane = pane
+	}
 
 	// published records that the authorizer admitted this connection through
 	// the callback below, and under which session. The endpoint grants nothing
@@ -861,6 +938,19 @@ func rpcErrorFor(err error) (code int, message, reason string) {
 	case errors.Is(err, ErrNotEnrolled):
 		return rpcPeerRefused, "worker caller refused",
 			"this process is not in a pane nocx has enrolled, so it has no worker tools. Nothing you can call will change that; tell the person their pane is not orchestrated."
+	case errors.Is(err, panebind.ErrShortRecord):
+		// THE HELPER'S REPORT DID NOT ARRIVE WHOLE. Nothing of the call ran,
+		// and retrying on this connection is not possible — but the fact is
+		// about the helper that opened the pane rather than about the caller,
+		// so the sentence says which of the two is broken.
+		return rpcPeerRefused, "worker caller refused",
+			"this connection stopped before it said which pane it belongs to, so nocx never learned what it was for and ran none of it. The helper holding this pane is the part that failed; the pane's agent can try again once that helper is restarted."
+	case errors.Is(err, panebind.ErrNotAPaneRecord), errors.Is(err, errPaneRecordRequired):
+		// A connection on the helper's lane that names no pane. It is refused
+		// rather than matched against the local rule: that rule answers for a
+		// process tree on THIS machine, and this connection is a far host's.
+		return rpcPeerRefused, "worker caller refused",
+			"this connection arrived on the lane nocx's helper uses but did not name a pane, so there is no pane whose tools it could be given and none of the call was run. This is a mismatch between the running helper and this build; say so rather than retrying."
 	case errors.Is(err, errUnpublishedAdmission):
 		// THE ONE ADMISSION THAT IS NOCX'S OWN FAULT. The authorizer granted
 		// and did not record, so the connection would have served under an

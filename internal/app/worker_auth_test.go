@@ -120,10 +120,29 @@ func openWorkerAuthSession(t *testing.T) (*session.Reg, session.Session, *panevi
 // about a machine needs (the domain is derived from exactly these).
 type workerAuthSessionOverride struct {
 	session.Session
+	// id is the session's own name, and it is a field rather than the embedded
+	// interface's answer because a test that stands a session up without a
+	// registry has no embedded session to ask — and a nil interface there is a
+	// panic inside the assertion being written.
+	id          session.ID
 	kind        session.Kind
 	host        string
 	sshOpts     []ssh.ConnectOption
 	fingerprint string
+}
+
+func (s workerAuthSessionOverride) ID() session.ID {
+	if s.id != "" {
+		return s.id
+	}
+	// Falling back to the embedded session is what every existing use of this
+	// double wants: it stands a REAL session up and overrides one or two of its
+	// route facts, so the id is the real one's. The field above is for the
+	// tests that have no real session to embed.
+	if s.Session == nil {
+		return ""
+	}
+	return s.Session.ID()
 }
 
 func (s workerAuthSessionOverride) Kind() session.Kind { return s.kind }

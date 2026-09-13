@@ -62,6 +62,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/sshdial"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
 )
 
 // lifecycleBindHost is the far-side address the lifecycle listener is bound
@@ -98,6 +99,12 @@ var (
 	// that believes it is getting something (channel.go's own rule for a
 	// target on an sftp open), not a no-op.
 	errNoPaneListeners = errors.New("no far-side listener was asked for")
+	// errNoPaneSession is a tool socket asked for with no session for its
+	// connections to name. It is named because the alternative is a pane whose
+	// every far agent is refused with a sentence about a mismatch, which sends
+	// whoever reads it looking at the endpoint rather than at the request that
+	// left it out.
+	errNoPaneSession = errors.New("a far-side tool socket was asked for with no session to name, so its connections could identify no pane")
 	// errBadPaneSpec is a pane's listeners asked for with an incomplete
 	// destination. It is refused before anything is dialed, for the reason
 	// validateShellSpec's errors are.
@@ -125,6 +132,17 @@ type PaneSpec struct {
 	// reach the coordinator's tool endpoint. Empty means this pane offers
 	// none.
 	ToolSocketPath string
+	// Session is the coordinator's session id for the pane these listeners
+	// belong to, and it is what every connection arriving on the tool socket
+	// ANNOUNCES before its own bytes (nocx-50w7p.16). The helper is the only
+	// party that knows it: its listener is per pane, so the pane a connection
+	// belongs to is not a claim anybody makes — it is the listener the helper
+	// accepted on, reported to the coordinator that asked for it.
+	//
+	// Required exactly when ToolSocketPath is set: a tool socket whose
+	// connections name no session is a socket the coordinator can only refuse
+	// (validatePaneSpec says so by name, before anything is dialed).
+	Session string
 	// ToolSocketTarget is the LOCAL socket each accepted connection is piped
 	// into: the tool endpoint of the coordinator that ASKED FOR THIS PANE, on
 	// the machine this helper runs on. It is the request's value and never the
@@ -159,6 +177,21 @@ type PaneListeners struct {
 	toolLn     net.Listener
 	toolPath   string
 	toolTarget string
+	// session is the session id every connection on toolLn announces before
+	// its own bytes, or empty when this pane has no tool socket.
+	session string
+	// forwards are the far-side tool connections this pane is carrying right
+	// now, keyed by the connection itself. They are held so Close can end
+	// them: a listener that stops accepting leaves the connections it already
+	// accepted running, and a connection outlives the session that justified
+	// it — the far agent keeps a pipe into a coordinator that has forgotten
+	// the pane, which is the shape ADR-0058 forbids one layer up.
+	//
+	// closed is what makes the registration and the close one decision rather
+	// than two: an Accept that returns while Close is running must not leave a
+	// connection nobody will ever close.
+	forwards map[net.Conn]struct{}
+	closed   bool
 
 	mu       sync.Mutex
 	claimed  bool
@@ -190,6 +223,7 @@ func (s *Service) OpenPaneListeners(ctx context.Context, spec PaneSpec) (*PaneLi
 	p := &PaneListeners{
 		toolPath:   spec.ToolSocketPath,
 		toolTarget: spec.ToolSocketTarget,
+		session:    spec.Session,
 		log:        s.log,
 	}
 	pool, err := s.acquirePooled(ctx, conn, spec.Destination, spec.AcceptOnTrust, spec.HostKeyFingerprint)
@@ -323,14 +357,45 @@ func (p *PaneListeners) bridge(conn net.Conn) {
 
 // acceptTool serves the far side's tool socket: every connection an agent
 // process makes there is piped into the coordinator's own endpoint socket.
+//
+// Every accepted connection is REGISTERED before it is served, so this pane can
+// end them all when it ends (Close). An accept that loses the race with Close
+// gets a connection already marked closed: it is closed here rather than handed
+// to a forward nobody will end.
 func (p *PaneListeners) acceptTool() {
 	for {
 		conn, err := p.toolLn.Accept()
 		if err != nil {
 			return
 		}
+		if !p.trackForward(conn) {
+			_ = conn.Close()
+			continue
+		}
 		go p.forwardTool(conn)
 	}
+}
+
+// trackForward registers one accepted far-side connection, or reports that this
+// pane is already closed and the connection must be dropped.
+func (p *PaneListeners) trackForward(conn net.Conn) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return false
+	}
+	if p.forwards == nil {
+		p.forwards = make(map[net.Conn]struct{})
+	}
+	p.forwards[conn] = struct{}{}
+	return true
+}
+
+// untrackForward forgets a connection whose forward has ended.
+func (p *PaneListeners) untrackForward(conn net.Conn) {
+	p.mu.Lock()
+	delete(p.forwards, conn)
+	p.mu.Unlock()
 }
 
 // forwardTool pipes one agent connection to the coordinator's tool endpoint.
@@ -353,6 +418,7 @@ func (p *PaneListeners) acceptTool() {
 // endpoint at all.
 func (p *PaneListeners) forwardTool(far net.Conn) {
 	defer func() { _ = far.Close() }()
+	defer p.untrackForward(far)
 	local, err := net.Dial("unix", p.toolTarget)
 	if err != nil {
 		p.log.Warn("ssh: refusing a far-side tool connection",
@@ -361,6 +427,39 @@ func (p *PaneListeners) forwardTool(far net.Conn) {
 		return
 	}
 	defer func() { _ = local.Close() }()
+	// BOTH ENDS ARE THE PANE'S. Closing only the far side ends the pump that
+	// reads from it, but not the one writing INTO the endpoint: a pump parked
+	// on a write would hold its goroutine and this connection open past the
+	// pane's end, which is the same defect one pump over. The registration
+	// loses to a concurrent Close exactly as the accept did — the pair is
+	// closed here and the forward ends before it starts.
+	if !p.trackForward(local) {
+		return
+	}
+	defer p.untrackForward(local)
+
+	// THE PANE RECORD GOES FIRST, before a single far byte, and it is the
+	// helper's whole contribution to admission (nocx-50w7p.16): the endpoint
+	// decides nothing about a forwarded connection without it, and a helper
+	// that cannot say which pane this is must not hand the connection over at
+	// all. Refused here rather than written short: a connection the endpoint
+	// would refuse on a malformed record is a connection whose far agent gets
+	// an MCP error about nocx rather than about its pane.
+	record, err := panebind.Encode(p.session)
+	if err != nil {
+		p.log.Warn("ssh: refusing a far-side tool connection: this pane cannot name its session",
+			"path", p.toolTarget, "error", err)
+		return
+	}
+	if n, err := local.Write(record); err != nil || n != len(record) {
+		// The COUNT is checked as well as the error: a short write with no
+		// error would hand the endpoint a truncated record, which is a pane
+		// frame that says nothing rather than no frame at all.
+		p.log.Warn("ssh: refusing a far-side tool connection: the pane record did not reach the endpoint",
+			"path", p.toolTarget, "wrote", n, "want", len(record), "error", err)
+		return
+	}
+
 	done := make(chan struct{}, 2)
 	go func() { _, _ = io.Copy(local, far); done <- struct{}{} }()
 	go func() { _, _ = io.Copy(far, local); done <- struct{}{} }()
@@ -392,6 +491,29 @@ func (p *PaneListeners) ToolSocketPath() string { return p.toolPath }
 // teardown, which is where it is called from.
 func (p *PaneListeners) Close() error {
 	p.closeOne.Do(func() {
+		// THE FORWARDS THIS PANE IS CARRYING ARE ENDED WITH IT. Closing the
+		// listener stops new connections; what it does not do is end the ones
+		// already accepted, and those are connections a far agent holds into a
+		// coordinator that has forgotten this pane. The closing event is the
+		// pane's — its session ended, its listener was cancelled, the daemon is
+		// going away — and a forward outliving it is a session's authority
+		// outliving the session (ADR-0058), one layer below the endpoint where
+		// the same rule is already enforced.
+		//
+		// Taken under the same lock as the registration, so a connection
+		// arriving during this Close is either already in the map (and closed
+		// here) or sees closed (and is closed by acceptTool).
+		p.mu.Lock()
+		p.closed = true
+		open := make([]net.Conn, 0, len(p.forwards))
+		for conn := range p.forwards {
+			open = append(open, conn)
+		}
+		p.forwards = nil
+		p.mu.Unlock()
+		for _, conn := range open {
+			_ = conn.Close()
+		}
 		if p.lifecycleLn != nil {
 			_ = p.lifecycleLn.Close()
 		}
@@ -433,6 +555,13 @@ func validatePaneSpec(spec PaneSpec) error {
 	}
 	if spec.ToolSocketPath != "" && spec.ToolSocketTarget == "" {
 		return fmt.Errorf("%w: %s", errNoToolSocket, spec.ToolSocketPath)
+	}
+	if spec.ToolSocketPath != "" && spec.Session == "" {
+		// A tool socket whose connections name no pane is a socket the
+		// coordinator can only refuse, so the pane is refused instead — before
+		// a connection is dialed, which is the rule every refusal in this
+		// function follows.
+		return fmt.Errorf("%w: %s", errNoPaneSession, spec.ToolSocketPath)
 	}
 	switch {
 	case spec.Destination.Host == "":

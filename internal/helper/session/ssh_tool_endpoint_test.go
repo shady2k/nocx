@@ -38,6 +38,7 @@ package session_test
 // the TRANSPORT decision — WHICH endpoint a pane's bytes arrive at.
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -86,6 +87,21 @@ func (s *sshStand) paneParams(t *testing.T, farPath, endpoint string) proto.SSHS
 // distinct paths on the fixture's "far host", so a pane forwarded to the wrong
 // endpoint is visible as a line arriving at the wrong socket — which is what
 // the mutation this bead fixes produced, for every pane but the first.
+// waitRecord waits for the pane record a forwarded connection announces, and
+// answers the session it names. It is separate from waitLine because the two
+// are different facts: the record says WHICH pane the connection is for, the
+// line says what the far agent asked.
+func (e *toolEndpointStand) waitRecord(t *testing.T) string {
+	t.Helper()
+	select {
+	case session := <-e.record:
+		return session
+	case <-time.After(toolEndpointWait):
+		t.Fatalf("no pane record reached this coordinator's tool endpoint, so the connection named no pane")
+		return ""
+	}
+}
+
 func TestEachCoordinatorsPaneForwardsToItsOwnToolEndpoint(t *testing.T) {
 	f := newSSHFixture(t, "pw", "printf 'ALIVE\n'; cat")
 	stand := newSSHStand(t, f, &sshCoordinator{
@@ -97,14 +113,16 @@ func TestEachCoordinatorsPaneForwardsToItsOwnToolEndpoint(t *testing.T) {
 	dir := t.TempDir()
 	farA, farB := filepath.Join(dir, "far-a.sock"), filepath.Join(dir, "far-b.sock")
 	coordA, coordB := filepath.Join(dir, "coord-a.sock"), filepath.Join(dir, "coord-b.sock")
-	endpointA := serveToolEndpoint(t, coordA)
-	endpointB := serveToolEndpoint(t, coordB)
+	endpointA := serveToolEndpoint(t, coordA, true)
+	endpointB := serveToolEndpoint(t, coordB, true)
 
-	if _, err := first.SpawnSSH(context.Background(), stand.paneParams(t, farA, coordA)); err != nil {
+	entryA, err := first.SpawnSSH(context.Background(), stand.paneParams(t, farA, coordA))
+	if err != nil {
 		t.Fatalf("the first coordinator's spawn-ssh: %v", err)
 	}
 	f.waitForwardGranted(t)
-	if _, err := second.SpawnSSH(context.Background(), stand.paneParams(t, farB, coordB)); err != nil {
+	entryB, err := second.SpawnSSH(context.Background(), stand.paneParams(t, farB, coordB))
+	if err != nil {
 		t.Fatalf("the second coordinator's spawn-ssh: %v", err)
 	}
 	f.waitForwardGranted(t)
@@ -120,6 +138,20 @@ func TestEachCoordinatorsPaneForwardsToItsOwnToolEndpoint(t *testing.T) {
 		t.Fatalf("the second pane's far agent could not write: %v", err)
 	}
 
+	// EACH ENDPOINT IS TOLD WHICH PANE ITS CONNECTION IS FOR before the bytes
+	// arrive, and it is told the pane of the coordinator that ASKED (nocx-50w7p.16
+	// over nocx-50w7p.18's per-request target): the two panes are the same
+	// helper, the same daemon and the same account, and the only thing telling
+	// them apart is this record.
+	if got := endpointA.waitRecord(t); got != entryA.HostSessionID.Session {
+		t.Fatalf("the first endpoint's connection announced pane %q, want its own pane %q", got, entryA.HostSessionID.Session)
+	}
+	if got := endpointB.waitRecord(t); got != entryB.HostSessionID.Session {
+		t.Fatalf("the second endpoint's connection announced pane %q, want its own pane %q", got, entryB.HostSessionID.Session)
+	}
+	if entryA.HostSessionID.Session == entryB.HostSessionID.Session {
+		t.Fatal("the two panes were given one session, so this test could not tell them apart")
+	}
 	if got := endpointA.waitLine(t); got != "a-tools" {
 		t.Fatalf("the first coordinator's endpoint was sent %q, want its own pane's line", got)
 	}
@@ -143,6 +175,109 @@ func dialFarTool(t *testing.T, path string) net.Conn {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	return conn
+}
+
+// TestAFarToolConnectionEndsWithTheSessionThatJustifiesIt — the closing half,
+// and precisely the half TestAnUnforwardedToolSocketPathIsRefusedByTheFarSide
+// stepped around: that test closes its live connection FIRST, and says why —
+// "an open connection would keep the forwarded channel alive, and the teardown
+// under test would be measuring the test's own client rather than the
+// listener's withdrawal". A far agent's pipe outliving its pane is the defect,
+// not a convenience for the test: the connection carries authority over a
+// session that has ended (ADR-0058), and nobody on the far side is going to
+// close it — the agent is a program that thinks it still has a tool socket.
+//
+// # Why there are TWO panes
+//
+// One pane cannot show this. Its close releases the pane's pooled reference,
+// and when that is the last reference the ssh connection itself goes — which
+// tears down every forwarded channel on it, the far agent's included. So a
+// single-pane test passes with the cancellation removed, and proves the pool
+// rather than the pane. The two panes here share one pooled connection (AD-4
+// keys the pool by destination), so closing the FIRST leaves the connection
+// alive: what ends its agent's tool connection is this pane ending it, and the
+// second pane still working is the evidence that nothing else did.
+func TestAFarToolConnectionEndsWithTheSessionThatJustifiesIt(t *testing.T) {
+	f := newSSHFixture(t, "pw", "printf 'ALIVE\n'; cat")
+	stand := newSSHStand(t, f, &sshCoordinator{
+		password: "pw", verdict: proto.HostKeyTrusted, fingerprint: f.fingerprint(),
+	})
+	dir := t.TempDir()
+	farA, farB := filepath.Join(dir, "far-a.sock"), filepath.Join(dir, "far-b.sock")
+	endpoint := serveToolEndpoint(t, stand.toolSocket, true)
+
+	entryA := stand.mustSpawn(t, stand.paneParams(t, farA, stand.toolSocket))
+	f.waitForwardGranted(t)
+	entryB := stand.mustSpawn(t, stand.paneParams(t, farB, stand.toolSocket))
+	f.waitForwardGranted(t)
+
+	// ONE AT A TIME, and that is not tidiness: what this test needs is which
+	// agent connection belongs to which pane, and the only thing that says so
+	// is the ORDER (the record names a session; the socket it arrived on is not
+	// in the record). Dialling and serving A completely before B touches the
+	// far side makes that mapping a fact rather than a hope.
+	agentA := dialFarTool(t, farA)
+	if _, err := agentA.Write([]byte("a-tools\n")); err != nil {
+		t.Fatalf("the first far agent could not write: %v", err)
+	}
+	// PAIRED SUCCESS FIRST: each connection is SERVED while its session lives,
+	// so what follows is something taken away rather than something never
+	// given.
+	if got := endpoint.waitRecord(t); got != entryA.HostSessionID.Session {
+		t.Fatalf("the first connection announced pane %q, want %q", got, entryA.HostSessionID.Session)
+	}
+	if got := endpoint.waitLine(t); got != "a-tools" {
+		t.Fatalf("the first far agent's line reached the endpoint as %q", got)
+	}
+	consumeAnswer(t, agentA)
+
+	agentB := dialFarTool(t, farB)
+	if _, err := agentB.Write([]byte("b-tools\n")); err != nil {
+		t.Fatalf("the second far agent could not write: %v", err)
+	}
+	if got := endpoint.waitRecord(t); got != entryB.HostSessionID.Session {
+		t.Fatalf("the second connection announced pane %q, want %q", got, entryB.HostSessionID.Session)
+	}
+	if got := endpoint.waitLine(t); got != "b-tools" {
+		t.Fatalf("the second far agent's line reached the endpoint as %q", got)
+	}
+	consumeAnswer(t, agentB)
+
+	// THE FIRST PANE'S OWN END. Nothing on the far side closes anything, and
+	// the pooled connection survives it because the second pane holds it.
+	if err := stand.client.CloseSession(context.Background(), entryA.HostSessionID); err != nil {
+		t.Fatalf("close-session: %v", err)
+	}
+
+	if err := agentA.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if line, err := bufio.NewReader(agentA).ReadBytes('\n'); err == nil || len(line) > 0 {
+		t.Fatalf("after the session closed the far agent's connection answered %q (err %v), want it ended", line, err)
+	}
+
+	// AND THE OTHER PANE IS UNTOUCHED — the pairing that says the ending above
+	// was this pane's own, and not the transport going away for both.
+	if _, err := agentB.Write([]byte("b-tools\n")); err != nil {
+		t.Fatalf("the surviving pane's agent could not write: %v", err)
+	}
+	if got := endpoint.waitLine(t); got != "b-tools" {
+		t.Fatalf("the surviving pane's line reached the endpoint as %q", got)
+	}
+}
+
+// consumeAnswer reads one answer from a far agent, so that a later read is about
+// what happened NEXT rather than about a reply already in flight.
+func consumeAnswer(t *testing.T, agent net.Conn) {
+	t.Helper()
+	if err := agent.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if answer, err := bufio.NewReader(agent).ReadString('\n'); err != nil {
+		t.Fatalf("a far agent was never answered, so nothing is being taken from it: %v", err)
+	} else if !strings.Contains(answer, "tools-ok") {
+		t.Fatalf("a far agent was answered %q, want the endpoint's own answer", answer)
+	}
 }
 
 // TestAPaneWhoseCoordinatorHasGoneIsRefusedAndNotReRouted is the bead's second
@@ -183,7 +318,7 @@ func TestAPaneWhoseCoordinatorHasGoneIsRefusedAndNotReRouted(t *testing.T) {
 	})
 	second := stand.addCoordinator(t)
 	// The coordinator that started this daemon, still running.
-	alive := serveToolEndpoint(t, stand.toolSocket)
+	alive := serveToolEndpoint(t, stand.toolSocket, true)
 
 	dir := t.TempDir()
 	farPath := filepath.Join(dir, "far.sock")

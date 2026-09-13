@@ -115,34 +115,54 @@ func ptyDimension(n int) (uint16, error) {
 	return uint16(n), nil
 }
 
+// This test carries two things the six verification cases in
+// realpty_cases_test.go do not: a key arriving encoded against the mode the
+// PROGRAM set (steps 2 and 4) and the reply the program actually asked for
+// (step 5). Each is written the way those six are — the handling it turns on,
+// and what removing that handling does — and every removal below was run by
+// hand against this test before it was written down:
+//
+//   - The key encoded against the mode the program set. Handling:
+//     Session.encode's IntentKindKey branch, which asks the emulator to encode
+//     the key from the terminal's own state. Removal (encode ESC [ A here
+//     instead of asking): step 4's KEY2 reads 1b5b41 where the program is owed
+//     1b4f41, and the wait for it never sees the value.
+//   - The reply the program actually asked for. Handling: the write of the
+//     emulator's replies on the ordered path in Session.Ingest. Removal (write
+//     replies[:0]): the program's DSR is never answered, its six-byte read
+//     never returns, and the wait never sees REPLY:1b5b313b3152.
+//
+// Step 6's resize is not one of the six: what it proves is the commit's
+// EXTERNAL effect — the program learns the size it is running at — which is the
+// part of a geometry commit that no rollback can take back.
 func TestAProgramRunsOnARealPTYDirectedByTheRuntimeWithNoClient(t *testing.T) {
 	prog := startProgram(t, realProgram, harnessGeometry(80, 24))
 	s, pump, ctrl := prog.s, prog.done, prog.ctrl
 
 	// 1. The program is up and has turned its terminal raw.
-	waitForScreen(t, s, "READY")
+	waitForScreen(t, s, prog.changed, "READY")
 
 	// 2. A key, before the program set any mode. The intent carries the KEY
 	// ("Up"); what it becomes is the runtime's decision, and here the program
 	// reads back the legacy sequence.
 	press(t, s, ctrl, "Up")
-	waitForScreen(t, s, "KEY1:1b5b41")
+	waitForScreen(t, s, prog.changed, "KEY1:1b5b41")
 
 	// 3. The program enables application cursor keys and says so, which is the
 	// observable state the next step waits on.
-	waitForScreen(t, s, "KEYS-ON")
+	waitForScreen(t, s, prog.changed, "KEYS-ON")
 
 	// 4. The SAME intent, and the program reads back the other sequence: the
 	// mode the program set is what decided the bytes, and no client was
 	// involved in the decision (ADR-0066, AD-1 as amended).
 	press(t, s, ctrl, "Up")
-	waitForScreen(t, s, "KEY2:1b4f41")
+	waitForScreen(t, s, prog.changed, "KEY2:1b4f41")
 
 	// 5. The program asked where its cursor was and got the runtime's answer:
 	// ESC [ 1 ; 1 R, hex-encoded by the program itself. The cursor was put at
 	// the home position by the program, so the answer is the runtime's STATE
 	// and not a constant.
-	waitForScreen(t, s, "REPLY:1b5b313b3152")
+	waitForScreen(t, s, prog.changed, "REPLY:1b5b313b3152")
 
 	// 6. A size the client reports and the runtime decides. The commit's
 	// external effect is that the PROGRAM learns it, which is what cannot be
@@ -159,7 +179,7 @@ func TestAProgramRunsOnARealPTYDirectedByTheRuntimeWithNoClient(t *testing.T) {
 	}
 	// The one byte the program is waiting for, sent as an intent like any other.
 	run(t, s, ctrl, IntentKindText, []byte("g"))
-	waitForScreen(t, s, "SIZE:30 100")
+	waitForScreen(t, s, prog.changed, "SIZE:30 100")
 
 	// 7. And no client was ever attached: everything above was the runtime's,
 	// with nobody watching.
@@ -167,13 +187,13 @@ func TestAProgramRunsOnARealPTYDirectedByTheRuntimeWithNoClient(t *testing.T) {
 		t.Fatalf("%d consumers were attached to a session driven with no client", len(got))
 	}
 
-	select {
-	case err := <-pump:
-		if err != nil {
-			t.Fatalf("feeding the program's output into the runtime failed: %v", err)
-		}
-	case <-time.After(hangLimit):
-		t.Fatalf("the program never exited; the screen reads:\n%s", s.Snapshot().Screen)
+	// The pump closes its report channel when the program's output ends, so
+	// this waits on that and reads the outcome it left behind: a clock here
+	// would be a duration where an event exists.
+	for range prog.changed {
+	}
+	if err := <-pump; err != nil {
+		t.Fatalf("feeding the program's output into the runtime failed: %v", err)
 	}
 }
 
@@ -187,6 +207,12 @@ type programSession struct {
 	s    *Session
 	ctrl Control
 	done <-chan error
+	// changed reports the runtime having taken in more of the program's
+	// output, and closes when the program's output ends. A wait selects on it
+	// rather than reading the screen on a timer: every assertion here is about
+	// a state the runtime reached, so the thing to wait for is the state
+	// having been reached, and the screen is checked after each report.
+	changed <-chan struct{}
 }
 
 // startProgram starts `sh -c script` on a real pty of the given size, builds
@@ -228,13 +254,14 @@ func startProgram(t *testing.T, script string, g Geometry) *programSession {
 	if err != nil {
 		t.Fatalf("build the runtime over the real pair: %v", err)
 	}
-	return &programSession{t: t, s: s, ctrl: sessionControl(t, s), done: feedFrom(t, lp, s)}
+	done, changed := feedFrom(t, lp, s)
+	return &programSession{t: t, s: s, ctrl: sessionControl(t, s), done: done, changed: changed}
 }
 
 func (p *programSession) screen() string { return string(p.s.Snapshot().Screen) }
 
 // wait blocks until the screen holds want, or fails at the hang limit.
-func (p *programSession) wait(want string) { waitForScreen(p.t, p.s, want) }
+func (p *programSession) wait(want string) { waitForScreen(p.t, p.s, p.changed, want) }
 
 // send admits and executes one intent and answers where it got to, WITHOUT
 // failing the test: the mouse and paste cases both need an intent that is
@@ -266,28 +293,46 @@ func (p *programSession) typed(text string) { p.t.Helper(); p.mustSend(IntentKin
 // feedFrom pumps the program's output into the runtime, which is what a
 // carrier does in the product: the runtime never reads the PTY itself, because
 // the bytes it decides and the bytes it ingests are the same ordered path.
-func feedFrom(t *testing.T, lp *pty.LocalPty, s *Session) <-chan error {
+//
+// It answers two channels and both are about the same event. done carries the
+// end of the pump — nil when the program simply exited, an error when the
+// runtime refused what it was handed. changed reports each read that reached
+// the runtime and is CLOSED when the pump ends, so a test waits on the
+// runtime's state changing rather than on a clock, and a wait that can no
+// longer be satisfied is told so instead of timing out.
+//
+// The report is a non-blocking send into a one-slot channel, which is exact
+// rather than lossy: the screen is checked after every report and it is the
+// CURRENT screen, so a report that arrives while one is already pending
+// carries nothing the pending one does not already cause to be re-read.
+func feedFrom(t *testing.T, lp *pty.LocalPty, s *Session) (<-chan error, <-chan struct{}) {
 	t.Helper()
-	out := make(chan error, 1)
+	done := make(chan error, 1)
+	changed := make(chan struct{}, 1)
 	go func() {
+		defer close(changed)
 		buf := make([]byte, 32<<10)
 		for {
 			n, err := lp.Read(buf)
 			if n > 0 {
 				if ingestErr := s.Ingest(append([]byte(nil), buf[:n]...)); ingestErr != nil {
-					out <- ingestErr
+					done <- ingestErr
 					return
+				}
+				select {
+				case changed <- struct{}{}:
+				default:
 				}
 			}
 			if err != nil {
 				// The program is gone: that is the end of this pump and not a
 				// failure of it.
-				out <- nil
+				done <- nil
 				return
 			}
 		}
 	}()
-	return out
+	return done, changed
 }
 
 // press admits and executes one key, and fails the test if it did not reach
@@ -312,18 +357,29 @@ func run(t *testing.T, s *Session, ctrl Control, kind IntentKind, payload []byte
 
 // waitForScreen waits until the screen holds want, and fails the test at the
 // hang limit. The condition is an observable state change — the screen the
-// runtime hands out — and the clock is only the end of the wait: nothing here
-// asserts how long anything took.
-func waitForScreen(t *testing.T, s *Session, want string) {
+// runtime hands out, re-read after each report that it took more of the
+// program's output in — and nothing here says how long anything took: the hang
+// limit only ends a wait that can no longer be satisfied, and a pump that has
+// ended says so rather than leaving the wait to expire.
+func waitForScreen(t *testing.T, s *Session, changed <-chan struct{}, want string) {
 	t.Helper()
-	deadline := time.Now().Add(hangLimit)
+	deadline := time.NewTimer(hangLimit)
+	defer deadline.Stop()
+	ended := false
 	for {
 		if strings.Contains(string(s.Snapshot().Screen), want) {
 			return
 		}
-		if time.Now().After(deadline) {
+		if ended {
+			t.Fatalf("the program's output ended and the screen never came to hold %q; it reads:\n%s", want, s.Snapshot().Screen)
+		}
+		select {
+		case _, ok := <-changed:
+			if !ok {
+				ended = true
+			}
+		case <-deadline.C:
 			t.Fatalf("the screen never came to hold %q within %s; it reads:\n%s", want, hangLimit, s.Snapshot().Screen)
 		}
-		time.Sleep(time.Millisecond)
 	}
 }

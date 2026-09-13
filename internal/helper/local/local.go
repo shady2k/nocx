@@ -87,12 +87,56 @@ type Installed struct {
 // interval on deploy.Ensure. It holds unchanged with the filesystem as the
 // transport: the local errors differ (ENOSPC, EACCES, a read-only mount) and
 // the two states they can leave do not.
+//
+// THE ARTIFACT IT WRITES IS THIS MACHINE'S OWN when the source carries one (see
+// preferredLocal): the helper that runs here links an ssh client, and the
+// artifact that is written to somebody else's host must not.
 func Install(ctx context.Context, src deploy.ArtifactSource, home string) (Installed, error) {
-	binary, contentHash, err := deploy.Ensure(ctx, FS{}, src, home, Platform())
+	binary, contentHash, err := deploy.Ensure(ctx, FS{}, preferredLocal{src: src, platform: Platform()}, home, Platform())
 	if err != nil {
 		return Installed{}, err
 	}
 	return Installed{Binary: binary, Generation: proto.GenerationID(contentHash)}, nil
+}
+
+// preferredLocal answers the host-local variant of a source when that source
+// carries one (deploy.LocalArtifactSource) and the source itself when it does
+// not.
+//
+// THE CHOICE LIVES HERE, and here rather than at the call site, because this is
+// the only place that installs a helper for THIS machine: the remote install
+// goes through deploy.Ensure with the raw source and can never reach the local
+// variant at all, which is what keeps the ssh-linked bytes off a host nobody
+// here controls. A caller passes the one artifact source it has and does not
+// have to know which variants its build carries.
+//
+// The fallback covers ANY error from the variant. Only one is reachable today —
+// "not built" — because the walk skips an artifact it cannot parse and
+// hashGzip refuses a corrupt one at init, but a second error class would be a
+// mode in which no helper is installed at all: a pane that cannot open, caused
+// by the variant that was supposed to improve it. A build that never ran `make
+// helper-local` therefore installs exactly what it installed before the variant
+// existed, and nothing in the product can tell the difference yet — the client
+// is linked but nothing dials (nocx-50w7p.1). Where a helper without it will be
+// told apart is the pane open, by name (plan §8).
+type preferredLocal struct {
+	src      deploy.ArtifactSource
+	platform deploy.Platform
+}
+
+// Artifact answers for THIS machine's platform — the only one deploy.Ensure is
+// asked for on this path, because that is what Platform() returns — from the
+// local variant when it has been built and from the wrapped source when it has
+// not.
+func (s preferredLocal) Artifact(p deploy.Platform) (data []byte, contentHash string, err error) {
+	local, ok := s.src.(deploy.LocalArtifactSource)
+	if !ok {
+		return s.src.Artifact(p)
+	}
+	if data, contentHash, err = local.LocalArtifact(s.platform); err == nil {
+		return data, contentHash, nil
+	}
+	return s.src.Artifact(p)
 }
 
 // Config is everything Open needs to reach one generation on this machine.

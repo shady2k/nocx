@@ -43,6 +43,16 @@ func (embeddedSource) Artifact(p deploy.Platform) (data []byte, contentHash stri
 	return nil, "", deploy.ErrUnsupportedPlatform
 }
 
+// LocalArtifact answers this machine's OWN helper — the variant built with
+// nocx_local_ssh, which is the same platform with an ssh client linked in. The
+// walk over its directory lives in source_local.go; this method exists so the
+// production source the composition root already passes around is the one that
+// carries both variants (deploy.LocalArtifactSource), rather than a second
+// source somebody has to remember to pass to the local install.
+func (embeddedSource) LocalArtifact(p deploy.Platform) (data []byte, contentHash string, err error) {
+	return localSource{}.Artifact(p)
+}
+
 // DefaultSource is the artifact source production installs from. It is a
 // variable so the composition-root tests can inject synthetic bytes while
 // production uses the embedded binaries.
@@ -68,10 +78,27 @@ type artifact struct {
 var artifactsByPlatform map[deploy.Platform]artifact
 
 func init() {
-	artifactsByPlatform = make(map[deploy.Platform]artifact)
-	entries, err := fs.ReadDir(artifactsFS, "bin")
+	artifactsByPlatform = artifactsInDir(artifactsFS, "bin")
+}
+
+// artifactsInDir reads one embedded artifact directory. THE NAMING CONVENTION
+// LIVES HERE ONCE: an artifact is named nocx-helper-<goos>-<goarch>.gz, the
+// platform is the whole of the name, and a file that does not parse as one is
+// skipped rather than guessed at. Two directories are read this way — bin/,
+// which is what gets deployed, and bin/local/, which is what this machine runs
+// itself — and they are separate DIRECTORIES rather than longer names because
+// the name is already spoken for by the platform: two variants of one platform
+// cannot be told apart by a name that spells only the platform.
+//
+// A directory that is absent embeds nothing but its committed .gitignore, so
+// an empty result is the ordinary state of a checkout that has not built that
+// variant — which is why the callers distinguish "not built" by their own
+// error rather than by this function failing.
+func artifactsInDir(fsys fs.FS, dir string) map[deploy.Platform]artifact {
+	found := make(map[deploy.Platform]artifact)
+	entries, err := fs.ReadDir(fsys, dir)
 	if err != nil {
-		return
+		return found
 	}
 	for _, e := range entries {
 		if e.IsDir() {
@@ -87,7 +114,7 @@ func init() {
 			continue
 		}
 		p := deploy.Platform{GOOS: parts[0], GOARCH: parts[1]}
-		data, err := artifactsFS.ReadFile("bin/" + name)
+		data, err := fs.ReadFile(fsys, dir+"/"+name)
 		if err != nil {
 			continue
 		}
@@ -95,8 +122,9 @@ func init() {
 		if err != nil {
 			continue
 		}
-		artifactsByPlatform[p] = artifact{compressed: data, contentHash: contentHash}
+		found[p] = artifact{compressed: data, contentHash: contentHash}
 	}
+	return found
 }
 
 func hashGzip(data []byte) (string, error) {

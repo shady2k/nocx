@@ -1,0 +1,12 @@
+# This machine's own helper (written by `make helper-local`), which is the
+# deployable artifact with the ssh client linked in (nocx_local_ssh).
+#
+# A directory of its own because the artifact name is frozen as
+# nocx-helper-<goos>-<goarch>.gz and the platform is the whole of it: two
+# variants of one platform cannot be told apart by the name.
+#
+# This committed .gitignore is also what makes the //go:embed all:bin/local in
+# the parent package compile on a checkout that has never built the variant —
+# a pattern matching no file is a compile error, and the all: prefix matches
+# dotfiles, so it always matches at least this file.
+nocx-helper-*.gz

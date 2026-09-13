@@ -27,10 +27,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -66,6 +70,11 @@ const paneWait = 15 * time.Second
 // sshFixture is an in-process ssh server that serves a session channel the way
 // a host does for `ssh host`: a pty, then a shell or a command on it.
 type sshFixture struct {
+	// t is the test this fixture is the far host of, kept so a failure that
+	// happens on an accept goroutine can be reported: t.Errorf is the one
+	// reporting method safe to call from another goroutine, and Fatal is not.
+	t *testing.T
+
 	addr       string
 	hostSigner gossh.Signer
 	password   string
@@ -104,6 +113,23 @@ type sshFixture struct {
 	// dropExit makes the next command's end close the channel with no
 	// exit-status request at all: the far side going away mid-session.
 	dropExit bool
+	// conns counts the TCP connections this "host" accepted. A pane's
+	// listeners and its shell channel must share ONE of them (AD-4's pool is
+	// keyed by the resolved destination), and this is how a test asserts that
+	// rather than trusting the pool's key.
+	conns int
+	// tcpForwards and unixForwards are the listeners this host granted, keyed
+	// by the address or path the client named them with — which is how a
+	// cancel finds them, and how the client's own forward list matches an
+	// incoming connection to the request that created it.
+	tcpForwards  map[string]net.Listener
+	unixForwards map[string]net.Listener
+	// forwardGranted and forwardClosed wake on a listener the far host grants
+	// and withdraws, and grantedPorts carries the ports, so a test waits on the
+	// far host's own events rather than polling them.
+	forwardGranted chan struct{}
+	forwardClosed  chan struct{}
+	grantedPorts   chan int
 }
 
 func newSSHFixture(t *testing.T, password, shellCommand string) *sshFixture {
@@ -118,10 +144,18 @@ func newSSHFixture(t *testing.T, password, shellCommand string) *sshFixture {
 	}
 	_ = pub
 	f := &sshFixture{
+		t:          t,
 		hostSigner: signer, password: password, shellCommand: shellCommand,
 		started: make(chan struct{}, 8), exited: make(chan struct{}, 8),
 		sized: make(chan struct{}, 8), signalled: make(chan struct{}, 8),
 		execSeen: make(chan struct{}, 8), changed: make(chan struct{}, 1),
+		tcpForwards:  map[string]net.Listener{},
+		unixForwards: map[string]net.Listener{},
+		// Eight: one lifecycle grant, one tool socket grant, and room for a
+		// test that asks for both twice.
+		forwardGranted: make(chan struct{}, 8),
+		forwardClosed:  make(chan struct{}, 8),
+		grantedPorts:   make(chan int, 8),
 	}
 	config := &gossh.ServerConfig{
 		PasswordCallback: func(_ gossh.ConnMetadata, pw []byte) (*gossh.Permissions, error) {
@@ -141,7 +175,15 @@ func newSSHFixture(t *testing.T, password, shellCommand string) *sshFixture {
 		t.Fatalf("listen: %v", err)
 	}
 	f.addr = ln.Addr().String()
-	t.Cleanup(func() { _ = ln.Close() })
+	t.Cleanup(func() {
+		_ = ln.Close()
+		// Every listener this host GRANTED is closed too, and a Unix one has
+		// its node removed: a test that fails before the session's own Close
+		// (or a helper that never got there) would otherwise leave a port
+		// bound, a socket file on disk and accept goroutines of a finished
+		// test still running.
+		f.closeAllForwards()
+	})
 	go func() {
 		for {
 			conn, aerr := ln.Accept()
@@ -178,7 +220,10 @@ func (f *sshFixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 		return
 	}
 	defer func() { _ = sconn.Close() }()
-	go gossh.DiscardRequests(reqs)
+	f.mu.Lock()
+	f.conns++
+	f.mu.Unlock()
+	go f.serveGlobalRequests(sconn, reqs)
 	for newChan := range chans {
 		ch, chReqs, aerr := newChan.Accept()
 		if aerr != nil {
@@ -190,6 +235,242 @@ func (f *sshFixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 		}
 		go f.serveSession(ch, chReqs)
 	}
+}
+
+// ── remote forward (-R) and streamlocal listener requests ───────────────
+
+// serveGlobalRequests is the far host's answer to a client that asks IT to
+// listen: `tcpip-forward` (the lifecycle channel's loopback port) and
+// `streamlocal-forward@openssh.com` (the pane's agent tool socket).
+//
+// It is a real implementation of both, and it has to be, because the client
+// side of them — x/crypto/ssh's forward list — looks the listener up by the
+// address the server sends back on each connection: an echoed address that did
+// not match the request is a connection the client refuses as spurious, which
+// is the RFC's requirement rather than a strictness of this fixture.
+//
+// The listeners live on 127.0.0.1 of THIS process, which is what the far host
+// is here: a real sshd on another machine binds the same way, and a test that
+// wants to be the far side's process dials the port this grants.
+func (f *sshFixture) serveGlobalRequests(sconn *gossh.ServerConn, reqs <-chan *gossh.Request) {
+	for req := range reqs {
+		switch req.Type {
+		case "tcpip-forward":
+			var p struct {
+				Addr string
+				Port uint32
+			}
+			if gossh.Unmarshal(req.Payload, &p) != nil {
+				_ = req.Reply(false, nil)
+				continue
+			}
+			ln, err := net.Listen("tcp", net.JoinHostPort(p.Addr, strconv.Itoa(int(p.Port))))
+			if err != nil {
+				_ = req.Reply(false, nil)
+				continue
+			}
+			port := f.boundPort(ln)
+			f.mu.Lock()
+			f.tcpForwards[net.JoinHostPort(p.Addr, strconv.Itoa(port))] = ln
+			f.mu.Unlock()
+			var reply []byte
+			if p.Port == 0 {
+				// RFC 4254 §7.1: a requested port 0 is answered with the one
+				// the server allocated, in a uint32 payload.
+				reply = gossh.Marshal(struct{ Port uint32 }{Port: uint32(port)}) // #nosec G115 -- a bound port.
+			}
+			_ = req.Reply(true, reply)
+			go f.acceptForwardedTCP(sconn, ln, p.Addr)
+			f.signal(f.forwardGranted)
+			f.signalPort(port)
+		case "cancel-tcpip-forward":
+			var p struct {
+				Addr string
+				Port uint32
+			}
+			if gossh.Unmarshal(req.Payload, &p) != nil {
+				_ = req.Reply(false, nil)
+				continue
+			}
+			f.closeForward(net.JoinHostPort(p.Addr, strconv.Itoa(int(p.Port))))
+			_ = req.Reply(true, nil)
+		case "streamlocal-forward@openssh.com":
+			var p struct {
+				SocketPath string
+			}
+			if gossh.Unmarshal(req.Payload, &p) != nil {
+				_ = req.Reply(false, nil)
+				continue
+			}
+			ln, err := net.Listen("unix", p.SocketPath)
+			if err != nil {
+				// An address already in use is REFUSED here rather than
+				// replaced, which is what OpenSSH does too: binding over a name
+				// somebody else owns would hand them this listener's traffic.
+				_ = req.Reply(false, nil)
+				continue
+			}
+			f.mu.Lock()
+			f.unixForwards[p.SocketPath] = ln
+			f.mu.Unlock()
+			_ = req.Reply(true, nil)
+			go f.acceptForwardedUnix(sconn, ln, p.SocketPath)
+			f.signal(f.forwardGranted)
+		case "cancel-streamlocal-forward@openssh.com":
+			var p struct {
+				SocketPath string
+			}
+			if gossh.Unmarshal(req.Payload, &p) != nil {
+				_ = req.Reply(false, nil)
+				continue
+			}
+			f.closeForward(p.SocketPath)
+			_ = req.Reply(true, nil)
+		default:
+			_ = req.Reply(false, nil)
+		}
+	}
+}
+
+// boundPort answers the port a listener the far host just bound is on. Every
+// listener this fixture grants is a TCP one, so anything else is the fixture
+// disagreeing with itself: it is REPORTED and the port read as zero, because
+// this runs on an accept goroutine as well, and only the test goroutine may
+// stop a test (testing.T's Fatal is the one method that may not be called from
+// another one).
+func (f *sshFixture) boundPort(ln net.Listener) int {
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		f.t.Errorf("the far host bound %v, which is not a TCP address", ln.Addr())
+		return 0
+	}
+	return addr.Port
+}
+
+// closeAllForwards withdraws every listener this host granted, on a test's
+// teardown. The socket files are removed with them: net.Listener.Close does not
+// unlink a Unix address, and a fixture that left its nodes behind would make
+// the next test's bind fail on a name nobody owns.
+func (f *sshFixture) closeAllForwards() {
+	f.mu.Lock()
+	names := make([]string, 0, len(f.tcpForwards)+len(f.unixForwards))
+	for name := range f.tcpForwards {
+		names = append(names, name)
+	}
+	for name := range f.unixForwards {
+		names = append(names, name)
+	}
+	f.mu.Unlock()
+	for _, name := range names {
+		f.closeForward(name)
+	}
+}
+
+// closeForward ends one granted listener, by the name it was granted under.
+func (f *sshFixture) closeForward(name string) {
+	f.mu.Lock()
+	ln := f.tcpForwards[name]
+	if ln == nil {
+		ln = f.unixForwards[name]
+	}
+	delete(f.tcpForwards, name)
+	delete(f.unixForwards, name)
+	f.mu.Unlock()
+	if ln != nil {
+		_ = ln.Close()
+		// A Unix listener's NODE outlives Close, and the fixture is the far
+		// host: removing it is what makes the path gone rather than stale.
+		if strings.HasPrefix(name, "/") {
+			_ = os.Remove(name)
+		}
+		f.signal(f.forwardClosed)
+	}
+}
+
+// acceptForwardedTCP turns every connection that arrives on a granted port into
+// a `forwarded-tcpip` channel back to the client, and pumps it.
+func (f *sshFixture) acceptForwardedTCP(sconn *gossh.ServerConn, ln net.Listener, host string) {
+	port := f.boundPort(ln)
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go func(conn net.Conn) {
+			defer func() { _ = conn.Close() }()
+			peerHost, peerPort := splitPeer(conn.RemoteAddr())
+			payload := gossh.Marshal(struct {
+				Addr       string
+				Port       uint32
+				OriginAddr string
+				OriginPort uint32
+			}{
+				Addr: host, Port: uint32(port), // #nosec G115 -- a bound port.
+				OriginAddr: peerHost, OriginPort: uint32(peerPort), // #nosec G115 -- a peer port.
+			})
+			ch, reqs, err := sconn.OpenChannel("forwarded-tcpip", payload)
+			if err != nil {
+				return
+			}
+			defer func() { _ = ch.Close() }()
+			go gossh.DiscardRequests(reqs)
+			f.pumpForwarded(conn, ch)
+		}(conn)
+	}
+}
+
+// acceptForwardedUnix is the same for a granted socket path: the connections
+// arrive as `forwarded-streamlocal@openssh.com`, whose payload names the path
+// the client asked for.
+func (f *sshFixture) acceptForwardedUnix(sconn *gossh.ServerConn, ln net.Listener, path string) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go func(conn net.Conn) {
+			defer func() { _ = conn.Close() }()
+			payload := gossh.Marshal(struct {
+				SocketPath string
+				Reserved   string
+			}{SocketPath: path})
+			ch, reqs, err := sconn.OpenChannel("forwarded-streamlocal@openssh.com", payload)
+			if err != nil {
+				return
+			}
+			defer func() { _ = ch.Close() }()
+			go gossh.DiscardRequests(reqs)
+			f.pumpForwarded(conn, ch)
+		}(conn)
+	}
+}
+
+// pumpForwarded copies bytes both ways between the far side's connection and
+// the channel the client holds, until either end is done.
+func (f *sshFixture) pumpForwarded(conn net.Conn, ch gossh.Channel) {
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(ch, conn); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(conn, ch); done <- struct{}{} }()
+	<-done
+}
+
+// splitPeer reads a net.Addr into the two host/port fields a
+// forwarded-tcpip payload carries. A peer that cannot be split yields an
+// empty host and port 0, which the client still parses: the origin address is
+// a label for the log and never an authority.
+func splitPeer(addr net.Addr) (string, int) {
+	if addr == nil {
+		return "", 0
+	}
+	h, p, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return "", 0
+	}
+	port, err := strconv.Atoi(p)
+	if err != nil {
+		return h, 0
+	}
+	return h, port
 }
 
 // sessionState is one session channel: its pty size, the command it is running
@@ -444,6 +725,86 @@ func (f *sshFixture) signal(ch chan struct{}) {
 	}
 }
 
+// signalPort records a port the far host just bound. It never blocks: the
+// channel is a record for a test that waits later, and a far host that owned a
+// goroutine on a test's read position would be a fixture that can deadlock the
+// thing it is measuring.
+func (f *sshFixture) signalPort(port int) {
+	select {
+	case f.grantedPorts <- port:
+	default:
+	}
+}
+
+// waitLifecyclePort waits until the far host has granted a loopback listener
+// and answers the port it bound.
+//
+// The wait is on the far host's own accept of the request — an event — and
+// paneWait only turns a client that never asked into a failure with a sentence.
+func (f *sshFixture) waitLifecyclePort(t *testing.T) int {
+	t.Helper()
+	select {
+	case port := <-f.grantedPorts:
+		return port
+	case <-time.After(paneWait):
+		t.Fatalf("the far host was never asked for a loopback listener")
+		return 0
+	}
+}
+
+// waitForwardGranted waits for ANY listener the far host has granted (a
+// streamlocal socket is not a port and has no number to answer with).
+func (f *sshFixture) waitForwardGranted(t *testing.T) {
+	t.Helper()
+	select {
+	case <-f.forwardGranted:
+	case <-time.After(paneWait):
+		t.Fatalf("the far host granted no listener")
+	}
+}
+
+// connections is how many TCP connections this host has accepted. One means
+// the pane's listeners and its shell channel rode a single pooled connection.
+func (f *sshFixture) connections() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.conns
+}
+
+// liveForwards is how many listeners the far host still holds, by name. A
+// session that ended leaves none: cancelling them is the process's Close.
+// waitNoForwards waits until the far host holds no listener.
+func (f *sshFixture) waitNoForwards(t *testing.T) {
+	t.Helper()
+	deadline := time.After(paneWait)
+	for {
+		if len(f.liveForwards()) == 0 {
+			return
+		}
+		select {
+		case <-f.forwardClosed:
+		case <-deadline:
+			t.Fatalf("the far host still holds listeners %v", f.liveForwards())
+		}
+	}
+}
+
+// liveForwards is how many listeners the far host still holds, by name. A
+// session that ended leaves none: cancelling them is the process's Close.
+func (f *sshFixture) liveForwards() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	names := make([]string, 0, len(f.tcpForwards)+len(f.unixForwards))
+	for name := range f.tcpForwards {
+		names = append(names, name)
+	}
+	for name := range f.unixForwards {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func (f *sshFixture) waitSignal(t *testing.T, ch chan struct{}, what string) {
 	t.Helper()
 	select {
@@ -678,11 +1039,15 @@ type sshStand struct {
 	coord     *sshCoordinator
 	inspector *recordingInspector
 	exits     *exitWatcher
-	toHelper  *wireRecorder
-	toCoord   *wireRecorder
-	cancel    context.CancelFunc
-	served    chan struct{}
-	closeOnce sync.Once
+	// toolSocket is the coordinator's own tool endpoint, as the helper was
+	// told at construction (NOCX_TOOL_SOCKET). Empty is a coordinator that runs
+	// none.
+	toolSocket string
+	toHelper   *wireRecorder
+	toCoord    *wireRecorder
+	cancel     context.CancelFunc
+	served     chan struct{}
+	closeOnce  sync.Once
 }
 
 // recordingInspector is the OS-evidence seam, and it RECORDS what it was asked
@@ -746,6 +1111,15 @@ func newSSHStand(t *testing.T, f *sshFixture, coord *sshCoordinator) *sshStand {
 	return newSSHStandWith(t, f, coord, true)
 }
 
+// newSSHStandWithoutToolEndpoint is the same stand with a coordinator that runs
+// NO tool endpoint: its helper was started without NOCX_TOOL_SOCKET, which is a
+// real state (cmd/nocx-server answers nil, nil when it has no tool surface) and
+// the one that makes a request for a far-side tool socket impossible to honour.
+func newSSHStandWithoutToolEndpoint(t *testing.T, f *sshFixture, coord *sshCoordinator) *sshStand {
+	t.Helper()
+	return newSSHStandFull(t, f, coord, true, "")
+}
+
 // newSSHStandWithoutSpawner is the same stand with the session service built the
 // way an UNTAGGED helper builds it: no ssh spawner at all, which is a fact about
 // the binary rather than about any request (plan §1). It exists so the refusal
@@ -759,15 +1133,26 @@ func newSSHStandWithoutSpawner(t *testing.T, f *sshFixture, coord *sshCoordinato
 
 func newSSHStandWith(t *testing.T, f *sshFixture, coord *sshCoordinator, withSSHSpawner bool) *sshStand {
 	t.Helper()
+	// The coordinator's own tool endpoint, when it runs one. The path is the
+	// stand's and never created: a test that wants an endpoint serves one
+	// there, and a test that does not leaves the path dead — which is exactly
+	// the difference between a pane whose agent can reach the tool surface and
+	// one whose agent cannot.
+	return newSSHStandFull(t, f, coord, withSSHSpawner, filepath.Join(t.TempDir(), "tool.sock"))
+}
+
+func newSSHStandFull(t *testing.T, f *sshFixture, coord *sshCoordinator, withSSHSpawner bool, toolSocket string) *sshStand {
+	t.Helper()
 	helperEnd, coordEnd := net.Pipe()
 	s := &sshStand{
-		toHelper:  &wireRecorder{Conn: helperEnd},
-		toCoord:   &wireRecorder{Conn: coordEnd},
-		fixture:   f,
-		coord:     coord,
-		inspector: &recordingInspector{},
-		exits:     newExitWatcher(),
-		served:    make(chan struct{}),
+		toHelper:   &wireRecorder{Conn: helperEnd},
+		toCoord:    &wireRecorder{Conn: coordEnd},
+		fixture:    f,
+		coord:      coord,
+		inspector:  &recordingInspector{},
+		exits:      newExitWatcher(),
+		toolSocket: toolSocket,
+		served:     make(chan struct{}),
 	}
 	realClient, err := ssh.NewReal(log.NewSlogAdapter(nil))
 	if err != nil {
@@ -778,7 +1163,7 @@ func newSSHStandWith(t *testing.T, f *sshFixture, coord *sshCoordinator, withSSH
 	s.sshsvc = sshsvc.New(realClient, standLog())
 	var sshSpawner session.SSHSpawner
 	if withSSHSpawner {
-		sshSpawner = session.NewSSHSpawner(s.sshsvc, standLog())
+		sshSpawner = session.NewSSHSpawner(s.sshsvc, toolSocket, standLog())
 	}
 	s.sessions = session.New(session.Options{
 		Generation: "gen-under-test",

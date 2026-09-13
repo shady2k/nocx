@@ -159,31 +159,9 @@ func (s *Service) OpenShell(ctx context.Context, spec ShellSpec) (*ShellChannel,
 		return nil, err
 	}
 
-	auth, err := s.authMethod(ctx, conn, spec.Destination.Identity)
+	pool, err := s.acquirePooled(ctx, conn, spec.Destination, spec.AcceptOnTrust, spec.HostKeyFingerprint)
 	if err != nil {
 		return nil, err
-	}
-	callback := s.hostKeyCallback(ctx, conn, spec.AcceptOnTrust)
-	if spec.HostKeyFingerprint != "" {
-		callback = pinnedHostKey(callback, spec.HostKeyFingerprint)
-	}
-	pool, err := s.client.AcquirePooled(ctx, ssh.PooledSpec{
-		Host:     spec.Destination.Host,
-		Port:     spec.Destination.Port,
-		User:     spec.Destination.User,
-		Identity: identityKey(spec.Destination.Identity),
-		Config: &gossh.ClientConfig{
-			User: spec.Destination.User,
-			// Exactly one method, for the reason the probe path gives: a
-			// second attempt against one host is indistinguishable from
-			// password spraying, and MaxAuthTries is finite.
-			Auth:            []gossh.AuthMethod{auth},
-			HostKeyCallback: callback,
-			Timeout:         ProbeTimeout,
-		},
-	})
-	if err != nil {
-		return nil, classifyChannelError(err)
 	}
 
 	sess, err := pool.Client().NewSession()

@@ -343,10 +343,15 @@ const (
 type LaunchOptions struct {
 	SessionID string // NOCX_SESSION_ID for this session; never empty when Enhanced
 	Enhanced  bool   // request marker-only prompt mode (ADR-0006)
-	// AgentHelperPath and AgentToolSocketPath are non-secret paths for the
-	// launch-owned MCP bridge. They never carry lifecycle authority.
-	AgentHelperPath     string
-	AgentToolSocketPath string
+	// The two far-host paths an agent pane's launch carries — the installed
+	// helper generation's executable and the far path its tool socket answers
+	// on — are NOT here, and their absence is deliberate (nocx-50w7p.14). A
+	// coordinator does not dial an ssh connection any more: this machine's
+	// helper does, and it is the party that renders the launch, names the far
+	// tool socket and forwards it (internal/helper/session's ssh spawner).
+	// Nothing in this package can reach a far host's filesystem, so a field
+	// here could only ever be empty — the surface nocx-e2bws was filed about.
+	//
 	// The authenticated lifecycle channel (ADR-0024). Capability is the
 	// per-epoch bearer: it travels as a bounded FRAME on the session
 	// channel and reaches the far shell through an inherited, already
@@ -497,11 +502,6 @@ type ConnectConfig struct {
 	// Enhanced requests the marker-only prompt mode (ADR-0006) for the
 	// remote shell; forwarded to the launcher in LaunchOptions.
 	Enhanced bool
-
-	// AgentHelperPath and AgentToolSocketPath are non-secret paths forwarded
-	// to the launch-owned MCP bridge.
-	AgentHelperPath     string
-	AgentToolSocketPath string
 
 	// Shell pins the far shell the launcher must target. Empty means
 	// "detect it" — the launcher receives ShellAuto and decides on the far
@@ -713,15 +713,6 @@ func WithSessionID(id string) ConnectOption {
 	return func(c *ConnectConfig) { c.SessionID = id }
 }
 
-// The two agent-path ConnectOptions that used to sit here (bff44b38) are gone:
-// neither ever had a caller — not on the commit that added them, not since, on
-// any platform — and the dead-code ratchet reported them as the branch's only
-// new unreachable functions (nocx-50w7p.9). The values they would have set are
-// supplied by the ONE wiring that runs: the child domain exports
-// NOCX_AGENT_HELPER_PATH and NOCX_TOOL_SOCKET and internal/app reads them into
-// the launcher's options (childdomain.go). The fields below stay, because the
-// ssh path still forwards whatever is in them; a per-connection wiring that
-// wants to fill them re-adds a two-line option where it is needed.
 // WithDesiredMode sets the resolved destination mode (raw|script|helper,
 // nocx-mlm7), the open-time gate shellStartCommand consults: script (or
 // empty — the pre-mode default) publishes and integrates; raw and helper

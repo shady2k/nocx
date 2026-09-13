@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -441,9 +442,20 @@ func TestAFarPaneIsRefusedUntilItIsEnrolledAndApproved(t *testing.T) {
 	// And an UNWATCHED pane is refused even with an answer: the observation
 	// interval is a separate admission act, and a pane nocx is not watching
 	// cannot be an admitting principal.
-	delete(stand.watched, string(farPaneP))
-	if env := stand.callOver(t, string(farPaneP)); env.Error == nil {
+	//
+	// A stand of its own, and the REFUSAL'S REASON asserted: on the stand above
+	// this call would be refused for the other reason a connection can be
+	// refused — the session's caller slot is held by a connection that is still
+	// open — and the test would pass without the enrolment check existing.
+	unwatched := newFarStand(t, remoteSession(farPaneP, "build.example.com", "deploy", "SHA256:key-a"))
+	unwatched.enrol(t, farPaneP, agent)
+	delete(unwatched.watched, string(farPaneP))
+	env := unwatched.callOver(t, string(farPaneP))
+	if env.Error == nil {
 		t.Fatal("a pane that is no longer watched was admitted")
+	}
+	if !strings.Contains(env.Error.Data.Reason, "not in a pane nocx has enrolled") {
+		t.Fatalf("the unwatched pane was refused for %q, want the enrolment refusal", env.Error.Data.Reason)
 	}
 }
 

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.probe.params.schema.json",
+  "title": "HelperSSHProbeParams",
+  "description": "One credential test against one host, asked of the helper that dials. Host, port and user are RESOLVED values: alias resolution, ~/.ssh/config merging and the credential's authorization against an endpoint stay in the coordinator, because it is the party that reads the config and holds the binding, and doing either here would be a second answer to 'which host is this' (plan §3). The helper dials exactly what it is told.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["host", "port", "user", "identity", "acceptOnTrust"],
+  "properties": {
+    "host": {
+      "description": "The dial target. An address and never an alias: it is what the coordinator's own dial path resolved, carried here rather than resolved a second time.",
+      "type": "string",
+      "minLength": 1
+    },
+    "port": {
+      "description": "The resolved port. Required rather than defaulted here, because a helper that picked 22 would be making a decision the profile already made.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "user": {
+      "description": "The resolved user. Required, for the same reason as the port.",
+      "type": "string",
+      "minLength": 1
+    },
+    "identity": { "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/identity" },
+    "acceptOnTrust": {
+      "description": "The coordinator's answer to 'may a host key this host has never presented be recorded'. It is the CALLER's decision travelling with the request: the coordinator sets it only after the accept flow it already owns has run (connections.trustHostKey), and the helper then asks for the write through trust-host-key. A helper therefore cannot turn 'ask the user' into 'trust it', and a `changed` verdict never reaches that write whatever this says — a changed key is the one signature of a machine in the middle.",
+      "type": "boolean"
+    }
+  }
+}

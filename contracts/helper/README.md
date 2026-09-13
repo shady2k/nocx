@@ -135,3 +135,49 @@ different answers.
 The rule the field states is per-OBSERVATION and not per-platform: a `/proc/<pid>/cwd` read
 that was refused is named the same way a platform that cannot answer at all is. The
 reader's problem is identical and the reason is not its business.
+
+## What landed with `nocx-50w7p.2`, and why `Version` moved to 3
+
+The **`ssh` service**, and with it the second direction this wire has always reserved and
+never used. `probe` is a forward op — the coordinator asks, the helper dials and answers —
+and `secret`, `sign`, `verify-host-key` and `trust-host-key` are **reverse ops**: the
+helper asks, over the same connection its request arrived on, and the coordinator answers
+through handlers registered at its composition root. `TypeRequest` and `TypeResponse` were
+allocated in both directions before either was spoken that way (`proto/frame.go`), and the
+version bump is what makes a generation that can answer the reverse half distinguishable
+from one that would drop the question: two peers that disagree refuse each other at hello,
+in both directions.
+
+The service exists because of the owner's invariant of 2026-09-13 — there is no ssh
+connection without a helper, and the coordinator holds no ssh client — and the reverse half
+exists because the two things a dial needs are things the helper must not have:
+
+- **the material.** A password crosses (`ssh.secret`), because ssh has no protocol for
+  proving one without presenting it; a private key does not (`ssh.sign`), because a
+  signature proves possession without handover, and `ssh/knownhosts` and the client stack
+  are forbidden imports in the deployed artifact
+  (`internal/helper/deploy/dependency_test.go`). The reference is the COORDINATOR's and is
+  opaque to the helper, so the helper cannot ask for material the coordinator did not name.
+- **the host-key decision.** `ssh.verify-host-key` answers `trusted`/`changed`/`unknown`
+  from the coordinator's own `known_hosts`, and `ssh.trust-host-key` writes through the one
+  write path this repository has for it. The DECISION travels in `probe.acceptOnTrust`,
+  which the coordinator sets; a helper cannot turn "ask the user" into "trust it", and a
+  `changed` verdict never reaches the write.
+
+Three decisions in these shapes are worth naming rather than leaving to a reader:
+
+- **The public key rides in the identity, and there is no discovery op.** x/crypto/ssh's
+  `Signer` answers `PublicKey()` _before_ it asks for a signature, so the helper must be
+  able to say which key it is offering. Putting it in the identity — where the party that
+  holds the private half already knows it — keeps `sign` a two-field cryptographic request
+  and removes any temptation to make an empty challenge mean "identify yourself".
+- **The outcome spellings are `ssh.ProbeOutcome`'s, character for character.** The
+  coordinator classifies its own probes with `ssh.ClassifyProbeError`; a second vocabulary
+  for one fact is the defect AD-8 names, so the wire spells the same six values and
+  `internal/helper/sshsvc` holds the test that keeps the two in step.
+- **A failure nobody can classify is a refusal, not an outcome.** `rejected` means the
+  server refused the credential; folding an unrecognised dial failure into it would send a
+  person to look at the host.
+
+The schemas are frozen from here like every sibling's: a new op degrades (an older helper
+answers `unknown_service`), and a new FIELD on one of these shapes does not.

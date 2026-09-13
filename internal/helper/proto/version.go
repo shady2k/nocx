@@ -32,4 +32,13 @@ package proto
 // This is 2 rather than 1 because the wire grew a frame type and a service
 // after 1 was written, and the deploy work is where a published number starts
 // to bind (nocx-6ojko).
-const Version = "2"
+//
+// This is 3 rather than 2 because the wire grew the `ssh` service — a forward
+// probe op, four reverse ops the helper asks the coordinator, and the three
+// refusals a helper's dial can end in (no_auth_channel, vault_sealed,
+// needs_interactive) — together with the frame direction they need: reverse
+// requests, which a generation speaking 2 would answer as an unexpected frame
+// and drop, hanging the helper that asked (nocx-50w7p.2). Two peers that
+// disagree about this number refuse each other at hello in both directions,
+// which is what makes the bump the whole of the compatibility story.
+const Version = "3"

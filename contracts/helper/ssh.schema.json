@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.schema.json",
+  "title": "HelperABISSHVocabulary",
+  "description": "The shared vocabulary of the helper ABI's ssh service: what a credential reference is, what a probe can answer, and what a host-key question can answer. It declares $defs and nothing else, so one concept has one declaration (AD-8) — the same discipline identities.schema.json applies to sessions, applied to the second subject this wire grew (nocx-50w7p.2). The service speaks in BOTH directions: `probe` is a forward op the helper answers, and `secret`, `sign`, `verify-host-key` and `trust-host-key` are reverse ops the helper ASKS the coordinator, over the same connection its own request arrived on.",
+  "$defs": {
+    "credential": {
+      "description": "An opaque handle on one stored credential, minted by the COORDINATOR and echoed back by the helper verbatim. The helper never interprets either field, and that is the whole authorization story on this wire: it cannot ask for material the coordinator did not name. PassphraseRef exists because a key and the passphrase that unlocks it are two stored secrets — resolving one where the other was meant is how a wrong-but-valid password gets tried against a server — and it is a REFERENCE and never material: the coordinator is the party that parses a private key, so a passphrase never reaches the helper at all.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref"],
+      "properties": {
+        "ref": {
+          "description": "Names the material the credential's auth kind presents: the password for password auth, the private key for key auth.",
+          "type": "string",
+          "minLength": 1
+        },
+        "passphraseRef": {
+          "description": "Names the passphrase of an encrypted key. Omitted for a password credential and for an unencrypted key.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "authKind": {
+      "description": "How a probe authenticates, in a closed set. It is the COORDINATOR's decision and not the helper's: the coordinator is the party that knows which material it stored, and a helper that guessed would send the wrong rung of the ladder against somebody's machine.",
+      "type": "string",
+      "enum": ["password", "key"]
+    },
+    "purpose": {
+      "description": "What the material a helper asks for is FOR, in a closed set. The purpose is load-bearing rather than decorative: the read is stanced (internal/credential), so a password and a passphrase are resolved through different declarations, different reasons in the vault's own audit, and — where a profile carries policy — potentially different answers.",
+      "type": "string",
+      "enum": ["password", "passphrase"]
+    },
+    "probeOutcome": {
+      "description": "The closed set of answers a probe can give. The spellings are ssh.ProbeOutcome's own, character for character: the coordinator classifies its own probes with ssh.ClassifyProbeError, and a second vocabulary for one fact is what AD-8 exists to prevent. `accepted` and `host-key-unknown` are different answers for the same reason a first connection is not a failure; `host-key-changed` is never conflated with it, because a changed key is the one signature of a machine in the middle. An unclassifiable failure is NOT a member here — it is a refusal of the op, so that 'the server refused this credential' and 'nobody knows what happened' stay apart.",
+      "type": "string",
+      "enum": [
+        "accepted",
+        "rejected",
+        "unreachable",
+        "host-key-unknown",
+        "host-key-changed",
+        "needs-interactive"
+      ]
+    },
+    "hostKeyVerdict": {
+      "description": "The closed set of answers to 'what is this host key'. Naming three outcomes is what lets a helper — which links no knownhosts and has no callback to consult — act on the coordinator's answer: `trusted` is the absence of a host-key error in internal/ssh rather than a value it stores, and `changed` must never be answered as `unknown`, because accepting an unknown key and accepting a changed one are the two different decisions this vocabulary exists to keep apart.",
+      "type": "string",
+      "enum": ["trusted", "changed", "unknown"]
+    },
+    "identity": {
+      "description": "The credential a probe authenticates with, plus the PUBLIC half of a key credential. The public key is here rather than discovered by an op of its own because x/crypto/ssh's Signer interface answers PublicKey() BEFORE it asks for a signature: the helper must be able to declare which key it is offering before it can be asked to sign with it. It is public material — what the peer learns on the first packet — and the private half never crosses, which is why `sign` is exactly a challenge and a signature and why there is no empty-challenge sentinel hiding a discovery question inside a cryptographic one.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["credential", "auth"],
+      "properties": {
+        "credential": { "$ref": "#/$defs/credential" },
+        "auth": { "$ref": "#/$defs/authKind" },
+        "publicKey": {
+          "description": "The wire-format public key blob (RFC 4253 §6.6) as base64. Required for key auth — a helper asked to sign with a key it was not given would have to invent one — and absent for password auth.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

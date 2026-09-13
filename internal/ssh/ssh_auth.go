@@ -147,12 +147,32 @@ func (rc *RealClient) addPublicKeyMethods(ctx context.Context, chain *[]authChai
 // Any error — vault sealed, secret missing, malformed key material — is
 // propagated to the caller. There is no silent fallback to file-based keys.
 func (rc *RealClient) addVaultKeyMethod(ctx context.Context, chain *[]authChainEntry, cfg *ConnectConfig) error {
-	secret, err := rc.getSecretWithUnlock(ctx, cfg, cfg.KeySecretID, "load the stored key")
+	signer, err := rc.storedKeySigner(ctx, cfg)
 	if err != nil {
 		return err
 	}
+	*chain = append(*chain, authChainEntry{kind: kindPublicKey, method: gossh.PublicKeys(signer)})
+	return nil
+}
+
+// storedKeySigner loads the private key material a config's KeySecretID names
+// — with PassphraseSecretID when the key is encrypted — and answers the
+// signer. It is the SAME construction addVaultKeyMethod appends to a chain,
+// and it is a function of its own because a second caller needs the signer
+// rather than a link in a chain: the helper's `sign` reverse op signs a
+// challenge with a stored key without ever building an auth chain
+// (internal/ssh's own seam, used by internal/app's reverse handlers).
+//
+// It is a pure extraction and changes nothing about the path: the errors, the
+// laziness of the passphrase read, and the refusal to fall back to a file are
+// all as they were.
+func (rc *RealClient) storedKeySigner(ctx context.Context, cfg *ConnectConfig) (gossh.Signer, error) {
+	secret, err := rc.getSecretWithUnlock(ctx, cfg, cfg.KeySecretID, "load the stored key")
+	if err != nil {
+		return nil, err
+	}
 	if secret.IsEmpty() {
-		return fmt.Errorf("key material not found for vault secret %q", cfg.KeySecretID)
+		return nil, fmt.Errorf("key material not found for vault secret %q", cfg.KeySecretID)
 	}
 
 	var signer gossh.Signer
@@ -191,11 +211,9 @@ func (rc *RealClient) addVaultKeyMethod(ctx context.Context, chain *[]authChainE
 			return nil
 		})
 	}); useErr != nil {
-		return useErr
+		return nil, useErr
 	}
-
-	*chain = append(*chain, authChainEntry{kind: kindPublicKey, method: gossh.PublicKeys(signer)})
-	return nil
+	return signer, nil
 }
 
 func (rc *RealClient) addAgentMethods(chain *[]authChainEntry) {

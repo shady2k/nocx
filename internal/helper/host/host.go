@@ -50,12 +50,20 @@ type Host struct {
 	instanceID  string
 	log         *slog.Logger
 
-	// mu guards out, services, requests and streamSeq. One mutex is enough:
-	// the critical sections are tiny, and the writer mutex is what keeps
-	// concurrent responses from interleaving mid-frame.
+	// mu guards out, services, requests, streamSeq, and the reverse-request
+	// table below. One mutex is enough: the critical sections are tiny, and
+	// the writer mutex is what keeps concurrent responses from interleaving
+	// mid-frame.
 	mu       sync.Mutex
 	services []Service
 	requests map[uint64]pendingRequest
+
+	// reverse holds the answers this host is waiting for: the requests IT sent
+	// to the coordinator (Ask, reverse.go), keyed by the ids it minted. It is
+	// the mirror of requests, which holds the cancels the CALLER may send for
+	// the requests this host is serving.
+	reverse    map[uint64]chan proto.Response
+	reverseSeq uint64
 
 	// streamSeq mints the stream ids chunked responses are keyed by (D14):
 	// the sentinel and its chunks may interleave with other responses, and
@@ -233,6 +241,12 @@ func (h *Host) frame(ctx context.Context, ty proto.FrameType, payload []byte) {
 			defer h.inflight.Done()
 			h.request(ctx, req)
 		}()
+	case proto.TypeResponse:
+		// An answer to a request THIS helper sent (Ask, reverse.go). Until the
+		// ssh service there was no such request, so this frame had no handler
+		// and fell to the default branch — logged as unexpected and dropped,
+		// which for a reverse request would have been a hang.
+		h.reverseResponse(payload)
 	case proto.TypeCancel:
 		h.cancel(payload)
 	case proto.TypeKeepAlive:

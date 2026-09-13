@@ -80,6 +80,13 @@ type Client struct {
 	doneOnce  sync.Once
 	closeOnce sync.Once
 
+	// reverseCtx is the lifetime every reverse HANDLER runs under (reverse.go):
+	// it ends when the connection does, so a handler blocked on a person does
+	// not outlive the connection that asked it. cancelReverse is safe to call
+	// more than once and from more than one goroutine.
+	reverseCtx    context.Context
+	cancelReverse context.CancelFunc
+
 	lostErr error
 }
 
@@ -208,6 +215,11 @@ func (c *Client) Cancel(id uint64) {
 // registry drains its use-guards before closing, so no caller sees that.
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
+		// Closing ends the connection, which is the end of every reverse
+		// handler's lifetime too (reverse.go). Cancelled here as well as in
+		// lose, because a caller that closes a client whose carrier never
+		// reports the loss would otherwise leave a handler waiting.
+		c.cancelReverse()
 		_ = c.conn.Close()
 	})
 	return nil
@@ -225,6 +237,9 @@ func (c *Client) mintID() uint64 {
 // ErrLost rather than sent into the void.
 func (c *Client) lose(reason error) {
 	c.doneOnce.Do(func() {
+		// Every reverse handler still running is freed here: the connection
+		// that asked is gone, so an answer has nowhere to go (reverse.go).
+		c.cancelReverse()
 		c.lostErr = reason
 		c.mu.Lock()
 		c.lost = true
@@ -251,6 +266,12 @@ func (c *Client) onFrame(ty proto.FrameType, payload []byte) {
 		c.verifyHelloOK(payload)
 	case proto.TypeResponse:
 		c.deliverResponse(payload)
+	case proto.TypeRequest:
+		// A request the HELPER sends this coordinator (reverse.go). It was
+		// `unexpected frame` until the ssh service existed, and dropping it is
+		// the one answer that always produces a hang: the helper is waiting
+		// for this, and nobody else will answer.
+		c.serveReverse(payload)
 	case proto.TypeChunk:
 		c.deliverChunk(payload)
 	case proto.TypeKeepAlive:

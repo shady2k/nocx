@@ -14,17 +14,26 @@
 # helper with the archive linked — not bumped mechanically, and not guessed
 # from the spike's probe, whose -s flag interaction was left unexplained there.
 #
-# WHICH IS WHY IT SAYS WHICH BINARY IT MEASURED. In this worktree the helper
-# does not import the emulator (nocx-ygxjv.2 wires it), so the numbers below
-# are the floor, and the script says so instead of letting a reader take them
-# for the size the budget is about.
+# WHICH IS WHY IT SAYS WHICH BINARY IT MEASURED. The helper imported no
+# emulator when this script was written, and it said so rather than letting a
+# reader take its numbers for the size the budget is about. It does import one
+# now (nocx-ygxjv.2): the measured 2026-09-13 figures are 17,044,136 (linux/
+# amd64), 16,303,928 (linux/arm64), 5,614,557 (darwin/amd64) and 5,308,802
+# (darwin/arm64) — the Linux pair carrying the whole of the archive, which is
+# what the 20 MiB ceiling in source_test.go is derived from. The check below
+# still reports whether the emulator is linked, because a run whose helper had
+# stopped importing it would print smaller numbers that the budget no longer
+# describes.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../../.." && pwd)"
 artifacts="$repo_root/internal/helper/deploy/artifacts/bin"
 targets="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64"
-ceiling_bytes=$((5 * 1024 * 1024))
+# The ceiling the test below the numbers asserts, so the two cannot print
+# different budgets: internal/helper/deploy/artifacts/source_test.go's
+# maxHelperBytes, which is derived from these numbers.
+ceiling_bytes=$((20 * 1024 * 1024))
 build=1
 
 while [ $# -gt 0 ]; do

@@ -25,31 +25,31 @@ var helperArtifactTargets = []string{
 	"nocx-helper-darwin-arm64.gz",
 }
 
-// THE CEILING IS SET FROM A MEASUREMENT, and this one is the CGo switch's
-// cost rather than the library's. Measured 2026-09-13 with
-// third_party/libghostty-vt/scripts/measure-helper-size.sh, on the artifacts
-// `make helpers` now produces (per-target Zig, CGO_ENABLED=1, external
-// linking, statically linked musl on Linux):
+// THE CEILING IS SET FROM A MEASUREMENT, and this one is libghostty-vt's cost,
+// measured on the INTEGRATED helper — the runtime, the emulator port and the
+// CGo adapter all linked, which is what changes the number. Measured
+// 2026-09-13 on this tree with `make vt-helper-size`, on the artifacts
+// `make helpers` produces (per-target Zig, CGO_ENABLED=1, external linking,
+// statically linked musl on Linux, -tags vtmusl):
 //
-//	linux/amd64   6,610,992
-//	linux/arm64   6,452,000
-//	darwin/amd64  4,378,173
-//	darwin/arm64  4,158,306
+//	linux/amd64   17,044,136   (was 6,610,992 — +10,433,144)
+//	linux/arm64   16,303,928   (was 6,452,000 — +9,851,928)
+//	darwin/amd64   5,614,557   (was 4,378,173 — +1,236,384)
+//	darwin/arm64   5,308,802   (was 4,158,306 — +1,150,496)
 //
-// The Linux pair moved from ~4.2 MB to ~6.6 MB because a static musl binary
-// carries its libc; that is the price of the property Makefile's helpers
-// comment protects, and it was paid deliberately rather than measured away.
-// 8 MiB leaves 1,777,616 bytes (21%) above the largest, which is the same
-// proportion the previous 5 MiB ceiling left above 4,212,352 — and it still
-// rejects a reintroduced client stack.
+// The Linux pair carries the whole of it and gained ~10 MB, which is the
+// static ghostty archive itself: those two helpers are the ones that link it
+// with the pinned musl triple, and musl's own libc is already in their figure.
+// The spike's estimate for this was +12.4 MB per Linux helper
+// (.internal/spikes/buildmatrix/README.md §4), so the measurement came in
+// under it rather than over.
 //
-// IT IS NOT THE INTEGRATION BUDGET. The helper links libghostty-vt in
-// nocx-ygxjv.2, and the spike measured roughly +12.4 MB per Linux helper for a
-// probe that links it (.internal/spikes/buildmatrix/README.md §4). That bump
-// must be derived from a REAL helper — through the same script and from the
-// sizes the test below logs — rather than applied in advance, because a
-// ceiling raised ahead of the measurement measures nothing.
-const maxHelperBytes int64 = 8 * 1024 * 1024
+// 20 MiB (20,971,520 bytes) leaves 3,927,384 bytes (23%) above the largest,
+// which is the same headroom the previous 8 MiB ceiling left above 6,610,992
+// — and the reason it is not raised further is that what the ceiling rejects
+// is still meaningful: a helper that grew by another archive's worth, or that
+// re-acquired a client stack, lands on the wrong side of it.
+const maxHelperBytes int64 = 20 * 1024 * 1024
 
 func TestMakeHelpersIsIdempotent(t *testing.T) {
 	first := artifactSizes(t)

@@ -61,9 +61,10 @@ const helperArtifactDir = "internal/helper/deploy/artifacts/bin"
 func TestHelperArtifactsCarryThePinnedThirdPartyNotices(t *testing.T) {
 	root := moduleRoot(t)
 	want := pinnedNotices(t, root)
+	paths := helperArtifactPaths(t)
 
-	for _, name := range helperArtifactTargets {
-		plain := decompressHelperArtifact(t, filepath.Join(root, helperArtifactDir, name))
+	for _, name := range sortedNames(paths) {
+		plain := decompressHelperArtifact(t, paths[name])
 		if !bytes.Contains(plain, want) {
 			t.Fatalf("%s does not carry the pinned third-party notices (%d bytes, sha256 %s); the helper links libghostty-vt, so a helper without them is a binary distributed without its licences",
 				name, len(want), hashBytes(want))
@@ -73,18 +74,16 @@ func TestHelperArtifactsCarryThePinnedThirdPartyNotices(t *testing.T) {
 	// The artifact for THIS machine is executed, which is the only check that
 	// sees the document the way a user on a remote host does — and the only one
 	// that can ask for exactness rather than presence.
-	host := "nocx-helper-" + runtime.GOOS + "-" + runtime.GOARCH + ".gz"
-	known := false
-	for _, name := range helperArtifactTargets {
-		if name == host {
-			known = true
-		}
-	}
-	if !known {
-		t.Fatalf("this host is %s/%s, which the helper matrix does not build for, so `nocx-helper --licenses` cannot be run against an artifact here; run this check where a matrix target matches the host", runtime.GOOS, runtime.GOARCH)
-	}
+	//
+	// It is the LOCAL one, because that is the helper this machine actually
+	// runs: the deployed variant in bin/ is the artifact somebody else's host
+	// would run, and it is checked above by containment like the other three
+	// foreign-architecture ones. helperArtifactPaths has already refused to
+	// build the map without the host's own local variant, which is what makes
+	// this lookup safe rather than guarded a second time here.
+	local := localHelperArtifactDir + "/nocx-helper-" + runtime.GOOS + "-" + runtime.GOARCH + ".gz"
 	bin := filepath.Join(t.TempDir(), "nocx-helper")
-	if err := os.WriteFile(bin, decompressHelperArtifact(t, filepath.Join(root, helperArtifactDir, host)), 0o700); err != nil {
+	if err := os.WriteFile(bin, decompressHelperArtifact(t, paths[local]), 0o700); err != nil {
 		t.Fatalf("write %s: %v", bin, err)
 	}
 	cmd := exec.Command(bin, "--licenses") // #nosec G204 -- the binary is the artifact this test decompressed into its own temp dir
@@ -92,13 +91,13 @@ func TestHelperArtifactsCarryThePinnedThirdPartyNotices(t *testing.T) {
 	if err != nil {
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
-			t.Fatalf("`%s --licenses` failed with exit %d: %s", host, exit.ExitCode(), exit.Stderr)
+			t.Fatalf("`%s --licenses` failed with exit %d: %s", local, exit.ExitCode(), exit.Stderr)
 		}
-		t.Fatalf("run `%s --licenses`: %v", host, err)
+		t.Fatalf("run `%s --licenses`: %v", local, err)
 	}
 	if !bytes.Equal(out, want) {
 		t.Fatalf("`%s --licenses` printed %d bytes (sha256 %s), the pinned document is %d bytes (sha256 %s)",
-			host, len(out), hashBytes(out), len(want), hashBytes(want))
+			local, len(out), hashBytes(out), len(want), hashBytes(want))
 	}
 }
 

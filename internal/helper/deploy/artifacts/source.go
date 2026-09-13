@@ -31,6 +31,15 @@ var ErrArtifactsNotBuilt = errors.New("deploy: helper artifacts not built (run m
 // binaries such as nocx-helper that only use deploy's filesystem types.
 type embeddedSource struct{}
 
+// THIS IS THE COMPILE-TIME HALF of "production cannot reach the injection seam
+// in internal/helper/local's preferredLocal": the production source carries the
+// local companion by construction rather than by hope, so the branch that
+// installs a source's own artifact can only be taken by a caller that supplied
+// bytes of its own — a test. The runtime half is
+// TestTheProductionArtifactSourceCarriesTheLocalVariant in that package, which
+// holds the value the composition root actually passes (DefaultSource).
+var _ deploy.LocalArtifactSource = embeddedSource{}
+
 func (embeddedSource) Artifact(p deploy.Platform) (data []byte, contentHash string, err error) {
 	if a, ok := artifactsByPlatform[p]; ok {
 		return a.compressed, a.contentHash, nil
@@ -49,6 +58,10 @@ func (embeddedSource) Artifact(p deploy.Platform) (data []byte, contentHash stri
 // production source the composition root already passes around is the one that
 // carries both variants (deploy.LocalArtifactSource), rather than a second
 // source somebody has to remember to pass to the local install.
+//
+// Its error is not a fallback's trigger: a directory holding nothing for the
+// platform is what the local install reports, because a build without this
+// variant has no helper to install at all (nocx-50w7p.7).
 func (embeddedSource) LocalArtifact(p deploy.Platform) (data []byte, contentHash string, err error) {
 	return localSource{}.Artifact(p)
 }

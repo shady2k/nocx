@@ -1,5 +1,6 @@
 .PHONY: all init build build-server dev dev-web lint format test clean hooks ci ci-full \
         ci-backend ci-linux ci-mac ci-os-split ci-frontend ci-e2e helpers helper-local \
+        require-local-helper \
         print-os-pkgs print-portable-pkgs \
         lint-ci test-ci build-ci root-ci frontend-ci
 
@@ -124,6 +125,14 @@ HELPER_ARTIFACT_DIR := internal/helper/deploy/artifacts/bin
 HELPER_LOCAL_DIR := $(HELPER_ARTIFACT_DIR)/local
 HELPER_LOCAL_TAGS := nocx_local_ssh
 HELPER_LOCAL_PLATFORM := $(HOST_GOOS)/$(shell $(GO) env GOARCH)
+
+# WHAT `make helper-local` BUILDS, and it is a LIST because one app can run on
+# more than one platform: the macOS universal bundle carries both darwin
+# slices, so it must carry both darwin local variants, and the release's
+# helpers job passes all three this product ships for. The default is the host,
+# which is the only one a `make dev` binary can install — `go run` and `go
+# build` produce the host's architecture and nothing else.
+HELPER_LOCAL_TARGETS ?= $(HELPER_LOCAL_PLATFORM)
 
 # --- the pinned libghostty-vt archives (nocx-ygxjv.10) ------------------------
 #
@@ -252,23 +261,47 @@ helpers: vt-archives
 	@$(call build_helper_artifacts,$(HELPER_TARGETS),$(HELPER_ARTIFACT_DIR),)
 	@echo "helper artifacts: $(HELPER_ARTIFACT_DIR)/nocx-helper-{$(HELPER_TARGETS)}.gz"
 
-# THE HELPER THIS MACHINE RUNS ITSELF (nocx-50w7p.1): the host platform's
-# artifact, built with the ssh client in it, into the embed's second directory
-# (bin/local/, which has its own //go:embed and its own source —
+# THE HELPER THIS MACHINE RUNS ITSELF (nocx-50w7p.1, nocx-50w7p.7): the
+# artifact for every platform in HELPER_LOCAL_TARGETS, built with the ssh
+# client in it, into the embed's second directory (bin/local/, which has its
+# own //go:embed and its own source —
 # internal/helper/deploy/artifacts/source_local.go).
 #
-# It is the ONLY target that passes nocx_local_ssh, and it is deliberately not a
-# prerequisite of `helpers`, `build`, `dev` or `build-release`. Building it
-# means deciding that this checkout's local helper may dial ssh, which today
-# links the client and changes nothing else — nothing dials yet. When the route
-# that uses it lands, the development and release targets adopt it deliberately
-# and this comment says so; until then a build that has not run it installs the
-# artifact it always did (internal/helper/local falls back), and no deployed
-# artifact is affected either way.
+# It is the ONLY make target that passes nocx_local_ssh, and `helpers` must
+# never pass it: that tag decides whether a helper can dial ssh at all, and the
+# deployed artifact reaches hosts nobody here controls. Two targets, two tags,
+# one definition of how an artifact is built (build_helper_artifacts).
+#
+# IT IS NOT OPTIONAL (nocx-50w7p.7). This machine's helper is the route every
+# local pane takes (ADR-0057) and internal/helper/local no longer falls back to
+# the deployable artifact, so a build that did not run this target ships an app
+# that cannot open a terminal at all. That is why every target that produces a
+# runnable binary depends on `require-local-helper` below and not on this one:
+# building the variant and CHECKING the binary really embeds it are two acts,
+# and only the second one fails when the artifact lands somewhere //go:embed
+# does not read.
 helper-local: vt-archives
 	@mkdir -p $(HELPER_LOCAL_DIR)
-	@$(call build_helper_artifacts,$(HELPER_LOCAL_PLATFORM),$(HELPER_LOCAL_DIR),$(HELPER_LOCAL_TAGS))
-	@echo "local helper artifact: $(HELPER_LOCAL_DIR)/nocx-helper-$(subst /,-,$(HELPER_LOCAL_PLATFORM)).gz"
+	@$(call build_helper_artifacts,$(HELPER_LOCAL_TARGETS),$(HELPER_LOCAL_DIR),$(HELPER_LOCAL_TAGS))
+	@for t in $(HELPER_LOCAL_TARGETS); do \
+	  echo "local helper artifact: $(HELPER_LOCAL_DIR)/nocx-helper-$${t%/*}-$${t#*/}.gz"; \
+	done
+
+# THE BUILD-TIME GATE, and the reason a target that ships or runs the app
+# depends on THIS rather than on helper-local: the local variant for every
+# platform the build can run on must be IN THE EMBED, not merely built. The
+# difference is not pedantic — an artifact written where //go:embed does not
+# read it leaves a binary that compiles cleanly and installs no helper, which is
+# exactly the failure the release workflow's own embeds-a-helper gate exists for
+# (nocx-mchgh). It is a test rather than a file listing for the same reason that
+# one is.
+#
+# NOCX_REQUIRE_LOCAL_ARTIFACTS carries the platform list, so the gate asserts
+# the platforms THIS build ships — both darwin slices for a universal bundle —
+# rather than whatever happens to be on disk.
+require-local-helper: helper-local
+	@NOCX_REQUIRE_LOCAL_ARTIFACTS="$(HELPER_LOCAL_TARGETS)" \
+	  $(GO) test ./internal/helper/deploy/artifacts -count=1
 
 all: lint test build
 
@@ -291,7 +324,13 @@ build: build-server
 # desktop shell's dependency surface into a headless daemon for nothing.
 # Same -ldflags as the app, because a pair that cannot report one version is
 # the defect the update health check exists to catch.
-build-server: helpers
+#
+# require-local-helper and not helper-local: this binary embeds BOTH artifact
+# directories, and since the local install stopped falling back to the
+# deployable artifact (nocx-50w7p.7) a coordinator built without the second one
+# serves no pane at all. The gate is what makes that a build failure here
+# rather than a refusal at the first window.
+build-server: helpers require-local-helper
 	CGO_ENABLED=0 $(GO) build -ldflags "$(LDFLAGS)" -o build/bin/nocx-server ./cmd/nocx-server
 
 # The shipped artefact. `-tags release` is what selects the real profile
@@ -300,7 +339,11 @@ build-server: helpers
 # `production` is v3's tag for production build semantics (devtools off).
 # `helpers` is a prerequisite because the shipped binary embeds the
 # cross-compiled helper artefacts; without them Artifact answers
-# ErrArtifactsNotBuilt and the remote panel has nothing to install.
+# ErrArtifactsNotBuilt and the remote panel has nothing to install. Its
+# host-local companion is a prerequisite for a stronger reason: the local
+# install no longer falls back (nocx-50w7p.7), so an app built without it
+# installs no helper and every pane refuses. Both are gated, not merely built
+# — see require-local-helper.
 #
 # The coordinator is built here too, and with `release` and nothing else:
 # that tag is what selects the shipped profile directory (appdir.go), and a
@@ -308,7 +351,7 @@ build-server: helpers
 # different vault and a different settings document from the window attached
 # to it. It is NOT built through build-server, which is the development
 # build of the same binary.
-build-release: helpers
+build-release: helpers require-local-helper
 	$(FRONTEND_BUILD)
 	$(GO) build -tags "$(strip release production $(WAILS_PLATFORM_TAGS))" -ldflags "$(LDFLAGS)" -o build/bin/nocx .
 	CGO_ENABLED=0 $(GO) build -tags release -ldflags "$(LDFLAGS)" -o build/bin/nocx-server ./cmd/nocx-server
@@ -318,7 +361,10 @@ build-release: helpers
 # no dev CLI without a Taskfile, and replicating the watcher is not worth
 # inventing one for — the dev-web target is the iteration path for frontend
 # work, this target is for exercising the real shell.
-dev: helpers
+#
+# Both artifact directories, host platform, gated: a dev binary that cannot
+# install its own helper is a dev loop where no terminal opens.
+dev: helpers require-local-helper
 	$(FRONTEND_BUILD)
 	$(GO) run -tags "$(strip $(WAILS_PLATFORM_TAGS))" .
 

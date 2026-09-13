@@ -36,6 +36,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/deploy"
+	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
 	"github.com/shady2k/nocx/internal/helper/endpoint"
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/local"
@@ -329,37 +330,83 @@ func TestInstallPrefersThisMachineSOwnArtifact(t *testing.T) {
 	}
 }
 
-// TestInstallWithoutALocalVariantInstallsTheDeployableArtifact is the same
-// choice failing softly: a build whose source carries no local variant — a
-// checkout that never ran `make helper-local` — installs exactly what it
-// installed before the variant existed. Without this, "prefer the variant"
-// could be implemented as "require the variant", and every ordinary build would
-// stop installing a helper at all.
+// TestInstallWithNoLocalVariantRefusesInsteadOfInstallingTheDeployableArtifact
+// is the same choice stated rather than smoothed over (nocx-50w7p.7). A source
+// that carries the companion and has nothing for this platform is a build that
+// cannot serve a pane, and the install hands that error back instead of quietly
+// installing the deployable bytes — which are a DIFFERENT build, the one with
+// no ssh client in it, so the fallback's effect was an app that looked
+// installed and could never dial.
 //
-// The error a source answers here is not the embedded one; the install falls
-// back on any failure from the variant, deliberately, so a fabricated error is
-// the honest input for that branch.
-func TestInstallWithoutALocalVariantInstallsTheDeployableArtifact(t *testing.T) {
+// Both halves are asserted, because either alone can be satisfied by the wrong
+// code: the error the caller gets, and the fact that nothing landed on disk. An
+// install that wrote the fallback and then reported the variant's error would
+// pass the first check and leave exactly the machine the fallback left.
+func TestInstallWithNoLocalVariantRefusesInsteadOfInstallingTheDeployableArtifact(t *testing.T) {
 	home := helperHome(t)
 	deployed := []byte("#!/bin/sh\n# the artifact that ships to another host\n")
 	src := variantSource{
 		deployed: newBytesSource(deployed),
-		local:    bytesSource{err: errors.New("no local variant built")},
+		local:    bytesSource{err: helperartifacts.ErrLocalArtifactsNotBuilt},
 	}
 
-	got, err := local.Install(context.Background(), src, home)
+	_, err := local.Install(context.Background(), src, home)
+	if !errors.Is(err, helperartifacts.ErrLocalArtifactsNotBuilt) {
+		t.Fatalf("Install = %v, want the local variant's own error %v", err, helperartifacts.ErrLocalArtifactsNotBuilt)
+	}
+	root := filepath.Join(home, ".nocx", "helper")
+	entries, readErr := os.ReadDir(root)
+	if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
+		t.Fatalf("read the helper root: %v", readErr)
+	}
+	for _, e := range entries {
+		t.Fatalf("the refused install left %s in %s: it installed nothing, so nothing may be there", e.Name(), root)
+	}
+}
+
+// TestInstallUsesASourceThatCarriesNoLocalCompanion is the INJECTION SEAM, and
+// it exists to say what that branch is for: a caller that supplies its own
+// bytes — internal/app's wiring test, and most of this file — hands over a
+// source with no local companion at all, and it must get back exactly the
+// artifact it supplied rather than a deployable variant smuggled in beside it.
+//
+// It is not a fallback for production, and
+// TestTheProductionArtifactSourceCarriesTheLocalVariant is what holds that:
+// the source a shipped binary installs from always has the companion, so the
+// only way to reach this branch is to bring your own source.
+func TestInstallUsesASourceThatCarriesNoLocalCompanion(t *testing.T) {
+	home := helperHome(t)
+	mine := []byte("#!/bin/sh\n# a caller's own bytes\n")
+
+	got, err := local.Install(context.Background(), newBytesSource(mine), home)
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	if string(got.Generation) != hashOf(deployed) {
-		t.Fatalf("installed generation = %s, want the deployable artifact's content hash %s", got.Generation, hashOf(deployed))
+	if string(got.Generation) != hashOf(mine) {
+		t.Fatalf("installed generation = %s, want the supplied source's content hash %s", got.Generation, hashOf(mine))
 	}
 	data, err := os.ReadFile(got.Binary) // #nosec G304 — this test installed it
 	if err != nil {
 		t.Fatalf("read the installed helper: %v", err)
 	}
-	if !bytes.Equal(data, deployed) {
-		t.Fatal("the install did not write the deployable artifact when no local variant was available")
+	if !bytes.Equal(data, mine) {
+		t.Fatal("the install wrote bytes the caller did not supply")
+	}
+}
+
+// TestTheProductionArtifactSourceCarriesTheLocalVariant is what makes that seam
+// un-takeable in production: helperartifacts.DefaultSource is the value the
+// composition root passes (internal/app's localHelperArtifacts), so an install
+// in a shipped binary always reaches local.LocalArtifact and a build carrying
+// no variant gets its error rather than the deployable helper.
+//
+// It is a source-level claim and it is written as one. No behavioural test can
+// tell "production's source carries the companion" from "this machine happens
+// to have run make helper-local", because the second would make the same test
+// pass for the wrong reason.
+func TestTheProductionArtifactSourceCarriesTheLocalVariant(t *testing.T) {
+	if _, ok := helperartifacts.DefaultSource.(deploy.LocalArtifactSource); !ok {
+		t.Fatalf("the production artifact source is %T and carries no host-local variant: every install in a shipped binary would then get the deployable helper — a build with no ssh client in it — and nothing in the product could tell", helperartifacts.DefaultSource)
 	}
 }
 

@@ -121,8 +121,15 @@ trap cleanup EXIT INT TERM
 # and with no way to get one. They are gitignored, so a fresh checkout always
 # starts empty. `make helpers` is the one owner of the build matrix; this calls
 # it rather than carrying a second copy.
+#
+# require-local-helper is the SECOND directory and it is not optional here
+# either: this machine's own helper is what serves every pane, and
+# internal/helper/local stopped falling back to the deployable artifact
+# (nocx-50w7p.7) — so the target both builds the host's variant and asserts the
+# embed carries it. A stand built without it compiles cleanly and opens
+# nothing.
 echo "=== building the helper artifacts ==="
-make -C "$repo_root" helpers
+make -C "$repo_root" helpers require-local-helper
 
 # Built rather than `go run`: go run wraps the binary in a child process that
 # survives a kill of the parent, and an orphaned backend holds the WS port

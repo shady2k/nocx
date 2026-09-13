@@ -99,9 +99,8 @@ func Install(ctx context.Context, src deploy.ArtifactSource, home string) (Insta
 	return Installed{Binary: binary, Generation: proto.GenerationID(contentHash)}, nil
 }
 
-// preferredLocal answers the host-local variant of a source when that source
-// carries one (deploy.LocalArtifactSource) and the source itself when it does
-// not.
+// preferredLocal answers the host-local variant of a source that carries one
+// (deploy.LocalArtifactSource), and the source's own artifact when it does not.
 //
 // THE CHOICE LIVES HERE, and here rather than at the call site, because this is
 // the only place that installs a helper for THIS machine: the remote install
@@ -110,15 +109,30 @@ func Install(ctx context.Context, src deploy.ArtifactSource, home string) (Insta
 // here controls. A caller passes the one artifact source it has and does not
 // have to know which variants its build carries.
 //
-// The fallback covers ANY error from the variant. Only one is reachable today —
-// "not built" — because the walk skips an artifact it cannot parse and
-// hashGzip refuses a corrupt one at init, but a second error class would be a
-// mode in which no helper is installed at all: a pane that cannot open, caused
-// by the variant that was supposed to improve it. A build that never ran `make
-// helper-local` therefore installs exactly what it installed before the variant
-// existed, and nothing in the product can tell the difference yet — the client
-// is linked but nothing dials (nocx-50w7p.1). Where a helper without it will be
-// told apart is the pane open, by name (plan §8).
+// THERE IS NO FALLBACK (nocx-50w7p.7). The variant IS what this machine runs,
+// so a build that carries none for its own platform has no helper to install:
+// the install propagates the source's own "not built" error
+// (deploy/artifacts.ErrLocalArtifactsNotBuilt for the embedded source, which
+// names the recovery `make helper-local`) and the pane open refuses with that
+// reason — ADR-0057, there is no Tier A behind the local helper.
+//
+// What it used to do is this bead. It installed the DEPLOYABLE artifact
+// instead: a different build for the same platform, the one with no ssh client
+// in it, so the app worked, the ssh route could never work, and no surface
+// could tell those two states apart. What answers for it now is the BUILD —
+// the Makefile's require-local-helper and the release workflow's gate — because
+// "this build cannot serve a pane" is a fact about the binary, and it belongs
+// where that binary is made rather than at the terminal somebody is trying to
+// open.
+//
+// The `!ok` branch is the INJECTION SEAM, not a fallback. A caller may hand
+// this package a source with no local companion at all — internal/app's tests
+// and this package's own do, with synthetic bytes, so that a wiring test does
+// not depend on `make helper-local` having run — and that caller is asking for
+// its own bytes, not for the deployable variant smuggled in beside them.
+// Production cannot take the branch: artifacts.DefaultSource is what the
+// composition root passes and it carries the companion, which
+// TestTheProductionArtifactSourceCarriesTheLocalVariant holds down.
 type preferredLocal struct {
 	src      deploy.ArtifactSource
 	platform deploy.Platform
@@ -126,17 +140,15 @@ type preferredLocal struct {
 
 // Artifact answers for THIS machine's platform — the only one deploy.Ensure is
 // asked for on this path, because that is what Platform() returns — from the
-// local variant when it has been built and from the wrapped source when it has
-// not.
+// local variant's source when the source carries one, and from the source
+// itself when it does not (see the type's own doc for why that branch is a
+// seam rather than a fallback).
 func (s preferredLocal) Artifact(p deploy.Platform) (data []byte, contentHash string, err error) {
 	local, ok := s.src.(deploy.LocalArtifactSource)
 	if !ok {
 		return s.src.Artifact(p)
 	}
-	if data, contentHash, err = local.LocalArtifact(s.platform); err == nil {
-		return data, contentHash, nil
-	}
-	return s.src.Artifact(p)
+	return local.LocalArtifact(s.platform)
 }
 
 // Config is everything Open needs to reach one generation on this machine.

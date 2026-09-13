@@ -276,7 +276,18 @@ export async function startStand(): Promise<StandManifest> {
   // it — so this line needs the image to carry the pinned Zig and the fetch to
   // be able to reach that release, and it links a statically built helper on
   // Linux rather than a purely Go one.
-  execFileSync('make', ['helpers'], { cwd: repoRoot, stdio: 'inherit' })
+  //
+  // require-local-helper IS THE SECOND DIRECTORY, and it is the stand's because
+  // a stand without it is a stand where no pane opens: the local install
+  // stopped falling back to the deployable artifact (nocx-50w7p.7), and every
+  // spec in this suite drives a terminal. It builds this host's variant and
+  // then asserts the embed really carries it, which a bare `make helper-local`
+  // does not — the failure it catches is an artifact written where //go:embed
+  // does not read it.
+  execFileSync('make', ['helpers', 'require-local-helper'], {
+    cwd: repoRoot,
+    stdio: 'inherit',
+  })
 
   // Built, not `go run`: go run wraps the binary in a child that survives a
   // kill of the parent, and an orphaned backend holds its profile's discovery

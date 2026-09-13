@@ -178,6 +178,25 @@ jobs:
       # asserted on the built artifact, not assumed from a flag.
       - name: Build the remote helpers
         run: make helpers
+
+      # THE VARIANT THIS MACHINE RUNS, and the list is the whole of "which
+      # platforms can run this release": the darwin pair because the macOS
+      # bundle is universal and either slice may be the one executing, and
+      # linux/amd64 because that is the AppImage. It is the same Makefile
+      # definition as the four above with the one tag that links an ssh client
+      # (nocx_local_ssh), and it is built HERE for the same reason they are:
+      # one origin, so the bytes both build jobs embed are the bytes this job
+      # built.
+      #
+      # `require-local-helper` and not `helper-local`: it builds the list and
+      # then asserts every one of them landed in the directory //go:embed
+      # reads, which is the half a build step cannot see. Since
+      # internal/helper/local stopped falling back to the deployable artifact
+      # (nocx-50w7p.7), an app built with the embed empty installs no helper
+      # and opens no pane.
+      - name: Build this machine's helpers
+        run: make require-local-helper HELPER_LOCAL_TARGETS="linux/amd64 darwin/amd64 darwin/arm64"
+
       # -v because the ceiling test LOGS each target's measured size and the
       # headroom (source_test.go): the budget for a helper that links
       # libghostty-vt has to be derived from a real one, and this step's
@@ -186,7 +205,11 @@ jobs:
       # The notices check is in this list because this is the only job that
       # holds all four artifacts: it decompresses each one and asserts the
       # pinned THIRD_PARTY_LICENSES is inside, then runs the host's artifact
-      # with `--licenses` and compares what it prints byte for byte.
+      # with `--licenses` and compares what it prints byte for byte. All three
+      # checks cover the local variants too — same three questions asked of the
+      # second directory, because an artifact that ships without its licences
+      # or past the ceiling does not become acceptable by being installed
+      # locally.
       # Named rather than covered by a bare `-run 'Test'` so that a check
       # added to this package is a decision about THIS job.
       - name: Verify helper build output is stable, bounded and licensed
@@ -200,6 +223,19 @@ jobs:
         with:
           name: helper-artifacts
           path: internal/helper/deploy/artifacts/bin/*.gz
+          retention-days: 7
+
+      # THE LOCAL VARIANTS TRAVEL SEPARATELY, and that separation is the safety
+      # property rather than tidiness: `bin/*.gz` above does not match
+      # `bin/local/*.gz`, so the ssh-linked bytes are embedded in the app and
+      # never published as a downloadable helper. They still travel from ONE
+      # origin — this job — because the build jobs may not rebuild them: the
+      # macOS runner has no pinned Zig, and two toolchains are two different
+      # binaries.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: helper-local-artifacts
+          path: internal/helper/deploy/artifacts/bin/local/*.gz
           retention-days: 7
 
       - name: Stage the helper binaries for publication
@@ -235,6 +271,36 @@ jobs:
           sort -o helper-hashes.txt helper-hashes.txt
           cat helper-hashes.txt
 
+      # THE LOCAL VARIANTS ARE NOT PUBLISHED, so there is no dist/ copy of them
+      # and no manifest entry — but the build jobs' embeddings are still held
+      # against this job, because it is the one origin for every helper byte a
+      # release embeds and a variant rebuilt in a build job is one this workflow
+      # cannot account for. Uncompressed and hashed the same way as the
+      # published ones above, for the reason stated there: a .gz differs
+      # between two runs on its header's mtime, and the decompressed bytes are
+      # what install.go keys a generation by.
+      #
+      # It writes into a directory of its own and never into dist/: that
+      # directory is what the build jobs upload, and `helper-binaries` is
+      # published from `dist/nocx-helper-*` — a local variant landing there
+      # would offer a hand-installable copy of the ssh-linked helper, which is
+      # the one thing the second directory exists to keep off a remote host.
+      - name: Hash the local helpers the build jobs must have embedded
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/local-stage"
+          mkdir -p "$stage"
+          : > helper-local-hashes.txt
+          for gz in internal/helper/deploy/artifacts/bin/local/nocx-helper-*.gz; do
+            name="$(basename "$gz" .gz)"          # nocx-helper-<goos>-<goarch>
+            plat="${name#nocx-helper-}"
+            out="$stage/nocx-helper-${plat}"
+            gunzip -c "$gz" > "$out"
+            printf '%s %s\n' "$plat" "$(shasum -a 256 "$out" | awk '{print $1}')" >> helper-local-hashes.txt
+          done
+          sort -o helper-local-hashes.txt helper-local-hashes.txt
+          cat helper-local-hashes.txt
+
       # The published binaries, for `publish`, and for `sign` to size in
       # the manifest. They come from this job and from nowhere else: no
       # build job stages a helper under dist/ any more, so one file name
@@ -247,11 +313,17 @@ jobs:
           retention-days: 7
 
       # The hashes of those same bytes — what `sign` holds both build jobs
-      # against, and what the manifest publishes as each helper's sha256.
+      # against, and what the manifest publishes as each helper's sha256. The
+      # local variants' hashes travel in this one artifact rather than a second
+      # one: they are read by the same step, in the same directory, one file
+      # apart, and a separate artifact would be a second download for a check
+      # that never looks at them alone.
       - uses: actions/upload-artifact@v7
         with:
           name: helper-hashes
-          path: helper-hashes.txt
+          path: |
+            helper-hashes.txt
+            helper-local-hashes.txt
           retention-days: 7
 
   # Named for its platform, like build-linux. It was `build` back when macOS was
@@ -263,6 +335,12 @@ jobs:
     runs-on: macos-15
     env:
       VERSION: ${{ needs.validate.outputs.version }}
+      # WHICH PLATFORMS THIS APP CAN RUN ON, stated by the job that knows: the
+      # macOS bundle is universal, so either slice may be the one executing and
+      # its embed must carry BOTH darwin local variants. The gate step below
+      # fails the build when one of them is missing, which is the only place a
+      # shipped app without its own helper can still be stopped.
+      NOCX_REQUIRE_LOCAL_ARTIFACTS: darwin/amd64 darwin/arm64
     steps:
       - uses: actions/checkout@v7
 
@@ -390,7 +468,7 @@ jobs:
           # of here. A guard that cannot reject a wrong answer is not one.
           id="$(security find-identity -v -p codesigning build.keychain | awk '{ if (match($0, /[0-9A-F]{40}/)) { print substr($0, RSTART, RLENGTH); exit } }')"
           if ! printf '%s' "$id" | grep -Eq '^[0-9A-F]{40}$'; then
-            echo "::error::no code-signing identity in the imported keychain (got '"'"'$id'"'"')"
+            echo "::error::no code-signing identity in the imported keychain (got '$id')"
             security find-identity -p codesigning build.keychain
             exit 1
           fi
@@ -414,6 +492,17 @@ jobs:
           name: helper-artifacts
           path: internal/helper/deploy/artifacts/bin
 
+      # AND THE LOCAL VARIANT, into the second directory //go:embed reads. It
+      # comes from the same job for the same reason the four above do, and it is
+      # the whole of this job's local bytes: neither build job installs the
+      # pinned Zig, so a variant built here would be a second origin AND a build
+      # that cannot even run.
+      - name: Download this machine's helpers the `helpers` job built
+        uses: actions/download-artifact@v8
+        with:
+          name: helper-local-artifacts
+          path: internal/helper/deploy/artifacts/bin/local
+
       # The gate, expressed as a test rather than as a file listing: a
       # build that embedded nothing answers ErrArtifactsNotBuilt for every
       # platform, and NOCX_REQUIRE_HELPER_ARTIFACTS turns the skip that
@@ -427,6 +516,18 @@ jobs:
       # any platform.
       - name: The built binary embeds a helper for every matrix platform
         run: NOCX_REQUIRE_HELPER_ARTIFACTS=1 go test ./internal/helper/deploy/ -run 'TestEveryMatrixPlatformResolves|TestArtifactReturnsCompressedBytesAndDecompressedHash' -count=1
+
+      # THE SAME GATE FOR THE SECOND DIRECTORY, and this one decides whether the
+      # app opens a terminal at all: since internal/helper/local stopped falling
+      # back to the deployable artifact (nocx-50w7p.7), a binary whose bin/local
+      # holds nothing for a platform it runs on installs no helper and refuses
+      # every pane. NOCX_REQUIRE_LOCAL_ARTIFACTS is the job's own platform list
+      # and turns that skip into a failure, exactly as the variable above does
+      # for the four — the difference is that it carries the platforms, so a
+      # universal bundle is checked on both of its slices rather than on the
+      # runner's architecture.
+      - name: The built binary embeds this machine's helper for every platform this app runs on
+        run: go test -v ./internal/helper/deploy/artifacts -count=1
 
       - name: Build universal bundle
         run: |
@@ -593,6 +694,22 @@ jobs:
           done
           sort -o embedded-hashes.txt embedded-hashes.txt
           cat embedded-hashes.txt
+          # AND THE SECOND DIRECTORY, which answers a different question from
+          # the gate above: the gate says "this platform's variant is in the
+          # embed", and this file is what `sign` diffs against the helpers job
+          # to prove the bytes came from there and not from this job. Same loop
+          # over what is on disk, so a fourth local target needs no edit here.
+          mkdir -p "$stage/local"
+          : > embedded-local-hashes.txt
+          for gz in internal/helper/deploy/artifacts/bin/local/nocx-helper-*.gz; do
+            name="$(basename "$gz" .gz)"          # nocx-helper-<goos>-<goarch>
+            plat="${name#nocx-helper-}"
+            out="$stage/local/nocx-helper-${VERSION}-${plat}"
+            gunzip -c "$gz" > "$out"
+            printf '%s %s\n' "$plat" "$(shasum -a 256 "$out" | awk '{print $1}')" >> embedded-local-hashes.txt
+          done
+          sort -o embedded-local-hashes.txt embedded-local-hashes.txt
+          cat embedded-local-hashes.txt
 
       - name: Smoke checks
         run: |
@@ -741,7 +858,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: embedded-hashes-macos
-          path: embedded-hashes.txt
+          path: |
+            embedded-hashes.txt
+            embedded-local-hashes.txt
           retention-days: 7
 
       # The keychain outlives the job's success or failure, so its removal
@@ -759,6 +878,9 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       VERSION: ${{ needs.validate.outputs.version }}
+      # The AppImage is amd64 and nothing else, so one local variant. See the
+      # macOS job's line for why this is a job-level fact.
+      NOCX_REQUIRE_LOCAL_ARTIFACTS: linux/amd64
     steps:
       - uses: actions/checkout@v7
 
@@ -814,6 +936,17 @@ jobs:
           name: helper-artifacts
           path: internal/helper/deploy/artifacts/bin
 
+      # AND THE LOCAL VARIANT, into the second directory //go:embed reads. It
+      # comes from the same job for the same reason the four above do, and it is
+      # the whole of this job's local bytes: neither build job installs the
+      # pinned Zig, so a variant built here would be a second origin AND a build
+      # that cannot even run.
+      - name: Download this machine's helpers the `helpers` job built
+        uses: actions/download-artifact@v8
+        with:
+          name: helper-local-artifacts
+          path: internal/helper/deploy/artifacts/bin/local
+
       # The gate, expressed as a test rather than as a file listing: a
       # build that embedded nothing answers ErrArtifactsNotBuilt for every
       # platform, and NOCX_REQUIRE_HELPER_ARTIFACTS turns the skip that
@@ -827,6 +960,18 @@ jobs:
       # any platform.
       - name: The built binary embeds a helper for every matrix platform
         run: NOCX_REQUIRE_HELPER_ARTIFACTS=1 go test ./internal/helper/deploy/ -run 'TestEveryMatrixPlatformResolves|TestArtifactReturnsCompressedBytesAndDecompressedHash' -count=1
+
+      # THE SAME GATE FOR THE SECOND DIRECTORY, and this one decides whether the
+      # app opens a terminal at all: since internal/helper/local stopped falling
+      # back to the deployable artifact (nocx-50w7p.7), a binary whose bin/local
+      # holds nothing for a platform it runs on installs no helper and refuses
+      # every pane. NOCX_REQUIRE_LOCAL_ARTIFACTS is the job's own platform list
+      # and turns that skip into a failure, exactly as the variable above does
+      # for the four — the difference is that it carries the platforms, so a
+      # universal bundle is checked on both of its slices rather than on the
+      # runner's architecture.
+      - name: The built binary embeds this machine's helper for every platform this app runs on
+        run: go test -v ./internal/helper/deploy/artifacts -count=1
 
       - name: Build Linux binary
         run: |
@@ -900,6 +1045,22 @@ jobs:
           done
           sort -o embedded-hashes.txt embedded-hashes.txt
           cat embedded-hashes.txt
+          # AND THE SECOND DIRECTORY, which answers a different question from
+          # the gate above: the gate says "this platform's variant is in the
+          # embed", and this file is what `sign` diffs against the helpers job
+          # to prove the bytes came from there and not from this job. Same loop
+          # over what is on disk, so a fourth local target needs no edit here.
+          mkdir -p "$stage/local"
+          : > embedded-local-hashes.txt
+          for gz in internal/helper/deploy/artifacts/bin/local/nocx-helper-*.gz; do
+            name="$(basename "$gz" .gz)"          # nocx-helper-<goos>-<goarch>
+            plat="${name#nocx-helper-}"
+            out="$stage/local/nocx-helper-${VERSION}-${plat}"
+            gunzip -c "$gz" > "$out"
+            printf '%s %s\n' "$plat" "$(shasum -a 256 "$out" | awk '{print $1}')" >> embedded-local-hashes.txt
+          done
+          sort -o embedded-local-hashes.txt embedded-local-hashes.txt
+          cat embedded-local-hashes.txt
 
       - name: Smoke checks (binary)
         run: |
@@ -941,7 +1102,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: embedded-hashes-linux
-          path: embedded-hashes.txt
+          path: |
+            embedded-hashes.txt
+            embedded-local-hashes.txt
           retention-days: 7
 
   # Separate from build so the signing key is never present in a job that runs
@@ -1015,17 +1178,24 @@ jobs:
           # to one host under one version, and D6's "exactly one automatic
           # reinstall" would fire on every connection, forever, silently.
           # That is the failure this step still exists to catch.
-          want="hashes/published/helper-hashes.txt"
-          [ -s "$want" ] || { echo "::error::the helpers job published no hash file"; exit 1; }
-          for job in macos linux; do
-            got="hashes/$job/embedded-hashes.txt"
-            [ -s "$got" ] || { echo "::error::build-$job uploaded no embedded-hashes.txt"; exit 1; }
-            if ! diff -u "$want" "$got"; then
-              echo "::error::build-$job embedded helper bytes that are not the published ones"
-              exit 1
-            fi
+          # BOTH DIRECTORIES, and the second one for a reason the first does not
+          # have: the local variants are never published, so nothing downstream
+          # would notice an app carrying a helper this workflow cannot account
+          # for. It is the same claim — one origin, and each build job's account
+          # of what it embedded is held against it.
+          for sfx in '' '-local'; do
+            want="hashes/published/helper${sfx}-hashes.txt"
+            [ -s "$want" ] || { echo "::error::the helpers job published no helper${sfx}-hashes.txt"; exit 1; }
+            for job in macos linux; do
+              got="hashes/$job/embedded${sfx}-hashes.txt"
+              [ -s "$got" ] || { echo "::error::build-$job uploaded no embedded${sfx}-hashes.txt"; exit 1; }
+              if ! diff -u "$want" "$got"; then
+                echo "::error::build-$job embedded helper${sfx} bytes that are not the ones the helpers job produced"
+                exit 1
+              fi
+            done
           done
-          echo "both build jobs embedded the bytes the helpers job published"
+          echo "both build jobs embedded the bytes the helpers job produced, in both directories"
 
       - name: Generate manifest.json
         run: |

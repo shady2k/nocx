@@ -37,7 +37,8 @@ import (
 // from the start and the test asks it what arrived.
 type bearerDialer struct {
 	mu       sync.Mutex
-	received bytes.Buffer
+	received []*bytes.Buffer
+	endpoint []net.Conn
 	dialed   chan struct{}
 	// arrived is signalled on the first byte, so an absence can be asserted as
 	// an event that did not happen rather than as a duration that elapsed.
@@ -50,14 +51,22 @@ func newBearerDialer() *bearerDialer {
 
 func (d *bearerDialer) DialContext(context.Context, string, string) (net.Conn, error) {
 	bridge, endpoint := net.Pipe()
+	// ONE BUFFER PER CONNECTION, appended in dial order: a reconnect's bytes are
+	// not the first connection's continued, and a test that pooled them could
+	// not tell a bridge that presents the bearer again from one that does not.
+	buf := &bytes.Buffer{}
+	d.mu.Lock()
+	d.received = append(d.received, buf)
+	d.endpoint = append(d.endpoint, endpoint)
+	d.mu.Unlock()
 	d.dialed <- struct{}{}
 	go func() {
-		buf := make([]byte, 256)
+		raw := make([]byte, 256)
 		for {
-			n, err := endpoint.Read(buf)
+			n, err := endpoint.Read(raw)
 			if n > 0 {
 				d.mu.Lock()
-				d.received.Write(buf[:n])
+				buf.Write(raw[:n])
 				d.mu.Unlock()
 				select {
 				case d.arrived <- struct{}{}:
@@ -72,14 +81,52 @@ func (d *bearerDialer) DialContext(context.Context, string, string) (net.Conn, e
 	return bridge, nil
 }
 
-// written is what the bridge has put on the connection so far.
-func (d *bearerDialer) written() string {
+// endpointAt is the i-th connection's far end, so a test can DROP one for real
+// rather than telling the link it is gone.
+func (d *bearerDialer) endpointAt(i int) net.Conn {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.received.String()
+	if i >= len(d.endpoint) {
+		return nil
+	}
+	return d.endpoint[i]
 }
 
-// awaitBearer waits until at least n bytes have arrived, without a duration.
+// awaitBytesAt waits until at least n bytes have arrived on connection i.
+func (d *bearerDialer) awaitBytesAt(t *testing.T, i, n int) string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := d.writtenAt(i); len(got) >= n {
+			return got
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("connection %d carried %d bytes, want at least %d", i, len(d.writtenAt(i)), n)
+	return ""
+}
+
+// connections is how many times the bridge has dialed.
+func (d *bearerDialer) connections() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.received)
+}
+
+// writtenAt is the i-th connection's bytes, empty when it does not exist yet.
+func (d *bearerDialer) writtenAt(i int) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if i >= len(d.received) {
+		return ""
+	}
+	return d.received[i].String()
+}
+
+// written is what the bridge has put on the connection so far.
+func (d *bearerDialer) written() string { return d.writtenAt(0) }
+
+// awaitBytes waits until at least n bytes have arrived on the first connection.
 func (d *bearerDialer) awaitBytes(t *testing.T, n int) string {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -160,5 +207,47 @@ func TestTheRequestFollowsTheBearerOnTheSameConnection(t *testing.T) {
 	}
 	if strings.Index(got, "tools/list") < len(testBearer)+1 {
 		t.Fatalf("the request overtook the bearer: %q", got)
+	}
+}
+
+// TestAReconnectPresentsTheBearerAgain — AC3's remaining half. A bearer
+// presented once and never again is a tool that stops working after the first
+// blip: the connection IS the admission interval (ADR-0058), so every connection
+// the bridge has to establish is a connection the endpoint has to admit.
+func TestAReconnectPresentsTheBearerAgain(t *testing.T) {
+	dialer := newBearerDialer()
+	link := newEndpointLink("sock", dialer, testBearer)
+	ctx := context.Background()
+
+	if _, _, err := link.attach(ctx); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if got := dialer.awaitBytes(t, len(testBearer)+1); !strings.HasPrefix(got, testBearer+"\n") {
+		t.Fatalf("the first connection began with %q, want the bearer", got)
+	}
+
+	// THE CONNECTION DROPS, as one does mid-session.
+	if err := dialer.endpointAt(0).Close(); err != nil {
+		t.Fatalf("drop the connection: %v", err)
+	}
+
+	// The bridge dials again. The loop is the wait: attach reuses its connection
+	// until the dead one is observed as gone, and the dialer says when a second
+	// dial happened — an observable, not a duration.
+	deadline := time.Now().Add(5 * time.Second)
+	for dialer.connections() < 2 {
+		if _, _, err := link.attach(ctx); err != nil {
+			t.Fatalf("re-attach: %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the bridge never dialled again after its connection dropped")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// AND THE NEW CONNECTION CARRIES THE BEARER: its own bytes, not the first
+	// connection's continued.
+	if got := dialer.awaitBytesAt(t, 1, len(testBearer)+1); !strings.HasPrefix(got, testBearer+"\n") {
+		t.Fatalf("the reconnected connection began with %q, want the bearer again", got)
 	}
 }

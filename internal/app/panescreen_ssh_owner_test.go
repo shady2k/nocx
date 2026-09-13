@@ -360,6 +360,68 @@ func TestReAdoptingABindingTheDaemonNoLongerHoldsIsALossNotAnOwnership(t *testin
 	}
 }
 
+// TestASessionThatEndsLeavesTheOpenersSet is the CLOSE half of the same
+// interval (nocx-50w7p.5), and it is the end the first version of this change
+// was missing: a session entered the set when it opened and left it only on
+// release or on the readopt loss branch, so a pane that simply ENDED stayed in
+// it. Nothing routes to such an entry today — the owner asks the registry first
+// and a closed session is out of it — but a set that only grows is a set that
+// will be believed later.
+func TestASessionThatEndsLeavesTheOpenersSet(t *testing.T) {
+	home := storagetest.IsolateWithHome(t)
+	src := fakeArtifacts{payload: syntheticPayload}
+	gen := src.hash()
+	_ = startFakeLocalEndpoint(t, endpoint.Dir(home), gen)
+
+	logger := log.NewSlogAdapter(discardLogger())
+	lg := discardLogger()
+	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
+	rc, rerr := ssh.NewReal(logger, ssh.WithKnownHostsFile(home+"/known_hosts"))
+	if rerr != nil {
+		t.Fatalf("ssh.NewReal: %v", rerr)
+	}
+	opener := &localHelperOpener{
+		log: lg, registry: reg, dir: endpoint.Dir(home), sshTargets: rc,
+		installed: helperlocal.Installed{
+			Binary: "/nonexistent/nocx-helper", Generation: proto.GenerationID(gen),
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	opened, selected, err := opener.OpenHosted(ctx, session.Config{
+		Kind: session.KindRemote, Host: "host.example",
+		Remote: &ssh.ConnectConfig{
+			User: "dev", Port: 22, AuthMode: "password",
+			Secrets: rememberedPassword{value: openPasswordFixturePassword}, SecretID: "sec:close:1",
+			AuthorizedEndpoint: "host.example:22",
+		},
+	}, "")
+	if err != nil || !selected {
+		t.Fatalf("opening the pane: selected=%v err=%v", selected, err)
+	}
+	sid := opened.Session.ID()
+	if !opener.holds(sid) {
+		t.Fatal("the pane is not in the opener's set straight after it opened, so this test cannot " +
+			"observe the end")
+	}
+
+	if cerr := opened.Session.Close(); cerr != nil {
+		t.Fatalf("closing the pane: %v", cerr)
+	}
+
+	// An observable state, not a duration: the watcher ends with the session it
+	// watches, so what is waited for is the set changing.
+	deadline := time.Now().Add(10 * time.Second)
+	for opener.holds(sid) {
+		if !time.Now().Before(deadline) {
+			t.Fatal("the opener still holds a session that has ended, so a later reader of this set would " +
+				"be told a terminal is there when it is not")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestTheReadoptPredicateAnswersForTheCarrierNotTheDestination is the focused
 // test for the question the readopt pass routes by (nocx-50w7p.5).
 //

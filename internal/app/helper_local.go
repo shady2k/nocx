@@ -36,8 +36,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"sync"
+	"syscall"
 
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/endpoint"
@@ -71,6 +73,121 @@ var errNoLocalGeneration = errors.New(
 // so "nobody answered" is the whole of what the ask can fail with.
 var errLocalEndpointUnreachable = errors.New(
 	"this machine's helper could not be asked")
+
+// refuseLocalHelperUnreachable classifies a failure of REACHING this machine's
+// helper into the refusal a person is shown (nocx-ie23r.4, design L4).
+//
+// THE SENTINELS ARE THE CLASSIFICATION, never the message text. Each one is a
+// distinct fact the client already decided — a peer that is not our helper, a
+// peer that never answered, a version the helper refused — and re-reading them
+// out of a string is how two answers to "what went wrong" start disagreeing.
+//
+// What is left after the handshake's own sentinels is the start boundary: the
+// dial found nothing serving and the binary did not come up (or came up and
+// ended before it served, or is not executable at all), which is the reason
+// helperlocal.Open's own doc calls "an error from the start".
+func refuseLocalHelperUnreachable(cause error) error {
+	switch {
+	case errors.Is(cause, helperclient.ErrHashMismatch),
+		errors.Is(cause, helperclient.ErrNotOurHelper):
+		// Something answered on this machine's endpoint and it is not the
+		// helper this build installed. One helper serves the endpoint, so
+		// the thing answering is another copy of nocx — and quitting it is
+		// the only remedy a person has that is not a lie.
+		return transport.RefuseLocalHelper(transport.HelperRefusal{
+			Reason: transport.HelperHandshakeFailed,
+			Action: transport.HelperActionQuitOtherNocx,
+			Cause:  cause,
+		})
+	case errors.Is(cause, helperclient.ErrVersionMismatch):
+		// The peer refused the protocol version (D5's exit 42), and its own
+		// sentinel says what that means: non-retryable until reinstall. The
+		// installed helper IS a different build from the one reaching for
+		// it, which no amount of quitting and reopening fixes.
+		return transport.RefuseLocalHelper(transport.HelperRefusal{
+			Reason: transport.HelperHandshakeFailed,
+			Action: transport.HelperActionReinstallNocx,
+			Cause:  cause,
+		})
+	case errors.Is(cause, helperclient.ErrSentinelTimeout),
+		errors.Is(cause, helperclient.ErrLost),
+		errors.Is(cause, syscall.EPIPE):
+		// The endpoint accepted and then said nothing, died mid-handshake, or
+		// hung up on the hello write. That last one is the SAME event seen by
+		// a different observer: internal/helper/local's own note says a peer
+		// closing mid-handshake produces three errors — ErrNotOurHelper (the
+		// pump saw what was said), ErrLost (the carrier calls a peer close
+		// transport loss) and a bare EPIPE from the hello write — so the bare
+		// EPIPE is classified here rather than left for a message match. The
+		// remaining non-EPIPE forms stay the carrier's documented gap.
+		// Nothing here entitles us to name it as another build, so the remedy
+		// is the mild one — and it is a real one: the socket is being served,
+		// so a second attempt costs a person one gesture.
+		return transport.RefuseLocalHelper(transport.HelperRefusal{
+			Reason: transport.HelperHandshakeFailed,
+			Action: transport.HelperActionRetryOpen,
+			Cause:  cause,
+		})
+	case errors.Is(cause, endpoint.ErrForeignDir):
+		// The endpoint directory belongs to another account. That directory is
+		// <home>/.nocx/run (endpoint.Dir), NOT the install directory — the
+		// install writes <home>/.nocx/helper/<gen>, and this arm is reached
+		// only after a SUCCESSFUL install, when the dial then finds a run
+		// directory somebody else owns. So the reason is START, not install:
+		// the install did succeed and nothing of ours is serving. The cause
+		// text names the real problem, and the remedy is the directory the
+		// person can actually fix.
+		return transport.RefuseLocalHelper(transport.HelperRefusal{
+			Reason: transport.HelperStartFailed,
+			Action: transport.HelperActionFixPermissions,
+			Cause:  cause,
+		})
+	default:
+		// Everything left is the start boundary: the binary did not come up.
+		// ctx.Err() lands here because a cancelled start is a fact about
+		// shutdown, not about the helper, and ErrPathTooLong because the
+		// socket path is derived from the generation rather than chosen by
+		// the product.
+		return transport.RefuseLocalHelper(transport.HelperRefusal{
+			Reason: transport.HelperStartFailed,
+			Cause:  cause,
+		})
+	}
+}
+
+// refuseLocalHelperNotInstalled classifies the state an open reaches when
+// Start put no generation on disk.
+//
+// cause is the install's own error when there was one, and errNoLocalGeneration
+// when nothing tried to install (a build with no artifact source wired, which
+// production cannot reach — helperartifacts.DefaultSource is what the
+// composition root passes). The two are different facts with the same
+// consequence, and the refusal says which one it has rather than averaging
+// them into one sentence about a missing helper.
+func refuseLocalHelperNotInstalled(cause error) error {
+	action := transport.HelperRefusalAction("")
+	switch {
+	case errors.Is(cause, syscall.ENOSPC), errors.Is(cause, syscall.EDQUOT):
+		// The disk, not the copy: the artifact was there and the bytes would
+		// not fit. A quota is the same fact — an allocation limit rather than
+		// a missing copy — so it names the same remedy. Repairing the
+		// application would not have helped, and telling somebody to reinstall
+		// is how a refusal becomes a lie.
+		action = transport.HelperActionFreeSpace
+	case errors.Is(cause, fs.ErrPermission), errors.Is(cause, syscall.EROFS):
+		// The directory, not the copy: nocx could not write where it installs
+		// — the directory is not ours to write, or the filesystem is
+		// read-only. A reinstall writes the SAME bytes to the SAME place and
+		// fails the same way, so it is the wrong remedy; the person has to
+		// make the install directory writable first.
+		action = transport.HelperActionFixPermissions
+	}
+	return transport.RefuseLocalHelper(transport.HelperRefusal{
+		Reason: transport.HelperInstallFailed,
+		Action: action,
+		Cause:  cause,
+	})
+}
 
 // localInventoryRoute asks THIS machine's own daemon what it holds, for one
 // generation (nocx-ie23r.2 — L5's missing local inventory).
@@ -158,6 +275,15 @@ type localHelperOpener struct {
 	// the install has run; an open before that is the refusal above.
 	installed helperlocal.Installed
 	dir       string
+	// installFailure is WHY Start could not put this machine's generation on
+	// disk, when it could not. It is recorded BESIDE the empty install rather
+	// than instead of it, and that is the whole of nocx-ie23r.4's install
+	// half: the refusal a person meets at the act has to name the concrete
+	// error — no space, a directory we may not write, an artifact this build
+	// does not carry — and Start is the only place that error exists. A
+	// refusal that could only say "not installed" would be naming the
+	// category, which the reason field already does.
+	installFailure error
 	// toolSocketPath is THIS backend's tool endpoint socket, when it is
 	// running one — internal/toolendpoint.Endpoint.SocketPath(), handed
 	// down by cmd/nocx-server's composition root (nocx-2tesu). Empty is a
@@ -218,6 +344,18 @@ func (o *localHelperOpener) installedLocalGeneration(installed helperlocal.Insta
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.installed = installed
+}
+
+// installFailed records why this machine's generation is NOT on disk, so the
+// refusal raised when a person opens a pane can name the concrete error
+// instead of only its absence (nocx-ie23r.4). It is called by the same start
+// step that calls installedLocalGeneration, and the two are mutually
+// exclusive by construction: an install either produced a generation or a
+// reason there is none.
+func (o *localHelperOpener) installFailed(cause error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.installFailure = cause
 }
 
 // setToolSocketPath records this backend's tool endpoint socket, so a pane
@@ -453,10 +591,17 @@ func (o *localHelperOpener) reattachedConn(sid session.ID) (localSessionConn, bo
 func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, string, error) {
 	o.mu.Lock()
 	installed, dir, existing, toolSocketPath, reverse := o.installed, o.dir, o.client, o.toolSocketPath, o.reverse
+	installFailure := o.installFailure
 	o.mu.Unlock()
 
 	if installed.Binary == "" || installed.Generation == "" || dir == "" {
-		return nil, "", errNoLocalGeneration
+		// WHY, not only THAT: a generation that was never installed carries
+		// the install's own error with it when there was one, and the
+		// sentinel's sentence when there was not (nocx-ie23r.4).
+		if installFailure == nil {
+			installFailure = errNoLocalGeneration
+		}
+		return nil, "", refuseLocalHelperNotInstalled(installFailure)
 	}
 	if existing != nil {
 		return existing, string(installed.Generation), nil
@@ -471,7 +616,7 @@ func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, 
 		Reverse: reverse,
 	})
 	if err != nil {
-		return nil, "", err
+		return nil, "", refuseLocalHelperUnreachable(err)
 	}
 	o.mu.Lock()
 	if o.client == nil {

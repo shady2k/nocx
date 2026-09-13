@@ -266,7 +266,14 @@ func (h openHandlers) answerOpenFailure(r Responder, req jsonrpcRequest, err err
 			_ = r.TryError(req.ID, rpcErrorFor(refusal.code, "", refusal.cause))
 			return
 		}
-		_ = respond(r, newJSONRPCError(req.ID, refusal.code, refusal.message))
+		// The sentence a person reads, and — when the refusal has one — the
+		// machine-readable half beside it: what failed and what to do, for a
+		// surface that keys on values rather than on prose.
+		resp := newJSONRPCError(req.ID, refusal.code, refusal.message)
+		if refusal.data != nil {
+			resp.Error.Data = refusal.data
+		}
+		_ = respond(r, resp)
 		return
 	}
 	// A gate refusal: another operation holds the config or session

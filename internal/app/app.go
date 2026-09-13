@@ -2585,13 +2585,14 @@ func localHelperArtifacts(opt optionSet) deploy.ArtifactSource {
 // caller that reaches for the endpoint, and nothing reaches for it until local
 // panes are opened through the helper (nocx-ie23r.3).
 //
-// A failure is a warning and not a refused start, because nothing in the
-// product depends on this yet. That is not the soft degrade AGENTS.md forbids:
-// there is no surface today offering something this install would have to
-// deliver. When there is one, the refusal belongs AT THE ACT — a person trying
-// to open a pane is told what failed, why and what to do (L4) — and that
-// surface is nocx-ie23r.3's, not a startup toast about a daemon nobody asked
-// for.
+// A failure is still not a refused start: the backend must serve whatever
+// happens to one machine's helper, and a refused start would take every other
+// machine down with it. But a local pane DOES depend on this install now, and
+// the refusal that answers for it EXISTS. So the failure is RECORDED here
+// rather than announced — a person who has not asked for a terminal is not
+// interrupted by a daemon they cannot act on — and it is raised AT THE ACT by
+// nocx-ie23r.4 (L4): the person opening a pane is told what failed, why and
+// what to do.
 //
 // It costs 34 ms on a cold home and 3 ms on a warm one, measured on Linux with
 // the 4.2 MB artifact this build embeds — the warm cost being the verification
@@ -2605,6 +2606,14 @@ func (a *App) installLocalHelper(ctx context.Context, home string) {
 	installed, err := helperlocal.Install(ctx, a.helperArtifacts, home)
 	if err != nil {
 		a.Logger.Warn("helper: the local generation is not installed", "error", err)
+		// The refusal is raised at the ACT and not here (ADR-0057): a person
+		// who has not asked for a terminal has not been harmed, and a startup
+		// toast about a daemon is noise they cannot act on. So the failure is
+		// RECORDED rather than announced, and the pane they do open is told
+		// what broke, why and what to do (nocx-ie23r.4).
+		if a.localHelper != nil {
+			a.localHelper.installFailed(err)
+		}
 		return
 	}
 	a.Logger.Info("helper: the local generation is installed",

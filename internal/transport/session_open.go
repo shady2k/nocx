@@ -122,6 +122,11 @@ type openRefusal struct {
 	// is raised off the REASON carried in the error data, so flattening it to
 	// a sentence would replace an unlock dialog with an error.
 	cause error
+	// data, when set, rides the error frame's data field beside the sentence.
+	// It is the machine-readable half of a refusal whose parts a surface keys
+	// on instead of reading prose — today the local helper's reason and
+	// action (RefuseLocalHelper), which are what a person is told to do.
+	data any
 }
 
 func (e *openRefusal) Error() string {

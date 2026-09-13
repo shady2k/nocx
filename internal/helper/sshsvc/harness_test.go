@@ -139,23 +139,64 @@ type fixture struct {
 	forwards      map[string]net.Listener
 	forwardBinds  []forwardBind
 	directTargets []string
-	// the exec plane (nocx-50w7p.10): the commands a LANE was asked to run, in
-	// order, and the program each lane channel runs. The program is the far
-	// side of the bridge — a function over the channel's bytes that answers an
-	// exit status — because what this fixture must be able to produce is a
-	// process, not a stream.
-	execs    []string
+	// the exec plane (nocx-50w7p.9 and nocx-50w7p.10): the commands this host
+	// was asked to run, in order, and the three ways a fixture answers one —
+	// three rather than one because two planes ask and each has its own
+	// subject.
+	execs []string
+	// execHandler scripts an exec's streams and status as STRINGS: the probe
+	// plane, whose subject is which named probe ran and what it answered. Nil
+	// means this fixture runs no handler of that kind.
+	execHandler func(cmd string) (stdout, stderr string, exit int, refuse bool)
+	// execPeer hands the channel to a function that answers an exit status: the
+	// lane's byte-level cases, where what matters is that the frame protocol
+	// crosses unchanged.
 	execPeer func(in io.Reader, out io.Writer) int
-	// execRun, when set, runs the lane's command FOR REAL — the process's
-	// stdin and stdout are the channel's — and answers its exit status. It is
-	// how the end-to-end case runs the SHIPPED bridge binary instead of a
-	// scripted echo, which is the difference between asserting the command and
-	// asserting that the command reaches a helper.
+	// execRun runs the command FOR REAL, with the channel as its stdio: the
+	// lane's end-to-end case, which runs the shipped bridge binary instead of a
+	// scripted far side.
 	execRun bool
 	execEnv []string
 	// noExit drops the exit-status request, which is what an sshd does for a
 	// channel that dies rather than one that exits.
-	noExit bool
+	noExit         bool
+	refuseSessions bool
+	// dials counts how many connections this host accepted. The probes run on a
+	// POOLED connection, so the number is what says whether a lease kept one or
+	// whether every probe paid for its own handshake.
+	dials int
+}
+
+// connections is how many times this host was dialed.
+func (f *fixture) connections() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.dials
+}
+
+// ran is the list of commands this host's shell was asked to run, in order —
+// the assertion that a NAMED PROBE ran and not a command the coordinator
+// composed (nocx-50w7p.9), and that a lane runs the bridge this repository
+// installs and nothing else (nocx-50w7p.10).
+func (f *fixture) ran() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.execs...)
+}
+
+// setExecHandler scripts what an exec request answers.
+func (f *fixture) setExecHandler(h func(cmd string) (stdout, stderr string, exit int, refuse bool)) {
+	f.mu.Lock()
+	f.execHandler = h
+	f.mu.Unlock()
+}
+
+// setSessionRefusal makes this host serve no session channel, which is how
+// OpenSSH answers at MaxSessions 1 with the user's own shell holding it.
+func (f *fixture) setSessionRefusal(refuse bool) {
+	f.mu.Lock()
+	f.refuseSessions = refuse
+	f.mu.Unlock()
 }
 
 func newFixture(t *testing.T, password string, acceptedKey gossh.Signer) *fixture {
@@ -223,6 +264,9 @@ func newFixture(t *testing.T, password string, acceptedKey gossh.Signer) *fixtur
 // subsystem) and the tcpip-forward global request (which is not a channel at
 // all and is answered out of band).
 func (f *fixture) serve(conn net.Conn, config *gossh.ServerConfig) {
+	f.mu.Lock()
+	f.dials++
+	f.mu.Unlock()
 	defer func() { _ = conn.Close() }()
 	sconn, chans, reqs, err := gossh.NewServerConn(conn, config)
 	if err != nil {
@@ -231,6 +275,13 @@ func (f *fixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 	defer func() { _ = sconn.Close() }()
 	go f.serveGlobalRequests(sconn, reqs)
 	for newChan := range chans {
+		f.mu.Lock()
+		refuse := f.refuseSessions
+		f.mu.Unlock()
+		if refuse {
+			_ = newChan.Reject(gossh.ResourceShortage, "too many sessions")
+			continue
+		}
 		if newChan.ChannelType() == "direct-tcpip" {
 			f.serveDirectTCPIP(newChan, newChan.ExtraData())
 			continue
@@ -522,17 +573,27 @@ func (f *fixture) serveChannel(ch gossh.Channel, reqs <-chan *gossh.Request) {
 	_ = ch.Close()
 }
 
-// serveExec runs ONE command on a channel — the far side of a lane — and
-// answers its exit status.
+// serveExec answers one exec request the way a host's shell would: run it,
+// report its status, close.
 //
-// The command is recorded BEFORE the reply, for the reason the subsystem
-// record is: the reply is what the helper synchronizes on, so a record written
-// after it is a record an assertion can outrun.
+// THREE ways to answer, because two planes in this package ask for an exec and
+// need different things from one. `execHandler` scripts the streams and the
+// status as STRINGS (the probe plane, nocx-50w7p.9: which named probe ran, and
+// what it answered). `execPeer` hands the channel to a function that answers an
+// exit status, and `execRun` runs the command FOR REAL with the channel as its
+// stdio (the lane plane, nocx-50w7p.10: that the bridge invocation crosses, and
+// that it reaches a helper). A fixture with none of the three set serves no
+// exec at all and refuses the request, which is what a restricted shell or a
+// ForceCommand policy does — and the honest default: a test that asks for a
+// program this fixture cannot run fails where it asked instead of reading an
+// empty success.
+//
+// The command is recorded BEFORE the reply, for the reason the subsystem record
+// is: the reply is what a caller synchronizes on, so a record written after it
+// is a record an assertion can outrun.
 func (f *fixture) serveExec(ch gossh.Channel, req *gossh.Request) {
-	var payload struct {
-		Command string
-	}
-	if err := gossh.Unmarshal(req.Payload, &payload); err != nil {
+	var m struct{ Command string }
+	if err := gossh.Unmarshal(req.Payload, &m); err != nil {
 		if req.WantReply {
 			_ = req.Reply(false, nil)
 		}
@@ -540,22 +601,47 @@ func (f *fixture) serveExec(ch gossh.Channel, req *gossh.Request) {
 		return
 	}
 	f.mu.Lock()
-	f.execs = append(f.execs, payload.Command)
-	peer, noExit, run, env := f.execPeer, f.noExit, f.execRun, append([]string(nil), f.execEnv...)
+	handler, peer, run := f.execHandler, f.execPeer, f.execRun
+	env, noExit := append([]string(nil), f.execEnv...), f.noExit
+	f.execs = append(f.execs, m.Command)
 	f.mu.Unlock()
-	if req.WantReply {
-		_ = req.Reply(true, nil)
+
+	reply := func(ok bool) {
+		if req.WantReply {
+			_ = req.Reply(ok, nil)
+		}
 	}
-	code := 0
-	switch {
-	case run:
-		code = runExecCommand(ch, payload.Command, env)
-	case peer != nil:
-		code = peer(ch, ch)
-	}
-	if !noExit {
+	status := func(code int) {
+		if noExit {
+			return
+		}
 		_, _ = ch.SendRequest("exit-status", false,
 			gossh.Marshal(struct{ Status uint32 }{Status: uint32(code)})) // #nosec G115 -- an exit status is 0-255
+	}
+
+	switch {
+	case handler != nil:
+		stdout, stderr, exit, refuse := handler(m.Command)
+		if refuse {
+			reply(false)
+			return
+		}
+		reply(true)
+		_, _ = ch.Write([]byte(stdout))
+		_, _ = ch.Stderr().Write([]byte(stderr))
+		status(exit)
+	case run, peer != nil:
+		reply(true)
+		code := 0
+		if run {
+			code = runExecCommand(ch, m.Command, env)
+		} else {
+			code = peer(ch, ch)
+		}
+		status(code)
+	default:
+		reply(false)
+		return
 	}
 	_ = ch.Close()
 }
@@ -606,15 +692,6 @@ func runExecCommand(ch gossh.Channel, command string, env []string) int {
 		return 127
 	}
 	return 0
-}
-
-// execsSeen reports the commands this fixture was asked to run, in order: the
-// assertion that a lane runs the bridge this repository installs and nothing
-// else.
-func (f *fixture) execsSeen() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]string(nil), f.execs...)
 }
 
 // subsystemsSeen reports the subsystem names this fixture was asked for, in

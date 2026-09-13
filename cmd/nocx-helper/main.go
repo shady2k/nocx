@@ -231,7 +231,7 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 	// artifact `make helpers` produces, which is what reaches a host nobody
 	// here controls — returns a seam that registers nothing, so every ssh op is
 	// answered `unknown_service`.
-	sshCap, err := holdSSHClient(log)
+	sshCap, err := holdSSHClient(log, agentToolSocketPath)
 	if err != nil {
 		log.Error("ssh client", "err", err)
 		return 1

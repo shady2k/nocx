@@ -163,7 +163,16 @@ func (s *Service) openLane(ctx context.Context, p proto.LaneParams) (proto.OpenC
 	// a person is watching, and an unknown key here comes back as
 	// host-key-unknown with its evidence so that flow can raise the sheet it
 	// always did.
-	pool, err := s.acquirePooled(ctx, conn, p.Destination, false)
+	//
+	// The fingerprint is empty — no PINNED key — and that is the same answer
+	// `open`, `forward` and the named probes give for this destination
+	// (nocx-50w7p.14's pin exists where the key has already been DECIDED: a
+	// pane or a shell whose spec carries the key the person accepted). A lane
+	// arrives with a machine whose helper was installed under a consent
+	// decision, not with a key: its verdict is the coordinator's own, taken
+	// through the reverse registry on the handshake, and pinning a second
+	// answer here would be a second place for the decision to live.
+	pool, err := s.acquirePooled(ctx, conn, p.Destination, false, "")
 	if err != nil {
 		return proto.OpenChannelResult{}, err
 	}

@@ -903,9 +903,16 @@ func New(opts ...Option) (*App, error) {
 	// from this process. The git lane and the platform probe still do, and
 	// installLeaseRoutes names that split in one place rather than hiding it.
 	overHelper := &sshOverHelper{local: localOpener, resolve: sshClient, log: slogger}
+	// The named probes ride the same connection to this machine's helper, and
+	// the same resolver: what each consumer asks for is a LEASE on a
+	// destination, and the helper is what dials it (nocx-50w7p.9).
+	probes := &helperProbes{local: localOpener, resolve: sshClient}
+	// ONE value for "who serves which lease", read twice: the git factory takes
+	// it and so does the file panel's factory below. Two literals would be two
+	// answers to one question, and the second would be the one that drifts.
+	sshLeases := installLeaseRoutes{viaLocal: overHelper, probes: probes}
 	helperFactory, helperReg := helperGitFactory(
-		installLeaseRoutes{direct: sshClient, viaLocal: overHelper},
-		helperartifacts.DefaultSource, helperConsent, helperInstalls, slogger)
+		sshLeases, helperartifacts.DefaultSource, helperConsent, helperInstalls, slogger)
 	helperReg.registry = sess
 	localOpener.registry = sess
 	// The one seam the transport asks for every destination. hostedOpeners is
@@ -1195,7 +1202,7 @@ func New(opts ...Option) (*App, error) {
 	// sampling every 10 s while the panel is visible and nothing is
 	// paused.
 	discoverySched := discovery.NewScheduler(
-		sshClient, logger,
+		probes, logger,
 		discovery.WithLocalProvider(func(l log.Logger) discovery.Provider {
 			return nativeports.NewProvider(l)
 		}),
@@ -1364,7 +1371,7 @@ func New(opts ...Option) (*App, error) {
 		// silently dialing the target directly.
 		transport.WithCompleters(
 			completion.NewLocal(),
-			&routedSSHCompleter{client: sshClient},
+			&routedSSHCompleter{probes: probes},
 		),
 		// Command discovery's shared half (carrier design §8, nocx-m8jwn.6).
 		// One backend-owned, in-memory cache serves every tab: the PATH
@@ -1375,7 +1382,7 @@ func New(opts ...Option) (*App, error) {
 		// nowhere else (AGENTS.md check 5).
 		transport.WithCommandNames(&commandNamesRouter{
 			svc:    commandnames.New(time.Now, logger),
-			client: sshClient,
+			probes: probes,
 		}),
 
 		transport.WithProbeResultStore(probeResultStore),
@@ -1394,7 +1401,10 @@ func New(opts ...Option) (*App, error) {
 		// factory is the caller that makes the package reachable from
 		// main() (AGENTS.md check 5).
 		transport.WithFilesystemRegistry(filesystem.New()),
-		transport.WithFilesystemProviderFactory(filesystemProviderFactory(sshClient)),
+		// The lease is this machine's helper's since nocx-50w7p.12: the sftp
+		// channel rides the same pooled connection the pane does, so a terminal
+		// and its Files panel authenticate once (AD-4, plan §3).
+		transport.WithFilesystemProviderFactory(filesystemProviderFactory(sshLeases)),
 		// Git (spec §5.1). The registry is the only route to a bound
 		// repository; the factory is the local one, and it is what makes
 		// internal/git reachable from main() at all — until this line
@@ -2796,10 +2806,8 @@ func (a *remoteLauncherAdapter) StartCommand(shell ssh.ShellKind, opts ssh.Launc
 	cmd, reason, ok := a.inner.StartCommand(
 		shellintegration.ShellKind(shell),
 		shellintegration.LaunchOptions{
-			SessionID:           opts.SessionID,
-			Enhanced:            opts.Enhanced,
-			AgentHelperPath:     opts.AgentHelperPath,
-			AgentToolSocketPath: opts.AgentToolSocketPath,
+			SessionID: opts.SessionID,
+			Enhanced:  opts.Enhanced,
 			// The lifecycle channel (ADR-0024 decision 2 "Over SSH"): the
 			// port becomes NOCX_LIFECYCLE_PORT and the capability the
 			// rcfile's @CAP@. Empty when no channel was established — the
@@ -2881,16 +2889,14 @@ func (a *remoteLauncherAdapter) Prepare(shell ssh.ShellKind, opts ssh.LaunchOpti
 		return "", nil, nil, false
 	}
 	sopts := shellintegration.LaunchOptions{
-		SessionID:           opts.SessionID,
-		Enhanced:            opts.Enhanced,
-		AgentHelperPath:     opts.AgentHelperPath,
-		AgentToolSocketPath: opts.AgentToolSocketPath,
-		Capability:          opts.Capability,
-		Recovery:            opts.Recovery,
-		Lane:                opts.Lane,
-		Domain:              opts.Domain,
-		Epoch:               opts.Epoch,
-		LifecyclePort:       opts.LifecyclePort,
+		SessionID:     opts.SessionID,
+		Enhanced:      opts.Enhanced,
+		Capability:    opts.Capability,
+		Recovery:      opts.Recovery,
+		Lane:          opts.Lane,
+		Domain:        opts.Domain,
+		Epoch:         opts.Epoch,
+		LifecyclePort: opts.LifecyclePort,
 	}
 	stage, err := shellintegration.Stage1Frame(shellintegration.ShellKind(shell), sopts)
 	if err != nil {

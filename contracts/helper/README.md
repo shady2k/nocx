@@ -353,7 +353,50 @@ the entry change safe: no reader of the new shape was built without it.
 The schemas are frozen from here like every sibling's: a new op degrades (an older
 helper answers `unknown_op`), and a new FIELD on one of these shapes does not.
 
-## What landed with `nocx-50w7p.10`, and why `Version` moved to 7
+## What landed with `nocx-50w7p.9`, and why `Version` moved to 7
+
+**Every probe is a named op, and a lease is what they run on.** Seven ops join
+the `ssh` service — `lease`, `unlease`, `uname`, `home`, `sample-ports`,
+`completion`, `command-names` — and with them the last shell commands the
+coordinator used to compose for a host: `uname -s -m` for the platform probe,
+the port-discovery ladder, the completion probe, the PATH enumeration. What a
+caller supplies now is a lease, a member of a closed set and typed arguments; no
+command, script or argv crosses, and the text of each one lives in
+`internal/remoteprobe`, which both ends link.
+
+Three decisions in these shapes are worth naming rather than leaving to a reader:
+
+- **A lease is not a channel.** A probe asked with no reference held would
+  acquire and release inside the one request, closing the connection for the
+  next probe to redial it — a second authentication per sample, on hosts where
+  that is how an account gets banned. So `lease` takes a pooled reference and
+  answers its id, every probe op runs on the connection that reference keeps
+  alive, and `unlease` drops it. It is the `ssh` service's own `open` for a
+  caller that wants no stream.
+- **One op per probe, and never a field on an existing one.** Each has its own
+  parameters and its own result, and a new FIELD on a frozen op is a break
+  (`additionalProperties: false`) while a new op is one an older helper answers
+  `unknown_op` to — which is exactly the reading a coordinator needs.
+- **One result shape for all five probes** (`probeExecResult`: captured streams,
+  remote exit status, `truncated`). Each caller classifies those facts its own
+  way — discovery reads exit 127 as "tool absent" and lsof's exit 1 as a valid
+  empty sample, completion rejects an unframed answer, deploy refuses a nonzero
+  status outright — and none of those are decisions the helper may take for the
+  caller. `truncated` is what keeps a PREFIX from being read as a complete
+  table, which for port discovery is the difference between "no listeners" and
+  "I could not see them".
+
+The bump is taken because of what the seven MEAN rather than because seven ops
+were added: a coordinator speaking 6 has no ops to ask these questions with and
+would fall back to its own dial — the state the owner's invariant exists to end
+— while a helper speaking 6 answers `unknown_op` to every one of them, which a
+coordinator reads correctly as "this machine's helper is older than this app"
+rather than as a host that refuses probes.
+
+The schemas are frozen from here like every sibling's: a new op degrades, and a
+new FIELD on one of these shapes does not.
+
+## What landed with `nocx-50w7p.10`, and why `Version` moved to 8
 
 The **exec lane**: the `lane` op, which is how the git-over-a-remote-helper
 bridge rides a connection the HELPER dialed, plus the two shape changes the same
@@ -401,7 +444,7 @@ Three decisions in these shapes are worth naming rather than leaving to a reader
   rebuilds `ssh.ErrUnknownHostKey` / `ssh.ErrHostKeyMismatch` from these fields —
   the same shape a refused channel has carried since generation 4.
 
-The version moved because the shapes moved: a generation speaking 6 accepts only
+The version moved because the shapes moved: a generation speaking 7 accepts only
 what it was built with (`additionalProperties: false`), so a probe result or a
 closed event carrying these fields is a payload it rejects rather than tolerates.
 Two peers that disagree refuse each other at hello in both directions.

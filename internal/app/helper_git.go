@@ -43,13 +43,14 @@ import (
 
 // helperInstallProvider is the full composition-root surface the factory
 // needs to bring a helper up on a host: the exec lane the helper rides
-// (D19), the write-capable install lease the deploy package installs
-// through (D7), and the bounded one-shot exec the platform probe uses
-// (D20). The interface exists so the factory is testable against doubles
-// without a live connection, and since nocx-50w7p.3 no SINGLE type satisfies
-// all three in production: the composition root wires installLeaseRoutes,
-// whose install lease is this machine's helper's and whose other two are
-// still this process's own dials.
+// (nocx-50w7p.10), the write-capable install lease the deploy package installs
+// through (D7), and the bounded one-shot exec the platform probe uses (D20).
+// The interface exists so the factory is testable against doubles without a
+// live connection — and since nocx-50w7p.9 the composition root wires
+// installLeaseRoutes, where ALL THREE are this machine's helper's: the lane as
+// a channel it opened, the install lease as the sftp channel it opened, and the
+// platform probe as a named op on a probe lease. No field of that dispatch is
+// the coordinator's own dial any more.
 //
 // The registry itself keeps the narrow laneProvider — install is a
 // selection-time concern, not a per-session one.

@@ -56,11 +56,6 @@ type testSSHServer struct {
 	// server can produce, so a test states a number rather than a mood.
 	execRefusals      int
 	execSubstitutions int
-	// execHandler, when set, answers every accepted exec request with its
-	// canned output, exit status and a channel close — the server side of a
-	// scripted remote probe (discovery tests). Nil keeps the default echo
-	// behavior. Read under s.mu; set via setExecHandler.
-	execHandler func(cmd string) (stdout, stderr string, exit int)
 	// maxSessions, when > 0, caps session channels per connection; further
 	// opens are rejected with ResourceShortage (OpenSSH's MaxSessions).
 	// Read under s.mu; set via setMaxSessions.
@@ -121,14 +116,6 @@ func (s *testSSHServer) logf(format string, args ...any) {
 		return
 	}
 	s.t.Logf(format, args...)
-}
-
-// setExecHandler installs the scripted exec responder. Call before the
-// test's first connection.
-func (s *testSSHServer) setExecHandler(h func(cmd string) (stdout, stderr string, exit int)) {
-	s.mu.Lock()
-	s.execHandler = h
-	s.mu.Unlock()
 }
 
 // execRefusalMode selects which of §6.4's `exec` rows this server produces.
@@ -196,34 +183,6 @@ func (s *testSSHServer) waitLiveConns(want int) {
 		defer s.liveMu.Unlock()
 		return len(s.liveConns) == want
 	})
-}
-
-// killConns closes every established server-side connection, simulating
-// transport loss for the clients. Closing the server side makes the
-// client's transport fail, which is what a real network loss does.
-//
-// It refuses to kill nothing. Every caller closes connections in order to
-// observe a loss immediately afterwards, so an empty set is never a no-op —
-// it is a wait that can only end at its deadline, reported as whatever the
-// caller was waiting on rather than as the kill that never happened. That is
-// precisely how nocx-zlvw read as a slow machine for a week: five identical
-// 5.05s failures under load, all of them the server having nothing to close.
-func (s *testSSHServer) killConns() {
-	s.t.Helper()
-	s.liveMu.Lock()
-	conns := make([]*gossh.ServerConn, 0, len(s.liveConns))
-	for c := range s.liveConns {
-		conns = append(conns, c)
-	}
-	s.liveMu.Unlock()
-	if len(conns) == 0 {
-		s.t.Fatal("killConns: no established connection to close — " +
-			"the loss the test is about to wait for can never arrive; " +
-			"wait for the server to accept the connection first (waitLiveConns)")
-	}
-	for _, c := range conns {
-		_ = c.Close()
-	}
 }
 
 func startTestSSHServer(t *testing.T) *testSSHServer {
@@ -459,20 +418,8 @@ func (s *testSSHServer) handleSession(ch gossh.Channel, reqs <-chan *gossh.Reque
 				s.mu.Lock()
 				s.shellCh = ch
 				s.execCommands <- m.Command
-				handler := s.execHandler
 				s.mu.Unlock()
 				s.shellReadyDo.Do(func() { close(s.shellReady) })
-				if handler != nil {
-					// Scripted exec: answer with the canned output, a real
-					// exit-status request, then close the channel the way
-					// sshd does — the client's Run returns only after all
-					// three.
-					stdout, stderr, exit := handler(m.Command)
-					_, _ = ch.Write([]byte(stdout))
-					_, _ = ch.Stderr().Write([]byte(stderr))
-					_, _ = ch.SendRequest("exit-status", false, gossh.Marshal(struct{ Status uint32 }{uint32(exit)})) //nolint:gosec // SSH exit statuses are 0-255
-					_ = ch.Close()
-				}
 
 			default:
 				_ = req.Reply(false, nil)

@@ -298,6 +298,14 @@ func identityOf(t ssh.DialTarget) proto.SSHIdentity {
 	}
 }
 
+// filesLeaseProvider is the narrow surface the file panel's factory needs, the
+// same way installLeaseProvider is the installer's. *ssh.RealClient used to
+// satisfy it; this machine's helper does now, which is the whole of
+// nocx-50w7p.12's Files half.
+type filesLeaseProvider interface {
+	FSConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.FSConn, error)
+}
+
 // HelperInstallConn acquires the write-capable install lease over an SFTP
 // stream this machine's helper opened.
 //
@@ -319,6 +327,33 @@ func (h *sshOverHelper) HelperInstallConn(ctx context.Context, host string, opts
 		return nil, fmt.Errorf("helper install lease for %s: %w", host, err)
 	}
 	return conn, nil
+}
+
+// FSConn acquires the file manager's SFTP lease over a channel this machine's
+// helper opened (nocx-50w7p.12).
+//
+// The lease is the SAME lease the panel has always held — one bounded lane, a
+// hard timeout, close-to-cancel, the typed error ladder (ssh.NewFSConn) — and
+// that is deliberate: what moved is the transport, not the consumer. What the
+// helper adds is the connection it rides. One pooled connection per
+// (destination, identity) carries the pane's shell channel AND this sftp
+// channel, so the file panel and the terminal it belongs to authenticate once
+// (AD-4), and the reference is the helper's: closing this lease closes the
+// channel (`ssh.close`), and the connection lives on for whoever asks next.
+func (h *sshOverHelper) FSConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.FSConn, error) {
+	stream, err := h.openChannel(ctx, proto.ChannelSFTP, host, opts)
+	if err != nil {
+		return nil, err
+	}
+	lease, err := ssh.NewFSConn(ctx, stream)
+	if err != nil {
+		// The stream is released whichever way this fails: an open channel
+		// nobody holds is a pooled reference the helper keeps for a caller
+		// that has given up.
+		_ = stream.Close()
+		return nil, fmt.Errorf("sftp provider for %s: %w", host, err)
+	}
+	return lease, nil
 }
 
 // UninstallHelper removes the helper install tree from a host, over the same
@@ -442,52 +477,65 @@ func decodeHostKeyEvidence(raw json.RawMessage) (proto.HostKeyEvidence, bool) {
 // lease", for the factory that needs three of them.
 //
 // It is a DISPATCH and not a policy, exactly like hostedOpeners: each method is
-// one lease and each lease has exactly one owner. The install lease, the git
-// lane and the settings probe are this machine's helper's; the platform probe
-// is still the coordinator's OWN dial, which is the state of the epic rather
-// than a preference — it is a separate consumer and it moves in its own task
-// (nocx-50w7p.9). A reader looking for "which leases still dial" gets the
-// answer from this struct's two fields and nothing else.
+// one lease and each lease has exactly one owner. Every lease this factory
+// needs is this machine's helper's: the exec lane a remote helper's bridge
+// rides (nocx-50w7p.10), the write-capable install lease (nocx-50w7p.3) and the
+// file panel's sftp lease (nocx-50w7p.12) through `viaLocal`, and the platform
+// probe (nocx-50w7p.9) through `probes` — which is the same helper, reached as
+// a named op on a probe lease rather than as a channel. There is no `direct`
+// field and no coordinator dial left in this dispatch, and that is the state
+// the epic's invariant asks for rather than a step on the way to it.
 type installLeaseRoutes struct {
-	direct   directLanes // the leases whose dial is still the coordinator's
-	viaLocal localLanes  // what this machine's helper answers
+	viaLocal helperLeases  // the leases this machine's helper answers
+	probes   *helperProbes // the platform probe: a named op on a lease
 }
 
-// localLanes is what this machine's helper serves for the install path: the
-// write-capable install lease and the exec lane a remote helper's bridge rides.
-type localLanes interface {
+// helperLeases is what this machine's helper answers through this dispatch: the
+// exec lane the git factory rides, the install lease and the file panel's,
+// each acquired as one channel on the pooled connection it names. It is a
+// composite of the narrow surfaces rather than a wider method set, so a
+// consumer still declares exactly the one it needs (and the lane's own
+// interface stays where its implementation is, next to the op it names).
+type helperLeases interface {
 	laneProvider
 	installLeaseProvider
-}
-
-// directLanes is what the coordinator's own client still answers here. It is
-// declared as its own interface rather than reusing helperInstallProvider so
-// that a helper-answered method cannot be satisfied by BOTH halves: a type that
-// filled in this field and implemented HelperInstallConn too would compile, and
-// the second dial path would be invisible.
-//
-// HelperConn is deliberately absent: it was this interface's own member until
-// nocx-50w7p.10, when the git lane moved to the helper and
-// ssh.RealClient.HelperConn was deleted.
-type directLanes interface {
-	DiscoveryConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.DiscoveryConn, error)
+	filesLeaseProvider
 }
 
 func (r installLeaseRoutes) LaneConn(ctx context.Context, host string, machine proto.Machine, generation proto.GenerationID, opts ...ssh.ConnectOption) (helperclient.HelperConn, error) {
 	return r.viaLocal.LaneConn(ctx, host, machine, generation, opts...)
 }
 
+// DiscoveryConn is the platform probe (D20), answered by this machine's helper
+// as the typed `ssh.uname` op.
+//
+// It keeps the ssh.DiscoveryConn SHAPE — and that shape is one command wide,
+// which `platformLease.Exec` refuses anything outside of — because its caller
+// is helper_git.go's probeExec, a conversion into the deploy package's own
+// one-command seam. What crosses to the helper is a lease and an op name: no
+// command reaches the wire (nocx-50w7p.9).
 func (r installLeaseRoutes) DiscoveryConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.DiscoveryConn, error) {
-	return r.direct.DiscoveryConn(ctx, host, opts...)
+	return r.probes.HelperPlatformProbe(ctx, host, opts...)
 }
 
 func (r installLeaseRoutes) HelperInstallConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.HelperInstallConn, error) {
 	return r.viaLocal.HelperInstallConn(ctx, host, opts...)
 }
 
-// The one assertion worth writing here: the dispatch above must satisfy the
-// interface the git factory takes, or the wiring line stops compiling — which
-// is the check, and it is why there is no second assertion for the uninstaller
-// (that one is satisfied at its own wiring line, where transport names the
-// interface).
-var _ helperInstallProvider = installLeaseRoutes{}
+// FSConn is the file panel's lease, and it is the helper's now (nocx-50w7p.12) —
+// the same `viaLocal` half HelperInstallConn and LaneConn use, because one value
+// answering for three leases of the same owner is one answer rather than three
+// that agree today.
+func (r installLeaseRoutes) FSConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.FSConn, error) {
+	return r.viaLocal.FSConn(ctx, host, opts...)
+}
+
+// The two assertions worth writing here: the dispatch must satisfy the
+// interface the git factory takes and the one the file-panel factory takes, or
+// a wiring line stops compiling — which is the check, and it is why there is no
+// assertion for the uninstaller (that one is satisfied at its own wiring line,
+// where transport names the interface).
+var (
+	_ helperInstallProvider = installLeaseRoutes{}
+	_ filesLeaseProvider    = installLeaseRoutes{}
+)

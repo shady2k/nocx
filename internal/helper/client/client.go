@@ -103,8 +103,14 @@ type Client struct {
 	// emptied by the claim or by the loss. Distinct from parkedChannels above,
 	// which parks a CHANNEL's bytes rather than a listener's connections.
 	parkedForwards map[proto.ForwardID][]proto.ForwardedTCPIPEvent
-	nextID         uint64
-	lost           bool
+	// probeLeases holds the probe references this coordinator asked for, keyed
+	// by the id the helper minted (probes.go). A third map rather than a
+	// reuse of either above, for the reason the other two are separate: the
+	// three name different things, are ended by different ops, and one entry
+	// keyed by another's identity is how a `close` becomes an `unlease`.
+	probeLeases map[proto.LeaseID]*ProbeLease
+	nextID      uint64
+	lost        bool
 
 	done      chan struct{}
 	hsCh      chan error
@@ -347,6 +353,10 @@ func (c *Client) lose(reason error) {
 			f.mu.Unlock()
 			f.close()
 		}
+		// Probe leases end with it too: a lease is a reference to a connection
+		// whose transport is this one, so a consumer watching Done must learn
+		// here rather than at its next probe, which may be minutes away.
+		c.endLeases(reason)
 	})
 }
 

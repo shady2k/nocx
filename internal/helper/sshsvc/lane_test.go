@@ -123,7 +123,7 @@ func TestALaneRunsTheInstalledBridgeAndCarriesItsBytes(t *testing.T) {
 	}
 
 	// ── the command ────────────────────────────────────────────────────
-	execs := f.execsSeen()
+	execs := f.ran()
 	if len(execs) != 1 {
 		t.Fatalf("the server was asked to run %d commands %q, want the one lane", len(execs), execs)
 	}
@@ -227,7 +227,7 @@ func TestALaneRefusesParametersThatCannotNameAnInstall(t *testing.T) {
 	// Nothing was dialed and nothing ran: every refusal above is decided before
 	// the connection, which is what makes them refusals rather than a far
 	// side's answer about a command this helper should not have built.
-	if got := len(f.execsSeen()); got != 0 {
+	if got := len(f.ran()); got != 0 {
 		t.Fatalf("a refused lane ran %d commands, want none", got)
 	}
 	if passwords, _ := f.authAttempts(); len(passwords) != 0 {
@@ -240,7 +240,7 @@ func TestALaneRefusesParametersThatCannotNameAnInstall(t *testing.T) {
 	if _, err := stand.lane(t, laneParams(t, f)); err != nil {
 		t.Fatalf("a well-formed lane was refused too: %v", err)
 	}
-	if got := f.execsSeen(); len(got) != 1 {
+	if got := f.ran(); len(got) != 1 {
 		t.Fatalf("the well-formed lane ran %d commands, want the bridge", len(got))
 	}
 }
@@ -272,7 +272,7 @@ func TestALaneNeverAcceptsAHostKeyOnTrust(t *testing.T) {
 	if ev.Fingerprint != f.hostKeyFingerprint() || len(ev.Key) == 0 {
 		t.Fatalf("evidence = %+v, want the offered fingerprint and its key bytes", ev)
 	}
-	if got := len(f.execsSeen()); got != 0 {
+	if got := len(f.ran()); got != 0 {
 		t.Fatalf("a lane whose host key was refused ran %d commands, want none: an unrecorded key is refused before the credential is offered, and long before a program runs", got)
 	}
 	if trusted := coord.trusted(); len(trusted) != 0 {
@@ -294,7 +294,7 @@ func TestALaneReportsARefusedCredentialAsItsOwnOutcome(t *testing.T) {
 	if code := refusalCode(err); code != string(proto.ProbeRejected) {
 		t.Fatalf("lane with a refused credential = %v (code %q), want %s", err, code, proto.ProbeRejected)
 	}
-	if got := len(f.execsSeen()); got != 0 {
+	if got := len(f.ran()); got != 0 {
 		t.Fatalf("a lane that could not authenticate ran %d commands, want none", got)
 	}
 }
@@ -477,7 +477,7 @@ func TestACoordinatorReachesARealHelperThroughALaneOverSSH(t *testing.T) {
 	// And the far side ran the ONE command that is a lane: the installed
 	// binary, this package's bridge subcommand, and the generation.
 	want := deploy.InstalledBinary(filepath.Dir(bin)) + " " + endpoint.BridgeCommand + " " + string(generation)
-	execs := f.execsSeen()
+	execs := f.ran()
 	if len(execs) != 1 || execs[0] != want {
 		t.Fatalf("the ssh session ran %q, want exactly %q", execs, want)
 	}

@@ -98,3 +98,28 @@ func DialDirectTCP(client *gossh.Client, addr string) (net.Conn, error) {
 func ListenRemoteTCP(client *gossh.Client, addr string) (net.Listener, error) {
 	return client.Listen("tcp", addr)
 }
+
+// ListenRemoteUnix asks the far side for a listener on a UNIX SOCKET PATH:
+// the streamlocal-forward request of OpenSSH (>= 6.7), which is how a pane
+// hands a far-host path to a process there that has no port to dial
+// (nocx-50w7p.14).
+//
+// It is the transport the pane's agent tool socket rides, and the reason it is
+// a PATH rather than a port is D12's: a loopback port on a machine anybody can
+// log into is reachable by every account on it, and the far side's sshd binds
+// a unix socket with the login account's own permissions instead — the same
+// boundary the local endpoint is (0700 directory, 0600 socket, endpoint's own
+// package doc).
+//
+// The PATH is the caller's and never invented here: only the party that knows
+// the far host's layout can name one, and the address is sent to the server
+// verbatim. It must not exist when the request arrives — OpenSSH refuses to
+// bind over an existing name rather than replacing it — and closing the
+// listener asks the server to cancel it.
+//
+// A server that will not forward streamlocal sockets (AllowStreamLocalForwarding
+// off) refuses the request, and the refusal is the server's own, classified by
+// the caller the same way every other channel refusal is.
+func ListenRemoteUnix(client *gossh.Client, path string) (net.Listener, error) {
+	return client.Listen("unix", path)
+}

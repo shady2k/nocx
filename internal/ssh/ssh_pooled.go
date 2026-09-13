@@ -32,6 +32,7 @@ package ssh
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -85,9 +86,27 @@ type PooledSpec struct {
 // its own interface here would put the helper's channel vocabulary inside the
 // coordinator's ssh package, which is the direction AD-8 forbids.
 type PooledConn struct {
-	client  *gossh.Client
-	release func()
-	once    sync.Once
+	client      *gossh.Client
+	fingerprint string
+	release     func()
+	once        sync.Once
+}
+
+// Fingerprint is the SHA256 fingerprint of the TARGET host's public key as
+// presented and verified when this connection was dialed.
+//
+// It is carried on the reference rather than looked up, because the party that
+// reads it is one process away and cannot enumerate the pool: the helper's
+// `lease` op answers it, and the coordinator's install path keys CONSENT by it
+// (ADR-0023 — the host key is the machine, where a route name is only a proxy
+// for one). A connection whose key was never established reports the empty
+// string, and the helper refuses an empty one rather than handing out a lease
+// whose identity nobody can state.
+func (p *PooledConn) Fingerprint() string {
+	if p == nil {
+		return ""
+	}
+	return p.fingerprint
 }
 
 // Client is the underlying connection.
@@ -136,11 +155,28 @@ func (rc *RealClient) AcquirePooled(ctx context.Context, spec PooledSpec) (*Pool
 	addr := net.JoinHostPort(spec.Host, strconv.Itoa(spec.Port))
 
 	dial := func(poolKey) (sshClientConn, error) {
-		gclient, err := (&dialer{client: rc}).dialDirect(ctx, addr, spec.Config, spec.Host, spec.User)
+		// The TARGET host's fingerprint is captured here, at the one place a
+		// helper's dial passes through, because the callback that sees the key
+		// is the caller's own (the helper's asks the coordinator what to make
+		// of it) and the pool entry is what must carry the answer: a LATER
+		// acquisition is a cache hit and runs no handshake at all, so a
+		// fingerprint remembered per-acquire would be empty for every lease
+		// but the first — and the install path keys consent by it (ADR-0023).
+		var fingerprint string
+		cfg := *spec.Config
+		inner := cfg.HostKeyCallback
+		cfg.HostKeyCallback = func(hostname string, remote net.Addr, key gossh.PublicKey) error {
+			fingerprint = gossh.FingerprintSHA256(key)
+			if inner == nil {
+				return errors.New("ssh: pooled connection: no host-key callback")
+			}
+			return inner(hostname, remote, key)
+		}
+		gclient, err := (&dialer{client: rc}).dialDirect(ctx, addr, &cfg, spec.Host, spec.User)
 		if err != nil {
 			return nil, err
 		}
-		pconn := &pooledSSHConn{client: gclient}
+		pconn := &pooledSSHConn{client: gclient, fingerprint: fingerprint}
 		stopKA, _ := startKeepalive(pconn, spec.KeepaliveInterval, spec.KeepaliveCountMax, nil)
 		pconn.setKeepaliveStop(stopKA)
 		return pconn, nil
@@ -164,7 +200,8 @@ func (rc *RealClient) AcquirePooled(ctx context.Context, spec PooledSpec) (*Pool
 		return nil, fmt.Errorf("ssh: pooled connection: unexpected client type %T", client.client)
 	}
 	return &PooledConn{
-		client:  gclient,
-		release: func() { rc.pool.Release(handle) },
+		client:      gclient,
+		fingerprint: client.HostKeyFingerprint(),
+		release:     func() { rc.pool.Release(handle) },
 	}, nil
 }

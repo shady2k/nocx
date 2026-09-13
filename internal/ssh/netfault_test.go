@@ -2,12 +2,18 @@ package ssh
 
 // A network that can be made to misbehave on cue.
 //
-// The suite already had ONE way to lose a connection: testSSHServer.killConns
-// closes the server side, which the client observes immediately. That is the
-// LOUD loss, and it is the one shape the product already handles — the channel
-// EOFs, Done fires, the session ends, the tab is marked. Every failure that
-// matters in the field is one of the quiet ones, and none of them could be
-// staged here at all:
+// The LOUD loss — a server that closes the connection, which the client
+// observes immediately — is the one shape the product already handles (the
+// channel EOFs, Done fires, the session ends, the tab is marked), and the suite
+// staged it with a killConns helper on the test server until the coordinator's
+// own discovery lease went away with the probes (nocx-50w7p.9). What replaces it
+// is staged one level out, where the lease now lives: the helper's lease is the
+// thing whose transport can die, the pool's own corpse handling is covered by
+// pool_dead_entry_test.go, and the consumer-visible half is
+// internal/helper/client's probes_test.go.
+//
+// Every failure that matters in the field is one of the QUIET ones, and none of
+// those could be staged here at all:
 //
 //   - a laptop that suspended, or a NAT that dropped the flow: the socket
 //     stays open, writes succeed, and nothing ever comes back;

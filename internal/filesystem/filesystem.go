@@ -5,7 +5,7 @@
 // # Why a second directory lister (spec D11)
 //
 // internal/completion already lists remote directories, through SSHCompleter
-// running bash over a DiscoveryConn. Under the AGENTS.md "one owner per
+// running a named probe on this machine's helper. Under the AGENTS.md "one owner per
 // behaviour" rule this must be justified rather than duplicated silently.
 //
 // They answer different questions. Completion asks "what does the shell think

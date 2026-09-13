@@ -390,15 +390,15 @@ type SSHSpawnParams struct {
 	WindowBytes int64 `json:"windowBytes"`
 	// Lifecycle is optional, on the same terms as SpawnParams'.
 	//
-	// WHAT THIS GENERATION DOES WITH IT, stated rather than implied: it
-	// delivers the PANE and does not establish the enhanced lifecycle channel.
-	// The lifecycle tunnel is a REMOTE LOOPBACK LISTENER on the ssh connection
-	// (plan §6), which needs a forward on this helper's connection — the
-	// direct-tcpip/forward ops of nocx-50w7p.8. Until that lands, a request
-	// carrying one is answered with a session that has no lifecycle window,
-	// `adopt-lifecycle` answers null for it, and the helper logs the refusal
-	// by name. Nothing is silently dropped: the two facts that the channel
-	// exists are exactly the two a caller can already check.
+	// WHAT THE HELPER DOES WITH IT, stated rather than implied: it asks the far
+	// side for a loopback listener on the connection it dials (plan §6 — the
+	// lifecycle tunnel is a remote listener, never a coordinator-side one),
+	// renders the port into the launcher, and carries the capability in frame 2
+	// of the bootstrap. A request it CANNOT honour — the far side refused the
+	// listener — is refused by name before anything is spawned, so a caller
+	// never waits out a hello budget for a channel that was never opened. The
+	// two facts that the channel exists are the two a caller can already check:
+	// the session's lifecycle window, and what `adopt-lifecycle` answers.
 	Lifecycle *LifecycleLaunch `json:"lifecycle,omitempty"`
 	// DesiredMode is the caller's integration intent, and the helper applies
 	// profile.DesiredMode's own gate to it: `raw` opens a plain login shell

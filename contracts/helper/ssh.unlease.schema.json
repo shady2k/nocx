@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.unlease.schema.json",
+  "title": "HelperSSHUnleaseResult",
+  "description": "The empty answer an idempotent release gives: a named object rather than a bare value, so the wire shape is declared once and can be frozen.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {}
+}

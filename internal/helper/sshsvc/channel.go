@@ -255,7 +255,7 @@ func (s *Service) takeChannel(id proto.ChannelID) *openChannel {
 // returning, so a refused subsystem does not leave a pool entry behind that
 // nothing owns.
 func (s *Service) dialChannel(ctx context.Context, conn *host.Host, p proto.OpenChannelParams) (*ssh.PooledConn, remoteEnd, error) {
-	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust)
+	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust, "")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -286,10 +286,21 @@ func (s *Service) dialChannel(ctx context.Context, conn *host.Host, p proto.Open
 
 // acquirePooled dials or reuses the one pooled connection for a destination,
 // with the client configuration this helper authenticates under.
-func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SSHDestination, acceptOnTrust bool) (*ssh.PooledConn, error) {
+//
+// fingerprint is the CALLER's own expectation about the host key, empty when
+// it has none: it is enforced in front of the coordinator's verdict, because a
+// host that changed between the caller's own check and this dial satisfies the
+// verdict's question and not the caller's (pinnedHostKey's own note). A pane's
+// shell channel is the caller that pins one, which is why this is a parameter
+// rather than a second acquisition function: one connection per destination is
+// AD-4's rule and two paths to it would be two answers.
+func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SSHDestination, acceptOnTrust bool, fingerprint string) (*ssh.PooledConn, error) {
 	cfg, err := s.clientConfig(ctx, conn, d.User, d.Identity, acceptOnTrust)
 	if err != nil {
 		return nil, err
+	}
+	if fingerprint != "" {
+		cfg.HostKeyCallback = pinnedHostKey(cfg.HostKeyCallback, fingerprint)
 	}
 	pool, err := s.client.AcquirePooled(ctx, ssh.PooledSpec{
 		Host:     d.Host,

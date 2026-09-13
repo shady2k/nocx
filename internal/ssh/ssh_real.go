@@ -726,17 +726,17 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 		shell = ShellAuto
 	}
 	opts := LaunchOptions{
-		SessionID:           cfg.SessionID,
-		Enhanced:            cfg.Enhanced,
-		AgentHelperPath:     cfg.AgentHelperPath,
-		AgentToolSocketPath: cfg.AgentToolSocketPath,
+		SessionID: cfg.SessionID,
+		Enhanced:  cfg.Enhanced,
 	}
-	// The lifecycle channel config addresses the carrier: lane, domain,
-	// epoch and port are names and travel in the command. The
-	// capability and the recovery fence are carried too, so the
-	// launcher can prove it does not put them there — they reach the
-	// far shell as a frame on the channel, never as command text. lc is
-	// nil when establishment was refused; the launch then carries no
+	// The lifecycle channel config addresses the carrier: lane, domain and
+	// epoch are NAMES and travel in the command, while the PORT — allocated
+	// by the listening side and unknowable here — travels in frame 2
+	// (carrier.go: "the lifecycle port is allocated by the proven master and
+	// travels in frame 2 instead"). The capability and the recovery fence are
+	// carried so the launcher can prove it does not put them anywhere: both
+	// reach the far shell as a frame on the channel, never as command text.
+	// lc is nil when establishment was refused; the launch then carries no
 	// channel config and the shell stays conventional.
 	if lc != nil {
 		opts.Lane = lc.launch.Lane

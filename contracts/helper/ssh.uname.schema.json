@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.uname.schema.json",
+  "title": "HelperSSHUnameResult",
+  "description": "What the uname probe answered: the captured streams, the remote exit status and whether the capture bound was hit. A probe that could not run at all is not this shape — it is a refusal of the op, because 'it never ran' and 'it ran and said nothing' are different answers.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["stdout", "stderr", "exitStatus", "truncated"],
+  "properties": {
+    "stdout": {
+      "type": "string",
+      "contentEncoding": "base64"
+    },
+    "stderr": {
+      "type": "string",
+      "contentEncoding": "base64"
+    },
+    "exitStatus": {
+      "type": "integer",
+      "minimum": -1
+    },
+    "truncated": {
+      "type": "boolean"
+    }
+  }
+}

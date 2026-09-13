@@ -24,10 +24,12 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	pkgsftp "github.com/pkg/sftp"
 	"github.com/shady2k/nocx/internal/credential"
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/consent"
@@ -36,6 +38,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
+
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
 	gossh "golang.org/x/crypto/ssh"
@@ -55,12 +58,38 @@ type pwSSHServer struct {
 	listener   net.Listener
 	addr       string
 
+	// rootDir is what an `sftp` subsystem serves, and EMPTY means this fixture
+	// serves none (every test that predates nocx-50w7p.12 asks for no
+	// subsystem, and a fixture that answered one would be answering a question
+	// nobody put).
+	rootDir string
+	// refuseSubsystem answers the sftp request false, which is what a host
+	// with no sftp-server does.
+	refuseSubsystem bool
+	// conns counts the connections that finished AUTHENTICATION, and
+	// subsystems records the subsystem names asked for in order. They are the
+	// server's own view — "how many times did somebody authenticate" is not a
+	// fact a client can report about itself.
+	conns      int
+	subsystems []string
+
 	mu        sync.Mutex
 	passwords []string
 	execs     int
+
+	liveMu sync.Mutex
+	live   map[*gossh.ServerConn]struct{}
 }
 
 func startPasswordSSHServer(t *testing.T) *pwSSHServer {
+	t.Helper()
+	return startPasswordSFTPSSHServer(t, "")
+}
+
+// startPasswordSFTPSSHServer is the same fixture with an `sftp` subsystem over
+// root (empty root = no subsystem), which is the destination shape the Files
+// panel and the bundle publish need.
+func startPasswordSFTPSSHServer(t *testing.T, root string) *pwSSHServer {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -74,7 +103,10 @@ func startPasswordSSHServer(t *testing.T) *pwSSHServer {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	s := &pwSSHServer{hostSigner: hostSigner, listener: listener, addr: listener.Addr().String()}
+	s := &pwSSHServer{
+		hostSigner: hostSigner, listener: listener, addr: listener.Addr().String(),
+		rootDir: root, live: make(map[*gossh.ServerConn]struct{}),
+	}
 
 	config := &gossh.ServerConfig{
 		PasswordCallback: func(_ gossh.ConnMetadata, password []byte) (*gossh.Permissions, error) {
@@ -109,6 +141,20 @@ func (s *pwSSHServer) serveConn(conn net.Conn, config *gossh.ServerConfig) {
 		_ = conn.Close()
 		return
 	}
+	// A connection that reaches here has AUTHENTICATED: NewServerConn returns
+	// only after the handshake and the auth exchange are done. That is the
+	// counter the Files acceptance reads.
+	s.mu.Lock()
+	s.conns++
+	s.mu.Unlock()
+	s.liveMu.Lock()
+	s.live[sshConn] = struct{}{}
+	s.liveMu.Unlock()
+	defer func() {
+		s.liveMu.Lock()
+		delete(s.live, sshConn)
+		s.liveMu.Unlock()
+	}()
 	go gossh.DiscardRequests(reqs)
 	for newChan := range chans {
 		if newChan.ChannelType() != "session" {
@@ -124,30 +170,57 @@ func (s *pwSSHServer) serveConn(conn net.Conn, config *gossh.ServerConfig) {
 	_ = sshConn.Close()
 }
 
-// handleSession answers what the two callers of this fixture ask of a far
-// side: the platform probe's pty-less exec, and the session's own shell.
+// handleSession answers what the callers of this fixture ask of a far side: the
+// platform probe's pty-less exec, the session's own shell, and — since
+// nocx-50w7p.12 — the `sftp` subsystem the Files panel's lease runs on.
+//
+// The requests are handled in THIS goroutine rather than beside the echo loop,
+// because a session serves one of the three and the choice is only known once
+// the request arrives: an echo loop reading the same channel as an sftp server
+// is two readers on one byte stream, and the first sftp INIT would be echoed
+// back as text.
 func (s *pwSSHServer) handleSession(ch gossh.Channel, reqs <-chan *gossh.Request) {
-	go func() {
-		for req := range reqs {
-			switch req.Type {
-			case "pty-req", "shell":
-				_ = req.Reply(true, nil)
-			case "exec":
-				_ = req.Reply(true, nil)
-				s.mu.Lock()
-				s.execs++
-				s.mu.Unlock()
-				// The probe reads one line and expects a platform triple;
-				// anything else fails the probe, which is a legitimate
-				// outcome for this test and never the thing it measures.
-				_, _ = ch.Write([]byte("Linux x86_64\n"))
-				_, _ = ch.SendRequest("exit-status", false, gossh.Marshal(struct{ Status uint32 }{Status: 0}))
-				_ = ch.Close()
-			default:
+	for req := range reqs {
+		switch req.Type {
+		case "pty-req":
+			_ = req.Reply(true, nil)
+		case "shell":
+			_ = req.Reply(true, nil)
+			s.echoLoop(ch)
+			return
+		case "subsystem":
+			var m struct{ Subsystem string }
+			if err := gossh.Unmarshal(req.Payload, &m); err != nil || m.Subsystem != "sftp" || s.rootDir == "" || s.refuseSubsystem {
 				_ = req.Reply(false, nil)
+				continue
 			}
+			s.mu.Lock()
+			s.subsystems = append(s.subsystems, m.Subsystem)
+			s.mu.Unlock()
+			_ = req.Reply(true, nil)
+			s.serveSFTP(ch)
+			return
+		case "exec":
+			_ = req.Reply(true, nil)
+			s.mu.Lock()
+			s.execs++
+			s.mu.Unlock()
+			// The probe reads one line and expects a platform triple;
+			// anything else fails the probe, which is a legitimate
+			// outcome for this test and never the thing it measures.
+			_, _ = ch.Write([]byte("Linux x86_64\n"))
+			_, _ = ch.SendRequest("exit-status", false, gossh.Marshal(struct{ Status uint32 }{Status: 0}))
+			_ = ch.Close()
+			return
+		default:
+			_ = req.Reply(false, nil)
 		}
-	}()
+	}
+}
+
+// echoLoop mirrors the interactive session: whatever is written comes back
+// unchanged, which is all the pane-open tests ask of the far side.
+func (s *pwSSHServer) echoLoop(ch gossh.Channel) {
 	buf := make([]byte, 4096)
 	for {
 		n, err := ch.Read(buf)
@@ -160,19 +233,22 @@ func (s *pwSSHServer) handleSession(ch gossh.Channel, reqs <-chan *gossh.Request
 	}
 }
 
+// serveSFTP serves the root directory over the channel, which is the far side
+// the Files panel's lease speaks to.
+func (s *pwSSHServer) serveSFTP(ch gossh.Channel) {
+	server, err := pkgsftp.NewServer(ch, pkgsftp.WithServerWorkingDirectory(s.rootDir))
+	if err != nil {
+		_ = ch.Close()
+		return
+	}
+	_ = server.Serve()
+	_ = server.Close()
+}
+
 func (s *pwSSHServer) authAttempts() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.passwords...)
-}
-
-// execCount is how many pty-less exec requests the far side served. The
-// platform probe is the only thing in this test that issues one, so a
-// non-zero count is the probe having authenticated and reached the host.
-func (s *pwSSHServer) execCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.execs
 }
 
 // ---------------------------------------------------------------------------
@@ -224,7 +300,7 @@ func (f *openPasswordPTYFactory) NewPTY(context.Context, pty.Config) (pty.Pty, e
 // open blocks behind it.
 func TestOpenPath_PasswordAskFiresOncePerOpen(t *testing.T) {
 	srv := startPasswordSSHServer(t)
-	reg, helperReg := openPasswordStack(t, srv)
+	reg, helperReg := openPasswordStack(t, srv, noLocalHelperProbes{t: t})
 
 	asker := &countingPasswordRequester{answer: openPasswordFixturePassword}
 	cfg := openPasswordConfig(srv, &ssh.ConnectConfig{
@@ -274,15 +350,19 @@ func writeKnownHostsFor(t *testing.T, path string, srv *pwSSHServer) {
 // TestOpenPath_ProbeStillRunsOnARememberedPassword is the other end of the
 // same rule, and the reason the suppression is narrow. A destination whose
 // password has been remembered (ADR-0017: the profile references a vault
-// secret) authenticates without interrupting anyone, so the platform probe
-// must still dial it, still reach the far host and still be able to select
-// the helper. Only the rung that would stop a person is off.
+// secret) resolves without interrupting anyone, so the platform probe must
+// still be ENTERED and still be handed the destination — only the rung that
+// would stop a person is off.
 //
-// Without this, "the probe must not prompt" could be satisfied by a probe
-// that no longer probes.
+// Without this, "the probe must not prompt" could be satisfied by a probe that
+// no longer probes. What the probe then DOES with that credential — authenticating
+// against the far side and running the uname command — is the helper's half, and
+// it is asserted where a helper exists: internal/helper/sshsvc's probe tests
+// drive a real ssh server with a password only the scripted coordinator has.
 func TestOpenPath_ProbeStillRunsOnARememberedPassword(t *testing.T) {
 	srv := startPasswordSSHServer(t)
-	reg, helperReg := openPasswordStack(t, srv)
+	probes := &recordingProbeSource{}
+	reg, helperReg := openPasswordStack(t, srv, probes)
 
 	asker := &countingPasswordRequester{answer: "the ask must never fire"}
 	cfg := openPasswordConfig(srv, &ssh.ConnectConfig{
@@ -315,13 +395,15 @@ func TestOpenPath_ProbeStillRunsOnARememberedPassword(t *testing.T) {
 	if got := asker.count(); got != 0 {
 		t.Errorf("a remembered password still raised %d ask(s); the open must be silent", got)
 	}
-	if got := srv.execCount(); got == 0 {
-		t.Error("the platform probe never reached the host: the suppression stopped the probe, not just the prompt")
+	asked := probes.asked()
+	if len(asked) != 1 {
+		t.Fatalf("the platform probe was entered %d time(s), want 1: the suppression stopped the probe, not just the prompt", len(asked))
 	}
-	for i, pw := range srv.authAttempts() {
-		if pw != openPasswordFixturePassword {
-			t.Errorf("auth attempt %d sent %q, want the remembered password", i, pw)
-		}
+	if asked[0].User != "e2euser" || net.JoinHostPort(asked[0].Host, strconv.Itoa(asked[0].Port)) != srv.addr {
+		t.Errorf("the probe was handed %+v, want the destination the profile resolved (%s)", asked[0], srv.addr)
+	}
+	if asked[0].Identity.Credential.Ref == "" {
+		t.Error("the probe was handed no credential reference: a probe that cannot authenticate is not a probe")
 	}
 }
 
@@ -336,7 +418,7 @@ func (r rememberedPassword) Resolve(context.Context, credential.SecretID, creden
 // openPasswordStack builds the real composition the open path runs through —
 // the session registry over a real ssh.RealClient, and the helper registry
 // whose selection runs before it. The only double is the artifact source.
-func openPasswordStack(t *testing.T, srv *pwSSHServer) (*session.Reg, *helperRegistry) {
+func openPasswordStack(t *testing.T, srv *pwSSHServer, probes probeHelperSource) (*session.Reg, *helperRegistry) {
 	t.Helper()
 	logger := log.NewSlogAdapter(discardLogger())
 
@@ -357,32 +439,86 @@ func openPasswordStack(t *testing.T, srv *pwSSHServer) (*session.Reg, *helperReg
 
 	consentStore := consent.NewStore(logger, storage.NewDocumentStore(t.TempDir()), "consent.json")
 	installStore := consent.NewInstallStore(logger, storage.NewDocumentStore(t.TempDir()), "installs.json")
-	// The install lease is this machine's helper's now (nocx-50w7p.3) and this
-	// stack has no local daemon, so the route is built with the direct client
-	// for BOTH halves. Nothing in this test's path acquires the install lease
-	// — it drives the AUTH ladder of a pane open — so the substitution is
-	// unreachable code with a name rather than a weakened assertion.
-	lanes := installLeaseRoutes{direct: client, viaLocal: noLocalHelper{t: t}}
+	// Every lease this dispatch serves is this machine's helper's, and this
+	// stack has no local daemon — so the lease half is the failing double
+	// above. Nothing in this test's path opens one (it drives the AUTH ladder
+	// of a pane open), which is what makes the substitution unreachable code
+	// with a name rather than a weakened assertion.
+	lanes := installLeaseRoutes{
+		viaLocal: noLocalHelperLease{t: t},
+		// The platform probe is this machine's helper's now (nocx-50w7p.9).
+		// This stack has no daemon, so the route is the caller's: a test that
+		// asserts the probe RUNS passes a recording source, and one that only
+		// drives the pane's auth ladder passes the failing default.
+		probes: &helperProbes{local: probes, resolve: client},
+	}
 	_, helperReg := helperGitFactory(lanes, refusingArtifactSource{}, consentStore, installStore, discardLogger())
 	helperReg.registry = reg
 	return reg, helperReg
 }
 
-// noLocalHelper is the local half of the install route for a stack that has
-// no local daemon. It FAILS the test if it is ever reached, which is the
-// honest shape: a stand-in that answered would hide the day the pane-open path
-// starts needing this machine's helper, and this test's subject is the auth
-// ladder, not the install or the lane.
-type noLocalHelper struct{ t *testing.T }
+// noLocalHelperLease is this machine's helper for a stack that has none: the
+// install lease, the file panel's and the git factory's exec lane. It FAILS the
+// test if it is ever reached, which is the honest shape — a stand-in that
+// answered would hide the day the pane-open path starts needing a helper lease,
+// and this test's subject is the auth ladder, not the install, the files or the
+// lane.
+type noLocalHelperLease struct{ t *testing.T }
 
-func (n noLocalHelper) HelperInstallConn(context.Context, string, ...ssh.ConnectOption) (ssh.HelperInstallConn, error) {
+func (n noLocalHelperLease) HelperInstallConn(context.Context, string, ...ssh.ConnectOption) (ssh.HelperInstallConn, error) {
 	n.t.Error("this stack has no local helper, so no install lease can be acquired")
 	return nil, errors.New("no local helper in this stack")
 }
 
-func (n noLocalHelper) LaneConn(context.Context, string, proto.Machine, proto.GenerationID, ...ssh.ConnectOption) (helperclient.HelperConn, error) {
+func (n noLocalHelperLease) FSConn(context.Context, string, ...ssh.ConnectOption) (ssh.FSConn, error) {
+	n.t.Error("this stack has no local helper, so no sftp lease can be acquired")
+	return nil, errors.New("no local helper in this stack")
+}
+
+func (n noLocalHelperLease) LaneConn(context.Context, string, proto.Machine, proto.GenerationID, ...ssh.ConnectOption) (helperclient.HelperConn, error) {
 	n.t.Error("this stack has no local helper, so no lane can be opened")
 	return nil, errors.New("no local helper in this stack")
+}
+
+// noLocalHelperProbes is the probe half of a stack that has no daemon: no
+// helper, so no lease. It fails the test if it is reached, which is the honest
+// shape for a test whose subject is the pane's auth ladder — a stand-in that
+// answered would hide the day that path starts needing a probe.
+type noLocalHelperProbes struct{ t *testing.T }
+
+func (n noLocalHelperProbes) probeHelper(context.Context) (probeHelper, error) {
+	n.t.Error("this stack has no local helper, so no probe lease can be acquired")
+	return nil, errors.New("no local helper in this stack")
+}
+
+// recordingProbeSource stands where this machine's helper stands, and records
+// what it was asked.
+//
+// The platform probe answers a credential question the COORDINATOR resolves and
+// the helper presents (the suppression travels with the resolution), and the
+// assertion this source serves is about that pair: the probe is ENTERED with a
+// remembered password and no ask. Whether the far side then authenticates is the
+// helper's half of the same criterion, and it is asserted where a helper exists
+// — internal/helper/sshsvc's probe tests drive a real server with a password
+// only the scripted coordinator has.
+type recordingProbeSource struct {
+	mu      sync.Mutex
+	targets []proto.SSHDestination
+}
+
+func (r *recordingProbeSource) probeHelper(context.Context) (probeHelper, error) { return r, nil }
+
+func (r *recordingProbeSource) AcquireProbeLease(_ context.Context, params proto.LeaseParams) (probeCommands, error) {
+	r.mu.Lock()
+	r.targets = append(r.targets, params.Destination)
+	r.mu.Unlock()
+	return &fakeProbeCommands{}, nil
+}
+
+func (r *recordingProbeSource) asked() []proto.SSHDestination {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]proto.SSHDestination(nil), r.targets...)
 }
 
 func openPasswordConfig(srv *pwSSHServer, remote *ssh.ConnectConfig) session.Config {

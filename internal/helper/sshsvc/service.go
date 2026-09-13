@@ -127,6 +127,12 @@ type Service struct {
 	mu       sync.Mutex
 	channels map[proto.ChannelID]*openChannel
 	forwards map[proto.ForwardID]*openForward
+	// leases are the probe leases: pooled references held for a coordinator
+	// that wants its probes answered on one transport. They live in the same
+	// registry as the channels and for the same reason — the service is
+	// process-scoped while the connections are per-coordinator, so identity is
+	// a random id and not anything derived from a connection (lease_id.go).
+	leases map[proto.LeaseID]*probeLease
 }
 
 // Compile-time proof that this satisfies the host's registerable service and
@@ -153,7 +159,8 @@ func (s *Service) Name() string { return proto.ServiceSSH }
 // a helper that claimed to answer `sign` would be claiming to hold key
 // material it does not have.
 func (s *Service) Ops() []string {
-	return append(append(append([]string{proto.OpProbe}, s.channelOps()...), s.forwardOps()...), s.laneOps()...)
+	ops := append(append(append([]string{proto.OpProbe}, s.channelOps()...), s.forwardOps()...), s.probeOps()...)
+	return append(ops, s.laneOps()...)
 }
 
 // ParamsSchema declares the shape of each op. D3 is enforced off this table:
@@ -171,6 +178,20 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.ForwardParams{})
 	case proto.OpUnforward:
 		return host.SchemaFor(proto.UnforwardParams{})
+	case proto.OpLease:
+		return host.SchemaFor(proto.LeaseParams{})
+	case proto.OpUnlease:
+		return host.SchemaFor(proto.UnleaseParams{})
+	case proto.OpUname:
+		return host.SchemaFor(proto.UnameParams{})
+	case proto.OpHome:
+		return host.SchemaFor(proto.HomeParams{})
+	case proto.OpSamplePorts:
+		return host.SchemaFor(proto.SamplePortsParams{})
+	case proto.OpCompletion:
+		return host.SchemaFor(proto.CompletionParams{})
+	case proto.OpCommandNames:
+		return host.SchemaFor(proto.CommandNamesParams{})
 	case proto.OpLane:
 		return host.SchemaFor(proto.LaneParams{})
 	}
@@ -195,7 +216,8 @@ func (s *Service) Refusal(err error) (string, json.RawMessage) {
 	switch {
 	case errors.Is(err, errNoAuthChannel):
 		return proto.ErrCodeNoAuthChannel, nil
-	case errors.Is(err, errBadProbeParams), errors.Is(err, errBadChannelParams), errors.Is(err, errBadLaneParams):
+	case errors.Is(err, errBadProbeParams), errors.Is(err, errBadChannelParams),
+		errors.Is(err, errBadLeaseParams), errors.Is(err, errBadLaneParams):
 		return proto.ErrCodeBadParams, nil
 	}
 	return "", nil
@@ -244,6 +266,62 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			}
 		}
 		return s.unforward(p.Forward)
+	case proto.OpLease:
+		var p proto.LeaseParams
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, fmt.Errorf("%w: %w", errBadLeaseParams, err)
+			}
+		}
+		return s.lease(ctx, p)
+	case proto.OpUnlease:
+		var p proto.UnleaseParams
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, fmt.Errorf("%w: %w", errBadLeaseParams, err)
+			}
+		}
+		return s.unlease(p.Lease)
+	case proto.OpUname:
+		var p proto.UnameParams
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, fmt.Errorf("%w: %w", errBadLeaseParams, err)
+			}
+		}
+		return s.uname(ctx, p)
+	case proto.OpHome:
+		var p proto.HomeParams
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, fmt.Errorf("%w: %w", errBadLeaseParams, err)
+			}
+		}
+		return s.home(ctx, p)
+	case proto.OpSamplePorts:
+		var p proto.SamplePortsParams
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, fmt.Errorf("%w: %w", errBadLeaseParams, err)
+			}
+		}
+		return s.samplePorts(ctx, p)
+	case proto.OpCompletion:
+		var p proto.CompletionParams
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, fmt.Errorf("%w: %w", errBadLeaseParams, err)
+			}
+		}
+		return s.completion(ctx, p)
+	case proto.OpCommandNames:
+		var p proto.CommandNamesParams
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, fmt.Errorf("%w: %w", errBadLeaseParams, err)
+			}
+		}
+		return s.commandNames(ctx, p)
 	case proto.OpLane:
 		var p proto.LaneParams
 		if len(params) > 0 {

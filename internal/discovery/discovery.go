@@ -101,16 +101,19 @@ type Sample struct {
 	Canceled       bool          // ctx canceled, or the lease closed (Detector.Close), while sampling; State/Listeners are the previous result
 }
 
-// Connector acquires an owned lease on the pooled SSH connection for
-// discovery (spec §3) — the SSH-shaped half of the seam's acquisition,
-// kept at the composition boundary so *ssh.RealClient satisfies it without
-// an adapter, exactly like tunnel.Connector. The Detector takes the OWN
-// reference — never the tab's — so closing the tab never kills an
-// in-flight sample's connection underneath it, and the interactive session
-// stays fully usable. The local machine needs no acquisition: the scheduler
-// builds its native provider through the composition-root factory.
+// Connector acquires an owned lease for discovery (spec §3) — the SSH-shaped
+// half of the seam's acquisition, kept at the composition boundary. The
+// Detector takes the OWN reference — never the tab's — so closing the tab never
+// kills an in-flight sample's connection underneath it, and the interactive
+// session stays fully usable.
+//
+// What the lease names is a DESTINATION, and what dials it is this machine's
+// helper: the coordinator holds no ssh client (the owner's invariant), and the
+// options it passes are the ones it resolves the destination with. The local
+// machine needs no acquisition: the scheduler builds its native provider
+// through the composition-root factory.
 type Connector interface {
-	DiscoveryConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.DiscoveryConn, error)
+	Lease(ctx context.Context, host string, opts ...ssh.ConnectOption) (Lease, error)
 }
 
 // Backoff is the typed transient-failure backoff (spec §4): 10s → 30s →
@@ -147,10 +150,10 @@ func (b *Backoff) Reset() { b.idx = 0 }
 // selection happens once per connection, then only the selected probe runs.
 // Cached outcomes survive for the connection lifetime — a missing tool is
 type ladderState struct {
-	selected string          // the probe that produced a valid sample; "" until selection completes
-	absent   map[string]bool // tool not found; cached for the connection lifetime
-	failed   map[string]bool // present but unusable (bad flags, unrecognized output shape)
-	tried    []string        // probes actually run, in order (diagnostics)
+	selected ProbeName          // the probe that produced a valid sample; "" until selection completes
+	absent   map[ProbeName]bool // tool not found; cached for the connection lifetime
+	failed   map[ProbeName]bool // present but unusable (bad flags, unrecognized output shape)
+	tried    []string           // probes actually run, in order (diagnostics)
 
 	// terminal refusal: sessions refused / exec prohibited / forced-command
 	// suspected. No exec runs while set; Retry clears it.
@@ -201,7 +204,7 @@ func NewDetector(conn ExecConn, logger log.Logger, opts ...DetectorOption) *Dete
 		logger:  logger,
 		timeout: 10 * time.Second,
 		sem:     make(chan struct{}, 1),
-		ladder:  &ladderState{absent: map[string]bool{}, failed: map[string]bool{}},
+		ladder:  &ladderState{absent: map[ProbeName]bool{}, failed: map[ProbeName]bool{}},
 		backoff: NewBackoff(),
 		last:    Sample{State: StatePending},
 	}
@@ -385,27 +388,27 @@ func (d *Detector) sampleOnce(ctx context.Context) probeResult {
 		case outcomeValid:
 			d.mu.Lock()
 			d.ladder.selected = st.name
-			d.ladder.tried = append(d.ladder.tried, st.name)
+			d.ladder.tried = append(d.ladder.tried, string(st.name))
 			d.mu.Unlock()
-			res.probe = st.name
+			res.probe = string(st.name)
 			res.tried = d.triedSoFar()
 			return res
 		case outcomeAbsent:
 			d.mu.Lock()
 			d.ladder.absent[st.name] = true
-			d.ladder.tried = append(d.ladder.tried, st.name)
-			if st.name == "netstat" {
+			d.ladder.tried = append(d.ladder.tried, string(st.name))
+			if st.name == ProbeNetstat {
 				// busybox netstat IS netstat: the same binary. A not-found
 				// on one is a not-found on the other, so skip the wasted
 				// exec.
-				d.ladder.absent["busybox-netstat"] = true
+				d.ladder.absent[ProbeBusyboxNetstat] = true
 			}
 			d.mu.Unlock()
 			continue
 		case outcomeUnsupported:
 			d.mu.Lock()
 			d.ladder.failed[st.name] = true
-			d.ladder.tried = append(d.ladder.tried, st.name)
+			d.ladder.tried = append(d.ladder.tried, string(st.name))
 			d.mu.Unlock()
 			continue
 		case outcomeRefused:
@@ -436,7 +439,7 @@ func (d *Detector) triedSoFar() []string {
 
 // runStep runs one probe command and classifies the outcome.
 func (d *Detector) runStep(ctx context.Context, st *step) probeResult {
-	res, err := d.conn.Exec(ctx, st.cmd)
+	res, err := d.conn.Sample(ctx, st.name)
 	if err != nil {
 		var ee *ExecError
 		switch {
@@ -479,7 +482,7 @@ func (d *Detector) runStep(ctx context.Context, st *step) probeResult {
 		}
 	}
 	if res.ExitStatus == 127 || res.ExitStatus == 126 || notFoundOnStderr(res.Stderr) {
-		return probeResult{kind: outcomeAbsent, class: st.name + " not present"}
+		return probeResult{kind: outcomeAbsent, class: string(st.name) + " not present"}
 	}
 	if !trailing || res.Truncated {
 		// The body was cut short: bounded output hit, or the remote died
@@ -489,11 +492,11 @@ func (d *Detector) runStep(ctx context.Context, st *step) probeResult {
 	if res.ExitStatus != 0 && res.ExitStatus != st.noMatchExit {
 		// The tool exists but cannot do its job (usage error, permission,
 		// broken build): cache it as failed and try the next probe.
-		return probeResult{kind: outcomeUnsupported, class: st.name + " exited " + strconv.Itoa(res.ExitStatus), stderr: stderrExcerpt(res.Stderr)}
+		return probeResult{kind: outcomeUnsupported, class: string(st.name) + " exited " + strconv.Itoa(res.ExitStatus), stderr: stderrExcerpt(res.Stderr)}
 	}
 	listeners, ok := st.parse(body)
 	if !ok {
-		return probeResult{kind: outcomeUnsupported, class: "unrecognized " + st.name + " output", stderr: stderrExcerpt(res.Stderr)}
+		return probeResult{kind: outcomeUnsupported, class: "unrecognized " + string(st.name) + " output", stderr: stderrExcerpt(res.Stderr)}
 	}
 	return probeResult{kind: outcomeValid, listeners: listeners, stderr: stderrExcerpt(res.Stderr)}
 }

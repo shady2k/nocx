@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.home.schema.json",
+  "title": "HelperSSHHomeResult",
+  "description": "What the home probe answered: the far account's home directory, or the empty string when the host could not say. It is a VALUE and not an exec result, unlike its four siblings, because this probe is two commands and a rule — ask $HOME, then fall back to the tilde for a shell that answers nothing — and the rule belongs to the probe's definition (internal/remoteprobe), not to each caller. A raw stream would put that rule one process out and let two copies of it disagree.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["home"],
+  "properties": {
+    "home": {
+      "description": "The home directory as the far side reported it, trimmed. Empty is a state the caller reports rather than guesses around.",
+      "type": "string"
+    }
+  }
+}

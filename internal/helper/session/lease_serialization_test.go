@@ -87,9 +87,10 @@ func TestOutputPumpDoesNotTakeSessionMutex(t *testing.T) {
 	releaseRead := make(chan struct{})
 	proc := &lockProbeProcess{readStarted: readStarted, releaseRead: releaseRead}
 	hs := &hostSession{
-		proc: proc,
-		win:  newWindow(2 * creditLimit),
-		log:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		proc:    proc,
+		win:     newWindow(2 * creditLimit),
+		runtime: pumpRuntime(t, proc),
+		log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	hs.mu.Lock()

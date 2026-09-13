@@ -488,7 +488,7 @@ func (m *model) ReportGeometry(g Geometry) error {
 	if err := m.live(); err != nil {
 		return err
 	}
-	if g.Cols == 0 || g.Rows == 0 {
+	if !g.Valid() {
 		return ErrGeometryInvalid
 	}
 	// A report is not a commit, and this is the whole of what it does. Under
@@ -516,7 +516,7 @@ func (m *model) CommitGeometry(g Geometry) (GeometryCommit, error) {
 		if err := m.pty.Resize(g); err != nil {
 			return m.geom, err
 		}
-		if err := m.emulator.Resize(g); err != nil {
+		if _, err := m.emulator.Resize(g); err != nil {
 			// The terminal already took a size that is not going to be
 			// committed. Put it back, so what is running and what the session
 			// describes are one size and not two.
@@ -534,7 +534,7 @@ func (m *model) CommitGeometry(g Geometry) (GeometryCommit, error) {
 			return m.geom, err
 		}
 		m.geom = GeometryCommit{Geometry: g, Revision: m.tick()}
-		if err := m.emulator.Resize(g); err != nil {
+		if _, err := m.emulator.Resize(g); err != nil {
 			return m.geom, err
 		}
 		return m.geom, nil
@@ -879,12 +879,12 @@ func newEmulatorSink() *emulatorSink {
 	return &emulatorSink{size: Geometry{Cols: 80, Rows: 24}}
 }
 
-func (e *emulatorSink) Resize(g Geometry) error {
+func (e *emulatorSink) Resize(g Geometry) ([]byte, error) {
 	if e.refuse {
-		return errResizeRefused
+		return nil, errResizeRefused
 	}
 	e.size = g
-	return nil
+	return nil, nil
 }
 
 // Size is the size the emulator is running at. A commit that opened on both

@@ -1,6 +1,10 @@
 package sessionruntime
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/shady2k/nocx/internal/emulator"
+)
 
 // ---------------------------------------------------------------------------
 // 1. Session incarnation
@@ -161,10 +165,14 @@ const (
 // ---------------------------------------------------------------------------
 
 // Geometry is a terminal size. The client REPORTS one; the runtime decides.
-type Geometry struct {
-	Cols, Rows     uint16
-	XPixel, YPixel uint16
-}
+//
+// It is the emulator port's own type ([emulator.Geometry]) and not a second
+// declaration of the same concept: a size is what the terminal IS, the port
+// owns that vocabulary (ADR-0065), and a runtime that carried its own copy
+// would convert at every boundary and disagree with the port the day one of
+// the two grew a field. The pixel size travels with it for the reason the port
+// gives — the emulator answers the program's own size queries from it.
+type Geometry = emulator.Geometry
 
 // Revision is the runtime's monotonic clock. Everything a client is handed —
 // the live frame, the cards, the committed geometry, the availability of an
@@ -492,7 +500,17 @@ type Terminal interface {
 type Emulator interface {
 	// Resize applies a size to the emulator's own geometry. A refusal is an
 	// error and nothing more, exactly as on [Terminal].
-	Resize(g Geometry) error
+	//
+	// It also carries the replies the resize produced, and that is where these
+	// two seams DIFFER, deliberately. A terminal with in-band size reports
+	// enabled (mode 2048) answers a resize by writing to the PTY, so the bytes a
+	// program is owed come from the SCREEN's side of a geometry commit and the
+	// runtime writes them to the PTY on the one ordered write path. [Terminal]
+	// has none to give — the kernel's own resize produces no bytes for the
+	// program, and internal/pty's seam returns an error and nothing else — so
+	// the replies travel one way. A seam here that returned only an error would
+	// make the runtime drop a report the program is waiting for.
+	Resize(g Geometry) (replies []byte, err error)
 }
 
 // Consumer is one subscriber of a session's output, as the runtime holds it:

@@ -9,7 +9,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/sessionruntime"
 )
 
 // One host session: a PTY, its process group, its bounded output window, its
@@ -182,11 +184,25 @@ type hostSession struct {
 	// session from before the fork until the row leaves the inventory". It is
 	// never reported: the key is the CALLER's record and the helper is only
 	// asked to honour it, not to publish it.
-	key             string
-	startedAt       time.Time
-	launch          proto.LaunchRecord
-	proc            Process
-	win             *window
+	key       string
+	startedAt time.Time
+	launch    proto.LaunchRecord
+	proc      Process
+	win       *window
+	// runtime is this session's ONE terminal-state owner (ADR-0066): the
+	// emulator, the modes the program set, the committed geometry and the
+	// answers to the program's own questions. It is created in spawn before
+	// the first byte of output is read, and it lives exactly as long as the
+	// session does — an enrolment, an attachment and a coordinator coming and
+	// going are all inside that interval and none of them creates it or ends
+	// it (requirement 5 of nocx-ygxjv.12).
+	runtime *sessionruntime.Session
+	// screen is the emulator the runtime directs. It is held here for its
+	// LIFETIME and not for its behaviour: every read and every write goes
+	// through runtime, and Close is this object's to call because a runtime
+	// does not own the pair it was handed ("a runtime does not create a
+	// terminal, it directs one").
+	screen          emulator.Terminal
 	log             *slog.Logger
 	lifecycleBudget int64
 
@@ -205,12 +221,39 @@ type hostSession struct {
 // (or win.close on EOF); throughout it MUST NOT take s.mu. write holds s.mu
 // from lease validation until proc.Write returns, so making pump contend on
 // that mutex would deadlock a blocked PTY write before the pump can drain it.
-// It never interprets a byte — it reads them to MOVE them (AD-6).
+//
+// It INGESTS before it delivers, and that order is the requirement rather than
+// a detail (ADR-0066, nocx-ygxjv.12): the window is bounded and reclaims its
+// oldest bytes, so the delivery path is lossy by design (D8) and the emulator's
+// ingest is lossless. Bytes the window discards are bytes a coordinator can
+// never rebuild a screen from, and it must be the WINDOW that loses them and
+// not the session's own terminal state. Ingest also answers whatever the
+// program asked for on the runtime's ordered write path, which is why a reply
+// needs no attachment and no controller: a program's question is the
+// terminal's obligation, not a user intent.
+//
+// Ingest's failure is logged and does not stop the move: the reader's own
+// stream is still the reader's, and a runtime that refused bytes has already
+// said so in its completeness.
 func (s *hostSession) pump() {
 	buf := make([]byte, pageSize)
 	for {
 		n, err := s.proc.Read(buf)
 		if n > 0 {
+			if ierr := s.runtime.Ingest(buf[:n]); ierr != nil {
+				if errors.Is(ierr, emulator.ErrClosed) || errors.Is(ierr, sessionruntime.ErrUnavailable) {
+					// The shutdown end: stop() closes the screen and the PTY,
+					// and a read already in flight may carry the last bytes
+					// past the close. Nothing is lost by it — the bytes still
+					// reach the window below, which is what a late attacher
+					// reads — so it is not a fault worth waking anybody for.
+					s.log.Debug("session output arrived after the terminal closed",
+						"session", s.id.Session, "bytes", n, "err", ierr)
+				} else {
+					s.log.Warn("session output not ingested", "session", s.id.Session,
+						"bytes", n, "err", ierr)
+				}
+			}
 			s.win.write(buf[:n])
 		}
 		if err != nil {
@@ -781,9 +824,36 @@ func (s *hostSession) writeLifecycle(sink Sink, f proto.SessionFrame) error {
 	return err
 }
 
+// resize applies one size to the PTY and to the emulator TOGETHER, through the
+// runtime's geometry commit. It is the only way a session's size moves: a size
+// that reached the PTY without the screen would leave the two disagreeing about
+// every cell after a column, and the screen is what the program's own size
+// queries are answered from (ADR-0066).
+//
+// The commit is not atomic and does not pretend to be. If one side refuses,
+// the runtime puts the other back to the commit in force and publishes
+// nothing, so what is running and what the session describes stay one size —
+// see sessionruntime.Session.CommitGeometry, which owns that rule.
+func (s *hostSession) resize(cols, rows uint16) error {
+	_, err := s.runtime.CommitGeometry(sessionruntime.Geometry{
+		Cols: int(cols),
+		Rows: int(rows),
+		// No cell metrics cross the wire today; see ptyTerminal.Resize.
+		CellWidthPx:  0,
+		CellHeightPx: 0,
+	})
+	return err
+}
+
 // stop ends the session's own goroutines and closes the PTY. It is what the
 // helper does on shutdown; ending a session on a caller's request is
 // close-session and is nocx-k6p18.7's.
+//
+// It is also where the runtime and its emulator are DESTROYED, which is the
+// closing end of the interval they draw: they are created in spawn, before the
+// first byte is read, and they end when the session ends and at no other
+// moment. A stopped PROCESS does not end them — an exited session stays in the
+// inventory carrying its status and its screen until somebody closes it.
 func (s *hostSession) stop() {
 	s.mu.Lock()
 	if s.stopped {
@@ -795,4 +865,13 @@ func (s *hostSession) stop() {
 	s.releaseConnection(nil)
 	_ = s.proc.Close()
 	s.win.close()
+	// The runtime first, then the screen, and the order is the only one that
+	// names what happened: Fail makes the runtime refuse rather than serving a
+	// screen that is about to go, and the screen's Close then releases what
+	// the emulator owns. A read already in flight can still arrive between the
+	// two, which pump reports as a closed terminal and nothing else.
+	if err := s.runtime.Fail("session ended"); err != nil {
+		s.log.Debug("session runtime already ended", "session", s.id.Session, "err", err)
+	}
+	s.screen.Close()
 }

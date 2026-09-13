@@ -199,34 +199,6 @@ func (s *testSSHServer) waitLiveConns(want int) {
 	})
 }
 
-// killConns closes every established server-side connection, simulating
-// transport loss for the clients. Closing the server side makes the
-// client's transport fail, which is what a real network loss does.
-//
-// It refuses to kill nothing. Every caller closes connections in order to
-// observe a loss immediately afterwards, so an empty set is never a no-op —
-// it is a wait that can only end at its deadline, reported as whatever the
-// caller was waiting on rather than as the kill that never happened. That is
-// precisely how nocx-zlvw read as a slow machine for a week: five identical
-// 5.05s failures under load, all of them the server having nothing to close.
-func (s *testSSHServer) killConns() {
-	s.t.Helper()
-	s.liveMu.Lock()
-	conns := make([]*gossh.ServerConn, 0, len(s.liveConns))
-	for c := range s.liveConns {
-		conns = append(conns, c)
-	}
-	s.liveMu.Unlock()
-	if len(conns) == 0 {
-		s.t.Fatal("killConns: no established connection to close — " +
-			"the loss the test is about to wait for can never arrive; " +
-			"wait for the server to accept the connection first (waitLiveConns)")
-	}
-	for _, c := range conns {
-		_ = c.Close()
-	}
-}
-
 func startTestSSHServer(t *testing.T) *testSSHServer {
 	t.Helper()
 

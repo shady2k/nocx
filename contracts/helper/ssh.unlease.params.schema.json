@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.unlease.params.schema.json",
+  "title": "HelperSSHUnleaseParams",
+  "description": "One pooled reference to release. Like close and unforward, an id this helper does not hold is answered as released rather than refused: the ordinary caller is a consumer shutting down, and a second release is not a disagreement about state.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["lease"],
+  "properties": {
+    "lease": {
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/leaseId"
+    }
+  }
+}

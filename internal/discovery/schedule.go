@@ -114,7 +114,7 @@ type schedTarget struct {
 	opts      []ssh.ConnectOption
 
 	provider Provider
-	conn     ssh.DiscoveryConn
+	conn     Lease
 	connDead bool
 
 	paused  bool // user Pause: suppresses every automatic sample
@@ -471,7 +471,7 @@ func (s *Scheduler) acquireProvider(t *schedTarget) Provider {
 	s.mu.Unlock()
 
 	var p Provider
-	var lease ssh.DiscoveryConn // the connection-loss watcher's material; nil for local
+	var lease Lease // the connection-loss watcher's material; nil for local
 	var acquireErr error
 	if isLocal {
 		if s.localProvider == nil {
@@ -481,7 +481,7 @@ func (s *Scheduler) acquireProvider(t *schedTarget) Provider {
 		}
 	} else {
 		acquireCtx, cancel := context.WithTimeout(context.Background(), acquireTimeout)
-		conn, err := s.connector.DiscoveryConn(acquireCtx, host, opts...)
+		conn, err := s.connector.Lease(acquireCtx, host, opts...)
 		cancel()
 		if err != nil {
 			acquireErr = err
@@ -491,7 +491,7 @@ func (s *Scheduler) acquireProvider(t *schedTarget) Provider {
 			// mechanism parameters this scheduler names explicitly (the
 			// defaults it wants) — the constructors stay reachable from
 			// production, not test-only.
-			p = NewDetector(adaptSSH(conn), s.logger, WithSampleTimeout(s.sampleTimeout), WithBackoffLevels(defaultBackoffLevels))
+			p = NewDetector(conn, s.logger, WithSampleTimeout(s.sampleTimeout), WithBackoffLevels(defaultBackoffLevels))
 		}
 	}
 
@@ -532,7 +532,7 @@ func (s *Scheduler) acquireProvider(t *schedTarget) Provider {
 // watchConn marks the target conn-lost when the lease's Done channel closes —
 // the transport-death signal. The lease releases itself on loss; there is no
 // Close to call.
-func (s *Scheduler) watchConn(t *schedTarget, conn ssh.DiscoveryConn) {
+func (s *Scheduler) watchConn(t *schedTarget, conn Lease) {
 	<-conn.Done()
 	s.mu.Lock()
 	if t.conn == conn {

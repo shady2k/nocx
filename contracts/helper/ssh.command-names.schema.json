@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.command-names.schema.json",
+  "title": "HelperSSHCommandNamesResult",
+  "description": "What one enumeration half answered. The caller frames-checks it before reading anything: the two scripts wrap their output between markers carrying the invocation's nonce, and a run that did not close its frame contributes nothing rather than contributing a prefix of an enumeration.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["stdout", "stderr", "exitStatus", "truncated"],
+  "properties": {
+    "stdout": {
+      "type": "string",
+      "contentEncoding": "base64"
+    },
+    "stderr": {
+      "type": "string",
+      "contentEncoding": "base64"
+    },
+    "exitStatus": {
+      "type": "integer",
+      "minimum": -1
+    },
+    "truncated": {
+      "type": "boolean"
+    }
+  }
+}

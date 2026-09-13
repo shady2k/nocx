@@ -18,6 +18,8 @@ package completion
 import (
 	"strings"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/remoteprobe"
 )
 
 // bash4Only names constructs the script must not use, with the version that
@@ -42,12 +44,27 @@ var bash4Only = []struct {
 	{"EPOCHSECONDS", "5.0", "nothing — the script must not need a clock"},
 }
 
+// shippedScript is the completion script AS SHIPPED, taken out of the command
+// the helper composes: the script lives in internal/remoteprobe now (D3 — no
+// command crosses the helper wire, so the text belongs to the process that runs
+// it), and reading it from the composed command is what keeps this check
+// pointed at the bytes a host would actually receive.
+func shippedScript() string {
+	cmd := remoteprobe.CompletionCommand("/tmp", "ls ", 3, 50, "portability")
+	lines := strings.Split(cmd, "\n")
+	// The command is header, script, delimiter: drop the first and last lines.
+	if len(lines) > 2 {
+		lines = lines[1 : len(lines)-1]
+	}
+	return strings.Join(lines, "\n")
+}
+
 // scriptCode is the script with comment lines removed. The comments explain
 // which constructs are forbidden and name them, so scanning the raw text
 // reports the explanation as a violation.
 func scriptCode() string {
 	var b strings.Builder
-	for _, line := range strings.Split(completionScript, "\n") {
+	for _, line := range strings.Split(shippedScript(), "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "#") {
 			continue
 		}
@@ -71,12 +88,12 @@ func TestRemoteScriptRunsOnBash32(t *testing.T) {
 // associative array was there for: `compgen -f` lists directories too, so a
 // directory appears in both passes and must be offered once.
 func TestRemoteScriptDedupesPathsAcrossBothPasses(t *testing.T) {
-	if !strings.Contains(completionScript, `seen_paths="$seen_paths|$entry|"`) {
+	if !strings.Contains(shippedScript(), `seen_paths="$seen_paths|$entry|"`) {
 		t.Error("the path dedup is gone; a directory is listed by both compgen -f and compgen -d and would be offered twice")
 	}
 	// The membership test must quote the entry inside the pattern, or a
 	// filename holding *, ? or [ is glob-matched instead of compared.
-	if !strings.Contains(completionScript, `[[ "$seen_paths" != *"|$entry|"* ]]`) {
+	if !strings.Contains(shippedScript(), `[[ "$seen_paths" != *"|$entry|"* ]]`) {
 		t.Error("the dedup membership test must quote $entry inside the pattern, so a filename with a glob character is compared literally")
 	}
 }

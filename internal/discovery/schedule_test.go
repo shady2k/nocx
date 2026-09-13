@@ -3,7 +3,6 @@ package discovery
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,11 +13,14 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Scripted ssh-flavored fake — the scheduler's connector surface speaks
-// ssh.DiscoveryConn (the connector stays SSH-shaped at the composition
-// boundary; the scheduler adapts it to the exec seam). queueConn pre-scripts
-// the NEXT acquisition (a refusal, a loss) instead of pre-seeding a list the
-// scheduler never reads.
+// Scripted lease fake — the scheduler's connector surface speaks discovery's
+// own Lease (a named probe plus the transport-loss signal the scheduler
+// watches). queueConn pre-scripts the NEXT acquisition (a refusal, a loss)
+// instead of pre-seeding a list the scheduler never reads.
+//
+// Its answers are the helper's: the results and the failure kinds are
+// remoteprobe's, which is the vocabulary the helper's probe ops answer in and
+// the one the ladder switches on.
 // ---------------------------------------------------------------------------
 
 type sshFakeConn struct {
@@ -35,7 +37,7 @@ type sshFakeConn struct {
 }
 
 type sshFakeResponse struct {
-	result *ssh.ExecResult
+	result *ExecResult
 	err    error
 }
 
@@ -43,9 +45,9 @@ func newSSHFakeConn() *sshFakeConn {
 	return &sshFakeConn{done: make(chan struct{})}
 }
 
-func (f *sshFakeConn) Exec(ctx context.Context, cmd string) (*ssh.ExecResult, error) {
+func (f *sshFakeConn) Sample(ctx context.Context, probe ProbeName) (*ExecResult, error) {
 	f.mu.Lock()
-	f.execs = append(f.execs, cmd)
+	f.execs = append(f.execs, string(probe))
 	block := f.block
 	f.mu.Unlock()
 
@@ -55,7 +57,7 @@ func (f *sshFakeConn) Exec(ctx context.Context, cmd string) (*ssh.ExecResult, er
 			return nil, ctx.Err()
 		case <-block:
 		case <-f.done:
-			return nil, ssh.ErrExecLost
+			return nil, &ExecError{Kind: ExecErrConnectionLost}
 		}
 	}
 
@@ -63,15 +65,15 @@ func (f *sshFakeConn) Exec(ctx context.Context, cmd string) (*ssh.ExecResult, er
 	defer f.mu.Unlock()
 	switch {
 	case f.closed:
-		return nil, ssh.ErrExecClosed
+		return nil, &ExecError{Kind: ExecErrLeaseClosed}
 	case f.lost:
-		return nil, ssh.ErrExecLost
+		return nil, &ExecError{Kind: ExecErrConnectionLost}
 	}
 	if f.autoValid {
-		return framedSSH(knownRow), nil
+		return framed(knownRow), nil
 	}
 	if len(f.responses) == 0 {
-		return nil, errors.New("fake: no queued response for " + cmd)
+		return nil, errors.New("fake: no queued response for " + string(probe))
 	}
 	resp := f.responses[0]
 	f.responses = f.responses[1:]
@@ -99,15 +101,6 @@ func (f *sshFakeConn) commands() []string {
 	return append([]string(nil), f.execs...)
 }
 
-// framedSSH builds the ssh lease's version of a sentinel-framed probe
-// response — what the real lease returns, before adaptSSH converts it.
-func framedSSH(body string) *ssh.ExecResult {
-	if body != "" && !strings.HasSuffix(body, "\n") {
-		body += "\n"
-	}
-	return &ssh.ExecResult{Stdout: []byte("NOCX-PD/1\n" + body + "NOCX-PD/1\n"), ExitStatus: 0}
-}
-
 type fakeConnector struct {
 	mu     sync.Mutex
 	conns  []*sshFakeConn
@@ -118,7 +111,7 @@ type fakeConnector struct {
 	autoValid bool
 }
 
-func (c *fakeConnector) DiscoveryConn(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.DiscoveryConn, error) {
+func (c *fakeConnector) Lease(_ context.Context, _ string, _ ...ssh.ConnectOption) (Lease, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.err != nil {
@@ -308,7 +301,7 @@ func TestScheduler_SampleNowActsAsRetry(t *testing.T) {
 
 	// First sample: the server refuses the extra session (MaxSessions 1).
 	f0 := newSSHFakeConn()
-	f0.queue(sshFakeResponse{err: ssh.ErrExecSessionRefused})
+	f0.queue(sshFakeResponse{err: &ExecError{Kind: ExecErrSessionRefused}})
 	conn.queueConn(f0)
 
 	s.ConnectionUp("ssh:p1:1", "host.example", testConnectOption())
@@ -328,7 +321,7 @@ func TestScheduler_SampleNowActsAsRetry(t *testing.T) {
 
 	// Automatic sampling is disabled by the refusal; SampleNow (the panel's
 	// Retry) clears it and samples immediately.
-	f0.queue(sshFakeResponse{result: framedSSH(knownRow)})
+	f0.queue(sshFakeResponse{result: framed(knownRow)})
 	s.SampleNow("ssh:p1:1")
 	waittest.WaitFor(t, "retry sample", func() bool {
 		return s.Status("ssh:p1:1").Sample.State == StateAvailable
@@ -360,7 +353,7 @@ func TestScheduler_ConnectionLossMarksLostAndReconnectResamples(t *testing.T) {
 	// Reconnect: ConnectionUp resets the stale result and a fresh detector
 	// (fresh lease — probe selection is once per connection) samples.
 	f1 := newSSHFakeConn()
-	f1.queue(sshFakeResponse{result: framedSSH(knownRow)})
+	f1.queue(sshFakeResponse{result: framed(knownRow)})
 	conn.queueConn(f1)
 	s.ConnectionUp("ssh:p1:1", "host.example", testConnectOption())
 	// Wait on the STATE, not the exec count: the count increments while the

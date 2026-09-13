@@ -713,16 +713,15 @@ func WithSessionID(id string) ConnectOption {
 	return func(c *ConnectConfig) { c.SessionID = id }
 }
 
-// WithAgentHelperPath supplies the non-secret bridge executable path.
-func WithAgentHelperPath(path string) ConnectOption {
-	return func(c *ConnectConfig) { c.AgentHelperPath = path }
-}
-
-// WithAgentToolSocketPath supplies the non-secret local tool socket path.
-func WithAgentToolSocketPath(path string) ConnectOption {
-	return func(c *ConnectConfig) { c.AgentToolSocketPath = path }
-}
-
+// The two agent-path ConnectOptions that used to sit here (bff44b38) are gone:
+// neither ever had a caller — not on the commit that added them, not since, on
+// any platform — and the dead-code ratchet reported them as the branch's only
+// new unreachable functions (nocx-50w7p.9). The values they would have set are
+// supplied by the ONE wiring that runs: the child domain exports
+// NOCX_AGENT_HELPER_PATH and NOCX_TOOL_SOCKET and internal/app reads them into
+// the launcher's options (childdomain.go). The fields below stay, because the
+// ssh path still forwards whatever is in them; a per-connection wiring that
+// wants to fill them re-adds a two-line option where it is needed.
 // WithDesiredMode sets the resolved destination mode (raw|script|helper,
 // nocx-mlm7), the open-time gate shellStartCommand consults: script (or
 // empty — the pre-mode default) publishes and integrates; raw and helper

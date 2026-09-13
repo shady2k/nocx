@@ -78,4 +78,18 @@ package proto
 // is the half that makes it honest: a 4-helper answers `unknown_op`, which a
 // coordinator reads as "this machine's helper is older than this app"
 // (nocx-50w7p.2's rationale, two generations on).
-const Version = "6"
+//
+// This is 7 rather than 6 because the wire grew the NAMED PROBES and the lease
+// they run on: `lease`, `unlease`, `uname`, `home`, `sample-ports`,
+// `completion` and `command-names` on the same `ssh` service (nocx-50w7p.9).
+// Seven ops added would each have been answerable as `unknown_op`, and the
+// bump is still taken because of what the SEVEN MEAN: they are the ops by which
+// every shell command the coordinator used to compose is now composed by the
+// helper from internal/remoteprobe. A coordinator speaking 6 has no ops to ask
+// these questions with and would fall back to its own dial — which is the state
+// the owner's invariant exists to end — and a helper speaking 6 answers
+// `unknown_op` to every one of them, which a coordinator reads correctly as
+// "this machine's helper is older than this app" rather than as a host that
+// refuses probes. The generation boundary is what makes that reading safe
+// instead of a guess.
+const Version = "7"

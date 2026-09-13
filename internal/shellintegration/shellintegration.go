@@ -42,10 +42,19 @@ type ShellIntegration interface {
 	ActivationEnv(enhanced bool) []string
 }
 
-// RemoteCommandRunner is the narrow command seam used to discover a remote
-// account's home. The composition root adapts an SSH client to this seam.
-type RemoteCommandRunner interface {
-	Output(command string) ([]byte, error)
+// RemoteHome is the narrow seam used to discover a remote account's home: a
+// QUESTION, and never a command.
+//
+// It used to be `Output(command string)`, which is what this file's caller
+// composed ("echo $HOME"), and that is the shape D3 refuses: a command string
+// handed to a transport is a free-form exec, and the two implementations —
+// this machine's helper, and the script-mode carrier path's own client — would
+// each be running whatever they were given. The commands are
+// internal/remoteprobe's (the probe, then its own fallback for a host whose
+// shell answers nothing), and an implementation runs those and only those.
+type RemoteHome interface {
+	// Home answers the far account's home directory.
+	Home() (string, error)
 }
 
 // Remote installation remains a method on Impl, but its transport is injected

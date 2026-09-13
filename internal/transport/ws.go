@@ -1023,8 +1023,8 @@ type RemoteCompleter interface {
 
 // WithCompleters attaches the completion sources for shell.complete
 // (nocx-w7h.15). local answers KindLocal sessions; remote answers
-// KindRemote sessions through a DiscoveryConn acquired with that session's
-// exact SSH options. Either may be nil — the handler then returns a stated
+// KindRemote sessions through a probe lease acquired with this machine's
+// helper under that session's exact SSH options. Either may be nil — the handler then returns a stated
 // empty reason for that session kind rather than a JSON-RPC error.
 func WithCompleters(local completion.Completer, remote RemoteCompleter) WSServerOption {
 	return func(s *WSServer) {

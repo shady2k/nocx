@@ -319,9 +319,10 @@ type fakeProbeConn struct {
 func (f *fakeProbeConn) Exec(_ context.Context, _ string) (*ssh.ExecResult, error) {
 	return &ssh.ExecResult{Stdout: []byte(f.uname)}, nil
 }
-func (f *fakeProbeConn) Done() <-chan struct{} { return make(chan struct{}) }
-func (f *fakeProbeConn) LostErr() error        { return nil }
-func (f *fakeProbeConn) Close() error          { return nil }
+func (f *fakeProbeConn) Done() <-chan struct{}      { return make(chan struct{}) }
+func (f *fakeProbeConn) LostErr() error             { return nil }
+func (f *fakeProbeConn) Close() error               { return nil }
+func (f *fakeProbeConn) HostKeyFingerprint() string { return "SHA256:fake" }
 
 // fakeInstallConn is a HelperInstallConn whose FS is an in-memory map. The
 // REAL deploy.Ensure runs against it, so the selection's install path is

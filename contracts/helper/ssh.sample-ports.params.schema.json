@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.sample-ports.params.schema.json",
+  "title": "HelperSSHSamplePortsParams",
+  "description": "One rung of port discovery's ladder, named. The probe is a member of a closed set and not a command: the caller chooses which dialect to run and the helper owns what that dialect is (the text lives in internal/remoteprobe, which both ends link), so a command never crosses this wire. The framing sentinel the caller parses afterwards is printed by the command itself — the answer carries it, so there is nothing to agree on here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["lease", "probe"],
+  "properties": {
+    "lease": {
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/leaseId"
+    },
+    "probe": {
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/portProbe"
+    }
+  }
+}

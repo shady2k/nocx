@@ -22,6 +22,8 @@ import (
 	"github.com/pkg/sftp"
 
 	"github.com/shady2k/nocx/internal/ssh"
+
+	"github.com/shady2k/nocx/internal/remoteprobe"
 )
 
 // ---------------------------------------------------------------------------
@@ -630,8 +632,7 @@ func TestEnsureInstalledRemote_SymlinkedRootRefused(t *testing.T) {
 	}
 }
 
-// TestGetRemoteHome proves the home-discovery command over a real SSH
-// connection.
+// TestGetRemoteHome proves the home question over a real SSH connection.
 func TestGetRemoteHome(t *testing.T) {
 	srv := startRemoteTestSSHServer(t)
 	defer srv.close()
@@ -640,7 +641,7 @@ func TestGetRemoteHome(t *testing.T) {
 	client := dialRemoteTestSSHClient(t, srv)
 	defer func() { _ = client.Close() }()
 
-	home, err := New(testLogger()).GetRemoteHome(remoteCommandRunner{client: client})
+	home, err := New(testLogger()).GetRemoteHome(remoteHomeRunner{client: client})
 	if err != nil {
 		t.Fatalf("GetRemoteHome: %v", err)
 	}
@@ -683,17 +684,29 @@ func sftpFSForClient(t *testing.T, client *gossh.Client) FS {
 	return sftpFS{SFTPFS: ssh.NewSFTPFS(mustSFTPClient(t, client))}
 }
 
-type remoteCommandRunner struct {
+// remoteHomeRunner is the test's own implementation of the home QUESTION: the
+// script it runs is internal/remoteprobe's list, in its order, exactly as the
+// production transports run it.
+type remoteHomeRunner struct {
 	client *gossh.Client
 }
 
-func (r remoteCommandRunner) Output(command string) ([]byte, error) {
-	sess, err := r.client.NewSession()
-	if err != nil {
-		return nil, err
+func (r remoteHomeRunner) Home() (string, error) {
+	for _, command := range remoteprobe.HomeCommands {
+		sess, err := r.client.NewSession()
+		if err != nil {
+			return "", err
+		}
+		out, err := sess.Output(command)
+		_ = sess.Close()
+		if err != nil {
+			return "", err
+		}
+		if home := strings.TrimSpace(string(out)); home != "" {
+			return home, nil
+		}
 	}
-	defer func() { _ = sess.Close() }()
-	return sess.Output(command)
+	return "", nil
 }
 
 // activationSnapshot returns a deterministic digest of the activation under

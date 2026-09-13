@@ -10,19 +10,24 @@ import (
 	"github.com/shady2k/nocx/internal/commandnames"
 )
 
-// fakeConn records the commands it was given and answers scripted output.
+// fakeConn records the PHASES it was asked for and answers scripted output.
+//
+// It records a phase and a nonce rather than a command, which is the change the
+// seam took: the source names which half of the enumeration to run and the
+// helper owns the command, so there is no command here to inspect and no need
+// for the fixture to read a nonce back out of one.
 type fakeConn struct {
 	mu     sync.Mutex
-	cmds   []string
-	answer func(cmd string) (*commandnames.ExecResult, error)
+	phases []commandnames.Phase
+	answer func(phase commandnames.Phase, nonce string) (*commandnames.ExecResult, error)
 	closed bool
 }
 
-func (c *fakeConn) Exec(_ context.Context, cmd string) (*commandnames.ExecResult, error) {
+func (c *fakeConn) Enumerate(_ context.Context, phase commandnames.Phase, nonce string) (*commandnames.ExecResult, error) {
 	c.mu.Lock()
-	c.cmds = append(c.cmds, cmd)
+	c.phases = append(c.phases, phase)
 	c.mu.Unlock()
-	return c.answer(cmd)
+	return c.answer(phase, nonce)
 }
 
 func (c *fakeConn) Close() error {
@@ -32,23 +37,7 @@ func (c *fakeConn) Close() error {
 	return nil
 }
 
-// nonceOf reads the nonce back out of the command the source built, so the
-// fixture can frame its answer the way the far side would.
-func nonceOf(cmd string) string {
-	const marker = "sh -s "
-	i := strings.Index(cmd, marker)
-	if i < 0 {
-		return ""
-	}
-	rest := cmd[i+len(marker):]
-	end := strings.IndexAny(rest, " \n")
-	if end < 0 {
-		return ""
-	}
-	return rest[:end]
-}
-
-func remoteSource(answer func(cmd string) (*commandnames.ExecResult, error)) (*commandnames.RemoteSource, *fakeConn) {
+func remoteSource(answer func(phase commandnames.Phase, nonce string) (*commandnames.ExecResult, error)) (*commandnames.RemoteSource, *fakeConn) {
 	conn := &fakeConn{answer: answer}
 	src := commandnames.NewRemoteSource("ssh:deploy@app1:22", "v39",
 		func(context.Context) (commandnames.ExecConn, error) { return conn, nil })
@@ -56,9 +45,8 @@ func remoteSource(answer func(cmd string) (*commandnames.ExecResult, error)) (*c
 }
 
 func TestRemoteSource_ProbeAndScanReadTheFramedAnswer(t *testing.T) {
-	src, conn := remoteSource(func(cmd string) (*commandnames.ExecResult, error) {
-		n := nonceOf(cmd)
-		if strings.Contains(cmd, "NOCX_CN %s BEGIN") && strings.Contains(cmd, "printf 'V 1") {
+	src, conn := remoteSource(func(phase commandnames.Phase, n string) (*commandnames.ExecResult, error) {
+		if phase == commandnames.PhaseProbe {
 			return &commandnames.ExecResult{Stdout: []byte(
 				"Welcome to app1\nNOCX_CN " + n + " BEGIN\nV 1\nU deploy\nF bash\nP /usr/bin\nD /usr/bin\nS 42\nNOCX_CN " + n + " END\n")}, nil
 		}
@@ -94,8 +82,7 @@ func TestRemoteSource_ProbeAndScanReadTheFramedAnswer(t *testing.T) {
 // reports the deadline's state because the cause is the same — a bound
 // stopped the work.
 func TestRemoteSource_ATruncatedAnswerIsNeverPublished(t *testing.T) {
-	src, _ := remoteSource(func(cmd string) (*commandnames.ExecResult, error) {
-		n := nonceOf(cmd)
+	src, _ := remoteSource(func(_ commandnames.Phase, n string) (*commandnames.ExecResult, error) {
 		return &commandnames.ExecResult{
 			Stdout:    []byte("NOCX_CN " + n + " BEGIN\nN ls\n"),
 			Truncated: true,
@@ -110,8 +97,7 @@ func TestRemoteSource_ATruncatedAnswerIsNeverPublished(t *testing.T) {
 // An answer whose frame never closes — the far side was cut off mid
 // enumeration — is rejected whole rather than half-parsed.
 func TestRemoteSource_AnUnclosedFrameIsRejectedWhole(t *testing.T) {
-	src, _ := remoteSource(func(cmd string) (*commandnames.ExecResult, error) {
-		n := nonceOf(cmd)
+	src, _ := remoteSource(func(_ commandnames.Phase, n string) (*commandnames.ExecResult, error) {
 		return &commandnames.ExecResult{Stdout: []byte("NOCX_CN " + n + " BEGIN\nN ls\nN grep\n")}, nil
 	})
 	if _, err := src.Scan(context.Background(), commandnames.Probe{}); err == nil {
@@ -122,7 +108,7 @@ func TestRemoteSource_AnUnclosedFrameIsRejectedWhole(t *testing.T) {
 // A refused exec is `failed`, not `timed-out`: the two are different facts
 // and the surface tells them apart.
 func TestRemoteSource_ARefusedExecIsAFailureNotADeadline(t *testing.T) {
-	src, _ := remoteSource(func(string) (*commandnames.ExecResult, error) {
+	src, _ := remoteSource(func(commandnames.Phase, string) (*commandnames.ExecResult, error) {
 		return nil, errors.New("exec request refused")
 	})
 	_, err := src.Scan(context.Background(), commandnames.Probe{})
@@ -137,8 +123,7 @@ func TestRemoteSource_ARefusedExecIsAFailureNotADeadline(t *testing.T) {
 // A non-zero exit status is a failure of the far side's shell, not an empty
 // answer.
 func TestRemoteSource_ANonZeroExitIsAFailure(t *testing.T) {
-	src, _ := remoteSource(func(cmd string) (*commandnames.ExecResult, error) {
-		n := nonceOf(cmd)
+	src, _ := remoteSource(func(_ commandnames.Phase, n string) (*commandnames.ExecResult, error) {
 		return &commandnames.ExecResult{
 			Stdout:     []byte("NOCX_CN " + n + " BEGIN\nN ls\nNOCX_CN " + n + " END\n"),
 			ExitStatus: 127,

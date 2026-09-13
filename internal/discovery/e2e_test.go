@@ -4,39 +4,59 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"net"
 	"os"
-	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/ssh"
 	gossh "golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/knownhosts"
+
+	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/remoteprobe"
 )
 
 // TestDetector_OverWire_NormalHost is the composition check the fake tests
-// cannot give: a real pooled SSH connection, a real DiscoveryConn lease, and
-// the real Detector, against an in-process SSH server that answers exec
-// requests the way a normal Linux host's shell would. The server returns the
-// REAL measured ss fixture; the detector must select ss once, parse 9
-// listeners, and classify the mixed evidence correctly.
+// cannot give: the REAL Detector, its real ladder, and the real command each
+// rung is, against an in-process SSH server that answers exec requests the way
+// a normal Linux host's shell would. The server returns the REAL measured ss
+// fixture; the detector must select ss once, parse 9 listeners, and classify
+// the mixed evidence correctly.
+//
+// # What changed when the transport moved, and what is proven where
+//
+// It used to dial with the coordinator's own ssh client and its DiscoveryConn
+// lease. Nothing does that any more — the owner's invariant is that every ssh
+// connection is made by this machine's helper, and the probes are named ops the
+// helper answers — so the transport half of this test now lives with the helper
+// (internal/helper/sshsvc's own tests drive the real `ssh` service against a
+// real server) and what is driven HERE is the half that is still this package's:
+// the ladder, the framing, the parsers and the five result states, over a real
+// connection whose server answers real commands.
+//
+// The commands are composed from internal/remoteprobe — the same package the
+// helper composes from — so a rename or a re-shaped rung that broke the ladder
+// would fail here and not only in the helper's own tests.
 func TestDetector_OverWire_NormalHost(t *testing.T) {
+	var mu sync.Mutex
+	var ran []string
 	srv := startDiscoveryServer(t, func(cmd string) (stdout, stderr string, exit int) {
-		if cmd != ssCmd {
-			t.Errorf("exec command = %q, want the ss probe command", cmd)
+		mu.Lock()
+		ran = append(ran, cmd)
+		mu.Unlock()
+		want, ok := remoteprobe.PortCommand(remoteprobe.PortSS)
+		if !ok {
+			t.Errorf("the ss probe has no command in remoteprobe")
+		}
+		if cmd != want {
+			t.Errorf("exec command = %q, want the ss probe command %q", cmd, want)
 		}
 		return "NOCX-PD/1\n" + ssMixedFixture + "\nNOCX-PD/1\n", "", 0
 	})
-	client := discoveryTestClient(t, srv)
-	opts := discoveryTestOpts(srv)
 
-	conn, err := client.DiscoveryConn(context.Background(), srv.addr, opts...)
-	if err != nil {
-		t.Fatalf("DiscoveryConn: %v", err)
-	}
-	d := NewDetector(adaptSSH(conn), log.NewSlogAdapter(nil), WithSampleTimeout(5*time.Second))
+	lease := dialProbeLease(t, srv)
+	d := NewDetector(lease, log.NewSlogAdapter(nil), WithSampleTimeout(5*time.Second))
 	defer func() { _ = d.Close() }()
 
 	s := d.Sample(context.Background())
@@ -46,7 +66,7 @@ func TestDetector_OverWire_NormalHost(t *testing.T) {
 	if s.State != StateAvailable {
 		t.Fatalf("state = %v, want available; classification=%q probes=%v", s.State, s.Classification, s.ProbesTried)
 	}
-	if s.Probe != "ss" {
+	if s.Probe != string(remoteprobe.PortSS) {
 		t.Fatalf("probe = %q, want ss (ladder selected once)", s.Probe)
 	}
 	if len(s.Listeners) != 9 {
@@ -70,7 +90,71 @@ func TestDetector_OverWire_NormalHost(t *testing.T) {
 	if s2.State != StateAvailable {
 		t.Fatalf("second state = %v, want available", s2.State)
 	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(ran) != 2 {
+		t.Errorf("ran %d commands, want 2 (selection is once per connection, then the selected probe only): %v", len(ran), ran)
+	}
 }
+
+// dialLease is the probe lease this test drives the detector through: a real
+// ssh connection and a real exec per probe, composed from remoteprobe.
+//
+// It stands where the helper stands in production, and it is deliberately the
+// SMALLEST thing that can: no pool, no credentials beyond a generated key, no
+// classification. What it shares with the helper's own probe runner is the only
+// thing that has to agree — the command each named probe is.
+type dialLease struct {
+	client *gossh.Client
+	done   chan struct{}
+}
+
+func dialProbeLease(t *testing.T, srv *discoveryServer) *dialLease {
+	t.Helper()
+	client, err := gossh.Dial("tcp", srv.addr, &gossh.ClientConfig{
+		User:            "test",
+		Auth:            []gossh.AuthMethod{gossh.PublicKeys(srv.userKey)},
+		HostKeyCallback: gossh.FixedHostKey(srv.hostKey.PublicKey()),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	l := &dialLease{client: client, done: make(chan struct{})}
+	t.Cleanup(func() {
+		_ = client.Close()
+		close(l.done)
+	})
+	return l
+}
+
+func (l *dialLease) Sample(ctx context.Context, probe ProbeName) (*ExecResult, error) {
+	command, ok := remoteprobe.PortCommand(probe)
+	if !ok {
+		return nil, &ExecError{Kind: ExecErrCommandTooLong}
+	}
+	sess, err := l.client.NewSession()
+	if err != nil {
+		return nil, &ExecError{Kind: ExecErrSessionRefused, Err: err}
+	}
+	defer func() { _ = sess.Close() }()
+
+	out, err := sess.Output(command)
+	result := &ExecResult{Stdout: out}
+	var exitErr *gossh.ExitError
+	switch {
+	case err == nil:
+		return result, nil
+	case errors.As(err, &exitErr):
+		result.ExitStatus = exitErr.ExitStatus()
+		return result, nil
+	}
+	return nil, &ExecError{Kind: ExecErrConnectionLost, Err: err}
+}
+
+func (l *dialLease) Done() <-chan struct{} { return l.done }
+func (l *dialLease) LostErr() error        { return nil }
+func (l *dialLease) Close() error          { return l.client.Close() }
 
 // ---------------------------------------------------------------------------
 // Minimal in-process SSH server with scripted exec. The internal/ssh test
@@ -171,28 +255,6 @@ func (s *discoveryServer) handleSession(ch gossh.Channel, reqs <-chan *gossh.Req
 		default:
 			_ = req.Reply(false, nil)
 		}
-	}
-}
-
-func discoveryTestClient(t *testing.T, srv *discoveryServer) *ssh.RealClient {
-	t.Helper()
-	khPath := filepath.Join(t.TempDir(), "known_hosts")
-	line := knownhosts.Line([]string{srv.addr}, srv.hostKey.PublicKey())
-	if err := os.WriteFile(khPath, []byte(line+"\n"), 0o600); err != nil {
-		t.Fatalf("write known_hosts: %v", err)
-	}
-	client, err := ssh.NewReal(log.NewSlogAdapter(nil), ssh.WithKnownHostsFile(khPath))
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	t.Cleanup(func() { _ = client.Close() })
-	return client
-}
-
-func discoveryTestOpts(srv *discoveryServer) []ssh.ConnectOption {
-	return []ssh.ConnectOption{
-		ssh.WithUser("test"),
-		ssh.WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(srv.userKey)}),
 	}
 }
 

@@ -444,15 +444,35 @@ export function resolvePlatform(argv, hostEnv) {
  * so without the tag the analysis fails to compile rather than reporting
  * anything — loudly, which is the correct failure.
  *
+ * PLUS `nocx_local_ssh`, since nocx-50w7p.9, and that one is not about cgo.
+ *
+ * The product ships a helper in TWO variants (nocx-50w7p.1): the deployable
+ * artifact, built without this tag, and the LOCAL one — same repository, same
+ * sources, this tag — which `make helper-local` builds and a running app
+ * installs on the machine it is on. `internal/helper/sshsvc` and everything
+ * beside it exist only in the second, and analysing without it reports every
+ * symbol whose caller is one of those as unreachable. That is not a finding
+ * about the code: it is a finding about the ANALYSIS, and baselining it would
+ * record a false positive as debt while the ratchet's own comment insists the
+ * answer stays true.
+ *
+ * The measurement that made this concrete: with the tag, linux/amd64 reports 84
+ * unreachable functions instead of 87 and NO additional finding — the analysis
+ * sees strictly more of the shipped program, so nothing hides behind the tag
+ * that was visible without it.
+ *
  * Derived rather than passed so that a local run and the CI job agree without
  * the caller having to remember; `--tags=` overrides for the awkward host.
  */
 export function resolveBuildTags(argv, hostEnv) {
   const arg = argv.find((a) => a.startsWith('--tags='))
   if (arg) return arg.slice('--tags='.length)
-  if (hostEnv.GOOS !== 'linux') return ''
-  const probe = spawnSync('pkg-config', ['--exists', 'webkit2gtk-4.1'], { stdio: 'ignore' })
-  return probe.status === 0 ? 'gtk3' : ''
+  const tags = ['nocx_local_ssh']
+  if (hostEnv.GOOS === 'linux') {
+    const probe = spawnSync('pkg-config', ['--exists', 'webkit2gtk-4.1'], { stdio: 'ignore' })
+    if (probe.status === 0) tags.unshift('gtk3')
+  }
+  return tags.join(',')
 }
 
 /** The host's own GOOS/GOARCH, asked of the toolchain rather than of node. */

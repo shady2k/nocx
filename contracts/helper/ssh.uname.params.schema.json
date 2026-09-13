@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.uname.params.schema.json",
+  "title": "HelperSSHUnameParams",
+  "description": "The platform probe (D20): ask the host what it is, in its own words. There is nothing for a caller to narrow — the command is fixed and the answer is the kernel and machine names — so the params are a lease and nothing else. The caller maps the answer onto Go's GOOS/GOARCH vocabulary; the helper decides nothing about it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["lease"],
+  "properties": {
+    "lease": {
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/leaseId"
+    }
+  }
+}

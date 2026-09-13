@@ -256,15 +256,16 @@ func decodeHostKeyEvidence(raw json.RawMessage) (proto.HostKeyEvidence, bool) {
 // lease", for the factory that needs three of them.
 //
 // It is a DISPATCH and not a policy, exactly like hostedOpeners: each method is
-// one lease and each lease has exactly one owner. The install lease is this
-// machine's helper's; the git lane and the platform probe are still the
-// coordinator's OWN dials, which is the state of the epic rather than a
-// preference — they are separate consumers and each moves in its own task. A
-// reader looking for "which leases still dial" gets the answer from this
-// struct's two fields and nothing else.
+// one lease and each lease has exactly one owner. The install lease AND the
+// platform probe are this machine's helper's now (nocx-50w7p.3 and
+// nocx-50w7p.9); the git lane is still the coordinator's own dial, which is the
+// state of the epic rather than a preference — it is a separate consumer and
+// moves under its own task. A reader looking for "which leases still dial" gets
+// the answer from this struct's fields and nothing else.
 type installLeaseRoutes struct {
-	direct   directLanes  // the lanes whose dial is still the coordinator's
-	viaLocal helperLeases // the leases this machine's helper answers
+	direct   directLanes   // the lanes whose dial is still the coordinator's
+	viaLocal helperLeases  // the leases this machine's helper answers
+	probes   *helperProbes // the platform probe, a named op on the same helper
 }
 
 // helperLeases is what this machine's helper answers through this dispatch: the
@@ -283,15 +284,22 @@ type helperLeases interface {
 // the second dial path would be invisible.
 type directLanes interface {
 	helperLaneProvider
-	DiscoveryConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.DiscoveryConn, error)
 }
 
 func (r installLeaseRoutes) HelperConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.HelperConn, error) {
 	return r.direct.HelperConn(ctx, host, opts...)
 }
 
+// DiscoveryConn is the platform probe (D20), answered by this machine's helper
+// as the typed `ssh.uname` op.
+//
+// It keeps the ssh.DiscoveryConn SHAPE — and that shape is one command wide,
+// which `platformLease.Exec` refuses anything outside of — because its caller
+// is helper_git.go's probeExec, a conversion into the deploy package's own
+// one-command seam. What crosses to the helper is a lease and an op name: no
+// command reaches the wire (nocx-50w7p.9).
 func (r installLeaseRoutes) DiscoveryConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.DiscoveryConn, error) {
-	return r.direct.DiscoveryConn(ctx, host, opts...)
+	return r.probes.HelperPlatformProbe(ctx, host, opts...)
 }
 
 func (r installLeaseRoutes) HelperInstallConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.HelperInstallConn, error) {

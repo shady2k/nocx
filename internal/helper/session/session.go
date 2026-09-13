@@ -119,11 +119,13 @@ type SSHSpawnRequest struct {
 	Cols uint16
 	Rows uint16
 	// Lifecycle is the caller's request for the authenticated lifecycle
-	// channel, carried so the gap can be NAMED where it is refused: this
-	// generation delivers the pane and opens no tunnel (the forward ops of
-	// nocx-50w7p.8), and the spawner logs that by name. It is never rendered
-	// into the launcher — a bearer value with no channel behind it would be a
-	// credential minted for nobody.
+	// channel. The spawner opens the far side's loopback listener for it,
+	// renders its addressing into the launcher, and puts the BEARER in frame 2
+	// — never in the command, because a bearer nothing can spend is a
+	// credential minted for nobody. A request the pane cannot honour (the far
+	// side refused a listener, or the far shell could not be integrated) is
+	// refused by name, or answered with a session whose lifecycle window does
+	// not exist and whose `adopt-lifecycle` is therefore null.
 	Lifecycle *proto.LifecycleLaunch
 }
 

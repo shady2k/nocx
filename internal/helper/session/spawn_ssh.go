@@ -27,19 +27,23 @@ package session
 //
 // NOT here, and each for a named reason:
 //
-//   - the LIFECYCLE TUNNEL. It is a remote loopback listener on the ssh
-//     connection and needs a forward on this helper's connection — the
-//     direct-tcpip/forward half of nocx-50w7p.8. A request carrying one is
-//     answered with the pane and no lifecycle window, which is stated in
-//     proto.SSHSpawnParams.Lifecycle and logged here by name.
-//   - the AGENT TOOL SOCKET's reachability. The two far-host paths travel in
-//     the launch when the coordinator supplies them (proto.SSHSpawnParams
-//     .AgentHelperPath/.AgentToolSocketPath), and making the SOCKET actually
-//     reachable from the far host is that same forward op's job. Until it
-//     lands the coordinator passes neither, and the far shell renders no
-//     NOCX_TOOL_SOCKET — the soft degrade nocx-2tesu already names, where the
-//     shell's own refusal text is what a person sees rather than a path
-//     nothing answers.
+//   - the SHELL-INTEGRATION GENERATION the far side installs. An integrated
+//     pane whose rcfile refuses still has its lifecycle channel — the shell
+//     speaks the protocol on a port that exists — but the bundle that would
+//     make a far host's prompt integrate is published by the coordinator's own
+//     sftp path (nocx-50w7p.15), not here. Until it lands, a far host with no
+//     generation execs a native login shell after naming that outcome, which
+//     is the fail-open this design promises rather than a silent degrade.
+//
+// The lifecycle TUNNEL and the agent tool socket's REACHABILITY are here now
+// (nocx-50w7p.14). Both are the helper's own forward on the connection this
+// process dialed, and both are created BEFORE the shell channel: the launcher
+// names them, and neither the port nor the path exists until the far side has
+// been asked for a listener (sshsvc.PaneSpec). The port reaches the far shell
+// in frame 2 — the frame protocol's own place for it, because the port is
+// allocated by the listening side and can never be in the command — and the
+// tool socket path reaches it through the launcher's environment, as the local
+// spawner does for a local pane.
 
 import (
 	"bytes"
@@ -59,30 +63,38 @@ import (
 	"github.com/shady2k/nocx/internal/shellintegration"
 )
 
-// ShellOpener is this spawner's seam on the ssh service: open one interactive
-// shell channel for a resolved destination.
+// ShellOpener is this spawner's seam on the ssh service: open one pane's
+// far-side listeners, and open the interactive shell channel that follows them.
 //
 // It is declared here, over *sshsvc.Service, rather than in the ssh service:
-// the service knows how to open a channel and nothing about sessions, and this
-// file knows about sessions and nothing about dialing. The one thing they share
-// is the ShellChannel both sides name.
+// the service knows how to open a channel and a listener and nothing about
+// sessions, and this file knows about sessions and nothing about dialing. The
+// things they share are the ShellChannel, the PaneListeners and the one
+// connection both are on.
 type ShellOpener interface {
+	OpenPaneListeners(ctx context.Context, spec sshsvc.PaneSpec) (*sshsvc.PaneListeners, error)
 	OpenShell(ctx context.Context, spec sshsvc.ShellSpec) (*sshsvc.ShellChannel, error)
 }
 
 // sshSpawner is the SSHSpawner this build wires into the session service.
 type sshSpawner struct {
 	opener ShellOpener
-	log    *slog.Logger
+	// toolSocket is THIS coordinator's tool endpoint, when it runs one — the
+	// value cmd/nocx-helper read once from its own environment, exactly as the
+	// local spawner holds it. Empty is a real state (no endpoint), and a
+	// request for a far-side tool socket is then refused by name rather than
+	// answered with a path nothing answers.
+	toolSocket string
+	log        *slog.Logger
 }
 
 // NewSSHSpawner builds the ssh spawner over this daemon's ssh service. It is
 // called by the composition root in the build that has one.
-func NewSSHSpawner(opener ShellOpener, logger *slog.Logger) SSHSpawner {
+func NewSSHSpawner(opener ShellOpener, toolSocket string, logger *slog.Logger) SSHSpawner {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &sshSpawner{opener: opener, log: logger}
+	return &sshSpawner{opener: opener, toolSocket: toolSocket, log: logger}
 }
 
 // SpawnSSH opens one shell channel, brings the launcher and its stage-1 up on
@@ -112,23 +124,52 @@ func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process
 		kind = shellintegration.ShellAuto
 	}
 
-	var stage []byte
-	command := ""
+	var (
+		stage   []byte
+		command string
+		plan    shellintegration.BootstrapPlan
+		pane    *sshsvc.PaneListeners
+	)
 	// integrate is the mode axis's own answer, asked of the one predicate that
 	// owns it. `raw` refuses integration outright; an unrecognised mode fails
 	// closed there too, so a caller cannot invent its way into a launcher.
 	if profile.DesiredMode(req.Mode).DeliversScripts() {
+		// THE FAR SIDE'S CARRIERS COME FIRST, and that ordering is the
+		// contract rather than tidiness: the launcher names the lifecycle port
+		// and the tool socket path, and neither exists until the far side has
+		// been asked for a listener. A command built before them would name a
+		// port nobody listens on and a path nobody answers.
+		listeners, err := p.openPaneListeners(ctx, req)
+		if err != nil {
+			// Refused, never degraded: the caller asked for an authenticated
+			// channel, and a launch that carries a port or a path nothing
+			// answers is a shell that blocks until its hello budget runs out
+			// (or an agent that fails for a reason that is not about it). A
+			// caller that wants the pane without the channel opens it without
+			// asking for one.
+			return nil, err
+		}
+		pane = listeners
+
 		opts := shellintegration.LaunchOptions{
 			SessionID:           req.SessionID,
 			Enhanced:            true,
 			AgentHelperPath:     req.AgentHelperPath,
 			AgentToolSocketPath: req.AgentToolSocketPath,
 		}
-		// No capability and no lifecycle port: the authenticated lifecycle
-		// channel is the forward this generation does not have (see the file
-		// header). A shell started without one is a MARKER-ONLY session —
-		// prompt boundaries and blocks, no domain — which is exactly what the
-		// coordinator's own path produces when it declines to open a tunnel.
+		// The authenticated lifecycle channel's addressing. The CAPABILITY is
+		// not rendered anywhere by the launcher: it reaches the far shell as
+		// frame 2 (the Secret source below), and the port travels with it —
+		// the transport is a loopback listener on the far side, and the frame
+		// protocol's own note says why the port cannot be in the command.
+		if req.Lifecycle != nil && pane != nil && pane.Lifecycle() != nil {
+			opts.Lane = req.Lifecycle.Lane
+			opts.Domain = req.Lifecycle.Domain
+			opts.Epoch = req.Lifecycle.Epoch
+			opts.Capability = req.Lifecycle.Capability
+			opts.Recovery = req.Lifecycle.Recovery
+			opts.LifecyclePort = pane.LifecyclePort()
+		}
 		built, err := shellintegration.Stage1Frame(kind, opts)
 		if err != nil {
 			// Fail closed and say so: no stage-1 means no carrier, and the
@@ -144,8 +185,33 @@ func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process
 					"session", req.SessionID, "shell", string(kind), "reason", string(reason))
 			} else {
 				stage, command = built, cmd
+				// Frame 2 is the ONE place a bearer travels. A pane with no
+				// lifecycle channel gets no Secret source, which the frame
+				// protocol answers with a NON-SECRET refusal — the far shell
+				// is told no channel was opened instead of waiting for one.
+				//
+				// Ordered is nil, and that is the plan's own documented meaning
+				// for "nothing to wait for": §6.1's barrier exists to order
+				// frame 2 behind the lifecycle RECEIVER and the publish, and
+				// the receiver here is a listener this process created before
+				// the shell existed. The publish is not this process's yet
+				// (nocx-50w7p.15), so there is no second fact to wait for.
+				plan = shellintegration.BootstrapPlan{Stage1: built}
+				if opts.Capability != "" {
+					plan.Secret = shellintegration.SecretFunc(func(context.Context) ([]byte, error) {
+						return shellintegration.SecretFrame(opts)
+					})
+				}
 			}
 		}
+	}
+	if stage == nil && pane != nil {
+		// The launcher declined, so the far shell is never told about the
+		// carriers and nothing will ever dial them: end them here rather than
+		// hold a listener and a port on somebody else's machine for the life
+		// of a session that cannot use them.
+		_ = pane.Close()
+		pane = nil
 	}
 
 	ch, err := p.opener.OpenShell(ctx, sshsvc.ShellSpec{
@@ -157,6 +223,9 @@ func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process
 		Rows:               req.Rows,
 	})
 	if err != nil {
+		if pane != nil {
+			_ = pane.Close()
+		}
 		return nil, err
 	}
 
@@ -164,6 +233,7 @@ func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process
 		ch:            ch,
 		shell:         string(kind),
 		feed:          newChannelFeed(),
+		pane:          pane,
 		done:          make(chan struct{}),
 		bootstrapDone: make(chan struct{}),
 		log:           p.log.With("session", req.SessionID),
@@ -182,20 +252,43 @@ func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process
 	}
 	go proc.watch()
 	if stage != nil {
-		go proc.bootstrap(ctx, stage)
+		go proc.bootstrap(ctx, plan)
 	} else {
 		close(proc.bootstrapDone)
 	}
-	if req.Lifecycle != nil {
-		// THE NAMED REFUSAL, said where the caller can reach it: the pane is
-		// delivered, the enhanced lifecycle is not, and the two facts a caller
-		// checks — the session's lifecycle window and adopt-lifecycle — both
-		// answer accordingly. Nothing is silently dropped; what is missing is
-		// the forward op of nocx-50w7p.8.
-		p.log.Warn("ssh pane: the enhanced lifecycle channel was asked for and this generation cannot open one; the pane runs without it",
-			"session", req.SessionID, "bead", "nocx-50w7p.8")
+	if req.Lifecycle != nil && (pane == nil || pane.Lifecycle() == nil) {
+		// The caller asked for an authenticated channel and this session has
+		// none: the far shell could not be integrated (an unsupported shell, a
+		// stage-1 that would not render), so no command carried the channel and
+		// no bearer was minted for nobody. It is said out loud because the
+		// caller's alternative reading of the same state is a hello that times
+		// out twenty seconds later, one process away.
+		p.log.Warn("ssh pane: the enhanced lifecycle channel was asked for and this pane could not integrate the far shell; the pane runs without it",
+			"session", req.SessionID, "bead", "nocx-50w7p.14")
 	}
 	return proc, nil
+}
+
+// openPaneListeners asks the far side for the carriers this request needs, or
+// answers nil when it needs none.
+//
+// A request with neither a lifecycle channel nor a far tool socket path asks
+// for no listener and costs no dial: a `raw` pane, or an integrated pane whose
+// coordinator runs no tool endpoint and wants no channel, is exactly today's
+// session. Answering an empty set is not a failure — it is the request.
+func (p *sshSpawner) openPaneListeners(ctx context.Context, req SSHSpawnRequest) (*sshsvc.PaneListeners, error) {
+	spec := sshsvc.PaneSpec{
+		Destination:        req.Destination,
+		AcceptOnTrust:      req.AcceptOnTrust,
+		HostKeyFingerprint: req.HostKeyFingerprint,
+		Lifecycle:          req.Lifecycle != nil,
+		ToolSocketPath:     req.AgentToolSocketPath,
+		ToolSocketTarget:   p.toolSocket,
+	}
+	if !spec.Lifecycle && spec.ToolSocketPath == "" {
+		return nil, nil
+	}
+	return p.opener.OpenPaneListeners(ctx, spec)
 }
 
 // sshProcess is a helper host session whose process runs on the FAR side of an
@@ -215,6 +308,12 @@ type sshProcess struct {
 	feed  *channelFeed
 	log   *slog.Logger
 
+	// pane is the session's far-side listeners and, through them, the
+	// lifecycle carrier: the far shell's connection to this process's own
+	// loopback listener, which finished the machine's teardown when the
+	// session ends. Nil for a pane that asked for none.
+	pane *sshsvc.PaneListeners
+
 	// bootstrapDone closes when the launcher's bootstrap has finished with the
 	// stream, whatever the outcome. Read waits on it, which is what makes the
 	// handover from the bootstrap driver to the session's pump a sequence
@@ -228,14 +327,34 @@ type sshProcess struct {
 }
 
 // The assertions that make this type's obligations the COMPILER's: a Process
-// the session service can own, and the group signaller its signal path reaches
-// for. Deliberately absent is LifecycleProcess — this generation opens no
-// lifecycle carrier for an ssh pane, and implementing the interface to return
-// nil would be a capability advertised and then withdrawn.
+// the session service can own, the group signaller its signal path reaches
+// for, and — since nocx-50w7p.14 — the lifecycle carrier the session service
+// asks for when a session requested an authenticated channel.
+//
+// LifecycleProcess is implemented UNCONDITIONALLY and answers nil for a pane
+// with no channel, which is not a capability advertised and withdrawn: the
+// interface's question is "what is your lifecycle stream" and nil is this
+// type's honest answer for a pane that has none (session.finishSpawn reads it
+// exactly that way, and the session keeps no launch without a window).
 var (
 	_ Process               = (*sshProcess)(nil)
 	_ ProcessGroupSignaller = (*sshProcess)(nil)
+	_ LifecycleProcess      = (*sshProcess)(nil)
 )
+
+// Lifecycle is the far shell's end of the authenticated channel: the stream
+// the session service reads the shell's frames from and writes the
+// coordinator's frames to.
+//
+// It is the ACCEPTED connection of this pane's own remote listener, carried
+// across a socketpair so a session owns one stable stream from its first
+// moment; nil when this pane has no channel.
+func (p *sshProcess) Lifecycle() io.ReadWriteCloser {
+	if p.pane == nil {
+		return nil
+	}
+	return p.pane.Lifecycle()
+}
 
 // errBootstrapInput is a write that arrived while the launcher's bootstrap
 // still owns the far side's input. It is REFUSED, never buffered: a buffered
@@ -299,6 +418,13 @@ func (p *sshProcess) Resize(_ context.Context, cols, rows, _, _ uint16) error {
 func (p *sshProcess) Close() error {
 	err := p.ch.Close()
 	p.feed.close(err)
+	if p.pane != nil {
+		// The listeners end with the session, and their end is a fact about
+		// the FAR HOST: closing them cancels the port and the path there, so a
+		// session that is over leaves nothing listening on somebody else's
+		// machine.
+		_ = p.pane.Close()
+	}
 	return err
 }
 
@@ -372,7 +498,7 @@ func (p *sshProcess) watch() {
 // only thing that should stop it is the session ending — which is what the
 // watcher below cancels on. The deadline inside DeliverBootstrap is what
 // bounds it otherwise (the same budgets the coordinator's own path uses).
-func (p *sshProcess) bootstrap(ctx context.Context, stage []byte) {
+func (p *sshProcess) bootstrap(ctx context.Context, plan shellintegration.BootstrapPlan) {
 	defer close(p.bootstrapDone)
 	bctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancel()
@@ -385,15 +511,15 @@ func (p *sshProcess) bootstrap(ctx context.Context, stage []byte) {
 	}()
 
 	stream := &bootstrapStream{feed: p.feed, in: p.ch}
-	outcome := shellintegration.DeliverBootstrap(bctx, log.NewSlogAdapter(p.log),
-		stream, shellintegration.BootstrapPlan{Stage1: stage})
+	outcome := shellintegration.DeliverBootstrap(bctx, log.NewSlogAdapter(p.log), stream, plan)
 	// SAID OUT LOUD, because it is the difference between a pane whose blocks
 	// will work and one that is only a terminal: the outcome names which of the
 	// two the far side reached, and until this line the only sign of a failed
 	// bootstrap was the absence of blocks much later. A session with no
-	// lifecycle channel (every ssh session of this generation) reports
-	// `channel-unavailable` after a successful integration and a native shell
-	// otherwise — both are answers, and neither is a failure of the pane.
+	// lifecycle channel — a `raw` one, or an integrated one whose far shell
+	// declined — reports `channel-unavailable` after a successful integration
+	// and a native shell otherwise: both are answers, and neither is a failure
+	// of the pane.
 	p.log.Info("ssh pane: the bootstrap reached its outcome",
 		"outcome", string(outcome), "integrated", outcome == shellintegration.OutcomeBootstrapAccepted)
 }

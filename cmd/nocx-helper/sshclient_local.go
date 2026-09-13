@@ -29,7 +29,7 @@ import (
 // because nothing dialed. It now also answers how the service reaches a
 // connection, which is the same two-part shape sessions uses (construct once,
 // Bind per connection).
-func holdSSHClient(log *slog.Logger) (sshSeam, error) {
+func holdSSHClient(log *slog.Logger, agentToolSocketPath string) (sshSeam, error) {
 	client, err := sshdial.New(log)
 	if err != nil {
 		return sshSeam{}, err
@@ -44,6 +44,6 @@ func holdSSHClient(log *slog.Logger) (sshSeam, error) {
 		// here, over the service that already owns the pool, because the two
 		// must share ONE pool — a second client would be a second connection
 		// per host, which is what AD-4's ref-counted pool exists to prevent.
-		sessionSpawner: session.NewSSHSpawner(svc, log),
+		sessionSpawner: session.NewSSHSpawner(svc, agentToolSocketPath, log),
 	}, nil
 }

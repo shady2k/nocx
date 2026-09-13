@@ -941,10 +941,11 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		// A LIFECYCLE ASKED FOR AND NOT GIVEN. The caller will now wait out a
 		// hello budget for a channel that does not exist, and until this line
 		// the only sign of it was that timeout, ten seconds later and in
-		// another process. For an ssh session this is the ordinary answer of
-		// this generation rather than a launcher declining: the tunnel is a
-		// forward on the helper's connection and lands with nocx-50w7p.8
-		// (proto.SSHSpawnParams.Lifecycle).
+		// another process. The ordinary cause is a launcher that declined the
+		// far shell (an unsupported shell kind), which is a session that
+		// integrates nothing rather than a failure of the pane; a helper whose
+		// far listener was REFUSED never reaches this line, because spawn-ssh
+		// refuses that request by name instead (sshsvc.OpenPaneListeners).
 		lg.Warn("helper: a lifecycle channel was asked for and the launcher provided none")
 	}
 	hs := &hostSession{

@@ -407,14 +407,19 @@ func (o *sessionOpener) resolveRemote(ctx context.Context, svc capability.OpenSe
 		if resolved != nil && resolved.HostName != "" {
 			remoteHost = resolved.HostName
 		}
-		var keyFile string
-		if resolved != nil {
-			keyFile = resolved.IdentityFile
-		}
+		// NO KeyFile from the resolution, and that absence is the point: the
+		// resolver's list is what ssh -G answers, which is the config's own
+		// `identityfile` lines AND ssh's defaults when it names none. Copying
+		// its first entry into the profile's own "this connection uses THIS
+		// key" field turned a discovered default into a named credential — and
+		// a named credential is offered ALONE, so an alias whose first default
+		// file happens to be absent was refused where ssh itself would have
+		// offered the next key or the agent. The list is the resolver's answer
+		// and both dial paths consult it there (resolveCredential's discovery
+		// arm, addPublicKeyMethods' file rungs).
 		remote = &ssh.ConnectConfig{
-			User:    user,
-			Port:    port,
-			KeyFile: keyFile,
+			User: user,
+			Port: port,
 			// No size: see the profile branch above — the registry decides
 			// it, and this struct carries what the caller supplied.
 			RemoteLauncher:  o.launcher,

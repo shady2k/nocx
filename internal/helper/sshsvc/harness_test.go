@@ -780,6 +780,11 @@ type coordinator struct {
 	// server accepts, the probe comes back rejected — a wrong credential,
 	// produced on the far side rather than pretended here.
 	signer gossh.Signer
+	// keyring answers a `sign` with the key the named reference holds, which is
+	// what a multi-key identity needs: the helper declares a QUEUE, so the
+	// coordinator has to be able to sign for whichever entry the far side
+	// challenged. Nil for the single-key fixtures, which use signer.
+	keyring map[string]gossh.Signer
 
 	verdict     proto.HostKeyVerdict
 	fingerprint string
@@ -817,10 +822,14 @@ func (c *coordinator) registry() *client.ReverseRegistry {
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, err
 		}
-		if p.Credential.Ref != wantRef {
-			return nil, &proto.Refusal{Code: proto.ErrCodeBadParams, Message: "unknown credential"}
+		signer, known := c.keyring[p.Credential.Ref]
+		if !known {
+			if p.Credential.Ref != wantRef {
+				return nil, &proto.Refusal{Code: proto.ErrCodeBadParams, Message: "unknown credential"}
+			}
+			signer = c.signer
 		}
-		sig, err := c.signer.Sign(rand.Reader, p.Challenge)
+		sig, err := signer.Sign(rand.Reader, p.Challenge)
 		if err != nil {
 			return nil, err
 		}
@@ -1014,14 +1023,29 @@ func passwordProbeParams(t *testing.T, f *fixture) proto.ProbeParams {
 	}
 }
 
-// keyProbeParams builds the params for a key credential: the reference and the
-// PUBLIC half, which is what the helper needs to declare the key it offers.
+// keyProbeParams builds the params for a key credential: the references and
+// the PUBLIC halves, which is what the helper needs to declare the keys it
+// offers before it is asked to sign with one of them.
 func keyProbeParams(t *testing.T, f *fixture, offer gossh.Signer) proto.ProbeParams {
 	t.Helper()
 	p := passwordProbeParams(t, f)
-	p.Destination.Identity.Auth = proto.SSHAuthKey
-	p.Destination.Identity.PublicKey = offer.PublicKey().Marshal()
+	p.Destination.Identity = proto.SSHIdentity{Auth: proto.SSHAuthKey, Keys: keyOffers(wantRef, offer)}
 	return p
+}
+
+// keyOffers renders signers into the wire's key queue: one entry per key, each
+// naming the reference the coordinator signs through and carrying its public
+// half — the pair a DECLARATION needs, with the private half staying where it
+// lives.
+func keyOffers(ref string, signers ...gossh.Signer) []proto.SSHKeyOffer {
+	offers := make([]proto.SSHKeyOffer, 0, len(signers))
+	for _, s := range signers {
+		offers = append(offers, proto.SSHKeyOffer{
+			Credential: proto.SSHCredential{Ref: ref},
+			PublicKey:  s.PublicKey().Marshal(),
+		})
+	}
+	return offers
 }
 
 // interactiveProbeParams builds the params for a keyboard-interactive rung: no

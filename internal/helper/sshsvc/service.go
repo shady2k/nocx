@@ -489,35 +489,59 @@ func validateProbe(p proto.ProbeParams) error {
 //
 // It is one switch over the CLOSED SET of auth kinds, and each arm states what
 // its kind needs rather than sharing a rule the kinds do not share: a password
-// names material, a key names material AND the public half it must declare
-// before it is asked to sign, and an interactive rung names NOTHING — the
-// person is the credential, and a reference there would name something that
-// does not exist.
+// names material, a key names the QUEUE of keys it will declare — each with the
+// public half it must present and a reference to sign through — and an
+// interactive rung names NOTHING, because the person is the credential and a
+// reference there would name something that does not exist.
+//
+// Each arm also refuses what belongs to another kind, in both directions. That
+// is not defensive noise: `additionalProperties: false` means the schema
+// decides what may be SENT, and this decides what may be DONE with it, so a
+// payload the contract layer would accept as shaped correctly must still be
+// refused here if it says two different things about how to authenticate.
 func validateIdentity(id proto.SSHIdentity) error {
 	switch id.Auth {
 	case proto.SSHAuthInteractive:
-		if id.Credential != nil || len(id.PublicKey) != 0 {
+		if id.Credential != nil || len(id.Keys) != 0 {
 			// An interactive rung that carries material is a caller that
 			// believes it is sending a credential, and answering it as a
 			// prompt would ask a person for something already in hand.
 			return fmt.Errorf("%w: interactive auth carries no credential", errBadProbeParams)
 		}
 		return nil
-	case proto.SSHAuthPassword, proto.SSHAuthKey:
+	case proto.SSHAuthPassword:
 		if id.Credential == nil || id.Credential.Ref == "" {
 			return fmt.Errorf("%w: no credential reference", errBadProbeParams)
 		}
-		if id.Auth == proto.SSHAuthKey && len(id.PublicKey) == 0 {
-			// A key credential with no public half cannot be offered: the
-			// helper would have to learn the key from somewhere, and the only
-			// somewhere is the coordinator, whose answer to "which key" is the
-			// identity the caller already built.
+		if len(id.Keys) != 0 {
+			return fmt.Errorf("%w: password auth carries keys", errBadProbeParams)
+		}
+		return nil
+	case proto.SSHAuthKey:
+		if id.Credential != nil {
+			// A key identity carries its material in the queue, one reference
+			// per key: a bare credential beside it would name a key with no
+			// public half to declare, which is the shape that cannot be
+			// offered at all.
+			return fmt.Errorf("%w: key auth names its keys, not a credential", errBadProbeParams)
+		}
+		if len(id.Keys) == 0 {
+			// A key identity with no key cannot be offered: the helper would
+			// have to learn the key from somewhere, and the only somewhere is
+			// the coordinator, whose answer to "which key" is the queue the
+			// caller already built.
 			return fmt.Errorf("%w: key auth with no public key", errBadProbeParams)
 		}
-		if len(id.PublicKey) != 0 && id.Auth == proto.SSHAuthPassword {
-			// Defensive: a public key on a password identity is a caller that
-			// assembled the two halves of two credentials.
-			return fmt.Errorf("%w: password auth carries no public key", errBadProbeParams)
+		for i, key := range id.Keys {
+			if key.Credential.Ref == "" {
+				return fmt.Errorf("%w: key %d names no credential", errBadProbeParams, i)
+			}
+			if len(key.PublicKey) == 0 {
+				return fmt.Errorf("%w: key %d carries no public key", errBadProbeParams, i)
+			}
+			if _, err := gossh.ParsePublicKey(key.PublicKey); err != nil {
+				return fmt.Errorf("%w: key %d is not a public key: %w", errBadProbeParams, i, err)
+			}
 		}
 		return nil
 	}
@@ -664,11 +688,26 @@ func (s *Service) authMethod(ctx context.Context, conn *host.Host, ep dialEndpoi
 		}), nil
 
 	case proto.SSHAuthKey:
-		pub, err := gossh.ParsePublicKey(ep.Identity.PublicKey)
-		if err != nil {
-			return nil, fmt.Errorf("%w: public key: %w", errBadProbeParams, err)
+		// ONE method, every key in the queue: `gossh.PublicKeys` sends a
+		// `publickey` QUERY per signer and the server answers each in turn, so a
+		// host that accepts only the third key a person's agent holds is
+		// authenticated by the same handshake that offers the other two. The
+		// private halves stay where they are — each signer is a reference to
+		// the coordinator (reverseSigner), and what crosses per challenge is a
+		// signature.
+		signers := make([]gossh.Signer, 0, len(ep.Identity.Keys))
+		for i, offer := range ep.Identity.Keys {
+			pub, err := gossh.ParsePublicKey(offer.PublicKey)
+			if err != nil {
+				// Unreachable through validateIdentity, which parses every
+				// entry before anything is dialed; kept because the alternative
+				// is a nil signer inside the method, which the handshake would
+				// answer for with a panic rather than a refusal.
+				return nil, fmt.Errorf("%w: key %d: public key: %w", errBadProbeParams, i, err)
+			}
+			signers = append(signers, &reverseSigner{ctx: ctx, conn: conn, cred: offer.Credential, pub: pub})
 		}
-		return gossh.PublicKeys(&reverseSigner{ctx: ctx, conn: conn, cred: ep.Identity.CredentialOf(), pub: pub}), nil
+		return gossh.PublicKeys(signers...), nil
 	}
 	// validateIdentity has already refused every other value; this arm exists
 	// so a kind added to the wire without a method here is a refusal and not a

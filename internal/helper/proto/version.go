@@ -144,4 +144,19 @@ package proto
 // refuse each other at hello in both directions, which is the honest reading,
 // and installs the new generation beside the old one (D7) so a session still
 // holding the old binary keeps it.
-const Version = "10"
+//
+// This is 11 rather than 10 because the wire grew the KEY QUEUE: `ssh.identity`
+// no longer carries one `credential` plus one `publicKey` for key auth, and
+// carries an ordered `keys` list instead, each entry a public half beside the
+// reference the coordinator signs through (nocx-50w7p.19). The SHAPE is the
+// half that makes this a bump rather than an addition: `additionalProperties:
+// false` means a 10-helper REJECTS an identity carrying `keys` — a key-auth dial
+// would not degrade into a single-key one, it would not dial at all, and the two
+// ordinary setups the change is for (a profile naming no credential, an agent
+// holding several keys) would be refusals arriving as protocol failures. The
+// password half is unchanged in meaning, so an 11-helper reading a password
+// identity behaves exactly as before; what no generation can do is read the
+// other's key auth, and only the number tells them apart. Two peers that
+// disagree refuse each other at hello in both directions, which is what makes
+// the number the whole of the compatibility story.
+const Version = "11"

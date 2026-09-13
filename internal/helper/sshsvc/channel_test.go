@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/pkg/sftp"
+	gossh "golang.org/x/crypto/ssh"
 
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/proto"
@@ -295,5 +296,47 @@ func TestOneIdentitySharesOneConnectionAndAnotherDoesNot(t *testing.T) {
 
 	if passwords, _ := f.authAttempts(); len(passwords) != 2 {
 		t.Fatalf("a second credential made %d authentication attempts in total, want 2: it is riding the first credential's transport", len(passwords))
+	}
+}
+
+// TestTwoKeyQueuesAreTwoPrincipals is the same invariant for the KEY queue, which
+// is what a key identity's pool component now is: a dial offering one key and a
+// dial offering two are two principals, because the second may authenticate as a
+// key the first never had.
+//
+// A pool keyed by the FIRST entry alone would share one transport between them,
+// and the server's own authentication count is what says so: two opens, two
+// connections.
+func TestTwoKeyQueuesAreTwoPrincipals(t *testing.T) {
+	first, second := newTestKey(t), newTestKey(t)
+	f := newFixture(t, "", first.signer)
+	coord := &coordinator{
+		verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+		keyring: map[string]gossh.Signer{"file:first": first.signer, "file:second": second.signer},
+	}
+	stand := newStand(t, coord)
+	t.Cleanup(stand.stop)
+
+	open := func(t *testing.T, refs []string, signers []gossh.Signer) *client.ChannelStream {
+		t.Helper()
+		params := sftpParams(t, f)
+		params.Destination.Identity = keyQueue(refs, signers)
+		stream, err := stand.openChannel(t, params)
+		if err != nil {
+			t.Fatalf("open an sftp channel: %v", err)
+		}
+		return stream
+	}
+
+	one := open(t, []string{"file:first"}, []gossh.Signer{first.signer})
+	defer func() { _ = one.Close() }()
+	two := open(t, []string{"file:first", "file:second"}, []gossh.Signer{first.signer, second.signer})
+	defer func() { _ = two.Close() }()
+
+	// The fixture's own connection count, because this handshake authenticates
+	// with a KEY: the password list stays empty however many connections were
+	// made, and counting it would pass for the wrong reason.
+	if got := f.connections(); got != 2 {
+		t.Fatalf("two key queues opened %d connection(s), want 2: a queue is the principal, not its first entry", got)
 	}
 }

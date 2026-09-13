@@ -12,15 +12,23 @@ import (
 
 // resolvedConfig holds the merged configuration from ~/.ssh/config and explicit options.
 type resolvedConfig struct {
-	hostName     string
-	user         string
-	port         int
-	identityFile string
-	keyAlgos     []string
-	cols         uint16
-	rows         uint16
-	xpixel       uint16
-	ypixel       uint16
+	hostName string
+	user     string
+	port     int
+	// identityFiles are the private key files this connection may offer, in
+	// OpenSSH's own order (the ssh -G answer: a config file's own
+	// `identityfile` lines, and ssh's defaults when it has none). The
+	// profile's `keyPath`, when it names one, REPLACES the list — what a
+	// profile declares wins over what discovery would have found.
+	identityFiles []string
+	// identitiesOnly is the resolved IdentitiesOnly directive. When set, the
+	// keys an agent holds are offered only where an identity file names them.
+	identitiesOnly bool
+	keyAlgos       []string
+	cols           uint16
+	rows           uint16
+	xpixel         uint16
+	ypixel         uint16
 	// remoteCommand is the destination's RemoteCommand directive, empty when
 	// unset. When non-empty, OpenSSH refuses a command-line remote command
 	// alongside it, so openShell runs it as-is and never sends a launcher
@@ -67,9 +75,10 @@ func (rc *RealClient) resolveConfig(ctx context.Context, host string, cfg *Conne
 		if hostCfg.Port > 0 && !hostHasExplicitPort {
 			resolved.port = hostCfg.Port
 		}
-		if hostCfg.IdentityFile != "" {
-			resolved.identityFile = hostCfg.IdentityFile
+		if len(hostCfg.IdentityFiles) > 0 {
+			resolved.identityFiles = append([]string(nil), hostCfg.IdentityFiles...)
 		}
+		resolved.identitiesOnly = hostCfg.IdentitiesOnly
 		if hostCfg.RemoteCommand != "" {
 			resolved.remoteCommand = hostCfg.RemoteCommand
 		}
@@ -83,7 +92,7 @@ func (rc *RealClient) resolveConfig(ctx context.Context, host string, cfg *Conne
 		resolved.port = cfg.Port
 	}
 	if cfg.KeyFile != "" {
-		resolved.identityFile = cfg.KeyFile
+		resolved.identityFiles = []string{cfg.KeyFile}
 	}
 	if cfg.Cols > 0 {
 		resolved.cols = cfg.Cols

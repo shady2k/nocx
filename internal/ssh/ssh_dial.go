@@ -50,8 +50,8 @@ func (rc *RealClient) poolKeyFor(ctx context.Context, resolved *resolvedConfig, 
 	identity := string(cfg.SecretID)
 	if identity == "" {
 		keyPath := cfg.KeyFile
-		if keyPath == "" {
-			keyPath = resolved.identityFile
+		if keyPath == "" && len(resolved.identityFiles) > 0 {
+			keyPath = resolved.identityFiles[0]
 		}
 		if keyPath != "" {
 			identity = publicKeyFingerprint(keyPath)
@@ -143,8 +143,8 @@ func (rc *RealClient) jumpRouteKey(ctx context.Context, cfg *ConnectConfig) stri
 		}
 		if keyFile != "" {
 			jumpKey.identity = keyFile
-		} else if jumpResolved.identityFile != "" {
-			jumpKey.identity = jumpResolved.identityFile
+		} else if len(jumpResolved.identityFiles) > 0 {
+			jumpKey.identity = jumpResolved.identityFiles[0]
 		}
 	}
 

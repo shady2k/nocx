@@ -469,3 +469,209 @@ func TestAKeyboardInteractiveProbeWithNoCoordinatorConnectionIsRefusedByName(t *
 		t.Fatalf("refusal code = %q (err %v), want %q", code, err, proto.ErrCodeNoAuthChannel)
 	}
 }
+
+// ── a key QUEUE, offered in order (nocx-50w7p.19) ──────────────────────────
+//
+// An agent holding several keys is the ordinary setup, and the one a given host
+// accepts is frequently not the first. This is the case at the helper's own
+// seam: the identity carries a QUEUE, the helper declares every entry in turn
+// within ONE `publickey` method, and the far side answers each — so the key that
+// authenticates can be any of them, and the ones before it are queries rather
+// than failed attempts.
+
+// keyQueue builds the identity a coordinator sends when it has several keys to
+// offer: one entry per key, in the order they must be declared.
+func keyQueue(refs []string, signers []gossh.Signer) proto.SSHIdentity {
+	offers := make([]proto.SSHKeyOffer, 0, len(signers))
+	for i, s := range signers {
+		offers = append(offers, proto.SSHKeyOffer{
+			Credential: proto.SSHCredential{Ref: refs[i]},
+			PublicKey:  s.PublicKey().Marshal(),
+		})
+	}
+	return proto.SSHIdentity{Auth: proto.SSHAuthKey, Keys: offers}
+}
+
+// keyQueueParams is keyProbeParams for a queue: the same destination, with the
+// identity replaced by every key the coordinator would offer.
+func keyQueueParams(t *testing.T, f *fixture, refs []string, signers []gossh.Signer) proto.ProbeParams {
+	t.Helper()
+	p := passwordProbeParams(t, f)
+	p.Destination.Identity = keyQueue(refs, signers)
+	return p
+}
+
+// TestAProbeAuthenticatesWithALaterKeyOfTheQueue is the multi-key criterion: a
+// host that accepts only the LAST key of the queue authenticates, because the
+// helper offered every key in turn rather than the first one.
+//
+// The far side's record is the evidence rather than the outcome: a queue that
+// arrived with one entry would still be accepted if that entry happened to be
+// the right key, so what is asserted is that all three were DECLARED, in order,
+// and that the accepted one is the third.
+func TestAProbeAuthenticatesWithALaterKeyOfTheQueue(t *testing.T) {
+	first, second, wanted := newTestKey(t), newTestKey(t), newTestKey(t)
+	// The server accepts only `wanted` — the LAST key the coordinator offers.
+	f := newFixture(t, "", wanted.signer)
+	refs := []string{"file:first", "file:second", "file:wanted"}
+	coord := &coordinator{
+		verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+		keyring: map[string]gossh.Signer{
+			refs[0]: first.signer, refs[1]: second.signer, refs[2]: wanted.signer,
+		},
+	}
+	stand := newStand(t, coord)
+
+	result, err := stand.probe(t, keyQueueParams(t, f, refs, []gossh.Signer{first.signer, second.signer, wanted.signer}))
+	if err != nil {
+		t.Fatalf("probe with a three-key queue: %v", err)
+	}
+	if result.Outcome != proto.ProbeAccepted {
+		t.Fatalf("outcome = %q (%s), want accepted: the host accepts the queue's LAST key", result.Outcome, result.Detail)
+	}
+	_, declared := f.authAttempts()
+	want := []string{gosshFingerprint(first), gosshFingerprint(second), gosshFingerprint(wanted)}
+	if len(declared) != len(want) {
+		t.Fatalf("the far side was shown %v, want all three keys %v", declared, want)
+	}
+	for i := range want {
+		if declared[i] != want[i] {
+			t.Fatalf("the far side was shown %v, want %v (first difference at %d)", declared, want, i)
+		}
+	}
+	if asked := coord.asked(); !contains(asked, proto.OpSign) {
+		t.Fatalf("reverse ops asked = %v: nothing was ever signed for", asked)
+	}
+}
+
+// TestAProbeWithEveryKeyOfTheQueueRejectedIsRejected is the paired refusal: the
+// server accepts none of the four keys offered, which is a REJECTED credential
+// rather than a malformed request — and it saw the whole queue before saying so.
+func TestAProbeWithEveryKeyOfTheQueueRejectedIsRejected(t *testing.T) {
+	accepted := newTestKey(t)
+	offered := []testKey{newTestKey(t), newTestKey(t), newTestKey(t)}
+	f := newFixture(t, "", accepted.signer)
+
+	refs := []string{"agent:one", "agent:two", "agent:three"}
+	signers := []gossh.Signer{offered[0].signer, offered[1].signer, offered[2].signer}
+	coord := &coordinator{
+		verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+		keyring: map[string]gossh.Signer{refs[0]: signers[0], refs[1]: signers[1], refs[2]: signers[2]},
+	}
+	stand := newStand(t, coord)
+
+	result, err := stand.probe(t, keyQueueParams(t, f, refs, signers))
+	if err != nil {
+		t.Fatalf("probe with a queue the host refuses: %v", err)
+	}
+	if result.Outcome != proto.ProbeRejected {
+		t.Fatalf("outcome = %q (%s), want rejected", result.Outcome, result.Detail)
+	}
+	_, declared := f.authAttempts()
+	if len(declared) != 3 {
+		t.Fatalf("the far side was shown %v, want every key of the queue", declared)
+	}
+}
+
+// TestNoKeyOfTheQueueEverCrossesToTheHelper extends the negative half to the
+// multi-key path, where there is more than one private half to leak: every key's
+// PEM text and its base64 body are searched for in BOTH directions, and the
+// positive control is that the helper really did ask for a signature.
+func TestNoKeyOfTheQueueEverCrossesToTheHelper(t *testing.T) {
+	keys := []testKey{newTestKey(t), newTestKey(t), newTestKey(t)}
+	f := newFixture(t, "", keys[2].signer)
+	refs := []string{"file:one", "agent:two", "file:three"}
+	coord := &coordinator{
+		verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+		keyring: map[string]gossh.Signer{refs[0]: keys[0].signer, refs[1]: keys[1].signer, refs[2]: keys[2].signer},
+	}
+	stand := newStand(t, coord)
+
+	result, err := stand.probe(t, keyQueueParams(t, f, refs, []gossh.Signer{keys[0].signer, keys[1].signer, keys[2].signer}))
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if result.Outcome != proto.ProbeAccepted {
+		t.Fatalf("outcome = %q (%s), want accepted", result.Outcome, result.Detail)
+	}
+
+	for i, key := range keys {
+		encoded := []byte(base64.StdEncoding.EncodeToString(key.pem))
+		for _, direction := range []struct {
+			name string
+			wire []byte
+		}{
+			{"coordinator to helper", stand.toHelper.bytes()},
+			{"helper to coordinator", stand.toCoord.bytes()},
+		} {
+			if bytes.Contains(direction.wire, key.pem) {
+				t.Fatalf("key %d crossed %s in the clear", i, direction.name)
+			}
+			if bytes.Contains(direction.wire, encoded) {
+				t.Fatalf("key %d crossed %s base64-encoded", i, direction.name)
+			}
+		}
+	}
+
+	// The positive control: the SAME search over the SAME recording does find
+	// something, so "nothing was found" is a fact about the keys rather than
+	// about the search.
+	if !bytes.Contains(stand.toCoord.bytes(), []byte(base64.StdEncoding.EncodeToString(keys[2].signer.PublicKey().Marshal()))) {
+		t.Fatal("not even a public half crossed, so this probe did not authenticate with a key at all")
+	}
+}
+
+// TestAKeyIdentityThisHelperCannotOfferIsRefused is the refusal half of the
+// identity SHAPE, one case per way a queue can be unofferable: no keys at all, an
+// entry with no reference to sign through, an entry with nothing to declare, and
+// the two shapes that mix kinds (a password carrying keys, a key carrying a bare
+// credential).
+func TestAKeyIdentityThisHelperCannotOfferIsRefused(t *testing.T) {
+	f := newFixture(t, "pw", newSigner(t))
+	coord := &coordinator{password: "pw", verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint()}
+	stand := newStand(t, coord)
+
+	good := newTestKey(t)
+	cases := []struct {
+		name     string
+		identity proto.SSHIdentity
+	}{
+		{"no keys at all", proto.SSHIdentity{Auth: proto.SSHAuthKey}},
+		{"an entry with no reference", proto.SSHIdentity{Auth: proto.SSHAuthKey, Keys: []proto.SSHKeyOffer{
+			{PublicKey: good.signer.PublicKey().Marshal()},
+		}}},
+		{"an entry with nothing to declare", proto.SSHIdentity{Auth: proto.SSHAuthKey, Keys: []proto.SSHKeyOffer{
+			{Credential: proto.SSHCredential{Ref: wantRef}},
+		}}},
+		{"an entry whose public half is not a key", proto.SSHIdentity{Auth: proto.SSHAuthKey, Keys: []proto.SSHKeyOffer{
+			{Credential: proto.SSHCredential{Ref: wantRef}, PublicKey: []byte("not a key")},
+		}}},
+		{"a key identity carrying a bare credential", proto.SSHIdentity{
+			Auth:       proto.SSHAuthKey,
+			Credential: &proto.SSHCredential{Ref: wantRef},
+			Keys:       keyQueue([]string{wantRef}, []gossh.Signer{good.signer}).Keys,
+		}},
+		{"a password identity carrying keys", proto.SSHIdentity{
+			Auth:       proto.SSHAuthPassword,
+			Credential: &proto.SSHCredential{Ref: wantRef},
+			Keys:       keyQueue([]string{wantRef}, []gossh.Signer{good.signer}).Keys,
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := passwordProbeParams(t, f)
+			p.Destination.Identity = tc.identity
+			_, err := stand.probe(t, p)
+			if err == nil {
+				t.Fatal("a probe with an unofferable identity succeeded")
+			}
+			if code := refusalCode(err); code != proto.ErrCodeBadParams {
+				t.Fatalf("refusal code = %q (err %v), want %q", code, err, proto.ErrCodeBadParams)
+			}
+			if passwords, _ := f.authAttempts(); len(passwords) != 0 {
+				t.Fatalf("the server was offered %q by a probe that should never have dialed", passwords)
+			}
+		})
+	}
+}

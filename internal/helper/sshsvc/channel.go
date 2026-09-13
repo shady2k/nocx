@@ -55,6 +55,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/helper/host"
@@ -589,11 +590,25 @@ func validateTarget(t proto.ChannelTarget) error {
 // a rotated credential cannot reuse a transport authenticated with the old
 // secret), and an inline key by the fingerprint of the public half that rides
 // in the identity — never by a path, which the helper does not have anyway.
+//
+// A KEY identity offers a QUEUE, so the principal it identifies is the whole
+// queue: its fingerprints joined in offer order, which is what makes two
+// coordinators that would offer different keys two different pool entries. An
+// entry whose public half cannot be parsed falls back to its reference, so a
+// malformed entry still separates the entry it stands for rather than
+// collapsing every such destination into one.
 func identityKey(id proto.SSHIdentity) string {
-	switch id.Auth {
-	case proto.SSHAuthKey:
-		if key, err := gossh.ParsePublicKey(id.PublicKey); err == nil {
-			return gossh.FingerprintSHA256(key)
+	if id.Auth == proto.SSHAuthKey {
+		parts := make([]string, 0, len(id.Keys))
+		for _, offer := range id.Keys {
+			if key, err := gossh.ParsePublicKey(offer.PublicKey); err == nil {
+				parts = append(parts, gossh.FingerprintSHA256(key))
+				continue
+			}
+			parts = append(parts, offer.Credential.Ref)
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, ",")
 		}
 	}
 	return id.CredentialOf().Ref

@@ -40,7 +40,7 @@ func TestAuthChainOrderAuto(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	resolved := &resolvedConfig{identityFile: keyPath, user: "alice", hostName: "h"}
+	resolved := &resolvedConfig{identityFiles: []string{keyPath}, user: "alice", hostName: "h"}
 	cfg := &ConnectConfig{
 		Secrets:  store,
 		SecretID: id,
@@ -93,7 +93,7 @@ func TestAuthChainFilterByAuthMode(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	resolved := &resolvedConfig{identityFile: keyPath, user: "alice", hostName: "h"}
+	resolved := &resolvedConfig{identityFiles: []string{keyPath}, user: "alice", hostName: "h"}
 
 	// auth=password should EXCLUDE publicKey bucket, include password buckets.
 	cfg := &ConnectConfig{Secrets: store, SecretID: id, AuthMode: "password"}
@@ -161,7 +161,7 @@ func TestAuthChainLateBindCredential(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	resolved := &resolvedConfig{identityFile: keyPath, user: "alice", hostName: "example.com", port: 22}
+	resolved := &resolvedConfig{identityFiles: []string{keyPath}, user: "alice", hostName: "example.com", port: 22}
 	cfg := &ConnectConfig{
 		Secrets:  store,
 		SecretID: id,
@@ -191,22 +191,55 @@ func TestAuthChainLateBindCredential(t *testing.T) {
 	}
 }
 
-func TestAuthChainDefaultKeyDiscovery(t *testing.T) {
+// TestAuthChainOffersEveryResolvedIdentityFile is the coordinator's own half of
+// default key discovery: the chain turns EVERY identity file the resolver
+// answered with into a public-key rung, skips the ones it cannot read, and
+// invents no list of its own.
+//
+// That last part is the point of the test. The chain used to append a hard-coded
+// `~/.ssh/id_ed25519, id_rsa, id_ecdsa` after the resolved file, so this
+// machine's keys were decided in two places that disagreed — on the order, on
+// the key types ssh 10 knows, and on every configuration that names its own
+// files. The list is the resolver's now, which is why the ORDER is asserted
+// where the resolution is (TestResolveTargetDiscoversTheDefaultKeysInTheResolvers
+// Order and the conformance test against ssh -G): a chain entry carries an
+// auth METHOD, and this package can no more read the key back out of one than
+// ssh can.
+func TestAuthChainOffersEveryResolvedIdentityFile(t *testing.T) {
 	rc := newTestRealClient(t)
 	ctx := context.Background()
-	// No identityFile, no password, no agent — should fall back to default
-	// key files in ~/.ssh/id_*. Those won't exist in test, so chain may be
-	// empty or contain only promptPassword.
-	resolved := &resolvedConfig{user: "alice", hostName: "h"}
-	cfg := &ConnectConfig{}
 
-	chain, err := rc.buildAuthChain(ctx, resolved, cfg)
-	// We expect at least promptPassword in the chain (or an error if no methods).
+	// Three DISTINCT paths: writeTestKey names its file the same thing every
+	// time, so one directory would make the "two files" below one file written
+	// twice — and a count of two would then prove nothing about the list.
+	first := writeTestKey(t, t.TempDir())
+	secondDir := t.TempDir()
+	second := writeTestKey(t, secondDir)
+	missing := filepath.Join(secondDir, "id_rsa") // this fixture's home has no such key
+
+	resolved := &resolvedConfig{
+		identityFiles: []string{missing, first, second},
+		user:          "alice", hostName: "h",
+	}
+
+	chain, err := rc.buildAuthChain(ctx, resolved, &ConnectConfig{})
 	if err != nil {
-		// A chain with nothing to send is acceptable here; which methods an
-		// empty HOME yields is the machine's business, not this test's.
-		t.Logf("no methods on this machine: %v", err)
-		return
+		t.Fatalf("buildAuthChain: %v", err)
+	}
+
+	var keyRungs int
+	for _, m := range chain {
+		if m.kind == kindPublicKey {
+			keyRungs++
+		}
+	}
+	if keyRungs != 2 {
+		t.Fatalf("the chain offers %d key rung(s), want 2 (the two that exist; %s is not there)", keyRungs, missing)
+	}
+	if last := chain[len(chain)-1]; last.kind != kindHostbased {
+		// The prompt rung is the last PASSWORD-capable one; hostbased closes
+		// the chain, exactly as it did before this change.
+		t.Fatalf("chain ends with %v, want the hostbased rung as before", last.kind)
 	}
 	foundPrompt := false
 	for _, m := range chain {
@@ -215,7 +248,7 @@ func TestAuthChainDefaultKeyDiscovery(t *testing.T) {
 		}
 	}
 	if !foundPrompt {
-		t.Error("chain should include promptPassword as last resort")
+		t.Error("chain should include promptPassword as its last password-capable resort")
 	}
 }
 
@@ -480,7 +513,8 @@ func TestAddVaultKeyMethod_PlainKey(t *testing.T) {
 	}
 	var chain []authChainEntry
 
-	// resolved.identityFile is empty so file path is not triggered.
+	// resolved.identityFiles is empty, so no file rung is built and the
+	// vault key is the only publicKey entry.
 	resolved := &resolvedConfig{}
 	if err := rc.addPublicKeyMethods(ctx, &chain, resolved, cfg); err != nil {
 		t.Fatalf("addPublicKeyMethods: %v", err)
@@ -616,7 +650,7 @@ func TestAddVaultKeyMethod_NoDiskAccess(t *testing.T) {
 	}
 	defer func() { readFileFn = orig }()
 
-	// Set resolved.identityFile to an existing file with garbage content.
+	// Point the resolved identity files at a file with garbage content.
 	// The spy on readFileFn will catch any attempted read — the vault key
 	// path must never call it.
 	dir := t.TempDir()
@@ -630,7 +664,7 @@ func TestAddVaultKeyMethod_NoDiskAccess(t *testing.T) {
 		KeySecretID: id,
 	}
 	var chain []authChainEntry
-	resolved := &resolvedConfig{identityFile: garbageFile}
+	resolved := &resolvedConfig{identityFiles: []string{garbageFile}}
 
 	if err := rc.addPublicKeyMethods(ctx, &chain, resolved, cfg); err != nil {
 		t.Fatalf("addPublicKeyMethods: %v", err)

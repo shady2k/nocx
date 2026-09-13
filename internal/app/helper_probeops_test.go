@@ -65,7 +65,6 @@ func (r *recordingResolver) ResolveTarget(_ context.Context, host string, opts .
 			User:           "deploy",
 			Auth:           ssh.DialAuthPassword,
 			Credential:     ssh.VaultRef("cred-9"),
-			PublicKey:      []byte("pub"),
 			KnownHostsAddr: "nocx-v1-route-digest:22",
 		},
 		// One hop, because the profile above names one: the resolved route has
@@ -75,7 +74,6 @@ func (r *recordingResolver) ResolveTarget(_ context.Context, host string, opts .
 			Host: "bastion.example", Port: 2200, User: "jumper",
 			Auth:       ssh.DialAuthPassword,
 			Credential: ssh.VaultRef("jump-cred"),
-			PublicKey:  []byte("jump-pub"),
 		}},
 	}, nil
 }

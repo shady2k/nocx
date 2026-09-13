@@ -403,6 +403,13 @@ func (t *Typist) look(paneID, agent string) (agentdriver.State, *Result) {
 // program's state (design §6.7: "while it is unknown the write gate refuses and
 // the attach says so").
 //
+// Every claim that is not Complete is refused, and Evicted is worth naming
+// because it is the one a reader might expect to be exempt: it means retention
+// kept DELIBERATELY less than the whole, so nothing was lost by accident — and
+// the screen it describes is still not the whole stream. A write decided on it
+// would be an answer to a question half of whose context was thrown away on
+// purpose, which is no better than one decided on a hole.
+//
 // A replay is Complete by construction and a byte-zero session runtime says so
 // too, so this refuses nothing an ordinary pane can produce.
 func (t *Typist) vouched(paneID, agent string, f paneview.Frame) *Result {

@@ -10,7 +10,7 @@
 # WHY IT EXISTS. Linking libghostty-vt into the helper is not a small change:
 # the spike measured +12.4 MB per Linux helper and +1.6 MB on darwin/arm64
 # (.internal/spikes/buildmatrix/README.md §4), against the 4.2–4.5 MB helpers
-# and the 5 MiB ceiling of the time. The ceiling must be re-derived from a real
+# and the ceiling of that time. The ceiling must be re-derived from a real
 # helper with the archive linked — not bumped mechanically, and not guessed
 # from the spike's probe, whose -s flag interaction was left unexplained there.
 #
@@ -63,9 +63,9 @@ fi
 echo
 echo "helper imports internal/emulator/ghostty: $linked"
 if [ "$linked" = no ]; then
-  echo "NOTE these sizes are the FLOOR: nothing in the helper links libghostty-vt"
-  echo "     yet (nocx-ygxjv.2 wires it). The ceiling must be re-derived from a"
-  echo "     run of this script AFTER that, with the archive linked."
+  echo "NOTE these sizes are the FLOOR: nothing in the helper links libghostty-vt,"
+  echo "     so the budget in source_test.go no longer describes these numbers."
+  echo "     Those numbers were derived from a run where the archive IS linked."
 fi
 
 echo

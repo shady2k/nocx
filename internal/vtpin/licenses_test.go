@@ -3,6 +3,7 @@ package vtpin
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -219,6 +220,98 @@ func TestCheckLicenseCoverageIsSymmetric(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ParseLicensesDoc reads a document back, and it is here because the tests are
+// its only consumer: nothing in the product parses THIRD_PARTY_LICENSES. The
+// generator (GenerateLicenses, via cmd/vtfetch licenses) writes it, the fetch
+// verifies its sha256, and internal/helper/notices embeds the bytes verbatim
+// and prints them — so the reader below is what makes a test able to JUDGE the
+// pinned document rather than merely reproduce it (nocx-ygxjv.14).
+//
+// It is deliberately strict: a document this reader cannot read is a document
+// nobody can check, and the alternative — parsing loosely and checking nothing
+// — is how a coverage test passes over a file that says nothing.
+//
+// `deadcode -tags gtk3 -whylive` carried the same answer before the move: both
+// this and parseLicenseEntry were reported unreachable from main, because no
+// production path reaches a reader (nocx-ygxjv.16).
+func ParseLicensesDoc(r io.Reader) (*LicensesDoc, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	chunks := strings.Split(string(data), sepMajor+"\n")
+	doc := &LicensesDoc{Preamble: strings.TrimSpace(chunks[0])}
+	for _, chunk := range chunks[1:] {
+		entry, err := parseLicenseEntry(chunk)
+		if err != nil {
+			return nil, err
+		}
+		doc.Entries = append(doc.Entries, entry)
+	}
+	seen := map[string]bool{}
+	for _, e := range doc.Entries {
+		if seen[e.Component] {
+			return nil, fmt.Errorf("component %q appears twice", e.Component)
+		}
+		seen[e.Component] = true
+	}
+	if len(doc.Entries) == 0 {
+		return nil, fmt.Errorf("no COMPONENT blocks in the document")
+	}
+	return doc, nil
+}
+
+func parseLicenseEntry(chunk string) (LicenseEntry, error) {
+	parts := strings.Split(chunk, sepText+"\n")
+	var entry LicenseEntry
+	for i, line := range strings.Split(strings.TrimRight(parts[0], "\n"), "\n") {
+		key, value, ok := strings.Cut(line, ": ")
+		if !ok {
+			return LicenseEntry{}, fmt.Errorf("license entry: line %d is %q, want a KEY: value line", i+1, line)
+		}
+		switch key {
+		case "COMPONENT":
+			entry.Component = value
+		case "LICENSE":
+			entry.License = value
+		case "LINKED AS":
+			entry.Members = strings.Fields(value)
+		case "EVIDENCE":
+			entry.Evidence = strings.Fields(value)
+		default:
+			return LicenseEntry{}, fmt.Errorf("license entry %q: unknown key %q", entry.Component, key)
+		}
+	}
+	if entry.Component == "" || entry.License == "" {
+		return LicenseEntry{}, fmt.Errorf("license entry %q is missing its COMPONENT or LICENSE line", entry.Component)
+	}
+	// After the header every pair of parts is a text header and its body,
+	// because the writer emits them as sepText/header/sepText/body.
+	if (len(parts)-1)%2 != 0 {
+		return LicenseEntry{}, fmt.Errorf("license entry %q: %d text blocks, which is not a whole number", entry.Component, len(parts)-1)
+	}
+	for i := 1; i < len(parts); i += 2 {
+		var text LicenseText
+		for _, line := range strings.Split(strings.TrimRight(parts[i], "\n"), "\n") {
+			key, value, ok := strings.Cut(line, ": ")
+			if !ok {
+				return LicenseEntry{}, fmt.Errorf("license entry %q: text line %q, want a KEY: value line", entry.Component, line)
+			}
+			switch key {
+			case "TEXT":
+				text.Label = value
+			case "ORIGIN":
+				text.Provenance = value
+			default:
+				return LicenseEntry{}, fmt.Errorf("license entry %q: unknown text key %q", entry.Component, key)
+			}
+		}
+		text.Body = strings.TrimSpace(parts[i+1])
+		entry.Texts = append(entry.Texts, text)
+	}
+	return entry, nil
 }
 
 // TestLicensesDocRoundTrips pins the format: the document is generated, fetched

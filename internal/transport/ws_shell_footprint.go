@@ -43,11 +43,16 @@ import (
 const footprintPath = "~/.nocx"
 
 // RemoteUninstaller removes nocx's shell integration from a remote host.
-// The single implementation is *ssh.RealClient, whose UninstallIntegration
-// acquires the pooled connection the way Connect does, asks the SFTP carrier
-// for the remote home and delegates Publisher.Uninstall to it — the raw SSH
-// client never leaves internal/ssh. Wired at the composition root; when not
-// wired, shell.footprint.uninstall answers an error and removes nothing.
+//
+// The single implementation is the composition root's carrier
+// (internal/app's remoteInstallerAdapter.UninstallIntegration), which rides
+// THIS MACHINE'S HELPER: a probe lease answers the account's home and an sftp
+// channel off the same pooled connection carries the removal. It no longer
+// reaches internal/ssh's client at all, and that is nocx-50w7p.5's change
+// rather than a detail of it — the coordinator holds no ssh client now, so a
+// capability here cannot be one whose implementation dials. Wired at the
+// composition root; when not wired, shell.footprint.uninstall answers an error
+// and removes nothing.
 type RemoteUninstaller interface {
 	UninstallIntegration(ctx context.Context, host string, opts ...ssh.ConnectOption) (removed, conflicts []string, err error)
 }

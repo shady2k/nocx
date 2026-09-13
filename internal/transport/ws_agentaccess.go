@@ -17,16 +17,24 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"unicode/utf8"
 )
 
-// AgentAccessRecord is one answer in the terms this surface speaks: three
-// facts and the answer, with no durable scope key. The key's grammar lives
-// where it is composed (internal/app) and is not spelled a second time here.
+// AgentAccessRecord is one answer in the terms this surface speaks: the four
+// facts a person was shown — including the MACHINE — and the answer, with no
+// durable scope key. The key's grammar lives where it is composed
+// (internal/app) and is not spelled a second time here.
+//
+// The machine is part of the row and not of some other message, because the
+// row is what a person clicks to unmake an answer: two machines' answers for
+// the same executable are two rows, and they have to be told apart before one
+// of them can be forgotten (nocx-50w7p.16).
 type AgentAccessRecord struct {
 	Executable string
 	Digest     string
 	Workspace  string
 	Answer     string
+	Machine    MachineFacts
 }
 
 // AgentAccessStore is the seam: this file must not learn where the answers
@@ -34,14 +42,15 @@ type AgentAccessRecord struct {
 // can be listed and forgotten by the facts a person was shown.
 type AgentAccessStore interface {
 	ListAgentAccess() []AgentAccessRecord
-	ForgetAgentAccess(executable, digest, workspace string) (bool, error)
+	ForgetAgentAccess(executable, digest, workspace string, machine MachineFacts) (bool, error)
 }
 
 type agentAccessAnswer struct {
-	Executable string `json:"executable"`
-	Digest     string `json:"digest"`
-	Workspace  string `json:"workspace"`
-	Answer     string `json:"answer"`
+	Executable string       `json:"executable"`
+	Digest     string       `json:"digest"`
+	Workspace  string       `json:"workspace"`
+	Answer     string       `json:"answer"`
+	Machine    MachineFacts `json:"machine"`
 }
 
 type agentAccessListResult struct {
@@ -49,9 +58,10 @@ type agentAccessListResult struct {
 }
 
 type agentAccessForgetParams struct {
-	Executable string `json:"executable"`
-	Digest     string `json:"digest"`
-	Workspace  string `json:"workspace"`
+	Executable string        `json:"executable"`
+	Digest     string        `json:"digest"`
+	Workspace  string        `json:"workspace"`
+	Machine    *MachineFacts `json:"machine"`
 }
 
 type agentAccessForgetResult struct {
@@ -60,7 +70,7 @@ type agentAccessForgetResult struct {
 
 func validateAgentAccessForgetRaw(raw json.RawMessage) string {
 	var p agentAccessForgetParams
-	if msg := decodeObject(raw, &p, "executable", "digest", "workspace"); msg != "" {
+	if msg := decodeObject(raw, &p, "executable", "digest", "workspace", "machine"); msg != "" {
 		return msg
 	}
 	if p.Executable == "" {
@@ -71,6 +81,46 @@ func validateAgentAccessForgetRaw(raw json.RawMessage) string {
 	}
 	if !isSHA256Hex(p.Digest) {
 		return "digest must be a sha256 hex digest"
+	}
+	return validateMachineFacts(p.Machine)
+}
+
+// validateMachineFacts refuses a machine a backend could not have derived. The
+// revoke path is the one place these facts come from a caller, and the only
+// thing a caller can do with them is name an existing row — but a row is
+// addressed by them, so a partial or invented machine must not be composed
+// into a key that silently matches nothing (or, worse, matches another
+// machine's answer).
+func validateMachineFacts(m *MachineFacts) string {
+	if m == nil {
+		return "machine is required"
+	}
+	const maxFactRunes = 512
+	for _, field := range []struct {
+		name  string
+		value string
+	}{{"host", m.Host}, {"account", m.Account}, {"hostKey", m.HostKey}} {
+		if utf8.RuneCountInString(field.value) > maxFactRunes {
+			return "machine " + field.name + " exceeds the length bound"
+		}
+	}
+	switch m.Kind {
+	case "local":
+		if m.Host != "" || m.Account != "" || m.HostKey != "" {
+			return "a local machine carries no host, account or host key"
+		}
+	case "ssh":
+		if m.Host == "" {
+			return "machine host is required"
+		}
+		if m.Account == "" {
+			return "machine account is required"
+		}
+		if m.HostKey == "" {
+			return "machine hostKey is required"
+		}
+	default:
+		return "machine kind must be local or ssh"
 	}
 	return ""
 }
@@ -133,7 +183,9 @@ func (h agentAccessHandlers) handleForget(_ context.Context, req jsonrpcRequest)
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "invalid params"})
 		return
 	}
-	forgotten, err := h.store.ForgetAgentAccess(p.Executable, p.Digest, p.Workspace)
+	// The validator has already refused a nil machine; the deref is that
+	// guarantee being used, not a check being skipped.
+	forgotten, err := h.store.ForgetAgentAccess(p.Executable, p.Digest, p.Workspace, *p.Machine)
 	if err != nil {
 		// The write failed and the answer still stands. Reported as an error
 		// rather than forgotten:false, which would tell a person their

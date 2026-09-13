@@ -15,14 +15,27 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { cleanup, render, fireEvent, waitFor } from '@solidjs/testing-library'
 import { AgentAccessSection } from './agent-access-section'
-import type { AgentAccessClient } from './agent-access-client'
+import type { AgentAccessAnswer, AgentAccessClient } from './agent-access-client'
 
-const CLAUDE = {
+// The two machines the backend derives, and the SAME executable answered about
+// on each — which is the case the machine exists for: without it these two
+// answers share one key, and a person could not unmake either.
+const SSH_MACHINE = {
+  kind: 'ssh',
+  host: 'build.example.com',
+  account: 'deploy',
+  hostKey: 'SHA256:key-a',
+} as const
+
+const CLAUDE: AgentAccessAnswer = {
   executable: '/run/current-system/sw/bin/claude',
   digest: '55640c4f3b8769e625c91e6aeaac3032c713a8bd0b83e04c9265772d7cb40825',
   workspace: 'default',
-  answer: 'denied' as const,
+  answer: 'denied',
+  machine: { kind: 'local' },
 }
+
+const CLAUDE_ON_SSH: AgentAccessAnswer = { ...CLAUDE, machine: SSH_MACHINE }
 
 function client(overrides: Partial<AgentAccessClient> = {}) {
   return {
@@ -40,6 +53,53 @@ describe('AgentAccessSection', () => {
     await waitFor(() => expect(view.container.textContent).toContain(CLAUDE.executable))
     expect(view.container.textContent).toContain('Denied')
     expect(view.container.textContent).toContain('Every tab in the default workspace')
+    // And WHERE the answer applies (nocx-50w7p.16): an answer about an agent on
+    // a host is a different row from one about the same agent here.
+    expect(view.container.textContent).toContain('On this machine')
+  })
+
+  // Two machines' answers for one executable are two rows, each naming its own
+  // machine — and the button on a row acts on THAT row. A page that showed
+  // them alike, or whose rows shared an identity, would let one machine's
+  // revocation land on another's answer.
+  it('tells two machines apart and revokes only the row that was pressed', async () => {
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce({ answers: [CLAUDE, CLAUDE_ON_SSH] })
+      .mockResolvedValueOnce({ answers: [CLAUDE] })
+    const forget = vi.fn().mockResolvedValue({ forgotten: true })
+    const view = render(() => <AgentAccessSection client={client({ list, forget })} />)
+
+    await waitFor(() => expect(view.container.textContent).toContain('On this machine'))
+    expect(view.container.textContent).toContain('On deploy@build.example.com')
+
+    // Two rows, and TWO IDENTITIES: the row's name is what a `For` re-keys on
+    // and what the busy label is compared against, so two machines sharing one
+    // would let one row's button read as the other's (nocx-50w7p.16).
+    const rows = view.container.querySelectorAll('[data-agent-access]')
+    expect(rows.length).toBe(2)
+    const identities = Array.from(rows, (row) => row.getAttribute('data-agent-access'))
+    expect(new Set(identities).size).toBe(2)
+
+    const sshRow = Array.from(rows).find((row) =>
+      (row.textContent ?? '').includes('deploy@build.example.com'),
+    )
+    expect(sshRow).toBeTruthy()
+    const button = (sshRow as HTMLElement).querySelector('button')
+    expect(button).toBeTruthy()
+    // The button's own name says which machine it revokes: two rows for one
+    // executable are otherwise two identical buttons to anybody who cannot see
+    // which row they are in.
+    expect(button?.getAttribute('aria-label')).toContain('deploy@build.example.com')
+    fireEvent.click(button as HTMLElement)
+
+    await waitFor(() => expect(forget).toHaveBeenCalledWith(CLAUDE_ON_SSH))
+    // The local answer is still listed: revoking one machine's answer did not
+    // unmake the other's.
+    await waitFor(() =>
+      expect(view.container.textContent).not.toContain('deploy@build.example.com'),
+    )
+    expect(view.container.textContent).toContain('On this machine')
   })
 
   // The whole point of the page: the decision is unmakeable from inside the

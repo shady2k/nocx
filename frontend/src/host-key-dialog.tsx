@@ -1,4 +1,5 @@
 import { Show } from 'solid-js'
+import { machineLabel, type MachineFacts } from './agent-machine'
 import { Button } from './ui/button'
 import { Dialog } from './ui/dialog'
 import { FactList } from './ui/fact-list'
@@ -81,6 +82,11 @@ interface AgentApprovalDialogProps {
   executable: string
   digest: string
   workspace: string
+  // The machine the answer would be given for. The wire always sends one
+  // (internal/transport sets it for every approval ask); it is optional here
+  // only because the capability's params are shared, and a surface must say
+  // what it cannot name rather than call an unknown machine local.
+  machine?: MachineFacts
   busy: boolean
   onDecide: (approved: boolean) => void
 }
@@ -108,10 +114,17 @@ interface AgentApprovalDialogProps {
  * that breaks something: the agent still runs, it simply runs without nocx's
  * tools, and the pane says so.
  *
- * AND IT ADMITS WHAT NOCX CANNOT YET DO. The answer is durable and no surface
- * can withdraw it — nothing reads agent-approvals.json (nocx-6jbad). A person
- * deciding is entitled to know the decision is one-way for now, and a dialog
- * that implied otherwise would be the more comfortable lie.
+ * AND IT NAMES THE MACHINE THE ANSWER IS FOR (nocx-50w7p.16). A person's yes
+ * admits an agent ON ONE MACHINE: the same executable on a host, or as another
+ * account on one, is asked about again. A dialog that did not say where would
+ * be collecting a decision about a place nobody named.
+ *
+ * AND IT SAYS WHERE THE ANSWER CAN BE UNDONE. It used to admit that no surface
+ * could withdraw it, which was true when it was written and stopped being true
+ * when the Settings page landed (Settings → Agent access, internal/transport's
+ * agentAccess.forget, nocx-6jbad): a person deciding is entitled to know the
+ * decision is revisitable, and a dialog that said otherwise would send them to
+ * edit agent-approvals.json by hand for no reason.
  */
 export function AgentApprovalDialog(props: AgentApprovalDialogProps) {
   return (
@@ -146,6 +159,19 @@ export function AgentApprovalDialog(props: AgentApprovalDialogProps) {
           facts={[
             { name: 'Agent', value: props.executable },
             {
+              name: 'Machine',
+              value: props.machine ? machineLabel(props.machine) : 'a machine nocx could not name',
+              // THREE cases and not two: an ask with no machine is not an ask
+              // about this machine. A note that fell through to the local
+              // wording would describe a place the wire never named, which is
+              // how a surface promises something nobody asked for.
+              note: !props.machine
+                ? 'nocx could not name the machine this question is about, so nothing here says where the agent would run.'
+                : props.machine.kind === 'ssh'
+                  ? 'The agent runs on that host, as that account. Your answer is remembered for that machine alone, so the same agent on another host — or as another account — is asked about again.'
+                  : 'The agent runs on this machine. Your answer is remembered for this machine alone.',
+            },
+            {
               name: 'Fingerprint',
               value: props.digest,
               note: 'The answer is remembered against these bytes, so a replaced program is asked about again.',
@@ -157,8 +183,8 @@ export function AgentApprovalDialog(props: AgentApprovalDialogProps) {
             },
             {
               name: 'Lasts',
-              value: 'Until you undo it, and nocx has no way to undo it yet',
-              note: 'The answer survives a restart. Removing it means editing agent-approvals.json in the profile by hand.',
+              value: 'Until you undo it in Settings → Agent access',
+              note: 'The answer survives a restart. Undoing it there means the next start of this agent asks again.',
             },
           ]}
         />

@@ -112,6 +112,30 @@ const maxHostPathRunes = 8192
 
 // ── wire shapes ────────────────────────────────────────────────────────────
 
+// MachineFacts names the MACHINE an agent-approval answer is about: which kind
+// of machine, and for an ssh one the host, the account and the host-key
+// identity the connection was accepted under. Four facts rather than one
+// composed sentence, because the renderer is what words them — a composed
+// string would make every surface parse a key whose grammar has one owner in
+// the backend (nocx-50w7p.16, and the same rule host.request already states
+// for `workspace`).
+//
+// The domain these facts describe is what the durable answer is keyed by, so a
+// yes given for one machine cannot admit an agent on another.
+type MachineFacts struct {
+	// Kind is "local" for the machine this backend runs on, "ssh" for one
+	// reached over a connection it authenticated. A closed set the backend
+	// builds; a client never invents one.
+	Kind string `json:"kind"`
+	// Host, Account and HostKey are the ssh destination: the host as dialed,
+	// the account the connection authenticated as, and the SHA-256 of the
+	// host key it was accepted under. All three are present for an ssh
+	// machine and absent for a local one.
+	Host    string `json:"host,omitempty"`
+	Account string `json:"account,omitempty"`
+	HostKey string `json:"hostKey,omitempty"`
+}
+
 // hostRequestParams is what the broker sends the client (with the minted
 // requestId merged in — marshalWithRequestID). The members after capability
 // are that capability's arguments; a capability that takes none sends none
@@ -126,6 +150,7 @@ type hostRequestParams struct {
 	Executable string         `json:"executable,omitempty"`
 	Digest     string         `json:"digest,omitempty"`
 	Workspace  string         `json:"workspace,omitempty"`
+	Machine    *MachineFacts  `json:"machine,omitempty"`
 }
 
 // hostResolvedParams is the client's answer: a closed outcome — "ok" (the
@@ -174,10 +199,16 @@ type HostAsk struct {
 	Count int
 	// HostCapAgentApproval's facts, one per member. Executable is the
 	// agent's absolute path, Digest the SHA-256 of its bytes, Workspace the
-	// name of the workspace the answer covers. Three fields rather than one
-	// composed sentence, because the renderer is what words them and a value
-	// carrying two facts cannot be given a row each (nocx-fu18z).
+	// name of the workspace the answer covers, and Machine the machine the
+	// answer would be given for. Four facts rather than one composed
+	// sentence, because the renderer is what words them and a value carrying
+	// two facts cannot be given a row each (nocx-fu18z) — and the machine is
+	// a fact of its own because the durable answer is keyed by it
+	// (nocx-50w7p.16): a yes given for a local agent must not stand for the
+	// same executable on a host, nor for another host, nor for another account
+	// on one.
 	Executable, Digest, Workspace string
+	Machine                       MachineFacts
 }
 
 // HostAnswer is what the client reported. Path is set only by a picker;
@@ -390,6 +421,20 @@ func (s *WSServer) RequestHost(ctx context.Context, ask HostAsk) (HostAnswer, er
 		Executable: ask.Executable,
 		Digest:     ask.Digest,
 		Workspace:  ask.Workspace,
+	}
+	if ask.Capability == HostCapAgentApproval {
+		// WHICH MACHINE the answer would be about, and it is REQUIRED. Every
+		// approval ask carries one: a dialog that could not say where would be
+		// asking a person to admit an agent somewhere nobody named, and the
+		// answer it collects is kept for that machine alone. The check is here
+		// rather than in the schema alone because the schema can only reject
+		// the payload AFTER it is on the wire, and a client that skipped its
+		// own validation would draw the ask with no machine at all.
+		if msg := validateMachineFacts(&ask.Machine); msg != "" {
+			return HostAnswer{}, errors.New("host ask: " + msg)
+		}
+		machine := ask.Machine
+		params.Machine = &machine
 	}
 	if ask.Capability == HostCapBadge {
 		// Sent only where it means something. A badge of zero CLEARS the

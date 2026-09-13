@@ -1795,6 +1795,7 @@ function main(): void {
               executable={ask.executable}
               digest={ask.digest}
               workspace={ask.workspace}
+              machine={ask.machine}
               busy={agentHostApprovalBusy()}
               onDecide={decideAgentHostApproval}
             />

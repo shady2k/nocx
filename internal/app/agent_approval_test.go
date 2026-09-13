@@ -16,6 +16,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/transport"
 )
@@ -58,13 +59,46 @@ func (s *approvalDocStore) List() ([]string, error) { return nil, nil }
 
 var _ storage.DocumentStore = (*approvalDocStore)(nil)
 
+// localMachineFacts is the machine the backend runs on, as the wire spells it.
+// The stands in this package open local panes unless a test says otherwise, so
+// this is the machine their answers are given for.
+func localMachineFacts() transport.MachineFacts {
+	return transport.MachineFacts{Kind: string(agentapproval.DomainLocal)}
+}
+
+// sshMachineFacts is one ssh host, as the wire spells it.
+func sshMachineFacts(host, account, hostKey string) transport.MachineFacts {
+	return transport.MachineFacts{
+		Kind: string(agentapproval.DomainSSH), Host: host, Account: account, HostKey: hostKey,
+	}
+}
+
 // approvalSessions gives every pane the SAME owned process, which is what two
-// panes on one machine really have: one shell binary, one digest.
-type approvalSessions struct{ pid int }
+// panes on one machine really have: one shell binary, one digest. A test about
+// a MACHINE sets sess, and one that does not care gets a local pane — the
+// domain of the machine this backend runs on.
+type approvalSessions struct {
+	pid  int
+	sess session.Session
+}
 
 func (approvalSessions) List() []session.Session { return nil }
 func (s approvalSessions) OwnedProcessPID(session.ID) (int, bool) {
 	return s.pid, s.pid > 0
+}
+
+func (s approvalSessions) Get(session.ID) (session.Session, error) {
+	if s.sess != nil {
+		return s.sess, nil
+	}
+	// A seam with a pid is a live local pane, which is what the original
+	// fixture meant. A seam with NEITHER holds nothing: answering a local pane
+	// for an id it was never given would hide a derivation that invents a
+	// machine, which is the one thing this seam exists to make visible.
+	if s.pid <= 0 {
+		return nil, errors.New("no such session")
+	}
+	return workerAuthSessionOverride{kind: session.KindLocal}, nil
 }
 
 // The question is put on a goroutine of its own now (nocx-t7xds), so this
@@ -121,6 +155,33 @@ func approvalServiceOver(t *testing.T, docs *approvalDocStore, requester hostApp
 	svc := newAgentApprovalService(approvalSessions{pid: os.Getpid()}, store, "workspace:default")
 	svc.SetRequester(requester)
 	return svc
+}
+
+// approvalServiceOnMachine is approvalServiceOver for a pane on a NAMED machine.
+// The domain an answer is keyed by is derived from this session and from
+// nothing else, so a test about machines is a test about which session the
+// backend was shown. Two of these over one docs are one person's two panes.
+func approvalServiceOnMachine(t *testing.T, docs *approvalDocStore, requester hostApprovalRequester, machine session.Session) *agentApprovalService {
+	t.Helper()
+	store := agentapproval.NewStore(log.NewSlogAdapter(nil), docs, "agent-approvals.json")
+	svc := newAgentApprovalService(approvalSessions{pid: os.Getpid(), sess: machine}, store, "workspace:default")
+	svc.SetRequester(requester)
+	return svc
+}
+
+// localPane is a pane on the machine the backend runs on.
+func localPane() session.Session { return workerAuthSessionOverride{kind: session.KindLocal} }
+
+// sshPane is a pane on a machine reached over ssh: the host, the account its
+// connection authenticated as, and the host key it was accepted under — the
+// three facts the domain is derived from.
+func sshPane(host, account, hostKey string) session.Session {
+	return workerAuthSessionOverride{
+		kind:        session.KindRemote,
+		host:        host,
+		sshOpts:     []ssh.ConnectOption{ssh.WithUser(account)},
+		fingerprint: hostKey,
+	}
 }
 
 // pendingOf reads the verdict an unanswered identity gets: not a refusal but a
@@ -259,13 +320,15 @@ func admit(t *testing.T, svc *agentApprovalService, sid session.ID, agent string
 	}
 }
 
-// A test-only read of whether the store now holds an answer for this agent.
+// A test-only read of whether the store now holds an answer for this agent on
+// the machine the test's pane is in — local, which is what approvalSessions'
+// default pane is.
 func (s *agentApprovalService) answered(agent string) bool {
 	executable, err := agentapproval.IdentityForExecutable(agent)
 	if err != nil {
 		return false
 	}
-	_, ok := s.store.Lookup(executable, s.scope)
+	_, ok := s.store.Lookup(executable, agentapproval.LocalDomain(), s.scope)
 	return ok
 }
 
@@ -434,4 +497,215 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+// ── the trust domain (nocx-50w7p.16) ────────────────────────────────────────
+//
+// One person, two panes, ONE document — and the same executable typed in both.
+// Every case below answers YES for the first machine and then asks the second
+// for the same agent, so a key that could not tell machines apart would admit
+// the second in silence. Each case is paired with the machine the person DID
+// answer about still being admitted, which is what makes the second machine's
+// question a separation rather than a store that lost the answer.
+
+func TestAYesForOneMachineDoesNotAdmitAnAgentOnAnother(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		first  session.Session
+		second session.Session
+		why    string
+	}{
+		{
+			"local does not stand for an ssh host", localPane(), sshPane("build.example.com", "deploy", "SHA256:key-a"),
+			"the same path and bytes on another machine is the same key without a domain",
+		},
+		{
+			"host A does not stand for host B", sshPane("build.example.com", "deploy", "SHA256:key-a"),
+			sshPane("other.example.com", "deploy", "SHA256:key-b"), "two hosts, one account",
+		},
+		{
+			"one account does not stand for another on one host", sshPane("build.example.com", "deploy", "SHA256:key-a"),
+			sshPane("build.example.com", "root", "SHA256:key-a"), "two accounts on one host",
+		},
+		{
+			"a machine whose host key changed does not stand for itself", sshPane("build.example.com", "deploy", "SHA256:key-a"),
+			sshPane("build.example.com", "deploy", "SHA256:key-c"), "a changed key is a different answer to give",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			docs := &approvalDocStore{}
+			agent := fakeAgent(t, "claude")
+			first := approvalServiceOnMachine(t, docs, &recordingRequester{answer: true}, tc.first)
+			second := approvalServiceOnMachine(t, docs, &recordingRequester{answer: true}, tc.second)
+
+			// The person answers about the FIRST machine, all the way through.
+			admit(t, first, session.ID("pane-first"), agent)
+
+			// PAIRED SUCCESS — the machine they answered about is still admitted.
+			if err := first.Approve(context.Background(), session.ID("pane-first-again"), agent); err != nil {
+				t.Fatalf("the machine the person answered about was refused: %v — %s", err, tc.why)
+			}
+
+			// THE CRITERION — the second machine is ASKED, not admitted. A wait
+			// is the only verdict that says "no answer of yours covers this";
+			// an admitted nil is the defect this test exists for.
+			pending := pendingOf(t, second.Approve(context.Background(), session.ID("pane-second"), agent))
+			if pending.Reason == "" {
+				t.Fatal("the second machine was asked with no reason given, so a pane cannot say what it waits on")
+			}
+			// The person answers about the SECOND machine too, and the answer is
+			// kept: the question is closed only after the record is written.
+			if reason := settledOf(t, pending); reason != "" {
+				t.Fatalf("the question about the second machine closed with %q, want the person's answer", reason)
+			}
+			secondRequester, isRecording := second.requester.(*recordingRequester)
+			if !isRecording {
+				t.Fatal("the standing questioner is not the recording one, so this test cannot see the question")
+			}
+			ask := secondRequester.seen()
+			if len(ask) != 1 {
+				t.Fatalf("the second machine asked %d questions, want 1", len(ask))
+			}
+			// And the question names the machine it is for, so the answer the
+			// person gives is one about that machine.
+			wantDomain, err := sessionDomain(approvalSessions{sess: tc.second}, session.ID("pane-second"))
+			if err != nil {
+				t.Fatalf("the second machine has no derivable domain: %v", err)
+			}
+			if got := ask[0].Machine; got != machineFacts(wantDomain) {
+				t.Fatalf("the question named machine %+v, want %+v", got, machineFacts(wantDomain))
+			}
+			// PAIRED SUCCESS on the second machine: now that the person has
+			// answered about IT, it admits — and the two answers coexist, each
+			// bound to its own machine.
+			if err := second.Approve(context.Background(), session.ID("pane-second-again"), agent); err != nil {
+				t.Fatalf("the machine the person then answered about was refused: %v", err)
+			}
+			if rows := second.ListAgentAccess(); len(rows) != 2 {
+				t.Fatalf("after two machines were answered about, the read-back has %d rows, want 2", len(rows))
+			}
+		})
+	}
+}
+
+// The question a person is asked names the machine, because the answer is kept
+// for that machine and for no other.
+func TestTheQuestionNamesTheMachineItIsFor(t *testing.T) {
+	requester := &recordingRequester{answer: true}
+	ssh := sshPane("build.example.com", "deploy", "SHA256:key-a")
+	svc := approvalServiceOnMachine(t, &approvalDocStore{}, requester, ssh)
+	agent := fakeAgent(t, "claude")
+
+	admit(t, svc, session.ID("pane-a"), agent)
+
+	ask := requester.seen()
+	if len(ask) != 1 {
+		t.Fatalf("asked %d times, want 1", len(ask))
+	}
+	got := ask[0].Machine
+	if got.Kind != string(agentapproval.DomainSSH) || got.Host != "build.example.com" ||
+		got.Account != "deploy" || got.HostKey != "SHA256:key-a" {
+		t.Fatalf("the question named machine %+v, want the ssh machine the pane is on", got)
+	}
+
+	// And a LOCAL pane says so rather than saying nothing: an absent machine
+	// would be a second empty spelling of local for a surface to know about.
+	localRequester := &recordingRequester{answer: true}
+	localSvc := approvalServiceOnMachine(t, &approvalDocStore{}, localRequester, localPane())
+	admit(t, localSvc, session.ID("pane-b"), fakeAgent(t, "codex"))
+	if got := localRequester.seen()[0].Machine; got.Kind != string(agentapproval.DomainLocal) ||
+		got.Host != "" || got.Account != "" || got.HostKey != "" {
+		t.Fatalf("a local pane's question named machine %+v, want local and nothing else", got)
+	}
+}
+
+// The read-back carries the machine, so two rows for one executable can be told
+// apart — and the row a person clicks is the row that is forgotten.
+func TestTheReadBackNamesTheMachineAndRevokesThatRowAlone(t *testing.T) {
+	docs := &approvalDocStore{}
+	agent := fakeAgent(t, "claude")
+	localSvc := approvalServiceOnMachine(t, docs, &recordingRequester{answer: true}, localPane())
+	sshSvc := approvalServiceOnMachine(t, docs, &recordingRequester{answer: true}, sshPane("build.example.com", "deploy", "SHA256:key-a"))
+	admit(t, localSvc, session.ID("pane-local"), agent)
+	admit(t, sshSvc, session.ID("pane-ssh"), agent)
+
+	records := sshSvc.ListAgentAccess()
+	if len(records) != 2 {
+		t.Fatalf("read-back showed %d rows for one executable on two machines, want 2", len(records))
+	}
+	// Selected by DOMAIN, not by position: the store orders rows by path and
+	// digest first, and both rows share those, so an index would be asserting
+	// the sort rather than the machine.
+	var sshRecord, localRecord *transport.AgentAccessRecord
+	for i := range records {
+		switch records[i].Machine.Kind {
+		case string(agentapproval.DomainSSH):
+			sshRecord = &records[i]
+		case string(agentapproval.DomainLocal):
+			localRecord = &records[i]
+		}
+	}
+	if sshRecord == nil || localRecord == nil {
+		t.Fatalf("read-back did not name both machines: %+v", records)
+	}
+	if sshRecord.Machine != sshMachineFacts("build.example.com", "deploy", "SHA256:key-a") {
+		t.Fatalf("the ssh row names %+v, want the machine its pane is on", sshRecord.Machine)
+	}
+
+	// Revoke the ssh row BY ITS OWN FACTS. The local answer is not the row this
+	// call names and must survive it — byte for byte, which is why the
+	// surviving row is compared to the whole facts value.
+	forgotten, err := sshSvc.ForgetAgentAccess(sshRecord.Executable, sshRecord.Digest, sshRecord.Workspace, sshRecord.Machine)
+	if err != nil || !forgotten {
+		t.Fatalf("revoke = %v, %v; want true, nil", forgotten, err)
+	}
+	remaining := sshSvc.ListAgentAccess()
+	if len(remaining) != 1 {
+		t.Fatalf("after revoking one machine's row, %d remain, want 1", len(remaining))
+	}
+	if remaining[0].Machine != localMachineFacts() {
+		t.Fatalf("the surviving row names %+v, want the local machine that was not revoked", remaining[0].Machine)
+	}
+}
+
+// The domain comes from the session's route and from nothing else, and a route
+// that cannot name a machine is a refusal rather than a guess.
+func TestTheDomainIsDerivedFromTheRouteOrRefused(t *testing.T) {
+	local, err := sessionDomain(approvalSessions{sess: localPane()}, "pane")
+	if err != nil || local != agentapproval.LocalDomain() {
+		t.Fatalf("local domain = %+v, %v; want the local domain", local, err)
+	}
+
+	sshDomain, err := sessionDomain(approvalSessions{sess: sshPane("h.example", "deploy", "SHA256:k")}, "pane")
+	if err != nil {
+		t.Fatalf("ssh domain: %v", err)
+	}
+	if sshDomain.Kind != agentapproval.DomainSSH || sshDomain.Host != "h.example" ||
+		sshDomain.Account != "deploy" || sshDomain.HostKey != "SHA256:k" {
+		t.Fatalf("ssh domain = %+v, want the pane's own route", sshDomain)
+	}
+
+	// An ssh pane whose route cannot name a machine keys nothing — and the
+	// refusal is a sentence, because it is printed in the person's own pane.
+	for _, partial := range []session.Session{
+		sshPane("", "deploy", "SHA256:k"),
+		sshPane("h.example", "", "SHA256:k"),
+		sshPane("h.example", "deploy", ""),
+	} {
+		if _, err := sessionDomain(approvalSessions{sess: partial}, "pane"); err == nil {
+			t.Fatal("a pane whose route cannot name a machine was given a domain anyway")
+		} else if !strings.Contains(err.Error(), "machine") {
+			t.Fatalf("refusal = %q, want a sentence naming what could not be told", err)
+		}
+	}
+
+	// A registry that does not hold the pane refuses too, rather than deriving
+	// a domain from nothing: approvalSessions with no pid and no session holds
+	// no pane, which is what the production registry does for an id it has
+	// never minted.
+	if _, err := sessionDomain(approvalSessions{}, "pane"); err == nil {
+		t.Fatal("an unknown pane was given a trust domain")
+	} else if !strings.Contains(err.Error(), "machine") {
+		t.Fatalf("refusal = %q, want a sentence naming what could not be told", err)
+	}
 }

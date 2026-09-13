@@ -783,7 +783,10 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		// composed in internal/app, and a second speller of it here is how the
 		// two halves of one rule drift (nocx-6jbad).
 		"agentAccess.forget": {
-			[]byte(`{"executable":"/run/current-system/sw/bin/claude","digest":"55640c4f3b8769e625c91e6aeaac3032c713a8bd0b83e04c9265772d7cb40825","workspace":"default"}`),
+			// The machine is part of the address (nocx-50w7p.16): two
+			// machines' answers for one executable are two rows, so a
+			// payload without one names no row.
+			[]byte(`{"executable":"/run/current-system/sw/bin/claude","digest":"55640c4f3b8769e625c91e6aeaac3032c713a8bd0b83e04c9265772d7cb40825","workspace":"default","machine":{"kind":"local"}}`),
 		},
 		// Typing carries a pane and text and NEVER an agent or a state, both
 		// of which the backend reads for itself (nocx-dkawo.1). The submit

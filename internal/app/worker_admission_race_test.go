@@ -118,7 +118,7 @@ func newRaceStand(t *testing.T, participants workerAuthParticipants) *raceStand 
 	if err != nil {
 		t.Fatalf("identify agent: %v", err)
 	}
-	if recordErr := approval.store.Record(executable, approval.scope, agentapproval.Granted); recordErr != nil {
+	if recordErr := approval.store.Record(executable, agentapproval.LocalDomain(), approval.scope, agentapproval.Granted); recordErr != nil {
 		t.Fatalf("record the answer: %v", recordErr)
 	}
 	if enrolErr := approval.Approve(context.Background(), sess.ID(), agent); enrolErr != nil {

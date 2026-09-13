@@ -35,6 +35,17 @@ func (o testOwner) OwnerUID(string) (uint32, error) { return o.uid, nil }
 
 type testContextKey struct{}
 
+// testAdmissionSession is the session a fake authorizer publishes under when
+// the test did not name one. The endpoint grants nothing it cannot attribute to
+// an interval — a connection with no session is one no retirement could close —
+// so a fake that admitted without naming one would be exercising a connection
+// the product refuses.
+const testAdmissionSession = "session-test"
+
+// testAdmissionEpoch is the interval a fake publishes under unless the test is
+// about a retired one, which it names itself.
+const testAdmissionEpoch AdmissionEpoch = 1
+
 type testAuthorizer struct {
 	mu        sync.Mutex
 	peer      Peer
@@ -44,19 +55,23 @@ type testAuthorizer struct {
 	release   func()
 	invoked   chan struct{}
 	sessionID string
+	// epoch is the interval this fake publishes under. Zero means the first,
+	// which is what every test that is not about a retirement wants.
+	epoch AdmissionEpoch
 }
 
 func (a *testAuthorizer) SessionForPeer(Peer) (string, bool) {
 	return a.sessionID, a.sessionID != ""
 }
 
-func (a *testAuthorizer) Admit(peer Peer) (assistant.ToolInvocation, func(), error) {
+func (a *testAuthorizer) Admit(peer Peer, publish func(session string, epoch AdmissionEpoch) bool) (assistant.ToolInvocation, func(), error) {
 	a.mu.Lock()
 	a.peer = peer
 	a.calls++
 	inv := a.inv
 	err := a.err
 	release := a.release
+	epoch := a.epoch
 	a.mu.Unlock()
 	if a.invoked != nil {
 		select {
@@ -67,7 +82,22 @@ func (a *testAuthorizer) Admit(peer Peer) (assistant.ToolInvocation, func(), err
 	if err == nil && release == nil {
 		release = func() {}
 	}
-	return inv, release, err
+	if err != nil {
+		return inv, release, err
+	}
+	// A granted admission is a PUBLISHED one: the endpoint serves nothing it
+	// did not record, so a fake that returned here without publishing would be
+	// refused rather than admitted.
+	if epoch == 0 {
+		epoch = testAdmissionEpoch
+	}
+	if inv.RunContext.Session == "" {
+		inv.RunContext.Session = testAdmissionSession
+	}
+	if !publish(inv.RunContext.Session, epoch) {
+		return assistant.ToolInvocation{}, nil, ErrNotEnrolled
+	}
+	return inv, release, nil
 }
 
 func (a *testAuthorizer) callCount() int {

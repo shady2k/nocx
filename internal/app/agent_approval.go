@@ -9,6 +9,7 @@ import (
 	"github.com/shady2k/nocx/internal/agentapproval"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/toolendpoint"
 	"github.com/shady2k/nocx/internal/transport"
 )
 
@@ -54,8 +55,15 @@ type agentApprovalService struct {
 	// the same identity the person answered about. The ANSWER is still read
 	// from the store on every call rather than cached here: a grant that was
 	// withdrawn must stop admitting live panes, not only new ones.
+	//
+	// Each record also carries the EPOCH of the interval it opened. A session
+	// can hold two intervals with identical approval — withdrawn and enrolled
+	// again — and the epoch is the only thing that tells a connection admitted
+	// under the first from one admitted under the second (ADR-0058, and
+	// nocx-9mn6z for what its absence cost).
 	mu       sync.Mutex
-	enrolled map[session.ID]agentapproval.Executable
+	enrolled map[session.ID]enrolledAgent
+	next     toolendpoint.AdmissionEpoch
 	// Identities with a question on screen, and every enrolment waiting on
 	// it. Starting the agent again while the person is still reading must not
 	// put a second copy of the question in the queue — it is the same
@@ -64,10 +72,18 @@ type agentApprovalService struct {
 	asking map[string][]chan string
 
 	// authorityEnded is called whenever an answer stops holding — a revoke, a
-	// withdrawn enrolment — so the tool endpoint can close the connections
-	// admitted under it. Bound by the composition root; nil means no endpoint
-	// was built, and nothing is admitted to close.
-	authorityEnded func()
+	// withdrawn enrolment — with the session and the EPOCH that ended, so the
+	// tool endpoint can close exactly the connections admitted under it.
+	// Bound by the composition root; nil means no endpoint was built, and
+	// nothing is admitted to close.
+	authorityEnded func(session.ID, toolendpoint.AdmissionEpoch)
+}
+
+// enrolledAgent is what one live enrolment holds: the identity the person
+// answered about, and the interval that answer opened.
+type enrolledAgent struct {
+	executable agentapproval.Executable
+	epoch      toolendpoint.AdmissionEpoch
 }
 
 func newAgentApprovalService(sessions workerAuthSessions, store *agentapproval.Store, scope string) *agentApprovalService {
@@ -75,7 +91,7 @@ func newAgentApprovalService(sessions workerAuthSessions, store *agentapproval.S
 		sessions: sessions, store: store,
 		scope:     agentToolEndpointScopePrefix + scope,
 		workspace: scope,
-		enrolled:  map[session.ID]agentapproval.Executable{},
+		enrolled:  map[session.ID]enrolledAgent{},
 		asking:    map[string][]chan string{},
 	}
 }
@@ -84,19 +100,47 @@ func (s *agentApprovalService) SetRequester(requester hostApprovalRequester) {
 	s.requester = requester
 }
 
-// Approved answers for the AGENT this session enrolled, which is the identity
-// the person was asked about. A session that never enrolled an agent has none,
-// and is refused rather than falling back to some other identity the process
-// tree happens to offer.
-func (s *agentApprovalService) Approved(sid session.ID, scope string) bool {
+// Interval answers for the AGENT this session enrolled, which is the identity
+// the person was asked about, and names the EPOCH of the interval that answer
+// opened. A session that never enrolled an agent has none, and is refused
+// rather than falling back to some other identity the process tree happens to
+// offer.
+//
+// The epoch is returned with the verdict and not asked for separately, because
+// the two are one fact read at one moment: a caller that asked "is this session
+// approved" and then "which interval is it in" could get a yes from one
+// interval and an epoch from the next, which is the gap the epoch exists to
+// close.
+func (s *agentApprovalService) Interval(sid session.ID, scope string) (toolendpoint.AdmissionEpoch, bool) {
 	s.mu.Lock()
-	executable, known := s.enrolled[sid]
+	enrolled, known := s.enrolled[sid]
 	s.mu.Unlock()
 	if !known {
-		return false
+		return 0, false
 	}
-	answer, ok := s.store.Lookup(executable, scope)
-	return ok && answer == agentapproval.Granted
+	answer, ok := s.store.Lookup(enrolled.executable, scope)
+	if !ok || answer != agentapproval.Granted {
+		return 0, false
+	}
+	return enrolled.epoch, true
+}
+
+// mintEpoch names the interval a session's answer opens. The counter only moves
+// forward and is shared by every session, so no two epochs are ever equal —
+// which is what lets a retirement name one interval and no other, including the
+// interval a live session held before it was enrolled again.
+//
+// A session that already holds an interval keeps it: an enrolment is what starts
+// an interval, and a pane starting a second agent under the answer it has is
+// still inside the first one.
+//
+// Called with mu held.
+func (s *agentApprovalService) mintEpoch(sid session.ID) toolendpoint.AdmissionEpoch {
+	if enrolled, known := s.enrolled[sid]; known && enrolled.epoch != 0 {
+		return enrolled.epoch
+	}
+	s.next++
+	return s.next
 }
 
 // Forget drops what an enrolment approved when that enrolment ends, so the map
@@ -106,22 +150,51 @@ func (s *agentApprovalService) Approved(sid session.ID, scope string) bool {
 // an admission that must stop being usable: the endpoint admits a connection
 // once (ADR-0058), so a live one carries the approval it was let in under and
 // nothing re-reads it per call. Ending the answer is therefore half the work,
-// and the endpoint is told before this returns.
+// and the endpoint is told — with the EPOCH that ended — before this returns.
+//
+// The lock is released before that notice, deliberately. The notice closes
+// sockets, and no lock in this file may be held across work the rest of the
+// backend does; what makes that safe is the epoch rather than the lock. An
+// enrolment landing between the two steps here opens a NEW interval, and the
+// notice still names the old one, so the connection admitted under the old
+// interval is closed and the new one is not (nocx-9mn6z, and the interleaving
+// its test drives).
 func (s *agentApprovalService) Forget(sid session.ID) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
+	enrolled, known := s.enrolled[sid]
 	delete(s.enrolled, sid)
 	s.mu.Unlock()
-	s.endAuthority()
+	if !known {
+		return
+	}
+	s.endAuthority(sid, enrolled.epoch)
+}
+
+// SessionEnded ends the admission interval of a session whose output is over.
+//
+// It is the transport's end of the interval and not the enrolling shell's: a
+// pane whose program exited, a tab somebody closed, and a watch the transport
+// withdrew all reach here, because the one thing they have in common is the
+// fact that matters — the session those connections were admitted for cannot
+// produce another call (nocx-9mn6z). Without it an exited-but-retained session
+// kept its admitted caller, and the grant inside it stayed usable until the
+// socket happened to end.
+func (s *agentApprovalService) SessionEnded(sessionID string) {
+	if s == nil || sessionID == "" {
+		return
+	}
+	s.Forget(session.ID(sessionID))
 }
 
 // BindAuthorityEnded takes what closes the tool-endpoint connections admitted
-// under an answer that has stopped holding. newToolAuthorizer calls it while
-// both are in hand; an approval seam that never gets one is one whose sessions
-// nothing can admit, so there is nothing to close.
-func (s *agentApprovalService) BindAuthorityEnded(ended func()) {
+// under an answer that has stopped holding, told which session and which
+// interval ended. newToolAuthorizer calls it while both are in hand; an
+// approval seam that never gets one is one whose sessions nothing can admit, so
+// there is nothing to close.
+func (s *agentApprovalService) BindAuthorityEnded(ended func(session.ID, toolendpoint.AdmissionEpoch)) {
 	if s == nil {
 		return
 	}
@@ -131,11 +204,11 @@ func (s *agentApprovalService) BindAuthorityEnded(ended func()) {
 // endAuthority tells the tool endpoint that an answer has stopped holding, so
 // the connections admitted under it are closed. Nil before the authorizer binds
 // it, and nil is safe: an endpoint that was never built admits nobody.
-func (s *agentApprovalService) endAuthority() {
-	if s == nil || s.authorityEnded == nil {
+func (s *agentApprovalService) endAuthority(sid session.ID, epoch toolendpoint.AdmissionEpoch) {
+	if s == nil || s.authorityEnded == nil || epoch == 0 {
 		return
 	}
-	s.authorityEnded()
+	s.authorityEnded(sid, epoch)
 }
 
 func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agent string) error {
@@ -180,7 +253,13 @@ func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agen
 	answer, found := s.store.Lookup(executable, s.scope)
 	switch {
 	case found && answer == agentapproval.Granted:
-		s.enrolled[sid] = executable
+		// THE EPOCH IS MINTED WHERE THE INTERVAL OPENS, and only there. An
+		// enrolment is what starts an interval, so a session starting a second
+		// agent under the answer it already has keeps the epoch it is in —
+		// and a session whose interval ended gets a new one, which is what
+		// lets the next admission be told apart from a connection admitted
+		// under the interval that ended.
+		s.enrolled[sid] = enrolledAgent{executable: executable, epoch: s.mintEpoch(sid)}
 		s.mu.Unlock()
 		return nil
 	case found:
@@ -280,6 +359,15 @@ func (s *agentApprovalService) ListAgentAccess() []transport.AgentAccessRecord {
 // than on the next session; the PANE still goes on running, which is the state
 // a denial produces, because nocx does not reach into an agent's process.
 //
+// WHICH SESSIONS IS READ FROM THE LIVE ENROLMENTS, not re-asked of the approval
+// afterwards. Asking "is this session still approved" was the previous shape and
+// it cannot answer this question: a session withdrawn and enrolled again about
+// the same agent is approved once more, so the re-asked answer says yes to a
+// connection that was admitted before the withdrawal — which is how the OLD
+// interval's connection survived the scan (nocx-9mn6z). The sessions this
+// answer actually holds are the ones still enrolled as it, and each is ended
+// with the epoch that enrolment is in.
+//
 // A workspace this backend does not answer for is refused rather than
 // composed into a key that would match nothing: silently forgetting nothing
 // and reporting success is how a person comes to believe a revocation landed.
@@ -290,22 +378,41 @@ func (s *agentApprovalService) ForgetAgentAccess(executable, digest, workspace s
 	if workspace != s.workspace {
 		return false, fmt.Errorf("nocx does not hold answers for workspace %q", workspace)
 	}
-	forgotten, err := s.store.Forget(agentapproval.Executable{Path: executable, SHA256: digest}, s.scope)
+	revoked := agentapproval.Executable{Path: executable, SHA256: digest}
+	forgotten, err := s.store.Forget(revoked, s.scope)
 	if err != nil {
 		return forgotten, err
 	}
-	if forgotten {
-		// An answer was actually unmade, so the admissions it held have to
-		// end: asking Approved again for each live admitted session is what
-		// closes the ones that no longer hold. AFTER the Forget and never
-		// before — before it, the answer still reads as granted.
-		//
+	if !forgotten {
 		// Nothing forgotten means no answer ended, so there is nothing to
-		// close; closing anyway would re-ask an unchanged set, and the answer
-		// to "did this call change anything" should not be "it depends".
-		s.endAuthority()
+		// close; closing anyway would end intervals whose answer still holds,
+		// and the answer to "did this call change anything" should not be "it
+		// depends".
+		return false, nil
 	}
-	return forgotten, nil
+	// AFTER the Forget and never before: before it, the answer still reads as
+	// granted, and a re-enrolment racing this could mint its epoch against an
+	// answer that had not stopped holding.
+	for _, sid := range s.enrolledAs(revoked) {
+		s.Forget(sid)
+	}
+	return true, nil
+}
+
+// enrolledAs names the sessions currently enrolled as one agent. It is a
+// snapshot, taken under the lock the enrolment mutates, so it can only miss a
+// session that enrolled as this agent AFTER the revocation — and that
+// enrolment is refused by the store, because the answer is already gone.
+func (s *agentApprovalService) enrolledAs(executable agentapproval.Executable) []session.ID {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	held := make([]session.ID, 0, len(s.enrolled))
+	for sid, enrolled := range s.enrolled {
+		if enrolled.executable == executable {
+			held = append(held, sid)
+		}
+	}
+	return held
 }
 
 // settle closes the question for every enrolment waiting on it — nothing when

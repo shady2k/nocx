@@ -138,12 +138,28 @@ type fakeWS struct{ addr, token string }
 func (f fakeWS) Addr() string  { return f.addr }
 func (f fakeWS) Token() string { return f.token }
 
+// workerTestSession names the session this stand's authorizer admits into. The
+// endpoint grants nothing it cannot attribute to an interval — a connection with
+// no session is one no retirement could close — so a stand that admitted
+// without naming one would be exercising a connection the product refuses.
+const workerTestSession = "sess-worker-test"
+
 type workerTestAuthorizer struct {
 	invocation assistant.ToolInvocation
 }
 
-func (a workerTestAuthorizer) Admit(toolendpoint.Peer) (assistant.ToolInvocation, func(), error) {
-	return a.invocation, func() {}, nil
+// Admit publishes the admission, because that is what an authorizer does now:
+// the endpoint records the connection from inside the decision, and refuses a
+// grant that was never recorded (nocx-9mn6z).
+func (a workerTestAuthorizer) Admit(_ toolendpoint.Peer, publish func(session string, epoch toolendpoint.AdmissionEpoch) bool) (assistant.ToolInvocation, func(), error) {
+	invocation := a.invocation
+	if invocation.RunContext.Session == "" {
+		invocation.RunContext.Session = workerTestSession
+	}
+	if !publish(invocation.RunContext.Session, 1) {
+		return assistant.ToolInvocation{}, nil, toolendpoint.ErrNotEnrolled
+	}
+	return invocation, func() {}, nil
 }
 
 type workerTestDispatcher struct {

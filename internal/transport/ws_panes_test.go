@@ -93,15 +93,38 @@ type feedableFactory struct{ p *feedablePTY }
 
 func (f *feedableFactory) NewPTY(context.Context, pty.Config) (pty.Pty, error) { return f.p, nil }
 
+// recordingPaneAdmissions is the admission interval's end, recorded. What a test
+// needs to see from the transport is WHICH session's interval it ended; what
+// ending one does to a live tool connection is asserted in internal/app, over a
+// real endpoint and a real socket, because that is where the connection lives.
+type recordingPaneAdmissions struct {
+	mu    sync.Mutex
+	ended []string
+}
+
+func (r *recordingPaneAdmissions) SessionEnded(sessionID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ended = append(r.ended, sessionID)
+}
+
+func (r *recordingPaneAdmissions) sessions() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.ended...)
+}
+
 // newPanesWS wires the transport with the store it reads through, over a source
-// that answers with bytes a test supplies.
-func newPanesWS(t *testing.T) (*WSServer, *paneviewtest.Views, *feedablePTY) {
+// that answers with bytes a test supplies. Extra options are the seams a test
+// adds to that shape, so there is one stand rather than one per seam.
+func newPanesWS(t *testing.T, extra ...WSServerOption) (*WSServer, *paneviewtest.Views, *feedablePTY) {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	term := newFeedablePTY()
 	reg := session.New(logger, &feedableFactory{p: term})
 	store := paneviewtest.NewViews(logger)
-	ws := NewWSServer(logger, reg, WithPaneScreens(store.Store))
+	opts := append([]WSServerOption{WithPaneScreens(store.Store)}, extra...)
+	ws := NewWSServer(logger, reg, opts...)
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -190,5 +213,52 @@ func TestTheObservationClosesWhenTheSessionsOutputEnds(t *testing.T) {
 	})
 	if _, err := store.Frame(sid); err == nil {
 		t.Error("the store still answers for a pane whose session is over")
+	}
+}
+
+// AND THE SAME END REACHES THE AUTHORITY (nocx-9mn6z).
+//
+// The observation and the screen are what the transport itself reads; the tool
+// endpoint's admission is the third thing a session's enrolment opened, and it
+// is the one that outlives a session nobody ended deliberately. It was told
+// nothing, so an exited-but-retained session kept its admitted caller and the
+// grant inside it.
+//
+// The three ways a session's end arrives all pass through unwatchPane — a
+// program that exited, an explicit close, and this call itself — so the two
+// assertions below are the funnel and one of its callers. The effect on a LIVE
+// tool connection is asserted in internal/app, where the socket is.
+func TestTheAdmissionIntervalClosesWhenTheSessionsOutputEnds(t *testing.T) {
+	admissions := &recordingPaneAdmissions{}
+	ws, store, term := newPanesWS(t, WithPaneAdmissions(admissions))
+	conn := connectWS(t, ws)
+	sid := openSessionOnConn(t, ws, conn, 1)
+	if err := store.Watch(sid, 40, 6); err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+
+	if err := term.Close(); err != nil {
+		t.Fatalf("close the pane's pty: %v", err)
+	}
+
+	waittest.WaitForTimeout(t, "the session's admission interval to close", 5*time.Second, func() bool {
+		ended := admissions.sessions()
+		return len(ended) == 1 && ended[0] == sid
+	})
+	if got := admissions.sessions(); len(got) != 1 {
+		t.Fatalf("ended intervals = %v, want exactly the session that ended", got)
+	}
+}
+
+// The funnel itself, called for a session whose end came from neither of the
+// paths above: whatever ends a session, the interval goes with it.
+func TestUnwatchingAPaneEndsItsAdmissionInterval(t *testing.T) {
+	admissions := &recordingPaneAdmissions{}
+	ws, _, _ := newPanesWS(t, WithPaneAdmissions(admissions))
+
+	ws.unwatchPane(session.ID("sess-unwatched"))
+
+	if got := admissions.sessions(); len(got) != 1 || got[0] != "sess-unwatched" {
+		t.Fatalf("ended intervals = %v, want the unwatched session", got)
 	}
 }

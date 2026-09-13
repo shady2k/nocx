@@ -1907,7 +1907,14 @@ func New(opts ...Option) (*App, error) {
 		transport.WithPaneObserver(paneWatch), transport.WithAgentRules(paneDrivers),
 		transport.WithAgentRuleStore(ruleStore),
 		transport.WithAgentCalibration(paneCalibration),
-		transport.WithAgentTypist(paneTyping))
+		transport.WithAgentTypist(paneTyping),
+		// The third end of a session's enrolment (nocx-9mn6z): the watch and
+		// the frame are closed by the two above, and the ANSWER that admitted
+		// the pane's agent's tool connection is closed by this one. The
+		// approval service owns that answer, so it is what is wired — the
+		// enroller closes the same interval by lane on the shell's own
+		// withdrawal, and both call Forget.
+		transport.WithPaneAdmissions(agentApprovalService))
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 	agentApprovalService.SetRequester(tp)
 	toolSurface := newToolSurfaceMonitor(toolSurfaceDeadline, func(fact toolSurfaceFact) {

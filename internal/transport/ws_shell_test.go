@@ -154,6 +154,10 @@ func TestShellComplete_JumpRouteDoesNotHoldSessionGate(t *testing.T) {
 	ws := NewWSServer(
 		logger,
 		reg,
+		// The ssh pane this case opens is this machine's helper's
+		// (nocx-50w7p.5). Its subject is whether a completion's jump route
+		// holds the session gate, which is downstream of the pane existing.
+		sshHelperOpt(reg),
 		WithCompleters(completion.NewLocal(), remote),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {

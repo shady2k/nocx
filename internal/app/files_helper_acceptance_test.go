@@ -81,6 +81,10 @@ type filesStand struct {
 	root    string
 	factory func(session.Session, string) (filesystem.Provider, error)
 	opts    []ssh.ConnectOption
+	// khPath is the coordinator's known_hosts. It is exposed because a ROUTE
+	// has more than one host in it: a test that adds a bastion has to record
+	// that bastion's key too, and the coordinator's own verdict is what decides.
+	khPath string
 }
 
 // askRecorder is the reverse side's credential resolver: it answers from a
@@ -159,7 +163,7 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 		Exec:        helperclient.NewSocketConn(coordEnd),
 		ExpectHash:  filesFixtureGenera,
 		SentinelTTL: 5 * time.Second,
-		Reverse:     helperReverseHandlers(rc, secrets, logger),
+		Reverse:     helperReverseHandlers(rc, secrets, &helperPrompt{log: logger}, logger),
 		Log:         logger,
 	})
 	if err != nil {
@@ -187,6 +191,7 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 	return &filesStand{
 		srv:     srv,
 		root:    srv.rootDir,
+		khPath:  khPath,
 		factory: filesystemProviderFactory(routes),
 		opts: []ssh.ConnectOption{
 			ssh.WithUser(filesFixtureUser),

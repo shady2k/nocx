@@ -18,6 +18,7 @@ package app
 import (
 	"context"
 	"errors"
+	"net"
 	"strings"
 	"testing"
 
@@ -58,12 +59,24 @@ func (r *recordingResolver) ResolveTarget(_ context.Context, host string, opts .
 		o(&r.got)
 	}
 	return ssh.DialTarget{
-		Host:       "10.0.0.7",
-		Port:       2222,
-		User:       "deploy",
-		Auth:       ssh.DialAuthPassword,
-		Credential: "cred-9",
-		PublicKey:  []byte("pub"),
+		DialEndpoint: ssh.DialEndpoint{
+			Host:           "10.0.0.7",
+			Port:           2222,
+			User:           "deploy",
+			Auth:           ssh.DialAuthPassword,
+			Credential:     ssh.VaultRef("cred-9"),
+			PublicKey:      []byte("pub"),
+			KnownHostsAddr: "nocx-v1-route-digest:22",
+		},
+		// One hop, because the profile above names one: the resolved route has
+		// to reach the helper with the destination, and this is the assertion
+		// that it does.
+		Route: []ssh.DialEndpoint{{
+			Host: "bastion.example", Port: 2200, User: "jumper",
+			Auth:       ssh.DialAuthPassword,
+			Credential: ssh.VaultRef("jump-cred"),
+			PublicKey:  []byte("jump-pub"),
+		}},
 	}, nil
 }
 
@@ -103,8 +116,26 @@ func TestTheHelperIsHandedTheResolvedDestination(t *testing.T) {
 	if got.Destination.Host != "10.0.0.7" || got.Destination.Port != 2222 || got.Destination.User != "deploy" {
 		t.Fatalf("the helper was handed %+v, want the RESOLVED destination", got.Destination)
 	}
-	if got.Destination.Identity.Credential.Ref != "cred-9" {
+	if got.Destination.Identity.Credential.Ref != ssh.VaultRef("cred-9").String() {
 		t.Fatalf("credential reference = %q, want the coordinator's own handle", got.Destination.Identity.Credential.Ref)
+	}
+	// The ROUTE travels with the destination, and a hop carries its own
+	// account and its own credential reference: a lease that dropped the hops
+	// would dial an address only the bastion can reach.
+	if len(got.Destination.Jumps) != 1 {
+		t.Fatalf("the helper was handed %d hops, want 1", len(got.Destination.Jumps))
+	}
+	hop := got.Destination.Jumps[0]
+	if hop.Host != "bastion.example" || hop.Port != 2200 || hop.User != "jumper" {
+		t.Fatalf("hop = %s@%s:%d, want jumper@bastion.example:2200", hop.User, hop.Host, hop.Port)
+	}
+	if hop.Identity.Credential.Ref != ssh.VaultRef("jump-cred").String() {
+		t.Fatalf("hop credential = %q, want the hop's own reference", hop.Identity.Credential.Ref)
+	}
+	// The storage identity of a routed destination is not its dial address, and
+	// the helper is told which one to look the key up under.
+	if got.Destination.KnownHostsAddr == "" || got.Destination.KnownHostsAddr == net.JoinHostPort("10.0.0.7", "2222") {
+		t.Fatalf("routed destination storage identity = %q", got.Destination.KnownHostsAddr)
 	}
 	if got.Destination.Identity.Auth != proto.SSHAuthKind(ssh.DialAuthPassword) {
 		t.Fatalf("auth kind = %q", got.Destination.Identity.Auth)

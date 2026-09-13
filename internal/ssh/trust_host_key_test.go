@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -49,11 +50,24 @@ func probeOnce(t *testing.T, client *RealClient, srv *testSSHServer) error {
 	if err != nil {
 		t.Fatalf("host key callback: %v", err)
 	}
-	conn, err := client.DialAuth(context.Background(), srv.addr, srv.addr, "test", &gossh.ClientConfig{
-		User:            "test",
-		Auth:            []gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)},
-		HostKeyCallback: cb,
-		Timeout:         10 * time.Second,
+	host, portText, err := net.SplitHostPort(srv.addr)
+	if err != nil {
+		t.Fatalf("split %q: %v", srv.addr, err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("port %q: %v", portText, err)
+	}
+	conn, err := client.DialAuth(context.Background(), PooledSpec{
+		Host: host,
+		Port: port,
+		User: "test",
+		Config: &gossh.ClientConfig{
+			User:            "test",
+			Auth:            []gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)},
+			HostKeyCallback: cb,
+			Timeout:         10 * time.Second,
+		},
 	})
 	if err != nil {
 		return err

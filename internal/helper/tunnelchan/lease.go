@@ -84,21 +84,12 @@ func newLease(client *helperclient.Client, host string, target ssh.DialTarget, l
 	return l
 }
 
-// destination is the resolved triple every op of this lease carries.
+// destination is the resolved destination every op of this lease carries: the
+// address, the account, the credential reference and the route, converted by
+// the one function that owns that conversion (ssh.WireDestination), so a hop or
+// a storage identity cannot be dropped on this path alone.
 func (l *lease) destination() proto.SSHDestination {
-	return proto.SSHDestination{
-		Host: l.target.Host,
-		Port: l.target.Port,
-		User: l.target.User,
-		Identity: proto.SSHIdentity{
-			Credential: proto.SSHCredential{
-				Ref:           string(l.target.Credential),
-				PassphraseRef: string(l.target.Passphrase),
-			},
-			Auth:      proto.SSHAuthKind(l.target.Auth),
-			PublicKey: l.target.PublicKey,
-		},
-	}
+	return ssh.WireDestination(l.target)
 }
 
 // usability answers whether a new stream may be opened, in the order the

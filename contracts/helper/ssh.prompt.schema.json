@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.prompt.schema.json",
+  "title": "HelperSSHPromptResult",
+  "description": "What a person answered, positionally matched to the challenge's questions. Position rather than a key or a label, because that is what keyboard-interactive IS: the protocol answers a challenge's list in order, and a mapping would be a second spelling of an order the protocol already fixes. The count is the helper's to check \u2014 a shorter list means the library would answer the missing questions with empty strings, i.e. try an empty password \u2014 and a coordinator that cannot answer refuses by name instead of answering with nothing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["answers"],
+  "properties": {
+    "answers": {
+      "description": "One answer per question, in the order the questions were asked. The values are secret material in transit and are never logged, stored or returned by the helper.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

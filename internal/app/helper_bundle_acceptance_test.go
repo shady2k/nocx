@@ -50,6 +50,7 @@ import (
 	"github.com/shady2k/nocx/internal/remoteprobe"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
+	gossh "golang.org/x/crypto/ssh"
 )
 
 // bundleStand is the assembled stack: the fixture server, the helper peer, the
@@ -114,7 +115,7 @@ func startBundleStand(t *testing.T, srv *pwSSHServer, secrets *askRecorder) *bun
 		Exec:        helperclient.NewSocketConn(coordEnd),
 		ExpectHash:  filesFixtureGenera,
 		SentinelTTL: 5 * time.Second,
-		Reverse:     helperReverseHandlers(rc, secrets, logger),
+		Reverse:     helperReverseHandlers(rc, secrets, &helperPrompt{log: logger}, logger),
 		Log:         logger,
 	})
 	if err != nil {
@@ -297,40 +298,114 @@ func TestOneDestinationCostsOneAuthentication(t *testing.T) {
 	t.Logf("MEASURED two consumers, one destination: authentications=%d subsystems=%v", srv.connCount(), srv.subsystemsSeen())
 }
 
-// TestThePublishCarrierRefusesAnInlineKeyTargetBeforeDialing is the SEAM-level
-// half of the direct-host consequence (nocx-50w7p.15): the carrier refuses a
-// connection whose only credential is an inline key file, by name and before
-// anything is dialed. The end-to-end half — the pane still opening and the
-// refusal reaching the session integration axis — is
-// TestLiveSshd_AnInlineKeyConnectionStillOpensAndNamesItsPublishRefusal, which
-// drives `RealClient.Connect` over a real sshd.
+// TestTheBundlePublishAuthenticatesWithAnInlineKey is the SEAM-level half of
+// the inline-key success (nocx-50w7p.15 with nocx-50w7p.11): a connection whose
+// profile names a key FILE publishes through this machine's helper, and the key
+// authenticates because the coordinator reads it and signs with it — the helper
+// holds nothing but a reference and a public half.
 //
-// The refusal is `ssh.ErrNoHelperIdentity`: the helper holds no secret at rest
-// and has no file to read a key from, so a credential the coordinator cannot
-// hand over is refused rather than published to a guess. The same destination's
-// Files panel and probes refuse identically, which is why this is the honest
-// state of the migration rather than a defect only the publish has; closing it
-// is the key-file identity that sentinel names.
-func TestThePublishCarrierRefusesAnInlineKeyTargetBeforeDialing(t *testing.T) {
-	srv, _, _ := newBundleFixture(t)
+// Until the key-reference work landed this connection was REFUSED by name
+// before any dial (`ssh.ErrNoHelperIdentity`), and the test that asserted that
+// is this one: the shape of the connection is unchanged — an `IdentityFile`
+// profile with no binding in the store — and only the answer to it moved. The
+// end-to-end half runs the same connection through the product's own
+// `RealClient.Connect` against a real sshd
+// (TestLiveSshd_AnInlineKeyFileConnectionPublishesAndReachesItsDomain).
+//
+// The paired refusal is right below it, because the two are the same code path:
+// a key this process can OPEN and one it cannot.
+func TestTheBundlePublishAuthenticatesWithAnInlineKey(t *testing.T) {
+	srv, _, home := newBundleFixture(t)
+	keyPath, keySigner := writeInlineKey(t)
+	// The host authenticates a key, not a password: without this the fixture
+	// would refuse the offer and the test would pass on the wrong outcome.
+	srv.acceptKey(keySigner.PublicKey())
 	stand := startBundleStand(t, srv, &askRecorder{value: openPasswordFixturePassword})
 
-	opts := []ssh.ConnectOption{
+	// The connection's own options name the file. Nothing is appended to them:
+	// what a direct-host open carries is what the publish is handed, and the
+	// resolution is the product's rather than this test's.
+	stand.opts = []ssh.ConnectOption{
 		ssh.WithUser(filesFixtureUser),
-		ssh.WithKeyFile(filepath.Join(t.TempDir(), "id_ed25519")),
-		ssh.WithAuthMode("publicKey"),
+		ssh.WithKeyFile(keyPath),
+		ssh.WithAuthorizedEndpoint(srv.addr),
+		ssh.WithConnectionName("bundle acceptance (inline key)"),
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
 
-	err := stand.carrier.EnsureInstalledRemote(ctx, srv.addr, opts...)
-	if !errors.Is(err, ssh.ErrNoHelperIdentity) {
-		t.Fatalf("the publish for an inline-key connection is %v, want a refusal wrapping ssh.ErrNoHelperIdentity", err)
+	if err := stand.publish(t); err != nil {
+		t.Fatalf("the publish for an inline-key connection through this machine's helper: %v", err)
+	}
+
+	// The bundle landed under the session's $HOME, which is where the far side
+	// looks for the generation it was handed.
+	if _, err := os.Stat(bundleManifest(home)); err != nil {
+		t.Errorf("the bundle is not under the session $HOME (%s): %v", home, err)
+	}
+
+	// ONE connection, authenticated by the KEY, and the sftp subsystem asked
+	// for over it: the helper dialed, and the credential it presented was a
+	// signature this process made.
+	if got := srv.connCount(); got != 1 {
+		t.Errorf("the fixture authenticated %d connection(s), want exactly 1", got)
+	}
+	if got := srv.keyFingerprintsSeen(); len(got) != 1 || got[0] != gossh.FingerprintSHA256(keySigner.PublicKey()) {
+		t.Errorf("the destination authenticated key(s) %v, want the offered key exactly once", got)
+	}
+	if seen := srv.subsystemsSeen(); len(seen) != 1 || seen[0] != "sftp" {
+		t.Errorf("the fixture was asked for subsystems %v, want exactly [sftp]", seen)
+	}
+	// The store was never consulted: this credential is a file, and material
+	// the coordinator does not hold is not material it asks a vault for.
+	if refs := stand.secrets.asked(); len(refs) != 0 {
+		t.Errorf("the credential store was asked for %v, want nothing — the key's bytes come from the file the profile names", refs)
+	}
+	// The home question still came first: the location is decided before
+	// anything is written, whatever the credential is.
+	if execs := srv.execCommands(); len(execs) == 0 || execs[0] != remoteprobe.HomeCommand {
+		t.Errorf("the fixture's exec requests are %v, want the home probe first", execs)
+	}
+	t.Logf("MEASURED an inline-key publish through the helper: authentications=%d keys=%v subsystems=%v",
+		srv.connCount(), srv.keyFingerprintsSeen(), srv.subsystemsSeen())
+}
+
+// TestTheBundlePublishRefusesALockedKeyBeforeDialing is the paired refusal, and
+// it is the state that still exists: a key file this process cannot OPEN (an
+// encrypted key with nowhere to read its passphrase) is refused as
+// `ssh.ErrEncryptedKey` — "the key is fine, it is only locked" — and it is
+// refused BEFORE any dial, so nothing is offered to the host and nothing runs
+// on it.
+//
+// The distinction from ErrAuthFailed is the point of the type: a person sent to
+// look at a host for a key that needed a passphrase has been sent to the wrong
+// place, and this is where that stays true one process out.
+func TestTheBundlePublishRefusesALockedKeyBeforeDialing(t *testing.T) {
+	srv, _, _ := newBundleFixture(t)
+	locked := filepath.Join(t.TempDir(), "id_ed25519")
+	if err := os.WriteFile(locked, encryptedTestKey(t), 0o600); err != nil {
+		t.Fatalf("write the locked key: %v", err)
+	}
+	stand := startBundleStand(t, srv, &askRecorder{value: openPasswordFixturePassword})
+	stand.opts = []ssh.ConnectOption{
+		ssh.WithUser(filesFixtureUser),
+		ssh.WithKeyFile(locked),
+		ssh.WithAuthorizedEndpoint(srv.addr),
+	}
+
+	err := stand.publish(t)
+	var lockedErr *ssh.ErrEncryptedKey
+	if !errors.As(err, &lockedErr) {
+		t.Fatalf("the publish for a locked key file is %v (%T), want *ssh.ErrEncryptedKey", err, err)
 	}
 	if got := srv.connCount(); got != 0 {
 		t.Errorf("the fixture authenticated %d connection(s), want 0 — this refusal is reached before any dial", got)
 	}
-	t.Logf("MEASURED the named refusal: %v", err)
+	if seen := srv.subsystemsSeen(); len(seen) != 0 {
+		t.Errorf("the fixture was asked for subsystems %v, want none", seen)
+	}
+	if execs := srv.execCommands(); len(execs) != 0 {
+		t.Errorf("the fixture ran %v, want nothing — a location is not asked for when the credential cannot be read", execs)
+	}
+	t.Logf("MEASURED the named refusal for a locked key: %v", err)
 }
 
 // ── the failure paths, each paired with the success above ─────────────────

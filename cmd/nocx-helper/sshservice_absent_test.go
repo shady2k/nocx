@@ -32,10 +32,12 @@ func TestTheDeployedHelperHasNoSSHService(t *testing.T) {
 
 	var out proto.ProbeResult
 	err = c.Call(context.Background(), proto.ServiceSSH, proto.OpProbe, proto.ProbeParams{
-		Host: "example.invalid", Port: 22, User: "nobody",
-		Identity: proto.SSHIdentity{
-			Credential: proto.SSHCredential{Ref: "cred"},
-			Auth:       proto.SSHAuthPassword,
+		Destination: proto.SSHDestination{
+			Host: "example.invalid", Port: 22, User: "nobody",
+			Identity: proto.SSHIdentity{
+				Credential: &proto.SSHCredential{Ref: "cred"},
+				Auth:       proto.SSHAuthPassword,
+			},
 		},
 	}, &out)
 	if err == nil {

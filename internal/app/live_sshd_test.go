@@ -81,7 +81,11 @@ type liveSshd struct {
 	signer    gossh.Signer // client key installed in authorized_keys
 	hostKey   gossh.PublicKey
 	clientRaw ed25519.PrivateKey // the raw client key, for the child-line ssh-agent fixture
-	client    *ssh.RealClient    // the pooled client, for the connection-loss proof
+	// clientKey is the same key written to a file, when the journey dials with
+	// a NAMED identity (`withClientKeyFile`). Empty means the fixture dials
+	// with the in-memory signer, which is every caller that predates it.
+	clientKey string
+	client    *ssh.RealClient // the pooled client, for the connection-loss proof
 	cmd       *exec.Cmd
 	logBuf    *lockedBuffer
 	// registeredLanes records the lane→session bindings the provider
@@ -125,6 +129,14 @@ type liveSshdOption func(*liveSshdConfig)
 type liveSshdConfig struct {
 	extraConfig string
 	record      bool
+	// clientKeyFile makes the fixture's own dial use an inline key FILE rather
+	// than an in-memory signer. The two authenticate with the SAME key and
+	// differ only in how the credential is named — which is what a profile
+	// difference looks like: `IdentityFile` names a path, while an explicit
+	// `AuthMethods` list names a value — and the publish reads the profile, so
+	// it is the option that decides whether a helper can be handed the
+	// credential at all.
+	clientKeyFile bool
 }
 
 // withSshdConfig appends lines to sshd_config. A Match block must be last,
@@ -329,6 +341,22 @@ func startLiveSshd(t *testing.T, allowForward bool, opts ...liveSshdOption) *liv
 		t.Fatalf("write authorized_keys: %v", err)
 	}
 
+	// The same key as a FILE, for the journeys that dial with a named identity
+	// rather than an in-memory signer. It lives beside the fixture's other
+	// material rather than under the session home: what a person's profile
+	// names is their own file, and the far side never reads it.
+	clientKeyPath := ""
+	if fxCfg.clientKeyFile {
+		clientKeyPEM, err := gossh.MarshalPrivateKey(clientRaw, "")
+		if err != nil {
+			t.Fatalf("marshal client key: %v", err)
+		}
+		clientKeyPath = filepath.Join(dir, "client_key")
+		if err := os.WriteFile(clientKeyPath, pem.EncodeToMemory(clientKeyPEM), 0o600); err != nil {
+			t.Fatalf("write client key: %v", err)
+		}
+	}
+
 	// The session HOME: a fresh fixture-owned directory (SetEnv override,
 	// verified on OpenSSH 9.2). Hermeticity is the point — the launcher's
 	// publish writes its bundle here, the hook always loads, and the
@@ -454,6 +482,7 @@ LogLevel VERBOSE
 		addr:      addr,
 		user:      userName,
 		home:      home,
+		clientKey: clientKeyPath,
 		signer:    clientSigner,
 		clientRaw: clientRaw,
 		hostKey:   hostSigner.PublicKey(),
@@ -773,7 +802,6 @@ func (fx *liveSshd) connect(t *testing.T, kernel *recordingKernel, shell ssh.She
 
 	opts := []ssh.ConnectOption{
 		ssh.WithUser(fx.user),
-		ssh.WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(fx.signer)}),
 		ssh.WithPTYSize(100, 30, 0, 0),
 		ssh.WithTimeout(20 * time.Second),
 		ssh.WithSessionID("sid-live-sshd"),
@@ -781,6 +809,11 @@ func (fx *liveSshd) connect(t *testing.T, kernel *recordingKernel, shell ssh.She
 		ssh.WithShell(shell),
 		ssh.WithRemoteLifecycle(provider),
 		ssh.WithRemoteLauncher(launcher),
+	}
+	if fx.clientKey != "" {
+		opts = append(opts, ssh.WithKeyFile(fx.clientKey))
+	} else {
+		opts = append(opts, ssh.WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(fx.signer)}))
 	}
 	if len(installers) > 0 {
 		opts = append(opts, ssh.WithRemoteInstaller(installers[0]))

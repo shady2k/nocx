@@ -26,11 +26,11 @@
 // difference:
 //
 //   - Acquiring a lease resolves and AUTHORIZES the destination and opens
-//     nothing. A routed dial (a jump route) is still refused by name at that
-//     moment — ssh.ErrRoutedDial, owned by nocx-50w7p.11 — and so is a
-//     credential the profile does not authorize for the endpoint. The
-//     CONNECTION is established when the first channel is opened on it, which
-//     is AD-4's pool doing what it was built to do.
+//     nothing. Resolution is where a credential the profile does not authorize
+//     for the endpoint is refused, and — since nocx-50w7p.11 — where a jump
+//     route becomes the ordered hops this lease's channels are dialed through.
+//     The CONNECTION is established when the first channel is opened on it,
+//     which is AD-4's pool doing what it was built to do.
 //   - Done closes on the HELPER connection's loss (nothing this lease holds
 //     can work any more) and on a listener ending for a reason this lease did
 //     not ask for (the far side's connection died under it — the case a remote
@@ -98,10 +98,10 @@ type Connector struct {
 // destination.
 //
 // The resolution is eager and the dial is not, which is the split the package
-// doc explains: a refusal the coordinator owns (ssh.ErrRoutedDial, an
-// unauthorized credential) is raised HERE, where a caller's start path can
+// doc explains: a refusal the coordinator owns (an unauthorized credential, a
+// route it cannot resolve) is raised HERE, where a caller's start path can
 // report it, and the connection itself is established by the helper on the
-// first channel.
+// first channel — through the hops the resolved destination carries.
 func (c *Connector) TunnelConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.TunnelConn, error) {
 	if c.Resolve == nil {
 		return nil, errors.New("tunnelchan: no destination resolver is wired")

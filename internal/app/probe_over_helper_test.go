@@ -27,12 +27,14 @@ package app
 // classification beside the evidence.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -56,6 +58,71 @@ import (
 type probeStack struct {
 	helper *sshOverHelper
 	khPath string
+	// client is the coordinator's own ssh client: the known_hosts the verdicts
+	// come from, and the one write path for a key a person accepts.
+	client *ssh.RealClient
+	// wire records every byte the connections between the two processes
+	// carried, in either direction. It is what makes a NEGATIVE claim about
+	// this ABI checkable — no private key and no agent socket may reach the
+	// helper — rather than merely plausible from a result that came back.
+	wire *wireLog
+}
+
+// wireTee records the bytes of one accepted connection in both directions. The
+// two processes are on opposite ends of a real Unix socket, so a tee here is
+// the whole of the wire between them and not a sample of it.
+type wireTee struct {
+	net.Conn
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *wireTee) Read(p []byte) (int, error) {
+	n, err := w.Conn.Read(p)
+	w.record(p[:n])
+	return n, err
+}
+
+func (w *wireTee) Write(p []byte) (int, error) {
+	n, err := w.Conn.Write(p)
+	w.record(p[:n])
+	return n, err
+}
+
+func (w *wireTee) record(b []byte) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.buf.Write(b)
+}
+
+func (w *wireTee) bytes() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]byte(nil), w.buf.Bytes()...)
+}
+
+// wireLog collects every tee one stack served. A stack serves several
+// connections — a probe dials its own and a lease holds one — and a claim about
+// what did NOT cross has to cover all of them.
+type wireLog struct {
+	mu   sync.Mutex
+	tees []*wireTee
+}
+
+func (l *wireLog) add(w *wireTee) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.tees = append(l.tees, w)
+}
+
+func (l *wireLog) bytes() []byte {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var all []byte
+	for _, w := range l.tees {
+		all = append(all, w.bytes()...)
+	}
+	return all
 }
 
 // startProbeStack brings up an endpoint served by the REAL ssh service, and the
@@ -106,10 +173,17 @@ func startProbeStackWithStore(t *testing.T, srv *pwSSHServer, store credential.R
 	}
 
 	svc := sshsvc.New(helperClient, discardLogger())
+	wire := &wireLog{}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		_ = endpoint.Serve(ctx, ln, func(conn net.Conn) {
-			h := host.New(conn, conn, string(generation), "instance-1", discardLogger())
+			// Every accepted connection is teed: the negative claims about
+			// this wire (no key material, no agent socket) are about what was
+			// SENT, and a later connection would leak just as much as the
+			// first.
+			tee := &wireTee{Conn: conn}
+			wire.add(tee)
+			h := host.New(tee, tee, string(generation), "instance-1", discardLogger())
 			h.Register(svc)
 			_ = h.Serve(ctx)
 		})
@@ -118,7 +192,7 @@ func startProbeStackWithStore(t *testing.T, srv *pwSSHServer, store credential.R
 	opener := &localHelperOpener{
 		log:     discardLogger(),
 		dir:     dir,
-		reverse: helperReverseHandlers(coordinatorClient, store, discardLogger()),
+		reverse: helperReverseHandlers(coordinatorClient, store, &helperPrompt{log: discardLogger()}, discardLogger()),
 	}
 	opener.installedLocalGeneration(helperlocal.Installed{
 		// Never started: the endpoint above is already serving, so the binary is
@@ -134,6 +208,8 @@ func startProbeStackWithStore(t *testing.T, srv *pwSSHServer, store credential.R
 	return &probeStack{
 		helper: &sshOverHelper{local: opener, resolve: coordinatorClient, log: discardLogger()},
 		khPath: khPath,
+		client: coordinatorClient,
+		wire:   wire,
 	}
 }
 

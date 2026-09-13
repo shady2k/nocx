@@ -39,7 +39,7 @@ func destination(t *testing.T, f *fixture) proto.SSHDestination {
 	return proto.SSHDestination{
 		Host: host, Port: port, User: "test",
 		Identity: proto.SSHIdentity{
-			Credential: proto.SSHCredential{Ref: wantRef},
+			Credential: &proto.SSHCredential{Ref: wantRef},
 			Auth:       proto.SSHAuthPassword,
 		},
 	}

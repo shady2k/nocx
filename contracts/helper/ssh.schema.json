@@ -2,10 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/helper/ssh.schema.json",
   "title": "HelperABISSHVocabulary",
-  "description": "The shared vocabulary of the helper ABI's ssh service: what a credential reference is, what a probe can answer, what a destination is, which channels this generation opens, where a channel connects, and the identity of a remote listener. It declares $defs and nothing else, so one concept has one declaration (AD-8) \u2014 the same discipline identities.schema.json applies to sessions, applied to the second subject this wire grew (nocx-50w7p.2, extended by nocx-50w7p.3's proxied channels and nocx-50w7p.8's forwards). The service speaks in BOTH directions: `probe`, `open`, `close`, `forward` and `unforward` are forward ops the helper answers, and `secret`, `sign`, `verify-host-key` and `trust-host-key` are reverse ops the helper ASKS the coordinator, over the same connection its own request arrived on.",
+  "description": "The shared vocabulary of the helper ABI's ssh service: what a credential reference is, what a probe can answer, what a destination is, which channels this generation opens, where a channel connects, and the identity of a remote listener. It declares $defs and nothing else, so one concept has one declaration (AD-8) \u2014 the same discipline identities.schema.json applies to sessions, applied to the second subject this wire grew (nocx-50w7p.2, extended by nocx-50w7p.3's proxied channels, nocx-50w7p.8's forwards and nocx-50w7p.11's jump routes and prompt rung). The service speaks in BOTH directions: `probe`, `open`, `close`, `forward` and `unforward` are forward ops the helper answers, and `secret`, `sign`, `prompt`, `verify-host-key` and `trust-host-key` are reverse ops the helper ASKS the coordinator, over the same connection its own request arrived on.",
   "$defs": {
     "credential": {
-      "description": "An opaque handle on one stored credential, minted by the COORDINATOR and echoed back by the helper verbatim. The helper never interprets either field, and that is the whole authorization story on this wire: it cannot ask for material the coordinator did not name. PassphraseRef exists because a key and the passphrase that unlocks it are two stored secrets \u2014 resolving one where the other was meant is how a wrong-but-valid password gets tried against a server \u2014 and it is a REFERENCE and never material: the coordinator is the party that parses a private key, so a passphrase never reaches the helper at all.",
+      "description": "An opaque handle on one credential, minted by the COORDINATOR and echoed back by the helper verbatim. The helper never interprets either field, and that is the whole authorization story on this wire: it cannot ask for material the coordinator did not name. The spelling is namespaced \u2014 `vault:<id>`, `file:<path>`, `agent:<key fingerprint>` \u2014 and parsed only by the coordinator, which is what lets one wire carry a stored key, an inline key file and an agent key without the helper knowing which it holds. PassphraseRef exists because a key and the passphrase that unlocks it are two stored secrets \u2014 resolving one where the other was meant is how a wrong-but-valid password gets tried against a server \u2014 and it is a REFERENCE and never material: the coordinator is the party that parses a private key, so a passphrase never reaches the helper at all.",
       "type": "object",
       "additionalProperties": false,
       "required": ["ref"],
@@ -23,9 +23,9 @@
       }
     },
     "authKind": {
-      "description": "How a probe authenticates, in a closed set. It is the COORDINATOR's decision and not the helper's: the coordinator is the party that knows which material it stored, and a helper that guessed would send the wrong rung of the ladder against somebody's machine.",
+      "description": "How a dial authenticates, in a closed set. It is the COORDINATOR's decision and not the helper's: the coordinator is the party that knows which credential it holds, and a helper that guessed would send the wrong rung of the ladder against somebody's machine. `password` presents a stored secret; `key` proves possession of a private key by signing, and it covers all THREE places a key lives (the vault, an inline file, the ssh-agent) because the wire only ever needs a signature; `interactive` answers the server's OWN keyboard-interactive questions from the coordinator's UI and carries no credential at all, because the person is the credential.",
       "type": "string",
-      "enum": ["password", "key"]
+      "enum": ["password", "key", "interactive"]
     },
     "purpose": {
       "description": "What the material a helper asks for is FOR, in a closed set. The purpose is load-bearing rather than decorative: the read is stanced (internal/credential), so a password and a passphrase are resolved through different declarations, different reasons in the vault's own audit, and \u2014 where a profile carries policy \u2014 potentially different answers.",
@@ -50,10 +50,10 @@
       "enum": ["trusted", "changed", "unknown"]
     },
     "identity": {
-      "description": "The credential a probe authenticates with, plus the PUBLIC half of a key credential. The public key is here rather than discovered by an op of its own because x/crypto/ssh's Signer interface answers PublicKey() BEFORE it asks for a signature: the helper must be able to declare which key it is offering before it can be asked to sign with it. It is public material \u2014 what the peer learns on the first packet \u2014 and the private half never crosses, which is why `sign` is exactly a challenge and a signature and why there is no empty-challenge sentinel hiding a discovery question inside a cryptographic one.",
+      "description": "The credential a dial authenticates with, plus the PUBLIC half of a key credential. The public key is here rather than discovered by an op of its own because x/crypto/ssh's Signer interface answers PublicKey() BEFORE it asks for a signature: the helper must be able to declare which key it is offering before it can be asked to sign with it. It is public material \u2014 what the peer learns on the first packet \u2014 and the private half never crosses, which is why `sign` is exactly a challenge and a signature and why there is no empty-challenge sentinel hiding a discovery question inside a cryptographic one. Which fields are REQUIRED depends on `auth`: password and key name a credential reference, key additionally carries the public half, and `interactive` carries neither \u2014 it names a person, and a reference there would name something that does not exist.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["credential", "auth"],
+      "required": ["auth"],
       "properties": {
         "credential": {
           "$ref": "#/$defs/credential"
@@ -62,14 +62,58 @@
           "$ref": "#/$defs/authKind"
         },
         "publicKey": {
-          "description": "The wire-format public key blob (RFC 4253 \u00a76.6) as base64. Required for key auth \u2014 a helper asked to sign with a key it was not given would have to invent one \u2014 and absent for password auth.",
+          "description": "The wire-format public key blob (RFC 4253 \u00a76.6) as base64. Required for key auth \u2014 a helper asked to sign with a key it was not given would have to invent one \u2014 and absent for password and interactive auth.",
           "type": "string",
           "minLength": 1
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "auth": {
+                "enum": ["password", "key"]
+              }
+            },
+            "required": ["auth"]
+          },
+          "then": {
+            "required": ["credential"]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "auth": {
+                "const": "key"
+              }
+            },
+            "required": ["auth"]
+          },
+          "then": {
+            "required": ["publicKey"]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "auth": {
+                "const": "interactive"
+              }
+            },
+            "required": ["auth"]
+          },
+          "then": {
+            "properties": {
+              "credential": false,
+              "publicKey": false
+            }
+          }
+        }
+      ]
     },
     "destination": {
-      "description": "One RESOLVED destination: the address, the account and what to authenticate as. Its three parts are typed fields and never one `user@host:port` string, because a spelling would have to be parsed again on the far side by something that is not allowed to guess. The fields carry the same meaning probe.params gives its own copies of them, since a destination and a probe take the same three facts.",
+      "description": "One RESOLVED destination: the address, the account, what to authenticate as, the route it is reached through, and the identity its host key is stored under. Its address parts are typed fields and never one `user@host:port` string, because a spelling would have to be parsed again on the far side by something that is not allowed to guess. This is the declaration `probe`, `open`, `forward`, `lease` and `lane` all take \u2014 a probe that carried its own copy of the same three facts would be a second place for a route to be forgotten, which is the difference between 'does this credential work' being answered about the host a person named and about a host they cannot reach.",
       "type": "object",
       "additionalProperties": false,
       "required": ["host", "port", "user", "identity"],
@@ -92,6 +136,19 @@
         },
         "identity": {
           "$ref": "#/$defs/identity"
+        },
+        "jumps": {
+          "description": "The hosts this destination is reached THROUGH, in dial order: Jumps[0] is dialed from this machine, each next hop through the one before it, and the destination through the last. A flat, ORDERED LIST rather than a nesting, so traversal order has exactly one spelling; the coordinator flattens its own recursive jump chain into it and the helper walks it from the front.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/hop"
+          }
+        },
+        "knownHostsAddr": {
+          "description": "The address this destination's host key is STORED under \u2014 the coordinator's own storage identity for it, which is NOT the dial address when the destination is reached through a jump host. The derivation is the coordinator's (known_hosts is its file and the route digest is its rule), and it travels with the destination so a helper cannot look up a line nobody wrote. Empty means the dial address, which is the direct route's answer.",
+          "type": "string",
+          "minLength": 1
         }
       }
     },
@@ -225,6 +282,38 @@
         "expected": {
           "description": "The recorded fingerprint(s) a `changed` key differs from. Present exactly then; a `host-key-unknown` answer has none.",
           "type": "string"
+        }
+      }
+    },
+    "hop": {
+      "description": "One INTERMEDIATE host a destination is reached through: a destination in every respect except that it carries no route of its own. `additionalProperties: false` is what says so \u2014 a hop cannot nest a route inside a route, which would leave the helper deciding which traversal order was meant. Each hop authenticates separately and its host key is verified separately, because a route is a chain of independent handshakes and not one connection with a longer address.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "port", "user", "identity"],
+      "properties": {
+        "host": {
+          "description": "The hop's dial target: an address, never an alias, for the reason a destination's is.",
+          "type": "string",
+          "minLength": 1
+        },
+        "port": {
+          "description": "The hop's resolved port.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "user": {
+          "description": "The hop's resolved account. It is the hop's own and never the destination's: a bastion is a different machine with different accounts on it.",
+          "type": "string",
+          "minLength": 1
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "knownHostsAddr": {
+          "description": "The address this hop's host key is STORED under, when that is not its dial address. A hop that is itself reached through a later hop has a route-derived one. Empty means the dial address, which is the ordinary case.",
+          "type": "string",
+          "minLength": 1
         }
       }
     }

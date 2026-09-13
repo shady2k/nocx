@@ -295,19 +295,25 @@ func (s *Service) dialChannel(ctx context.Context, conn *host.Host, p proto.Open
 // rather than a second acquisition function: one connection per destination is
 // AD-4's rule and two paths to it would be two answers.
 func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SSHDestination, acceptOnTrust bool, fingerprint string) (*ssh.PooledConn, error) {
-	cfg, err := s.clientConfig(ctx, conn, d.User, d.Identity, acceptOnTrust)
+	ep := endpointOf(d)
+	cfg, err := s.clientConfig(ctx, conn, ep, acceptOnTrust)
 	if err != nil {
 		return nil, err
 	}
 	if fingerprint != "" {
 		cfg.HostKeyCallback = pinnedHostKey(cfg.HostKeyCallback, fingerprint)
 	}
+	route, err := s.routeOf(ctx, conn, d, acceptOnTrust)
+	if err != nil {
+		return nil, err
+	}
 	pool, err := s.client.AcquirePooled(ctx, ssh.PooledSpec{
-		Host:     d.Host,
-		Port:     d.Port,
-		User:     d.User,
+		Host:     ep.Host,
+		Port:     ep.Port,
+		User:     ep.User,
 		Identity: identityKey(d.Identity),
 		Config:   cfg,
+		Route:    route,
 	})
 	if err != nil {
 		return nil, classifyChannelError(err)
@@ -521,16 +527,43 @@ func validateDestination(p proto.OpenChannelParams) error {
 
 // validateDestinationAddress is the half of an open's validation that every op
 // taking a destination shares.
+//
+// It checks the ROUTE as well as the destination, and it checks it here rather
+// than at the dial for the reason every validator in this file exists: a hop
+// with no address is a request this helper cannot perform, and discovering that
+// at the second handshake would mean a connection to nowhere whose failure
+// names the wrong machine.
 func validateDestinationAddress(d proto.SSHDestination) error {
+	if err := validateEndpointAddress(d.Host, d.Port, d.User); err != nil {
+		return err
+	}
+	if err := validateIdentity(d.Identity); err != nil {
+		return err
+	}
+	for i, hop := range d.Jumps {
+		if err := validateEndpointAddress(hop.Host, hop.Port, hop.User); err != nil {
+			return fmt.Errorf("route hop %d: %w", i, err)
+		}
+		if err := validateIdentity(hop.Identity); err != nil {
+			return fmt.Errorf("route hop %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// validateEndpointAddress is the address half, shared by a destination and
+// every hop of a route: they are the same three facts and a difference between
+// them would be a second answer to "is this dialable".
+func validateEndpointAddress(host string, port int, user string) error {
 	switch {
-	case d.Host == "":
+	case host == "":
 		return fmt.Errorf("%w: no host", errBadChannelParams)
-	case d.Port <= 0 || d.Port > 65535:
-		return fmt.Errorf("%w: port %d", errBadChannelParams, d.Port)
-	case d.User == "":
+	case port <= 0 || port > 65535:
+		return fmt.Errorf("%w: port %d", errBadChannelParams, port)
+	case user == "":
 		return fmt.Errorf("%w: no user", errBadChannelParams)
 	}
-	return validateIdentity(d.Identity)
+	return nil
 }
 
 // validateTarget refuses an address this helper will not connect to, before
@@ -563,7 +596,7 @@ func identityKey(id proto.SSHIdentity) string {
 			return gossh.FingerprintSHA256(key)
 		}
 	}
-	return id.Credential.Ref
+	return id.CredentialOf().Ref
 }
 
 // classifyChannelError types a channel's failure in the coordinator's own

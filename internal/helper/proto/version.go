@@ -108,7 +108,25 @@ package proto
 // other at hello in both directions, which is what makes the number the whole
 // of the compatibility story.
 //
-// This is 9 rather than 8 because the wire grew a FIELD on two frozen ops, and
+// This is 9 rather than 8 because the wire grew the ROUTE and the PROMPT: a
+// destination may now name the hosts it is reached through (`jumps`, each with
+// its own credential reference and its own storage identity) and the address a
+// host key is STORED under (`knownHostsAddr`), `authKind` grew the
+// `interactive` member whose questions a helper relays to a person, and the
+// `prompt` reverse op is how it asks (nocx-50w7p.11). The shapes are the half
+// that makes this a bump rather than an addition: `additionalProperties: false`
+// means an 8-helper REJECTS a destination carrying `jumps` — a jump-routed
+// connection would not degrade into a direct dial, it would not dial at all,
+// and a person would see a protocol failure where they asked for a host — and
+// an 8-helper reads `auth: "interactive"` as a kind it does not know and
+// refuses it, which is the right answer arriving one generation early. The op
+// is the half that makes it honest: an 8-helper answers `unknown_op` to
+// `prompt`, which a coordinator reads as "this machine's helper is older than
+// this app". Two peers that disagree refuse each other at hello in both
+// directions, which is what makes the number the whole of the compatibility
+// story.
+//
+// This is 10 rather than 9 because the wire grew a FIELD on two frozen ops, and
 // a field is the half that cannot be added: `session.spawn.params` and
 // `session.spawn-ssh.params` gained `agentToolEndpoint` — the caller's own
 // tool endpoint on this machine, which the pane's tool connections belong to
@@ -119,11 +137,11 @@ package proto
 // coordinator that OPENED the pane.
 //
 // The reason is the freeze's own rule and not tidiness. Both shapes are
-// `additionalProperties: false`, so an 8-helper builds its params schema from
+// `additionalProperties: false`, so a 9-helper builds its params schema from
 // the same struct this one does, REJECTS the payload carrying the field, and
 // answers `bad_params` — a sentence about the request, which is a lie: the
 // request is well-formed and the helper is old. Bumping makes the two peers
 // refuse each other at hello in both directions, which is the honest reading,
 // and installs the new generation beside the old one (D7) so a session still
 // holding the old binary keeps it.
-const Version = "9"
+const Version = "10"

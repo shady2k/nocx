@@ -132,6 +132,13 @@ type fixture struct {
 	passwords  []string
 	keys       []string
 	subsystems []string
+	// the keyboard-interactive rung: the answer this host accepts (empty = it
+	// does not offer the method) and the answers it RECEIVED, in order. The
+	// second is the far side's own view of what a person typed, which is what
+	// makes "the coordinator's answer reached the server" a fact rather than a
+	// hope.
+	kbdPassword string
+	kbdPrompts  []string
 	// the forward plane (nocx-50w7p.8): the policy the server applies, the
 	// listeners it bound, and the direct-tcpip targets it was asked to reach.
 	allowForward  bool
@@ -209,6 +216,29 @@ func newFixture(t *testing.T, password string, acceptedKey gossh.Signer) *fixtur
 		forwards:     map[string]net.Listener{},
 	}
 	config := &gossh.ServerConfig{
+		// Keyboard-interactive is OFFERED only when the fixture is armed with an
+		// answer, which is a real distinction: a host configured for passwords
+		// or keys alone answers this method with a refusal, and a test that
+		// wants the rung exercised has to say so.
+		KeyboardInteractiveCallback: func(_ gossh.ConnMetadata, ch gossh.KeyboardInteractiveChallenge) (*gossh.Permissions, error) {
+			f.mu.Lock()
+			want := f.kbdPassword
+			f.mu.Unlock()
+			if want == "" {
+				return nil, errors.New("keyboard-interactive refused")
+			}
+			answers, err := ch("", "", []string{"Password: "}, []bool{false})
+			f.mu.Lock()
+			f.kbdPrompts = append(f.kbdPrompts, answers...)
+			f.mu.Unlock()
+			if err != nil {
+				return nil, err
+			}
+			if len(answers) != 1 || answers[0] != want {
+				return nil, errors.New("keyboard-interactive answer refused")
+			}
+			return nil, nil
+		},
 		PasswordCallback: func(_ gossh.ConnMetadata, pw []byte) (*gossh.Permissions, error) {
 			f.mu.Lock()
 			f.passwords = append(f.passwords, string(pw))
@@ -716,6 +746,14 @@ func (f *fixture) hostPort(t *testing.T) (string, int) {
 	return addr, port
 }
 
+// kbdAnswersSeen reports the answers this host received for its
+// keyboard-interactive challenge, in order.
+func (f *fixture) kbdAnswersSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.kbdPrompts...)
+}
+
 func (f *fixture) authAttempts() (passwords, keyFingerprints []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -750,9 +788,18 @@ type coordinator struct {
 	// refusal with its own code, and not an internal error.
 	sealed bool
 
-	mu    sync.Mutex
-	ops   []string
-	trust []proto.TrustHostKeyParams
+	// promptAnswers is what this coordinator's person says when the helper
+	// relays a server's keyboard-interactive questions. Nil means nobody is
+	// there to answer, which is what the refused pair scripts; promptRefusal,
+	// when set, is answered instead — the cancelled prompt and the coordinator
+	// with no renderer attached.
+	promptAnswers []string
+	promptRefusal *proto.Refusal
+
+	mu      sync.Mutex
+	ops     []string
+	trust   []proto.TrustHostKeyParams
+	prompts []proto.PromptParams
 }
 
 func (c *coordinator) registry() *client.ReverseRegistry {
@@ -778,6 +825,24 @@ func (c *coordinator) registry() *client.ReverseRegistry {
 			return nil, err
 		}
 		return proto.SignResult{Signature: gossh.Marshal(sig)}, nil
+	})
+	r.Register(proto.ServiceSSH, proto.OpPrompt, func(_ context.Context, raw json.RawMessage) (any, error) {
+		c.record(proto.OpPrompt)
+		var p proto.PromptParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		c.mu.Lock()
+		c.prompts = append(c.prompts, p)
+		refusal, answers := c.promptRefusal, c.promptAnswers
+		c.mu.Unlock()
+		if refusal != nil {
+			return nil, refusal
+		}
+		if len(answers) != len(p.Prompts) {
+			return nil, &proto.Refusal{Code: proto.ErrCodeInternal, Message: "this coordinator was asked something nobody scripted"}
+		}
+		return proto.PromptResult{Answers: answers}, nil
 	})
 	r.Register(proto.ServiceSSH, proto.OpVerifyHostKey, func(_ context.Context, _ json.RawMessage) (any, error) {
 		c.record(proto.OpVerifyHostKey)
@@ -815,6 +880,14 @@ func (c *coordinator) asked() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]string(nil), c.ops...)
+}
+
+// promptsAsked reports the questions the helper relayed, in order: the evidence
+// that the SERVER's own text crossed rather than a question nocx invented.
+func (c *coordinator) promptsAsked() []proto.PromptParams {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]proto.PromptParams(nil), c.prompts...)
 }
 
 func (c *coordinator) trusted() []proto.TrustHostKeyParams {
@@ -931,10 +1004,12 @@ func passwordProbeParams(t *testing.T, f *fixture) proto.ProbeParams {
 	t.Helper()
 	host, port := f.hostPort(t)
 	return proto.ProbeParams{
-		Host: host, Port: port, User: "test",
-		Identity: proto.SSHIdentity{
-			Credential: proto.SSHCredential{Ref: wantRef},
-			Auth:       proto.SSHAuthPassword,
+		Destination: proto.SSHDestination{
+			Host: host, Port: port, User: "test",
+			Identity: proto.SSHIdentity{
+				Credential: &proto.SSHCredential{Ref: wantRef},
+				Auth:       proto.SSHAuthPassword,
+			},
 		},
 	}
 }
@@ -944,8 +1019,18 @@ func passwordProbeParams(t *testing.T, f *fixture) proto.ProbeParams {
 func keyProbeParams(t *testing.T, f *fixture, offer gossh.Signer) proto.ProbeParams {
 	t.Helper()
 	p := passwordProbeParams(t, f)
-	p.Identity.Auth = proto.SSHAuthKey
-	p.Identity.PublicKey = offer.PublicKey().Marshal()
+	p.Destination.Identity.Auth = proto.SSHAuthKey
+	p.Destination.Identity.PublicKey = offer.PublicKey().Marshal()
+	return p
+}
+
+// interactiveProbeParams builds the params for a keyboard-interactive rung: no
+// credential reference and no public key, because the person IS the credential
+// and there is nothing stored to name.
+func interactiveProbeParams(t *testing.T, f *fixture) proto.ProbeParams {
+	t.Helper()
+	p := passwordProbeParams(t, f)
+	p.Destination.Identity = proto.SSHIdentity{Auth: proto.SSHAuthInteractive}
 	return p
 }
 

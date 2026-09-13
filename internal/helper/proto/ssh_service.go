@@ -186,6 +186,25 @@ const (
 	// other option: `knownhosts` is a forbidden import there, so its host-key
 	// callback cannot decide anything by itself (internal/helper/deploy).
 	OpVerifyHostKey = "verify-host-key"
+	// OpPrompt asks the coordinator's UI for the answers a server's
+	// keyboard-interactive challenge needs, and answers with them.
+	//
+	// It is the ONE reverse op whose subject is a PERSON rather than a stored
+	// secret, and the separation is the point: `secret` returns material the
+	// coordinator already holds, while this returns something nobody holds
+	// until the question is asked. It carries the server's own prompts — their
+	// text and whether the answer is echoed — because that is what makes the
+	// ask answerable by somebody who is not looking at the far host (a
+	// "Password:" and a "Verification code:" are different questions), and
+	// because inventing a question of nocx's own would leave the person
+	// answering something the server did not ask.
+	//
+	// A coordinator with no UI attached refuses it by name (ErrCodeNoAuthChannel
+	// when no connection is there to ask, ErrCodePromptCancelled when a person
+	// dismissed the question), and neither refusal is a fallback: the helper
+	// has nothing to present and says so rather than guessing at an empty
+	// answer, which a server would read as a wrong password.
+	OpPrompt = "prompt"
 	// OpTrustHostKey records a key the coordinator has already decided to
 	// accept. The DECISION is not made here: it travels in ProbeParams
 	// .AcceptOnTrust, set by the caller that has asked whatever it asks before
@@ -221,6 +240,21 @@ const (
 	// SSHAuthKey proves possession of the credential's private key by
 	// signing the handshake's challenge.
 	SSHAuthKey SSHAuthKind = "key"
+	// SSHAuthInteractive answers the SERVER's own keyboard-interactive
+	// prompts, and it is a kind of its own rather than a spelling of
+	// SSHAuthPassword because the method is not the same one: `password`
+	// carries no question and is answered by a callback that produces the
+	// stored secret, while this one carries the far side's prompts — their
+	// text and whether an answer is echoed — to a PERSON, through the
+	// coordinator's own ask (proto.OpPrompt).
+	//
+	// It has no credential reference and no public key, and that absence is
+	// the honest shape: there is nothing stored to name and nothing to offer
+	// before the server speaks. The coordinator resolves this rung only when
+	// the connection has a password requester wired (ssh.ConnectConfig
+	// .PasswordRequester), which is exactly the boundary a PROBE crosses the
+	// other way — a probe dials without one, so it cannot raise a prompt.
+	SSHAuthInteractive SSHAuthKind = "interactive"
 )
 
 // SSHIdentity is the credential a probe authenticates with, plus the public
@@ -231,29 +265,45 @@ const (
 // absent for SSHAuthPassword; a helper that is asked to sign with a key it was
 // not given will refuse rather than invent one.
 type SSHIdentity struct {
-	Credential SSHCredential `json:"credential"`
-	Auth       SSHAuthKind   `json:"auth"`
+	// Credential is a POINTER so that "this identity carries no credential" is
+	// a fact on the wire rather than a zero-valued struct: encoding/json's
+	// omitempty does not omit a struct, so an interactive rung would otherwise
+	// carry {"credential":{"ref":""}} — which the frozen schema must either
+	// accept as noise (making "a password identity names material" unenforced)
+	// or reject, while a nil credential is simply not there. The schema
+	// requires it exactly for password and key auth, and forbids it for
+	// interactive.
+	Credential *SSHCredential `json:"credential,omitempty"`
+	Auth       SSHAuthKind    `json:"auth"`
 	// PublicKey is base64 in JSON (encoding/json's []byte). Public material:
 	// it is what the peer learns anyway on the first packet.
 	PublicKey []byte `json:"publicKey,omitempty"`
 }
 
+// CredentialOf answers the credential this identity carries, as a value: the
+// interactive rung carries none, and every caller that reads a field rather
+// than a pointer reads it through here instead of testing for nil itself.
+func (id SSHIdentity) CredentialOf() SSHCredential {
+	if id.Credential == nil {
+		return SSHCredential{}
+	}
+	return *id.Credential
+}
+
 // ProbeParams is one credential test against one host.
 //
-// Host, Port and User are RESOLVED values. Alias resolution, ~/.ssh/config
-// merging and the credential's own authorization against the endpoint stay in
-// the coordinator — it is the party that reads the config and holds the
-// binding, and moving that into the helper would be a second answer to "which
-// host is this" (plan §3). The helper dials exactly what it is told.
+// It carries the SAME destination every other op takes (proto.SSHDestination)
+// rather than its own copy of the address, the account and the credential, for
+// the reason this whole package is one file per subject: a probe, a channel, a
+// forward and a lane all ask the same question — who is this and how does one
+// dial it — and four declarations of it would be four places for a hop or a
+// storage identity to be forgotten. A route reached through jump hosts is
+// therefore testable by the settings surface exactly as it is openable by a
+// pane, which is the difference between "does this credential work" being
+// answered about the host the person named and about a host they cannot reach.
 type ProbeParams struct {
-	Host string `json:"host"`
-	Port int    `json:"port"`
-	User string `json:"user"`
-	// Identity is what to authenticate with. It is required: a probe with no
-	// credential is not a question this op can answer, and letting it fall
-	// through to "try nothing" would report the host's refusal as the
-	// credential's.
-	Identity SSHIdentity `json:"identity"`
+	// Destination is the resolved address, account, credential and route.
+	Destination SSHDestination `json:"destination"`
 	// AcceptOnTrust is the coordinator's answer to "may a key this host has
 	// never presented be recorded". It is the CALLER's decision travelling
 	// with the request: the coordinator sets it only after the accept flow it
@@ -393,17 +443,67 @@ type SignResult struct {
 	Signature []byte `json:"signature"`
 }
 
+// PromptParams asks the coordinator's UI the questions a server's
+// keyboard-interactive challenge carries.
+//
+// Host, Port and User are what the ask is ABOUT, and they are here so the
+// question can name the connection it belongs to — the same discipline
+// ssh.PasswordRequest applies on the coordinator's own prompt rung, where a
+// bare "enter password" box is how the wrong password ends up in the wrong
+// connection. They are the RESOLVED values the destination carried, never
+// re-derived here.
+type PromptParams struct {
+	Host string `json:"host"`
+	Port int    `json:"port"`
+	User string `json:"user"`
+	// Prompts are the server's questions, in the order it asked them. An
+	// empty list is refused rather than answered with nothing: a
+	// keyboard-interactive challenge with no prompts is a protocol event this
+	// helper has no question to relay for.
+	Prompts []Prompt `json:"prompts"`
+}
+
+// Prompt is ONE question a server asked during a keyboard-interactive
+// challenge: its own text, and whether the answer is echoed.
+//
+// Both fields are the SERVER's, passed through unchanged. Echo is load-bearing
+// in a way that is easy to lose: a UI that does not know a question is a
+// secret would print the answer on a screen, and one that assumes every
+// question is a secret would hide a "Verification code:" the person needs to
+// see as they type it.
+type Prompt struct {
+	Prompt string `json:"prompt"`
+	Echo   bool   `json:"echo"`
+}
+
+// PromptResult carries the answers, positionally matched to PromptParams
+// .Prompts. Position rather than a key or a label, because that is what
+// keyboard-interactive IS: the protocol answers a challenge's list in order,
+// and a mapping would be a second spelling of an order the protocol already
+// fixes.
+type PromptResult struct {
+	Answers []string `json:"answers"`
+}
+
 // VerifyHostKeyParams asks what to make of a host key the helper was just
 // offered during a handshake.
 type VerifyHostKeyParams struct {
-	// Host is the storage identity the coordinator looks the key up under —
-	// an address for a direct route. It is the coordinator's value and not
-	// something the helper derives: the identity of a route through a jump
-	// host is a digest only the coordinator can compute (ssh_real.go's
-	// knownHostsTargetAddr), and a helper that guessed it would write a line
-	// the next connection would not find.
-	Host      string `json:"host"`
-	Algorithm string `json:"algorithm"`
+	// Host is the address the key was OFFERED for: the address this helper
+	// dialed. It is what the resulting error and its evidence name, and it is
+	// what a person is shown.
+	Host string `json:"host"`
+	// KnownHostsAddr is the address the coordinator looks the key up under —
+	// its STORAGE identity, which is the offered address for a direct route
+	// and a route digest for a destination reached through a jump host
+	// (ssh_real.go's knownHostsTargetAddr). It is the coordinator's value and
+	// not something the helper derives: the helper echoes what the
+	// destination carried (proto.SSHDestination.KnownHostsAddr), and a helper
+	// that guessed the digest would look for a line the coordinator's next
+	// connection would not write.
+	//
+	// Empty means the offered address, which is the direct route's answer.
+	KnownHostsAddr string `json:"knownHostsAddr,omitempty"`
+	Algorithm      string `json:"algorithm"`
 	// Key is the wire-format public key blob the peer presented.
 	Key []byte `json:"key"`
 }
@@ -477,6 +577,54 @@ type SSHDestination struct {
 	// the helper must declare before it is asked to sign. Required: a channel
 	// with no credential is not a question this op can answer.
 	Identity SSHIdentity `json:"identity"`
+	// Jumps are the hosts this destination is reached THROUGH, in dial order:
+	// Jumps[0] is dialed from this machine, Jumps[1] through Jumps[0], and the
+	// destination through the last of them. Each hop is a destination in its
+	// own right — its own address, its own account, its own credential
+	// reference and its own host key to verify — because a route is a chain of
+	// independent handshakes and not one connection with a longer address.
+	//
+	// It is a flat, ordered list rather than a nesting of destinations, and
+	// that is a decision rather than a simplification: a hop that carried its
+	// own route would be a second way to say the same thing, and the two would
+	// have to agree about traversal order. The coordinator flattens its own
+	// recursive jump chain into this list; the helper walks it from the front.
+	Jumps []SSHHop `json:"jumps,omitempty"`
+	// KnownHostsAddr is the address this destination's host key is STORED
+	// under — the coordinator's own storage identity for it, which is not the
+	// dial address when the destination is reached through a jump host
+	// (ssh.RealClient's route record: a key accepted through one bastion must
+	// never vouch for the same host dialed directly, or for the same host
+	// through a different one).
+	//
+	// It travels WITH the destination because the derivation is the
+	// coordinator's: known_hosts is its file, the route hash is its rule, and a
+	// helper that re-derived either would be a second answer to "which machine
+	// is this" (AD-8). Empty means the dial address is the storage identity,
+	// which is the direct route's answer and the only one a hop can have.
+	KnownHostsAddr string `json:"knownHostsAddr,omitempty"`
+}
+
+// SSHHop is one INTERMEDIATE host a destination is reached through: a
+// destination in every respect except that it carries no route of its own,
+// because a route is the flat list above and a hop inside it cannot be
+// re-routed without a second way to say what order to walk.
+//
+// Its fields are the destination's, spelled once more rather than shared by
+// embedding, for a reason the schema can enforce: a hop must not be able to
+// carry `jumps` at all, and `additionalProperties: false` says that — while a
+// shared declaration would let a document nest a route inside a route and
+// leave the helper deciding which one it meant.
+type SSHHop struct {
+	Host     string      `json:"host"`
+	Port     int         `json:"port"`
+	User     string      `json:"user"`
+	Identity SSHIdentity `json:"identity"`
+	// KnownHostsAddr is the hop's own storage identity, resolved exactly as
+	// the destination's is (a hop that is itself reached through a later hop
+	// has a route-hashed one). Empty means the hop's dial address, which is
+	// the ordinary case.
+	KnownHostsAddr string `json:"knownHostsAddr,omitempty"`
 }
 
 // ChannelKind is the closed set of proxied channels this generation opens.
@@ -735,6 +883,13 @@ const (
 	// coordinator has nowhere to read. It is the key half of the
 	// `needs-interactive` outcome the probe reports.
 	ErrCodeNeedsInteractive = "needs_interactive"
+	// ErrCodePromptCancelled means the coordinator asked a person and the
+	// person dismissed the question. It is its own code rather than a
+	// `needs_interactive` because the two are different states of the world:
+	// `needs_interactive` says the material exists and nobody can supply it,
+	// while this says somebody was asked and declined — which is a decision,
+	// and one a caller must not answer by retrying.
+	ErrCodePromptCancelled = "prompt_cancelled"
 	// ErrCodeChannelRefused means the far side would not give the helper the
 	// channel it asked for: the server refused the session, or it refused the
 	// subsystem request on the session it did open. ONE code for the two,

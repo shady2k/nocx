@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -341,6 +342,88 @@ func TestASignalledSSHPaneTakesTheChannelRequest(t *testing.T) {
 // the changed key never verified — and would pass while proving nothing. A
 // fresh fixture is a fresh port, which is a fresh pool key, which is a real
 // dial.
+// TestAPaneReachesAHostBehindAJumpHost is the ROUTE acceptance for a pane: the
+// helper dials a bastion, dials the destination THROUGH it, and opens the
+// shell on that connection — with each hop authenticated once and its host key
+// verified by the coordinator.
+//
+// The fixture is a real ssh server that proxies `direct-tcpip` channels, which
+// is exactly what a jump host is; the assertion that the route was really
+// traversed is the bastion's own record of WHICH ADDRESS it was asked to reach,
+// beside the connection count on each end. A helper that had dropped the hops
+// would dial the destination directly — and would still reach it, because both
+// fixtures are on loopback, which is why the bastion's own record is the
+// evidence and not the pane's success.
+func TestAPaneReachesAHostBehindAJumpHost(t *testing.T) {
+	bastion := newSSHFixture(t, "pw", "")
+	target := newSSHFixture(t, "pw", "printf 'ROUTED\n'; cat")
+
+	// The scripted coordinator answers one password for every reference it is
+	// asked about, which is what lets one principal stand for both hops: each
+	// hop asks separately, over the connection its own request arrived on.
+	coord := &sshCoordinator{
+		password: "pw", verdict: proto.HostKeyTrusted, fingerprint: target.fingerprint(),
+	}
+	stand := newSSHStand(t, target, coord)
+
+	host, port := target.hostPort(t)
+	bHost, bPort := bastion.hostPort(t)
+	wantTarget := net.JoinHostPort(host, strconv.Itoa(port))
+	params := proto.SSHSpawnParams{
+		Destination: proto.SSHDestination{
+			Host: host, Port: port, User: "test",
+			Identity: proto.SSHIdentity{
+				Credential: &proto.SSHCredential{Ref: sshTestRef},
+				Auth:       proto.SSHAuthPassword,
+			},
+			// The bastion, with its OWN address, account and credential — a
+			// hop is a destination that is not routed any further.
+			Jumps: []proto.SSHHop{{
+				Host: bHost, Port: bPort, User: "jumper",
+				Identity: proto.SSHIdentity{
+					Credential: &proto.SSHCredential{Ref: sshTestJumpRef},
+					Auth:       proto.SSHAuthPassword,
+				},
+			}},
+		},
+		AcceptOnTrust:      true,
+		HostKeyFingerprint: target.fingerprint(),
+		Cols:               80,
+		Rows:               24,
+		DesiredMode:        proto.SSHModeRaw,
+	}
+
+	entry := stand.mustSpawn(t, params)
+	if !entry.IsRemote() {
+		t.Fatalf("the session's launch record is not the ssh branch: %+v", entry)
+	}
+	// The event: the far program ran, on the far side of the bastion.
+	if out := target.waitFarOutput(t, "ROUTED"); !strings.Contains(out, "ROUTED") {
+		t.Fatalf("the far program's output is %q, want the token it printed", out)
+	}
+
+	// ONE connection per hop, counted by the servers themselves: the bastion
+	// authenticated once and the destination once. A helper that dialed the
+	// destination directly would leave the bastion at zero; one that dialed a
+	// fresh route per channel would show more than one on either end.
+	if got := bastion.connections(); got != 1 {
+		t.Fatalf("the bastion authenticated %d connection(s), want exactly 1", got)
+	}
+	if got := target.connections(); got != 1 {
+		t.Fatalf("the destination authenticated %d connection(s), want exactly 1", got)
+	}
+	// And the bastion was asked to reach the destination's address, which is
+	// what "through the jump host" means.
+	if seen := bastion.directTargetsSeen(); len(seen) != 1 || seen[0] != wantTarget {
+		t.Fatalf("the bastion was asked to reach %v, want exactly %s", seen, wantTarget)
+	}
+	if asked := coord.asked(); !contains(asked, proto.OpVerifyHostKey) {
+		t.Fatalf("the helper never asked the coordinator about a host key; it asked %v", asked)
+	}
+	t.Logf("MEASURED bastion %d auth(s) reaching %v, destination %d auth(s)",
+		bastion.connections(), bastion.directTargetsSeen(), target.connections())
+}
+
 func TestSpawnSSHRefusesByNameWithAPairedSuccess(t *testing.T) {
 	// mutate bends the request or the coordinator and answers how to put it
 	// back. The refusal runs FIRST, while this destination has no pooled

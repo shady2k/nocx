@@ -27,6 +27,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/vault"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -135,7 +136,7 @@ func TestTheSecretHandlerReadsTheMaterialTheReferenceNames(t *testing.T) {
 	f := newReverseFixture(t, map[credential.SecretID][]byte{"cred-1": []byte("hunter2")})
 
 	result, err := f.handlers.secret(context.Background(), params(t, proto.SecretParams{
-		Credential: proto.SSHCredential{Ref: "cred-1"},
+		Credential: proto.SSHCredential{Ref: ssh.VaultRef("cred-1").String()},
 		Purpose:    proto.PurposePassword,
 	}))
 	if err != nil {
@@ -162,7 +163,7 @@ func TestTheSecretHandlerRefusesASealedVaultByItsOwnName(t *testing.T) {
 	f.secrets.err = vault.ErrVaultSealed
 
 	_, err := f.handlers.secret(context.Background(), params(t, proto.SecretParams{
-		Credential: proto.SSHCredential{Ref: "cred-1"},
+		Credential: proto.SSHCredential{Ref: ssh.VaultRef("cred-1").String()},
 		Purpose:    proto.PurposePassword,
 	}))
 	if code := reverseRefusalCode(t, err); code != proto.ErrCodeVaultSealed {
@@ -182,22 +183,22 @@ func TestTheSecretHandlerRefusesWhatItCannotResolve(t *testing.T) {
 	}{
 		{
 			"a purpose this coordinator does not know",
-			proto.SecretParams{Credential: proto.SSHCredential{Ref: "cred-1"}, Purpose: "otp"},
+			proto.SecretParams{Credential: proto.SSHCredential{Ref: ssh.VaultRef("cred-1").String()}, Purpose: "otp"},
 			proto.ErrCodeBadParams,
 		},
 		{
 			"a passphrase asked for by a credential that has none",
-			proto.SecretParams{Credential: proto.SSHCredential{Ref: "cred-1"}, Purpose: proto.PurposePassphrase},
+			proto.SecretParams{Credential: proto.SSHCredential{Ref: ssh.VaultRef("cred-1").String()}, Purpose: proto.PurposePassphrase},
 			proto.ErrCodeBadParams,
 		},
 		{
 			"a credential reference with nothing behind it",
-			proto.SecretParams{Credential: proto.SSHCredential{Ref: "no-such-id"}, Purpose: proto.PurposePassword},
+			proto.SecretParams{Credential: proto.SSHCredential{Ref: ssh.VaultRef("no-such-id").String()}, Purpose: proto.PurposePassword},
 			"",
 		},
 		{
 			"stored material that is empty",
-			proto.SecretParams{Credential: proto.SSHCredential{Ref: "empty"}, Purpose: proto.PurposePassword},
+			proto.SecretParams{Credential: proto.SSHCredential{Ref: ssh.VaultRef("empty").String()}, Purpose: proto.PurposePassword},
 			"",
 		},
 	}
@@ -230,7 +231,7 @@ func TestTheSignHandlerSignsWithTheStoredKey(t *testing.T) {
 
 	challenge := []byte("the handshake's challenge")
 	result, err := f.handlers.sign(context.Background(), params(t, proto.SignParams{
-		Credential: proto.SSHCredential{Ref: "key-1"},
+		Credential: proto.SSHCredential{Ref: ssh.VaultRef("key-1").String()},
 		Challenge:  challenge,
 		Algorithm:  signer.PublicKey().Type(),
 	}))
@@ -268,7 +269,7 @@ func TestTheSignHandlerUnlocksAnEncryptedKeyWithItsPassphrase(t *testing.T) {
 
 	challenge := []byte("another challenge")
 	result, err := f.handlers.sign(context.Background(), params(t, proto.SignParams{
-		Credential: proto.SSHCredential{Ref: "key-1", PassphraseRef: "key-1-pass"},
+		Credential: proto.SSHCredential{Ref: ssh.VaultRef("key-1").String(), PassphraseRef: ssh.VaultRef("key-1-pass").String()},
 		Challenge:  challenge,
 		Algorithm:  signer.PublicKey().Type(),
 	}))
@@ -296,7 +297,7 @@ func TestTheSignHandlerReportsALockedKeyAsNeedsInteractive(t *testing.T) {
 	f := newReverseFixture(t, map[credential.SecretID][]byte{"key-1": keyPEM})
 
 	_, err := f.handlers.sign(context.Background(), params(t, proto.SignParams{
-		Credential: proto.SSHCredential{Ref: "key-1"},
+		Credential: proto.SSHCredential{Ref: ssh.VaultRef("key-1").String()},
 		Challenge:  []byte("challenge"),
 		Algorithm:  signer.PublicKey().Type(),
 	}))
@@ -315,7 +316,7 @@ func TestTheSignHandlerRefusesWhatItMustNotSign(t *testing.T) {
 	}{
 		{
 			"no challenge — signing nothing is not a discovery question",
-			proto.SignParams{Credential: proto.SSHCredential{Ref: "key-1"}, Algorithm: signer.PublicKey().Type()},
+			proto.SignParams{Credential: proto.SSHCredential{Ref: ssh.VaultRef("key-1").String()}, Algorithm: signer.PublicKey().Type()},
 		},
 		{
 			"no credential",
@@ -323,11 +324,11 @@ func TestTheSignHandlerRefusesWhatItMustNotSign(t *testing.T) {
 		},
 		{
 			"no algorithm",
-			proto.SignParams{Credential: proto.SSHCredential{Ref: "key-1"}, Challenge: []byte("c")},
+			proto.SignParams{Credential: proto.SSHCredential{Ref: ssh.VaultRef("key-1").String()}, Challenge: []byte("c")},
 		},
 		{
 			"an algorithm the key is not",
-			proto.SignParams{Credential: proto.SSHCredential{Ref: "key-1"}, Challenge: []byte("c"), Algorithm: "ssh-rsa"},
+			proto.SignParams{Credential: proto.SSHCredential{Ref: ssh.VaultRef("key-1").String()}, Challenge: []byte("c"), Algorithm: "ssh-rsa"},
 		},
 	}
 	for _, tc := range cases {
@@ -491,4 +492,218 @@ func bytesContainsAny(haystack, needle []byte) bool {
 		}
 	}
 	return false
+}
+
+// ── prompt ─────────────────────────────────────────────────────────────
+
+// promptAsker is the renderer-facing seam a helper's keyboard-interactive
+// question is answered through. It records what was asked and answers with a
+// scripted value, or with the transport's own refusal for a person who said no.
+type promptAsker struct {
+	answer string
+	err    error
+	mu     sync.Mutex
+	asked  []ssh.PasswordRequest
+}
+
+func (p *promptAsker) RequestConnectionPassword(_ context.Context, req ssh.PasswordRequest) (ssh.PasswordAnswer, error) {
+	p.mu.Lock()
+	p.asked = append(p.asked, req)
+	err := p.err
+	p.mu.Unlock()
+	if err != nil {
+		return ssh.PasswordAnswer{}, err
+	}
+	return ssh.PasswordAnswer{Password: p.answer}, nil
+}
+
+func (p *promptAsker) questions() []ssh.PasswordRequest {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]ssh.PasswordRequest(nil), p.asked...)
+}
+
+// TestThePromptHandlerAsksThePersonTheServersOwnQuestion is the coordinator's
+// half of the keyboard-interactive rung, and the assertion is about the QUESTION
+// rather than the answer: the server's text and its echo flag are what the
+// person sees, and a handler that substituted a sentence of its own would leave
+// them answering something nobody asked.
+func TestThePromptHandlerAsksThePersonTheServersOwnQuestion(t *testing.T) {
+	f := newReverseFixture(t, nil)
+	asker := &promptAsker{answer: "hunter2"}
+	f.handlers.prompts = &helperPrompt{asker: asker, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	raw, err := f.handlers.prompt(context.Background(), params(t, proto.PromptParams{
+		Host: "prod.example.com", Port: 22, User: "deploy",
+		Prompts: []proto.Prompt{{Prompt: "Password: ", Echo: false}},
+	}))
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	result, ok := raw.(proto.PromptResult)
+	if !ok {
+		t.Fatalf("prompt answered %T, want a PromptResult", raw)
+	}
+	if len(result.Answers) != 1 || result.Answers[0] != "hunter2" {
+		t.Fatalf("answers = %v, want the person's answer", result.Answers)
+	}
+	asked := asker.questions()
+	if len(asked) != 1 {
+		t.Fatalf("the person was asked %d question(s), want 1", len(asked))
+	}
+	if asked[0].Reason != "Password: " {
+		t.Fatalf("the ask's reason is %q, want the server's own question verbatim", asked[0].Reason)
+	}
+	if asked[0].Host != "prod.example.com" || asked[0].User != "deploy" {
+		t.Fatalf("the ask does not name the connection it belongs to: %+v", asked[0])
+	}
+}
+
+// TestThePromptHandlerAsksOncePerQuestion is the multi-question case: a server
+// that asks for a password AND a code gets two asks, in order.
+//
+// Repeating one answer across both prompts would be the defect this test exists
+// for: the seam collects one value per ask, so a handler that copied the first
+// answer into the second slot would send a password into a verification-code
+// field.
+func TestThePromptHandlerAsksOncePerQuestion(t *testing.T) {
+	f := newReverseFixture(t, nil)
+	asker := &promptAsker{answer: "answer"}
+	f.handlers.prompts = &helperPrompt{asker: asker, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	raw, err := f.handlers.prompt(context.Background(), params(t, proto.PromptParams{
+		Host: "prod.example.com", Port: 22, User: "deploy",
+		Prompts: []proto.Prompt{
+			{Prompt: "Password: ", Echo: false},
+			{Prompt: "Verification code: ", Echo: true},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	result, ok := raw.(proto.PromptResult)
+	if !ok {
+		t.Fatalf("prompt answered %T, want a PromptResult", raw)
+	}
+	if len(result.Answers) != 2 {
+		t.Fatalf("answers = %v, want one per question", result.Answers)
+	}
+	asked := asker.questions()
+	if len(asked) != 2 || asked[0].Reason != "Password: " || asked[1].Reason != "Verification code: " {
+		t.Fatalf("the person was asked %+v, want both questions in the server's order", asked)
+	}
+}
+
+// TestThePromptHandlerRefusesWhatItCannotAnswerItself covers the three states a
+// helper must be able to tell apart: a person who dismissed the question, a
+// coordinator with no renderer to ask, and a request that is not a question at
+// all. Each is a NAMED refusal, because the alternative — an empty answer — is a
+// password attempt nobody made.
+func TestThePromptHandlerRefusesWhatItCannotAnswerItself(t *testing.T) {
+	t.Run("the person dismissed it", func(t *testing.T) {
+		f := newReverseFixture(t, nil)
+		f.handlers.prompts = &helperPrompt{
+			asker: &promptAsker{err: transport.ErrPasswordPromptCancelled},
+			log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		}
+		_, err := f.handlers.prompt(context.Background(), params(t, promptRequest()))
+		if got := reverseRefusalCode(t, err); got != proto.ErrCodePromptCancelled {
+			t.Fatalf("code = %q, want %q", got, proto.ErrCodePromptCancelled)
+		}
+	})
+
+	t.Run("no renderer is attached", func(t *testing.T) {
+		f := newReverseFixture(t, nil)
+		f.handlers.prompts = &helperPrompt{
+			asker: &promptAsker{err: transport.ErrPasswordNoClientConnected},
+			log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		}
+		_, err := f.handlers.prompt(context.Background(), params(t, promptRequest()))
+		if got := reverseRefusalCode(t, err); got != proto.ErrCodeNoAuthChannel {
+			t.Fatalf("code = %q, want %q", got, proto.ErrCodeNoAuthChannel)
+		}
+	})
+
+	t.Run("this coordinator has no prompt seam wired", func(t *testing.T) {
+		f := newReverseFixture(t, nil)
+		f.handlers.prompts = &helperPrompt{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+		_, err := f.handlers.prompt(context.Background(), params(t, promptRequest()))
+		if got := reverseRefusalCode(t, err); got != proto.ErrCodeNoAuthChannel {
+			t.Fatalf("code = %q, want %q", got, proto.ErrCodeNoAuthChannel)
+		}
+	})
+
+	t.Run("a challenge with no questions", func(t *testing.T) {
+		f := newReverseFixture(t, nil)
+		f.handlers.prompts = &helperPrompt{asker: &promptAsker{answer: "x"}, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+		_, err := f.handlers.prompt(context.Background(), params(t, proto.PromptParams{
+			Host: "prod.example.com", Port: 22, User: "deploy",
+		}))
+		if got := reverseRefusalCode(t, err); got != proto.ErrCodeBadParams {
+			t.Fatalf("code = %q, want %q", got, proto.ErrCodeBadParams)
+		}
+	})
+
+	// A request that is not an ENDPOINT is refused before it reaches the ask:
+	// the question's host, account and port are what the dialog names the
+	// connection by, and a renderer shown "someone@:0" has been handed a fact
+	// nobody resolved.
+	malformed := []struct {
+		name string
+		p    proto.PromptParams
+	}{
+		{"no host", proto.PromptParams{Port: 22, User: "deploy", Prompts: []proto.Prompt{{Prompt: "Password: "}}}},
+		{"no account", proto.PromptParams{Host: "prod.example.com", Port: 22, Prompts: []proto.Prompt{{Prompt: "Password: "}}}},
+		{"no port", proto.PromptParams{Host: "prod.example.com", User: "deploy", Prompts: []proto.Prompt{{Prompt: "Password: "}}}},
+		{"an impossible port", proto.PromptParams{Host: "prod.example.com", Port: 70000, User: "deploy", Prompts: []proto.Prompt{{Prompt: "Password: "}}}},
+	}
+	for _, tc := range malformed {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newReverseFixture(t, nil)
+			asker := &promptAsker{answer: "x"}
+			f.handlers.prompts = &helperPrompt{asker: asker, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+			_, err := f.handlers.prompt(context.Background(), params(t, tc.p))
+			if got := reverseRefusalCode(t, err); got != proto.ErrCodeBadParams {
+				t.Fatalf("code = %q, want %q", got, proto.ErrCodeBadParams)
+			}
+			if asked := asker.questions(); len(asked) != 0 {
+				t.Fatalf("a person was asked %+v by a request that names no endpoint", asked)
+			}
+		})
+	}
+}
+
+// promptRequest is one ordinary keyboard-interactive challenge.
+func promptRequest() proto.PromptParams {
+	return proto.PromptParams{
+		Host: "prod.example.com", Port: 22, User: "deploy",
+		Prompts: []proto.Prompt{{Prompt: "Password: ", Echo: false}},
+	}
+}
+
+// ── references ─────────────────────────────────────────────────────────
+
+// TestASecretIsNeverReadOutOfAFileOrAnAgent is the grammar's own guard: the
+// material a helper PRESENTS is always stored material, so a file or agent
+// reference asked for as a password is refused rather than answered with a
+// private key read off disk.
+func TestASecretIsNeverReadOutOfAFileOrAnAgent(t *testing.T) {
+	f := newReverseFixture(t, map[credential.SecretID][]byte{"cred-1": []byte("pw")})
+
+	for _, ref := range []ssh.CredentialRef{
+		ssh.FileRef("/home/u/.ssh/id_ed25519"),
+		ssh.AgentRef("SHA256:whatever"),
+	} {
+		_, err := f.handlers.secret(context.Background(), params(t, proto.SecretParams{
+			Credential: proto.SSHCredential{Ref: ref.String()},
+			Purpose:    proto.PurposePassword,
+		}))
+		if got := reverseRefusalCode(t, err); got != proto.ErrCodeBadParams {
+			t.Fatalf("a %s reference asked for as a password answered %q, want %q", ref.Kind(), got, proto.ErrCodeBadParams)
+		}
+	}
+	if ids := f.secrets.resolvedIDs(); len(ids) != 0 {
+		t.Fatalf("the store was read for %v, want nothing: neither reference names stored material", ids)
+	}
 }

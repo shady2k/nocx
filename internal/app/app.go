@@ -991,12 +991,15 @@ func New(opts ...Option) (*App, error) {
 
 	// THE ANSWERS THIS COORDINATOR GIVES ITS HELPER (nocx-50w7p.2). A helper
 	// that dials has to ask for the material it may present, a signature it
-	// cannot make, and a verdict on a host key it has no file to consult — and
-	// every one of those answers already lives in this process (the vault, the
-	// ssh client's known_hosts). They are bound here, where both exist, and
-	// handed to the connection the local opener builds (helper_local.go's
-	// connect), which is the only place a helper can ask.
-	localOpener.setReverseHandlers(helperReverseHandlers(sshClient, credResolver, slogger))
+	// cannot make, a verdict on a host key it has no file to consult, and —
+	// since nocx-50w7p.11 — the answer only a PERSON has. Every one of those
+	// answers already lives in this process (the vault, the ssh client's
+	// known_hosts, the renderer), and they are bound here, where the vault and
+	// the client exist. The prompt seam is filled in below, once the transport
+	// that raises the question is built: this root builds the transport late,
+	// so the holder is what lets one registry be complete either way.
+	helperPrompts := &helperPrompt{log: slogger}
+	localOpener.setReverseHandlers(helperReverseHandlers(sshClient, credResolver, helperPrompts, slogger))
 
 	// API requests resolve only opaque secrow handles through the capability
 	// seam. The terminal's ResolveLine remains name-based; this adapter is
@@ -1916,6 +1919,14 @@ func New(opts ...Option) (*App, error) {
 		// withdrawal, and both call Forget.
 		transport.WithPaneAdmissions(agentApprovalService))
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
+	// The prompt seam a helper's keyboard-interactive challenge needs is the
+	// transport's own connection-password ask — the same one the coordinator's
+	// dial path uses, so a helper's question and a dial's question raise one
+	// dialog with one set of outcomes (prompt cancelled, no renderer
+	// attached, the sealed vault). The transport is built here and the
+	// registry was bound above with the vault and the ssh client, which is
+	// what the holder exists for.
+	helperPrompts.set(tp)
 	agentApprovalService.SetRequester(tp)
 	toolSurface := newToolSurfaceMonitor(toolSurfaceDeadline, func(fact toolSurfaceFact) {
 		status := "unavailable"

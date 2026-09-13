@@ -36,6 +36,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,8 +44,8 @@ import (
 )
 
 // PooledSpec is one connection to acquire: a destination the CALLER has
-// already resolved, the identity component of the pool key, and the client
-// configuration to dial with.
+// already resolved, the route it is reached through, the identity component of
+// the pool key, and the client configuration to dial with.
 //
 // Host, Port and User are resolved values — an address and an account, never
 // an alias — for the reason proto.ProbeParams states: alias resolution and
@@ -68,11 +69,73 @@ type PooledSpec struct {
 	// that can answer the handshake's two questions (the helper asks the
 	// coordinator over the reverse channel and builds this from the answers).
 	Config *gossh.ClientConfig
+	// Route is the hosts this destination is reached THROUGH, in dial order:
+	// Route[0] is dialed from this machine, each next hop through the one
+	// before it, and this spec's own destination through the last. Empty for a
+	// direct connection.
+	//
+	// Each hop carries its own resolved address, its own identity and its own
+	// client configuration, because a route is a chain of independent
+	// handshakes: the hop's credential and the hop's host key are the
+	// coordinator's answers, one hop at a time, exactly as they are for the
+	// destination.
+	Route []PooledHop
 	// KeepaliveInterval and KeepaliveCountMax arm the same prober the
 	// coordinator's own connections carry, so a pooled connection that has
 	// gone quiet is noticed on this side of the wire too. Zero disables it.
 	KeepaliveInterval time.Duration
 	KeepaliveCountMax int
+}
+
+// PooledHop is one intermediate host a connection is dialed through. It is the
+// same four facts the destination is — address, account, pool identity, client
+// configuration — because a hop authenticates and is verified exactly as the
+// destination is; only its POOLING differs, and that is this package's decision
+// rather than the caller's.
+type PooledHop struct {
+	Host     string
+	Port     int
+	User     string
+	Identity string
+	Config   *gossh.ClientConfig
+}
+
+// routeHop is one endpoint this package is about to dial: a PooledHop and the
+// destination share this shape, and it exists so the dialing code has one
+// parameter type rather than two that agree by convention.
+type routeHop struct {
+	host     string
+	port     int
+	user     string
+	identity string
+	config   *gossh.ClientConfig
+}
+
+func (h PooledHop) routeHop() routeHop {
+	return routeHop{host: h.Host, port: h.Port, user: h.User, identity: h.Identity, config: h.Config}
+}
+
+// addr is the dial address of one endpoint.
+func (h routeHop) addr() string { return net.JoinHostPort(h.host, strconv.Itoa(h.port)) }
+
+// routeKeyOf renders an ordered route into the pool key's route component.
+//
+// It is built out of poolKey.jumpRouteKey — the same rendering the
+// coordinator's own pool keys use for their bastion — joined the same way the
+// coordinator joins a multi-hop chain, so the two pools identify a route by the
+// same string and a connection cannot be shared between two different routes.
+// An empty route renders empty, which is how a direct connection is spelled.
+func routeKeyOf(route []PooledHop) string {
+	if len(route) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(route))
+	for _, hop := range route {
+		parts = append(parts, poolKey{
+			host: hop.Host, port: hop.Port, user: hop.User, identity: hop.Identity,
+		}.jumpRouteKey())
+	}
+	return strings.Join(parts, ">")
 }
 
 // PooledConn is a borrowed reference to a pooled connection: the caller may
@@ -129,30 +192,31 @@ func (p *PooledConn) Close() error {
 // AcquirePooled returns a reference to the pooled connection for a resolved
 // spec, dialing it if no live connection with the same key exists.
 //
-// The dial runs through the same `dialDirect` the coordinator's own path uses,
-// so the context-aware handshake watchdog, the classification of an
-// authentication refusal and the known_hosts-free configuration all behave
-// identically — one implementation, two callers, which is the whole point of
-// the seam rather than a second dialer beside the first.
+// The dial runs through the same dialer the coordinator's own path uses, so the
+// context-aware handshake watchdog, the classification of an authentication
+// refusal and the known_hosts-free configuration all behave identically — one
+// implementation, two callers, which is the whole point of the seam rather than
+// a second dialer beside the first.
+//
+// A ROUTED spec dials its hops the way the coordinator's own jump path does:
+// each hop is itself acquired from this same pool (AD-4), so two destinations
+// behind one bastion share that bastion's authenticated connection, and the
+// bastion's reference is released when the last connection through it is. The
+// destination's key is what the pool entry carries — a hop's own fingerprint is
+// not what anybody keys consent by (ADR-0023 keys it by the machine a person
+// is connecting TO).
 func (rc *RealClient) AcquirePooled(ctx context.Context, spec PooledSpec) (*PooledConn, error) {
-	switch {
-	case spec.Host == "":
-		return nil, fmt.Errorf("ssh: pooled connection: no host")
-	case spec.Port <= 0 || spec.Port > 65535:
-		return nil, fmt.Errorf("ssh: pooled connection: port %d", spec.Port)
-	case spec.User == "":
-		return nil, fmt.Errorf("ssh: pooled connection: no user")
-	case spec.Config == nil:
-		return nil, fmt.Errorf("ssh: pooled connection: no client configuration")
+	if err := spec.validate(); err != nil {
+		return nil, err
 	}
 
 	key := poolKey{
-		host:     spec.Host,
-		port:     spec.Port,
-		user:     spec.User,
-		identity: spec.Identity,
+		host:      spec.Host,
+		port:      spec.Port,
+		user:      spec.User,
+		identity:  spec.Identity,
+		jumpRoute: routeKeyOf(spec.Route),
 	}
-	addr := net.JoinHostPort(spec.Host, strconv.Itoa(spec.Port))
 
 	dial := func(poolKey) (sshClientConn, error) {
 		// The TARGET host's fingerprint is captured here, at the one place a
@@ -162,6 +226,11 @@ func (rc *RealClient) AcquirePooled(ctx context.Context, spec PooledSpec) (*Pool
 		// acquisition is a cache hit and runs no handshake at all, so a
 		// fingerprint remembered per-acquire would be empty for every lease
 		// but the first — and the install path keys consent by it (ADR-0023).
+		//
+		// The HOPS are deliberately not captured: their keys are verified by
+		// the coordinator through the same ask, but the identity a lease
+		// reports is the destination's, which is the machine the consent
+		// decision is about.
 		var fingerprint string
 		cfg := *spec.Config
 		inner := cfg.HostKeyCallback
@@ -172,25 +241,209 @@ func (rc *RealClient) AcquirePooled(ctx context.Context, spec PooledSpec) (*Pool
 			}
 			return inner(hostname, remote, key)
 		}
-		gclient, err := (&dialer{client: rc}).dialDirect(ctx, addr, &cfg, spec.Host, spec.User)
+		conn, err := rc.dialRoute(ctx, spec.Route, routeHop{
+			host: spec.Host, port: spec.Port, user: spec.User, identity: spec.Identity, config: &cfg,
+		})
 		if err != nil {
 			return nil, err
 		}
-		pconn := &pooledSSHConn{client: gclient, fingerprint: fingerprint}
-		stopKA, _ := startKeepalive(pconn, spec.KeepaliveInterval, spec.KeepaliveCountMax, nil)
-		pconn.setKeepaliveStop(stopKA)
-		return pconn, nil
+		conn.fingerprint = fingerprint
+		stopKA, _ := startKeepalive(conn, spec.KeepaliveInterval, spec.KeepaliveCountMax, nil)
+		conn.setKeepaliveStop(stopKA)
+		return conn, nil
 	}
 
 	handle, err := rc.pool.AcquireDial(ctx, key, dial)
 	if err != nil {
 		return nil, err
 	}
+	return rc.borrowPooled(handle)
+}
+
+// DialAuth dials a resolved spec ONCE and hands back the connection, without
+// touching the pool: the caller owns the whole chain — the hops and the
+// destination alike — and closing it closes all of them.
+//
+// It is what a PROBE rides. A probe answers "does this credential work here",
+// it half-applies nothing, and the connection it left behind would be one whose
+// lifetime nothing owns; that is why the coordinator's own probe path bypasses
+// its pool too, and why this is a method of its own rather than a mode of
+// AcquirePooled. A routed probe dials each hop for itself and closes it, which
+// is the honest reading of "leaves nothing behind" — including the bastion.
+//
+// The caller must Close what it is given, as with every PooledConn.
+func (rc *RealClient) DialAuth(ctx context.Context, spec PooledSpec) (*PooledConn, error) {
+	if err := spec.validate(); err != nil {
+		return nil, err
+	}
+	var fingerprint string
+	cfg := *spec.Config
+	inner := cfg.HostKeyCallback
+	cfg.HostKeyCallback = func(hostname string, remote net.Addr, key gossh.PublicKey) error {
+		fingerprint = gossh.FingerprintSHA256(key)
+		if inner == nil {
+			return errors.New("ssh: probe: no host-key callback")
+		}
+		return inner(hostname, remote, key)
+	}
+	client, release, err := rc.dialRouteOnce(ctx, spec.Route, routeHop{
+		host: spec.Host, port: spec.Port, user: spec.User, identity: spec.Identity, config: &cfg,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &PooledConn{
+		client:      client,
+		fingerprint: fingerprint,
+		release:     release,
+	}, nil
+}
+
+// validate refuses a spec that cannot be dialed, before anything is dialed. The
+// destination and every hop are checked the same way: a hop that is missing an
+// address is a route the caller built wrongly, and discovering that at the
+// second handshake would mean a connection to nowhere whose failure names the
+// wrong thing.
+func (s PooledSpec) validate() error {
+	if err := validateEndpoint(s.Host, s.Port, s.User, s.Config); err != nil {
+		return err
+	}
+	for i, hop := range s.Route {
+		if err := validateEndpoint(hop.Host, hop.Port, hop.User, hop.Config); err != nil {
+			return fmt.Errorf("route hop %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+func validateEndpoint(host string, port int, user string, cfg *gossh.ClientConfig) error {
+	switch {
+	case host == "":
+		return fmt.Errorf("ssh: pooled connection: no host")
+	case port <= 0 || port > 65535:
+		return fmt.Errorf("ssh: pooled connection: port %d", port)
+	case user == "":
+		return fmt.Errorf("ssh: pooled connection: no user")
+	case cfg == nil:
+		return fmt.Errorf("ssh: pooled connection: no client configuration")
+	}
+	return nil
+}
+
+// dialRoute answers a pooled reference to an endpoint reached through route,
+// acquiring each hop from this same pool.
+//
+// The recursion is the structure rather than an accident: the last hop is
+// acquired with its own pool key and its dial, in turn, acquires the hop before
+// it, so the chain is pooled at every level and a second destination through
+// the same bastion finds it already there. The reference the destination holds
+// releases the hop's, which releases the one before it — the same ownership
+// chain the coordinator's own jump dial keeps, one caller out.
+func (rc *RealClient) dialRoute(ctx context.Context, route []PooledHop, last routeHop) (*pooledSSHConn, error) {
+	var upstream *PooledConn
+	if len(route) > 0 {
+		var err error
+		upstream, err = rc.acquireHop(ctx, route)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var upClient *gossh.Client
+	if upstream != nil {
+		upClient = upstream.Client()
+	}
+	client, err := rc.dialEndpoint(ctx, upClient, last)
+	if err != nil {
+		if upstream != nil {
+			_ = upstream.Close()
+		}
+		return nil, err
+	}
+	var release func()
+	if upstream != nil {
+		release = func() { _ = upstream.Close() }
+	}
+	return &pooledSSHConn{client: client, release: release}, nil
+}
+
+// acquireHop answers a pooled reference to the LAST hop of route.
+func (rc *RealClient) acquireHop(ctx context.Context, route []PooledHop) (*PooledConn, error) {
+	hop := route[len(route)-1]
+	hopEndpoint := hop.routeHop()
+	key := poolKey{
+		host:      hop.Host,
+		port:      hop.Port,
+		user:      hop.User,
+		identity:  hop.Identity,
+		jumpRoute: routeKeyOf(route[:len(route)-1]),
+	}
+	dial := func(poolKey) (sshClientConn, error) {
+		return rc.dialRoute(ctx, route[:len(route)-1], hopEndpoint)
+	}
+	handle, err := rc.pool.AcquireDial(ctx, key, dial)
+	if err != nil {
+		return nil, err
+	}
+	return rc.borrowPooled(handle)
+}
+
+// dialRouteOnce dials an endpoint through route WITHOUT pooling anything, and
+// answers a client whose release closes the destination and every hop under it.
+func (rc *RealClient) dialRouteOnce(ctx context.Context, route []PooledHop, last routeHop) (*gossh.Client, func(), error) {
+	if len(route) == 0 {
+		client, err := rc.dialEndpoint(ctx, nil, last)
+		if err != nil {
+			return nil, nil, err
+		}
+		return client, func() { _ = client.Close() }, nil
+	}
+	upClient, closeUpstream, err := rc.dialRouteOnce(ctx, route[:len(route)-1], route[len(route)-1].routeHop())
+	if err != nil {
+		return nil, nil, err
+	}
+	client, err := rc.dialEndpoint(ctx, upClient, last)
+	if err != nil {
+		closeUpstream()
+		return nil, nil, err
+	}
+	return client, func() {
+		_ = client.Close()
+		closeUpstream()
+	}, nil
+}
+
+// dialEndpoint performs the TCP dial and the handshake for ONE endpoint: to the
+// address directly when there is no upstream, and through the network of the
+// connection before it when there is.
+func (rc *RealClient) dialEndpoint(ctx context.Context, upstream *gossh.Client, ep routeHop) (*gossh.Client, error) {
+	d := &dialer{client: rc}
+	if upstream == nil {
+		return d.dialDirect(ctx, ep.addr(), ep.config, ep.host, ep.user)
+	}
+	conn, err := upstream.DialContext(ctx, "tcp", ep.addr())
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("dial %s through the host before it: %w", ep.addr(), err)
+	}
+	client, err := d.handshakeOver(ctx, conn, ep.addr(), ep.config)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("ssh client conn through a hop: %w", err)
+	}
+	return client, nil
+}
+
+// borrowPooled wraps a pool handle as the borrowed reference callers hold. A
+// pool entry that is not this package's own wrapper cannot be handed out as a
+// *gossh.Client, and guessing at it would be a type assertion standing in for a
+// guarantee.
+func (rc *RealClient) borrowPooled(handle *poolHandle) (*PooledConn, error) {
 	client, ok := handle.conn.(*pooledSSHConn)
 	if !ok {
-		// A pool entry that is not this package's own wrapper cannot be
-		// handed out as a *gossh.Client, and guessing at it would be a
-		// type assertion standing in for a guarantee.
 		rc.pool.Release(handle)
 		return nil, fmt.Errorf("ssh: pooled connection: unexpected connection type %T", handle.conn)
 	}

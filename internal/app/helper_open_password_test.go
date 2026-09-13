@@ -17,10 +17,12 @@ package app
 // — and this is the same rule at the seam the helper selection added.
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -88,11 +90,25 @@ type pwSSHServer struct {
 	// fact a client can report about itself.
 	conns      int
 	subsystems []string
+	// directTargets is the addresses this host was asked to reach on a
+	// `direct-tcpip` channel, in order. It is what lets one fixture stand as a
+	// BASTION: a jump hop's whole job is to connect to an address on its own
+	// network, so a route through this host shows up here as the next hop's
+	// address — which is the evidence that a dial went through it rather than
+	// straight at the destination.
+	directTargets []string
 
 	mu        sync.Mutex
 	passwords []string
 	execs     int
-	execSeen  []string
+	// acceptedKey, when set, is a public key this host authenticates: the
+	// public-key half of the same fixture, for the credentials that prove a key
+	// rather than present a password. keyFingerprints records every key that
+	// was OFFERED, accepted or not, which is how a test tells "this key
+	// authenticated" from "something did".
+	acceptedKey     gossh.PublicKey
+	keyFingerprints []string
+	execSeen        []string
 
 	liveMu sync.Mutex
 	live   map[*gossh.ServerConn]struct{}
@@ -135,6 +151,23 @@ func startPasswordSFTPSSHServer(t *testing.T, root string) *pwSSHServer {
 			}
 			return nil, errors.New("wrong password")
 		},
+		// A host that accepts a KEY authenticates the offer before it asks for
+		// a signature, so the accepted key is read here rather than captured at
+		// construction: a test that arms the fixture after it starts is asking
+		// about the same host.
+		PublicKeyCallback: func(_ gossh.ConnMetadata, key gossh.PublicKey) (*gossh.Permissions, error) {
+			s.mu.Lock()
+			s.keyFingerprints = append(s.keyFingerprints, gossh.FingerprintSHA256(key))
+			accepted := s.acceptedKey
+			s.mu.Unlock()
+			if accepted == nil {
+				return nil, errors.New("this host takes no key")
+			}
+			if !bytes.Equal(accepted.Marshal(), key.Marshal()) {
+				return nil, errors.New("not the key this host accepts")
+			}
+			return nil, nil
+		},
 	}
 	config.AddHostKey(hostSigner)
 	go s.acceptLoop(config)
@@ -174,6 +207,12 @@ func (s *pwSSHServer) serveConn(conn net.Conn, config *gossh.ServerConfig) {
 	}()
 	go gossh.DiscardRequests(reqs)
 	for newChan := range chans {
+		if newChan.ChannelType() == "direct-tcpip" {
+			// What a jump host serves: the far side connects to a target on
+			// ITS network and carries the bytes.
+			go s.serveDirectTCPIP(newChan)
+			continue
+		}
 		if newChan.ChannelType() != "session" {
 			_ = newChan.Reject(gossh.UnknownChannelType, "unknown channel type")
 			continue
@@ -185,6 +224,45 @@ func (s *pwSSHServer) serveConn(conn net.Conn, config *gossh.ServerConfig) {
 		go s.handleSession(ch, chReqs)
 	}
 	_ = sshConn.Close()
+}
+
+// serveDirectTCPIP proxies one `direct-tcpip` channel to the address it names,
+// which is the whole of a bastion's behaviour. The dial happens before the
+// channel is accepted, so a target that refuses rejects the open itself — the
+// refusal the dialing side classifies.
+func (s *pwSSHServer) serveDirectTCPIP(newChan gossh.NewChannel) {
+	var p struct {
+		Host       string
+		Port       uint32
+		OriginHost string
+		OriginPort uint32
+	}
+	if err := gossh.Unmarshal(newChan.ExtraData(), &p); err != nil {
+		_ = newChan.Reject(gossh.ConnectionFailed, "malformed direct-tcpip payload")
+		return
+	}
+	target := net.JoinHostPort(p.Host, strconv.Itoa(int(p.Port)))
+	s.mu.Lock()
+	s.directTargets = append(s.directTargets, target)
+	s.mu.Unlock()
+
+	conn, err := net.DialTimeout("tcp", target, 15*time.Second)
+	if err != nil {
+		_ = newChan.Reject(gossh.ConnectionFailed, err.Error())
+		return
+	}
+	ch, chReqs, err := newChan.Accept()
+	if err != nil {
+		_ = conn.Close()
+		return
+	}
+	go gossh.DiscardRequests(chReqs)
+	go func() {
+		defer func() { _ = ch.Close() }()
+		defer func() { _ = conn.Close() }()
+		_, _ = io.Copy(ch, conn)
+	}()
+	_, _ = io.Copy(conn, ch)
 }
 
 // handleSession answers what the callers of this fixture ask of a far side: the

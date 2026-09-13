@@ -832,7 +832,7 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 			Host:        p.Destination.Host,
 			Port:        p.Destination.Port,
 			User:        p.Destination.User,
-			IdentityRef: p.Destination.Identity.Credential.Ref,
+			IdentityRef: p.Destination.Identity.CredentialOf().Ref,
 			Shell:       string(shellKindOrAuto(p.Shell)),
 			// Empty, always: this helper resolved no directory on the far
 			// side. See proto.SSHLaunchRecord.
@@ -857,7 +857,7 @@ func validateSSHSpawn(p proto.SSHSpawnParams) error {
 		return fmt.Errorf("%w: port %d", ErrBadSSHParams, p.Destination.Port)
 	case p.Destination.User == "":
 		return fmt.Errorf("%w: no user", ErrBadSSHParams)
-	case p.Destination.Identity.Credential.Ref == "":
+	case p.Destination.Identity.CredentialOf().Ref == "":
 		return fmt.Errorf("%w: no credential reference", ErrBadSSHParams)
 	}
 	if p.Cwd != "" {

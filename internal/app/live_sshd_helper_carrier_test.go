@@ -18,8 +18,10 @@ package app
 import (
 	"context"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,6 +40,22 @@ import (
 	"github.com/shady2k/nocx/internal/waittest"
 	gossh "golang.org/x/crypto/ssh"
 )
+
+// withClientKeyFile makes the fixture dial with `IdentityFile`-shaped options
+// instead of an inline signer: the private key is written to a file the session
+// may read, and every connection the journey makes names that PATH.
+//
+// It is defined in THIS file because its only callers are here — an option
+// nothing calls in the other build is a lint failure, and hanging it where it is
+// used is honest where a fabricated caller is not. What it selects is a real
+// profile difference rather than a test convenience: the two shapes differ in
+// exactly the place this epic cares about, because a helper is handed a
+// REFERENCE and reads nothing itself. A path is something the coordinator can
+// resolve and sign for; a signer value in memory is not, there being nothing to
+// name.
+func withClientKeyFile() liveSshdOption {
+	return func(c *liveSshdConfig) { c.clientKeyFile = true }
+}
 
 // liveFixtureKeyRef names the fixture's client key on this wire. It is opaque
 // to the helper, which echoes it back when it needs a signature.
@@ -143,7 +161,7 @@ func startLiveHelperStand(t *testing.T, fx *liveSshd) (*remoteInstallerAdapter, 
 		Exec:        helperclient.NewSocketConn(coordEnd),
 		ExpectHash:  filesFixtureGenera,
 		SentinelTTL: 5 * time.Second,
-		Reverse:     helperReverseHandlers(rc, key, logger),
+		Reverse:     helperReverseHandlers(rc, key, &helperPrompt{log: logger}, logger),
 		Log:         logger,
 	})
 	if err != nil {
@@ -221,32 +239,34 @@ func TestLiveSshd_OneSessionPerConnectionStillIntegratesOverTheHelper(t *testing
 	t.Logf("MEASURED a saved connection under MaxSessions 1 over the helper: domain established, %d authentication(s)", fx.authCount())
 }
 
-// TestLiveSshd_AnInlineKeyConnectionStillOpensAndNamesItsPublishRefusal is the
-// END-TO-END half of the direct-host consequence (nocx-50w7p.15), on a real
-// sshd and through the product's own `RealClient.Connect`.
+// TestLiveSshd_AnInlineKeyFileConnectionPublishesAndReachesItsDomain is the
+// END-TO-END half of the inline-key success (nocx-50w7p.11 with nocx-50w7p.15),
+// on a real sshd and through the product's own `RealClient.Connect`.
 //
-// The fixture's connect options carry an INLINE signer — which is what a
-// direct-host open (`spec.Host`, an alias through ~/.ssh/config) carries when
-// its profile holds no credential binding — and the publish is handed those
-// same options. A helper cannot be handed an inline key (no file, no agent,
-// no secret at rest), so `ssh.ResolveTarget` refuses it by name, and the three
-// things a person can observe are asserted here:
+// The fixture dials with `IdentityFile`-shaped options — the shape a direct-host
+// open carries when its profile names a key rather than binding one in the
+// store — and the publish is handed those same options. This test used to
+// assert the OPPOSITE: a helper could not be handed an inline key (no file, no
+// agent, no secret at rest), so `ssh.ResolveTarget` refused the connection by
+// name and the far side was left with no generation. Now the coordinator reads
+// the file and signs with it, and what is asserted here is the consequence a
+// person sees:
 //
-//  1. the session still opens and runs commands — the publish is fail-open
-//     (ADR-0004), which is why this is a degrade and not a lost terminal;
-//  2. the refusal is BEFORE any dial: the server sees the pane and this
-//     harness's lifecycle transport and NOT the helper, where a helper dial
-//     would read one login more (the tagged one-slot test measures that 3);
-//  3. the far side reports a terminal outcome on the session integration
-//     axis, so the renderer has something to show, and the product log names
-//     the sentinel rather than only "the publish failed".
+//  1. the publish HAPPENS — the bundle lands under the session's `$HOME`, and
+//     the far side reaches its accepted domain because it found the generation
+//     it was handed, which is this epic's acceptance criterion;
+//  2. the helper dialed for it: the server accepted three authentications — the
+//     pane, this harness's lifecycle transport, and the helper — where the old
+//     shape measured two and named a refusal;
+//  3. the session integration axis reports no refusal, and a shell runs
+//     commands, so the absolute part of ADR-0004 is intact either way.
 //
-// `liveBundleCarrier` deliberately appends this fixture's identity so the
-// ROUTING journeys can publish at all; this test is the one that does not,
-// which is what makes it the direct-host case rather than a rehearsal of it.
-func TestLiveSshd_AnInlineKeyConnectionStillOpensAndNamesItsPublishRefusal(t *testing.T) {
+// `liveBundleCarrier` deliberately APPENDS a stored identity for the routing
+// journeys; this test passes the production carrier the fixture's own options,
+// which is what makes it the inline-key case rather than a rehearsal of one.
+func TestLiveSshd_AnInlineKeyFileConnectionPublishesAndReachesItsDomain(t *testing.T) {
 	logs, logger := captureProductLogs(t)
-	fx := startLiveSshd(t, true)
+	fx := startLiveSshd(t, true, withClientKeyFile())
 	fx.logger = logger
 
 	carrier, _ := startLiveHelperStand(t, fx)
@@ -260,41 +280,109 @@ func TestLiveSshd_AnInlineKeyConnectionStillOpensAndNamesItsPublishRefusal(t *te
 		}
 	})
 
-	// 1. A working shell, which is the absolute part of ADR-0004.
-	waittest.WaitForTimeout(t, "a usable prompt with the publish refused", 30*time.Second, func() bool {
-		kernel.mu.Lock()
-		domain := kernel.domain
-		kernel.mu.Unlock()
-		if domain != "" {
-			if d, ok := kernel.Domain(domain); ok && d.State == lifecycle.DomainEstablished {
-				t.Errorf("the domain established although nothing could be published")
+	// 1. The accepted domain: the far side loaded the generation the publish
+	//    put under its $HOME. This is the observable the epic's acceptance is
+	//    written on, and it is the one the old refusal could never reach.
+	waittest.WaitForTimeoutDetail(t, "the accepted domain for an inline-key connection", 30*time.Second,
+		func() string { return fmt.Sprintf("terminal:\n%s", out.String()) },
+		func() bool {
+			kernel.mu.Lock()
+			domain := kernel.domain
+			kernel.mu.Unlock()
+			if domain == "" {
+				return false
 			}
-		}
-		if _, err := ch.Write([]byte("printf 'KEYFILE%s\\n' _OK\n")); err != nil {
-			return false
-		}
+			d, ok := kernel.Domain(domain)
+			return ok && d.State == lifecycle.DomainEstablished
+		})
+
+	// The bundle is where the far side looks for it. The domain above is the
+	// far side's own verdict; this is the file, so a domain that established
+	// over a generation written somewhere else could not pass both.
+	if _, err := os.Stat(filepath.Join(fx.home, ".nocx", "manifest.json")); err != nil {
+		t.Errorf("the bundle is not under the session $HOME (%s): %v", fx.home, err)
+	}
+
+	// 2. The helper dialed, and the credential it presented authenticated:
+	//    three logins — the pane's session, this harness's lifecycle transport
+	//    lease, and the helper's own dial for the publish. The old shape
+	//    measured two, because the refusal came before any dial.
+	if n := fx.authCount(); n != 3 {
+		t.Errorf("the server accepted %d authentications, want 3 — the pane, this harness's lifecycle transport, and this machine's helper dialing for an inline-key publish", n)
+	}
+
+	// 3. Nothing on the integration axis reports a missing publish, and the
+	//    shell is usable: the publish succeeds, and the terminal is not what
+	//    paid for it.
+	if reason := ch.ShellIntegrationReason(); reason == ssh.ReasonPublishUnavailable {
+		t.Errorf("the session integration reason is %q, but the publish succeeded: a refusal reported over a live generation is as wrong as the reverse", reason)
+	}
+	if _, err := ch.Write([]byte("printf 'KEYFILE%s\n' _OK\n")); err != nil {
+		t.Fatalf("write to the remote shell: %v", err)
+	}
+	waittest.WaitForTimeout(t, "a usable prompt on an inline-key connection", 30*time.Second, func() bool {
 		return strings.Contains(out.String(), "KEYFILE_OK")
 	})
-
-	// 2. No helper dial: the pane's login and this harness's lifecycle
-	// transport lease are the whole count.
-	if n := fx.authCount(); n != 2 {
-		t.Errorf("the server accepted %d authentications, want 2 — the pane and this harness's lifecycle transport. A third would be a helper that dialed for a credential it must not be handed", n)
-	}
-
-	// 3. The refusal is visible where a person can see it: the far side's own
-	//    verdict for a publish that did not happen, on the session integration
-	//    axis the renderer reads, and the sentinel's sentence in the log.
-	if reason := ch.ShellIntegrationReason(); reason != ssh.ReasonPublishUnavailable {
-		t.Errorf("the session integration reason is %q, want %q — a degrade nobody can see is the log-only degrade AGENTS.md forbids", reason, ssh.ReasonPublishUnavailable)
-	}
-	if got := logs.String(); !strings.Contains(got, ssh.ErrNoHelperIdentity.Error()) {
-		t.Errorf("the product log does not name the refusal (%q); it must say which credential a helper cannot be handed rather than only that the publish failed", ssh.ErrNoHelperIdentity.Error())
-	}
-	t.Logf("MEASURED an inline-key connection: prompt ok, %d authentication(s), reason %q, refusal named in the log",
-		fx.authCount(), ch.ShellIntegrationReason())
+	t.Logf("MEASURED an inline-key connection: prompt ok, %d authentication(s), reason %q, bundle under %s",
+		fx.authCount(), ch.ShellIntegrationReason(), fx.home)
 
 	if _, err := ch.Write([]byte("exit\n")); err != nil {
 		t.Fatalf("write exit: %v", err)
 	}
+}
+
+// TestLiveSshd_ALockedKeyFileRefusesThePublishBeforeDialing is the paired
+// refusal, on the same real sshd and through the same product carrier: the
+// connection names a key FILE this process cannot open (an encrypted key with
+// nowhere to read its passphrase), and the publish is refused as
+// `ssh.ErrEncryptedKey` BEFORE any dial.
+//
+// Both halves matter. The TYPE is what keeps a locked key from reaching a
+// person as "the server refused your credential" — the key is fine, it needs a
+// passphrase, and the host is not the thing to go and look at. The COUNT is
+// what keeps the refusal honest: a helper that dialed first and read afterwards
+// would have offered a connection to a host for a credential nobody could
+// present.
+func TestLiveSshd_ALockedKeyFileRefusesThePublishBeforeDialing(t *testing.T) {
+	logs, logger := captureProductLogs(t)
+	fx := startLiveSshd(t, true)
+	fx.logger = logger
+
+	carrier, _ := startLiveHelperStand(t, fx)
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("product log:\n%s", logs.String())
+		}
+	})
+
+	// The fixture's own key, encrypted: the same key the journeys above
+	// authenticate with, in the one state this process cannot open.
+	block, err := gossh.MarshalPrivateKeyWithPassphrase(fx.clientRaw, "", []byte("a passphrase nobody has"))
+	if err != nil {
+		t.Fatalf("marshal the locked key: %v", err)
+	}
+	locked := filepath.Join(t.TempDir(), "id_ed25519")
+	if writeErr := os.WriteFile(locked, pem.EncodeToMemory(block), 0o600); writeErr != nil {
+		t.Fatalf("write the locked key: %v", writeErr)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	err = carrier.EnsureInstalledRemote(ctx, fx.addr,
+		ssh.WithUser(fx.user),
+		ssh.WithKeyFile(locked),
+		ssh.WithAuthorizedEndpoint(fx.addr),
+	)
+
+	var lockedErr *ssh.ErrEncryptedKey
+	if !errors.As(err, &lockedErr) {
+		t.Fatalf("the publish for a locked key file is %v (%T), want *ssh.ErrEncryptedKey", err, err)
+	}
+	if n := fx.authCount(); n != 0 {
+		t.Errorf("the server accepted %d authentication(s), want 0 — this refusal is reached before any dial, and a helper that dialed first would be offering a host a credential nobody can present", n)
+	}
+	if _, statErr := os.Stat(filepath.Join(fx.home, ".nocx", "manifest.json")); !os.IsNotExist(statErr) {
+		t.Errorf("a bundle appeared under the session home although the credential could not be read: stat err = %v", statErr)
+	}
+	t.Logf("MEASURED the named refusal for a locked key file: %v, %d authentication(s)", err, fx.authCount())
 }

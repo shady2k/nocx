@@ -453,7 +453,7 @@ The schemas are frozen from here like every sibling's: the new op degrades (an
 older helper answers `unknown_op`, which a coordinator reads as "this machine's
 helper is older than this app"), and a new FIELD on one of these shapes does not.
 
-## What landed with `nocx-50w7p.18`, and why `Version` moved to 9
+## What landed with `nocx-50w7p.18`, and why `Version` moved to 10
 
 One field, on two ops: `agentToolEndpoint` on `session.spawn.params` and
 `session.spawn-ssh.params` — the tool endpoint **on the helper's own machine**
@@ -493,13 +493,15 @@ Three things about the field are worth naming rather than leaving to a reader:
   endpoint the daemon could fall back to, because there is no longer a daemon-held
   one to fall back TO.
 
-The bump is the freeze's own rule and not tidiness: both shapes carry
-`additionalProperties: false`, so a helper speaking 8 builds its params schema
-from the same struct this one does and REJECTS a payload carrying the field,
-answering `bad_params` — a sentence about a request that is well-formed. Two
-peers that disagree refuse each other at hello in both directions, each
-generation installs beside the other (D7), and a session still holding the old
-binary keeps it.
+`nocx-50w7p.11` took the number to 9 (the route and the prompt) in the same
+window this change was written in, so this one is 10 rather than 9; nothing else
+about it differs. The bump is the freeze's own rule and not tidiness: both
+shapes carry `additionalProperties: false`, so a helper speaking 9 builds its
+params schema from the same struct this one does and REJECTS a payload carrying
+the field, answering `bad_params` — a sentence about a request that is
+well-formed. Two peers that disagree refuse each other at hello in both
+directions, each generation installs beside the other (D7), and a session still
+holding the old binary keeps it.
 
 The schemas are frozen from here like every sibling's: a new op degrades, and a
 new FIELD on one of these shapes does not.

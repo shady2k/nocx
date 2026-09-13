@@ -179,7 +179,7 @@ func laneParams() proto.LaneParams {
 		Destination: proto.SSHDestination{
 			Host: "host.example.com", Port: 22, User: "deploy",
 			Identity: proto.SSHIdentity{
-				Credential: proto.SSHCredential{Ref: "cred-1"},
+				Credential: &proto.SSHCredential{Ref: "cred-1"},
 				Auth:       proto.SSHAuthPassword,
 			},
 		},

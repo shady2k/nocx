@@ -52,11 +52,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 
 	"github.com/shady2k/nocx/internal/credential"
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/vault"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -64,23 +66,90 @@ import (
 // helperReverseHandlers builds the registry a helper's questions are answered
 // through. It is constructed once, at the composition root, and handed to
 // every connection this coordinator opens to its helper.
-func helperReverseHandlers(client *ssh.RealClient, secrets credential.Resolver, log *slog.Logger) *helperclient.ReverseRegistry {
-	h := &helperReverse{client: client, secrets: secrets, log: log}
+func helperReverseHandlers(client *ssh.RealClient, secrets credential.Resolver, prompts *helperPrompt, log *slog.Logger) *helperclient.ReverseRegistry {
+	h := &helperReverse{client: client, secrets: secrets, prompts: prompts, log: log}
 	r := helperclient.NewReverseRegistry()
 	r.Register(proto.ServiceSSH, proto.OpSecret, h.secret)
 	r.Register(proto.ServiceSSH, proto.OpSign, h.sign)
+	r.Register(proto.ServiceSSH, proto.OpPrompt, h.prompt)
 	r.Register(proto.ServiceSSH, proto.OpVerifyHostKey, h.verifyHostKey)
 	r.Register(proto.ServiceSSH, proto.OpTrustHostKey, h.trustHostKey)
 	return r
 }
 
-// helperReverse holds the three seams every handler delegates to: the ssh
-// client (host keys and signatures), the credential resolver (material) and
-// the logger.
+// helperPrompt is the coordinator's answer to a helper that needs a PERSON: the
+// seam onto the renderer's connection-password ask, whose implementation does
+// not exist when the reverse handlers are bound.
+//
+// It is a holder rather than an argument because of the composition root's own
+// order: the vault and the ssh client exist when the opener is built, and the
+// transport — which is what can raise a question on a renderer — is built
+// later in the same function. The alternative is a setter on the registry,
+// which would make "who answers a prompt" a second thing to keep in step with
+// "who answers material". Setting it here keeps the whole answer in one
+// registry, and a prompt asked before the transport exists is refused by name
+// (no asker wired) rather than silently answered with nothing.
+type helperPrompt struct {
+	mu    sync.RWMutex
+	asker ssh.ConnectionPasswordRequester
+	log   *slog.Logger
+}
+
+// set records the asker once the transport is built.
+func (p *helperPrompt) set(asker ssh.ConnectionPasswordRequester) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.asker = asker
+}
+
+// RequestConnectionPassword is the ssh package's own seam, unchanged: it is
+// what the coordinator's own prompt rung calls, so a helper's question and a
+// dial's question reach the person through ONE path with one set of outcomes.
+func (p *helperPrompt) RequestConnectionPassword(ctx context.Context, req ssh.PasswordRequest) (ssh.PasswordAnswer, error) {
+	p.mu.RLock()
+	asker := p.asker
+	p.mu.RUnlock()
+	if asker == nil {
+		return ssh.PasswordAnswer{}, errNoPromptAsker
+	}
+	return asker.RequestConnectionPassword(ctx, req)
+}
+
+// errNoPromptAsker is this coordinator having no surface to ask a person on:
+// the transport that raises the question is not built yet, or this process runs
+// without a renderer at all. It is a sentinel rather than a sentence because the
+// prompt handler turns exactly it into the wire's `no_auth_channel` — the same
+// state a helper with no coordinator connection is in, and the same answer.
+var errNoPromptAsker = errors.New("no asker is wired for a connection prompt")
+
+// helperReverse holds the seams every handler delegates to: the ssh client
+// (host keys and signatures), the credential resolver (material), the prompt
+// seam (the person) and the logger.
 type helperReverse struct {
 	client  *ssh.RealClient
 	secrets credential.Resolver
+	prompts *helperPrompt
 	log     *slog.Logger
+}
+
+// credentialRef reads a reference that crossed the wire back into the typed
+// handle this package resolves, refusing anything else by name.
+func credentialRef(ref string, purpose string) (ssh.CredentialRef, error) {
+	parsed, err := ssh.ParseCredentialRef(ref)
+	if err != nil {
+		return ssh.CredentialRef{}, badReverseParams(fmt.Sprintf("%s: %v", purpose, err))
+	}
+	return parsed, nil
+}
+
+// optionalCredentialRef is the same read for a reference that may be absent — a
+// passphrase, for instance, which most keys have not got. An empty value is the
+// zero reference rather than an error, and anything non-empty must parse.
+func optionalCredentialRef(ref string, purpose string) (ssh.CredentialRef, error) {
+	if ref == "" {
+		return ssh.CredentialRef{}, nil
+	}
+	return credentialRef(ref, purpose)
 }
 
 // secret answers the material a helper has to PRESENT. The read is stanced and
@@ -96,28 +165,37 @@ func (h *helperReverse) secret(ctx context.Context, raw json.RawMessage) (any, e
 	}
 
 	var (
-		ref    string
+		ref    ssh.CredentialRef
 		reason string
+		err    error
 	)
 	switch p.Purpose {
 	case proto.PurposePassword:
-		ref = p.Credential.Ref
+		ref, err = credentialRef(p.Credential.Ref, "the password reference")
 		reason = "read the password a helper must present"
 	case proto.PurposePassphrase:
 		// A passphrase has its own reference because it is its own row: a key
 		// and the passphrase that unlocks it are two stored secrets, and
 		// resolving one where the other was meant is how a wrong-but-valid
 		// password gets tried against a server.
-		ref = p.Credential.PassphraseRef
+		ref, err = credentialRef(p.Credential.PassphraseRef, "the passphrase reference")
 		reason = "read the passphrase of a key a helper must unlock"
 	default:
 		return nil, badReverseParams(fmt.Sprintf("purpose %q is not one this coordinator knows", p.Purpose))
 	}
-	if ref == "" {
-		return nil, badReverseParams(fmt.Sprintf("no %s reference in the credential", string(p.Purpose)))
+	if err != nil {
+		return nil, err
+	}
+	if ref.Kind() != ssh.CredentialVault {
+		// Material a helper presents is always STORED material: a file key and
+		// an agent key are asked for as SIGNATURES (`sign`), never as bytes,
+		// and a password has no file or agent form. Answering this would mean
+		// reading a private key out of a file into the wire.
+		return nil, badReverseParams(fmt.Sprintf(
+			"a %s reference cannot be presented as %s material", ref.Kind(), string(p.Purpose)))
 	}
 
-	secret, err := h.secrets.Resolve(ctx, credential.SecretID(ref), credential.Operation(reason))
+	secret, err := h.secrets.Resolve(ctx, credential.SecretID(ref.ID()), credential.Operation(reason))
 	if err != nil {
 		return nil, h.materialRefusal(err)
 	}
@@ -136,17 +214,17 @@ func (h *helperReverse) secret(ctx context.Context, raw json.RawMessage) (any, e
 
 // sign answers one signature over one challenge.
 //
-// The passphrase reference, when there is one, goes where the key is: the
-// coordinator is the party that parses a private key, so an encrypted key is
+// The reference decides WHERE the signature is made — a vault key parsed inside
+// the store's own Use callback, a key file read here, an agent asked to answer
+// for itself — and in all three cases the private half stays on this side of
+// the wire. The passphrase reference, when there is one, goes where the key is:
+// this process is the party that parses a private key, so an encrypted key is
 // unlocked here and never at the helper (proto/ssh_service.go says why a
 // signature can cross where a key cannot).
 func (h *helperReverse) sign(ctx context.Context, raw json.RawMessage) (any, error) {
 	var p proto.SignParams
 	if err := decodeReverseParams(raw, &p); err != nil {
 		return nil, err
-	}
-	if p.Credential.Ref == "" {
-		return nil, badReverseParams("no credential reference to sign with")
 	}
 	if len(p.Challenge) == 0 {
 		// Signing nothing is a request nobody makes. Refusing it is also what
@@ -160,22 +238,24 @@ func (h *helperReverse) sign(ctx context.Context, raw json.RawMessage) (any, err
 	if h.client == nil {
 		return nil, errors.New("no ssh client is wired, so nothing can sign")
 	}
-
-	cfg := &ssh.ConnectConfig{
-		KeySecretID: credential.SecretID(p.Credential.Ref),
-		Secrets:     h.secrets,
+	ref, err := credentialRef(p.Credential.Ref, "the signing reference")
+	if err != nil {
+		return nil, err
 	}
-	if p.Credential.PassphraseRef != "" {
-		cfg.PassphraseSecretID = credential.SecretID(p.Credential.PassphraseRef)
+	passphrase, err := optionalCredentialRef(p.Credential.PassphraseRef, "the passphrase reference")
+	if err != nil {
+		return nil, err
 	}
 
-	signature, algorithm, err := h.client.SignWithStoredKey(ctx, cfg, p.Challenge)
+	signature, algorithm, err := h.client.SignWithCredentialRef(ctx, h.secrets, ref, passphrase, p.Challenge)
 	if err != nil {
 		var locked *ssh.ErrEncryptedKey
 		if errors.As(err, &locked) {
 			// The key is fine; it is locked, and the passphrase is nowhere to
 			// be read. That is the `needs-interactive` answer the probe
-			// reports, not a failure of the credential.
+			// reports, not a failure of the credential. It covers both halves
+			// of a wrong passphrase — absent and incorrect — because for a
+			// person they are one state: the key cannot be opened without one.
 			return nil, &proto.Refusal{Code: proto.ErrCodeNeedsInteractive, Message: err.Error()}
 		}
 		return nil, h.materialRefusal(err)
@@ -185,6 +265,86 @@ func (h *helperReverse) sign(ctx context.Context, raw json.RawMessage) (any, err
 			"the credential's key is %s and the request asked to sign as %s", algorithm, p.Algorithm))
 	}
 	return proto.SignResult{Signature: signature}, nil
+}
+
+// prompt asks the PERSON at this coordinator's UI the questions a server asked
+// during a keyboard-interactive challenge, and answers what they said.
+//
+// It is the one reverse op whose answer nobody holds: `secret` reads a stored
+// value, `sign` computes one, and this one exists only for the moment a person
+// is in front of the screen. That is also why its failures are named rather
+// than folded together — a dismissed prompt and a coordinator with no renderer
+// are different states, and neither may be answered with an empty string, which
+// a server reads as a wrong password and reports as a rejected credential.
+//
+// The ask goes through the SAME seam the coordinator's own prompt rung uses
+// (ssh.ConnectionPasswordRequester), so a helper's question and a dial's
+// question raise one dialog with one set of outcomes; the connection and the
+// account the server's question is about travel with it, because a bare "enter
+// password" box is how the wrong password ends up in the wrong connection.
+func (h *helperReverse) prompt(ctx context.Context, raw json.RawMessage) (any, error) {
+	var p proto.PromptParams
+	if err := decodeReverseParams(raw, &p); err != nil {
+		return nil, err
+	}
+	if len(p.Prompts) == 0 {
+		return nil, badReverseParams("no prompts to answer")
+	}
+	if p.Host == "" || p.User == "" {
+		return nil, badReverseParams("the prompts name no host or account")
+	}
+	// The port is checked like every other endpoint on this wire: it is display
+	// data for the ask ("which connection is this"), and a renderer shown a
+	// port of 0 has been handed a fact nobody resolved. The schema says the
+	// same thing; this is the running coordinator saying it.
+	if p.Port <= 0 || p.Port > 65535 {
+		return nil, badReverseParams(fmt.Sprintf("the prompts name port %d", p.Port))
+	}
+	if h.prompts == nil {
+		return nil, &proto.Refusal{
+			Code:    proto.ErrCodeNoAuthChannel,
+			Message: "no prompt can be raised: this coordinator is not connected to a renderer",
+		}
+	}
+
+	// ONE ASK PER QUESTION, in the order the server asked them, because that is
+	// what a terminal does and because the alternative leaks secrets: this
+	// seam collects one value, and copying it across every question would send
+	// a password into a "Verification code:" prompt. The server's own text is
+	// the question a person reads in each ask.
+	answers := make([]string, 0, len(p.Prompts))
+	for _, prompt := range p.Prompts {
+		answer, err := h.prompts.RequestConnectionPassword(ctx, ssh.PasswordRequest{
+			User: p.User,
+			Host: p.Host,
+			// The server's own question, verbatim: nocx invented neither the
+			// question nor the answer, and a reason of its own would be a
+			// sentence about a host instead of the question being asked.
+			Reason: prompt.Prompt,
+		})
+		if err != nil {
+			return nil, h.promptRefusal(ctx, err)
+		}
+		answers = append(answers, answer.Password)
+	}
+	return proto.PromptResult{Answers: answers}, nil
+}
+
+// promptRefusal types a failed ask for the helper.
+//
+// A prompt a person DISMISSED is its own code, because it is a decision and not
+// a failure: the credential may be perfectly good and the answer is simply no.
+// Anything else — no renderer attached, a transport that died mid-ask, the
+// context cancelled — is this coordinator having nowhere to ask, which is the
+// same state a helper with no coordinator connection is in and the same code.
+func (h *helperReverse) promptRefusal(ctx context.Context, err error) error {
+	if errors.Is(err, transport.ErrPasswordPromptCancelled) {
+		return &proto.Refusal{Code: proto.ErrCodePromptCancelled, Message: err.Error()}
+	}
+	if errors.Is(err, transport.ErrPasswordNoClientConnected) || errors.Is(err, errNoPromptAsker) || ctx.Err() != nil {
+		return &proto.Refusal{Code: proto.ErrCodeNoAuthChannel, Message: err.Error()}
+	}
+	return err
 }
 
 // verifyHostKey answers what to make of a host key the helper was just
@@ -198,7 +358,16 @@ func (h *helperReverse) verifyHostKey(_ context.Context, raw json.RawMessage) (a
 	if err := decodeReverseParams(raw, &p); err != nil {
 		return nil, err
 	}
-	key, err := h.checkHostKeyParams(p.Host, p.Algorithm, p.Key)
+	// The STORAGE identity is what is looked up, and it is not always the
+	// offered address: a host reached through a jump has a route-derived one,
+	// and the answer here must be about the record the coordinator's own dial
+	// would have consulted. The offered address is still checked — it travels
+	// in the error and in the evidence a person is shown.
+	storageAddr := p.KnownHostsAddr
+	if storageAddr == "" {
+		storageAddr = p.Host
+	}
+	key, err := h.checkHostKeyParams(storageAddr, p.Algorithm, p.Key)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +375,7 @@ func (h *helperReverse) verifyHostKey(_ context.Context, raw json.RawMessage) (a
 		return nil, errors.New("no ssh client is wired, so no host key can be judged")
 	}
 
-	err = h.client.CheckHostKey(p.Host, p.Key)
+	err = h.client.CheckHostKey(storageAddr, p.Key)
 	var (
 		unknown *ssh.ErrUnknownHostKey
 		changed *ssh.ErrHostKeyMismatch

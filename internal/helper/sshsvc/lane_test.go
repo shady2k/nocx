@@ -67,7 +67,7 @@ func laneParams(t *testing.T, f *fixture) proto.LaneParams {
 		Destination: proto.SSHDestination{
 			Host: host, Port: port, User: "test",
 			Identity: proto.SSHIdentity{
-				Credential: proto.SSHCredential{Ref: "cred-1"},
+				Credential: &proto.SSHCredential{Ref: "cred-1"},
 				Auth:       proto.SSHAuthPassword,
 			},
 		},

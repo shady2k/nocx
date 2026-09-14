@@ -71,6 +71,53 @@ func (p *blockingProcess) awaitEntered(t *testing.T) {
 // blocked, and every one after it, since the gate stays closed only once.
 func (p *blockingProcess) release() { p.once.Do(func() { close(p.gate) }) }
 
+// WaitReadable and RawReadUntilAgain give blockingProcess a read barrier
+// (nocx-6q1uh.15): the [rawReader] shape hasReadBarrier (owner_ssh.go)
+// requires, over the same "serve the script, then park" read behaviour
+// scriptedProcess.Read already has. Every intent-bearing test in this file
+// needs this to be true — without it, commitIntent refuses every intent
+// ErrNoReadBarrier before Admit is ever asked, regardless of what the test
+// itself is exercising (a commit deadline, an access bump, a cancelled
+// caller). blockingProcess, not scriptedProcess, is where this lives: the
+// bare *scriptedProcess ("") owner_adversarial_test.go's
+// TestNoReadBarrierRefusesATokenAtReceiptButNeverRecordsItsOutcome uses is
+// deliberately left without a barrier (that test's whole point), and giving
+// scriptedProcess itself these methods would give that fixture one too.
+// Explicit p.scriptedProcess.* field access is required throughout: this
+// type's own release method (above) shadows the embedded release CHANNEL.
+func (p *blockingProcess) WaitReadable(ctx context.Context) error {
+	p.scriptedProcess.mu.Lock()
+	hasScript := len(p.scriptedProcess.script) > 0
+	p.scriptedProcess.mu.Unlock()
+	if hasScript {
+		return nil
+	}
+	select {
+	case <-p.scriptedProcess.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (p *blockingProcess) RawReadUntilAgain(_ []byte, deliver func([]byte)) (eof bool, err error) {
+	p.scriptedProcess.mu.Lock()
+	chunk := p.scriptedProcess.script
+	p.scriptedProcess.script = nil
+	p.scriptedProcess.mu.Unlock()
+	if len(chunk) > 0 {
+		deliver(chunk)
+	}
+	select {
+	case <-p.scriptedProcess.release:
+		return true, io.EOF
+	default:
+		return false, nil
+	}
+}
+
+var _ rawReader = (*blockingProcess)(nil)
+
 // newIntentTestSession builds a real owner and token book over proc, wired
 // the way finishSpawn wires them (service.go) minus the parts a bare owner
 // test does not need: no Service, no inventory row. Control is granted up
@@ -176,7 +223,12 @@ func awaitResult(t *testing.T, done <-chan ownerResult) ownerResult {
 // own fake clock.
 func TestAnIntentPastCommitByIsRefused(t *testing.T) {
 	t.Run("at receipt", func(t *testing.T) {
-		proc := newScriptedProcess("")
+		// rawReaderFakeProcess (owner_adversarial_test.go), not
+		// newScriptedProcess: this test needs a session WITH a read barrier
+		// so tokenGate's own commitBy check (the thing under test) is what
+		// refuses it, never the read-barrier check ahead of it in the same
+		// function (nocx-6q1uh.15).
+		proc := newRawReaderFakeProcess()
 		hs, control := newIntentTestSession(t, proc)
 		hs.owner.nowMono = func() int64 { return 1000 }
 		tok := mintRegionToken(t, hs)
@@ -188,10 +240,8 @@ func TestAnIntentPastCommitByIsRefused(t *testing.T) {
 		if res.BytesWritten != 0 {
 			t.Fatalf("a commit_deadline refusal reported %d bytes written, want 0", res.BytesWritten)
 		}
-		select {
-		case w := <-proc.written:
-			t.Fatalf("a commit_deadline refusal wrote to the program: %q", w)
-		default:
+		if got := proc.writtenPayloads(); len(got) != 0 {
+			t.Fatalf("a commit_deadline refusal wrote to the program: %q", got)
 		}
 	})
 
@@ -408,7 +458,12 @@ func TestCancellingTheCallDoesNotCancelTheIntent(t *testing.T) {
 // all: TestARetryWhileTheFirstWriteIsBlockedGetsInProgress's own executed
 // outcome never carries a Refusal object to omit anything from.
 func TestASessionIntentRefusalShowsTheRegionOnceThenOmitsIt(t *testing.T) {
-	proc := newScriptedProcess("")
+	// rawReaderFakeProcess, not newScriptedProcess (nocx-6q1uh.15): the
+	// stale_target refusal under test is decided by checkToken inside
+	// sessionruntime.Session.Commit, which an intent only reaches once it has
+	// cleared tokenGate's own read-barrier check — a session with no barrier
+	// refuses ErrNoReadBarrier before Commit is ever called.
+	proc := newRawReaderFakeProcess()
 	svc, hs := spawnScripted(t, proc, 0)
 
 	snap := callOp[proto.SnapshotResult](t, svc, proto.OpSnapshot, proto.SnapshotParams{Session: hs.id})

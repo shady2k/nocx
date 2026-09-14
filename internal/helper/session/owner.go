@@ -398,10 +398,24 @@ func (o *sessionOwner) run() {
 // once, termination is requested and a write already in flight is
 // interrupted. What is already in flight resolves on its own terms
 // (completeWrite), never cancelled: bytes on a PTY cannot be recalled.
+//
+// A token-bearing itemIntent can be sitting in o.pending here with its token
+// already Consumed: tokenGate (tokens.go) binds the token at RECEIPT, well
+// before an item ever reaches o.pending, and "unused -> proceed" is exactly
+// how it gets here. Cancelling it without recording an outcome would be the
+// same wedge nocx-6q1uh.15 fixes at tokenGate's own no-read-barrier
+// refusal — a bound slot with nothing ever recorded against it, so
+// session.intent.status can answer nothing but in_progress forever. So this
+// records before it resolves, the same order finishItem and commitIntent's
+// own early refusals already use.
 func (o *sessionOwner) beginClosing() {
 	o.closing = true
 	for _, it := range o.pending {
-		o.resolve(it, ownerResult{State: sessionruntime.IntentStateCancelled, Err: errOwnerClosing})
+		res := ownerResult{State: sessionruntime.IntentStateCancelled, Err: errOwnerClosing}
+		if it.kind == itemIntent {
+			o.recordTokenOutcome(it.intent, res)
+		}
+		o.resolve(it, res)
 	}
 	o.pending = nil
 	o.requestTermination()

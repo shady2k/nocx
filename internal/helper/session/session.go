@@ -72,6 +72,17 @@ type SpawnRequest struct {
 	Cols      uint16
 	Rows      uint16
 	Lifecycle *proto.LifecycleLaunch
+	// AgentToolToken is the bearer that admits this pane's far agent, minted by
+	// the coordinator that asked for the pane (nocx-50w7p.16 for the ssh route,
+	// nocx-e2bws for this one). It travels into the launch options and from
+	// there into the DESCRIPTOR the shell reads — never the environment block,
+	// never argv — because the far agent presents it to the endpoint, which
+	// admits nothing a bearer does not answer for.
+	//
+	// It exists on this request because a pane the far host's own helper spawns
+	// is a pane this coordinator cannot admit by process ownership either: the
+	// shell is on another machine, and the interval is opened by this value.
+	AgentToolToken string
 	// AgentToolEndpoint is THIS request's own tool endpoint on the helper's
 	// machine — the caller's socket, which the launch renders as the shell's
 	// NOCX_TOOL_SOCKET. It is carried per request rather than held by the
@@ -120,10 +131,6 @@ type SSHSpawnRequest struct {
 	// only from a tagged helper and a second copy of the predicate here would
 	// be a second answer to one question (AD-8).
 	Mode proto.SSHMode
-	// AgentHelperPath and AgentToolSocketPath are the far host's two paths to
-	// nocx's tool surface, or empty — see proto.SSHSpawnParams.
-	AgentHelperPath     string
-	AgentToolSocketPath string
 	// AgentToolEndpoint is THIS request's own tool endpoint on the helper's
 	// machine: what every connection arriving on the far-side tool socket is
 	// forwarded into. It is a second value beside AgentToolSocketPath because
@@ -140,9 +147,13 @@ type SSHSpawnRequest struct {
 	// secret and this struct is not a place it rests: it goes into the launch
 	// options, which render it into the descriptor, and nowhere else.
 	AgentToolToken string
-	// Cols and Rows are the channel's pty size.
-	Cols uint16
-	Rows uint16
+	// AgentToolsAbsent is why this pane's agent gets no tool surface, from the
+	// closed set internal/shellintegration owns, or empty when nocx did not say
+	// (nocx-e2bws). It reaches the launcher's environment as a code; the SHELL
+	// renders the sentence a person reads.
+	AgentToolsAbsent string
+	Cols             uint16
+	Rows             uint16
 	// Lifecycle is the caller's request for the authenticated lifecycle
 	// channel. The spawner opens the far side's loopback listener for it,
 	// renders its addressing into the launcher, and puts the BEARER in frame 2

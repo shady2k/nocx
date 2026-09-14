@@ -35,6 +35,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	nocxlog "github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/shellintegration"
 )
 
 // LifecycleDataPlane receives opaque lifecycle bytes from the coordinator.
@@ -672,6 +673,10 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		// pane is the only party that knows which endpoint its tools belong
 		// to (nocx-50w7p.18).
 		AgentToolEndpoint: p.AgentToolEndpoint,
+		// The bearer the launch stages for this pane's agent (nocx-e2bws), on
+		// the same terms as the ssh route's: a fact about THIS request, minted
+		// by the coordinator that asked for the pane.
+		AgentToolToken: p.AgentToolToken,
 	})
 	if err != nil {
 		s.mu.Lock()
@@ -791,14 +796,12 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 	lg = lg.With("session", proto.SessionHex(raw))
 
 	proc, err := s.sshSpawner.SpawnSSH(ctx, SSHSpawnRequest{
-		SessionID:           proto.SessionHex(raw),
-		Destination:         p.Destination,
-		AcceptOnTrust:       p.AcceptOnTrust,
-		HostKeyFingerprint:  p.HostKeyFingerprint,
-		Shell:               p.Shell,
-		Mode:                p.DesiredMode,
-		AgentHelperPath:     p.AgentHelperPath,
-		AgentToolSocketPath: p.AgentToolSocketPath,
+		SessionID:          proto.SessionHex(raw),
+		Destination:        p.Destination,
+		AcceptOnTrust:      p.AcceptOnTrust,
+		HostKeyFingerprint: p.HostKeyFingerprint,
+		Shell:              p.Shell,
+		Mode:               p.DesiredMode,
 		// The pane's bearer, on the same terms as the endpoint above: a fact
 		// about THIS request (nocx-50w7p.16).
 		AgentToolToken: p.AgentToolToken,
@@ -807,9 +810,13 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 		// that opened this pane, and only that coordinator can name its own
 		// endpoint on this machine.
 		AgentToolEndpoint: p.AgentToolEndpoint,
-		Cols:              cols,
-		Rows:              rows,
-		Lifecycle:         p.Lifecycle,
+		// Why there is no tool surface on this pane, when the caller said: a
+		// code from internal/shellintegration's closed set, rendered into the
+		// launch's environment for the shell to name to a person (nocx-e2bws).
+		AgentToolsAbsent: p.AgentToolsAbsent,
+		Cols:             cols,
+		Rows:             rows,
+		Lifecycle:        p.Lifecycle,
 	})
 	if err != nil {
 		s.mu.Lock()
@@ -871,6 +878,19 @@ func validateSSHSpawn(p proto.SSHSpawnParams) error {
 	default:
 		return fmt.Errorf("%w: shell %q is not one this helper launches", ErrBadSSHParams, p.Shell)
 	}
+	// The reason code is a CLOSED SET internal/shellintegration owns
+	// (agenttools.go: the codes, the environment variable's name and the
+	// render), and this asks the OWNER rather than keeping a second copy of the
+	// list. A code this build's shells cannot turn into a sentence is refused
+	// rather than exported: a shell handed one would report nothing at all, or
+	// worse, a sentence about a state nobody is in (nocx-e2bws).
+	if p.AgentToolsAbsent != "" && !shellintegration.AgentToolsAbsent(p.AgentToolsAbsent).Known() {
+		return fmt.Errorf("%w: agent tools absent reason %q is not one this helper knows", ErrBadSSHParams, p.AgentToolsAbsent)
+	}
+	// AND IT MAY NOT CONTRADICT A PATH — there is no path left to contradict,
+	// since the ssh route's far-host paths were deleted with the case they
+	// served (nocx-e2bws): a pane this machine's helper carries on a host with
+	// no helper of its own has no tool surface, and says so.
 	return nil
 }
 

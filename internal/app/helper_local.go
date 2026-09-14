@@ -564,6 +564,28 @@ func (o *localHelperOpener) setToolSocketPath(path string) {
 	o.toolSocketPath = path
 }
 
+// installedHelperBinary answers the executable of the generation Start put on
+// THIS machine, or empty when nothing was installed.
+//
+// It is the second fact a nested child's launch needs, one field beside
+// toolEndpoint and for the same reason (nocx-1n56d): a sudo/su child runs on
+// this machine, so the MCP adapter its shell execs is this machine's installed
+// helper — the SAME path every local pane this machine opens already carries
+// (helper/session's LocalSpawner takes it from the daemon's own
+// os.Executable). Reading it from this process's environment, which is what
+// the builder used to do, names a path that belongs to whoever launched the
+// backend rather than to the child being composed: a backend started inside a
+// pane inherits that pane's LOCAL path, which is another generation's binary
+// (nocx-e2bws).
+//
+// Read under the opener's own lock, per grant, for the reason the endpoint is:
+// the install happens at Start and this builder is wired at New.
+func (o *localHelperOpener) installedHelperBinary() string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.installed.Binary
+}
+
 // toolEndpoint answers the tool socket this backend runs, for the pane about
 // to be spawned on it — or empty, which is the state a backend with no tool
 // surface is in and not "not configured yet".
@@ -841,11 +863,23 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		// THIS backend's endpoint, per spawn, for the reason the local arm gives:
 		// the pane's tools belong to the coordinator that opened it, and one
 		// account's daemon serves several coordinators (D12). The two FAR-HOST
-		// paths are deliberately left empty — a far socket path with no endpoint
-		// here is refused rather than degraded, and this opener arranges no
-		// far-side forward yet, so the honest request is the one that asks for no
-		// tool surface at all.
+		// paths are deliberately left empty, and since the owner's decision of
+		// 2026-09-14 that is a POLICY rather than a gap (nocx-e2bws): agent
+		// orchestration works where a nocx helper is INSTALLED on the machine,
+		// the bridge the agent runs IS that helper, and the integration bundle
+		// carries no executable — so a pane this machine's helper carries on a
+		// host with no helper of its own has no tool surface at all, and the
+		// shape that says so is the one that names no path.
+		//
+		// It arrives at this opener exactly in the case the reason describes:
+		// the far host's own helper declined or is not installed (the registry
+		// asks it first), so there is nothing there for the pane's agent to
+		// reach.
 		AgentToolEndpoint: o.toolEndpoint(),
+		// AND THAT IS SAID OUT LOUD, as a code the far shell renders into the
+		// sentence a person reads: "path is not configured" would send them
+		// looking for a setting no host has.
+		AgentToolsAbsent: string(shellintegration.AgentToolsNoHelperOnHost),
 		// THE PANE'S BEARER, MINTED WITH THE LAUNCH (nocx-50w7p.16). It has to
 		// travel with the spawn because the far launcher renders it into the
 		// frame the shell reads — and the shell is running before a person has

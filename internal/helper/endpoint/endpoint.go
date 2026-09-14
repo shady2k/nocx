@@ -116,6 +116,67 @@ const maxSocketPath = 103
 // is would start two helpers and each hold half the sessions.
 func Dir(home string) string { return filepath.Join(home, ".nocx", DirName) }
 
+// socketFileName is the socket's name inside a pane's directory. A FIXED name is
+// what makes the directory the identity: a caller that holds the pane's
+// directory has the whole path without a second name being agreed on.
+const socketFileName = "tool.sock"
+
+// SessionSocket answers BOTH paths one far pane's tool socket is made of: the
+// per-pane directory that must exist before the socket is bound, and the socket
+// inside it (nocx-e2bws).
+//
+// ONE function rather than two, and that is the reason it is shaped this way: a
+// caller that took the directory from one derivation and the socket's name from
+// another could create one directory and bind a socket somewhere else, and the
+// directory is what a teardown removes and what the 0700 boundary is.
+//
+// # Why a directory per pane
+//
+// The socket belongs to ONE pane, and it is created on somebody else's machine:
+// the far side's sshd binds it with the login account's permissions, so the
+// DIRECTORY is the boundary — 0700, the same one this machine's own endpoint
+// keeps, for D12's reason one host over (a path any account can reach is a path
+// any account can dial). A directory per pane also makes the cleanup one
+// removal: the session ends, the directory goes, and with it the socket file
+// the far sshd leaves behind when its listener is closed — a CANCELLED forward
+// unlinks its socket, a closed one does not, which is why a teardown removes
+// the directory rather than the socket.
+//
+// # name is the caller's, and it is NOT the session id
+//
+// The path must be known BEFORE the spawn, because it travels in the launch
+// (the shell's NOCX_TOOL_SOCKET), while the session id is minted by the helper
+// on the FAR side DURING it (AD-7). So this takes the caller's own name for
+// this pane's directory — a claim key, a minted token — and never a session id.
+// What the pane's connections are STAMPED with is the real id, and it travels
+// separately (proto.ToolSocketParams.Session).
+//
+// # The bound is a refusal, never a truncation
+//
+// sun_path is 104 bytes on darwin and 108 on Linux, and maxSocketPath is the
+// smaller of the two minus the terminator. A home long enough to push the
+// socket path past it is refused with the number in the sentence, for
+// ErrPathTooLong's own reason: two panes sharing a name is two panes sharing a
+// socket.
+func SessionSocket(home, name string) (dir, socket string, err error) {
+	if name == "" {
+		return "", "", errors.New("endpoint: no name for this pane's socket directory")
+	}
+	// The name becomes a PATH on somebody else's machine, so anything that
+	// could climb out of the directory is refused before a path is built from
+	// it. Backslashes are refused with slashes because the coordinator's own
+	// operating system is not necessarily the far host's.
+	if strings.ContainsAny(name, `/\`+"\x00") || name == "." || name == ".." {
+		return "", "", fmt.Errorf("endpoint: %q is not a name this pane's directory can be built from", name)
+	}
+	dir = filepath.Join(Dir(home), name)
+	socket = filepath.Join(dir, socketFileName)
+	if len(socket) > maxSocketPath {
+		return "", "", fmt.Errorf("%w: %d bytes, the limit is %d: %s", ErrPathTooLong, len(socket), maxSocketPath, socket)
+	}
+	return dir, socket, nil
+}
+
 // Path is the socket path for one generation inside dir.
 func Path(dir string, gen proto.GenerationID) (string, error) {
 	name, err := socketName(gen)

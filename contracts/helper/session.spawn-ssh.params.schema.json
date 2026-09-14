@@ -55,16 +55,16 @@
       "type": "string",
       "enum": ["auto", "raw", "script", "helper"]
     },
-    "agentHelperPath": {
-      "description": "The FAR host's path to the installed helper generation — the executable a launched shell execs to reach this generation's MCP adapter. It is the COORDINATOR's value: it owns the deploy, so it is the party that knows where the generation landed. A path, never a command. Empty renders no NOCX_AGENT_HELPER_PATH at all, which is the soft degrade the local path already states (the shell's own refusal text is what a person sees, rather than a pane pointed at a path nothing answers).",
-      "type": "string"
-    },
-    "agentToolSocketPath": {
-      "description": "The socket a pane's tool bridge connects to, AS THE FAR HOST SEES IT: reachable only through a forward on the helper's connection, which is another bead's op (nocx-50w7p.8). Empty renders no NOCX_TOOL_SOCKET, which is the honest state until that forward exists — a path this helper's own machine answers is not reachable from the far side, and naming it there would point a pane at a socket nothing can open.",
-      "type": "string"
-    },
     "agentToolEndpoint": {
       "description": "The LOCAL socket each connection arriving on the far-side tool socket is forwarded into: this pane's own coordinator's tool endpoint on THIS machine, and the second half of `agentToolSocketPath`'s pair — one names a path on the far host, this names an endpoint on the machine the helper runs on. It travels per spawn for the same reason `session.spawn.params`'s field of that name does (nocx-50w7p.18): a helper daemon serves several coordinators of one account (D12), so an endpoint fixed at the daemon's own start would send a pane's far tool connections to a coordinator that never asked for that pane. A far socket path with no endpoint here is refused by name before anything is dialed.",
+      "type": "string"
+    },
+    "agentToolToken": {
+      "description": "The bearer the pane's agent presents to be admitted (nocx-50w7p.16): what the coordinator minted for THIS pane and its admission epoch. It is a SECRET, and this shape is not a place it rests — the far launcher renders it into the descriptor frame its shell reads, and it is never part of the launch record, the logs, or anything the helper hands a child process. Empty is a real state: a coordinator that requires no bearer sends none, and a pane whose frame carries none admits nobody answering to a token.",
+      "type": "string"
+    },
+    "agentToolsAbsent": {
+      "description": "WHY this pane's agent gets no nocx tools, from the closed set internal/shellintegration owns, or absent when nocx did not say (nocx-e2bws). It travels on this op because this is the route the reason is a fact about: a pane THIS machine's helper carries on a host with no nocx helper of its own has no bridge for the agent to run and no socket for it to dial, and a shell told nothing reports a path it was never given. A value this helper does not know is refused by name, and a value that contradicts `agentToolSocketPath` is refused in both directions.",
       "type": "string"
     },
     "lifecycle": {

@@ -217,6 +217,11 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 				// which is the soft degrade for a caller that runs none.
 				AgentToolSocketPath: req.AgentToolEndpoint,
 				AgentHelperPath:     s.agentHelperPath,
+				// The pane's bearer, on the road every bearer takes
+				// (launcher.go says why it is not in the env block):
+				// nocx-e2bws, and the same value the ssh route carries for a
+				// far pane this machine's helper dials.
+				AgentToolToken: req.AgentToolToken,
 			}
 			if req.Lifecycle != nil {
 				opts.Lane = req.Lifecycle.Lane

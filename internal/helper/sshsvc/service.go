@@ -130,6 +130,16 @@ type Service struct {
 	mu       sync.Mutex
 	channels map[proto.ChannelID]*openChannel
 	forwards map[proto.ForwardID]*openForward
+	// toolSockets are the far-side tool sockets this helper serves: one per
+	// pane whose shell runs on a far host (nocx-e2bws). They live in the same
+	// registry as the forwards and for the same reason — the service is
+	// process-scoped while the connections are per-coordinator, so identity is
+	// a random id and not anything derived from a connection — and they are a
+	// SECOND table rather than entries in the first because what they carry is
+	// not the same thing: a forward hands its connections to the coordinator
+	// as channels, while a tool socket pipes them into an endpoint itself,
+	// with a pane record written first.
+	toolSockets map[proto.ForwardID]*toolSocket
 	// leases are the probe leases: pooled references held for a coordinator
 	// that wants its probes answered on one transport. They live in the same
 	// registry as the channels and for the same reason — the service is
@@ -163,7 +173,8 @@ func (s *Service) Name() string { return proto.ServiceSSH }
 // material it does not have.
 func (s *Service) Ops() []string {
 	ops := append(append(append([]string{proto.OpProbe}, s.channelOps()...), s.forwardOps()...), s.probeOps()...)
-	return append(ops, s.laneOps()...)
+	ops = append(ops, s.laneOps()...)
+	return append(ops, s.toolSocketOps()...)
 }
 
 // ParamsSchema declares the shape of each op. D3 is enforced off this table:
@@ -197,6 +208,8 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.CommandNamesParams{})
 	case proto.OpLane:
 		return host.SchemaFor(proto.LaneParams{})
+	case proto.OpToolSocket:
+		return host.SchemaFor(proto.ToolSocketParams{})
 	}
 	return nil
 }
@@ -220,7 +233,8 @@ func (s *Service) Refusal(err error) (string, json.RawMessage) {
 	case errors.Is(err, errNoAuthChannel):
 		return proto.ErrCodeNoAuthChannel, nil
 	case errors.Is(err, errBadProbeParams), errors.Is(err, errBadChannelParams),
-		errors.Is(err, errBadLeaseParams), errors.Is(err, errBadLaneParams):
+		errors.Is(err, errBadLeaseParams), errors.Is(err, errBadLaneParams),
+		errors.Is(err, errBadToolSocketParams):
 		return proto.ErrCodeBadParams, nil
 	}
 	return "", nil
@@ -333,6 +347,14 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			}
 		}
 		return s.openLane(ctx, p)
+	case proto.OpToolSocket:
+		var p proto.ToolSocketParams
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, fmt.Errorf("%w: %w", errBadToolSocketParams, err)
+			}
+		}
+		return s.toolSocket(ctx, p)
 	}
 	return nil, fmt.Errorf("ssh: no op %q on this service", op)
 }

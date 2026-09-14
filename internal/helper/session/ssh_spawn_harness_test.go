@@ -1181,15 +1181,6 @@ func newSSHStand(t *testing.T, f *sshFixture, coord *sshCoordinator) *sshStand {
 	return newSSHStandWith(t, f, coord, true)
 }
 
-// newSSHStandWithoutToolEndpoint is the same stand with a coordinator that runs
-// NO tool endpoint: it names none on its spawn requests, which is a real state
-// (cmd/nocx-server answers nil, nil when it has no tool surface) and the one
-// that makes a request for a far-side tool socket impossible to honour.
-func newSSHStandWithoutToolEndpoint(t *testing.T, f *sshFixture, coord *sshCoordinator) *sshStand {
-	t.Helper()
-	return newSSHStandFull(t, f, coord, true, "")
-}
-
 // newSSHStandWithoutSpawner is the same stand with the session service built the
 // way an UNTAGGED helper builds it: no ssh spawner at all, which is a fact about
 // the binary rather than about any request (plan §1). It exists so the refusal

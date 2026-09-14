@@ -844,6 +844,13 @@ __nocx_agent_stage() {
     __nocx_agent_stage_reason=
     __nocx_agent_launch_dir=
     __nocx_agent_launch_lease=
+    # NOCX SAID WHY THERE IS NO TOOL SURFACE (nocx-e2bws): the launch names a
+    # code, this shell owns the sentence. "Path is not configured" would send a
+    # person looking for a setting no host has.
+    if [[ -z "$__helper" || -z "$__socket" ]] && [[ -n "${NOCX_AGENT_TOOLS_ABSENT:-}" ]]; then
+        __nocx_agent_stage_reason='no nocx helper is installed on this host, so the agent gets no nocx tools'
+        return 1
+    fi
     if [[ -z "$__helper" ]]; then
         __nocx_agent_stage_reason='nocx helper path is not configured'
         return 1

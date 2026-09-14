@@ -305,6 +305,13 @@ func stage1AgentEnv(opts LaunchOptions) string {
 		b.WriteString(ToolSocketEnvVar + "=" + ShellQuote(opts.AgentToolSocketPath) + "\n")
 		b.WriteString("export " + ToolSocketEnvVar + "\n")
 	}
+	if opts.AgentToolsAbsent != "" {
+		// The one fact the far shell cannot see: why nocx named no bridge and
+		// no socket. It is a code from a closed set and the shell owns the
+		// sentence (agenttools.go says why the two are split).
+		b.WriteString(AgentToolsAbsentEnvVar + "=" + ShellQuote(opts.AgentToolsAbsent.String()) + "\n")
+		b.WriteString("export " + AgentToolsAbsentEnvVar + "\n")
+	}
 	return b.String()
 }
 

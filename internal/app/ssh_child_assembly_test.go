@@ -420,6 +420,10 @@ func newSSHChildHarness(t *testing.T, fx *liveSshd) *sshChildHarness {
 			// This harness runs no coordinator tool endpoint, and the ssh
 			// child it composes names none whatever answered: its shell runs
 			// on the far host (nestedToolSocket).
+			func() string { return "" },
+			// Nor a helper binary for the same reason: the child runs on
+			// another machine, where this one's install is not what it execs
+			// (nocx-e2bws).
 			func() string { return "" })))
 	facts := &factLog{}
 	pub.SetEmitter(facts)

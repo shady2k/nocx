@@ -270,6 +270,22 @@ type SpawnParams struct {
 	// at all — the shell's own refusal text is what a user sees, which is the
 	// soft degrade nocx-2tesu exists to keep soft.
 	AgentToolEndpoint string `json:"agentToolEndpoint,omitempty"`
+	// AgentToolToken is the bearer that admits this pane's far agent, minted by
+	// the coordinator that opened the pane (nocx-50w7p.16): what the far
+	// launcher renders into the frame its shell reads, and what the agent's MCP
+	// bridge presents before its first request.
+	//
+	// IT IS ON THIS SHAPE BY ANALOGY WITH SSHSpawnParams AND OUT OF THE SAME
+	// NEED (nocx-e2bws): a pane on a far host is reached by a coordinator
+	// whose pid relation to the pane does not exist, so the endpoint cannot
+	// admit it by process ownership and needs the interval's bearer instead.
+	// A pane on THIS machine is admitted as its coordinator's own child, which
+	// is why the field is optional and empty for the ordinary local pane.
+	//
+	// It is a SECRET and this struct is not a place it rests: it goes into the
+	// launch options, which render it into the descriptor the shell reads —
+	// never into the agent env block, and never into a log line.
+	AgentToolToken string `json:"agentToolToken,omitempty"`
 }
 
 // MaxIdempotencyKey bounds the key a caller may mint. The helper keeps one
@@ -425,20 +441,6 @@ type SSHSpawnParams struct {
 	// profile.DesiredMode's own gate to it: `raw` opens a plain login shell
 	// and integrates nothing, and an unrecognised value fails closed.
 	DesiredMode SSHMode `json:"desiredMode"`
-	// AgentHelperPath and AgentToolSocketPath are the two FAR-HOST paths a
-	// launched shell needs to reach nocx's tool surface (nocx-e2bws): the
-	// installed helper generation's executable, and the socket the pane's MCP
-	// bridge connects to.
-	//
-	// They are the COORDINATOR's values and they are paths, never commands:
-	// the coordinator owns the deploy, so it is the party that knows where the
-	// generation landed, and the socket is reachable only through a forward it
-	// arranges. Empty renders no variable at all, which is the soft degrade
-	// the local path already states (nocx-2tesu): the shell's own refusal text
-	// is what a user sees, rather than a pane pointed at a path nothing
-	// answers.
-	AgentHelperPath     string `json:"agentHelperPath,omitempty"`
-	AgentToolSocketPath string `json:"agentToolSocketPath,omitempty"`
 	// AgentToolEndpoint is the LOCAL socket every connection arriving on the
 	// far-side tool socket is piped into: this pane's own coordinator's tool
 	// endpoint on THIS machine, which is the one that asked for the pane.
@@ -475,6 +477,21 @@ type SSHSpawnParams struct {
 	// tree rule admits those panes) sends none, and a pane whose frame carries
 	// none admits nobody answering to a token.
 	AgentToolToken string `json:"agentToolToken,omitempty"`
+	// AgentToolsAbsent is WHY this pane's agent gets no nocx tools, from the
+	// closed set internal/shellintegration owns (nocx-e2bws): the code, not a
+	// sentence, because the SHELL renders the sentence a person reads and the
+	// fact the shell cannot see is the reason.
+	//
+	// It travels on the ssh spawn because that is the route the reason is a
+	// fact about: THIS machine's helper carries a pane whose shell runs on a
+	// host with no nocx helper of its own, so there is no bridge for the agent
+	// to run there and no socket for it to dial — and a shell told nothing
+	// reports "path is not configured", which sends a person looking for a
+	// setting no host has.
+	//
+	// Empty is the honest state for every other pane: nocx did not say, and the
+	// shell keeps its own sentence.
+	AgentToolsAbsent string `json:"agentToolsAbsent,omitempty"`
 	// IdempotencyKey is the caller's name for the spawn, on exactly the terms
 	// SpawnParams states: a repeat answers with the session the first one made
 	// rather than forking a second remote shell.

@@ -159,13 +159,23 @@ import (
 // worth of a JSON-escape, a conditional field and an unset — and the bundle is
 // what a publish writes. The bound is unchanged, still 2.96x.
 //
+// AND THEY MOVED when the shell's stage learned to name WHY a pane has no tool
+// surface (nocx-e2bws): the worst path writes 89060 bytes, up from 88591. THE
+// GROWTH IS THE TWO SCRIPTS, and that is measured rather than argued — reverting
+// nocx.bash and nocx.zsh to their previous bytes, with every Go change left in
+// place, returns this path to 88591 exactly. nocx.bash gained 435 bytes and
+// nocx.zsh 321 (a branch, the sentence it names, and the comment above them),
+// and the bundle publishes both scripts RAW at 0600, so their comments are
+// publish bytes like any other. The CALL count is untouched at 63, because what
+// changed is the size of two files and not the work the publish does.
+//
 // REPORT-p3-measure.md, which the failure messages below tell you to update
 // alongside these constants, HAS NEVER EXISTED in this repository — checked
 // across every ref. Whoever restores it, or removes the instruction, owns
 // nocx-uxuwu.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 88591
+	measuredMaxPublishBytes = 89060
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

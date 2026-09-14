@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.tool-socket.params.schema.json",
+  "title": "HelperSSHToolSocketParams",
+  "description": "Ask the far side for a TOOL SOCKET: a unix socket bound at a path the caller names, whose accepted connections this helper pipes into a socket on ITS OWN machine with the pane record written first (nocx-e2bws). It is its own op rather than a kind of `forward` because what arrives on it is not handed to the coordinator as a channel: the endpoint that admits an agent must be told WHICH PANE the connection belongs to before a byte of it is read, and only the party holding the listener can write that record.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["destination", "acceptOnTrust", "path", "target", "session"],
+  "properties": {
+    "destination": {
+      "description": "The connection the socket is requested on, and what to authenticate as: the same resolved triple `open` and `forward` take, resolved by the coordinator.",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/destination"
+    },
+    "acceptOnTrust": {
+      "description": "The coordinator's answer to 'may a host key this host has never presented be recorded', carried for the same reason probe, open and forward carry it: this op may be the first contact with a host, and the helper may not decide that for itself.",
+      "type": "boolean"
+    },
+    "hostKeyFingerprint": {
+      "description": "The key the caller expects for this destination, when it has one. Empty means it named none, which is the ordinary case for a direct connection and is refused for a linked credential by the coordinator before this request is ever built.",
+      "type": "string"
+    },
+    "path": {
+      "description": "The socket path ON THE FAR HOST, as that host will see it. It must not exist when the request arrives — OpenSSH refuses to bind over an existing name rather than replacing it — and the directory holding it must already exist, because neither sshd nor this helper creates one: a helper that invented a path would be guessing about somebody else's filesystem.",
+      "type": "string",
+      "minLength": 1
+    },
+    "target": {
+      "description": "The socket on THIS machine every accepted connection is piped into: the tool endpoint of the coordinator that asked for the pane, named by that coordinator per request rather than held by the daemon (one account's daemon serves several coordinators, D12).",
+      "type": "string",
+      "minLength": 1
+    },
+    "session": {
+      "description": "The coordinator's session id for the pane these connections belong to. It is written before any far byte, and it is REQUIRED: a tool socket whose connections name no pane is a socket the coordinator can only refuse, so the request is refused by name before anything is dialed.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

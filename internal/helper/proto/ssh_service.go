@@ -871,6 +871,78 @@ type UnforwardParams struct {
 	Forward ForwardID `json:"forward"`
 }
 
+// OpToolSocket asks the far side for a TOOL SOCKET: a unix socket bound at a
+// path the caller names, on the connection the destination names.
+//
+// # Why it is its own op, and why the far side is a SOCKET and not a channel
+//
+// Every other listener on this wire hands its accepted connections to the
+// COORDINATOR as channels (`forward`, and the announcements that carry them).
+// This one does not, and the difference is the whole reason it exists: what
+// arrives on a pane's tool socket is an AGENT, and the endpoint that admits an
+// agent must be told WHICH PANE the connection belongs to before a single byte
+// of it is read — a record only the party holding the listener can write
+// (internal/toolendpoint's panebind, whose reader refuses a connection without
+// one). A helper that announced the connection instead would hand the
+// coordinator a stream with no pane on it.
+//
+// So the op takes the two ends AND the pane: `path` is bound on the far host
+// by its own sshd (a streamlocal forward — the same request the coordinator's
+// own -R would make, which is why a path that must not exist yet is the
+// caller's business), `target` is the socket on THIS machine each accepted
+// connection is piped into, and `session` is what is written first.
+//
+// It answers the same ForwardID `forward` answers, and it is ended by the same
+// `unforward`: a tool socket is a listener, and one op that ends listeners is
+// what keeps "which id is ended by which call" answerable at the type level.
+//
+// The reason the far side is a PATH rather than the loopback port `forward`
+// binds is D12's: a loopback port on a machine anybody can log into is
+// reachable by every account on it, while a unix socket is bound with the login
+// account's own permissions — the same boundary the local endpoint is (0700
+// directory, 0600 socket).
+const OpToolSocket = "tool-socket"
+
+// ToolSocketParams is one pane's far-side tool socket, as the caller resolves
+// it.
+//
+// The two ends are the CALLER's, and the helper may not invent either: it
+// cannot read the far host's filesystem, so a far path it chose would be a
+// guess about somebody else's machine, and it does not hold the coordinator's
+// endpoint either — that is a path on this machine which the pane's owner
+// names (nocx-50w7p.18's rule, one op over). What the helper owns is the
+// listener, the record written on every connection through it, and the pump.
+type ToolSocketParams struct {
+	Destination   SSHDestination `json:"destination"`
+	AcceptOnTrust bool           `json:"acceptOnTrust"`
+	// HostKeyFingerprint is the caller's statement about the key it expects,
+	// carried for the reason `forward` and `open` carry it: this op may be the
+	// first contact with a host.
+	HostKeyFingerprint string `json:"hostKeyFingerprint,omitempty"`
+	// Path is the socket path ON THE FAR HOST, as that host will see it. It
+	// must not exist when the request arrives — OpenSSH refuses to bind over
+	// an existing name rather than replacing it — and the directory holding it
+	// must already be there, because neither sshd nor this helper creates one.
+	Path string `json:"path"`
+	// Target is the socket on THIS machine every accepted connection is piped
+	// into: the tool endpoint of the coordinator that asked for the pane.
+	Target string `json:"target"`
+	// Session is the coordinator's session id for the pane these connections
+	// belong to, and it is written before any far byte (panebind). Required:
+	// a tool socket whose connections name no pane is a socket the coordinator
+	// can only refuse, and it is refused by name before anything is dialed.
+	Session string `json:"session"`
+}
+
+// ToolSocketResult names the listener, so the caller can end it with the same
+// `unforward` every other listener is ended by. Path is echoed back rather than
+// derived there: the caller named it, and the answer says what was actually
+// asked for rather than what somebody re-derived.
+type ToolSocketResult struct {
+	Forward ForwardID `json:"forward"`
+	Path    string    `json:"path"`
+}
+
 // UnforwardResult is the empty answer an idempotent unforward gives.
 type UnforwardResult struct{}
 

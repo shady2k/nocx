@@ -169,7 +169,18 @@ func (s *Service) unforward(id proto.ForwardID) (proto.UnforwardResult, error) {
 	s.mu.Lock()
 	f := s.forwards[id]
 	delete(s.forwards, id)
+	// A TOOL SOCKET IS A LISTENER TOO, and it is ended by this same op: the
+	// coordinator holds one id namespace for "a listener this helper holds",
+	// and which mechanism created it is not a fact its caller acts on
+	// (nocx-e2bws). Its close is its own — no channels were announced for it,
+	// so there is nothing to notify.
+	ts := s.toolSockets[id]
+	delete(s.toolSockets, id)
 	s.mu.Unlock()
+	if ts != nil {
+		_ = ts.Close()
+		return proto.UnforwardResult{}, nil
+	}
 	if f == nil {
 		s.log.Debug("ssh: unforward for an unknown listener", "forward", id.String())
 		return proto.UnforwardResult{}, nil

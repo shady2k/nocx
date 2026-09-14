@@ -33,6 +33,7 @@ import (
 	"strings"
 	"testing"
 
+	helperlocal "github.com/shady2k/nocx/internal/helper/local"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
@@ -56,7 +57,7 @@ type nestedGrantHarness struct {
 	parent  lifecycle.DomainID
 }
 
-func newNestedGrantHarness(t *testing.T, kind transportKind, endpoint func() string) *nestedGrantHarness {
+func newNestedGrantHarness(t *testing.T, kind transportKind, endpoint func() string, localHelper func() string) *nestedGrantHarness {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	k := lifecycle.New(lifecycle.Options{})
@@ -69,7 +70,7 @@ func newNestedGrantHarness(t *testing.T, kind transportKind, endpoint func() str
 	// typed is nil: it is the SSH child's delivery seam, and these tests
 	// compose the sudo/su child, which never reaches for it.
 	builder := newChildGrantBuilder(logger,
-		func() *lifecyclepub.Publisher { return pub }, transports, sessions, nil, endpoint)
+		func() *lifecyclepub.Publisher { return pub }, transports, sessions, nil, endpoint, localHelper)
 	pub = lifecyclepub.New(k, lifecyclepub.WithGrantBuilder(builder))
 
 	parentLn, err := lifecyclechannel.NewListener(logger, pub)
@@ -133,7 +134,7 @@ func TestNestedLocalChildLaunchNamesTheCoordinatorsToolEndpoint(t *testing.T) {
 	// endpoint at all — the production seam, not a value handed to the test.
 	a.SetLocalToolSocketPath(sock)
 
-	h := newNestedGrantHarness(t, transportKind{local: true}, a.localHelper.toolEndpoint)
+	h := newNestedGrantHarness(t, transportKind{local: true}, a.localHelper.toolEndpoint, a.localHelper.installedHelperBinary)
 	launch := h.grantSudo()
 
 	want := shellintegration.ToolSocketEnvVar + "='" + sock + "'"
@@ -153,7 +154,8 @@ func TestNestedLocalChildLaunchNamesTheCoordinatorsToolEndpoint(t *testing.T) {
 func TestNestedChildOnAnotherMachineNamesNoToolEndpoint(t *testing.T) {
 	t.Setenv(shellintegration.ToolSocketEnvVar, "/run/user/1000/nocx/foreign-coordinator.sock")
 
-	h := newNestedGrantHarness(t, transportKind{port: 41234}, func() string { return "/run/user/1000/nocx/tool.sock" })
+	h := newNestedGrantHarness(t, transportKind{port: 41234}, func() string { return "/run/user/1000/nocx/tool.sock" },
+		func() string { return "/home/u/.nocx/helper/installed/nocx-helper" })
 	launch := h.grantSudo()
 
 	if strings.Contains(launch, shellintegration.ToolSocketEnvVar+"=") {
@@ -178,7 +180,7 @@ func TestNestedLocalChildWithNoToolSurfaceNamesNoVariable(t *testing.T) {
 		t.Fatal("newTestApp built no local helper opener to derive the endpoint through")
 	}
 
-	h := newNestedGrantHarness(t, transportKind{local: true}, a.localHelper.toolEndpoint)
+	h := newNestedGrantHarness(t, transportKind{local: true}, a.localHelper.toolEndpoint, a.localHelper.installedHelperBinary)
 	launch := h.grantSudo()
 
 	if strings.Contains(launch, shellintegration.ToolSocketEnvVar+"=") {
@@ -189,5 +191,78 @@ func TestNestedLocalChildWithNoToolSurfaceNamesNoVariable(t *testing.T) {
 	// variable the launch is expected to carry INSTEAD.
 	if !strings.Contains(launch, "NOCX_SESSION_ID='aabbccddeeff00112233445566778899'") {
 		t.Fatalf("the child's launch lost its session identity too:\n%s", launch)
+	}
+}
+
+// TestNestedLocalChildNamesThisMachinesInstalledHelperBinary is the third
+// criterion at the composition root, and it is the twin of the endpoint test
+// above one field over (nocx-e2bws): a sudo child started inside a pane on
+// THIS machine must carry the executable of the helper generation THIS backend
+// installed, because that is the MCP adapter its agent will run.
+//
+// THE ENVIRONMENT IS THE MUTATION, and it is set rather than merely unset. The
+// variable the builder used to read is given the path a backend started from
+// inside a pane inherits — another generation's binary — so a launch that
+// still read it would carry THAT value and fail here, while a launch that asks
+// the opener carries the installed one. Restoring the env read turns this test
+// red; that is what makes it evidence rather than a description.
+func TestNestedLocalChildNamesThisMachinesInstalledHelperBinary(t *testing.T) {
+	storagetest.Isolate(t)
+	a, err := newTestApp(t)
+	if err != nil {
+		t.Fatalf("newTestApp: %v", err)
+	}
+	if a.localHelper == nil {
+		t.Fatal("newTestApp built no local helper opener to derive the binary through")
+	}
+	// The value Start's install step records, through the production setter it
+	// records it with — not a field the test reaches into.
+	const installed = "/home/u/.nocx/helper/12-linux-amd64-abcd/nocx-helper"
+	a.localHelper.installedLocalGeneration(helperlocal.Installed{Binary: installed, Generation: "abcd"})
+
+	const foreign = "/home/u/.nocx/helper/11-linux-amd64-ffff/nocx-helper"
+	t.Setenv("NOCX_AGENT_HELPER_PATH", foreign)
+
+	h := newNestedGrantHarness(t, transportKind{local: true}, a.localHelper.toolEndpoint, a.localHelper.installedHelperBinary)
+	launch := h.grantSudo()
+
+	if want := "NOCX_AGENT_HELPER_PATH='" + installed + "'"; !strings.Contains(launch, want) {
+		t.Fatalf("the nested child's launch does not name this machine's installed helper %s:\n%s", want, launch)
+	}
+	if strings.Contains(launch, foreign) {
+		t.Fatalf("the nested child's launch names the binary this process's environment carries (%s), which is a fact about whoever launched the backend rather than about the child:\n%s",
+			foreign, launch)
+	}
+}
+
+// TestNestedSSHChildNamesNoToolSurface is the other half of the same criterion,
+// and it is the one the owner's decision of 2026-09-14 is visible through. A
+// nested ssh child's shell runs on ANOTHER machine: nocx installs no helper
+// there, the integration bundle carries no executable, and nothing else may put
+// one there — so its launch names neither a bridge binary nor a socket, and the
+// shell's own stage reports that absence to the person.
+//
+// Both environment variables are set to values with a path in them, so a
+// launch that still read the environment — which is exactly what both fields
+// did — would name the WRONG MACHINE's binary and socket here and fail.
+func TestNestedSSHChildNamesNoToolSurface(t *testing.T) {
+	t.Setenv("NOCX_AGENT_HELPER_PATH", "/home/u/.nocx/helper/12-linux-amd64-abcd/nocx-helper")
+	t.Setenv(shellintegration.ToolSocketEnvVar, "/run/user/1000/nocx/tool.sock")
+
+	opts := sshChildLaunchOptions("aabbccddeeff00112233445566778899", typedTestRequest(),
+		lifecycle.DomainHandle{Domain: "dom-ssh-child", Epoch: 1})
+
+	if opts.AgentHelperPath != "" {
+		t.Fatalf("a nested ssh child's launch names %q as its bridge binary; that path is on THIS machine and the child runs on another",
+			opts.AgentHelperPath)
+	}
+	if opts.AgentToolSocketPath != "" {
+		t.Fatalf("a nested ssh child's launch names %q as its tool socket; this backend's endpoint is a path nothing on the far host reaches",
+			opts.AgentToolSocketPath)
+	}
+	// The launch is a real one: the identity the far side needs is still
+	// there, so an empty options value cannot be satisfied by an empty launch.
+	if opts.SessionID == "" || opts.Lane != string(typedTestRequest().Lane) || opts.Capability == "" {
+		t.Fatalf("the far launch lost its own identity: %+v", opts)
 	}
 }

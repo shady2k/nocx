@@ -68,16 +68,6 @@ func (s *sshStand) addCoordinator(t *testing.T) *client.Client {
 	})
 }
 
-// paneParams is spawnParams with this pane's own two tool values: the far
-// host's path, and the endpoint ON THIS MACHINE the far side's bytes are for.
-func (s *sshStand) paneParams(t *testing.T, farPath, endpoint string) proto.SSHSpawnParams {
-	t.Helper()
-	params := s.spawnParams(t, proto.SSHModeAuto)
-	params.AgentToolSocketPath = farPath
-	params.AgentToolEndpoint = endpoint
-	return params
-}
-
 // TestEachCoordinatorsPaneForwardsToItsOwnToolEndpoint is the bead's first
 // acceptance criterion, over the real socket: TWO coordinators ride ONE daemon,
 // each opens a pane, and each pane's far-side tool connection arrives at ITS
@@ -116,14 +106,31 @@ func TestEachCoordinatorsPaneForwardsToItsOwnToolEndpoint(t *testing.T) {
 	endpointA := serveToolEndpoint(t, coordA, true)
 	endpointB := serveToolEndpoint(t, coordB, true)
 
-	entryA, err := first.SpawnSSH(context.Background(), stand.paneParams(t, farA, coordA))
+	// EACH COORDINATOR OPENS ITS OWN PANE, and then asks for that pane's tool
+	// socket with ITS OWN endpoint as the target (nocx-e2bws): the far path and
+	// the local target are the request's now, where they used to ride the
+	// spawn — which is what makes one pane's tools belong to the coordinator
+	// that asked for them, on one daemon serving both.
+	entryA, err := first.SpawnSSH(context.Background(), stand.spawnParams(t, proto.SSHModeAuto))
 	if err != nil {
 		t.Fatalf("the first coordinator's spawn-ssh: %v", err)
 	}
+	if _, opErr := first.OpenToolSocket(context.Background(), proto.ToolSocketParams{
+		Destination: stand.spawnParams(t, proto.SSHModeAuto).Destination,
+		Path:        farA, Target: coordA, Session: entryA.HostSessionID.Session,
+	}); opErr != nil {
+		t.Fatalf("the first coordinator's tool socket: %v", opErr)
+	}
 	f.waitForwardGranted(t)
-	entryB, err := second.SpawnSSH(context.Background(), stand.paneParams(t, farB, coordB))
+	entryB, err := second.SpawnSSH(context.Background(), stand.spawnParams(t, proto.SSHModeAuto))
 	if err != nil {
 		t.Fatalf("the second coordinator's spawn-ssh: %v", err)
+	}
+	if _, opErr := second.OpenToolSocket(context.Background(), proto.ToolSocketParams{
+		Destination: stand.spawnParams(t, proto.SSHModeAuto).Destination,
+		Path:        farB, Target: coordB, Session: entryB.HostSessionID.Session,
+	}); opErr != nil {
+		t.Fatalf("the second coordinator's tool socket: %v", opErr)
 	}
 	f.waitForwardGranted(t)
 
@@ -206,9 +213,21 @@ func TestAFarToolConnectionEndsWithTheSessionThatJustifiesIt(t *testing.T) {
 	farA, farB := filepath.Join(dir, "far-a.sock"), filepath.Join(dir, "far-b.sock")
 	endpoint := serveToolEndpoint(t, stand.toolSocket, true)
 
-	entryA := stand.mustSpawn(t, stand.paneParams(t, farA, stand.toolSocket))
+	entryA := stand.mustSpawn(t, stand.spawnParams(t, proto.SSHModeAuto))
+	if _, opErr := stand.client.OpenToolSocket(context.Background(), proto.ToolSocketParams{
+		Destination: stand.spawnParams(t, proto.SSHModeAuto).Destination,
+		Path:        farA, Target: stand.toolSocket, Session: entryA.HostSessionID.Session,
+	}); opErr != nil {
+		t.Fatalf("the first pane's tool socket: %v", opErr)
+	}
 	f.waitForwardGranted(t)
-	entryB := stand.mustSpawn(t, stand.paneParams(t, farB, stand.toolSocket))
+	entryB := stand.mustSpawn(t, stand.spawnParams(t, proto.SSHModeAuto))
+	if _, opErr := stand.client.OpenToolSocket(context.Background(), proto.ToolSocketParams{
+		Destination: stand.spawnParams(t, proto.SSHModeAuto).Destination,
+		Path:        farB, Target: stand.toolSocket, Session: entryB.HostSessionID.Session,
+	}); opErr != nil {
+		t.Fatalf("the second pane's tool socket: %v", opErr)
+	}
 	f.waitForwardGranted(t)
 
 	// ONE AT A TIME, and that is not tidiness: what this test needs is which
@@ -328,8 +347,18 @@ func TestAPaneWhoseCoordinatorHasGoneIsRefusedAndNotReRouted(t *testing.T) {
 		t.Fatalf("bind the coordinator endpoint that is about to go: %v", err)
 	}
 
-	if _, err := second.SpawnSSH(context.Background(), stand.paneParams(t, farPath, gonePath)); err != nil {
+	entry, err := second.SpawnSSH(context.Background(), stand.spawnParams(t, proto.SSHModeAuto))
+	if err != nil {
 		t.Fatalf("spawn-ssh through the coordinator that is about to go: %v", err)
+	}
+	// The departed coordinator's endpoint is the TARGET of this request, which
+	// is what makes its disappearance the thing under test (nocx-e2bws: the
+	// target is the caller's, per request).
+	if _, opErr := second.OpenToolSocket(context.Background(), proto.ToolSocketParams{
+		Destination: stand.spawnParams(t, proto.SSHModeAuto).Destination,
+		Path:        farPath, Target: gonePath, Session: entry.HostSessionID.Session,
+	}); opErr != nil {
+		t.Fatalf("the tool socket of the coordinator that is about to go: %v", opErr)
 	}
 	f.waitForwardGranted(t)
 	if err := gone.Close(); err != nil {

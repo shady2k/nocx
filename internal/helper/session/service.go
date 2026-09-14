@@ -673,6 +673,10 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		// pane is the only party that knows which endpoint its tools belong
 		// to (nocx-50w7p.18).
 		AgentToolEndpoint: p.AgentToolEndpoint,
+		// The bearer the launch stages for this pane's agent (nocx-e2bws), on
+		// the same terms as the ssh route's: a fact about THIS request, minted
+		// by the coordinator that asked for the pane.
+		AgentToolToken: p.AgentToolToken,
 	})
 	if err != nil {
 		s.mu.Lock()

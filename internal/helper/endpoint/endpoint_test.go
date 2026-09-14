@@ -16,6 +16,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/helper/endpoint"
@@ -280,5 +281,51 @@ func TestTheLoserOfABindRaceIsToldSomebodyIsServingRatherThanAnErrno(t *testing.
 
 	if _, lerr := endpoint.Listen(dir, gen); !errors.Is(lerr, endpoint.ErrAlreadyServing) {
 		t.Fatalf("the loser of the bind race got %v, want ErrAlreadyServing", lerr)
+	}
+}
+
+// TestSessionSocketAnswersOnePaneDirectoryAndItsSocket pins the derivation a far
+// host's tool socket is bound at (nocx-e2bws): one directory per pane under the
+// account's endpoint directory — the same `Dir(home)` this machine's own
+// endpoint uses, extended by one level — and the socket inside it.
+//
+// The two are returned TOGETHER, and that is the property under test: the caller
+// that CREATES the directory (before the far sshd binds the socket) and the
+// caller that REMOVES it (when the session ends) must be naming the directory
+// the socket was actually bound in, and a second derivation is how the two stop
+// agreeing.
+func TestSessionSocketAnswersOnePaneDirectoryAndItsSocket(t *testing.T) {
+	const home = "/home/dev"
+	const name = "0f9b4d7159d38afee9648a843654516f"
+
+	dir, socket, err := endpoint.SessionSocket(home, name)
+	if err != nil {
+		t.Fatalf("SessionSocket: %v", err)
+	}
+	if want := filepath.Join(endpoint.Dir(home), name); dir != want {
+		t.Fatalf("directory = %q, want %q", dir, want)
+	}
+	if want := filepath.Join(dir, "tool.sock"); socket != want {
+		t.Fatalf("socket = %q, want %q", socket, want)
+	}
+	if endpoint.Dir(home) != filepath.Dir(dir) {
+		t.Fatalf("the per-pane directory %q is not directly under the account's endpoint directory %q",
+			dir, endpoint.Dir(home))
+	}
+
+	// A HOME LONG ENOUGH IS REFUSED, never truncated: two panes sharing a name
+	// is two panes sharing a socket. The assertion is on the REFUSAL and not on
+	// the number, which belongs to the package that owns the platform's bound.
+	if _, _, err := endpoint.SessionSocket("/"+strings.Repeat("d", 200), name); !errors.Is(err, endpoint.ErrPathTooLong) {
+		t.Fatalf("a home past the sun_path bound answered %v, want ErrPathTooLong", err)
+	}
+
+	// A name that could climb out of the directory is not one this path may be
+	// built from: it is handed to somebody else's sshd, so it is refused before
+	// a path exists.
+	for _, bad := range []string{"", "..", ".", "a/b", `a\b`, "a\x00b"} {
+		if _, _, err := endpoint.SessionSocket(home, bad); err == nil {
+			t.Fatalf("SessionSocket accepted %q as a name to build a directory from", bad)
+		}
 	}
 }

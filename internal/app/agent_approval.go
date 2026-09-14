@@ -88,6 +88,21 @@ type agentApprovalService struct {
 	// Bound by the composition root; nil means no endpoint was built, and
 	// nothing is admitted to close.
 	authorityEnded func(session.ID, toolendpoint.AdmissionEpoch)
+
+	// farToolSockets is the OTHER consumer of "this session is over"
+	// (nocx-e2bws). A far pane's tool socket is opened by the coordination
+	// registry and lives on somebody else's host, and the event that ends it is
+	// the same one that retires its bearer — so this service, which is the
+	// transport's only channel for that event, hands it on rather than letting
+	// the two ends of one interval be driven by two different facts. Nil when
+	// this coordinator opened no far panes, and then there is nothing to end.
+	farToolSockets sessionEndCleanup
+}
+
+// sessionEndCleanup is one consumer of "the session this was for is over": the
+// narrowest shape for a fact this service forwards and does not act on.
+type sessionEndCleanup interface {
+	SessionEnded(sid session.ID)
 }
 
 // enrolledAgent is what one live enrolment holds: the identity the person
@@ -287,6 +302,14 @@ func (s *agentApprovalService) SessionEnded(sessionID string) {
 	// will bind that bearer again and nothing else would ever drop it.
 	if s.spawnTokens != nil {
 		s.spawnTokens.Forget(session.ID(sessionID))
+	}
+	// AND THE TOOL SURFACE THAT LAUNCH WAS GIVEN, when it had one (nocx-e2bws):
+	// the far pane's socket is ended here, on the same event, because "the pane
+	// can produce no another call" is exactly what makes a listener on somebody
+	// else's host wrong to keep — and because one event with two orders of
+	// arrival would let the socket outlive the credential it carried.
+	if s.farToolSockets != nil {
+		s.farToolSockets.SessionEnded(session.ID(sessionID))
 	}
 }
 

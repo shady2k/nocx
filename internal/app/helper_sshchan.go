@@ -41,10 +41,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
+	"path/filepath"
 
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
+	"github.com/shady2k/nocx/internal/helper/endpoint"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -398,7 +401,7 @@ func (h *sshOverHelper) openChannel(ctx context.Context, kind proto.ChannelKind,
 }
 
 // translate re-types a helper refusal into the error this coordinator's callers
-// already switch on.
+// already switches on.
 //
 // It is the one place the migration has to be careful, and the reason is that
 // Go values do not cross a process boundary: the helper raises the SAME typed
@@ -493,6 +496,11 @@ type helperLeases interface {
 	laneProvider
 	installLeaseProvider
 	filesLeaseProvider
+	// The far pane's tool surface is NOT here, and that is this composite's own
+	// narrowness rule: it is a second consumer's need, declared as its own
+	// interface (farPaneToolSocketter, helper_git.go), and the composition root
+	// hands the registry the SAME *sshOverHelper directly rather than routing it
+	// through this dispatch — one value, two seams, no forwarding.
 }
 
 func (r installLeaseRoutes) LaneConn(ctx context.Context, host string, machine proto.Machine, generation proto.GenerationID, opts ...ssh.ConnectOption) (helperclient.HelperConn, error) {
@@ -532,3 +540,173 @@ var (
 	_ helperInstallProvider = installLeaseRoutes{}
 	_ filesLeaseProvider    = installLeaseRoutes{}
 )
+
+// farPaneToolRoutes are the three routes one far pane's tool surface is made of,
+// resolved TOGETHER and before the spawn (nocx-e2bws): the DIRECTORY that must
+// exist on the far host before the socket can be bound, the SOCKET's path there
+// — which is what the launch names as NOCX_TOOL_SOCKET — and the TARGET on this
+// machine every connection arriving on it is piped into, which is this
+// coordinator's own tool endpoint.
+//
+// They travel as one value because they are one pane's: a caller that took the
+// path from one call and the directory from another could bind a socket
+// somewhere its teardown would never remove, and the directory is the 0700
+// boundary.
+type farPaneToolRoutes struct {
+	Dir    string
+	Path   string
+	Target string
+}
+
+// PrepareFarPaneToolSocket resolves those three routes for one pane whose shell
+// will run on a host with an installed helper, and CREATES the far directory.
+//
+// # Why the directory is made here, before the spawn
+//
+// The far side's sshd binds the socket, and it will not create the directory
+// above it: a bind whose parent is missing fails with ENOENT, and a launch that
+// named a socket nobody could bind is an agent failing for a reason that is not
+// about the agent. So the directory exists first — 0700, at creation, never left
+// to a umask — and its three levels are made one at a time, each only if it is
+// not already there (another pane on that host has almost certainly made the
+// first two).
+//
+// # name is the caller's, and the home is the ACCOUNT's
+//
+// name is the pane's CLAIM — the caller's own name for this spawn, which the
+// wire already carries and the helper already stores — never a session id: the
+// session id is minted on the far side DURING the spawn (AD-7) and travels
+// separately, as the record's Session. The home is the one the SFTP subsystem
+// starts in, which is the account's passwd home: this path is bound by that
+// account for that account's own agent, so the passwd home is the right root
+// here — unlike the shell bundle, whose carrier must activate under the
+// SESSION's home (nocx-50w7p.15).
+func (h *sshOverHelper) PrepareFarPaneToolSocket(ctx context.Context, host string, opts []ssh.ConnectOption, name string) (farPaneToolRoutes, error) {
+	var routes farPaneToolRoutes
+	conn, err := h.HelperInstallConn(ctx, host, opts...)
+	if err != nil {
+		return routes, err
+	}
+	defer func() { _ = conn.Close() }()
+	home, err := conn.Home()
+	if err != nil {
+		return routes, fmt.Errorf("the far account's home directory: %w", err)
+	}
+	dir, socket, err := endpoint.SessionSocket(home, name)
+	if err != nil {
+		return routes, err
+	}
+	for _, level := range []string{filepath.Dir(endpoint.Dir(home)), endpoint.Dir(home), dir} {
+		if err := mkdirFarPaneLevel(conn, level); err != nil {
+			return routes, err
+		}
+	}
+	routes = farPaneToolRoutes{Dir: dir, Path: socket, Target: h.local.toolEndpoint()}
+	h.log.Info("far pane: tool socket prepared", "host", host, "path", socket, "target", routes.Target)
+	return routes, nil
+}
+
+// mkdirFarPaneLevel makes one level of the far pane's directory, tolerating a
+// level that is already there. A DIRECTORY is what is tolerated and nothing
+// else: a level that exists as a file, a symlink or somebody else's directory is
+// refused, because a path the far sshd binds through is a path this coordinator
+// must own.
+func mkdirFarPaneLevel(conn ssh.HelperInstallConn, dir string) error {
+	info, err := conn.Lstat(dir)
+	switch {
+	case err == nil:
+		if !info.IsDir() {
+			return fmt.Errorf("the far host's %s exists and is not a directory", dir)
+		}
+		return nil
+	case !errors.Is(err, fs.ErrNotExist):
+		return err
+	}
+	if err := conn.Mkdir(dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("create %s on the far host: %w", dir, err)
+	}
+	return nil
+}
+
+// OpenFarPaneToolSocket asks THIS machine's helper for the far socket: the
+// listener is created on the connection that helper already holds to that host,
+// and every connection arriving on it is piped into this coordinator's endpoint
+// with the pane record written first.
+//
+// IT IS NOT THE FAR HELPER THAT SERVES THIS, and that is the whole reason the
+// op exists: the far host's helper has no ssh client (it is the untagged
+// artifact), so the only party that can ask that host's sshd for a streamlocal
+// listener is the helper here — the one holding the connection. What the far
+// helper contributes is the LAUNCH that names the path, which is why the two
+// halves are one decision made in one place.
+//
+// session is the id the FAR helper minted for this pane. It is what every
+// connection through the socket announces, and the endpoint admits nothing
+// without it.
+func (h *sshOverHelper) OpenFarPaneToolSocket(ctx context.Context, host string, opts []ssh.ConnectOption, routes farPaneToolRoutes, session string) (proto.ForwardID, error) {
+	client, _, err := h.local.connect(ctx)
+	if err != nil {
+		return proto.ForwardID{}, err
+	}
+	target, err := h.resolve.ResolveTarget(ctx, host, opts...)
+	if err != nil {
+		return proto.ForwardID{}, err
+	}
+	res, err := client.OpenToolSocket(ctx, proto.ToolSocketParams{
+		Destination: ssh.WireDestination(target),
+		// FALSE, and not a default: the accept flow belongs to a pane open,
+		// where a person is watching. This op runs after one, on a connection
+		// the helper has already authenticated, so an unknown key here is the
+		// ErrUnknownHostKey the accept path knows how to raise.
+		AcceptOnTrust: false,
+		Path:          routes.Path,
+		Target:        routes.Target,
+		Session:       session,
+	})
+	if err != nil {
+		return proto.ForwardID{}, h.translate(host, err)
+	}
+	return res.Forward, nil
+}
+
+// CloseFarPaneToolSocket ends the listener, and with it every connection it is
+// still carrying. It is the first half of the teardown; the directory is the
+// second, and it comes after because a directory removed under a live listener
+// is a socket whose name still exists on a host this coordinator has forgotten.
+func (h *sshOverHelper) CloseFarPaneToolSocket(ctx context.Context, id proto.ForwardID) error {
+	client, _, err := h.local.connect(ctx)
+	if err != nil {
+		return err
+	}
+	return client.CloseListener(ctx, id)
+}
+
+// RemoveFarPaneToolSocketDir removes the far pane's directory and the socket
+// file inside it. The FILE FIRST, because a closed streamlocal listener leaves
+// its socket behind (a cancelled one unlinks it; a closed one does not), and a
+// directory holding a stale socket is one a later pane's bind would fail on.
+func (h *sshOverHelper) RemoveFarPaneToolSocketDir(ctx context.Context, host string, opts []ssh.ConnectOption, routes farPaneToolRoutes) error {
+	conn, err := h.HelperInstallConn(ctx, host, opts...)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	// Absence is not a failure: the far side may have swept it, and the second
+	// teardown of one pane is not a disagreement about state.
+	if err := conn.Remove(routes.Path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("remove %s on the far host: %w", routes.Path, err)
+	}
+	if err := conn.Remove(routes.Dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("remove %s on the far host: %w", routes.Dir, err)
+	}
+	return nil
+}
+
+// RecordPaneBearer binds the bearer a pane's launch carried to the session the
+// helper reported, in the book the approval service reads. It is the far arm of
+// localHelperOpener's own record: a pane whose shell is on another host cannot
+// be admitted by process ownership, so its interval is opened by the bearer its
+// launch staged (nocx-50w7p.16).
+func (h *sshOverHelper) RecordPaneBearer(sid session.ID, token string) {
+	h.local.spawnTokens.record(sid, token)
+}

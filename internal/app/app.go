@@ -945,6 +945,13 @@ func New(opts ...Option) (*App, error) {
 	sshLeases := installLeaseRoutes{viaLocal: overHelper, probes: probes}
 	helperFactory, helperReg := helperGitFactory(
 		sshLeases, helperartifacts.DefaultSource, helperConsent, helperInstalls, slogger)
+	// AND THE SAME OBJECT ANSWERS THE FAR PANE'S TOOL SURFACE (nocx-e2bws): it
+	// holds this machine's helper's connection, so the install lease and the far
+	// socket are one owner asked two questions. The registry takes the value
+	// directly rather than through installLeaseRoutes, because a forwarding
+	// method per op would put a capability on a dispatch that has no use for it
+	// — the narrowness rule this file's own comments keep.
+	helperReg.tools = overHelper
 	helperReg.registry = sess
 	localOpener.registry = sess
 	// The one seam the transport asks for every destination. hostedOpeners is
@@ -1529,6 +1536,10 @@ func New(opts ...Option) (*App, error) {
 	// its launch already carried, so what the far shell staged and what the
 	// endpoint accepts are the same value (nocx-50w7p.16).
 	agentApprovalService.SetSpawnTokens(localOpener.spawnTokens)
+	// The other consumer of a session's end (nocx-e2bws): the registry that
+	// opened a far pane's tool socket ends it on the same event that retires the
+	// pane's bearer, so one interval has one closing edge.
+	agentApprovalService.farToolSockets = helperReg
 	// The declaration's carrier, built beside the rendezvous and wired into
 	// the same publisher: a participant says what its work produced over the
 	// authenticated channel it is already enrolled on (ADR-0024 decision 2).

@@ -60,6 +60,27 @@ type helperInstallProvider interface {
 	DiscoveryConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.DiscoveryConn, error)
 }
 
+// farPaneToolSocketter is the far pane's tool surface as the helper registry
+// needs it (nocx-e2bws): the three routes resolved and the directory made before
+// the spawn, the listener opened after it, and the teardown that ends both when
+// the session does.
+//
+// NARROW ON PURPOSE, one consumer wide. It is the rule that already keeps
+// laneProvider and installLeaseProvider apart, applied to the fourth thing this
+// coordinator asks of a machine: an implementer of "bring a helper up on a host"
+// must not grow "bind a socket on it", and a test double for the first must not
+// fake the second. The composition root wires both from ONE value — they are the
+// same owner — and that is a wiring decision rather than an interface one.
+type farPaneToolSocketter interface {
+	PrepareFarPaneToolSocket(ctx context.Context, host string, opts []ssh.ConnectOption, name string) (farPaneToolRoutes, error)
+	OpenFarPaneToolSocket(ctx context.Context, host string, opts []ssh.ConnectOption, routes farPaneToolRoutes, session string) (proto.ForwardID, error)
+	CloseFarPaneToolSocket(ctx context.Context, id proto.ForwardID) error
+	RemoveFarPaneToolSocketDir(ctx context.Context, host string, opts []ssh.ConnectOption, routes farPaneToolRoutes) error
+	// RecordPaneBearer binds a far pane's launch bearer to the session the far
+	// helper reported, in the book the approval service reads.
+	RecordPaneBearer(sid session.ID, token string)
+}
+
 func accountFromOptions(opts []ssh.ConnectOption) string {
 	var cfg ssh.ConnectConfig
 	for _, opt := range opts {
@@ -91,6 +112,9 @@ func helperGitFactory(lanes helperInstallProvider, source deploy.ArtifactSource,
 		lanes: lanes, install: lanes, source: source, log: log, consent: store,
 		hosts:   make(map[session.ID]*hostHelper),
 		closing: make(map[string]struct{}),
+		// farTools is made by its first holder rather than here, so a registry
+		// nothing opens a far tool socket on holds no map at all.
+
 	}
 	return func(sess session.Session) transport.GitOpenSelection {
 		// The platform probe is the one bounded remote exec the decision
@@ -531,6 +555,132 @@ type helperRegistry struct {
 	mu            sync.Mutex
 	hosts         map[session.ID]*hostHelper
 	closing       map[string]struct{}
+	// farTools are the far-side tool sockets this registry opened, keyed by the
+	// session each belongs to (nocx-e2bws). They are held HERE rather than by
+	// the hostHelper because the event that ends them is a session's end and not
+	// a helper's: the transport tells this coordinator a session is over, and the
+	// map from a session to what that session was given is exactly what the
+	// teardown needs to find the listener and its directory.
+	farTools map[session.ID]farToolSocket
+	// tools is this coordinator's far tool surface, or nil when this build wires
+	// none: a nil surface is a pane opened conventionally and truthfully (no
+	// socket, and the far host named as the reason), never a failure.
+	tools farPaneToolSocketter
+}
+
+// farToolSocket is one far pane's tool socket as this coordinator holds it: the
+// three routes it was resolved from, the connection they belong to, and the
+// listener id `unforward` ends. It is a value and not a pointer because a
+// teardown that took it out of the map owns it completely.
+type farToolSocket struct {
+	host   string
+	opts   []ssh.ConnectOption
+	routes farPaneToolRoutes
+	id     proto.ForwardID
+}
+
+// farToolTeardownTimeout bounds the two acts a session's end owes the far host.
+// They are ACTS and not a loop — one unforward, one sftp removal — and the bound
+// exists so a far side that has stopped answering cannot hold the transport's
+// own teardown behind them.
+const farToolTeardownTimeout = 10 * time.Second
+
+// beginFarToolSocket registers one far pane's socket against its session BEFORE
+// the listener exists, and answers false when the session is ALREADY over.
+//
+// # Why before, and what the false means
+//
+// Opening a listener on somebody else's host is a round trip, and a session can
+// end inside it — a pane whose program exited, a tab closed, a transport that
+// withdrew the watch. A registration made after the open would miss that end and
+// the listener would outlive the session it was opened for, which is exactly the
+// invariant this whole path exists to keep (ADR-0058). So the ENTRY comes first,
+// with no listener id in it, and the id is filled in by completeFarToolSocket.
+//
+// false means the end ran while the listener was being opened: the entry is gone
+// (and the directory with it), so the CALLER owns the listener it just created
+// and must close it itself. That is the only case where a far tool socket is
+// closed by the opener rather than by the session's end.
+func (r *helperRegistry) beginFarToolSocket(sid session.ID, ts farToolSocket) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.farTools == nil {
+		r.farTools = make(map[session.ID]farToolSocket)
+	}
+	if _, ended := r.farTools[sid]; ended {
+		// Unreachable in production — one open per session — but a second
+		// open for a session already registered must not overwrite the entry
+		// the teardown is about to read.
+		return false
+	}
+	r.farTools[sid] = ts
+	return true
+}
+
+// completeFarToolSocket fills in the listener id of a registration made before
+// the open, and answers whether the SESSION IS STILL LIVE: false means its end
+// ran during the open, the entry went with it, and the caller owns the teardown.
+func (r *helperRegistry) completeFarToolSocket(sid session.ID, id proto.ForwardID) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	held, live := r.farTools[sid]
+	if !live {
+		return false
+	}
+	held.id = id
+	r.farTools[sid] = held
+	return true
+}
+
+// SessionEnded ends the far-side tool socket of a session whose output is over:
+// the listener first, then the directory it was bound in (nocx-e2bws).
+//
+// IT IS THE CLOSING EDGE OF AN INTERVAL THIS FILE OPENS in openFarHelper, and
+// the event is the transport's rather than this registry's: a session's output
+// ending is the fact that makes the far pane unable to produce another agent
+// call, and it is the same fact that retires the pane's bearer — so the socket
+// and the credential it carried end together, which is what "no listener
+// outlives its session" means in practice (ADR-0058).
+//
+// A failure is LOGGED and not returned: the session is already over, the caller
+// is the transport's teardown, and a far host that refused to remove a directory
+// is not a state anybody can act on from here — but it is not silence either,
+// because a directory left behind is a socket path a later pane's bind could
+// fail on, and whoever reads this line is the one who can see that.
+//
+// It is idempotent: the entry is taken out of the map before anything is done,
+// so a second end for one session finds nothing and does nothing.
+func (r *helperRegistry) SessionEnded(sid session.ID) {
+	r.mu.Lock()
+	held, ok := r.farTools[sid]
+	delete(r.farTools, sid)
+	r.mu.Unlock()
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), farToolTeardownTimeout)
+	defer cancel()
+	// A ZERO ID IS A LISTENER STILL BEING OPENED: the session ended inside that
+	// round trip, and completeFarToolSocket is about to answer false — so the
+	// OPENER closes the listener, and what is owed here is the directory (which
+	// the open may also have failed on). Nothing is skipped: this removal takes
+	// the socket file with it, so a listener that comes up microseconds later is
+	// closed by its opener into a directory that is already gone.
+	if held.id.IsZero() {
+		if err := r.tools.RemoveFarPaneToolSocketDir(ctx, held.host, held.opts, held.routes); err != nil {
+			r.log.Warn("far pane: the tool socket's directory was not removed",
+				"session", sid, "host", held.host, "dir", held.routes.Dir, "error", err)
+		}
+		return
+	}
+	if err := r.tools.CloseFarPaneToolSocket(ctx, held.id); err != nil {
+		r.log.Warn("far pane: the tool socket was not closed; its session is over",
+			"session", sid, "host", held.host, "path", held.routes.Path, "error", err)
+	}
+	if err := r.tools.RemoveFarPaneToolSocketDir(ctx, held.host, held.opts, held.routes); err != nil {
+		r.log.Warn("far pane: the tool socket's directory was not removed",
+			"session", sid, "host", held.host, "dir", held.routes.Dir, "error", err)
+	}
 }
 
 // OpenHosted applies the same helper resolver used by git.open, then spawns
@@ -658,6 +808,29 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 			Epoch: launch.Epoch, Capability: launch.Capability, Recovery: launch.Recovery,
 		}
 	}
+	// THE PANE'S TOOL SURFACE IS RESOLVED BEFORE ITS SPAWN, because the launch
+	// this spawn renders is what names the socket on the far host (nocx-e2bws):
+	// the far agent dials NOCX_TOOL_SOCKET, and a path that only existed after
+	// the shell started would be a path no launch ever named.
+	//
+	// The NAME is the claim — the caller's own name for this spawn, which the
+	// wire already carries to the far helper — and never a session id: that id
+	// is minted on the far side DURING this call (AD-7) and is what the
+	// listener's pane record is stamped with, one step below.
+	//
+	// A FAILURE HERE IS NOT A REFUSAL (ADR-0004): a pane whose far directory
+	// could not be made still opens, conventionally, with no tool surface — and
+	// that is the same soft degrade as a coordinator that runs no endpoint.
+	var routes farPaneToolRoutes
+	var toolToken string
+	if claim != "" && r.tools != nil {
+		prepared, perr := r.tools.PrepareFarPaneToolSocket(ctx, cfg.Host, opts, claim)
+		if perr != nil {
+			r.log.Warn("far pane: no tool socket for this pane", "host", cfg.Host, "error", perr)
+		} else {
+			routes, toolToken = prepared, mintToolToken()
+		}
+	}
 	entry, err := c.Spawn(ctx, proto.SpawnParams{
 		Cwd: cfg.Cwd, Cols: cfg.Cols, Rows: cfg.Rows, Lifecycle: lifecycleLaunch,
 		// THE CLAIM RIDES THE SPAWN, and it is the L7 interval's opening half
@@ -667,13 +840,18 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		// repeat forks a SECOND one on somebody else's machine. Empty is the
 		// honest value when the caller wrote no claim.
 		IdempotencyKey: claim,
-		// No agentToolEndpoint, and that is the honest answer rather than an
-		// omission (nocx-50w7p.18): the endpoint a pane's tools belong to is a
-		// socket on the machine the HELPER runs on, and this session's helper
-		// is on the far host (the guard above admits KindRemote only) — a path
-		// from this backend is not reachable from that host's shell. The pane
-		// carries no tool surface here, exactly as it did before the field
-		// existed.
+		// THE FAR PATH, when this pane has a tool surface at all. The field's
+		// meaning is "the tool endpoint on the helper's own machine", and this
+		// pane's helper is on the FAR host — so what travels is the socket path
+		// there, which the far launcher renders as the shell's
+		// NOCX_TOOL_SOCKET and the far sshd binds at this machine's helper's
+		// request (nocx-e2bws).
+		AgentToolEndpoint: routes.Path,
+		// AND THE BEARER ITS AGENT WILL PRESENT: a pane on another host cannot
+		// be admitted by process ownership, so its interval is opened by this
+		// value, which the far launcher stages into the frame its shell reads
+		// (nocx-50w7p.16).
+		AgentToolToken: toolToken,
 	})
 	if err != nil {
 		if lifecycleAdapter != nil {
@@ -717,6 +895,45 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 	r.mu.Lock()
 	r.hosts[sid] = h
 	r.mu.Unlock()
+	// THE LISTENER IS OPENED NOW, with the session id the FAR helper minted, and
+	// it is registered against that session so its end is not this process's to
+	// remember (nocx-e2bws). The interval, both ends named: it opens here, after
+	// the spawn answered, and closes in helperRegistry.SessionEnded, which the
+	// transport calls when the session's output is over — the same event that
+	// retires the pane's bearer. A listener that outlived its session would be a
+	// socket on somebody else's host accepting agents for a pane this
+	// coordinator has forgotten (ADR-0058).
+	if routes.Path != "" {
+		// REGISTERED BEFORE THE LISTENER EXISTS, so an end that arrives during
+		// the open is not lost (beginFarToolSocket's own note).
+		live := r.beginFarToolSocket(sid, farToolSocket{host: cfg.Host, opts: opts, routes: routes})
+		id, oerr := r.tools.OpenFarPaneToolSocket(ctx, cfg.Host, opts, routes, string(sid))
+		switch {
+		case oerr != nil:
+			// The launch already names the socket, so a listener that never came
+			// up is a far agent that would fail on a path nothing serves. Said
+			// out loud, and the directory goes with it: it is this open's own
+			// scaffolding.
+			r.log.Warn("far pane: the tool socket was not opened; the pane runs with no tools",
+				"host", cfg.Host, "path", routes.Path, "error", oerr)
+			if rerr := r.tools.RemoveFarPaneToolSocketDir(ctx, cfg.Host, opts, routes); rerr != nil {
+				r.log.Warn("far pane: the tool socket's directory was not removed", "host", cfg.Host, "error", rerr)
+			}
+		case !live || !r.completeFarToolSocket(sid, id):
+			// THE SESSION ENDED WHILE THE LISTENER WAS BEING OPENED: its end
+			// took the registration (and removed the directory), so this open
+			// owns the listener it just made and ends it here rather than
+			// leaving a socket on somebody else's host for a session this
+			// coordinator has forgotten.
+			r.log.Info("far pane: the session ended while its tool socket was opening; closing it",
+				"session", sid, "host", cfg.Host, "path", routes.Path)
+			if cerr := r.tools.CloseFarPaneToolSocket(ctx, id); cerr != nil {
+				r.log.Warn("far pane: the tool socket was not closed", "session", sid, "host", cfg.Host, "error", cerr)
+			}
+		default:
+			r.tools.RecordPaneBearer(sid, toolToken)
+		}
+	}
 	var lifecycleLane lifecycle.LaneID
 	var startLifecycle func()
 	var abortLifecycle func()

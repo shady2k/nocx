@@ -72,6 +72,17 @@ type SpawnRequest struct {
 	Cols      uint16
 	Rows      uint16
 	Lifecycle *proto.LifecycleLaunch
+	// AgentToolToken is the bearer that admits this pane's far agent, minted by
+	// the coordinator that asked for the pane (nocx-50w7p.16 for the ssh route,
+	// nocx-e2bws for this one). It travels into the launch options and from
+	// there into the DESCRIPTOR the shell reads — never the environment block,
+	// never argv — because the far agent presents it to the endpoint, which
+	// admits nothing a bearer does not answer for.
+	//
+	// It exists on this request because a pane the far host's own helper spawns
+	// is a pane this coordinator cannot admit by process ownership either: the
+	// shell is on another machine, and the interval is opened by this value.
+	AgentToolToken string
 	// AgentToolEndpoint is THIS request's own tool endpoint on the helper's
 	// machine — the caller's socket, which the launch renders as the shell's
 	// NOCX_TOOL_SOCKET. It is carried per request rather than held by the

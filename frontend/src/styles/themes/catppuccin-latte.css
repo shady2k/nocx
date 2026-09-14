@@ -40,7 +40,8 @@
   /* ── Additional semantic colours (§2.2) ──────────────────────────── */
   --color-success: #40a02b;
   --color-warning: #df8e1d;
-  --color-danger: #d20f39;
+  --color-danger: #cf103a;
+  --color-danger-surface: #eee8ee;
   --color-accent-secondary: #8839ef;
   --color-error: #e64553;
 
@@ -63,7 +64,7 @@
   --color-surface-active: #dce0e8;
   --color-surface-disabled: rgba(255, 255, 255, 0.7);
   --color-success-hover: #388d26;
-  --color-danger-hover: rgba(210, 15, 57, 0.1);
+  --color-danger-hover: rgba(207, 16, 58, 0.1);
   --color-warning-hover: rgba(223, 142, 29, 0.1);
   --color-focus-ring: rgba(30, 102, 245, 0.6);
   --color-scrim: rgba(0, 0, 0, 0.5);

@@ -20,7 +20,7 @@
 
   /* Chrome sits *behind* content and is deliberately darker than the
      canvas — the tab bar, the vertical strip and the settings rail. */
-  --color-chrome: #05080d;
+  --color-chrome: #04070b;
   --color-chrome-rail: #080b11;
   --color-surface-sunken: #0d1017;
   --color-tab-active: #12161f;
@@ -42,6 +42,7 @@
   --color-success: #aad94c;
   --color-warning: #ffb454;
   --color-danger: #f07178;
+  --color-danger-surface: #161319;
   --color-accent-secondary: #59c2ff;
   --color-error: #d95757;
 

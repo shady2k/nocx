@@ -37,6 +37,13 @@
  *    the two themes that already existed, and the one cell that failed
  *    (light.css, dim text on chrome, 4.43:1) was fixed rather than exempted.
  *
+ * 4. **The terminal screen's surface roles** (spec 2026-09-14 §7). Chrome and
+ *    floating surfaces measured against `--terminal-background` in CIELAB ΔL*,
+ *    and the failed row's `--color-danger-surface` legible for text and for the
+ *    danger status word. The fifth statement of that section — that the rows
+ *    actually paint the ground — needs a layout and lives in the terminal-screen
+ *    end-to-end check (nocx-9bpeq.9).
+ *
  * ## What this deliberately does NOT gate
  *
  * **The terminal palette.** `--terminal-ansi-0…15` and the foreground/background
@@ -51,10 +58,9 @@
  * floor (see the note in tokyo-night.css).
  *
  * **The semantic colours** (`--color-success`, `--color-warning`,
- * `--color-danger`). They are used as chip text in places, and light.css puts
- * success at 2.69:1 on the canvas — a real failure, pre-existing and outside this
- * change. Gating them here would mean redesigning light.css inside a commit that
- * adds themes. Filed as nocx-foyr instead.
+ * `--color-danger`) on the app's backgrounds. Danger is gated only where the
+ * terminal screen uses it — on the failed row's own surface (4 above). light.css
+ * still puts success at 2.69:1 on the canvas; that is nocx-foyr.
  */
 import { describe, it, expect } from 'vitest'
 import { KNOWN_THEME_IDS, DEFAULT_THEME_ID } from './renderers/theme-bootstrap'
@@ -121,6 +127,35 @@ function contrastRatio(fg: string, bg: string): number {
   const lb = luminance(b)
   return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05)
 }
+
+/** CIELAB L* (D65) — perceived lightness, so "these two surfaces can be told
+ *  apart" is one number per pair rather than a luminance ratio that means
+ *  different things at the dark and light ends. */
+function lightness(value: string): number {
+  const rgb = hexToRGB(value)
+  if (rgb === null) return Number.NaN
+  const lin = (c: number): number => {
+    const s = c / 255
+    return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4)
+  }
+  const y = 0.2126729 * lin(rgb[0]) + 0.7151522 * lin(rgb[1]) + 0.072175 * lin(rgb[2])
+  const f = y > 216 / 24389 ? Math.cbrt(y) : ((24389 / 27) * y + 16) / 116
+  return 116 * f - 16
+}
+
+function deltaL(a: string, b: string): number {
+  return Math.abs(lightness(a) - lightness(b))
+}
+
+/** The terminal screen's one ground (spec §7). History rows, the live region and
+ *  the composer all paint it; everything below is measured against it. */
+const GROUND = '--terminal-background'
+
+/** Spec §7 thresholds. A theme that fails is fixed by changing that theme's
+ *  values; changing a number here is the owner's decision. */
+const MIN_CHROME_DL = 2
+const MIN_RAISED_DL = 3
+const MIN_FAILURE_DL = 2
 
 /** Text tokens — anything the app paints words with. */
 const TEXT_TOKENS = ['--color-text', '--color-text-muted', '--color-text-dim']
@@ -192,6 +227,37 @@ describe('theme catalogue', () => {
     const canvas = t.get('--color-canvas')!
     expect(contrastRatio(t.get('--color-border')!, canvas)).toBeGreaterThanOrEqual(AA_NON_TEXT)
     expect(contrastRatio(t.get('--color-accent')!, canvas)).toBeGreaterThanOrEqual(AA_NON_TEXT)
+  })
+
+  it.each(themeIds)('%s sets its chrome apart from the terminal ground', (id) => {
+    const t = tokensById.get(id)!
+    const d = deltaL(t.get('--color-chrome')!, t.get(GROUND)!)
+    expect(Number.isNaN(d), `${id}: chrome or ground is not an opaque hex`).toBe(false)
+    expect(d, `${id}: ΔL* chrome vs ${GROUND}`).toBeGreaterThanOrEqual(MIN_CHROME_DL)
+  })
+
+  it.each(themeIds)('%s lifts a floating surface off the terminal ground', (id) => {
+    const t = tokensById.get(id)!
+    const d = deltaL(t.get('--color-surface-raised')!, t.get(GROUND)!)
+    expect(Number.isNaN(d), `${id}: surface-raised or ground is not an opaque hex`).toBe(false)
+    expect(d, `${id}: ΔL* surface-raised vs ${GROUND}`).toBeGreaterThanOrEqual(MIN_RAISED_DL)
+  })
+
+  it.each(themeIds)('%s paints a failed row that reads as failed and stays legible', (id) => {
+    const t = tokensById.get(id)!
+    const surface = t.get('--color-danger-surface')
+    expect(surface, `${id}: --color-danger-surface is not declared`).toBeDefined()
+    const d = deltaL(surface!, t.get(GROUND)!)
+    expect(Number.isNaN(d), `${id}: --color-danger-surface is not an opaque hex`).toBe(false)
+    expect(d, `${id}: ΔL* danger-surface vs ${GROUND}`).toBeGreaterThanOrEqual(MIN_FAILURE_DL)
+    expect(
+      contrastRatio(t.get('--color-text')!, surface!),
+      `${id}: text on danger-surface`,
+    ).toBeGreaterThanOrEqual(AA_TEXT)
+    expect(
+      contrastRatio(t.get('--color-danger')!, surface!),
+      `${id}: danger on danger-surface`,
+    ).toBeGreaterThanOrEqual(AA_TEXT)
   })
 
   it.each(themeIds)('%s carries a terminal palette distinct from its background', (id) => {

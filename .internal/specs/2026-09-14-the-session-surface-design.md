@@ -498,9 +498,13 @@ delivers it under §8's guarantee. `owedTasks`, `withOwedTask`, `awaitMenuLeftSc
 
 - **Removed:** `workers.screen`, `workers.answer` (registry rows, executors, schemas, their
   `contracts/agent.approvalRequested.schema.json` entries, `workerScreener`, `workerAnswerer`);
-  `owedTasks` and its helpers; the renderer screen request path for `session.read`
-  (`internal/assistant/blocks.go:280-285`, `internal/transport/ws_readscreen.go:181-190`) — after
-  ADR-0066 the helper frame is the only screen authority; finished items still read from the ledger.
+  `owedTasks` and its helpers.
+- **Kept, deliberately:** the renderer screen request path (`internal/assistant/blocks.go:280-285`,
+  `internal/transport/ws_readscreen.go:181-190`) for the built-in assistant reading **its own run's
+  pane**. It reads a running command block's region, and block boundaries live in the renderer until
+  `nocx-2v80t` (the backend owns the blocks); the helper frame has no block to cut. A descendant's
+  pane is read from the helper only (§6.1). Retiring the renderer path is `nocx-2v80t`'s, or
+  `nocx-3g262`'s when the assistant reads arbitrary panes — found while planning (2026-09-14).
 - **New ADR:** _"A write into a descendant's pane is one step under a target the helper minted"_.
   Supersedes ADR-0064 §1 and ADR-0029; extends ADR-0064 §2 to descendants. `INDEX.md` rows updated;
   the ADRs themselves untouched.

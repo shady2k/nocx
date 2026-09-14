@@ -120,9 +120,12 @@ test('a file dropped on an SSH tab arrives on the far host', async ({ page }) =>
     // says it has. Asserted separately from the panel so a failure here reads
     // as "the shell never reported its directory" rather than as a tree bug.
     const remoteBase = path.basename(remoteHome)
-    await expect(page.locator('.pane.active .nocx-editor-context .ui-meta')).toContainText(remoteBase, {
-      timeout: 90_000,
-    })
+    await expect(page.locator('.pane.active .nocx-editor-context .ui-meta')).toContainText(
+      remoteBase,
+      {
+        timeout: 90_000,
+      },
+    )
 
     // The Files panel is open on Files from cold start; it rescopes to the SSH
     // session, roots at `/`, and REVEALS the tab's cwd — which is what puts

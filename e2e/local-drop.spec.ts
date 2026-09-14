@@ -93,9 +93,12 @@ test('a file dropped on a local tab arrives in that tab’s directory', async ({
     // than as a tree bug.
     await page.keyboard.type(`cd ${destDir}`)
     await page.keyboard.press('Enter')
-    await expect(page.locator('.pane.active .nocx-editor-context .ui-meta')).toContainText(destBase, {
-      timeout: 60_000,
-    })
+    await expect(page.locator('.pane.active .nocx-editor-context .ui-meta')).toContainText(
+      destBase,
+      {
+        timeout: 60_000,
+      },
+    )
 
     // The Files panel is open on Files from cold start, roots at `/`, and
     // REVEALS the tab's cwd — which is what puts the destination directory's

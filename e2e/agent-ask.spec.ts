@@ -301,7 +301,9 @@ async function pointAtFromRun(block: Locator): Promise<void> {
 
   await block.locator('[data-block-actions]').click()
   await expect(page.locator('.ui-context-menu__item[data-item-id="grant"]')).toHaveCount(0)
-  const copyCommand = page.locator('[data-testid="block-actions-menu"] .ui-context-menu__item').filter({ hasText: 'Copy command' })
+  const copyCommand = page
+    .locator('[data-testid="block-actions-menu"] .ui-context-menu__item')
+    .filter({ hasText: 'Copy command' })
   await expect(copyCommand).toBeVisible()
   await copyCommand.click()
   await expect(page.locator('[data-testid="block-actions-menu"]')).toHaveCount(0)

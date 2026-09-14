@@ -703,7 +703,6 @@
   border-top: 0;
 }
 
-
 .cmd-output {
   /* The block body's own padding, named because the LIVE region wears the
      same box while the command runs (see .xterm-live-container.live-running):
@@ -922,4 +921,3 @@
   font-size: var(--font-size-terminal);
   line-height: 1.2;
 }
-

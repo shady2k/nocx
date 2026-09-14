@@ -321,7 +321,8 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
       terminal: ({ status }) => {
         if (status === 'success') return { outcome: 'success', text: ASK_STATUS_CHIPS.done }
         if (status === 'failure') return { outcome: 'failure', text: ASK_STATUS_CHIPS.failed }
-        if (status === 'cancelled') return { outcome: 'cancelled', text: ASK_STATUS_CHIPS.cancelled }
+        if (status === 'cancelled')
+          return { outcome: 'cancelled', text: ASK_STATUS_CHIPS.cancelled }
         return null
       },
     },

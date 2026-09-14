@@ -2223,8 +2223,9 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
       pending[0]?.resolve({ accepted: true })
       await Promise.resolve()
       await Promise.resolve()
-      const recoveryChip =
-        editorOf(content).root.querySelector<HTMLElement>('[data-control="recovery"]')
+      const recoveryChip = editorOf(content).root.querySelector<HTMLElement>(
+        '[data-control="recovery"]',
+      )
       expect(recoveryChip?.style.display).toBe('none')
 
       // The current acknowledgement refuses. A genuinely fresh episode must
@@ -3172,7 +3173,9 @@ describe('the projections consume the kernel through the composition root (ADR-0
       expect(menuButton).not.toBeNull()
       menuButton!.click()
       const menuItems = Array.from(
-        document.querySelectorAll<HTMLElement>('[data-testid="block-actions-menu"] .ui-context-menu__item'),
+        document.querySelectorAll<HTMLElement>(
+          '[data-testid="block-actions-menu"] .ui-context-menu__item',
+        ),
       )
       const grant = menuItems.find((item) => item.dataset.itemId === 'grant')
       const stop = menuItems.find((item) => item.dataset.itemId === 'stop')
@@ -5704,13 +5707,15 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
       block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       const items = Array.from(
-        document.querySelectorAll<HTMLButtonElement>('[data-testid="block-actions-menu"] .ui-context-menu__item'),
+        document.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="block-actions-menu"] .ui-context-menu__item',
+        ),
       )
       expect(items.find((item) => item.dataset.itemId === 'grant')).toBeUndefined()
       expect(items.map((item) => item.textContent)).toContain('Copy command')
-      expect(ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')?.style.display).toBe(
-        'none',
-      )
+      expect(
+        ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')?.style.display,
+      ).toBe('none')
       expect((content as unknown as { grantedBlocks: GrantBlock[] }).grantedBlocks).toEqual([])
       expect(dispatcherCalls.some((call) => call.method === 'agent.ask')).toBe(false)
     } finally {
@@ -7375,9 +7380,9 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
       const grantState = content as unknown as { grantedBlocks: GrantBlock[] }
       const viaMenu = grantState.grantedBlocks[0]
       expect(viaMenu?.itemId).toBe('e-1')
-      expect(ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')?.textContent).toContain(
-        '1',
-      )
+      expect(
+        ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')?.textContent,
+      ).toContain('1')
 
       block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       const unmark = document.querySelector<HTMLButtonElement>(
@@ -7640,9 +7645,9 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
 
       const grantState = content as unknown as { grantedBlocks: GrantBlock[] }
       expect(grantState.grantedBlocks[0]?.itemId).toBe('e-1')
-      expect(ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')?.textContent).toContain(
-        '1',
-      )
+      expect(
+        ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')?.textContent,
+      ).toContain('1')
       const chip = ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')!
       chip.click()
       expect(
@@ -7725,13 +7730,16 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
       const [untimed, instant] = restored
       expect(untimed.querySelector('.cmd-header-text')?.textContent).toBe('make test')
       expect(
-        untimed.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]'),
+        untimed.querySelector(
+          ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]',
+        ),
       ).toBeNull()
       // And the other fact still says itself out loud, so the absence above
       // reads as "unknown" and never as "the chip was dropped".
       expect(
-        instant.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]')
-          ?.textContent,
+        instant.querySelector(
+          ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]',
+        )?.textContent,
       ).toBe('0ms')
     } finally {
       teardown()
@@ -8038,7 +8046,9 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
 
       turnBlock!.querySelector<HTMLElement>('[data-block-actions]')!.click()
       const copyOut = Array.from(
-        document.querySelectorAll<HTMLElement>('[data-testid="block-actions-menu"] .ui-context-menu__item'),
+        document.querySelectorAll<HTMLElement>(
+          '[data-testid="block-actions-menu"] .ui-context-menu__item',
+        ),
       ).find((el) => el.textContent === 'Copy output')
       expect(copyOut).toBeDefined()
       copyOut!.click()
@@ -8269,9 +8279,9 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
   }
 
   const chipEls = (content: TerminalContent): HTMLElement[] =>
-    Array.from(editorOf(content).root.querySelectorAll<HTMLElement>('[data-control^="model"]')).filter(
-      (el) => el.style.display !== 'none',
-    )
+    Array.from(
+      editorOf(content).root.querySelectorAll<HTMLElement>('[data-control^="model"]'),
+    ).filter((el) => el.style.display !== 'none')
 
   const chipsOf = (content: TerminalContent): string[] =>
     chipEls(content).map((el) => el.textContent ?? '')
@@ -9360,9 +9370,9 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         chordOn(viewOf(ed).contentDOM)
 
         await vi.waitFor(() =>
-          expect(ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label')).toContain(
-            'frozen screen attached automatically',
-          ),
+          expect(
+            ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label'),
+          ).toContain('frozen screen attached automatically'),
         )
         expect(captureLiveFrame).toHaveBeenCalledTimes(1)
       } finally {
@@ -10028,10 +10038,16 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
 
   /** Open the running block's overflow menu and return its items. */
   function runningBlockMenu(content: TerminalContent): HTMLElement[] {
-    const btn = paneOf(content).querySelector<HTMLElement>('.cmd-block-running [data-block-actions]')
+    const btn = paneOf(content).querySelector<HTMLElement>(
+      '.cmd-block-running [data-block-actions]',
+    )
     expect(btn, 'the running block has no ⋮ button').not.toBeNull()
     btn!.click()
-    return Array.from(document.querySelectorAll<HTMLElement>('[data-testid="block-actions-menu"] .ui-context-menu__item'))
+    return Array.from(
+      document.querySelectorAll<HTMLElement>(
+        '[data-testid="block-actions-menu"] .ui-context-menu__item',
+      ),
+    )
   }
 
   function itemNamed(items: HTMLElement[], action: string): HTMLElement | undefined {
@@ -10084,9 +10100,9 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
 
       const block = paneOf(content).querySelector<HTMLElement>('.cmd-block-running')
       expect(block?.dataset.granted).toBe('true')
-      expect(ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')?.dataset.state).toBe(
-        'chosen',
-      )
+      expect(
+        ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')?.dataset.state,
+      ).toBe('chosen')
 
       escapeOn(view.contentDOM)
       expect(ed.isVisible).toBe(false)

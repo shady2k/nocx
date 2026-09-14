@@ -77,7 +77,9 @@ describe('createRunningBlock', () => {
       noopSelect,
       freshStore(),
     )
-    const where = el.querySelector<HTMLElement>(':scope > .cmd-header > .cmd-header-meta > .ui-meta')
+    const where = el.querySelector<HTMLElement>(
+      ':scope > .cmd-header > .cmd-header-meta > .ui-meta',
+    )
     expect(where?.textContent).toBe('dev/projects')
   })
 
@@ -201,7 +203,9 @@ describe('createCommandBlock', () => {
       'shell',
     )
     expect(el.dataset.outcome).toBe('failure')
-    const exit = el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])')
+    const exit = el.querySelector(
+      ':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])',
+    )
     expect(exit?.textContent).toBe('exit 1')
   })
 
@@ -335,7 +339,9 @@ describe('createCommandBlock', () => {
       freshStore(),
       'shell',
     )
-    const dur = el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]')
+    const dur = el.querySelector(
+      ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]',
+    )
     expect(dur?.textContent).toBe('1.2s')
   })
 
@@ -435,7 +441,9 @@ describe('createCommandBlock', () => {
       freshStore(),
       'shell',
     )
-    const where = el.querySelector<HTMLElement>(':scope > .cmd-header > .cmd-header-meta > .ui-meta')
+    const where = el.querySelector<HTMLElement>(
+      ':scope > .cmd-header > .cmd-header-meta > .ui-meta',
+    )
     expect(where?.textContent).toBe('user/repos')
     expect(where?.textContent).not.toMatch(/\p{Extended_Pictographic}/u)
   })
@@ -1229,7 +1237,9 @@ describe('overflow menu (P1-6)', () => {
 
     ;(el.querySelector('[data-block-actions]') as HTMLElement).click()
     const item = Array.from(
-      document.querySelectorAll<HTMLButtonElement>('[data-testid="block-actions-menu"] .ui-context-menu__item'),
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="block-actions-menu"] .ui-context-menu__item',
+      ),
     ).find((button) => button.textContent === 'Show dump')
     expect(item).toBeDefined()
     item!.click()
@@ -3043,7 +3053,9 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     expect(item.textContent).not.toBe('Copy output')
 
     release('stored')
-    await vi.waitFor(() => expect(document.body.querySelector('[data-testid="block-actions-menu"]')).toBeNull())
+    await vi.waitFor(() =>
+      expect(document.body.querySelector('[data-testid="block-actions-menu"]')).toBeNull(),
+    )
   })
 
   it('a COMMAND block still copies what the terminal drew — unchanged', () => {
@@ -3577,7 +3589,11 @@ describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-
 describe('the block grant menu action', () => {
   const menuItems = (el: HTMLElement): HTMLElement[] => {
     el.querySelector<HTMLElement>('[data-block-actions]')!.click()
-    return Array.from(document.querySelectorAll<HTMLElement>('[data-testid="block-actions-menu"] .ui-context-menu__item'))
+    return Array.from(
+      document.querySelectorAll<HTMLElement>(
+        '[data-testid="block-actions-menu"] .ui-context-menu__item',
+      ),
+    )
   }
 
   afterEach(() => {

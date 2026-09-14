@@ -67,10 +67,7 @@ const RULES: Rule[] = [
   // composer (nocx-9bpeq.7): `styles/surfaces/composer.css` is where the
   // cascade now finds `.nocx-editor .cm-gutters` and its neighbours.
   ...topLevelRules(
-    readFileSync(
-      resolve(import.meta.dirname ?? '.', '..', 'styles/surfaces/composer.css'),
-      'utf8',
-    ),
+    readFileSync(resolve(import.meta.dirname ?? '.', '..', 'styles/surfaces/composer.css'), 'utf8'),
   ),
 ]
 

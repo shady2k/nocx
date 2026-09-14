@@ -334,7 +334,8 @@ export function scanKitIdentities(uiDir) {
           continue
         }
         const right = asg.right
-        if (right.type === 'Literal' && typeof right.value === 'string') words(right.value).forEach(add)
+        if (right.type === 'Literal' && typeof right.value === 'string')
+          words(right.value).forEach(add)
         else if (right.type === 'TemplateLiteral') extractQuasiClasses(right).static.forEach(add)
       }
       // el.classList.add('a', 'b') — literal arguments only.

@@ -252,19 +252,29 @@ func TestTheSpawnSSHOpAndTheLaunchUnionConformToTheirContractsOverTheWire(t *tes
 	}
 
 	// And the coordinator's projection of the same two sessions: the ssh pane
-	// answers with its remote branch and a ZERO local record, the local pane
-	// with its own record and no remote branch.
+	// answers with its remote branch and NO local record, the local pane with
+	// its own record and no remote branch.
+	//
+	// ABSENCE, NOT A ZERO RECORD (nocx-s8mfn). The coordinator's DTO used to
+	// fill the branch it had not got with zeros, which is the same fabricated
+	// pid the wire above refuses: a reader that found `launch` beside a remote
+	// one would ask this machine's OS about a process on another one. Exactly
+	// one branch is present, which is also what the inventory contract that
+	// carries this entry now states.
 	if remote.RemoteLaunch == nil || remote.IsRemote() == false {
 		t.Fatalf("the ssh session's projection has no remote branch: %+v", remote)
 	}
-	if remote.Launch.Pid != 0 || remote.Launch.Shell != "" {
-		t.Fatalf("the ssh session's projection carries a local launch record: %+v", remote.Launch)
+	if remote.Launch != nil {
+		t.Fatalf("the ssh session's projection carries a LOCAL launch record: %+v", *remote.Launch)
 	}
 	if local.RemoteLaunch != nil {
 		t.Fatalf("a local session reported a remote launch: %+v", local.RemoteLaunch)
 	}
+	if local.Launch == nil {
+		t.Fatal("the local session's projection lost its launch record entirely")
+	}
 	if local.Launch.Pid == 0 || local.Launch.Shell == "" {
-		t.Fatalf("the local launch record lost its own facts: %+v", local.Launch)
+		t.Fatalf("the local launch record lost its own facts: %+v", *local.Launch)
 	}
 }
 

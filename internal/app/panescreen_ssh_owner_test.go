@@ -168,7 +168,7 @@ func TestReAdoptingARemoteOnLocalBindingRefusesWhenTheProfileMoved(t *testing.T)
 	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
 	route := &countingLocalRoute{entries: []helperclient.SessionEntry{{
 		HostSessionID: helperclient.HostSessionID{Generation: "gen-1", Session: "sess-1"},
-		Launch:        helperclient.LaunchRecord{Cwd: "/home/alice"},
+		Launch:        &helperclient.LaunchRecord{Cwd: "/home/alice"},
 	}}}
 	rp := &readoptPass{
 		registry: &helperRegistry{registry: reg},

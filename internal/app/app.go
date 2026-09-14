@@ -1477,7 +1477,10 @@ func New(opts ...Option) (*App, error) {
 		// install directory (D25), so the same registry is wired there.
 		transport.WithGitHelperFactory(helperFactory),
 		transport.WithHelperSessionOpener(hosted),
-		transport.WithHostSessionInventory(&helperSessionInventories{registry: helperReg}),
+		// The inventory asks the TWO parties that hold sessions: this machine's
+		// opener (its ssh panes included, nocx-s8mfn) and the far registry. It
+		// is the same pair, in the same order, that paneScreen.owner routes by.
+		transport.WithHostSessionInventory(&helperSessionInventories{registry: helperReg, local: localOpener}),
 		// The D25 channel closer (remote-helper design D25): the registry
 		// closes every live helper channel on a machine before
 		// shell.footprint.helperUninstall removes its install directory —

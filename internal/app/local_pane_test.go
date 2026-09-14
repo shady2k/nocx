@@ -146,10 +146,18 @@ func TestLocalPaneRecordsOwnedLaunchPID(t *testing.T) {
 	}
 	var launchPID int
 	for _, entry := range entries {
-		if entry.HostSessionID.Session == string(sid) {
-			launchPID = entry.Launch.Pid
-			break
+		if entry.HostSessionID.Session != string(sid) {
+			continue
 		}
+		// THE LOCAL BRANCH, GUARDED. This pane's process is on this machine, so
+		// the record is there — and an entry that described no process at all
+		// is the same "no positive launch pid" failure the check below reports,
+		// rather than a panic inside this loop (nocx-s8mfn: the branch is a
+		// pointer now, and the other two readers of it panicked exactly here).
+		if entry.Launch != nil {
+			launchPID = entry.Launch.Pid
+		}
+		break
 	}
 	if launchPID <= 0 {
 		t.Fatalf("helper returned no positive launch pid for session %s", sid)

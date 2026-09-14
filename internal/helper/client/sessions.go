@@ -106,13 +106,21 @@ type SessionEntry struct {
 	Workspace     string        `json:"workspace"`
 	StartedAt     string        `json:"startedAt"`
 	// Launch is the LOCAL branch of the wire's launch union: the record a
-	// helper-hosted local pane has always had, unchanged. It is the ZERO
-	// record exactly when RemoteLaunch is non-nil — see that field.
-	Launch LaunchRecord `json:"launch"`
+	// helper-hosted local pane has always had, unchanged.
+	//
+	// IT IS ABSENT — never a record of zeros — when RemoteLaunch is present, and
+	// that absence is load-bearing (nocx-s8mfn). The contract this DTO feeds
+	// (contracts/sessions.inventory.schema.json) carries the union and requires
+	// exactly one branch, because a reader that found a `launch` record beside a
+	// remote one would be reading a pid of 0: the kernel's scheduler rather than
+	// the process the helper spawned, on a machine the session is not on. The
+	// projection is therefore "one value the other nil" — what the wire's own
+	// oneOf says — rather than a filled-in local record with a zero in it.
+	Launch *LaunchRecord `json:"launch,omitempty"`
 	// RemoteLaunch is the SSH branch, present exactly when this session's
-	// process is a remote shell channel. When it is present, Launch describes
-	// nothing: there is no process on this machine to describe, and the wire
-	// sends no local record for one.
+	// process is a remote shell channel. When it is present, Launch is nil:
+	// there is no process on this machine to describe, and the wire sends no
+	// local record for one.
 	RemoteLaunch    *RemoteLaunch `json:"remoteLaunch,omitempty"`
 	Observed        *Observation  `json:"observed"`
 	Window          WindowSpan    `json:"window"`
@@ -222,7 +230,7 @@ func mapSessionEntry(in proto.SessionEntry) SessionEntry {
 	// described no process": it is not a local session with pid 0.
 	switch {
 	case in.Launch.Local != nil:
-		out.Launch = LaunchRecord{
+		out.Launch = &LaunchRecord{
 			Shell: in.Launch.Local.Shell, Cwd: in.Launch.Local.Cwd, Pid: in.Launch.Local.Pid,
 			Pgid: in.Launch.Local.Pgid, Cols: in.Launch.Local.Cols, Rows: in.Launch.Local.Rows,
 			WindowBytes: in.Launch.Local.WindowBytes,
@@ -938,7 +946,16 @@ func (a *AttachedSession) ForegroundJob() (int, error) {
 		if entries[i].HostSessionID != id {
 			continue
 		}
-		return classifyForegroundObservation(entries[i].Observed, entries[i].Launch.Pid)
+		// The pid comes from the branch that HAS one: a remote session's
+		// process is on another machine and its local record is absent, so a
+		// session with no local branch compares against no shell group (0) —
+		// which is the honest answer, and the observation is nil for such a
+		// session anyway (the helper has no pid here to inspect).
+		launchPID := 0
+		if entries[i].Launch != nil {
+			launchPID = entries[i].Launch.Pid
+		}
+		return classifyForegroundObservation(entries[i].Observed, launchPID)
 	}
 	// The helper answered and does not hold this session. Said as its own
 	// sentence rather than as ErrNoForegroundJob: "there is no job in front"

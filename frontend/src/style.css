@@ -1395,7 +1395,12 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-2) 0;
+  /* `padding-block`, never the shorthand (nocx-9bpeq.8): this is a direct
+     child of `.scrollback-inner`, at the same specificity as its
+     `padding-inline: var(--pane-inline-padding)` row rule and later in the
+     cascade — a `padding` shorthand here would win and reset that inset to
+     0, pulling this boundary's text back to the pane's edge. */
+  padding-block: var(--space-2);
   color: var(--color-text-muted);
   font-size: var(--font-size-xs);
   text-transform: uppercase;

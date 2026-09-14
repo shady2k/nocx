@@ -130,9 +130,23 @@ describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () 
     // child of the stack) gets none.
     expect(shipped('.scrollback-inner > *', 'padding-inline')).toBe('var(--pane-inline-padding)')
     expect(shipped('.scrollback-inner > *', 'box-sizing')).toBe('border-box')
-    for (const selector of ['.cmd-block', '.xterm-live-container']) {
+    // Every one of these is a direct child of `.scrollback-inner` at equal
+    // specificity to that row rule (one class each): `.cmd-block` (every
+    // kind), the live region and `.scrollback-restore-boundary` ("Previous
+    // session" / "New shell"). A `padding`/`padding-inline`/`padding-left`/
+    // `padding-right` declared on any of them, later in the cascade, wins
+    // outright and resets the row's inline inset to 0 — the defect a review
+    // found on `.scrollback-restore-boundary` (nocx-9bpeq.8): its own
+    // `padding: var(--space-2) 0` shorthand pulled the boundary text back to
+    // the pane's edge while every other row kept the gutter.
+    for (const selector of [
+      '.cmd-block',
+      '.xterm-live-container',
+      '.scrollback-restore-boundary',
+    ]) {
       for (const property of INLINE) expect(shipped(selector, property)).toBeNull()
     }
+    expect(shipped('.scrollback-restore-boundary', 'padding-block')).toBe('var(--space-2)')
   })
 
   it('the running region states only its block padding, never resetting the inset', () => {

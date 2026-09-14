@@ -491,6 +491,21 @@ type SSHSpawnParams struct {
 	// tree rule admits those panes) sends none, and a pane whose frame carries
 	// none admits nobody answering to a token.
 	AgentToolToken string `json:"agentToolToken,omitempty"`
+	// AgentToolsAbsent is WHY this pane's agent gets no nocx tools, from the
+	// closed set internal/shellintegration owns (nocx-e2bws): the code, not a
+	// sentence, because the SHELL renders the sentence a person reads and the
+	// fact the shell cannot see is the reason.
+	//
+	// It travels on the ssh spawn because that is the route the reason is a
+	// fact about: THIS machine's helper carries a pane whose shell runs on a
+	// host with no nocx helper of its own, so there is no bridge for the agent
+	// to run there and no socket for it to dial — and a shell told nothing
+	// reports "path is not configured", which sends a person looking for a
+	// setting no host has.
+	//
+	// Empty is the honest state for every other pane: nocx did not say, and the
+	// shell keeps its own sentence.
+	AgentToolsAbsent string `json:"agentToolsAbsent,omitempty"`
 	// IdempotencyKey is the caller's name for the spawn, on exactly the terms
 	// SpawnParams states: a repeat answers with the session the first one made
 	// rather than forking a second remote shell.

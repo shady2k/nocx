@@ -158,6 +158,11 @@ func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process
 			Enhanced:            true,
 			AgentHelperPath:     req.AgentHelperPath,
 			AgentToolSocketPath: req.AgentToolSocketPath,
+			// WHY THERE IS NO TOOL SURFACE, when the caller said (nocx-e2bws):
+			// a code, rendered into the shell's environment so the stage can
+			// name the reason to a person rather than reporting a path no
+			// launch gave it.
+			AgentToolsAbsent: shellintegration.AgentToolsAbsent(req.AgentToolsAbsent),
 			// The bearer, on the frame-2 road the lifecycle capability takes
 			// rather than in the agent env block (nocx-50w7p.16).
 			AgentToolToken: req.AgentToolToken,

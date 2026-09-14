@@ -203,3 +203,75 @@ func TestAnUnforwardedToolSocketPathIsRefusedByTheFarSide(t *testing.T) {
 		t.Fatalf("the socket file %s outlived the listener", farPath)
 	}
 }
+
+// TestAFarShellWithNoHelperIsToldWhyItHasNoTools is criterion 2 of nocx-e2bws:
+// a pane this machine's helper carries on a host with no nocx helper of its own
+// has NO tool surface, and the far shell is TOLD why in the words a person can
+// act on rather than left reporting a path no launch gave it.
+//
+// It reads the launch the far side actually received — the delivered stage-1
+// frame, which is the same text the assertions above read for the presence case
+// — so what is asserted is what the shell sources rather than what the request
+// meant.
+//
+// THE ABSENCES ARE CHECKED AS ASSIGNMENTS, not as bare names: the delivered
+// frame embeds the whole nocx.bash, which READS both variables
+// (`${NOCX_TOOL_SOCKET:-}`, `${NOCX_AGENT_HELPER_PATH:-nocx-helper}`), so a
+// substring check for the name alone would be satisfied by the script's own
+// logic rather than by what this launch rendered (spawn_local_test.go records
+// the same trap).
+func TestAFarShellWithNoHelperIsToldWhyItHasNoTools(t *testing.T) {
+	f := newSSHFixture(t, "pw", "printf 'ALIVE\n'; cat")
+	stand := newSSHStand(t, f, &sshCoordinator{
+		password: "pw", verdict: proto.HostKeyTrusted, fingerprint: f.fingerprint(),
+	})
+
+	params := stand.spawnParams(t, proto.SSHModeAuto)
+	params.AgentToolsAbsent = string(shellintegration.AgentToolsNoHelperOnHost)
+	stand.mustSpawn(t, params)
+
+	f.waitFarOutput(t, shellintegration.OutcomePrefix)
+	delivered := string(f.programInputSeen())
+
+	want := shellintegration.AgentToolsAbsentEnvVar + "='" + string(shellintegration.AgentToolsNoHelperOnHost) + "'"
+	if !strings.Contains(delivered, want) {
+		t.Fatalf("the far shell was not told why it has no tools (%s):\n%s", want, tail(delivered, 600))
+	}
+	for _, name := range []string{shellintegration.ToolSocketEnvVar, "NOCX_AGENT_HELPER_PATH"} {
+		if strings.Contains(delivered, name+"=") {
+			t.Fatalf("the launch of a pane with no tool surface rendered %s=:\n%s", name, tail(delivered, 600))
+		}
+	}
+}
+
+// TestASpawnNamingAnAbsentReasonTheHelperDoesNotKnowIsRefused — and the same
+// for a reason that CONTRADICTS a path. Both are refusals of the REQUEST, and
+// both are raised before the claim is taken or anything is dialed: the code is
+// rendered into a shell's environment, so a helper handing on a code its shells
+// cannot turn into a sentence would leave a person with a pane that reports
+// nothing at all (nocx-e2bws).
+func TestASpawnNamingAnAbsentReasonTheHelperDoesNotKnowIsRefused(t *testing.T) {
+	f := newSSHFixture(t, "pw", "printf 'ALIVE\n'; cat")
+	stand := newSSHStand(t, f, &sshCoordinator{
+		password: "pw", verdict: proto.HostKeyTrusted, fingerprint: f.fingerprint(),
+	})
+
+	// A code from a newer coordinator: refused by name, in both directions
+	// (a helper ten generations old answers the same way).
+	params := stand.spawnParams(t, proto.SSHModeAuto)
+	params.AgentToolsAbsent = "some-future-code"
+	if _, err := stand.spawn(t, params); err == nil {
+		t.Fatal("a spawn naming a reason this helper does not know was accepted")
+	}
+
+	// AND A REASON BESIDE A PATH: the two say opposite things about this pane,
+	// and a launch rendering both is a shell told there is a socket it may not
+	// use.
+	params = stand.spawnParams(t, proto.SSHModeAuto)
+	params.AgentToolsAbsent = string(shellintegration.AgentToolsNoHelperOnHost)
+	params.AgentToolSocketPath = filepath.Join(t.TempDir(), "nocx-tool.sock")
+	params.AgentToolEndpoint = stand.toolSocket
+	if _, err := stand.spawn(t, params); err == nil {
+		t.Fatal("a spawn that named both an absent reason and a tool socket was accepted")
+	}
+}

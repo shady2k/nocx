@@ -140,9 +140,13 @@ type SSHSpawnRequest struct {
 	// secret and this struct is not a place it rests: it goes into the launch
 	// options, which render it into the descriptor, and nowhere else.
 	AgentToolToken string
-	// Cols and Rows are the channel's pty size.
-	Cols uint16
-	Rows uint16
+	// AgentToolsAbsent is why this pane's agent gets no tool surface, from the
+	// closed set internal/shellintegration owns, or empty when nocx did not say
+	// (nocx-e2bws). It reaches the launcher's environment as a code; the SHELL
+	// renders the sentence a person reads.
+	AgentToolsAbsent string
+	Cols             uint16
+	Rows             uint16
 	// Lifecycle is the caller's request for the authenticated lifecycle
 	// channel. The spawner opens the far side's loopback listener for it,
 	// renders its addressing into the launcher, and puts the BEARER in frame 2

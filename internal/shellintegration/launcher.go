@@ -61,6 +61,18 @@ type LaunchOptions struct {
 	// lifecycle capability and report rendezvous remain outside this config.
 	AgentHelperPath     string
 	AgentToolSocketPath string
+	// AgentToolsAbsent says why this pane's agent has NO tool surface, from
+	// the closed set in agenttools.go. It is set exactly when both paths above
+	// are empty and nocx knows the reason — an ssh pane on a host with no
+	// installed helper, and any nested ssh (AgentToolsNoHelperOnHost) — and it
+	// travels as a non-secret environment entry so the shell's stage can name
+	// the reason to the person instead of reporting a path it was never given.
+	//
+	// Empty means "nocx did not say", which is a different state from any code
+	// in the set: a local pane whose coordinator runs no endpoint is a
+	// configuration a person can change, and the shell keeps its own sentence
+	// for it rather than being told the host has no helper.
+	AgentToolsAbsent AgentToolsAbsent
 	// AgentToolToken is the pane's tool bearer (nocx-50w7p.16): what the far
 	// agent's MCP bridge presents to be admitted, and what the pane's epoch
 	// bounds. It is LOWER-CASE HEX and it is a SECRET, so it travels by one of
@@ -157,6 +169,12 @@ func launcherEnvBlock(opts LaunchOptions) string {
 	if opts.AgentToolSocketPath != "" {
 		b.WriteString(ToolSocketEnvVar + "=" + ShellQuote(opts.AgentToolSocketPath) + "\n")
 	}
+	if opts.AgentToolsAbsent != "" {
+		// Non-secret and going into the shell's environment: the stage reads it
+		// to choose its sentence, and a person who inspects the pane sees the
+		// same code the launch was built from.
+		b.WriteString(AgentToolsAbsentEnvVar + "=" + ShellQuote(opts.AgentToolsAbsent.String()) + "\n")
+	}
 	// Lifecycle channel addressing and transport (ADR-0024). The capability
 	// is deliberately NOT here: it reaches the shell by one of the two forms
 	// in capability_source.go and must never appear in /proc/<pid>/environ.
@@ -180,6 +198,9 @@ func launcherEnvBlock(opts LaunchOptions) string {
 	}
 	if opts.AgentToolSocketPath != "" {
 		b.WriteString(" " + ToolSocketEnvVar)
+	}
+	if opts.AgentToolsAbsent != "" {
+		b.WriteString(" " + AgentToolsAbsentEnvVar)
 	}
 	if opts.Lane != "" && opts.Domain != "" && opts.Epoch != 0 && opts.Capability != "" {
 		b.WriteString(" NOCX_LIFECYCLE_LANE NOCX_LIFECYCLE_DOMAIN NOCX_LIFECYCLE_EPOCH")

@@ -601,6 +601,11 @@ __nocx_agent_stage() {
     typeset -g __nocx_agent_stage_reason=
     typeset -g __nocx_agent_launch_dir=
     typeset -g __nocx_agent_launch_lease=
+    # NOCX SAID WHY THERE IS NO TOOL SURFACE (nocx-e2bws): see nocx.bash's twin.
+    if [[ -z "$__helper" || -z "$__socket" ]] && [[ -n "${NOCX_AGENT_TOOLS_ABSENT:-}" ]]; then
+        typeset -g __nocx_agent_stage_reason='no nocx helper is installed on this host, so the agent gets no nocx tools'
+        return 1
+    fi
     if [[ -z "$__helper" ]]; then
         __nocx_agent_stage_reason='nocx helper path is not configured'
         return 1

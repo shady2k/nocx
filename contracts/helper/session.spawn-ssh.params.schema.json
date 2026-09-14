@@ -67,6 +67,14 @@
       "description": "The LOCAL socket each connection arriving on the far-side tool socket is forwarded into: this pane's own coordinator's tool endpoint on THIS machine, and the second half of `agentToolSocketPath`'s pair — one names a path on the far host, this names an endpoint on the machine the helper runs on. It travels per spawn for the same reason `session.spawn.params`'s field of that name does (nocx-50w7p.18): a helper daemon serves several coordinators of one account (D12), so an endpoint fixed at the daemon's own start would send a pane's far tool connections to a coordinator that never asked for that pane. A far socket path with no endpoint here is refused by name before anything is dialed.",
       "type": "string"
     },
+    "agentToolToken": {
+      "description": "The bearer the pane's agent presents to be admitted (nocx-50w7p.16): what the coordinator minted for THIS pane and its admission epoch. It is a SECRET, and this shape is not a place it rests — the far launcher renders it into the descriptor frame its shell reads, and it is never part of the launch record, the logs, or anything the helper hands a child process. Empty is a real state: a coordinator that requires no bearer sends none, and a pane whose frame carries none admits nobody answering to a token.",
+      "type": "string"
+    },
+    "agentToolsAbsent": {
+      "description": "WHY this pane's agent gets no nocx tools, from the closed set internal/shellintegration owns, or absent when nocx did not say (nocx-e2bws). It travels on this op because this is the route the reason is a fact about: a pane THIS machine's helper carries on a host with no nocx helper of its own has no bridge for the agent to run and no socket for it to dial, and a shell told nothing reports a path it was never given. A value this helper does not know is refused by name, and a value that contradicts `agentToolSocketPath` is refused in both directions.",
+      "type": "string"
+    },
     "lifecycle": {
       "description": "The caller's request for the authenticated lifecycle channel. THIS GENERATION DELIVERS THE PANE AND OPENS NO TUNNEL: the lifecycle channel is a remote loopback listener on the ssh connection and needs a forward on the helper's connection (nocx-50w7p.8). A request carrying one is answered with a session that has no lifecycle window, whose adopt-lifecycle answers null, and the helper logs the refusal by name. The two bearer values are accepted and never rendered anywhere: a capability with no channel behind it is a credential minted for nobody. Delivering the pane rather than refusing the request is ADR-0004's rule — an ordinary usable terminal is the one thing no failure path may suppress, and losing it to nocx's OWN optional work is the only way to lose it that is nocx's fault.",
       "type": ["object", "null"],

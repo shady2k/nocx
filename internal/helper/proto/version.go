@@ -159,17 +159,22 @@ package proto
 // other's key auth, and only the number tells them apart. Two peers that
 // disagree refuse each other at hello in both directions, which is what makes
 // the number the whole of the compatibility story.
-// This is 13 rather than 12 because the wire grew a FIELD and an OP for the far
-// pane's tool surface (nocx-e2bws). `session.spawn.params` gained
+// This is 13 rather than 12 because the wire grew TWO FIELDS and an OP for the
+// far pane's tool surface (nocx-e2bws). `session.spawn.params` gained
 // `agentToolToken` — the bearer the pane's agent presents to be admitted — and
-// the `ssh` service gained `tool-socket`, the listener a far host's agent dials
-// into the coordinator that opened the pane. The FIELD is the half that cannot
-// be added: both spawn shapes are `additionalProperties: false`, so a 12-helper
-// REJECTS a payload carrying the token and answers `bad_params` — a sentence
-// about a request that is well-formed, spoken by a helper that is old. The OP
-// is the other half for the same reason one generation on: a 12-helper answers
-// `unknown_op`, which a coordinator must read as "this machine's helper cannot
-// serve a pane's tools", and the number is what tells it that before it tries.
-// Two peers that disagree refuse each other at hello in both directions, which
-// is what makes the number the whole of the compatibility story.
+// `session.spawn-ssh.params` gained it too together with `agentToolsAbsent`,
+// the reason a pane has no tool surface at all: the owner's decision of
+// 2026-09-14 makes agent orchestration a feature of hosts with an installed
+// helper, so the case that gets nothing now says so in the shell's own
+// words. The `ssh` service gained `tool-socket`, the listener a far host's
+// agent dials into the coordinator that opened the pane. The FIELDS are the
+// half that cannot be added: both spawn shapes are `additionalProperties:
+// false`, so a 12-helper REJECTS a payload carrying either and answers
+// `bad_params` — a sentence about a request that is well-formed, spoken by a
+// helper that is old. The OP is the other half for the same reason one
+// generation on: a 12-helper answers `unknown_op`, which a coordinator must
+// read as "this machine's helper cannot serve a pane's tools", and the number
+// is what tells it that before it tries. Two peers that disagree refuse each
+// other at hello in both directions, which is what makes the number the whole
+// of the compatibility story.
 const Version = "13"

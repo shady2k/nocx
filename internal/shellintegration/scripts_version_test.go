@@ -206,6 +206,7 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// and starts the agent before anybody has answered.
 		"50": "cfc9be48045ec8c8d505d4bd3446f406e3652c10463857c1ec359269d833e1c4",
 		"51": "d3faeae6c421c4cddf7989289b47ed704a1f8138e25044d798d63acb8ed19a65",
+		"52": "0f2d345dfc3e65fde991ff74f55c25d80bd627f0bb8331bb3d9f3fc368e2ed74",
 	}
 
 	h := sha256.New()

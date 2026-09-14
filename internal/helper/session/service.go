@@ -35,6 +35,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	nocxlog "github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/shellintegration"
 )
 
 // LifecycleDataPlane receives opaque lifecycle bytes from the coordinator.
@@ -807,9 +808,13 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 		// that opened this pane, and only that coordinator can name its own
 		// endpoint on this machine.
 		AgentToolEndpoint: p.AgentToolEndpoint,
-		Cols:              cols,
-		Rows:              rows,
-		Lifecycle:         p.Lifecycle,
+		// Why there is no tool surface on this pane, when the caller said: a
+		// code from internal/shellintegration's closed set, rendered into the
+		// launch's environment for the shell to name to a person (nocx-e2bws).
+		AgentToolsAbsent: p.AgentToolsAbsent,
+		Cols:             cols,
+		Rows:             rows,
+		Lifecycle:        p.Lifecycle,
 	})
 	if err != nil {
 		s.mu.Lock()
@@ -870,6 +875,23 @@ func validateSSHSpawn(p proto.SSHSpawnParams) error {
 	case "", proto.SSHShellAuto, proto.SSHShellBash, proto.SSHShellZsh, proto.SSHShellUnknown:
 	default:
 		return fmt.Errorf("%w: shell %q is not one this helper launches", ErrBadSSHParams, p.Shell)
+	}
+	// The reason code is a CLOSED SET internal/shellintegration owns
+	// (agenttools.go: the codes, the environment variable's name and the
+	// render), and this asks the OWNER rather than keeping a second copy of the
+	// list. A code this build's shells cannot turn into a sentence is refused
+	// rather than exported: a shell handed one would report nothing at all, or
+	// worse, a sentence about a state nobody is in (nocx-e2bws).
+	if p.AgentToolsAbsent != "" && !shellintegration.AgentToolsAbsent(p.AgentToolsAbsent).Known() {
+		return fmt.Errorf("%w: agent tools absent reason %q is not one this helper knows", ErrBadSSHParams, p.AgentToolsAbsent)
+	}
+	// AND IT MAY NOT CONTRADICT A PATH. A reason says this pane has no tool
+	// surface; a far socket path says it has one. Refused in both directions
+	// rather than resolved in favour of one, because a launch rendering both is
+	// a shell told there is a socket it may not use.
+	if p.AgentToolsAbsent != "" && p.AgentToolSocketPath != "" {
+		return fmt.Errorf("%w: agent tools are absent (%s) and a tool socket was named (%s)",
+			ErrBadSSHParams, p.AgentToolsAbsent, p.AgentToolSocketPath)
 	}
 	return nil
 }

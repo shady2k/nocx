@@ -86,7 +86,9 @@ const SHADOW_WINDOW = 0.2
 const DEFAULT_LEDGES: readonly LedgeSource[] = [
   { selector: '.tabbar', edge: 'bottom' },
   { selector: '.pane.active .cmd-block', edge: 'top' },
-  { selector: '.pane.active .nocx-chip', edge: 'top' },
+  // The meta a block wears (spec 2026-09-14 §5.5). The composer is not a
+  // ledge: the animal does not stand where the caret is.
+  { selector: '.pane.active .cmd-block .ui-meta', edge: 'top' },
 ]
 
 export function timingFrom(pack: PetPack, loaded: LoadedPack | null = null): PetTiming {

@@ -1,0 +1,138 @@
+/* A block of the ledger: its row, its header, its outcome (spec 2026-09-14 §3).
+   A SURFACE stylesheet on purpose: the block places kit components — Meta,
+   Badge, IconButton, Spinner — and styles/components/ is exempt from the gate
+   that keeps a surface from repainting them. Rows are full width and carry the
+   pane gutter (style.css `.scrollback-inner > *`, nocx-9bpeq.8); nothing here
+   gives a block an inline padding of its own. */
+
+.cmd-block {
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--color-divider);
+  border-radius: 0;
+  background: transparent;
+  /* `content-visibility: auto` with an intrinsic-size guess is gone. Off-screen
+     blocks reported the GUESS — 48px — from `getBoundingClientRect()`, so the
+     scroll target computed for "put this block at the top" was built on a
+     number that was wrong by an order of magnitude: measured, a 635px block
+     answering 48. Skipping layout for off-screen content is a real
+     optimisation, but not while exact offsets decide where the view lands. */
+  overflow: visible;
+  /* The arrow, not the hand. A block is selectable, but what fills it is command
+     output you read and select text in — and a pointer cursor over a wall of
+     text says "this is a link" while making it harder to see where the caret
+     will land. The controls that really are clickable (the ⋮ button, the menu
+     items) keep their own `cursor: pointer` (nocx-6w4z). */
+  position: relative;
+}
+
+.cmd-block:first-child {
+  border-top: 0;
+}
+
+/* THE FAILED ROW (§3.3): a per-theme tint edge to edge and a bar at the row's
+   left edge, inside its own box so no text moves. Before hover and selection,
+   so their tint wins the ground and the bar stays. */
+.cmd-block[data-outcome='failure'] {
+  background: var(--color-danger-surface);
+}
+
+.cmd-block[data-outcome='failure']::before {
+  content: '';
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: 3px;
+  background: var(--color-danger);
+  pointer-events: none;
+}
+
+/* A failed block nested in a turn has no row inset: its bar sits over the
+   turn's containment gutter instead of over its own first column. */
+.cmd-children > .cmd-block[data-outcome='failure']::before {
+  inset-inline-start: calc(-1 * var(--space-3));
+}
+
+.cmd-block:hover {
+  background: color-mix(in srgb, var(--color-text), transparent 97%);
+}
+
+.cmd-block.cmd-block-selected {
+  background: color-mix(in srgb, var(--color-accent), transparent 94%);
+}
+
+.cmd-block.cmd-block-selected:hover {
+  background: color-mix(in srgb, var(--color-accent), transparent 91%);
+}
+
+.cmd-header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* Bottom: the gap between the command and what it printed, on the header
+     because a running block has no .cmd-output. Top: the row's rhythm (§8). */
+  padding: var(--space-2) 0 var(--space-3);
+  pointer-events: auto;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Where on the left, the right-hand group pushed out by its own auto margin —
+   never space-between, which mis-spaces any child count but two (nocx-a44m). */
+.cmd-header-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.cmd-header-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  margin-left: auto;
+}
+
+.cmd-header-waiting {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* The ⋮ is quiet until the block is looked at, and never unreachable: opacity
+   keeps its box and its tab stop (ADR-0008). Placement, by the gate's own list. */
+.cmd-block > .cmd-header .cmd-header-right > .ui-icon-button {
+  opacity: 0;
+}
+
+.cmd-block:hover > .cmd-header .cmd-header-right > .ui-icon-button,
+.cmd-block.cmd-block-selected > .cmd-header .cmd-header-right > .ui-icon-button,
+.cmd-block:focus-within > .cmd-header .cmd-header-right > .ui-icon-button {
+  opacity: 1;
+}
+
+.cmd-header-text {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-terminal);
+  color: var(--color-text);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* ONE TOOL CALL reads as a margin note (ADR-0040, ADR-0028 decision 4). */
+.cmd-block[data-block-kind='tool'] .cmd-header {
+  padding-bottom: 2px;
+}
+
+.cmd-block[data-block-kind='tool'] .cmd-header-text {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.cmd-block[data-block-kind='tool'][data-effect='mutate-destructive'] .cmd-header-text,
+.cmd-block[data-block-kind='tool'][data-effect='privilege-change'] .cmd-header-text {
+  color: var(--color-warning);
+}

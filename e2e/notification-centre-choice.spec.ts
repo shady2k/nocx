@@ -65,7 +65,11 @@ const blockOf = (page: Page, title: string) => page.locator('.cmd-block').filter
  * the chip is the failure one.
  */
 async function commandFinished(page: Page, title: string): Promise<void> {
-  await expect(blockOf(page, title).locator('.cmd-header-exit-fail').first()).toHaveText('exit 1', {
+  const block = blockOf(page, title).first()
+  await expect(block).toHaveAttribute('data-outcome', 'failure', { timeout: 30_000 })
+  await expect(
+    block.locator(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
+  ).toHaveText('exit 1', {
     timeout: 30_000,
   })
 }

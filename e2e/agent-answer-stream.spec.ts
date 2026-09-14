@@ -137,7 +137,9 @@ function answerBlock(page: Page, question: string) {
 }
 
 async function answerFinished(page: Page, question: string): Promise<void> {
-  await expect(answerBlock(page, question).locator('.cmd-header-exit')).toHaveText('completed', {
+  // Success is silent (spec 2026-09-14 §3.1): the outcome attribute is the
+  // observable, the word `completed` never reaches the DOM.
+  await expect(answerBlock(page, question)).toHaveAttribute('data-outcome', 'success', {
     timeout: 30_000,
   })
 }

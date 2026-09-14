@@ -28,6 +28,7 @@ const srcDir = import.meta.dirname ?? resolve(new URL('.', import.meta.url).path
 const STYLE_ENTRY = resolve(srcDir, 'style.css')
 const BASE_STYLE_ENTRY = resolve(srcDir, 'styles/base.css')
 const FRAME_STYLE_ENTRY = resolve(srcDir, 'frame/display.css')
+const COMMAND_BLOCK_STYLE_ENTRY = resolve(srcDir, 'styles/surfaces/command-block.css')
 
 import type { PaneIdentity } from './terminal-content'
 import { grantBlockFromElement, type GrantBlock } from './ask-entry'
@@ -1816,7 +1817,7 @@ describe('the live prompt says where Enter will land (nocx-3779)', () => {
       expect(chip!.textContent).toBe('root@192.168.0.57')
       // The block header never appears in the severed product: blocks are
       // a completion projection with no stream (or app) trigger.
-      expect(tab.pane.querySelector('.cmd-header-location')).toBeNull()
+      expect(tab.pane.querySelector('.cmd-header-meta')).toBeNull()
     } finally {
       teardown()
     }
@@ -2413,28 +2414,28 @@ function extractRuleBlock(css: string, className: string): string | null {
 
 const stripComments = (s: string): string => s.replace(/\/\*[\s\S]*?\*\//g, '')
 
-// The SSH block header regression (nocx-a44m): the cwd chip used to park in
-// the dead centre of the header because `.cmd-header-chips` separated its
-// children with `justify-content: space-between` — right for two children
-// (a local block is [cwd, right]) and wrong for three (an SSH block adds the
-// location chip, and three children space evenly). Fixed in 30014e3 by
-// pushing the right group out with its own `margin-left: auto`, which behaves
-// identically for any child count. jsdom computes no layout, so these
-// assertions pin what jsdom CAN see: the DOM order that expresses the intent
-// ("cwd left, duration and exit right"), and the stylesheet's structural
-// contract that turns that order into position without assuming a count.
-describe('the SSH block header keeps cwd left and duration/exit right (nocx-a44m)', () => {
+// The SSH block header regression (nocx-a44m): the cwd meta used to park in
+// the dead centre of the header because `.cmd-header-meta` (then
+// `.cmd-header-chips`) separated its children with `justify-content:
+// space-between` — right for two children (a local block is [meta, right])
+// and wrong for three. Fixed in 30014e3 by pushing the right group out with
+// its own `margin-left: auto`, which behaves identically for any child count.
+// jsdom computes no layout, so these assertions pin what jsdom CAN see: the
+// DOM order that expresses the intent ("where left, duration and outcome
+// right"), and the stylesheet's structural contract that turns that order
+// into position without assuming a count.
+describe('the SSH block header keeps its where-meta left and the right group right (nocx-a44m)', () => {
   const container = (): HTMLElement => document.createElement('div')
   const store = (): CommandSnapshotStore => new CommandSnapshotStore()
   const noop = (): void => {}
 
-  it('orders an SSH block header location, cwd, then the right group', () => {
+  it('orders the where meta before the right group, on an SSH block', () => {
     const el = createCommandBlock(
       'command',
       1,
       'deploy',
       '/srv/www',
-      'user@server', // location — the chip that made the header three children
+      'user@server', // location — the fact that made the where meta two parts
       '<span class="term-line">done</span>',
       1200,
       0,
@@ -2444,25 +2445,30 @@ describe('the SSH block header keeps cwd left and duration/exit right (nocx-a44m
       store(),
       'shell',
     )
-    const chips = el.querySelector('.cmd-header-chips')
-    expect(chips).not.toBeNull()
-    const loc = chips?.querySelector('.cmd-header-location')
-    const cwd = chips?.querySelector('.cmd-header-cwd')
-    const right = chips?.querySelector('.cmd-header-right')
-    expect(loc).not.toBeNull()
-    expect(cwd).not.toBeNull()
+    const metaRow = el.querySelector('.cmd-header-meta')
+    expect(metaRow).not.toBeNull()
+    const where = metaRow?.querySelector(':scope > .ui-meta')
+    const right = metaRow?.querySelector(':scope > .cmd-header-right')
+    expect(where).not.toBeNull()
     expect(right).not.toBeNull()
 
-    const order = [...(chips as HTMLElement).children]
-    expect(order.indexOf(loc as HTMLElement)).toBeLessThan(order.indexOf(cwd as HTMLElement))
-    expect(order.indexOf(cwd as HTMLElement)).toBeLessThan(order.indexOf(right as HTMLElement))
+    const order = [...(metaRow as HTMLElement).children]
+    expect(order.indexOf(where as HTMLElement)).toBeLessThan(order.indexOf(right as HTMLElement))
 
-    // The right group holds what belongs on the right: duration and exit.
-    expect(right?.querySelector('.cmd-header-duration')).not.toBeNull()
-    expect(right?.querySelector('.cmd-header-exit-ok')).not.toBeNull()
+    // Where reads host then directory, as one Meta.
+    const parts = [...(where as HTMLElement).querySelectorAll('.ui-meta__part')].map(
+      (p) => p.textContent,
+    )
+    expect(parts).toEqual(['user@server', 'srv/www'])
+
+    // The right group holds what belongs on the right: the duration, and —
+    // success being silent (spec 2026-09-14 §3.1) — no status word.
+    expect(right?.querySelector('.ui-meta[data-column="duration"]')).not.toBeNull()
+    expect(el.dataset.outcome).toBe('success')
+    expect(right?.querySelector('.ui-meta:not([data-column])')).toBeNull()
   })
 
-  it('keeps cwd before the right group on a local block too', () => {
+  it('keeps the where meta before the right group on a local block too', () => {
     const el = createCommandBlock(
       'command',
       1,
@@ -2478,27 +2484,27 @@ describe('the SSH block header keeps cwd left and duration/exit right (nocx-a44m
       store(),
       'shell',
     )
-    const chips = el.querySelector('.cmd-header-chips')
-    const cwd = chips?.querySelector('.cmd-header-cwd')
-    const right = chips?.querySelector('.cmd-header-right')
-    expect(cwd).not.toBeNull()
+    const metaRow = el.querySelector('.cmd-header-meta')
+    const where = metaRow?.querySelector(':scope > .ui-meta')
+    const right = metaRow?.querySelector(':scope > .cmd-header-right')
+    expect(where).not.toBeNull()
     expect(right).not.toBeNull()
-    const order = [...(chips as HTMLElement).children]
-    expect(order.indexOf(cwd as HTMLElement)).toBeLessThan(order.indexOf(right as HTMLElement))
+    const order = [...(metaRow as HTMLElement).children]
+    expect(order.indexOf(where as HTMLElement)).toBeLessThan(order.indexOf(right as HTMLElement))
   })
 
   it('the stylesheet pushes the right group with its own auto margin, not space-between', () => {
-    const css: string = readFileSync(STYLE_ENTRY, 'utf8')
-    const chips = stripComments(extractRuleBlock(css, 'cmd-header-chips') ?? '')
+    const css: string = readFileSync(COMMAND_BLOCK_STYLE_ENTRY, 'utf8')
+    const metaRow = stripComments(extractRuleBlock(css, 'cmd-header-meta') ?? '')
     const right = stripComments(extractRuleBlock(css, 'cmd-header-right') ?? '')
-    expect(chips).not.toBe('')
+    expect(metaRow).not.toBe('')
     expect(right).not.toBe('')
 
-    // space-between assumes exactly two children; the location chip made the
-    // SSH header three. The container must not distribute, and the right
-    // group must carry its own auto margin — the mechanism that behaves
-    // identically for any child count (nocx-a44m).
-    expect(chips).not.toMatch(/justify-content\s*:\s*(space-between|space-around|space-evenly)/)
+    // space-between assumes exactly two children; a located block's where
+    // meta can grow a second part. The container must not distribute, and
+    // the right group must carry its own auto margin — the mechanism that
+    // behaves identically for any child count (nocx-a44m).
+    expect(metaRow).not.toMatch(/justify-content\s*:\s*(space-between|space-around|space-evenly)/)
     expect(right).toMatch(/margin-left\s*:\s*auto/)
   })
 })
@@ -7731,10 +7737,15 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
       const restored = [...inner.querySelectorAll('[data-restored="true"]')] as HTMLElement[]
       const [untimed, instant] = restored
       expect(untimed.querySelector('.cmd-header-text')?.textContent).toBe('make test')
-      expect(untimed.querySelector('.cmd-header-duration')).toBeNull()
+      expect(
+        untimed.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]'),
+      ).toBeNull()
       // And the other fact still says itself out loud, so the absence above
       // reads as "unknown" and never as "the chip was dropped".
-      expect(instant.querySelector('.cmd-header-duration')?.textContent).toBe('0ms')
+      expect(
+        instant.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]')
+          ?.textContent,
+      ).toBe('0ms')
     } finally {
       teardown()
     }
@@ -12039,30 +12050,30 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       expect(editorOf(content).isVisible).toBe(false)
 
       await vi.waitFor(() =>
-        expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).toBe(
-          'stopped',
-        ),
+        expect(
+          answer.querySelector(
+            ':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])',
+          )?.textContent,
+        ).toBe('stopped'),
       )
       expect(answer.dataset.turnState).toBe('cancelled')
-      expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).not.toBe(
-        'failed',
-      )
+      expect(answer.dataset.outcome).toBe('cancelled')
       expect(answer.querySelector('[data-answer-body]')?.textContent).toContain(
         'partial prose survives',
       )
 
       // The notification is allowed to arrive after the reserved cancellation
-      // response; it must be idempotent and cannot replace the stopped chip.
+      // response; it must be idempotent and cannot replace the stopped word.
       const state = client.dispatcher.subscribe.mock.calls.find(
         ([method]) => method === 'agent.runState',
       )?.[1] as ((params: unknown) => void) | undefined
       state!({ runId: 42, entryId: 'entry-42', state: 'cancelled', droppedDeltas: 0 })
-      expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).not.toBe(
-        'failed',
-      )
-      expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).toBe(
-        'stopped',
-      )
+      expect(answer.dataset.outcome).not.toBe('failure')
+      expect(answer.dataset.outcome).toBe('cancelled')
+      expect(
+        answer.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])')
+          ?.textContent,
+      ).toBe('stopped')
     } finally {
       teardown()
     }
@@ -12868,7 +12879,9 @@ describe('replayed completion restores a durable block outcome (nocx-gm21o)', ()
         '[data-entry-id="entry-replayed-command"]',
       )
       expect(
-        restored?.querySelector('.cmd-header-exit')?.textContent,
+        restored?.querySelector(
+          ':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])',
+        )?.textContent,
         'the restored block still reads unknown after its completion replayed',
       ).toBe('exit 7')
     } finally {

@@ -118,6 +118,7 @@
 @import './styles/surfaces/agent-policy.css';
 @import './styles/surfaces/git.css';
 @import './styles/surfaces/skill-view.css';
+@import './styles/surfaces/command-block.css';
 
 /* ── App body row: strip | panes | sidebar | activity bar ─────────────── */
 
@@ -1014,145 +1015,6 @@
   display: none;
 }
 
-/* ── Command blocks ─────────────────────────────────────────────────── */
-
-.cmd-block {
-  margin: 0;
-  border: 0;
-  border-top: 1px solid var(--color-surface-hover);
-  border-radius: 0;
-  background: transparent;
-  /* `content-visibility: auto` with an intrinsic-size guess is gone. Off-screen
-     blocks reported the GUESS — 48px — from `getBoundingClientRect()`, so the
-     scroll target computed for "put this block at the top" was built on a
-     number that was wrong by an order of magnitude: measured, a 635px block
-     answering 48. Skipping layout for off-screen content is a real
-     optimisation, but not while exact offsets decide where the view lands. */
-  overflow: visible;
-  /* The arrow, not the hand. A block is selectable, but what fills it is command
-     output you read and select text in — and a pointer cursor over a wall of
-     text says "this is a link" while making it harder to see where the caret
-     will land. The controls that really are clickable (the ⋮ button, the menu
-     items) keep their own `cursor: pointer` (nocx-6w4z). */
-  position: relative;
-}
-
-.cmd-block:first-child {
-  border-top: 0;
-}
-
-.cmd-block:hover {
-  background: color-mix(in srgb, var(--color-text), transparent 97%);
-}
-
-.cmd-block.cmd-block-selected {
-  background: color-mix(in srgb, var(--color-accent), transparent 94%);
-}
-
-.cmd-block.cmd-block-selected:hover {
-  background: color-mix(in srgb, var(--color-accent), transparent 91%);
-}
-
-.cmd-header {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  /* The bottom half of this padding is the gap between the command and what it
-     printed. It belongs to the header rather than to `.cmd-output`, because a
-     RUNNING block has no `.cmd-output` at all — the live xterm follows the
-     header directly — and a rule on the output would have left exactly the case
-     you are looking at while a command runs without any gap. */
-  padding: 3px 0 var(--space-3);
-  background: transparent;
-  border: 0;
-  font-family: var(--font-family-ui);
-  font-size: var(--font-size-xs);
-  pointer-events: auto;
-  -webkit-user-select: none;
-  user-select: none;
-  color: var(--color-text-dim);
-}
-
-/* Left-to-right: the chips that say WHERE (location, cwd) group at the start,
-   and the right-hand group is pushed out by its own auto margin.
-
-   This used to be `justify-content: space-between`, which is right for two
-   children and wrong for three. A local block has no location chip, so the row
-   was [cwd, right] and space-between put them at the two ends, exactly as
-   intended. An SSH block adds the location chip, and the same rule then spaced
-   three children evenly — parking the cwd chip in the dead centre of the
-   header. Nobody saw it until shell integration started producing blocks over
-   SSH at all. */
-.cmd-header-chips {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.cmd-header-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: none;
-  margin-left: auto;
-}
-
-.cmd-header-text {
-  font-family: var(--font-family-mono);
-  font-size: var(--font-size-terminal);
-  color: var(--color-text);
-  white-space: pre-wrap;
-  overflow-wrap: break-word;
-  -webkit-user-select: text;
-  user-select: text;
-}
-
-.cmd-header-cwd {
-  flex: none;
-}
-
-.cmd-header-duration {
-  font-variant-numeric: tabular-nums;
-  min-width: 52px;
-}
-
-.cmd-header-spinner {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--color-accent);
-  opacity: 0.6;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .cmd-header-spinner {
-    animation: cmd-spin-pulse 1.2s ease-in-out infinite;
-  }
-}
-
-@keyframes cmd-spin-pulse {
-  0%,
-  100% {
-    opacity: 0.4;
-  }
-  50% {
-    opacity: 1;
-  }
-}
-
-.cmd-header-exit {
-  min-width: 44px;
-}
-
-/* The ask kind's in-progress chip. The pulse is its NEIGHBOUR, not its
-   content — the same arrangement a running command's header has, where the
-   dot is bare in the chip row and the chip beside it carries the text. The
-   chip never wraps or clips its own word. */
-.cmd-answer-waiting {
-  white-space: nowrap;
-}
-
 /* The ONE "work is happening here, nothing has been written yet" stand-in
    (nocx-vnirv.1): three dots where the first words will appear. Two hosts,
    one class — a turn's children while the model thinks or a tool runs, and
@@ -1257,34 +1119,6 @@
   border-top: 0;
 }
 
-/* ONE TOOL CALL: a header and nothing else (ADR-0040). The header's bottom
-   padding is the gap between a command and what it printed, and a call
-   prints nothing here — its result belongs to the ledger's attempt, and the
-   command a `run` call opened is a block of its own beside this. */
-.cmd-block[data-block-kind='tool'] .cmd-header {
-  padding-bottom: 2px;
-}
-
-/* It reads as a MARGIN NOTE, not as content: the answer is what the person
-   came for, and a call that shouted would compete with it. Dim and one size
-   below the body — and monospace, which it inherits, because the tool name
-   and its arguments are identifiers a person compares against the same words
-   in the terminal above. */
-.cmd-block[data-block-kind='tool'] .cmd-header-text {
-  font-size: var(--font-size-sm);
-  color: var(--color-text-muted);
-}
-
-/* A call that CHANGES something must not read like a call that looked at
-   something. The variance is the BACKEND's effect class, typed on the block
-   — never derived here from the tool's name (ADR-0028 decision 4). Only the
-   two ends are painted: a reader needs "this only looked" and "this could
-   not be undone" distinguishable at a glance, and giving all seven classes a
-   colour of their own would turn the turn into a legend. */
-.cmd-block[data-block-kind='tool'][data-effect='mutate-destructive'] .cmd-header-text,
-.cmd-block[data-block-kind='tool'][data-effect='privilege-change'] .cmd-header-text {
-  color: var(--color-warning);
-}
 
 .cmd-output {
   /* The block body's own padding, named because the LIVE region wears the

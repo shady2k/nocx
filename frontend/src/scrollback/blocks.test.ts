@@ -17,6 +17,7 @@ import {
   blockCommandText,
   blockKindRules,
   FENCE_DEFER_MS,
+  settleBlockOutcome,
   type BlockKind,
 } from './blocks'
 import { clampMenuPosition } from '../ui/menu-geometry'
@@ -39,6 +40,14 @@ const noopSelect = (): void => {}
 /** A fresh, empty store — verdicts default to "no snapshot" per test. */
 const freshStore = (): CommandSnapshotStore => new CommandSnapshotStore()
 
+/** Re-settle a built command block through the one outcome owner. */
+function completeRestoredLike(el: HTMLElement, exitCode: number, durationMs: number): void {
+  settleBlockOutcome(el, 'command', durationMs, {
+    status: exitCode === 0 ? 'success' : 'failure',
+    exitCode,
+  })
+}
+
 describe('createRunningBlock', () => {
   it('creates a div with classes cmd-block and cmd-block-running', () => {
     const container = document.createElement('div')
@@ -57,7 +66,7 @@ describe('createRunningBlock', () => {
     expect(text?.textContent).toBe('ls -la')
   })
 
-  it('includes cwd chip in the header (standard .nocx-chip component)', () => {
+  it('includes cwd in the header, as the where Meta’s own text', () => {
     const container = document.createElement('div')
     const el = createRunningBlock(
       1,
@@ -68,15 +77,14 @@ describe('createRunningBlock', () => {
       noopSelect,
       freshStore(),
     )
-    const cwd = el.querySelector('.cmd-header-cwd')
-    expect(cwd?.textContent).toBe('\u{1F4C1} dev/projects')
-    expect(cwd?.classList.contains('nocx-chip')).toBe(true)
+    const where = el.querySelector<HTMLElement>(':scope > .cmd-header > .cmd-header-meta > .ui-meta')
+    expect(where?.textContent).toBe('dev/projects')
   })
 
   it('shows a spinner for running state', () => {
     const container = document.createElement('div')
     const el = createRunningBlock(1, 'sleep 10', '~', '', () => container, noopSelect, freshStore())
-    const spinner = el.querySelector('.cmd-header-spinner')
+    const spinner = el.querySelector('.ui-spinner')
     expect(spinner).not.toBeNull()
   })
 
@@ -144,12 +152,13 @@ describe('createCommandBlock', () => {
       'shell',
     )
     expect(el.classList.contains('cmd-block-unreconciled')).toBe(true)
-    expect(el.querySelector('.cmd-header-exit')).toBeNull()
-    expect(el.querySelector('.cmd-header-exit-ok')).toBeNull()
-    expect(el.querySelector('.cmd-header-exit-fail')).toBeNull()
+    expect(el.dataset.outcome).toBeUndefined()
+    expect(
+      el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
+    ).toBeNull()
     // Not running either: its rows are fixed, so there is no spinner. Neither
     // running nor finished is the whole of what it says.
-    expect(el.querySelector('.cmd-header-spinner')).toBeNull()
+    expect(el.querySelector('.ui-spinner')).toBeNull()
   })
 
   it('creates a frozen block with success status', () => {
@@ -169,8 +178,10 @@ describe('createCommandBlock', () => {
       'shell',
     )
     expect(el.classList.contains('cmd-block')).toBe(true)
-    const exit = el.querySelector('.cmd-header-exit-ok')
-    expect(exit?.textContent).toBe('ok')
+    expect(el.dataset.outcome).toBe('success')
+    expect(
+      el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
+    ).toBeNull()
   })
 
   it('creates a frozen block with failure status', () => {
@@ -189,7 +200,8 @@ describe('createCommandBlock', () => {
       freshStore(),
       'shell',
     )
-    const exit = el.querySelector('.cmd-header-exit-fail')
+    expect(el.dataset.outcome).toBe('failure')
+    const exit = el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])')
     expect(exit?.textContent).toBe('exit 1')
   })
 
@@ -323,11 +335,11 @@ describe('createCommandBlock', () => {
       freshStore(),
       'shell',
     )
-    const dur = el.querySelector('.cmd-header-duration')
+    const dur = el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]')
     expect(dur?.textContent).toBe('1.2s')
   })
 
-  it('omits exit badge when exitCode is null', () => {
+  it('omits the outcome when exitCode is null', () => {
     const el = createCommandBlock(
       'command',
       1,
@@ -343,7 +355,10 @@ describe('createCommandBlock', () => {
       freshStore(),
       'shell',
     )
-    expect(el.querySelector('.cmd-header-exit')).toBeNull()
+    expect(el.dataset.outcome).toBeUndefined()
+    expect(
+      el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
+    ).toBeNull()
   })
 
   it('omits .cmd-output when outputHtml is empty (P0-3)', () => {
@@ -420,8 +435,9 @@ describe('createCommandBlock', () => {
       freshStore(),
       'shell',
     )
-    const cwdEl = el.querySelector('.cmd-header-cwd')
-    expect(cwdEl?.textContent).toBe('\u{1F4C1} user/repos')
+    const where = el.querySelector<HTMLElement>(':scope > .cmd-header > .cmd-header-meta > .ui-meta')
+    expect(where?.textContent).toBe('user/repos')
+    expect(where?.textContent).not.toMatch(/\p{Extended_Pictographic}/u)
   })
 })
 
@@ -457,7 +473,7 @@ describe('freezeBlock', () => {
     expect(parent.children.length).toBe(1)
     expect(parent.children[0]).toBe(frozen)
     expect(frozen.classList.contains('cmd-block')).toBe(true)
-    expect(frozen.querySelector('.cmd-header-exit-ok')).not.toBeNull()
+    expect(frozen.dataset.outcome).toBe('success')
     expect(frozen.querySelector('.cmd-output')?.innerHTML).toContain('done')
   })
 
@@ -717,7 +733,9 @@ describe('BlockManager', () => {
     vi.useFakeTimers()
     try {
       const rec = manager.startBlock('find /', '~', 10)
-      const duration = rec.el.querySelector<HTMLElement>('.cmd-header-duration')
+      const duration = rec.el.querySelector<HTMLElement>(
+        ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]',
+      )
       expect(duration?.textContent).toBe('0s')
 
       fixedNow = 66_250
@@ -838,17 +856,28 @@ describe('BlockManager', () => {
     manager.restorePast([restored])
     manager.startBlock('live', '~', 0)
 
+    const status = (el: HTMLElement) =>
+      el.querySelector<HTMLElement>(
+        ':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])',
+      )
+    const duration = (el: HTMLElement) =>
+      el.querySelector<HTMLElement>(
+        ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]',
+      )
+
     expect(manager.completeRestoredBlock('missing', 7, 9_999)).toBe(false)
     expect(restored.classList.contains('cmd-block-unreconciled')).toBe(true)
-    expect(restored.querySelector('.cmd-header-exit')).toBeNull()
+    expect(restored.dataset.outcome).toBeUndefined()
+    expect(status(restored)).toBeNull()
 
     expect(manager.completeRestoredBlock('entry-restored', 7, 1_234)).toBe(true)
     expect(restored.classList.contains('cmd-block-unreconciled')).toBe(false)
     expect(restored.dataset.restoredStatus).toBe('failure')
-    expect(restored.querySelector('.cmd-header-exit-fail')?.textContent).toBe('exit 7')
-    expect(restored.querySelector('.cmd-header-duration')?.textContent).toBe('1.2s')
+    expect(restored.dataset.outcome).toBe('failure')
+    expect(status(restored)?.textContent).toBe('exit 7')
+    expect(duration(restored)?.textContent).toBe('1.2s')
     expect(manager.completeRestoredBlock('entry-restored', 0, 0)).toBe(false)
-    expect(restored.querySelector('.cmd-header-exit-fail')?.textContent).toBe('exit 7')
+    expect(status(restored)?.textContent).toBe('exit 7')
 
     expect(manager.completeRestoredBlock('1', 0, 0)).toBe(false)
     expect(manager.blocks.find((block) => block.command === 'live')?.status).toBe('running')
@@ -886,7 +915,10 @@ describe('BlockManager', () => {
 
     expect(manager.completeRestoredBlock('entry-nested', 0, 2_000)).toBe(true)
     expect(nested.classList.contains('cmd-block-unreconciled')).toBe(false)
-    expect(nested.querySelector('.cmd-header-exit-ok')?.textContent).toBe('ok')
+    expect(nested.dataset.outcome).toBe('success')
+    expect(
+      nested.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
+    ).toBeNull()
   })
 
   it('clearAll removes all blocks and resets state', () => {
@@ -1469,10 +1501,11 @@ describe('freezeBlock entered presentation (N6, nocx-y5v5)', () => {
       freshStore(),
       'entered',
     )
-    expect(frozen.querySelector('.cmd-header-exit')).toBeNull() // no exit code at all
-    expect(frozen.querySelector('.cmd-header-exit-ok')).toBeNull()
-    expect(frozen.querySelector('.cmd-header-exit-fail')).toBeNull()
-    expect(frozen.querySelector('.cmd-header-spinner')).toBeNull() // frozen, not running
+    expect(frozen.dataset.outcome).toBeUndefined() // no exit code at all
+    expect(
+      frozen.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
+    ).toBeNull()
+    expect(frozen.querySelector('.ui-spinner')).toBeNull() // frozen, not running
     expect(frozen.classList.contains('cmd-block-entered')).toBe(true)
     expect(frozen.querySelector('.cmd-output')?.innerHTML).toContain('host key prompt')
   })
@@ -1504,7 +1537,7 @@ describe('freezeBlock entered presentation (N6, nocx-y5v5)', () => {
       freshStore(),
       'entered',
     )
-    expect(frozen.querySelector('.cmd-header-exit')).toBeNull()
+    expect(frozen.dataset.outcome).toBeUndefined()
     expect(frozen.classList.contains('cmd-block-entered')).toBe(true)
   })
 })
@@ -1536,8 +1569,8 @@ describe('BlockManager entered freeze (N6, nocx-y5v5)', () => {
     expect(manager.runningBlock).toBeNull()
     expect(manager.cmdStartTime).toBeNull()
     // The frozen block paints neither success nor failure.
-    expect(entered!.el.querySelector('.cmd-header-exit')).toBeNull()
-    expect(entered!.el.querySelector('.cmd-header-spinner')).toBeNull()
+    expect(entered!.el.dataset.outcome).toBeUndefined()
+    expect(entered!.el.querySelector('.ui-spinner')).toBeNull()
     expect(entered!.el.classList.contains('cmd-block-entered')).toBe(true)
     // The running block element was replaced in the DOM.
     expect(inner.querySelectorAll('.cmd-block-running').length).toBe(0)
@@ -1570,7 +1603,7 @@ describe('BlockManager entered freeze (N6, nocx-y5v5)', () => {
     const done = manager.freezeBlock(() => undefined, 8, 0)
     expect(done!.status).toBe('success')
     expect(done!.exitCode).toBe(0)
-    expect(done!.el.querySelector('.cmd-header-exit-ok')).not.toBeNull()
+    expect(done!.el.dataset.outcome).toBe('success')
     expect(manager.blocks[0].status).toBe('entered') // still untouched
   })
 })
@@ -1671,7 +1704,7 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     expect(frozen).not.toBeNull()
     expect(frozen!.status).toBe('unknown')
     expect(frozen!.exitCode).toBeNull()
-    expect(frozen!.el.querySelector('.cmd-header-exit')).toBeNull()
+    expect(frozen!.el.dataset.outcome).toBeUndefined()
     expect(manager.runningBlock).toBeNull()
     expect(rec.attemptId).toBe('att-1')
   })
@@ -2306,7 +2339,10 @@ describe('BlockManager.addAnswerBlock', () => {
     const rows = Array.from(h.el.querySelectorAll('.term-line')).map((r) => r.textContent)
     expect(rows).toEqual(['partial'])
     expect(h.el.querySelector('.cmd-answer-error')?.textContent).toBe('the model returned no text')
-    const chip = h.el.querySelector('.cmd-header-exit')
+    expect(h.el.dataset.outcome).toBe('failure')
+    const chip = h.el.querySelector(
+      ':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])',
+    )
     expect(chip?.textContent).toBe('failed')
   })
 
@@ -2339,7 +2375,7 @@ describe('BlockManager.addAnswerBlock', () => {
     h.append('the answer')
     h.close('failure', 'the model returned no text')
     const askRight = h.el.querySelector('.cmd-header-right')!
-    expect(askRight.querySelector('.cmd-header-exit')?.textContent).toBe('failed')
+    expect(askRight.querySelector('.ui-meta:not([data-column])')?.textContent).toBe('failed')
     expect(askRight.lastElementChild?.hasAttribute('data-block-actions')).toBe(true)
   })
 
@@ -2384,8 +2420,12 @@ describe('BlockManager.addAnswerBlock', () => {
     const secondMenu = openBlockMenu(h.el)
     h.close('cancelled')
     expect(secondMenu.isConnected).toBe(false)
-    expect(h.el.querySelector('.cmd-header-exit')?.textContent).toBe('stopped')
-    expect(h.el.querySelector('.cmd-answer-waiting')).toBeNull()
+    expect(h.el.dataset.outcome).toBe('cancelled')
+    expect(
+      h.el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])')
+        ?.textContent,
+    ).toBe('stopped')
+    expect(h.el.querySelector('.cmd-header-waiting')).toBeNull()
     expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
   })
 })
@@ -2686,8 +2726,8 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     expect(frozen!.el.dataset.blockKind).toBe('command')
     // The visible difference in the flow: the ask block's header names its
     // in-progress state; a command block's never does.
-    expect(answer.el.querySelector('.cmd-answer-waiting')).not.toBeNull()
-    expect(frozen!.el.querySelector('.cmd-answer-waiting')).toBeNull()
+    expect(answer.el.querySelector('.cmd-header-waiting')).not.toBeNull()
+    expect(frozen!.el.querySelector('.cmd-header-waiting')).toBeNull()
   })
 
   it('the kind rules are read from one table; a kind that declares nothing fails loudly', () => {
@@ -2755,19 +2795,23 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
   it('says it is thinking between submit and the first delta, and stops on the first delta', () => {
     const { manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
-    const waiting = h.el.querySelector('.cmd-answer-waiting')
+    const waiting = h.el.querySelector('.cmd-header-waiting')
     expect(waiting?.textContent).toBe('thinking')
     h.append('first')
-    expect(h.el.querySelector('.cmd-answer-waiting')).toBeNull()
+    expect(h.el.querySelector('.cmd-header-waiting')).toBeNull()
   })
 
   it('a run that fails before any delta stops waiting and says failed', () => {
     const { manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
-    expect(h.el.querySelector('.cmd-answer-waiting')).not.toBeNull()
+    expect(h.el.querySelector('.cmd-header-waiting')).not.toBeNull()
     h.close('failure', 'the model did not answer in time')
-    expect(h.el.querySelector('.cmd-answer-waiting')).toBeNull()
-    expect(h.el.querySelector('.cmd-header-exit')?.textContent).toBe('failed')
+    expect(h.el.querySelector('.cmd-header-waiting')).toBeNull()
+    expect(h.el.dataset.outcome).toBe('failure')
+    expect(
+      h.el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])')
+        ?.textContent,
+    ).toBe('failed')
     expect(h.el.querySelector('.cmd-answer-error')?.textContent).toBe(
       'the model did not answer in time',
     )
@@ -3352,7 +3396,7 @@ describe.each(['shell', 'agent'] as const)('a %s-authored block', (author) => {
 // header is supposed to be per-kind except the WORDS (nocx-ex636).
 //
 // Two constructions were standing. The command's exit chip was built in
-// createHeader and carried `cmd-header-exit-ok`/`-fail`; the turn's was built
+// createHeader and carried its own ok/fail modifier classes; the turn's was built
 // again in the answer flow's close and carried neither. And a turn was handed
 // `durationMs = null` at build and never given one afterwards, so its group
 // held one chip where a command's holds two.
@@ -3361,7 +3405,7 @@ describe.each(['shell', 'agent'] as const)('a %s-authored block', (author) => {
 // snapshots of either: a second construction cannot agree with the first by
 // accident, and a chip that only one kind emits shows up as a difference in
 // the group.
-describe('the header’s right-hand group has one owner (nocx-hoeq3)', () => {
+describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-hoeq3)', () => {
   beforeAll(async () => {
     await shellHighlightReady
   })
@@ -3400,7 +3444,7 @@ describe('the header’s right-hand group has one owner (nocx-hoeq3)', () => {
   }
 
   /** A turn driven to its close, on a clock that makes it take `ms`. */
-  function closedTurn(ms: number, status: 'success' | 'failure' = 'success') {
+  function closedTurn(ms: number, status: 'success' | 'failure' | 'cancelled' = 'success') {
     let t = 0
     const { manager } = newManager(() => t)
     const turn = manager.addAnswerBlock('how much disk is free?', '/home/dev')
@@ -3410,115 +3454,123 @@ describe('the header’s right-hand group has one owner (nocx-hoeq3)', () => {
     return turn.el
   }
 
-  /** The right-hand group's contents, as the class list of each child in DOM
-   *  order. The class list is the whole identity — the tone, the shared chip
-   *  appearance and the identity class an e2e spec reads are all in it — so
-   *  two kinds whose groups read the same here are carrying the same chips,
-   *  built by the same code, in the same order. */
-  function rightGroup(el: HTMLElement): string[] {
-    const right = el.querySelector('.cmd-header-right')!
-    return Array.from(right.children).map((c) => c.className)
-  }
-
-  it('the class list of a command’s terminal chip and a turn’s is the same list', () => {
-    // Criterion 1. Not "both contain cmd-header-exit": the ASSERTION is
-    // equality, so a second construction anywhere — one modifier missing, one
-    // class added — fails here rather than the day somebody styles
-    // `.cmd-header-exit-ok` and only one kind moves.
-    const okCmd = settledCommand(27, 0).querySelector('.cmd-header-exit')!
-    const okTurn = closedTurn(1200, 'success').querySelector('.cmd-header-exit')!
-    expect(okTurn.className).toBe(okCmd.className)
-    expect(okCmd.className).toBe('nocx-chip nocx-chip-ok cmd-header-exit cmd-header-exit-ok')
-
-    const failCmd = settledCommand(27, 2).querySelector('.cmd-header-exit')!
-    const failTurn = closedTurn(1200, 'failure').querySelector('.cmd-header-exit')!
-    expect(failTurn.className).toBe(failCmd.className)
-    expect(failCmd.className).toBe('nocx-chip nocx-chip-fail cmd-header-exit cmd-header-exit-fail')
-  })
-
-  it('the WORDS stay the kind’s own — a turn is completed, a command is ok', () => {
-    // The other half of criterion 1, and the line nocx-ex636 drew: one chip,
-    // two vocabularies. An answer is not a command's output and must not
-    // borrow its words, so sharing the construction must not share the text.
-    expect(settledCommand(27, 0).querySelector('.cmd-header-exit')?.textContent).toBe('ok')
-    expect(settledCommand(27, 2).querySelector('.cmd-header-exit')?.textContent).toBe('exit 2')
-    expect(closedTurn(1200, 'success').querySelector('.cmd-header-exit')?.textContent).toBe(
-      'completed',
+  const status = (el: HTMLElement) =>
+    el.querySelector<HTMLElement>(
+      ':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])',
     )
-    expect(closedTurn(1200, 'failure').querySelector('.cmd-header-exit')?.textContent).toBe(
-      'failed',
+  const duration = (el: HTMLElement) =>
+    el.querySelector<HTMLElement>(
+      ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]',
     )
+
+  it('a command that succeeded says how long it took and nothing about how it went', () => {
+    const el = settledCommand(27, 0)
+    expect(el.dataset.outcome).toBe('success')
+    expect(status(el)).toBeNull()
+    expect(duration(el)?.textContent).toBe('27ms')
   })
 
-  it('each kind declares what its right group holds, in the rules table', () => {
-    // Criterion 2: the decision is beside the other per-kind rules, so a
-    // third kind declares its group or fails loudly — it never inherits the
-    // command's group by being built through the same builder.
-    expect(blockKindRules('command').headerRight.chips).toEqual(['duration', 'terminal'])
-    expect(blockKindRules('ask').headerRight.chips).toEqual(['duration', 'terminal'])
+  it('a command that failed says so in the danger tone, and the row is marked failed', () => {
+    const el = settledCommand(5, 1)
+    expect(el.dataset.outcome).toBe('failure')
+    expect(status(el)?.textContent).toBe('exit 1')
+    expect(status(el)?.dataset.tone).toBe('danger')
   })
 
-  it('a finished turn says how long it took, in the same chip a command uses', () => {
-    // Criterion 3. A turn HAS a duration — the model took time, and that is
-    // as worth knowing as `df` taking 27ms. Same chip, same formatter.
+  it('a turn uses its own words through the same function', () => {
+    const ok = closedTurn(1200, 'success')
+    expect(ok.dataset.outcome).toBe('success')
+    expect(status(ok)).toBeNull()
+    expect(duration(ok)?.textContent).toBe('1.2s')
+
+    const failed = closedTurn(10, 'failure')
+    expect(failed.dataset.outcome).toBe('failure')
+    expect(status(failed)?.textContent).toBe('failed')
+    expect(status(failed)?.dataset.tone).toBe('danger')
+
+    const stopped = closedTurn(10, 'cancelled')
+    expect(stopped.dataset.outcome).toBe('cancelled')
+    expect(status(stopped)?.textContent).toBe('stopped')
+    expect(status(stopped)?.dataset.tone).toBe('dim')
+  })
+
+  it('a block with no outcome of its own states none, and carries no data-outcome', () => {
+    for (const s of ['entered', 'unreconciled'] as const) {
+      const el = createCommandBlock(
+        'command',
+        1,
+        'ssh box',
+        '~',
+        '',
+        '',
+        null,
+        null,
+        s,
+        () => document.createElement('div'),
+        noopSelect,
+        freshStore(),
+        'shell',
+      )
+      expect(el.dataset.outcome).toBeUndefined()
+      expect(status(el)).toBeNull()
+      expect(el.querySelector('.ui-spinner')).toBeNull()
+    }
+  })
+
+  it('settling twice restates the group rather than growing a second copy', () => {
+    const el = settledCommand(27, 0)
+    completeRestoredLike(el, 2, 40)
+    expect(el.dataset.outcome).toBe('failure')
+    expect(el.querySelectorAll(':scope > .cmd-header .cmd-header-right > .ui-meta').length).toBe(2)
+    expect(status(el)?.textContent).toBe('exit 2')
+  })
+
+  it('the ⋮ stays last in the group whatever settles after it', () => {
     const turn = closedTurn(1234)
-    const dur = turn.querySelector('.cmd-header-duration')!
-    expect(dur.textContent).toBe('1.2s')
-    expect(dur.className).toBe(
-      settledCommand(27, 0).querySelector('.cmd-header-duration')!.className,
-    )
-    // The same formatter, asserted at a second magnitude so an agreement at
-    // one number is not mistaken for an agreement about formatting.
-    expect(closedTurn(27).querySelector('.cmd-header-duration')?.textContent).toBe('27ms')
+    const right = turn.querySelector(':scope > .cmd-header .cmd-header-right')!
+    expect(right.lastElementChild?.classList.contains('ui-icon-button')).toBe(true)
   })
 
-  it('the two headers agree on their right group: same chips, same order, same ⋮ last', () => {
-    // Criterion 4, off the DOM. The right edge and the gap to the ⋮ are one
-    // CSS rule (.cmd-header-right: margin-left auto, gap 8px) applied to one
-    // element class, so what geometry actually turns on is WHAT IS IN THE
-    // GROUP — which is what this reads.
-    const cmd = settledCommand(27, 0)
-    const turn = closedTurn(1234)
-    expect(rightGroup(turn)).toEqual(rightGroup(cmd))
-    const group = rightGroup(cmd)
-    // The ⋮ is the kit's IconButton now, not a class this file names — its
-    // identity is data-block-actions, asserted below.
-    expect(group.slice(0, -1)).toEqual([
-      'nocx-chip nocx-chip-muted cmd-header-duration',
-      'nocx-chip nocx-chip-ok cmd-header-exit cmd-header-exit-ok',
+  it('the where-meta names host and directory as one element, and never an emoji', () => {
+    const el = createCommandBlock(
+      'command',
+      1,
+      'ls',
+      '/srv/app/current',
+      'dev@staging',
+      '',
+      3,
+      0,
+      'success',
+      () => document.createElement('div'),
+      noopSelect,
+      freshStore(),
+      'shell',
+    )
+    const where = el.querySelector<HTMLElement>(
+      ':scope > .cmd-header > .cmd-header-meta > .ui-meta',
+    )!
+    expect([...where.querySelectorAll('.ui-meta__part')].map((p) => p.textContent)).toEqual([
+      'dev@staging',
+      'app/current',
     ])
-    expect(
-      cmd.querySelector('.cmd-header-right')!.lastElementChild?.hasAttribute('data-block-actions'),
-    ).toBe(true)
-    // …and neither group is trivially equal by being empty or by hanging off
-    // a different container.
-    expect(turn.querySelector('.cmd-header-right')).not.toBeNull()
+    expect(where.textContent).not.toMatch(/\p{Extended_Pictographic}/u)
   })
 
-  it('the turn states its outcome once, on its own header, however much it did', () => {
-    // Criterion 5, as ADR-0040 leaves it. The outcome used to be a question
-    // of WHICH FRAGMENT states it — the turn was several blocks and only the
-    // last one had ended. There is one block now, so how long the turn took
-    // and how it ended land on the header that carries the question, and no
-    // child of it says anything about an outcome it does not have.
-    let t = 0
-    const { manager } = newManager(() => t)
-    const turn = manager.addAnswerBlock('how much disk is free?', '/repo')
-    turn.toolCall({ callId: 'c1', tool: 'run', effect: 'mutate-destructive', opensBlock: true })
-    manager.startBlock('df -h', '/repo', 0, 0, 'agent')
-    turn.append('41G free')
-    t = 900
-    turn.close('success')
-
-    const own = turn.el.querySelector(':scope > .cmd-header')!
-    expect(own.querySelector('.cmd-header-duration')?.textContent).toBe('900ms')
-    expect(own.querySelector('.cmd-header-exit')?.textContent).toBe('completed')
-    // Exactly one of each in the whole turn: the command's block is still
-    // running, so nothing else states a duration or an outcome yet.
-    expect(turn.el.querySelectorAll('.cmd-header-exit')).toHaveLength(1)
-    // And a run of prose has no header to state anything with.
-    const prose = turn.el.querySelector('.cmd-block[data-block-kind="text"]')!
-    expect(prose.querySelector('.cmd-header')).toBeNull()
+  it('a running block shows the kit spinner and a ticking duration', () => {
+    const el = createRunningBlock(
+      1,
+      'sleep 10',
+      '~',
+      '',
+      () => document.createElement('div'),
+      noopSelect,
+      freshStore(),
+    )
+    const spinner = el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-spinner')
+    expect(spinner?.getAttribute('data-size')).toBe('sm')
+    expect(duration(el)?.textContent).toBe('0s')
+    expect(el.dataset.outcome).toBeUndefined()
   })
 })
 

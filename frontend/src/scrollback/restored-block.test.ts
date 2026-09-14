@@ -423,28 +423,37 @@ describe('a block built from the store', () => {
   //
   // The chip is the KIND's now: an ask block reads its terminal word from the
   // block's status, which is what a turn's outcome actually is.
+  const status = (el: HTMLElement) =>
+    el.querySelector<HTMLElement>(
+      ':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])',
+    )
+  const duration = (el: HTMLElement) =>
+    el.querySelector<HTMLElement>(
+      ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]',
+    )
+
   it('a restored turn says it completed, from its status and never from an exit code', () => {
     const [el] = turn([{ entryId: 'cmd-1', kind: 'shell', source: 'user' }])
-    expect(el.querySelector('.cmd-header-exit')?.textContent).toBe('completed')
-    expect(el.querySelector('.cmd-header-exit')?.className).toBe(
-      'nocx-chip nocx-chip-ok cmd-header-exit cmd-header-exit-ok',
-    )
-    expect(el.querySelector('.cmd-header-duration')?.textContent).toBe('1.2s')
+    // Success is silent (spec 2026-09-14 \u00a73.1): the outcome is the
+    // observable, and no status word reaches the DOM.
+    expect(el.dataset.outcome).toBe('success')
+    expect(status(el)).toBeNull()
+    expect(duration(el)?.textContent).toBe('1.2s')
   })
 
   it('a turn that failed says so in its own word, not in the shell\u2019s', () => {
     const [el] = turn([], { status: 'failure' })
-    expect(el.querySelector('.cmd-header-exit')?.textContent).toBe('failed')
-    expect(el.querySelector('.cmd-header-exit')?.className).toBe(
-      'nocx-chip nocx-chip-fail cmd-header-exit cmd-header-exit-fail',
-    )
+    expect(el.dataset.outcome).toBe('failure')
+    expect(status(el)?.textContent).toBe('failed')
+    expect(status(el)?.dataset.tone).toBe('danger')
   })
 
   it('a turn handed an exit code still speaks its own vocabulary, never \u201cok\u201d', () => {
     // The store cannot send one today, and the point is that the header does
     // not depend on that staying true: an answer is not a command's output
-    // (nocx-ex636), so the ask kind's chip never reads the shell's code.
+    // (nocx-ex636), so the ask kind's outcome never reads the shell's code.
     const [el] = turn([], { exitCode: 0 })
-    expect(el.querySelector('.cmd-header-exit')?.textContent).toBe('completed')
+    expect(el.dataset.outcome).toBe('success')
+    expect(status(el)).toBeNull()
   })
 })

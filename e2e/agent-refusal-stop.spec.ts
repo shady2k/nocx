@@ -125,11 +125,17 @@ function answerBlock(page: Page, question: string) {
   return page.locator('.pane.active .cmd-block').filter({ hasText: question })
 }
 
-/** The answer block's own header, excluding any child block's status chip. */
-async function answerState(page: Page, question: string, state: string): Promise<void> {
+/** The answer block's own settled state: `data-outcome`, and the word too
+ *  when the outcome states one — success is silent (spec 2026-09-14 §3.1),
+ *  so `completed` asserts only the attribute. */
+async function answerState(page: Page, question: string, word: string): Promise<void> {
+  const outcome = word === 'completed' ? 'success' : word === 'stopped' ? 'cancelled' : 'failure'
+  const block = answerBlock(page, question)
+  await expect(block).toHaveAttribute('data-outcome', outcome, { timeout: 30_000 })
+  if (outcome === 'success') return
   await expect(
-    answerBlock(page, question).locator(':scope > .cmd-header .cmd-header-exit'),
-  ).toHaveText(state, { timeout: 30_000 })
+    block.locator(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
+  ).toHaveText(word, { timeout: 30_000 })
 }
 
 function approvalPrompt(page: Page) {
@@ -267,9 +273,7 @@ test.describe('a refusal is an answer, and a turn can be stopped (nocx-uvac6.7)'
     )
     await expect(body).toContainText(refusal[0])
     await expect(body).toContainText('I would need your approval to read this session.')
-    await expect(
-      answerBlock(page, QUESTION).locator(':scope > .cmd-header .cmd-header-exit'),
-    ).not.toHaveText('failed')
+    await expect(answerBlock(page, QUESTION)).not.toHaveAttribute('data-outcome', 'failure')
   })
 
   test('Deny always tells the model not to propose the call again', async ({ page }) => {
@@ -363,7 +367,7 @@ test.describe('a refusal is an answer, and a turn can be stopped (nocx-uvac6.7)'
 
     await answerState(page, QUESTION, 'stopped')
     await expect(body).toContainText(PARTIAL)
-    await expect(answer.locator(':scope > .cmd-header .cmd-header-exit')).not.toHaveText('failed')
+    await expect(answer).not.toHaveAttribute('data-outcome', 'failure')
 
     const NEXT = `Now answer this normally, ${nonce}?`
     fake.setScript({ chunks: ['The next answer completed normally.'] })

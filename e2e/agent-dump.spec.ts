@@ -113,7 +113,9 @@ base.describe('a finished turn can show its raw model dump (nocx-0mvpy.4)', () =
       await askFromPrompt(page, question)
 
       const block = page.locator('.pane.active .cmd-block').filter({ hasText: question })
-      await expect(block.locator(':scope > .cmd-header .cmd-header-exit')).toHaveText('completed', {
+      // Success is silent (spec 2026-09-14 §3.1): the outcome attribute is
+      // the observable, on the block's own root — never a nested child's.
+      await expect(block).toHaveAttribute('data-outcome', 'success', {
         timeout: 30_000,
       })
       await block.locator('[data-block-actions]').click()

@@ -27,6 +27,8 @@ import { mountDumpPanel } from '../ui/dump-panel'
 import { decorateLinks } from '../terminal-links/decorate'
 import { cwdLabel } from '../cwd-label'
 import { createBadge } from '../ui/badge-element'
+import { createMeta, updateMeta, type MetaPart } from '../ui/meta'
+import { createSpinner } from '../ui/spinner-element'
 import { createComponent } from 'solid-js'
 import { render } from 'solid-js/web'
 import { ContextMenu, type ContextMenuItem } from '../ui/context-menu'
@@ -232,7 +234,7 @@ interface HeaderRightRules {
    *  the run's terminal status and its words are its own — an answer is not
    *  a command's output and does not borrow "ok". The CHIP the two produce
    *  is one chip, built once, below. */
-  readonly terminal: (outcome: BlockOutcome) => TerminalChipSpec | null
+  readonly terminal: (outcome: BlockOutcome) => TerminalOutcomeSpec | null
 }
 
 /** One slot in the header's right-hand group. */
@@ -248,10 +250,11 @@ interface BlockOutcome {
   readonly exitCode: number | null
 }
 
-/** What a terminal chip says: its tone and its word. The tone is the
- *  block's outcome; the word is the kind's vocabulary. */
-interface TerminalChipSpec {
-  readonly ok: boolean
+/** How a settled block ended, as its kind SAYS it (nocx-hoeq3, nocx-9bpeq.6).
+ *  The outcome goes on the block (`data-outcome`) whatever it is; the WORD is
+ *  rendered only when it is news — success is silent (spec 2026-09-14 §3.1). */
+interface TerminalOutcomeSpec {
+  readonly outcome: 'success' | 'failure' | 'cancelled'
   readonly text: string
 }
 
@@ -291,7 +294,9 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
         // the rule is about the STATUS and a later exit code arriving must
         // not silently start painting one.
         if (status === 'entered' || status === 'unreconciled' || exitCode === null) return null
-        return exitCode === 0 ? { ok: true, text: 'ok' } : { ok: false, text: `exit ${exitCode}` }
+        return exitCode === 0
+          ? { outcome: 'success', text: 'ok' }
+          : { outcome: 'failure', text: `exit ${exitCode}` }
       },
     },
   },
@@ -313,9 +318,9 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
       // whether it finished, while the live one said `completed` from a
       // second construction (nocx-hoeq3).
       terminal: ({ status }) => {
-        if (status === 'success') return { ok: true, text: ASK_STATUS_CHIPS.done }
-        if (status === 'failure') return { ok: false, text: ASK_STATUS_CHIPS.failed }
-        if (status === 'cancelled') return { ok: false, text: ASK_STATUS_CHIPS.cancelled }
+        if (status === 'success') return { outcome: 'success', text: ASK_STATUS_CHIPS.done }
+        if (status === 'failure') return { outcome: 'failure', text: ASK_STATUS_CHIPS.failed }
+        if (status === 'cancelled') return { outcome: 'cancelled', text: ASK_STATUS_CHIPS.cancelled }
         return null
       },
     },
@@ -644,99 +649,77 @@ function formatDuration(ms: number): string {
   return `${min}m ${sec}s`
 }
 
-// ── The header's right-hand group: one owner (nocx-hoeq3) ──────────────────
+// ── The header's right-hand group and the block's outcome: one owner ───────
 
-/** THE construction of a header's duration chip, for every kind and for both
- *  of the states that show one.
- *
- *  A turn takes time and that is as worth knowing as `df` taking 27ms, so it
- *  is drawn with the same chip and the same identity class a command's is —
- *  which is also what makes the two headers line up, since the width floor
- *  lives on `.cmd-header-duration`.
- *
- *  The TEXT is the caller's, because the two formatters are deliberately
- *  different: a running command shows whole seconds (the ticker fires once a
- *  second, so a tenths digit could only read `.0`) and a finished one shows
- *  the precise figure. Two formatters, one chip. */
-function durationChip(text: string): HTMLElement {
-  const el = document.createElement('span')
-  el.className = 'nocx-chip nocx-chip-muted cmd-header-duration'
-  el.textContent = text
-  return el
-}
-
-/** THE construction of a header's TERMINAL chip, for every kind.
- *
- *  There were two. The command's carried `cmd-header-exit-ok`/`-fail` and the
- *  turn's did not, which was invisible only because no stylesheet paints
- *  those modifiers — the two would have disagreed the day one did. The WORD
- *  still comes from the kind (nocx-ex636); the element does not. */
-function terminalChip(spec: TerminalChipSpec): HTMLElement {
-  const el = document.createElement('span')
-  el.className = spec.ok
-    ? 'nocx-chip nocx-chip-ok cmd-header-exit cmd-header-exit-ok'
-    : 'nocx-chip nocx-chip-fail cmd-header-exit cmd-header-exit-fail'
-  el.textContent = spec.text
-  return el
+/** THE duration fact, for every kind and both states that show one. The
+ *  TEXT is the caller's: a running command shows whole seconds, a finished one
+ *  the precise figure (nocx-hoeq3). The column variance keeps durations in a
+ *  tabular column across blocks. */
+function durationMeta(text: string): HTMLSpanElement {
+  return createMeta([text], { tone: 'muted', column: 'duration' })
 }
 
 /**
- * Fill a header's right-hand group with what a SETTLED block of this kind
- * shows, in the order the kind declared (nocx-hoeq3).
+ * Settle a block: its right-hand group and its `data-outcome`, from the
+ * kind's rules, in one place (nocx-hoeq3, nocx-9bpeq.6).
  *
- * Called from the two moments a block settles, so there is one answer for
- * both: at BUILD, for a block whose outcome was already known (a frozen
- * command, a restored anything), and at CLOSE, for a turn that was built
- * while it was still being written. Before this the close built its own chip
- * and never a duration, so a turn's header held one chip where a command's
- * held two — the difference in number and placement the owner reported.
- *
- * IDEMPOTENT: the settled chips are cleared first, so settling a header twice
- * re-states the group rather than growing a second copy of it. The ⋮ is not
+ * Called with the BLOCK, after its header is attached — at build for a block
+ * whose outcome was already known, at close for a turn, at replay for a
+ * restored command. IDEMPOTENT: the settled facts are cleared first, so a
+ * second settle restates the group instead of growing it. The ⋮ is not
  * ours — placeHeaderChip keeps it last, whether or not it exists yet.
  */
-function settleHeaderRight(
-  right: Element,
+export function settleBlockOutcome(
+  block: HTMLElement,
   kind: BlockKind,
   durationMs: number | null,
   outcome: BlockOutcome,
 ): void {
-  for (const stale of right.querySelectorAll('.cmd-header-duration, .cmd-header-exit')) {
+  const right = block.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')
+  if (!right) return
+  for (const stale of right.querySelectorAll(
+    ':scope > .ui-meta, :scope > .ui-spinner, :scope > .cmd-header-waiting',
+  )) {
     stale.remove()
   }
+  delete block.dataset.outcome
   const rules = blockKindRules(kind).headerRight
   for (const slot of rules.chips) {
     if (slot === 'duration') {
-      if (durationMs !== null) placeHeaderChip(right, durationChip(formatDuration(durationMs)))
+      if (durationMs !== null) placeHeaderChip(right, durationMeta(formatDuration(durationMs)))
       continue
     }
     const spec = rules.terminal(outcome)
-    if (spec) placeHeaderChip(right, terminalChip(spec))
+    if (!spec) continue
+    block.dataset.outcome = spec.outcome
+    // Success is silent (spec 2026-09-14 §3.1): the word left the DOM, and
+    // `data-outcome` is what an e2e spec waits on instead.
+    if (spec.outcome === 'success') continue
+    placeHeaderChip(
+      right,
+      createMeta([spec.text], { tone: spec.outcome === 'failure' ? 'danger' : 'dim' }),
+    )
   }
 }
 
 /**
- * Create the header row for a block — flat, warp-style (P0-1).
- * No card background, no pill/chip styling. Plain muted small text.
- * The grammar (highlighting, the status vocabulary) is the kind's
- * (nocx-ex636).
+ * Create the header row for a block (spec 2026-09-14 §3): a meta row — where,
+ * then the right-hand group — above the command. Metadata is text, not chips.
+ * A settled block's outcome is NOT decided here: the builder calls
+ * settleBlockOutcome once the header is attached, so there is one owner.
  */
 function createHeader(
   kind: BlockKind,
   command: string,
   cwd: string,
   location: string,
-  durationMs: number | null,
-  exitCode: number | null,
   status: HeaderStatus,
   store: CommandSnapshotStore,
   author: CommandAuthor = 'shell',
 ): HTMLElement {
   const header = div('cmd-header')
   const rules = blockKindRules(kind)
-
-  // ── Chips row (above command text): cwd left, duration+exit right ──
-  const chipsRow = div('cmd-header-chips')
+  const metaRow = div('cmd-header-meta')
 
   // Who ran it, when it was not the human (design §3.1, nocx-iadtt): the
   // kit's badge in its info tone — the same "informational provenance"
@@ -746,76 +729,50 @@ function createHeader(
   if (author !== 'shell') {
     const mark = createBadge({ text: author, tone: 'info' })
     mark.dataset.author = author
-    chipsRow.appendChild(mark)
+    metaRow.appendChild(mark)
   }
 
-  // Where the command ran, when it is somewhere other than this machine. Warp
-  // puts `user@host` at the head of every block header and it is the attribute
-  // ours was missing: a scrollback full of blocks with no host in them reads
-  // the same whether you were on your laptop or three hops away (nocx-6w4z).
-  if (location) {
-    const loc = document.createElement('span')
-    loc.className = 'nocx-chip nocx-chip-muted cmd-header-location'
-    loc.textContent = location
-    chipsRow.appendChild(loc)
-  }
+  // WHERE: host (when not this machine, nocx-6w4z) and directory, one Meta,
+  // so the pair has one ellipsis and reads as one fact. No icon: the row is
+  // text.
+  const where: MetaPart[] = []
+  if (location) where.push(location)
+  if (cwd) where.push(cwdLabel(cwd))
+  if (where.length > 0) metaRow.appendChild(createMeta(where, { tone: 'muted' }))
 
-  // CWD — standard chip component
-  if (cwd) {
-    const cwdEl = document.createElement('span')
-    cwdEl.className = 'nocx-chip cmd-header-cwd'
-    cwdEl.textContent = `📁 ${cwdLabel(cwd)}`
-    chipsRow.appendChild(cwdEl)
-  }
-
-  // Right: duration + exit status (or spinner while running)
   const right = div('cmd-header-right')
 
   if (status === 'running') {
-    // The elapsed time, ticking. It used to appear only once the command had
-    // finished, which is the one moment you no longer need it — the question
-    // "how long has this been going" is asked WHILE it is going. Warp shows it
-    // live and so does this (nocx-6w4z).
-    const spinner = document.createElement('span')
-    spinner.className = 'cmd-header-spinner'
-    right.appendChild(spinner)
-    right.appendChild(durationChip(formatRunningDuration(0)))
-  } else if (status === 'waiting') {
+    // The elapsed time, ticking, beside the kit spinner. It used to appear
+    // only once the command had finished, which is the one moment you no
+    // longer need it — the question "how long has this been going" is asked
+    // WHILE it is going. Warp shows it live and so does this (nocx-6w4z).
+    right.appendChild(createSpinner({ label: 'Running', size: 'sm' }))
+    right.appendChild(durationMeta(formatRunningDuration(0)))
+  } else if (status === 'waiting' && rules.statusChips) {
     // The kind's own in-progress vocabulary: the ask block says it is
-    // thinking until the first delta lands, and the answer
-    // lifecycle removes it at exactly that moment (nocx-ex636). The
-    // command kind has no in-progress WORD — its running state is the
-    // spinner above — so a command handed this status shows nothing.
-    if (rules.statusChips) {
-      // The SAME pulse a running command's header carries, in the SAME
-      // place: a bare dot in the chip row, left of the chip (AD-8 — one
-      // owner for "this block is in progress", and one shape for it). A
-      // static word is a label; a word beside a live pulse is a report
-      // that something is happening right now. It sat INSIDE the chip for
-      // one round and read as a different control from the command's,
-      // which is two vocabularies for one concept.
-      const pulse = document.createElement('span')
-      // Its own identity class beside the shared appearance: the pulse is a
-      // SIBLING of the chip now, so whoever ends the wait has to be able to
-      // find it. Removing only the chip left a dot pulsing next to
-      // `completed` — the report half that nobody owned.
-      pulse.className = 'cmd-header-spinner cmd-answer-waiting-pulse'
-      right.appendChild(pulse)
-      const wait = document.createElement('span')
-      wait.className = 'nocx-chip nocx-chip-muted cmd-answer-waiting'
-      wait.textContent = rules.statusChips.inProgress
-      right.appendChild(wait)
-    }
-  } else {
-    // Settled: the group is the kind's, from its one owner. A block whose
-    // outcome arrives LATER — a turn, which is written before it ends —
-    // settles the same group through the same function at its close.
-    settleHeaderRight(right, kind, durationMs, { status, exitCode })
+    // thinking until the first delta lands, and the answer lifecycle removes
+    // it at exactly that moment (nocx-ex636). The command kind has no
+    // in-progress WORD — its running state is the spinner above — so a
+    // command handed this status shows nothing.
+    //
+    // The SAME spinner a running command's header carries, beside the SAME
+    // kind of word (AD-8 — one owner for "this block is in progress", and
+    // one shape for it), both inside one placement span so whoever ends the
+    // wait removes one thing.
+    const waiting = document.createElement('span')
+    waiting.className = 'cmd-header-waiting'
+    waiting.appendChild(createSpinner({ label: rules.statusChips.inProgress, size: 'sm' }))
+    waiting.appendChild(createMeta([rules.statusChips.inProgress], { tone: 'accent' }))
+    right.appendChild(waiting)
   }
+  // A settled block's outcome is filled in later, by settleBlockOutcome,
+  // once this header is attached to its block — there is no branch here for
+  // it, on purpose: there is exactly one place that writes it.
 
-  chipsRow.appendChild(right)
-  header.appendChild(chipsRow)
-  // ── Header text (below chips) ──────────────────────────────────────
+  metaRow.appendChild(right)
+  header.appendChild(metaRow)
+  // ── Header text (below the meta row) ────────────────────────────────
   // The grammar is the kind's (nocx-ex636): a command header carries the
   // same syntactic highlight pass as the live editor (same lexer, same
   // classes — see shell-highlight.ts); a question is prose and renders
@@ -1332,17 +1289,7 @@ export function createCommandBlock(
   // header — and a run of prose is the one that does not (ADR-0040): there
   // is nothing to name it, because the intent was the question.
   if (rules.header) {
-    const header = createHeader(
-      kind,
-      command,
-      cwd,
-      location,
-      durationMs,
-      exitCode,
-      status,
-      store,
-      author,
-    )
+    const header = createHeader(kind, command, cwd, location, status, store, author)
     // Overflow menu (P2-9) — always the LAST element of the header-right
     // group (owner directive: ⋮ never shifts position). It reads the block's
     // copyable text from the BLOCK, at click time (nocx-ex636).
@@ -1350,6 +1297,13 @@ export function createCommandBlock(
     const right = header.querySelector('.cmd-header-right')
     if (right) right.appendChild(overflow)
     wrapper.appendChild(header)
+    // Settle the block's outcome now that its header is attached — there is
+    // one owner for this (nocx-hoeq3, nocx-9bpeq.6). A block still WAITING
+    // has no outcome to settle yet; its header already drew the in-progress
+    // state above, and settling here would strip it right back off.
+    if (status !== 'waiting') {
+      settleBlockOutcome(wrapper, kind, durationMs, { status, exitCode })
+    }
   }
   if (outputEl) wrapper.appendChild(outputEl)
 
@@ -1437,17 +1391,7 @@ export function createRunningBlock(
   wrapper.dataset.blockKind = 'command'
   if (command && findReferences(command).length > 0) wrapper.dataset.recordedCommand = command
 
-  const header = createHeader(
-    'command',
-    command,
-    cwd,
-    location,
-    null,
-    null,
-    'running',
-    store,
-    author,
-  )
+  const header = createHeader('command', command, cwd, location, 'running', store, author)
 
   // Overflow menu — copying the command, plus what can be done ABOUT the
   // command while it is still running (nocx-92gfl, nocx-23rph).
@@ -1891,12 +1835,10 @@ export class BlockManager {
       if (block) break
     }
     if (!block) return false
-    const right = block.querySelector('.cmd-header-right')
-    if (!right) return false
     const status = exitCode === 0 ? 'success' : 'failure'
     block.classList.remove('cmd-block-unreconciled')
     block.dataset.restoredStatus = status
-    settleHeaderRight(right, 'command', durationMs, { status, exitCode })
+    settleBlockOutcome(block, 'command', durationMs, { status, exitCode })
     return true
   }
 
@@ -2128,11 +2070,16 @@ export class BlockManager {
 
   private _startTicker(el: HTMLElement): void {
     this._stopTicker()
-    const chip = el.querySelector('.cmd-header-duration')
+    const meta = el.querySelector<HTMLSpanElement>(
+      ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]',
+    )
     const started = this._cmdStartTime
-    if (!chip || started === null) return
+    if (!meta || started === null) return
     this._ticker = setInterval(() => {
-      chip.textContent = formatRunningDuration(this._now() - started)
+      updateMeta(meta, [formatRunningDuration(this._now() - started)], {
+        tone: 'muted',
+        column: 'duration',
+      })
     }, 1000)
   }
 
@@ -2546,8 +2493,7 @@ export class BlockManager {
       children.querySelector(':scope > .cmd-answer-typing')?.remove()
     }
     const stopWaiting = (): void => {
-      el.querySelector('.cmd-header-right .cmd-answer-waiting')?.remove()
-      el.querySelector('.cmd-header-right .cmd-answer-waiting-pulse')?.remove()
+      el.querySelector(':scope > .cmd-header .cmd-header-right > .cmd-header-waiting')?.remove()
       // The corner stops reporting work when the first answer delta lands.
       // The child marker has a different lifetime: it belongs to the whole
       // run and is removed only by close.
@@ -2732,12 +2678,11 @@ export class BlockManager {
         // A `run` that was announced and never reached a command must not
         // adopt somebody else's block later: the claim dies with the turn.
         if (claimedBy() === children) claim(null)
-        // The header's right-hand group, from its ONE owner (nocx-hoeq3):
-        // how long the turn took and how it ended, as the ask kind's rules
-        // say them. One header now, so the outcome lands where the question
-        // is and nowhere else.
-        const right = el.querySelector('.cmd-header-right')
-        if (right) settleHeaderRight(right, 'ask', now() - startedAt, { status, exitCode: null })
+        // The header's right-hand group and the block's outcome, from its
+        // ONE owner (nocx-hoeq3, nocx-9bpeq.6): how long the turn took and
+        // how it ended, as the ask kind's rules say them. One header now, so
+        // the outcome lands where the question is and nowhere else.
+        settleBlockOutcome(el, 'ask', now() - startedAt, { status, exitCode: null })
         // The model that answered, on the answer itself (nocx-e6kn2): the
         // person must be able to tell which model answered without going to
         // look it up. The value is the ask result's pinned model — this run's

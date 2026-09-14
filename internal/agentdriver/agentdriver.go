@@ -43,6 +43,7 @@ package agentdriver
 
 import (
 	"fmt"
+	"strconv"
 	"sync/atomic"
 
 	"github.com/shady2k/nocx/internal/paneview"
@@ -159,7 +160,21 @@ type Observation struct {
 	// than present and empty, because absent and empty are different claims
 	// and only one of them is true.
 	Extras []Extra
+	// InputBox is the agent's own input box, cursor included, from
+	// Document.InputBox. Empty (Last < First) when its anchor did not bind —
+	// the ordinary case while a dialog has replaced the box.
+	InputBox RowSpan
+	// MenuZone is the rows in which this agent can draw a menu, from
+	// Document.MenuZone. Empty for the same reason InputBox can be.
+	MenuZone RowSpan
 }
+
+// RowSpan is an inclusive row range of a frame, First through Last. A span
+// naming no row sets Last below First — never the zero value {0, 0}, which
+// would read as row zero alone — so a caller checks emptiness with a
+// comparison (Last < First) rather than a method this package would be the
+// only caller of.
+type RowSpan struct{ First, Last int }
 
 // Extra is one extractor's yield: the name the document gave it, and one map
 // per row it matched, from a capture group's name to the text it captured. A
@@ -279,12 +294,12 @@ func (r *Registry) For(agent string) (Driver, bool) {
 func (r *Registry) Observe(agent string, f paneview.Frame) Observation {
 	d, ok := r.For(agent)
 	if !ok {
-		return Observation{State: StateUnknown}
+		return Observation{State: StateUnknown, InputBox: noRowSpan, MenuZone: noRowSpan}
 	}
 	if o, ok := d.(Observer); ok {
 		return o.Observe(f)
 	}
-	return Observation{State: d.Classify(f)}
+	return Observation{State: d.Classify(f), InputBox: noRowSpan, MenuZone: noRowSpan}
 }
 
 // Classify is the scalar projection of Observe, and it is written as one so
@@ -397,4 +412,168 @@ func (o Observation) Transcript() []string {
 		}
 	}
 	return out
+}
+
+// MenuExtra is the name a rule document gives the extractor that reads a
+// menu's rows AT and ABOVE the cursor — the question, its own selected
+// option, and every option above it. It is a constant here for the same
+// reason SubagentsExtra and TranscriptExtra are: the document's vocabulary is
+// this package's contract.
+const MenuExtra = "menu"
+
+// menuBelowExtra is the extractor that reads a menu's rows BELOW the cursor —
+// unexported, because nothing outside Menu's own projection reads it by name:
+// unlike Subagents and Transcript, which read one extractor's yield, Menu
+// composes two into a single ordered list, so the second name is this
+// package's own bookkeeping rather than a second public vocabulary word.
+const menuBelowExtra = "menuBelow"
+
+// The capture groups claude.rule.json's menu and menuBelow extractors name,
+// and the engine's own reserved row-index key (region.capture, predicate.go).
+const (
+	menuOptionKey   = "option"
+	menuQuestionKey = "question"
+	rowIndexKey     = "_row"
+)
+
+// Menu is one menu's whole reading of one frame: the question the agent or
+// the user is being asked, its options as drawn, which one is selected, and
+// the rows the menu occupies.
+type Menu struct {
+	// Question is the nearest non-option row above the topmost option, as
+	// drawn. It is the mechanical answer the rule's own walk produces, not
+	// necessarily the sentence a person would call "the question" — folder
+	// trust's real prompt sits several rows above a heading ("Security
+	// guide") the walk stops on first, because nothing shorter of reading the
+	// screen's PROSE (which this package never does, by design) tells the two
+	// apart. It is quoted here, and in the manifest, exactly as measured.
+	Question string
+	// Options is every option the menu drew, top to bottom, marker and
+	// numbering stripped.
+	Options []string
+	// Selected indexes Options, or -1 when no selection is drawn. In
+	// practice this package never observes the second case: the states Menu
+	// answers for both require the cursor to sit on a marked row.
+	Selected int
+	// Rows is the question row through the last option row, selection
+	// included.
+	Rows RowSpan
+	// Body is the rows between the question and the first (topmost) option —
+	// empty (Last < First) when the two are adjacent.
+	Body RowSpan
+}
+
+// Menu projects the observation's menu extractors into a menu, when the
+// screen was classified as one of the two states a menu can be answered on
+// and the walk found a genuine boundary above the cursor's own option.
+//
+// False is the ordinary answer for a permission_choice or modal_choice frame
+// whose cursor row is an option with nothing but more options (or the frame's
+// own top) above it: there is no question, so there is no row to type an
+// answer past and no menu target is possible (design §6.3). It is also the
+// answer for every other state, and for an agent whose rule extracted no menu
+// at all.
+func (o Observation) Menu() (Menu, bool) {
+	if o.State != StatePermissionChoice && o.State != StateModalChoice {
+		return Menu{}, false
+	}
+	above := extraRows(o.Extras, MenuExtra)
+	if len(above) == 0 {
+		return Menu{}, false
+	}
+	cursorOption, ok := above[0][menuOptionKey]
+	if !ok {
+		return Menu{}, false
+	}
+	cursorRow, ok := rowIndexOf(above[0])
+	if !ok {
+		return Menu{}, false
+	}
+	var aboveOptions []map[string]string
+	var question map[string]string
+	for _, row := range above[1:] {
+		if _, isOption := row[menuOptionKey]; isOption {
+			aboveOptions = append(aboveOptions, row)
+			continue
+		}
+		question = row
+		break
+	}
+	if question == nil {
+		// Every row the walk could reach was itself an option, or the walk
+		// ran out of frame — either way, no question bounds this menu.
+		return Menu{}, false
+	}
+	questionRow, ok := rowIndexOf(question)
+	if !ok {
+		return Menu{}, false
+	}
+
+	var belowOptions []map[string]string
+	for _, row := range extraRows(o.Extras, menuBelowExtra) {
+		if _, isOption := row[menuOptionKey]; !isOption {
+			break
+		}
+		belowOptions = append(belowOptions, row)
+	}
+
+	options := make([]string, 0, len(aboveOptions)+1+len(belowOptions))
+	for i := len(aboveOptions) - 1; i >= 0; i-- {
+		options = append(options, aboveOptions[i][menuOptionKey])
+	}
+	selected := len(options)
+	options = append(options, cursorOption)
+	for _, row := range belowOptions {
+		options = append(options, row[menuOptionKey])
+	}
+
+	firstOptionRow := cursorRow
+	if len(aboveOptions) > 0 {
+		if r, ok := rowIndexOf(aboveOptions[len(aboveOptions)-1]); ok {
+			firstOptionRow = r
+		}
+	}
+	lastOptionRow := cursorRow
+	if len(belowOptions) > 0 {
+		if r, ok := rowIndexOf(belowOptions[len(belowOptions)-1]); ok {
+			lastOptionRow = r
+		}
+	}
+
+	return Menu{
+		Question: question[menuQuestionKey],
+		Options:  options,
+		Selected: selected,
+		Rows:     RowSpan{First: questionRow, Last: lastOptionRow},
+		Body:     RowSpan{First: questionRow + 1, Last: firstOptionRow - 1},
+	}, true
+}
+
+// extraRows returns the named extractor's yield, or nil when the rule carries
+// no extractor by that name or it matched nothing on this frame — the same
+// absence Subagents and Transcript already read through their own loops over
+// Extras, pulled out once because Menu reads two names instead of one.
+func extraRows(extras []Extra, name string) []map[string]string {
+	for _, e := range extras {
+		if e.Name == name {
+			return e.Rows
+		}
+	}
+	return nil
+}
+
+// rowIndexOf reads the engine's own reserved "_row" key back into an int.
+// False when the row carries none — which a hand-built Extras value can do,
+// since nothing but region.capture is required to set it — or when it does
+// not parse, which is never true of a value that key produced.
+func rowIndexOf(row map[string]string) (int, bool) {
+	s, ok := row[rowIndexKey]
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }

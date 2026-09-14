@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"testing"
 
@@ -47,6 +48,22 @@ type manifestEntry struct {
 	Branch     *int              `json:"branch,omitempty"`
 	Unverified string            `json:"unverified,omitempty"`
 	Note       string            `json:"note,omitempty"`
+	// Menu is the rule's menu reading at this moment, asserted alongside the
+	// state for every menu moment the inventory names. It is optional because
+	// most entries name no menu at all — a spinner, an idle box, a finished
+	// turn — and OMITTING it there is not "the rule found no menu", it is "no
+	// claim is made"; only its PRESENCE asserts anything about Observation.Menu.
+	Menu *manifestMenu `json:"menu,omitempty"`
+}
+
+// manifestMenu is the owner's asserted reading of Observation.Menu() at one
+// entry — every field read off the actual capture, quoted verbatim rather
+// than paraphrased, because a paraphrase is a second, unverifiable claim about
+// the same screen.
+type manifestMenu struct {
+	Question string   `json:"question"`
+	Options  []string `json:"options"`
+	Selected int      `json:"selected"`
 }
 
 func (e manifestEntry) recorded() bool { return e.Unverified == "" }
@@ -103,7 +120,7 @@ func loadManifest(path string) (manifest, error) {
 			if e.Moment == "" {
 				return manifest{}, fmt.Errorf("entry %d is unverified but names no moment", i)
 			}
-			if e.Capture != "" || e.AtMs != nil || e.State != "" || e.Branch != nil {
+			if e.Capture != "" || e.AtMs != nil || e.State != "" || e.Branch != nil || e.Menu != nil {
 				return manifest{}, fmt.Errorf("entry %d is unverified and also names a recording", i)
 			}
 			continue
@@ -172,6 +189,19 @@ func checkManifest(m manifest, dir string, reg *agentdriver.Registry) []error {
 			}
 			if e.Branch != nil && ex.Matched != *e.Branch {
 				errs = append(errs, fmt.Errorf("%s: matched branch %d, want %d", e, ex.Matched, *e.Branch))
+			}
+			if e.Menu != nil {
+				menu, ok := reg.Observe(m.Agent, moments[i].Frame).Menu()
+				switch {
+				case !ok:
+					errs = append(errs, fmt.Errorf("%s: menu wants %+v, Menu() found none", e, *e.Menu))
+				case menu.Question != e.Menu.Question:
+					errs = append(errs, fmt.Errorf("%s: menu question %q, want %q", e, menu.Question, e.Menu.Question))
+				case !slices.Equal(menu.Options, e.Menu.Options):
+					errs = append(errs, fmt.Errorf("%s: menu options %q, want %q", e, menu.Options, e.Menu.Options))
+				case menu.Selected != e.Menu.Selected:
+					errs = append(errs, fmt.Errorf("%s: menu selected %d, want %d", e, menu.Selected, e.Menu.Selected))
+				}
 			}
 		}
 	}

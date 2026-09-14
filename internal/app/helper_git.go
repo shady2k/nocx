@@ -652,6 +652,26 @@ func (r *helperRegistry) completeFarToolSocket(sid session.ID, id proto.ForwardI
 // so a second end for one session finds nothing and does nothing.
 func (r *helperRegistry) SessionEnded(sid session.ID) {
 	r.mu.Lock()
+	_, ok := r.farTools[sid]
+	r.mu.Unlock()
+	if !ok {
+		return
+	}
+	r.tearDownFarToolSocket(sid)
+}
+
+// tearDownFarToolSocket takes the registration out of the map and ends what it
+// names — the directory FIRST and the listener second — and it is one function
+// because two callers own it: a session's end (SessionEnded), and the opener
+// that finds the session already over when its listener comes up.
+//
+// THE ORDER IS THE POINT. The directory goes while the listener still holds the
+// pooled reference that keeps the connection to that host up, so the removal is
+// an operation on a connection that is already there rather than a dial of its
+// own; the listener is ended last, and with it the reference. A socket whose
+// file is gone answers nobody in between, so no agent can dial into the gap.
+func (r *helperRegistry) tearDownFarToolSocket(sid session.ID) {
+	r.mu.Lock()
 	held, ok := r.farTools[sid]
 	delete(r.farTools, sid)
 	r.mu.Unlock()
@@ -673,13 +693,13 @@ func (r *helperRegistry) SessionEnded(sid session.ID) {
 		}
 		return
 	}
-	if err := r.tools.CloseFarPaneToolSocket(ctx, held.id); err != nil {
-		r.log.Warn("far pane: the tool socket was not closed; its session is over",
-			"session", sid, "host", held.host, "path", held.routes.Path, "error", err)
-	}
 	if err := r.tools.RemoveFarPaneToolSocketDir(ctx, held.host, held.opts, held.routes); err != nil {
 		r.log.Warn("far pane: the tool socket's directory was not removed",
 			"session", sid, "host", held.host, "dir", held.routes.Dir, "error", err)
+	}
+	if err := r.tools.CloseFarPaneToolSocket(ctx, held.id); err != nil {
+		r.log.Warn("far pane: the tool socket was not closed; its session is over",
+			"session", sid, "host", held.host, "path", held.routes.Path, "error", err)
 	}
 }
 
@@ -932,6 +952,19 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 			}
 		default:
 			r.tools.RecordPaneBearer(sid, toolToken)
+			// AND THE SESSION MAY HAVE ENDED BEFORE THE REGISTRATION EXISTED:
+			// between Adopt and beginFarToolSocket there is the same gap one
+			// step earlier, and a session that ended in it would leave an entry
+			// nothing will ever come back for. The session's own lifetime is the
+			// authority for that question — so it is asked, and the opener owns
+			// the teardown when it is already over.
+			select {
+			case <-sess.Done():
+				r.log.Info("far pane: the session ended before its tool socket was registered; closing it",
+					"session", sid, "host", cfg.Host, "path", routes.Path)
+				r.tearDownFarToolSocket(sid)
+			default:
+			}
 		}
 	}
 	var lifecycleLane lifecycle.LaneID

@@ -97,7 +97,12 @@ type fakeFarTools struct {
 	opened   []openedFarSocket
 	closed   []proto.ForwardID
 	removed  []farPaneToolRoutes
-	bearers  map[session.ID]string
+	// order is the sequence of acts, because THE TEARDOWN'S ORDER IS PART OF
+	// THE CONTRACT: the directory is removed while the listener's pooled
+	// reference still holds the connection up, and the listener is ended after
+	// it (no second dial, and no socket file left behind a live listener).
+	order   []string
+	bearers map[session.ID]string
 	// openErr makes the listener fail, which is the soft degrade ADR-0004 asks
 	// for: the pane still opens, with no tools.
 	openErr error
@@ -155,6 +160,7 @@ func (f *fakeFarTools) CloseFarPaneToolSocket(_ context.Context, id proto.Forwar
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.closed = append(f.closed, id)
+	f.order = append(f.order, "close")
 	return nil
 }
 
@@ -162,6 +168,7 @@ func (f *fakeFarTools) RemoveFarPaneToolSocketDir(_ context.Context, _ string, _
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.removed = append(f.removed, routes)
+	f.order = append(f.order, "remove")
 	return nil
 }
 
@@ -309,6 +316,14 @@ func TestAFarHelperHostedPaneGetsAToolSurface(t *testing.T) {
 		t.Fatalf("the teardown removed %v, want the directory the listener was bound in (%q)",
 			removed, opened[0].routes.Dir)
 	}
+	// THE ORDER, and it is the difference between one connection and two: the
+	// removal happens while the listener's pooled reference still holds the
+	// connection to that host up, so it rides that connection instead of dialing
+	// its own; the listener goes last, taking the reference with it.
+	if len(stand.tools.order) < 2 || stand.tools.order[len(stand.tools.order)-2] != "remove" || stand.tools.order[len(stand.tools.order)-1] != "close" {
+		t.Fatalf("the teardown acted in the order %v, want the directory removed and then the listener ended", stand.tools.order)
+	}
+
 	// Idempotent: a second end for one session does nothing.
 	stand.reg.SessionEnded(sid)
 	if _, _, again, _ := stand.tools.seen(); len(again) != 1 {

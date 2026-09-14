@@ -288,10 +288,13 @@ func TestAnSSHPaneReportsNoOSEvidenceAndNeverAsksTheInspector(t *testing.T) {
 	if entry.RemoteLaunch.IdentityRef != sshTestRef {
 		t.Fatalf("identity reference = %q, want the coordinator's own %q", entry.RemoteLaunch.IdentityRef, sshTestRef)
 	}
-	// The local branch is ZERO, and that is the projection of "this session has
-	// no process here" rather than a record with a pid of 0.
-	if entry.Launch.Pid != 0 || entry.Launch.Pgid != 0 || entry.Launch.Shell != "" {
-		t.Fatalf("an ssh session carries a LOCAL launch record: %+v", entry.Launch)
+	// The local branch is ABSENT — not a record of zeros (nocx-s8mfn) — and
+	// that is the projection of "this session has no process here": a filled-in
+	// record would carry pid 0, which is the kernel's scheduler rather than the
+	// process the helper spawned, and the inventory contract that carries this
+	// entry requires exactly one branch.
+	if entry.Launch != nil {
+		t.Fatalf("an ssh session carries a LOCAL launch record: %+v", *entry.Launch)
 	}
 	if entry.RemoteLaunch.Cwd != "" {
 		t.Fatalf("a remote launch record reported a directory (%q) that nobody resolved", entry.RemoteLaunch.Cwd)

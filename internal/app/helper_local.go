@@ -674,13 +674,24 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 		reason ssh.RefusalReason
 	)
 	if remote == nil {
-		shell = res.Entry.Launch.Shell
-		if err := o.registry.RecordOwnedProcessPID(sid, res.Entry.Launch.Pid); err != nil {
+		// THE LOCAL BRANCH IS PRESENT EXACTLY WHEN THE PROCESS IS ON THIS
+		// MACHINE (nocx-s8mfn): the union carries one branch and the other is
+		// absent rather than zero-filled, so a session that described no
+		// process at all is a broken answer and is refused by name rather than
+		// recorded as a pid of 0.
+		launch := res.Entry.Launch
+		if launch == nil {
+			_ = res.Session.Close()
+			return transport.HostedSessionOpen{}, true, fmt.Errorf(
+				"this machine's helper reported no launch record for session %s", sid)
+		}
+		shell = launch.Shell
+		if err := o.registry.RecordOwnedProcessPID(sid, launch.Pid); err != nil {
 			_ = res.Session.Close()
 			return transport.HostedSessionOpen{}, true, fmt.Errorf("recording local helper launch pid: %w", err)
 		}
 		status, reason = localIntegrationStatus(shell, res.LifecycleLane)
-		o.watchForReplacement(res.Session, res.Entry.Launch.Pid, shell)
+		o.watchForReplacement(res.Session, launch.Pid, shell)
 	}
 	if res.LifecycleLane != "" && o.noteChildDomainParent != nil {
 		o.noteChildDomainParent(res.LifecycleTransport, res.LifecycleLane, string(sid))
@@ -1005,6 +1016,97 @@ func (o *localHelperOpener) screenClient(ctx context.Context, sid string) (*help
 		return nil, helperclient.HostSessionID{}, err
 	}
 	return c, helperclient.HostSessionID{Generation: generation, Session: sid}, nil
+}
+
+// heldSessions answers the sessions THIS coordinator is holding on this
+// machine's daemon, as the daemon itself describes them (nocx-s8mfn).
+//
+// # Why it is here and not a second derivation in the transport
+//
+// "Which helper holds this session" already had ONE owner — this opener, asked
+// through holds() and screenClient by paneScreen.owner — and the inventory RPC
+// was asking a different party for the same fact, which is why it answered "no
+// active helper" for every ssh pane this machine's daemon was carrying. So the
+// inventory asks the owner: the sessions whose carrier is this daemon, reached
+// over the SAME connection a frame read would use.
+//
+// # What it asks the daemon for, and what it filters
+//
+// One ask per connection, for the whole set the daemon holds, narrowed to the
+// sessions THIS coordinator opened or took back. The narrowing is not
+// decoration: one account's daemon serves several coordinators (D12), and an
+// unfiltered answer would put another window's panes into this coordinator's
+// inventory — rows whose process facts belong to a session nobody here has a
+// pane for.
+//
+// A TWO-BRANCH GROUPING, because after an update this machine's daemon is not
+// one process: a session that was taken back rides the generation its binding
+// named (reattached), while one opened since rides the installed generation.
+// One ask per distinct connection is what keeps the answer from costing a round
+// trip per pane.
+//
+// A NIL ANSWER MEANS THIS OPENER HOLDS NOTHING, which is not the same fact as
+// an answered-empty inventory: nobody was asked. The caller keeps that
+// distinction (helperSessionInventories.Sessions), because a coordinator with
+// no local panes must still be able to answer for its far ones.
+//
+// # It never starts a daemon on its own account
+//
+// Every connection it asks through is one screenClient resolves: the session's
+// own re-attached connection when it has one, and otherwise `connect`, which is
+// the connection every pane this coordinator opened already rides. Nothing here
+// opens a connection to a daemon that no pane of ours is on.
+func (o *localHelperOpener) heldSessions(ctx context.Context) ([]helperclient.SessionEntry, error) {
+	o.mu.Lock()
+	ids := make([]session.ID, 0, len(o.held))
+	for sid := range o.held {
+		ids = append(ids, sid)
+	}
+	o.mu.Unlock()
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	// The connections to ask, with the session ids each is responsible for.
+	// ONE ASK PER CONNECTION is what this group of lists buys; the order is not
+	// a contract and is not made one here — `held` is a map, the registry's own
+	// half of the aggregate is a map too, and every reader of the answer finds
+	// its entry by session id rather than by position.
+	type ask struct {
+		client   *helperclient.Client
+		sessions map[string]struct{}
+	}
+	var asks []*ask
+	byClient := make(map[*helperclient.Client]*ask, 1)
+	for _, sid := range ids {
+		c, id, err := o.screenClient(ctx, string(sid))
+		if err != nil {
+			return nil, err
+		}
+		a, ok := byClient[c]
+		if !ok {
+			a = &ask{client: c, sessions: make(map[string]struct{})}
+			byClient[c] = a
+			asks = append(asks, a)
+		}
+		a.sessions[id.Session] = struct{}{}
+	}
+
+	out := make([]helperclient.SessionEntry, 0, len(ids))
+	for _, a := range asks {
+		entries, err := a.client.Sessions(ctx)
+		if err != nil {
+			// A daemon that could not answer fails the whole read, for the
+			// reason the registry's own aggregate gives: a partial list must
+			// never be read as a complete inventory.
+			return nil, err
+		}
+		for _, entry := range entries {
+			if _, mine := a.sessions[entry.HostSessionID.Session]; mine {
+				out = append(out, entry)
+			}
+		}
+	}
+	return out, nil
 }
 
 // Release gives up the connection opened for a session that did not come back

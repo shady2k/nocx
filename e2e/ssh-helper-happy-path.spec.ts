@@ -23,9 +23,13 @@
  *    structural rather than asserted through a second RPC: an ssh pane exists
  *    only because a helper claimed the destination
  *    (internal/transport/session_open.go refuses every other route for a
- *    remote kind by name). `sessions.inventory` is deliberately NOT used: it
- *    walks the registry only a FAR helper host fills and answers "no active
- *    helper" for exactly the panes this epic is about.
+ *    remote kind by name). `sessions.inventory` is deliberately NOT used for
+ *    this clause, and the reason is no longer the one it was: since
+ *    nocx-s8mfn it DOES answer for these panes (this machine's opener is one
+ *    of the two parties it asks), so it is no longer unavailable as a second,
+ *    independent confirmation — what it names is the carrier, which the
+ *    structural argument above already settles, while the criterion here is
+ *    the count the FAR host kept.
  * 2. **Answered with no browser client attached.** The pane runs a program that
  *    writes `ESC[6n` (DSR) to its terminal and READS the reply back off its own
  *    pty, then writes those bytes to a file on the far host and prints them.

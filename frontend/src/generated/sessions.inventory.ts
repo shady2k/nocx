@@ -18,6 +18,9 @@ export interface SessionsInventoryResult {
    */
   sessions: SessionEntry[]
 }
+/**
+ * One session a helper is holding. Its process is described by a UNION of two launch records — `launch` for a PTY the helper forked on its own machine, `remoteLaunch` for a shell channel it dialed — and exactly one is present. The other is ABSENT rather than filled in with zeros: a `launch` record beside a remote one would carry pid 0, which is the kernel's scheduler rather than a process on this machine, and a reader that trusted it would ask the OS about something nobody started (nocx-s8mfn, D10's 'the launch record is the authority').
+ */
 export interface SessionEntry {
   hostSessionId: {
     generation: string
@@ -25,11 +28,34 @@ export interface SessionEntry {
   }
   workspace: string
   startedAt: string
-  launch: {
+  /**
+   * The LOCAL branch: what the helper recorded at the moment it forked this session's process. Absent when `remoteLaunch` is present.
+   */
+  launch?: {
     shell: string
     cwd: string
     pid: number
     pgid: number
+    cols: number
+    rows: number
+    windowBytes: number
+  }
+  /**
+   * The SSH branch: the destination the helper resolved and dialed, echoed so a reader of the inventory knows which machine this pane is on. The identity is a REFERENCE and never material — the credential's opaque handle, which the helper does not interpret.
+   */
+  remoteLaunch?: {
+    host: string
+    port: number
+    user: string
+    identityRef: string
+    /**
+     * The tier this session was launched FOR, from the closed set internal/helper/proto's SSHShellKind owns: `auto` when the profile pinned nothing, which is the honest value because the far side's own dispatcher decides which tier runs and its answer is not reported back. The set is deliberately NOT repeated here — one owner, and a copy would be a second vocabulary to keep in step.
+     */
+    shell: string
+    /**
+     * Empty, always, in this generation: the far login shell's directory is the far side's answer and this helper neither asks for it nor changes it. Present rather than omitted so a reader cannot mistake 'nobody resolved a directory here' for a wire that does not carry one.
+     */
+    cwd: string
     cols: number
     rows: number
     windowBytes: number

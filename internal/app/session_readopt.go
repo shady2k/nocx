@@ -341,7 +341,7 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 		// cwd, which is where the pane was opened and not where the shell
 		// is now, and a tab named after a directory the process left is a
 		// statement that used to be true.
-		Cwd:       mine.Launch.Cwd,
+		Cwd:       launchCwd(mine),
 		PaneID:    p.PaneID,
 		ProfileID: p.ProfileID,
 		// No size: nothing here measured a viewport. The registry's own
@@ -460,8 +460,11 @@ func (rp *readoptPass) readoptLocal(ctx context.Context, p content.PendingSessio
 		Kind: session.KindLocal,
 		// The cwd is the HELPER's, exactly as on the remote route: the launch
 		// record the daemon has kept since the shell started, not the pane's
-		// stored cwd, which is where the pane was opened.
-		Cwd:    mine.Launch.Cwd,
+		// stored cwd, which is where the pane was opened. The union is read the
+		// same way here as there, because a local CARRIER says nothing about
+		// which branch the destination's record is on: an ssh pane this
+		// machine's daemon opened has no directory on THIS machine to report.
+		Cwd:    launchCwd(mine),
 		PaneID: p.PaneID,
 	}
 	if p.Host != "" {
@@ -683,7 +686,13 @@ func (rp *readoptPass) readopt(
 			// nothing at all is what this bead was filed for — absence on
 			// this axis means "conventional by design", and a shell that was
 			// integrated five minutes ago is not that.
-			IntegrationShell:  entry.Launch.Shell,
+			// THE LOCAL BRANCH ALONE, exactly as an open fills it
+			// (helper_local.go's OpenHosted): a pane whose process is a shell
+			// channel on somebody else's host has no shell on this machine to
+			// integrate, and empty on this axis is "do not register" rather
+			// than a gap. A record of zeros here would have claimed a shell
+			// named "" instead.
+			IntegrationShell:  localShell(&entry),
 			IntegrationStatus: adoption.status,
 			IntegrationReason: adoption.reason,
 		}
@@ -698,6 +707,48 @@ func (rp *readoptPass) readopt(
 		_ = rp.registry.registry.Close(sid)
 	}
 	return err
+}
+
+// launchCwd is the directory the HELPER recorded for a session, read off
+// whichever branch of the launch union its entry carries (nocx-s8mfn).
+//
+// ONE DERIVATION FOR BOTH ROUTES, and that is why it is a function: the far
+// route and this machine's route both re-adopt against the directory the
+// daemon has kept since the shell started, and the union is the same question
+// on both. A session taken back off a far helper is normally the PTY that host
+// forked — the local branch — but the same id space may hold a shell channel
+// it dialed, whose directory is the far side's answer and is empty in this
+// generation; and a local CARRIER says nothing about which branch applies,
+// since an ssh pane carried by this machine's daemon has no directory here to
+// report. Reading the local branch unconditionally would be reading a record
+// such a session does not have.
+//
+// Absent entries answer "" — the honest value, and the same one the wire's own
+// absence means. It is not a fallback to the pane's stored cwd, which is where
+// the pane was opened rather than where the shell is.
+func launchCwd(entry *client.SessionEntry) string {
+	switch {
+	case entry == nil:
+		return ""
+	case entry.Launch != nil:
+		return entry.Launch.Cwd
+	case entry.RemoteLaunch != nil:
+		return entry.RemoteLaunch.Cwd
+	default:
+		return ""
+	}
+}
+
+// localShell is the shell the helper FORKED on its own machine, or "" when
+// this session's process is not on it. It is the IntegrationShell an open
+// records (helper_local.go's OpenHosted), for the same reason: the
+// integration axis is about a shell on THIS machine, and a session on somebody
+// else's host has none to integrate.
+func localShell(entry *client.SessionEntry) string {
+	if entry == nil || entry.Launch == nil {
+		return ""
+	}
+	return entry.Launch.Shell
 }
 
 // reattachTarget names where a session is being taken back from, for the two
@@ -726,7 +777,10 @@ func (rp *readoptPass) rearmLocal(sess session.Session, entry client.SessionEntr
 	// worker admission's root-pid check and agent approval's "this pane is
 	// ours". A re-attached pane that left it unknown would refuse both, which
 	// is the feature silently going away across a restart.
-	if entry.Launch.Pid > 0 {
+	// AND ONLY WHEN THERE IS ONE, which is the union's answer: a pane whose
+	// process is a shell channel on a far host has no pid on this machine, and
+	// its entry carries no local branch at all (nocx-s8mfn).
+	if entry.Launch != nil && entry.Launch.Pid > 0 {
 		if err := rp.registry.registry.RecordOwnedProcessPID(sess.ID(), entry.Launch.Pid); err != nil {
 			rp.registry.log.Warn("a re-attached local pane's launch pid was not recorded",
 				"session_id", string(sess.ID()), "error", err)

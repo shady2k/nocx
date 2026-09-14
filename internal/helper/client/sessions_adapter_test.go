@@ -29,6 +29,9 @@ func TestSessionsMapsTheRealHelperResultIntoCoordinatorDTO(t *testing.T) {
 	if entry.HostSessionID.Generation != string(spawned.Entry.Session.Generation) {
 		t.Fatalf("generation = %q, want %q", entry.HostSessionID.Generation, spawned.Entry.Session.Generation)
 	}
+	if entry.Launch == nil {
+		t.Fatal("a helper-hosted local session came back with no local launch record")
+	}
 	if entry.Launch.Cwd != "/" {
 		t.Fatalf("launch cwd = %q, want /", entry.Launch.Cwd)
 	}

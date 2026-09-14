@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -211,6 +212,22 @@ func (m *memStore) Delegation(_ context.Context, id ParticipantID) (Delegation, 
 		return Delegation{}, fmt.Errorf("no delegation over %q: %w", id, ErrNotDelegated)
 	}
 	return d, nil
+}
+
+func (m *memStore) DelegationsBy(_ context.Context, sessionID string) ([]Delegation, error) {
+	if err := m.hit("delegationsby"); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Delegation
+	for _, d := range m.dels {
+		if d.ControllerSession == sessionID {
+			out = append(out, d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Participant < out[j].Participant })
+	return out, nil
 }
 
 func (m *memStore) Participant(_ context.Context, id ParticipantID) (Participant, error) {

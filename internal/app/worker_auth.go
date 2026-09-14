@@ -74,6 +74,30 @@ type workerAuthAuthorityEnding interface {
 	BindAuthorityEnded(ended func(session.ID, toolendpoint.AdmissionEpoch))
 }
 
+// workerAuthRevoker is the subtree revocation an admission's retirement
+// triggers (design §7.2): ending the interval a session's answer carried
+// must also end that session's authority over every descendant reachable
+// through it, not merely the connection admitted under it. *workers.Registrar
+// satisfies this directly — it is a pure record-level revocation with no
+// helper dependency, so it is wired in production the moment a session's
+// admission retires, unlike the helper-epoch half of revocation
+// (internal/app.paneAccessHub), which needs the helper client Task 5 has not
+// built yet.
+type workerAuthRevoker interface {
+	RevokeController(ctx context.Context, controller string, cause string) ([]string, error)
+}
+
+// workerAuthPaneAccessBinder is *paneAccessHub's Bind (design §7.1). The
+// endpoint adapter binds a DescendantPaneAccess for the admitted session
+// before dispatch, never inferred from a call's own parameters. Nil means no
+// hub is wired — a backend built before Task 5's helper client and
+// monotonic clock exist to give it real implementations — and then every
+// invocation's RunContext.PaneAccess stays nil, which every reader of it
+// must already treat as "no descendant authority granted".
+type workerAuthPaneAccessBinder interface {
+	Bind(controller string, identity session.Identity, authority AuthorityInterval) *DescendantPaneAccess
+}
+
 // The slot is the coordinator seat, not a conversation gate. M1 makes talk
 // mesh from day one; A1 says membership makes a participant addressable while
 // delegation makes it controllable. Each participant has its own session, so
@@ -133,6 +157,35 @@ type toolAuthorizer struct {
 	// endpoint was built, and nil is the honest answer then: there are no
 	// intervals to close.
 	admissions toolendpoint.SessionAdmissions
+	// revoker ends a controller's authority over its descendants when its
+	// admission retires (workerAuthRevoker). Nil is the honest answer for a
+	// backend built with no worker record to revoke against.
+	revoker workerAuthRevoker
+	// paneAccess binds the DescendantPaneAccess capability an admitted
+	// session's calls carry (workerAuthPaneAccessBinder). Nil until Task
+	// 5/8 give the hub real helper and clock implementations to bind.
+	paneAccess workerAuthPaneAccessBinder
+}
+
+// BindRevoker wires the subtree revocation retire triggers. Called once at
+// the composition root, alongside the worker record's own construction —
+// unlike BindSessionAdmissions, this needs no two-phase wiring, because the
+// record exists before the authorizer does.
+func (a *toolAuthorizer) BindRevoker(r workerAuthRevoker) {
+	if a == nil {
+		return
+	}
+	a.revoker = r
+}
+
+// BindPaneAccess wires the descendant-pane authority binder. Left unwired at
+// the composition root until a real paneHelpers/monotonicClock exist to
+// construct the hub with (Task 5) — see internal/app/pane_access.go.
+func (a *toolAuthorizer) BindPaneAccess(b workerAuthPaneAccessBinder) {
+	if a == nil {
+		return
+	}
+	a.paneAccess = b
 }
 
 // BindSessionAdmissions implements toolendpoint.SessionAdmissionBinder.
@@ -194,10 +247,22 @@ func newToolAuthorizer(
 // interval is closed and the one admitted under its successor is not
 // (nocx-9mn6z).
 func (a *toolAuthorizer) retire(sid session.ID, epoch toolendpoint.AdmissionEpoch) {
-	if a == nil || a.admissions == nil || sid == "" || epoch == 0 {
+	if a == nil || sid == "" || epoch == 0 {
 		return
 	}
-	_ = a.admissions.RetireAdmissions(string(sid), epoch)
+	if a.admissions != nil {
+		_ = a.admissions.RetireAdmissions(string(sid), epoch)
+	}
+	// §7.2's "controller admission retired" trigger: the connection is one
+	// thing this interval carried, this session's authority over what it
+	// spawned is another, and both end here rather than the second waiting
+	// for whatever the closed connection eventually causes. Fire-and-forget
+	// like the admissions close above — retire has nobody to report an
+	// error to, and a revocation that could not run is a record-level
+	// housekeeping failure, not a reason to keep the connection open.
+	if a.revoker != nil {
+		_, _ = a.revoker.RevokeController(context.Background(), string(sid), "admission retired")
+	}
 }
 
 func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, session.Session, toolendpoint.AdmissionEpoch, error) {
@@ -418,6 +483,18 @@ func (a *toolAuthorizer) Admit(peer toolendpoint.Peer, publish func(session stri
 			},
 			Grant: callerGrant(admitted, workerEnvironmentForSession(admittedSession)),
 		}
+	}
+	// Both branches: the admitted session's OWN incarnation (design §7.1's
+	// binding, never derived from the participant branch's liveness — a
+	// different incarnation entirely, nocx-bm99e's distinction applied
+	// here). And the DescendantPaneAccess capability, when a binder is
+	// wired: a worker calling about ITSELF may still be the controller of
+	// children it spawned, so both caller shapes get one bound the same
+	// way, from the same identity.
+	invocation.RunContext.ControllerIdentity = admittedSession.Identity()
+	if a.paneAccess != nil {
+		invocation.RunContext.PaneAccess = a.paneAccess.Bind(string(admitted), admittedSession.Identity(),
+			AuthorityInterval{Kind: "endpoint", AdmissionEpoch: epoch})
 	}
 	if !publish(string(admitted), epoch) {
 		release()

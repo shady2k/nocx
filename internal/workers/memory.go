@@ -195,6 +195,23 @@ func (s *MemoryStore) Delegation(_ context.Context, id ParticipantID) (Delegatio
 	return copyDelegation(d), nil
 }
 
+// DelegationsBy lists every delegation whose ControllerSession is sessionID,
+// ordered by Participant so two reads of an unchanged record answer the
+// same way (map iteration is random, and a revocation walking this list
+// twice must see the same set).
+func (s *MemoryStore) DelegationsBy(_ context.Context, sessionID string) ([]Delegation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Delegation
+	for _, d := range s.dels {
+		if d.ControllerSession == sessionID {
+			out = append(out, copyDelegation(d))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Participant < out[j].Participant })
+	return out, nil
+}
+
 func (s *MemoryStore) Participant(_ context.Context, id ParticipantID) (Participant, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

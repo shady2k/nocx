@@ -70,6 +70,16 @@ type Store interface {
 	// authority is decided.
 	Delegation(ctx context.Context, id ParticipantID) (Delegation, error)
 
+	// DelegationsBy lists every delegation whose ControllerSession is
+	// sessionID — the downward edge a revocation needs and Resolve does not:
+	// Resolve walks a chain UPWARD from a participant via
+	// ParticipantBySession, but ending a session's own authority (it
+	// terminalized, it closed, its admission retired) must also end
+	// whatever IT controls, and there is no other route from "this session"
+	// to "the delegations it holds". Order is unspecified; a revocation
+	// walks every entry regardless.
+	DelegationsBy(ctx context.Context, sessionID string) ([]Delegation, error)
+
 	// Participant reads one back.
 	Participant(ctx context.Context, id ParticipantID) (Participant, error)
 

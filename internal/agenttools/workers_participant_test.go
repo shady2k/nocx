@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/session"
 )
 
 // A9: the holder's own resources live inside the object. A participant names
@@ -38,7 +39,7 @@ func TestWorkerParticipantNilNamesNothing(t *testing.T) {
 // coordinator's capability can never be read as a participant's by a
 // consumer that forgot to check a boolean.
 func TestGroupCapabilitiesAreTwoTypes(t *testing.T) {
-	var coordinator Capability = NewWorkerCoordinator("session-1", nil)
+	var coordinator Capability = NewWorkerCoordinator("session-1", session.Identity{}, nil)
 	var participant Capability = NewWorkerParticipant("worker-1")
 	if _, ok := coordinator.(*WorkerParticipant); ok {
 		t.Fatal("a coordinator capability satisfies *WorkerParticipant")

@@ -663,11 +663,16 @@ func executeWorkerSpawn(ctx context.Context, cap agenttools.Capability, args jso
 	}
 	participant, err := seams.workerStore.Register(ctx, workers.RegisterRequest{
 		CoordinatorSession: coordinator.Session(),
-		Role:               workers.RoleWorker,
-		Task:               p.Task,
-		Command:            p.Command,
-		Environment:        environment,
-		CreatedByRunID:     seams.runID,
+		// The coordinator's OWN incarnation, never the spawned participant's
+		// liveness epoch: Delegation.ControllerIdentity is what a
+		// revocation's chain resolution reads back (nocx-bm99e), and this is
+		// the one production call site that mints it.
+		CoordinatorIdentity: coordinator.Identity(),
+		Role:                workers.RoleWorker,
+		Task:                p.Task,
+		Command:             p.Command,
+		Environment:         environment,
+		CreatedByRunID:      seams.runID,
 	})
 	if err != nil {
 		return "", fmt.Errorf("workers.spawn: %w", err)

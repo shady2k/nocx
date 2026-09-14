@@ -13,6 +13,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/workers"
 )
 
@@ -156,13 +157,23 @@ func workerSeams(rec WorkerRecord) toolSeams {
 	return toolSeams{workerStore: rec, workerEnvironment: testWorkerEnv, runID: "run-1"}
 }
 
-// A coordinator holding the environment its grant named.
-func testCoordinator(session string, environments ...string) *agenttools.WorkerCoordinator {
+// A coordinator holding the environment its grant named. Its identity is the
+// zero value: these tests are not about which incarnation bound it, and
+// testCoordinatorWithIdentity is the one that is.
+func testCoordinator(sessionID string, environments ...string) *agenttools.WorkerCoordinator {
+	return testCoordinatorWithIdentity(sessionID, session.Identity{}, environments...)
+}
+
+// testCoordinatorWithIdentity is testCoordinator with the incarnation named,
+// for the one test that is about whether it travels (nocx-bm99e's shape,
+// applied to the endpoint-bound coordinator rather than the spawned
+// participant).
+func testCoordinatorWithIdentity(sessionID string, identity session.Identity, environments ...string) *agenttools.WorkerCoordinator {
 	scopes := make([]content.GrantScope, 0, len(environments))
 	for _, e := range environments {
 		scopes = append(scopes, content.GrantScope{Kind: content.ResourceEnvironment, ID: e})
 	}
-	return agenttools.NewWorkerCoordinator(session, scopes)
+	return agenttools.NewWorkerCoordinator(sessionID, identity, scopes)
 }
 
 // D3, at the tool: the answer is about the run's OWN session, and the model
@@ -303,6 +314,29 @@ func TestWorkerSpawnStartsOneWorkerAndReturnsItLive(t *testing.T) {
 	}
 	if got.ID != "p-1" || got.State != "live" {
 		t.Fatalf("result = %+v, want the worker live", got)
+	}
+}
+
+// The delegation Register creates must be bound to WHICH INCARNATION of the
+// coordinator session granted it (nocx-bm99e) — the identity the endpoint or
+// kernel adapter bound this run under, carried on the capability itself,
+// never the spawned participant's own liveness epoch (a different session
+// entirely). Before this travelled, RegisterRequest.CoordinatorIdentity was
+// always the zero value at this one production call site.
+func TestWorkerSpawnCarriesTheCoordinatorsOwnIncarnation(t *testing.T) {
+	rec := &fakeWorkerRecord{}
+	identity := session.Identity{InstanceID: "backend-A", Epoch: 3}
+	_, err := executeWorkerSpawn(context.Background(),
+		testCoordinatorWithIdentity("sess-coordinator", identity, testWorkerEnv),
+		json.RawMessage(`{"command":"claude","task":"read AGENTS.md and report"}`), workerSeams(rec))
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if len(rec.registered) != 1 {
+		t.Fatalf("record saw %d registrations, want 1", len(rec.registered))
+	}
+	if got := rec.registered[0].CoordinatorIdentity; got != identity {
+		t.Fatalf("registration coordinator identity = %+v, want %+v", got, identity)
 	}
 }
 

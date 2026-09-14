@@ -6,32 +6,34 @@ package agenttools
 
 import "github.com/shady2k/nocx/internal/content"
 
-// SessionDescendantCapability is session.read's capability: the run's own
-// session reader — unchanged, still grant-scoped exactly as narrowSession
-// always built it, for the ledger/renderer path (design §11 "kept,
-// deliberately") — plus the run's PaneAccess and SessionReads, carried
-// through untouched from RunContext.
+// SessionDescendantCapability is session.read's and session.keys' shared
+// capability: the run's own session reader — unchanged, still grant-scoped
+// exactly as narrowSession always built it, for the ledger/renderer path
+// (design §11 "kept, deliberately") — plus the run's PaneAccess,
+// SessionReads and SessionKeys, carried through untouched from RunContext.
 //
-// PaneAccess and SessionReads travel as `any` because this package sits
-// below internal/app (which binds the concrete DescendantPaneAccess and
-// PaneReader) and below internal/assistant (whose executeSessionRead is
-// the one place that type-asserts them back). Narrow does not need to know
-// either concretely: it only carries them from RunContext to the
-// executor, which is the "point of use" RunContext.PaneAccess's own doc
-// already names.
+// PaneAccess, SessionReads and SessionKeys travel as `any` because this
+// package sits below internal/app (which binds the concrete
+// DescendantPaneAccess, PaneReader and PaneKeys) and below
+// internal/assistant (whose executeSessionRead/executeSessionKeys are the
+// places that type-assert them back). Narrow does not need to know any of
+// them concretely: it only carries them from RunContext to the executor,
+// which is the "point of use" RunContext.PaneAccess's own doc already
+// names.
 type SessionDescendantCapability struct {
 	*SessionReader
 	PaneAccess   any
 	SessionReads any
+	SessionKeys  any
 }
 
-// narrowDescendants is session.read's Narrow (registry.go's declaration
-// row). The own-session reader is built exactly as narrowSession already
-// does — resources still narrow it to the grant's session scopes, for the
-// run's own pane — and PaneAccess/SessionReads pass through from runCtx
-// untouched: a sessionId naming a descendant is authorized by PaneAccess
-// alone, never by the grant's session scopes, which only ever name the
-// run's own session (§7.1).
+// narrowDescendants is session.read's and session.keys' shared Narrow
+// (registry.go's declaration rows). The own-session reader is built exactly
+// as narrowSession already does — resources still narrow it to the grant's
+// session scopes, for the run's own pane — and PaneAccess/SessionReads/
+// SessionKeys pass through from runCtx untouched: a sessionId naming a
+// descendant is authorized by PaneAccess alone, never by the grant's
+// session scopes, which only ever name the run's own session (§7.1).
 func narrowDescendants(grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error) {
 	own, err := narrowSession(grant, resources, runCtx)
 	if err != nil {
@@ -42,5 +44,6 @@ func narrowDescendants(grant content.Grant, resources []ResourceRef, runCtx RunC
 		SessionReader: reader,
 		PaneAccess:    runCtx.PaneAccess,
 		SessionReads:  runCtx.SessionReads,
+		SessionKeys:   runCtx.SessionKeys,
 	}, nil
 }

@@ -173,6 +173,11 @@ type toolAuthorizer struct {
 	// wires it, which every reader of RunContext.SessionReads must already
 	// treat as "no descendant read path bound".
 	sessionReads any
+	// sessionKeys is session.keys' write path over a descendant
+	// (assistant.PaneKeys, Task 9), handed to every admitted invocation
+	// alongside paneAccess and sessionReads for the identical reason. Nil
+	// until the composition root wires it.
+	sessionKeys any
 }
 
 // BindRevoker wires the subtree revocation retire triggers. Called once at
@@ -208,6 +213,16 @@ func (a *toolAuthorizer) BindSessionReads(r any) {
 		return
 	}
 	a.sessionReads = r
+}
+
+// BindSessionKeys wires session.keys' write path over a descendant
+// (assistant.PaneKeys, Task 9) — see internal/app/session_keys.go. k is
+// `any` for the same reason BindSessionReads' r is.
+func (a *toolAuthorizer) BindSessionKeys(k any) {
+	if a == nil {
+		return
+	}
+	a.sessionKeys = k
 }
 
 // BindSessionAdmissions implements toolendpoint.SessionAdmissionBinder.
@@ -520,6 +535,9 @@ func (a *toolAuthorizer) Admit(peer toolendpoint.Peer, publish func(session stri
 	}
 	if a.sessionReads != nil {
 		invocation.RunContext.SessionReads = a.sessionReads
+	}
+	if a.sessionKeys != nil {
+		invocation.RunContext.SessionKeys = a.sessionKeys
 	}
 	if !publish(string(admitted), epoch) {
 		release()

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/helper/session.access-bump.schema.json",
   "title": "HelperSessionAccessBumpResult",
-  "description": "The access epoch now in force, once every older uncommitted intent is terminal (nocx-6q1uh.5, spec §7.2). A bump always applies — the design names no case where it may not — so a caller that cannot reach the session at all sees a transport-level error rather than a typed refusal here.",
+  "description": "The access epoch now in force, once every older uncommitted intent is terminal (nocx-6q1uh.6, spec §7.2). A bump always applies — the design names no case where it may not — so a caller that cannot reach the session at all sees a transport-level error rather than a typed refusal here.",
   "type": "object",
   "additionalProperties": false,
   "required": ["epoch"],

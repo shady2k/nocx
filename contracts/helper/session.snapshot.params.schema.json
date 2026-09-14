@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/helper/session.snapshot.params.schema.json",
   "title": "HelperSessionSnapshotParams",
-  "description": "Names the session a consistent screen read is taken from (nocx-6q1uh.5, spec §6.1).",
+  "description": "Names the session a consistent screen read is taken from (nocx-6q1uh.6, spec §6.1).",
   "type": "object",
   "additionalProperties": false,
   "required": ["session"],

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/helper/session.target.schema.json",
   "title": "HelperSessionTargetResult",
-  "description": "A minted, one-shot target (nocx-6q1uh.5, spec §6.2): a signed token a caller presents back to session.intent to spend it, and the id session.intent-status polls by without ever re-transmitting the signed value.",
+  "description": "A minted, one-shot target (nocx-6q1uh.6, spec §6.2): a signed token a caller presents back to session.intent to spend it, and the id session.intent-status polls by without ever re-transmitting the signed value.",
   "type": "object",
   "additionalProperties": false,
   "required": ["token", "tokenId", "expiresAtMs"],

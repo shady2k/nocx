@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/helper/session.intent.params.schema.json",
   "title": "HelperSessionIntentParams",
-  "description": "Spends one target: the token it was minted onto, the access epoch and commit deadline the coordinator read at the same moment, and the key or text payload (nocx-6q1uh.5, spec §6.5).",
+  "description": "Spends one target: the token it was minted onto, the access epoch and commit deadline the coordinator read at the same moment, and the key or text payload (nocx-6q1uh.6, spec §6.5).",
   "type": "object",
   "additionalProperties": false,
   "required": ["session", "token", "accessEpoch", "commitBy", "kind", "payload"],

@@ -407,10 +407,15 @@ func TestAResizeRacingACommitMakesTheTargetIncomparable(t *testing.T) {
 	ctrl := grantAgent(t, rt)
 
 	mintedAt := rt.Geometry()
-	errIncomparable := errors.New("incomparable: the geometry changed since this target was minted")
+	// Named errGeometryChanged rather than errIncomparable — nocx-6q1uh.4/.6
+	// added a package-level errIncomparable (tokens.go) after this test was
+	// written, and this local sentinel is unrelated to it (this task has no
+	// token yet, per this test's own doc above); the rename only avoids the
+	// shadow, which govet now catches package-wide.
+	errGeometryChanged := errors.New("incomparable: the geometry changed since this target was minted")
 	checkGeometry := func(snap sessionruntime.Snapshot) error {
 		if snap.Geometry != mintedAt {
-			return errIncomparable
+			return errGeometryChanged
 		}
 		return nil
 	}
@@ -445,8 +450,8 @@ func TestAResizeRacingACommitMakesTheTargetIncomparable(t *testing.T) {
 		t.Fatalf("resize: state=%v err=%v", res.State, res.Err)
 	}
 	res := <-intentDone
-	if !errors.Is(res.Err, errIncomparable) {
-		t.Fatalf("the intent behind a committed resize resolved err=%v, want %v", res.Err, errIncomparable)
+	if !errors.Is(res.Err, errGeometryChanged) {
+		t.Fatalf("the intent behind a committed resize resolved err=%v, want %v", res.Err, errGeometryChanged)
 	}
 }
 

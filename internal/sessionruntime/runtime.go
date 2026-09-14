@@ -685,7 +685,21 @@ func (s *Session) Commit(i Intent, check func(Snapshot) error) ([]byte, error) {
 	if err := s.live(); err != nil {
 		return nil, err
 	}
-	if s.completeness == CompletenessUnknown {
+	// The gate is every state that is not [CompletenessComplete], not only
+	// [CompletenessUnknown]: a digest taken against the screen is only as
+	// good as the claim that the screen is the WHOLE of what the program
+	// wrote, and three other states say it is not. LostIngest and Evicted
+	// are the direct case — bytes this incarnation once had are gone, by
+	// loss or by retention, and the emulator's screen was built from less
+	// than the program actually sent. NoFence is subtler: ingest was whole,
+	// but the interval has no authenticated boundary, so nothing here can
+	// tell a legitimate reply from a coincidence at the same bytes — the
+	// same "cannot validate it" reasoning spec §5.5 gives for the reserve
+	// overflow. All four collapse to the one refusal a caller already
+	// checks for (spec §5.5: overflow is reported as `completeness_unknown`
+	// too), so this returns [ErrCompletenessUnknown] rather than minting a
+	// second sentinel for the same decision.
+	if s.completeness != CompletenessComplete {
 		return nil, ErrCompletenessUnknown
 	}
 	if len(s.queue) == 0 {

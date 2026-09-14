@@ -13,11 +13,12 @@
 //
 // A thin adapter over SolidPaneContent (extended, not re-implemented — it
 // already owns the host element's lifecycle: creation as `.surface-host`,
-// one Solid root, one disposal, and the `.pane:has(> .surface-host)` padding
-// rule in styles/base.css that keeps this tab flush with its pane the way
-// Settings and the API workbench already are). What this class adds is what
-// only it knows: the store subscription, the resolved-skill identity, and
-// the re-read on activation.
+// one Solid root, one disposal. `.pane` itself pads nothing since
+// nocx-9bpeq.8 moved the gutter into the ledger's rows, so a surface host
+// is flush with its pane by default — no rule keeps this tab flush the way
+// Settings and the API workbench already are, because none is needed).
+// What this class adds is what only it knows: the store subscription, the
+// resolved-skill identity, and the re-read on activation.
 //
 // IDENTITY IS THE RESOLVED SKILL, NEVER THE REQUESTED NAME. Two roots can
 // discover a skill under one name; discovery keeps the first root's copy

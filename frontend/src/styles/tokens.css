@@ -84,11 +84,10 @@ html {
      of the same number would be the dead twin this token used to be. */
   --activity-bar-width: 48px;
   --tab-height: 38px;
-  /* The terminal pane's inline gutter. Declared here rather than on `.pane` so
-     every row that must line up with the live terminal reads one number. Its
-     value moves xterm's column count and the frozen block's first column, so
-     it changes only with the alignment test (nocx-9bpeq.8). */
-  --pane-inline-padding: 10px;
+  /* The ledger's side gutter. Rows carry it (style.css `.scrollback-inner > *`,
+     `.nocx-summon-answers > *`, `.nocx-editor`), not the pane, so a row can paint
+     to the edge (spec 2026-09-14 §4, nocx-9bpeq.8). */
+  --pane-inline-padding: var(--space-4);
 
   /* A command block's BODY padding. Named here because two surfaces wear it:
      the frozen `.cmd-output` and the live region that becomes it. They must

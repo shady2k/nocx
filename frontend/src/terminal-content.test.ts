@@ -329,6 +329,43 @@ describe('TerminalContent geometry handoff and PTY resize policy (nocx-cwnz0)', 
     }
   })
 
+  it('fits the grid to the live content box, not to the scroller (nocx-9bpeq.8)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const renderer = rendererOf(content)
+    const raf = globalThis.requestAnimationFrame
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      cb(0)
+      return 0
+    }
+    try {
+      const live = withScrollback.scrollback.xtermLiveContainer
+      live.style.paddingLeft = '16px'
+      live.style.paddingRight = '16px'
+      /* eslint-disable @typescript-eslint/unbound-method */
+      // Fallback path: jsdom reports clientWidth 0, so the delivered viewport
+      // is the guess — and the rows' inset is still not the grid's.
+      content.viewportChanged({ width: 1000, height: 400 })
+      expect(renderer.fitViewport).toHaveBeenLastCalledWith(
+        expect.objectContaining({ width: 968, height: 400 }),
+      )
+      // Measured path: the scroller's content width minus the same inset.
+      Object.defineProperty(withScrollback.scrollback.scrollbackArea, 'clientWidth', {
+        value: 800,
+        configurable: true,
+      })
+      content.viewportChanged({ width: 1000, height: 400 })
+      expect(renderer.fitViewport).toHaveBeenLastCalledWith(
+        expect.objectContaining({ width: 768, height: 400 }),
+      )
+      /* eslint-enable @typescript-eslint/unbound-method */
+    } finally {
+      globalThis.requestAnimationFrame = raf
+      teardown()
+    }
+  })
+
   it('sends only the final grid to the session after the 80 ms settle window', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     let teardown: (() => void) | undefined
@@ -2500,10 +2537,12 @@ describe('summoned editor overlay stylesheet contract (nocx-92gfl)', () => {
     expect(answers).not.toBe('')
     expect(editor).not.toBe('')
     expect(pane).not.toBeNull()
-    expect(pane?.[1] ?? '').toMatch(/--pane-inline-padding\s*:\s*10px/)
+    // The pane insets nothing; the stack is full width and its rows carry the
+    // gutter (nocx-9bpeq.8, asserted in scrollback/trailing-edge.test.ts).
+    expect(pane?.[1] ?? '').not.toMatch(/(^|;)\s*padding\s*:/)
     expect(stack).toMatch(/position\s*:\s*absolute/)
-    expect(stack).toMatch(/left\s*:\s*var\(--pane-inline-padding\)/)
-    expect(stack).toMatch(/right\s*:\s*var\(--pane-inline-padding\)/)
+    expect(stack).toMatch(/left\s*:\s*0/)
+    expect(stack).toMatch(/right\s*:\s*0/)
     expect(stack).toMatch(/bottom\s*:\s*0/)
     expect(stack).toMatch(/display\s*:\s*flex/)
     expect(stack).toMatch(/flex-direction\s*:\s*column/)

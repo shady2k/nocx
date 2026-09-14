@@ -23,9 +23,9 @@
  *    structural rather than asserted through a second RPC: an ssh pane exists
  *    only because a helper claimed the destination
  *    (internal/transport/session_open.go refuses every other route for a
- *    remote kind by name), and `sessions.inventory` — which walks the registry
- *    only a FAR helper host fills — is asked for what it saw and carried into
- *    this criterion's failure message instead of gating on it.
+ *    remote kind by name). `sessions.inventory` is deliberately NOT used: it
+ *    walks the registry only a FAR helper host fills and answers "no active
+ *    helper" for exactly the panes this epic is about.
  * 2. **Answered with no browser client attached.** The pane runs a program that
  *    writes `ESC[6n` (DSR) to its terminal and READS the reply back off its own
  *    pty, then writes those bytes to a file on the far host and prints them.
@@ -54,14 +54,21 @@
  *
  * # No timing
  *
- * Every wait is on an observable state: the far shell's own OSC 7 cwd in the
- * pane, the fixture's counter, a row in the Files tree, a file the FAR program
- * writes, `sessions.live`'s own `attached`, the coordinator's inventory and its
- * recording. Nothing is waited out, and the two places a program paces itself
- * (parking on a trigger file, and being polled through its own artifact) are
- * the far side's clock rather than a duration this test chose.
+ * Every wait is on an observable state: the fixture's counter, a row in the
+ * Files tree, the files the FAR program writes (its marker, its cursor report,
+ * its pid and its own trace), `sessions.live`'s own `attached`, and the
+ * coordinator's recording. Nothing is waited out, and the two places a program
+ * paces itself (parking on a trigger file, and being polled through its own
+ * artifacts) are the far side's clock rather than a duration this test chose.
  */
-import { mkdirSync, mkdtempSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  mkdirSync,
+  mkdtempSync,
+  existsSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -110,6 +117,14 @@ const WAITING = 'nocx-dsr-waiting'
 const TRIGGER = 'nocx-dsr-go'
 const ANSWER = 'nocx-dsr-answer'
 const PROBE = 'nocx-dsr-probe.sh'
+/** The far shell's own pid, reported by the shell itself. */
+const PID = 'nocx-pid'
+
+/** The probe's own account of what it did, step by step. It exists because a
+ *  far-side program that exits early leaves nothing else behind: the byte it
+ *  read, the byte it never read, and where it got to are all invisible from
+ *  this side of the pty. */
+const TRACE = 'nocx-dsr-trace'
 
 /**
  * The probe: it PARKS, then asks its terminal for the cursor position and reads
@@ -131,19 +146,29 @@ const PROBE = 'nocx-dsr-probe.sh'
  * asked anything yet, which is what lets the spec close the browser and only
  * THEN release it.
  */
-const PROBE_SCRIPT = `: > "$HOME/${WAITING}"
-while [ ! -f "$HOME/${TRIGGER}" ]; do sleep 0.2; done
-stty -icanon -echo min 1 time 0
+const PROBE_SCRIPT = `L="$HOME/${TRACE}"
+echo "probe start: home=$HOME pwd=$(pwd) tty=$(tty 2>&1)" >>"$L"
+: > "$HOME/${WAITING}"
+echo "parked, waiting for ${TRIGGER}" >>"$L"
+ticks=0
+while [ ! -f "$HOME/${TRIGGER}" ]; do ticks=$((ticks+1)); sleep 0.2; done
+echo "released after $ticks ticks" >>"$L"
+stty -icanon -echo min 1 time 0 2>>"$L"
+echo "stty done" >>"$L"
 printf '\\033[6n'
+echo "query sent" >>"$L"
+i=0
 r=''
-while :; do
-	c=$(dd bs=1 count=1 2>/dev/null)
-	[ -n "$c" ] || break
+while [ "$i" -lt 32 ]; do
+	c=$(dd bs=1 count=1 2>>"$L")
+	if [ -z "$c" ]; then echo "dd returned nothing at byte $i" >>"$L"; break; fi
 	r="$r$c"
-	[ "$c" = R ] && break
+	i=$((i+1))
+	if [ "$c" = R ]; then echo "terminator at byte $i" >>"$L"; break; fi
 done
-stty icanon echo
-printf '%s' "$r" > "$HOME/${ANSWER}"
+echo "read: $r" >>"$L"
+stty icanon echo 2>>"$L"
+printf '%s' "$r" >"$HOME/${ANSWER}"
 printf 'NOCXDSR[%s]\\n' "$r"
 `
 
@@ -173,14 +198,6 @@ interface LiveSession {
   attached: boolean
 }
 
-interface InventorySession {
-  hostSessionId: { generation: string; session: string }
-  launch: { pid: number; pgid: number; windowBytes: number; cwd: string }
-  window: { base: number; written: number }
-  writer: string | null
-  exit: { code: number; signal?: number; at: string } | null
-}
-
 interface SessionOutput {
   produced: number
   effectiveSize: { cols: number; rows: number }
@@ -204,39 +221,6 @@ async function liveSessions(ep: BackendEndpoint): Promise<LiveSession[]> {
   return answer.sessions
 }
 
-async function inventory(ep: BackendEndpoint): Promise<InventorySession[]> {
-  const answer = await ask<{ sessions: InventorySession[] }>(ep, 'sessions.inventory', {})
-  return answer.sessions
-}
-
-/**
- * What this machine's helper inventory says about ONE session, as a line for a
- * failure message.
- *
- * It is a question, not a gate, and the reason is which helper that RPC is
- * about. `sessions.inventory` walks helperRegistry.hosts — the registry
- * internal/app/helper_git.go fills when a FAR host hosts the helper — and
- * answers "no active helper" when nothing is registered there (:779-788). A
- * pane carried by THIS MACHINE's helper is not in that map: the registry's
- * OpenHosted (:485-500) declines a host that will not host the helper, and the
- * local opener spawns the pane instead, so the inventory is empty for exactly
- * the panes this epic is about. A gate written on it would fail for a reason
- * that is not the criterion; the answer still travels, in the criterion's
- * message below, so a failing run says what it saw.
- */
-async function describeHelperInventory(ep: BackendEndpoint, sessionId: string): Promise<string> {
-  try {
-    const entries = await inventory(ep)
-    const mine = entries.find((entry) => entry.hostSessionId.session === sessionId)
-    if (mine === undefined) {
-      return `the helper inventory lists ${entries.length} session(s) and not ${sessionId}`
-    }
-    return `the helper holds ${sessionId} as pid ${mine.launch.pid}`
-  } catch (err) {
-    return `the helper inventory could not be read (${err instanceof Error ? err.message : String(err)})`
-  }
-}
-
 /**
  * The fixture's own count of authenticated connections, read off its `AUTH=`
  * line: the LAST value, because the line carries a running count rather than
@@ -247,6 +231,45 @@ function authenticatedConnections(fixture: SshdFixture): number {
   if (printed.length === 0) return 0
   const last = printed[printed.length - 1]
   return Number(last.slice('AUTH='.length))
+}
+
+/**
+ * What the FAR host holds, as the value a poll reports when it is not what the
+ * spec expected.
+ *
+ * A program on the far side that exits early leaves nothing on this side of the
+ * pty: no output a spec can read, no exit code, no reason. The files it wrote
+ * and the trace it keeps are the only account of what it did — so they ARE the
+ * poll's failure value, and Playwright prints them as "Received:" beside the
+ * expectation. A message string cannot serve here: it is fixed when the poll is
+ * configured, and this has to be read at the moment the poll gives up.
+ */
+function farSideReport(remoteHome: string): string {
+  let names: string[] = []
+  try {
+    names = readdirSync(remoteHome).sort()
+  } catch (err) {
+    return `the far home could not be read (${String(err)})`
+  }
+  const tracePath = path.join(remoteHome, TRACE)
+  const trace = existsSync(tracePath) ? readFileSync(tracePath, 'utf8') : '(no trace)'
+  return `far home holds [${names.join(', ')}] | probe trace: ${JSON.stringify(trace.slice(-600))}`
+}
+
+/**
+ * Is this pid there, asked of the KERNEL? `kill(pid, 0)` sends no signal and
+ * reports whether the process exists — the criterion's "still running", read
+ * from the operating system rather than from anything nocx recorded about
+ * itself. The far host of this journey is this container, so the pid a far
+ * shell reported is visible here.
+ */
+function aliveFromThisMachine(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** Everything the coordinator has recorded for one session, decoded, in stream
@@ -475,15 +498,11 @@ test.describe('one ssh connection per host, answered unwatched, surviving the co
       const paneSessionId = await activePane.getAttribute('data-session-id')
       expect(paneSessionId).not.toBeNull()
 
-      // WHAT OPENED THIS PANE is carried, not asserted through a second RPC.
-      // On this tree an ssh pane exists ONLY because a helper claimed the
-      // destination: internal/transport/session_open.go refuses every other
-      // route for a remote kind by name ("SSH sessions are opened by this
-      // machine's helper, and no helper claimed this destination"), so the pane
-      // above IS the helper's dial rather than a conventional one wearing the
-      // same tab. The inventory is asked anyway because its answer is what a
-      // failure needs to be readable.
-      const helperReport = await describeHelperInventory(endpoint, paneSessionId!)
+      // WHAT OPENED THIS PANE is structural rather than a second RPC: an ssh
+      // pane exists ONLY because a helper claimed the destination
+      // (internal/transport/session_open.go refuses every other route for a
+      // remote kind by name), so the pane above IS the helper's dial and not a
+      // conventional one wearing the same tab.
 
       // Files on the SAME host, and the evidence is the panel's own claim about
       // what it is showing plus a listing it could only have got by asking:
@@ -515,7 +534,7 @@ test.describe('one ssh connection per host, answered unwatched, surviving the co
       // really got a listing rather than being about to ask.
       expect(
         authenticatedConnections(fixture),
-        `the far host authenticated more than one connection for one pane and one Files panel: the consumers did not share the helper pool (${helperReport})`,
+        'the far host authenticated more than one connection for one pane and one Files panel: the consumers did not share the helper pool',
       ).toBe(1)
 
       // ── STAGE 2: the runtime answers with no browser client attached ─────
@@ -528,16 +547,31 @@ test.describe('one ssh connection per host, answered unwatched, surviving the co
       const waiting = path.join(remoteHome, WAITING)
       const trigger = path.join(remoteHome, TRIGGER)
       const answerPath = path.join(remoteHome, ANSWER)
+      const pidFile = path.join(remoteHome, PID)
 
+      // THE FAR SHELL'S OWN PID, asked of the shell while a client is still
+      // attached. This is the process the replacement coordinator must still be
+      // holding at the end, and it is the one reading that needs no coordinator
+      // to survive: the file is on the far host.
       await clickIntoEditor(first)
+      await first.keyboard.type(`echo NOCXJOB=$$ > $HOME/${PID}`)
+      await first.keyboard.press('Enter')
+      await expect
+        .poll(() => (existsSync(pidFile) ? 'written' : farSideReport(remoteHome)), {
+          timeout: 60_000,
+          intervals: [250],
+        })
+        .toBe('written')
+      const shellPid = Number(/NOCXJOB=(\d+)/.exec(readFileSync(pidFile, 'utf8'))?.[1] ?? 0)
+      expect(shellPid).toBeGreaterThan(0)
+
       await first.keyboard.type(`bash ${path.join(remoteHome, PROBE)}`)
       await first.keyboard.press('Enter')
       await expect
-        .poll(() => existsSync(waiting), {
+        .poll(() => (existsSync(waiting) ? 'parked' : farSideReport(remoteHome)), {
           timeout: 120_000,
-          message: 'the far program never started, so it is not parked on anything',
         })
-        .toBe(true)
+        .toBe('parked')
 
       // ── the window closes, and the coordinator says so ──────────────────
       await first.context().close()
@@ -561,13 +595,11 @@ test.describe('one ssh connection per host, answered unwatched, surviving the co
       // ── the question, asked with nobody watching ────────────────────────
       writeFileSync(trigger, 'go\n')
       await expect
-        .poll(() => (existsSync(answerPath) ? readFileSync(answerPath, 'utf8') : null), {
+        .poll(() => (existsSync(answerPath) ? 'answered' : farSideReport(remoteHome)), {
           timeout: 120_000,
           intervals: [100],
-          message:
-            'the far program never read a reply to its DSR query while no client was attached',
         })
-        .not.toBeNull()
+        .toBe('answered')
 
       const report = readFileSync(answerPath, 'utf8')
       expect(report).toMatch(CURSOR_REPORT)
@@ -588,11 +620,6 @@ test.describe('one ssh connection per host, answered unwatched, surviving the co
       expect(contentBefore).toContain(`${DSR_LINE}${report}]`)
 
       // ── STAGE 3: the coordinator is replaced ────────────────────────────
-      const hostBefore = (await inventory(endpoint)).find(
-        (entry) => entry.hostSessionId.session === paneSessionId,
-      )!
-      expect(hostBefore).toBeDefined()
-      const writtenBefore = hostBefore.window.written
       // The pane the session is the pipe of, read BEFORE the replacement: the
       // pairing is the coordinator's (AD-7), and the claim below is that the
       // replacing one kept it rather than attaching a bare shell nobody owns.
@@ -624,17 +651,6 @@ test.describe('one ssh connection per host, answered unwatched, surviving the co
       const liveAfter = (await liveSessions(endpoint)).find((s) => s.sessionId === paneSessionId)!
       expect(liveAfter.paneId).toBe(paneIdBefore)
 
-      // THE SAME FAR PROCESS, not a new one wearing the old id: the runtime's
-      // own inventory names the same host session and the same pid, and says
-      // nothing has exited.
-      const hostAfter = (await inventory(endpoint)).find(
-        (entry) => entry.hostSessionId.session === paneSessionId,
-      )!
-      expect(hostAfter.hostSessionId).toEqual(hostBefore.hostSessionId)
-      expect(hostAfter.launch.pid).toBe(hostBefore.launch.pid)
-      expect(hostAfter.exit).toBeNull()
-      expect(hostAfter.window.written).toBeGreaterThanOrEqual(writtenBefore)
-
       // ── the same CONTENT, read through the new coordinator ──────────────
       //
       // The pane is drawn from this session's own stream, and the stream the
@@ -652,6 +668,31 @@ test.describe('one ssh connection per host, answered unwatched, surviving the co
       await expect(pane).toBeVisible({ timeout: 180_000 })
       await promptReady(returned)
       await clickIntoEditor(returned)
+
+      // THE SAME FAR SHELL, asked of the far side itself. The shell reports its
+      // pid again, and the two lines of the file it writes must agree: a
+      // replacement that had opened a fresh shell would put ITS pid there, and
+      // a session whose runtime was recreated could not answer at all. The
+      // kernel is then asked directly that the pid is still running — the far
+      // host is this container, which is what makes that question askable from
+      // here rather than only from the far side.
+      await returned.keyboard.type(`echo NOCXJOB=$$ >> $HOME/${PID}`)
+      await returned.keyboard.press('Enter')
+      await expect
+        .poll(
+          () =>
+            existsSync(pidFile) && readFileSync(pidFile, 'utf8').trim().split('\n').length >= 2
+              ? 'written'
+              : farSideReport(remoteHome),
+          { timeout: 120_000, intervals: [250] },
+        )
+        .toBe('written')
+      const reported = readFileSync(pidFile, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => Number(/NOCXJOB=(\d+)/.exec(line)?.[1] ?? 0))
+      expect(reported).toEqual([shellPid, shellPid])
+      expect(aliveFromThisMachine(shellPid)).toBe(true)
 
       // A LIVE WRITE THAT ROUND-TRIPS: typed into the pane the replacement
       // coordinator adopted, executed by the SAME far shell (which is why the

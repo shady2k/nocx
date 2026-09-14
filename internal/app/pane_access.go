@@ -73,6 +73,17 @@ type paneHelpers interface {
 	// never re-derived, so classification, rows and digest describe one
 	// frame (design §6.1).
 	Target(ctx context.Context, sessionID string, p proto.TargetParams) (proto.TargetResult, error)
+	// Intent spends a target's token — session.keys' own write (Task 9,
+	// design §6.5). Added alongside Snapshot/Target rather than through a
+	// second per-session lookup, for the reason paneReader's own doc gives:
+	// PaneKeys and a read resolve the identical "which helper holds this
+	// pane" question, and a second answer to it would be a second owner of
+	// one input (AGENTS.md).
+	Intent(ctx context.Context, sessionID string, p proto.IntentParams) (proto.IntentResult, error)
+	// IntentStatus polls a token-bound intent without spending or
+	// re-presenting it (design §6.2) — PaneKeys' recovery path when a
+	// transport error leaves an intent's own outcome unknown (design §7.2).
+	IntentStatus(ctx context.Context, sessionID string, tokenID string) (proto.IntentStatusResult, error)
 }
 
 // paneHelperLookup finds the helper that owns a session's pane — the same

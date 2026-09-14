@@ -117,6 +117,13 @@ type RunContext struct {
 	// means no adapter bound one yet, which every sessionId naming a
 	// descendant must then refuse rather than guess at.
 	SessionReads any
+	// SessionKeys is session.keys' write path over PaneAccess's descendants
+	// (assistant.PaneKeys, design §6.4, §6.5, Task 9) — bound by the same
+	// adapter alongside PaneAccess and SessionReads, for the identical
+	// layering and nil-safety reasons SessionReads already documents. Nil
+	// means no adapter bound one yet, which session.keys must refuse rather
+	// than guess at.
+	SessionKeys any
 }
 
 // MarkedSessionWindow is one person-marked row span: which item, and which
@@ -429,6 +436,35 @@ var declarations = []Declaration{
 		ResolveResources: resourceSession,
 		Executes:         Dynamic,
 		Params:           "session.read.schema.json",
+		Narrow:           narrowDescendants,
+	},
+	{
+		Name:        "session.keys",
+		Description: "Write one step under a target session.read minted for a worker you spawned (or one of its own workers): a single key, one text atom pasted (never submitted — a newline is refused unless the program has bracketed paste on), or a named menu option (chosen step by step until it is selected, then confirmed). A sequence is not one call: send Down, read again, then send the next key. tokenId comes from that session.read's target, and it is spent at most once.",
+		// MUTATE-DESTRUCTIVE for the same reason workers.answer already is:
+		// an option this call sends can approve a tool call inside the
+		// worker or trust a directory on the person's behalf, and neither
+		// comes back. It is the worst case this one row covers — a plain
+		// key such as Down is far more often reversible — but the
+		// declaration has one effect class for the whole row, exactly as
+		// workers.answer's own row already does for the same reason.
+		//
+		// The DELEGATION effect this write ALSO requires — a session with
+		// no send-input on its chain refuses reachability entirely — is
+		// workers.EffectSendInput, resolved per call by
+		// DescendantPaneAccess.Resolve inside PaneKeys.Send (design §7.1),
+		// never this field: this row's Effect is the CONTENT policy's own
+		// classification, a different lattice (ADR-0020) answering a
+		// different question.
+		Effect:           []content.Effect{content.EffectMutateDestructive},
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 4 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
+		ResolveResources: resourceSession,
+		Executes:         InGo,
+		Params:           "session.keys.schema.json",
 		Narrow:           narrowDescendants,
 	},
 	{

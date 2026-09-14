@@ -2299,18 +2299,23 @@ func New(opts ...Option) (*App, error) {
 	toolAuthorizer.BindPaneAccess(accessHub)
 	descendantPaneReader := newPaneReader(accessHub, paneWatch, paneDrivers)
 	toolAuthorizer.BindSessionReads(descendantPaneReader)
+	// session.keys' write path (design §6.4, §6.5, Task 9), over the SAME
+	// hub and reader session.read already built above — never a second
+	// helper lookup, authority chain or clock.
+	descendantPaneKeys := newPaneKeys(descendantPaneReader, accessHub)
+	toolAuthorizer.BindSessionKeys(descendantPaneKeys)
 	// The kernel's own side of the same binding (design §7.3): a
 	// coordinator run's session.read naming a worker IT spawned reaches
 	// this for its own runID, bound fresh per run as KernelAuthority —
 	// never a value fixed here at start-up, because a run's own authority
 	// interval is its own run.
-	tp.SetPaneAccessBinder(func(runID, sessionID string) (any, any, session.Identity) {
+	tp.SetPaneAccessBinder(func(runID, sessionID string) (any, any, any, session.Identity) {
 		var identity session.Identity
 		if s, err := sess.Get(session.ID(sessionID)); err == nil {
 			identity = s.Identity()
 		}
 		access := accessHub.Bind(sessionID, identity, KernelAuthority{RunID: runID})
-		return access, descendantPaneReader, identity
+		return access, descendantPaneReader, descendantPaneKeys, identity
 	})
 	workerSup.exited = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, e workers.Exit) {
 		if _, err := workerRecord.Exited(ctx, id, l, e); err != nil {

@@ -8,24 +8,18 @@ package app
 //
 // bead: nocx-6q1uh.13
 //
-// FINDING (reported in full in the worker's session report, summarized
-// here): §7.2 describes a per-INTENT barrier — "the owner acknowledges [a
-// bump] only after every older uncommitted intent is terminal", and refuses
-// a stale intent at commit with `access_revoked`, carrying the epoch it was
-// admitted under. Task 7 (this package, internal/workers) has not built
-// session.intent yet (that is Task 9/10), so there is no production type
-// named "intent", no `access_revoked` outcome, and no per-intent epoch
-// anywhere in this package today — confirmed by grep: `access_revoked`
-// appears nowhere in internal/. The tests below model the barrier against
-// the one seam this layer exposes for it (paneHelpers.AccessBump blocking,
-// which IS how the owner is expected to hold a bump open per §7.2's own
-// wording), and record the epoch the hub itself has for a session
-// (aboveFor/setEpoch) as the closest available stand-in for "the epoch an
-// admitted intent carries". Task 7's own plan-listed acceptance criterion
-// for this exact schedule, `TestAnIntentAdmittedBeforeRevocationIsRefusedAt
-// Commit`, was never written in pane_access_test.go — grep confirms no such
-// test exists on this branch. This gap should be revisited once Task 9/10
-// land a real session.intent seam (13b).
+// nocx-6q1uh.9 (Task 9) replaced the approximation this file originally
+// carried, TestRevocationDoesNotReportAckBeforeAHeldIntentIsRefused, with
+// TestAnIntentAdmittedBeforeRevocationIsRefusedAtCommit below, now that
+// PaneKeys and session.intent exist: the held call is Intent itself (the
+// real seam, session_keys.go's commitStep), not AccessBump standing in for
+// it, and the refusal is the real access_revoked IntentRefusal, not an
+// inferred stand-in read off the hub's own epoch bookkeeping. The original
+// finding (§7.2 describes a per-INTENT barrier that this package could not
+// yet exercise directly, because Task 7 predates session.intent) is why
+// that approximation existed in the first place; it is superseded, not
+// merely kept alongside the real thing — one behaviour, one test, per
+// AGENTS.md "Two surfaces may never own the same input".
 
 import (
 	"context"
@@ -35,96 +29,200 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/sessionruntime"
 	"github.com/shady2k/nocx/internal/workers"
 )
 
 // ── item 1: revocation between the authority check and the helper write ───
 
-// heldIntentHelper models §7.2's "the owner applies a bump ahead of queued
-// intents and acknowledges only after every older uncommitted intent is
-// terminal" at the seam this layer has today: AccessBump blocking IS the
-// helper holding an older intent open. entered fires the instant the bump
-// itself reaches the helper (after paneAccessHub.revokeOne has already read
-// the session's recorded epoch via aboveFor); release lets the fake finish
-// that held intent and answer, which is this test's stand-in for "the held
-// intent went terminal".
-type heldIntentHelper struct {
-	entered     chan struct{}
-	enteredOnce sync.Once
-	release     chan struct{}
-	epoch       uint64
-	aboveSeen   uint64 // set atomically: the epoch threshold the held call actually saw
+// intentHeldHelper is the real seam §7.2's barrier is about: Intent (Task
+// 9's session.intent client call, session_keys.go's commitStep) is held
+// open here, and AccessBump — a real revocation's own call — enforces the
+// ordering §7.2 states in its own words: "the owner acknowledges [a bump]
+// only after every older uncommitted intent is terminal". This fake plays
+// the owner's part for both calls at once, which is what lets the test
+// assert the ordering rather than assume it: AccessBump blocks on
+// intentDone, and only Intent's own release closes it — so an AccessBump
+// that returned early would be a bug in the FAKE the test would itself
+// catch by timing out on the wrong branch, not a bug the test takes on
+// faith.
+type intentHeldHelper struct {
+	intentEntered chan struct{}
+	release       chan struct{}
+	intentDone    chan struct{}
+
+	mu       sync.Mutex
+	bumpedTo uint64
+	seenAt   uint64 // the AccessEpoch Intent's own payload carried, set once
 }
 
-func (h *heldIntentHelper) AccessBump(ctx context.Context, sessionID string, above uint64) (uint64, error) {
-	atomic.StoreUint64(&h.aboveSeen, above)
-	h.enteredOnce.Do(func() { close(h.entered) })
+func (h *intentHeldHelper) Intent(ctx context.Context, _ string, p proto.IntentParams) (proto.IntentResult, error) {
+	h.mu.Lock()
+	h.seenAt = p.AccessEpoch
+	h.mu.Unlock()
+	close(h.intentEntered)
 	select {
 	case <-h.release:
 	case <-ctx.Done():
+		return proto.IntentResult{}, ctx.Err()
+	}
+	defer close(h.intentDone)
+	h.mu.Lock()
+	bumped := h.bumpedTo
+	h.mu.Unlock()
+	if bumped != 0 && p.AccessEpoch < bumped {
+		return proto.IntentResult{State: "refused", Refusal: &proto.IntentRefusal{Cause: "access_revoked"}}, nil
+	}
+	return proto.IntentResult{State: "executed", BytesWritten: 1}, nil
+}
+
+func (h *intentHeldHelper) AccessBump(ctx context.Context, _ string, above uint64) (uint64, error) {
+	h.mu.Lock()
+	h.bumpedTo = above + 1
+	h.mu.Unlock()
+	select {
+	case <-h.intentDone:
+	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
-	return h.epoch, nil
+	return above + 1, nil
 }
 
-// Snapshot and Target are not exercised by this fake's own tests (it
-// models AccessBump's hold alone); these satisfy paneHelpers.
-func (h *heldIntentHelper) Snapshot(context.Context, string) (proto.SnapshotResult, error) {
-	return proto.SnapshotResult{}, errors.New("heldIntentHelper: Snapshot not configured")
+// Snapshot, Target and IntentStatus are not exercised by this fake's own
+// test (it models Intent/AccessBump's ordering alone); these satisfy
+// paneHelpers.
+func (h *intentHeldHelper) Snapshot(context.Context, string) (proto.SnapshotResult, error) {
+	return proto.SnapshotResult{}, errors.New("intentHeldHelper: Snapshot not configured")
 }
 
-func (h *heldIntentHelper) Target(context.Context, string, proto.TargetParams) (proto.TargetResult, error) {
-	return proto.TargetResult{}, errors.New("heldIntentHelper: Target not configured")
+func (h *intentHeldHelper) Target(context.Context, string, proto.TargetParams) (proto.TargetResult, error) {
+	return proto.TargetResult{}, errors.New("intentHeldHelper: Target not configured")
 }
 
-// A revocation must not report ack while an intent it needs to outlast is
-// still held: it may only ack once that intent has resolved (refused, in
-// the design's own wording, once session.intent exists). While held, a
-// concurrent reader of the hub's own epoch bookkeeping sees the OLD epoch —
-// the one every intent admitted so far was checked against — never one a
-// still-outstanding bump has applied early.
-func TestRevocationDoesNotReportAckBeforeAHeldIntentIsRefused(t *testing.T) {
+func (h *intentHeldHelper) IntentStatus(context.Context, string, string) (proto.IntentStatusResult, error) {
+	return proto.IntentStatusResult{}, errors.New("intentHeldHelper: IntentStatus not configured")
+}
+
+// fakeKeysReader is the minimal paneKeysReader (session_keys.go) this test
+// needs: Record answers from a fixed table (the one target this test mints
+// by hand, before Send is ever called); Read is not exercised here — the
+// option loop's own tests (Task 9) exercise it directly.
+type fakeKeysReader struct {
+	records map[string]targetRecord
+}
+
+func (r *fakeKeysReader) Record(tokenID string) (targetRecord, bool) {
+	rec, ok := r.records[tokenID]
+	return rec, ok
+}
+
+func (r *fakeKeysReader) Read(context.Context, any, string, *sessionruntime.TargetKind, *sessionruntime.RowRange) (assistant.PaneRead, error) {
+	return assistant.PaneRead{}, errors.New("fakeKeysReader: Read not configured")
+}
+
+// TestAnIntentAdmittedBeforeRevocationIsRefusedAtCommit is Task 7's own
+// plan-listed acceptance criterion for this schedule, never written until
+// Task 9 built session.intent (this file's own finding above, and
+// nocx-6q1uh.13b): a real PaneKeys.Send passes its authority check (the
+// token's record resolves, StillHolds holds), is held at the real
+// session.intent call by intentHeldHelper, a real revocation runs
+// concurrently and bumps the session's access epoch, and only once the held
+// intent has been refused access_revoked by (this fake's model of) the
+// owner's own commit-point check does the revocation itself report ack —
+// never before.
+func TestAnIntentAdmittedBeforeRevocationIsRefusedAtCommit(t *testing.T) {
+	registrar, _ := newGroupTwoCallersRecord()
+	ctx := context.Background()
+	w, err := registrar.Register(ctx, workers.RegisterRequest{
+		CoordinatorSession: "sess-D", Role: workers.RoleWorker,
+		Task: "t", Command: "agent", Environment: "env-local",
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	sessionID := string(w.Participant.ID)
+
 	const oldEpoch = 1
-	helper := &heldIntentHelper{entered: make(chan struct{}), release: make(chan struct{}), epoch: oldEpoch + 1}
-	lookup := &fakeLookup{helpers: map[string]paneHelpers{"sess-w1": helper}}
-	hub := newPaneAccessHub(nil, lookup, nil)
-	hub.setEpoch("sess-w1", oldEpoch)
+	helper := &intentHeldHelper{
+		intentEntered: make(chan struct{}), release: make(chan struct{}), intentDone: make(chan struct{}),
+	}
+	lookup := &fakeLookup{helpers: map[string]paneHelpers{sessionID: helper}}
+	hub := newPaneAccessHub(registrar, lookup, nil)
+	hub.setEpoch(sessionID, oldEpoch)
+	access := hub.Bind("sess-D", session.Identity{InstanceID: "backend-A", Epoch: 1}, EndpointAuthority{AdmissionEpoch: 1})
 
-	doneCh := make(chan map[string]string, 1)
-	go func() { doneCh <- hub.revoke(context.Background(), []string{"sess-w1"}) }()
+	reach, err := access.Resolve(ctx, sessionID, workers.EffectSendInput)
+	if err != nil {
+		t.Fatalf("resolve before revocation: %v", err)
+	}
+	reader := &fakeKeysReader{records: map[string]targetRecord{
+		"tok-1": {
+			Access: access, SessionID: sessionID, Chain: reach.Chain, AccessEpoch: oldEpoch,
+			View: assistant.TargetView{Token: "tok-1-signed", TokenID: "tok-1", Kind: sessionruntime.TargetInput},
+		},
+	}}
+	keys := newPaneKeys(reader, hub)
+
+	type sendOutcome struct {
+		res assistant.KeysResult
+		err error
+	}
+	sendDone := make(chan sendOutcome, 1)
+	go func() {
+		key := assistant.KeyName("Down")
+		res, err := keys.Send(context.Background(), access, assistant.KeysRequest{SessionID: sessionID, TokenID: "tok-1", Key: &key})
+		sendDone <- sendOutcome{res, err}
+	}()
 
 	select {
-	case <-helper.entered:
+	case <-helper.intentEntered:
 	case <-time.After(watchdogBound):
-		t.Fatal("revoke never reached the helper")
+		t.Fatal("Send never reached the helper's Intent — the authority check did not pass, or admission was already closed")
 	}
 
+	revokeDone := make(chan map[string]string, 1)
+	go func() { revokeDone <- hub.revoke(context.Background(), []string{sessionID}) }()
+
 	// Deterministic, not a race: the held intent has not resolved (release
-	// is not yet closed), and revoke's only paths to returning are the
-	// helper answering or a commitBy deadline (none set here).
+	// is not yet closed), and revoke's only path to returning is the
+	// helper's AccessBump, which this fake ties to intentDone.
 	select {
-	case res := <-doneCh:
+	case res := <-revokeDone:
 		t.Fatalf("revoke reported %v before the held intent was refused", res)
 	default:
 	}
-	if got := hub.aboveFor("sess-w1"); got != oldEpoch {
-		t.Fatalf("epoch visible while the intent is held = %d, want the old epoch %d", got, oldEpoch)
+
+	close(helper.release) // the held intent now sees the bumped epoch and refuses
+
+	var outcome sendOutcome
+	select {
+	case outcome = <-sendDone:
+	case <-time.After(watchdogBound):
+		t.Fatal("Send never returned after the held intent was released")
+	}
+	if outcome.err != nil {
+		t.Fatalf("Send: %v", outcome.err)
+	}
+	if outcome.res.State != "refused" || outcome.res.Refusal == nil || outcome.res.Refusal.Cause != "access_revoked" {
+		t.Fatalf("Send result = %+v, want refused/access_revoked", outcome.res)
+	}
+	if outcome.res.BytesWritten != 0 {
+		t.Fatalf("bytesWritten = %d, want 0 for a refusal", outcome.res.BytesWritten)
 	}
 
-	close(helper.release) // the held intent is now terminal
-
 	select {
-	case res := <-doneCh:
-		if res["sess-w1"] != "ack" {
+	case res := <-revokeDone:
+		if res[sessionID] != "ack" {
 			t.Fatalf("confirmedBy = %v, want ack once the held intent resolved", res)
 		}
 	case <-time.After(watchdogBound):
 		t.Fatal("revoke did not return after the held intent resolved")
 	}
-	if got := atomic.LoadUint64(&helper.aboveSeen); got != oldEpoch {
-		t.Fatalf("the bump reaching the helper carried above=%d, want the old epoch %d recorded before it was sent", got, oldEpoch)
+	if got := helper.seenAt; got != oldEpoch {
+		t.Fatalf("the intent that reached the helper carried AccessEpoch=%d, want the OLD epoch %d it was admitted under", got, oldEpoch)
 	}
 }
 

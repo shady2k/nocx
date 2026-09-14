@@ -503,23 +503,24 @@ type effectKernel struct {
 }
 
 // PaneAccessBinder mints, for ONE run, the DescendantPaneAccess and
-// PaneReader-backed SessionReads that run needs to reach the panes of
-// workers IT spawned (design §7.1, §7.3), plus the run's OWN controller
-// identity — the kernel's side of the same triple worker_auth.go's Admit
-// binds for the tool endpoint (ControllerIdentity, PaneAccess, and now
-// SessionReads alongside it). internal/app's composition root supplies the
-// real closure, over its own hub, PaneReader and session registry, called
-// fresh per run with THIS run's own runID (bound as KernelAuthority there)
-// — never a value fixed at start-up, because a run's own authority
-// interval is its own run. paneAccess/sessionReads are `any` for the
-// reason RunContext.PaneAccess already is: this package sits below
-// internal/app and cannot name either concrete type; identity is
-// session.Identity because RunContext.ControllerIdentity already is —
-// both packages import internal/session directly. A nil binder (a build
-// before Task 8's wiring, or a caller that never set one) leaves
-// everything zero, which every reader already treats as "no descendant
-// authority granted".
-type PaneAccessBinder func(runID, sessionID string) (paneAccess any, sessionReads any, identity session.Identity)
+// PaneReader-backed SessionReads/PaneKeys-backed SessionKeys that run needs
+// to reach the panes of workers IT spawned (design §7.1, §7.3, §6.4-§6.5),
+// plus the run's OWN controller identity — the kernel's side of the same
+// quadruple worker_auth.go's Admit binds for the tool endpoint
+// (ControllerIdentity, PaneAccess, SessionReads, and now SessionKeys
+// alongside them, Task 9). internal/app's composition root supplies the
+// real closure, over its own hub, PaneReader, PaneKeys and session
+// registry, called fresh per run with THIS run's own runID (bound as
+// KernelAuthority there) — never a value fixed at start-up, because a run's
+// own authority interval is its own run. paneAccess/sessionReads/
+// sessionKeys are `any` for the reason RunContext.PaneAccess already is:
+// this package sits below internal/app and cannot name any of their
+// concrete types; identity is session.Identity because
+// RunContext.ControllerIdentity already is — both packages import
+// internal/session directly. A nil binder (a build before Task 8's wiring,
+// or a caller that never set one) leaves everything zero, which every
+// reader already treats as "no descendant authority granted".
+type PaneAccessBinder func(runID, sessionID string) (paneAccess any, sessionReads any, sessionKeys any, identity session.Identity)
 
 // newEffectKernel builds the pipeline for one run. A schema that does
 // not compile is a broken declaration — the run fails here, loudly, rather
@@ -563,10 +564,10 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 	// which every reader of them must already treat as "no descendant
 	// authority granted" — the same safe default PaneAccess already
 	// documents.
-	var paneAccess, sessionReads any
+	var paneAccess, sessionReads, sessionKeys any
 	var controllerIdentity session.Identity
 	if runSeams.paneAccessBinder != nil {
-		paneAccess, sessionReads, controllerIdentity = runSeams.paneAccessBinder(runID, sessionID)
+		paneAccess, sessionReads, sessionKeys, controllerIdentity = runSeams.paneAccessBinder(runID, sessionID)
 	}
 	m := &effectKernel{
 		log:         logger,
@@ -588,6 +589,7 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 			ControllerIdentity:    controllerIdentity,
 			PaneAccess:            paneAccess,
 			SessionReads:          sessionReads,
+			SessionKeys:           sessionKeys,
 		},
 		resolutions: make(map[string]*skill.Resolution),
 		validators:  make(map[string]*jsonschema.Schema, len(registry.All())),

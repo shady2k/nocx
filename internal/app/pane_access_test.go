@@ -63,6 +63,14 @@ func (h *fakeHelper) Target(context.Context, string, proto.TargetParams) (proto.
 	return proto.TargetResult{}, errors.New("fakeHelper: Target not configured")
 }
 
+func (h *fakeHelper) Intent(context.Context, string, proto.IntentParams) (proto.IntentResult, error) {
+	return proto.IntentResult{}, errors.New("fakeHelper: Intent not configured")
+}
+
+func (h *fakeHelper) IntentStatus(context.Context, string, string) (proto.IntentStatusResult, error) {
+	return proto.IntentStatusResult{}, errors.New("fakeHelper: IntentStatus not configured")
+}
+
 // fakeLookup answers HelperFor from a fixed table, for a session whose
 // helper is already known to the test rather than discovered.
 type fakeLookup struct {

@@ -190,6 +190,15 @@ func (h helperPaneClient) Target(ctx context.Context, _ string, p proto.TargetPa
 	return h.client.Target(ctx, p)
 }
 
+func (h helperPaneClient) Intent(ctx context.Context, _ string, p proto.IntentParams) (proto.IntentResult, error) {
+	p.Session = proto.HostSessionID{Generation: proto.GenerationID(h.id.Generation), Session: h.id.Session}
+	return h.client.Intent(ctx, p)
+}
+
+func (h helperPaneClient) IntentStatus(ctx context.Context, _ string, tokenID string) (proto.IntentStatusResult, error) {
+	return h.client.IntentStatus(ctx, h.id, tokenID)
+}
+
 // paneReplay is the calibration replay, over the LOCAL helper.
 //
 // It is the local daemon and not the pane's own helper — a stored set belongs

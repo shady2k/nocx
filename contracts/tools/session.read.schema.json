@@ -185,11 +185,11 @@
           "properties": {
             "token": {
               "type": "string",
-              "description": "The signed target, opaque to you: present it back to session.keys or session.message unchanged."
+              "description": "The signed target itself, opaque to you. session.keys does not take this field — it takes tokenId below, which names the same target for it without you handling the signature."
             },
             "tokenId": {
               "type": "string",
-              "description": "Names the same target without its signature."
+              "description": "Names the same target without its signature. Pass this back as session.keys' tokenId to spend it."
             },
             "kind": {
               "type": "string",

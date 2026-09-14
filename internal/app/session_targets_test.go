@@ -96,6 +96,14 @@ func (h *fakePaneReaderHelper) AccessBump(context.Context, string, uint64) (uint
 	return 0, errors.New("fakePaneReaderHelper: AccessBump not configured")
 }
 
+func (h *fakePaneReaderHelper) Intent(context.Context, string, proto.IntentParams) (proto.IntentResult, error) {
+	return proto.IntentResult{}, errors.New("fakePaneReaderHelper: Intent not configured")
+}
+
+func (h *fakePaneReaderHelper) IntentStatus(context.Context, string, string) (proto.IntentStatusResult, error) {
+	return proto.IntentStatusResult{}, errors.New("fakePaneReaderHelper: IntentStatus not configured")
+}
+
 // testDescendant registers one participant under controller "sess-C" and
 // returns its session id, a hub bound to a lookup that answers helper for
 // it, and the access Resolve is exercised through.

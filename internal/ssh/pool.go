@@ -209,9 +209,18 @@ func (k poolKey) jumpRouteKey() string {
 }
 
 // refCount tracks how many tabs (channels) reference a pooled connection.
-// Guarded by the pool mutex.
+// n is guarded by the pool mutex. detachCount and closeReason are the
+// detached-writer bookkeeping a helper's SSH sessions need (spec §5.7,
+// nocx-6q1uh.3): detachCount (also guarded by the pool mutex) is how many
+// detached writers THIS connection currently holds, given back to the
+// pool's own live gauge when the connection actually closes, whichever way
+// that happens; closeReason is set once, by CloseTainted, before the close
+// it names, so every handle sharing this connection — a sibling channel —
+// can read back why its own session ended.
 type refCount struct {
-	n int
+	n           int
+	detachCount int
+	closeReason atomic.Value // string, unset until CloseTainted
 }
 
 // poolHandle is a reference to a pooled connection, returned by Acquire.
@@ -233,6 +242,19 @@ type poolHandle struct {
 	releaseOnce sync.Once
 }
 
+// closeReason is the name CloseTainted gave this handle's connection when it
+// closed it (spec §5.7's detached-writer cap), or "" for a connection that
+// has not been (or was not) closed that way. Every handle sharing the
+// connection reads the same value, because they share the *refCount it is
+// stored on.
+func (h *poolHandle) closeReason() string {
+	if h == nil || h.ref == nil {
+		return ""
+	}
+	v, _ := h.ref.closeReason.Load().(string)
+	return v
+}
+
 // ConnPool is a ref-counted ssh.Client connection pool (AD-4). Channels
 // multiplex over one connection per poolKey; the connection closes when the
 // last tab releases its reference. The pool wraps the dial logic: on a cache
@@ -247,7 +269,29 @@ type ConnPool struct {
 	// dial is the connection factory (injected for testing; production sets
 	// it to a function that calls gossh.Dial).
 	dial func(key poolKey) (sshClientConn, error)
+
+	// detachedWriters is how many detached writers this pool currently
+	// holds, summed across every connection (spec §5.7's maxDetachedWriters,
+	// "counted per helper process" — one ConnPool serves the whole helper
+	// for its life, which is what makes this pool the process-wide gauge).
+	// Guarded by mu.
+	detachedWriters int
 }
+
+// maxDetachedWriters bounds how many writers this pool's connections
+// currently hold detached (spec §5.7): a fail-closed cap on one helper
+// process's worst case, since golang.org/x/crypto/ssh gives no per-channel
+// interrupt and a write stuck behind a zero-sized window can only ever be
+// abandoned, never cancelled. Each one still holds a goroutine and a
+// connection open until its peer lets it go.
+const maxDetachedWriters = 8
+
+// ReasonDetachedWriterCap is why CloseTainted closes a connection when the
+// cap above is already spent — the one name both the pool's own bookkeeping
+// and a sibling channel reading it back (poolHandle.closeReason,
+// sshsvc.ShellChannel via *PooledConn) use, so there is exactly one spelling
+// of this cause (AGENTS.md, "Look for the existing answer").
+const ReasonDetachedWriterCap = "detached_writer_cap"
 
 // poolEntry holds a connection and its ref count.
 type poolEntry struct {
@@ -414,6 +458,11 @@ func (p *ConnPool) Release(h *poolHandle) {
 				delete(p.pool, h.key)
 			}
 			toClose = h.conn
+			// Every detached writer this connection ever held ends with it
+			// (mux teardown unblocks every remaining channel), so the cap's
+			// live gauge gives those slots back here rather than never.
+			p.detachedWriters -= h.ref.detachCount
+			h.ref.detachCount = 0
 			p.log.Debug("pool connection closed (last ref)",
 				"host", h.key.host, "user", h.key.user, "port", h.key.port)
 		}
@@ -425,6 +474,59 @@ func (p *ConnPool) Release(h *poolHandle) {
 	if toClose != nil {
 		_ = toClose.Close()
 	}
+}
+
+// Taint marks h's connection so Acquire never hands it to a new caller again
+// (spec §5.7's first detach): removing it from the pool map is enough — an
+// existing handle's Release still finds it by h.ref/h.conn regardless, so
+// siblings already holding a reference are unaffected and the connection
+// closes exactly when the last of them releases, as any entry at ref zero
+// does. h's own reference is untouched; the caller still owns it and must
+// eventually Release it like any other.
+//
+// Taint also records one more detached writer against this pool
+// (maxDetachedWriters, "per helper process"). Once the pool already holds
+// the cap, Taint escalates instead: it closes h's connection AT ONCE
+// (CloseTainted, ReasonDetachedWriterCap) rather than waiting for the last
+// release — the cap is fail-closed rather than a leak.
+func (p *ConnPool) Taint(h *poolHandle) {
+	if h == nil || h.pool != p {
+		return
+	}
+	p.mu.Lock()
+	h.ref.detachCount++
+	p.detachedWriters++
+	exceeded := p.detachedWriters > maxDetachedWriters
+	if !exceeded {
+		if entry, ok := p.pool[h.key]; ok && entry.ref == h.ref {
+			delete(p.pool, h.key)
+		}
+	}
+	p.mu.Unlock()
+	if exceeded {
+		p.CloseTainted(h, ReasonDetachedWriterCap)
+	}
+}
+
+// CloseTainted closes h's connection NOW, ending every sibling channel on it
+// rather than waiting for the last release. reason is recorded on the
+// shared refCount BEFORE the close, so any handle sharing this connection —
+// a sibling — reads it back through poolHandle.closeReason once its own
+// Wait/Read notices the connection is gone.
+func (p *ConnPool) CloseTainted(h *poolHandle, reason string) {
+	if h == nil || h.pool != p {
+		return
+	}
+	h.ref.closeReason.Store(reason)
+	p.mu.Lock()
+	if entry, ok := p.pool[h.key]; ok && entry.ref == h.ref {
+		delete(p.pool, h.key)
+	}
+	p.detachedWriters -= h.ref.detachCount
+	h.ref.detachCount = 0
+	p.mu.Unlock()
+	p.log.Warn("closing a tainted ssh connection", "host", h.key.host, "user", h.key.user, "port", h.key.port, "reason", reason)
+	_ = h.conn.Close()
 }
 
 // CloseAll closes all pooled connections regardless of ref count.

@@ -155,6 +155,38 @@ type PooledConn struct {
 	fingerprint string
 	release     func()
 	once        sync.Once
+
+	// taint and taintReason bridge to the owning pool's own bookkeeping
+	// (ConnPool.Taint / poolHandle.closeReason, spec §5.7, nocx-6q1uh.3).
+	// Both are nil for a connection dialed outside the pool (DialAuth):
+	// there is no pool entry to taint, and Taint is then a documented no-op
+	// rather than a caller error — a probe never carries a writer this
+	// mechanism exists for.
+	taint       func()
+	taintReason func() string
+}
+
+// Taint marks this borrowed connection so the pool hands it to no new
+// caller again (spec §5.7's first detach): existing siblings — including
+// this reference — run to their own end, and it closes when the last of
+// them releases, or at once past the helper's detached-writer cap. A no-op
+// for a connection this package dialed outside the pool.
+func (p *PooledConn) Taint() {
+	if p == nil || p.taint == nil {
+		return
+	}
+	p.taint()
+}
+
+// TaintReason is the name this connection was closed under by the pool's
+// cap (ReasonDetachedWriterCap), or "" otherwise — read by a sibling channel
+// to report why ITS OWN session ended (spec §5.7: "the sibling sessions on
+// that connection report that reason on exit").
+func (p *PooledConn) TaintReason() string {
+	if p == nil || p.taintReason == nil {
+		return ""
+	}
+	return p.taintReason()
 }
 
 // Fingerprint is the SHA256 fingerprint of the TARGET host's public key as
@@ -458,5 +490,7 @@ func (rc *RealClient) borrowPooled(handle *poolHandle) (*PooledConn, error) {
 		client:      gclient,
 		fingerprint: client.HostKeyFingerprint(),
 		release:     func() { rc.dial.pool.Release(handle) },
+		taint:       func() { rc.dial.pool.Taint(handle) },
+		taintReason: handle.closeReason,
 	}, nil
 }

@@ -127,6 +127,17 @@ type ShellChannel struct {
 	closeOne sync.Once
 }
 
+// ErrDetachedWriterCap is why a sibling channel's session ended when the
+// helper's detached-writer cap was already spent (spec §5.7,
+// nocx-6q1uh.3): its own connection was closed at once rather than at its
+// last release, because ANOTHER channel on it had a write stuck behind a
+// zero-sized window and the helper already held maxDetachedWriters such
+// writers. wait recognises internal/ssh's ReasonDetachedWriterCap (read
+// through the pooled connection's TaintReason) and wraps it with this
+// sentinel so a caller can tell this apart from an ordinary transport
+// failure.
+var ErrDetachedWriterCap = errors.New("sshsvc: detached_writer_cap")
+
 // ErrShellClosed is what a read or write on a channel that has ended returns.
 // It is not ErrChannelClosed (that is the proxied plane's own sentinel, and
 // the two are read by different callers); it is here so a session's failure
@@ -370,6 +381,15 @@ func sshSignalName(sig syscall.Signal) (string, bool) {
 	return name, ok
 }
 
+// Taint marks this channel's pooled connection so the pool hands it to no
+// new channel again (spec §5.7's first detach, nocx-6q1uh.3): existing
+// siblings — including this one — run to their own end, and it closes when
+// the last of them releases, or at once past the helper's detached-writer
+// cap (internal/ssh's ConnPool.Taint).
+func (c *ShellChannel) Taint() {
+	c.pool.Taint()
+}
+
 // Done closes when the far command has ended and WaitErr has been recorded.
 // The ordering is internal/pty's — status first, then the close — so observing
 // Done is enough to read it.
@@ -384,8 +404,22 @@ func (c *ShellChannel) WaitErr() (error, bool) {
 }
 
 // wait records the far command's end once.
+//
+// A sibling whose OWN write never stuck can still have its channel ended by
+// another channel's detach exceeding the helper's cap (spec §5.7): its
+// connection closes out from under it, sess.Wait returns whatever the
+// mux teardown produces, and this is where that gets renamed to the reason
+// it actually was, read back from the pooled connection every handle
+// sharing it can see.
 func (c *ShellChannel) wait() {
 	err := c.sess.Wait()
+	if c.pool.TaintReason() == ssh.ReasonDetachedWriterCap {
+		if err != nil {
+			err = fmt.Errorf("%w: %w", ErrDetachedWriterCap, err)
+		} else {
+			err = fmt.Errorf("%w: the connection closed clean but under the cap", ErrDetachedWriterCap)
+		}
+	}
 	c.exitMu.Lock()
 	c.exitErr = shellExit(err)
 	c.exitSet = true

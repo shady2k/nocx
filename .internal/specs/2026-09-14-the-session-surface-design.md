@@ -2,379 +2,483 @@
 
 - **Epic:** `nocx-6q1uh`. **Brainstorm:** `nocx-0j000`.
 - **Brief this answers:** `.internal/specs/2026-09-11-coordinator-surface-after-herdr-design.md`
-  §7 (items 1–11, from four codex reviews). Every item is answered in §10 below.
+  §7 (items 1–11, from four codex reviews). Every item is answered in §11.
 - **Stands on:** epic `nocx-ygxjv` (closed 2026-09-14): one emulator, in the helper's session
   runtime, beside the PTY (ADR-0066).
-- **Status:** sections 1–3 approved by the owner on 2026-09-14; sections 4–9 written by the author
-  on the owner's instruction and sent to codex review.
+- **Revision 2** (2026-09-14): answers codex's first review of revision 1 (`357f62e3`), eighteen
+  findings, all verified against the tree; dispositions in §14. Two of them were the owner's to
+  decide and were decided (§3, decisions 6–8).
 
 ## 1. What a user can do that they could not
 
-Let a coordinator, and nocx's own assistant, read a pane, send it any keys, and message an agent
-in it at its next free prompt or during its turn, through one `session.*` surface, with nothing
-written onto a screen the caller did not see.
+Let a coordinator, and nocx's own assistant, read a pane, send it keys, and message an agent in it
+at its next free prompt or during its turn, through one `session.*` surface, with nothing written
+onto a screen the caller did not see.
 
-**End-to-end check (from the epic, kept):** through the real MCP bridge and tool endpoint, a
-coordinator reads a held mock-agent worker with `session.read`, answers a permission menu with
-`session.keys` naming the option, sends `session.message when=now` during a turn and `when=free`
-after it, while another of its calls is still in flight; a key conditioned on a menu that has
-since changed writes zero bytes to the PTY.
+**End-to-end checks (rule 2), two, because there are two callers:**
+
+1. **Coordinator:** through the real MCP bridge and tool endpoint, a coordinator reads a held
+   mock-agent worker with `session.read`, answers a permission menu with `session.keys option`,
+   sends `session.message when=now` during a turn and `when=free` after it, while another of its
+   calls is in flight; a key whose target menu has since changed writes zero bytes to the PTY.
+2. **Built-in assistant:** in a run started from one pane, the assistant reads a **different,
+   non-agent** pane in **another workspace**, proposes a key, the approval is asked, the person
+   permits, the key reaches the program; a second proposal whose region changed during the ask is
+   refused with the region as it now reads, and nothing is written.
 
 ## 2. Binding documents this crosses
 
-| Document                                            | What it decided                                                                                                                                                                                                                                                       | What this design does                                                                                                                                                                                                                                                                           |
-| --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **AD-6** amendment (`docs/architecture.md:159-174`) | A grid decides two powers; power (1) has two cases: text into positively identified `free_text`, keys from a menu's closed set, frame re-read immediately before the write. ADR-0066 moved the emulator to the backend; ADR-0064's second case and its re-read stand. | **Amended** (§9): power (1) gains conditional input under a named target, any key, input during a turn, and — for the built-in assistant only — any pane under a `region` target. The re-read becomes a revalidation inside the runtime at execution.                                           |
-| **AD-1**                                            | Raw bytes on the data plane, JSON-RPC on the control plane; ADR-0066 amends the inward direction to intent.                                                                                                                                                           | Keys and text are intents encoded by the runtime against the terminal's modes; no raw PTY bytes cross JSON-RPC.                                                                                                                                                                                 |
-| **AD-7**, **AD-8**                                  | Server-authoritative sessions; interfaces at one composition root.                                                                                                                                                                                                    | One `SessionAccess` capability interface with two implementations (§6), wired in `internal/app`.                                                                                                                                                                                                |
-| **ADR-0020**                                        | Authority granted per run; which resources a tool reaches is the capability's answer.                                                                                                                                                                                 | Kept: the tool never decides which sessions it reaches.                                                                                                                                                                                                                                         |
-| **ADR-0029** (Proposed)                             | A keystroke is bound to what makes it meaningful, not to the frame; the final gate is local and synchronous; a scoped diff answers the common case.                                                                                                                   | **Superseded** by the new ADR (§9): the binding is a caller-named region checked by the runtime under its own lock. Its rules 1 and 4 survive as that mechanism; its rule 5 (model-authored conditions) is not adopted — a changed region is returned to the model, which re-reads and decides. |
-| **ADR-0063**                                        | Typing is refused on evidence against the rule.                                                                                                                                                                                                                       | Kept for agent targets.                                                                                                                                                                                                                                                                         |
-| **ADR-0064** (Accepted)                             | §1 closed key set, option named by its text; §2 reads by the holding session; §4 what it may never do.                                                                                                                                                                | §1's closed key set **superseded** by the new ADR. Option-by-text survives as `session.keys option`. §2 kept. §4 re-read and restated in the new ADR.                                                                                                                                           |
-| **ADR-0066** (Accepted)                             | The runtime owns screen, modes, replies and the order input is admitted in; freshness is an admission question.                                                                                                                                                       | Implemented: `sessionruntime.Admit`/`Execute` get their first production caller.                                                                                                                                                                                                                |
-| 2026-09-11 design §4 decisions 5–10                 | `workers.wait` and the drop go (parts 2–3); scope of rights; two deliveries; any key; one `session.*` surface.                                                                                                                                                        | Implemented for 6–7, 9–10. Decision 5 is not this epic's (`nocx-luqz9`).                                                                                                                                                                                                                        |
-| 2026-09-03 mesh design M1/M2                        | Talk is mesh, act is star.                                                                                                                                                                                                                                            | Unchanged: only a coordinator's own workers and the assistant's granted panes are reached. Neighbours are `nocx-i8umd`.                                                                                                                                                                         |
-| `AGENTS.md` testing rules 1–5                       | User-path tests, a happy path, failure intervals, independent tests, the wire in the contract.                                                                                                                                                                        | §8.                                                                                                                                                                                                                                                                                             |
+| Document                                            | What it decided                                                                                                                                                                                                                                                               | What this design does                                                                                                                                                                                                                                       |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **AD-6** amendment (`docs/architecture.md:159-174`) | A grid decides two powers; power (1) has two cases (text into positively identified `free_text`; keys from a menu's closed set); the frame is re-read immediately before the write. ADR-0066 moved the emulator to the backend; ADR-0064's second case and its re-read stand. | **Amended** (§10): power (1) is conditional input under a helper-minted target — one key or one text atom per target, input during a turn, and for the built-in assistant any pane. The re-read becomes validation by the session's I/O owner at execution. |
+| **AD-1**                                            | Raw bytes on the data plane, JSON-RPC on the control plane; ADR-0066 amends inward input to intent.                                                                                                                                                                           | Keys and text are intents encoded by the runtime against the terminal's modes.                                                                                                                                                                              |
+| **AD-7**, **AD-8**                                  | Server-authoritative sessions; interfaces at one composition root.                                                                                                                                                                                                            | Two capability types bound by their adapters (§6.1), wired in `internal/app`.                                                                                                                                                                               |
+| **ADR-0020**                                        | Authority granted per run; the capability decides which resources a tool reaches; policy cannot widen the run fence.                                                                                                                                                          | **Changed for the built-in assistant** by owner decision 6: its run capability reaches every pane (§6.2). The fence is widened deliberately, in the ADR (§10), not worked around.                                                                           |
+| **ADR-0029** (Proposed)                             | A keystroke is bound to what makes it meaningful; the final gate is local and synchronous; a scoped diff answers the common case.                                                                                                                                             | **Superseded** (§10). Rule 1 (local synchronous gate) and rule 4 (scoped comparison) become the target mechanism; rule 5 (model-authored conditions) is not adopted — a changed target returns to the model.                                                |
+| **ADR-0063**                                        | Typing refused on evidence against the rule.                                                                                                                                                                                                                                  | Kept for agent targets.                                                                                                                                                                                                                                     |
+| **ADR-0064** (Accepted)                             | §1 closed key set, option named by its text; §2 reads by the holding session; §4 what it may never do.                                                                                                                                                                        | §1 **superseded**; option-by-text survives as `session.keys option`. §2 kept and extended to descendants (owner decision 7). §4 restated in the new ADR where it survives.                                                                                  |
+| **ADR-0066** (Accepted)                             | The runtime owns screen, modes, replies and admission order; freshness is an admission question.                                                                                                                                                                              | Implemented: admission gets a production caller and a single I/O owner (§4.4).                                                                                                                                                                              |
+| 2026-09-11 design §4 decisions 5–10                 | `workers.wait`/drop go; scope of rights; two deliveries; any key; one `session.*` surface.                                                                                                                                                                                    | 6 (as restated by owner decision 7), 7, 9, 10 here. 5 is `nocx-luqz9`.                                                                                                                                                                                      |
+| mesh design M1/M2                                   | Talk is mesh, act is star.                                                                                                                                                                                                                                                    | Unchanged: act reaches descendants; neighbours only talk (`nocx-i8umd`).                                                                                                                                                                                    |
+| `AGENTS.md` testing rules 1–5                       | User-path tests, happy path per epic, failure intervals, independent tests, the wire in the contract.                                                                                                                                                                         | §12.                                                                                                                                                                                                                                                        |
 
 ## 3. Owner decisions (2026-09-14)
 
-1. **Any pane for the assistant.** The built-in assistant may write keys and text into any pane,
-   not only one where nocx recognised an agent. On a pane with no recognised agent the condition is
-   "the region I saw is unchanged".
-2. **Approval is the existing policy.** The user's permissions decide ask, permit or refuse, as for
-   every other tool. A rule may be scoped by the program running in the pane — e.g. `vim` permitted,
-   another program refused.
-3. **A changed screen is a refusal returned to the model.** Nothing is written; the model re-reads
-   the screen and decides whether to retry.
-4. **The condition is checked inside the helper runtime**, not by a coordinator-side re-read and not
-   by a classifier moved into the helper.
-5. Sections 1–3 of this design (§4, §5, §7) are approved as written.
+1. **The assistant writes into any kind of pane**, not only a recognised agent's. On a pane with no
+   recognised agent the condition is "the region I saw is unchanged".
+2. **Approval is the existing policy.** The user's permissions decide ask, permit or refuse. A rule
+   may be scoped by the program running in the pane.
+3. **A changed screen is a refusal returned to the model**, which re-reads and decides whether to
+   retry.
+4. **The condition is checked in the helper**, not by a coordinator-side re-read and not by a
+   classifier moved into the helper.
+5. §4, §5 and §7 of revision 1 approved in intent.
+6. **The built-in assistant is not bounded by pane or workspace.** It may work with any pane in any
+   workspace; policy decides what it may do in each.
+7. **An orchestrated agent** (a coordinator, or any agent nocx orchestrates) **acts on the panes of
+   its descendants** and only talks to its neighbours.
+8. **Text into a pane whose echo is off or unknowable always asks** (every SSH pane is unknowable).
+   No standing permit covers it. Keys that are not text are unaffected. A coordinator acting on its
+   own descendants is unaffected.
 
-## 4. Architecture (approved)
+## 4. Architecture
 
-### 4.1 Three tools, both callers
+### 4.1 Three tools, two callers
 
-- `session.read` — a pane's screen and a **target**: what the caller saw.
-- `session.keys` — keys, text chunks, or a menu option by its text, conditioned on a target.
+- `session.read` — a pane's screen and, on request, a **target**.
+- `session.keys` — one key, one text atom, or a menu option by its text, under a target.
 - `session.message` — a message to an agent, at its next free prompt or during its turn.
 
-`workers.screen` and `workers.answer` are removed (§9). The coordinator's dispatcher allowlist
-(`internal/assistant/dispatch.go:156-174`) gains these three; the endpoint's `tools.catalogue`
-(`internal/toolendpoint/catalogue.go:29`) is made to offer exactly what that dispatcher accepts —
-today it offers `session.*` from the grant and then refuses the call.
+`workers.screen` and `workers.answer` are removed (§10). The coordinator's dispatcher allowlist
+(`internal/assistant/dispatch.go:156-174`) gains the three; the endpoint's `tools.catalogue`
+(`internal/toolendpoint/catalogue.go:29`) and dispatch consume the **same bound capability**
+(§6.1), so the catalogue offers exactly what dispatch accepts.
 
-### 4.2 The target
+### 4.2 The target is minted by the helper, not authored by the caller
 
-Returned by `session.read`, passed back verbatim by the caller. Fields:
+A caller cannot be trusted to hand back what it read: tool arguments are model-authored JSON.
+So the target is an **opaque token minted by the helper** from the frame it holds.
 
-- `sessionId`, the session **incarnation**, and for an enrolled agent the **enrolment incarnation**;
-- `kind`: `menu` | `input` | `working` | `region`;
-- `rows`: `[first, last]` in the visible screen;
-- `digest`: SHA-256 of the normalised text of those rows (§4.4);
-- `revision`: the runtime revision the reading was taken at (informational; never compared for
-  equality — a spinner advances it every tick);
-- for `menu`: `question`, `options[]`, `selected` (as drawn).
+`session.read { sessionId, target?: { kind, rows? } }` → the coordinator asks the helper's new
+`session.target` operation to mint a token over the chosen rows. The helper computes a
+**structural digest, version 1**, over:
 
-Who computes the rows:
+- session incarnation, active buffer (normal/alternate and its instance), geometry (cols × rows);
+- for each row in the range: every cell's grapheme, width and the style attributes the emulator
+  holds (`internal/emulator/emulator.go:139-159`), and the row's wrap flag;
+- for `input` and `message` targets: cursor position and visibility.
 
-- **Agent panes:** the coordinator, from the agent rule (§5.3). `menu` covers the question through
-  the last option, selection marker included. `input` and `working` cover the input box.
-- **Any other pane (`region`):** the whole visible screen by default; the caller may narrow it by
-  passing `rows` to `session.read`. Without narrowing, a status-line clock refuses every write,
-  which is the correct answer to a caller who claims to rely on the whole screen.
+Token = `{ tokenId, sessionId, incarnation, buffer, geometry, rows, digest, programIdentity?,
+echo, mintedAt, expiresAt }`, authenticated with HMAC-SHA256 under a key the helper draws per
+session incarnation and never exports. Default lifetime 60 s. The model receives the token string
+plus readable fields (the region text, and for `menu` the question, options and selected option).
 
-A `region` target is also accepted on an agent pane (a coordinator pressing `Ctrl+O`); the
-`menu`/`input`/`working` kinds add a coordinator-side classification check before admission.
+The coordinator keeps a **server-side record** keyed by `tokenId`: the bound capability that asked
+for it (§6.1), the target kind, the menu identity, the participant's enrolment incarnation, and any
+approval tied to it. A token presented by a different capability than minted it is refused.
 
-### 4.3 The write: one helper operation over the runtime
+**Kinds and rows:**
 
-A new helper session-service operation, `session.intent`, admits and executes one
-`sessionruntime.Intent` synchronously and returns its terminal state:
+- `menu`, `input`, `working` — agent panes only; the coordinator chooses the rows from the agent
+  rule (§5.3) and records its classification.
+- `region` — any pane; the whole visible screen unless the caller names `rows`.
+
+**Incomparable is a refusal:** a buffer switch, resize or incarnation change between mint and
+execution refuses with `incomparable`, never compares row text that happens to match.
+
+### 4.3 The write: `session.intent`
 
 ```
-request:  { sessionId, incarnation, principal, kind: key|text|paste,
-            payload, precondition: { rows: [a,b], digest } }
-response: { state: executed|refused|failed|cancelled,
-            revisionAfter,            // runtime revision immediately after the write
-            refusal?: { cause: stale_region|stale_incarnation|completeness_unknown|
-                               cannot_encode|write_failed,
-                        regionNow: string } }
+request:  { token, principal, accessEpoch, kind: key|text, payload }
+response: { state: executed | refused | failed_partial | delivery_unknown | cancelled,
+            bytesWritten, fenceAfter,
+            refusal?: { cause: stale_target | incomparable | expired | forged |
+                               completeness_unknown | cannot_encode | would_submit |
+                               program_changed | echo_off | busy,
+                        regionNow } }
 ```
 
-`sessionruntime.Precondition` gains `Rows`; `Execute` compares the digest of those rows, not of
-`screenTextLocked()`. Under the runtime lock it (1) checks incarnation, completeness and the region
-digest, (2) encodes the intent against the current modes (DECCKM, bracketed paste), (3) writes, or
-refuses with nothing written. `revisionAfter` is taken under the same lock, so "frames after my
-write" is expressible (`revision > revisionAfter`).
+The helper verifies the token's MAC and expiry, derives the precondition from the token (never
+from the request), and hands the intent to the session's I/O owner (§4.4). A `refused` intent wrote
+nothing. `failed_partial` carries `bytesWritten` (`0 < n < len`); `delivery_unknown` is a write
+whose outcome the writer cannot report. Neither is ever reported as a refusal
+(`internal/sessionruntime/runtime.go:567` today discards `n`; that changes).
 
-### 4.4 Normalisation
+### 4.4 One I/O owner per session
 
-One rule for both callers and for the digest: each row is the runtime's cell text with trailing
-blanks trimmed; wide-character continuation cells are dropped; rows joined with `\n`. The worker
-path's right-trim is kept; the renderer's blank-keeping read path is deleted with the renderer
-source (§5.5).
+Revision 1 proposed taking the runtime mutex for client frames. That would deadlock: the runtime
+already holds `Session.mu` across a PTY write (`internal/sessionruntime/runtime.go:88-96`) while the
+pump must take it to ingest (`internal/helper/session/session.go:341-346`), so a program flooding
+output without reading input stalls — a defect in the tree today, filed as `nocx-6q1uh.1`.
 
-### 4.5 One writer
+Instead each helper session gets **one I/O owner goroutine** that alone orders input and output:
 
-Frames from an attached client (a person typing) today reach the PTY through
-`hostSession.write` → `proc.Write` (`internal/helper/session/session.go:901-921`), under the host
-session's lock, while the runtime writes its replies under its own. Both go through the runtime's
-write lock after this epic, so an intent's check-and-write is atomic against the program's output
-being ingested **and** against every other input. Client input does not become an intent here
-(that is `nocx-zg3k3`); it only takes the same lock.
+- a **reader goroutine** does the blocking `proc.Read` and hands chunks to the owner over a channel;
+- a **writer goroutine** does the blocking `proc.Write` of chunks the owner hands it and reports
+  completions (`n`, error) back; for an SSH process the same shape covers a channel whose window is
+  exhausted;
+- the owner `select`s over chunks, intents, client frames, runtime replies and write completions.
+  It takes the runtime mutex **only** to ingest a chunk or to validate a precondition — never
+  across I/O.
 
-**The race that remains, stated:** the program may redraw between our write and the moment it
-reads its input. No design removes it; the region check makes the window the program's own
-scheduling latency rather than a network round trip plus a queue.
+**Executing an intent:** the owner first drains every chunk already delivered by the reader and
+ingests it; then validates token, incarnation, completeness, program identity and echo, and the
+digest, under the runtime mutex; then enqueues the encoded bytes to the writer and records the
+intent's **fence** (a per-session monotonic input sequence). Client frames and runtime replies go
+through the same queue and receive fences too, so nothing interleaves inside an intent's bytes.
 
-## 5. Keys, targets and menus (approved)
+**Output fence:** every ingested chunk is tagged with the highest fence whose bytes the writer had
+**completed** when the reader delivered it; frames carry `inputFence`. "Output after my write" is
+`inputFence ≥ fenceAfter`.
+
+**Backpressure:** the writer queue is bounded. When full, new intents are refused `busy`; client
+frames keep today's lease backpressure; runtime replies are never dropped and count against a
+separate small reserve. The owner never blocks on the writer, so the reader is always drained.
+
+**The race that remains, stated:** a program may emit output after it read our input but before
+the reader delivers it, or before it has processed the input at all; the fence then says "after"
+for bytes the program produced "before" it acted on us. So echo is confirmed by **content in a
+fenced frame**, never by the fence alone, and the design claims no more than that.
+
+### 4.5 Normalisation for display
+
+The digest is structural (§4.2). The **text** returned to a model and shown in an approval is: each
+row's graphemes with trailing blanks trimmed, continuation cells dropped, rows joined with `\n`.
+The renderer's blank-keeping read path is deleted (§5.5).
+
+## 5. Keys, targets and menus
 
 ### 5.1 `session.keys`
 
-`{ sessionId, target, keys: [ {key: "Enter"} | {text: "..."} , ... ] }` or
-`{ sessionId, target, option: "<option text as drawn>" }`.
+Exactly one of:
 
-Key names: `Enter`, `Esc`, `Tab`, `BackTab`, `Backspace`, `Delete`, `Up`, `Down`, `Left`, `Right`,
-`Home`, `End`, `PageUp`, `PageDown`, `Insert`, `F1`–`F12`, `Space`, and `Ctrl+<letter>`,
-`Alt+<key>`, `Shift+<key>` combinations. Any key may be sent (2026-09-11 decision 9). The set is a
-closed vocabulary of names so the runtime can encode it against the modes; it is not a closed set
-of permitted keys.
+- `{ sessionId, target, key: "Enter" }` — one key. Names: `Enter`, `Esc`, `Tab`, `BackTab`,
+  `Backspace`, `Delete`, `Up`, `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`,
+  `Insert`, `F1`–`F12`, `Space`, and one chord `Ctrl+<letter>`, `Alt+<key>`, `Shift+<key>`.
+- `{ sessionId, target, text: "..." }` — one text atom, written as a paste. Text containing a
+  newline or a control character is refused `would_submit` unless the program has bracketed paste
+  on, because without it the newline is an Enter the target did not authorise.
+- `{ sessionId, target, option: "<option text as drawn>" }` — `menu` targets only.
 
-### 5.2 How `keys` and `option` are written
+**A target authorises one state-changing step.** A sequence (`Down, Enter`; `Enter` then text) is
+not accepted: after the first step the screen has moved and no target describes it. This is what
+brief §7.2 required and what revision 1 departed from; the departure is withdrawn. Multi-step work is
+separate calls, each with a fresh target, or `option`.
 
-- **`keys`** — the whole sequence is **one** intent under **one** precondition, written
-  contiguously; no other input interleaves. This departs from brief §7.2 ("each key in a sequence is
-  revalidated"): after the first key the screen has moved and there is no precondition left to
-  state for the second. A caller who needs per-step revalidation uses `option`.
-- **`option`** — a coordinator-side loop, each step a separate intent:
-  1. read the frame and extract the menu through the rule;
-  2. if the question or the option set differs from the target — refuse, returning what is on
-     screen now;
-  3. if the wanted option is not selected, send one `Up`/`Down` conditioned on the current menu
-     region, and go to 1;
-  4. send `Enter` conditioned on the region in which the wanted option is the selected one.
+### 5.2 How `option` is written
 
-  This is today's `Typist.Choose` (`internal/agenttyping/agenttyping.go:546-590`) with every step
-  checked in the helper. It is bounded by the option count plus a settle budget; a menu that does
-  not settle is a refusal naming what it saw.
+A coordinator-side loop, each step its own freshly minted target and its own intent:
+
+1. read the frame; extract the menu through the rule;
+2. question or option set differs from the caller's target → refused, with what is on screen now;
+3. wanted option not selected → mint a `menu` target, send one `Up`/`Down` under it, go to 1;
+4. wanted option selected → mint a `menu` target (whose digest includes the selection's style and
+   marker) and send `Enter` under it.
+
+Bounded by option count plus a settle budget; a menu that does not settle is a refusal naming what
+it saw. It replaces `Typist.Choose` (`internal/agenttyping/agenttyping.go:546-590`).
 
 ### 5.3 Menu extraction first
 
-The Claude rule today has two extractors (`subagents`, `transcript`,
-`internal/agentdriver/…/claude.rule.json:256-270`), and `ReadMenu` guesses rows around the cursor
-(`agenttyping.go:492-516`). The rule engine gains a `menu` extractor per supported menu state
-(`permission_choice`, `modal_choice`) yielding `question`, `options[]`, `selected`, and the row
-bounds of question, options and body. `ReadMenu` and target construction consume that one result.
-A menu whose body boundary cannot be found yields **no** `menu` target: `session.read` returns a
-`region` target and only a region-conditioned write is possible. A real Claude menu answered
-successfully is required beside that refusal (brief §7.3).
+The Claude rule has two extractors (`subagents`, `transcript`), and `ReadMenu` guesses rows around
+the cursor (`agenttyping.go:492-516`). The rule engine gains, per supported menu state
+(`permission_choice`, `modal_choice`), a `menu` extractor yielding `question`, `options[]`,
+`selected`, and row bounds of question, options and body; and per agent a declared **input box**
+and **menu zone** (the rows in which that agent can draw a menu — for Claude, from the top of the
+input box to the bottom of the screen, to be verified by the live procedure). `ReadMenu` and target
+construction consume that one result. A menu whose body boundary is not found yields no `menu`
+target, only `region`. A real Claude menu answered successfully is required beside that refusal.
 
 ### 5.4 Refused without writing
 
-Completeness unknown; session or enrolment incarnation changed; caller lacks authority over the
-pane (§6); for agent kinds, the coordinator's classification disagrees with the target kind; region
-digest differs at execution.
+Token forged, expired or presented by another capability; incomparable; completeness unknown;
+enrolment incarnation changed; access epoch changed (§6.1); for agent kinds, the coordinator's
+fresh classification disagrees with the target kind; digest differs; program identity changed;
+echo off without a floor-satisfying approval (§6.4); `would_submit`; `busy`.
 
 ### 5.5 `session.read`: one source
 
-`session.read` today reads a running item from the renderer (`executeSessionScreen` →
-`WSServer.RequestScreen`, `internal/assistant/blocks.go:280-285`,
-`internal/transport/ws_readscreen.go:181-190`). The renderer is not an authority on the screen
-after ADR-0066. A running item is read from the helper frame (`paneview.Store`), finished items
-from the ledger as today. The renderer request path is deleted. The schema
-(`contracts/tools/session.read.schema.json`) keeps its item and window behaviour and gains
-`target`, `classification` (agent state or `none`), and `pendingMessages` (§7). Distinct outcomes,
-each its own result shape: no such session, not held by this caller, completeness unknown, frame
-unavailable (helper unreachable), and for agent panes classification `unknown`.
+`session.read` reads a running item from the renderer today (`internal/assistant/blocks.go:280-285`
+→ `internal/transport/ws_readscreen.go:181-190`). After ADR-0066 the renderer is no authority on the
+screen. Running items are read from the helper frame (`paneview.Store`); finished items from the
+ledger as today; the renderer request path is deleted. The schema
+(`contracts/tools/session.read.schema.json`) keeps item and window behaviour and gains `target`,
+`classification` (agent state or `none`), `pendingMessages` (§7) and `deliveryStateLost` (§7.5).
+Distinct outcomes: no such session; not reachable by this caller; completeness unknown; frame
+unavailable (helper unreachable); agent classification `unknown`.
 
 ## 6. Authority and approval
 
-### 6.1 One capability interface
+### 6.1 Two capability types, bound by their adapters
 
-```go
-type SessionAccess interface {
-    // Resolve names the pane and why this caller may reach it, server-side.
-    Resolve(ctx, sessionID) (Pane, error)
-    // Check re-establishes the same authority now; called before every intent.
-    Check(ctx, Pane) error
-}
-```
+The shared dispatch request is caller-neutral (`internal/assistant/dispatch.go:16-24`), so the
+authority is bound **before** dispatch, by the adapter that authenticated the caller, and never
+inferred from parameters:
 
-- **Own-session implementation** (the built-in assistant): panes within the run grant's session
-  scope (`narrowSession`, `internal/agenttools/narrow.go:187`), as `session.read` today.
-- **Delegated-worker implementation** (a coordinator): a pane is reachable iff its participant's
-  delegation names the caller's session as `ControllerSession` and permits the effect
-  (`internal/workers/registrar.go:380-396` moves behind this interface). Session → participant
-  resolution is server-side; the model never names a participant.
+- **`AssistantPaneAccess`** — minted by the in-process kernel adapter for a built-in assistant run.
+- **`DescendantPaneAccess`** — minted by the tool endpoint adapter, bound to the authenticated
+  controller session resolved server-side (`internal/app/worker_auth.go:367-427`).
 
-`Check` runs **before every intent**, not once per call: today delegation is checked at the start
-of `Registrar.Answer` and not again through its up-to-20 s wait (`registrar.go:419-435`,
-`internal/app/workers.go:1587-1630`). Revocation (grant epoch retired, delegation ended, worker
-closed) cancels queued messages and fails the next step with nothing written.
+They are distinct types (a sealed sum); tool constructors accept the one their caller has. The
+catalogue projection and dispatch take the same bound value.
 
-### 6.2 A coordinator over its own workers
+**Per-pane access gate.** In the coordinator each pane has an access gate and an **access epoch**.
+An intent holds the gate (shared) from its authority check through the `session.intent` round trip
+and carries the epoch. Every revocation path — delegation ended, run grant retired, worker closed,
+participant re-enrolled, run cancelled — takes the gate exclusively and bumps the epoch before it
+returns. So once a revocation has returned, no intent admitted under the old authority can still be
+written. The helper round trip is bounded (existing 5 s op timeout), which bounds how long a
+revocation waits. Queued messages re-check the epoch before each step.
 
-Full rights over its own workers (2026-09-11 decision 6): read, keys, message, no approval prompt.
-The worker's own permission settings are unaffected; a turn-starting message borrows them, which is
-why neighbours never get this path.
+### 6.2 The built-in assistant
 
-### 6.3 The built-in assistant: the existing policy
+Owner decision 6: `AssistantPaneAccess` reaches every live pane in every workspace. This widens the
+run fence ADR-0020 set (`internal/agenttools/narrow.go:187` carries only the sessions the grant
+names today); the widening is recorded in the new ADR (§10), and every effect on every pane still
+passes the policy gate (§6.3). Reading stays `observe`; `session.keys` and `session.message` are
+`send-input`.
 
-`session.keys` and `session.message` declare effect `send-input` (mutate). They go through the
-kernel gate like every tool (`internal/assistant/kernel.go:1842-1881`, `decideInvocationWithReason`
-`:660`): expiry, floor, verdict of the effect × resource matrix, ask/permit/refuse.
+### 6.3 Policy: pane scope and program predicate
 
-- **New resource kind `pane-program`:** `{ domain, program }`. `domain` is the approval domain the
-  backend already derives (`internal/agentapproval/store.go` `Domain`: local, or ssh host + account
-  - host key). `program` is the foreground command of the pane as the helper observes it
-    (`proto` `ForegroundCommand`, `internal/helper/proto/session_service.go:754-759`). A policy row
-    may be scoped by program: `vim` permit, `sudo` refuse, everything else ask.
-- **Unknown program** (an SSH pane has no local process evidence; an observation that failed) is
-  never matched by a row that names a program; it falls to rows that name none, and by default to
-  ask.
-- **The approval request** carries the pane, the target's region text (what the model saw), and the
-  input readably: key names, text verbatim, the option text. It is built from the existing
-  `ApprovalRequest` (`kernel.go:264-345`), not a parallel structure.
-- **After approval** nothing is re-asked: the helper's region check decides. A changed region is
-  `refused` with `regionNow`, returned to the model (owner decision 3). A standing permit never
-  bypasses the region check.
-- **A floor (proposed, for review):** text into a local pane whose terminal has `ECHO` off (a
-  password prompt) is never covered by a standing permit; it always asks. The helper reads the
-  line discipline flags from the PTY it owns. On SSH panes the far terminal's flags are not
-  observable; there the floor cannot fire and the program scope is `unknown`, which already asks.
+The effect × resource matrix is kept (`internal/assistant/kernel.go:660`,
+`internal/content/effectpolicy.go`). Two additions:
 
-## 7. `session.message` (approved)
+- **Pane scope** uses the canonical `ResourceWorkspace` pane sub-scope (`internal/content/ledger.go:
+289-302`), not a new compound resource kind.
+- **Program predicate** — a separately typed, backend-derived execution-context predicate a row may
+  carry: `program: <executable>`. It is **not** `ForegroundCommand` (display-only, mutable,
+  omitted when the foreground group is the shell's — `internal/helper/session/inspect.go:162-186`).
+  On a local pane the helper derives a **process identity** — foreground process pid, its start
+  time, and the executable's path with device and inode — at token mint, puts it in the token, and
+  re-derives it at execution; a different identity refuses `program_changed`. On an SSH pane there
+  is no process identity; the predicate never matches, so program-scoped rows never apply and the
+  programless rows decide.
 
-**Agent panes only.** On any other pane: refused, naming `session.keys`. "Free prompt" is only
-defined for a recognised agent.
+  Named work, not implied: the predicate's wire and persistence schema, fail-closed parsing, the
+  matcher, the settings page that edits such rows, and the approval page that offers "always for
+  this program". Domain derivation (local vs ssh host/account/host key) is shared through a neutral
+  interface extracted from `internal/agentapproval/store.go`'s `Domain`, not by using the external-
+  agent admission store as a policy model.
 
-`{ sessionId, text, when: "free" | "now", id, target? }` — `id` is the caller's idempotency key;
-`when=now` requires an `input` or `working` target.
+- **The approval request** is the existing `ApprovalRequest` (`kernel.go:264-345`) carrying the
+  pane, the token's readable region, the program identity if any, and the input readably (key name,
+  text verbatim, option text). An approval binds to the `tokenId`. A standing permit never bypasses
+  the target check.
 
-**`when=free` does not block the call.** It returns `queued` immediately; nocx delivers when the
-agent is free. The message's state is visible in `session.read` → `pendingMessages`. Waking the
-coordinator on delivery is `nocx-luqz9`. (The brief assumed a waiting call; that contradicts
-decision 5 — a coordinator must not hang.) One FIFO queue per pane, one delivery at a time, in
-coordinator memory; a coordinator restart reports queued messages as `lost` on the next read of
-that pane rather than silently forgetting them.
+### 6.4 The echo floor
 
-**Delivery, the same for both modes, each step a separate intent:**
+Owner decision 8. For **text** from the built-in assistant (`session.keys text`, `session.message`):
 
-1. **Paste**, as bracketed paste if the program enabled it, conditioned on "input box empty, no
-   menu" (the `input` region digest of an empty box). Text already in the box → refused: someone is
-   typing, and a stale echo must not be mistaken for ours.
-2. **Echo:** wait (bounded) for a frame with `revision > revisionAfter` whose input region contains
-   the text. A multi-line paste renders in Claude as `[Pasted text #N +M lines]`; the rule defines
-   the echo form per agent.
-3. **Enter**, conditioned on the input region exactly as it was when the echo was confirmed.
-4. **Submission confirmed:** the input box cleared, or the agent moved to `working`, or it shows its
-   queued-message indicator.
+- the helper reads the line discipline's `ECHO` flag from the PTY it owns at mint and **again at
+  execution**; SSH panes report `unknown`;
+- `off` or `unknown` at mint → the policy outcome is at least **ask**, whatever standing rows say;
+- `on` at mint but `off` at execution → refused `echo_off`, returned to the model, nothing written;
+- a floor ask is approved for that token only and is never saved as a standing permit.
 
-**Outcomes:** `refused` (nothing written) · `partial` (paste written, echo not confirmed; Enter not
-sent; the result carries the input box as it now reads) · `written` (Enter written, submission not
-confirmed) · `submitted` (confirmed) · `cancelled` (removed before the paste executed) · `lost`
-(coordinator restarted while queued).
+Linux and macOS PTYs are tested for on, off, query failure, and a change during the ask.
 
-**Cancellation and duplicates:** a queued message may be cancelled until the paste executes; after
-that, cancellation answers "already written". A repeated `id` is never delivered twice. Authority is
-re-checked before each step, including while queued.
+### 6.5 An orchestrated agent over its descendants
 
-**To measure live, not assume:** whether a Claude menu reacts to pasted text. The "no menu"
-precondition protects either way.
+Owner decision 7. `DescendantPaneAccess` reaches the panes of the caller's **descendants**: the
+transitive closure of delegations whose controller chain leads to the caller's session, resolved
+server-side (`internal/workers/registrar.go:380-396` is the direct-child check today). Full rights,
+no approval prompt, no echo floor. Neighbours are `nocx-i8umd` (talk only).
+
+## 7. `session.message`
+
+**Agent panes only;** any other pane is refused naming `session.keys`. `{ sessionId, text,
+when: "free" | "now", id, target? }`; `when=now` requires an `input` or `working` target.
+
+### 7.1 Queue
+
+`when=free` returns `queued` immediately; nocx delivers when the agent is free. One FIFO queue per
+pane, one delivery at a time, in coordinator memory. State is visible in `session.read`'s
+`pendingMessages`. Waking the coordinator on delivery is `nocx-luqz9`.
+
+### 7.2 Delivery, each step its own freshly minted target and intent
+
+1. **Paste**, under an `input` target whose digest covers the menu zone (§5.3) and shows the input
+   box empty with the cursor in it. Text already in the box → refused: someone is typing.
+2. **Echo:** wait (bounded) for a frame with `inputFence ≥ fenceAfter` whose input box contains the
+   text in the form the rule defines (Claude renders a multi-line paste as
+   `[Pasted text #N +M lines]`).
+3. **Enter**, under a target minted from that echo frame covering the **whole menu zone** — so a
+   menu drawn anywhere the agent can draw one changes the digest and refuses the Enter.
+4. **Submission confirmed:** input box cleared, or `working`, or the agent's queued-message
+   indicator.
+
+### 7.3 Outcomes
+
+`refused` (nothing written) · `failed_partial` / `delivery_unknown` (paste write incomplete, with
+`bytesWritten`) · `partial` (paste written, echo not confirmed; Enter not sent; box contents
+reported) · `written` (Enter written, submission not confirmed) · `submitted` · `cancelled`
+(removed before the paste executed).
+
+**Guarantee:** at-most-once submission to the PTY per idempotency key. It is not an acceptance
+receipt from the agent.
+
+### 7.4 Idempotency
+
+Key: `{ capability identity, session incarnation, enrolment incarnation, namespace, id }`, where
+namespace is `caller` or `nocx` (the owed task, §8). The record holds a payload hash and the
+current or terminal state. Same key, same payload → the recorded state. Same key, different
+payload → refused `id_reused`. Records live until the session incarnation ends.
+
+### 7.5 The failure interval after paste
+
+From "the first paste byte may have reached the PTY" to a terminal outcome:
+
+- **caller disconnect** does not cancel: the delivery belongs to the pane's queue, not to the
+  connection;
+- **authority revoked** (epoch bumped) at any phase: no further step is taken; if the paste was
+  written, the state becomes `partial` with the box contents and stays in `pendingMessages` until
+  the incarnation ends. nocx never erases the input box — it could erase a person's typing;
+- **cancel** before the paste executes → `cancelled`; after → answers the recorded state;
+- **coordinator restart:** the queue is in memory. A read of the pane after restart reports
+  `deliveryStateLost: { since }`; no per-message outcome is claimed, because nothing survived to
+  know it.
+
+Each boundary above is an assertion written into the bead before implementation.
 
 ## 8. The owed task, re-homed
 
-Today a spawn that meets a question marks the participant in `owedTasks`
-(`internal/app/workers.go:434-490`) and `workers.answer` delivers the task after the menu leaves
-(`withOwedTask`, `:1537-1550`). With `workers.answer` removed, **spawn enqueues the task as a
-`when=free` message** with a deterministic id (`task:<participant>`) instead of marking a set. Any
-answer — `session.keys` from the coordinator, or the person pressing Enter in the pane — frees the
-prompt and the queue delivers it, exactly once by id, with the outcomes of §7. `owedTasks`,
-`withOwedTask`, `awaitMenuLeftScreen` and `typeOwedTask` are deleted.
+A spawn that meets a question today marks `owedTasks` (`internal/app/workers.go:434-490`) and
+`workers.answer` delivers the task (`withOwedTask`, `:1537-1550`). Instead, spawn enqueues the task
+as a `when=free` message in namespace `nocx`, id `task`, keyed to the participant's enrolment
+incarnation. Any answer — `session.keys` from the coordinator or the person pressing Enter — frees
+the prompt and the queue delivers it under §7's guarantee. `owedTasks`, `withOwedTask`,
+`awaitMenuLeftScreen` and `typeOwedTask` are deleted.
 
-## 9. What is removed, superseded and amended
+## 9. Components and dependencies
 
-- **Removed:** `workers.screen`, `workers.answer` — registry rows, executors, schemas, their entries
-  in `contracts/agent.approvalRequested.schema.json`, `workerScreener`, `workerAnswerer`, and the
-  renderer screen request path (§5.5). Tests that asserted them move to the new tools' user-path
-  tests, not deleted silently.
-- **New ADR** (next free number): _"A write into a pane is conditioned on the region its caller
-  saw, and the runtime checks it"_. Supersedes ADR-0064 §1 (closed key set) and ADR-0029
-  (proposed). States ADR-0064 §4's prohibitions again where they survive. `INDEX.md` rows updated
-  (`Superseded by ADR-NNNN` / `Accepted (§1 superseded by ADR-NNNN)`); ADRs themselves untouched.
-- **AD-6** (`docs/architecture.md:159-174`): power (1) is restated with its cases — text into an
-  identified `free_text` or input box; any key under a named target; input during a turn; and for
-  the built-in assistant, any pane under a `region` target with approval by policy. The re-read
-  sentence becomes "revalidated by the runtime at execution". Citations move in the same commit.
+| Unit                                              | Does                                            | Depends on            |
+| ------------------------------------------------- | ----------------------------------------------- | --------------------- |
+| helper I/O owner (`internal/helper/session`)      | orders reads, writes, replies, intents; fences  | runtime               |
+| `sessionruntime`                                  | ingest, structural digest, validation, encoding | emulator              |
+| helper `session.target` / `session.intent` ops    | mint and verify tokens; execute                 | I/O owner             |
+| rule engine (`internal/agentdriver`)              | menu extractor, input box, menu zone            | —                     |
+| `AssistantPaneAccess` / `DescendantPaneAccess`    | authority, access gate and epoch                | workers store, grants |
+| `session.read/keys/message` tools                 | argument handling, targets, loops, queue        | all above             |
+| policy (`internal/content`, `internal/assistant`) | pane scope, program predicate, echo floor       | helper identity/echo  |
 
-## 10. The brief's eleven requirements, answered
+## 10. Removed, superseded, amended
 
-| §7 item                          | Answer                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1 The race                       | §4.3, §4.5: check and write under the runtime lock, one writer, `state` reports what was written; the remaining race stated.                                                                                                                                                                                                                                                                                                   |
-| 2 Preconditions, not identity    | The region includes the selection marker and the input box contents; incarnation and enrolment incarnation bound; `option` revalidates per step; `keys` is one intent (departure stated, §5.2). ADR-0029 superseded (§9).                                                                                                                                                                                                      |
-| 3 Menu extraction first          | §5.3, first task.                                                                                                                                                                                                                                                                                                                                                                                                              |
-| 4 AD-6 amended; unenrolled panes | §9. Unenrolled panes: the assistant may write under a `region` target (owner decision 1); a coordinator never reaches one (it reaches only its workers). No backend classifier for them.                                                                                                                                                                                                                                       |
-| 5 Capabilities                   | §6.1.                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| 6 Approval of opaque input       | §6.3: `pane-program` resource, readable request, revalidation by the region check, floor for no-echo. Paths to test: permit, refuse, decline, resume, target-changed.                                                                                                                                                                                                                                                          |
-| 7 One read, a contract           | §5.5, §4.4: helper frame only; normalisation stated; distinct outcomes.                                                                                                                                                                                                                                                                                                                                                        |
-| 8 Answer path re-homed           | §8: owed task as a queued message, exactly once by id.                                                                                                                                                                                                                                                                                                                                                                         |
-| 9 Messages as a state machine    | §7: ordering by `revisionAfter`; outcomes; stale echo, multi-line, truncation (echo mismatch → `partial`), cancellation, duplicates.                                                                                                                                                                                                                                                                                           |
-| 10 Concurrency                   | `nocx-tlaft` closed: the bridge runs calls concurrently (`internal/mcpstdio/mcpstdio.go:223-250`), the endpoint dispatches per request (`internal/toolendpoint/endpoint.go:658-740`). `when=free` no longer waits in a call at all. The one-connection-per-session slot (`internal/app/worker_auth.go:97-109`) stays; the e2e check proves a read and a corrective key while another call is in flight on that one connection. |
-| 11 Tests                         | §11.                                                                                                                                                                                                                                                                                                                                                                                                                           |
+- **Removed:** `workers.screen`, `workers.answer` — registry rows, executors, schemas, their
+  `contracts/agent.approvalRequested.schema.json` entries, `workerScreener`, `workerAnswerer`; the
+  renderer screen request path. Tests asserting them move to the new tools' user-path tests.
+- **New ADR** (next free number): _"A write into a pane is conditioned on a target the helper
+  minted, one step per target"_. Supersedes ADR-0064 §1 and ADR-0029; widens ADR-0020's run fence
+  for the built-in assistant (owner decision 6) and extends ADR-0064 §2 to descendants (decision 7);
+  records the echo floor (decision 8). `INDEX.md` rows updated; the ADRs themselves untouched.
+- **AD-6** (`docs/architecture.md:159-174`): power (1) restated as in §2; citations move in the same
+  commit.
 
-## 11. Tests
+## 11. The brief's eleven requirements
 
-- **Happy path (rule 2):** the epic's end-to-end check (§1), mock agent through production wiring:
-  real `cmd/nocx-server` coordinator, real helper runtime, real MCP bridge and endpoint.
-- **Runtime:** `Execute` with a row precondition — refuses on a changed region with zero bytes on
-  the PTY (read off the PTY, not a mock); succeeds on an unchanged region under a spinner in
-  another row; encodes `Up` as `ESC[A` and `ESC O A` under DECCKM; a client frame and an intent do
-  not interleave.
-- **Failing-call matrix,** each with bytes written, input left in the box, outcome and cleanup, each
-  paired with its ordinary success: helper unreachable; frame unavailable; completeness unknown;
-  delegation store error; grant revoked while a message is queued and between paste and Enter; PTY
-  write failure; coordinator disconnect after paste; echo never appears; menu appears between paste
-  and Enter; duplicate id; cancel before and after paste.
-- **Policy:** `pane-program` row permits `vim`, refuses another program, asks for `unknown`; a
-  standing permit still refused by a changed region; the no-echo floor asks despite a permit.
-- **Contracts (rule 5):** schemas for `session.keys`, `session.message`, the extended
-  `session.read`, and the helper `session.intent` op; `_DTOConformsToContract` and
+| §7 item                  | Answer                                                                                                                                                                                                                                            |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1 The race               | §4.4: one I/O owner, drain before validate, fences, no lock across I/O; `bytesWritten`; remaining race stated.                                                                                                                                    |
+| 2 Preconditions          | Structural digest with style, buffer, geometry, cursor (§4.2); one step per target (§5.1); `option` revalidates per step (§5.2); incarnations and access epoch bound; ADR-0029 superseded.                                                        |
+| 3 Menu extraction        | §5.3, first task.                                                                                                                                                                                                                                 |
+| 4 AD-6; unenrolled panes | §10; the assistant writes to any pane under `region` (decision 1); no backend classifier for them.                                                                                                                                                |
+| 5 Capabilities           | §6.1: two bound types; server-side resolution; revocation through the access gate.                                                                                                                                                                |
+| 6 Opaque input approval  | §6.3–6.4; paths tested: permit, refuse, decline, resume, target changed, program changed, echo floor.                                                                                                                                             |
+| 7 One read, a contract   | §5.5, §4.5.                                                                                                                                                                                                                                       |
+| 8 Answer path            | §8.                                                                                                                                                                                                                                               |
+| 9 Messages               | §7.                                                                                                                                                                                                                                               |
+| 10 Concurrency           | Bridge and endpoint are concurrent (`internal/mcpstdio/mcpstdio.go:223-250`, `internal/toolendpoint/endpoint.go:658-740`); `when=free` does not wait in a call; the e2e check proves a read and a corrective key while another call is in flight. |
+| 11 Tests                 | §12.                                                                                                                                                                                                                                              |
+
+## 12. Tests
+
+Rule 4 applies with full weight (transport and authority): **the concurrency and authority tests
+are written from this spec by an author other than the implementer**, and their assertions are put
+into the beads before implementation.
+
+- **Happy paths:** both checks of §1, through production wiring (real coordinator, real helper
+  runtime, real bridge and endpoint; the assistant through the real kernel and approval flow).
+- **I/O owner, on a real PTY:** a program that floods output without reading input and asks DSR —
+  output keeps arriving and the reply is written (watchdog, not a duration); a client frame and an
+  intent never interleave; drain-before-validate refuses a write whose region changed in output
+  already delivered; `failed_partial` reports the true `bytesWritten`.
+- **Targets:** forged MAC, altered rows, expired token, token from another capability, alternate
+  screen switch, resize, style-only selection change, cursor-only move — each refused, each paired
+  with an unchanged target that succeeds while a spinner runs outside the rows.
+- **Authority schedules:** revocation after the authority check and before the write (forced by a
+  test hook in the gate) → nothing written; revocation while a message is queued, between paste and
+  Enter; descendant two levels down reachable, a neighbour not; the assistant and the coordinator
+  cannot use each other's capability.
+- **Policy:** program predicate permits `vim` locally; the program exec'ing into another between
+  permit and write → `program_changed`; SSH pane never matches a program row; echo floor asks
+  despite a programless permit on SSH; echo turning off during an ask → `echo_off`.
+- **Messages:** every §7.5 boundary; echo never appears; menu appears between paste and Enter
+  outside the input rows; duplicate and reused ids; cancel before and after paste; restart →
+  `deliveryStateLost`.
+- **Contracts (rule 5):** `session.keys`, `session.message`, extended `session.read`, helper
+  `session.target` and `session.intent`; `_DTOConformsToContract` and
   `_OverTheWireConformsToContract` for each.
-- **Live, outside CI** (2026-09-11 decisions 12, 14): the `nocx-detection-verify` procedure extended
-  with a menu answered by `option`, a message during a turn and after it, and the pasted-text-into-
-  a-menu measurement.
+- **Live, outside CI:** the `nocx-detection-verify` procedure extended with Claude's menu zone, a
+  menu answered by `option`, messages during and after a turn, and pasted text into a menu.
 
-## 12. Tasks (for the plan)
+## 13. Tasks (for the plan)
 
-1. Runtime: row precondition, `revisionAfter`, one write lock for client frames and intents;
-   helper `session.intent` op and its client.
-2. Rule: `menu` extractor with question, options, selected and row bounds; `ReadMenu` on it.
-3. `SessionAccess` with both implementations; per-intent `Check`; catalogue equals dispatch.
-4. `session.read` from the helper frame with `target`; renderer screen request deleted; contract.
-5. `session.keys` (`keys`, `option`) for both callers; `pane-program` resource and policy rows;
-   no-echo floor.
-6. `session.message`: queue, delivery state machine, `pendingMessages`, cancellation.
-7. Owed task as a queued message; `workers.screen`/`workers.answer` removed.
-8. New ADR, AD-6 amendment, `INDEX.md`.
-9. End-to-end check; live procedure extension.
+1. Helper I/O owner, writer/reader goroutines, fences, `bytesWritten` (closes `nocx-6q1uh.1`).
+2. Structural digest, token mint/verify, `session.target` and `session.intent` ops and client.
+3. Rule: menu extractor, input box, menu zone; `ReadMenu` on it.
+4. `AssistantPaneAccess`, `DescendantPaneAccess`, access gate and epoch; catalogue = dispatch.
+5. `session.read` from the helper frame with targets; renderer screen request deleted; contract.
+6. `session.keys` (`key`, `text`, `option`) for both callers.
+7. Policy: pane scope, program predicate (helper identity), echo floor, settings and approval UI.
+8. `session.message`: queue, delivery, idempotency, failure interval.
+9. Owed task as a message; `workers.screen`/`workers.answer` removed.
+10. New ADR, AD-6 amendment, `INDEX.md`.
+11. Independent concurrency and authority tests; both end-to-end checks; live procedure.
 
-Order: 1 and 2 in parallel (disjoint files); 3 after 1; 4 after 1–3; 5 after 4; 6 after 5; 7 after
-6; 8 alongside 5; 9 last.
+Order: 1, 3 in parallel; 2 after 1; 4 in parallel with 2; 5 after 2–4; 6 after 5; 7 after 6 (UI
+part may run beside 6); 8 after 6; 9 after 8; 10 beside 6; 11's independent tests written from the
+spec as soon as 2 and 4 have interfaces, run last.
 
-## 13. Out
+## 14. Codex review of revision 1 (2026-09-14, on `357f62e3`)
 
-Neighbours (`nocx-i8umd`); coordinator wake and removal of `workers.wait` (`nocx-luqz9`); hooks
-(`nocx-7faow`); client keyboard input as intents (`nocx-zg3k3`); remote workers (`nocx-cxq7d`).
+Every finding was checked against the tree before disposition.
 
-## 14. Open for review
-
-1. Is one-intent-per-`keys`-sequence (§5.2) safe enough, or must a sequence be refused when the
-   caller did not use `option`?
-2. The no-echo floor (§6.3): is reading `ECHO` from the PTY the helper owns reliable across Linux
-   and macOS, and is "always ask" the right strength?
-3. `pane-program` from `ForegroundCommand`: is the foreground command a trustworthy scope (a
-   program can rename itself), and what should an SSH pane's program be when shell integration
-   knows the running command?
-4. Taking the runtime's write lock for client frames (§4.5): latency and lock-order risk against
-   `hostSession.mu`.
+| #   | Finding                                                                           | Disposition                                                                                       |
+| --- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| 1   | Runtime mutex across client writes deadlocks the pump                             | Accepted; verified the same shape already exists for replies → `nocx-6q1uh.1`; §4.4 one I/O owner |
+| 2   | Stale emulator validated before delivered output is ingested; revision not causal | Accepted; drain-before-validate, fences, content-confirmed echo, §4.4                             |
+| 3   | Multi-key sequence crosses states                                                 | Accepted; one step per target, §5.1                                                               |
+| 4   | Text digest ignores buffer, geometry, cursor, width, style                        | Accepted; structural digest v1, incomparable refusal, §4.2                                        |
+| 5   | Target is model-authored                                                          | Accepted; helper-minted HMAC token plus server-side record, §4.2                                  |
+| 6   | Authority check is TOCTOU against revocation                                      | Accepted; per-pane access gate and epoch, §6.1                                                    |
+| 7   | Enter does not enforce "no menu"                                                  | Accepted; Enter target covers the rule's menu zone, §5.3, §7.2                                    |
+| 8   | Partial writes lose `n`                                                           | Accepted; `bytesWritten`, `failed_partial`, `delivery_unknown`, §4.3                              |
+| 9   | In-memory queue cannot report per-message `lost`                                  | Accepted; generic `deliveryStateLost`, §7.5                                                       |
+| 10  | Idempotency key undefined                                                         | Accepted; §7.4                                                                                    |
+| 11  | Interval after paste unspecified                                                  | Accepted; §7.5                                                                                    |
+| 12  | `ForegroundCommand` untrustworthy for a permit                                    | Accepted; process identity minted and revalidated by the helper, §6.3                             |
+| 13  | SSH unknown echo can be permitted silently                                        | Owner decided: always ask (decision 8); §6.4                                                      |
+| 14  | `pane-program` misuses admission `Domain`, closed resource kinds                  | Accepted; pane sub-scope plus typed predicate, work named, §6.3                                   |
+| 15  | "Any pane" not implementable through the run fence                                | Owner decided: unbounded for the assistant (decision 6); fence widened in the ADR, §6.2           |
+| 16  | Caller authority not bound                                                        | Accepted; two bound capability types, §6.1                                                        |
+| 17  | Tests can pass with parts broken                                                  | Accepted; assistant happy path, adversarial schedules, independent author, §12                    |
+| 18  | §8 cross-reference wrong                                                          | Fixed                                                                                             |

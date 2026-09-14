@@ -120,6 +120,18 @@ type sshFixture struct {
 	// dropExit makes the next command's end close the channel with no
 	// exit-status request at all: the far side going away mid-session.
 	dropExit bool
+	// neverReadShellNum, when non-zero, names WHICH shell request (the Nth,
+	// counted from 1 against f.shells) this fixture never calls ch.Read for
+	// — a per-session selector, not a fixture-wide one, so a test can leave
+	// a SIBLING session's channel reading normally. gossh's server-side
+	// channel only ever sends a window-adjust from INSIDE a Read
+	// (golang.org/x/crypto/ssh's channel.adjustWindow, driven by
+	// channel.Read — there is no public hook to suppress it any other way),
+	// so a session that is never read never adjusts, and the far side's
+	// window against a big enough write from us stays at its one-time
+	// initial grant (channelWindowSize, 2 MiB) forever — a real, if
+	// artificial, zero-window peer (nocx-6q1uh.3, spec §5.7).
+	neverReadShellNum int
 	// conns counts the TCP connections this "host" accepted. A pane's
 	// listeners and its shell channel must share ONE of them (AD-4's pool is
 	// keyed by the resolved destination), and this is how a test asserts that
@@ -610,9 +622,11 @@ func (f *sshFixture) serveSession(ch gossh.Channel, reqs <-chan *gossh.Request) 
 			// shell.
 			f.mu.Lock()
 			f.shells++
+			shellNum := f.shells
+			neverRead := f.neverReadShellNum != 0 && shellNum == f.neverReadShellNum
 			f.mu.Unlock()
 			_ = req.Reply(true, nil)
-			f.start(ch, st, f.shellCommand)
+			f.start(ch, st, f.shellCommand, neverRead)
 		case "exec":
 			var e struct{ Command string }
 			if gossh.Unmarshal(req.Payload, &e) != nil {
@@ -626,7 +640,7 @@ func (f *sshFixture) serveSession(ch gossh.Channel, reqs <-chan *gossh.Request) 
 			f.mu.Unlock()
 			_ = req.Reply(true, nil)
 			f.signal(f.execSeen)
-			f.start(ch, st, e.Command)
+			f.start(ch, st, e.Command, false)
 		default:
 			_ = req.Reply(false, nil)
 		}
@@ -638,7 +652,7 @@ func (f *sshFixture) serveSession(ch gossh.Channel, reqs <-chan *gossh.Request) 
 // The command is handed to a shell (`sh -c`), exactly as sshd hands a far
 // account's session to its login shell: the launcher carrier is a command LINE
 // with its own quoting, and re-parsing it here is what a real host does.
-func (f *sshFixture) start(ch gossh.Channel, st *sessionState, command string) {
+func (f *sshFixture) start(ch gossh.Channel, st *sessionState, command string, neverRead bool) {
 	shell := "/bin/sh"
 	if _, lookErr := os.Stat(shell); lookErr != nil {
 		shell = "/bin/bash"
@@ -663,7 +677,9 @@ func (f *sshFixture) start(ch gossh.Channel, st *sessionState, command string) {
 	drained := make(chan struct{})
 
 	go f.pumpToChannel(ch, master, drained)
-	go f.pumpToProgram(ch, master)
+	if !neverRead {
+		go f.pumpToProgram(ch, master)
+	}
 	go func() {
 		werr := cmd.Wait()
 		code := 0

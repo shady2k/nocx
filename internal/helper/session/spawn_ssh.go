@@ -350,6 +350,7 @@ var (
 	_ Process               = (*sshProcess)(nil)
 	_ ProcessGroupSignaller = (*sshProcess)(nil)
 	_ LifecycleProcess      = (*sshProcess)(nil)
+	_ writerDetacher        = (*sshProcess)(nil)
 )
 
 // Lifecycle is the far shell's end of the authenticated channel: the stream
@@ -448,6 +449,17 @@ func (p *sshProcess) WaitErr() (error, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.waitErr, p.waitSet
+}
+
+// Detach satisfies owner.go's writerDetacher (spec §5.7, nocx-6q1uh.3): the
+// owner calls it once, from its own goroutine, when a write in flight must
+// be abandoned rather than joined — golang.org/x/crypto/ssh gives this
+// channel no per-channel interrupt. It taints this channel's pooled
+// connection (ShellChannel.Taint, reaching internal/ssh's ConnPool.Taint) so
+// the pool hands the connection to no new channel; past the helper's
+// detached-writer cap, the pool closes it at once instead.
+func (p *sshProcess) Detach() {
+	p.ch.Taint()
 }
 
 // Pid is ZERO, always, and that is the answer rather than a gap: this session

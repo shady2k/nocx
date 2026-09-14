@@ -996,6 +996,17 @@ func (s *hostSession) stop() {
 	if tailLost := s.owner.stop(true, time.Time{}); tailLost {
 		s.log.Warn("session owner: the drain did not reach EOF before shutdown", "session", s.id.Session)
 	}
+	// A graceful stop with no deadline never itself forces the detach path
+	// (spec §5.7) — this call site passes owner.stop none today, unlike a
+	// future helper-shutdown caller of this same method (the comment on
+	// stop itself). Checked anyway: owner.writerDetached is one-way and
+	// sticky, so it is true here only when an EARLIER call on this same
+	// owner already forced the detach, and that fact belongs in this
+	// session's own shutdown log rather than being silently absorbed into
+	// an ordinary close.
+	if s.owner.writerDetached() {
+		s.log.Warn("session owner: a stuck ssh writer was abandoned before this session closed", "session", s.id.Session)
+	}
 	// The runtime first, then the screen, and the order is the only one that
 	// names what happened: Fail makes the runtime refuse rather than serving a
 	// screen that is about to go, and the screen's Close then releases what

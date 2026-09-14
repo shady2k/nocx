@@ -37,17 +37,26 @@ package session
 // through inputFence() (a future caller stamping a snapshot, nocx-6q1uh.4),
 // and it is an atomic for exactly that reason.
 //
-// # What this task does not build
+// # SSH sessions: no barrier, and a detach rather than a join
 //
-// SSH sessions run through the fallback reader-goroutine path today, which
-// keeps them working, but this task does not give them a read barrier, a
-// detach on a stuck writer, or a tainted pool — nocx-6q1uh.3's sibling task
-// does. Concretely: if an SSH channel's write blocks forever (no per-channel
-// interrupt exists on golang.org/x/crypto/ssh — spec §5.7), this owner's
-// writer goroutine blocks with it, and stop() with a deadline that fires
-// still waits on it after forcing proc.Close(), because nothing here can
-// abandon it safely. The fix is spec §5.7's detached writer, and it belongs
-// in the next task alongside the no_read_barrier refusal.
+// SSH sessions run through the fallback reader-goroutine path (rawReader is
+// unimplemented on sshProcess), which is what makes hasReadBarrier answer
+// false for them (owner_ssh.go): golang.org/x/crypto/ssh's Channel gives no
+// readiness boundary, so a blocking Read may be holding bytes this owner has
+// not ingested when a check function would run, and commitIntent refuses
+// every intent on such a session before Admit is ever asked
+// (ErrNoReadBarrier). Reads and snapshots are unaffected.
+//
+// golang.org/x/crypto/ssh also offers no PER-CHANNEL interrupt (unlike a
+// local PTY's SetWriteDeadline), so a write stuck behind a peer holding its
+// window at zero cannot be unblocked the way interruptWriter unblocks a
+// local one. stop's forced-deadline branch detaches instead of joining
+// forever: triggerDetach (below) signals run's own goroutine, and
+// performDetach (owner_ssh.go) resolves the stuck item delivery_unknown and
+// clears writerBusy/inFlight without ever hearing back from the writer
+// goroutine, which keeps running, abandoned, until the pool's own taint
+// mechanism ends its connection (internal/ssh's ConnPool.Taint /
+// CloseTainted, reached through sshsvc.ShellChannel.Taint).
 import (
 	"context"
 	"errors"
@@ -207,6 +216,17 @@ type sessionOwner struct {
 	// §5.4). Everything else below is run()'s alone.
 	completedFence atomic.Uint64
 
+	// detachSignal, detachOnce and detached are the SSH detach path (spec
+	// §5.7, nocx-6q1uh.3, owner_ssh.go): stop closes detachSignal, once,
+	// when its own deadline fires against a Process it cannot interrupt
+	// (writeInterrupter); run's own goroutine answers it (performDetach),
+	// because inFlight and writerBusy below are touched from nowhere else.
+	// detached is read from outside run()'s goroutine (writerDetached), an
+	// atomic for the same reason completedFence is.
+	detachSignal chan struct{}
+	detachOnce   sync.Once
+	detached     atomic.Bool
+
 	// --- run()'s own state; touched from nowhere else ----------------------
 	pending    []ownerItem
 	closing    bool
@@ -235,6 +255,7 @@ func newSessionOwner(proc Process, rt *sessionruntime.Session, win *window, log 
 		cancelRead:    cancelRead,
 		writeReq:      make(chan []byte),
 		writeRes:      make(chan writeOutcome, 1),
+		detachSignal:  make(chan struct{}),
 	}
 }
 
@@ -281,6 +302,8 @@ func (o *sessionOwner) run() {
 			o.handleReadEvent(ev)
 		case res := <-o.writeRes:
 			o.completeWrite(res)
+		case <-o.detachSignal:
+			o.performDetach()
 		}
 		o.advance()
 	}
@@ -480,6 +503,16 @@ func (o *sessionOwner) processHead(it ownerItem) {
 // encodes without writing. Either refusing leaves nothing to write, and the
 // item resolves on the spot.
 func (o *sessionOwner) commitIntent(it ownerItem) {
+	// A session with no read barrier (spec §5.2 — today, an SSH channel: a
+	// blocking reader may be holding bytes this owner has not ingested yet)
+	// cannot prove the screen a check function is about to read is the
+	// screen right now, so every intent on it is refused before Admit is
+	// ever asked. Reads and snapshots are unaffected: they read whatever
+	// has already been ingested, not "as of this instant".
+	if !o.hasReadBarrier() {
+		o.resolve(it, ownerResult{State: sessionruntime.IntentStateRefused, Err: ErrNoReadBarrier})
+		return
+	}
 	pi := it.intent
 	id, err := o.rt.Admit(pi.Intent)
 	if err != nil {
@@ -667,6 +700,16 @@ func (o *sessionOwner) stop(graceful bool, deadline time.Time) (tailLost bool) {
 		return false
 	case <-timer.C:
 		_ = o.proc.Close()
+		// A Process with no writeInterrupter (an SSH channel — see that
+		// interface's doc) may have a write stuck behind a peer holding its
+		// window at zero, which proc.Close's channel close cannot unblock
+		// (spec §5.7). Detaching is what lets run's own exit condition
+		// become true regardless; for a Process that DOES support
+		// interruption, beginClosing already interrupted the write when
+		// closing began, and this signal finds nothing in flight to detach.
+		if _, ok := o.proc.(writeInterrupter); !ok {
+			o.triggerDetach()
+		}
 		<-o.stopped
 		return true
 	}

@@ -261,8 +261,28 @@
             "required": ["id", "namespace", "phase"],
             "properties": {
               "id": { "type": "string" },
-              "namespace": { "type": "string" },
-              "phase": { "type": "string" },
+              "namespace": {
+                "type": "string",
+                "enum": ["caller", "nocx"]
+              },
+              "phase": {
+                "type": "string",
+                "enum": [
+                  "queued",
+                  "pasting",
+                  "awaiting_echo",
+                  "entering",
+                  "awaiting_submission",
+                  "refused",
+                  "failed_partial",
+                  "delivery_unknown",
+                  "partial",
+                  "written",
+                  "submitted",
+                  "cancelled",
+                  "indeterminate"
+                ]
+              },
               "bytesWritten": { "type": "integer" },
               "boxContents": { "type": "string" }
             }
@@ -271,6 +291,18 @@
         "readBarrier": {
           "type": "boolean",
           "description": "Whether this descendant's session offers the read barrier a state-changing step needs. Present only when sessionId named a descendant; false means only session.read works there, never session.keys or session.message."
+        },
+        "deliveryStateLost": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["since"],
+          "description": "Present only after a coordinator restart, for a descendant pane this coordinator holds no message-queue record for (design §8.6): the queue is in memory only, so nothing here reports a per-message outcome — only that anything before `since` is unknown.",
+          "properties": {
+            "since": {
+              "type": "integer",
+              "description": "This coordinator's own start time, in epoch milliseconds."
+            }
+          }
         }
       }
     }

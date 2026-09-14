@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/session.message.schema.json",
+  "title": "SessionMessageParams",
+  "description": "Send a message to a worker's agent (or one of its own workers), or cancel one still queued. Exactly one of the two disjoint forms: the send form (text, when, id, and — when when is \"now\" — tokenId) or the cancel form (cancel).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The worker whose pane to message, exactly as session.read read it."
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The message text, delivered as a paste followed by Enter. Send-form only."
+    },
+    "when": {
+      "type": "string",
+      "enum": ["free", "now"],
+      "description": "\"free\": queue and deliver once the agent is free — returns queued immediately. \"now\": attempt delivery within this call, under tokenId's target (kind input or working). Send-form only, and required with text."
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "This message's idempotency key: a resend with the SAME text/when (and, for \"now\", the same target kind) returns the recorded phase rather than sending a second time; a resend with a different payload is refused. Send-form only, and required with text."
+    },
+    "tokenId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A prior session.read target's tokenId, of kind input or working. Required when when is \"now\"; ignored (the delivery mints its own fresh targets) once queued for \"free\" delivery."
+    },
+    "cancel": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The cancel form: withdraw the still-queued message with this id. Disjoint from text/when/id/tokenId — a call never carries both forms."
+    }
+  },
+  "$defs": {
+    "result": {
+      "title": "SessionMessageResult",
+      "description": "The send form's result (a MessageView) or the cancel form's result — disjoint, exactly as the params are. Inlined rather than $ref'd to sibling $defs entries: contract tests compile $defs/result standalone (extracted from this file), so a $ref reaching outside it would not resolve.",
+      "oneOf": [
+        {
+          "title": "SessionMessageSendResult",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sessionId", "id", "namespace", "phase"],
+          "properties": {
+            "sessionId": { "type": "string" },
+            "id": { "type": "string" },
+            "namespace": {
+              "type": "string",
+              "enum": ["caller", "nocx"],
+              "description": "\"caller\" for every session.message a model sent; \"nocx\" is reserved for the owed task and never appears on a send-form response to a caller's own call."
+            },
+            "phase": {
+              "type": "string",
+              "enum": [
+                "queued",
+                "pasting",
+                "awaiting_echo",
+                "entering",
+                "awaiting_submission",
+                "refused",
+                "failed_partial",
+                "delivery_unknown",
+                "partial",
+                "written",
+                "submitted",
+                "cancelled",
+                "indeterminate"
+              ],
+              "description": "The closed phase set. In flight: queued, pasting, awaiting_echo, entering, awaiting_submission. Terminal: refused (nothing written), failed_partial/delivery_unknown (paste incomplete, see bytesWritten), partial (paste written, echo not confirmed, Enter not sent — see boxContents), written (Enter written, submission not confirmed), submitted, cancelled, indeterminate (a step's own outcome could not be learned)."
+            },
+            "bytesWritten": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Present chiefly for failed_partial and delivery_unknown: bytes of the paste actually written."
+            },
+            "boxContents": {
+              "type": "string",
+              "description": "Present for partial: what the input box holds right now, so a caller can see what it would be adding to."
+            }
+          }
+        },
+        {
+          "title": "SessionMessageCancelResult",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["result"],
+          "properties": {
+            "result": {
+              "type": "string",
+              "enum": ["cancelled", "too_late", "no_such_message"],
+              "description": "cancelled: the message was queued and is now cancelled, or was already cancelled (idempotent). too_late: the paste step was already claimed and may be written; see phase. no_such_message: no record for that id — the one result exempt from the phase rule."
+            },
+            "phase": {
+              "type": "string",
+              "enum": [
+                "queued",
+                "pasting",
+                "awaiting_echo",
+                "entering",
+                "awaiting_submission",
+                "refused",
+                "failed_partial",
+                "delivery_unknown",
+                "partial",
+                "written",
+                "submitted",
+                "cancelled",
+                "indeterminate"
+              ],
+              "description": "Present exactly when result is not no_such_message."
+            }
+          }
+        }
+      ]
+    }
+  }
+}

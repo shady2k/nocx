@@ -61,6 +61,7 @@ var executors = map[string]func(ctx context.Context, cap agenttools.Capability, 
 	"session.list":     executeSessionListTool,
 	"session.read":     executeSessionReadTool,
 	"session.keys":     executeSessionKeysTool,
+	"session.message":  executeSessionMessageTool,
 	"notes.search":     executeNotesSearch,
 	"notes.create":     executeNotesCreate,
 	"notes.update":     executeNotesUpdate,
@@ -938,6 +939,18 @@ func executeSessionKeysTool(ctx context.Context, cap agenttools.Capability, args
 		return "", fmt.Errorf("session.keys: capability is %T, not *agenttools.SessionDescendantCapability", cap)
 	}
 	return executeSessionKeys(ctx, reader, args)
+}
+
+// executeSessionMessageTool is session.message's InGo-executor-map entry
+// (design §8, Task 10), the same InGo path executeSessionKeysTool takes: no
+// renderer requester is needed, since a descendant's message path travels on
+// the capability's SessionMessages field.
+func executeSessionMessageTool(ctx context.Context, cap agenttools.Capability, args json.RawMessage, _ toolSeams) (string, error) {
+	reader, ok := cap.(*agenttools.SessionDescendantCapability)
+	if !ok {
+		return "", fmt.Errorf("session.message: capability is %T, not *agenttools.SessionDescendantCapability", cap)
+	}
+	return executeSessionMessage(ctx, reader, args)
 }
 
 // filesReadResult is the tool's return: total (the file's size), the window

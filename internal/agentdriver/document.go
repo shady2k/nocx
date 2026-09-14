@@ -79,6 +79,35 @@ type Document struct {
 	// frame's own last row (see menuZoneSpan), never at the anchor's own
 	// count of rows in the other direction.
 	MenuZone *RegionSpec `json:"menuZone,omitempty"`
+	// MenuDisplacesInputBox is a declared, measured fact about this agent
+	// (nocx-6q1uh.10): whenever a permission/modal menu is on screen, does
+	// InputBox always come back empty (Last < First) relative to the
+	// nearest PRECEDING free_text/working moment in the same capture — i.e.
+	// does a menu always DISPLACE the input box, never merely coexist with
+	// it at the same rows.
+	//
+	// Measured on every corpus pair replayed off testdata/captures that has
+	// a real preceding free_text/working baseline in the same capture
+	// (claude-2.1.266-permission, claude-lmstudio-permission, claude-modal,
+	// claude-permission, claude-permission-60, and both model-menu
+	// captures): InputBox went from bound (e.g. rows 35-38) to fully
+	// unbound ({0,-1}) at every single menu moment, with zero
+	// counterexamples — never merely shifted rows while staying bound. The
+	// three onboarding dialogs with NO preceding baseline in their capture
+	// (theme-picker, folder-trust, claude-trust) do not contradict this:
+	// the box had never been drawn yet, so there was nothing to displace.
+	// This is consistent with this file's own INPUT BOX FLOATS note above:
+	// the box's top rule never binds inside a dialog, which is exactly why
+	// it goes fully unbound rather than merely relocating.
+	//
+	// True here means callers MAY bind a state-changing step's precondition
+	// to InputBox + cursor alone (design §8.2's paste and Enter, and the
+	// step-4 "or working" submission check) instead of the wider MenuZone:
+	// a menu appearing is caught because InputBox itself goes empty, so a
+	// target minted from it stops matching the moment a menu is drawn.
+	// Registry.MenuDisplacesInputBox answers false (fail closed, fall back
+	// to MenuZone) for an agent that has no driver or never sets this.
+	MenuDisplacesInputBox bool `json:"menuDisplacesInputBox,omitempty"`
 }
 
 // AnchorSpec binds a name to a row of the frame. A binding that fails is not
@@ -305,6 +334,11 @@ func compileExtractors(specs []Extractor) ([]compiledExtractor, error) {
 }
 
 func (d documentDriver) Agent() string { return d.doc.Agent }
+
+// MenuDisplacesInputBox answers Document.MenuDisplacesInputBox for this
+// agent's rule — the declared, measured fact Registry.MenuDisplacesInputBox
+// projects (nocx-6q1uh.10).
+func (d documentDriver) MenuDisplacesInputBox() bool { return d.doc.MenuDisplacesInputBox }
 
 // bound is the anchor table for one frame. Absent names are simply missing,
 // which is what makes "did this bind" askable.

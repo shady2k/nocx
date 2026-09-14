@@ -296,5 +296,6 @@
   ],
   "inputBox": { "anchor": "topRule", "to": "bottomRule" },
   "menuZone": { "anchor": "cursor", "up": true, "toEdge": true },
+  "menuDisplacesInputBox": true,
   "default": "unknown"
 }

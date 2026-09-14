@@ -50,6 +50,14 @@ html {
   --space-6: 24px;
   --space-8: 32px;
   --space-12: 48px;
+
+  /* ── Icon sizes (spec §8, nocx-9bpeq.2) ───────────────────────────────
+     A glyph's box. Not type: the kit's icons carry a viewBox and no intrinsic
+     size, so whoever renders one says how big it is, and says it with one of
+     these. */
+  --icon-size-sm: 14px;
+  --icon-size-md: 16px;
+  --icon-size-lg: 20px;
   /* The scale was set while the whole shell was monospace, where SF Mono's
      larger x-height makes 12/14 read bigger than it measures. In a
      proportional UI font the same numbers read small, so every step moves up
@@ -76,6 +84,11 @@ html {
      of the same number would be the dead twin this token used to be. */
   --activity-bar-width: 48px;
   --tab-height: 38px;
+  /* The terminal pane's inline gutter. Declared here rather than on `.pane` so
+     every row that must line up with the live terminal reads one number. Its
+     value moves xterm's column count and the frozen block's first column, so
+     it changes only with the alignment test (nocx-9bpeq.8). */
+  --pane-inline-padding: 10px;
 
   /* A command block's BODY padding. Named here because two surfaces wear it:
      the frozen `.cmd-output` and the live region that becomes it. They must

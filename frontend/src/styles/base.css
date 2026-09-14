@@ -461,7 +461,6 @@ select:focus-visible {
   pointer-events: none;
   display: flex;
   flex-direction: column;
-  --pane-inline-padding: 10px;
   padding: 0 var(--pane-inline-padding);
   --default-contextmenu: hide;
 }

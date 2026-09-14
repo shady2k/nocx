@@ -5,7 +5,8 @@
   §7 (items 1–11). Every item is answered in §12.
 - **Stands on:** epic `nocx-ygxjv` (closed 2026-09-14): one emulator, in the helper's session
   runtime, beside the PTY (ADR-0066).
-- **Revision 3** (2026-09-14). Revision 1 (`357f62e3`) and revision 2 (`0e11c56f`) were reviewed by
+- **Revision 4** (2026-09-14): answers codex round 3 on revision 3 (`63203c36`). Revision 1
+  (`357f62e3`), revision 2 (`0e11c56f`) and revision 3 were reviewed by
   codex; dispositions in §15. After the second review the owner split the epic (decision 9): this
   document is the **shared core plus the orchestrating caller**. The built-in assistant acting on
   arbitrary panes is the sibling epic `nocx-3g262` (§14), which inherits decisions 1–3, 6 and 8 and
@@ -104,22 +105,31 @@ Each helper session has **one owner goroutine**. It alone decides the order of e
 changes the terminal or its model: output ingest, runtime replies, client frames, intents, resize,
 and shutdown. It never blocks on I/O.
 
-- **Local PTY:** the master fd is non-blocking. The owner reads it itself through the Go poller
-  (`os.File` read with an immediate deadline) — so "everything readable now" is a real boundary:
-  read until the deadline expires with nothing, i.e. `EAGAIN`.
-- **SSH channel:** there is no readiness boundary on `ssh.Channel` (`internal/helper/sshsvc/
-shell.go:293-294`). A reader goroutine does the blocking read and sends chunks to the owner. The
-  owner's barrier is "every chunk the reader has handed over"; the guarantees that depend on a real
-  read barrier are weakened for SSH panes and say so (§5.4, §5.7).
-- **Writer:** a writer goroutine performs the blocking `Write` of exactly one item at a time and
-  reports `(n, err)` back. The owner hands it the next item only after the previous completed.
+- **Local PTY:** the master fd is set `O_NONBLOCK` **before** it is wrapped by `os.NewFile`, on both
+  platforms — on Darwin `creack/pty` opens `/dev/ptmx` blocking and wraps it at once
+  (`pty_darwin.go:14-18`), so `internal/pty` opens the master itself or re-wraps a dup that is
+  non-blocking from the start; an fd wrapped while blocking is never pollable. Readiness and reading
+  are split: a **readiness goroutine** waits on the poller (`SyscallConn().Read` returning `false`
+  until readable) and only signals the owner; the **owner** performs the reads, as a raw
+  non-blocking `read(2)` loop through `SyscallConn().Read`, until `EAGAIN`. An expired deadline is
+  never used as a probe — Go returns a timeout before issuing `read(2)`.
+- **SSH channel (a local helper holding an SSH channel):** `ssh.Channel` has no readiness boundary
+  (`internal/helper/sshsvc/shell.go:293-294`) — a blocking reader may hold bytes the owner has not
+  seen. So there is **no read barrier**, and state-changing intents on such a session are
+  **refused `no_read_barrier`**. Reads and snapshots still work. A pane whose PTY is held by a helper
+  on the far host has a real PTY and a real barrier there. Descendants on SSH are not in this epic's
+  scope anyway (remote workers are `nocx-cxq7d`); the refusal is what makes that explicit.
+- **Writer:** a writer goroutine performs the `Write` of exactly one item at a time on the same
+  non-blocking file (the Go poller absorbs `EAGAIN` for a pollable file) and reports `(n, err)`
+  back. The owner hands it the next item only after the previous completed.
 
 ### 5.3 The commit point
 
 Every input item (reply, client frame, intent, resize) is queued in the owner in arrival order.
 When the writer is idle and an item reaches the head:
 
-1. the owner **drains** (local: reads to `EAGAIN` and ingests; SSH: ingests every handed-over chunk);
+1. the owner **drains**: reads to `EAGAIN` and ingests (a local PTY; sessions without a barrier never
+   reach this step with an intent);
 2. for an intent, **validates** under the runtime mutex (§6.2): token, one-shot state, incarnation,
    completeness, access epoch (§7.2), digest;
 3. **hands the encoded bytes to the writer** and assigns the item its **fence** (a per-session
@@ -139,8 +149,9 @@ Each ingested chunk is stamped, **at the owner's read**, with the highest fence 
 completed when that read happened; frames carry `inputFence`. On a local PTY, bytes read after a
 completed write were readable only after it — but may still have been _produced_ before the
 program read our input. So `inputFence ≥ fenceAfter` means "observed after my write", never "caused
-by my write". Echo is therefore confirmed by content in a fenced frame (§8.2). On SSH the stamp is
-at the owner's receipt of a reader chunk, which is weaker still; the same content rule applies.
+by my write". Echo is therefore confirmed by content in a fenced frame (§8.2). A session without a
+read barrier stamps at the owner's receipt of a reader chunk; it takes no intents, so nothing relies
+on that stamp.
 
 ### 5.5 Replies and bounds
 
@@ -161,20 +172,27 @@ makes every outstanding target `incomparable` from the moment the item is commit
 
 ### 5.7 Shutdown
 
-A closing state machine, owned by the owner:
+Three distinct operations, never collapsed into one close — the existing code separates process
+exit from output EOF because collapsing them lost the final output
+(`internal/helper/session/session.go:407-420`):
 
-1. **stop admission:** new items are refused `closing`;
-2. **close the process** (local PTY close / SSH channel close), which unblocks the writer's and the
-   SSH reader's calls;
-3. **drain to EOF:** the owner (local) or the reader (SSH) delivers the final chunks; the owner
-   ingests them — the tail is not lost (today the reader owns final window closure,
-   `internal/helper/session/session.go:407-420`, and that stays the reader's/owner's);
-4. **resolve** every queued item: not yet handed to the writer → `cancelled`; in flight → its
-   writer result, or `delivery_unknown`;
-5. **join** reader and writer goroutines; only then close the runtime and the screen.
+- **request termination** (signal the process group / close the SSH session's remote side);
+- **interrupt the writer** (local: `SetWriteDeadline` in the past on the pollable file, which
+  unblocks a pending write; SSH: close the channel's write half);
+- **close the readable side** (local PTY master / SSH channel).
 
-Channels are closed only by their sending side. Tests: exit with unread tail bytes; shutdown with a
-local write blocked and with an SSH write blocked.
+**Process exit or graceful stop:** stop admission (`closing`) → request termination → interrupt the
+writer → keep reading **until EOF** and ingest the tail → resolve queued items (not handed to the
+writer → `cancelled`; in flight → the writer's result, or `delivery_unknown`) → join readiness,
+reader and writer goroutines → close the readable side → close runtime and screen.
+
+**Forced stop** (helper shutdown with a deadline): the same order, but if EOF does not arrive by the
+deadline the readable side is closed and the session reports `tailLost: true` — the design does not
+promise a drain that cannot occur.
+
+Channels are closed only by their sending side. Tests: exit with unread tail bytes (tail ingested);
+forced stop with a program that never closes its output (`tailLost`); shutdown with a local write
+blocked and with an SSH write blocked (writer interrupted, joined).
 
 ### 5.8 Liveness test (replaces `nocx-6q1uh.1`'s assertion)
 
@@ -187,7 +205,9 @@ program that never reads, the reserve overflows into `completeness: lost` rather
 ### 6.1 Minted from a retained snapshot
 
 `session.read` asks the helper for a **snapshot**: `{ snapshotId, frame, revision, inputFence,
-completeness }`. The helper retains the last few snapshots per session (a ring of 8, each for at most
+completeness, accessEpoch, readBarrier }`. `accessEpoch` is the helper session's current access
+epoch (§7.2) and is stored with every token the snapshot yields; it starts at 1 for each session
+incarnation, and a helper restart is a new incarnation. The helper retains the last few snapshots per session (a ring of 8, each for at most
 2 s). The coordinator classifies that frame with the agent rule and chooses the rows, then asks the
 helper to **mint a target from the same `snapshotId`**. An evicted snapshot refuses `snapshot_gone`
 and `session.read` retries once from a fresh snapshot. Classification, rows, menu identity and
@@ -203,11 +223,18 @@ targets, cursor position and visibility.
 Token: `{ tokenId, sessionId, incarnation, buffer, geometry, rows, digest, mintedAt, expiresAt }`,
 HMAC-SHA256 under a key the helper draws per session incarnation and never exports; lifetime 60 s.
 
-**One-shot:** at the commit point the owner atomically moves `tokenId` from _unused_ to _consumed_
-and records the intent's result, retained for the incarnation (bounded; oldest records evicted only
-after their token expired). The same token with the same intent returns the recorded or in-progress
-result; with a different intent → `token_spent`. This is the replay barrier; a lost response is
-recovered by asking again with the same token.
+**Bounded, and one-shot.** Minting **reserves a record slot** for the token; a session holds at
+most 64 live tokens (unexpired, minted or consumed). When all slots are held, `session.target` is
+refused `capacity` before a token exists — never by evicting a live replay barrier. A slot is
+released only when its token has expired **and** its result has been read or has aged 5 minutes;
+result records are capped at 4 KiB each.
+
+At the commit point the owner atomically moves `tokenId` from _unused_ to _consumed_ and binds the
+**canonical intent** (`kind`, `payload`, `accessEpoch`). A second `session.intent` with the same
+token and the same canonical intent returns the recorded result, or `in_progress` with
+`retryAfterMs` while the write is still in flight; with a different intent → `token_spent`.
+`session.intent.status { tokenId }` (non-mutating) answers the same without presenting a payload:
+`unknown` (never seen, or slot released) · `in_progress` · the recorded result.
 
 The coordinator keeps a record per `tokenId`: the bound capability (§7.1), target kind, menu
 identity, the participant's enrolment incarnation, and the delegation chain generations (§7.2). A
@@ -251,13 +278,16 @@ It replaces `Typist.Choose` (`agenttyping.go:546-590`).
 ### 6.5 The write op
 
 ```
-session.intent  { token, accessEpoch, kind: key|text, payload }
-→ { state: executed | refused | failed_partial | delivery_unknown | cancelled,
-    bytesWritten, fenceAfter,
+session.intent  { token, accessEpoch, commitBy, kind: key|text, payload }
+→ { state: executed | refused | failed_partial | delivery_unknown | cancelled | in_progress,
+    bytesWritten, fenceAfter, retryAfterMs?,
     refusal?: { cause: stale_target | incomparable | expired | forged | token_spent |
                        snapshot_gone | completeness_unknown | cannot_encode | would_submit |
-                       access_revoked | busy | closing,
+                       access_revoked | no_read_barrier | commit_deadline | capacity |
+                       busy | closing,
                 regionNow } }
+
+session.intent.status { tokenId } → { state: unknown | in_progress | <recorded result> }
 ```
 
 `refused` wrote nothing; `failed_partial` carries `0 < bytesWritten < len`; `delivery_unknown` is a
@@ -286,22 +316,32 @@ one mutex under which (a) a delegation is created, (b) a delegation is ended or 
 generation bumped, and (c) a chain is resolved into a **chain vector** `[(delegation, generation)]`.
 A spawn under a delegation being revoked serialises against that revocation and sees it ended.
 
-**Epoch in the helper.** Each helper session has an **access epoch**. When a revocation ends or
-suspends a delegation, the coordinator — still in the revocation call — collects the sessions of
-every descendant pane under it and sends `session.access.bump(sessionId) → epoch` to each helper;
-the owner applies a bump as an input item ahead of queued intents, so every intent admitted under
-the old epoch is refused `access_revoked` at its commit point. An intent carries the epoch its
-authority check observed.
+**Epoch in the helper.** Each helper session has an **access epoch**, reported in every snapshot
+(§6.1) and carried by every intent. When a revocation ends or suspends a delegation, the
+coordinator — still in the revocation call — collects the sessions of every descendant pane under
+it and sends `session.access.bump(sessionId, above: epoch) → epoch` to each helper. The owner applies
+a bump as an input item ahead of queued intents and **acknowledges only after every older
+uncommitted intent is terminal** (`access_revoked`). The bump is idempotent (`above` names the epoch
+it supersedes), so a lost acknowledgement is recovered by sending it again.
 
-**When a helper does not answer.** A bump has a deadline. On expiry the coordinator **closes its
-connection to that helper**; the helper cancels every uncommitted intent bound to a closed
-connection (items already handed to the writer were committed before the revocation and are
-reported as such). Either way, when the revocation returns, no byte can be written under the old
-authority. Revocation reports which helpers were bumped and which were cut off.
+**Commit deadlines make the barrier provable without an answer.** Every intent carries `commitBy`,
+an absolute deadline on the machine's monotonic clock (`CLOCK_MONOTONIC` on Linux, `mach_continuous_
+time`-based on Darwin — the coordinator and a local helper share it), 5 s after the coordinator sent
+it. The owner refuses an intent reaching its commit point after `commitBy` (`commit_deadline`), and
+refuses at receipt one whose `commitBy` has already passed. So when a helper does not acknowledge a
+bump, the revocation waits until the latest `commitBy` of any intent it sent to that session has
+passed; after that no old intent can commit, whatever the helper's state or the connection's. It
+returns with that session marked `confirmedBy: deadline` instead of `confirmedBy: ack`. A far-host
+helper does not share the clock; it gets no intents in this epic (§5.2), and a later epic that sends
+them must require the acknowledgement.
+
+Until a session's bump is acknowledged (or the deadline passed), the coordinator admits no new
+intent there, and afterwards it needs a fresh snapshot for the new epoch.
 
 **Transport timeouts are not safety boundaries.** An intent RPC whose caller context ends does not
 release anything as though execution ended: the coordinator records the intent as `indeterminate`
-and asks the helper for the token's recorded result (§6.2) before reporting an outcome.
+and asks `session.intent.status` (§6.2) before reporting an outcome; if the helper cannot be asked,
+the outcome is reported `indeterminate` once `commitBy` has passed, never `cancelled`.
 
 ### 7.3 The assistant over its descendants
 
@@ -340,14 +380,35 @@ idempotency key; not an acceptance receipt.
 
 ### 8.4 Idempotency
 
-Key: `{ controller session, controller epoch, participant enrolment incarnation, namespace, id }`
-— every part server-derived except `id`; namespace `caller` or `nocx` (§9). The record holds a
-payload hash and the state. Same key, same payload → the recorded state; different payload →
-`id_reused`. Records live until the participant's enrolment incarnation ends.
+One typed key, every part server-derived except `id`:
+
+```
+MessageKey {
+  caller:      endpoint | kernel
+  controller:  { sessionId, liveness: Liveness }   // the bound session's own incarnation
+  authority:   endpoint → the admission epoch the connection was admitted under
+                          (internal/toolendpoint/authorizer.go:47-62);
+               kernel   → the run id
+  participant: { id, liveness: Liveness }          // compared with Liveness.SameIncarnation
+                                                   // (internal/workers/workers.go:190-196)
+  namespace:   caller | nocx
+  id:          string                               // from the caller; "task" in namespace nocx
+}
+```
+
+`Delegation.Epoch` is **not** used: it is documented as the controller's incarnation and filled with
+the participant's (`internal/workers/workers.go:317`, `registrar.go:299`) — filed as `nocx-bm99e`,
+fixed before this key is built.
+
+The record holds `payloadHash` = SHA-256 of canonical JSON v1 `{ "v":1, "text", "when",
+"targetKind" }` (keys sorted, UTF-8, no insignificant whitespace) and the state. Same key, same
+hash → the recorded state; different hash → `id_reused`. Records live until the participant's
+incarnation ends.
 
 ### 8.5 Ownership and lock order
 
-- A delivery step: under the **queue mutex**, claim the step (record phase + generation), release;
+- A delivery step: under the **queue mutex**, refuse if the record is cancelled, else claim the step
+  (record phase + generation) — the claim is cancel's linearisation point (§8.6) — and release;
   resolve authority (store mutex, released); call `session.intent` holding **no** coordinator lock;
   under the queue mutex, commit the phase only if the record's generation still matches.
 - A revocation: store mutex → bump generation → release → helper bumps (no lock held) → queue mutex
@@ -360,7 +421,10 @@ payload hash and the state. Same key, same payload → the recorded state; diffe
 - **caller disconnect** does not cancel: a delivery belongs to the pane's queue;
 - **authority revoked** at any phase: no further step; if the paste executed, state `partial` with
   box contents, kept until the incarnation ends; nocx never erases the box;
-- **cancel** before the paste executes → `cancelled`; after → the recorded state;
+- **cancel** linearises on the queue claim (§8.5): a cancel that takes the queue mutex before the
+  paste step is claimed wins → `cancelled`, and the step is never claimed; once the paste step is
+  claimed, cancel answers `too_late` with the recorded state (which may become `executed`). A cancel
+  never reports `cancelled` for a message whose paste can still be written;
 - **coordinator restart:** the queue is in memory; a read afterwards reports
   `deliveryStateLost: { since }`, no per-message outcome.
 
@@ -376,14 +440,14 @@ delivers it under §8's guarantee. `owedTasks`, `withOwedTask`, `awaitMenuLeftSc
 
 ## 10. Components
 
-| Unit                                                                                     | Does                                                                                         | Depends on                   |
-| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------- |
-| helper session owner (`internal/helper/session`)                                         | ordering, drain, commit point, fences, bounds, resize, shutdown, access epoch, token records | runtime, process             |
-| `sessionruntime`                                                                         | ingest, snapshots, structural digest, validation, encoding                                   | emulator                     |
-| helper ops `session.snapshot`, `session.target`, `session.intent`, `session.access.bump` | wire                                                                                         | owner                        |
-| rule engine (`internal/agentdriver`)                                                     | menu extractor, input box, menu zone                                                         | —                            |
-| `DescendantPaneAccess` (`internal/app`, `internal/workers`)                              | chain resolution, generations, revocation fan-out                                            | workers store, helper client |
-| tools `session.read/keys/message`                                                        | arguments, targets, option loop, message queue                                               | all above                    |
+| Unit                                                                                                              | Does                                                                                         | Depends on                   |
+| ----------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------- |
+| helper session owner (`internal/helper/session`)                                                                  | ordering, drain, commit point, fences, bounds, resize, shutdown, access epoch, token records | runtime, process             |
+| `sessionruntime`                                                                                                  | ingest, snapshots, structural digest, validation, encoding                                   | emulator                     |
+| helper ops `session.snapshot`, `session.target`, `session.intent`, `session.intent.status`, `session.access.bump` | wire                                                                                         | owner                        |
+| rule engine (`internal/agentdriver`)                                                                              | menu extractor, input box, menu zone                                                         | —                            |
+| `DescendantPaneAccess` (`internal/app`, `internal/workers`)                                                       | chain resolution, generations, revocation fan-out                                            | workers store, helper client |
+| tools `session.read/keys/message`                                                                                 | arguments, targets, option loop, message queue                                               | all above                    |
 
 ## 11. Removed, superseded, amended
 
@@ -440,6 +504,16 @@ the implementer; their assertions go into the beads first.
   `deliveryStateLost`; watchdog at each §8.5 handoff.
 - **Contracts (rule 5):** `session.keys`, `session.message`, extended `session.read`, the four helper
   ops; `_DTOConformsToContract` and `_OverTheWireConformsToContract`.
+- **Revision 4 additions:** the production local PTY adapter on Linux and Darwin — bytes preloaded,
+  one drain consumes all of them, the next read reaches `EAGAIN` with no sleep; an SSH-channel
+  session refuses an intent `no_read_barrier` and still serves a snapshot; 64 live tokens then
+  `capacity` with no eviction, and concurrent mint/consume at the cap; a first write blocked while a
+  retry gets `in_progress` and `session.intent.status` later gets the result; a bump acknowledged only
+  after an older queued intent is `access_revoked`; a helper paused between peer close and EOF
+  handling cannot let a revocation return before `commitBy` passes, and the old intent is refused
+  `commit_deadline`; cancel after the paste claim → `too_late`; message keys that differ only in
+  controller incarnation, admission epoch or participant incarnation do not collide; forced stop with
+  a program that never closes output → `tailLost`.
 - **Live, outside CI:** `nocx-detection-verify` extended with Claude's menu zone and echo form, an
   option answered, messages during and after a turn, pasted text into a menu.
 
@@ -509,3 +583,17 @@ not lost:
 | 15  | Path+inode not an executable identity                  | Sibling epic, §14                                                                                                                |
 | 16  | No echo seam; commit-point read                        | Sibling epic, §14 (plus the `ICANON` correction)                                                                                 |
 | 17  | Widening changes unscoped rows; no pane addressing     | Sibling epic, §14                                                                                                                |
+
+### Round 3 (on `63203c36`)
+
+| #   | Finding                                                         | Disposition                                                                                                  |
+| --- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| 1   | Expired-deadline read is no probe; Darwin fd not pollable       | Accepted; `O_NONBLOCK` before wrapping, readiness goroutine + owner raw read loop to `EAGAIN`, §5.2          |
+| 2   | SSH has no barrier, so the headline guarantee fails there       | Accepted; intents refused `no_read_barrier` on a local helper's SSH channel, §5.2                            |
+| 3   | Close-then-drain cannot keep the tail                           | Accepted; termination, writer interrupt and readable close split; forced stop reports `tailLost`, §5.7       |
+| 4   | One-shot records unbounded without a mint cap                   | Accepted; slot reserved at mint, 64 live tokens, `capacity`, §6.2                                            |
+| 5   | No wire for lost-response recovery                              | Accepted; `in_progress` + `session.intent.status`, §6.2, §6.5                                                |
+| 6   | Closing the connection is not a barrier                         | Accepted; acknowledged bump after older intents are terminal, or monotonic `commitBy` deadline elapsed, §7.2 |
+| 7   | No source of the access epoch for an intent                     | Accepted; epoch in every snapshot, fresh snapshot after a bump, §6.1, §7.2                                   |
+| 8   | Post-call generation check cannot enforce cancel                | Accepted; cancel linearises on the queue claim, `too_late` after it, §8.5–8.6                                |
+| 9   | Idempotency key parts ambiguous; `Delegation.Epoch` mislabelled | Accepted; typed `MessageKey` and canonical payload v1, §8.4; defect filed `nocx-bm99e`                       |

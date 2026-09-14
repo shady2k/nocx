@@ -44,6 +44,7 @@
 @import './styles/components/section.css';
 @import './styles/components/swatch-picker.css';
 @import './styles/components/badge.css';
+@import './styles/components/meta.css';
 @import './styles/components/watch-badge.css';
 @import './styles/components/secret-chip.css';
 @import './styles/components/terminal-link.css';

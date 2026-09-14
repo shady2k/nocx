@@ -1,0 +1,51 @@
+/* Meta (ui/README table) — the kit's inline fact on the terminal screen: muted
+   text, one line, tabular figures (spec 2026-09-14 §6.1). It replaces the
+   boxed `.nocx-chip` family; there is deliberately no background, border or
+   padding here — metadata is text. Colours are tokens only (ADR-0013 §4). */
+
+.ui-meta {
+  display: inline-block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-2xs);
+  /* Equal advance widths: a duration that ticks or a column of exit codes must
+     not change width digit by digit (the reason .nocx-chip carried the same
+     declaration, nocx-6w4z). */
+  font-variant-numeric: tabular-nums;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.ui-meta[data-tone='muted'] {
+  color: var(--color-text-muted);
+}
+
+.ui-meta[data-tone='dim'] {
+  color: var(--color-text-dim);
+}
+
+.ui-meta[data-tone='danger'] {
+  color: var(--color-danger);
+}
+
+.ui-meta[data-tone='accent'] {
+  color: var(--color-accent);
+}
+
+/* Where the fact is a safety question — the remote host the pending command
+   will run on (spec §5.2) — the part reads at normal text colour. */
+.ui-meta__part[data-emphasis='strong'] {
+  color: var(--color-text);
+}
+
+/* The width floor a column of durations aligns on: the same floor
+   `.cmd-header-duration` gave the chip (style.css), carried by the kit now. */
+.ui-meta[data-column='duration'] {
+  min-width: 3.25rem;
+  text-align: end;
+}

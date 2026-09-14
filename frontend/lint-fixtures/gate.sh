@@ -324,6 +324,36 @@ if ! echo "$import_check" | grep -q 'no-restricted-imports'; then
   exit 1
 fi
 
+# ── Raw controls inside the terminal-owned tree (nocx-9bpeq.10) ─────────────
+# The rule is path-scoped, so only a file inside src/scrollback/ can prove the
+# narrowed exemption: a createElement('button') there MUST fire, and innerHTML
+# there must NOT — the frozen block is serialised HTML by design (ADR-0012).
+raw_fixture="src/scrollback/__gate_raw_controls.ts"
+cleanup_raw_fixture() { rm -f "$raw_fixture"; }
+trap cleanup_raw_fixture EXIT INT TERM
+cat > "$raw_fixture" <<'FIXTURE'
+// Temporary fixture written by lint-fixtures/gate.sh. If you are reading this in
+// a working tree, the gate crashed between writing and removing it; delete it.
+export function gateRawControl(): HTMLElement {
+  const host = document.createElement('div')
+  host.innerHTML = '<span class="term-line"></span>'
+  host.append(document.createElement('button'))
+  return host
+}
+FIXTURE
+raw_check=$(npx eslint --no-ignore "$raw_fixture" 2>&1 || true)
+cleanup_raw_fixture
+trap - EXIT INT TERM
+
+if ! echo "$raw_check" | grep -q "createElement('button')\|nocx/no-raw-controls"; then
+  echo "RAW CONTROLS GATE FAILED — createElement('button') inside scrollback/ was not reported"
+  exit 1
+fi
+if echo "$raw_check" | grep -q 'innerHTML assignment'; then
+  echo "RAW CONTROLS GATE FAILED — innerHTML inside scrollback/ was reported; the frozen block's HTML is by design"
+  exit 1
+fi
+
 # ── ESLint fixture check ─────────────────────────────────────────────────────
 # Run eslint on .tsx and .ts files (not .css — espree cannot parse CSS).
 # The .ts glob is needed for the solid/reactivity .ts fixture.

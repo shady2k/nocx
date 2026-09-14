@@ -46,6 +46,7 @@ async function copyToClipboardImpl(text: string): Promise<void> {
     }
   }
 
+  // eslint-disable-next-line nocx/no-raw-controls -- not a control: an off-screen buffer for the legacy execCommand('copy') path when navigator.clipboard refuses. A second clipboard implementation beside ClipboardAccess; see the bead filed with this commit.
   const ta = document.createElement('textarea')
   ta.value = text
   ta.style.position = 'fixed'

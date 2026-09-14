@@ -95,15 +95,26 @@ function loadInlineMarkupBaseline() {
 
 const inlineMarkupBaseline = loadInlineMarkupBaseline()
 
-// ─── Path-based exemption patterns (ADR-0014) ──────────────────────────────────────
-// Application surfaces: files matching an exempt pattern are allowed to use raw
-// controls / innerHTML. ESLint's own ignores (dist, lint-fixtures) handle the
-// rest; this function only checks explicit ADR exemptions.
-const EXEMPT_PATTERNS = [
-  // The kit — native implementation details live here intentionally
+// ─── Path-based exemption patterns (ADR-0014, ADR-0012) ────────────────────────────
+// Two different reasons a file is exempt, and they do not exempt the same thing.
+//
+// The kit and the tests are exempt from everything: the kit is where native controls
+// legitimately live, and a test builds whatever it is testing.
+//
+// The FRAMEWORK-NEUTRAL files are ADR-0012's "deliberately still imperative" set:
+// terminal-owned code kept free of Solid for AD-6. That is a statement about the
+// framework, never about the kit's vocabulary — but the exemption was once read that
+// way, and a raw ⋮ button, a hand-rolled chip family and an emoji folder accumulated
+// under it with every gate green (nocx-9bpeq). So these files are exempt only from
+// the innerHTML check, because the frozen block is serialised HTML by design, and
+// they are NOT exempt from building raw controls.
+const KIT_AND_TEST_PATTERNS = [
   (rel) => rel.includes('/src/ui/'),
+  (rel) => /\.(test|spec)\.(ts|tsx)$/.test(rel),
+  (rel) => rel.includes('/test-support/'),
+]
 
-  // Terminal-owned files (ADR-0012 §"What is deliberately still imperative")
+const FRAMEWORK_NEUTRAL_PATTERNS = [
   (rel) => rel.endsWith('/src/tabs.ts'),
   (rel) => rel.endsWith('/src/tab-content.ts'),
   (rel) => rel.endsWith('/src/terminal-content.ts'),
@@ -118,14 +129,20 @@ const EXEMPT_PATTERNS = [
   (rel) => rel.endsWith('/src/frame.ts'),
   (rel) => rel.endsWith('/src/submit.ts'),
   (rel) => rel.endsWith('/src/ipc.ts'),
-
-  // Test files and test support
-  (rel) => /\.(test|spec)\.(ts|tsx)$/.test(rel),
-  (rel) => rel.includes('/test-support/'),
 ]
+
+const EXEMPT_PATTERNS = [...KIT_AND_TEST_PATTERNS, ...FRAMEWORK_NEUTRAL_PATTERNS]
 
 function isExempt(relPath) {
   return EXEMPT_PATTERNS.some((p) => p(relPath))
+}
+
+function isKitOrTest(relPath) {
+  return KIT_AND_TEST_PATTERNS.some((p) => p(relPath))
+}
+
+function isFrameworkNeutral(relPath) {
+  return FRAMEWORK_NEUTRAL_PATTERNS.some((p) => p(relPath))
 }
 
 function hashNode(sourceCode, node) {
@@ -151,13 +168,16 @@ const nocxPlugin = {
             'Use a kit component from \'ui/\' instead of raw <input type="{{type}}">. See ADR-0014.',
           innerHTML:
             'Use a kit component instead of innerHTML assignment. Icons are components, not markup. See ADR-0014.',
+          rawCreateElement:
+            "document.createElement('{{tag}}') builds a raw control. Use the kit's emitter from 'ui/' (createButton, createIconButton) — the imperative exemption is about Solid, not about the kit. See ADR-0014, nocx-9bpeq.",
         },
       },
       create(context) {
         const filename = context.filename ?? ''
         const rel = relative(PROJECT_ROOT, filename)
 
-        if (isExempt(rel)) return {}
+        if (isKitOrTest(rel)) return {}
+        const frameworkNeutral = isFrameworkNeutral(rel)
 
         const sourceCode = context.sourceCode
 
@@ -240,9 +260,31 @@ const nocxPlugin = {
           }
         }
 
+        // Imperative raw controls: el = document.createElement('button'). The rule saw
+        // JSX only, so every imperative surface could build one (nocx-9bpeq.10). Every
+        // `input` counts — its type is set after construction, where the AST cannot
+        // follow it.
+        const RAW_CREATED = new Set(['button', 'select', 'textarea', 'input'])
+        function checkCreateElement(node) {
+          const callee = node.callee
+          if (callee.type !== 'MemberExpression' || callee.property.type !== 'Identifier') return
+          if (callee.property.name !== 'createElement') return
+          const arg = node.arguments[0]
+          if (!arg || arg.type !== 'Literal' || typeof arg.value !== 'string') return
+          const tag = arg.value.toLowerCase()
+          if (!RAW_CREATED.has(tag)) return
+          const id = hashNode(sourceCode, node)
+          if (!isBaselined(id)) {
+            context.report({ node, messageId: 'rawCreateElement', data: { tag } })
+          }
+        }
+
         return {
           JSXOpeningElement: checkJSX,
-          AssignmentExpression: checkInnerHTML,
+          // The frozen block is serialised HTML by design (ADR-0012) — innerHTML stays
+          // allowed where that serialiser lives, and nowhere else.
+          ...(frameworkNeutral ? {} : { AssignmentExpression: checkInnerHTML }),
+          CallExpression: checkCreateElement,
         }
       },
     },

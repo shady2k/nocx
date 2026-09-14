@@ -164,19 +164,20 @@ export class GrantController {
     }))
     const footer = document.createElement('div')
     footer.className = 'ui-floating-panel__footer'
-    const dismissAll = document.createElement('button')
-    dismissAll.type = 'button'
-    dismissAll.className = 'ui-context-menu__item'
-    dismissAll.dataset.action = 'dismiss-all-grants'
-    dismissAll.textContent = 'Dismiss all'
-    dismissAll.addEventListener('click', (event) => {
-      event.stopPropagation()
-      this.blocks = []
-      this.repaintBlocks()
-      this.updateChip()
-      this.onChange?.(this.blocks)
-      this.panel.hide()
+    const dismissAll = createButton({
+      label: 'Dismiss all',
+      variant: 'ghost',
+      size: 'sm',
+      onClick: (event) => {
+        event.stopPropagation()
+        this.blocks = []
+        this.repaintBlocks()
+        this.updateChip()
+        this.onChange?.(this.blocks)
+        this.panel.hide()
+      },
     })
+    dismissAll.dataset.action = 'dismiss-all-grants'
     footer.appendChild(dismissAll)
     this.panel.show({ rows, selectedIndex: -1, after: [footer] })
   }

@@ -315,6 +315,22 @@ type hostSession struct {
 	// exactly like runtime and screen do — built in spawn before the first
 	// byte is read, ended in stop.
 	owner *sessionOwner
+	// tokens is this session's one-shot token book (nocx-6q1uh.4, spec
+	// §6.2), the SAME instance finishSpawn binds to owner via SetTokens —
+	// this copy is what a snapshot/target RPC handler (nocx-6q1uh.5) reaches
+	// through hs rather than through the owner, which it has no handle on.
+	tokens *tokenBook
+	// now is this session's clock, for the retained-snapshot ring below —
+	// s.now (Service's own seam) in production, a fake clock in a test that
+	// wants to drive snapshotMaxAge without a real wait.
+	now func() time.Time
+	// snapMu, snapNext and snapRing are the retained-snapshot ring
+	// (nocx-6q1uh.4, spec §6.1, snapshots.go): snapNext mints each
+	// SnapshotID from 1, and snapRing holds the last snapshotRing of them,
+	// indexed by id modulo the ring's width.
+	snapMu   sync.Mutex
+	snapNext SnapshotID
+	snapRing [snapshotRing]*retainedSnapshot
 
 	mu          sync.Mutex
 	subs        map[proto.SubscriberID]*subscriber

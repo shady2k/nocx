@@ -966,6 +966,13 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 	// run with no sink bound.
 	owner := newSessionOwner(proc, rt, win, s.log)
 	rt.SetReplies(owner)
+	// The session's one token book (nocx-6q1uh.4, spec §6.2), drawn over
+	// THIS incarnation and bound to the owner before anything can submit a
+	// token-bearing intent — the same ordering guarantee SetReplies already
+	// gives Ingest. hs below gets the same instance, for the RPC handlers
+	// (nocx-6q1uh.5) that mint and verify through hs rather than the owner.
+	tokens := newTokenBook(rt.Incarnation(), s.now)
+	owner.SetTokens(tokens)
 	lifecycleWin := (*window)(nil)
 	lifecycleBudget := int64(0)
 	var lifecycleCarrier io.ReadWriteCloser
@@ -1001,6 +1008,8 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		runtime:         rt,
 		screen:          screen,
 		owner:           owner,
+		tokens:          tokens,
+		now:             s.now,
 		lifecycleWin:    lifecycleWin,
 		lifecycleBudget: lifecycleBudget,
 		// Retained for the life of the session, and only when there is a
@@ -1013,6 +1022,9 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		subs:            make(map[proto.SubscriberID]*subscriber),
 		attachments:     make(map[proto.AttachmentID]*attachment),
 	}
+	// The book's tokens report themselves under this session's id — minted
+	// one line above, so it could not be named at newTokenBook time.
+	tokens.bindSession(hs.id)
 
 	s.mu.Lock()
 	s.sessions[hs.id.Session] = hs

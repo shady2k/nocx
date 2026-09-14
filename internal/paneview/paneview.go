@@ -165,27 +165,49 @@ func From(term emulator.Terminal) (Frame, error) {
 		// program had erased it.
 		return Frame{}, fmt.Errorf("paneview: terminal reports %dx%d: %w", geom.Cols, geom.Rows, emulator.ErrOutOfRange)
 	}
+	rows := make([]emulator.Row, geom.Rows)
+	for y := range geom.Rows {
+		row, err := term.Row(y)
+		if err != nil {
+			return Frame{}, fmt.Errorf("paneview: row %d: %w", y, err)
+		}
+		rows[y] = row
+	}
+	return FromRows(geom, screen == emulator.ScreenAlternate, rows, cursor), nil
+}
+
+// FromRows is [From]'s row-to-cell half, split out for a caller that already
+// holds rows, a cursor and a geometry from ONE consistent read taken for
+// another purpose (internal/helper/session's takeSnapshot, nocx-6q1uh.4: a
+// target's digest needs the same rows-with-style a frame is built from, and
+// reading the terminal a second time cannot promise the two describe the
+// same instant the way a single locked read does — [sessionruntime.Session
+// .Snapshot] is that read, and it already returns rows).
+//
+// It is this package's ONE place that turns an [emulator.Row] into a Frame
+// line, which [From] itself now calls, so a caller with rows in hand and a
+// caller with only a live [emulator.Terminal] see identically-shaped Frames
+// rather than two mappings agreeing today and drifting the day one of them
+// learns about a width class the other has not (AGENTS.md, "look for the
+// existing answer").
+func FromRows(geom emulator.Geometry, altScreen bool, rows []emulator.Row, cursor emulator.Cursor) Frame {
 	f := Frame{
 		Cols:          geom.Cols,
 		Rows:          geom.Rows,
 		CursorX:       cursor.X,
 		CursorY:       cursor.Y,
 		CursorVisible: cursor.Visible,
-		AltScreen:     screen == emulator.ScreenAlternate,
-		Lines:         make([][]Cell, geom.Rows),
+		AltScreen:     altScreen,
+		Lines:         make([][]Cell, len(rows)),
 	}
-	for y := range geom.Rows {
-		row, err := term.Row(y)
-		if err != nil {
-			return Frame{}, fmt.Errorf("paneview: row %d: %w", y, err)
-		}
+	for y, row := range rows {
 		line := make([]Cell, len(row.Cells))
 		for x, c := range row.Cells {
 			line[x] = Cell{Text: c.Grapheme, Width: cellWidth(c.Width)}
 		}
 		f.Lines[y] = line
 	}
-	return f, nil
+	return f
 }
 
 // cellWidth maps the emulator's width class onto the column count a consumer

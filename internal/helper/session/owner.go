@@ -83,6 +83,15 @@ const (
 // through (nocx-6q1uh.4); this task supplies the seam and a caller with
 // nothing to check yet passes nil.
 //
+// Token, Canonical and CommitBy are nocx-6q1uh.4's own addition: the one-shot
+// target this intent is spending, the canonical form [tokenBook.Consume]
+// binds it to, and the monotonic deadline past which the commit point
+// refuses `commit_deadline` rather than admit it at all. Whoever submits a
+// wire-driven session.intent (nocx-6q1uh.5 wires the op) fills these in; a
+// caller with no token — Task 2's own tests, and any intent this package
+// admits without one — leaves Token's ID at its zero value, which
+// commitIntent reads as "no token gate applies".
+//
 // admittedID is filled in by commitIntent once sessionruntime.Admit answers,
 // so the owner can correct the runtime's record through ReportOutcome if the
 // write that follows fails or falls short — Commit itself never writes, so
@@ -90,6 +99,10 @@ const (
 type pendingIntent struct {
 	Intent sessionruntime.Intent
 	Check  func(sessionruntime.Snapshot) error
+
+	Token     Token
+	Canonical canonicalIntent
+	CommitBy  int64
 
 	admittedID sessionruntime.IntentID
 }
@@ -207,6 +220,19 @@ type sessionOwner struct {
 	// §5.4). Everything else below is run()'s alone.
 	completedFence atomic.Uint64
 
+	// tokens is this session's one-shot token book (nocx-6q1uh.4, spec
+	// §6.2), bound once by SetTokens before the first token-bearing intent
+	// can arrive — the same one-time-binding shape [sessionruntime.Session
+	// .SetReplies] uses, for the same reason: the book is built the moment
+	// after this owner is, over the very incarnation it already serves.
+	tokens *tokenBook
+	// nowMono answers the commit point's monotonic clock, in the units a
+	// pendingIntent's CommitBy is expressed in. It defaults to a wrapper
+	// over time.Now here because this task has no monotonic clock of its
+	// own to inject (nocx-6q1uh.5's internal/monoclock replaces it); a test
+	// wanting a fake clock sets the field directly, in-package.
+	nowMono func() int64
+
 	// --- run()'s own state; touched from nowhere else ----------------------
 	pending    []ownerItem
 	closing    bool
@@ -235,7 +261,17 @@ func newSessionOwner(proc Process, rt *sessionruntime.Session, win *window, log 
 		cancelRead:    cancelRead,
 		writeReq:      make(chan []byte),
 		writeRes:      make(chan writeOutcome, 1),
+		nowMono:       func() int64 { return time.Now().UnixNano() },
 	}
+}
+
+// SetTokens binds this session's one-shot token book. It must run before the
+// first token-bearing intent can be submitted — finishSpawn does this
+// immediately after constructing the owner, the same moment it binds
+// Session.SetReplies — and is never rebound afterward: one incarnation, one
+// book, for the owner's whole life.
+func (o *sessionOwner) SetTokens(tb *tokenBook) {
+	o.tokens = tb
 }
 
 // run is the owner goroutine. It returns once shutdown (stop) has been asked
@@ -479,17 +515,32 @@ func (o *sessionOwner) processHead(it ownerItem) {
 // enters the runtime's own record of it, and Commit revalidates, checks and
 // encodes without writing. Either refusing leaves nothing to write, and the
 // item resolves on the spot.
+//
+// tokenGate (tokens.go, nocx-6q1uh.4) runs FIRST when pi carries a token: it
+// is where Verify, Consume and the commitBy deadline are decided, entirely
+// before this method ever calls Admit — a replayed result or an in-flight
+// one is answered without touching the runtime a second time, and a refusal
+// decided there is recorded to the book before this method ever sees it.
 func (o *sessionOwner) commitIntent(it ownerItem) {
 	pi := it.intent
+	if pi.Token.ID != (TokenID{}) {
+		if o.tokenGate(it, pi) {
+			return
+		}
+	}
 	id, err := o.rt.Admit(pi.Intent)
 	if err != nil {
-		o.resolve(it, ownerResult{State: sessionruntime.IntentStateRefused, Err: err})
+		res := ownerResult{State: sessionruntime.IntentStateRefused, Err: err}
+		o.recordTokenOutcome(pi, res)
+		o.resolve(it, res)
 		return
 	}
 	pi.admittedID = id
 	encoded, err := o.rt.Commit(sessionruntime.Intent{ID: id}, pi.Check)
 	if err != nil {
-		o.resolve(it, ownerResult{State: o.rt.IntentState(id), Err: err})
+		res := ownerResult{State: o.rt.IntentState(id), Err: err}
+		o.recordTokenOutcome(pi, res)
+		o.resolve(it, res)
 		return
 	}
 	o.writeStart(it, encoded)
@@ -578,10 +629,17 @@ func (o *sessionOwner) finishItem(it ownerItem, fence sessionruntime.Fence, res 
 	if writeErr != nil {
 		state = sessionruntime.IntentStateFailed
 	}
+	result := ownerResult{State: state, BytesWritten: res.n, FenceAfter: fence, Err: writeErr}
 	if it.kind == itemIntent {
 		o.rt.ReportOutcome(it.intent.admittedID, writeErr)
+		// tokens.go, nocx-6q1uh.4: a token-bearing intent's outcome is
+		// recorded so a same-token, same-intent replay (or a
+		// session.intent.status poll) sees the SAME answer this write just
+		// produced, rather than re-attempting or reporting in_progress
+		// forever.
+		o.recordTokenOutcome(it.intent, result)
 	}
-	o.resolve(it, ownerResult{State: state, BytesWritten: res.n, FenceAfter: fence, Err: writeErr})
+	o.resolve(it, result)
 }
 
 // resolve answers one item's caller, if there is one to answer: a reply

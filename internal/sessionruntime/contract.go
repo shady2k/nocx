@@ -858,6 +858,13 @@ type Runtime interface {
 // Snapshot is one consistent read. Every field belongs to Revision, which is
 // what makes "the cards through R and the live frame at R, then the changes
 // after R" expressible at all.
+//
+// Rows, Cursor and Identity were added for a one-shot target's commit-point
+// check (nocx-6q1uh.4, spec §6.2): [Session.Commit]'s check runs against
+// EXACTLY this snapshot, and a target's digest must be recomputed over the
+// same rows-with-style the token was minted from — Screen, below, has
+// already reduced them to text and dropped the style a selection highlight
+// or an attribute-only change lives in.
 type Snapshot struct {
 	Revision     Revision
 	At           Incarnation
@@ -867,6 +874,18 @@ type Snapshot struct {
 	Screen       []byte
 	Rendezvous   RendezvousState
 	Completeness Completeness
+	// Rows is every row of the active screen, WITH style — the source
+	// [Digest] reads, never trimmed or converted to text the way Screen is.
+	// Nil when the screen could not be read (a closed emulator), exactly the
+	// case Screen answers nil for.
+	Rows []emulator.Row
+	// Cursor is the caret [Digest] folds in for an `input` target.
+	Cursor emulator.Cursor
+	// Identity is what a target's [ScreenIdentity] is judged against: the
+	// buffer switching, a resize or an incarnation change since a token was
+	// minted is refused `incomparable` by comparing THIS rather than by
+	// diffing the rows.
+	Identity ScreenIdentity
 }
 
 // ---------------------------------------------------------------------------

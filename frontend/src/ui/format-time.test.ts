@@ -1,6 +1,6 @@
 // The clock half of a transfer's wording. One owner, so "14 s" and
 // "2 min ago" mean the same thing in every surface that prints them.
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { formatDuration, formatRelativeTime, formatTimestamp } from './format-time'
 
 describe('how long it took', () => {
@@ -70,9 +70,30 @@ describe('when it happened', () => {
 })
 
 describe('the exact moment, for the hover behind the label', () => {
-  it('is the reader’s own locale rendering of that instant', () => {
-    const at = Date.UTC(2026, 7, 22, 12, 34, 56)
-    expect(formatTimestamp(at)).toBe(new Date(at).toLocaleString())
+  it('is English with a 24-hour clock whatever locale the engine defaults to', () => {
+    // A Russian default, the way the owner's WebView answered: the clock chip
+    // read "пн, 14 сент. 21:04:04" in an English UI (spec §1, §5.4).
+    const RealFormat = Intl.DateTimeFormat
+    const format = vi
+      .spyOn(Intl, 'DateTimeFormat')
+      .mockImplementation(
+        (locales?: string | string[], options?: Intl.DateTimeFormatOptions) =>
+          new RealFormat(locales ?? 'ru-RU', options),
+      )
+    const toLocale = vi.spyOn(Date.prototype, 'toLocaleString').mockImplementation(function (
+      this: Date,
+    ) {
+      return new RealFormat('ru-RU', { dateStyle: 'short', timeStyle: 'medium' }).format(this)
+    })
+    try {
+      expect(formatTimestamp(new Date(2026, 8, 14, 19, 32, 23).getTime())).toBe(
+        '14 Sep 2026, 19:32:23',
+      )
+      expect(formatTimestamp(new Date(2026, 0, 5, 0, 4, 9).getTime())).toBe('5 Jan 2026, 00:04:09')
+    } finally {
+      format.mockRestore()
+      toLocale.mockRestore()
+    }
   })
 
   it('says nothing for a non-time', () => {

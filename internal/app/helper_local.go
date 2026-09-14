@@ -564,6 +564,28 @@ func (o *localHelperOpener) setToolSocketPath(path string) {
 	o.toolSocketPath = path
 }
 
+// installedHelperBinary answers the executable of the generation Start put on
+// THIS machine, or empty when nothing was installed.
+//
+// It is the second fact a nested child's launch needs, one field beside
+// toolEndpoint and for the same reason (nocx-1n56d): a sudo/su child runs on
+// this machine, so the MCP adapter its shell execs is this machine's installed
+// helper — the SAME path every local pane this machine opens already carries
+// (helper/session's LocalSpawner takes it from the daemon's own
+// os.Executable). Reading it from this process's environment, which is what
+// the builder used to do, names a path that belongs to whoever launched the
+// backend rather than to the child being composed: a backend started inside a
+// pane inherits that pane's LOCAL path, which is another generation's binary
+// (nocx-e2bws).
+//
+// Read under the opener's own lock, per grant, for the reason the endpoint is:
+// the install happens at Start and this builder is wired at New.
+func (o *localHelperOpener) installedHelperBinary() string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.installed.Binary
+}
+
 // toolEndpoint answers the tool socket this backend runs, for the pane about
 // to be spawned on it — or empty, which is the state a backend with no tool
 // surface is in and not "not configured yet".

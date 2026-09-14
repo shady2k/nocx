@@ -38,7 +38,6 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
@@ -126,7 +125,15 @@ func (r *sessionRegistry) lookup(lane lifecycle.LaneID) (string, bool) {
 // endpoint AFTER New returns and tells the App through SetLocalToolSocketPath,
 // so a value captured here would be empty for the life of the process. See
 // nestedToolSocket for what it answers and whose value it is.
-func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, transports *transportRegistry, sessions *sessionRegistry, typed *typedRunner, toolEndpoint func() string) lifecyclepub.GrantBuilder {
+//
+// localHelperBinary is the same shape one field over, and it answers the other
+// half of a nested child's agent env: NOCX_AGENT_HELPER_PATH, the executable
+// the child's agent runs as its MCP adapter. It is this machine's INSTALLED
+// generation (localHelperOpener.installedHelperBinary), read per grant, and
+// never this process's environment — a backend started from inside a pane
+// inherits that pane's path, which belongs to another generation
+// (nocx-e2bws).
+func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, transports *transportRegistry, sessions *sessionRegistry, typed *typedRunner, toolEndpoint func() string, localHelperBinary func() string) lifecyclepub.GrantBuilder {
 	return func(req lifecyclepub.GrantRequest) (boot lifecyclepub.GrantBootstrap, err error) {
 		// Every outcome is logged, refusals loudest. A refusal here is
 		// invisible by construction — the publisher answers it with an
@@ -166,7 +173,7 @@ func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, tra
 		}
 		switch req.Env {
 		case lifecycle.EnvSudo, lifecycle.EnvSu:
-			return buildLocalChildBootstrap(p, sessions, req, parent.Transport, kind, toolEndpoint)
+			return buildLocalChildBootstrap(p, sessions, req, parent.Transport, kind, toolEndpoint, localHelperBinary)
 		case lifecycle.EnvSSH:
 			return buildSSHChildBootstrap(lg, p, sessions, req, kind, typed)
 		default:
@@ -227,7 +234,7 @@ func nestedToolSocket(kind transportKind, endpoint func() string) string {
 // into the preserved fd; its final line closes the descriptor once bash has
 // read it, so the per-epoch capability it carries cannot be re-read by a
 // descendant.
-func buildLocalChildBootstrap(pub *lifecyclepub.Publisher, sessions *sessionRegistry, req lifecyclepub.GrantRequest, parentTransport lifecycle.TransportID, kind transportKind, toolEndpoint func() string) (lifecyclepub.GrantBootstrap, error) {
+func buildLocalChildBootstrap(pub *lifecyclepub.Publisher, sessions *sessionRegistry, req lifecyclepub.GrantRequest, parentTransport lifecycle.TransportID, kind transportKind, toolEndpoint func() string, localHelperBinary func() string) (lifecyclepub.GrantBootstrap, error) {
 	sid, ok := sessions.lookup(req.Lane)
 	if !ok {
 		return lifecyclepub.GrantBootstrap{}, fmt.Errorf("child domain: no session registered for lane %s", req.Lane)
@@ -237,9 +244,17 @@ func buildLocalChildBootstrap(pub *lifecyclepub.Publisher, sessions *sessionRegi
 		return lifecyclepub.GrantBootstrap{}, err
 	}
 	opts := shellintegration.LaunchOptions{
-		SessionID:           sid,
-		Enhanced:            true,
-		AgentHelperPath:     os.Getenv("NOCX_AGENT_HELPER_PATH"),
+		SessionID: sid,
+		Enhanced:  true,
+		// BOTH PATHS COME FROM THE COMPOSITION ROOT, and neither from this
+		// process's environment (nocx-1n56d for the socket, nocx-e2bws for
+		// the binary). This child's shell runs on THIS machine -- that is
+		// what a local transport means, and the remote case is refused
+		// below -- so the agent it starts must exec the helper generation
+		// THIS backend installed, which the opener holds and the environment
+		// does not: a backend launched from inside a pane inherits a path
+		// naming a different generation.
+		AgentHelperPath:     localHelperBinary(),
 		AgentToolSocketPath: nestedToolSocket(kind, toolEndpoint),
 		Capability:          hex.EncodeToString(h.Capability[:]),
 		Recovery:            hex.EncodeToString(h.Recovery[:]),
@@ -350,24 +365,7 @@ func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, sessions
 	// to the digest of the stage-1 frame, so a command whose digest names
 	// bytes nobody will send is a far side blocking on a frame that never
 	// arrives.
-	opts := shellintegration.LaunchOptions{
-		SessionID:       sid,
-		Enhanced:        true,
-		AgentHelperPath: os.Getenv("NOCX_AGENT_HELPER_PATH"),
-		// AgentToolSocketPath is deliberately NOT set here, and it is not a
-		// leftover of the env read this replaced (nocx-1n56d). This child's
-		// shell runs on the far host of a NEW connection, so this backend's
-		// endpoint is a path nothing there reaches — see nestedToolSocket
-		// for the two ways naming one would be wrong — and the far side's
-		// own socket is a listener this path does not create: it is the
-		// decision nocx-e2bws records as open. Empty renders no
-		// NOCX_TOOL_SOCKET at all, which is the launch that says the truth.
-		Lane:       string(req.Lane),
-		Domain:     string(h.Domain),
-		Epoch:      h.Epoch,
-		Capability: hex.EncodeToString(h.Capability[:]),
-		Recovery:   hex.EncodeToString(h.Recovery[:]),
-	}
+	opts := sshChildLaunchOptions(sid, req, h)
 	stage, err := shellintegration.Stage1Frame(shellintegration.ShellAuto, opts)
 	if err != nil {
 		_ = ln.Close()
@@ -435,4 +433,43 @@ func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, sessions
 	go delivery.run(context.Background())
 
 	return lifecyclepub.GrantBootstrap{Domain: h.Domain, Epoch: h.Epoch, Bootstrap: line}, nil
+}
+
+// sshChildLaunchOptions composes the far-side launch's options for ONE minted
+// child, and it is a function of its own for one reason: the two ABSENCES in it
+// are the whole of what a nested ssh gets from nocx's tool surface, and a
+// value that must be absent is exactly what an assertion has to be able to
+// reach. Reading them off a live stage-1 frame is a test of the frame protocol
+// rather than of this decision, and the decision is one line each.
+//
+// BOTH TOOL-SURFACE FIELDS ARE EMPTY, AND NEITHER IS AN OMISSION (nocx-e2bws):
+//
+//   - AgentHelperPath: this child's shell runs on the far host of a NEW
+//     connection, and the executable its agent would run is THAT host's
+//     installed helper — a fact no party in this process holds. An
+//     os.Getenv("NOCX_AGENT_HELPER_PATH") here, which is what stood in this
+//     position, answers with THIS machine's path: the wrong machine, named
+//     confidently.
+//   - AgentToolSocketPath: this backend's endpoint is a path nothing there
+//     reaches (nocx-1n56d), and the far side's own socket is a listener this
+//     path does not create.
+//
+// The owner's decision of 2026-09-14 settles the case rather than the fields:
+// agent orchestration works where a nocx helper is INSTALLED on that machine
+// (the consent-gated install, and the only route that puts the `mcp` bridge
+// there), the integration bundle carries no executable, nothing else may put
+// one there, and a host neither nocx nor its owner installed a helper on gets
+// NO tools — the shell's own stage names why. Empty renders no
+// NOCX_AGENT_HELPER_PATH and no NOCX_TOOL_SOCKET at all, which is the launch
+// that says the truth.
+func sshChildLaunchOptions(sid string, req lifecyclepub.GrantRequest, h lifecycle.DomainHandle) shellintegration.LaunchOptions {
+	return shellintegration.LaunchOptions{
+		SessionID:  sid,
+		Enhanced:   true,
+		Lane:       string(req.Lane),
+		Domain:     string(h.Domain),
+		Epoch:      h.Epoch,
+		Capability: hex.EncodeToString(h.Capability[:]),
+		Recovery:   hex.EncodeToString(h.Recovery[:]),
+	}
 }

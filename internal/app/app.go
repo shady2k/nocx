@@ -1613,7 +1613,11 @@ func New(opts ...Option) (*App, error) {
 			// the same value every local pane here carries to its shell, so a
 			// nested child cannot be pointed at a socket that is not its
 			// parent's.
-			localOpener.toolEndpoint)),
+			localOpener.toolEndpoint,
+			// And the binary that child's agent execs as its MCP adapter,
+			// from the same holder and never from this process's environment
+			// (nocx-e2bws).
+			localOpener.installedHelperBinary)),
 		// The enrolment act (nocx-szb40.5): the agent wrapper in the shell
 		// bundle asks over this same authenticated channel, and this is what
 		// an unwired enroller refuses: the fail-closed half of D4, and the

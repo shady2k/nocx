@@ -180,7 +180,7 @@ package proto
 //
 // This is 14 rather than 13 because the wire grew the ONE-SHOT WRITE PATH:
 // `snapshot`, `target`, `intent`, `intent-status` and `access-bump` on the
-// `session` service (nocx-6q1uh.5) — a coordinator classifies a screen, mints
+// `session` service (nocx-6q1uh.6) — a coordinator classifies a screen, mints
 // a bounded one-shot token from it, and spends that token exactly once
 // through the commit point. Five ops added would each have been answerable
 // as `unknown_op`, and the bump is taken anyway because of what they mean

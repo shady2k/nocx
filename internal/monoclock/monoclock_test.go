@@ -11,7 +11,7 @@ import (
 )
 
 // TestMonotonicNowIsSharedAcrossProcesses is the acceptance criterion named
-// in the plan (nocx-6q1uh.5, Task 5): a `commitBy` deadline is computed by
+// in the plan (nocx-6q1uh.6, Task 5): a `commitBy` deadline is computed by
 // the coordinator process and checked by the helper process, two different
 // processes on the same machine, so the property this package must have is
 // not merely "increases within one process" (time.Now() has that too) but

@@ -1,6 +1,6 @@
 package session
 
-// The RPC-facing half of the one-shot write path (nocx-6q1uh.5, spec §6, §7.2):
+// The RPC-facing half of the one-shot write path (nocx-6q1uh.6, spec §6, §7.2):
 // session.snapshot, session.target, session.intent, session.intent-status and
 // session.access-bump. Everything that decides WHAT the wire's five ops mean
 // lives here; owner.go, tokens.go and access.go are what they call into.
@@ -399,7 +399,7 @@ func (hs *hostSession) accessBump(above uint64) (uint64, error) {
 
 // --- the wire token: Token (tokens.go) marshalled opaque and self-describing --
 
-// wireToken is Token's own wire shape (nocx-6q1uh.5): every field JSON-tagged
+// wireToken is Token's own wire shape (nocx-6q1uh.6): every field JSON-tagged
 // and fixed-width binary fields hex-encoded, then the whole thing base64-
 // encoded into the one opaque string session.target answers and
 // session.intent presents back. It carries Token.Identity.At through the

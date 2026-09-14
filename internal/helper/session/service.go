@@ -406,7 +406,7 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 }
 
 // intentServiceMutations are the two ops a caller's cancelled context must
-// never be read as "not executed" (D11, nocx-6q1uh.5, spec §6.5's own
+// never be read as "not executed" (D11, nocx-6q1uh.6, spec §6.5's own
 // framing: "transport cancellation never implies not executed"). session.intent
 // runs to its commit point once the owner has it — bytes on a PTY cannot be
 // recalled, and a half-applied bump would leave some queued intents refused
@@ -465,7 +465,7 @@ func (s *Service) Refusal(err error) (string, json.RawMessage) {
 		return proto.ErrCodeBadParams, nil
 	case errors.Is(err, errBadTargetKind):
 		return proto.ErrCodeBadParams, nil
-	// session.target's own refusals (nocx-6q1uh.5, spec §6.1, §6.2): a
+	// session.target's own refusals (nocx-6q1uh.6, spec §6.1, §6.2): a
 	// transport-level code rather than an IntentResult.refusal, because
 	// target mints nothing a caller could poll session.intent-status for —
 	// there is no token yet to name one by.
@@ -1033,7 +1033,7 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 	// THIS incarnation and bound to the owner before anything can submit a
 	// token-bearing intent — the same ordering guarantee SetReplies already
 	// gives Ingest. hs below gets the same instance, for the RPC handlers
-	// (nocx-6q1uh.5) that mint and verify through hs rather than the owner.
+	// (nocx-6q1uh.6) that mint and verify through hs rather than the owner.
 	tokens := newTokenBook(rt.Incarnation(), s.now)
 	owner.SetTokens(tokens)
 	// The runtime's control epoch is granted lazily, by the first

@@ -455,7 +455,7 @@ var (
 // token-bearing intent. It is this task's own vocabulary (Digest,
 // ScreenIdentity) that decides both of its refusals, which is why it lives
 // here rather than being assembled by whoever wires session.intent
-// (nocx-6q1uh.5): that caller supplies the token and the canonical intent
+// (nocx-6q1uh.6): that caller supplies the token and the canonical intent
 // and gets this function back ready to pass as pendingIntent.Check.
 func checkToken(t Token) func(sessionruntime.Snapshot) error {
 	return func(snap sessionruntime.Snapshot) error {
@@ -476,7 +476,7 @@ func checkToken(t Token) func(sessionruntime.Snapshot) error {
 //
 // It runs AT RECEIPT (owner.go's run(), the moment an itemIntent carrying a
 // token comes off o.incoming) rather than at the intent's turn in the
-// write-ordering queue (nocx-6q1uh.5, spec §6.2's replay/in_progress
+// write-ordering queue (nocx-6q1uh.6, spec §6.2's replay/in_progress
 // answer): a retry submitted while an earlier write on the SAME session is
 // still blocked must answer in_progress or the recorded result at once, and
 // it cannot if it is sitting behind that write in o.pending waiting for
@@ -650,7 +650,7 @@ func causeOf(err error) string {
 }
 
 // wireIntentState renders an ownerResult in the wire's own closed vocabulary
-// (spec §6.5, nocx-6q1uh.5): executed, refused, failed_partial,
+// (spec §6.5, nocx-6q1uh.6): executed, refused, failed_partial,
 // delivery_unknown, cancelled, in_progress — never a bare "failed", because a
 // caller acting on this answer needs to know whether SOME bytes reached the
 // program.

@@ -66,7 +66,7 @@ import (
 
 // ownerItemKind is which of the four ordered lanes an item travels
 // (spec §5.3); itemAccessBump is named here for the wire op a later task
-// wires (nocx-6q1uh.5's session.access-bump) so ownerItem's shape does not
+// wires (nocx-6q1uh.6's session.access-bump) so ownerItem's shape does not
 // change again when that task adds it.
 type ownerItemKind int
 
@@ -88,7 +88,7 @@ const (
 // target this intent is spending, the canonical form [tokenBook.Consume]
 // binds it to, and the monotonic deadline past which the commit point
 // refuses `commit_deadline` rather than admit it at all. Whoever submits a
-// wire-driven session.intent (nocx-6q1uh.5 wires the op) fills these in; a
+// wire-driven session.intent (nocx-6q1uh.6 wires the op) fills these in; a
 // caller with no token — Task 2's own tests, and any intent this package
 // admits without one — leaves Token's ID at its zero value, which
 // commitIntent reads as "no token gate applies".
@@ -114,7 +114,7 @@ type ownerItem struct {
 	payload []byte
 	intent  *pendingIntent
 	resize  *sessionruntime.Geometry
-	// above is itemAccessBump's own payload (nocx-6q1uh.5, spec §7.2): the
+	// above is itemAccessBump's own payload (nocx-6q1uh.6, spec §7.2): the
 	// epoch this bump supersedes. Meaningless for every other kind.
 	above uint64
 	// done is buffered(1): resolve never blocks on a caller that stopped
@@ -129,7 +129,7 @@ type ownerResult struct {
 	BytesWritten int
 	FenceAfter   sessionruntime.Fence
 	Err          error
-	// Epoch is itemAccessBump's own answer (nocx-6q1uh.5, spec §7.2): the
+	// Epoch is itemAccessBump's own answer (nocx-6q1uh.6, spec §7.2): the
 	// access epoch now in force. Meaningless for every other kind.
 	Epoch uint64
 	// Cause is the wire's own refusal-cause spelling (spec §6.5), set only by
@@ -141,7 +141,7 @@ type ownerResult struct {
 	// %s-formatted error wraps nothing). A caller rendering the wire result
 	// reads Cause first and falls back to causeOf(Err) only when it is
 	// empty — which is also how it tells a replay from a fresh refusal
-	// (nocx-6q1uh.5's own wire layer, session.intent's regionOmitted).
+	// (nocx-6q1uh.6's own wire layer, session.intent's regionOmitted).
 	Cause string
 }
 
@@ -244,7 +244,7 @@ type sessionOwner struct {
 	// .SetReplies] uses, for the same reason: the book is built the moment
 	// after this owner is, over the very incarnation it already serves.
 	tokens *tokenBook
-	// accessEpoch is this session's current access epoch (nocx-6q1uh.5,
+	// accessEpoch is this session's current access epoch (nocx-6q1uh.6,
 	// spec §7.2): 1 for a fresh incarnation, raised only by applyAccessBump
 	// (access.go). It is an atomic for the same reason completedFence is —
 	// takeSnapshot (snapshots.go) reads it from outside this owner's own
@@ -258,7 +258,7 @@ type sessionOwner struct {
 	// time.Now — a wall clock can jump (NTP, a suspend/resume) in either
 	// direction, and a deadline built on one could be defeated or tripped by
 	// an event that has nothing to do with how long the intent actually
-	// waited (nocx-6q1uh.5, spec §7.2). A test wanting a fake clock sets the
+	// waited (nocx-6q1uh.6, spec §7.2). A test wanting a fake clock sets the
 	// field directly, in-package.
 	nowMono func() int64
 
@@ -551,7 +551,7 @@ func (o *sessionOwner) processHead(it ownerItem) {
 		o.commitIntent(it)
 	default:
 		// itemAccessBump never reaches here: run()'s own incoming case
-		// (nocx-6q1uh.5) intercepts it before it is ever appended to
+		// (nocx-6q1uh.6) intercepts it before it is ever appended to
 		// o.pending — see access.go's doc for why. Reaching this arm at all
 		// means an ownerItemKind was queued that nothing above recognises,
 		// which is a defect in whatever constructed it, not a wire fact.

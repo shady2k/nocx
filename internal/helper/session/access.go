@@ -1,7 +1,7 @@
 package session
 
 // The helper-side half of the access epoch a revocation cannot be outrun by
-// (nocx-6q1uh.5, spec §7.2). A revocation, still inside its own coordinator-
+// (nocx-6q1uh.6, spec §7.2). A revocation, still inside its own coordinator-
 // side call, sends `access-bump(session, above)` to every descendant pane's
 // helper; this file is what the owner does with it: raise the epoch, refuse
 // every intent already queued that predates the raise, and answer only once

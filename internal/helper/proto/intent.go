@@ -1,6 +1,6 @@
 package proto
 
-// The five wire ops of the one-shot write path (nocx-6q1uh.5, design §6, §7.2):
+// The five wire ops of the one-shot write path (nocx-6q1uh.6, design §6, §7.2):
 // a consistent SNAPSHOT of a session's screen, a one-shot TARGET minted from
 // it, the INTENT that spends a target, a non-mutating STATUS poll for the
 // same, and the ACCESS-BUMP a revocation sends ahead of whatever intents are

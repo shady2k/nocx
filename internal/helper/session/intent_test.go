@@ -1,7 +1,7 @@
 package session
 
 // The owner-side acceptance criteria of the one-shot write path
-// (nocx-6q1uh.5, spec §6.2, §6.5, §7.2): a commit deadline enforced twice,
+// (nocx-6q1uh.6, spec §6.2, §6.5, §7.2): a commit deadline enforced twice,
 // an access-epoch bump that waits for what it revokes, and a retry that
 // answers in_progress while genuinely blocked. Each submits ownerItems
 // directly, the same seam commit_point_test.go (nocx-6q1uh.4) already
@@ -165,7 +165,7 @@ func awaitResult(t *testing.T, done <-chan ownerResult) ownerResult {
 	}
 }
 
-// TestAnIntentPastCommitByIsRefused is nocx-6q1uh.5's own acceptance
+// TestAnIntentPastCommitByIsRefused is nocx-6q1uh.6's own acceptance
 // criterion: spec §7.2's "refuses at receipt one whose commitBy has already
 // passed" and "refuses it again at the commit point" are two SEPARATE
 // checks in this tree — tokenGate (tokens.go) gates at receipt, the moment

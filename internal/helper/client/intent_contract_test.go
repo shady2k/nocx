@@ -1,6 +1,6 @@
 package client_test
 
-// The one-shot write path's five ops (nocx-6q1uh.5, spec §6, §7.2) off the
+// The one-shot write path's five ops (nocx-6q1uh.6, spec §6, §7.2) off the
 // real socket: contracts/README.md's three checks, applied to snapshot,
 // target, intent, intent-status and access-bump. TestTheOneShotWritePathDTOs
 // ConformToTheirContracts is the first two (the Go struct marshals to

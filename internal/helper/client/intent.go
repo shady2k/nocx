@@ -1,6 +1,6 @@
 package client
 
-// The coordinator's side of the one-shot write path (nocx-6q1uh.5, spec §6,
+// The coordinator's side of the one-shot write path (nocx-6q1uh.6, spec §6,
 // §7.2): read a consistent snapshot, mint a target from it, spend the
 // target's token as an intent, poll or bump as needed. Every method here is
 // a thin wire crossing — the DECISIONS (which rows to target, whether an

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.intent-status.schema.json",
+  "title": "HelperSessionIntentStatusResult",
+  "description": "Answers session.intent-status (nocx-6q1uh.5, spec §6.2): 'unknown' for a token this generation never minted or has since released its slot for, 'in_progress' while a bound intent is still resolving, or the terminal state a bound intent settled at — mirroring result.state when result is present. result carries the same compact record session.intent itself would answer, with regionOmitted set rather than a stale echo of the screen: the caller re-reads a fresh region instead.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["state"],
+  "properties": {
+    "state": {
+      "type": "string",
+      "enum": ["unknown", "in_progress", "executed", "refused", "failed_partial", "delivery_unknown", "cancelled"]
+    },
+    "result": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/intentResult"
+    }
+  },
+  "oneOf": [
+    {
+      "properties": { "state": { "enum": ["unknown", "in_progress"] } },
+      "not": { "required": ["result"] }
+    },
+    {
+      "properties": { "state": { "enum": ["executed", "refused", "failed_partial", "delivery_unknown", "cancelled"] } },
+      "required": ["result"]
+    }
+  ]
+}

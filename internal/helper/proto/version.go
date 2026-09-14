@@ -177,4 +177,18 @@ package proto
 // is what tells it that before it tries. Two peers that disagree refuse each
 // other at hello in both directions, which is what makes the number the whole
 // of the compatibility story.
-const Version = "13"
+//
+// This is 14 rather than 13 because the wire grew the ONE-SHOT WRITE PATH:
+// `snapshot`, `target`, `intent`, `intent-status` and `access-bump` on the
+// `session` service (nocx-6q1uh.5) — a coordinator classifies a screen, mints
+// a bounded one-shot token from it, and spends that token exactly once
+// through the commit point. Five ops added would each have been answerable
+// as `unknown_op`, and the bump is taken anyway because of what they mean
+// together: a 13-helper has no targeted, revocation-safe write at all, and a
+// silent fallback to whatever this generation still writes with would defeat
+// spec §7.2's "revocation that cannot be outrun" — a coordinator must learn
+// it is talking to an older helper at hello, not by watching a bump it sent
+// go unacknowledged forever. Two peers that disagree refuse each other at
+// hello in both directions, which is what makes the number the whole of the
+// compatibility story.
+const Version = "14"

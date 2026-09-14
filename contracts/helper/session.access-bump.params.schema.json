@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.access-bump.params.schema.json",
+  "title": "HelperSessionAccessBumpParams",
+  "description": "Raises a session's access epoch to at least above+1 (nocx-6q1uh.5, spec §7.2). Idempotent on above: a repeat bump naming the same value returns the epoch already in force rather than raising it again.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session", "above"],
+  "properties": {
+    "session": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/hostSessionId"
+    },
+    "above": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/accessEpoch"
+    }
+  }
+}

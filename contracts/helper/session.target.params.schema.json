@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.target.params.schema.json",
+  "title": "HelperSessionTargetParams",
+  "description": "Mints a one-shot target from a retained snapshot: which rows, and which of the four kinds the agent rule names for them (nocx-6q1uh.5, spec §6.2, §6.3). It carries no includeCursor: that property follows from kind alone — only 'input' targets carry the caret into their digest — so a field this op would silently ignore is refused by the contract rather than offered.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session", "snapshotId", "kind", "first", "last"],
+  "properties": {
+    "session": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/hostSessionId"
+    },
+    "snapshotId": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "kind": {
+      "description": "One of the closed set spec §6.3 names: menu (question through the last option), input (the input box, cursor included), working (the menu zone), region (the whole visible screen or named rows).",
+      "type": "string",
+      "enum": ["menu", "input", "working", "region"]
+    },
+    "first": { "type": "integer" },
+    "last": { "type": "integer" }
+  }
+}

@@ -40,10 +40,9 @@ type retainedSnapshot struct {
 	Completeness sessionruntime.Completeness
 	// AccessEpoch is the helper session's access epoch at the moment this
 	// snapshot was taken (spec §6.1: "stored with every token the snapshot
-	// yields"). It is fixed at 1 here — nocx-6q1uh.7 is what ever moves a
-	// session's epoch away from 1 — so every token this task can mint
-	// carries a real field of the shape Task 7 will start writing to,
-	// without this task inventing a revocation mechanism of its own.
+	// yields"): 1 for a fresh incarnation, raised by session.access-bump
+	// (nocx-6q1uh.5, spec §7.2, owner.go's accessEpoch / access.go's
+	// applyAccessBump).
 	AccessEpoch uint64
 }
 
@@ -114,7 +113,7 @@ func (hs *hostSession) takeSnapshot() (retainedSnapshot, error) {
 		Revision:     snap.Revision,
 		InputFence:   fence,
 		Completeness: snap.Completeness,
-		AccessEpoch:  1,
+		AccessEpoch:  hs.owner.currentAccessEpoch(),
 	}
 	hs.snapRing[uint64(id)%snapshotRing] = &rs
 	return rs, nil

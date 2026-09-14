@@ -165,15 +165,18 @@ func newRuntimeService(t *testing.T, proc Process) *Service {
 	return svc
 }
 
-// spawnScripted spawns one session over the scripted process and answers the
-// session row AND the host session behind it, so a test can read the runtime
-// the spawn built.
+// spawnScripted spawns one session over proc and answers the session row AND
+// the host session behind it, so a test can read the runtime the spawn built.
+//
+// proc is a Process rather than the narrower *scriptedProcess so a caller
+// that needs a WRITE it can hold open (intent_test.go's blockingProcess,
+// wrapping one) can drive this same spawn path instead of a second one.
 //
 // The call is made on a BARE context — no Bind, no attachment, no connection —
 // which is the whole condition these tests exist for: a helper session's
 // terminal is not created by a coordinator connecting, and it does not end when
 // one leaves.
-func spawnScripted(t *testing.T, proc *scriptedProcess, windowBytes int64) (*Service, *hostSession) {
+func spawnScripted(t *testing.T, proc Process, windowBytes int64) (*Service, *hostSession) {
 	t.Helper()
 	svc := newRuntimeService(t, proc)
 	res := callOp[proto.SpawnResult](t, svc, proto.OpSpawn, proto.SpawnParams{

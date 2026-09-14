@@ -470,13 +470,32 @@ func checkToken(t Token) func(sessionruntime.Snapshot) error {
 	}
 }
 
-// tokenGate is commitIntent's hook into this book: Verify, then Consume,
-// then the commitBy deadline, all decided before commitIntent ever calls
-// Admit. It resolves it and answers true for every outcome except "unused ->
-// proceed", which answers false and lets commitIntent continue into
-// Admit/Commit exactly as it would for a token-less intent — pi.Check
-// (ordinarily [checkToken] bound to pi.Token) is what the runtime's own
-// commit point then runs against a fresh, consistent read.
+// tokenGate is this book's hook into the owner's own bookkeeping: Verify,
+// then Consume, then the access-epoch and commitBy checks, all decided
+// before an intent is ever admitted to the runtime's queue.
+//
+// It runs AT RECEIPT (owner.go's run(), the moment an itemIntent carrying a
+// token comes off o.incoming) rather than at the intent's turn in the
+// write-ordering queue (nocx-6q1uh.5, spec §6.2's replay/in_progress
+// answer): a retry submitted while an earlier write on the SAME session is
+// still blocked must answer in_progress or the recorded result at once, and
+// it cannot if it is sitting behind that write in o.pending waiting for
+// advance() to free the writer — advance() never even looks at pending[0]
+// while the writer is busy, so a gate deferred to the commit point would
+// leave a retry unanswered for as long as the blocked write is. Gating at
+// receipt costs nothing a genuinely new intent needs: Verify, Consume, the
+// epoch check and the commitBy check are all about the TOKEN and the
+// SESSION's authority, never about the freshest screen — that comparison
+// (pi.Check, ordinarily [checkToken] bound to pi.Token) still runs inside
+// the runtime's own Commit, at the actual commit point, against whatever the
+// screen says by the time this intent reaches the head of the write queue.
+//
+// It answers true for every outcome except "unused -> proceed", which
+// answers false and lets the caller (run()'s incoming case) queue the item
+// for its turn exactly as it would for a token-less intent; commitIntent
+// (owner.go) then goes straight to Admit/Commit for anything it dequeues,
+// because by construction nothing reaches o.pending as an itemIntent without
+// having already cleared this gate.
 func (o *sessionOwner) tokenGate(it ownerItem, pi *pendingIntent) (handled bool) {
 	tb := o.tokens
 	if tb == nil {
@@ -506,10 +525,28 @@ func (o *sessionOwner) tokenGate(it ownerItem, pi *pendingIntent) (handled bool)
 		o.resolve(it, ownerResult{State: sessionruntime.IntentStateAdmitted})
 		return true
 	}
-	// Unused -> now consumed and bound. commitBy is checked here, after
-	// binding rather than before, so a replay of the SAME token+intent after
-	// a deadline refusal sees the recorded commit_deadline result rather
-	// than a fresh chance to race the deadline again.
+	// Unused -> now consumed and bound. Both checks below run AFTER binding
+	// rather than before, so a replay of the SAME token+intent after either
+	// refusal sees the recorded result rather than a fresh chance to race
+	// the same check again (the commitBy comment already established this;
+	// the epoch check follows it for the same reason).
+	//
+	// The epoch check is spec §7.2's own barrier: a revocation bumps this
+	// session's access epoch and sweeps every intent already queued
+	// (applyAccessBump, access.go) — but tokenGate itself now runs the
+	// moment an intent is RECEIVED (owner.go's run(), not at its turn in the
+	// write-ordering queue, which is what lets a retry answer in_progress
+	// while an earlier write is still blocked rather than sitting behind
+	// it), so an intent whose claimed epoch is already stale THE MOMENT IT
+	// ARRIVES — no bump in flight at all, just a caller that never refreshed
+	// after one — needs its own check here rather than relying on a sweep
+	// that only ever looks at what is already queued.
+	if pi.Canonical.AccessEpoch < o.accessEpoch.Load() {
+		res := storedResult{State: "refused", Cause: "access_revoked"}
+		tb.Record(pi.Token.ID, res)
+		o.resolve(it, resultFromStored(res))
+		return true
+	}
 	if o.nowMono() > pi.CommitBy {
 		res := storedResult{State: "refused", Cause: "commit_deadline"}
 		tb.Record(pi.Token.ID, res)
@@ -529,12 +566,19 @@ func (o *sessionOwner) recordTokenOutcome(pi *pendingIntent, res ownerResult) {
 	if o.tokens == nil || pi.Token.ID == (TokenID{}) {
 		return
 	}
+	state := wireIntentState(res)
 	stored := storedResult{
-		State:        ownerStateName(res.State),
+		State:        state,
 		BytesWritten: res.BytesWritten,
 		FenceAfter:   uint64(res.FenceAfter),
 	}
-	if res.Err != nil {
+	if state == "refused" && res.Err != nil {
+		// Cause is meaningful ONLY for a refusal (spec §6.5: "refusal is
+		// present exactly when state is refused") — a failed_partial write
+		// also carries a non-nil Err (the write error finishItem recorded,
+		// owner.go), and running it through causeOf would store a
+		// misleading "refused"-family cause on a result nothing ever reads
+		// one from.
 		stored.Cause = causeOf(res.Err)
 	}
 	o.tokens.Record(pi.Token.ID, stored)
@@ -553,17 +597,23 @@ func resultFromStored(r storedResult) ownerResult {
 	}
 	if r.Cause != "" {
 		res.Err = fmt.Errorf("session: %s", r.Cause)
+		// Cause is the clean spelling causeOf(res.Err) can never recover
+		// from the line above (a %s-formatted error wraps nothing, so
+		// errors.Is against a sentinel never matches) — see ownerResult's
+		// own doc. A caller rendering the wire result reads this field
+		// first, which is also how it tells a REPLAY from a fresh refusal.
+		res.Cause = r.Cause
 	}
 	return res
 }
 
 // causeOf names an error in the wire's refusal vocabulary (spec §6.5) for
-// the causes THIS task's code can produce. access_revoked, no_read_barrier
-// and would_submit have no caller yet — nocx-6q1uh.7 and nocx-6q1uh.3 are
-// what add them — so an error this switch does not recognise falls back to
-// a generic "refused": the original error is still on ownerResult.Err for
-// anything inspecting it directly, and the string is read back only from a
-// REPLAY of the exact attempt that produced it.
+// the causes this package can produce. no_read_barrier and would_submit have
+// no caller yet — nocx-6q1uh.3's SSH detached writer and nocx-6q1uh.7's
+// capability layer are what add them — so an error this switch does not
+// recognise falls back to a generic "refused": the original error is still
+// on ownerResult.Err for anything inspecting it directly, and the string is
+// read back only from a REPLAY of the exact attempt that produced it.
 func causeOf(err error) string {
 	switch {
 	case errors.Is(err, ErrForged):
@@ -580,6 +630,10 @@ func causeOf(err error) string {
 		return "incomparable"
 	case errors.Is(err, errStaleTarget):
 		return "stale_target"
+	case errors.Is(err, errAccessRevoked):
+		return "access_revoked"
+	case errors.Is(err, errCommitDeadline):
+		return "commit_deadline"
 	case errors.Is(err, sessionruntime.ErrCompletenessUnknown):
 		return "completeness_unknown"
 	case errors.Is(err, sessionruntime.ErrIntentUnsupported):
@@ -595,41 +649,70 @@ func causeOf(err error) string {
 	}
 }
 
-// ownerStateName and ownerStateFromName are storedResult.State's own small
-// vocabulary, round-tripped through [sessionruntime.IntentState]. It is
-// provisional — nocx-6q1uh.5 owns the actual wire vocabulary (spec §6.5's
-// executed/refused/failed_partial/delivery_unknown/cancelled/in_progress)
-// and is expected to refine this mapping when it wires session.intent's
-// response, in particular the failed/failed_partial split this package's
-// IntentState does not itself draw.
-func ownerStateName(s sessionruntime.IntentState) string {
-	switch s {
+// wireIntentState renders an ownerResult in the wire's own closed vocabulary
+// (spec §6.5, nocx-6q1uh.5): executed, refused, failed_partial,
+// delivery_unknown, cancelled, in_progress — never a bare "failed", because a
+// caller acting on this answer needs to know whether SOME bytes reached the
+// program.
+//
+// [sessionruntime.IntentState] draws no failed/failed_partial/delivery_unknown
+// split of its own — IntentStateFailed only ever means "the write did not
+// land whole" (finishItem, owner.go) — so this is the one place that split is
+// decided, and today it always resolves to failed_partial: a local session's
+// write is always eventually reported by the real proc.Write call underneath
+// it (runWriter, owner.go), whether it lands whole, short or erroring, so
+// BytesWritten and Err are always known facts here. delivery_unknown is the
+// state for a write whose completion could not be observed AT ALL — an
+// in-flight write abandoned by owner.stop's deadline (spec §7.2's
+// "confirmedBy: deadline" case) — and no path in this package produces that
+// today: nocx-6q1uh.3's SSH detached writer is the first caller that can
+// leave a write truly unresolved, for the reason its own doc names (no
+// per-channel interrupt on an ssh.Channel). Until then this switch's
+// IntentStateFailed arm is the only one exercised, and it is written as its
+// own arm rather than folded into a default so the day a caller CAN produce
+// delivery_unknown, this switch is the one place that changes.
+func wireIntentState(res ownerResult) string {
+	switch res.State {
 	case sessionruntime.IntentStateExecuted:
 		return "executed"
 	case sessionruntime.IntentStateRefused:
 		return "refused"
 	case sessionruntime.IntentStateFailed:
-		return "failed"
+		return "failed_partial"
 	case sessionruntime.IntentStateCancelled:
 		return "cancelled"
 	case sessionruntime.IntentStateAdmitted:
-		return "admitted"
+		return "in_progress"
 	default:
-		return "unknown"
+		return "refused"
 	}
 }
 
+// ownerStateFromName reverses wireIntentState for [resultFromStored]'s own
+// purpose: reconstructing enough of an ownerResult, from a record this book
+// already stored under the wire's own spelling, that a caller resolving a
+// REPLAY sees the same answer the original attempt produced. It is
+// deliberately lossy in exactly one direction: "failed_partial" and
+// "delivery_unknown" both reconstruct as [sessionruntime.IntentStateFailed],
+// because that is the only state either could have come from — a replayed
+// answer that happened to be delivery_unknown would re-report as
+// failed_partial (wireIntentState's own default for Failed), which cannot
+// happen today because nothing yet produces delivery_unknown in the first
+// place (see wireIntentState's own doc). "unknown" — a spelling this book
+// never wrote — is refused into [sessionruntime.IntentStateNone] rather than
+// guessed at, the same defensive default causeOf's own switch uses for an
+// error it does not recognise.
 func ownerStateFromName(s string) sessionruntime.IntentState {
 	switch s {
 	case "executed":
 		return sessionruntime.IntentStateExecuted
 	case "refused":
 		return sessionruntime.IntentStateRefused
-	case "failed":
+	case "failed_partial", "delivery_unknown":
 		return sessionruntime.IntentStateFailed
 	case "cancelled":
 		return sessionruntime.IntentStateCancelled
-	case "admitted":
+	case "in_progress":
 		return sessionruntime.IntentStateAdmitted
 	default:
 		return sessionruntime.IntentStateNone

@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.intent.schema.json",
+  "title": "HelperSessionIntentResult",
+  "description": "What became of one session.intent (nocx-6q1uh.5, spec §6.5): the closed state vocabulary identities.schema.json's intentResult declares once for this op and for session.intent-status's own recorded answer.",
+  "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/intentResult"
+}

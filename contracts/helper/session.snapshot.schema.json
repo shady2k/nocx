@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.snapshot.schema.json",
+  "title": "HelperSessionSnapshotResult",
+  "description": "One consistent read of a session's screen (nocx-6q1uh.5, spec §6.1): the frame a coordinator classifies with the agent rule, the runtime facts session.screen already answers, and the access-epoch and read-barrier facts a target minted from THIS snapshot inherits. Every field describes the same instant — the fence is read before the screen, never after (spec §5.4).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["snapshotId", "frame", "revision", "inputFence", "completeness", "accessEpoch", "readBarrier"],
+  "properties": {
+    "snapshotId": {
+      "description": "Names this reading within the session's retained ring (a ring of 8, each held at most 2s). session.target mints against it; an evicted or aged-out id is refused snapshot_gone.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "frame": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/screenFrame"
+    },
+    "revision": {
+      "description": "The runtime's monotonic clock at the read — the same fact session.screen already reports.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "inputFence": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/inputFenceValue"
+    },
+    "completeness": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/completeness"
+    },
+    "accessEpoch": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/accessEpoch"
+    },
+    "readBarrier": {
+      "description": "Whether this session's read side currently guarantees nothing written before this snapshot is still unobserved. True for a local PTY's raw, drained read; a session with none (an SSH channel with no barrier of its own, nocx-6q1uh.3) reports false.",
+      "type": "boolean"
+    }
+  }
+}

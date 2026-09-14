@@ -298,12 +298,12 @@ async function pointAtFromRun(block: Locator): Promise<void> {
   const indicator = page.locator('.pane.active .ui-mode-indicator:visible')
   await expect(indicator).toHaveAttribute('data-target', 'shell')
 
-  await block.locator('.cmd-overflow-btn').click()
-  await expect(page.locator('.cmd-overflow-menu-item[data-action="grant"]')).toHaveCount(0)
-  const copyCommand = page.locator('.cmd-overflow-menu-item').filter({ hasText: 'Copy command' })
+  await block.locator('[data-block-actions]').click()
+  await expect(page.locator('.ui-context-menu__item[data-item-id="grant"]')).toHaveCount(0)
+  const copyCommand = page.locator('[data-testid="block-actions-menu"] .ui-context-menu__item').filter({ hasText: 'Copy command' })
   await expect(copyCommand).toBeVisible()
   await copyCommand.click()
-  await expect(page.locator('.cmd-overflow-menu')).toHaveCount(0)
+  await expect(page.locator('[data-testid="block-actions-menu"]')).toHaveCount(0)
 
   await page.locator(INPUT).click()
   await selectWholeOutput(block)

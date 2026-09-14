@@ -867,8 +867,8 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
       gridFullscreen: false,
     })
 
-    await running.locator('.cmd-overflow-btn').click()
-    await page.locator('.cmd-overflow-menu-item[data-action="stop"]').click()
+    await running.locator('[data-block-actions]').click()
+    await page.locator('.ui-context-menu__item[data-item-id="stop"]').click()
     await expect.poll(async () => (await recorded(page)).signalResults.length).toBeGreaterThan(0)
     const signal = (await recorded(page)).signalResults.at(-1)
     const fourFacts = { lifecycle, beforeStop, signal }

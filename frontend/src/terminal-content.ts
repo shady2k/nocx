@@ -3046,7 +3046,7 @@ export class TerminalContent extends BasePaneContent {
           const active = document.activeElement
           if (isTextEntry(active, this.scrollback?.xtermLiveContainer)) return
           if (hasOpenOverlays()) return
-          if (document.querySelector('.cmd-overflow-menu')) return
+          if (document.querySelector('.ui-context-menu')) return
           if (this.stopCurrentSummonedAnswerAndDismiss()) e.preventDefault()
           return
         }
@@ -3062,7 +3062,7 @@ export class TerminalContent extends BasePaneContent {
           const active = document.activeElement
           if (isTextEntry(active, this.scrollback?.xtermLiveContainer)) return
           if (hasOpenOverlays()) return
-          if (document.querySelector('.cmd-overflow-menu')) return
+          if (document.querySelector('.ui-context-menu')) return
           if (this.stopLiveAnswer()) {
             e.preventDefault()
             return
@@ -3093,7 +3093,7 @@ export class TerminalContent extends BasePaneContent {
           // before).
           if (isTextEntry(active, this.scrollback?.xtermLiveContainer)) return
           if (hasOpenOverlays()) return
-          if (document.querySelector('.cmd-overflow-menu')) return
+          if (document.querySelector('.ui-context-menu')) return
           if (this.editor.handleExternalEscape(e)) e.preventDefault()
           return
         }

@@ -28,6 +28,7 @@
 import { render } from 'solid-js/web'
 import { IconButton } from './ui/icon-button'
 import { StatusCard } from './ui/status-card'
+import { CloseIcon } from './ui/icons'
 
 /** The wire's closed vocabulary for why nobody could be asked
  *  (contracts/ledger.query.schema.json). Declared here because this is the one
@@ -130,7 +131,7 @@ function UnreconciledNotice(props: { account: UnreconciledAccount; onDismiss: ()
       description={unreconciledDescription(props.account)}
       action={
         <IconButton ariaLabel="Dismiss" size="sm" onClick={() => props.onDismiss()}>
-          {'×'}
+          <CloseIcon />
         </IconButton>
       }
     />

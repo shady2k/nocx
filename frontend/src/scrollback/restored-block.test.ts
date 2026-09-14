@@ -66,22 +66,25 @@ describe('a block built from the store', () => {
     const el = restoredBlock(facts(), S, container, () => {}, store(), actions)
     document.body.append(el)
     try {
-      el.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      el.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       const mark = document.querySelector<HTMLButtonElement>(
-        '.cmd-overflow-menu-item[data-action="grant"]',
+        '.ui-context-menu__item[data-item-id="grant"]',
       )
       expect(mark?.textContent).toBe('Ask about this block')
       mark?.click()
       expect(toggleGrant).toHaveBeenCalledWith(el)
       expect(el.dataset.entryId).toBe('entry-1')
 
-      el.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      el.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       const unmark = document.querySelector<HTMLButtonElement>(
-        '.cmd-overflow-menu-item[data-action="grant"]',
+        '.ui-context-menu__item[data-item-id="grant"]',
       )
       expect(unmark?.textContent).toBe('Unmark')
     } finally {
-      document.querySelectorAll('.cmd-overflow-menu').forEach((menu) => menu.remove())
+      // Escape closes the kit menu through the component itself; removing
+      // the portalled node by hand would leave its Solid root, and the
+      // document listeners it owns, alive.
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
       el.remove()
     }
   })

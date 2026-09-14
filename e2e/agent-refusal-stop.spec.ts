@@ -353,10 +353,10 @@ test.describe('a refusal is an answer, and a turn can be stopped (nocx-uvac6.7)'
     const body = answer.locator('.cmd-output[data-answer-body]')
     await expect(body).toContainText(PARTIAL, { timeout: 15_000 })
 
-    const overflow = answer.locator('.cmd-overflow-btn')
+    const overflow = answer.locator('[data-block-actions]')
     await expect(overflow).toBeVisible()
     await overflow.click()
-    const stop = page.locator('.cmd-overflow-menu-item[data-action="stop"]')
+    const stop = page.locator('.ui-context-menu__item[data-item-id="stop"]')
     await expect(stop).toBeVisible()
     await expect(stop).toBeEnabled()
     await stop.click()

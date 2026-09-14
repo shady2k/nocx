@@ -3175,21 +3175,21 @@ describe('the projections consume the kernel through the composition root (ADR-0
       ;(
         content as unknown as { inputTargets: { setActive(id: string): void } }
       ).inputTargets.setActive('agent')
-      const menuButton = rec.el.querySelector<HTMLElement>('.cmd-overflow-btn')
+      const menuButton = rec.el.querySelector<HTMLElement>('[data-block-actions]')
       expect(menuButton).not.toBeNull()
       menuButton!.click()
       const menuItems = Array.from(
-        document.querySelectorAll<HTMLElement>('.cmd-overflow-menu-item'),
+        document.querySelectorAll<HTMLElement>('[data-testid="block-actions-menu"] .ui-context-menu__item'),
       )
-      const grant = menuItems.find((item) => item.dataset.action === 'grant')
-      const stop = menuItems.find((item) => item.dataset.action === 'stop')
+      const grant = menuItems.find((item) => item.dataset.itemId === 'grant')
+      const stop = menuItems.find((item) => item.dataset.itemId === 'stop')
       expect(grant).toBeDefined()
       expect(grant?.textContent).toBe('Ask about this block')
       grant!.click()
       const grantsBeforeAck = (content as unknown as { grantedBlocks: GrantBlock[] }).grantedBlocks
       expect(grantsBeforeAck[0]?.command).toBe('echo sk-proj-abcdef')
       expect(stop).toBeUndefined()
-      document.querySelector('.cmd-overflow-menu')?.remove()
+      document.querySelector('[data-testid="block-actions-menu"]')?.remove()
 
       // The ack lands here. It used to be refused for the class alone and
       // dropped for good — no retry, nothing shown, nothing logged.
@@ -5709,11 +5709,11 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(markShortcut.defaultPrevented).toBe(false)
       expect((content as unknown as { grantedBlocks: GrantBlock[] }).grantedBlocks).toEqual([])
 
-      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       const items = Array.from(
-        document.querySelectorAll<HTMLButtonElement>('.cmd-overflow-menu-item'),
+        document.querySelectorAll<HTMLButtonElement>('[data-testid="block-actions-menu"] .ui-context-menu__item'),
       )
-      expect(items.find((item) => item.dataset.action === 'grant')).toBeUndefined()
+      expect(items.find((item) => item.dataset.itemId === 'grant')).toBeUndefined()
       expect(items.map((item) => item.textContent)).toContain('Copy command')
       expect(ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')?.style.display).toBe(
         'none',
@@ -5748,9 +5748,9 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       const grantState = content as unknown as { grantedBlocks: GrantBlock[] }
       expect(grantState.grantedBlocks).toHaveLength(1)
 
-      whole.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      whole.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       const menuGrant = document.querySelector<HTMLButtonElement>(
-        '.cmd-overflow-menu-item[data-action="grant"]',
+        '.ui-context-menu__item[data-item-id="grant"]',
       )
       expect(menuGrant).not.toBeNull()
       menuGrant!.click()
@@ -5767,12 +5767,12 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
       // Hiding the pane removes every body-level and inline grant surface,
       // including a menu that otherwise lives outside the pane subtree.
-      whole.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
-      expect(document.querySelector('.cmd-overflow-menu')).not.toBeNull()
+      whole.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
+      expect(document.querySelector('[data-testid="block-actions-menu"]')).not.toBeNull()
       content.setVisible(false)
       expect(chip.style.display).toBe('none')
       expect(document.querySelector('.ui-floating-panel[data-open="true"]')).toBeNull()
-      expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
+      expect(document.querySelector('[data-testid="block-actions-menu"]')).toBeNull()
       expect(whole.dataset.granted).toBeUndefined()
       expect(rows.querySelector('.term-line[data-granted]')).toBeNull()
       // A target change while the tab is in the background cannot repaint
@@ -5798,8 +5798,8 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(grantState.grantedBlocks[0]).toBe(before[0])
       expect(grantState.grantedBlocks[1]).toBe(before[1])
 
-      whole.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
-      expect(document.querySelector('.cmd-overflow-menu-item[data-action="grant"]')).toBeNull()
+      whole.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
+      expect(document.querySelector('.ui-context-menu__item[data-item-id="grant"]')).toBeNull()
 
       submitKey(ed, { metaKey: true })
 
@@ -5860,15 +5860,15 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       registry.setActive('agent')
       const block = frozenBlockOf(content, 'git status', ['clean'])
 
-      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
-      expect(document.querySelector('.cmd-overflow-menu-item[data-action="grant"]')).not.toBeNull()
+      block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
+      expect(document.querySelector('.ui-context-menu__item[data-item-id="grant"]')).not.toBeNull()
 
       // Programmatic, because that is the case the pane-hide sweep cannot
       // reach: ask entry and restore both call setActive without anybody
       // clicking. A menu left open goes on offering Mark in Run.
       registry.setActive('shell')
 
-      expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
+      expect(document.querySelector('[data-testid="block-actions-menu"]')).toBeNull()
     } finally {
       teardown()
     }
@@ -5990,9 +5990,9 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       // The menu speaks about the BLOCK, so with any of it marked its action
       // is Unmark — and it takes the row marks with it rather than leaving
       // half of them behind under a label that says nothing is marked.
-      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       const action = document.querySelector<HTMLButtonElement>(
-        '.cmd-overflow-menu-item[data-action="grant"]',
+        '.ui-context-menu__item[data-item-id="grant"]',
       )!
       expect(action.textContent).toBe('Unmark')
       action.click()
@@ -6033,9 +6033,9 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(block.querySelector<HTMLElement>('.term-line')?.dataset.granted).toBe('true')
       expect(block.querySelectorAll<HTMLElement>('.term-line[data-granted]')).toHaveLength(1)
 
-      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       const unmark = document.querySelector<HTMLButtonElement>(
-        '.cmd-overflow-menu-item[data-action="grant"]',
+        '.ui-context-menu__item[data-item-id="grant"]',
       )
       expect(unmark?.textContent).toBe('Unmark')
       unmark?.click()
@@ -6059,9 +6059,9 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       ed.show()
       const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
       submitKey(ed, { metaKey: true })
-      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       document
-        .querySelector<HTMLButtonElement>('.cmd-overflow-menu-item[data-action="grant"]')!
+        .querySelector<HTMLButtonElement>('.ui-context-menu__item[data-item-id="grant"]')!
         .click()
       expect(block.dataset.granted).toBe('true')
       expect(block.querySelector('.term-line[data-granted]')).toBeNull()
@@ -6197,9 +6197,9 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
       const marked = frozenBlockOf(content, 'git status', ['clean'])
       submitKey(ed, { metaKey: true })
-      marked.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      marked.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       document
-        .querySelector<HTMLButtonElement>('.cmd-overflow-menu-item[data-action="grant"]')!
+        .querySelector<HTMLButtonElement>('.ui-context-menu__item[data-item-id="grant"]')!
         .click()
       const grantChip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
       expect(grantChip.dataset.state).toBe('chosen')
@@ -7372,9 +7372,9 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
       const block = inner.querySelector<HTMLElement>('[data-restored="true"]')!
       expect(block.dataset.entryId).toBe('e-1')
 
-      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       const mark = document.querySelector<HTMLButtonElement>(
-        '.cmd-overflow-menu-item[data-action="grant"]',
+        '.ui-context-menu__item[data-item-id="grant"]',
       )
       expect(mark?.textContent).toBe('Ask about this block')
       mark?.click()
@@ -7386,9 +7386,9 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
         '1',
       )
 
-      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       const unmark = document.querySelector<HTMLButtonElement>(
-        '.cmd-overflow-menu-item[data-action="grant"]',
+        '.ui-context-menu__item[data-item-id="grant"]',
       )
       expect(unmark?.textContent).toBe('Unmark')
       unmark?.click()
@@ -7638,9 +7638,9 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
       const block = inner.querySelector<HTMLElement>('[data-restored="true"]')!
       expect(block.dataset.entryId).toBe('e-1')
 
-      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       const mark = document.querySelector<HTMLButtonElement>(
-        '.cmd-overflow-menu-item[data-action="grant"]',
+        '.ui-context-menu__item[data-item-id="grant"]',
       )
       expect(mark?.textContent).toBe('Ask about this block')
       mark?.click()
@@ -7656,9 +7656,9 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
         ed.root.querySelector<HTMLElement>('.ui-floating-panel[data-variant="grant"]')?.textContent,
       ).toContain('make test')
 
-      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       const unmark = document.querySelector<HTMLButtonElement>(
-        '.cmd-overflow-menu-item[data-action="grant"]',
+        '.ui-context-menu__item[data-item-id="grant"]',
       )
       expect(unmark?.textContent).toBe('Unmark')
       unmark?.click()
@@ -8038,9 +8038,9 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
       // The turn draws NO body of its own — the wiretap is not an answer.
       expect(turnBlock!.querySelector(':scope > [data-answer-body]')).toBeNull()
 
-      turnBlock!.querySelector<HTMLElement>('.cmd-overflow-btn')!.click()
+      turnBlock!.querySelector<HTMLElement>('[data-block-actions]')!.click()
       const copyOut = Array.from(
-        document.querySelectorAll<HTMLElement>('.cmd-overflow-menu-item'),
+        document.querySelectorAll<HTMLElement>('[data-testid="block-actions-menu"] .ui-context-menu__item'),
       ).find((el) => el.textContent === 'Copy output')
       expect(copyOut).toBeDefined()
       copyOut!.click()
@@ -9567,8 +9567,8 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         content.setVisible(true)
         ed.show()
         const block = frozenBlock(content, 'git status', ['clean'])
-        block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
-        expect(document.querySelector('.cmd-overflow-menu')).not.toBeNull()
+        block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
+        expect(document.querySelector('[data-testid="block-actions-menu"]')).not.toBeNull()
 
         chordOn(document.body)
 
@@ -9695,7 +9695,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     const frozen = document.createElement('div')
     frozen.className = 'cmd-block'
     const frozenButton = document.createElement('button')
-    frozenButton.className = 'cmd-overflow-btn'
+    frozenButton.setAttribute('data-block-actions', '')
     const selectedText = document.createTextNode('selected output')
     frozen.append(selectedText, frozenButton)
     scrollbackInner!.append(frozen)
@@ -9713,9 +9713,10 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     targets.push({ name: 'scrollback background', element: scrollbackBackground! })
 
     const menu = document.createElement('div')
-    menu.className = 'cmd-overflow-menu'
+    menu.className = 'ui-context-menu'
+    menu.dataset.testid = 'block-actions-menu'
     const menuItem = document.createElement('button')
-    menuItem.className = 'cmd-overflow-menu-item'
+    menuItem.className = 'ui-context-menu__item'
     menu.append(menuItem)
     document.body.append(menu)
     targets.push({ name: 'block action menu', element: menuItem })
@@ -10029,14 +10030,14 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
 
   /** Open the running block's overflow menu and return its items. */
   function runningBlockMenu(content: TerminalContent): HTMLElement[] {
-    const btn = paneOf(content).querySelector<HTMLElement>('.cmd-block-running .cmd-overflow-btn')
+    const btn = paneOf(content).querySelector<HTMLElement>('.cmd-block-running [data-block-actions]')
     expect(btn, 'the running block has no ⋮ button').not.toBeNull()
     btn!.click()
-    return Array.from(document.querySelectorAll<HTMLElement>('.cmd-overflow-menu-item'))
+    return Array.from(document.querySelectorAll<HTMLElement>('[data-testid="block-actions-menu"] .ui-context-menu__item'))
   }
 
   function itemNamed(items: HTMLElement[], action: string): HTMLElement | undefined {
-    return items.find((el) => el.dataset.action === action)
+    return items.find((el) => el.dataset.itemId === action)
   }
 
   it('the running block grant action exists only after the target switches to Ask', async () => {
@@ -10074,7 +10075,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       const runItems = runningBlockMenu(content)
       expect(itemNamed(runItems, 'grant')).toBeUndefined()
       expect(itemNamed(runItems, 'stop')?.textContent).toBe('Stop')
-      paneOf(content).querySelector<HTMLElement>('.cmd-block-running .cmd-overflow-btn')!.click()
+      paneOf(content).querySelector<HTMLElement>('.cmd-block-running [data-block-actions]')!.click()
 
       await summonChord(content)
       await vi.waitFor(() => expect(ed.isVisible).toBe(true))
@@ -10094,7 +10095,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       expect(targetNamed(ed)).toBe('shell')
       expect(block?.dataset.granted).toBeUndefined()
       expect(itemNamed(runningBlockMenu(content), 'grant')).toBeUndefined()
-      paneOf(content).querySelector<HTMLElement>('.cmd-block-running .cmd-overflow-btn')!.click()
+      paneOf(content).querySelector<HTMLElement>('.cmd-block-running [data-block-actions]')!.click()
 
       await summonChord(content)
       const unmark = itemNamed(runningBlockMenu(content), 'grant')
@@ -10104,7 +10105,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     } finally {
       restore()
       teardown()
-      document.querySelectorAll('.cmd-overflow-menu').forEach((m) => m.remove())
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     }
   })
 
@@ -10127,7 +10128,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     } finally {
       restore()
       teardown()
-      document.querySelectorAll('.cmd-overflow-menu').forEach((m) => m.remove())
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     }
   })
 
@@ -10171,7 +10172,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     } finally {
       restore()
       teardown()
-      document.querySelectorAll('.cmd-overflow-menu').forEach((m) => m.remove())
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     }
   })
 
@@ -10217,7 +10218,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     } finally {
       restore()
       teardown()
-      document.querySelectorAll('.cmd-overflow-menu').forEach((el) => el.remove())
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     }
   })
 })
@@ -12217,7 +12218,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     )
     const input = document.createElement('input')
     const menu = document.createElement('div')
-    menu.className = 'cmd-overflow-menu'
+    menu.className = 'ui-context-menu'
     let overlayClosed = false
     let overlay: ReturnType<typeof pushOverlay> | null = null
     try {

@@ -13,6 +13,7 @@ package agentdriver
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/shady2k/nocx/internal/paneview"
@@ -162,6 +163,17 @@ func opensWithGlyph(text string, glyphs []string) bool {
 // toEdge says the region's bound is the FRAME's own edge in its direction
 // rather than a row count, and the engine permits it only for a region that
 // reads UP — see Document.validate, which is where that argument is stated.
+//
+// colFrom renders every visited row starting at that column rather than
+// column 0 — zero means column 0, which is exactly f.Text's own rendering, so
+// every existing region is unaffected. It exists for the menu grammar: an
+// option list's own column of alignment is the CURSOR's, not a fixed one a
+// document could name, because the same agent draws it at column 1 in an
+// inline dialog and at column 3 inside an overlay panel (measured off
+// 2.1.266-model's capture). A region built with RegionSpec.FromCol="cursor"
+// carries the frame's CursorX here, and it is set once, by RegionSpec.at,
+// rather than re-read per row — the cursor does not move while one frame is
+// being read.
 type region struct {
 	anchor           int
 	up               bool
@@ -170,6 +182,7 @@ type region struct {
 	stopAtBlank      bool
 	skipStatusGlyphs []string
 	toEdge           bool
+	colFrom          int
 }
 
 // stackTop answers where the status stack the region begins in ends: the row
@@ -213,15 +226,16 @@ func opensAtColumnZero(f paneview.Frame, row int, glyphs []string) bool {
 	return false
 }
 
-// eachRow walks the region once, in order, handing every candidate row's
-// right-trimmed text to visit, and stops when visit says so or the region ends.
+// eachRow walks the region once, in order, handing every candidate row's own
+// index and right-trimmed text to visit, and stops when visit says so or the
+// region ends.
 //
 // It is the ONE walk. anyRow is this with a boolean out-parameter and capture
 // is this collecting, so the cap, the blank terminator, the indent skip, the
 // status-stack step and the frame's own edge are enforced in a single place — a
 // second walk written beside it is a second set of bounds, and the whole
 // argument for the region is that its bounds are the engine's.
-func (r region) eachRow(f paneview.Frame, visit func(text string) bool) {
+func (r region) eachRow(f paneview.Frame, visit func(y int, text string) bool) {
 	start := r.anchor
 	if r.up && len(r.skipStatusGlyphs) > 0 {
 		start = r.stackTop(f)
@@ -234,7 +248,7 @@ func (r region) eachRow(f paneview.Frame, visit func(text string) bool) {
 		if y < 0 || y >= f.Rows {
 			return
 		}
-		text := strings.TrimRight(f.Text(y), " ")
+		text := rowTextFrom(f, y, r.colFrom)
 		if strings.TrimSpace(text) == "" {
 			if r.stopAtBlank {
 				return
@@ -246,7 +260,7 @@ func (r region) eachRow(f paneview.Frame, visit func(text string) bool) {
 				continue
 			}
 		}
-		if !visit(text) {
+		if !visit(y, text) {
 			return
 		}
 	}
@@ -256,7 +270,7 @@ func (r region) eachRow(f paneview.Frame, visit func(text string) bool) {
 // handed the row's text right-trimmed.
 func (r region) anyRow(f paneview.Frame, match func(text string) bool) bool {
 	found := false
-	r.eachRow(f, func(text string) bool {
+	r.eachRow(f, func(_ int, text string) bool {
 		if match(text) {
 			found = true
 			return false
@@ -275,21 +289,30 @@ func (r region) anyRow(f paneview.Frame, match func(text string) bool) bool {
 // carries for a forged spinner, applied to a forged panel row. A group that did
 // not participate in a match contributes no key, so an absent field is absent
 // rather than empty.
+//
+// Every row also carries "_row", the frame's own visible row index, decimal.
+// It is the engine's own bookkeeping rather than a document's capture group —
+// nothing here can WRITE it (a pattern that also named a group "_row" would
+// simply be overwritten below) — and it exists for a projection that has to
+// turn several matched rows back into a RowSpan, which a generic
+// map[string]string otherwise has no position for. Observation.Menu is the
+// first reader.
 func (r region) capture(f paneview.Frame, re *regexp.Regexp) []map[string]string {
 	names := re.SubexpNames()
 	var out []map[string]string
-	r.eachRow(f, func(text string) bool {
+	r.eachRow(f, func(y int, text string) bool {
 		m := re.FindStringSubmatch(text)
 		if m == nil {
 			return true
 		}
-		row := make(map[string]string, len(names))
+		row := make(map[string]string, len(names)+1)
 		for i, name := range names {
 			if i == 0 || name == "" || m[i] == "" {
 				continue
 			}
 			row[name] = m[i]
 		}
+		row["_row"] = strconv.Itoa(y)
 		out = append(out, row)
 		return true
 	})

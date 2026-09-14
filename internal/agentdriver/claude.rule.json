@@ -54,6 +54,16 @@
       "ruleGlyph": "▔",
       "floor": 0,
       "minRow": 1
+    },
+    {
+      "name": "cursor",
+      "kind": "cursor"
+    },
+    {
+      "name": "belowCursor",
+      "kind": "offset",
+      "from": "cursor",
+      "offset": 1
     }
   ],
   "branches": [
@@ -267,7 +277,24 @@
       "toEdge": true,
       "skipStatusGlyphs": ["✻", "✢", "✽", "✶", "·", "*"],
       "pattern": "^(?P<text>.*)$"
+    },
+    {
+      "name": "menu",
+      "anchor": "belowCursor",
+      "up": true,
+      "maxRows": 16,
+      "fromCol": "cursor",
+      "pattern": "^(?:(?:(?P<selected>❯)| ) (?:\\d+\\.\\s*)?(?P<option>\\S.*)|(?P<question>\\S.*))$"
+    },
+    {
+      "name": "menuBelow",
+      "anchor": "cursor",
+      "maxRows": 8,
+      "fromCol": "cursor",
+      "pattern": "^(?:(?:(?P<selected>❯)| ) (?:\\d+\\.\\s*)?(?P<option>\\S.*)|(?P<question>\\S.*))$"
     }
   ],
+  "inputBox": { "anchor": "topRule", "to": "bottomRule" },
+  "menuZone": { "anchor": "cursor", "up": true, "maxRows": 16 },
   "default": "unknown"
 }

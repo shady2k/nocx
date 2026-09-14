@@ -28,7 +28,20 @@
       "capture": "claude-2.1.266-turn",
       "atMs": 8000,
       "state": "modal_choice",
-      "note": "the onboarding theme list, before the first Enter dismisses it; re-recorded on Claude Code 2.1.266 through the hardened record.sh (nocx-nru89.8)"
+      "menu": {
+        "question": "To change this later, run /theme",
+        "options": [
+          "Auto (match terminal)",
+          "Dark mode ✔",
+          "Light mode",
+          "Dark mode (colorblind-friendly)",
+          "Light mode (colorblind-friendly)",
+          "Dark mode (ANSI colors only)",
+          "Light mode (ANSI colors only)"
+        ],
+        "selected": 1
+      },
+      "note": "the onboarding theme list, before the first Enter dismisses it; re-recorded on Claude Code 2.1.266 through the hardened record.sh (nocx-nru89.8). Its menu's \"question\" is the mechanical nearest-non-option row above the list (\"To change this later, run /theme\"), not the heading above it (nocx-6q1uh.2's commit body)."
     },
     {
       "capture": "claude-lmstudio-turn",
@@ -60,7 +73,12 @@
       "capture": "claude-2.1.266-turn",
       "atMs": 20500,
       "state": "permission_choice",
-      "note": "numbers none of its options; identified by the cursor on the marker and the confirm legend below (nocx-f545a.2); re-recorded on Claude Code 2.1.266 through the hardened record.sh (nocx-nru89.8)"
+      "menu": {
+        "question": "Security guide",
+        "options": ["No, exit", "Yes, I trust this folder"],
+        "selected": 0
+      },
+      "note": "numbers none of its options; identified by the cursor on the marker and the confirm legend below (nocx-f545a.2); re-recorded on Claude Code 2.1.266 through the hardened record.sh (nocx-nru89.8). Its menu's own \"question\" is the mechanical answer the walk produces (the nearest non-option row above the topmost option) rather than the real prompt several rows above — quoted here exactly as Menu() reads it, per nocx-6q1uh.2's own commit body."
     },
     {
       "capture": "claude-lmstudio-turn",
@@ -230,7 +248,19 @@
       "capture": "claude-2.1.266-model",
       "atMs": 49000,
       "state": "modal_choice",
-      "note": "a menu the user opened, not a tool approval; re-recorded on Claude Code 2.1.266 through the hardened record.sh (nocx-nru89.8)"
+      "menu": {
+        "question": "specify with --model.",
+        "options": [
+          "Default (recommended)   Use the default model (currently Opus 5 (1M context)) · $5/$25 per Mtok",
+          "Opus (1M context)       Opus 5 with 1M context · Best for everyday, complex tasks · $5/$25 per Mtok",
+          "Sonnet                  Sonnet 5 · Efficient for routine tasks · $2/$10 per Mtok",
+          "Sonnet 5 (1M context)   Sonnet 5 for long sessions · $2/$10 per Mtok",
+          "Haiku                   Haiku 4.5 · Fastest for quick answers · $1/$5 per Mtok",
+          "qwen/qwen3.6-35b-a3b ✔  Custom model"
+        ],
+        "selected": 5
+      },
+      "note": "a menu the user opened, not a tool approval; re-recorded on Claude Code 2.1.266 through the hardened record.sh (nocx-nru89.8). No \"─\" rule is drawn anywhere on this frame — the overlay opens with \"▔\" instead — so this menu's question is read off the frame's own overlay heading text, not off the ordinary input box's chrome (nocx-6q1uh.2's commit body)."
     },
     {
       "capture": "claude-lmstudio-model",
@@ -250,6 +280,7 @@
       "atMs": 49000,
       "state": "permission_choice",
       "branch": 0,
+      "menu": { "question": "Do you want to proceed?", "options": ["Yes", "No"], "selected": 0 },
       "note": "Bash command / touch marker.txt, only 2 options because the settings ask-rule names this exact command; re-recorded on Claude Code 2.1.266 through the hardened record.sh, against .claude/skills/nocx-detection-verify/permission-ask-settings.json (nocx-nru89.8)"
     },
     {
@@ -265,6 +296,15 @@
       "atMs": 118000,
       "state": "permission_choice",
       "branch": 0,
+      "menu": {
+        "question": "Do you want to create note.txt?",
+        "options": [
+          "Yes",
+          "Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)",
+          "No"
+        ],
+        "selected": 0
+      },
       "note": "replaces the input box; its selected row opens with the input marker; re-recorded on Claude Code 2.1.266 through the hardened record.sh, at a mark later than the nocx-nru89.2 recording because this run's model took longer to reach the second (Write) request (nocx-nru89.8)"
     },
     {

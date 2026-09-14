@@ -55,13 +55,43 @@ type Document struct {
 	// than a constant because a rule the engine does not understand should
 	// be able to end in unknown, and free_text is the expensive direction.
 	Default State `json:"default"`
+	// InputBox is the rows of the agent's own input box, cursor included —
+	// the region between its two rule rows (RegionSpec.To). Absent (or its
+	// anchor unbound on a given frame) means the box's chrome could not be
+	// found, which is the ordinary case while a dialog has replaced it.
+	InputBox *RegionSpec `json:"inputBox,omitempty"`
+	// MenuZone is the rows in which this agent can draw a menu — wide enough
+	// to hold whichever chrome opens it, since the corpus draws that chrome
+	// two different ways: an inline dialog closes with the same rule the
+	// input box's own bottom border uses, and an overlay panel (2.1.266's
+	// /model) draws no such rule anywhere on screen and opens with a
+	// different one instead (see menuZoneSpan). It is read via a fixed
+	// budget of rows above its anchor through the frame's own last row, never
+	// upward without bound, because everything above that budget is the
+	// agent's own scrollback.
+	MenuZone *RegionSpec `json:"menuZone,omitempty"`
 }
 
 // AnchorSpec binds a name to a row of the frame. A binding that fails is not
 // an error: the anchor is ABSENT, and a predicate may ask about that.
 type AnchorSpec struct {
 	Name string `json:"name"`
-	// Kind is "searchUp", "offset" or "firstNonBlankBelow".
+	// Kind is "searchUp", "offset", "firstNonBlankBelow" or "cursor".
+	//
+	// "cursor" binds at Frame.CursorY unconditionally — NOT only when
+	// CursorVisible, unlike the plan this package started from: every real
+	// capture in testdata/captures reads CursorVisible=false at every menu
+	// AND every free-text moment (Claude Code parks DECTCEM off and draws its
+	// own indicator), and every existing predicate that reads the cursor
+	// (cursorOn, cursorOpensItsRow, numberedOptionAfterCursor and the rest of
+	// predicate.go) already treats CursorX/CursorY as trustworthy regardless
+	// of visibility. Gating this anchor on CursorVisible would make it never
+	// bind for the one agent this package drives.
+	//
+	// validate refuses a "cursor" anchor named by a Pred — the deliberate
+	// decision at holds's belowCursorContains case stands, generalised from a
+	// predicate to an anchor: only an Extractor or a document-level region
+	// (InputBox, MenuZone) may name it.
 	Kind string `json:"kind"`
 	// From names the anchor this one is computed from. Empty means the
 	// frame's own bottom edge, which only searchUp uses.
@@ -136,9 +166,29 @@ type RegionSpec struct {
 	// that reads DOWN (see validate), which is the direction the row cap
 	// exists to bound.
 	ToEdge bool `json:"toEdge,omitempty"`
+	// To names a SECOND anchor that closes this region, inclusive of both
+	// ends, instead of a row count or the frame's edge. It exists for
+	// Document.InputBox alone: the input box is closed by its own second rule
+	// row (claude's "bottomRule"), and that row's position cannot be a row
+	// count because the box grows with a multi-line paste. validate refuses
+	// it anywhere but a document-level region (a predicate or an extractor
+	// still has only the engine's two bounds).
+	To string `json:"to,omitempty"`
+	// FromCol renders every row this region visits starting at a COLUMN
+	// rather than column 0. The only value validate accepts is "cursor",
+	// meaning the frame's own CursorX — the one column an option list is
+	// reliably aligned to, since the SAME agent draws it at column 1 in an
+	// inline dialog and at column 3 inside an overlay panel (measured off
+	// claude's bash-permission and 2.1.266-model captures). It exists for the
+	// menu extractors alone; validate refuses it on a predicate.
+	FromCol string `json:"fromCol,omitempty"`
 }
 
-func (r RegionSpec) at(row int) region {
+func (r RegionSpec) at(f paneview.Frame, row int) region {
+	colFrom := 0
+	if r.FromCol == "cursor" {
+		colFrom = f.CursorX
+	}
 	return region{
 		anchor:           row,
 		up:               r.Up,
@@ -147,6 +197,7 @@ func (r RegionSpec) at(row int) region {
 		stopAtBlank:      r.StopAtBlank,
 		skipStatusGlyphs: r.SkipStatusGlyphs,
 		toEdge:           r.ToEdge,
+		colFrom:          colFrom,
 	}
 }
 
@@ -268,10 +319,84 @@ func (d documentDriver) Observe(f paneview.Frame) Observation {
 	// The degenerate frame is the engine's, not a branch: a document cannot
 	// express "there is no grid to read", and should not have to.
 	if f.Rows <= 0 || f.Cols <= 0 || len(f.Lines) == 0 {
-		return Observation{State: StateUnknown}
+		return Observation{State: StateUnknown, InputBox: noRowSpan, MenuZone: noRowSpan}
 	}
 	anchors := d.bindAnchors(f)
-	return Observation{State: d.decide(f, anchors, nil), Extras: d.extract(f, anchors)}
+	obs := Observation{State: d.decide(f, anchors, nil), Extras: d.extract(f, anchors)}
+	obs.InputBox = betweenAnchors(f, anchors, d.doc.InputBox)
+	obs.MenuZone = menuZoneSpan(f, anchors, d.doc.MenuZone)
+	return obs
+}
+
+// noRowSpan is the empty RowSpan: Last below First, per RowSpan's own contract
+// (agentdriver.go), so a caller checking emptiness never has to know the zero
+// value {0,0} would otherwise read as "row zero alone".
+var noRowSpan = RowSpan{Last: -1}
+
+// betweenAnchors computes Document.InputBox: the span from one bound anchor
+// through a SECOND named anchor (RegionSpec.To), inclusive of both. It is not
+// region.eachRow's walk — that walk excludes its own anchor row and is capped
+// by a row count or the frame's edge, neither of which fits a box whose height
+// is a multi-line paste — so this reads the two rows the earlier binding pass
+// already found and reports the span directly.
+func betweenAnchors(f paneview.Frame, anchors bound, spec *RegionSpec) RowSpan {
+	if spec == nil {
+		return noRowSpan
+	}
+	first, ok := anchors[spec.Anchor]
+	if !ok {
+		return noRowSpan
+	}
+	last, ok := anchors[spec.To]
+	if !ok {
+		return noRowSpan
+	}
+	if first > last {
+		first, last = last, first
+	}
+	if last >= f.Rows {
+		last = f.Rows - 1
+	}
+	if first < 0 {
+		first = 0
+	}
+	return RowSpan{First: first, Last: last}
+}
+
+// menuZoneSpan computes Document.MenuZone: up to MaxRows rows above the
+// anchor through the frame's own LAST row — never the anchor's own count of
+// rows in the other direction, and never the frame's top.
+//
+// The direction is fixed rather than configurable because no single anchor
+// closes a menu's chrome the same way twice: an inline dialog (claude's
+// bash-permission, write-permission, folder-trust, the theme picker) closes
+// with the same "─" rule the input box's own bottom border uses, found as
+// "bottomRule"; an overlay panel (2.1.266-model's /model picker) draws no "─"
+// anywhere on its frame and opens instead with a "▔" rule, found as
+// "overlayTop". Anchoring on the CURSOR is what both share — every menu
+// moment this package classifies as permission_choice or modal_choice binds
+// it, by the same predicates that decide the state — so a fixed budget of
+// rows above it is read AS the zone's start, and its end is always the
+// frame's own bottom: nothing below an input box or a menu is the agent's own
+// untrusted output, so walking toward it is the safe direction here exactly
+// as walking toward the top is region.eachRow's for an extractor.
+func menuZoneSpan(f paneview.Frame, anchors bound, spec *RegionSpec) RowSpan {
+	if spec == nil {
+		return noRowSpan
+	}
+	row, ok := anchors[spec.Anchor]
+	if !ok {
+		return noRowSpan
+	}
+	first := row - spec.MaxRows + 1
+	if first < 0 {
+		first = 0
+	}
+	last := f.Rows - 1
+	if last < first {
+		return noRowSpan
+	}
+	return RowSpan{First: first, Last: last}
 }
 
 // decide is the ordered branch walk. It reads predicates and anchors, and
@@ -323,7 +448,7 @@ func (d documentDriver) extract(f paneview.Frame, anchors bound) []Extra {
 		if !ok {
 			continue
 		}
-		rows := e.spec.at(row).capture(f, e.re)
+		rows := e.spec.at(f, row).capture(f, e.re)
 		if len(rows) == 0 {
 			continue
 		}
@@ -398,7 +523,7 @@ func holds(f paneview.Frame, anchors bound, p Pred) bool {
 		if !ok {
 			return false
 		}
-		return p.at(row).anyRow(f, func(text string) bool {
+		return p.at(f, row).anyRow(f, func(text string) bool {
 			if p.Text != "" && !strings.Contains(text, p.Text) {
 				return false
 			}
@@ -461,6 +586,8 @@ func bindOne(f paneview.Frame, anchors bound, a AnchorSpec) (int, bool) {
 			return 0, false
 		}
 		return guard(f, row, a)
+	case "cursor":
+		return guard(f, f.CursorY, a)
 	}
 	return 0, false
 }
@@ -488,6 +615,7 @@ func (d Document) validate() error {
 		return fmt.Errorf("agentdriver: document default %q is not a state", d.Default)
 	}
 	seen := make(map[string]bool, len(d.Anchors))
+	cursorAnchors := make(map[string]bool, len(d.Anchors))
 	for _, a := range d.Anchors {
 		if a.Name == "" {
 			return fmt.Errorf("agentdriver: an anchor has no name")
@@ -501,11 +629,17 @@ func (d Document) validate() error {
 			}
 		}
 		seen[a.Name] = true
+		if a.Kind == "cursor" {
+			cursorAnchors[a.Name] = true
+		}
 	}
 	for i, b := range d.Branches {
 		if b.Below != nil {
 			if !seen[b.Below.Anchor] {
 				return fmt.Errorf("agentdriver: branch %d reads below %q, which no anchor binds", i, b.Below.Anchor)
+			}
+			if cursorAnchors[b.Below.Anchor] {
+				return fmt.Errorf("agentdriver: branch %d reads below %q, a cursor anchor; only an extractor or a document-level region may name one", i, b.Below.Anchor)
 			}
 			if !b.Below.AllMatched.Valid() || !b.Below.Counterexample.Valid() {
 				return fmt.Errorf("agentdriver: branch %d names a state that does not exist", i)
@@ -519,11 +653,20 @@ func (d Document) validate() error {
 			if p.Anchor != "" && !seen[p.Anchor] {
 				return fmt.Errorf("agentdriver: branch %d names anchor %q, which no anchor binds", i, p.Anchor)
 			}
+			if p.Anchor != "" && cursorAnchors[p.Anchor] {
+				return fmt.Errorf("agentdriver: branch %d names anchor %q, a cursor anchor; only an extractor or a document-level region may name one", i, p.Anchor)
+			}
 			if p.ToEdge && !p.Up {
 				return fmt.Errorf("agentdriver: branch %d reads to the frame edge without reading up; an unbounded region may only walk AWAY from the chrome it is anchored in", i)
 			}
 			if len(p.SkipStatusGlyphs) > 0 && !p.Up {
 				return fmt.Errorf("agentdriver: branch %d steps over a status stack without reading up; a status stack is only ever between an anchor and the agent's output ABOVE it", i)
+			}
+			if p.To != "" {
+				return fmt.Errorf("agentdriver: branch %d closes a region at a second anchor %q; that reach is for the input box alone", i, p.To)
+			}
+			if p.FromCol != "" {
+				return fmt.Errorf("agentdriver: branch %d reads from column %q; a predicate has no use for it and it is refused rather than ignored", i, p.FromCol)
 			}
 			if p.Kind == "belowCursorContains" && (p.MaxRows <= 0 || p.MaxRows > maxExtractorRows) {
 				return fmt.Errorf("agentdriver: branch %d reads below the cursor with a cap of %d rows; the engine requires 1 to %d, because an uncapped region is how a forged row gets read",
@@ -540,6 +683,12 @@ func (d Document) validate() error {
 		}
 		if len(e.SkipStatusGlyphs) > 0 && !e.Up {
 			return fmt.Errorf("agentdriver: extractor %q steps over a status stack without reading up; a status stack is only ever between an anchor and the agent's output ABOVE it", e.Name)
+		}
+		if e.To != "" {
+			return fmt.Errorf("agentdriver: extractor %q closes a region at a second anchor %q; that reach is for the input box alone", e.Name, e.To)
+		}
+		if e.FromCol != "" && e.FromCol != "cursor" {
+			return fmt.Errorf("agentdriver: extractor %q reads from column %q; the engine only knows \"cursor\"", e.Name, e.FromCol)
 		}
 		if e.ToEdge {
 			// The row cap below is the engine's bound on how far a region
@@ -565,6 +714,52 @@ func (d Document) validate() error {
 		if e.MaxRows > maxExtractorRows {
 			return fmt.Errorf("agentdriver: extractor %q asks for %d rows; the engine allows %d", e.Name, e.MaxRows, maxExtractorRows)
 		}
+	}
+	if d.InputBox != nil {
+		if err := validateInputBox(*d.InputBox, seen); err != nil {
+			return err
+		}
+	}
+	if d.MenuZone != nil {
+		if err := validateMenuZone(*d.MenuZone, seen); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateInputBox requires exactly the two anchors a between-anchors span
+// needs and nothing a row-count or edge-bounded region would also accept —
+// two shapes sharing a JSON type is not a licence to accept either shape
+// wherever one of them appears.
+func validateInputBox(r RegionSpec, seen map[string]bool) error {
+	if r.Anchor == "" || !seen[r.Anchor] {
+		return fmt.Errorf("agentdriver: inputBox names anchor %q, which no anchor binds", r.Anchor)
+	}
+	if r.To == "" || !seen[r.To] {
+		return fmt.Errorf("agentdriver: inputBox closes at %q, which no anchor binds", r.To)
+	}
+	if r.Up || r.ToEdge || r.MaxRows != 0 || r.FromCol != "" {
+		return fmt.Errorf("agentdriver: inputBox names a row count, an edge or a column origin beside its closing anchor %q; a between-anchors span has one bound", r.To)
+	}
+	return nil
+}
+
+// validateMenuZone requires the fixed shape menuZoneSpan interprets — an
+// anchor and a row budget read upward from it — and refuses every field that
+// shape does not use, for the same reason validateInputBox does.
+func validateMenuZone(r RegionSpec, seen map[string]bool) error {
+	if r.Anchor == "" || !seen[r.Anchor] {
+		return fmt.Errorf("agentdriver: menuZone names anchor %q, which no anchor binds", r.Anchor)
+	}
+	if !r.Up {
+		return fmt.Errorf("agentdriver: menuZone does not read up from %q; its budget of rows is read ABOVE the anchor, the frame's own last row closes it either way", r.Anchor)
+	}
+	if r.MaxRows <= 0 || r.MaxRows > maxExtractorRows {
+		return fmt.Errorf("agentdriver: menuZone asks for %d rows above %q; the engine requires 1 to %d", r.MaxRows, r.Anchor, maxExtractorRows)
+	}
+	if r.To != "" || r.ToEdge || r.FromCol != "" {
+		return fmt.Errorf("agentdriver: menuZone names a closing anchor, a frame edge or a column origin beside its row budget; the zone always closes at the frame's own last row")
 	}
 	return nil
 }

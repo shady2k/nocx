@@ -340,7 +340,7 @@ func emittingExtractors(in []agentdriver.ExtractorReading) []agentEmittingExtrac
 	return out
 }
 
-func emittingSpan(s *agentdriver.RowSpan) *agentEmittingSpan {
+func emittingSpan(s *agentdriver.ExplainRowSpan) *agentEmittingSpan {
 	if s == nil {
 		return nil
 	}

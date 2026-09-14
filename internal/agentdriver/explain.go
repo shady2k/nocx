@@ -87,7 +87,7 @@ type ExtractorReading struct {
 	Anchor string
 	// Region is the row span the engine allowed, nil when the anchor did
 	// not bind — in which case the extractor never ran at all.
-	Region *RowSpan
+	Region *ExplainRowSpan
 	// Rows is the yield, exactly as Observe reports it in Extra.Rows: one
 	// map per matched row, and a capture group that did not participate
 	// contributes no key.
@@ -156,7 +156,7 @@ type PredicateReading struct {
 	Held      bool
 	// Region is the row span the predicate was permitted to search, when it
 	// searches one and its anchor bound. Inclusive at both ends.
-	Region *RowSpan
+	Region *ExplainRowSpan
 }
 
 // BelowReading is the three-valued branch's answer, kept three-valued: folding
@@ -172,8 +172,14 @@ type BelowReading struct {
 	Verdict string
 }
 
-// RowSpan is an inclusive row range of the frame.
-type RowSpan struct{ From, To int }
+// ExplainRowSpan is an inclusive row range of the frame, reported by the
+// emitting view alone — it is From/To rather than agentdriver.RowSpan's own
+// First/Last because the two answer different questions with different
+// emptiness rules (a predicate or an extractor with no region reports this as
+// a nil pointer; RowSpan is a value type whose OWN Last-below-First is
+// "empty", because Observation.InputBox and MenuZone are never optional) and
+// were never meant to be one type wearing two names.
+type ExplainRowSpan struct{ From, To int }
 
 // Explainer is a driver whose rule can report its own reading. It is a
 // separate interface for the same reason Observer is: nothing is required to
@@ -389,7 +395,7 @@ func regionDetail(r RegionSpec) string {
 // clamped to the frame. Nil for a predicate that searches no region and for
 // one whose anchor did not bind — in both cases there is no span, and drawing
 // one anyway would put a highlight on rows nothing looked at.
-func predRegion(f paneview.Frame, anchors bound, p Pred) *RowSpan {
+func predRegion(f paneview.Frame, anchors bound, p Pred) *ExplainRowSpan {
 	if p.Kind != "regionAny" || p.MaxRows <= 0 {
 		return nil
 	}
@@ -429,7 +435,7 @@ func (d documentDriver) readExtractors(f paneview.Frame, anchors bound) []Extrac
 // from its anchor, starting one row off it, and the frame's own edge is the
 // other bound — the same two bounds region.eachRow enforces, read rather than
 // re-decided.
-func spanOf(f paneview.Frame, r RegionSpec, anchor int) *RowSpan {
+func spanOf(f paneview.Frame, r RegionSpec, anchor int) *ExplainRowSpan {
 	first, last := anchor+1, anchor+r.MaxRows
 	if r.Up {
 		first, last = anchor-r.MaxRows, anchor-1
@@ -443,5 +449,5 @@ func spanOf(f paneview.Frame, r RegionSpec, anchor int) *RowSpan {
 	if first > last {
 		return nil
 	}
-	return &RowSpan{From: first, To: last}
+	return &ExplainRowSpan{From: first, To: last}
 }

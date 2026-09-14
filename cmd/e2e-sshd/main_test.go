@@ -130,6 +130,79 @@ func TestConnSignal_FiresForAClientThatOffersNoPublicKey(t *testing.T) {
 	}
 }
 
+// AUTH= counts AUTHENTICATED connections, exactly once each, and does not
+// count a client the fixture refused.
+//
+// The first criterion of e2e/ssh-helper-happy-path.spec.ts is that a pane and
+// Files on one host share ONE connection — a claim about the helper's pool that
+// only the far host can answer, and the answer has to be a counter rather than
+// a reading of the fixture's own chatter (nocx-50w7p.6). The counting rule is
+// therefore worth a test of its own: a counter moved on every ACCEPT, or on
+// every userauth ATTEMPT, would report two connections for one client that
+// probed twice, and the spec would fail for a reason that has nothing to do
+// with the pool.
+func TestAuthCount_CountsAuthenticatedConnectionsOnly(t *testing.T) {
+	addr, hostKey, userSigner := startFixture(t)
+
+	// The counter, read the way the printer reads it. Not through an accessor
+	// on the fixture: a function only a test calls is dead code by
+	// .githooks/check-deadcode.mjs, and this test is about the state that the
+	// AUTH= line carries rather than about a second reading of it.
+	count := func() int {
+		authenticated.mu.Lock()
+		defer authenticated.mu.Unlock()
+		return authenticated.n
+	}
+	// waitFor polls until the counter reaches want. The counter moves in the
+	// accept goroutine, so a client's Dial returning is not yet a completed
+	// server-side handshake — the value is the observable, never a sleep.
+	waitFor := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			if count() == want {
+				return
+			}
+			if !time.Now().Before(deadline) {
+				t.Fatalf("the fixture's counted authenticated connections = %d after 10s, want %d", count(), want)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	before := count()
+
+	// Refused first, and it must leave the counter alone: this is the half that
+	// tells "authenticated" from "arrived". A stranger's key is a real refusal
+	// — the fixture accepts exactly the key startFixture minted.
+	stranger, _, _, err := signer()
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+	if _, err := gossh.Dial("tcp", addr, &gossh.ClientConfig{
+		User:            "e2e",
+		Auth:            []gossh.AuthMethod{gossh.PublicKeys(stranger)},
+		HostKeyCallback: gossh.InsecureIgnoreHostKey(), //nolint:gosec // fixture host key, minted in-process
+		Timeout:         10 * time.Second,
+	}); err == nil {
+		t.Fatal("the fixture authenticated a key it does not accept, so the refusal this test needs never happened")
+	}
+	if got := count(); got != before {
+		t.Fatalf("the fixture counted %d authenticated connections after a refused client, want %d: a connection that never authenticated was counted", got, before)
+	}
+
+	// Accepted: one client, one increment.
+	_ = dial(t, addr, hostKey, userSigner)
+	waitFor(before + 1)
+
+	// And a SECOND connection is a second increment — the count is a count of
+	// connections, not a latch. Without this half, a counter that never moved
+	// again would satisfy the spec that reads it while reporting a second
+	// connection as a shared one.
+	_ = dial(t, addr, hostKey, userSigner)
+	waitFor(before + 2)
+}
+
 // A real sshd tells the session which login shell it is, and the nocx launcher
 // carrier reads exactly that.
 //

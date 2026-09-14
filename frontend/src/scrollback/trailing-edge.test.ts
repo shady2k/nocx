@@ -1,33 +1,36 @@
 // THE SCROLLBAR IS THE PANE'S TRAILING EDGE, NOT AN OBJECT STANDING NEAR IT
 // (nocx-mvbne).
 //
-// The activity bar sits on the window's trailing edge now. `.pane` carries
-// `--pane-inline-padding: 10px`, so the scroller — and with it the stable
-// gutter the bar is drawn in — used to stop 10px short of the pane's border
-// edge. That put canvas on BOTH sides of the thumb: content, gutter, thumb,
-// 10px of canvas, the rail's divider. A bar with a margin either side reads
-// as a free-standing stripe, which is what the eye kept catching on; a bar
-// flush against the surface it borders reads as that surface's edge and
-// disappears. Orca is the reference — same bar, no gap, quiet.
+// The activity bar sits on the window's trailing edge now. `.pane` used to
+// carry `--pane-inline-padding` as its own inline padding, so the scroller —
+// and with it the stable gutter the bar is drawn in — stopped short of the
+// pane's border edge, cancelled back to flush with a negative margin on
+// `.scrollback-layout`. Rows now carry the gutter instead (nocx-9bpeq.8), so
+// the scrollbar is flush for a simpler reason: the pane pads nothing, the
+// scroller pads nothing, and there is nothing left to cancel.
 //
 // This is geometry, not colour. Tinting the thumb down to `--color-divider`
 // was tried on paper first and rejected: in tokyo-night that is #2a2b3d
 // against a #2b3049 thumb, so the tint moves nearly nothing while the
 // floating stays.
 //
-// The three facts below are one contract, and the middle one is why the fix
-// is on `.scrollback-layout` rather than on the scroller itself:
+// The contract is now three facts, and the fourth is the fit that depends on
+// them:
 //
-//   1. the layout cancels the pane's trailing padding, so the gutter ends on
-//      the pane's border edge;
-//   2. `.scrollback-area` carries NO padding of its own — `usableViewport`
-//      reads its `clientWidth` as the grid width (terminal-content.ts, the
-//      invariant nocx-vydj bought), and padding counts in `clientWidth`, so a
-//      padded scroller fits a grid 10px wider than the box it is drawn in and
-//      the last columns are cut mid-glyph by `.xterm-inner`'s overflow;
-//   3. nothing INSIDE the scroller re-inserts a trailing inset, because the
-//      live region and the frozen blocks share that content box and a grid
-//      fitted to `clientWidth` must be able to fill it.
+//   1. the pane insets nothing — the gutter it used to own moved into the
+//      rows, so there is no padding left for `.scrollback-layout` to cancel;
+//   2. `.scrollback-area` carries NO padding of its own — its `clientWidth`
+//      is the ROW width, not the grid width, now that a row insets itself;
+//   3. every child of `.scrollback-inner` (a block, the separator, the
+//      restore boundary, the live region) states the same
+//      `padding-inline: var(--pane-inline-padding)` as a border-box, so the
+//      frozen column and the live column share one content box; a block
+//      nested in a turn is not a child of the stack and gets none;
+//   4. `usableViewport` (terminal-content.ts) fits the grid to that content
+//      box — the scroller's `clientWidth` minus the live row's own computed
+//      inline padding — which is what keeps the grid from being `2 ×
+//      gutter` wider than the box it is drawn in (the nocx-vydj defect,
+//      returned if this drifts).
 //
 // jsdom computes no cascade, so this reads the shipped stylesheets the way
 // `cmd-output-wrap.test.ts` does.
@@ -40,10 +43,10 @@ type Rule = { selectors: string[]; body: string }
 const HERE = import.meta.dirname ?? '.'
 const STYLE_ENTRY = resolve(HERE, '..', 'style.css')
 const BASE_ENTRY = resolve(HERE, '..', 'styles/base.css')
+const TOKENS_ENTRY = resolve(HERE, '..', 'styles/tokens.css')
 
 /** Top-level rules only, comments stripped. An at-rule block is skipped
- *  whole: a declaration that only holds at some viewport width does not
- *  hold. Lifted from cmd-output-wrap.test.ts. */
+ *  whole. Lifted from cmd-output-wrap.test.ts. */
 function topLevelRules(css: string): Rule[] {
   const rules: Rule[] = []
   const source = css.replace(/\/\*[\s\S]*?\*\//g, '')
@@ -75,73 +78,81 @@ function topLevelRules(css: string): Rule[] {
 }
 
 const RULES: Rule[] = [
+  ...topLevelRules(readFileSync(TOKENS_ENTRY, 'utf8')),
   ...topLevelRules(readFileSync(BASE_ENTRY, 'utf8')),
   ...topLevelRules(readFileSync(STYLE_ENTRY, 'utf8')),
 ]
 
-/** Every declaration the shipped cascade gives a bare class, later rules
- *  winning — the order the browser resolves them in. */
-function shippedValue(className: string, property: string): string | null {
+/** Every declaration the shipped cascade gives `selector` exactly, later
+ *  rules winning. */
+function shipped(selector: string, property: string): string | null {
   let found: string | null = null
   const pattern = new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+)`)
   for (const rule of RULES) {
-    if (!rule.selectors.includes(`.${className}`)) continue
+    if (!rule.selectors.includes(selector)) continue
     const m = rule.body.match(pattern)
     if (m) found = m[1].trim()
   }
   return found
 }
 
-describe('the scrollback scrollbar lands on the pane edge (nocx-mvbne)', () => {
-  it('the pane still states its inline breathing room as one token', () => {
-    // The cancellation below is written against this token rather than
-    // against a second copy of the number: two 10s that must agree is the
-    // dead twin the pane's own comment warns about.
-    expect(shippedValue('pane', '--pane-inline-padding')).toBe('10px')
-    expect(shippedValue('pane', 'padding')).toBe('0 var(--pane-inline-padding)')
+const INLINE = [
+  'padding',
+  'padding-inline',
+  'padding-left',
+  'padding-right',
+  'padding-inline-start',
+  'padding-inline-end',
+]
+
+describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () => {
+  it('the gutter is one token on the spacing scale', () => {
+    expect(shipped(':root', '--pane-inline-padding')).toBe('var(--space-4)')
   })
 
-  it('the scrollback layout cancels that padding on the trailing side only', () => {
-    // Trailing side only: the LEADING inset is what keeps the first column
-    // off the pane's edge, and nothing about the scrollbar asks for it back.
-    const marginRight = shippedValue('scrollback-layout', 'margin-right')
-    expect(marginRight).toBe('calc(-1 * var(--pane-inline-padding))')
-    expect(shippedValue('scrollback-layout', 'margin-left')).toBeNull()
+  it('the pane insets nothing, so the scroller and its scrollbar reach the pane edge', () => {
+    for (const property of INLINE) expect(shipped('.pane', property)).toBeNull()
+    // Nothing is left to cancel, so no cancellation may survive: a negative
+    // margin with no padding to pay for it pushes the scroller past the pane.
+    expect(shipped('.scrollback-layout', 'margin-right')).toBeNull()
+    expect(shipped('.scrollback-layout', 'margin-left')).toBeNull()
   })
 
-  it('the scroller takes no padding, because its clientWidth is the grid width', () => {
-    for (const property of ['padding', 'padding-right', 'padding-inline', 'padding-inline-end']) {
-      expect(shippedValue('scrollback-area', property)).toBeNull()
+  it('the scroller takes no padding, because its clientWidth is where the fit starts', () => {
+    for (const property of INLINE) expect(shipped('.scrollback-area', property)).toBeNull()
+    expect(shipped('.scrollback-area', 'scrollbar-gutter')).toBe('stable')
+  })
+
+  it('every row of the ledger carries the same inset, as a border-box', () => {
+    // One rule for every child of the stack — blocks, separator, restore
+    // boundary and the live region — so a frozen column and the live column
+    // cannot sit on different edges, and a block nested in a turn (not a
+    // child of the stack) gets none.
+    expect(shipped('.scrollback-inner > *', 'padding-inline')).toBe('var(--pane-inline-padding)')
+    expect(shipped('.scrollback-inner > *', 'box-sizing')).toBe('border-box')
+    for (const selector of ['.cmd-block', '.xterm-live-container']) {
+      for (const property of INLINE) expect(shipped(selector, property)).toBeNull()
     }
   })
 
-  it('the gutter stays reserved, so the trailing edge never moves', () => {
-    // Without this the bar's arrival and departure would move the very edge
-    // the fix aligns to, and `refitIfResized` would see a width that
-    // alternates with the row count.
-    expect(shippedValue('scrollback-area', 'scrollbar-gutter')).toBe('stable')
+  it('the running region states only its block padding, never resetting the inset', () => {
+    // A `padding` shorthand here (0,2,0) would override the row inset (0,1,0)
+    // with 0 and put the running grid on a different edge from the block it
+    // freezes into.
+    expect(shipped('.xterm-live-container.live-running', 'padding')).toBeNull()
+    expect(shipped('.xterm-live-container.live-running', 'padding-block')).toBe(
+      'var(--cmd-output-pad-top) var(--cmd-output-pad-bottom)',
+    )
   })
 
-  it('nothing inside the scroller re-inserts a trailing inset', () => {
-    // The live region is a descendant of the scroller, not a sibling of it
-    // (scrollback/controller.ts builds `.scrollback-area > .scrollback-inner
-    // > .xterm-live-container`), so blocks and the running grid share one
-    // content box. An inset on either would put the frozen column and the
-    // live column on different right edges.
-    for (const className of ['scrollback-inner', 'xterm-live-container']) {
-      for (const property of ['padding-right', 'margin-right', 'padding-inline-end']) {
-        expect(shippedValue(className, property)).toBeNull()
-      }
-    }
+  it('the summon stack is full width and its answers wear the row inset', () => {
+    expect(shipped('.nocx-summon-stack', 'left')).toBe('0')
+    expect(shipped('.nocx-summon-stack', 'right')).toBe('0')
+    expect(shipped('.nocx-summon-answers > *', 'padding-inline')).toBe('var(--pane-inline-padding)')
+    expect(shipped('.nocx-summon-answers > *', 'box-sizing')).toBe('border-box')
   })
 
-  it('the composer keeps its breathing room on both sides', () => {
-    // The summon stack is absolutely positioned against the pane, so it is
-    // unaffected by the layout's margin — and it must stay that way: a
-    // composer flush against the rail is a text field with no edge.
-    const stack = RULES.find((r) => r.selectors.includes('.nocx-summon-stack'))
-    expect(stack).toBeDefined()
-    expect(stack!.body).toMatch(/left\s*:\s*var\(--pane-inline-padding\)/)
-    expect(stack!.body).toMatch(/right\s*:\s*var\(--pane-inline-padding\)/)
+  it('the composer carries the gutter itself', () => {
+    expect(shipped('.nocx-editor', 'padding')).toBe('10px var(--pane-inline-padding) 12px')
   })
 })

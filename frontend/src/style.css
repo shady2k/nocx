@@ -185,7 +185,9 @@
   background: var(--color-canvas);
   border-top: 1px solid var(--color-surface-raised);
   border-left: 3px solid var(--color-accent);
-  padding: 10px 14px 12px;
+  /* The pane no longer insets its children (nocx-9bpeq.8): the composer is a
+     row and carries the ledger's gutter itself. T7 rewrites the rest. */
+  padding: 10px var(--pane-inline-padding) 12px;
 }
 
 /* One absolute presentation stack keeps the running program's pane geometry
@@ -193,8 +195,8 @@
    one existing composer takes the final flex seat when no answer is streaming. */
 .nocx-summon-stack {
   position: absolute;
-  left: var(--pane-inline-padding);
-  right: var(--pane-inline-padding);
+  left: 0;
+  right: 0;
   bottom: 0;
   z-index: 10;
   /* The stack owns the rows it occupies. Its opaque ground stops the frozen
@@ -245,6 +247,14 @@
   max-height: min(50vh, calc(36em + 6px));
   overflow-y: auto;
   overflow-x: hidden;
+}
+
+/* An answer in the stack is a row of the ledger before it is seated into
+   one, so it wears the row inset now rather than inheriting a pane padding
+   that no longer exists (nocx-9bpeq.8). */
+.nocx-summon-answers > * {
+  box-sizing: border-box;
+  padding-inline: var(--pane-inline-padding);
 }
 
 .nocx-summon-stack > .nocx-editor[data-placement='overlay'] {
@@ -787,32 +797,13 @@
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
-  /* THE SCROLLBAR IS THE PANE'S TRAILING EDGE, NOT AN OBJECT NEAR IT.
-
-     `.pane` insets its children by `--pane-inline-padding` on both sides —
-     breathing room around terminal text — so the scroller, and with it the
-     stable gutter the thumb is drawn in, used to stop 10px short of the
-     pane's border edge. With the activity bar on the window's trailing edge
-     that left canvas on BOTH sides of the thumb: text, gutter, thumb, 10px of
-     canvas, the rail's divider. A bar with a margin either side reads as a
-     free-standing stripe and the eye keeps catching on it; a bar flush
-     against the surface it borders reads as that surface's edge and goes
-     quiet (nocx-mvbne).
-
-     Cancelling on the LAYOUT rather than on `.scrollback-area` is the whole
-     of it. `usableViewport` fits the grid to the scroller's `clientWidth`
-     (terminal-content.ts), and padding counts in `clientWidth` — so pushing
-     the box out and paying for it with `padding-right` on the scroller would
-     fit a grid 10px wider than the box it is drawn in, which is the overhang
-     nocx-vydj closed. The layout's margin moves the box and nothing else: the
-     content edge and the measured width stay one number, and the text column
-     simply gains the 10px the gap was holding.
-
-     The leading inset stays. Nothing about a trailing scrollbar asks for the
-     first column to sit on the pane's edge. The composer is unaffected — it
-     is absolutely positioned against the pane and states both insets itself
-     (`.nocx-summon-stack`). */
-  margin-right: calc(-1 * var(--pane-inline-padding));
+  /* THE SCROLLBAR IS THE PANE'S TRAILING EDGE, NOT AN OBJECT NEAR IT. The
+     pane used to inset its children and this layout cancelled the trailing
+     half so the stable gutter the thumb is drawn in stopped flush against
+     the pane's border edge rather than short of it (nocx-mvbne). The pane
+     no longer pads at all — the gutter moved into the rows themselves
+     (`.scrollback-inner > *`, nocx-9bpeq.8) — so there is nothing left here
+     to cancel. */
 }
 
 .scrollback-area {
@@ -873,6 +864,22 @@
   margin-top: auto;
 }
 
+/* EVERY ROW WEARS THE GUTTER, AND THE STACK DOES NOT (nocx-9bpeq.8).
+
+   The pane's side gutter moved from `.pane` into the rows so a row can paint
+   its own ground edge to edge — a failed block's tint, a selection — and put a
+   mark at its left edge without moving its text. One rule for every child of
+   the stack, the live region included, so the frozen column and the live
+   column are one content box by construction. A block nested in a turn is not
+   a child of the stack and is not inset again.
+
+   The grid is fitted INSIDE this inset: `usableViewport` subtracts the live
+   row's computed inline padding from the scroller's clientWidth. */
+.scrollback-inner > * {
+  box-sizing: border-box;
+  padding-inline: var(--pane-inline-padding);
+}
+
 .scrollback-separator {
   flex: none;
   height: 1px;
@@ -914,8 +921,9 @@
      from its bottom edge — moved by that much at every freeze. The controller
      never hard-codes the 8: it reads the padding off this element and sizes
      the box to content + padding, so this rule stays the only place the
-     number lives. */
-  padding: var(--cmd-output-pad-top) 0 var(--cmd-output-pad-bottom);
+     number lives. `padding-block`, never the shorthand: the shorthand's `0`
+     would reset the row inset. */
+  padding-block: var(--cmd-output-pad-top) var(--cmd-output-pad-bottom);
   /* The containing block for the running command's "working, nothing
      written yet" stand-in (nocx-vnirv.1) — see the rule below. */
   position: relative;
@@ -931,11 +939,13 @@
    byte lands and the stand-in is removed, the box does not shrink, and the
    frozen body that replaces the region is the same box. `prefers-reduced-
    motion` opts out of the dots' animation the same way it does in the turn
-   (the rule below), and the dots themselves stay — the report survives. */
+   (the rule below), and the dots themselves stay — the report survives. The
+   stand-in stands at the first column, which is inside the inset now
+   (nocx-9bpeq.8). */
 .xterm-live-container.live-running > .cmd-answer-typing {
   position: absolute;
   top: var(--cmd-output-pad-top);
-  left: 0;
+  left: var(--pane-inline-padding);
   pointer-events: none;
 }
 

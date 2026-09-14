@@ -421,6 +421,19 @@ export class ScrollbackController {
     return (Number.isFinite(top) ? top : 0) + (Number.isFinite(bottom) ? bottom : 0)
   }
 
+  /** The inline inset the live region wears as a ROW of the ledger
+   *  (nocx-9bpeq.8): the pane gutter moved from `.pane` into every row so a
+   *  row can paint to the edge. The grid is drawn inside that inset, so the fit
+   *  must not count it — read off the element, like `_bodyPaddingPx`, so the
+   *  stylesheet stays the one place the number lives. Zero wherever there is no
+   *  layout to read (jsdom without inline styles). */
+  get liveInlineInsetPx(): number {
+    const cs = getComputedStyle(this.xtermLiveContainer)
+    const left = parseFloat(cs.paddingLeft)
+    const right = parseFloat(cs.paddingRight)
+    return (Number.isFinite(left) ? left : 0) + (Number.isFinite(right) ? right : 0)
+  }
+
   /**
    * The vertical offset, in CSS pixels, that moves the live region's first
    * SHOWN row to the running block's outputStart (nocx-w1n4).

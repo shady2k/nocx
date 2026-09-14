@@ -4260,11 +4260,12 @@ export class TerminalContent extends BasePaneContent {
    *
    * The guard covers WIDTH too since nocx-cwnz0, and that half needs its own
    * argument, because a width the fit can move is a width that can alternate.
-   * It cannot: `usableViewport` reads `.scrollback-area`'s clientWidth, and
-   * that box is `flex: 1 1 auto` inside the pane — its width comes from the
-   * pane, never from the grid drawn in it, and `overflow-x: hidden` keeps a
-   * wide grid from widening it. The one thing that could move it is the
-   * vertical scrollbar appearing as rows change, and neither engine lets it:
+   * It cannot: `usableViewport` reads `.scrollback-area`'s clientWidth minus
+   * the live row's inline inset, and that box is `flex: 1 1 auto` inside the
+   * pane — its width comes from the pane, never from the grid drawn in it, and
+   * `overflow-x: hidden` keeps a wide grid from widening it. The one thing
+   * that could move it is the vertical scrollbar appearing as rows change,
+   * and neither engine lets it:
    * Chromium reserves the gutter (`scrollbar-gutter: stable`, style.css) and
    * WebKit draws an overlay bar that occupies no width at all. Which is also
    * why the two engines disagreed by 10px in nocx-vydj and why clientWidth,
@@ -4315,7 +4316,13 @@ export class TerminalContent extends BasePaneContent {
     // `running` the cap is null and the delivered/scroller height applies.
     const cap = this.scrollback?.runningLiveCap
     const height = cap ?? (area && area.clientHeight > 0 ? area.clientHeight : viewport.height)
-    const width = area && area.clientWidth > 0 ? area.clientWidth : viewport.width
+    // THE GRID'S BOX IS THE LIVE ROW'S CONTENT BOX (nocx-9bpeq.8). Rows carry
+    // the pane gutter, the live region included, so the scroller's clientWidth
+    // is the grid width PLUS that inset — fitting to clientWidth would put the
+    // last columns under `.xterm-inner`'s overflow, which is nocx-vydj again.
+    // Subtracted on the fallback path too: the delivered box is the pane's.
+    const outer = area && area.clientWidth > 0 ? area.clientWidth : viewport.width
+    const width = Math.max(0, outer - (this.scrollback?.liveInlineInsetPx ?? 0))
     return { ...viewport, width, height }
   }
 

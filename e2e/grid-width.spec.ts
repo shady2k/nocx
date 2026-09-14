@@ -17,6 +17,11 @@
  * which is why the defect was reported as "the packaged app clips and the
  * browser does not". A jsdom test cannot see any of it: there is no layout, so
  * `clientWidth` is 0 and `usableViewport` returns the delivered box unchanged.
+ *
+ * The box is the live row's content box since nocx-9bpeq.8: the pane's gutter
+ * moved into the rows, so the scroller's clientWidth is the grid width plus
+ * that inset, and the fit — and this spec — must measure the box the inset
+ * leaves rather than the scroller itself.
  */
 
 import { test, expect } from './harness'
@@ -43,12 +48,17 @@ test('the grid is not wider than the scroller it is drawn in', async ({ page }) 
   const geometry = () =>
     page.evaluate(() => {
       const pane = document.querySelector('.pane.active')
-      const area = pane?.querySelector('.scrollback-area') as HTMLElement | null
+      const live = pane?.querySelector('.xterm-live-container') as HTMLElement | null
       const screen = pane?.querySelector('.xterm-screen') as HTMLElement | null
-      if (!area || !screen) return { overhang: 1, fill: 0, settled: false }
+      if (!live || !screen) return { overhang: 1, fill: 0, settled: false }
+      // THE GRID'S BOX IS THE LIVE ROW'S CONTENT BOX (nocx-9bpeq.8): rows
+      // carry the pane gutter, so the scroller's clientWidth is the grid width
+      // plus that inset on both sides.
+      const cs = getComputedStyle(live)
+      const box = live.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)
       const width = screen.getBoundingClientRect().width
-      const overhang = Math.round(width - area.clientWidth)
-      const fill = width / area.clientWidth
+      const overhang = Math.round(width - box)
+      const fill = width / box
       // At most zero overhang: whole cells rarely tile the box exactly, so the
       // grid is normally a few pixels NARROWER, and any positive number is a
       // column the user cannot see. And it still has to FILL the scroller —

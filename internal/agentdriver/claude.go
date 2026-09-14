@@ -32,6 +32,27 @@ package agentdriver
 // the approval dialog states its question directly above the options, so the
 // permission branch is ordered before the modal branch and tests for it.
 //
+// # The menu ZONE cannot be a fixed budget above that same cursor
+//
+// nocx-6q1uh.17. Task 1 anchored menuZone on the cursor because the input
+// box's own top rule never binds inside a dialog (the section above), and
+// gave it a 16-row budget upward — the same cap an extractor reads with,
+// reused without re-deriving it. Replaying claude-2.1.266-permission found
+// that budget wrong rather than merely tight: at 46s (working, cursor at row
+// 37 of 40) the bash-permission dialog that opens 3s later draws its panel
+// header at row 13 (24 rows above that same cursor) and its question at row
+// 21; the write-permission dialog, 72s after the SAME working moment in the
+// same capture, draws its own panel from row 20 (17 rows above that cursor)
+// and its question at row 25. Two different panel tops from one working
+// moment's cursor, neither reachable from a budget sized for the other, and
+// no anchor bound at the working moment predicts either — the panel does not
+// exist yet when the zone is read. So the rule reads up with no bound but the
+// frame's own top (RegionSpec.ToEdge) instead of a row count: the "the whole
+// screen below the last transcript line, or the whole screen, is acceptable"
+// fallback design §6.3 names when nothing bounds the
+// zone tighter. A larger zone only ever refuses an Enter more often; a
+// smaller one is what let a menu appear underneath one undetected.
+//
 // # The spinner is not at a fixed offset, and position alone does not decide
 //
 // FIRST CORRECTION. The spinner sits in the status stack — the contiguous run

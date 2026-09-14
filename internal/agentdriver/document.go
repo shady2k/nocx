@@ -60,15 +60,24 @@ type Document struct {
 	// anchor unbound on a given frame) means the box's chrome could not be
 	// found, which is the ordinary case while a dialog has replaced it.
 	InputBox *RegionSpec `json:"inputBox,omitempty"`
-	// MenuZone is the rows in which this agent can draw a menu — wide enough
-	// to hold whichever chrome opens it, since the corpus draws that chrome
-	// two different ways: an inline dialog closes with the same rule the
-	// input box's own bottom border uses, and an overlay panel (2.1.266's
-	// /model) draws no such rule anywhere on screen and opens with a
-	// different one instead (see menuZoneSpan). It is read via a fixed
-	// budget of rows above its anchor through the frame's own last row, never
-	// upward without bound, because everything above that budget is the
-	// agent's own scrollback.
+	// MenuZone is the rows in which this agent can draw a menu — every row a
+	// LATER menu moment might paint on, read at a free_text or working
+	// moment that has no menu on screen yet. That is what makes a fixed
+	// budget above the anchor wrong rather than merely tight (nocx-6q1uh.17):
+	// the panel a dialog opens with is not a fixed distance from the anchor
+	// it is measured from at the moment BEFORE it exists. Replayed off
+	// claude-2.1.266-permission, a working moment at 46s has its cursor
+	// parked at row 37 of a 40-row frame; the bash-permission dialog that
+	// appears 3s later draws its panel header at row 13 and its question at
+	// row 21, and the write-permission dialog, 72s after that SAME working
+	// moment, draws its own panel from row 20 and its question at row 25 —
+	// two different tops from one working moment's cursor, both far above
+	// any budget worth calling a cap. So the zone
+	// reads up from its anchor with RegionSpec.ToEdge instead of MaxRows: no
+	// bound but the frame's own top, matching the honest answer design §6.3
+	// allows when no anchor bounds it tighter. It still closes at the
+	// frame's own last row (see menuZoneSpan), never at the anchor's own
+	// count of rows in the other direction.
 	MenuZone *RegionSpec `json:"menuZone,omitempty"`
 }
 
@@ -363,9 +372,10 @@ func betweenAnchors(f paneview.Frame, anchors bound, spec *RegionSpec) RowSpan {
 	return RowSpan{First: first, Last: last}
 }
 
-// menuZoneSpan computes Document.MenuZone: up to MaxRows rows above the
-// anchor through the frame's own LAST row — never the anchor's own count of
-// rows in the other direction, and never the frame's top.
+// menuZoneSpan computes Document.MenuZone: from the anchor upward through the
+// frame's own LAST row — never the anchor's own count of rows in the other
+// direction. Upward reach is either a fixed MaxRows budget above the anchor,
+// or (RegionSpec.ToEdge) unbounded up to the frame's own top row.
 //
 // The direction is fixed rather than configurable because no single anchor
 // closes a menu's chrome the same way twice: an inline dialog (claude's
@@ -375,11 +385,25 @@ func betweenAnchors(f paneview.Frame, anchors bound, spec *RegionSpec) RowSpan {
 // anywhere on its frame and opens instead with a "▔" rule, found as
 // "overlayTop". Anchoring on the CURSOR is what both share — every menu
 // moment this package classifies as permission_choice or modal_choice binds
-// it, by the same predicates that decide the state — so a fixed budget of
-// rows above it is read AS the zone's start, and its end is always the
-// frame's own bottom: nothing below an input box or a menu is the agent's own
-// untrusted output, so walking toward it is the safe direction here exactly
-// as walking toward the top is region.eachRow's for an extractor.
+// it, by the same predicates that decide the state — and its end is always
+// the frame's own bottom: nothing below an input box or a menu is the
+// agent's own untrusted output, so walking toward it is the safe direction
+// here exactly as walking toward the top is region.eachRow's for an
+// extractor.
+//
+// ToEdge exists because MaxRows answered a question this zone does not ask.
+// A budget of rows above the anchor bounds how far a REPAINT already on
+// screen may be read from — right for an extractor, which only ever reads
+// chrome that is already there. The menu zone is read at a moment with NO
+// menu on screen, to decide where a menu would be safe to have appeared by
+// the time Enter lands (design §6.3), and nocx-6q1uh.17 measured that this
+// panel's own top is not a fixed distance from the cursor: claude's
+// bash-permission dialog opens its panel 24 rows above a working moment's
+// cursor, write-permission opens its own panel 17 rows above that SAME
+// cursor, later in the same capture. A cap sized for one starves the other,
+// and the corpus gives no anchor that binds tighter at every free_text and
+// working moment, so ToEdge reads all the way to the frame's own top row —
+// the honest fallback design §6.3 names when nothing bounds it closer.
 func menuZoneSpan(f paneview.Frame, anchors bound, spec *RegionSpec) RowSpan {
 	if spec == nil {
 		return noRowSpan
@@ -388,9 +412,12 @@ func menuZoneSpan(f paneview.Frame, anchors bound, spec *RegionSpec) RowSpan {
 	if !ok {
 		return noRowSpan
 	}
-	first := row - spec.MaxRows + 1
-	if first < 0 {
-		first = 0
+	first := 0
+	if !spec.ToEdge {
+		first = row - spec.MaxRows + 1
+		if first < 0 {
+			first = 0
+		}
 	}
 	last := f.Rows - 1
 	if last < first {
@@ -746,20 +773,33 @@ func validateInputBox(r RegionSpec, seen map[string]bool) error {
 }
 
 // validateMenuZone requires the fixed shape menuZoneSpan interprets — an
-// anchor and a row budget read upward from it — and refuses every field that
-// shape does not use, for the same reason validateInputBox does.
+// anchor read upward from, either by a row budget or (ToEdge) with no bound
+// but the frame's own top — and refuses every field neither shape uses, for
+// the same reason validateInputBox does.
+//
+// MaxRows and ToEdge are mutually exclusive, as they are for an extractor
+// (see the Extractors loop above): a region has one upward bound, and two is
+// how they come to disagree. Unlike an extractor, MenuZone's ToEdge needs no
+// companion Up check beyond the one below — an upward-only field is already
+// meaningless without it — because there is no downward MenuZone shape to
+// confuse it with; the zone's closing edge is always the frame's own last
+// row, fixed by menuZoneSpan itself rather than by anything a document names.
 func validateMenuZone(r RegionSpec, seen map[string]bool) error {
 	if r.Anchor == "" || !seen[r.Anchor] {
 		return fmt.Errorf("agentdriver: menuZone names anchor %q, which no anchor binds", r.Anchor)
 	}
 	if !r.Up {
-		return fmt.Errorf("agentdriver: menuZone does not read up from %q; its budget of rows is read ABOVE the anchor, the frame's own last row closes it either way", r.Anchor)
+		return fmt.Errorf("agentdriver: menuZone does not read up from %q; its reach is read ABOVE the anchor, the frame's own last row closes it either way", r.Anchor)
 	}
-	if r.MaxRows <= 0 || r.MaxRows > maxExtractorRows {
-		return fmt.Errorf("agentdriver: menuZone asks for %d rows above %q; the engine requires 1 to %d", r.MaxRows, r.Anchor, maxExtractorRows)
+	if r.ToEdge {
+		if r.MaxRows != 0 {
+			return fmt.Errorf("agentdriver: menuZone names both a cap of %d rows and the frame edge above %q; a region has one bound, and two is how they come to disagree", r.MaxRows, r.Anchor)
+		}
+	} else if r.MaxRows <= 0 || r.MaxRows > maxExtractorRows {
+		return fmt.Errorf("agentdriver: menuZone asks for %d rows above %q; the engine requires 1 to %d, or toEdge for no bound but the frame's own top", r.MaxRows, r.Anchor, maxExtractorRows)
 	}
-	if r.To != "" || r.ToEdge || r.FromCol != "" {
-		return fmt.Errorf("agentdriver: menuZone names a closing anchor, a frame edge or a column origin beside its row budget; the zone always closes at the frame's own last row")
+	if r.To != "" || r.FromCol != "" {
+		return fmt.Errorf("agentdriver: menuZone names a closing anchor or a column origin beside its upward reach; the zone always closes at the frame's own last row")
 	}
 	return nil
 }

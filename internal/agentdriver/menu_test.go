@@ -80,6 +80,116 @@ func TestInputBoxAndMenuZoneCoverWhatTheyName(t *testing.T) {
 	}
 }
 
+// TestTheMenuZoneAtFreeTextAndWorkingCoversEveryLaterMenuInTheCapture is
+// nocx-6q1uh.17's own acceptance criterion: session.message's Enter
+// precondition (design §8.2) digests the "working" target's MenuZone at a
+// free_text or working moment, before any menu is on screen, and relies on a
+// menu APPEARING inside that zone to change the digest and refuse the Enter.
+// A menu that draws even one row outside the zone can appear invisibly to
+// that precondition.
+//
+// TestInputBoxAndMenuZoneCoverWhatTheyName already checks MenuZone against
+// Menu().Rows at the SAME moment a menu is on screen — necessary, but not the
+// property design §8.2 needs, which is about a zone read BEFORE the menu
+// exists. This test replays the two real pairs in testdata/captures where a
+// free_text or working moment is later followed, in the SAME capture, by a
+// permission_choice or modal_choice moment: claude-2.1.266-permission (a
+// working moment at 46s, then bash-permission at 49s and write-permission at
+// 118s) and claude-lmstudio-permission (working at 48s and free_text at
+// 101s, each followed by one or more of the same three dialogs). The other
+// captures in the manifest that carry a menu moment (claude-2.1.266-turn's
+// theme-picker and folder-trust, claude-2.1.266-model's model-menu, and the
+// standalone claude-modal/claude-permission/claude-trust captures) draw their
+// menu BEFORE the first free_text or working moment in the same recording,
+// so there is no earlier moment for this property to constrain there.
+//
+// panelFirst is measured by replay (agent-capture replay -at <ms> <capture>,
+// quoted in the commit body), not read from Observation: the panel's own
+// header row ("Bash command" / "Create file", right below the transcript's
+// closing rule) draws well above Menu().Rows, which starts at the question,
+// and design §6.3 asks the zone to cover "question, options and panel" —
+// checking containment of Rows alone would miss a zone that grew just enough
+// to cover the question without reaching the panel above it.
+func TestTheMenuZoneAtFreeTextAndWorkingCoversEveryLaterMenuInTheCapture(t *testing.T) {
+	reg := registry(t)
+
+	type laterMenu struct {
+		atMs       int64
+		panelFirst int // measured: the dialog's own panel header row
+	}
+	pairs := []struct {
+		name         string
+		capture      string
+		earlierAtMs  int64
+		earlierState agentdriver.State
+		laters       []laterMenu
+	}{
+		{
+			name:         "working before bash-permission and write-permission",
+			capture:      "claude-2.1.266-permission",
+			earlierAtMs:  46000,
+			earlierState: agentdriver.StateWorking,
+			laters: []laterMenu{
+				{atMs: 49000, panelFirst: 13},  // "Bash command" header; question at row 21
+				{atMs: 118000, panelFirst: 20}, // "Create file" header; question at row 25
+			},
+		},
+		{
+			name:         "working before all three later dialogs",
+			capture:      "claude-lmstudio-permission",
+			earlierAtMs:  48000,
+			earlierState: agentdriver.StateWorking,
+			laters: []laterMenu{
+				{atMs: 49000, panelFirst: 13},  // "Bash command" header; question at row 21
+				{atMs: 60000, panelFirst: 12},  // "Bash command" header; question at row 20
+				{atMs: 110000, panelFirst: 20}, // "Create file" header; question at row 25
+			},
+		},
+		{
+			name:         "free_text before write-permission only",
+			capture:      "claude-lmstudio-permission",
+			earlierAtMs:  101000,
+			earlierState: agentdriver.StateFreeText,
+			// The 49000ms and 60000ms dialogs precede this free_text moment
+			// (it sits between the interrupted bash turn and the write
+			// turn), so only the LATER one, write-permission at 110000ms,
+			// is a moment this zone needs to reach.
+			laters: []laterMenu{
+				{atMs: 110000, panelFirst: 20},
+			},
+		},
+	}
+
+	for _, p := range pairs {
+		t.Run(p.name, func(t *testing.T) {
+			earlier := reg.Observe("claude", replay(t, p.capture, p.earlierAtMs))
+			if earlier.State != p.earlierState {
+				t.Fatalf("%s@%dms state = %q, want %q", p.capture, p.earlierAtMs, earlier.State, p.earlierState)
+			}
+			zone := earlier.MenuZone
+			if zone.Last < zone.First {
+				t.Fatalf("%s@%dms: MenuZone is empty: %+v", p.capture, p.earlierAtMs, zone)
+			}
+			for _, l := range p.laters {
+				laterObs := reg.Observe("claude", replay(t, p.capture, l.atMs))
+				menu, ok := laterObs.Menu()
+				if !ok {
+					t.Errorf("%s@%dms: Menu() found none", p.capture, l.atMs)
+					continue
+				}
+				if zone.First > l.panelFirst {
+					t.Errorf("%s@%dms zone %+v (read at %dms) does not reach the panel's own header at row %d",
+						p.capture, l.atMs, zone, p.earlierAtMs, l.panelFirst)
+				}
+				if zone.First > menu.Rows.First || menu.Rows.Last > zone.Last {
+					t.Errorf("%s@%dms zone %+v (read at %dms) does not contain menu rows %+v",
+						p.capture, l.atMs, zone, p.earlierAtMs, menu.Rows)
+				}
+			}
+		})
+	}
+}
+
 // TestAMenuWithoutAQuestionIsNoMenu is the paired failure the acceptance
 // criterion names: a cursor row that IS an option, with only more options (or
 // the frame's own top) above it. There is no question to type an answer past,

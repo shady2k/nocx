@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 /**
  * Kit identity scanner — derives the set of class names that kit components
- * own, by walking the **AST** of every .tsx file in the ui/ directory.
+ * own, by walking the **AST** of every .tsx and vanilla .ts module in the ui/
+ * directory.
  *
  * Only class names that appear as **static** values on JSX `class=` /
  * `className=` / `classList=` attributes count. Comments, JSDoc, string
  * arguments to `querySelector`/`closest`/`matches`, and variant-lookup
  * object values are invisible to this scanner.
+ * In a .ts module: static words assigned to `.className` and literal
+ * arguments to `.classList.add`.
  *
  * Where a class expression cannot be statically resolved (e.g. a function
  * call returning a class string), the scanner reports it as undetermined
@@ -189,21 +192,25 @@ function expressionSnippet(expr) {
 /**
  * Classes a component happens to render that are nevertheless not identities.
  *
- * **Empty, and that is the finished state.** Its one entry was `kit-scope`, the styling
- * scope no component owned and every component's appearance depended on: `dialog.tsx`
- * rendered it on its own panel because a modal has no consumer to apply it, and a purely
- * mechanical AST rule read that single occurrence as "dialog.tsx owns kit-scope" — which
- * would then have made settings.tsx's own `<div class="kit-scope">` an inline-markup
- * violation. T15 (nocx-pnbd) deleted the class, so the exception has nothing left to
- * describe; rule 6 in `check-css-integrity.mjs` is what keeps the selector from coming
- * back, and this set staying empty is what says no component needs an exception.
+ * **One entry, argued below.** Its first entry was `kit-scope`, the styling scope no
+ * component owned; T15 (nocx-pnbd) deleted the class. The second arrived with vanilla
+ * modules (nocx-9bpeq.4), and is a component using a class that another owner defines.
  *
  * The set exists rather than being deleted because the derivation is over EVERY static
  * class, not over a `ui-` prefix (the design: "the prefix is not the test"). If a
  * component ever legitimately renders a class it does not own, this is where that gets
  * argued in writing instead of disappearing into a regex.
  */
-const NOT_AN_IDENTITY = new Set()
+const NOT_AN_IDENTITY = new Set([
+  // `ui/answer-markdown.ts` stamps `term-line` on the table rows it renders into a
+  // block body, BECAUSE the scrollback owns that class: the row must be a terminal
+  // line for copy, selection and grants (`blockOutputText`, `.term-line[data-granted]`)
+  // to treat it as one. The component uses the scrollback's vocabulary rather than
+  // owning it; reading the stamp as ownership would make style.css's own
+  // `.term-line` rules a kit violation (measured 2026-09-14: exactly two hits,
+  // style.css:1312 and :1351, and nothing else).
+  'term-line',
+])
 
 export function scanKitIdentities(uiDir) {
   const byClass = new Map()
@@ -218,7 +225,11 @@ export function scanKitIdentities(uiDir) {
   }
 
   for (const entry of entries) {
-    if (!entry.endsWith('.tsx') || entry.includes('.test.') || entry.includes('.spec.')) {
+    const isTsx = entry.endsWith('.tsx')
+    // Vanilla-emitted components (meta.ts, secret-chip.ts, mode-indicator.ts) own
+    // identities too: the class they stamp on the element they return.
+    const isTs = entry.endsWith('.ts') && !entry.endsWith('.d.ts')
+    if ((!isTsx && !isTs) || entry.includes('.test.') || entry.includes('.spec.')) {
       continue
     }
     const absPath = resolve(uiDir, entry)
@@ -229,13 +240,13 @@ export function scanKitIdentities(uiDir) {
       continue
     }
 
-    // Skip files with no JSX at all
-    if (!content.includes('<')) continue
+    // Skip .tsx files with no JSX at all
+    if (isTsx && !content.includes('<')) continue
 
     let ast
     try {
       ast = parse(content, {
-        jsx: true,
+        jsx: isTsx,
         loc: false,
         range: false,
         errorRecovery: true,
@@ -300,6 +311,47 @@ export function scanKitIdentities(uiDir) {
               })
             }
           }
+        }
+      }
+    }
+
+    if (isTs) {
+      const add = (cls) => {
+        if (NOT_AN_IDENTITY.has(cls)) return
+        if (!byClass.has(cls)) byClass.set(cls, new Set())
+        byClass.get(cls).add(entry)
+        if (cls.includes('__')) fileParts.add(cls)
+        else fileRoots.add(cls)
+      }
+      // el.className = 'a b' / `a ${x}` — the static words only, as for JSX.
+      for (const asg of walk(ast, 'AssignmentExpression')) {
+        const left = asg.left
+        if (
+          left.type !== 'MemberExpression' ||
+          left.property.type !== 'Identifier' ||
+          left.property.name !== 'className'
+        ) {
+          continue
+        }
+        const right = asg.right
+        if (right.type === 'Literal' && typeof right.value === 'string') words(right.value).forEach(add)
+        else if (right.type === 'TemplateLiteral') extractQuasiClasses(right).static.forEach(add)
+      }
+      // el.classList.add('a', 'b') — literal arguments only.
+      for (const call of walk(ast, 'CallExpression')) {
+        const callee = call.callee
+        if (
+          callee.type !== 'MemberExpression' ||
+          callee.property.type !== 'Identifier' ||
+          callee.property.name !== 'add' ||
+          callee.object.type !== 'MemberExpression' ||
+          callee.object.property.type !== 'Identifier' ||
+          callee.object.property.name !== 'classList'
+        ) {
+          continue
+        }
+        for (const arg of call.arguments) {
+          if (arg.type === 'Literal' && typeof arg.value === 'string') words(arg.value).forEach(add)
         }
       }
     }

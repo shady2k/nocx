@@ -950,3 +950,49 @@ test.describe('6. Page duties', () => {
     })
   })
 })
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Meta — the computed colour is the theme's token (nocx-9bpeq.4)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// jsdom resolves no var(), so meta.test.ts can only prove the rule names the
+// token. This proves the element a surface will actually mount computes to the
+// token's value, in a dark and a light theme, without remounting. The module is
+// imported from the vite server the stand runs — the same file the app bundles.
+test.describe('Meta computed colour', () => {
+  for (const theme of ['tokyo-night', 'light']) {
+    test(`muted and danger compute to their tokens in ${theme}`, async ({ page }) => {
+      const result = await page.evaluate(async (themeId) => {
+        document.documentElement.setAttribute('data-theme', themeId)
+        const { createMeta } =
+          (await import('/src/ui/meta.ts')) as typeof import('../frontend/src/ui/meta')
+        const host = document.createElement('div')
+        document.body.append(host)
+        const muted = createMeta(['repos/nocx'])
+        const danger = createMeta(['exit 1'], { tone: 'danger' })
+        host.append(muted, danger)
+        const probe = (tokenName: string): string => {
+          const p = document.createElement('span')
+          p.style.color = `var(${tokenName})`
+          host.append(p)
+          return getComputedStyle(p).color
+        }
+        const out = {
+          muted: getComputedStyle(muted).color,
+          danger: getComputedStyle(danger).color,
+          mutedToken: probe('--color-text-muted'),
+          dangerToken: probe('--color-danger'),
+          fontSize: getComputedStyle(muted).fontSize,
+          whiteSpace: getComputedStyle(muted).whiteSpace,
+        }
+        host.remove()
+        return out
+      }, theme)
+      expect(result.muted).toBe(result.mutedToken)
+      expect(result.danger).toBe(result.dangerToken)
+      expect(result.muted).not.toBe(result.danger)
+      expect(result.whiteSpace).toBe('nowrap')
+      expect(Number.parseFloat(result.fontSize)).toBeGreaterThan(0)
+    })
+  }
+})

@@ -164,8 +164,15 @@ fi
 # surface's own class — must stay silent, because placement is the one thing a parent
 # has no other way to express and a rule that reported it would be turned off.
 integrity_kit_hits=$(echo "$integrity_check" | grep -c '"rule":"surface-paints-kit"' || true)
-if [ "$integrity_kit_hits" -ne 2 ]; then
-  echo "CSS INTEGRITY GATE FAILED — expected exactly 2 surface-paints-kit hits (tier A + tier B), got ${integrity_kit_hits}"
+if [ "$integrity_kit_hits" -ne 3 ]; then
+  echo "CSS INTEGRITY GATE FAILED — expected exactly 3 surface-paints-kit hits (tier A + tier B + a vanilla-emitted identity), got ${integrity_kit_hits}"
+  exit 1
+fi
+
+# The vanilla hit specifically: a scanner that stopped reading .ts modules would
+# still produce the other two.
+if ! echo "$integrity_check" | grep -q 'fixture-vanilla'; then
+  echo "CSS INTEGRITY GATE FAILED — rule 3 did not report a surface repainting a vanilla-emitted identity"
   exit 1
 fi
 

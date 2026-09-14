@@ -60,9 +60,11 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	helperlocal "github.com/shady2k/nocx/internal/helper/local"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	helpersession "github.com/shady2k/nocx/internal/helper/session"
 	"github.com/shady2k/nocx/internal/helper/sshdial"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/vault"
@@ -85,6 +87,18 @@ type filesStand struct {
 	// has more than one host in it: a test that adds a bastion has to record
 	// that bastion's key too, and the coordinator's own verdict is what decides.
 	khPath string
+	// opener and routes are the two halves of this machine's helper exactly as
+	// the composition root builds them. They are exposed because a test of the
+	// OPEN SEAM needs the seam, not only the factory built over it: the
+	// selection probe and the pane's own spawn meet inside hostedOpeners, and
+	// the leases beside them (install, files, lane) are the same dispatch the
+	// file panel's factory is handed (nocx-k6p18.35).
+	opener *localHelperOpener
+	routes installLeaseRoutes
+	// registry is the session registry an opened pane is ADOPTED into. It is
+	// what makes a hosted open an open rather than a spawn: the helper mints
+	// the id, and this process takes the session under it.
+	registry *session.Reg
 }
 
 // askRecorder is the reverse side's credential resolver: it answers from a
@@ -116,7 +130,14 @@ func (a *askRecorder) asked() []string {
 }
 
 // startFilesStand assembles the stack against a fixture serving root over sftp.
-func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver) *filesStand {
+//
+// extra names FURTHER destinations this stand dials — a second host the open
+// seam asks for, a bastion a route goes through. They are fixtures like srv and
+// not options of it, and the reason they are parameters rather than something a
+// test arranges afterwards is the known_hosts file: the coordinator's verdict is
+// taken from ONE file, built here, and a host whose key is not in it is a host
+// the helper must ask its coordinator about rather than one it can trust.
+func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver, extra ...*pwSSHServer) *filesStand {
 	t.Helper()
 	logger := discardLogger()
 	// The ssh client takes the harness's own logging seam (internal/log), the
@@ -127,7 +148,7 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 	// It never dials for the Files lease, and the fixture's authentication
 	// count is what says so.
 	khPath := filepath.Join(t.TempDir(), "known_hosts")
-	writeKnownHostsFor(t, khPath, srv)
+	writeKnownHostsFor(t, khPath, append([]*pwSSHServer{srv}, extra...)...)
 	rc, err := ssh.NewReal(sshLog, ssh.WithKnownHostsFile(khPath))
 	if err != nil {
 		t.Fatalf("ssh.NewReal: %v", err)
@@ -137,6 +158,12 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 	// The helper: the real daemon-side client dials, the real ssh service is
 	// registered on a real host protocol engine, and the carrier between the
 	// two sides is a socketpair. This is sshsvc's own stand, assembled here.
+	//
+	// The SESSION service is registered beside it, because a helper daemon has
+	// one and this stand is a daemon: the file panel's lease only needs the ssh
+	// service, while a PANE needs the sessions too — `spawn-ssh` is answered
+	// there, and a stand that answered every op except the one a pane is would
+	// make the open seam untestable at this level.
 	helperEnd, coordEnd := net.Pipe()
 	sshdialClient, err := sshdial.New(logger)
 	if err != nil {
@@ -145,6 +172,17 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 	svc := sshsvc.New(sshdialClient, logger)
 	engine := host.New(helperEnd, helperEnd, filesFixtureGenera, "instance-1", logger)
 	engine.Register(svc)
+	sessions := helpersession.New(helpersession.Options{
+		Generation: proto.GenerationID(filesFixtureGenera),
+		SSHSpawner: helpersession.NewSSHSpawner(svc, logger),
+		Log:        logger,
+	})
+	engine.Register(sessions)
+	// The session service is BOUND to its connection, as cmd/nocx-helper binds
+	// it: an attach names the subscriber as the connection it arrived on, and
+	// the service refuses one from a connection it does not serve.
+	bindSessions := sessions.Bind(engine)
+	t.Cleanup(bindSessions)
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan struct{})
 	go func() {
@@ -176,10 +214,18 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 	// takes for every consumer after the first. Nothing here installs or
 	// starts anything, because the daemon is in this process for the length of
 	// this test.
+	//
+	// The resolver is wired because a PANE open resolves its destination here
+	// before the helper is handed an address (the same split app.go makes at
+	// setSSHTargets); a stand that left it nil would refuse every ssh open by
+	// name, which is the state a Files-only stand was in.
 	opener := &localHelperOpener{log: logger}
 	opener.installed = helperInstalledStub()
 	opener.dir = t.TempDir()
 	opener.client = peer
+	opener.setSSHTargets(rc)
+	registry := session.New(log.NewSlogAdapter(logger), &openPasswordPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(logger))})
+	opener.registry = registry
 
 	over := &sshOverHelper{local: opener, resolve: rc, log: logger}
 	// Both halves of the dispatch, as the composition root builds it: this
@@ -189,10 +235,13 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 	routes := installLeaseRoutes{viaLocal: over, probes: &helperProbes{local: opener, resolve: rc}}
 
 	return &filesStand{
-		srv:     srv,
-		root:    srv.rootDir,
-		khPath:  khPath,
-		factory: filesystemProviderFactory(routes),
+		srv:      srv,
+		root:     srv.rootDir,
+		khPath:   khPath,
+		opener:   opener,
+		routes:   routes,
+		registry: registry,
+		factory:  filesystemProviderFactory(routes),
 		opts: []ssh.ConnectOption{
 			ssh.WithUser(filesFixtureUser),
 			ssh.WithAuthMode("password"),

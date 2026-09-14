@@ -257,24 +257,81 @@ func probeHelperPlatform(sess session.Session, lanes helperInstallProvider, sour
 	return platform, available, err
 }
 
+// probeHelperPlatformAt is the probe for every caller that has nothing to open
+// on the connection afterwards: it takes the lease, asks, and releases. The
+// open path is deliberately not one of those callers — it hands the reference
+// back instead, so the pane it is about to open rides the authentication the
+// probe already paid for (probeHelperPlatformHeld, nocx-k6p18.35).
 func probeHelperPlatformAt(ctx context.Context, host string, opts []ssh.ConnectOption, lanes helperInstallProvider, source deploy.ArtifactSource) (string, deploy.Platform, bool, error) {
+	hold, fingerprint, platform, available, err := probeHelperPlatformHeld(ctx, host, opts, lanes, source)
+	hold.release()
+	return fingerprint, platform, available, err
+}
+
+// probeHold is the pooled reference a platform probe ran on, held past the
+// probe itself.
+//
+// # The interval it is, with both ends named
+//
+// It OPENS where the lease is taken in probeHelperPlatformHeld below: that is
+// the dial, and on a destination whose helper cannot be used it is also the
+// far host's only authentication for the whole open. It CLOSES at release,
+// which the open path defers until the pane it opened holds a reference of its
+// own — hostedOpeners.OpenHosted runs it after the local `spawn-ssh` (or the
+// far helper's lane) has come up, and helperRegistry.OpenHosted runs it
+// immediately, because a caller with nothing to open has nothing to hold it
+// for.
+//
+// WHY IT IS HELD AT ALL (nocx-k6p18.35). The selection probe runs BEFORE the
+// session exists, so when it declines — the ordinary answer for a destination
+// that ships no far-side helper — the connection it authenticated is the one
+// the pane's own `spawn-ssh` is about to ask for. Released there, the helper's
+// unlease drops the pool's last reference, the connection closes, and the spawn
+// dials and authenticates again a few milliseconds later: two logins on
+// somebody else's host for one pane, which is what the epic's e2e counted
+// (`cmd/e2e-sshd` saw 2). Held across the open, the spawn's acquisition is a
+// cache hit on the same ref-counted entry and the host authenticates once.
+//
+// release is nil-safe and idempotent, and both properties are load-bearing: a
+// destination that never reached a lease holds nil, and the decline, the
+// failure and the success paths all release exactly once.
+type probeHold struct {
+	lease ssh.DiscoveryConn
+	once  sync.Once
+}
+
+func (h *probeHold) release() {
+	if h == nil {
+		return
+	}
+	h.once.Do(func() { _ = h.lease.Close() })
+}
+
+// probeHelperPlatformHeld is the same probe with its lease LEFT OPEN, and it is
+// the held half of the interval probeHold documents: what it returns is a
+// reference the CALLER must release.
+//
+// A non-nil hold is returned whenever a lease was taken, INCLUDING on the two
+// failures below — a probe whose command failed, and a platform no artifact
+// exists for. Neither means the connection is unusable, and the open path keeps
+// it for exactly that reason; a hold whose connection died is evicted by the
+// pool on the next acquisition, so holding a dead one costs nothing.
+func probeHelperPlatformHeld(ctx context.Context, host string, opts []ssh.ConnectOption, lanes helperInstallProvider, source deploy.ArtifactSource) (*probeHold, string, deploy.Platform, bool, error) {
 	// The probe dials with the interactive rung removed, and the reason is
-	// the open path rather than the git one. Selection now runs BEFORE the
-	// session exists (OpenHosted), so the probe's lease is the only reference
-	// on the pooled connection: it dials, and when the decision is made it
-	// releases, which closes the connection. On a destination whose only
-	// credential is a password the user types, that dial raised the ask, and
-	// the session's own dial a moment later raised a SECOND one — in front of
-	// a user who had already answered, on an open that was blocked behind it.
-	// The password reached an authentication that was then thrown away, and
-	// the session never opened (nocx-bzac4).
+	// the open path rather than the git one. Selection runs BEFORE the
+	// session exists (OpenHosted), so this dial is the reference the whole
+	// open is built on: it authenticates, and the pane's own spawn a moment
+	// later rides that same pooled connection rather than paying for a second
+	// login (probeHold). A dial that had to STOP AND ASK a person, on the
+	// other hand, would raise a prompt for a question the product asked
+	// itself, in front of a user who then has to answer it again for the real
+	// session — the ask belongs to the pane, not to a probe (nocx-bzac4).
 	//
-	// Suppressing the ask rather than sharing the connection is the choice
-	// because it is a rule this codebase already has: a probe answers a
-	// question the product asked itself and may not stop a person to do it
-	// (ssh.WithoutPasswordPrompt, which is what un-wires the rung; a prompt
-	// credential reaches this probe as ssh.ErrNoAuthMethod instead, refused
-	// before any dial). Every
+	// Suppressing the ask is the choice because it is a rule this codebase
+	// already has: a probe answers a question the product asked itself and may
+	// not stop a person to do it (ssh.WithoutPasswordPrompt, which is what
+	// un-wires the rung; a prompt credential reaches this probe as
+	// ssh.ErrNoAuthMethod instead, refused before any dial). Every
 	// silent credential still applies, so a key, an agent or a remembered
 	// password probes exactly as before; only the destination that would have
 	// to interrupt someone declines — and declining degrades to the plain
@@ -289,21 +346,26 @@ func probeHelperPlatformAt(ctx context.Context, host string, opts []ssh.ConnectO
 	probeOpts = append(probeOpts, ssh.WithoutPasswordPrompt())
 	probe, err := lanes.DiscoveryConn(ctx, host, probeOpts...)
 	if err != nil {
-		return "", deploy.Platform{}, false, fmt.Errorf("probe lease for %s: %w", host, err)
+		// No lease, so no hold: the reference this function would hand back was
+		// never taken, and the caller's release is a no-op on nil.
+		return nil, "", deploy.Platform{}, false, fmt.Errorf("probe lease for %s: %w", host, err)
 	}
-	defer func() { _ = probe.Close() }()
+	// NO deferred Close here, and that absence IS this function: the reference
+	// travels back to the caller, which releases it once the interval it
+	// belongs to is over (probeHold's own comment).
+	hold := &probeHold{lease: probe}
 	fingerprint := ""
 	if fp, ok := probe.(interface{ HostKeyFingerprint() string }); ok {
 		fingerprint = fp.HostKeyFingerprint()
 	}
 	platform, err := deploy.Probe(ctx, probeExec{probe})
 	if err != nil {
-		return fingerprint, deploy.Platform{}, false, err
+		return hold, fingerprint, deploy.Platform{}, false, err
 	}
 	if _, _, aerr := source.Artifact(platform); aerr != nil {
-		return fingerprint, platform, false, aerr
+		return hold, fingerprint, platform, false, aerr
 	}
-	return fingerprint, platform, true, nil
+	return hold, fingerprint, platform, true, nil
 }
 
 // installHelperFor installs the helper artifact on sess's host for the
@@ -475,6 +537,11 @@ type helperRegistry struct {
 // and attaches through the helper ABI. The returned session id is the helper's
 // id; the coordinator never mints a replacement.
 //
+// THE HOLD IS RELEASED HERE, and for this caller that is the whole of it: a
+// caller with nothing to open on the connection has nothing to hold it for. The
+// open PATH is the caller that has something — the pane — and it releases the
+// hold after the pane exists instead (hostedOpeners.OpenHosted).
+//
 // claim is L7's idempotency key, and it is the caller's rather than this
 // function's because the DURABLE part of it — the row written before the first
 // irreversible effect — belongs to the session-open path above both openers.
@@ -483,13 +550,45 @@ type helperRegistry struct {
 // forking a second shell on somebody else's machine (nocx-50w7p.5). Empty means
 // no claim was written and this spawn is owed no such promise.
 func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config, claim string) (transport.HostedSessionOpen, bool, error) {
+	opened, hold, selected, err := r.openHoldingLease(ctx, cfg, claim)
+	hold.release()
+	return opened, selected, err
+}
+
+// openHoldingLease is OpenHosted with the selection probe's pooled reference
+// HANDED BACK rather than released, and the hold is the caller's to release.
+//
+// # Why the distinction exists at all (nocx-k6p18.35)
+//
+// The platform probe an open begins with is a DIAL: it authenticates against
+// the far host to ask one question. On a destination whose own helper is
+// declined — the ordinary answer for a host that ships no helper, and the whole
+// of the epic's e2e — the pane is opened a moment later by THIS machine's helper
+// through `spawn-ssh`, on the SAME pooled connection under the same key. If the
+// probe's reference is dropped in between, the helper's unlease closes that
+// connection as its last reference and the spawn authenticates a second time:
+// two logins on somebody else's host for one pane.
+//
+// So the reference travels out of here instead, and its interval has two named
+// ends, both in code: it OPENS in probeHelperPlatformHeld, which is where the
+// lease is taken, and it CLOSES at the caller's release — after the arm that
+// opened the pane has taken a reference of its own. For a destination the far
+// host's own helper serves, that arm is openFarHelper below and the hold is
+// released by the caller the moment it returns; for a destination it declines,
+// it is the local opener's `spawn-ssh` (hostedOpeners.OpenHosted).
+//
+// A HOLD IS RETURNED WHENEVER A LEASE WAS TAKEN, including on the two decline
+// arms, and nil when the destination never reached one — a kind this route does
+// not serve, or a lease the helper refused to hand out. probeHold.release is
+// nil-safe and idempotent, so no arm has to test for either.
+func (r *helperRegistry) openHoldingLease(ctx context.Context, cfg session.Config, claim string) (transport.HostedSessionOpen, *probeHold, bool, error) {
 	if cfg.Kind != session.KindRemote || cfg.Remote == nil || r.install == nil || r.registry == nil {
-		return transport.HostedSessionOpen{}, false, nil
+		return transport.HostedSessionOpen{}, nil, false, nil
 	}
 	opts := session.SSHOptionsFromConfig(cfg.Remote)
-	fingerprint, platform, available, err := probeHelperPlatformAt(ctx, cfg.Host, opts, r.install, r.source)
+	hold, fingerprint, platform, available, err := probeHelperPlatformHeld(ctx, cfg.Host, opts, r.install, r.source)
 	if err != nil && !available {
-		return transport.HostedSessionOpen{}, false, nil
+		return transport.HostedSessionOpen{}, hold, false, nil
 	}
 	resolver := newResolver(
 		withStore(r.consent),
@@ -497,8 +596,25 @@ func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config, cla
 		withHelperRequested(true),
 	)
 	if resolver.Resolve(Machine{Fingerprint: fingerprint, Mode: profile.DesiredMode(cfg.Remote.DesiredMode)}) != DesiredHelper {
-		return transport.HostedSessionOpen{}, false, nil
+		return transport.HostedSessionOpen{}, hold, false, nil
 	}
+	opened, selected, err := r.openFarHelper(ctx, cfg, claim, opts, platform, fingerprint)
+	return opened, hold, selected, err
+}
+
+// openFarHelper is the SELECTED arm of the remote route: the far host's own
+// helper is installed if it is not there, reached, and the pane spawned on it.
+//
+// It is a function of its own rather than the rest of openHoldingLease for the
+// reason every extraction in this package is — the interval the hold exists for
+// is then two statements in one small function, rather than one that scrolls
+// past ninety lines of spawn-and-attach. What it takes from the selection is
+// what the selection already decided: the connect options the whole open uses,
+// the platform the probe answered, and the host-key fingerprint it observed
+// (which the open reports back, ADR-0023). Re-deriving any of the three here
+// would be a second answer to "what did the probe say", and on a host whose
+// answer is expensive to obtain that second answer is another login.
+func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, claim string, opts []ssh.ConnectOption, platform deploy.Platform, fingerprint string) (transport.HostedSessionOpen, bool, error) {
 	installed, err := installHelperAt(ctx, cfg.Host, opts, r.install, r.source, platform)
 	if err != nil {
 		return transport.HostedSessionOpen{}, true, err

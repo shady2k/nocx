@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -75,6 +76,14 @@ type pwSSHServer struct {
 	// ForceCommand or a restricted shell does: the home probe cannot run, and
 	// the publish must refuse rather than guess.
 	refuseExec bool
+	// refuseShell answers the `shell` request false, which is what an account
+	// with no login shell does: AUTHENTICATION SUCCEEDS and no session can be
+	// started on it. It is the one knob under which a dial is expensive and the
+	// OPEN is refused, which is the arm an open's cleanup is judged on
+	// (nocx-k6p18.35): the probe authenticated, the pane's spawn did not, and
+	// the reference the probe held has to be given back — a held lease that
+	// outlives a failed open is a connection nobody will ever close.
+	refuseShell bool
 	// closeOnSFTPWrite closes the whole connection the moment the sftp
 	// subsystem's first packet arrives — a transport lost MID-PUBLISH, and
 	// deterministic: the subsystem handshake has already succeeded, so the
@@ -299,6 +308,14 @@ func (s *pwSSHServer) handleSession(ch gossh.Channel, reqs <-chan *gossh.Request
 		case "pty-req":
 			_ = req.Reply(true, nil)
 		case "shell":
+			if s.refuseShell {
+				// Refused, not answered: the account has no shell to run, and
+				// the connection stays up — which is the state that separates
+				// "this host cannot carry a pane" from "this host cannot be
+				// reached".
+				_ = req.Reply(false, nil)
+				continue
+			}
 			_ = req.Reply(true, nil)
 			s.echoLoop(ch)
 			return
@@ -562,10 +579,16 @@ func TestOpenPath_PasswordAskFiresOncePerOpen(t *testing.T) {
 	}
 }
 
-func writeKnownHostsFor(t *testing.T, path string, srv *pwSSHServer) {
+// writeKnownHostsFor records every given fixture's host key in ONE file, which
+// is what a coordinator with more than one destination to dial has (a second
+// host, a bastion on the route). One host is the ordinary call.
+func writeKnownHostsFor(t *testing.T, path string, srvs ...*pwSSHServer) {
 	t.Helper()
-	line := knownhosts.Line([]string{srv.addr}, srv.hostSigner.PublicKey())
-	if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
+	var b strings.Builder
+	for _, srv := range srvs {
+		b.WriteString(knownhosts.Line([]string{srv.addr}, srv.hostSigner.PublicKey()) + "\n")
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
 		t.Fatalf("write known_hosts: %v", err)
 	}
 }

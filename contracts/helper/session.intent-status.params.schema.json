@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.intent-status.params.schema.json",
+  "title": "HelperSessionIntentStatusParams",
+  "description": "Polls what became of one token-bound intent, without presenting its payload again (nocx-6q1uh.6, spec §6.2).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session", "tokenId"],
+  "properties": {
+    "session": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/hostSessionId"
+    },
+    "tokenId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    }
+  }
+}

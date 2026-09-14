@@ -361,6 +361,7 @@ func (s *Service) Ops() []string {
 		proto.OpSpawn, proto.OpSpawnSSH, proto.OpSessions, proto.OpAttach, proto.OpAck,
 		proto.OpDetach, proto.OpResize, proto.OpCloseSession, proto.OpSignal,
 		proto.OpAdoptLifecycle, proto.OpScreen, proto.OpReplay,
+		proto.OpSnapshot, proto.OpTarget, proto.OpIntent, proto.OpIntentStatus, proto.OpAccessBump,
 	}
 }
 
@@ -390,14 +391,36 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.ScreenParams{})
 	case proto.OpReplay:
 		return host.SchemaFor(proto.ReplayParams{})
+	case proto.OpSnapshot:
+		return host.SchemaFor(proto.SnapshotParams{})
+	case proto.OpTarget:
+		return host.SchemaFor(proto.TargetParams{})
+	case proto.OpIntent:
+		return host.SchemaFor(proto.IntentParams{})
+	case proto.OpIntentStatus:
+		return host.SchemaFor(proto.IntentStatusParams{})
+	case proto.OpAccessBump:
+		return host.SchemaFor(proto.AccessBumpParams{})
 	}
 	return nil
 }
 
-// RefusesCancel: no operation here refuses cancellation. Every one of them is
-// short and none half-applies — the long-running thing is the SESSION, and a
-// session is not a request.
-func (s *Service) RefusesCancel(string) bool { return false }
+// intentServiceMutations are the two ops a caller's cancelled context must
+// never be read as "not executed" (D11, nocx-6q1uh.6, spec §6.5's own
+// framing: "transport cancellation never implies not executed"). session.intent
+// runs to its commit point once the owner has it — bytes on a PTY cannot be
+// recalled, and a half-applied bump would leave some queued intents refused
+// under the new epoch and others still judged by the old one. Every other op
+// here is a single read with nothing to half-apply.
+var intentServiceMutations = map[string]bool{
+	proto.OpIntent:     true,
+	proto.OpAccessBump: true,
+}
+
+// RefusesCancel: session.intent and session.access-bump refuse cancellation
+// (above); every other operation here is short and none half-applies — the
+// long-running thing is the SESSION, and a session is not a request.
+func (s *Service) RefusesCancel(op string) bool { return intentServiceMutations[op] }
 
 // Refusal codes this service's errors for the wire, so the coordinator
 // switches on a code rather than on a message. ErrNoSuchSession is the one
@@ -440,6 +463,16 @@ func (s *Service) Refusal(err error) (string, json.RawMessage) {
 		return proto.ErrCodeNoSSHClient, nil
 	case errors.Is(err, ErrCwdUnsupported), errors.Is(err, ErrRemotePgid), errors.Is(err, ErrBadSSHParams):
 		return proto.ErrCodeBadParams, nil
+	case errors.Is(err, errBadTargetKind):
+		return proto.ErrCodeBadParams, nil
+	// session.target's own refusals (nocx-6q1uh.6, spec §6.1, §6.2): a
+	// transport-level code rather than an IntentResult.refusal, because
+	// target mints nothing a caller could poll session.intent-status for —
+	// there is no token yet to name one by.
+	case errors.Is(err, ErrSnapshotGone):
+		return "snapshot_gone", nil
+	case errors.Is(err, ErrCapacity):
+		return "capacity", nil
 	}
 	return "", nil
 }
@@ -501,6 +534,36 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			return nil, err
 		}
 		return s.replay(p)
+	case proto.OpSnapshot:
+		var p proto.SnapshotParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.snapshot(p)
+	case proto.OpTarget:
+		var p proto.TargetParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.target(p)
+	case proto.OpIntent:
+		var p proto.IntentParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.intent(ctx, p)
+	case proto.OpIntentStatus:
+		var p proto.IntentStatusParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.intentStatus(p)
+	case proto.OpAccessBump:
+		var p proto.AccessBumpParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.accessBump(p)
 	case proto.OpDetach:
 		var p proto.DetachParams
 		if err := decode(params, &p); err != nil {
@@ -970,9 +1033,16 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 	// THIS incarnation and bound to the owner before anything can submit a
 	// token-bearing intent — the same ordering guarantee SetReplies already
 	// gives Ingest. hs below gets the same instance, for the RPC handlers
-	// (nocx-6q1uh.5) that mint and verify through hs rather than the owner.
+	// (nocx-6q1uh.6) that mint and verify through hs rather than the owner.
 	tokens := newTokenBook(rt.Incarnation(), s.now)
 	owner.SetTokens(tokens)
+	// The runtime's control epoch is granted lazily, by the first
+	// session.intent this session ever receives (hostSession.ensureControl,
+	// intent_ops.go) — not here. Granting it eagerly at spawn would make
+	// ensureControl's own grant path dead code in every production spawn,
+	// since it checks-then-grants and would always find one already in
+	// force; see intent_ops.go's package doc for why the grant belongs
+	// there instead.
 	lifecycleWin := (*window)(nil)
 	lifecycleBudget := int64(0)
 	var lifecycleCarrier io.ReadWriteCloser

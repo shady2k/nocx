@@ -69,12 +69,13 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/emulator"
+	"github.com/shady2k/nocx/internal/monoclock"
 	"github.com/shady2k/nocx/internal/sessionruntime"
 )
 
 // ownerItemKind is which of the four ordered lanes an item travels
 // (spec §5.3); itemAccessBump is named here for the wire op a later task
-// wires (nocx-6q1uh.5's session.access-bump) so ownerItem's shape does not
+// wires (nocx-6q1uh.6's session.access-bump) so ownerItem's shape does not
 // change again when that task adds it.
 type ownerItemKind int
 
@@ -96,7 +97,7 @@ const (
 // target this intent is spending, the canonical form [tokenBook.Consume]
 // binds it to, and the monotonic deadline past which the commit point
 // refuses `commit_deadline` rather than admit it at all. Whoever submits a
-// wire-driven session.intent (nocx-6q1uh.5 wires the op) fills these in; a
+// wire-driven session.intent (nocx-6q1uh.6 wires the op) fills these in; a
 // caller with no token — Task 2's own tests, and any intent this package
 // admits without one — leaves Token's ID at its zero value, which
 // commitIntent reads as "no token gate applies".
@@ -122,6 +123,9 @@ type ownerItem struct {
 	payload []byte
 	intent  *pendingIntent
 	resize  *sessionruntime.Geometry
+	// above is itemAccessBump's own payload (nocx-6q1uh.6, spec §7.2): the
+	// epoch this bump supersedes. Meaningless for every other kind.
+	above uint64
 	// done is buffered(1): resolve never blocks on a caller that stopped
 	// listening, and a reply (itemReply) carries none — nothing submitted it
 	// through submit, and nothing is waiting on it.
@@ -134,6 +138,20 @@ type ownerResult struct {
 	BytesWritten int
 	FenceAfter   sessionruntime.Fence
 	Err          error
+	// Epoch is itemAccessBump's own answer (nocx-6q1uh.6, spec §7.2): the
+	// access epoch now in force. Meaningless for every other kind.
+	Epoch uint64
+	// Cause is the wire's own refusal-cause spelling (spec §6.5), set only by
+	// resultFromStored (tokens.go) when this result is a REPLAY of a
+	// previously recorded outcome. It exists because storedResult.Cause is
+	// the one thing resultFromStored cannot round-trip through Err alone:
+	// Err there is rebuilt as fmt.Errorf("session: %s", cause), which
+	// causeOf's errors.Is checks can never match back to a sentinel (a
+	// %s-formatted error wraps nothing). A caller rendering the wire result
+	// reads Cause first and falls back to causeOf(Err) only when it is
+	// empty — which is also how it tells a replay from a fresh refusal
+	// (nocx-6q1uh.6's own wire layer, session.intent's regionOmitted).
+	Cause string
 }
 
 var (
@@ -235,11 +253,22 @@ type sessionOwner struct {
 	// .SetReplies] uses, for the same reason: the book is built the moment
 	// after this owner is, over the very incarnation it already serves.
 	tokens *tokenBook
+	// accessEpoch is this session's current access epoch (nocx-6q1uh.6,
+	// spec §7.2): 1 for a fresh incarnation, raised only by applyAccessBump
+	// (access.go). It is an atomic for the same reason completedFence is —
+	// takeSnapshot (snapshots.go) reads it from outside this owner's own
+	// goroutine, through currentAccessEpoch (access.go) — even though every
+	// WRITE to it happens on run()'s own goroutine, same as every other
+	// field below this comment.
+	accessEpoch atomic.Uint64
 	// nowMono answers the commit point's monotonic clock, in the units a
-	// pendingIntent's CommitBy is expressed in. It defaults to a wrapper
-	// over time.Now here because this task has no monotonic clock of its
-	// own to inject (nocx-6q1uh.5's internal/monoclock replaces it); a test
-	// wanting a fake clock sets the field directly, in-package.
+	// pendingIntent's CommitBy is expressed in: internal/monoclock.Now
+	// (CLOCK_MONOTONIC on Linux, CLOCK_MONOTONIC_RAW on Darwin), never
+	// time.Now — a wall clock can jump (NTP, a suspend/resume) in either
+	// direction, and a deadline built on one could be defeated or tripped by
+	// an event that has nothing to do with how long the intent actually
+	// waited (nocx-6q1uh.6, spec §7.2). A test wanting a fake clock sets the
+	// field directly, in-package.
 	nowMono func() int64
 	// detachSignal, detachOnce and detached are the SSH detach path (spec
 	// §5.7, nocx-6q1uh.3, owner_ssh.go): stop closes detachSignal, once,
@@ -268,7 +297,7 @@ type sessionOwner struct {
 // before the first byte is ever read.
 func newSessionOwner(proc Process, rt *sessionruntime.Session, win *window, log *slog.Logger) *sessionOwner {
 	readCtx, cancelRead := context.WithCancel(context.Background())
-	return &sessionOwner{
+	o := &sessionOwner{
 		proc:          proc,
 		rt:            rt,
 		win:           win,
@@ -280,9 +309,16 @@ func newSessionOwner(proc Process, rt *sessionruntime.Session, win *window, log 
 		cancelRead:    cancelRead,
 		writeReq:      make(chan []byte),
 		writeRes:      make(chan writeOutcome, 1),
-		nowMono:       func() int64 { return time.Now().UnixNano() },
+		nowMono:       func() int64 { return int64(monoclock.Now()) },
 		detachSignal:  make(chan struct{}),
 	}
+	// A fresh incarnation starts at epoch 1 (spec §7.2, §6.1): the zero
+	// value an unset atomic.Uint64 would otherwise report is not a real
+	// epoch anything ever grants, and a snapshot reporting 0 would look
+	// indistinguishable from "no epoch protocol applies" to a coordinator
+	// that has never seen a bump.
+	o.accessEpoch.Store(1)
+	return o
 }
 
 // SetTokens binds this session's one-shot token book. It must run before the
@@ -326,9 +362,22 @@ func (o *sessionOwner) run() {
 				o.beginClosing()
 			}
 		case it := <-o.incoming:
-			if o.closing {
+			switch {
+			case it.kind == itemAccessBump:
+				// Ahead of everything already queued, whether or not the
+				// owner is closing (spec §7.2: a bump always applies, and
+				// carries no refusal of its own) — see access.go's own doc
+				// for why this cannot wait for its turn in o.pending.
+				o.applyAccessBump(it)
+			case o.closing:
 				o.resolve(it, ownerResult{State: sessionruntime.IntentStateCancelled, Err: errOwnerClosing})
-			} else {
+			case it.kind == itemIntent && it.intent.Token.ID != (TokenID{}) && o.tokenGate(it, it.intent):
+				// tokenGate (tokens.go) resolved it directly: a replay of an
+				// already-recorded or in-flight token, or a refusal decided
+				// before this intent is ever admitted (forged, expired,
+				// token_spent, access_revoked, commit_deadline). Nothing
+				// left to queue.
+			default:
 				o.pending = append(o.pending, it)
 			}
 		case <-readableCh:
@@ -523,8 +572,11 @@ func (o *sessionOwner) processHead(it ownerItem) {
 	case itemIntent:
 		o.commitIntent(it)
 	default:
-		// itemAccessBump: named for a later task (nocx-6q1uh.5) and not yet
-		// produced by anything in this one.
+		// itemAccessBump never reaches here: run()'s own incoming case
+		// (nocx-6q1uh.6) intercepts it before it is ever appended to
+		// o.pending — see access.go's doc for why. Reaching this arm at all
+		// means an ownerItemKind was queued that nothing above recognises,
+		// which is a defect in whatever constructed it, not a wire fact.
 		o.resolve(it, ownerResult{
 			State: sessionruntime.IntentStateRefused,
 			Err:   fmt.Errorf("session: owner item kind %d has no handler yet", it.kind),
@@ -538,11 +590,16 @@ func (o *sessionOwner) processHead(it ownerItem) {
 // encodes without writing. Either refusing leaves nothing to write, and the
 // item resolves on the spot.
 //
-// tokenGate (tokens.go, nocx-6q1uh.4) runs FIRST when pi carries a token: it
-// is where Verify, Consume and the commitBy deadline are decided, entirely
-// before this method ever calls Admit — a replayed result or an in-flight
-// one is answered without touching the runtime a second time, and a refusal
-// decided there is recorded to the book before this method ever sees it.
+// A token-bearing intent has ALREADY cleared tokenGate (tokens.go,
+// nocx-6q1uh.4/.5) by the time it reaches here: run() (this file) gates it
+// at receipt, before it is ever appended to o.pending, so nothing this
+// method dequeues as an itemIntent can be a replay, an in-flight duplicate,
+// or one refused for a reason tokenGate already decided. What tokenGate
+// cannot decide at receipt is whether time itself has since run out: an
+// intent within its commitBy when it arrived can still fall past it while
+// queued behind other input, with no bump involved at all — so this method
+// re-checks the deadline, alone, right before ever calling Admit (spec
+// §7.2: "refuses AT RECEIPT and AT THE COMMIT POINT").
 func (o *sessionOwner) commitIntent(it ownerItem) {
 	// A session with no read barrier (spec §5.2 — today, an SSH channel: a
 	// blocking reader may be holding bytes this owner has not ingested yet)
@@ -555,10 +612,11 @@ func (o *sessionOwner) commitIntent(it ownerItem) {
 		return
 	}
 	pi := it.intent
-	if pi.Token.ID != (TokenID{}) {
-		if o.tokenGate(it, pi) {
-			return
-		}
+	if pi.Token.ID != (TokenID{}) && o.nowMono() > pi.CommitBy {
+		res := ownerResult{State: sessionruntime.IntentStateRefused, Err: errCommitDeadline}
+		o.recordTokenOutcome(pi, res)
+		o.resolve(it, res)
+		return
 	}
 	id, err := o.rt.Admit(pi.Intent)
 	if err != nil {

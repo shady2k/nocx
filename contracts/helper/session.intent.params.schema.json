@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.intent.params.schema.json",
+  "title": "HelperSessionIntentParams",
+  "description": "Spends one target: the token it was minted onto, the access epoch and commit deadline the coordinator read at the same moment, and the key or text payload (nocx-6q1uh.6, spec §6.5).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session", "token", "accessEpoch", "commitBy", "kind", "payload"],
+  "properties": {
+    "session": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/hostSessionId"
+    },
+    "token": {
+      "description": "The whole signed target session.target minted, presented back to spend it.",
+      "type": "string",
+      "minLength": 1
+    },
+    "accessEpoch": {
+      "description": "The epoch the coordinator currently believes applies — checked again at the commit point against the session's live epoch, never trusted from the token alone (spec §7.2).",
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/accessEpoch"
+    },
+    "commitBy": {
+      "description": "An absolute deadline on the machine's shared monotonic clock (internal/monoclock.Now, nanoseconds). Refused commit_deadline at receipt if already passed, and refused again at the commit point if it passes while queued.",
+      "type": "integer"
+    },
+    "kind": {
+      "description": "sessionruntime.IntentKindKey or IntentKindText.",
+      "type": "string",
+      "enum": ["key", "text"]
+    },
+    "payload": {
+      "description": "The intent's own argument, raw bytes (base64 on the wire): the encoded key description sessionruntime's own key-event decoder reads for kind key, or the literal text to type for kind text.",
+      "type": "string"
+    }
+  }
+}

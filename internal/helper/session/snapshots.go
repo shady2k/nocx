@@ -40,10 +40,9 @@ type retainedSnapshot struct {
 	Completeness sessionruntime.Completeness
 	// AccessEpoch is the helper session's access epoch at the moment this
 	// snapshot was taken (spec §6.1: "stored with every token the snapshot
-	// yields"). It is fixed at 1 here — nocx-6q1uh.7 is what ever moves a
-	// session's epoch away from 1 — so every token this task can mint
-	// carries a real field of the shape Task 7 will start writing to,
-	// without this task inventing a revocation mechanism of its own.
+	// yields"): 1 for a fresh incarnation, raised by session.access-bump
+	// (nocx-6q1uh.6, spec §7.2, owner.go's accessEpoch / access.go's
+	// applyAccessBump).
 	AccessEpoch uint64
 }
 
@@ -114,7 +113,7 @@ func (hs *hostSession) takeSnapshot() (retainedSnapshot, error) {
 		Revision:     snap.Revision,
 		InputFence:   fence,
 		Completeness: snap.Completeness,
-		AccessEpoch:  1,
+		AccessEpoch:  hs.owner.currentAccessEpoch(),
 	}
 	hs.snapRing[uint64(id)%snapshotRing] = &rs
 	return rs, nil
@@ -122,7 +121,7 @@ func (hs *hostSession) takeSnapshot() (retainedSnapshot, error) {
 
 // retained answers the snapshot named id, if the ring still holds its slot
 // and it has not aged past [snapshotMaxAge]. Either miss is reported the
-// same way — false — because a caller (session.target, nocx-6q1uh.5) treats
+// same way — false — because a caller (session.target, nocx-6q1uh.6) treats
 // both as `snapshot_gone`: a coordinator minting a target from a stale frame
 // would bind a token to a screen the program has since redrawn, whether the
 // ring physically overwrote the slot or merely outlived it.
@@ -140,7 +139,7 @@ func (hs *hostSession) retained(id SnapshotID) (retainedSnapshot, bool) {
 }
 
 // mintTarget is the join of the ring and the token book that session.target
-// will call (nocx-6q1uh.5 wires the op itself): resolve snapshotId in THIS
+// will call (nocx-6q1uh.6 wires the op itself): resolve snapshotId in THIS
 // session's ring and mint from it in one call, so no caller can mint against
 // a snapshot that looked live a moment ago and is gone by the time it asks.
 func (hs *hostSession) mintTarget(id SnapshotID, kind sessionruntime.TargetKind, rows sessionruntime.RowRange) (Token, error) {

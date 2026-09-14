@@ -401,6 +401,83 @@
           "type": ["string", "null"]
         }
       }
+    },
+    "accessEpoch": {
+      "description": "A session's access epoch (nocx-6q1uh.6, spec §7.2): starts at 1 for every incarnation, rises only through session.access-bump, and is carried by every snapshot and every intent so a revocation can prove no intent declaring an older epoch may still commit. It is a SEPARATE concept from leaseEpoch (the write CAPABILITY's own lease, spec §6's attach/detach) and from the runtime's own control epoch (who directs a session): three different questions that happen to share a shape, kept apart the way sessionruntime.ControlEpoch's own doc keeps itself apart from leaseEpoch — merging any two would let an answer to one silently stand in for another.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "inputFenceValue": {
+      "description": "A session's per-input monotonic sequence (spec §5.4): the fence the owner assigns the moment it hands a write to the writer goroutine — never a byte offset, and never comparable across sessions. Read BEFORE a screen is read, so a snapshot's own inputFence never claims to be newer than the rows it is paired with.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "refusalCause": {
+      "description": "Why a session.intent wrote nothing, the closed set nocx-6q1uh.6 draws (spec §6.5). An unrecognised spelling is not a cause a reader may act on — the same closed-vocabulary rule `completeness` already states one level up.",
+      "type": "string",
+      "enum": [
+        "stale_target",
+        "incomparable",
+        "expired",
+        "forged",
+        "token_spent",
+        "snapshot_gone",
+        "completeness_unknown",
+        "cannot_encode",
+        "would_submit",
+        "access_revoked",
+        "no_read_barrier",
+        "commit_deadline",
+        "capacity",
+        "busy",
+        "closing"
+      ]
+    },
+    "intentState": {
+      "description": "Where one session.intent got to (spec §6.5). Deliberately not a boolean and never a bare 'failed': failed_partial (some bytes reached the program) and delivery_unknown (the write's completion was never reported, ordinarily a shutdown mid-write) are different facts a caller acts on differently, and collapsing them would answer 'the program has this' with the same spelling as 'nobody knows'.",
+      "type": "string",
+      "enum": [
+        "executed",
+        "refused",
+        "failed_partial",
+        "delivery_unknown",
+        "cancelled",
+        "in_progress"
+      ]
+    },
+    "intentRefusal": {
+      "description": "Why a session.intent was refused. RegionNow travels only on the response that produced this exact refusal; a replay or session.intent-status answers the same refusal with RegionOmitted instead, never a stale echo of what the screen looked like when this was first decided.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cause"],
+      "properties": {
+        "cause": { "$ref": "#/$defs/refusalCause" },
+        "regionNow": {
+          "description": "What is on screen now, normalised text, bounded to 16 KiB (regionTruncated marks the cut).",
+          "type": "string"
+        },
+        "regionTruncated": { "type": "boolean" },
+        "regionOmitted": { "type": "boolean" }
+      }
+    },
+    "intentResult": {
+      "description": "What became of one session.intent, or the compact record a replay or session.intent-status answers with instead of re-attempting it (spec §6.2, §6.5). refusal is present exactly when state is 'refused'; failed_partial and delivery_unknown never carry one, because the closed refusal vocabulary describes only why NOTHING was written, and both of those wrote something (or wrote a completion nobody can vouch for) rather than being refused outright.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "bytesWritten", "fenceAfter"],
+      "properties": {
+        "state": { "$ref": "#/$defs/intentState" },
+        "bytesWritten": { "type": "integer", "minimum": 0 },
+        "fenceAfter": { "$ref": "#/$defs/inputFenceValue" },
+        "retryAfterMs": {
+          "description": "Present only alongside state 'in_progress': how long before asking session.intent-status again is worth it.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "refusal": { "$ref": "#/$defs/intentRefusal" }
+      }
     }
   }
 }

@@ -220,11 +220,65 @@ func (d *dispatchOperation) Dispatch(invocation ToolInvocation) (string, error) 
 	return outcome.output, nil
 }
 
-// Catalogue returns the executable tools admitted by grant. It is kept beside
-// Dispatch so an external caller can ask the same registry projection that
-// the dispatcher enforces, without sending authority in request params.
+// Catalogue returns the executable tools admitted by grant, filtered to the
+// ones THIS dispatcher would actually accept — the same two admission rules
+// prepare applies below, before it ever asks a grant anything (nocx-6q1uh.16).
+// registry.ForGrant alone answers "does the registry projection cover this
+// resource and effect"; it says nothing about a dispatcher's own name
+// allowlist. That gap is exactly what let the tool endpoint's dispatcher
+// (NewToolDispatcher, allowed=orchestrationMethodNames) hand an external
+// coordinator session.list, session.run and session.wait through
+// tools.catalogue while Dispatch refused every one of them: those three are
+// not on that allowlist, and effectsPermitted's alternative relation only
+// needs ONE of session.run's declared effects permitted for ForGrant to
+// offer it, which a caller grant permitting Observe/MutateDestructive/
+// Delegate satisfies. acceptsMethod is prepare's own predicate, reused
+// rather than re-derived, so a name this filter admits is never one Dispatch
+// then refuses on name or reachability grounds alone — one function, two
+// consumers, rather than a second list of what a caller may call (AGENTS.md,
+// "look for the existing answer before you write a second one").
 func (d *dispatchOperation) Catalogue(grant content.Grant) []agenttools.Tool {
-	return d.registry.ForGrant(grant)
+	projected := d.registry.ForGrant(grant)
+	out := make([]agenttools.Tool, 0, len(projected))
+	for _, tool := range projected {
+		if d.acceptsMethod(tool.Name, grant) {
+			out = append(out, tool)
+		}
+	}
+	return out
+}
+
+// methodAllowed reports whether name passes this dispatcher's own name
+// allowlist — prepare's first admission rule. nil for the kernel's own
+// dispatcher (every declared name is a candidate); set to
+// orchestrationMethodNames for the tool endpoint's (NewToolDispatcher).
+func (d *dispatchOperation) methodAllowed(name string) bool {
+	if d.allowed == nil {
+		return true
+	}
+	_, ok := d.allowed[name]
+	return ok
+}
+
+// reachableForGrant reports whether the registry's grant projection admits
+// name for grant — prepare's second admission rule, applied only to the
+// orchestration surface (isOrchestrationMethod) for the reason prepare's own
+// comment gives: every other name keeps its historical attempt-before-
+// capability behavior, refused later by Narrow rather than here.
+func (d *dispatchOperation) reachableForGrant(name string, grant content.Grant) bool {
+	if !isOrchestrationMethod(name) {
+		return true
+	}
+	return methodReachable(d.registry, grant, name)
+}
+
+// acceptsMethod combines both of prepare's name-level admission rules into
+// the one predicate Catalogue filters ForGrant's output through. It says
+// nothing about a specific call's parsed arguments or resolved resources —
+// that authority stays per-call, decided inside prepare and Narrow, never
+// projected here.
+func (d *dispatchOperation) acceptsMethod(name string, grant content.Grant) bool {
+	return d.methodAllowed(name) && d.reachableForGrant(name, grant)
 }
 
 func (d *dispatchOperation) dispatch(invocation ToolInvocation, transform dispatchTransform, gate dispatchGate, beforeExecute func(*preparedInvocation, agenttools.Capability) error, executor dispatchExecutor) (dispatchOutcome, error) {
@@ -273,10 +327,8 @@ func (d *dispatchOperation) prepare(invocation ToolInvocation, transform dispatc
 	if !ok {
 		return preparedInvocation{}, fmt.Errorf("%w: %q", ErrUnknownMethod, invocation.Method)
 	}
-	if d.allowed != nil {
-		if _, ok := d.allowed[decl.Name]; !ok {
-			return preparedInvocation{}, fmt.Errorf("%w: %q", ErrUnreachableMethod, decl.Name)
-		}
+	if !d.methodAllowed(decl.Name) {
+		return preparedInvocation{}, fmt.Errorf("%w: %q", ErrUnreachableMethod, decl.Name)
 	}
 	if len(invocation.RawParams) > maxArgsBytes {
 		return preparedInvocation{}, fmt.Errorf("%w: tool %q arguments exceed the %d-byte bound", ErrInvalidParams, decl.Name, maxArgsBytes)
@@ -302,7 +354,7 @@ func (d *dispatchOperation) prepare(invocation ToolInvocation, transform dispatc
 	// their historical attempt-before-capability behavior (notably
 	// git.status and skill mutations), so this shared operation only applies
 	// the reachability gate to the worker surface in this refactor.
-	if isOrchestrationMethod(prepared.decl.Name) && !methodReachable(d.registry, invocation.Grant, prepared.decl.Name) {
+	if !d.reachableForGrant(prepared.decl.Name, invocation.Grant) {
 		return preparedInvocation{}, fmt.Errorf("%w: %q", ErrUnreachableMethod, prepared.decl.Name)
 	}
 	return prepared, nil

@@ -45,6 +45,28 @@ func workerGrantForTest() content.Grant {
 	})
 }
 
+// wholeRegistryGrantForTest permits every effect and covers every resource
+// kind and content scope family any declaration in the registry uses, so
+// registry.ForGrant(this) offers every tool that has a capability
+// constructor at all (every row but git.status, which is Narrow-nil by
+// design). It exists for TestTheCatalogueOffersExactlyWhatDispatchAccepts's
+// whole-registry sweep: a grant that already excluded some tool by resource
+// kind or scope family would make that tool's ForGrant absence
+// indistinguishable from the two admission rules under test (the allowlist
+// and the orchestration reachability check), so the sweep needs every
+// tool's OWN resource declaration to be the only thing an exclusion can be
+// attributed to.
+func wholeRegistryGrantForTest() content.Grant {
+	return autonomousMatrix().AsGrant([]content.GrantScope{
+		{Kind: content.ResourceSession, ID: "session-1"},
+		{Kind: content.ResourceEnvironment, ID: content.EnvironmentIDFor(content.EnvLocal, "")},
+		{Kind: content.ResourceWorkspace, ID: agenttools.ParticipantWorkspaceScopeID("workspace-1")},
+		{Kind: content.ResourcePath, ID: "/"},
+		{Kind: content.ResourceDestination, ID: "https://"},
+		{Kind: content.ResourceContent, ID: "content"},
+	})
+}
+
 func TestToolDispatcher_GrantWithoutEnvironmentLeavesSpawnUnreachable(t *testing.T) {
 	rec := &fakeWorkerRecord{}
 	dispatcher := toolDispatcherForTest(t, rec)
@@ -383,28 +405,25 @@ func TestAttemptRecordingDispatcherFinishTimeoutBoundsAWedgedLedger(t *testing.T
 // construction — carrier.go: Declare offers ForGrant(grant), and nothing
 // past it can invoke a name Declare did not offer).
 //
-// Scoped to the orchestration surface (workers.* and session.read) rather
-// than the whole registry, deliberately: registry.ForGrant already offers
-// session.list, session.run and session.wait under this same grant shape
+// Widened to set equality over the WHOLE registry (nocx-6q1uh.16), not just
+// the orchestration surface: registry.ForGrant already offered session.list,
+// session.run and session.wait under this same grant shape
 // (TestGroupEndpoint_CatalogueUsesAdmittedGrantAndIgnoresParams in
-// internal/toolendpoint counts them into its own "expected" set), while
-// the tool endpoint's dispatcher has never accepted any of the three — a
-// mismatch that predates this task and that this task was not asked to
-// fix. Asserting equality over the whole registry here would make this
-// test a second, accidental owner of THEIR reachability instead of
-// session.read's, and would be a false claim today. Found while
-// implementing nocx-6q1uh.8; worth its own bead.
+// internal/toolendpoint counted them into its own "expected" set) while the
+// tool endpoint's dispatcher had never accepted any of the three — that
+// mismatch is what Catalogue's acceptsMethod filter (dispatch.go) now
+// closes, so nothing keeps this test scoped to a curated name list any
+// more. wholeRegistryGrantForTest is what makes the sweep meaningful: it
+// covers every resource kind and scope family the registry uses, so a
+// name's absence from ForGrant can only be attributed to the two admission
+// rules under test (methodAllowed, reachableForGrant), never to the grant
+// itself being narrower than some declaration needs.
 func TestTheCatalogueOffersExactlyWhatDispatchAccepts(t *testing.T) {
 	reg, err := agenttools.Assemble(toolsDirFS(t))
 	if err != nil {
 		t.Fatalf("assemble tools: %v", err)
 	}
-	grant := workerGrantForTest()
-	names := []string{
-		"workers.spawn", "workers.say", "workers.wait", "workers.holdings",
-		"workers.close", "workers.screen", "workers.answer", "workers.inbox",
-		"session.read",
-	}
+	grant := wholeRegistryGrantForTest()
 
 	check := func(t *testing.T, dispatcher ToolDispatcher) {
 		t.Helper()
@@ -416,17 +435,17 @@ func TestTheCatalogueOffersExactlyWhatDispatchAccepts(t *testing.T) {
 		for _, tool := range cataloguer.Catalogue(grant) {
 			offered[tool.Name] = true
 		}
-		for _, name := range names {
-			_, dispatchErr := dispatcher.Dispatch(workerInvocationForTest(name, grant, `{}`))
+		for _, tool := range reg.All() {
+			_, dispatchErr := dispatcher.Dispatch(workerInvocationForTest(tool.Name, grant, `{}`))
 			// "Accepted" means dispatch did not refuse the METHOD itself —
 			// unreachable for this grant, or not a declared method at all.
 			// A failure past that gate (invalid args, no renderer wired in
-			// this test harness) is a fact about the CALL, not about
-			// whether the method is offered, and is deliberately not
-			// treated as a mismatch here.
+			// this test harness, no content/skill seam wired) is a fact
+			// about the CALL, not about whether the method is offered, and
+			// is deliberately not treated as a mismatch here.
 			accepted := !errors.Is(dispatchErr, ErrUnreachableMethod) && !errors.Is(dispatchErr, ErrUnknownMethod)
-			if offered[name] != accepted {
-				t.Fatalf("%s: catalogue offers=%v, dispatch accepts=%v (dispatch err=%v)", name, offered[name], accepted, dispatchErr)
+			if offered[tool.Name] != accepted {
+				t.Fatalf("%s: catalogue offers=%v, dispatch accepts=%v (dispatch err=%v)", tool.Name, offered[tool.Name], accepted, dispatchErr)
 			}
 		}
 	}
@@ -441,4 +460,50 @@ func TestTheCatalogueOffersExactlyWhatDispatchAccepts(t *testing.T) {
 		}
 		check(t, &dispatchOperation{registry: reg, validators: validators, results: results})
 	})
+}
+
+// TestCatalogueOmitsANameTheGrantPermitsButTheEndpointDispatcherRefuses is
+// the failure-path pair of the test above, isolating the exact defect this
+// task closes rather than relying on the whole-registry sweep to surface it
+// incidentally: session.list, session.run and session.wait are all in
+// registry.ForGrant(grant) under a grant that permits everything, yet none
+// is on the tool endpoint's own orchestrationMethodNames allowlist, so
+// Catalogue must omit all three and Dispatch must refuse all three with
+// ErrUnreachableMethod — never one without the other.
+func TestCatalogueOmitsANameTheGrantPermitsButTheEndpointDispatcherRefuses(t *testing.T) {
+	reg, err := agenttools.Assemble(toolsDirFS(t))
+	if err != nil {
+		t.Fatalf("assemble tools: %v", err)
+	}
+	grant := wholeRegistryGrantForTest()
+	names := []string{"session.list", "session.run", "session.wait"}
+
+	forGrantNames := map[string]bool{}
+	for _, tool := range reg.ForGrant(grant) {
+		forGrantNames[tool.Name] = true
+	}
+	for _, name := range names {
+		if !forGrantNames[name] {
+			t.Fatalf("test setup: registry.ForGrant no longer offers %q under this grant — the scenario this test exercises no longer holds", name)
+		}
+	}
+
+	dispatcher := toolDispatcherForTest(t, &fakeWorkerRecord{})
+	cataloguer, ok := dispatcher.(ToolCatalogue)
+	if !ok {
+		t.Fatalf("dispatcher does not implement ToolCatalogue")
+	}
+	offered := map[string]bool{}
+	for _, tool := range cataloguer.Catalogue(grant) {
+		offered[tool.Name] = true
+	}
+	for _, name := range names {
+		if offered[name] {
+			t.Fatalf("catalogue offered %q, which registry.ForGrant permits but this dispatcher's own allowlist refuses", name)
+		}
+		_, dispatchErr := dispatcher.Dispatch(workerInvocationForTest(name, grant, `{}`))
+		if !errors.Is(dispatchErr, ErrUnreachableMethod) {
+			t.Fatalf("Dispatch(%s) = %v, want ErrUnreachableMethod", name, dispatchErr)
+		}
+	}
 }

@@ -79,16 +79,16 @@ type TargetView struct {
 }
 
 // MessageView is one queued session.message, as session.read's
-// pendingMessages reports it (design §8). Task 8 declares the shape
-// PaneRead needs before Task 10 builds the queue behind it: Phase is a
-// plain string here rather than the closed MessagePhase set Task 10 adds in
-// internal/app/pane_messages.go — replace this field's type there rather
-// than adding a second one, once that set exists. Pending is always empty
-// and DeliveryLost always nil until then (design §8.1).
+// pendingMessages reports it (design §8). Task 8 declared the shape PaneRead
+// needs before Task 10 built the queue behind it, with Phase as a plain
+// string; Task 10 replaces that with the closed MessagePhase set
+// (execute_session_message.go) rather than adding a second type for the same
+// field. Pending is empty and DeliveryLost nil until a PaneMessages is wired
+// (paneReader.SetMessages, internal/app/session_targets.go).
 type MessageView struct {
 	ID           string
 	Namespace    string
-	Phase        string
+	Phase        MessagePhase
 	BytesWritten int
 	BoxContents  string
 }
@@ -271,6 +271,19 @@ type sessionReadResult struct {
 	Target          *sessionTargetWire   `json:"target,omitempty"`
 	PendingMessages []sessionMessageWire `json:"pendingMessages,omitempty"`
 	ReadBarrier     *bool                `json:"readBarrier,omitempty"`
+	// DeliveryStateLost is set only after a coordinator restart, for a
+	// descendant pane this PaneMessages instance holds no queue record for
+	// (design §8.6, Task 10): the in-memory queue does not survive a
+	// restart, so nothing here reports a per-message outcome — only that
+	// anything before Since is unknown.
+	DeliveryStateLost *sessionDeliveryLostWire `json:"deliveryStateLost,omitempty"`
+}
+
+// sessionDeliveryLostWire is design §8.6's "a read afterwards reports
+// deliveryStateLost: { since }" — an object rather than a bare timestamp, so
+// the wire shape has room to grow without becoming a second type.
+type sessionDeliveryLostWire struct {
+	SinceMs int64 `json:"since"`
 }
 
 type blockSpan struct {
@@ -558,14 +571,21 @@ func descendantSessionReadResult(sessionID string, read PaneRead, maxBytes int64
 		out.Remaining = out.Dropped
 	}
 	for _, m := range read.Pending {
-		// MessageView and sessionMessageWire share the same fields, in the
-		// same order — a plain conversion rather than a field-by-field
-		// literal, so a field added to one is a compile error until the
-		// other names it too.
-		out.PendingMessages = append(out.PendingMessages, sessionMessageWire(m))
+		// Built field-by-field rather than a naked sessionMessageWire(m)
+		// conversion: MessageView.Phase is the closed MessagePhase type
+		// (Task 10), sessionMessageWire.Phase stays a plain wire string, and
+		// Go's struct conversion requires identical field types, not merely
+		// identical underlying types.
+		out.PendingMessages = append(out.PendingMessages, sessionMessageWire{
+			ID: m.ID, Namespace: m.Namespace, Phase: string(m.Phase),
+			BytesWritten: m.BytesWritten, BoxContents: m.BoxContents,
+		})
 	}
 	if read.Target != nil {
 		out.Target = sessionTargetWireFrom(read.Target)
+	}
+	if read.DeliveryLost != nil {
+		out.DeliveryStateLost = &sessionDeliveryLostWire{SinceMs: read.DeliveryLost.UnixMilli()}
 	}
 	return out
 }

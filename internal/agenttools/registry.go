@@ -124,6 +124,13 @@ type RunContext struct {
 	// means no adapter bound one yet, which session.keys must refuse rather
 	// than guess at.
 	SessionKeys any
+	// SessionMessages is session.message's queue-and-deliver path over
+	// PaneAccess's descendants (assistant.PaneMessages, design §8, Task 10)
+	// — bound by the same adapter alongside PaneAccess, SessionReads and
+	// SessionKeys, for the identical layering and nil-safety reasons
+	// SessionReads already documents. Nil means no adapter bound one yet,
+	// which session.message must refuse rather than guess at.
+	SessionMessages any
 }
 
 // MarkedSessionWindow is one person-marked row span: which item, and which
@@ -465,6 +472,26 @@ var declarations = []Declaration{
 		ResolveResources: resourceSession,
 		Executes:         InGo,
 		Params:           "session.keys.schema.json",
+		Narrow:           narrowDescendants,
+	},
+	{
+		Name:        "session.message",
+		Description: "Send a message to a worker's agent (or one of its own workers): queued (when \"free\") for delivery once the agent is free, or attempted immediately (when \"now\", under a target session.read minted of kind input or working). Delivery pastes the text, waits for it to echo, then presses Enter — reported as a phase, never a plain success flag. The disjoint form session.message { sessionId, cancel: id } withdraws a still-queued message; id makes a resend of the same call at-most-once.",
+		// MUTATE-DESTRUCTIVE for the same reason session.keys' own row
+		// is: a delivered message reaches the agent and is not
+		// reversible from here. The delegation effect this write also
+		// requires (send-input) is resolved per call by
+		// DescendantPaneAccess.Resolve inside PaneMessages.Send, exactly
+		// as session.keys' own row documents for itself.
+		Effect:           []content.Effect{content.EffectMutateDestructive},
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 4 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
+		ResolveResources: resourceSession,
+		Executes:         InGo,
+		Params:           "session.message.schema.json",
 		Narrow:           narrowDescendants,
 	},
 	{

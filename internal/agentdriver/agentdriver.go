@@ -309,6 +309,30 @@ func (r *Registry) Classify(agent string, f paneview.Frame) State {
 	return r.Observe(agent, f).State
 }
 
+// menuDisplacer is the optional half a Driver may implement (documentDriver
+// does) to answer Document.MenuDisplacesInputBox — the same "extras are
+// optional" shape Observer already is, applied to a per-agent declared fact
+// rather than a per-frame one.
+type menuDisplacer interface {
+	MenuDisplacesInputBox() bool
+}
+
+// MenuDisplacesInputBox answers whether agent's rule declares that a
+// permission/modal menu always displaces its input box (nocx-6q1uh.10):
+// false — fail closed, callers fall back to the wider MenuZone — for an
+// agent with no driver, one switched off, or a driver that never declares
+// it. Never a per-frame answer: this is a static fact about the RULE, read
+// once per call rather than carried on Observation, because it does not
+// change from one frame to the next the way Extras can.
+func (r *Registry) MenuDisplacesInputBox(agent string) bool {
+	d, ok := r.For(agent)
+	if !ok {
+		return false
+	}
+	m, ok := d.(menuDisplacer)
+	return ok && m.MenuDisplacesInputBox()
+}
+
 // SubagentsExtra is the name a rule document gives the extractor that reads an
 // agent's CHILD rows off its own chrome. It is a constant here rather than a
 // string at each reader because the document's vocabulary is this package's

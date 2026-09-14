@@ -6,25 +6,27 @@ package agenttools
 
 import "github.com/shady2k/nocx/internal/content"
 
-// SessionDescendantCapability is session.read's and session.keys' shared
-// capability: the run's own session reader — unchanged, still grant-scoped
-// exactly as narrowSession always built it, for the ledger/renderer path
-// (design §11 "kept, deliberately") — plus the run's PaneAccess,
-// SessionReads and SessionKeys, carried through untouched from RunContext.
+// SessionDescendantCapability is session.read's, session.keys' and
+// session.message's shared capability: the run's own session reader —
+// unchanged, still grant-scoped exactly as narrowSession always built it,
+// for the ledger/renderer path (design §11 "kept, deliberately") — plus the
+// run's PaneAccess, SessionReads, SessionKeys and SessionMessages, carried
+// through untouched from RunContext.
 //
-// PaneAccess, SessionReads and SessionKeys travel as `any` because this
-// package sits below internal/app (which binds the concrete
-// DescendantPaneAccess, PaneReader and PaneKeys) and below
-// internal/assistant (whose executeSessionRead/executeSessionKeys are the
-// places that type-assert them back). Narrow does not need to know any of
-// them concretely: it only carries them from RunContext to the executor,
-// which is the "point of use" RunContext.PaneAccess's own doc already
-// names.
+// PaneAccess, SessionReads, SessionKeys and SessionMessages travel as `any`
+// because this package sits below internal/app (which binds the concrete
+// DescendantPaneAccess, PaneReader, PaneKeys and PaneMessages) and below
+// internal/assistant (whose executeSessionRead/executeSessionKeys/
+// executeSessionMessage are the places that type-assert them back). Narrow
+// does not need to know any of them concretely: it only carries them from
+// RunContext to the executor, which is the "point of use"
+// RunContext.PaneAccess's own doc already names.
 type SessionDescendantCapability struct {
 	*SessionReader
-	PaneAccess   any
-	SessionReads any
-	SessionKeys  any
+	PaneAccess      any
+	SessionReads    any
+	SessionKeys     any
+	SessionMessages any
 }
 
 // narrowDescendants is session.read's and session.keys' shared Narrow
@@ -41,9 +43,10 @@ func narrowDescendants(grant content.Grant, resources []ResourceRef, runCtx RunC
 	}
 	reader, _ := own.(*SessionReader)
 	return &SessionDescendantCapability{
-		SessionReader: reader,
-		PaneAccess:    runCtx.PaneAccess,
-		SessionReads:  runCtx.SessionReads,
-		SessionKeys:   runCtx.SessionKeys,
+		SessionReader:   reader,
+		PaneAccess:      runCtx.PaneAccess,
+		SessionReads:    runCtx.SessionReads,
+		SessionKeys:     runCtx.SessionKeys,
+		SessionMessages: runCtx.SessionMessages,
 	}, nil
 }

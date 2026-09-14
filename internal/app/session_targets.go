@@ -38,6 +38,22 @@ type paneAgent interface {
 	Snapshot(paneID string) (paneobserve.Observation, bool)
 }
 
+// paneMessagesSource is what paneReader needs from session.message's queue
+// (Task 10) to fill PaneRead.Pending and PaneRead.DeliveryLost (design §8.1,
+// §8.6): the same two facts session.read's own wire result reports for a
+// descendant. It is set post-construction (SetMessages) rather than taken by
+// newPaneReader, because paneMessages itself needs THIS reader to mint the
+// targets its own deliveries spend (newPaneMessages's own reader
+// parameter) — a genuine cycle at the wiring level, broken the same way
+// toolAuthorizer.BindSessionKeys already breaks one (construct both, then
+// patch the back-reference). nil (the T8 zero value) leaves Pending empty
+// and DeliveryLost nil, which is the correct answer before Task 10's wiring
+// runs.
+type paneMessagesSource interface {
+	Pending(sessionID string) []assistant.MessageView
+	DeliveryLost(sessionID string) *time.Time
+}
+
 // targetRecord is the coordinator's own record of a minted target (design
 // §6.2): the bound capability it was minted under, the view handed back to
 // the caller, the participant's enrolment incarnation and the delegation
@@ -65,8 +81,9 @@ type paneReader struct {
 	agents paneAgent
 	rules  *agentdriver.Registry
 
-	mu      sync.Mutex
-	records map[string]targetRecord
+	mu       sync.Mutex
+	records  map[string]targetRecord
+	messages paneMessagesSource
 }
 
 // newPaneReader builds a PaneReader over hub (for both Resolve's registrar
@@ -79,6 +96,17 @@ func newPaneReader(hub *paneAccessHub, agents paneAgent, rules *agentdriver.Regi
 }
 
 var _ assistant.PaneReader = (*paneReader)(nil)
+
+// SetMessages wires session.message's queue into this reader's Pending and
+// DeliveryLost fields (Task 10). Called once at composition-root time, after
+// newPaneMessages has been built over this same reader — see
+// paneMessagesSource's own doc for why this is a setter rather than a
+// constructor argument.
+func (p *paneReader) SetMessages(m paneMessagesSource) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.messages = m
+}
 
 // maxSnapshotRetries is §6.1's "an evicted snapshot refuses snapshot_gone
 // and session.read retries once from a fresh snapshot" — one retry, so two
@@ -136,6 +164,13 @@ func (p *paneReader) Read(ctx context.Context, access any, sessionID string, wan
 			Classification: classification,
 			ReadBarrier:    snap.ReadBarrier,
 		}
+		p.mu.Lock()
+		messages := p.messages
+		p.mu.Unlock()
+		if messages != nil {
+			read.Pending = messages.Pending(sessionID)
+			read.DeliveryLost = messages.DeliveryLost(sessionID)
+		}
 		if want == nil {
 			return read, nil
 		}
@@ -175,6 +210,23 @@ func (p *paneReader) recordTarget(tokenID string, rec targetRecord) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.records[tokenID] = rec
+}
+
+// AgentFor answers the same enrolment-cache agent name Read classifies
+// sessionID's frame with (design §6.1) — exposed for a caller (Task 10's
+// PaneMessages, choosing between a TargetInput and a TargetWorking target
+// by MenuDisplacesInputBox) that needs to know which agent's rule applies,
+// never a second lookup of "what agent runs here". Empty when this reader
+// has no enrolment cache wired, or the session is not (yet) enrolled.
+func (p *paneReader) AgentFor(sessionID string) string {
+	if p.agents == nil {
+		return ""
+	}
+	o, ok := p.agents.Snapshot(sessionID)
+	if !ok {
+		return ""
+	}
+	return o.Agent
 }
 
 // Record answers a minted target's own bookkeeping (design §6.2): the

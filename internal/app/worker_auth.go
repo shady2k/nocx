@@ -178,6 +178,12 @@ type toolAuthorizer struct {
 	// alongside paneAccess and sessionReads for the identical reason. Nil
 	// until the composition root wires it.
 	sessionKeys any
+	// sessionMessages is session.message's queue-and-deliver path over a
+	// descendant (assistant.PaneMessages, Task 10), handed to every
+	// admitted invocation alongside paneAccess, sessionReads and
+	// sessionKeys for the identical reason. Nil until the composition root
+	// wires it.
+	sessionMessages any
 }
 
 // BindRevoker wires the subtree revocation retire triggers. Called once at
@@ -223,6 +229,17 @@ func (a *toolAuthorizer) BindSessionKeys(k any) {
 		return
 	}
 	a.sessionKeys = k
+}
+
+// BindSessionMessages wires session.message's queue-and-deliver path over a
+// descendant (assistant.PaneMessages, Task 10) — see
+// internal/app/pane_messages.go. m is `any` for the same reason
+// BindSessionReads' r is.
+func (a *toolAuthorizer) BindSessionMessages(m any) {
+	if a == nil {
+		return
+	}
+	a.sessionMessages = m
 }
 
 // BindSessionAdmissions implements toolendpoint.SessionAdmissionBinder.
@@ -538,6 +555,9 @@ func (a *toolAuthorizer) Admit(peer toolendpoint.Peer, publish func(session stri
 	}
 	if a.sessionKeys != nil {
 		invocation.RunContext.SessionKeys = a.sessionKeys
+	}
+	if a.sessionMessages != nil {
+		invocation.RunContext.SessionMessages = a.sessionMessages
 	}
 	if !publish(string(admitted), epoch) {
 		release()

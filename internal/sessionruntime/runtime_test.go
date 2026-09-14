@@ -3,6 +3,7 @@ package sessionruntime
 import (
 	"bytes"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -50,18 +51,28 @@ func admitted(t *testing.T, s *Session, ctrl Control, kind IntentKind, payload [
 	return id
 }
 
-// admittedThenExecuted admits one intent under ctrl and executes it, answering
-// where it got to. The id is checked rather than ignored: Execute answering for
-// a different intent than the one admitted is itself a defect, and a test that
-// dropped the id would hide it.
+// admittedThenExecuted admits one intent under ctrl, commits it and performs
+// the write Commit no longer does (nocx-6q1uh.3): this is the stand-in for
+// the session's I/O owner every test in this file that used to call Execute
+// now goes through, so a schedule written against "admit then execute"
+// keeps its shape without each call site learning the owner's protocol.
+//
+// A write that fails or lands short is reported through
+// [Session.ReportOutcome] exactly as the owner would, so IntentStateFailed
+// is still reachable here the same way Execute used to reach it directly.
 func admittedThenExecuted(t *testing.T, s *Session, ctrl Control, kind IntentKind, payload []byte) (IntentID, IntentState, error) {
 	t.Helper()
 	id := admitted(t, s, ctrl, kind, payload)
-	gotID, state, err := s.Execute()
-	if gotID != id {
-		t.Fatalf("executing the admitted intent answered for id %d, want %d (state %s, err %v)", gotID, id, intentStateName(state), err)
+	encoded, err := s.Commit(Intent{ID: id}, nil)
+	if err != nil {
+		return id, s.IntentState(id), err
 	}
-	return gotID, state, err
+	n, writeErr := s.Terminal().Write(encoded)
+	if writeErr == nil && n != len(encoded) {
+		writeErr = io.ErrShortWrite
+	}
+	s.ReportOutcome(id, writeErr)
+	return id, s.IntentState(id), writeErr
 }
 
 // ---------------------------------------------------------------------------

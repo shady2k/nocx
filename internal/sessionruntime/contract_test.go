@@ -96,6 +96,32 @@ func admitKey(m Runtime, ctrl Control, payload []byte) (IntentID, error) {
 	return id, nil
 }
 
+// commitAndWrite is Execute's replacement in the schedules below
+// (nocx-6q1uh.3): [Runtime.Commit] validates and encodes without writing —
+// this bead's whole point, the runtime must never hold its lock across a PTY
+// write — so a schedule stands in for the session's I/O owner that would
+// otherwise perform it, writing the committed bytes to the terminal the
+// runtime was constructed over. It answers the same three values Execute
+// did, so a schedule written against the old shape needs only its call
+// site's name changed.
+//
+// id is the intent the schedule believes is at the head; passing it lets
+// Commit's own defensive check catch a schedule that has lost track of
+// admission order, the same way a mismatched id from Execute used to be a
+// finding rather than a silent pass. 0 stands for "whatever is at the head",
+// for the schedules that admitted nothing this call and only want the
+// refusal an empty queue or an unknown completeness produces.
+func commitAndWrite(m Runtime, id IntentID) (IntentID, IntentState, error) {
+	encoded, err := m.Commit(Intent{ID: id}, nil)
+	if err != nil {
+		return id, m.IntentState(id), err
+	}
+	if _, werr := m.Terminal().Write(encoded); werr != nil {
+		return id, m.IntentState(id), werr
+	}
+	return id, m.IntentState(id), nil
+}
+
 // lastExecuted is what reached the PTY last, which is the only place a schedule
 // can see the bytes the runtime decided on. It is read from the terminal the
 // runtime was CONSTRUCTED over and not from the runtime: a runtime that kept
@@ -647,7 +673,7 @@ func scheduleTakeoverWithInputQueued(m Runtime) error {
 	}
 	observe(kindIntent, int(IntentStateAdmitted))
 
-	if id, state, execErr := m.Execute(); execErr != nil || id != now || state != IntentStateExecuted {
+	if id, state, execErr := commitAndWrite(m, now); execErr != nil || id != now || state != IntentStateExecuted {
 		return failed("takeover/one-intent-executes",
 			"executing the first admitted intent: id=%d state=%s err=%v", id, intentStateName(state), execErr)
 	}
@@ -676,9 +702,9 @@ func scheduleTakeoverWithInputQueued(m Runtime) error {
 		return failed("takeover/executed-survives-the-handover",
 			"the handover reported an executed intent as %s; bytes on a PTY cannot be recalled", intentStateName(got))
 	}
-	if id, state, err := m.Execute(); !errors.Is(err, ErrNothingAdmitted) {
+	if id, state, err := commitAndWrite(m, 0); !errors.Is(err, ErrNothingAdmitted) {
 		return failed("takeover/queue-is-empty",
-			"Execute after the handover returned id=%d state=%s err=%v, want %v",
+			"Commit after the handover returned id=%d state=%s err=%v, want %v",
 			id, intentStateName(state), err, ErrNothingAdmitted)
 	}
 	terminal, terr := terminalOf(m)
@@ -742,7 +768,7 @@ func scheduleDisconnectAfterAdmission(m Runtime) error {
 		return failed("observer-loss/keeps-admitted-input",
 			"an observer disconnect left an admitted intent %s; losing a watcher is not losing control", intentStateName(got))
 	}
-	if _, state, execErr := m.Execute(); execErr != nil || state != IntentStateExecuted {
+	if _, state, execErr := commitAndWrite(m, id); execErr != nil || state != IntentStateExecuted {
 		return failed("observer-loss/input-still-executes",
 			"executing an intent admitted before the observer left: state=%s err=%v", intentStateName(state), execErr)
 	}
@@ -941,7 +967,7 @@ func scheduleKeyEncodedAgainstModes(m Runtime) error {
 	if err != nil {
 		return err
 	}
-	if id, state, execErr := m.Execute(); execErr != nil || id != up || state != IntentStateExecuted {
+	if id, state, execErr := commitAndWrite(m, up); execErr != nil || id != up || state != IntentStateExecuted {
 		return failed("key/execute", "executing a key intent: id=%d state=%s err=%v", id, intentStateName(state), execErr)
 	}
 	got, err := lastExecuted(m)
@@ -964,7 +990,7 @@ func scheduleKeyEncodedAgainstModes(m Runtime) error {
 	if err != nil {
 		return err
 	}
-	if id, state, execErr := m.Execute(); execErr != nil || id != up || state != IntentStateExecuted {
+	if id, state, execErr := commitAndWrite(m, up); execErr != nil || id != up || state != IntentStateExecuted {
 		return failed("key/execute-again", "executing the second key intent: id=%d state=%s err=%v", id, intentStateName(state), execErr)
 	}
 	got, err = lastExecuted(m)
@@ -1055,7 +1081,7 @@ func schedulePreconditionStaleAtExecution(m Runtime) error {
 	}
 
 	before := fingerprintOf(m)
-	gotID, state, err := m.Execute()
+	gotID, state, err := commitAndWrite(m, id)
 	if !errors.Is(err, ErrPreconditionStale) {
 		return failed("precondition/revalidated-at-execution",
 			"executing against the screen the caller read returned %v, want %v", err, ErrPreconditionStale)
@@ -1136,8 +1162,8 @@ func scheduleRuntimeFailure(m Runtime) error {
 	if _, err := m.Admit(Intent{At: m.Incarnation(), Under: 1, By: person(), Kind: IntentKindKey, Payload: []byte("l")}); !errors.Is(err, ErrUnavailable) {
 		return failed("failure/admit-refused", "Admit on a failed runtime returned %v, want %v", err, ErrUnavailable)
 	}
-	if _, _, err := m.Execute(); !errors.Is(err, ErrUnavailable) {
-		return failed("failure/execute-refused", "Execute on a failed runtime returned %v, want %v", err, ErrUnavailable)
+	if _, _, err := commitAndWrite(m, 0); !errors.Is(err, ErrUnavailable) {
+		return failed("failure/execute-refused", "Commit on a failed runtime returned %v, want %v", err, ErrUnavailable)
 	}
 	if _, err := m.CommitGeometry(Geometry{Cols: 80, Rows: 24}); !errors.Is(err, ErrUnavailable) {
 		return failed("failure/commit-geometry-refused", "CommitGeometry on a failed runtime returned %v, want %v", err, ErrUnavailable)
@@ -1983,10 +2009,10 @@ func invalidEvents() []invalidEvent {
 				}
 				observe(kindCompleteness, int(CompletenessUnknown))
 				before := fingerprintOf(m)
-				id, state, err := m.Execute()
+				id, state, err := commitAndWrite(m, 0)
 				if !errors.Is(err, ErrCompletenessUnknown) {
 					return failed("invalid/unknown-completeness-refuses-the-write",
-						"Execute returned id=%d state=%s err=%v, want %v", id, intentStateName(state), err, ErrCompletenessUnknown)
+						"Commit returned id=%d state=%s err=%v, want %v", id, intentStateName(state), err, ErrCompletenessUnknown)
 				}
 				return mustBeUnchanged(m, before, "invalid/unknown-completeness-changes-nothing")
 			},
@@ -2074,7 +2100,7 @@ func TestUnknownCompletenessRefusalFailsWhenItsRuleIsRemoved(t *testing.T) {
 	if _, err := admitKey(m, ctrl, []byte("l")); err != nil {
 		t.Fatal(err)
 	}
-	if _, state, err := m.Execute(); err != nil || state != IntentStateExecuted {
+	if _, state, err := commitAndWrite(m, 0); err != nil || state != IntentStateExecuted {
 		t.Fatalf("with rule %q removed the write must go through: state=%s err=%v",
 			ruleNames[ruleUnknownCompletenessRefusesWrites], intentStateName(state), err)
 	}

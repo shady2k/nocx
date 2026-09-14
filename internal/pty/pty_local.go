@@ -2,16 +2,19 @@ package pty
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/creack/pty"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/loginshell"
+	"golang.org/x/sys/unix"
 )
 
 type LocalPty struct {
@@ -149,7 +152,7 @@ func NewLocal(logger log.Logger, cfg Config) (*LocalPty, error) {
 	cmd.Env = env
 	cmd.ExtraFiles = cfg.ExtraFiles
 
-	f, err := pty.StartWithSize(cmd, &pty.Winsize{
+	f, err := startWithSize(cmd, &pty.Winsize{
 		Cols: cfg.Cols,
 		Rows: cfg.Rows,
 		X:    cfg.XPixel,
@@ -180,6 +183,170 @@ func NewLocal(logger log.Logger, cfg Config) (*LocalPty, error) {
 	}()
 
 	return lp, nil
+}
+
+// startWithSize is creack/pty's StartWithAttrs, with the ONE difference this
+// bead exists for: the master comes from this package's own openMaster
+// (master_nonblock_linux.go, master_nonblock_darwin.go), non-blocking from
+// the moment it is opened, rather than from creack/pty's Open — which on
+// Darwin never becomes pollable at all and on Linux is reverted to blocking
+// by its own ptsname/unlockpt ioctls (both files' doc comments have the
+// measurement). Everything else here — the slave becomes the child's
+// stdin/stdout/stderr, Setsid and Setctty, the size applied before Start —
+// is what StartWithAttrs already does, over the master this package opened
+// instead of creack/pty's own.
+func startWithSize(cmd *exec.Cmd, ws *pty.Winsize) (master *os.File, err error) {
+	master, slaveName, err := openMaster()
+	if err != nil {
+		return nil, err
+	}
+	closeMaster := true
+	defer func() {
+		if closeMaster {
+			_ = master.Close()
+		}
+	}()
+
+	slave, err := os.OpenFile(slaveName, os.O_RDWR|syscall.O_NOCTTY, 0) //nolint:gosec // slaveName is this package's own openMaster
+	if err != nil {
+		return nil, fmt.Errorf("pty: open the slave %s: %w", slaveName, err)
+	}
+	defer func() { _ = slave.Close() }() // the child has its own copy after Start; the parent needs none.
+
+	if ws != nil {
+		if err := pty.Setsize(master, ws); err != nil {
+			return nil, fmt.Errorf("pty: set the initial size: %w", err)
+		}
+	}
+
+	if cmd.Stdin == nil {
+		cmd.Stdin = slave
+	}
+	if cmd.Stdout == nil {
+		cmd.Stdout = slave
+	}
+	if cmd.Stderr == nil {
+		cmd.Stderr = slave
+	}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setsid = true
+	cmd.SysProcAttr.Setctty = true
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("pty: start the shell: %w", err)
+	}
+	closeMaster = false
+	return master, nil
+}
+
+// RawReadUntilAgain reads everything currently available off the master,
+// through the runtime poller rather than a blocking Read: it issues raw,
+// non-blocking read(2) calls over SyscallConn().Read, handing each one's
+// bytes to deliver as they arrive, until read(2) answers EAGAIN — never
+// until a deadline expires, because an expired deadline is a timeout
+// answered before read(2) is ever issued and would report "nothing more to
+// read right now" when the true answer is "the poller never got to ask".
+//
+// It is this method that makes the owner's drain step (spec §5.3) a single,
+// bounded call: everything readable at the moment of the call is delivered
+// before it returns, and a second call on an idle fd returns (false, nil)
+// at once, having issued exactly one read(2) that answered EAGAIN.
+//
+// deliver is called with a slice into buf and must not retain it past the
+// call: buf is reused for the next chunk read within the same call.
+func (lp *LocalPty) RawReadUntilAgain(buf []byte, deliver func([]byte)) (eof bool, err error) {
+	rc, scErr := lp.file.SyscallConn()
+	if scErr != nil {
+		return false, scErr
+	}
+	var readErr error
+	ctlErr := rc.Read(func(fd uintptr) bool {
+		for {
+			n, e := unix.Read(int(fd), buf)
+			switch {
+			case e == nil && n > 0:
+				deliver(buf[:n])
+				continue
+			case e == nil && n == 0:
+				// The master's read side reached EOF: the slave has no more
+				// writers. Report it and stop — there is nothing further to
+				// drain and nothing further to wait for.
+				eof = true
+				return true
+			case errors.Is(e, unix.EINTR):
+				continue
+			case errors.Is(e, unix.EAGAIN):
+				// Everything currently available has been delivered. This is
+				// the ordinary, successful end of a drain — not an error.
+				return true
+			default:
+				readErr = e
+				return true
+			}
+		}
+	})
+	if ctlErr != nil {
+		return eof, ctlErr
+	}
+	return eof, readErr
+}
+
+// WaitReadable blocks until the master is readable, cancellable by ctx, and
+// reads NOTHING itself: it is the readiness half spec §5.2 splits from the
+// reading half, so that only the owner's own goroutine ever issues a
+// read(2) against this fd (RawReadUntilAgain, above) and no byte is ever
+// consumed by the goroutine that merely noticed readiness.
+//
+// The mechanism is SyscallConn().Read's own contract: the callback returning
+// false (without touching the fd) tells the runtime poller "not satisfied
+// yet — wait for a read-ready event and call me again", and this returns
+// the moment that second call arrives, having issued no read(2) at all.
+func (lp *LocalPty) WaitReadable(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	rc, scErr := lp.file.SyscallConn()
+	if scErr != nil {
+		return scErr
+	}
+	// Cancellation reaches a wait already parked in the runtime poller the
+	// same way InterruptWrite reaches a blocked write: a deadline in the
+	// past on the pollable file, set from outside this goroutine. It is
+	// always cleared afterward, on every path, so a later wait or read is
+	// never affected by a cancellation this one answered.
+	stop := context.AfterFunc(ctx, func() {
+		_ = lp.file.SetReadDeadline(time.Unix(1, 0))
+	})
+	defer stop()
+	defer func() { _ = lp.file.SetReadDeadline(time.Time{}) }()
+
+	first := true
+	waitErr := rc.Read(func(uintptr) bool {
+		if first {
+			first = false
+			return false
+		}
+		return true
+	})
+	if waitErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return waitErr
+	}
+	return nil
+}
+
+// InterruptWrite unblocks a Write in flight on this master, the way spec
+// §5.7 asks: a write deadline set in the past on the pollable file. It never
+// touches the read side, so a drain already in progress (RawReadUntilAgain)
+// is unaffected, and it is always safe to call more than once — the second
+// call finds nothing blocked and simply re-arms an already-expired
+// deadline.
+func (lp *LocalPty) InterruptWrite() error {
+	return lp.file.SetWriteDeadline(time.Unix(1, 0))
 }
 
 // Shell is the binary this pty actually started, as exec resolved it: an

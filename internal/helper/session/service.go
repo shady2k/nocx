@@ -796,14 +796,12 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 	lg = lg.With("session", proto.SessionHex(raw))
 
 	proc, err := s.sshSpawner.SpawnSSH(ctx, SSHSpawnRequest{
-		SessionID:           proto.SessionHex(raw),
-		Destination:         p.Destination,
-		AcceptOnTrust:       p.AcceptOnTrust,
-		HostKeyFingerprint:  p.HostKeyFingerprint,
-		Shell:               p.Shell,
-		Mode:                p.DesiredMode,
-		AgentHelperPath:     p.AgentHelperPath,
-		AgentToolSocketPath: p.AgentToolSocketPath,
+		SessionID:          proto.SessionHex(raw),
+		Destination:        p.Destination,
+		AcceptOnTrust:      p.AcceptOnTrust,
+		HostKeyFingerprint: p.HostKeyFingerprint,
+		Shell:              p.Shell,
+		Mode:               p.DesiredMode,
 		// The pane's bearer, on the same terms as the endpoint above: a fact
 		// about THIS request (nocx-50w7p.16).
 		AgentToolToken: p.AgentToolToken,
@@ -889,14 +887,10 @@ func validateSSHSpawn(p proto.SSHSpawnParams) error {
 	if p.AgentToolsAbsent != "" && !shellintegration.AgentToolsAbsent(p.AgentToolsAbsent).Known() {
 		return fmt.Errorf("%w: agent tools absent reason %q is not one this helper knows", ErrBadSSHParams, p.AgentToolsAbsent)
 	}
-	// AND IT MAY NOT CONTRADICT A PATH. A reason says this pane has no tool
-	// surface; a far socket path says it has one. Refused in both directions
-	// rather than resolved in favour of one, because a launch rendering both is
-	// a shell told there is a socket it may not use.
-	if p.AgentToolsAbsent != "" && p.AgentToolSocketPath != "" {
-		return fmt.Errorf("%w: agent tools are absent (%s) and a tool socket was named (%s)",
-			ErrBadSSHParams, p.AgentToolsAbsent, p.AgentToolSocketPath)
-	}
+	// AND IT MAY NOT CONTRADICT A PATH — there is no path left to contradict,
+	// since the ssh route's far-host paths were deleted with the case they
+	// served (nocx-e2bws): a pane this machine's helper carries on a host with
+	// no helper of its own has no tool surface, and says so.
 	return nil
 }
 

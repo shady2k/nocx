@@ -55,14 +55,6 @@
       "type": "string",
       "enum": ["auto", "raw", "script", "helper"]
     },
-    "agentHelperPath": {
-      "description": "The FAR host's path to the installed helper generation — the executable a launched shell execs to reach this generation's MCP adapter. It is the COORDINATOR's value: it owns the deploy, so it is the party that knows where the generation landed. A path, never a command. Empty renders no NOCX_AGENT_HELPER_PATH at all, which is the soft degrade the local path already states (the shell's own refusal text is what a person sees, rather than a pane pointed at a path nothing answers).",
-      "type": "string"
-    },
-    "agentToolSocketPath": {
-      "description": "The socket a pane's tool bridge connects to, AS THE FAR HOST SEES IT: reachable only through a forward on the helper's connection, which is another bead's op (nocx-50w7p.8). Empty renders no NOCX_TOOL_SOCKET, which is the honest state until that forward exists — a path this helper's own machine answers is not reachable from the far side, and naming it there would point a pane at a socket nothing can open.",
-      "type": "string"
-    },
     "agentToolEndpoint": {
       "description": "The LOCAL socket each connection arriving on the far-side tool socket is forwarded into: this pane's own coordinator's tool endpoint on THIS machine, and the second half of `agentToolSocketPath`'s pair — one names a path on the far host, this names an endpoint on the machine the helper runs on. It travels per spawn for the same reason `session.spawn.params`'s field of that name does (nocx-50w7p.18): a helper daemon serves several coordinators of one account (D12), so an endpoint fixed at the daemon's own start would send a pane's far tool connections to a coordinator that never asked for that pane. A far socket path with no endpoint here is refused by name before anything is dialed.",
       "type": "string"

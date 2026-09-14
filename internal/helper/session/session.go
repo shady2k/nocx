@@ -131,10 +131,6 @@ type SSHSpawnRequest struct {
 	// only from a tagged helper and a second copy of the predicate here would
 	// be a second answer to one question (AD-8).
 	Mode proto.SSHMode
-	// AgentHelperPath and AgentToolSocketPath are the far host's two paths to
-	// nocx's tool surface, or empty — see proto.SSHSpawnParams.
-	AgentHelperPath     string
-	AgentToolSocketPath string
 	// AgentToolEndpoint is THIS request's own tool endpoint on the helper's
 	// machine: what every connection arriving on the far-side tool socket is
 	// forwarded into. It is a second value beside AgentToolSocketPath because

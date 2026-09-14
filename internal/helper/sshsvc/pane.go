@@ -72,15 +72,6 @@ import (
 const lifecycleBindHost = "127.0.0.1"
 
 var (
-	// errNoToolSocket is what a request naming a far-host tool socket path is
-	// refused with when the caller that asked for the pane named no endpoint
-	// on this machine for it: the path would be a path nothing answers — the
-	// silent degrade a launch must never carry.
-	//
-	// It is a NAMED refusal rather than a log line because the alternative is
-	// a pane whose agent finds a socket that accepts nothing, which reads as a
-	// broken agent rather than as a missing endpoint.
-	errNoToolSocket = errors.New("this pane's coordinator declared no tool endpoint, so a far-side tool socket has nothing to forward to")
 	// errPaneToolEndpointUnreachable is what a far-side tool connection is
 	// refused with when the pane's OWN coordinator endpoint cannot be reached
 	// — the coordinator has exited, or its socket is gone.
@@ -98,12 +89,6 @@ var (
 	// that believes it is getting something (channel.go's own rule for a
 	// target on an sftp open), not a no-op.
 	errNoPaneListeners = errors.New("no far-side listener was asked for")
-	// errNoPaneSession is a tool socket asked for with no session for its
-	// connections to name. It is named because the alternative is a pane whose
-	// every far agent is refused with a sentence about a mismatch, which sends
-	// whoever reads it looking at the endpoint rather than at the request that
-	// left it out.
-	errNoPaneSession = errors.New("a far-side tool socket was asked for with no session to name, so its connections could identify no pane")
 	// errBadPaneSpec is a pane's listeners asked for with an incomplete
 	// destination. It is refused before anything is dialed, for the reason
 	// validateShellSpec's errors are.
@@ -127,31 +112,6 @@ type PaneSpec struct {
 	// Lifecycle asks for the loopback listener the integrated shell dials
 	// back to.
 	Lifecycle bool
-	// ToolSocketPath is the FAR-HOST path an agent process there dials to
-	// reach the coordinator's tool endpoint. Empty means this pane offers
-	// none.
-	ToolSocketPath string
-	// Session is the coordinator's session id for the pane these listeners
-	// belong to, and it is what every connection arriving on the tool socket
-	// ANNOUNCES before its own bytes (nocx-50w7p.16). The helper is the only
-	// party that knows it: its listener is per pane, so the pane a connection
-	// belongs to is not a claim anybody makes — it is the listener the helper
-	// accepted on, reported to the coordinator that asked for it.
-	//
-	// Required exactly when ToolSocketPath is set: a tool socket whose
-	// connections name no session is a socket the coordinator can only refuse
-	// (validatePaneSpec says so by name, before anything is dialed).
-	Session string
-	// ToolSocketTarget is the LOCAL socket each accepted connection is piped
-	// into: the tool endpoint of the coordinator that ASKED FOR THIS PANE, on
-	// the machine this helper runs on. It is the request's value and never the
-	// daemon's (nocx-50w7p.18) — one account's daemon serves several
-	// coordinators (D12), so a target held at the daemon's start would forward
-	// a pane's far agent to a coordinator that never asked for that pane.
-	// Empty is a real state — the caller runs no endpoint — and a request
-	// naming a far path is then refused by name (errNoToolSocket) rather than
-	// half-answered.
-	ToolSocketTarget string
 }
 
 // PaneListeners is one pane's far-side listeners and the lifecycle carrier
@@ -172,15 +132,6 @@ type PaneListeners struct {
 	// bridged to the connection the shell dials.
 	carrier *os.File
 	sink    *os.File
-
-	// tool is this pane's far-side tool socket: the listener the far sshd
-	// bound and the streams on it, each piped into the coordinator's own
-	// endpoint with the pane record written first. Nil when this pane offers
-	// none. It is the SAME type the `ssh.tool-socket` op serves
-	// (toolsocket.go), because a pane's socket and a far-hosted pane's socket
-	// are one mechanism with two callers — and this half is the one that has
-	// always existed.
-	tool *toolSocket
 
 	mu       sync.Mutex
 	claimed  bool
@@ -224,16 +175,9 @@ func (s *Service) OpenPaneListeners(ctx context.Context, spec PaneSpec) (*PaneLi
 			return nil, err
 		}
 	}
-	if spec.ToolSocketPath != "" {
-		if err := p.openTool(pool, spec); err != nil {
-			_ = p.Close()
-			return nil, err
-		}
-	}
 	s.log.Info("ssh: pane listeners opened",
 		"host", spec.Destination.Host, "port", spec.Destination.Port,
-		"lifecycle", spec.Lifecycle, "lifecycle_port", p.port,
-		"tool_socket", spec.ToolSocketPath)
+		"lifecycle", spec.Lifecycle, "lifecycle_port", p.port)
 	return p, nil
 }
 
@@ -261,29 +205,6 @@ func (p *PaneListeners) openLifecycle(pool *ssh.PooledConn) error {
 	}
 	p.lifecycleLn, p.port, p.carrier, p.sink = ln, port, carrier, sink
 	go p.acceptLifecycle()
-	return nil
-}
-
-// openTool asks the far side for a listener on the caller's path and starts
-// serving what arrives on it: every connection is piped into the coordinator's
-// endpoint with this pane's record written first.
-//
-// The socket is a `toolSocket` (toolsocket.go), which is the same value the
-// `ssh.tool-socket` op builds for a pane whose shell runs on a far host. The
-// POOL IS NOT handed to it, and that is the one difference between the two
-// callers: this pane's pooled reference covers its lifecycle listener too, so
-// the pane owns the reference and releases it last, on its own Close.
-func (p *PaneListeners) openTool(pool *ssh.PooledConn, spec PaneSpec) error {
-	ln, err := sshdial.ListenRemoteUnix(pool.Client(), spec.ToolSocketPath)
-	if err != nil {
-		// Refused rather than degraded, for the same reason the lifecycle is:
-		// the path travels into the far shell's environment, and a shell told
-		// about a socket the server refused to bind is a shell whose agent
-		// fails for a reason that is not about the agent.
-		return fmt.Errorf("the far side refused a tool socket at %s: %w", spec.ToolSocketPath, classifyChannelError(err))
-	}
-	p.tool = newToolSocket(p.log, ln, nil, spec.ToolSocketPath, spec.ToolSocketTarget, spec.Session)
-	go p.tool.accept()
 	return nil
 }
 
@@ -364,36 +285,11 @@ func (p *PaneListeners) Lifecycle() io.ReadWriteCloser {
 // for.
 func (p *PaneListeners) LifecyclePort() int { return p.port }
 
-// ToolSocketPath is the far-host path the shell's environment names, empty
-// when this pane offers none.
-func (p *PaneListeners) ToolSocketPath() string {
-	if p.tool == nil {
-		return ""
-	}
-	return p.tool.Path()
-}
-
 // Close cancels the far-side listeners and releases this service's pooled
 // reference. It is idempotent and safe to call from the session's own
 // teardown, which is where it is called from.
 func (p *PaneListeners) Close() error {
 	p.closeOne.Do(func() {
-		// THE TOOL SOCKET IS ENDED WITH THE PANE, and it ends everything it is
-		// carrying too: closing the listener stops new connections, while the
-		// ones already accepted are connections a far agent holds into a
-		// coordinator that has forgotten this pane. The closing event is the
-		// pane's — its session ended, its listener was cancelled, the daemon is
-		// going away — and a forward outliving it is a session's authority
-		// outliving the session (ADR-0058), one layer below the endpoint where
-		// the same rule is already enforced.
-		//
-		// Its registration and its close are one decision (toolSocket's own
-		// lock), so a connection arriving during this Close is either already
-		// in its map — and closed there — or sees closed and is dropped by the
-		// accept loop.
-		if p.tool != nil {
-			_ = p.tool.Close()
-		}
 		if p.lifecycleLn != nil {
 			_ = p.lifecycleLn.Close()
 		}
@@ -403,10 +299,8 @@ func (p *PaneListeners) Close() error {
 		if p.sink != nil {
 			_ = p.sink.Close()
 		}
-		// THE POOL IS LAST, and it is the pane's rather than the tool
-		// socket's: one reference covers both listeners on this connection
-		// (they were opened on the same pooled client), so it is released once
-		// and only after everything riding it has been closed.
+		// THE POOL IS LAST: it is the pane's own reference, and it is released
+		// once, after everything riding it has been closed.
 		if p.pool != nil {
 			_ = p.pool.Close()
 		}
@@ -431,18 +325,11 @@ func listenerPort(ln net.Listener) (int, error) {
 // validatePaneSpec refuses a listener set this helper will not create, before
 // anything is dialed.
 func validatePaneSpec(spec PaneSpec) error {
-	if !spec.Lifecycle && spec.ToolSocketPath == "" {
+	if !spec.Lifecycle {
+		// The only listener a PANE asks for now is the lifecycle channel: its
+		// tool socket is the `ssh.tool-socket` op's (nocx-e2bws), which serves
+		// a pane whose shell runs on a host whose own helper hosts it.
 		return errNoPaneListeners
-	}
-	if spec.ToolSocketPath != "" && spec.ToolSocketTarget == "" {
-		return fmt.Errorf("%w: %s", errNoToolSocket, spec.ToolSocketPath)
-	}
-	if spec.ToolSocketPath != "" && spec.Session == "" {
-		// A tool socket whose connections name no pane is a socket the
-		// coordinator can only refuse, so the pane is refused instead — before
-		// a connection is dialed, which is the rule every refusal in this
-		// function follows.
-		return fmt.Errorf("%w: %s", errNoPaneSession, spec.ToolSocketPath)
 	}
 	switch {
 	case spec.Destination.Host == "":

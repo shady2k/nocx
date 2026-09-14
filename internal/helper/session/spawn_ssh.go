@@ -154,10 +154,8 @@ func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process
 		pane = listeners
 
 		opts := shellintegration.LaunchOptions{
-			SessionID:           req.SessionID,
-			Enhanced:            true,
-			AgentHelperPath:     req.AgentHelperPath,
-			AgentToolSocketPath: req.AgentToolSocketPath,
+			SessionID: req.SessionID,
+			Enhanced:  true,
 			// WHY THERE IS NO TOOL SURFACE, when the caller said (nocx-e2bws):
 			// a code, rendered into the shell's environment so the stage can
 			// name the reason to a person rather than reporting a path no
@@ -296,21 +294,8 @@ func (p *sshSpawner) openPaneListeners(ctx context.Context, req SSHSpawnRequest)
 		AcceptOnTrust:      req.AcceptOnTrust,
 		HostKeyFingerprint: req.HostKeyFingerprint,
 		Lifecycle:          req.Lifecycle != nil,
-		ToolSocketPath:     req.AgentToolSocketPath,
-		// The session this pane IS. Every connection on the far-side tool
-		// socket announces it before its own bytes, which is how the
-		// coordinator learns which pane a far agent arrived on
-		// (nocx-50w7p.16) — the helper's listener is per pane, so this is a
-		// fact of the acceptance rather than a claim the far side makes.
-		Session: req.SessionID,
-		// The REQUEST's endpoint, and never a value this daemon holds: the
-		// far side's bytes are FOR the coordinator that opened this pane, so
-		// the target is that coordinator's own socket on this machine
-		// (nocx-50w7p.18). Empty is refused by name in validatePaneSpec,
-		// before anything is dialed.
-		ToolSocketTarget: req.AgentToolEndpoint,
 	}
-	if !spec.Lifecycle && spec.ToolSocketPath == "" {
+	if !spec.Lifecycle {
 		return nil, nil
 	}
 	return p.opener.OpenPaneListeners(ctx, spec)

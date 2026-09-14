@@ -441,20 +441,6 @@ type SSHSpawnParams struct {
 	// profile.DesiredMode's own gate to it: `raw` opens a plain login shell
 	// and integrates nothing, and an unrecognised value fails closed.
 	DesiredMode SSHMode `json:"desiredMode"`
-	// AgentHelperPath and AgentToolSocketPath are the two FAR-HOST paths a
-	// launched shell needs to reach nocx's tool surface (nocx-e2bws): the
-	// installed helper generation's executable, and the socket the pane's MCP
-	// bridge connects to.
-	//
-	// They are the COORDINATOR's values and they are paths, never commands:
-	// the coordinator owns the deploy, so it is the party that knows where the
-	// generation landed, and the socket is reachable only through a forward it
-	// arranges. Empty renders no variable at all, which is the soft degrade
-	// the local path already states (nocx-2tesu): the shell's own refusal text
-	// is what a user sees, rather than a pane pointed at a path nothing
-	// answers.
-	AgentHelperPath     string `json:"agentHelperPath,omitempty"`
-	AgentToolSocketPath string `json:"agentToolSocketPath,omitempty"`
 	// AgentToolEndpoint is the LOCAL socket every connection arriving on the
 	// far-side tool socket is piped into: this pane's own coordinator's tool
 	// endpoint on THIS machine, which is the one that asked for the pane.

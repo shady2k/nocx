@@ -40,19 +40,17 @@ func TestASpawnSSHPaneOnAHostWithNoHelperNamesNoToolsAndSaysWhy(t *testing.T) {
 	}
 	req := asks[0]
 
-	if req.AgentToolSocketPath != "" {
-		t.Fatalf("the spawn named the far socket path %q, and no host without a helper can serve it",
-			req.AgentToolSocketPath)
-	}
-	if req.AgentHelperPath != "" {
-		t.Fatalf("the spawn named the far bridge binary %q, and nothing puts one on a host with no helper",
-			req.AgentHelperPath)
-	}
+	// NEITHER FAR PATH IS ASSERTED HERE ANY MORE, and that is the stronger
+	// statement: the ssh spawn shape has no field to name one with
+	// (nocx-e2bws deleted both), so "carries neither" is structural rather than
+	// something a request could get wrong. What the launch DOES say is read off
+	// the delivered stage-1 frame in
+	// internal/helper/session's TestAFarShellWithNoHelperIsToldWhyItHasNoTools.
 	if want := string(shellintegration.AgentToolsNoHelperOnHost); req.AgentToolsAbsent != want {
 		t.Fatalf("the spawn named no reason for the absence (%q), so the far shell reports a path it was never given; want %q",
 			req.AgentToolsAbsent, want)
 	}
 	if req.AgentToolEndpoint == "" {
-		t.Fatal("the spawn named no tool endpoint: this backend runs one, and the absence tested above is about the FAR host")
+		t.Fatal("the spawn named no tool endpoint: this backend runs one, and the absence is about the FAR host rather than about a coordinator with no tool surface")
 	}
 }

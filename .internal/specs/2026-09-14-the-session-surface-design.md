@@ -5,8 +5,8 @@
   §7 (items 1–11). Every item is answered in §12.
 - **Stands on:** epic `nocx-ygxjv` (closed 2026-09-14): one emulator, in the helper's session
   runtime, beside the PTY (ADR-0066).
-- **Revision 4** (2026-09-14): answers codex round 3 on revision 3 (`63203c36`). Revision 1
-  (`357f62e3`), revision 2 (`0e11c56f`) and revision 3 were reviewed by
+- **Revision 5** (2026-09-14): answers codex round 4 on revision 4 (`d8be1b3d`). Revisions 1
+  (`357f62e3`), 2 (`0e11c56f`), 3 (`63203c36`) and 4 were reviewed by
   codex; dispositions in §15. After the second review the owner split the epic (decision 9): this
   document is the **shared core plus the orchestrating caller**. The built-in assistant acting on
   arbitrary panes is the sibling epic `nocx-3g262` (§14), which inherits decisions 1–3, 6 and 8 and
@@ -62,7 +62,8 @@ unknowable always asks. Kept here:
 - `session.read { sessionId, target?: kind }` — a descendant pane's screen, its classification,
   pending messages, and on request a target.
 - `session.keys { sessionId, target, key | text | option }` — one step under a target.
-- `session.message { sessionId, text, when: free|now, id, target? }` — a message to the agent.
+- `session.message { sessionId, text, when: free|now, id, target? }` — a message to the agent;
+  `session.message { sessionId, cancel: id }` — the disjoint cancel form (§8.6).
 
 `workers.screen` and `workers.answer` are removed (§11). Both callers reach the three tools through
 `DescendantPaneAccess`: the coordinator through the tool endpoint (its dispatcher allowlist,
@@ -178,7 +179,10 @@ exit from output EOF because collapsing them lost the final output
 
 - **request termination** (signal the process group / close the SSH session's remote side);
 - **interrupt the writer** (local: `SetWriteDeadline` in the past on the pollable file, which
-  unblocks a pending write; SSH: close the channel's write half);
+  unblocks a pending write; SSH: **there is no per-channel interrupt** — `CloseWrite` only sends EOF
+  and a write blocked in `remoteWin.reserve` stays blocked until the peer closes the channel or the
+  pooled mux fails, `golang.org/x/crypto/ssh/channel.go:247-269, 585-600`. So the SSH writer is
+  **detached**, below);
 - **close the readable side** (local PTY master / SSH channel).
 
 **Process exit or graceful stop:** stop admission (`closing`) → request termination → interrupt the
@@ -190,9 +194,21 @@ reader and writer goroutines → close the readable side → close runtime and s
 deadline the readable side is closed and the session reports `tailLost: true` — the design does not
 promise a drain that cannot occur.
 
+**A writer that cannot be interrupted is detached, not joined.** For an SSH channel the owner sends
+channel close (not mux close — sibling channels share the pooled connection), waits a join deadline,
+and on expiry **detaches** the writer: its completion channel is buffered (capacity 1) so its
+eventual send never blocks, it holds no lock and never touches the runtime after the handoff, and
+its in-flight item resolves `delivery_unknown`. The session then closes runtime and screen and
+reports `writerDetached: true`. The detached goroutine ends when the peer closes the channel or the
+pooled connection ends; the pool counts detached writers per connection and closes an idle
+connection whose only remaining users are detached writers. Since SSH-channel sessions take no
+intents (§5.2), a detached writer can only have been carrying client input or a reply.
+
 Channels are closed only by their sending side. Tests: exit with unread tail bytes (tail ingested);
 forced stop with a program that never closes its output (`tailLost`); shutdown with a local write
-blocked and with an SSH write blocked (writer interrupted, joined).
+blocked (writer interrupted, joined) and with an SSH write blocked by a peer holding its window at
+zero (writer detached, session closed within the join deadline, sibling channel on the same
+connection unaffected).
 
 ### 5.8 Liveness test (replaces `nocx-6q1uh.1`'s assertion)
 
@@ -224,10 +240,17 @@ Token: `{ tokenId, sessionId, incarnation, buffer, geometry, rows, digest, minte
 HMAC-SHA256 under a key the helper draws per session incarnation and never exports; lifetime 60 s.
 
 **Bounded, and one-shot.** Minting **reserves a record slot** for the token; a session holds at
-most 64 live tokens (unexpired, minted or consumed). When all slots are held, `session.target` is
-refused `capacity` before a token exists — never by evicting a live replay barrier. A slot is
-released only when its token has expired **and** its result has been read or has aged 5 minutes;
-result records are capped at 4 KiB each.
+most 256 slots. When all slots are held, `session.target` is refused `capacity` before a token
+exists — never by evicting a live replay barrier. A slot is released only when **both** its token
+has expired **and** 5 minutes have passed since the token reached a terminal state (or since it
+expired unused). Retention never depends on a result having been read — the helper cannot observe
+receipt. After release, `session.intent.status` answers `unknown`, and a coordinator holding an
+`indeterminate` intent reports it `indeterminate` (never `cancelled`, never `executed`).
+
+**The stored result is compact and bounded:** `{ state, bytesWritten, fenceAfter, refusal.cause }`
+— at most 128 bytes, never `regionNow`. `regionNow` (bounded to 16 KiB of normalised text with
+`regionTruncated: true` beyond it) is returned only on the response that produced the result; a
+replay or `status` returns the compact record with `regionOmitted: true`, and the caller re-reads.
 
 At the commit point the owner atomically moves `tokenId` from _unused_ to _consumed_ and binds the
 **canonical intent** (`kind`, `payload`, `accessEpoch`). A second `session.intent` with the same
@@ -373,10 +396,17 @@ and runs the delivery within the call.
 
 ### 8.3 Outcomes and guarantee
 
-`refused` · `failed_partial` / `delivery_unknown` (paste incomplete, `bytesWritten`) · `partial`
-(paste written, echo not confirmed, Enter not sent, box contents reported) · `written` (Enter
-written, submission not confirmed) · `submitted` · `cancelled`. **At-most-once submission** per
-idempotency key; not an acceptance receipt.
+A message is always in exactly one **phase** from a closed set:
+
+- in flight: `queued` · `pasting` (paste step claimed) · `awaiting_echo` · `entering` (Enter step
+  claimed) · `awaiting_submission`;
+- terminal: `refused` (nothing written) · `failed_partial` / `delivery_unknown` (paste incomplete,
+  `bytesWritten`) · `partial` (paste written, echo not confirmed, Enter not sent, box contents
+  reported) · `written` (Enter written, submission not confirmed) · `submitted` · `cancelled` ·
+  `indeterminate` (a step's helper outcome could not be learned, §7.2).
+
+`session.read`'s `pendingMessages` and every `session.message` response carry the phase.
+**At-most-once submission** per idempotency key; not an acceptance receipt.
 
 ### 8.4 Idempotency
 
@@ -385,7 +415,10 @@ One typed key, every part server-derived except `id`:
 ```
 MessageKey {
   caller:      endpoint | kernel
-  controller:  { sessionId, liveness: Liveness }   // the bound session's own incarnation
+  controller:  { sessionId, identity: session.Identity }  // the bound session's own identity
+                                                          // (internal/session/session.go:60-75);
+                                                          // an admitted coordinator and a kernel
+                                                          // run's session both have one
   authority:   endpoint → the admission epoch the connection was admitted under
                           (internal/toolendpoint/authorizer.go:47-62);
                kernel   → the run id
@@ -421,10 +454,12 @@ incarnation ends.
 - **caller disconnect** does not cancel: a delivery belongs to the pane's queue;
 - **authority revoked** at any phase: no further step; if the paste executed, state `partial` with
   box contents, kept until the incarnation ends; nocx never erases the box;
-- **cancel** linearises on the queue claim (§8.5): a cancel that takes the queue mutex before the
-  paste step is claimed wins → `cancelled`, and the step is never claimed; once the paste step is
-  claimed, cancel answers `too_late` with the recorded state (which may become `executed`). A cancel
-  never reports `cancelled` for a message whose paste can still be written;
+- **cancel** is `session.message { sessionId, cancel: id }`, resolved to the full server-derived
+  `MessageKey` in namespace `caller`. It linearises on the queue claim (§8.5): under the queue mutex,
+  a message in phase `queued` becomes `cancelled` and the response is `{ cancelled: true, phase:
+"cancelled" }`; any later phase → `{ cancelled: false, reason: "too_late", phase }`; no such key →
+  `{ cancelled: false, reason: "unknown" }`. A cancel never reports `cancelled` for a message whose
+  paste can still be written. Namespace `nocx` (the owed task) is not cancellable by a caller;
 - **coordinator restart:** the queue is in memory; a read afterwards reports
   `deliveryStateLost: { since }`, no per-message outcome.
 
@@ -597,3 +632,18 @@ not lost:
 | 7   | No source of the access epoch for an intent                     | Accepted; epoch in every snapshot, fresh snapshot after a bump, §6.1, §7.2                                   |
 | 8   | Post-call generation check cannot enforce cancel                | Accepted; cancel linearises on the queue claim, `too_late` after it, §8.5–8.6                                |
 | 9   | Idempotency key parts ambiguous; `Delegation.Epoch` mislabelled | Accepted; typed `MessageKey` and canonical payload v1, §8.4; defect filed `nocx-bm99e`                       |
+
+### Round 4 (on `d8be1b3d`)
+
+| #   | Finding                                               | Disposition                                                                                                                                                    |
+| --- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `CloseWrite` does not interrupt a blocked SSH write   | Accepted; channel close, join deadline, then a detached writer with a non-blocking completion; the pool reaps a connection held only by detached writers, §5.7 |
+| 2   | "Result read" is not observable                       | Accepted; retention by time after terminal state and token expiry only, §6.2                                                                                   |
+| 3   | 4 KiB cap vs unbounded `regionNow`                    | Accepted; compact stored result, `regionNow` only on the producing response (bounded, truncation flagged), §6.2                                                |
+| 4   | Controller `Liveness` not available for a coordinator | Accepted; `session.Identity` of the bound session, §8.4                                                                                                        |
+| 5   | Cancel has no operation or response                   | Accepted; disjoint cancel form of `session.message`, closed phase set, §4.1, §8.3, §8.6                                                                        |
+
+Clock note from round 4, carried into the plan: `commitBy` is an integer nanosecond reading from
+`unix.ClockGettime(CLOCK_MONOTONIC)` on Linux and `CLOCK_MONOTONIC_RAW` (the `mach_continuous_time`
+domain) on Darwin, behind a build-tagged reader — never a `time.Time`, wall time, or Go's
+process-relative monotonic reading.

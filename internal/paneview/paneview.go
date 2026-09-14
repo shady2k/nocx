@@ -97,6 +97,16 @@ type Frame struct {
 	// A replay leaves it [sessionruntime.CompletenessComplete]: the bytes it
 	// was handed are the whole of what it was asked to show.
 	Completeness sessionruntime.Completeness
+	// InputFence is the highest write the session's I/O owner had completed
+	// when this frame was read (nocx-6q1uh.3, spec §5.4): the owner stamps it
+	// at its own read, never this package, because the fence is the owner's
+	// per-session monotonic sequence and this package holds no writer to
+	// order against. "inputFence ≥ fenceAfter" means the frame was OBSERVED
+	// after a given write completed — never that it was CAUSED by it, since
+	// the program may have produced these bytes before reading that write at
+	// all. The zero value names no fence and is what every frame not read
+	// through an owner (a replay, today's session.screen) carries.
+	InputFence sessionruntime.Fence
 }
 
 // Text renders one row as a string, skipping continuation cells so a

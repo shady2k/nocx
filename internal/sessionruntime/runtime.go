@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/emulator"
@@ -51,6 +50,21 @@ type Config struct {
 	// a caller can hold several sessions to ONE account, which is the
 	// arrangement per-session fairness is checkable against.
 	Allowance *Allowance
+	// Replies is where Ingest, CommitGeometry and repairLocked hand the bytes
+	// they used to write directly (spec §5.5): a reply to the program's own
+	// question queues as an ordinary input item instead of being written
+	// under this package's lock, which is the other half of nocx-6q1uh.1's
+	// fix (Commit is the half at the write end of an intent; this is the
+	// half at Ingest's).
+	//
+	// It may be nil at construction and bound afterward with [Session.SetReplies]:
+	// the production sink — the session's I/O owner — is built OVER the
+	// runtime a moment after the runtime is built (internal/helper/session's
+	// newSessionRuntime has no owner yet to hand here), and nothing calls
+	// Ingest before that binding completes. A runtime asked to deliver a
+	// reply with none bound refuses loudly (see deliverReplyLocked) rather
+	// than discarding the program's answer.
+	Replies ReplySink
 }
 
 // Allowance is the delivery allowance consumer queues draw on, keyed by the
@@ -88,24 +102,42 @@ func (a *Allowance) take(account SessionID) bool {
 // Session is the session runtime: an implementation of [Runtime] over a real
 // terminal and a real emulator (nocx-ygxjv.9).
 //
-// # One mutex, held across the write
+// # One mutex, held across validation and encoding — never across a write
 //
-// Every field is guarded by mu, and a write to the terminal happens under it
-// rather than beside it. That is deliberate and it follows the boundary's
-// existing owner: internal/helper/session.hostSession.write holds its mutex
-// from validating the writer through the return of proc.Write, so a lease
-// transition can never land between the check and the write. [Execute] is the
-// same shape for the same reason — the control epoch it revalidates, the
-// precondition it re-reads and the bytes it writes must be one indivisible
-// step, or a takeover can land between the check and the PTY.
+// Every field is guarded by mu, and mu is held for exactly as long as
+// deciding an intent's fate takes: revalidating its incarnation and control
+// epoch, re-checking its precondition, running the caller's own check and
+// encoding it against the modes the program set ([Commit]). It is NEVER held
+// across the write those bytes then take — this package no longer performs
+// that write at all (nocx-6q1uh.1, nocx-6q1uh.3, spec §5.1).
 //
-// The cost is that a read ([Snapshot], [IntentState]) waits behind a write
-// that is blocked on a program not reading its terminal. That is the honest
-// consequence of the ordering the contract requires, and the alternative —
-// checking under one lock and writing under another — is the defect the
-// contract's Precondition exists to prevent.
+// Before this bead the two were one step: [Session] wrote to the terminal
+// itself, under mu, the same way internal/helper/session.hostSession.write
+// once held ITS mutex from validating the writer through the return of
+// proc.Write. Both were the same defect stated twice — a lease or a control
+// epoch cannot change between a check and a write only if nothing else may
+// run meanwhile, and "nothing else may run" is exactly what stalls a pane
+// whose program floods output and never reads its input: the pump needed
+// this same lock to ingest, and a write blocked on that program held it.
+// [Commit] answers the requirement (one indivisible validate-and-decide step)
+// without answering it with a lock a slow write can hold forever: it returns
+// the encoded bytes and writes nothing, so the one thing left to serialise
+// against a takeover — deciding whose authority the bytes are decided under —
+// finishes before mu is ever released, and the write that follows is the
+// caller's, off this lock entirely.
+//
+// The remaining cost is unchanged in shape and smaller in practice: a read
+// ([Snapshot], [IntentState]) still waits behind whichever of Ingest, Commit
+// or CommitGeometry currently holds mu, but none of those calls blocks on a
+// program's own pace any more — Reply through [ReplySink] and the return from
+// Commit are both bounded, and the actual write is the owner's, elsewhere.
 type Session struct {
 	mu sync.Mutex
+
+	// replies is where a reply to the program's own question goes once it can
+	// no longer be written here (deliverReplyLocked). See [Config.Replies]
+	// and [SetReplies].
+	replies ReplySink
 
 	inc   Incarnation
 	avail Availability
@@ -186,7 +218,23 @@ func New(cfg Config) (*Session, error) {
 		geom:         GeometryCommit{Geometry: cfg.Geometry, Revision: 1},
 		completeness: cfg.Completeness,
 		allowance:    allowance,
+		replies:      cfg.Replies,
 	}, nil
+}
+
+// SetReplies binds the sink Ingest, CommitGeometry and repairLocked hand
+// their replies to, after construction. It exists for exactly one caller's
+// shape: internal/helper/session's spawn builds the runtime before the
+// session's I/O owner exists — the owner is built OVER the runtime a moment
+// later and is itself the sink (spec §5) — so [Config.Replies] cannot name it
+// at [New] time. Nothing may call Ingest, CommitGeometry or a resize between
+// spawn and this binding (the owner starts the read loop that would trigger
+// any of them), so there is no window in which a reply arrives with nothing
+// bound.
+func (s *Session) SetReplies(r ReplySink) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.replies = r
 }
 
 // ---------------------------------------------------------------- the reads
@@ -314,6 +362,13 @@ func (s *Session) intentStateLocked(id IntentID) IntentState {
 func (s *Session) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.snapshotLocked()
+}
+
+// snapshotLocked is Snapshot's body, split out for [Commit]: Commit already
+// holds s.mu when it runs the caller's check, and Snapshot would deadlock
+// taken from inside it.
+func (s *Session) snapshotLocked() Snapshot {
 	return Snapshot{
 		Revision:     s.rev,
 		At:           s.inc,
@@ -414,25 +469,35 @@ func (s *Session) live() error {
 	return nil
 }
 
-// writeLocked is the ONE path to the PTY, and it is why the contract can say
-// replies and user intents share one ordered path: both reach the program
-// through this method, under the same lock, so a reply to the program's own
-// query can never interleave inside an intent's bytes.
+// deliverReplyLocked is Ingest's, CommitGeometry's and repairLocked's ONE
+// path for a reply the runtime itself decided to send: it used to be a
+// direct write here (writeLocked, deleted with Execute — nocx-6q1uh.3), and
+// is now a hand-off to whatever [ReplySink] is bound, so that the SAME
+// ordered queue an intent's bytes go through also carries the program's own
+// answers, and this package never blocks on a program not reading them.
 //
-// A short write is a FAILURE and not a success: the terminal took fewer bytes
-// than it was handed, and nobody may claim the rest reached the program.
-func (s *Session) writeLocked(b []byte) error {
-	if len(b) == 0 {
+// A nil replies is a construction bug this reports rather than silently
+// discarding the program's answer: see [Config.Replies]'s note on when it
+// may legitimately be nil (never after [SetReplies] has run, which the
+// composition root guarantees before the first byte is read).
+//
+// [ErrReplyReserveFull] is recognised by value: the reserve overflowing means
+// the program kept asking questions without reading its input, and this
+// incarnation's completeness becomes [CompletenessLostIngest] and stays so
+// (spec §5.5) — every later intent is then refused [ErrCompletenessUnknown]
+// by [Commit], visibly, rather than the pane silently falling behind.
+func (s *Session) deliverReplyLocked(p []byte) error {
+	if len(p) == 0 {
 		return nil
 	}
-	n, err := s.terminal.Write(b)
-	if err != nil {
-		return err
+	if s.replies == nil {
+		return fmt.Errorf("sessionruntime: a reply arrived with no ReplySink bound")
 	}
-	if n != len(b) {
-		return io.ErrShortWrite
+	err := s.replies.Reply(p)
+	if errors.Is(err, ErrReplyReserveFull) {
+		s.completeness = CompletenessLostIngest
 	}
-	return nil
+	return err
 }
 
 // ----------------------------------------------------------------- control
@@ -518,41 +583,64 @@ func (s *Session) Admit(i Intent) (IntentID, error) {
 	return i.ID, nil
 }
 
-// Execute performs the next admitted intent: it revalidates the incarnation,
-// the control epoch and the precondition, encodes the intent against the modes
-// the PROGRAM set, and writes the bytes.
+// Commit is Execute's replacement (nocx-6q1uh.3, spec §5.1, §5.3): it
+// revalidates the incarnation, the control epoch and the precondition of the
+// intent at the head of the admitted queue, runs check against a fresh
+// snapshot — still under s.mu, which is where a token's digest and an access
+// epoch are judged (internal/helper/session, nocx-6q1uh.4) — encodes the
+// intent against the modes the PROGRAM set, and returns the encoded bytes.
 //
-// Revalidation happens here rather than only at admission, and the re-read of
-// the screen is the one ADR-0064 requires: the identification that authorises
-// a write is the one taken immediately before it.
-func (s *Session) Execute() (IntentID, IntentState, error) {
+// It writes NOTHING. The caller — the session's I/O owner — hands Encoded to
+// its writer and assigns it a Fence; that hand-off, not this call, is the
+// linearisation point spec §5.3 names. Marking the intent Executed here is
+// therefore provisional, on the case that dominates: the write that follows
+// succeeds. A caller for whom it did not calls [Session.ReportOutcome] to
+// correct the record — see that method's doc for why Commit cannot make this
+// distinction itself.
+//
+// i names which intent the caller believes is at the head, and a non-zero
+// i.ID that does not match is refused: the owner's own queue is the one
+// place ordering is decided, so a mismatch here is a defect in the CALLER's
+// bookkeeping, not evidence about the terminal. i.ID == 0 skips the check —
+// the shape a caller with no queue of its own (a schedule constructing a
+// bare Intent) uses when it already knows only one thing can be at the head.
+func (s *Session) Commit(i Intent, check func(Snapshot) error) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.live(); err != nil {
-		return 0, IntentStateNone, err
+		return nil, err
 	}
 	if s.completeness == CompletenessUnknown {
-		return 0, IntentStateNone, ErrCompletenessUnknown
+		return nil, ErrCompletenessUnknown
 	}
 	if len(s.queue) == 0 {
-		return 0, IntentStateNone, ErrNothingAdmitted
+		return nil, ErrNothingAdmitted
 	}
 	id := s.queue[0]
-	s.queue = s.queue[1:]
 	rec := s.intents[id]
+	if i.ID != 0 && i.ID != id {
+		return nil, fmt.Errorf("sessionruntime: commit named intent %d, the head is %d", i.ID, id)
+	}
+	s.queue = s.queue[1:]
 
 	if rec.intent.At != s.inc {
 		rec.state = IntentStateRefused
-		return id, rec.state, ErrStaleIncarnation
+		return nil, ErrStaleIncarnation
 	}
 	if rec.intent.Under != s.control.Epoch {
 		rec.state = IntentStateCancelled
-		return id, rec.state, ErrStaleControlEpoch
+		return nil, ErrStaleControlEpoch
 	}
 	if p := rec.intent.Precondition; p != nil {
 		if p.Digest != sha256.Sum256(s.screenTextLocked()) {
 			rec.state = IntentStateRefused
-			return id, rec.state, ErrPreconditionStale
+			return nil, ErrPreconditionStale
+		}
+	}
+	if check != nil {
+		if err := check(s.snapshotLocked()); err != nil {
+			rec.state = IntentStateRefused
+			return nil, err
 		}
 	}
 
@@ -562,15 +650,37 @@ func (s *Session) Execute() (IntentID, IntentState, error) {
 		// never written, and leaving it queued would write it later against
 		// evidence nobody has re-checked.
 		rec.state = IntentStateRefused
-		return id, rec.state, err
-	}
-	if err := s.writeLocked(encoded); err != nil {
-		rec.state = IntentStateFailed
-		return id, rec.state, err
+		return nil, err
 	}
 	rec.state = IntentStateExecuted
 	s.tick()
-	return id, rec.state, nil
+	return encoded, nil
+}
+
+// ReportOutcome corrects an intent's record with what its write actually did,
+// once the caller has attempted it — [Commit] cannot know this, because it
+// never writes (that is the whole of what moved to the caller). A nil err
+// leaves the record exactly as Commit left it (Executed); any other value
+// means the write did not land whole, and the record becomes
+// [IntentStateFailed] — never Cancelled: a write can fail PART-WAY, and
+// bytes it did take are beyond recall, which is the same distinction Execute
+// used to draw at its own write site.
+//
+// It is a method of the concrete type rather than of [Runtime] because
+// nothing generic over the contract needs it: a schedule that wants to
+// exercise a failing write attaches its own terminal instrument and reads
+// the failure off THAT, the way this package's own tests do (a real runtime
+// has no test double standing between it and the terminal it was
+// constructed over).
+func (s *Session) ReportOutcome(id IntentID, writeErr error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if writeErr == nil {
+		return
+	}
+	if rec, ok := s.intents[id]; ok && rec.state == IntentStateExecuted {
+		rec.state = IntentStateFailed
+	}
 }
 
 // encode is where an intent becomes bytes, against the modes the program set.
@@ -660,7 +770,7 @@ func (s *Session) CommitGeometry(g Geometry) (GeometryCommit, error) {
 		// The terminal already took a size that is not going to be committed.
 		return s.geom, errors.Join(err, s.repairLocked())
 	}
-	if writeErr := s.writeLocked(replies); writeErr != nil {
+	if writeErr := s.deliverReplyLocked(replies); writeErr != nil {
 		// Both sides took it, but the program's own report of the new size
 		// never reached it: the attempt did not complete, so it does not
 		// publish, and the sides go back to the commit that stands.
@@ -688,7 +798,7 @@ func (s *Session) repairLocked() error {
 	}
 	if replies, err := s.emulator.Resize(s.geom.Geometry); err != nil {
 		failed = append(failed, err)
-	} else if writeErr := s.writeLocked(replies); writeErr != nil {
+	} else if writeErr := s.deliverReplyLocked(replies); writeErr != nil {
 		failed = append(failed, writeErr)
 	}
 	return errors.Join(failed...)
@@ -726,13 +836,13 @@ func (s *Session) Ingest(b []byte) error {
 		s.completeness = CompletenessLostIngest
 		return err
 	}
-	// The program's own answer is written on the ordered path. A failure here
-	// is reported, and it does NOT swallow what the stream produced: the bytes
-	// reached the emulator, so the effects the program asked for and the frame
-	// the screen moved to are owed to the consumer either way. An effect
-	// dropped because a reply could not be delivered is a bell that rings
-	// nowhere and is never reported as lost.
-	replyErr := s.writeLocked(replies)
+	// The program's own answer is handed to the reply sink on the ordered
+	// path. A failure here is reported, and it does NOT swallow what the
+	// stream produced: the bytes reached the emulator, so the effects the
+	// program asked for and the frame the screen moved to are owed to the
+	// consumer either way. An effect dropped because a reply could not be
+	// delivered is a bell that rings nowhere and is never reported as lost.
+	replyErr := s.deliverReplyLocked(replies)
 	for _, e := range s.emulator.Effects() {
 		s.nextEffect++
 		effect := Effect{

@@ -101,6 +101,53 @@ const (
 // owner.
 type IntentID uint64
 
+// Fence is a per-session monotonic input sequence, assigned by the session's
+// I/O owner (internal/helper/session) to the write it hands to the writer
+// goroutine — never by this package, which has no writer of its own to order
+// (spec §5.3, §5.4). It travels with a frame as InputFence so a reader can
+// tell "observed after my write" from "caused by my write": bytes read after
+// a completed write were readable only after it, but the program may have
+// produced them before reading that write at all.
+type Fence uint64
+
+// Commitment is the pair the owner assembles at its commit point: the bytes
+// [Session.Commit] validated and encoded, and the Fence the owner assigns the
+// moment it hands them to the writer (the linearisation point, spec §5.3
+// step 3). It is declared here, beside Fence, because both are read back
+// through a frame's InputFence and a caller reasoning about one needs the
+// other; Commit itself returns only the bytes; Encoded is never invalid, but
+// Fence must not be read as "written" if it is not paired with them.
+type Commitment struct {
+	Encoded []byte
+	Fence   Fence
+}
+
+// ReplySink is where a runtime's own answers to the program go, once they can
+// no longer be written under this package's lock (spec §5.5): the session's
+// I/O owner implements it, queuing a reply as an ordinary input item in
+// arrival order beside client frames and intents. Reply must never block —
+// the owner is mid-drain when it calls it, from Ingest, and a Reply that
+// waited on the very write it is queuing behind would be the mutex this
+// bead removes, reintroduced one level up.
+//
+// [ErrReplyReserveFull] is the one error a caller need distinguish: the
+// reserve is bounded (internal/helper/session's replyReserveBytes), and a
+// program that keeps asking questions without reading its input overflows
+// it. The runtime's response is to say so rather than degrade silently — see
+// [Config.Replies] and [Session.SetReplies].
+type ReplySink interface {
+	Reply(p []byte) error
+}
+
+// ErrReplyReserveFull names a reply the owner's bounded reserve could not
+// hold. It is not this package's error to construct — the owner returns it
+// from Reply — but it is named here because Ingest recognises it BY VALUE
+// (errors.Is) to decide the one thing that follows: the incarnation's
+// completeness becomes [CompletenessLostIngest] and stays so, because a
+// program whose own questions go unanswered is a program this session can no
+// longer honestly claim to have kept pace with.
+var ErrReplyReserveFull = errors.New("sessionruntime: reply reserve full")
+
 // Intent is one thing a principal asked the terminal to do.
 //
 // It carries what realSession.writeJob does not, and that absence is the defect
@@ -708,11 +755,27 @@ type Runtime interface {
 	// NOT delivered: the returned id names something that has not reached the
 	// PTY, and no caller may report otherwise.
 	Admit(i Intent) (IntentID, error)
-	// Execute performs the next admitted intent: revalidates its incarnation,
-	// its control epoch and its precondition, encodes it against the modes the
-	// program set, and writes. Revalidation at CONSUMPTION rather than at
-	// admission is the point — see Precondition.
-	Execute() (IntentID, IntentState, error)
+	// Commit is what replaces Execute (nocx-6q1uh.3, spec §5): it revalidates
+	// the intent at the HEAD of the admitted queue — its incarnation, its
+	// control epoch and its precondition — against i (a defensive identity
+	// check when i.ID is non-zero: a caller naming the wrong head is a bug in
+	// the caller's own ordering, refused rather than silently committed under
+	// a different intent's authority), then runs check against a fresh
+	// Snapshot, still under the same lock — the seam a token's digest and an
+	// access epoch are judged through (internal/helper/session, nocx-6q1uh.4)
+	// — and finally encodes the intent against the modes the program set.
+	//
+	// It writes NOTHING. That is the whole of what changed from Execute: the
+	// runtime must never hold its lock across a PTY write (spec §5.1), so the
+	// write is the CALLER's — the session's I/O owner — which hands the
+	// returned bytes to its writer and assigns them a Fence. Commit marks the
+	// intent Executed on the strength of that: the ordinary case, where the
+	// write that follows succeeds. A caller for whom it did not — a short
+	// write, a write that failed — corrects the record itself (production:
+	// internal/helper/session's owner; the concrete *Session additionally
+	// exposes SetReplies and the correction as ordinary methods, since this
+	// interface has no seam for a fact that arrives after Commit returns).
+	Commit(i Intent, check func(Snapshot) error) ([]byte, error)
 	// IntentState reports where one intent got to.
 	IntentState(id IntentID) IntentState
 

@@ -3,6 +3,7 @@ package sessionruntime
 import (
 	"context"
 	"fmt"
+	"io"
 	"math"
 	"strings"
 	"testing"
@@ -244,12 +245,18 @@ func startProgram(t *testing.T, script string, g Geometry) *programSession {
 	}
 	t.Cleanup(screen.Close)
 
+	term := &ptyTerminal{lp: lp}
 	s, err := New(Config{
 		Incarnation:  Incarnation{Session: "a-real-session", Generation: 1},
 		Geometry:     g,
-		Terminal:     &ptyTerminal{lp: lp},
+		Terminal:     term,
 		Emulator:     screen,
 		Completeness: CompletenessComplete,
+		// The stand-in for the session's I/O owner (spec §5): a reply
+		// queues in production rather than writing here directly, and these
+		// tests read the program's own answer off the real pty the same way
+		// regardless of which path put it there.
+		Replies: directReplySink{term: term},
 	})
 	if err != nil {
 		t.Fatalf("build the runtime over the real pair: %v", err)
@@ -263,18 +270,24 @@ func (p *programSession) screen() string { return string(p.s.Snapshot().Screen) 
 // wait blocks until the screen holds want, or fails at the hang limit.
 func (p *programSession) wait(want string) { waitForScreen(p.t, p.s, p.changed, want) }
 
-// send admits and executes one intent and answers where it got to, WITHOUT
-// failing the test: the mouse and paste cases both need an intent that is
-// REFUSED (a mouse event no program asked for), which is a result and not a
-// failure.
+// send admits, commits and writes one intent to the real pty, answering
+// where it got to, WITHOUT failing the test: the mouse and paste cases both
+// need an intent that is REFUSED (a mouse event no program asked for), which
+// is a result and not a failure. The write is this test's stand-in for the
+// session's I/O owner (nocx-6q1uh.3): Commit no longer performs it.
 func (p *programSession) send(kind IntentKind, payload []byte) (IntentState, error) {
 	p.t.Helper()
 	id := admitted(p.t, p.s, p.ctrl, kind, payload)
-	gotID, state, err := p.s.Execute()
-	if gotID != id {
-		p.t.Fatalf("executing the admitted intent answered for id %d, want %d", gotID, id)
+	encoded, err := p.s.Commit(Intent{ID: id}, nil)
+	if err != nil {
+		return p.s.IntentState(id), err
 	}
-	return state, err
+	n, writeErr := p.s.Terminal().Write(encoded)
+	if writeErr == nil && n != len(encoded) {
+		writeErr = io.ErrShortWrite
+	}
+	p.s.ReportOutcome(id, writeErr)
+	return p.s.IntentState(id), writeErr
 }
 
 // mustSend is send for the intent that has to reach the program.

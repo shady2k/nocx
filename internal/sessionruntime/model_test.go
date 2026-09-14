@@ -401,19 +401,29 @@ func (m *model) Admit(i Intent) (IntentID, error) {
 	return i.ID, nil
 }
 
-func (m *model) Execute() (IntentID, IntentState, error) {
+// Commit is Execute's replacement (nocx-6q1uh.3): the model's Runtime
+// implementation must keep the same shape as [Session]'s so the schedules in
+// contract_test.go judge both by one vocabulary. It stops short of writing —
+// that moved to the caller everywhere, model included — so the bytes reach
+// the program only when the schedule helper (commitAndWrite,
+// contract_test.go) performs the write Commit approved, the same stand-in
+// runtime_test.go's admittedThenExecuted is for the real Session.
+func (m *model) Commit(i Intent, check func(Snapshot) error) ([]byte, error) {
 	if err := m.live(); err != nil {
-		return 0, IntentStateNone, err
+		return nil, err
 	}
 	if m.rules.on(ruleUnknownCompletenessRefusesWrites) && m.completeness == CompletenessUnknown {
-		return 0, IntentStateNone, ErrCompletenessUnknown
+		return nil, ErrCompletenessUnknown
 	}
 	if len(m.queue) == 0 {
-		return 0, IntentStateNone, ErrNothingAdmitted
+		return nil, ErrNothingAdmitted
 	}
 	id := m.queue[0]
-	m.queue = m.queue[1:]
 	mi := m.intents[id]
+	if i.ID != 0 && i.ID != id {
+		return nil, fmt.Errorf("sessionruntime model: commit named intent %d, the head is %d", i.ID, id)
+	}
+	m.queue = m.queue[1:]
 
 	if m.rules.on(ruleRevalidateAtExecution) {
 		// Revalidation at CONSUMPTION. Admission established these once;
@@ -423,34 +433,34 @@ func (m *model) Execute() (IntentID, IntentState, error) {
 		// before it.
 		if mi.intent.At != m.inc {
 			mi.state = IntentStateRefused
-			return id, mi.state, ErrStaleIncarnation
+			return nil, ErrStaleIncarnation
 		}
 		if mi.intent.Under != m.control.Epoch {
 			mi.state = IntentStateCancelled
-			return id, mi.state, ErrStaleControlEpoch
+			return nil, ErrStaleControlEpoch
 		}
 		if p := mi.intent.Precondition; p != nil {
 			if p.Digest != sha256.Sum256(m.screen) {
 				mi.state = IntentStateRefused
-				return id, mi.state, ErrPreconditionStale
+				return nil, ErrPreconditionStale
 			}
+		}
+	}
+	if check != nil {
+		if err := check(m.Snapshot()); err != nil {
+			mi.state = IntentStateRefused
+			return nil, err
 		}
 	}
 
 	// The bytes reach the program through the terminal this runtime was
-	// constructed over, and nowhere else: what a schedule reads as "what
-	// reached the PTY" is that terminal's record, so nothing here keeps a
-	// second copy of it. A write that fails is reported as FAILED and never as
-	// executed — nobody may say the bytes landed — and never as cancelled
-	// either, because a write can fail part-way and the bytes it did take are
-	// beyond recall. That is the whole reason IntentStateFailed exists.
-	if _, err := m.pty.Write(m.encode(mi.intent)); err != nil {
-		mi.state = IntentStateFailed
-		return id, mi.state, err
-	}
+	// constructed over, and nowhere else — but Commit itself never writes
+	// them there; the caller does (contract_test.go's commitAndWrite), the
+	// same division [Session.Commit] draws.
+	encoded := m.encode(mi.intent)
 	mi.state = IntentStateExecuted
 	m.tick()
-	return id, mi.state, nil
+	return encoded, nil
 }
 
 // encode is ruleEncodeAgainstModes: the bytes a key becomes are decided HERE,

@@ -2,6 +2,7 @@ package sessionruntime
 
 import (
 	"errors"
+	"io"
 	"sync"
 	"testing"
 
@@ -260,6 +261,15 @@ func realRuntime(t *testing.T, opts ...func(*Config)) (*Session, *harnessTermina
 		Terminal:     term,
 		Emulator:     emu,
 		Completeness: CompletenessComplete,
+		// Before this bead a reply was written straight through Terminal,
+		// under this package's own lock (writeLocked). The tests here read
+		// "what reached the program" off term.Written() regardless of
+		// whether it arrived via Commit's caller or via a reply, so the
+		// default sink stands in for the owner that would otherwise carry a
+		// reply the rest of the way: it is the terminal itself, called
+		// directly, exactly reproducing the pre-owner behaviour these tests
+		// were written against.
+		Replies: directReplySink{term: term},
 	}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -269,4 +279,25 @@ func realRuntime(t *testing.T, opts ...func(*Config)) (*Session, *harnessTermina
 		t.Fatalf("build the runtime under test: %v", err)
 	}
 	return s, term, emu
+}
+
+// directReplySink is the harness's stand-in for the session's I/O owner
+// (internal/helper/session.sessionOwner, spec §5): a reply queues as an
+// ordinary input item in production, and here — where nothing else is ever
+// mid-write when Ingest runs, because these tests drive one goroutine at a
+// time — writing it straight through is the same observable behaviour with
+// none of the owner's machinery to fake. It never returns
+// [ErrReplyReserveFull]: the reserve-overflow schedule is this bead's own
+// (owner_test.go, internal/helper/session), not this package's to duplicate.
+type directReplySink struct{ term Terminal }
+
+func (d directReplySink) Reply(p []byte) error {
+	n, err := d.term.Write(p)
+	if err != nil {
+		return err
+	}
+	if n != len(p) {
+		return io.ErrShortWrite
+	}
+	return nil
 }

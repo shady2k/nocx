@@ -958,6 +958,14 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		lg.Error("helper: the session's terminal could not be created", "error", err)
 		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
 	}
+	win := newWindow(shape.bound)
+	// The one I/O owner (nocx-6q1uh.3, spec §5), built over the runtime and
+	// bound to it as its ReplySink BEFORE anything ever reads from proc — no
+	// byte has been read yet (newSessionRuntime's whole reason for running
+	// here rather than lazily), so there is no window in which Ingest could
+	// run with no sink bound.
+	owner := newSessionOwner(proc, rt, win, s.log)
+	rt.SetReplies(owner)
 	lifecycleWin := (*window)(nil)
 	lifecycleBudget := int64(0)
 	var lifecycleCarrier io.ReadWriteCloser
@@ -989,9 +997,10 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		key:             shape.key,
 		startedAt:       s.now(),
 		proc:            proc,
-		win:             newWindow(shape.bound),
+		win:             win,
 		runtime:         rt,
 		screen:          screen,
+		owner:           owner,
 		lifecycleWin:    lifecycleWin,
 		lifecycleBudget: lifecycleBudget,
 		// Retained for the life of the session, and only when there is a
@@ -1013,7 +1022,7 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 	s.resolveKeyLocked(claim, hs.id.Session)
 	*spawned = true
 	s.mu.Unlock()
-	go hs.pump()
+	go owner.run()
 	if lifecycleCarrier != nil {
 		go hs.lifecyclePump(lifecycleCarrier)
 	}

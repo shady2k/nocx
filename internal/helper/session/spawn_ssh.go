@@ -158,6 +158,9 @@ func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process
 			Enhanced:            true,
 			AgentHelperPath:     req.AgentHelperPath,
 			AgentToolSocketPath: req.AgentToolSocketPath,
+			// The bearer, on the frame-2 road the lifecycle capability takes
+			// rather than in the agent env block (nocx-50w7p.16).
+			AgentToolToken: req.AgentToolToken,
 		}
 		// The authenticated lifecycle channel's addressing. The CAPABILITY is
 		// not rendered anywhere by the launcher: it reaches the far shell as
@@ -196,8 +199,12 @@ func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process
 				// for "nothing to wait for": §6.1's barrier exists to order
 				// frame 2 behind the lifecycle RECEIVER and the publish, and
 				// the receiver here is a listener this process created before
-				// the shell existed. The publish is not this process's yet
-				// (nocx-50w7p.15), so there is no second fact to wait for.
+				// the shell existed. The publish is not a fact this process
+				// could be handed a gate for: the COORDINATOR publishes before
+				// it asks for this spawn (nocx-50w7p.21, internal/app's
+				// publishForPane), so by the time this plan exists the write
+				// has already reached its terminal outcome and there is no
+				// second fact to wait for.
 				plan = shellintegration.BootstrapPlan{Stage1: built}
 				if opts.Capability != "" {
 					plan.Secret = shellintegration.SecretFunc(func(context.Context) ([]byte, error) {

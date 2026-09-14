@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -248,10 +249,21 @@ func listenEndpoint(t *testing.T) *net.UnixListener {
 
 func runAdapter(t *testing.T, socket, input string) string {
 	t.Helper()
+	return runAdapterLogging(t, socket, input, discardLogger)
+}
+
+// runAdapterLogging is runAdapter with the bridge's diagnostics captured.
+//
+// It is the same session either way: what changes is where the bridge's OWN
+// lines go, which is the only way to assert anything about them — a test that
+// left the logger nil would be asserting about output nobody produced
+// (nocx-50w7p.16).
+func runAdapterLogging(t *testing.T, socket, input string, logger *slog.Logger) string {
+	t.Helper()
 	reader, writer := io.Pipe()
 	output := &recordingWriter{written: make(chan struct{}, 16)}
 	done := make(chan error, 1)
-	go func() { done <- Serve(context.Background(), reader, output, socket) }()
+	go func() { done <- Serve(context.Background(), reader, output, socket, logger) }()
 	if _, err := io.WriteString(writer, input); err != nil {
 		t.Fatal(err)
 	}

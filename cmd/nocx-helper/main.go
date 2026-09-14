@@ -56,7 +56,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if len(args) == 3 && args[0] == "mcp" && args[1] == "--socket" && args[2] != "" {
-		if err := mcpstdio.Serve(ctx, os.Stdin, os.Stdout, args[2]); err != nil && !errors.Is(err, context.Canceled) {
+		if err := mcpstdio.Serve(ctx, os.Stdin, os.Stdout, args[2], log); err != nil && !errors.Is(err, context.Canceled) {
 			log.Error("mcp", "err", err)
 			os.Exit(1)
 		}

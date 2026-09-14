@@ -19,6 +19,14 @@ type Peer struct {
 	// asserted pane may stand for — the endpoint only establishes that the
 	// report was made by the process allowed to make it.
 	Pane string
+	// Token is the bearer the connection PRESENTED, as the pane's own agent
+	// bridge wrote it (nocx-50w7p.16). It is a different party's claim from
+	// Pane: the helper's record says which pane the connection arrived on and
+	// no process on the far side can forge it, while this one says the caller
+	// holds the bearer the coordinator minted for that pane — and only the
+	// authorizer can decide whether the two belong together. EMPTY means
+	// nothing was presented, which is a refusal rather than a default.
+	Token string
 }
 
 // Lane is the identity of the one process whose connections may name a pane:
@@ -91,3 +99,37 @@ var ErrSessionCallerActive = errors.New("session already has a worker caller")
 // ErrNotEnrolled means the peer is not inside a process tree enrolled for a
 // live worker session.
 var ErrNotEnrolled = errors.New("toolendpoint: caller is not in an enrolled process tree")
+
+// ErrNoLiveInterval means the caller named a pane this coordinator holds and
+// watches, and that pane holds no live admission interval: either nobody has
+// answered for the agent in it yet, or the answer that admitted it has ended —
+// the session it belonged to finished, or the person withdrew the approval
+// (nocx-50w7p.16).
+//
+// It is a refusal of its OWN, separate from ErrNotEnrolled, because the two
+// facts send an agent to different places. "Not in a pane nocx has enrolled" is
+// about the pane's identity — a helper's record that did not land, a pane this
+// coordinator does not hold — and the action is to tell the person their pane
+// is not orchestrated. This one is about the pane's ADMISSION: the pane is real
+// and nocx knows it, and what changed is that nothing admits into it any more.
+//
+// The epoch is what makes the second fact expressible at all. A connection
+// admitted once (ADR-0058) carries the interval it was let in under, so "this
+// pane has ended its interval" is a different statement from "this pane never
+// had one", and a sentence that could not tell them apart would send a person
+// hunting a helper fault for an agent they turned off.
+var ErrNoLiveInterval = errors.New("toolendpoint: the pane holds no live admission interval")
+
+// ErrBearerRefused means the caller named a live, enrolled pane and did not
+// present the bearer that interval admits with — a value from another pane,
+// another launch, an interval that has been replaced, no value at all, or an
+// interval whose mint failed and so holds none (nocx-50w7p.16).
+//
+// It is separate from ErrNoLiveInterval for the same reason that one is
+// separate from ErrNotEnrolled: the pane's answer is in force, so the agent is
+// in an orchestrated pane and the thing that does not match is the CLAIM it
+// presented. An agent reading "not in a pane nocx has enrolled" would go and
+// tell the person their pane is not orchestrated, which is false and costs a
+// round trip; the fact is that the value it presented is not the one the pane
+// holds, and the ordinary repair is to restart that agent.
+var ErrBearerRefused = errors.New("toolendpoint: caller did not present the pane's bearer")

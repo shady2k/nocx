@@ -746,7 +746,11 @@ func New(opts ...Option) (*App, error) {
 	// built here and its generation arrives at Start, which is where the
 	// install happens; everything else it needs is bound below as the seams
 	// it reaches come into existence.
-	localOpener := &localHelperOpener{log: slogger, procs: procs}
+	// THE BOOK OF SPAWN-MINTED BEARERS lives on the opener because that is the
+	// party that launches a pane and learns its session id (nocx-50w7p.16), and
+	// it is built HERE so that the approval service below can be wired to the
+	// same one: two books would bind bearers nobody presented.
+	localOpener := &localHelperOpener{log: slogger, procs: procs, spawnTokens: &spawnTokens{}}
 	// THE REGISTRY HAS NO LOCAL PTY FACTORY, and that is the point of
 	// nocx-ie23r.3 rather than an omission. There is exactly one constructor
 	// of a local PTY in this repository and it lives in the daemon
@@ -1521,6 +1525,10 @@ func New(opts ...Option) (*App, error) {
 	// is not delivery.
 	workerEnrol := newWorkerEnrolments(logger, sess)
 	agentApprovalService := newAgentApprovalService(sess, agentApprovals, string(workspace.Default))
+	// ONE LAUNCH, ONE BEARER: the interval a pane's agent opens binds the bearer
+	// its launch already carried, so what the far shell staged and what the
+	// endpoint accepts are the same value (nocx-50w7p.16).
+	agentApprovalService.SetSpawnTokens(localOpener.spawnTokens)
 	// The declaration's carrier, built beside the rendezvous and wired into
 	// the same publisher: a participant says what its work produced over the
 	// authenticated channel it is already enrolled on (ADR-0024 decision 2).

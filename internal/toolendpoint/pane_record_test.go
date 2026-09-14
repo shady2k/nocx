@@ -30,6 +30,9 @@ const (
 // credentials report: everything dialling it is "the helper". That is what
 // makes the record path reachable from a test at all — in production the
 // predicate compares the peer against the process the coordinator dialed.
+// testPaneToken is the bearer a forwarded connection presents in these tests.
+const testPaneToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 func forwardedEndpoint(t *testing.T, auth *testAuthorizer, dispatch *testDispatcher) *Endpoint {
 	t.Helper()
 	cfg := endpointConfig(t, auth, dispatch)
@@ -55,8 +58,18 @@ func sendRequest(t *testing.T, ep *Endpoint, session, request string) rpcRespons
 		if err != nil {
 			t.Fatalf("encode pane record: %v", err)
 		}
-		if _, err := conn.Write(record); err != nil {
-			t.Fatalf("write pane record: %v", err)
+		if _, writeErr := conn.Write(record); writeErr != nil {
+			t.Fatalf("write pane record: %v", writeErr)
+		}
+		// AND THE BEARER, right behind it: the record is the helper's claim
+		// about the pane and this is the agent's claim about itself, and the
+		// endpoint reads the pair in one window (nocx-50w7p.16).
+		token, err := panebind.EncodeToken(testPaneToken)
+		if err != nil {
+			t.Fatalf("encode tool token: %v", err)
+		}
+		if _, writeErr := conn.Write(token); writeErr != nil {
+			t.Fatalf("write tool token: %v", writeErr)
 		}
 	}
 	if _, err := conn.Write([]byte(request + "\n")); err != nil {
@@ -89,6 +102,9 @@ func TestAPaneRecordNamesThePaneAndLeavesThePayloadWhereItWas(t *testing.T) {
 	}
 	if got := auth.seenPeer(t).Pane; got != testPaneSession {
 		t.Fatalf("the authorizer was told pane %q, want the session the record named (%q)", got, testPaneSession)
+	}
+	if token := auth.seenPeer(t).Token; token != testPaneToken {
+		t.Fatalf("the authorizer was told token %q, want the bearer the connection presented", token)
 	}
 	if got := string(dispatch.lastInvocation().RawParams); got != `{"sessionId":"`+testPaneSession+`"}` {
 		t.Fatalf("the dispatcher saw params %s, want the far agent's own bytes — the record must not eat into them", got)

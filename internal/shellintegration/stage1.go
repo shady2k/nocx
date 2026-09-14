@@ -215,12 +215,17 @@ CP=${Y%%"$NL"*}
 Y=${Y#*"$NL"}
 FN=${Y%%"$NL"*}
 LP=${Y#*"$NL"}
+AT=
+case "$LP" in
+*"$NL"*) AT=${LP#*"$NL"}; LP=${LP%%"$NL"*} ;;
+esac
 S=
 Y=
 case "$CP" in ''|*[!0-9a-f]*) Q @BADSECRET@ ;; esac
 case "$FN" in *[!0-9a-f]*) Q @BADSECRET@ ;; esac
 case "$LP" in ''|*[!0-9]*) Q @BADSECRET@ ;; esac
 [ "$LP" -ge 1 ] 2>/dev/null && [ "$LP" -le 65535 ] 2>/dev/null || Q @BADSECRET@
+case "$AT" in *[!0-9a-f]*) Q @BADSECRET@ ;; esac
 G=$(mktemp "${TMPDIR:-/tmp}/nocx.XXXXXX") || Q @NOTEMP@
 [ -n "$G" ] || Q @NOTEMP@
 ( : <"$G" ) || Q @NOCAPFD@
@@ -232,11 +237,12 @@ W=1
 rm -f "$G" || Q @NOUNLINK@
 [ ! -e "$G" ] || Q @NOUNLINK@
 G=
-printf "%s\n%s\n" "$CP" "$FN" >&@CAPW@ || Q @NOCAPWRITE@
+printf "%s\n%s\n%s\n" "$CP" "$FN" "$AT" >&@CAPW@ || Q @NOCAPWRITE@
 exec @CAPW@>&-
 W=
 CP=
 FN=
+AT=
 A=1
 else
 S=
@@ -414,12 +420,27 @@ func SecretFrame(opts LaunchOptions) ([]byte, error) {
 	if !hexFieldOK(opts.Recovery) {
 		return nil, fmt.Errorf("shellintegration: recovery fence is not lowercase hex")
 	}
+	// The tool token is the SAME KIND of value as the capability — a
+	// per-epoch bearer that may not travel in argv, the environment, a named
+	// file or a log — so it travels the same way, as one more line of this
+	// payload (nocx-50w7p.16, design D4's descriptor form).
+	if opts.AgentToolToken != "" && !hexFieldOK(opts.AgentToolToken) {
+		return nil, fmt.Errorf("shellintegration: agent tool token is not lowercase hex")
+	}
 	if opts.LifecyclePort < 1 || opts.LifecyclePort > 65535 {
 		return nil, fmt.Errorf("shellintegration: lifecycle port %d is outside 1..65535", opts.LifecyclePort)
 	}
 	body := fmt.Sprintf("%s %s %s %s %d\n%s\n%s\n%d\n",
 		FrameMagic, secretFrameSecret, sid, opts.Domain, opts.Epoch,
 		opts.Capability, opts.Recovery, opts.LifecyclePort)
+	// A LINE ONLY WHEN THERE IS A TOKEN, so that a session with no tool
+	// surface produces the byte-identical frame it produced before this
+	// existed, and so that the reader's tolerance of a missing line is the
+	// same thing as "this pane's agent presents nothing" — which the endpoint
+	// refuses by name rather than admitting.
+	if opts.AgentToolToken != "" {
+		body += opts.AgentToolToken + "\n"
+	}
 	if len(body) > MaxSecretFrameLen {
 		return nil, fmt.Errorf("shellintegration: secret frame is %d bytes, over the %d cap",
 			len(body), MaxSecretFrameLen)

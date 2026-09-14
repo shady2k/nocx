@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"sync"
 
@@ -52,6 +53,10 @@ type workerAuthApproval interface {
 	// facts are one read: a verdict from one interval and an epoch from the
 	// next is the gap the epoch exists to close.
 	Interval(sid session.ID, scope string) (toolendpoint.AdmissionEpoch, bool)
+	// IntervalToken answers the same question with the bearer that interval
+	// admits with, in one snapshot (nocx-50w7p.16): a verdict and a bearer read
+	// separately could come from two different intervals.
+	IntervalToken(sid session.ID, scope string) (toolendpoint.AdmissionEpoch, string, bool)
 }
 
 // workerAuthAuthorityEnding is implemented by an approval seam whose answers
@@ -195,9 +200,9 @@ func (a *toolAuthorizer) retire(sid session.ID, epoch toolendpoint.AdmissionEpoc
 	_ = a.admissions.RetireAdmissions(string(sid), epoch)
 }
 
-func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, session.Session, toolendpoint.AdmissionEpoch, bool) {
+func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, session.Session, toolendpoint.AdmissionEpoch, error) {
 	if a == nil || a.sessions == nil || a.enrolments == nil {
-		return "", nil, 0, false
+		return "", nil, 0, toolendpoint.ErrNotEnrolled
 	}
 	// THE ASSERTED PANE, and it is a different answer rather than a shortcut
 	// through the local one (nocx-50w7p.16). A far agent has no pid here: what
@@ -206,7 +211,7 @@ func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, sessi
 	// on this arm at all — it is the HELPER's, and matching it against a
 	// process tree would admit whatever tree the helper happens to be in.
 	if peer.Pane != "" {
-		return a.admittedPane(peer.Pane)
+		return a.admittedPane(peer.Pane, peer.Token)
 	}
 	// The pinner is required HERE and not above it, because this is the only
 	// arm that uses it: admission by pane is a session, an enrolment and an
@@ -214,7 +219,7 @@ func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, sessi
 	// further up, a coordinator that cannot pin would refuse far agents for a
 	// reason that does not apply to them.
 	if a.pinner == nil || peer.PID <= 0 {
-		return "", nil, 0, false
+		return "", nil, 0, toolendpoint.ErrNotEnrolled
 	}
 	var admitted session.ID
 	var admittedSession session.Session
@@ -246,13 +251,24 @@ func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, sessi
 		if admitted != "" {
 			// A peer matching two live enrolled roots has no unambiguous
 			// session authority. Refuse rather than selecting map order.
-			return "", nil, 0, false
+			return "", nil, 0, toolendpoint.ErrNotEnrolled
 		}
 		admitted = sid
 		admittedSession = sess
 		admittedEpoch = epoch
 	}
-	return admitted, admittedSession, admittedEpoch, admitted != ""
+	if admitted == "" {
+		// THE LOCAL ARM KEEPS THE ONE SENTENCE (nocx-50w7p.16). Its question is
+		// "is a process of mine the caller", and every way it can fail —
+		// no pinner, no matching tree, no watched session, no live interval —
+		// is answered by the caller not being a process in a pane nocx
+		// enrolled. The pane arm can say more because the helper told it WHICH
+		// pane, so there the interval's own state is separable; here it is
+		// not, and a second sentence would be guessing at which of four
+		// causes produced it.
+		return "", nil, 0, toolendpoint.ErrNotEnrolled
+	}
+	return admitted, admittedSession, admittedEpoch, nil
 }
 
 // admittedPane decides authority for a connection this machine's helper
@@ -275,31 +291,61 @@ func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, sessi
 //     closes with the approval interval exactly as a local one's does — and
 //     the publication below is the same publication, into the same record the
 //     session's end retires.
-func (a *toolAuthorizer) admittedPane(pane string) (session.ID, session.Session, toolendpoint.AdmissionEpoch, bool) {
+//
+// THE THREE FACTS, THE BEARER, AND WHY THE REFUSALS ARE NAMED (nocx-50w7p.16).
+// This arm can separate what the local one cannot, because the helper told it
+// WHICH pane arrived. So the first three facts — an unknown session, a local
+// one, an unwatched pane — answer ErrNotEnrolled, which is a statement about
+// the caller's PANE; a pane with no live interval answers ErrNoLiveInterval,
+// which is a statement about its ADMISSION; and a live interval met with the
+// wrong bearer answers ErrBearerRefused, which is a statement about the CLAIM.
+// Each sends the agent that reads it somewhere different, and the sentences the
+// endpoint writes from them say so (internal/toolendpoint's rpcErrorFor).
+func (a *toolAuthorizer) admittedPane(pane, token string) (session.ID, session.Session, toolendpoint.AdmissionEpoch, error) {
 	sid := session.ID(pane)
 	if sid == "" {
-		return "", nil, 0, false
+		return "", nil, 0, toolendpoint.ErrNotEnrolled
 	}
 	sess, err := a.sessions.Get(sid)
 	if err != nil || sess == nil {
-		return "", nil, 0, false
+		return "", nil, 0, toolendpoint.ErrNotEnrolled
 	}
 	if sess.Kind() != session.KindRemote {
-		return "", nil, 0, false
+		return "", nil, 0, toolendpoint.ErrNotEnrolled
 	}
 	if !a.enrolments.Watched(pane) {
-		return "", nil, 0, false
+		return "", nil, 0, toolendpoint.ErrNotEnrolled
 	}
-	epoch, live := a.approval.Interval(sid, agentToolEndpointScopePrefix+a.workspace)
+	epoch, minted, live := a.approval.IntervalToken(sid, agentToolEndpointScopePrefix+a.workspace)
 	if !live {
-		return "", nil, 0, false
+		// RETIRED: no live interval, so nothing this pane ever carried admits
+		// now — a session that ended, an approval withdrawn, a re-approval that
+		// opened a new interval under a new bearer, or a pane nobody has
+		// answered for yet.
+		return "", nil, 0, toolendpoint.ErrNoLiveInterval
 	}
-	return sid, sess, epoch, true
+	// THE BEARER, compared in CONSTANT TIME and against the interval's own
+	// value: a token from another pane, an older interval, or no token at all
+	// is refused here, and the comparison says nothing about how far a wrong
+	// value got.
+	//
+	// AN INTERVAL THAT HOLDS NO BEARER REFUSES EVERYBODY. mintToolToken can
+	// fail — 32 random bytes is a syscall away — and it answers that with the
+	// empty string, which is documented as "a token no connection can present".
+	// The comparison alone would not honour that: subtle.ConstantTimeCompare
+	// answers 1 for two EMPTY slices, so an interval with a failed mint and a
+	// connection that presented nothing would have agreed and admitted a pane
+	// on no bearer at all. The emptiness is a refusal, stated rather than left
+	// to the length rule of a comparison that has one exception.
+	if minted == "" || subtle.ConstantTimeCompare([]byte(token), []byte(minted)) != 1 {
+		return "", nil, 0, toolendpoint.ErrBearerRefused
+	}
+	return sid, sess, epoch, nil
 }
 
 func (a *toolAuthorizer) SessionForPeer(peer toolendpoint.Peer) (string, bool) {
-	admitted, _, _, ok := a.admittedPeer(peer)
-	return string(admitted), ok
+	admitted, _, _, err := a.admittedPeer(peer)
+	return string(admitted), err == nil
 }
 
 // Admit decides authority for one connection, and PUBLISHES the decision
@@ -319,9 +365,14 @@ func (a *toolAuthorizer) SessionForPeer(peer toolendpoint.Peer) (string, bool) {
 // endpoint, so this grants nothing and the caller is told what a peer outside
 // an enrolled pane is told — because that is now the fact.
 func (a *toolAuthorizer) Admit(peer toolendpoint.Peer, publish func(session string, epoch toolendpoint.AdmissionEpoch) bool) (assistant.ToolInvocation, func(), error) {
-	admitted, admittedSession, epoch, ok := a.admittedPeer(peer)
-	if !ok {
-		return assistant.ToolInvocation{}, nil, toolendpoint.ErrNotEnrolled
+	admitted, admittedSession, epoch, refusal := a.admittedPeer(peer)
+	if refusal != nil {
+		// THE NAMED REFUSAL TRAVELS. `Admit` used to answer every failure with
+		// one error, so a far pane whose interval had ended and a process tree
+		// that never matched reached the agent as the same sentence — and the
+		// sentence they got was the process tree's, which is not what happened
+		// to either of the pane arm's two cases (nocx-50w7p.16).
+		return assistant.ToolInvocation{}, nil, refusal
 	}
 
 	release, acquired := a.slots.acquire(admitted)

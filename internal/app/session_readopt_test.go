@@ -92,6 +92,17 @@ type scriptedSpawner struct {
 	mu      sync.Mutex
 	spawned int
 	procs   []*idleProcess
+	// ssh is what each `spawn-ssh` on this daemon ASKED FOR, in order, as the
+	// session service decoded it off the helper's wire (nocx-50w7p.16). It is
+	// recorded rather than dropped because a request is the only place a
+	// per-launch fact — the pane's bearer, the far host's tool paths — can be
+	// observed from outside the spawner, and the tests that read one assert
+	// what the LAUNCH carried rather than what the coordinator meant to send.
+	ssh []helpersession.SSHSpawnRequest
+	// failSSH makes the next ssh spawn fail with this error, which is how a
+	// test drives the helper's own refusal path: the failure a coordinator
+	// reads when the far shell channel could not be opened.
+	failSSH error
 }
 
 func (s *scriptedSpawner) Spawn(req helpersession.SpawnRequest) (helpersession.Process, error) {
@@ -120,12 +131,33 @@ func (s *scriptedSpawner) Spawn(req helpersession.SpawnRequest) (helpersession.P
 // nothing in them reads a remote session's pid.
 func (s *scriptedSpawner) SpawnSSH(_ context.Context, req helpersession.SSHSpawnRequest) (helpersession.Process, error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ssh = append(s.ssh, req)
+	if s.failSSH != nil {
+		// NOTHING IS STARTED AND THE REQUEST IS STILL RECORDED: a daemon that
+		// refused a launch is exactly the case a test compares against the one
+		// that accepted it.
+		return nil, s.failSSH
+	}
 	s.spawned++
 	pid := 4000 + s.spawned
 	p := &idleProcess{done: make(chan struct{}), pid: pid, id: req.SessionID}
 	s.procs = append(s.procs, p)
-	s.mu.Unlock()
 	return p, nil
+}
+
+// sshSpawns is what this daemon was asked to open, in the order it was asked.
+func (s *scriptedSpawner) sshSpawns() []helpersession.SSHSpawnRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]helpersession.SSHSpawnRequest(nil), s.ssh...)
+}
+
+// refuseSSH makes every later ssh spawn fail with err.
+func (s *scriptedSpawner) refuseSSH(err error) {
+	s.mu.Lock()
+	s.failSSH = err
+	s.mu.Unlock()
 }
 
 // exitWith ends the one process this spawner started, with a status the helper

@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
@@ -64,6 +66,10 @@ type agentApprovalService struct {
 	mu       sync.Mutex
 	enrolled map[session.ID]enrolledAgent
 	next     toolendpoint.AdmissionEpoch
+	// spawnTokens is where a pane's launch-minted bearer waits for the interval
+	// that binds it (nocx-50w7p.16). Nil means this coordinator opened no panes
+	// of its own, and every interval then mints its own bearer.
+	spawnTokens spawnTokenSource
 	// Identities with a question on screen, and every enrolment waiting on
 	// it. Starting the agent again while the person is still reading must not
 	// put a second copy of the question in the queue — it is the same
@@ -97,6 +103,11 @@ type enrolledAgent struct {
 	// another machine's answer.
 	domain agentapproval.Domain
 	epoch  toolendpoint.AdmissionEpoch
+	// token is the bearer this interval admits a far pane's agent with, minted
+	// with the epoch and retired with it (nocx-50w7p.16). It is read back under
+	// the same lock as the epoch, in one snapshot, because a bearer paired with
+	// a newer interval would admit into an authority the answer never covered.
+	token string
 }
 
 func newAgentApprovalService(sessions workerAuthSessions, store *agentapproval.Store, scope string) *agentApprovalService {
@@ -136,6 +147,78 @@ func (s *agentApprovalService) Interval(sid session.ID, scope string) (toolendpo
 		return 0, false
 	}
 	return enrolled.epoch, true
+}
+
+// IntervalToken answers the same question Interval does and returns the
+// bearer the interval admits with, in ONE snapshot (nocx-50w7p.16).
+//
+// Atomic on purpose: a caller that asked for the epoch and then for the token
+// could pair an epoch from one interval with a bearer from the next, and the
+// admission check exists to close exactly that kind of gap. The token is empty
+// for a session with no live interval — which is not a token that admits, it is
+// the absence of one.
+func (s *agentApprovalService) IntervalToken(sid session.ID, scope string) (toolendpoint.AdmissionEpoch, string, bool) {
+	s.mu.Lock()
+	enrolled, known := s.enrolled[sid]
+	s.mu.Unlock()
+	if !known {
+		return 0, "", false
+	}
+	answer, ok := s.store.Lookup(enrolled.executable, enrolled.domain, scope)
+	if !ok || answer != agentapproval.Granted {
+		return 0, "", false
+	}
+	return enrolled.epoch, enrolled.token, true
+}
+
+// spawnTokenSource is the bearer an opener minted for the pane it launched, or
+// nothing when this coordinator did not launch one (nocx-50w7p.16).
+//
+// The interval BINDS that bearer rather than minting its own, and the reason is
+// an order rather than a preference: the launch carried the bearer to the far
+// shell before the pane had a session id, and the interval is created later,
+// when the pane's agent enrols and a person answers. A bearer minted at approval
+// would be one the staged configuration could never have learned.
+type spawnTokenSource interface {
+	SpawnToken(sid session.ID) (string, bool)
+	// Forget drops what a launch left, when the session it was for ends.
+	Forget(sid session.ID)
+}
+
+// bearerFor answers which bearer this interval admits with: the pane's own, when
+// its launch was minted here, and otherwise a fresh one. The fresh one is not a
+// fallback for a bug — a pane opened without a tool surface has no agent to
+// admit, and nothing presents it — it is what keeps every interval holding a
+// bearer rather than becoming one nobody can use.
+func (s *agentApprovalService) bearerFor(sid session.ID) string {
+	if s.spawnTokens != nil {
+		if token, ok := s.spawnTokens.SpawnToken(sid); ok {
+			return token
+		}
+	}
+	return mintToolToken()
+}
+
+// SetSpawnTokens wires where a pane's launch-minted bearer waits. Called once at
+// the composition root; leaving it nil means every interval mints its own,
+// which is what a coordinator that opens no panes of its own does.
+func (s *agentApprovalService) SetSpawnTokens(source spawnTokenSource) {
+	s.mu.Lock()
+	s.spawnTokens = source
+	s.mu.Unlock()
+}
+
+// mintToolToken mints the per-pane bearer: 32 random bytes, lower-case hex —
+// the shape panebind's own validator enforces on both ends. A
+// failure is not fatal here — an empty token is one no connection can present,
+// so the interval admits by epoch alone exactly as it did before this existed,
+// and the pane's agent is refused rather than admitted on a guess.
+func mintToolToken() string {
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(raw[:])
 }
 
 // mintEpoch names the interval a session's answer opens. The counter only moves
@@ -200,6 +283,11 @@ func (s *agentApprovalService) SessionEnded(sessionID string) {
 		return
 	}
 	s.Forget(session.ID(sessionID))
+	// AND WHAT THE LAUNCH LEFT GOES WITH IT: the pane is gone, so no interval
+	// will bind that bearer again and nothing else would ever drop it.
+	if s.spawnTokens != nil {
+		s.spawnTokens.Forget(session.ID(sessionID))
+	}
 }
 
 // BindAuthorityEnded takes what closes the tool-endpoint connections admitted
@@ -293,7 +381,10 @@ func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agen
 		// and a session whose interval ended gets a new one, which is what
 		// lets the next admission be told apart from a connection admitted
 		// under the interval that ended.
-		s.enrolled[sid] = enrolledAgent{executable: executable, domain: domain, epoch: s.mintEpoch(sid)}
+		s.enrolled[sid] = enrolledAgent{
+			executable: executable, domain: domain,
+			epoch: s.mintEpoch(sid), token: s.bearerFor(sid),
+		}
 		s.mu.Unlock()
 		return nil
 	case found:

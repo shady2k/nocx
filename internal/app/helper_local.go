@@ -48,6 +48,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/procwatch"
+	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -244,9 +245,78 @@ func refuseLocalHelperNotInstalled(cause error) error {
 // connection's end is not.
 
 // localHelperOpener opens a pane on this machine's helper.
+// spawnTokens is the bearer each pane this opener spawned was launched with,
+// kept until the interval that admits it takes it (nocx-50w7p.16).
+//
+// It exists because of an ORDER, and the order is the whole reason this type is
+// not a field on the session: the launch has to carry a bearer BEFORE the
+// coordinator knows which session it is for — the helper mints the session id
+// and reports it in the spawn's result — while the interval that gives the
+// bearer its meaning is created later still, when the pane's agent enrols and a
+// person answers. So the bearer is minted with the launch and BOUND when the
+// interval opens, and this is where it waits in between.
+//
+// An entry lives from the successful spawn until the session ends: a pane that
+// is never enrolled keeps one 64-byte string until then, and a pane whose
+// session ends drops it with the interval that was holding it — which is why
+// SpawnToken peeks rather than consumes (see its comment) and why forget exists
+// at all.
+type spawnTokens struct {
+	mu   sync.Mutex
+	byID map[session.ID]string
+}
+
+func (b *spawnTokens) record(sid session.ID, token string) {
+	if b == nil || sid == "" || token == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.byID == nil {
+		b.byID = make(map[session.ID]string)
+	}
+	b.byID[sid] = token
+}
+
+// SpawnToken is the seam the approval service reads: the bearer this opener
+// launched the pane with.
+//
+// IT IS A PEEK AND NOT A TAKE, and re-approval is why. A session can hold two
+// intervals with identical approval — withdrawn and enrolled again — and both
+// belong to the SAME launch: the far shell staged one bearer and cannot learn a
+// second, so an interval that rotated it would refuse the pane's own agent for
+// presenting the value that was correct when it was written. What retires a
+// bearer is the interval ending (session end, withdrawal), which is where the
+// entry is dropped, not the first reader.
+func (b *spawnTokens) SpawnToken(sid session.ID) (string, bool) {
+	if b == nil || sid == "" {
+		return "", false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	token, ok := b.byID[sid]
+	return token, ok && token != ""
+}
+
+// Forget drops what a launch left, when the session it was for ends. Called by
+// the approval service, which is the party that sees that event and is also the
+// party that stopped holding the bearer.
+func (b *spawnTokens) Forget(sid session.ID) {
+	if b == nil || sid == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.byID, sid)
+}
+
 type localHelperOpener struct {
 	log      *slog.Logger
 	registry *session.Reg
+	// spawnTokens holds the bearer of each pane this opener launched, until the
+	// interval that admits it takes it. Nil is a legitimate wiring for a test
+	// that builds an opener without one, and then the approval mints its own.
+	spawnTokens *spawnTokens
 	// kernel and lifecycleLoss are the authenticated-channel seams, the same
 	// two the remote hosted route uses. Nil is a legitimate wiring and makes
 	// a conventional session, never a failure.
@@ -710,6 +780,45 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	if err != nil {
 		return hostedSpawnResult{}, fmt.Errorf("resolve the ssh pane's destination: %w", err)
 	}
+	// THE GENERATION THE LAUNCH NAMES HAS TO BE ON THE FAR SIDE BEFORE THE
+	// LAUNCH IS ASKED FOR (nocx-50w7p.21).
+	//
+	// A helper-hosted ssh pane runs the SCRIPT carrier: the daemon builds
+	// stage-1 and a start command that execs `$HOME/.nocx/launch`, and the far
+	// shell's own first check is `[ -x "$HOME/.nocx/launch" ]` — which is a
+	// fact only a PUBLISH creates. Until this line nothing published for this
+	// route: the trigger lived in RealClient.Connect's startPublish, and that
+	// whole dial half is compiled out of a coordinator built without
+	// nocx_local_ssh (ssh_real_dial.go). So the bundle was never written, the
+	// far side refused the generation, and the pane degraded to a conventional
+	// terminal with a hello-timeout — the defect measured by the epic's e2e
+	// (nocx-50w7p.21).
+	//
+	// IT IS SEQUENCED BEFORE THE SPAWN, NOT CONCURRENT WITH IT, and the
+	// ordering is the design's rather than a preference: §6.1's barrier (steps
+	// 4-5) exists so stage-1 cannot re-prove a generation while the write is
+	// still in flight, and the party that would wait here is the DAEMON, which
+	// has no gate to wait on — spawn_ssh.go says exactly that where it builds
+	// its bootstrap plan with `Ordered` nil. What this call does is make that
+	// honest: by the time the spawn op is sent, the publish has reached its
+	// terminal outcome. The cost is on a wall-clock that only starts when the
+	// shell exists, so it takes nothing from the far side's bootstrap budget.
+	//
+	// The FAILURE IS NOT A REFUSAL (design §6.1 step 5, §6.4): a publish that
+	// could not commit leaves any generation already there byte-identical, so
+	// the pane still opens and the far side decides for itself. It is logged
+	// with its own cause rather than reported as this open's error, because
+	// ADR-0004 makes an ordinary usable terminal the one thing no failure path
+	// may suppress.
+	if perr := o.publishForPane(ctx, cfg); perr != nil {
+		// THE LOGGER IS OPTIONAL and the failure is not: a test that wires an
+		// opener without one must still get the fail-open behaviour below
+		// rather than a panic, so the log line is guarded rather than assumed.
+		if o.log != nil {
+			o.log.Warn("ssh pane: the shell integration bundle could not be published; the far side may find no generation",
+				"host", cfg.Host, "error", perr)
+		}
+	}
 	params := proto.SSHSpawnParams{
 		Destination: ssh.WireDestination(target),
 		// The two facts the far launcher is built for, read off the config the
@@ -737,11 +846,67 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		// far-side forward yet, so the honest request is the one that asks for no
 		// tool surface at all.
 		AgentToolEndpoint: o.toolEndpoint(),
+		// THE PANE'S BEARER, MINTED WITH THE LAUNCH (nocx-50w7p.16). It has to
+		// travel with the spawn because the far launcher renders it into the
+		// frame the shell reads — and the shell is running before a person has
+		// answered anything about this pane, which is why the interval that
+		// gives it meaning cannot be what mints it.
+		AgentToolToken: mintToolToken(),
 	}
-	return spawn.run(ctx, cfg, func(ctx context.Context, life *proto.LifecycleLaunch) (helperclient.SessionEntry, error) {
+	res, err := spawn.run(ctx, cfg, func(ctx context.Context, life *proto.LifecycleLaunch) (helperclient.SessionEntry, error) {
 		params.Lifecycle = life
 		return spawn.client.SpawnSSH(ctx, params)
 	})
+	if err != nil {
+		return res, err
+	}
+	// BOUND TO THE SESSION THE HELPER REPORTED, which is the id the interval
+	// will be created under when this pane's agent enrols and a person answers.
+	// The launch carried the bearer; this is the only place that learns which
+	// session it was for.
+	o.spawnTokens.record(res.Session.ID(), params.AgentToolToken)
+	return res, nil
+}
+
+// publishForPane writes the shell-integration bundle onto the destination an
+// ssh open is about to dial, through THIS MACHINE'S HELPER, when this pane's
+// mode asks for the script carrier (nocx-50w7p.21).
+//
+// # It asks the value that already knows, and it asks twice for nothing
+//
+// `cfg.Remote.RemoteInstaller` is the installer the open was built with —
+// stamped by the connection resolver for a saved profile and by the transport
+// for a direct host (nocx-mlm7 P8) — and it is the SAME value
+// internal/ssh's startPublish handed to this publish before this route
+// existed. So there is no second publisher and no new seam: this file calls
+// the carrier the config already carries, which is also what keeps one
+// destination one authentication (helper_publish.go's pool key is the
+// resolved destination).
+//
+// The MODE GATE is asked of the axis (`profile.DesiredMode.DeliversScripts`),
+// the one owner of "does this destination integrate" (AD-8), and it is asked
+// with the same input the daemon asks it with — the mode that is about to
+// travel in the spawn params. A `raw` pane publishes nothing, and a nil
+// installer publishes nothing, which is not a refusal: a build wiring no
+// installer is a build that integrates nothing, and the open proceeds to the
+// same plain shell either way.
+func (o *localHelperOpener) publishForPane(ctx context.Context, cfg session.Config) error {
+	remote := cfg.Remote
+	if remote == nil || remote.RemoteInstaller == nil {
+		return nil
+	}
+	if !profile.DesiredMode(remote.DesiredMode).DeliversScripts() {
+		return nil
+	}
+	// The destination is named the way the pane names it — the host and the
+	// options this open is about to resolve with — so the publish's lease and
+	// the pane's channel land on ONE pooled connection rather than costing two
+	// authentications for one machine.
+	if err := remote.RemoteInstaller.EnsureInstalledRemote(
+		ctx, cfg.Host, session.SSHOptionsFromConfig(remote)...); err != nil {
+		return fmt.Errorf("publish the shell integration bundle on %s: %w", cfg.Host, err)
+	}
+	return nil
 }
 
 // localIntegrationStatus is what this open already knows about the pane's
@@ -1159,11 +1324,34 @@ type hostedOpeners struct {
 // The claim travels BOTH ways, because both spawns are irreversible: a repeat
 // that reaches either helper must answer with the session the first attempt made
 // rather than fork a second shell.
+//
+// # THE INTERVAL, BOTH ENDS NAMED (nocx-k6p18.35)
+//
+// Asking the far host's own helper begins with a platform PROBE, and a probe is
+// a dial: it authenticates to ask one question. It OPENS the interval by taking
+// a pooled reference on the destination (probeHelperPlatformHeld) and it CLOSES
+// at the deferred release below, which runs only after the arm that actually
+// opened the pane has taken a reference of its own — `spawn-ssh` on this
+// machine's helper for a destination the far host's helper declined, which is
+// the ordinary password host, and the far helper's lane for one it serves.
+//
+// Releasing it at either helper's own edge instead — which is what the decline
+// used to do, one `unlease` before this function's second arm ran — makes that
+// second arm's acquisition a fresh dial, because the unlease was the pool's last
+// reference and the connection closed with it: two authentications on somebody
+// else's host for one pane. Holding it makes the acquisition a cache hit on the
+// same ref-counted entry, and the host authenticates once.
+//
+// hold is nil whenever no lease was taken (a local destination never reaches
+// here, and a refusal to hand one out returns no hold), and release is safe on
+// nil and idempotent — so no arm below tests for either.
 func (h *hostedOpeners) OpenHosted(ctx context.Context, cfg session.Config, claim string) (transport.HostedSessionOpen, bool, error) {
 	if cfg.Kind == session.KindLocal {
 		return h.local.OpenHosted(ctx, cfg, claim)
 	}
-	if opened, selected, err := h.remote.OpenHosted(ctx, cfg, claim); selected {
+	opened, hold, selected, err := h.remote.openHoldingLease(ctx, cfg, claim)
+	defer hold.release()
+	if selected {
 		return opened, true, err
 	}
 	return h.local.OpenHosted(ctx, cfg, claim)

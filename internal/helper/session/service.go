@@ -799,6 +799,9 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 		Mode:                p.DesiredMode,
 		AgentHelperPath:     p.AgentHelperPath,
 		AgentToolSocketPath: p.AgentToolSocketPath,
+		// The pane's bearer, on the same terms as the endpoint above: a fact
+		// about THIS request (nocx-50w7p.16).
+		AgentToolToken: p.AgentToolToken,
 		// Per request, for the same reason `spawn`'s is (nocx-50w7p.18):
 		// what arrives on the far-side tool socket is FOR the coordinator
 		// that opened this pane, and only that coordinator can name its own

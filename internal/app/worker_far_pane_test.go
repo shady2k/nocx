@@ -233,13 +233,57 @@ func (s *farStand) enrol(t *testing.T, sid session.ID, agent string) {
 
 // callOver writes one pane record and one request on a fresh connection and
 // answers what the endpoint said.
+// paneToken is the bearer the named pane's interval admits with, read from the
+// SAME service the endpoint asks: a test that presented a value of its own
+// choosing would be asserting about its own fixture.
+// A pane with no live interval has no bearer, and this returns the empty
+// string rather than failing: the tests that ask for one before enrolling a
+// pane, or after its session ended, are asserting about exactly that absence,
+// and a harness that refused to make them would be asserting it for them.
+func (s *farStand) paneToken(t *testing.T, pane string) string {
+	t.Helper()
+	_, token, _ := s.approval.IntervalToken(session.ID(pane), agentToolEndpointScopePrefix+workerTestWorkspace)
+	return token
+}
+
+// callOver presents the pane's CURRENT bearer, which is what a real bridge does.
 func (s *farStand) callOver(t *testing.T, pane string) rpcEnvelope {
+	t.Helper()
+	return s.callOverWithToken(t, pane, s.paneToken(t, pane))
+}
+
+func (s *farStand) callOverWithToken(t *testing.T, pane, token string) rpcEnvelope {
+	t.Helper()
+	conn := s.dialWithToken(t, pane, token)
+	t.Cleanup(func() { _ = conn.Close() })
+	return s.answerFrom(t, conn)
+}
+
+// callOnce is the same call with the connection CLOSED before it returns.
+//
+// It exists because a session admits ONE caller at a time, and a connection
+// holds that slot until its serve loop ends — so a test that makes a second
+// call about the same session, after the first one was ADMITTED, has to give
+// the slot back first or it is measuring the slot rather than the rule it
+// wrote. callOverWithToken keeps its connection open on purpose: the tests
+// about a live connection being closed by a retirement need exactly that.
+func (s *farStand) callOnce(t *testing.T, pane, token string) rpcEnvelope {
+	t.Helper()
+	conn := s.dialWithToken(t, pane, token)
+	defer func() { _ = conn.Close() }()
+	return s.answerFrom(t, conn)
+}
+
+// dialWithToken opens one connection, writes the pane record and the bearer the
+// caller supplied, and sends one request. NOTHING is cleaned up here: the caller
+// owns the connection, which is what lets the one-connection-per-call tests hold
+// theirs open and the closed-again ones let it go.
+func (s *farStand) dialWithToken(t *testing.T, pane, token string) net.Conn {
 	t.Helper()
 	conn, err := net.Dial("unix", s.endpoint.SocketPath())
 	if err != nil {
 		t.Fatalf("dial endpoint: %v", err)
 	}
-	t.Cleanup(func() { _ = conn.Close() })
 	if pane != "" {
 		record, encErr := panebind.Encode(pane)
 		if encErr != nil {
@@ -249,12 +293,30 @@ func (s *farStand) callOver(t *testing.T, pane string) rpcEnvelope {
 			t.Fatalf("write record: %v", werr)
 		}
 	}
+	// The bearer, when the test supplied one. NOT written when it did not: a
+	// connection with no token then reaches the endpoint as a request where a
+	// bearer belongs, which is exactly the absence being tested.
+	if token != "" {
+		bearer, encErr := panebind.EncodeToken(token)
+		if encErr != nil {
+			t.Fatalf("encode token: %v", encErr)
+		}
+		if _, werr := conn.Write(bearer); werr != nil {
+			t.Fatalf("write token: %v", werr)
+		}
+	}
 	if _, werr := conn.Write([]byte(requestHoldings + "\n")); werr != nil {
 		// A refusal is written and the connection closed, and a write racing
 		// that close fails with EPIPE — the answer is already on its way, and
 		// the read below is what reports it.
 		_ = werr
 	}
+	return conn
+}
+
+// answerFrom reads the one answer the endpoint owes for the request above.
+func (s *farStand) answerFrom(t *testing.T, conn net.Conn) rpcEnvelope {
+	t.Helper()
 	if derr := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); derr != nil {
 		t.Fatalf("set deadline: %v", derr)
 	}
@@ -368,7 +430,11 @@ func TestAFarPanesAgentIsRefusedAfterItsSessionEnds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	if _, err := conn.Write(append(record, []byte(requestHoldings+"\n")...)); err != nil {
+	bearer, err := panebind.EncodeToken(stand.paneToken(t, string(farPaneP)))
+	if err != nil {
+		t.Fatalf("encode token: %v", err)
+	}
+	if _, err := conn.Write(append(append(record, bearer...), []byte(requestHoldings+"\n")...)); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
@@ -419,12 +485,65 @@ func TestAFarPaneIsAdmittedWithoutAProcessPinner(t *testing.T) {
 		t.Fatalf("newToolAuthorizer: %v", err)
 	}
 
-	if _, _, _, ok := unpinnable.admittedPeer(toolendpoint.Peer{Pane: string(farPaneP)}); !ok {
-		t.Fatal("a far pane was refused because this coordinator cannot pin processes")
+	if _, _, _, err := unpinnable.admittedPeer(toolendpoint.Peer{
+		Pane: string(farPaneP), Token: stand.paneToken(t, string(farPaneP)),
+	}); err != nil {
+		t.Fatalf("a far pane was refused because this coordinator cannot pin processes: %v", err)
 	}
-	if _, _, _, ok := unpinnable.admittedPeer(toolendpoint.Peer{PID: farOwnedPID}); ok {
-		t.Fatal("a pid was admitted with no pinner to check it against")
+	if _, _, _, err := unpinnable.admittedPeer(toolendpoint.Peer{PID: farOwnedPID}); !errors.Is(err, toolendpoint.ErrNotEnrolled) {
+		t.Fatalf("a pid was admitted with no pinner to check it against: err = %v", err)
 	}
+}
+
+// TestAFarConnectionIsRefusedWithoutThePanesCurrentBearer — AC1's refusals,
+// each paired with the admission they are the absence of (nocx-50w7p.16):
+// nothing presented, a value that is not the pane's, and ANOTHER PANE's token,
+// which is the case a per-connection check could pass and a per-pane one cannot.
+func TestAFarConnectionIsRefusedWithoutThePanesCurrentBearer(t *testing.T) {
+	// A STAND PER CASE, and that is not tidiness: a session admits ONE caller
+	// at a time, and a connection left open by an earlier case makes the next
+	// call fail for that reason instead. Measured — with one stand, the
+	// wrong-token case passed while the bearer check was removed, so the test
+	// was asserting about the caller slot and calling it the bearer.
+	newStand := func() *farStand {
+		stand := newFarStand(t,
+			remoteSession(farPaneP, "build.example.com", "deploy", "SHA256:key-a"),
+			remoteSession(farPaneQ, "build.example.com", "deploy", "SHA256:key-a"))
+		stand.enrol(t, farPaneP, "claude")
+		stand.enrol(t, farPaneQ, "claude")
+		return stand
+	}
+
+	t.Run("admitted with the pane's current bearer", func(t *testing.T) {
+		if env := newStand().callOver(t, string(farPaneP)); env.Error != nil {
+			t.Fatalf("the pane's own agent was refused with its current bearer: %+v", env.Error)
+		}
+	})
+
+	t.Run("nothing presented", func(t *testing.T) {
+		env := newStand().callOverWithToken(t, string(farPaneP), "")
+		if env.Error == nil {
+			t.Fatal("a connection presenting no bearer was admitted")
+		}
+		if !strings.Contains(env.Error.Data.Reason, "did not present the token") {
+			t.Fatalf("refused for %q, want the bearer's own sentence", env.Error.Data.Reason)
+		}
+	})
+
+	t.Run("a bearer that is not the pane's", func(t *testing.T) {
+		if env := newStand().callOverWithToken(t, string(farPaneP), strings.Repeat("ab", 32)); env.Error == nil {
+			t.Fatal("a connection presenting a wrong bearer was admitted")
+		}
+	})
+
+	t.Run("another pane's bearer", func(t *testing.T) {
+		stand := newStand()
+		// The same coordinator, the same host, the same account: everything
+		// agrees except which pane the bearer is for.
+		if env := stand.callOverWithToken(t, string(farPaneP), stand.paneToken(t, string(farPaneQ))); env.Error == nil {
+			t.Fatal("another pane's bearer admitted a connection")
+		}
+	})
 }
 
 // TestAFarRecordCannotStandForALocalPane — the arm's guard. A local pane's

@@ -295,6 +295,6 @@
     }
   ],
   "inputBox": { "anchor": "topRule", "to": "bottomRule" },
-  "menuZone": { "anchor": "cursor", "up": true, "maxRows": 16 },
+  "menuZone": { "anchor": "cursor", "up": true, "toEdge": true },
   "default": "unknown"
 }

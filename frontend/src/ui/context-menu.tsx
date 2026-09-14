@@ -20,7 +20,7 @@
  * The surface may place the menu (choosing when to open it and where) and
  * may never repaint it — items are the kit's own buttons.
  */
-import { For, Show, createEffect, onCleanup, type Component } from 'solid-js'
+import { For, Show, createEffect, createSignal, onCleanup, type Component } from 'solid-js'
 import { Portal } from 'solid-js/web'
 import { clampMenuPosition } from './menu-geometry'
 
@@ -43,7 +43,17 @@ export interface ContextMenuItem {
    * which is the only place that has one.
    */
   icon?: Component
-  onSelect: () => void
+  /** The action. It may return a promise — but the menu only WAITS for one when
+   *  the item declares `busyLabel`; otherwise it closes first and acts after, the
+   *  order the next overlay's focus restore depends on (see releaseFocus). */
+  onSelect: () => void | Promise<void>
+  /**
+   * The item does async work the person must see happen — copying a stored answer,
+   * loading a dump (nocx-v13pd). The menu stays open, the row is disabled and reads
+   * this label, and the menu closes when the work settles either way. A control that
+   * looks clicked and does nothing reads as broken.
+   */
+  busyLabel?: string
 }
 
 export interface ContextMenuProps {
@@ -62,6 +72,18 @@ export interface ContextMenuProps {
   open: boolean
   x: number
   y: number
+  /**
+   * Which edge of the menu `x` names. `start` (default) is the left edge — a menu
+   * opened at a pointer. `end` is the right edge — a menu hanging from a control's
+   * right side, like a block's ⋮. Either way the position goes through the shared clamp.
+   */
+  align?: 'start' | 'end'
+  /**
+   * The element that opened the menu. A pointerdown on it is not "outside": the opener
+   * is a toggle, and closing on its pointerdown would let the click that follows reopen
+   * what the person meant to close.
+   */
+  anchor?: HTMLElement
   items: ContextMenuItem[]
   /** Called when the menu dismisses itself: outside pointerdown, Escape,
    *  or an item being picked. The caller owns the open state. */
@@ -73,6 +95,8 @@ export function ContextMenu(props: ContextMenuProps) {
   let element: HTMLDivElement | undefined
   /** Whoever held the keyboard when the menu took it. */
   let opener: HTMLElement | null = null
+  /** The id of the item whose async work is in flight, if any. */
+  const [busy, setBusy] = createSignal<string | null>(null)
 
   /**
    * Hand the keyboard back to the opener.
@@ -116,7 +140,7 @@ export function ContextMenu(props: ContextMenuProps) {
     // imperative block menu uses (nocx-vnirv.2).
     const rect = el.getBoundingClientRect()
     const { left, top } = clampMenuPosition(
-      { x: props.x, y: props.y },
+      { x: props.align === 'end' ? props.x - rect.width : props.x, y: props.y },
       { width: rect.width, height: rect.height },
       { width: window.innerWidth, height: window.innerHeight },
     )
@@ -134,7 +158,10 @@ export function ContextMenu(props: ContextMenuProps) {
     if (!props.open) return
     const onPointerDown = (e: PointerEvent): void => {
       const el = element
-      if (el && e.target instanceof Node && !el.contains(e.target)) props.onClose()
+      if (!(e.target instanceof Node)) return
+      if (el?.contains(e.target)) return
+      if (props.anchor?.contains(e.target)) return
+      props.onClose()
     }
     const onKeyDown = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') {
@@ -188,10 +215,23 @@ export function ContextMenu(props: ContextMenuProps) {
                 type="button"
                 class="ui-context-menu__item"
                 role="menuitem"
+                data-item-id={item.id}
+                disabled={busy() === item.id}
+                data-busy={busy() === item.id ? '' : undefined}
                 onClick={() => {
-                  releaseFocus()
-                  props.onClose()
-                  item.onSelect()
+                  if (busy() !== null) return
+                  if (item.busyLabel === undefined) {
+                    releaseFocus()
+                    props.onClose()
+                    void item.onSelect()
+                    return
+                  }
+                  setBusy(item.id)
+                  void Promise.resolve(item.onSelect()).finally(() => {
+                    setBusy(null)
+                    releaseFocus()
+                    props.onClose()
+                  })
                 }}
               >
                 <span class="ui-context-menu__icon" aria-hidden="true">
@@ -199,7 +239,9 @@ export function ContextMenu(props: ContextMenuProps) {
                     {(Icon) => <Icon />}
                   </Show>
                 </span>
-                <span class="ui-context-menu__label">{item.label}</span>
+                <span class="ui-context-menu__label">
+                  {busy() === item.id ? item.busyLabel : item.label}
+                </span>
               </button>
             )}
           </For>

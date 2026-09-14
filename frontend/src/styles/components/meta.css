@@ -1,6 +1,6 @@
 /* Meta (ui/README table) — the kit's inline fact on the terminal screen: muted
    text, one line, tabular figures (spec 2026-09-14 §6.1). It replaces the
-   boxed `.nocx-chip` family; there is deliberately no background, border or
+   old boxed chip family; there is deliberately no background, border or
    padding here — metadata is text. Colours are tokens only (ADR-0013 §4). */
 
 .ui-meta {
@@ -14,8 +14,8 @@
   font-family: var(--font-family-ui);
   font-size: var(--font-size-2xs);
   /* Equal advance widths: a duration that ticks or a column of exit codes must
-     not change width digit by digit (the reason .nocx-chip carried the same
-     declaration, nocx-6w4z). */
+     not change width digit by digit (the reason the old chip carried the
+     same declaration, nocx-6w4z). */
   font-variant-numeric: tabular-nums;
   -webkit-user-select: none;
   user-select: none;

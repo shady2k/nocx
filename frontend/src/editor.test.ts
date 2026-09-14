@@ -299,10 +299,11 @@ describe('CommandEditor', () => {
   })
 
   it('multiline: growth reports stop at the cap', () => {
-    // The cap is 30 lines and must equal the CSS max-height in style.css:
-    // past it the box no longer grows, so there is nothing for the scrollback
-    // to follow. Ten lines was the original cap and was raised because a
-    // pasted curl with a JSON body is twenty.
+    // The cap is 30 lines and must equal the CSS max-height in
+    // styles/surfaces/composer.css: past it the box no longer grows, so
+    // there is nothing for the scrollback to follow. Ten lines was the
+    // original cap and was raised because a pasted curl with a JSON body is
+    // twenty.
     const resized = vi.fn()
     const { ed } = setup({ resized })
     ed.show()
@@ -313,70 +314,67 @@ describe('CommandEditor', () => {
     expect(resized).toHaveBeenCalledTimes(1) // still 30 rows — no further report
   })
 
-  it('setCwd updates the cwd chip text', () => {
+  const context = (container: ParentNode) =>
+    container.querySelector<HTMLElement>('.nocx-editor-context .ui-meta')!
+
+  it('the context is one kit Meta naming the directory (spec §5.2)', () => {
     const { ed, container } = setup()
     ed.show()
-    expect(container.querySelector('.nocx-editor-cwd')!.textContent).toContain('~')
+    expect(context(container).textContent).toContain('~')
     ed.setCwd('/home/dev/projects')
-    expect(container.querySelector('.nocx-editor-cwd')!.textContent).toContain('dev/projects')
+    expect(context(container).textContent).toContain('dev/projects')
+    expect(context(container).title).toBe('/home/dev/projects')
+    expect(container.textContent).not.toContain('📁')
   })
 
-  it('an SSH prompt shows the location chip with the block header string (nocx-3779)', () => {
+  it('an SSH prompt names the host first, in the strong emphasis (nocx-3779, spec §5.2)', () => {
     const { ed, container } = setup()
     ed.show()
-    const chip = container.querySelector<HTMLElement>('.nocx-editor-location')
-    expect(chip).not.toBeNull()
+    ed.setCwd('/srv/nocx')
     ed.setLocation('root@192.168.0.57')
-    expect(chip!.style.display).not.toBe('none')
-    expect(chip!.textContent).toBe('root@192.168.0.57')
+    const strong = context(container).querySelector('[data-emphasis="strong"]')
+    expect(strong?.textContent).toBe('root@192.168.0.57')
+    expect(context(container).textContent).toContain('srv/nocx')
   })
 
-  it('a local session (empty location) grows no location chip at all (nocx-3779)', () => {
+  it('a local session names no host at all (nocx-3779)', () => {
     const { ed, container } = setup()
     ed.show()
     ed.setLocation('')
-    const chip = container.querySelector<HTMLElement>('.nocx-editor-location')
-    expect(chip).not.toBeNull()
-    expect(chip!.style.display).toBe('none')
-    expect(chip!.textContent).toBe('')
+    expect(context(container).querySelector('[data-emphasis="strong"]')).toBeNull()
   })
 
-  it('a fresh editor shows no location chip until a location is set (nocx-3779)', () => {
+  it('the context dims when focus leaves the composer and returns when it comes back', () => {
+    const { ed, view, container } = setup()
+    ed.show()
+    view.contentDOM.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
+    expect(context(container).dataset.tone).toBe('muted')
+    view.contentDOM.dispatchEvent(
+      new FocusEvent('focusout', { bubbles: true, relatedTarget: document.body }),
+    )
+    expect(context(container).dataset.tone).toBe('dim')
+  })
+
+  it('the chrome row holds no clock (spec §5.4)', () => {
     const { ed, container } = setup()
     ed.show()
-    const chip = container.querySelector<HTMLElement>('.nocx-editor-location')
-    expect(chip!.style.display).toBe('none')
-    expect(chip!.textContent).toBe('')
-  })
-
-  it('the location chip uses the kit identity classes, not bespoke ones (nocx-3779)', () => {
-    const { ed, container } = setup()
-    ed.show()
-    ed.setLocation('root@example.com')
-    const chip = container.querySelector('.nocx-editor-location')
-    expect(chip!.classList.contains('nocx-chip')).toBe(true)
-    expect(chip!.classList.contains('nocx-chip-muted')).toBe(true)
-  })
-
-  it('setTime updates the time chip', () => {
-    const { ed, container } = setup()
-    ed.setTime(new Date('2026-08-01T12:34:56'))
-    expect(container.querySelector('.nocx-editor-time')!.textContent).toContain('12:34:56')
-  })
-
-  it('orders the chrome left group before the clock, which the stylesheet pins right (nocx-a44m)', () => {
-    const { ed, container } = setup()
-    ed.show()
-    // jsdom computes no layout, but the intent is source order: the clock is
-    // the LAST direct child of the chrome row, and .nocx-editor-time carries
-    // margin-left: auto so it keeps the right edge for any child count.
-    // A future third sibling lands after the left group, not in the middle.
     const chrome = container.querySelector<HTMLElement>('.nocx-editor-chrome')!
-    const left = container.querySelector<HTMLElement>('.nocx-editor-chrome-left')!
-    const time = container.querySelector<HTMLElement>('.nocx-editor-time')!
-    const order = [...chrome.children]
-    expect(order.indexOf(left)).toBeLessThan(order.indexOf(time))
-    expect(order.indexOf(time)).toBe(order.length - 1)
+    expect(chrome.textContent).not.toMatch(/\d{1,2}:\d{2}/)
+    expect('setTime' in ed).toBe(false)
+  })
+
+  it('orders the context before the controls, and the controls are kit Buttons', () => {
+    const { ed, container } = setup()
+    ed.show()
+    const row = [...container.querySelector<HTMLElement>('.nocx-editor-chrome')!.children]
+    const ctx = container.querySelector('.nocx-editor-context')!
+    const controls = container.querySelector('.nocx-editor-controls')!
+    expect(row.indexOf(ctx)).toBeLessThan(row.indexOf(controls))
+    for (const c of controls.querySelectorAll('[data-control]')) {
+      expect(c.classList.contains('ui-button')).toBe(true)
+      expect((c as HTMLElement).dataset.variant).toBe('ghost')
+      expect((c as HTMLElement).dataset.size).toBe('sm')
+    }
   })
 
   it('rootContains returns true for the input surface and chrome (focus-bounce)', () => {
@@ -385,7 +383,7 @@ describe('CommandEditor', () => {
     // The focus-bounce tests `rootContains(activeElement)`; with CM6 the active
     // element is the contentDOM, so this is the contract that must hold.
     expect(ed.rootContains(view.contentDOM)).toBe(true)
-    expect(ed.rootContains(container.querySelector('.nocx-editor-cwd'))).toBe(true)
+    expect(ed.rootContains(context(container))).toBe(true)
   })
 
   it('rootContains returns false for elements outside the editor root', () => {
@@ -1001,7 +999,7 @@ describe('command existence verdicts', () => {
 // passes while meaning nothing.
 describe('the model chip (nocx-rikz5)', () => {
   const chipsOf = (ed: CommandEditor): HTMLElement[] =>
-    Array.from(ed.root.querySelectorAll<HTMLElement>('.nocx-editor-model')).filter(
+    Array.from(ed.root.querySelectorAll<HTMLElement>('[data-control^="model"]')).filter(
       (el) => el.style.display !== 'none',
     )
 
@@ -1101,13 +1099,13 @@ describe('the model chip (nocx-rikz5)', () => {
     expect(textsOf(ed)).toEqual([])
   })
 
-  it('joins the chrome row it lives in — the same .nocx-chip vocabulary as its neighbours, no ui-badge', () => {
+  it('is a kit ghost Button that truncates, in the controls group (spec §5.2)', () => {
     const { ed } = setup()
     ed.setModelChip({ kind: 'ready', endpoint: 'openrouter', model: 'm-a' })
     for (const chip of chipsOf(ed)) {
-      expect(chip.classList.contains('nocx-chip')).toBe(true)
-      expect(chip.classList.contains('ui-badge')).toBe(false)
-      expect(chip.closest('.nocx-editor-chrome-left')).not.toBeNull()
+      expect(chip.classList.contains('ui-button')).toBe(true)
+      expect(chip.dataset.truncate).toBe('true')
+      expect(chip.closest('.nocx-editor-controls')).not.toBeNull()
     }
   })
 })
@@ -1116,22 +1114,21 @@ describe('the grant chip (nocx-wcswn)', () => {
   // owns everything it SAYS (nocx-5u3oz.13). So this asserts identity and
   // position only — the label, the aria-label, the title and the typed state
   // are grant.test.ts's, and asserting them here is what made two owners.
-  it('is the last chip in the row, and carries the kit identity', () => {
+  it('is the last control in the row, and is a kit Button', () => {
     const { ed } = setup()
-    const left = ed.root.querySelector('.nocx-editor-chrome-left')!
-    const grant = left.querySelector<HTMLElement>('.nocx-editor-grant')!
-    expect(grant.classList.contains('nocx-chip')).toBe(true)
-    expect([...left.children].indexOf(grant)).toBe(left.children.length - 1)
-
+    const controls = ed.root.querySelector('.nocx-editor-controls')!
+    const grant = controls.querySelector<HTMLElement>('[data-control="grant"]')!
+    expect(grant.classList.contains('ui-button')).toBe(true)
+    expect([...controls.children].indexOf(grant)).toBe(controls.children.length - 1)
     ed.setModelChip({ kind: 'ready', endpoint: 'openrouter', model: 'm-a' })
-    expect([...left.children].indexOf(grant)).toBe(left.children.length - 1)
+    expect([...controls.children].indexOf(grant)).toBe(controls.children.length - 1)
   })
 
   it('clicking the chip reaches the host without changing the input target', () => {
     const { ed } = setup()
     const opened = vi.fn()
     ed.onGrantChipClick(opened)
-    ed.root.querySelector<HTMLElement>('.nocx-editor-grant')!.click()
+    ed.root.querySelector<HTMLElement>('[data-control="grant"]')!.click()
     expect(opened).toHaveBeenCalledTimes(1)
   })
 })

@@ -5,20 +5,5 @@
     "Every entry is a character standing in for an icon as element text (nocx-9bpeq.5).",
     "The baseline may only shrink. Its normal state is empty."
   ],
-  "violations": [
-    {
-      "file": "src/editor.ts",
-      "glyph": "📁",
-      "context": "text-assignment",
-      "count": 2,
-      "reason": "The composer's cwd chip; removed with the chip by nocx-9bpeq.7 (spec 2026-09-14 §5.2)."
-    },
-    {
-      "file": "src/scrollback/blocks.ts",
-      "glyph": "📁",
-      "context": "text-assignment",
-      "count": 1,
-      "reason": "The block header's cwd chip; removed with the chip by nocx-9bpeq.6 (spec 2026-09-14 §3.1)."
-    }
-  ]
+  "violations": []
 }

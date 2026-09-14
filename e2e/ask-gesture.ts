@@ -41,7 +41,7 @@ export const INPUT = '.pane.active .nocx-editor-input'
  *  stands (`data-granted`) and the input line's chip COUNTS the marks. The
  *  chip is deliberately not a second list of command names — the names live
  *  in its popover, and the block itself is where a person reads them. */
-const GRANT_CHIP = '.pane.active .nocx-editor-grant'
+const GRANT_CHIP = '.pane.active [data-control="grant"]'
 const GRANTED = '.pane.active .cmd-block[data-granted="true"]'
 
 /** `:visible` on purpose: CM6 keeps a hidden measurement spacer beside the

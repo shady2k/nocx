@@ -262,7 +262,6 @@ test('no emoji and no glyph stands in for an icon on the terminal screen', async
 })
 
 test('the composer shows no clock', async ({ page }) => {
-  test.fail() // nocx-9bpeq.7 turns this green; that commit deletes this line.
   await twoBlocks(page)
   await expect(page.locator(`${COMPOSER} .nocx-editor-time`)).toHaveCount(0)
   await expect(page.locator(COMPOSER_CHROME)).not.toHaveText(/\d{1,2}:\d{2}/)
@@ -298,7 +297,6 @@ test('every control in a block header and the composer is a kit component', asyn
 })
 
 test('history, live terminal and composer stand on one ground in every theme', async ({ page }) => {
-  test.fail() // nocx-9bpeq.3, .7 and .8; the last of them deletes this line.
   test.setTimeout(120_000)
   await twoBlocks(page)
   const okRow = `${SETTLED}:not([data-outcome="failure"])`

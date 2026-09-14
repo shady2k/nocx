@@ -1,6 +1,7 @@
 import { grantRows, type GrantBlock } from './ask-entry'
 import { FloatingPanel, type FloatingPanelRow } from './ui/floating-panel'
 import { createIconButton } from './ui/icon-button-element'
+import { createButton } from './ui/button-element'
 import { CloseIcon } from './ui/icons'
 
 export type { GrantBlock }
@@ -34,12 +35,16 @@ export class GrantController {
   constructor(options: GrantControllerOptions = {}) {
     this.onChange = options.onChange
     this.ownsChip = options.chip === undefined
-    this.chip = options.chip ?? document.createElement('button')
-    if (this.ownsChip) {
-      this.chip.type = 'button'
-      this.chip.className = 'nocx-chip nocx-editor-grant'
-      this.chip.addEventListener('click', () => this.toggle())
-    }
+    this.chip =
+      options.chip ??
+      createButton({
+        label: '',
+        variant: 'ghost',
+        size: 'sm',
+        truncate: true,
+        onClick: () => this.toggle(),
+      })
+    if (this.ownsChip) this.chip.dataset.control = 'grant'
     this.panel = new FloatingPanel({
       variant: 'grant',
       role: 'listbox',
@@ -138,9 +143,9 @@ export class GrantController {
     const automatic = this.automaticBlock === null ? '' : ' + screen'
     const spoken = this.automaticBlock === null ? '' : ' · frozen screen attached automatically'
     this.chip.textContent = `marked for the question · ${count}${automatic}`
-    // The chip ellipsises when the pane is narrow (style.css), so the title
-    // carries the whole line rather than a label about it — nothing may live
-    // only in the ellipsis.
+    // The chip ellipsises within its bounded width (Button's `data-truncate`,
+    // composer.css), so the title carries the whole line rather than a label
+    // about it — nothing may live only in the ellipsis.
     this.chip.title =
       count === 0 && this.automaticBlock === null
         ? 'Mark blocks to include them in a question'

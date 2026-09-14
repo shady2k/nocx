@@ -29,6 +29,7 @@ const STYLE_ENTRY = resolve(srcDir, 'style.css')
 const BASE_STYLE_ENTRY = resolve(srcDir, 'styles/base.css')
 const FRAME_STYLE_ENTRY = resolve(srcDir, 'frame/display.css')
 const COMMAND_BLOCK_STYLE_ENTRY = resolve(srcDir, 'styles/surfaces/command-block.css')
+const COMPOSER_STYLE = resolve(srcDir, 'styles/surfaces/composer.css')
 
 import type { PaneIdentity } from './terminal-content'
 import { grantBlockFromElement, type GrantBlock } from './ask-entry'
@@ -1805,16 +1806,14 @@ describe('the live prompt says where Enter will land (nocx-3779)', () => {
   /** jsdom lacks scrollTo/scrollIntoView; the scrollback controller calls
    *  both when blocks are created and the layout changes. */
 
-  it('an SSH prompt shows the location chip the block header would carry', async () => {
+  it('an SSH prompt shows the location the block header would carry, strong in the context (spec §5.2)', async () => {
     const { content, tab, teardown } = await mountSshTerminal()
     try {
       content.setVisible(true)
-      // The chip is fed at session open from ONE derivation
+      // The context is fed at session open from ONE derivation
       // (this.locationLine()); no stream marker may change it (ADR-0024 §1).
-      const chip = tab.pane.querySelector<HTMLElement>('.nocx-editor-location')
-      expect(chip).not.toBeNull()
-      expect(chip!.style.display).not.toBe('none')
-      expect(chip!.textContent).toBe('root@192.168.0.57')
+      const strong = tab.pane.querySelector('.nocx-editor-context [data-emphasis="strong"]')
+      expect(strong?.textContent).toBe('root@192.168.0.57')
       // The block header never appears in the severed product: blocks are
       // a completion projection with no stream (or app) trigger.
       expect(tab.pane.querySelector('.cmd-header-meta')).toBeNull()
@@ -1823,16 +1822,13 @@ describe('the live prompt says where Enter will land (nocx-3779)', () => {
     }
   })
 
-  it('a local session grows no location chip', async () => {
+  it('a local session names no host at all', async () => {
     const { content, tab, teardown } = await mountTerminal(makeClipboard(), {
       attachToDocument: true,
     })
     try {
       content.setVisible(true)
-      const chip = tab.pane.querySelector<HTMLElement>('.nocx-editor-location')
-      expect(chip).not.toBeNull()
-      expect(chip!.style.display).toBe('none')
-      expect(chip!.textContent).toBe('')
+      expect(tab.pane.querySelector('.nocx-editor-context [data-emphasis="strong"]')).toBeNull()
     } finally {
       teardown()
     }
@@ -1858,7 +1854,7 @@ describe('the recovery action chip in editor chrome (nocx-atyf.2)', () => {
 
   const recoveryLabel = (content: TerminalContent): string | null => {
     const withEditor = content as unknown as { editor: { root: HTMLElement } }
-    const el = withEditor.editor.root.querySelector<HTMLElement>('.nocx-editor-recovery')
+    const el = withEditor.editor.root.querySelector<HTMLElement>('[data-control="recovery"]')
     if (!el || el.style.display === 'none') return null
     return el.textContent
   }
@@ -2228,7 +2224,7 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
       await Promise.resolve()
       await Promise.resolve()
       const recoveryChip =
-        editorOf(content).root.querySelector<HTMLElement>('.nocx-editor-recovery')
+        editorOf(content).root.querySelector<HTMLElement>('[data-control="recovery"]')
       expect(recoveryChip?.style.display).toBe('none')
 
       // The current acknowledgement refuses. A genuinely fresh episode must
@@ -2509,22 +2505,13 @@ describe('the SSH block header keeps its where-meta left and the right group rig
   })
 })
 
-// The command editor's chrome row has the same latent class as the SSH
-// header above: `justify-content: space-between` is only correct for exactly
-// two children (left group + clock), and the row must not break if a third
-// joins it. Same fix, same contract assertion: the row does not distribute,
-// and the clock — the right-edge element — carries its own auto margin
-// (nocx-a44m).
-describe('the command editor chrome pins the clock to the right edge without distributing (nocx-a44m)', () => {
-  it('the stylesheet gives the clock its own auto margin, not space-between on the row', () => {
-    const css: string = readFileSync(STYLE_ENTRY, 'utf8')
+describe('the composer chrome keeps its row height whatever it holds (nocx-i4h04, spec §5.2)', () => {
+  it('declares a fixed height, never a floor, and never distributes its children', () => {
+    const css = stripComments(readFileSync(COMPOSER_STYLE, 'utf8'))
     const chrome = stripComments(extractRuleBlock(css, 'nocx-editor-chrome') ?? '')
-    const time = stripComments(extractRuleBlock(css, 'nocx-editor-time') ?? '')
-    expect(chrome).not.toBe('')
-    expect(time).not.toBe('')
-
+    expect(chrome).toMatch(/(^|;|\s)height\s*:\s*var\(--control-height-xs\)/)
+    expect(chrome).not.toMatch(/min-height/)
     expect(chrome).not.toMatch(/justify-content\s*:\s*(space-between|space-around|space-evenly)/)
-    expect(time).toMatch(/margin-left\s*:\s*auto/)
   })
 })
 
@@ -2535,7 +2522,7 @@ describe('summoned editor overlay stylesheet contract (nocx-92gfl)', () => {
     const stack = stripComments(extractRuleBlock(css, 'nocx-summon-stack') ?? '')
     const answers = stripComments(extractRuleBlock(css, 'nocx-summon-answers') ?? '')
     const editor =
-      css.match(
+      stripComments(readFileSync(COMPOSER_STYLE, 'utf8')).match(
         /\.nocx-summon-stack\s*>\s*\.nocx-editor\[data-placement=['"]overlay['"]\]\s*\{([^}]*)\}/,
       )?.[1] ?? ''
     const pane = baseCss.match(/\.pane\s*\{([^}]*)\}/)
@@ -5721,7 +5708,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       )
       expect(items.find((item) => item.dataset.itemId === 'grant')).toBeUndefined()
       expect(items.map((item) => item.textContent)).toContain('Copy command')
-      expect(ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')?.style.display).toBe(
+      expect(ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')?.style.display).toBe(
         'none',
       )
       expect((content as unknown as { grantedBlocks: GrantBlock[] }).grantedBlocks).toEqual([])
@@ -5765,7 +5752,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(before).toHaveLength(2)
       expect(before[0]).toMatchObject({ blockEl: rows, start: 1, count: 1 })
       expect(before[1]).toMatchObject({ blockEl: whole })
-      const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
+      const chip = ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')!
       chip.click()
       expect(document.querySelector('.ui-floating-panel[data-open="true"]')).not.toBeNull()
       expect(whole.dataset.granted).toBe('true')
@@ -5955,7 +5942,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       ed.show()
       const block = frozenBlockOf(content, 'ls', ['one', 'two', 'three'])
       submitKey(ed, { metaKey: true })
-      const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
+      const chip = ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')!
 
       selectRows(block, 0, 1)
       document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')!.click()
@@ -5986,7 +5973,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       ed.show()
       const block = frozenBlockOf(content, 'ls', ['one', 'two', 'three'])
       submitKey(ed, { metaKey: true })
-      const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
+      const chip = ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')!
       selectRows(block, 0, 1)
       document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')!.click()
       selectRows(block, 2, 3)
@@ -6024,7 +6011,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
       submitKey(ed, { metaKey: true })
       selectRows(block, 0, 1)
-      const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
+      const chip = ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')!
       expect(chip.dataset.state).toBe('default')
       expect(chip.textContent).toContain('0')
       expect(block.dataset.granted).toBeUndefined()
@@ -6207,7 +6194,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       document
         .querySelector<HTMLButtonElement>('.ui-context-menu__item[data-item-id="grant"]')!
         .click()
-      const grantChip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
+      const grantChip = ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')!
       expect(grantChip.dataset.state).toBe('chosen')
 
       typeAndAsk(ed, content, 'why did it fail?')
@@ -7388,7 +7375,7 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
       const grantState = content as unknown as { grantedBlocks: GrantBlock[] }
       const viaMenu = grantState.grantedBlocks[0]
       expect(viaMenu?.itemId).toBe('e-1')
-      expect(ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')?.textContent).toContain(
+      expect(ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')?.textContent).toContain(
         '1',
       )
 
@@ -7653,10 +7640,10 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
 
       const grantState = content as unknown as { grantedBlocks: GrantBlock[] }
       expect(grantState.grantedBlocks[0]?.itemId).toBe('e-1')
-      expect(ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')?.textContent).toContain(
+      expect(ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')?.textContent).toContain(
         '1',
       )
-      const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
+      const chip = ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')!
       chip.click()
       expect(
         ed.root.querySelector<HTMLElement>('.ui-floating-panel[data-variant="grant"]')?.textContent,
@@ -8282,7 +8269,7 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
   }
 
   const chipEls = (content: TerminalContent): HTMLElement[] =>
-    Array.from(editorOf(content).root.querySelectorAll<HTMLElement>('.nocx-editor-model')).filter(
+    Array.from(editorOf(content).root.querySelectorAll<HTMLElement>('[data-control^="model"]')).filter(
       (el) => el.style.display !== 'none',
     )
 
@@ -8344,7 +8331,7 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
       content.setVisible(true)
-      const grant = editorOf(content).root.querySelector<HTMLElement>('.nocx-editor-grant')!
+      const grant = editorOf(content).root.querySelector<HTMLElement>('[data-control="grant"]')!
       expect(grant.style.display).toBe('none')
 
       switchToAsk(content)
@@ -8364,15 +8351,15 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
     try {
       switchToAsk(content)
       await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
-      const left = editorOf(content).root.querySelector<HTMLElement>('.nocx-editor-chrome-left')!
+      const left = editorOf(content).root.querySelector<HTMLElement>('.nocx-editor-controls')!
       const children = [...left.children]
-      const grant = left.querySelector<HTMLElement>('.nocx-editor-grant')!
+      const grant = left.querySelector<HTMLElement>('[data-control="grant"]')!
       const visibleModels = chipEls(content)
       expect(visibleModels).toHaveLength(2)
       expect(visibleModels.every((chip) => children.indexOf(chip) < children.indexOf(grant))).toBe(
         true,
       )
-      const chips = children.filter((child) => child.classList.contains('nocx-chip'))
+      const chips = children.filter((child) => child.hasAttribute('data-control'))
       expect(chips[chips.length - 1]).toBe(grant)
     } finally {
       teardown()
@@ -8703,7 +8690,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
 
       const summonedFacts = capturedActionFacts[capturedActionFacts.length - 1]
       expect(summonedFacts).toEqual(expect.objectContaining({ presentation: 'editor' }))
-      const recovery = ed.root.querySelector<HTMLElement>('.nocx-editor-recovery')
+      const recovery = ed.root.querySelector<HTMLElement>('[data-control="recovery"]')
       expect(recovery?.style.display).toBe('none')
 
       expect(ed.isVisible).toBe(true)
@@ -8713,7 +8700,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       // and says so on the badge below. An ordinary running command is no
       // exception — a summon that pins a photograph and then sends nothing
       // is where the owner's zero-count report came from (nocx-hp8p2.4).
-      expect(ed.root.querySelector('.nocx-editor-grant')?.getAttribute('aria-label')).toContain(
+      expect(ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label')).toContain(
         'frozen screen attached automatically',
       )
       // Ask, not the shell: the summoned editor's only target. Read off the
@@ -8759,7 +8746,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
 
       await summonChord(content)
 
-      expect(ed.root.querySelector('.nocx-editor-grant')?.getAttribute('aria-label')).toContain(
+      expect(ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label')).toContain(
         'frozen screen attached automatically',
       )
     } finally {
@@ -8791,7 +8778,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       // The program is still painting its screen — it has never frozen, so the
       // attachment owner is the running block itself. Without this the
       // assistant is asked about a screen nothing handed it.
-      expect(ed.root.querySelector('.nocx-editor-grant')?.getAttribute('aria-label')).toContain(
+      expect(ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label')).toContain(
         'frozen screen attached automatically',
       )
     } finally {
@@ -8822,7 +8809,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       // screen, and it is the program the owner reported this against. The
       // gesture, not the buffer kind, is what says which screen the question
       // carries.
-      expect(ed.root.querySelector('.nocx-editor-grant')?.getAttribute('aria-label')).toContain(
+      expect(ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label')).toContain(
         'frozen screen attached automatically',
       )
     } finally {
@@ -9373,7 +9360,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         chordOn(viewOf(ed).contentDOM)
 
         await vi.waitFor(() =>
-          expect(ed.root.querySelector('.nocx-editor-grant')?.getAttribute('aria-label')).toContain(
+          expect(ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label')).toContain(
             'frozen screen attached automatically',
           ),
         )
@@ -9399,7 +9386,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         await settleAttachment()
 
         expect(
-          ed.root.querySelector('.nocx-editor-grant')?.getAttribute('aria-label'),
+          ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label'),
         ).not.toContain('frozen screen attached automatically')
         expect(captureLiveFrame).not.toHaveBeenCalled()
       } finally {
@@ -9438,7 +9425,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
 
         expect(targetNamed(ed)).toBe('agent')
         expect(
-          ed.root.querySelector('.nocx-editor-grant')?.getAttribute('aria-label'),
+          ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label'),
         ).not.toContain('frozen screen attached automatically')
         expect(captureLiveFrame).not.toHaveBeenCalled()
       } finally {
@@ -10097,7 +10084,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
 
       const block = paneOf(content).querySelector<HTMLElement>('.cmd-block-running')
       expect(block?.dataset.granted).toBe('true')
-      expect(ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')?.dataset.state).toBe(
+      expect(ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')?.dataset.state).toBe(
         'chosen',
       )
 
@@ -11958,7 +11945,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       affordance!.click()
 
       // Counted as a person mark, and the rows are painted as granted.
-      const chip = document.querySelector<HTMLElement>('.nocx-editor-grant')
+      const chip = document.querySelector<HTMLElement>('[data-control="grant"]')
       expect(chip?.textContent).toContain('· 1')
       expect(rows[1].dataset.granted).toBe('true')
       expect(rows[2].dataset.granted).toBe('true')

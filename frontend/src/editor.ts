@@ -26,6 +26,8 @@ import {
 import type { SubmitPlan } from './submit'
 import type { ModelChipState } from './agent-readiness'
 import { cwdLabel } from './cwd-label'
+import { createButton } from './ui/button-element'
+import { createMeta, updateMeta, type MetaPart } from './ui/meta'
 
 /**
  * The indent a pasted command arrives with, when it arrives at the very
@@ -57,9 +59,9 @@ export function stripPastedIndent(text: string, atLineStart: boolean): string {
 }
 
 /** The row count at which `resized` stops firing — it must match the CSS cap
- *  in style.css (`.nocx-editor .cm-editor`, 30 lines), because past the cap
- *  the box no longer grows and the scrollback has nothing to follow. Raise
- *  both or neither. */
+ *  in styles/surfaces/composer.css (`.nocx-editor .cm-editor`, 30 lines),
+ *  because past the cap the box no longer grows and the scrollback has
+ *  nothing to follow. Raise both or neither. */
 const MAX_ROWS = 30
 
 export interface EditorActions {
@@ -166,12 +168,14 @@ export class CommandEditor {
   /** The permanent grant chip in the chrome row. */
   private grantChip: HTMLButtonElement
   private _onGrantChipClick: (() => void) | null = null
-  /** Left chip group: the location + cwd chips sit together, the clock
-   *  keeps the right edge of the chrome row. */
-  private chromeLeft: HTMLElement
-  private locationChip: HTMLElement
-  private cwdChip: HTMLElement
-  private timeChip: HTMLElement
+  /** The row's two groups (spec §5.2): where the pending command runs, and
+   *  the controls for the target Enter reaches. */
+  private context: HTMLElement
+  private controls: HTMLElement
+  /** One kit Meta: host (strong, remote only) · directory. */
+  private contextMeta: HTMLSpanElement
+  private _cwd = '~'
+  private _focused = false
   /** Recovery action chip — hidden in the healthy state, shows one action
    *  label in an exception state. The chip IS the action: one click, no
    *  popover (nocx-atyf.2). */
@@ -182,8 +186,8 @@ export class CommandEditor {
    *  resolve — one chip carrying the rung of the ladder the person is on.
    *  Buttons, because they are controls: a chip that navigates must be
    *  reachable by keyboard, and `recoveryChip` above is the precedent.
-   *  Hidden until setModelChip is called with a state, exactly as
-   *  locationChip is, so the row's height never moves (nocx-6c546). */
+   *  Hidden until setModelChip is called with a state, so the row's height
+   *  never moves (nocx-6c546). */
   private modelEndpointChip: HTMLButtonElement
   private modelChip: HTMLButtonElement
   /** Where each chip goes when clicked. STORED rather than captured in a
@@ -234,22 +238,7 @@ export class CommandEditor {
   }
 
   /**
-   * The clock ticks only while the editor is on screen.
-   *
-   * It used to be stamped once, by the input-state transition that revealed the
-   * editor, and then left alone — so the chip showed the second the prompt
-   * appeared and stayed there. Sit at a prompt for ten minutes and it is ten
-   * minutes wrong, which is worse than showing nothing: a wrong clock is still
-   * read as a clock.
-   *
-   * A block in the scrollback is the opposite case and keeps its frozen stamp:
-   * it records when that command ran. This chip is not a record, it is the
-   * present, and the editor is where the present is (nocx-6w4z).
-   */
-  private clock: ReturnType<typeof setInterval> | null = null
-
-  /**
-   * The editor's own surface styling. Kept as a CM6 theme (not style.css)
+   * The editor's own surface styling. Kept as a CM6 theme (not a stylesheet)
    * because a theme extension deterministically overrides the base theme,
    * which is what these rules must do: kill the base theme's dotted focus
    * outline (the textarea had `outline: none`) and paint the caret and the
@@ -264,8 +253,8 @@ export class CommandEditor {
   private static readonly editorTheme = EditorView.theme({
     // The blink period the mark half animates on, handed to the stylesheet
     // from the one place it is declared (block-cursor.ts). Reduced motion is
-    // NOT handled here — style.css guards its own animation with the media
-    // query, the way the rest of this app's animations are guarded.
+    // NOT handled here — composer.css guards its own animation with the
+    // media query, the way the rest of this app's animations are guarded.
     '&': { '--nocx-cursor-blink': `${CURSOR_BLINK_MS}ms` },
     '&.cm-focused': { outline: 'none' },
     '.cm-content': { caretColor: 'var(--color-text)' },
@@ -327,72 +316,83 @@ export class CommandEditor {
     this.root.className = 'nocx-editor'
     this.root.style.display = 'none'
 
-    // ── Editor chrome (header row) ──────────────────────────────────────
+    // ── Editor chrome: the meta row (spec 2026-09-14 §5.2) ──────────────
+    // The same anatomy a block header has: where on the left, and here the
+    // controls for the target Enter reaches on the right. Placement only —
+    // every element in it is the kit's (styles/surfaces/composer.css).
     this.chrome = document.createElement('div')
     this.chrome.className = 'nocx-editor-chrome'
 
-    // Left group: location + cwd together, the clock keeps the right edge.
-    // Placement only — the chips carry their own appearance (ui/README).
-    this.chromeLeft = document.createElement('div')
-    this.chromeLeft.className = 'nocx-editor-chrome-left'
+    this.context = document.createElement('div')
+    this.context.className = 'nocx-editor-context'
+    this.contextMeta = createMeta(['~'], { tone: 'dim', title: '~' })
+    this.context.append(this.contextMeta)
 
-    // Where the pending command would land: the same chip the block header
-    // shows (`nocx-chip nocx-chip-muted`), fed the same string. Hidden until
-    // setLocation receives a value — a local session grows NO chip.
-    this.locationChip = document.createElement('span')
-    this.locationChip.className = 'nocx-chip nocx-chip-muted nocx-editor-location'
-    this.locationChip.style.display = 'none'
+    this.controls = document.createElement('div')
+    this.controls.className = 'nocx-editor-controls'
 
-    this.cwdChip = document.createElement('span')
-    this.cwdChip.className = 'nocx-chip nocx-editor-cwd'
-    this.cwdChip.textContent = '📁 ~'
-
-    this.grantChip = document.createElement('button')
-    this.grantChip.type = 'button'
-    this.grantChip.className = 'nocx-chip nocx-editor-grant'
-    this.grantChip.style.display = 'none'
-    this.grantChip.addEventListener('click', () => this._onGrantChipClick?.())
-    this.timeChip = document.createElement('span')
-    this.timeChip.className = 'nocx-chip nocx-editor-time'
-
-    this.recoveryChip = document.createElement('button')
-    this.recoveryChip.type = 'button'
-    this.recoveryChip.className = 'nocx-chip nocx-editor-recovery'
+    // Recovery: hidden in the healthy state; one label in an exception state.
+    // The control IS the action — one click, no popover (nocx-atyf.2).
+    this.recoveryChip = createButton({
+      label: '',
+      variant: 'ghost',
+      size: 'sm',
+      onClick: () => this._recoveryOnClick?.(),
+    })
+    this.recoveryChip.dataset.control = 'recovery'
     this.recoveryChip.style.display = 'none'
-    this.recoveryChip.addEventListener('click', () => this._recoveryOnClick?.())
 
     // The model that will answer, and the way to change it (nocx-rikz5).
-    // The same .nocx-chip family as every other chip in this row: the row
-    // has no ui-badge in it and must not grow one — two visual grammars in
-    // one row is worse than one old grammar.
-    this.modelEndpointChip = document.createElement('button')
-    this.modelEndpointChip.type = 'button'
-    this.modelEndpointChip.className = 'nocx-chip nocx-editor-model'
+    // Hidden until setModelChip is called with a state, so the row never
+    // grows on its own; the row's height is fixed regardless (nocx-6c546,
+    // nocx-i4h04).
+    this.modelEndpointChip = createButton({
+      label: '',
+      variant: 'ghost',
+      size: 'sm',
+      truncate: true,
+      onClick: () => {
+        const page = this._modelChipTargets.endpoint
+        if (page) this._onModelChipClick?.(page)
+      },
+    })
+    this.modelEndpointChip.dataset.control = 'model-endpoint'
     this.modelEndpointChip.style.display = 'none'
-    this.modelEndpointChip.addEventListener('click', () => {
-      const page = this._modelChipTargets.endpoint
-      if (page) this._onModelChipClick?.(page)
-    })
 
-    this.modelChip = document.createElement('button')
-    this.modelChip.type = 'button'
-    this.modelChip.className = 'nocx-chip nocx-editor-model'
+    this.modelChip = createButton({
+      label: '',
+      variant: 'ghost',
+      size: 'sm',
+      truncate: true,
+      onClick: () => {
+        const page = this._modelChipTargets.model
+        if (page) this._onModelChipClick?.(page)
+      },
+    })
+    this.modelChip.dataset.control = 'model'
     this.modelChip.style.display = 'none'
-    this.modelChip.addEventListener('click', () => {
-      const page = this._modelChipTargets.model
-      if (page) this._onModelChipClick?.(page)
-    })
 
-    this.chromeLeft.append(
-      this.recoveryChip,
-      this.locationChip,
-      this.cwdChip,
-      this.modelEndpointChip,
-      this.modelChip,
-      this.grantChip,
-    )
-    this.chrome.append(this.chromeLeft, this.timeChip)
+    // The grant control: the editor owns the element and its place;
+    // GrantController owns everything it says (nocx-5u3oz.13).
+    this.grantChip = createButton({
+      label: '',
+      variant: 'ghost',
+      size: 'sm',
+      truncate: true,
+      onClick: () => this._onGrantChipClick?.(),
+    })
+    this.grantChip.dataset.control = 'grant'
+    this.grantChip.style.display = 'none'
+
+    this.controls.append(this.recoveryChip, this.modelEndpointChip, this.modelChip, this.grantChip)
+    this.chrome.append(this.context, this.controls)
     this.root.appendChild(this.chrome)
+
+    // Focus dims the context (spec §5.3). focusin/focusout on the root rather
+    // than CM6's focus tracking: a click on a control keeps the composer
+    // "focused", and a move to another pane does not.
+    this.root.addEventListener('focusin', this.onFocusIn)
+    this.root.addEventListener('focusout', this.onFocusOut)
 
     // ── CodeMirror 6 surface (ADR-0010) ────────────────────────────────
     // The extension list is a constructor parameter: the editor must not
@@ -500,33 +500,6 @@ export class CommandEditor {
     this.view.dispatch({ effects: this.targetCompartment.reconfigure(extensions) })
   }
 
-  private startClock(): void {
-    this.setTime(new Date())
-    if (this.clock !== null) return
-    this.clock = setInterval(() => this.setTime(new Date()), 1000)
-  }
-
-  private stopClock(): void {
-    if (this.clock === null) return
-    clearInterval(this.clock)
-    this.clock = null
-  }
-
-  /** Update the time chip with date, weekday and time. */
-  setTime(ts: Date): void {
-    const datePart = ts.toLocaleDateString([], {
-      weekday: 'short',
-      month: 'short',
-      day: 'numeric',
-    })
-    const timePart = ts.toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    })
-    this.timeChip.textContent = `${datePart} ${timePart}`
-  }
-
   mount(container: HTMLElement): void {
     container.appendChild(this.root)
   }
@@ -612,35 +585,48 @@ export class CommandEditor {
     )
   }
 
-  /** Update the cwd chip text — the same short form a block header shows. */
+  private readonly onFocusIn = (): void => {
+    this._focused = true
+    this.renderContext()
+  }
+
+  private readonly onFocusOut = (e: FocusEvent): void => {
+    if (e.relatedTarget instanceof Node && this.root.contains(e.relatedTarget)) return
+    this._focused = false
+    this.renderContext()
+  }
+
+  /** Update the directory the pending command will run in. */
   setCwd(cwd: string): void {
-    this.cwdChip.textContent = `📁 ${cwdLabel(cwd)}`
+    this._cwd = cwd.trim() || '~'
+    this.renderContext()
   }
 
   /**
    * Where the pending command would land — the same string the block header
    * shows, routed from the one locationLine derivation rather than computed
    * a second way (two derivations of "which host" are how they start
-   * disagreeing). Empty for a local session: no chip, and the absence is
+   * disagreeing). Empty for a local session: no host, and the absence is
    * the information.
    */
   setLocation(location: string): void {
     this._location = location
-    this.renderLocation()
+    this.renderContext()
   }
 
-  /** The chip is where the next Enter would land: hidden for a local
-   *  session, the host string otherwise. The trust-gated display is deleted
-   *  with the `trusted` boolean (ADR-0024 §6) — no stream sequence may
-   *  promote or revoke the chip. */
-  private renderLocation(): void {
-    if (!this._location) {
-      this.locationChip.style.display = 'none'
-      this.locationChip.textContent = ''
-      return
-    }
-    this.locationChip.style.display = ''
-    this.locationChip.textContent = this._location
+  /** The context's one writer: host (strong — it answers "where does Enter
+   *  go", spec §5.2) · directory, dimmed when the composer is not focused. The
+   *  host is routed from the one locationLine derivation; empty for a local
+   *  session, where its absence is the information. ADR-0024 §6: no stream
+   *  sequence promotes or revokes it. */
+  private renderContext(): void {
+    const parts: MetaPart[] = this._location
+      ? [{ text: this._location, emphasis: 'strong' }, cwdLabel(this._cwd)]
+      : [cwdLabel(this._cwd)]
+    updateMeta(this.contextMeta, parts, {
+      tone: this._focused ? 'muted' : 'dim',
+      title: this._cwd,
+    })
   }
 
   // ── keyboard ──────────────────────────────────────────────────────────
@@ -999,7 +985,6 @@ export class CommandEditor {
     // empty one above. Clearing the property lets the pane decide, which is
     // where that decision belongs.
     this.root.style.visibility = ''
-    this.startClock()
     // A view that was display:none can cache zero or stale geometry; ask CM6
     // to re-measure before it is painted and focused (spec W1 check 5).
     this.view.requestMeasure()
@@ -1141,10 +1126,6 @@ export class CommandEditor {
    */
   hide(): void {
     this._inputActive = false
-    // Stopped, not left running. Every tab owns an editor, so a timer that
-    // outlives visibility is one wakeup per second per tab for a chip nobody
-    // can see — and they accumulate for the life of the window.
-    this.stopClock()
     this.view.contentDOM.blur()
     this.root.removeAttribute('inert')
     this.root.style.display = 'none'
@@ -1159,7 +1140,7 @@ export class CommandEditor {
   }
 
   /** Whether the editor's root element contains `el`. Used to scope the
-   *  focus-bounce so clicks on the editor surface / cwd chip
+   *  focus-bounce so clicks on the editor surface / composer context
    *  are not swallowed. CM6's contentDOM lives inside root, so the contract
    *  the focus-bounce tests against holds unchanged. */
   rootContains(el: Node | null): boolean {
@@ -1172,15 +1153,13 @@ export class CommandEditor {
   }
 
   dispose(): void {
-    // A tab can be closed while its editor is on screen, which is the common
-    // case rather than the edge one — hide() would never run and the interval
-    // would outlive everything it refers to.
-    this.stopClock()
     // The arbiter outlives the overlay it points at otherwise; a closed tab
     // must not keep consuming keys through a dead closure.
     this.keyArbiter = null
     this._onGrantChipClick = null
     this.root.removeEventListener('keydown', this.onKeydown, true)
+    this.root.removeEventListener('focusin', this.onFocusIn)
+    this.root.removeEventListener('focusout', this.onFocusOut)
     this.view.destroy()
     this.root.remove()
   }

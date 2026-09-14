@@ -55,11 +55,20 @@ const RULES: Rule[] = [
   ...topLevelRules(readFileSync(STYLE_ENTRY, 'utf8')),
   // The Ask token's own appearance moved into the kit with the indicator
   // (nocx-4ff.7): the base identity lives in styles/components/. The
-  // gutter that PLACES it stays in style.css — both are read here, the
-  // same way the cascade would see them.
+  // gutter that PLACES it stays in the composer surface — both are read
+  // here, the same way the cascade would see them.
   ...topLevelRules(
     readFileSync(
       resolve(import.meta.dirname ?? '.', '..', 'styles/components/mode-indicator.css'),
+      'utf8',
+    ),
+  ),
+  // The gutter's own rules moved out of style.css with the rest of the
+  // composer (nocx-9bpeq.7): `styles/surfaces/composer.css` is where the
+  // cascade now finds `.nocx-editor .cm-gutters` and its neighbours.
+  ...topLevelRules(
+    readFileSync(
+      resolve(import.meta.dirname ?? '.', '..', 'styles/surfaces/composer.css'),
       'utf8',
     ),
   ),

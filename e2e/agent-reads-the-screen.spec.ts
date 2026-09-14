@@ -403,12 +403,12 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
     // accessible name and the visible label carries the short form
     // (nocx-hp8p2.5). Both are asserted: the name is what a screen reader
     // says, the label is what the row shows.
-    await expect(page.locator('.nocx-editor-grant')).toHaveAttribute(
+    await expect(page.locator('[data-control="grant"]')).toHaveAttribute(
       'aria-label',
       /frozen screen attached automatically/,
       { timeout: 10_000 },
     )
-    await expect(page.locator('.nocx-editor-grant')).toContainText('+ screen')
+    await expect(page.locator('[data-control="grant"]')).toContainText('+ screen')
 
     // ── The question ─────────────────────────────────────────────────────
     // Two model responses, because a real tool-calling run is two: the
@@ -490,7 +490,7 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
         .locator('.pane.active .cmd-block.cmd-block-running')
         .filter({ hasText: 'put-marker-on-screen.sh' }),
     ).toHaveCount(0, { timeout: 20_000 })
-    await expect(page.locator('.nocx-editor-grant')).not.toHaveAttribute(
+    await expect(page.locator('[data-control="grant"]')).not.toHaveAttribute(
       'aria-label',
       /frozen screen attached automatically/,
     )

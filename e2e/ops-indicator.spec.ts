@@ -121,7 +121,7 @@ test('a running upload is visible and cancellable with the sidebar collapsed', a
     // an operations bug.
     await page.keyboard.type(`cd ${destDir}`)
     await page.keyboard.press('Enter')
-    await expect(page.locator('.pane.active .nocx-editor-cwd')).toContainText(destBase, {
+    await expect(page.locator('.pane.active .nocx-editor-context .ui-meta')).toContainText(destBase, {
       timeout: 60_000,
     })
     const panel = page.locator(FILES_PANEL)

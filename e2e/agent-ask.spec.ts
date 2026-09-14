@@ -129,7 +129,7 @@ const OBSERVE_ROW = '.st-policy__row[data-effect="observe"]'
  *  So "the chip names the block it came from" is asserted as "the block the
  *  selection came from is the one that is marked", which is the same claim
  *  and does not restate a list the surface refuses to keep twice. */
-const GRANT_CHIP = '.pane.active .nocx-editor-grant'
+const GRANT_CHIP = '.pane.active [data-control="grant"]'
 const GRANTED = '.pane.active .cmd-block[data-granted="true"]'
 
 /** The blocks a question would carry, by their own header text — read off

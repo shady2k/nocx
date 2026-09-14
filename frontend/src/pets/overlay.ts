@@ -83,7 +83,7 @@ const SWEEP_INTERVAL_MS = 100
 /** The contact shadow appears only shortly before a ledge landing. */
 const SHADOW_WINDOW = 0.2
 
-const DEFAULT_LEDGES: readonly LedgeSource[] = [
+export const DEFAULT_LEDGES: readonly LedgeSource[] = [
   { selector: '.tabbar', edge: 'bottom' },
   { selector: '.pane.active .cmd-block', edge: 'top' },
   // The meta a block wears (spec 2026-09-14 §5.5). The composer is not a

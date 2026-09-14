@@ -93,7 +93,7 @@ test('a file dropped on a local tab arrives in that tab’s directory', async ({
     // than as a tree bug.
     await page.keyboard.type(`cd ${destDir}`)
     await page.keyboard.press('Enter')
-    await expect(page.locator('.pane.active .nocx-editor-cwd')).toContainText(destBase, {
+    await expect(page.locator('.pane.active .nocx-editor-context .ui-meta')).toContainText(destBase, {
       timeout: 60_000,
     })
 

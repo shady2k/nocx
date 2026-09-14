@@ -3456,12 +3456,13 @@ export class TerminalContent extends BasePaneContent {
       document.addEventListener('keydown', this._targetChordKeydown, true)
 
       this.grantController = new GrantController({
-        chip: this.editor.root.querySelector<HTMLButtonElement>('.nocx-editor-grant') ?? undefined,
+        chip:
+          this.editor.root.querySelector<HTMLButtonElement>('[data-control="grant"]') ?? undefined,
         onChange: (blocks) => {
           this.grantedBlocks = [...blocks]
         },
       })
-      const chipRow = this.editor.root.querySelector<HTMLElement>('.nocx-editor-chrome-left')
+      const chipRow = this.editor.root.querySelector<HTMLElement>('.nocx-editor-controls')
       if (chipRow) this.grantController.mount(chipRow)
       this.editor.onGrantChipClick(() => this.grantController?.toggle())
       this.grantController.setBlocks(this.grantedBlocks)
@@ -5417,7 +5418,7 @@ export class TerminalContent extends BasePaneContent {
       // silent DOM invariant, not a refusal a person can reach.
       return { kind: 'invariant', reason: 'missing-live-container' }
     }
-    const markerHost = editor.root.querySelector<HTMLElement>('.nocx-editor-chrome-left')
+    const markerHost = editor.root.querySelector<HTMLElement>('.nocx-editor-controls')
     if (markerHost === null) {
       // The mounted editor always has its chrome row; this is a silent DOM
       // invariant, not a refusal a person can reach.
@@ -5561,7 +5562,7 @@ export class TerminalContent extends BasePaneContent {
         return false
       }
 
-      const markerHost = editor.root.querySelector<HTMLElement>('.nocx-editor-chrome-left')
+      const markerHost = editor.root.querySelector<HTMLElement>('.nocx-editor-controls')
       const frameHost = this.scrollback?.xtermLiveContainer
       if (markerHost === null || frameHost === undefined) return false
       if (!this._placeEditorInSummonStack(editor)) return false

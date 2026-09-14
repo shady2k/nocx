@@ -44,6 +44,7 @@ const HERE = import.meta.dirname ?? '.'
 const STYLE_ENTRY = resolve(HERE, '..', 'style.css')
 const BASE_ENTRY = resolve(HERE, '..', 'styles/base.css')
 const TOKENS_ENTRY = resolve(HERE, '..', 'styles/tokens.css')
+const COMPOSER_ENTRY = resolve(HERE, '..', 'styles/surfaces/composer.css')
 
 /** Top-level rules only, comments stripped. An at-rule block is skipped
  *  whole. Lifted from cmd-output-wrap.test.ts. */
@@ -81,6 +82,9 @@ const RULES: Rule[] = [
   ...topLevelRules(readFileSync(TOKENS_ENTRY, 'utf8')),
   ...topLevelRules(readFileSync(BASE_ENTRY, 'utf8')),
   ...topLevelRules(readFileSync(STYLE_ENTRY, 'utf8')),
+  // The composer's own rules moved out of style.css (nocx-9bpeq.7); the
+  // gutter this suite is about moved with them.
+  ...topLevelRules(readFileSync(COMPOSER_ENTRY, 'utf8')),
 ]
 
 /** Every declaration the shipped cascade gives `selector` exactly, later

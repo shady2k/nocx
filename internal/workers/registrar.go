@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/session"
 )
 
 // Registrar brings a participant into existence and keeps the two terminal
@@ -162,8 +163,18 @@ func NewRegistrar(s Store, sp Spawner, e Enrolments, sup Supervisor, opts ...Opt
 type RegisterRequest struct {
 	Group              ID
 	CoordinatorSession string
-	Role               Role
-	Task               string
+	// CoordinatorIdentity is the controller session's own incarnation at the
+	// moment of registration — the caller's session.Identity(), never
+	// derived from the participant this call creates. It travels straight
+	// onto Delegation.ControllerIdentity; Register never substitutes the
+	// participant's own liveness epoch for it (nocx-bm99e). The zero value
+	// is a caller that has not been wired to its bound session's identity
+	// yet, which Register accepts rather than refuses: nothing reads
+	// ControllerIdentity in production today, the same way nothing read the
+	// field it replaces.
+	CoordinatorIdentity session.Identity
+	Role                Role
+	Task                string
 	// Command is the line the participant runs, passed through to the
 	// spawner untouched.
 	Command     string
@@ -296,10 +307,14 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Regist
 	del := Delegation{
 		ControllerSession: req.CoordinatorSession,
 		Participant:       p.ID,
-		Epoch:             live.Epoch,
-		CreatedByRunID:    req.CreatedByRunID,
-		Effects:           DefaultBundle(),
-		State:             DelegationActive,
+		// The controller's OWN incarnation, from the request — never
+		// live.Epoch, which is this participant's liveness epoch and
+		// answers a different question (nocx-bm99e).
+		ControllerIdentity: req.CoordinatorIdentity,
+		Generation:         1,
+		CreatedByRunID:     req.CreatedByRunID,
+		Effects:            DefaultBundle(),
+		State:              DelegationActive,
 	}
 	if err := r.store.PutDelegation(ctx, del); err != nil {
 		return Registration{Participant: p}, r.compensate(ctx, p, spawned, true, fmt.Errorf("worker: delegation: %w", err))

@@ -243,22 +243,24 @@ func TestHoldingsAreAnsweredBySessionAndSurviveALostDelegation(t *testing.T) {
 		t.Fatalf("commit elsewhere: %v", err)
 	}
 	if err := s.PutDelegation(ctx, Delegation{
-		ControllerSession: coordSession,
-		Participant:       p.ID,
-		Epoch:             7,
-		CreatedByRunID:    "run-42",
-		Effects:           DefaultBundle(),
-		State:             DelegationActive,
+		ControllerSession:  coordSession,
+		Participant:        p.ID,
+		ControllerIdentity: testControllerIdentity(),
+		Generation:         1,
+		CreatedByRunID:     "run-42",
+		Effects:            DefaultBundle(),
+		State:              DelegationActive,
 	}); err != nil {
 		t.Fatalf("put delegation: %v", err)
 	}
 	// The human takes over the pane. Control is suspended; membership is not.
 	if err := s.PutDelegation(ctx, Delegation{
-		ControllerSession: coordSession,
-		Participant:       p.ID,
-		Epoch:             7,
-		Effects:           DefaultBundle(),
-		State:             DelegationInputSuspended,
+		ControllerSession:  coordSession,
+		Participant:        p.ID,
+		ControllerIdentity: testControllerIdentity(),
+		Generation:         1,
+		Effects:            DefaultBundle(),
+		State:              DelegationInputSuspended,
 	}); err != nil {
 		t.Fatalf("suspend delegation: %v", err)
 	}
@@ -372,14 +374,21 @@ func TestWhatTheRecordDoesNotHoldIsRefusedByName(t *testing.T) {
 
 // The delegation is read back as it was put, and a second put REPLACES the
 // effects rather than adding to them.
+//
+// ControllerIdentity and Generation are asserted by name here because they
+// are the two fields nocx-bm99e's fix touched: a store that round-trips
+// Effects and State but drops or corrupts either of these would still pass
+// every other test in this file.
 func TestADelegationIsReadBackAndASecondPutReplacesIt(t *testing.T) {
 	ctx := context.Background()
 	s := newSeededStore(t)
 	if err := s.CommitPrepared(ctx, newParticipant("p-1")); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
+	identity := testControllerIdentity()
 	if err := s.PutDelegation(ctx, Delegation{
-		ControllerSession: coordSession, Participant: "p-1", Epoch: 7,
+		ControllerSession: coordSession, Participant: "p-1",
+		ControllerIdentity: identity, Generation: 1,
 		CreatedByRunID: "run-42", Effects: DefaultBundle(), State: DelegationActive,
 	}); err != nil {
 		t.Fatalf("put: %v", err)
@@ -388,7 +397,8 @@ func TestADelegationIsReadBackAndASecondPutReplacesIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
-	if got.ControllerSession != coordSession || got.Epoch != 7 || got.CreatedByRunID != "run-42" {
+	if got.ControllerSession != coordSession || got.ControllerIdentity != identity ||
+		got.Generation != 1 || got.CreatedByRunID != "run-42" {
 		t.Fatalf("delegation = %+v", got)
 	}
 	if !got.Permits(EffectClose) || got.Permits(EffectDelegateFurther) {
@@ -396,7 +406,8 @@ func TestADelegationIsReadBackAndASecondPutReplacesIt(t *testing.T) {
 	}
 
 	if perr := s.PutDelegation(ctx, Delegation{
-		ControllerSession: coordSession, Participant: "p-1", Epoch: 7,
+		ControllerSession: coordSession, Participant: "p-1",
+		ControllerIdentity: identity, Generation: 2,
 		Effects: []Effect{EffectObserve}, State: DelegationActive,
 	}); perr != nil {
 		t.Fatalf("second put: %v", perr)
@@ -407,6 +418,9 @@ func TestADelegationIsReadBackAndASecondPutReplacesIt(t *testing.T) {
 	}
 	if len(got.Effects) != 1 || got.Effects[0] != EffectObserve {
 		t.Fatalf("effects = %v: a second put added to the first rather than replacing it", got.Effects)
+	}
+	if got.Generation != 2 {
+		t.Fatalf("generation = %d, want 2: a second put replaced it rather than preserving the first", got.Generation)
 	}
 }
 

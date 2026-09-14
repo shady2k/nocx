@@ -67,6 +67,8 @@ package workers
 import (
 	"errors"
 	"time"
+
+	"github.com/shady2k/nocx/internal/session"
 )
 
 // ID names a worker.
@@ -314,8 +316,25 @@ type Delegation struct {
 	ControllerSession string
 	// Participant is what the authority is over.
 	Participant ParticipantID
-	// Epoch binds the delegation to an incarnation of the controller session.
-	Epoch uint64
+	// ControllerIdentity binds the delegation to an INCARNATION of the
+	// controller session — the backend instance that minted it and the
+	// session's own epoch (session.Identity, internal/session/session.go:
+	// 60-63), never the participant's. A controller session that ended and
+	// whose id was later reused is a different incarnation, and this is
+	// what makes that distinguishable from "the same coordinator, still
+	// running" (session.Identity.SameIncarnation).
+	//
+	// This replaces a field named Epoch that was documented exactly this
+	// way and filled from the participant's own liveness epoch instead
+	// (registrar.go, pre-nocx-bm99e) — a defect with no production reader,
+	// caught only because nothing ever asked it the question its name
+	// promised an answer to.
+	ControllerIdentity session.Identity
+	// Generation counts revocations of this delegation. It starts at 1 when
+	// Register creates the delegation; a later task's Revoke bumps it under
+	// the store's mutex so a chain resolved before a revocation and one
+	// resolved after never compare equal. Nothing bumps it yet.
+	Generation uint64
 	// CreatedByRunID is provenance only. Lineage proves "A created B" and
 	// confers nothing; this field is the same class and is never read to
 	// decide whether an operation is allowed.

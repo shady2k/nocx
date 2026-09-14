@@ -90,7 +90,7 @@ describe('createRunningBlock', () => {
   it('includes overflow menu button (P2-9)', () => {
     const container = document.createElement('div')
     const el = createRunningBlock(1, 'cmd', '~', '', () => container, noopSelect, freshStore())
-    const btn = el.querySelector('.cmd-overflow-btn')
+    const btn = el.querySelector('[data-block-actions]')
     expect(btn).not.toBeNull()
   })
 
@@ -400,7 +400,7 @@ describe('createCommandBlock', () => {
       freshStore(),
       'shell',
     )
-    const btn = el.querySelector('.cmd-overflow-btn')
+    const btn = el.querySelector('[data-block-actions]')
     expect(btn).not.toBeNull()
   })
 
@@ -480,7 +480,7 @@ describe('freezeBlock', () => {
       freshStore(),
       'success',
     )
-    expect(frozen.querySelector('.cmd-overflow-btn')).not.toBeNull()
+    expect(frozen.querySelector('[data-block-actions]')).not.toBeNull()
   })
 })
 
@@ -1047,14 +1047,14 @@ describe('overflow menu (P1-6)', () => {
     )
     container.appendChild(el)
 
-    const btn = el.querySelector('.cmd-overflow-btn') as HTMLElement
+    const btn = el.querySelector('[data-block-actions]') as HTMLElement
     expect(btn).not.toBeNull()
 
     // Click the ⋮ button
     btn.click()
 
     // Menu should now exist in document.body
-    const menu = document.body.querySelector('.cmd-overflow-menu')
+    const menu = document.body.querySelector('[data-testid="block-actions-menu"]')
     expect(menu).not.toBeNull()
 
     // Clean up
@@ -1082,20 +1082,17 @@ describe('overflow menu (P1-6)', () => {
     )
     container.appendChild(el)
 
-    const btn = el.querySelector('.cmd-overflow-btn') as HTMLElement
+    const btn = el.querySelector('[data-block-actions]') as HTMLElement
     btn.click()
 
     // Menu should exist
-    expect(document.body.querySelector('.cmd-overflow-menu')).not.toBeNull()
+    expect(document.body.querySelector('[data-testid="block-actions-menu"]')).not.toBeNull()
 
-    // Wait for the setTimeout(0) that registers the close listener
-    await new Promise((r) => setTimeout(r, 10))
-
-    // Click outside
-    document.body.click()
+    // Pointerdown outside (the kit closes on pointerdown, not click)
+    document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
 
     // Menu should be removed
-    expect(document.body.querySelector('.cmd-overflow-menu')).toBeNull()
+    expect(document.body.querySelector('[data-testid="block-actions-menu"]')).toBeNull()
 
     document.body.removeChild(container)
   })
@@ -1120,15 +1117,15 @@ describe('overflow menu (P1-6)', () => {
     )
     container.appendChild(el)
 
-    const btn = el.querySelector('.cmd-overflow-btn') as HTMLElement
+    const btn = el.querySelector('[data-block-actions]') as HTMLElement
     btn.click()
 
-    expect(document.body.querySelector('.cmd-overflow-menu')).not.toBeNull()
+    expect(document.body.querySelector('[data-testid="block-actions-menu"]')).not.toBeNull()
 
     // Press Escape
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
 
-    expect(document.body.querySelector('.cmd-overflow-menu')).toBeNull()
+    expect(document.body.querySelector('[data-testid="block-actions-menu"]')).toBeNull()
 
     document.body.removeChild(container)
   })
@@ -1153,15 +1150,15 @@ describe('overflow menu (P1-6)', () => {
     )
     container.appendChild(el)
 
-    const btn = el.querySelector('.cmd-overflow-btn') as HTMLElement
+    const btn = el.querySelector('[data-block-actions]') as HTMLElement
 
     // First click opens
     btn.click()
-    expect(document.body.querySelector('.cmd-overflow-menu')).not.toBeNull()
+    expect(document.body.querySelector('[data-testid="block-actions-menu"]')).not.toBeNull()
 
     // Second click closes
     btn.click()
-    expect(document.body.querySelector('.cmd-overflow-menu')).toBeNull()
+    expect(document.body.querySelector('[data-testid="block-actions-menu"]')).toBeNull()
 
     document.body.removeChild(container)
   })
@@ -1198,16 +1195,16 @@ describe('overflow menu (P1-6)', () => {
     el.dataset.turnState = 'success'
     container.appendChild(el)
 
-    ;(el.querySelector('.cmd-overflow-btn') as HTMLElement).click()
+    ;(el.querySelector('[data-block-actions]') as HTMLElement).click()
     const item = Array.from(
-      document.querySelectorAll<HTMLButtonElement>('.cmd-overflow-menu-item'),
+      document.querySelectorAll<HTMLButtonElement>('[data-testid="block-actions-menu"] .ui-context-menu__item'),
     ).find((button) => button.textContent === 'Show dump')
     expect(item).toBeDefined()
     item!.click()
     await new Promise<void>((resolve) => queueMicrotask(resolve))
 
     expect(seen).toEqual(['turn-entry-1'])
-    document.querySelector('.cmd-overflow-menu')?.remove()
+    document.querySelector('[data-testid="block-actions-menu"]')?.remove()
     document.querySelector('.nocx-dialog')?.remove()
     document.body.removeChild(container)
   })
@@ -2006,14 +2003,14 @@ function captureClipboard(): string[] {
 /** Open one block's ⋮ menu and return it. */
 function openBlockMenu(blockEl: HTMLElement): HTMLElement {
   blockEl
-    .querySelector<HTMLElement>('.cmd-overflow-btn')!
+    .querySelector<HTMLElement>('[data-block-actions]')!
     .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-  return document.body.querySelector<HTMLElement>('.cmd-overflow-menu')!
+  return document.body.querySelector<HTMLElement>('[data-testid="block-actions-menu"]')!
 }
 
 /** Open the menu and click the item with this label. */
 function clickMenuItem(blockEl: HTMLElement, label: string): void {
-  Array.from(openBlockMenu(blockEl).querySelectorAll<HTMLElement>('.cmd-overflow-menu-item'))
+  Array.from(openBlockMenu(blockEl).querySelectorAll<HTMLElement>('.ui-context-menu__item'))
     .find((b) => b.textContent === label)!
     .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
 }
@@ -2336,14 +2333,14 @@ describe('BlockManager.addAnswerBlock', () => {
       'shell',
     )
     const cmdRight = cmd.querySelector('.cmd-header-right')!
-    expect(cmdRight.lastElementChild?.classList.contains('cmd-overflow-btn')).toBe(true)
+    expect(cmdRight.lastElementChild?.hasAttribute('data-block-actions')).toBe(true)
 
     const h = manager.addAnswerBlock('q', '/')
     h.append('the answer')
     h.close('failure', 'the model returned no text')
     const askRight = h.el.querySelector('.cmd-header-right')!
     expect(askRight.querySelector('.cmd-header-exit')?.textContent).toBe('failed')
-    expect(askRight.lastElementChild?.classList.contains('cmd-overflow-btn')).toBe(true)
+    expect(askRight.lastElementChild?.hasAttribute('data-block-actions')).toBe(true)
   })
 
   // nocx-e6kn2 acceptance: the person must be able to tell which model
@@ -2380,8 +2377,8 @@ describe('BlockManager.addAnswerBlock', () => {
     const h = manager.addAnswerBlock('q', '/', actions)
 
     const menu = openBlockMenu(h.el)
-    expect(menu.querySelector<HTMLElement>('[data-action="stop"]')?.textContent).toBe('Stop')
-    menu.querySelector<HTMLElement>('[data-action="stop"]')!.click()
+    expect(menu.querySelector<HTMLElement>('[data-item-id="stop"]')?.textContent).toBe('Stop')
+    menu.querySelector<HTMLElement>('[data-item-id="stop"]')!.click()
     expect(stop).toHaveBeenCalledTimes(1)
 
     const secondMenu = openBlockMenu(h.el)
@@ -2572,12 +2569,15 @@ describe('the working stand-in (nocx-vnirv.1)', () => {
 // A running block sits at the bottom of the scrollback by construction, so
 // an unclamped menu opened past the window's bottom edge and the two
 describe('the block overflow menu stays in the viewport', () => {
-  // The imperative menu appends itself to document.body and stays until
-  // dismissed; a test that opens one and ends must take it down, or the
-  // NEXT describe's openBlockMenu finds THIS menu first (they share the
-  // same body-level query) and clicks an item that belongs to a dead test.
+  // The menu is a Solid render island portalled into document.body and
+  // stays open until dismissed; a test that opens one and ends must close
+  // it, or the NEXT describe's openBlockMenu finds THIS menu first (they
+  // share the same body-level query) and clicks an item that belongs to a
+  // dead test. Escape closes it through the component itself — removing
+  // the portalled node by hand would leave its Solid root, and the
+  // document listeners it owns, alive.
   afterEach(() => {
-    document.querySelectorAll('.cmd-overflow-menu').forEach((m) => m.remove())
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
   })
 
   function openMenu(nearBottom: boolean): { menu: HTMLElement; buttonRect: DOMRect } {
@@ -2585,13 +2585,13 @@ describe('the block overflow menu stays in the viewport', () => {
     document.body.appendChild(container)
     const el = createRunningBlock(1, 'make', '~', '', () => container, noopSelect, freshStore())
     container.appendChild(el)
-    const btn = el.querySelector<HTMLElement>('.cmd-overflow-btn')!
+    const btn = el.querySelector<HTMLElement>('[data-block-actions]')!
     const rect = nearBottom
       ? { top: 743, bottom: 765, left: 950, right: 972, width: 22, height: 22 }
       : { top: 700, bottom: 722, left: 1000, right: 1022, width: 22, height: 22 }
     btn.getBoundingClientRect = () => rect as DOMRect
     btn.click()
-    const menu = document.querySelector<HTMLElement>('.cmd-overflow-menu')!
+    const menu = document.querySelector<HTMLElement>('[data-testid="block-actions-menu"]')!
     return { menu, buttonRect: rect as DOMRect }
   }
 
@@ -2615,55 +2615,6 @@ describe('the block overflow menu stays in the viewport', () => {
     expect({ left, top }).toEqual(expected)
   })
 
-  it('measures the menu OUT OF FLOW — measured in flow it reports the window\u2019s width and lands nowhere near its ⋮', () => {
-    // jsdom has no box model, so the two tests above cannot tell an in-flow
-    // menu from a fixed one: every rect is zeros and the arithmetic agrees
-    // with itself. This one supplies the difference the browser makes, and
-    // it is the difference the defect was made of (owner, 2026-08-24): a
-    // plain div appended to `body` is an in-flow block box as wide as the
-    // body, so measuring it there reports the WINDOW width as the menu's,
-    // `btnRect.right - width` goes negative, and the clamp does exactly as
-    // asked — pins the menu to the left edge of the screen.
-    const CONTENT_WIDTH = 160
-    // Through the descriptor rather than the bare method: a prototype method
-    // captured by reference is what the unbound-method lint exists for, and
-    // the stub still needs the original's dynamic `this` to delegate.
-    const originalDesc = Object.getOwnPropertyDescriptor(
-      Element.prototype,
-      'getBoundingClientRect',
-    )!
-    const delegate = originalDesc.value as (this: Element) => DOMRect
-    Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
-      if (this instanceof HTMLElement && this.classList.contains('cmd-overflow-menu')) {
-        const width = this.style.position === 'fixed' ? CONTENT_WIDTH : window.innerWidth
-        return {
-          x: 0,
-          y: 0,
-          top: 0,
-          left: 0,
-          right: width,
-          bottom: 120,
-          width,
-          height: 120,
-        } as DOMRect
-      }
-      return delegate.call(this)
-    }
-    try {
-      // The ⋮ that is NOT against the right edge, so the clamp has nothing
-      // to correct and the assertion is about the measurement alone.
-      const { menu, buttonRect } = openMenu(true)
-      const left = Number.parseFloat(menu.style.left)
-      // Beside the ⋮ that opened it, right-aligned to the button — and
-      // therefore NOT against the left edge, which is where the in-flow
-      // measurement put it.
-      expect(left).toBe(buttonRect.right - CONTENT_WIDTH)
-      expect(left).toBeGreaterThan(8)
-    } finally {
-      Object.defineProperty(Element.prototype, 'getBoundingClientRect', originalDesc)
-    }
-  })
-
   it('clamps the menu back inside when the ⋮ hugs the right edge', () => {
     const { menu, buttonRect } = openMenu(false)
     const menuRect = menu.getBoundingClientRect()
@@ -2685,26 +2636,17 @@ describe('the block overflow menu stays in the viewport', () => {
     const el = createRunningBlock(1, 'make', '~', '', () => container, noopSelect, freshStore())
     container.appendChild(el)
     const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
-    el.querySelector<HTMLElement>('.cmd-overflow-btn')!.click()
-    const menu = document.querySelector<HTMLElement>('.cmd-overflow-menu')!
-    // Fixed at body level: out of flow, so the block underneath never moves
-    // to make room, and nothing in the open path scrolls the page.
-    expect(menu.parentElement).toBe(document.body)
-    expect(menu.style.position).toBe('fixed')
+    el.querySelector<HTMLElement>('[data-block-actions]')!.click()
+    const menu = document.querySelector<HTMLElement>('[data-testid="block-actions-menu"]')!
+    // Portalled at body level: out of flow, so the block underneath never
+    // moves to make room, and nothing in the open path scrolls the page.
+    // The kit sets no inline position — context-menu.css fixes the shell —
+    // so the assertion is about WHERE it mounted, not its inline style.
+    expect(menu.closest('body')).toBe(document.body)
+    expect(menu.parentElement).not.toBe(el)
     expect(scrollTo).not.toHaveBeenCalled()
     scrollTo.mockRestore()
     container.remove()
-  })
-
-  it('a menu taller than the viewport scrolls WITHIN the shell — the CSS contract', () => {
-    // jsdom lays nothing out, so the reachability half of the clamp is
-    // asserted on the shipped stylesheet: the shell caps its height and
-    // scrolls its own items, instead of running past the window's edge.
-    const css = readFileSync(resolve(import.meta.dirname ?? '.', '..', 'style.css'), 'utf8')
-    const rule = css.match(/\.cmd-overflow-menu\s*\{([^}]*)\}/)
-    expect(rule).not.toBeNull()
-    expect(rule![1]).toContain('max-height')
-    expect(rule![1]).toContain('overflow-y: auto')
   })
 })
 
@@ -3048,7 +2990,7 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
 
     const menu = openBlockMenu(h.el)
     const item = Array.from(
-      menu.querySelectorAll<HTMLButtonElement>('.cmd-overflow-menu-item'),
+      menu.querySelectorAll<HTMLButtonElement>('.ui-context-menu__item'),
     ).find((b) => b.textContent === 'Copy output')!
     item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
     // The item reports the work rather than sitting there looking clicked.
@@ -3057,7 +2999,7 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     expect(item.textContent).not.toBe('Copy output')
 
     release('stored')
-    await vi.waitFor(() => expect(document.body.querySelector('.cmd-overflow-menu')).toBeNull())
+    await vi.waitFor(() => expect(document.body.querySelector('[data-testid="block-actions-menu"]')).toBeNull())
   })
 
   it('a COMMAND block still copies what the terminal drew — unchanged', () => {
@@ -3085,12 +3027,12 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
 
     const openMenu = () => {
       h.el
-        .querySelector<HTMLElement>('.cmd-overflow-btn')!
+        .querySelector<HTMLElement>('[data-block-actions]')!
         .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-      return document.body.querySelector<HTMLElement>('.cmd-overflow-menu')!
+      return document.body.querySelector<HTMLElement>('[data-testid="block-actions-menu"]')!
     }
     const item = (menu: HTMLElement, label: string) =>
-      Array.from(menu.querySelectorAll<HTMLElement>('.cmd-overflow-menu-item')).find(
+      Array.from(menu.querySelectorAll<HTMLElement>('.ui-context-menu__item')).find(
         (b) => b.textContent === label,
       )
 
@@ -3169,16 +3111,16 @@ it('closes every body-level overflow menu when its pane is hidden', () => {
     manager.startBlock('ls', '~', 0)
     const frozen = manager.freezeBlock((y) => (y === 0 ? new BufferLine('out') : undefined), 0, 0)
     expect(frozen).not.toBeNull()
-    const button = frozen!.el.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!
+    const button = frozen!.el.querySelector<HTMLButtonElement>('[data-block-actions]')!
 
     button.click()
-    expect(document.querySelector('.cmd-overflow-menu')).not.toBeNull()
+    expect(document.querySelector('[data-testid="block-actions-menu"]')).not.toBeNull()
 
     manager.closeOverflowMenus()
 
-    expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
+    expect(document.querySelector('[data-testid="block-actions-menu"]')).toBeNull()
     button.click()
-    expect(document.querySelector('.cmd-overflow-menu')).not.toBeNull()
+    expect(document.querySelector('[data-testid="block-actions-menu"]')).not.toBeNull()
   } finally {
     manager.closeOverflowMenus()
     inner.remove()
@@ -3367,16 +3309,16 @@ describe.each(['shell', 'agent'] as const)('a %s-authored block', (author) => {
     document.body.appendChild(parent)
     const el = build(parent)
     parent.appendChild(el)
-    const btn = el.querySelector('.cmd-overflow-btn') as HTMLElement
+    const btn = el.querySelector('[data-block-actions]') as HTMLElement
     expect(btn).not.toBeNull()
     btn.click()
     const items = Array.from(
-      document.body.querySelectorAll('.cmd-overflow-menu .cmd-overflow-menu-item'),
+      document.body.querySelectorAll('[data-testid="block-actions-menu"] .ui-context-menu__item'),
     ).map((i) => i.textContent)
     expect(items).toContain('Copy command')
     expect(items).toContain('Copy output')
     expect(items).toContain('Copy all')
-    document.body.querySelector('.cmd-overflow-menu')?.remove()
+    document.body.querySelector('[data-testid="block-actions-menu"]')?.remove()
     parent.remove()
   })
 
@@ -3538,11 +3480,16 @@ describe('the header’s right-hand group has one owner (nocx-hoeq3)', () => {
     const cmd = settledCommand(27, 0)
     const turn = closedTurn(1234)
     expect(rightGroup(turn)).toEqual(rightGroup(cmd))
-    expect(rightGroup(cmd)).toEqual([
+    const group = rightGroup(cmd)
+    // The ⋮ is the kit's IconButton now, not a class this file names — its
+    // identity is data-block-actions, asserted below.
+    expect(group.slice(0, -1)).toEqual([
       'nocx-chip nocx-chip-muted cmd-header-duration',
       'nocx-chip nocx-chip-ok cmd-header-exit cmd-header-exit-ok',
-      'cmd-overflow-btn',
     ])
+    expect(
+      cmd.querySelector('.cmd-header-right')!.lastElementChild?.hasAttribute('data-block-actions'),
+    ).toBe(true)
     // …and neither group is trivially equal by being empty or by hanging off
     // a different container.
     expect(turn.querySelector('.cmd-header-right')).not.toBeNull()
@@ -3577,12 +3524,15 @@ describe('the header’s right-hand group has one owner (nocx-hoeq3)', () => {
 
 describe('the block grant menu action', () => {
   const menuItems = (el: HTMLElement): HTMLElement[] => {
-    el.querySelector<HTMLElement>('.cmd-overflow-btn')!.click()
-    return Array.from(document.querySelectorAll<HTMLElement>('.cmd-overflow-menu-item'))
+    el.querySelector<HTMLElement>('[data-block-actions]')!.click()
+    return Array.from(document.querySelectorAll<HTMLElement>('[data-testid="block-actions-menu"] .ui-context-menu__item'))
   }
 
   afterEach(() => {
-    document.querySelectorAll('.cmd-overflow-menu').forEach((menu) => menu.remove())
+    // Escape closes the kit menu through the component itself; removing the
+    // portalled node by hand would leave its Solid root, and the document
+    // listeners it owns, alive.
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
   })
 
   it('marks running and finished blocks through one liveness-free action', () => {
@@ -3619,14 +3569,14 @@ describe('the block grant menu action', () => {
     )
     document.body.append(running, finished)
     try {
-      const runningGrant = menuItems(running).find((item) => item.dataset.action === 'grant')
+      const runningGrant = menuItems(running).find((item) => item.dataset.itemId === 'grant')
       expect(runningGrant?.textContent).toBe('Ask about this block')
       isActive.mockClear()
       runningGrant?.click()
       expect(toggleGrant).toHaveBeenCalledWith(running)
       expect(isActive).not.toHaveBeenCalled()
 
-      const finishedGrant = menuItems(finished).find((item) => item.dataset.action === 'grant')
+      const finishedGrant = menuItems(finished).find((item) => item.dataset.itemId === 'grant')
       expect(finishedGrant?.textContent).toBe('Ask about this block')
       isActive.mockClear()
       finishedGrant?.click()
@@ -3664,7 +3614,7 @@ describe('the block grant menu action', () => {
     )
     document.body.append(el)
     try {
-      const grant = menuItems(el).find((item) => item.dataset.action === 'grant')
+      const grant = menuItems(el).find((item) => item.dataset.itemId === 'grant')
       expect(grant?.textContent).toBe('Unmark')
     } finally {
       el.remove()
@@ -3701,14 +3651,14 @@ describe('the block grant menu action', () => {
     document.body.append(el)
     try {
       const unavailableItems = menuItems(el)
-      expect(unavailableItems.find((item) => item.dataset.action === 'grant')).toBeUndefined()
+      expect(unavailableItems.find((item) => item.dataset.itemId === 'grant')).toBeUndefined()
       expect(unavailableItems.map((item) => item.textContent)).toContain('Copy command')
       expect(grantsAvailable).toHaveBeenLastCalledWith()
 
-      el.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      el.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       available = true
       const availableItems = menuItems(el)
-      expect(availableItems.find((item) => item.dataset.action === 'grant')?.textContent).toBe(
+      expect(availableItems.find((item) => item.dataset.itemId === 'grant')?.textContent).toBe(
         'Unmark',
       )
     } finally {
@@ -3732,11 +3682,11 @@ describe('the block grant menu action', () => {
     )
     document.body.append(el)
     try {
-      const stopItem = menuItems(el).find((item) => item.dataset.action === 'stop')
+      const stopItem = menuItems(el).find((item) => item.dataset.itemId === 'stop')
       expect(stopItem?.textContent).toBe('Stop')
       stopItem!.click()
       expect(stop).toHaveBeenCalledTimes(1)
-      expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
+      expect(document.querySelector('[data-testid="block-actions-menu"]')).toBeNull()
     } finally {
       el.remove()
     }
@@ -3759,11 +3709,11 @@ describe('the block grant menu action', () => {
     )
     document.body.append(el)
     try {
-      const stopItem = menuItems(el).find((item) => item.dataset.action === 'stop')
+      const stopItem = menuItems(el).find((item) => item.dataset.itemId === 'stop')
       active = false
       stopItem!.click()
       expect(stop).not.toHaveBeenCalled()
-      expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
+      expect(document.querySelector('[data-testid="block-actions-menu"]')).toBeNull()
     } finally {
       el.remove()
     }
@@ -3786,7 +3736,7 @@ describe('the block grant menu action', () => {
     document.body.append(el)
     try {
       const items = menuItems(el)
-      expect(items.find((item) => item.dataset.action === 'stop')).toBeUndefined()
+      expect(items.find((item) => item.dataset.itemId === 'stop')).toBeUndefined()
       expect(isActive).toHaveBeenCalledWith(el)
     } finally {
       el.remove()
@@ -3812,7 +3762,7 @@ describe('the block grant menu action', () => {
     )
     document.body.append(el)
     try {
-      expect(menuItems(el).find((item) => item.dataset.action === 'stop')).toBeUndefined()
+      expect(menuItems(el).find((item) => item.dataset.itemId === 'stop')).toBeUndefined()
     } finally {
       el.remove()
     }
@@ -3852,7 +3802,7 @@ describe('the block grant menu action', () => {
     document.body.append(first, second)
     try {
       const menu = menuItems(first)
-      const stopItem = menu.find((item) => item.dataset.action === 'stop')
+      const stopItem = menu.find((item) => item.dataset.itemId === 'stop')
       expect(stopItem?.textContent).toBe('Stop')
       expect(actions.isActive).toHaveBeenCalledWith(first)
 
@@ -3891,8 +3841,8 @@ describe('the block grant menu action', () => {
       expect(labels).toEqual(
         expect.arrayContaining(['Copy command', 'Copy output', 'Copy all', 'Wrap lines']),
       )
-      expect(items.find((item) => item.dataset.action === 'grant')).toBeUndefined()
-      expect(items.find((item) => item.dataset.action === 'stop')).toBeUndefined()
+      expect(items.find((item) => item.dataset.itemId === 'grant')).toBeUndefined()
+      expect(items.find((item) => item.dataset.itemId === 'stop')).toBeUndefined()
     } finally {
       el.remove()
     }

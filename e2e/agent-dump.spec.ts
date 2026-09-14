@@ -116,7 +116,7 @@ base.describe('a finished turn can show its raw model dump (nocx-0mvpy.4)', () =
       await expect(block.locator(':scope > .cmd-header .cmd-header-exit')).toHaveText('completed', {
         timeout: 30_000,
       })
-      await block.locator('.cmd-overflow-btn').click()
+      await block.locator('[data-block-actions]').click()
       await page.getByRole('button', { name: 'Show dump' }).click()
 
       const dialog = page.getByRole('dialog', { name: 'Model dump' })

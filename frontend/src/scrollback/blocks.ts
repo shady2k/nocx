@@ -15,7 +15,6 @@ import { createDisclosure, type Disclosure } from '../ui/disclosure'
 import type { Drive } from '../generated/agent.dump'
 import { reasoningStartsExpanded } from '../reasoning-expanded'
 import { showToast } from '../ui/toast'
-import { clampMenuPosition } from '../ui/menu-geometry'
 import { findReferences } from '../secret-reference'
 import { commandFragment } from '../command-text'
 import { KIND_LABELS, type SecretKind } from '../secret-kind'
@@ -28,6 +27,11 @@ import { mountDumpPanel } from '../ui/dump-panel'
 import { decorateLinks } from '../terminal-links/decorate'
 import { cwdLabel } from '../cwd-label'
 import { createBadge } from '../ui/badge-element'
+import { createComponent } from 'solid-js'
+import { render } from 'solid-js/web'
+import { ContextMenu, type ContextMenuItem } from '../ui/context-menu'
+import { createIconButton } from '../ui/icon-button-element'
+import { ArrowDownUpIcon, CopyIcon, FileIcon, MoreIcon, PinIcon, SquareIcon } from '../ui/icons'
 // ── Clipboard helper ────────────────────────────────────────────────────────
 
 async function copyToClipboardImpl(text: string): Promise<void> {
@@ -913,7 +917,7 @@ export function blockCommandText(blockEl: HTMLElement): string {
  *  the order by using this, instead of learning the button's position by
  *  luck. */
 function placeHeaderChip(right: Element, chip: Element): void {
-  right.insertBefore(chip, right.querySelector('.cmd-overflow-btn'))
+  right.insertBefore(chip, right.querySelector('[data-block-actions]'))
 }
 
 /**
@@ -963,29 +967,32 @@ function buildOverflowMenu(
   dump?: DumpSource,
   running?: RunningBlockActions,
 ): HTMLElement {
-  const btn = document.createElement('button')
-  btn.className = 'cmd-overflow-btn'
-  btn.textContent = '\u22EE' // ⋮ vertical ellipsis
-  btn.setAttribute('aria-label', 'Block actions')
+  /** Disposes the open menu's Solid root, or null while closed. The menu is a
+   *  render island: mounted on open, disposed on close (spec 2026-09-14 §6.3). */
+  let dispose: (() => void) | null = null
 
-  let menu: HTMLElement | null = null
-  let closeOnEscape: ((e: KeyboardEvent) => void) | null = null
-  let closeOnClick: ((ev: MouseEvent) => void) | null = null
-
-  const closeMenu = () => {
-    if (menu) {
-      menu.remove()
-      menu = null
-    }
-    if (closeOnEscape) {
-      document.removeEventListener('keydown', closeOnEscape)
-      closeOnEscape = null
-    }
-    if (closeOnClick) {
-      document.removeEventListener('click', closeOnClick)
-      closeOnClick = null
-    }
+  const closeMenu = (): void => {
+    const d = dispose
+    dispose = null
+    d?.()
   }
+
+  const btn = createIconButton({
+    size: 'xs',
+    ariaLabel: 'Block actions',
+    icon: () => MoreIcon({}) as Element,
+    attrs: { 'data-block-actions': '' },
+    onClick: (e) => {
+      e.stopPropagation()
+      e.preventDefault()
+      if (dispose !== null) {
+        closeMenu()
+        return
+      }
+      openMenu()
+    },
+  })
+
   overflowMenuClosers.set(blockEl, closeMenu)
   const onBlockSettled = (): void => {
     closeMenu()
@@ -993,151 +1000,60 @@ function buildOverflowMenu(
   }
   blockEl.addEventListener('nocx:block-settled', onBlockSettled)
 
-  btn.addEventListener('click', (e) => {
-    e.stopPropagation()
-    e.preventDefault()
+  // WHERE A BLOCK'S OUTPUT COMES FROM, AND WHY THE TWO KINDS DIFFER (nocx-v13pd).
+  // A COMMAND block copies what the terminal DREW: the rows in the DOM are the
+  // artefact. An ANSWER block copies what was RECORDED: the DOM is a rendering of
+  // the markdown, so a copy scraped from it would quietly differ from what the
+  // model said. Copying an answer is therefore async — the item reports the work
+  // (busyLabel) — and a fetch that comes back empty REFUSES rather than falling
+  // back to the painted text.
+  const isAnswer = (): boolean => blockEl.dataset.blockKind === 'ask'
 
-    // If menu is already open, close it.
-    if (menu) {
-      closeMenu()
-      return
-    }
+  const storedAnswer = async (): Promise<string | null> => {
+    const entryId = blockEl.dataset.entryId
+    if (!entryId || !answerText) return null
+    return answerText(entryId)
+  }
 
-    // Build the dropdown.
-    menu = document.createElement('div')
-    menu.className = 'cmd-overflow-menu'
-    const copyCmd = document.createElement('button')
-    copyCmd.className = 'cmd-overflow-menu-item'
-    copyCmd.textContent = 'Copy command'
-    copyCmd.addEventListener('click', (ev) => {
-      ev.stopPropagation()
-      // Once history.record acks, the block shows — and therefore copies —
-      // the MASKED command: what you see is what went to the store, and the
-      // renderer no longer holds the plaintext for that block (ADR-0021,
-      // the receipt round's named trade). The full masked text lives in
-      // data-recorded-command; the chips in the header are labels.
-      const recorded = btn.closest('.cmd-block')?.getAttribute('data-recorded-command')
-      clipboardFallback(recorded ?? command)
-      closeMenu()
+  const refuseCopy = (): void => {
+    showToast({
+      level: 'warning',
+      message: 'The stored answer is not available, so nothing was copied.',
     })
+  }
 
-    // WHERE A BLOCK'S OUTPUT COMES FROM, AND WHY THE TWO KINDS DIFFER
-    // (nocx-v13pd).
-    //
-    // A COMMAND block copies what the terminal DREW. The rows in the DOM are
-    // the artefact — the serializer put them there from the grid — so
-    // scraping them is not a shortcut, it is reading the thing itself.
-    //
-    // An ANSWER block copies what was RECORDED. Since nocx-swoje the answer
-    // flow RENDERS the model's markdown: `# ` becomes a heading and the
-    // marker is consumed, `**bold**` becomes weight and the asterisks are
-    // gone. The DOM is therefore a rendering of the answer and no longer the
-    // answer, and a copy scraped from it would quietly differ from what the
-    // model said. The durable text is right there — SubmitAgentAsk writes a
-    // text/plain artifact for every answer — and the block already knows its
-    // entry id, because the deltas were routed by it.
-    //
-    // Which makes copying an answer ASYNC, and that has two consequences the
-    // menu has to honour: the item says it is working (a control that looks
-    // clicked and does nothing reads as broken), and a fetch that comes back
-    // empty REFUSES rather than falling back to the painted text. A copy
-    // that quietly differs from the record is worse than one that did not
-    // happen.
-    const isAnswer = () => blockEl.dataset.blockKind === 'ask'
+  /** The command as the block shows it: once history.record acks, the MASKED
+   *  command in data-recorded-command (ADR-0021). */
+  const intent = (): string => blockEl.getAttribute('data-recorded-command') ?? command
 
-    /** The answer's stored text, or null — retention took it, the store is
-     *  unreachable, or this window has no source wired. All three are the
-     *  same fact to a person: it is not here. */
-    const storedAnswer = async (): Promise<string | null> => {
-      const entryId = blockEl.dataset.entryId
-      if (!entryId || !answerText) return null
-      return answerText(entryId)
-    }
+  // The label names the EFFECTIVE wrap state: the attribute answers when it is
+  // there, and the rendered style answers when the setting decided (see the
+  // history of this item in git for the full argument).
+  const wrapOn = (): boolean => {
+    const attr = blockEl.getAttribute('data-wrap')
+    if (attr === 'on') return true
+    if (attr === 'off') return false
+    const out = blockEl.querySelector<HTMLElement>('.cmd-output')
+    return out ? getComputedStyle(out).whiteSpace.startsWith('pre-wrap') : false
+  }
 
-    const refuseCopy = (): void => {
-      showToast({
-        level: 'warning',
-        message: 'The stored answer is not available, so nothing was copied.',
-      })
-    }
-
-    /** Run an async menu action with the item reporting the work, and close
-     *  the menu when it settles either way. */
-    const whileFetching = async (
-      item: HTMLButtonElement,
-      work: () => Promise<void>,
-      busyLabel = 'Copying…',
-    ) => {
-      item.disabled = true
-      item.dataset.busy = ''
-      item.textContent = busyLabel
-      try {
-        await work()
-      } finally {
-        closeMenu()
-      }
-    }
-
-    const copyOut = document.createElement('button')
-    copyOut.className = 'cmd-overflow-menu-item'
-    copyOut.textContent = 'Copy output'
-    copyOut.addEventListener('click', (ev) => {
-      ev.stopPropagation()
-      if (!isAnswer()) {
-        // The copyable text is asked of the BLOCK at read time (nocx-ex636):
-        // an answer block's body is appended after the frame, so the
-        // builder-time output reference is null — the block knows where its
-        // output lives.
-        clipboardFallback(blockOutputText(blockEl))
-        closeMenu()
-        return
-      }
-      void whileFetching(copyOut, async () => {
-        const stored = await storedAnswer()
-        if (stored === null) refuseCopy()
-        else clipboardFallback(stored)
-      })
-    })
-    const copyAll = document.createElement('button')
-    copyAll.className = 'cmd-overflow-menu-item'
-    copyAll.textContent = 'Copy all'
-    copyAll.addEventListener('click', (ev) => {
-      ev.stopPropagation()
-      const intent = () =>
-        btn.closest('.cmd-block')?.getAttribute('data-recorded-command') ?? command
-      if (!isAnswer()) {
-        clipboardFallback(`${intent()}\n${blockOutputText(blockEl)}`)
-        closeMenu()
-        return
-      }
-      // The same source as Copy output, deliberately: two items on one block
-      // reading one thing from two places is how they start to disagree.
-      void whileFetching(copyAll, async () => {
-        const stored = await storedAnswer()
-        if (stored === null) refuseCopy()
-        else clipboardFallback(`${intent()}\n${stored}`)
-      })
-    })
-
-    const dumpItem = document.createElement('button')
-    dumpItem.className = 'cmd-overflow-menu-item'
-    dumpItem.textContent = 'Show dump'
-    dumpItem.addEventListener('click', (ev) => {
-      ev.stopPropagation()
-      const entryId = blockEl.dataset.entryId
-      if (
-        !dump ||
-        !entryId ||
-        !isAnswer() ||
-        !blockEl.dataset.turnState ||
-        blockEl.dataset.turnState === 'waiting'
-      ) {
-        closeMenu()
-        return
-      }
-      void whileFetching(
-        dumpItem,
-        async () => {
+  function items(): ContextMenuItem[] {
+    const list: ContextMenuItem[] = []
+    const answerSettled =
+      dump !== undefined &&
+      isAnswer() &&
+      blockEl.dataset.turnState !== undefined &&
+      blockEl.dataset.turnState !== '' &&
+      blockEl.dataset.turnState !== 'waiting'
+    if (answerSettled) {
+      list.push({
+        id: 'dump',
+        label: 'Show dump',
+        icon: FileIcon,
+        busyLabel: 'Loading…',
+        onSelect: async () => {
+          const entryId = blockEl.dataset.entryId
+          if (!dump || !entryId) return
           try {
             const result = await dump(entryId)
             const host = document.createElement('div')
@@ -1147,137 +1063,105 @@ function buildOverflowMenu(
             showToast({ level: 'danger', message: 'Could not load the model dump' })
           }
         },
-        'Loading…',
-      )
-    })
-    if (
-      dump &&
-      isAnswer() &&
-      blockEl.dataset.turnState &&
-      blockEl.dataset.turnState !== 'waiting'
-    ) {
-      menu.appendChild(dumpItem)
+      })
     }
-
-    const isActive = running?.isActive(blockEl) ?? false
     if (running?.toggleGrant && (running.grantsAvailable?.() ?? true)) {
-      const grant = document.createElement('button')
-      grant.className = 'cmd-overflow-menu-item'
-      grant.dataset.action = 'grant'
-      grant.textContent = running.isGranted?.(blockEl) ? 'Unmark' : 'Ask about this block'
-      grant.addEventListener('click', (ev) => {
-        ev.stopPropagation()
-        running.toggleGrant?.(blockEl)
-        closeMenu()
+      list.push({
+        id: 'grant',
+        label: running.isGranted?.(blockEl) ? 'Unmark' : 'Ask about this block',
+        icon: PinIcon,
+        onSelect: () => running.toggleGrant?.(blockEl),
       })
-      menu.appendChild(grant)
     }
-    // Wrap is a per-block override of the kind's default, and it lives here
-    // rather than as a control on the block because it is rare: the kind is
-    // right nearly always (a command's grid must not re-wrap — nocx-juau —
-    // and an answer's prose must). What it is for is the exception the kind
-    // cannot know about: one wide table in otherwise ordinary output, or one
-    // answer a person wants to read as it came. The override is the DOM
-    // state `data-wrap` on the block, so the CSS reads one attribute and the
-    // kind's own rule stays the default underneath it.
-    //
-    // The label names the EFFECTIVE state, not the attribute: with the
-    // `terminal.wrapOutput` setting deciding untouched blocks, a block that
-    // is already wrapping carries no attribute at all, and a menu offering
-    // to "Wrap lines" on a wrapped block is a control you have to try in
-    // order to understand. So the attribute answers when it is there, and
-    // the rendered style answers when it is not — one question, asked of
-    // whoever actually decided it.
-    const wrapOn = (): boolean => {
-      const attr = blockEl.getAttribute('data-wrap')
-      if (attr === 'on') return true
-      if (attr === 'off') return false
-      const out = blockEl.querySelector<HTMLElement>('.cmd-output')
-      return out ? getComputedStyle(out).whiteSpace.startsWith('pre-wrap') : false
-    }
-    const wrapItem = document.createElement('button')
-    wrapItem.className = 'cmd-overflow-menu-item'
-    wrapItem.textContent = wrapOn() ? 'Do not wrap' : 'Wrap lines'
-    wrapItem.addEventListener('click', (ev) => {
-      ev.stopPropagation()
-      blockEl.setAttribute('data-wrap', wrapOn() ? 'off' : 'on')
-      closeMenu()
-    })
-
-    // Stopping remains time-limited; granting the whole block does not.
     // Stopping is the only liveness-bound action; granting is not.
-    if (running && isActive) {
-      const stop = document.createElement('button')
-      stop.className = 'cmd-overflow-menu-item'
-      stop.dataset.action = 'stop'
-      stop.textContent = 'Stop'
-      stop.addEventListener('click', (ev) => {
-        ev.stopPropagation()
-        if (!running.isActive(blockEl)) {
-          closeMenu()
-          return
-        }
-        closeMenu()
-        running.stop()
+    if (running && running.isActive(blockEl)) {
+      list.push({
+        id: 'stop',
+        label: 'Stop',
+        icon: SquareIcon,
+        onSelect: () => {
+          if (running.isActive(blockEl)) running.stop()
+        },
       })
-      menu.append(stop)
     }
-    menu.append(copyCmd, copyOut, copyAll, wrapItem)
-    // Render at body level so it floats above all scroll containers (P1-6).
-    document.body.appendChild(menu)
+    list.push({
+      id: 'copy-command',
+      label: 'Copy command',
+      icon: CopyIcon,
+      onSelect: () => clipboardFallback(intent()),
+    })
+    if (isAnswer()) {
+      list.push(
+        {
+          id: 'copy-output',
+          label: 'Copy output',
+          icon: CopyIcon,
+          busyLabel: 'Copying…',
+          onSelect: async () => {
+            const stored = await storedAnswer()
+            if (stored === null) refuseCopy()
+            else clipboardFallback(stored)
+          },
+        },
+        {
+          id: 'copy-all',
+          label: 'Copy all',
+          icon: CopyIcon,
+          busyLabel: 'Copying…',
+          // The same source as Copy output, deliberately: two items on one block
+          // reading one thing from two places is how they start to disagree.
+          onSelect: async () => {
+            const stored = await storedAnswer()
+            if (stored === null) refuseCopy()
+            else clipboardFallback(`${intent()}\n${stored}`)
+          },
+        },
+      )
+    } else {
+      list.push(
+        {
+          id: 'copy-output',
+          label: 'Copy output',
+          icon: CopyIcon,
+          onSelect: () => clipboardFallback(blockOutputText(blockEl)),
+        },
+        {
+          id: 'copy-all',
+          label: 'Copy all',
+          icon: CopyIcon,
+          onSelect: () => clipboardFallback(`${intent()}\n${blockOutputText(blockEl)}`),
+        },
+      )
+    }
+    list.push({
+      id: 'wrap',
+      label: wrapOn() ? 'Do not wrap' : 'Wrap lines',
+      icon: ArrowDownUpIcon,
+      onSelect: () => blockEl.setAttribute('data-wrap', wrapOn() ? 'off' : 'on'),
+    })
+    return list
+  }
 
-    // Position relative to the button using fixed coordinates — clamped by
-    // the SAME geometry the kit's ContextMenu clamps through
-    // (ui/menu-geometry.ts, nocx-vnirv.2). This is not a second clamp: a
-    // running block sits at the bottom of the scrollback by construction, so
-    // an unclamped menu opens past the window's bottom edge and "Ask about
-    // this command" and "Stop" — the two items that exist ONLY while it runs
-    // — are off-screen. Measured AFTER the menu is in the DOM, because the
-    // clamp needs the laid-out size to keep the whole shell inside the
-    // viewport. A menu taller than the viewport still fits: the shell's
-    // `max-height` + `overflow-y` (style.css) scrolls within the menu.
-    // TAKEN OUT OF FLOW BEFORE IT IS MEASURED, which is the whole of this
-    // ordering and is not a tidy-up. A plain div appended to `body` is an
-    // in-flow block box: it is as wide as the body, so measuring it there
-    // reports the WINDOW's width as the menu's. `btnRect.right - width` then
-    // goes negative and the clamp does exactly what it is asked to — pins
-    // the menu against the left edge of the screen, nowhere near the ⋮ that
-    // opened it (owner, 2026-08-24). Fixed positioning with no `left`/`top`
-    // yet shrinks the box to its content, which is the size the clamp needs.
-    menu.style.position = 'fixed'
-    const btnRect = btn.getBoundingClientRect()
-    const menuRect = menu.getBoundingClientRect()
-    // Freeze the measured shell dimensions before assigning its final
-    // coordinates. This keeps the clamp calculation stable in browsers whose
-    // fixed-position box reports a different static rect after placement.
-    menu.style.width = `${menuRect.width}px`
-    menu.style.height = `${menuRect.height}px`
-    // Right-aligned to the button, exactly where the fixed `right` it
-    // replaces put it.
-    const { left, top } = clampMenuPosition(
-      { x: btnRect.right - menuRect.width, y: btnRect.bottom + 2 },
-      { width: menuRect.width, height: menuRect.height },
-      { width: window.innerWidth, height: window.innerHeight },
+  function openMenu(): void {
+    // Right-aligned to the button, below it: the kit turns `align: 'end'` into
+    // `x - width` and clamps through menu-geometry.ts (nocx-vnirv.2).
+    const rect = btn.getBoundingClientRect()
+    const host = document.createElement('div')
+    dispose = render(
+      () =>
+        createComponent(ContextMenu, {
+          open: true,
+          align: 'end',
+          anchor: btn,
+          x: rect.right,
+          y: rect.bottom + 2,
+          items: items(),
+          onClose: closeMenu,
+          'data-testid': 'block-actions-menu',
+        }),
+      host,
     )
-    menu.style.left = `${left}px`
-    menu.style.top = `${top}px`
-
-    // Close on outside click (after this event finishes).
-    closeOnClick = (ev: MouseEvent) => {
-      if (!menu?.contains(ev.target as Node) && ev.target !== btn) {
-        closeMenu()
-      }
-    }
-    setTimeout(() => document.addEventListener('click', closeOnClick!), 0)
-
-    // Close on Escape.
-    closeOnEscape = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape') {
-        closeMenu()
-      }
-    }
-    document.addEventListener('keydown', closeOnEscape)
-  })
+  }
 
   return btn
 }
@@ -1330,7 +1214,7 @@ function wireBlockSelection(
    *  it, and not the ⋮ or its menu, which own their own clicks. */
   const mine = (e: Event): boolean => {
     const target = e.target as HTMLElement
-    if (target.closest('.cmd-overflow-btn, .cmd-overflow-menu')) return false
+    if (target.closest('[data-block-actions], .ui-context-menu')) return false
     return target.closest('.cmd-block') === blockEl
   }
 
@@ -1485,7 +1369,7 @@ export function createCommandBlock(
   // and there is no race to order. A single mousedown (detail 1) is not
   // intercepted: drag selection and click-to-select keep working.
   wrapper.addEventListener('mousedown', (e: MouseEvent) => {
-    if ((e.target as HTMLElement).closest('.cmd-overflow-btn, .cmd-overflow-menu')) return
+    if ((e.target as HTMLElement).closest('[data-block-actions], .ui-context-menu')) return
     // The innermost block owns the gesture, for the reason selection does:
     // a turn contains the blocks it caused, so the same double-click reaches
     // every ancestor's listener (ADR-0040).

@@ -441,7 +441,7 @@ test.describe('asking about a command that is still running (nocx-92gfl)', () =>
     //    ordinary session.signal intent; the answer remains streaming and no
     //    agent.cancel frame exists. Focused grid delivery is already the
     //    xterm/raw path and is covered separately.
-    await turn.locator(':scope > .cmd-header .cmd-overflow-btn').focus()
+    await turn.locator(':scope > .cmd-header [data-block-actions]').focus()
     await page.keyboard.press('Control+C')
     await expect
       .poll(async () => (await recorded(page)).signals)

@@ -485,7 +485,7 @@ test.describe('one person, one run, the whole assistant sentence (nocx-hp8p2.2)'
     // ══ PROMISE 4 — the person stops it ═══════════════════════════════════
     // Through the real gesture: the TURN's own ⋮ (`:scope > .cmd-header`, never
     // the command child's, which carries an identical button), then Stop.
-    const overflow = turn.locator(':scope > .cmd-header .cmd-overflow-btn')
+    const overflow = turn.locator(':scope > .cmd-header [data-block-actions]')
     await expect(
       overflow,
       'PROMISE 4 (the person stops it): the turn has no ⋮ of its own to stop it from',
@@ -493,7 +493,7 @@ test.describe('one person, one run, the whole assistant sentence (nocx-hp8p2.2)'
     await overflow.click()
     // The menu renders at document.body level so it floats above every scroll
     // container — it is deliberately NOT a descendant of the block.
-    const stop = page.locator('.cmd-overflow-menu-item[data-action="stop"]')
+    const stop = page.locator('.ui-context-menu__item[data-item-id="stop"]')
     await expect(
       stop,
       'PROMISE 4 (the person stops it): a live turn offers no Stop in its menu',

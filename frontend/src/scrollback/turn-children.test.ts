@@ -166,7 +166,7 @@ describe('a turn draws the blocks it caused, in order', () => {
     // Who ran it: the assistant, said out loud.
     expect(rec.el.querySelector('.ui-badge[data-author="agent"]')?.textContent).toBe('agent')
     // Its own ⋮.
-    expect(rec.el.querySelector(':scope > .cmd-header .cmd-overflow-btn')).not.toBeNull()
+    expect(rec.el.querySelector(':scope > .cmd-header [data-block-actions]')).not.toBeNull()
 
     // And it freezes with its own exit status, in place.
     const frozen = manager.freezeBlock(() => undefined, 0, 3)

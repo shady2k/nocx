@@ -225,3 +225,31 @@ describe('Button — ghost selected', () => {
     expect(css).not.toMatch(/ui-grouped-nav|ui-settings-section-nav/)
   })
 })
+
+describe('Button truncate (nocx-9bpeq.7)', () => {
+  it('yields to its row: data-truncate is set only when asked', () => {
+    const { container } = render(() => (
+      <>
+        <Button onClick={vi.fn()} size="sm" truncate>
+          long
+        </Button>
+        <Button onClick={vi.fn()} size="sm">
+          short
+        </Button>
+      </>
+    ))
+    const [long, short] = [...container.querySelectorAll('button')]
+    expect(long.dataset.truncate).toBe('true')
+    expect(short.hasAttribute('data-truncate')).toBe(false)
+  })
+
+  it('the stylesheet ellipsises a small truncating button on one line', () => {
+    const css = readFileSync(new URL('../styles/components/button.css', import.meta.url), 'utf8')
+    const rule =
+      /\.ui-button\[data-size='sm'\]\[data-truncate='true'\]\s*\{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(rule).toMatch(/text-overflow:\s*ellipsis/)
+    expect(rule).toMatch(/white-space:\s*nowrap/)
+    expect(rule).toMatch(/overflow:\s*hidden/)
+    expect(rule).toMatch(/display:\s*inline-block/)
+  })
+})

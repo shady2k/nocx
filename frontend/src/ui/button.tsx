@@ -77,6 +77,14 @@ export interface ButtonProps {
    * managing their own focus order need -1 so they are not a second tab stop.
    */
   tabIndex?: number
+  /**
+   * The button yields to its row and ellipsises its label instead of growing
+   * or wrapping (nocx-9bpeq.7). Defined for `size="sm"`, its only consumer —
+   * the composer's controls, where a model id is long and a wrapped control
+   * would move the scrollback that hangs from the row. Whoever sets it keeps
+   * the whole value in `title` and the accessible name.
+   */
+  truncate?: boolean
 }
 
 /**
@@ -109,6 +117,7 @@ export function Button(props: ButtonAttrs) {
     'size',
     'selected',
     'tabIndex',
+    'truncate',
   ] as const
   const [local, rest] = splitProps(props, knownKeys)
   return (
@@ -117,6 +126,7 @@ export function Button(props: ButtonAttrs) {
       data-variant={local.variant ?? 'default'}
       data-secondary={local.secondary !== undefined ? 'true' : undefined}
       {...(local.size && local.size !== 'md' ? { 'data-size': local.size } : {})}
+      data-truncate={local.truncate === true ? 'true' : undefined}
       type={local.type ?? 'button'}
       disabled={local.disabled === true}
       aria-selected={local.selected === true ? 'true' : undefined}

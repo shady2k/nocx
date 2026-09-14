@@ -91,6 +91,23 @@
   font-size: var(--font-size-2xs);
 }
 
+/* ── Truncate — the button yields to its row (nocx-9bpeq.7) ────────────
+   `text-overflow` applies to a block container's own inline content; inside
+   the base rule's inline-flex the label is an anonymous flex item and would
+   hard-clip mid-glyph. So a truncating button is inline-block, with the line
+   box as tall as the control so the label stays centred. Defined for the
+   small size, the only consumer; its row places the width. */
+.ui-button[data-size='sm'][data-truncate='true'] {
+  display: inline-block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: start;
+  line-height: var(--control-height-xs);
+}
+
 /* ── Disabled — was dead code as button.kit-scope:disabled (§3.6) ───── */
 
 .ui-button:disabled {

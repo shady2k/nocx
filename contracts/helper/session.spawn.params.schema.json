@@ -35,6 +35,10 @@
       "description": "The tool endpoint ON THIS HELPER'S MACHINE that the pane belongs to: the CALLER's own tool socket, which the shell's NOCX_TOOL_SOCKET names. It travels per spawn rather than being read from the daemon's own environment (nocx-50w7p.18), because one account's daemon serves several coordinators at once (D12) and a value fixed at the daemon's start is a fact about whichever coordinator started it — a pane opened by another one would reach an endpoint that never asked for that pane. Empty is a real state: a caller that runs no tool endpoint names none, the pane carries no NOCX_TOOL_SOCKET, and the shell's own refusal text is what a person sees.",
       "type": "string"
     },
+    "agentToolToken": {
+      "description": "The bearer that admits this pane's agent, minted by the coordinator that opened the pane (nocx-50w7p.16). It is present where a pane cannot be admitted by process ownership — a far host, reached by a coordinator with no pid relation to the shell — and absent for the ordinary local pane, which the endpoint admits as its coordinator's own child. It is a SECRET: the launcher renders it into the descriptor the shell reads and it never becomes an environment entry, an argv word or a log line.",
+      "type": "string"
+    },
     "lifecycle": {
       "description": "Optional authenticated lifecycle carrier configuration. Capability and recovery are consumed only by the shell bootstrap and never become argv or environment entries.",
       "type": "object",

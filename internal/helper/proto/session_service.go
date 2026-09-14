@@ -270,6 +270,22 @@ type SpawnParams struct {
 	// at all — the shell's own refusal text is what a user sees, which is the
 	// soft degrade nocx-2tesu exists to keep soft.
 	AgentToolEndpoint string `json:"agentToolEndpoint,omitempty"`
+	// AgentToolToken is the bearer that admits this pane's far agent, minted by
+	// the coordinator that opened the pane (nocx-50w7p.16): what the far
+	// launcher renders into the frame its shell reads, and what the agent's MCP
+	// bridge presents before its first request.
+	//
+	// IT IS ON THIS SHAPE BY ANALOGY WITH SSHSpawnParams AND OUT OF THE SAME
+	// NEED (nocx-e2bws): a pane on a far host is reached by a coordinator
+	// whose pid relation to the pane does not exist, so the endpoint cannot
+	// admit it by process ownership and needs the interval's bearer instead.
+	// A pane on THIS machine is admitted as its coordinator's own child, which
+	// is why the field is optional and empty for the ordinary local pane.
+	//
+	// It is a SECRET and this struct is not a place it rests: it goes into the
+	// launch options, which render it into the descriptor the shell reads —
+	// never into the agent env block, and never into a log line.
+	AgentToolToken string `json:"agentToolToken,omitempty"`
 }
 
 // MaxIdempotencyKey bounds the key a caller may mint. The helper keeps one

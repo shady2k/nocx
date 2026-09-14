@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.tool-socket.schema.json",
+  "title": "HelperSSHToolSocketResult",
+  "description": "The tool socket's identity, so the caller can end it with the same `unforward` every other listener is ended by, and the path that was asked for — echoed rather than re-derived, because the caller named it and a second derivation is how two answers to 'where is this socket' start disagreeing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["forward", "path"],
+  "properties": {
+    "forward": {
+      "description": "The listener id, as 32 hex characters. Minted by the helper — the end that owns the listener — and echoed verbatim by the coordinator on the unforward that ends it.",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/forwardId"
+    },
+    "path": {
+      "description": "The far-host path the socket was bound at, as the caller named it.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

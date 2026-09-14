@@ -22,13 +22,22 @@ package client
 // # Who owns it, and when it ends
 //
 // The COORDINATOR that opened it, and it ends when the session it was opened
-// for ends: `OpenToolSocket` answers the id and `CloseListener` ends it, both
-// on the same connection. A caller that keeps only the id cannot end it by
-// accident from another process (the helper holds listeners per connection —
-// `host.ConnectionFrom`), and a caller that forgets ends it with the connection
-// the request arrived on, which is the helper's own teardown. That is the same
-// rule the pane's own listeners follow one process over ("the session is the
-// thing it holds now, and it ends at exactly the same moment").
+// for ends: `OpenToolSocket` answers the id and `CloseListener` ends it. That
+// duty is REAL rather than tidy, because nothing else ends it in time: the
+// helper's registries are PROCESS-scoped (`sshsvc.Service` lives beside the
+// sessions and has no teardown of its own, and its listeners are keyed by a
+// random id rather than by the connection that asked for them), so `unforward`
+// ends whatever the id names without asking who is asking — and a coordinator
+// that dies without closing leaves the listener, and the far-side socket it
+// bound, until the daemon exits. The id is a random 128-bit value minted per
+// request and answered to the caller that asked; nothing else scopes it, which
+// is why closing it is the caller's job rather than something the transport
+// does on its behalf.
+//
+// It is the same rule the pane's own listeners follow one process over ("the
+// session is the thing it holds now, and it ends at exactly the same moment"),
+// with one difference worth stating: the pane's holder is the daemon itself,
+// and this one's is a caller that has to remember.
 
 import (
 	"context"

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
@@ -54,6 +55,20 @@ type Registrar struct {
 	spawn Spawner
 	enrol Enrolments
 	sup   Supervisor
+
+	// storeMu is the ONE mutex §7.2 asks for: under it a delegation is
+	// created (Register step 5), a delegation is ended and its generation
+	// bumped (Revoke, RevokeController), and a chain is resolved into a
+	// vector (Resolve, StillHolds). The store's own methods are each
+	// individually locked, which is not enough on its own — a generation
+	// bump is a read-modify-write across two of them (Delegation then
+	// PutDelegation), and two such bumps racing on the same participant
+	// would lose one's increment without a lock held across the pair. This
+	// is safe to add here, and not merely convenient, only because every
+	// write to a delegation already goes through the Registrar — verified:
+	// PutDelegation has exactly one caller (Register) and Delegation's
+	// writers are the same set this field now guards.
+	storeMu sync.Mutex
 
 	bound    int
 	deadline time.Duration
@@ -316,8 +331,15 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Regist
 		Effects:            DefaultBundle(),
 		State:              DelegationActive,
 	}
-	if err := r.store.PutDelegation(ctx, del); err != nil {
-		return Registration{Participant: p}, r.compensate(ctx, p, spawned, true, fmt.Errorf("worker: delegation: %w", err))
+	// Held across the write, per §7.2: a delegation is CREATED under the
+	// same mutex a revocation ENDS one under, so a revocation racing this
+	// spawn serialises against it rather than reading a half-committed
+	// store.
+	r.storeMu.Lock()
+	putErr := r.store.PutDelegation(ctx, del)
+	r.storeMu.Unlock()
+	if putErr != nil {
+		return Registration{Participant: p}, r.compensate(ctx, p, spawned, true, fmt.Errorf("worker: delegation: %w", putErr))
 	}
 
 	// Step 6, and the order inside it is the point.
@@ -369,6 +391,16 @@ func (r *Registrar) compensate(ctx context.Context, p Participant, spawned Spawn
 		// closes it afterwards — the participant it describes dies with this
 		// backend, and so does the record.
 		return errors.Join(cause, fmt.Errorf("worker: terminalize: %w", err))
+	}
+	// The participant is now terminal, so anything IT controlled is a
+	// delegation with nobody live behind it (§7.2's "participant
+	// terminalized" trigger). A revocation failure here is never folded into
+	// cause: cause is why the REGISTRATION failed, and a compensation that
+	// also failed to revoke is a fact about the record, not about the
+	// caller's request.
+	if _, revokeErr := r.Revoke(ctx, p.ID, "registration compensated"); revokeErr != nil {
+		r.log.WithContext(ctx).Warn("worker: revoke after compensation",
+			"participant", string(p.ID), "error", revokeErr)
 	}
 	return cause
 }
@@ -498,6 +530,16 @@ func (r *Registrar) admit(ctx context.Context, id ParticipantID, l Liveness, kin
 			return after, fmt.Errorf("worker: terminalize %q: %w", want, err)
 		}
 		after.State = want
+		// §7.2's "participant terminalized" trigger, the ordinary-exit half
+		// of what compensate's Terminalize covers for a failed registration.
+		// Never turned into this call's own error: admit's contract is
+		// about recording the declared/exited fact, and a revocation that
+		// could not run is a housekeeping failure the record itself still
+		// reports correctly (the participant IS terminal either way).
+		if _, revokeErr := r.Revoke(ctx, id, "participant terminalized"); revokeErr != nil {
+			r.log.WithContext(ctx).Warn("worker: revoke after terminalization",
+				"participant", string(id), "error", revokeErr)
+		}
 	}
 	// The fact needs judgement, and it enters the set AFTER the record is
 	// settled — so what the coordinator is woken about is what the record
@@ -942,5 +984,21 @@ func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id Par
 		// not have to have raced the record to be allowed to.
 		return nil
 	}
-	return r.closer.Close(ctx, p)
+	if err := r.closer.Close(ctx, p); err != nil {
+		return err
+	}
+	// §7.2's "controller closed" trigger. This revokes the AUTHORITY the
+	// instant the coordinator acts, rather than waiting for the process
+	// exit this close causes to reach the record by the ordinary path
+	// (admit's own Terminalize-triggered revoke, which would otherwise be
+	// the only thing to end it, on its own schedule): a session a
+	// coordinator has already decided to end must stop being reachable now,
+	// not once its teardown happens to complete. Idempotent with that later
+	// admit-triggered revoke — the second call finds the delegation already
+	// out of Active and does nothing.
+	if _, revokeErr := r.Revoke(ctx, id, "closed"); revokeErr != nil {
+		r.log.WithContext(ctx).Warn("worker: revoke after close",
+			"participant", string(id), "error", revokeErr)
+	}
+	return nil
 }

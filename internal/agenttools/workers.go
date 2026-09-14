@@ -25,6 +25,7 @@ import (
 	"errors"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/session"
 )
 
 // WorkerCoordinator is the narrowed authority a run holds over its own worker: it
@@ -37,6 +38,7 @@ import (
 // let it name a different session would be answering somebody else's question.
 type WorkerCoordinator struct {
 	session      string
+	identity     session.Identity
 	environments map[string]struct{}
 }
 
@@ -44,8 +46,13 @@ type WorkerCoordinator struct {
 // participant ids at all: a participant is reached through the record keyed by
 // this session, so there is nothing here for a revoked delegation to leave
 // behind.
-func NewWorkerCoordinator(session string, scopes []content.GrantScope) *WorkerCoordinator {
-	c := &WorkerCoordinator{session: session, environments: make(map[string]struct{})}
+//
+// identity is the session's own INCARNATION (RunContext.ControllerIdentity),
+// never derived from a participant's liveness: a delegation this coordinator
+// creates by spawning is bound to which incarnation of it granted the
+// authority (nocx-bm99e), and this is where that travels from.
+func NewWorkerCoordinator(sessionID string, identity session.Identity, scopes []content.GrantScope) *WorkerCoordinator {
+	c := &WorkerCoordinator{session: sessionID, identity: identity, environments: make(map[string]struct{})}
 	for _, s := range scopes {
 		if s.Kind == content.ResourceEnvironment && s.ID != "" {
 			c.environments[s.ID] = struct{}{}
@@ -60,6 +67,17 @@ func (c *WorkerCoordinator) Session() string {
 		return ""
 	}
 	return c.session
+}
+
+// Identity is the incarnation of Session this coordinator was bound under.
+// It travels onto workers.RegisterRequest.CoordinatorIdentity when this
+// coordinator spawns a worker (executeWorkerSpawn), never substituted with
+// the spawned participant's own liveness epoch.
+func (c *WorkerCoordinator) Identity() session.Identity {
+	if c == nil {
+		return session.Identity{}
+	}
+	return c.identity
 }
 
 // MaySpawnInto reports whether the grant named this environment. A spawn
@@ -159,7 +177,7 @@ func narrowWorkers(grant content.Grant, _ []ResourceRef, runCtx RunContext) (Cap
 			scopes = append(scopes, s)
 		}
 	}
-	return NewWorkerCoordinator(runCtx.Session, scopes), nil
+	return NewWorkerCoordinator(runCtx.Session, runCtx.ControllerIdentity, scopes), nil
 }
 
 // resourceParticipantWorkspace names the resource a participant's call is

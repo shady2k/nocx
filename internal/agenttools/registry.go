@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/session"
 )
 
 // ResourceRef is one resource a validated call resolves to. ID is the
@@ -87,6 +88,25 @@ type RunContext struct {
 	// asked about, so a call that names the item without naming the window
 	// is answered inside the mark rather than past it (nocx-hp8p2.15).
 	MarkedSessionWindows []MarkedSessionWindow
+	// ControllerIdentity is the INCARNATION of Session — the backend instance
+	// that minted it and the session's own epoch (session.Identity) — never
+	// derived from Participant, which names a different incarnation
+	// (nocx-bm99e). It is established once, by the adapter that authenticated
+	// the caller (the tool endpoint or the kernel), from the session it
+	// admitted, and travels onto workers.RegisterRequest.CoordinatorIdentity
+	// and workers.Delegation.ControllerIdentity when this run spawns a
+	// worker: a delegation's authority is bound to WHICH INCARNATION of the
+	// controller session granted it, not to the session id alone.
+	ControllerIdentity session.Identity
+	// PaneAccess is the DescendantPaneAccess capability (internal/app) bound
+	// for this run by the same adapter, before dispatch — never inferred
+	// from a call's parameters (design §7.1). It is `any` because this
+	// package sits below internal/app in the dependency graph and cannot
+	// name the concrete type; a tool that reaches a descendant's pane types
+	// it at the point of use. Nil means no adapter bound one yet (Task 5/8
+	// wiring), which every reader of it must treat as "no descendant
+	// authority", never as a coordinator's own pane.
+	PaneAccess any
 }
 
 // MarkedSessionWindow is one person-marked row span: which item, and which

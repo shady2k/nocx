@@ -57,6 +57,16 @@ func (s *Service) readScreen(p proto.ScreenParams) (proto.ScreenResult, error) {
 // runtime that has been ended answers [emulator.ErrClosed] rather than a
 // screen, which is the honest answer for a session nobody can read any more.
 func (hs *hostSession) readFrame() (paneview.Frame, uint64, sessionruntime.Completeness, error) {
+	// Read BEFORE the cells, never after (spec §5.4, nocx-6q1uh.3): the
+	// fence this frame carries must never claim to be newer than what the
+	// screen it is paired with actually reflects. Reading it first can only
+	// under-report — a write that completed in the gap between this line and
+	// ReadScreen's callback is one the frame is honestly silent about — and
+	// under-reporting is the direction §5.4 already tolerates ("may still
+	// have been produced before the program read our input"); over-reporting
+	// would tell a caller their write landed before the screen could
+	// possibly show it.
+	fence := hs.owner.inputFence()
 	var frame paneview.Frame
 	rev, completeness, err := hs.runtime.ReadScreen(func(term emulator.Terminal) error {
 		f, ferr := paneview.From(term)
@@ -66,6 +76,7 @@ func (hs *hostSession) readFrame() (paneview.Frame, uint64, sessionruntime.Compl
 	if err != nil {
 		return paneview.Frame{}, 0, sessionruntime.CompletenessUnknown, err
 	}
+	frame.InputFence = fence
 	return frame, uint64(rev), completeness, nil
 }
 

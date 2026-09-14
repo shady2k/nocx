@@ -308,6 +308,13 @@ type hostSession struct {
 	screen          emulator.Terminal
 	log             *slog.Logger
 	lifecycleBudget int64
+	// owner is this session's one I/O owner (nocx-6q1uh.3, spec §5): the
+	// goroutine that alone orders output ingest, runtime replies, client
+	// frames, intents and resize, and the only thing that ever calls
+	// s.proc.Read or s.proc.Write. It exists for the life of the session
+	// exactly like runtime and screen do — built in spawn before the first
+	// byte is read, ended in stop.
+	owner *sessionOwner
 
 	mu          sync.Mutex
 	subs        map[proto.SubscriberID]*subscriber
@@ -319,55 +326,16 @@ type hostSession struct {
 	stopped     bool
 }
 
-// pump moves bytes from the PTY into the window and nowhere else. Its interval
-// starts before each proc.Read and ends after that read's bytes reach win.write
-// (or win.close on EOF); throughout it MUST NOT take s.mu. write holds s.mu
-// from lease validation until proc.Write returns, so making pump contend on
-// that mutex would deadlock a blocked PTY write before the pump can drain it.
-//
-// It INGESTS before it delivers, and that order is the requirement rather than
-// a detail (ADR-0066, nocx-ygxjv.12): the window is bounded and reclaims its
-// oldest bytes, so the delivery path is lossy by design (D8) and the emulator's
-// ingest is lossless. Bytes the window discards are bytes a coordinator can
-// never rebuild a screen from, and it must be the WINDOW that loses them and
-// not the session's own terminal state. Ingest also answers whatever the
-// program asked for on the runtime's ordered write path, which is why a reply
-// needs no attachment and no controller: a program's question is the
-// terminal's obligation, not a user intent.
-//
-// Ingest's failure is logged and does not stop the move: the reader's own
-// stream is still the reader's, and a runtime that refused bytes has already
-// said so in its completeness.
-func (s *hostSession) pump() {
-	buf := make([]byte, pageSize)
-	for {
-		n, err := s.proc.Read(buf)
-		if n > 0 {
-			if ierr := s.runtime.Ingest(buf[:n]); ierr != nil {
-				if errors.Is(ierr, emulator.ErrClosed) || errors.Is(ierr, sessionruntime.ErrUnavailable) {
-					// The shutdown end: stop() closes the screen and the PTY,
-					// and a read already in flight may carry the last bytes
-					// past the close. Nothing is lost by it — the bytes still
-					// reach the window below, which is what a late attacher
-					// reads — so it is not a fault worth waking anybody for.
-					s.log.Debug("session output arrived after the terminal closed",
-						"session", s.id.Session, "bytes", n, "err", ierr)
-				} else {
-					s.log.Warn("session output not ingested", "session", s.id.Session,
-						"bytes", n, "err", ierr)
-				}
-			}
-			s.win.write(buf[:n])
-		}
-		if err != nil {
-			if !errors.Is(err, io.EOF) {
-				s.log.Warn("session output ended", "session", s.id.Session, "err", err)
-			}
-			s.win.close()
-			return
-		}
-	}
-}
+// pump is gone (nocx-6q1uh.3): reading, ingesting and delivering to the
+// window are now the session's I/O owner's (owner.go, ingestOne/drainLocal/
+// handleReadEvent), for the reason its own doc names — this method took no
+// lock BECAUSE hostSession.write held one across proc.Write, and holding one
+// across a write is exactly what stalled a pane whose program floods output
+// and never reads its input (nocx-6q1uh.1). The owner replaces the lock
+// rather than working around it: everything pump did — ingest before
+// delivering to win, log a failure without stopping the move, close the
+// window on EOF or an error — is now that goroutine's, and it never
+// contends with a write because nothing it does blocks on one.
 
 // lifecyclePump moves raw lifecycle bytes from the helper-owned shell channel
 // into its bounded window. No decoder or policy exists on this host.
@@ -894,30 +862,53 @@ func (s *hostSession) releaseConnection(sink Sink) {
 
 // write applies one inbound data frame to the PTY, if and only if it comes
 // from the current holder of the write capability at the current lease epoch
-// and from the connection that owns that attachment. It holds s.mu from
-// validation through the return of s.proc.Write; lease transitions wait for
-// that interval to end, and pump MUST NOT acquire s.mu during its own
-// proc.Read-to-window-write interval.
+// and from the connection that owns that attachment.
+//
+// It holds s.mu ONLY for the lease checks, which is the fix nocx-6q1uh.1
+// asked for stated as a lock-discipline rule: this used to hold s.mu from
+// validation through the return of s.proc.Write, which is exactly what let a
+// blocked write starve pump's own read-to-window-write interval, since both
+// needed the same lock. The write itself is now a submission to this
+// session's I/O owner (owner.go), off s.mu entirely — the owner orders it
+// against every other input item on its own, and a lease transition here can
+// still never land inside somebody else's write, because the owner never
+// hands the writer two payloads at once.
+//
+// This still WAITS for the item's own outcome before answering, unlike a
+// client frame's other lane (a resize, an intent): that is a deliberate
+// choice beyond what the plan's literal text says, made to keep this
+// call's synchronous contract — the caller has always been told whether ITS
+// bytes reached the PTY, and changing that to "queued" would be a second,
+// unplanned change to what this RPC promises. See the task's report for the
+// alternative this rejects and why.
 func (s *hostSession) write(sink Sink, f proto.SessionFrame) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.writer == nil {
+		s.mu.Unlock()
 		return ErrNoWriter
 	}
 	attachment, ok := s.attachments[s.writerAtt]
 	if !ok || attachment.sink != sink || attachment.subscriber != *s.writer {
+		s.mu.Unlock()
 		return ErrNotTheWriter
 	}
 	held, err := proto.SessionBytes(string(*s.writer))
 	if err != nil || held != f.Subscriber {
+		s.mu.Unlock()
 		return ErrNotTheWriter
 	}
 	if f.Epoch != s.epoch {
+		s.mu.Unlock()
 		return ErrStaleLease
 	}
-	_, werr := s.proc.Write(f.Payload)
-	return werr
+	s.mu.Unlock()
+
+	done, submitErr := s.owner.submit(ownerItem{kind: itemClientFrame, payload: f.Payload})
+	if submitErr != nil {
+		return submitErr
+	}
+	res := <-done
+	return res.Err
 }
 
 func (s *hostSession) writeLifecycle(sink Sink, f proto.SessionFrame) error {
@@ -949,15 +940,28 @@ func (s *hostSession) writeLifecycle(sink Sink, f proto.SessionFrame) error {
 // the runtime puts the other back to the commit in force and publishes
 // nothing, so what is running and what the session describes stay one size —
 // see sessionruntime.Session.CommitGeometry, which owns that rule.
+//
+// It is a submission to the session's I/O owner (spec §5.6) rather than a
+// direct call, so a resize can never land between a validated intent and the
+// write it is about to make: both travel the owner's one ordered queue, and
+// CommitGeometry's own reply — the in-band size report a program that asked
+// for one is owed — reaches the PTY through the SAME writer, because
+// repairLocked and CommitGeometry hand it to Session.Commit's ReplySink,
+// which is this owner.
 func (s *hostSession) resize(cols, rows uint16) error {
-	_, err := s.runtime.CommitGeometry(sessionruntime.Geometry{
+	g := sessionruntime.Geometry{
 		Cols: int(cols),
 		Rows: int(rows),
 		// No cell metrics cross the wire today; see ptyTerminal.Resize.
 		CellWidthPx:  0,
 		CellHeightPx: 0,
-	})
-	return err
+	}
+	done, submitErr := s.owner.submit(ownerItem{kind: itemResize, resize: &g})
+	if submitErr != nil {
+		return submitErr
+	}
+	res := <-done
+	return res.Err
 }
 
 // stop ends the session's own goroutines and closes the PTY. It is what the
@@ -969,6 +973,17 @@ func (s *hostSession) resize(cols, rows uint16) error {
 // first byte is read, and they end when the session ends and at no other
 // moment. A stopped PROCESS does not end them — an exited session stays in the
 // inventory carrying its status and its screen until somebody closes it.
+//
+// The shutdown ORDER (spec §5.7: stop admission, request termination,
+// interrupt the writer, read to EOF, resolve queued items, join, close the
+// readable side) is owner.stop's, not this method's — this call is graceful
+// with no deadline, which is the shape every existing caller of stop already
+// expected (nothing here passed a deadline before this task, and nothing
+// asks for a forced stop yet; a helper-shutdown caller with a deadline is
+// this same owner.stop, called differently, when that caller exists).
+// hostSession's own remaining job is exactly what it was: fail the runtime
+// and close the screen, in that order, once the owner has confirmed there is
+// nothing left for either of them to race.
 func (s *hostSession) stop() {
 	s.mu.Lock()
 	if s.stopped {
@@ -978,13 +993,14 @@ func (s *hostSession) stop() {
 	s.stopped = true
 	s.mu.Unlock()
 	s.releaseConnection(nil)
-	_ = s.proc.Close()
-	s.win.close()
+	if tailLost := s.owner.stop(true, time.Time{}); tailLost {
+		s.log.Warn("session owner: the drain did not reach EOF before shutdown", "session", s.id.Session)
+	}
 	// The runtime first, then the screen, and the order is the only one that
 	// names what happened: Fail makes the runtime refuse rather than serving a
 	// screen that is about to go, and the screen's Close then releases what
 	// the emulator owns. A read already in flight can still arrive between the
-	// two, which pump reports as a closed terminal and nothing else.
+	// two, which the owner reports as a closed terminal and nothing else.
 	if err := s.runtime.Fail("session ended"); err != nil {
 		s.log.Debug("session runtime already ended", "session", s.id.Session, "err", err)
 	}

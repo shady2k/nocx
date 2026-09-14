@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -35,6 +36,21 @@ func (p *stubPTY) Write(b []byte) (int, error) {
 func (p *stubPTY) Dir() string { return "/" }
 
 func (p *stubPTY) SignalProcessGroup(int, syscall.Signal) error { return nil }
+
+// InterruptWrite, WaitReadable and RawReadUntilAgain satisfy localPTY's
+// owner seam (nocx-6q1uh.3). stubPTY starts nothing and nothing ever spawns
+// a session I/O owner over it — Spawn fails before that point in every test
+// this fixture serves — so these are never called; they exist only so
+// *stubPTY still satisfies localPTY, the way Dir and SignalProcessGroup
+// already had to.
+func (p *stubPTY) InterruptWrite() error { return nil }
+
+func (p *stubPTY) WaitReadable(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (p *stubPTY) RawReadUntilAgain([]byte, func([]byte)) (bool, error) { return true, nil }
 
 // openDescriptors is how many descriptors this PROCESS holds. /dev/fd is the
 // one spelling both targets answer — on Linux it is a symlink to

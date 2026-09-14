@@ -14,7 +14,7 @@
   --color-tab-active: #ffffff;
   --color-surface: #ffffff;
   --color-surface-hover: #f0f0f0;
-  --color-surface-raised: #ffffff;
+  --color-surface-raised: #f3f4f7;
   --color-text: #1a1a1a;
   --color-text-muted: #4b5160;
   /* Two channels darker than the #5a6170 it was. Dim text on --color-chrome
@@ -36,6 +36,7 @@
   --color-success: #16a34a;
   --color-warning: #96560a;
   --color-danger: #c81e1e;
+  --color-danger-surface: #fdf6f6;
   --color-accent-secondary: #7c3aed;
   --color-error: #ef4444;
 

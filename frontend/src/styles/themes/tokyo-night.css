@@ -43,6 +43,12 @@
   --color-success: #9ece6a;
   --color-warning: #e0af68;
   --color-danger: #f7768e;
+  /* The failed row's ground (spec 2026-09-14 §3.3). A solid per-theme value,
+     never a color-mix of danger into the ground — ADR-0013 §3.1 measured those.
+     Chosen as the smallest step from --terminal-background that a person can see
+     (ΔL* ≥ 2) while text and the danger status word keep 4.5:1 on it; the test
+     in theme-catalogue.test.ts holds every theme to the same numbers. */
+  --color-danger-surface: #231f2a;
   --color-accent-secondary: #9d7cd8;
   --color-error: #ff6b6b;
 

@@ -173,6 +173,20 @@ type Session struct {
 	// numbers so that "bounded" is checkable rather than asserted.
 	ingestWork uint64
 	ingestLost uint64
+
+	// bufferInstance, bufferActive and bufferSeen are ScreenIdentity's own
+	// bookkeeping (nocx-6q1uh.4, digest.go's ScreenIdentity doc): the
+	// emulator's [emulator.Terminal.Screen] answers only which buffer is
+	// active, never an identity for the buffer itself, so this package
+	// derives one by counting every observed toggle between primary and
+	// alternate. bufferSeen is false only before the first locked screen
+	// read this incarnation has ever done; that first read counts as
+	// observing an instance too (bufferInstance becomes 1, not 0), so a
+	// token minted before any toggle still carries a real instance rather
+	// than the zero value a bare ScreenIdentity{} also has.
+	bufferInstance uint64
+	bufferActive   bool
+	bufferSeen     bool
 }
 
 // intentRecord is one admitted intent and where it got to. The record outlives
@@ -369,6 +383,7 @@ func (s *Session) Snapshot() Snapshot {
 // holds s.mu when it runs the caller's check, and Snapshot would deadlock
 // taken from inside it.
 func (s *Session) snapshotLocked() Snapshot {
+	rows, cur, identity := s.screenStateLocked()
 	return Snapshot{
 		Revision:     s.rev,
 		At:           s.inc,
@@ -378,6 +393,66 @@ func (s *Session) snapshotLocked() Snapshot {
 		Screen:       s.screenTextLocked(),
 		Rendezvous:   s.rendezvous.State,
 		Completeness: s.completeness,
+		Rows:         rows,
+		Cursor:       cur,
+		Identity:     identity,
+	}
+}
+
+// screenStateLocked reads the rows (WITH style), the caret and the
+// [ScreenIdentity] a target's digest is judged against (nocx-6q1uh.4, spec
+// §6.2) — the same active screen [screenTextLocked] reduces to text, read a
+// second way because a digest must notice a selection highlight or an
+// attribute-only change that carries no text of its own.
+//
+// A screen that cannot be read answers no rows at all and an identity naming
+// only the incarnation, the same honest silence [screenTextLocked] keeps for
+// a closed emulator: a caller comparing Cols/Rows against a token's would see
+// 0x0 and refuse `incomparable` rather than being handed a screen nobody
+// read.
+func (s *Session) screenStateLocked() ([]emulator.Row, emulator.Cursor, ScreenIdentity) {
+	geom, err := s.emulator.Geometry()
+	if err != nil {
+		return nil, emulator.Cursor{}, ScreenIdentity{At: s.inc}
+	}
+	rows := make([]emulator.Row, 0, geom.Rows)
+	for y := range geom.Rows {
+		row, rowErr := s.emulator.Row(y)
+		if rowErr != nil {
+			return nil, emulator.Cursor{}, ScreenIdentity{At: s.inc}
+		}
+		rows = append(rows, row)
+	}
+	cur, err := s.emulator.Cursor()
+	if err != nil {
+		cur = emulator.Cursor{}
+	}
+	scr, err := s.emulator.Screen()
+	alt := err == nil && scr == emulator.ScreenAlternate
+	s.observeBufferLocked(alt)
+	return rows, cur, ScreenIdentity{
+		At:             s.inc,
+		AltScreen:      alt,
+		BufferInstance: s.bufferInstance,
+		Cols:           geom.Cols,
+		Rows:           geom.Rows,
+	}
+}
+
+// observeBufferLocked advances bufferInstance the moment the active buffer
+// differs from what the last locked screen read saw (see the field's own
+// doc). Running it on every locked read rather than only from [Ingest] reads
+// the identical count either way — the guard is idempotent, so a hundred
+// reads between two toggles advance it exactly as many times as a hundred
+// ingests would (once, at the toggle) — and it is done here because this is
+// the one place both [Snapshot] and [Commit]'s check already read the live
+// buffer, where [Ingest] would have to read it again for no additional
+// accuracy.
+func (s *Session) observeBufferLocked(alt bool) {
+	if !s.bufferSeen || alt != s.bufferActive {
+		s.bufferInstance++
+		s.bufferActive = alt
+		s.bufferSeen = true
 	}
 }
 

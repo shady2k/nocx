@@ -5,7 +5,7 @@
   §7 (items 1–11). Every item is answered in §12.
 - **Stands on:** epic `nocx-ygxjv` (closed 2026-09-14): one emulator, in the helper's session
   runtime, beside the PTY (ADR-0066).
-- **Revision 5** (2026-09-14): answers codex round 4 on revision 4 (`d8be1b3d`). Revisions 1
+- **Revision 6** (2026-09-14): answers codex round 5 on revision 5 (`b28d8881`); revision 5 answered round 4 on `d8be1b3d`. Revisions 1
   (`357f62e3`), 2 (`0e11c56f`), 3 (`63203c36`) and 4 were reviewed by
   codex; dispositions in §15. After the second review the owner split the epic (decision 9): this
   document is the **shared core plus the orchestrating caller**. The built-in assistant acting on
@@ -200,8 +200,12 @@ and on expiry **detaches** the writer: its completion channel is buffered (capac
 eventual send never blocks, it holds no lock and never touches the runtime after the handoff, and
 its in-flight item resolves `delivery_unknown`. The session then closes runtime and screen and
 reports `writerDetached: true`. The detached goroutine ends when the peer closes the channel or the
-pooled connection ends; the pool counts detached writers per connection and closes an idle
-connection whose only remaining users are detached writers. Since SSH-channel sessions take no
+pooled connection ends. **The first detach taints that pool generation:** the pool admits no new
+channel on it (a new session dials a fresh generation), lets its non-detached siblings run to their
+own end, and closes the connection when none remain — which ends every detached writer on it.
+**A helper holds at most 8 detached writers.** A detach that would exceed the cap closes its tainted
+connection at once instead, ending its siblings' channels with a named reason
+(`detached_writer_cap`) reported on those sessions; the cap is fail-closed rather than a leak. Since SSH-channel sessions take no
 intents (§5.2), a detached writer can only have been carrying client input or a reply.
 
 Channels are closed only by their sending side. Tests: exit with unread tail bytes (tail ingested);
@@ -240,7 +244,7 @@ Token: `{ tokenId, sessionId, incarnation, buffer, geometry, rows, digest, minte
 HMAC-SHA256 under a key the helper draws per session incarnation and never exports; lifetime 60 s.
 
 **Bounded, and one-shot.** Minting **reserves a record slot** for the token; a session holds at
-most 256 slots. When all slots are held, `session.target` is refused `capacity` before a token
+most `maxLiveTokens` = 256 slots. When all slots are held, `session.target` is refused `capacity` before a token
 exists — never by evicting a live replay barrier. A slot is released only when **both** its token
 has expired **and** 5 minutes have passed since the token reached a terminal state (or since it
 expired unused). Retention never depends on a result having been read — the helper cannot observe
@@ -455,11 +459,17 @@ incarnation ends.
 - **authority revoked** at any phase: no further step; if the paste executed, state `partial` with
   box contents, kept until the incarnation ends; nocx never erases the box;
 - **cancel** is `session.message { sessionId, cancel: id }`, resolved to the full server-derived
-  `MessageKey` in namespace `caller`. It linearises on the queue claim (§8.5): under the queue mutex,
-  a message in phase `queued` becomes `cancelled` and the response is `{ cancelled: true, phase:
-"cancelled" }`; any later phase → `{ cancelled: false, reason: "too_late", phase }`; no such key →
-  `{ cancelled: false, reason: "unknown" }`. A cancel never reports `cancelled` for a message whose
-  paste can still be written. Namespace `nocx` (the owed task) is not cancellable by a caller;
+  `MessageKey` in namespace `caller`. It linearises on the queue claim (§8.5) and is **idempotent**.
+  Response shapes, exactly:
+  - `{ result: "cancelled", phase: "cancelled" }` — the message was `queued` and is now cancelled, or
+    was already `cancelled` (a retry after a lost response gets the same answer);
+  - `{ result: "too_late", phase }` — any other phase; the paste step was claimed and may be written;
+  - `{ result: "no_such_message" }` — no record for that key. This is not a message phase and carries
+    none; it is the one `session.message` response exempt from §8.3's phase rule.
+
+  A cancel never reports `cancelled` for a message whose paste can still be written. Namespace `nocx`
+  (the owed task) is not cancellable by a caller;
+
 - **coordinator restart:** the queue is in memory; a read afterwards reports
   `deliveryStateLost: { since }`, no per-message outcome.
 
@@ -541,8 +551,8 @@ the implementer; their assertions go into the beads first.
   ops; `_DTOConformsToContract` and `_OverTheWireConformsToContract`.
 - **Revision 4 additions:** the production local PTY adapter on Linux and Darwin — bytes preloaded,
   one drain consumes all of them, the next read reaches `EAGAIN` with no sleep; an SSH-channel
-  session refuses an intent `no_read_barrier` and still serves a snapshot; 64 live tokens then
-  `capacity` with no eviction, and concurrent mint/consume at the cap; a first write blocked while a
+  session refuses an intent `no_read_barrier` and still serves a snapshot; `maxLiveTokens` (the production constant, 256)
+  live tokens then `capacity` with no eviction, and concurrent mint/consume at the cap; a first write blocked while a
   retry gets `in_progress` and `session.intent.status` later gets the result; a bump acknowledged only
   after an older queued intent is `access_revoked`; a helper paused between peer close and EOF
   handling cannot let a revocation return before `commitBy` passes, and the old intent is refused
@@ -647,3 +657,14 @@ Clock note from round 4, carried into the plan: `commitBy` is an integer nanosec
 `unix.ClockGettime(CLOCK_MONOTONIC)` on Linux and `CLOCK_MONOTONIC_RAW` (the `mach_continuous_time`
 domain) on Darwin, behind a build-tagged reader — never a `time.Time`, wall time, or Go's
 process-relative monotonic reading.
+
+### Round 5 (on `b28d8881`)
+
+| #   | Finding                                              | Disposition                                                                                                                                                       |
+| --- | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Detached SSH writers unbounded behind a live sibling | Accepted as suggested; the first detach taints the pool generation (no new channels, closed when siblings end), cap of 8 per helper, fail-closed at the cap, §5.7 |
+| 2   | Cancel not idempotent; `unknown` has no phase        | Accepted as suggested; `cancelled` is idempotent success, `no_such_message` exempt from the phase rule, exact shapes, §8.6                                        |
+| 3   | Acceptance still says 64 tokens                      | Fixed; tests reference `maxLiveTokens`, §6.2, §13                                                                                                                 |
+
+Round 5's verdict was `READY_FOR_PLAN: no` on exactly these three, each with a concrete remedy that
+revision 6 adopts as proposed; no design area was reopened. The review closes on that basis.

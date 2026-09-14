@@ -35,6 +35,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/workers"
 )
@@ -66,6 +67,16 @@ func (h *heldIntentHelper) AccessBump(ctx context.Context, sessionID string, abo
 		return 0, ctx.Err()
 	}
 	return h.epoch, nil
+}
+
+// Snapshot and Target are not exercised by this fake's own tests (it
+// models AccessBump's hold alone); these satisfy paneHelpers.
+func (h *heldIntentHelper) Snapshot(context.Context, string) (proto.SnapshotResult, error) {
+	return proto.SnapshotResult{}, errors.New("heldIntentHelper: Snapshot not configured")
+}
+
+func (h *heldIntentHelper) Target(context.Context, string, proto.TargetParams) (proto.TargetResult, error) {
+	return proto.TargetResult{}, errors.New("heldIntentHelper: Target not configured")
 }
 
 // A revocation must not report ack while an intent it needs to outlast is
@@ -223,8 +234,8 @@ func TestBoundControllersCannotResolveEachOthersDescendants(t *testing.T) {
 	}
 
 	hub := newPaneAccessHub(registrar, nil, nil)
-	accessA := hub.Bind("sess-A", session.Identity{InstanceID: "backend-A", Epoch: 1}, AuthorityInterval{Kind: "endpoint", AdmissionEpoch: 1})
-	accessB := hub.Bind("sess-B", session.Identity{InstanceID: "backend-A", Epoch: 1}, AuthorityInterval{Kind: "endpoint", AdmissionEpoch: 2})
+	accessA := hub.Bind("sess-A", session.Identity{InstanceID: "backend-A", Epoch: 1}, EndpointAuthority{AdmissionEpoch: 1})
+	accessB := hub.Bind("sess-B", session.Identity{InstanceID: "backend-A", Epoch: 1}, EndpointAuthority{AdmissionEpoch: 2})
 
 	if _, err := accessB.Resolve(ctx, string(wA.Participant.ID), workers.EffectObserve); !errors.Is(err, workers.ErrNotReachable) {
 		t.Fatalf("B resolved A's descendant: err = %v, want ErrNotReachable", err)
@@ -242,19 +253,20 @@ func TestBoundControllersCannotResolveEachOthersDescendants(t *testing.T) {
 	}
 }
 
-// FINDING, demonstrated rather than merely asserted (spec §7.1 requires the
-// endpoint/kernel variant be bound before dispatch and never inferred from a
-// call's own parameters — it does NOT say the two variants are otherwise
-// interchangeable, but nothing downstream of Bind enforces that they are
-// not). AuthorityInterval.Kind is a plain string nothing reads: grep across
-// internal/ finds no production caller inspecting .Authority() or .Kind
-// anywhere below Bind. So an access minted "endpoint" and one minted
-// "kernel" for the very same controller resolve identically — there is no
-// seam today that "expects" a kernel-bound access and would refuse an
-// endpoint-bound one, or vice versa. This is not a passing guarantee; it is
-// the gap §7.1's last sentence promises is closed and isn't, yet, at this
-// layer.
-func TestAuthorityKindIsBoundButNotEnforcedByAnyDownstreamCheck(t *testing.T) {
+// FORMERLY TestAuthorityKindIsBoundButNotEnforcedByAnyDownstreamCheck
+// (nocx-6q1uh.13a's finding): AuthorityInterval was one struct with a plain
+// string Kind nothing read below Bind, so an access minted "endpoint" and
+// one minted "kernel" for the same controller resolved identically and
+// nothing downstream could tell them apart. Task 8 closed that gap by
+// making the two variants distinct TYPES (EndpointAuthority,
+// KernelAuthority) behind a sealed Authority interface, with AsEndpoint/
+// AsKernel accessors that refuse the wrong variant by a failed type
+// assertion rather than by comparing a label. This test now demonstrates
+// the closed gap directly: Resolve still treats both bindings identically
+// (§7.1 never said reach should differ by adapter), but a consumer that
+// needs ONE variant's own fact — here, the admission epoch only
+// EndpointAuthority carries — is refused the other outright.
+func TestAKernelBoundAccessRefusesTheEndpointAccessorAndViceVersa(t *testing.T) {
 	registrar, _ := newGroupTwoCallersRecord()
 	ctx := context.Background()
 	w, err := registrar.Register(ctx, workers.RegisterRequest{
@@ -267,17 +279,42 @@ func TestAuthorityKindIsBoundButNotEnforcedByAnyDownstreamCheck(t *testing.T) {
 	hub := newPaneAccessHub(registrar, nil, nil)
 
 	endpointBound := hub.Bind("sess-C", session.Identity{InstanceID: "backend-A", Epoch: 1},
-		AuthorityInterval{Kind: "endpoint", AdmissionEpoch: 7})
+		EndpointAuthority{AdmissionEpoch: 7})
 	kernelBound := hub.Bind("sess-C", session.Identity{InstanceID: "backend-A", Epoch: 1},
-		AuthorityInterval{Kind: "kernel", RunID: "run-1"})
+		KernelAuthority{RunID: "run-1"})
 
+	// The refusal: each binding's accessor for the OTHER variant fails,
+	// rather than silently returning a zero value a caller might mistake
+	// for a real fact.
+	if _, ok := kernelBound.AsEndpoint(); ok {
+		t.Fatal("a kernel-bound access answered AsEndpoint as ok — the wrong variant was not refused")
+	}
+	if _, ok := endpointBound.AsKernel(); ok {
+		t.Fatal("an endpoint-bound access answered AsKernel as ok — the wrong variant was not refused")
+	}
+
+	// Paired ordinary success: each binding's OWN accessor answers its own
+	// fact correctly.
+	ep, ok := endpointBound.AsEndpoint()
+	if !ok || ep.AdmissionEpoch != 7 {
+		t.Fatalf("endpoint-bound AsEndpoint = %+v, %v, want {AdmissionEpoch:7}, true", ep, ok)
+	}
+	k, ok := kernelBound.AsKernel()
+	if !ok || k.RunID != "run-1" {
+		t.Fatalf("kernel-bound AsKernel = %+v, %v, want {RunID:run-1}, true", k, ok)
+	}
+
+	// Resolve itself is unaffected by which variant bound the access: reach
+	// is a property of the controller and the chain, never of the adapter
+	// that authenticated the caller (§7.1's own scope for the two
+	// variants).
 	epReach, epErr := endpointBound.Resolve(ctx, string(w.Participant.ID), workers.EffectObserve)
 	kReach, kErr := kernelBound.Resolve(ctx, string(w.Participant.ID), workers.EffectObserve)
 	if epErr != nil || kErr != nil {
-		t.Fatalf("resolve: endpoint err=%v kernel err=%v, want both to succeed identically (demonstrating Kind is not checked)", epErr, kErr)
+		t.Fatalf("resolve: endpoint err=%v kernel err=%v, want both to succeed", epErr, kErr)
 	}
 	if epReach.SessionID != kReach.SessionID || len(epReach.Chain) != len(kReach.Chain) {
-		t.Fatalf("endpoint- and kernel-bound access resolved differently for the same controller: %+v vs %+v — if this ever fails, Kind has started being enforced and this finding is stale", epReach, kReach)
+		t.Fatalf("endpoint- and kernel-bound access resolved differently for the same controller: %+v vs %+v", epReach, kReach)
 	}
 }
 

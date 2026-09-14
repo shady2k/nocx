@@ -2,15 +2,25 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/tools/session.read.schema.json",
   "title": "SessionReadParams",
-  "description": "Parameters for the session.read agent tool: read one item in a terminal session, or the current screen when id is omitted. The result identifies whether it is a running item, an exited item, or the current screen; an alternate-buffer result is current screen content, not scrollback.",
+  "description": "Parameters for the session.read agent tool: read your own pane (an item, or the current screen when id is omitted), or a descendant's pane by sessionId. The result identifies whether it is a running item, an exited item, or a screen; an alternate-buffer result is current screen content, not scrollback.",
   "type": "object",
   "additionalProperties": false,
   "required": [],
   "properties": {
+    "sessionId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The session to read. Omit it, or name your own session, to read your own pane; name a worker you spawned (or one of its own workers) to read a descendant's pane instead."
+    },
+    "target": {
+      "type": "string",
+      "enum": ["menu", "input", "working", "region"],
+      "description": "Mint a target from the frame this read just classified, spendable with session.keys or session.message: menu (a question's rows, selection included), input (the input box, cursor included), working (the rows a menu could appear in), or region (the whole screen). Only meaningful with sessionId naming a descendant; omit to only read."
+    },
     "id": {
       "type": "string",
       "minLength": 1,
-      "description": "An item id from session.list. Omit it to read the current screen."
+      "description": "An item id from session.list, for your own pane. Omit it to read the current screen."
     },
     "start": {
       "type": "integer",
@@ -47,8 +57,8 @@
         },
         "source": {
           "type": "string",
-          "enum": ["ledger", "renderer"],
-          "description": "Which side produced this: the recorded output, or a live capture."
+          "enum": ["ledger", "renderer", "helper"],
+          "description": "Which side produced this: the recorded output, a live capture of your own pane, or a descendant's helper."
         },
         "exitCode": {
           "type": "integer",
@@ -153,6 +163,114 @@
         "note": {
           "type": "string",
           "description": "A fact about the read the text alone would not carry — why the output is not what was asked for. Absent when there is nothing to say."
+        },
+        "classification": {
+          "type": "string",
+          "enum": [
+            "free_text",
+            "permission_choice",
+            "modal_choice",
+            "working",
+            "error",
+            "unknown",
+            "none"
+          ],
+          "description": "What a descendant's screen is inviting, from the agent rule. Present only when sessionId named a descendant; `none` means that pane is not running a recognized agent, `unknown` means an agent is running but this frame could not be classified."
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["token", "tokenId", "kind", "rows", "expiresAtMs"],
+          "description": "A target minted from the same frame this read classified, present only when the call named a target kind. Spend it with session.keys or session.message before it expires.",
+          "properties": {
+            "token": {
+              "type": "string",
+              "description": "The signed target, opaque to you: present it back to session.keys or session.message unchanged."
+            },
+            "tokenId": {
+              "type": "string",
+              "description": "Names the same target without its signature."
+            },
+            "kind": {
+              "type": "string",
+              "enum": ["menu", "input", "working", "region"],
+              "description": "The kind actually minted. May differ from what you asked for: a menu with no found body boundary, or an empty input box or menu zone, mints a region target over the whole screen instead."
+            },
+            "rows": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["first", "last"],
+              "description": "The rows this target covers, both ends inclusive.",
+              "properties": {
+                "first": { "type": "integer" },
+                "last": { "type": "integer" }
+              }
+            },
+            "region": {
+              "type": "string",
+              "description": "The target's rows as text, for a region target only."
+            },
+            "menu": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["question", "options", "selected", "rows"],
+              "description": "Present for a menu target: the question, its options as drawn, and which one is selected.",
+              "properties": {
+                "question": { "type": "string" },
+                "options": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "selected": {
+                  "type": "integer",
+                  "description": "Indexes options, or -1 when nothing is selected."
+                },
+                "rows": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["first", "last"],
+                  "properties": {
+                    "first": { "type": "integer" },
+                    "last": { "type": "integer" }
+                  }
+                },
+                "body": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["first", "last"],
+                  "description": "Rows between the question and the first option. Absent when they are adjacent.",
+                  "properties": {
+                    "first": { "type": "integer" },
+                    "last": { "type": "integer" }
+                  }
+                }
+              }
+            },
+            "expiresAtMs": {
+              "type": "integer",
+              "description": "When this target stops being spendable, in epoch milliseconds."
+            }
+          }
+        },
+        "pendingMessages": {
+          "type": "array",
+          "description": "session.message calls still queued for this pane. Always empty until nocx delivers a queued message (design §8).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "namespace", "phase"],
+            "properties": {
+              "id": { "type": "string" },
+              "namespace": { "type": "string" },
+              "phase": { "type": "string" },
+              "bytesWritten": { "type": "integer" },
+              "boxContents": { "type": "string" }
+            }
+          }
+        },
+        "readBarrier": {
+          "type": "boolean",
+          "description": "Whether this descendant's session offers the read barrier a state-changing step needs. Present only when sessionId named a descendant; false means only session.read works there, never session.keys or session.message."
         }
       }
     }

@@ -123,6 +123,21 @@ func frameFromWire(w proto.ScreenFrame) paneview.Frame {
 	return f
 }
 
+// FrameFromSnapshot renders a session.snapshot result's wire frame into the
+// frame the agent rule classifies (paneview.Frame), with the completeness
+// and revision that belong to the snapshot rather than to any later read —
+// the frame session.read's PaneReader classifies and mints a target from
+// must be the one THIS snapshot named (design §6.1), never a fresh Screen
+// read taken a moment later. It reuses frameFromWire and
+// completenessFromWire, Screen's own conversions, rather than a second
+// rendering of the same wire shape.
+func FrameFromSnapshot(r proto.SnapshotResult) paneview.Frame {
+	frame := frameFromWire(r.Frame)
+	frame.Revision = sessionruntime.Revision(r.Revision)
+	frame.Completeness = completenessFromWire(r.Completeness)
+	return frame
+}
+
 // completenessFromWire spells the wire's claim as the contract's, and THIS
 // function is what makes an unrecognised spelling UNKNOWN — the state a write
 // gate refuses in. It cannot be left to the decode: a named string type keeps

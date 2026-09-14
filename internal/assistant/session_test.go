@@ -4,11 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/santhosh-tekuri/jsonschema/v6"
+
+	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/paneview"
+	"github.com/shady2k/nocx/internal/sessionruntime"
 )
 
 func testToolBound() agenttools.ResultBound {
@@ -105,8 +111,9 @@ func TestExecuteSessionList_PropagatesSourceFailure(t *testing.T) {
 func TestExecuteSessionRead_ExitedCarriesStateAndCode(t *testing.T) {
 	source := &sessionSourceFake{item: SessionItemRead{ID: "item-1", State: "exited", ExitCode: intPtr(7), Text: "done"}}
 	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}}, nil, nil)
+	cap := &agenttools.SessionDescendantCapability{SessionReader: reader}
 
-	out, err := executeSessionRead(toolTestContext(), reader, source, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`))
+	out, err := executeSessionRead(toolTestContext(), cap, source, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`))
 	if err != nil {
 		t.Fatalf("executeSessionRead: %v", err)
 	}
@@ -118,8 +125,9 @@ func TestExecuteSessionRead_ExitedCarriesStateAndCode(t *testing.T) {
 func TestExecuteSessionRead_ExitedNoBodyCarriesRetentionNote(t *testing.T) {
 	source := &sessionSourceFake{item: SessionItemRead{ID: "item-1", State: "exited", Note: "output was not kept"}}
 	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}}, nil, nil)
+	cap := &agenttools.SessionDescendantCapability{SessionReader: reader}
 
-	out, err := executeSessionRead(toolTestContext(), reader, source, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`))
+	out, err := executeSessionRead(toolTestContext(), cap, source, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`))
 	if err != nil {
 		t.Fatalf("executeSessionRead: %v", err)
 	}
@@ -133,7 +141,7 @@ func TestExecuteSessionRead_RunningUsesRendererAndCarriesState(t *testing.T) {
 	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}}, nil, nil)
 	req := sessionScreenRequester{body: liveFrameBody("current")}
 
-	out, err := executeSessionRead(toolTestContext(), reader, source, req, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`))
+	out, err := executeSessionRead(toolTestContext(), &agenttools.SessionDescendantCapability{SessionReader: reader}, source, req, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`))
 	if err != nil {
 		t.Fatalf("executeSessionRead: %v", err)
 	}
@@ -151,7 +159,7 @@ func TestExecuteSessionRead_AutomaticItemUsesRendererWithoutLedgerRow(t *testing
 	)
 	req := sessionScreenRequester{body: liveFrameBody("current screen")}
 
-	out, err := executeSessionRead(toolTestContext(), reader, source, req, json.RawMessage(`{"id":"att-shell"}`))
+	out, err := executeSessionRead(toolTestContext(), &agenttools.SessionDescendantCapability{SessionReader: reader}, source, req, json.RawMessage(`{"id":"att-shell"}`))
 	if err != nil {
 		t.Fatalf("executeSessionRead: %v", err)
 	}
@@ -185,7 +193,7 @@ func TestExecuteSessionRead_NoIDReturnsCurrentScreenAndAlternateCaveat(t *testin
 	}
 	body = encoded
 
-	out, err := executeSessionRead(toolTestContext(), reader, nil, sessionScreenRequester{body: body}, json.RawMessage(`{"sessionId":"pane-a"}`))
+	out, err := executeSessionRead(toolTestContext(), &agenttools.SessionDescendantCapability{SessionReader: reader}, nil, sessionScreenRequester{body: body}, json.RawMessage(`{"sessionId":"pane-a"}`))
 	if err != nil {
 		t.Fatalf("executeSessionRead: %v", err)
 	}
@@ -197,12 +205,12 @@ func TestExecuteSessionRead_NoIDReturnsCurrentScreenAndAlternateCaveat(t *testin
 func TestExecuteSessionRead_PropagatesLedgerAndRendererFailures(t *testing.T) {
 	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}}, nil, nil)
 	ledgerErr := errors.New("ledger unavailable")
-	if _, err := executeSessionRead(toolTestContext(), reader, &sessionSourceFake{err: ledgerErr}, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`)); !strings.Contains(err.Error(), "ledger unavailable") {
+	if _, err := executeSessionRead(toolTestContext(), &agenttools.SessionDescendantCapability{SessionReader: reader}, &sessionSourceFake{err: ledgerErr}, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`)); !strings.Contains(err.Error(), "ledger unavailable") {
 		t.Fatalf("ledger error = %v, want source failure", err)
 	}
 	rendererErr := errors.New("renderer disappeared")
 	source := &sessionSourceFake{item: SessionItemRead{ID: "item-1", State: "running"}}
-	if _, err := executeSessionRead(toolTestContext(), reader, source, sessionScreenRequester{err: rendererErr}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`)); !strings.Contains(err.Error(), "renderer disappeared") {
+	if _, err := executeSessionRead(toolTestContext(), &agenttools.SessionDescendantCapability{SessionReader: reader}, source, sessionScreenRequester{err: rendererErr}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`)); !strings.Contains(err.Error(), "renderer disappeared") {
 		t.Fatalf("renderer error = %v, want renderer failure", err)
 	}
 }
@@ -221,7 +229,7 @@ func TestExecuteSessionRead_ExitedBoundsTextAndReturnedEnd(t *testing.T) {
 	}}
 	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}}, nil, nil)
 
-	out, err := executeSessionRead(toolTestContext(), reader, source, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1","count":2000}`))
+	out, err := executeSessionRead(toolTestContext(), &agenttools.SessionDescendantCapability{SessionReader: reader}, source, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1","count":2000}`))
 	if err != nil {
 		t.Fatalf("executeSessionRead: %v", err)
 	}
@@ -250,7 +258,7 @@ func TestExecuteSessionRead_LiveScreenBoundsTextAndReturnedEnd(t *testing.T) {
 	expectedText := strings.Join(lines[:expectedLines], "\n")
 	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}}, nil, nil)
 
-	out, err := executeSessionRead(toolTestContext(), reader, nil, sessionScreenRequester{body: liveFrameBody(lines...)}, json.RawMessage(`{"sessionId":"pane-a"}`))
+	out, err := executeSessionRead(toolTestContext(), &agenttools.SessionDescendantCapability{SessionReader: reader}, nil, sessionScreenRequester{body: liveFrameBody(lines...)}, json.RawMessage(`{"sessionId":"pane-a"}`))
 	if err != nil {
 		t.Fatalf("executeSessionRead: %v", err)
 	}
@@ -304,7 +312,7 @@ func TestExecuteSessionRead_AutomaticItemIsBoundedByItsMark(t *testing.T) {
 			req := &recordingRequester{body: liveFrameBody("marked band")}
 			source := &sessionSourceFake{err: errors.New("item not found")}
 
-			if _, err := executeSessionRead(toolTestContext(), reader, source, req, json.RawMessage(tc.args)); err != nil {
+			if _, err := executeSessionRead(toolTestContext(), &agenttools.SessionDescendantCapability{SessionReader: reader}, source, req, json.RawMessage(tc.args)); err != nil {
 				t.Fatalf("executeSessionRead: %v", err)
 			}
 			calls := req.calls()
@@ -316,5 +324,212 @@ func TestExecuteSessionRead_AutomaticItemIsBoundedByItsMark(t *testing.T) {
 				t.Fatalf("region = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// ── the descendant read path (design §6.1, §11 "kept, deliberately") ──────
+
+// failingRequester is the fake §11 asks for: any call to it is the defect
+// the design forbids — a sessionId naming a descendant reaching the
+// renderer, which stays reserved for the run's own pane.
+type failingRequester struct{ called bool }
+
+func (r *failingRequester) RequestScreen(context.Context, string, *FrameRegion) (json.RawMessage, error) {
+	r.called = true
+	return nil, errors.New("RequestScreen must never be called for a descendant sessionId")
+}
+
+func (r *failingRequester) RequestRun(context.Context, string, string) (json.RawMessage, error) {
+	return nil, errors.New("not used")
+}
+
+// fakeDescendantReader is a PaneReader a test drives directly: it records
+// what it was asked and answers a canned PaneRead or error.
+type fakeDescendantReader struct {
+	calls   int
+	access  any
+	session string
+	want    *sessionruntime.TargetKind
+	read    PaneRead
+	err     error
+}
+
+func (f *fakeDescendantReader) Read(_ context.Context, access any, sessionID string, want *sessionruntime.TargetKind, _ *sessionruntime.RowRange) (PaneRead, error) {
+	f.calls++
+	f.access = access
+	f.session = sessionID
+	f.want = want
+	return f.read, f.err
+}
+
+// A sessionId naming a DESCENDANT is read through PaneReader and never
+// reaches RendererRequester — the renderer stays reserved for the run's
+// OWN pane (design §11 "kept, deliberately"). failingRequester fails the
+// test the moment it is asked, so this is a demonstration, not an
+// inspection.
+func TestASessionIdNamingADescendantNeverCallsTheRenderer(t *testing.T) {
+	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "own-session"}}, nil, nil)
+	fakeReader := &fakeDescendantReader{read: PaneRead{
+		Frame:          paneview.Frame{},
+		Classification: agentdriver.StateFreeText,
+		ReadBarrier:    true,
+	}}
+	cap := &agenttools.SessionDescendantCapability{SessionReader: reader, PaneAccess: "fake-access", SessionReads: fakeReader}
+	req := &failingRequester{}
+
+	out, err := executeSessionRead(toolTestContext(), cap, nil, req, json.RawMessage(`{"sessionId":"worker-session"}`))
+	if err != nil {
+		t.Fatalf("executeSessionRead: %v", err)
+	}
+	if req.called {
+		t.Fatal("RequestScreen was called for a sessionId naming a descendant")
+	}
+	if fakeReader.calls != 1 {
+		t.Fatalf("PaneReader.Read calls = %d, want 1", fakeReader.calls)
+	}
+	if fakeReader.session != "worker-session" {
+		t.Fatalf("PaneReader.Read was asked about %q, want worker-session", fakeReader.session)
+	}
+	if fakeReader.access != "fake-access" {
+		t.Fatalf("PaneReader.Read access = %v, want the run's own PaneAccess forwarded untouched", fakeReader.access)
+	}
+	if !strings.Contains(out, `"source":"helper"`) || !strings.Contains(out, `"classification":"free_text"`) {
+		t.Fatalf("descendant read result = %s, want source helper and classification free_text", out)
+	}
+}
+
+// Paired ordinary success: a sessionId that names (or omits, naming) the
+// run's OWN session keeps using the renderer, exactly as it always did —
+// PaneReader is never asked. TestExecuteSessionRead_RunningUsesRendererAndCarriesState
+// and its neighbours above already cover this path in full; this pairs the
+// failure case just demonstrated with the one case in this file that most
+// directly contrasts it.
+func TestASessionIdNamingTheRunsOwnSessionNeverCallsPaneReader(t *testing.T) {
+	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "own-session"}}, nil, nil)
+	fakeReader := &fakeDescendantReader{}
+	cap := &agenttools.SessionDescendantCapability{SessionReader: reader, PaneAccess: "fake-access", SessionReads: fakeReader}
+	req := sessionScreenRequester{body: liveFrameBody("current")}
+
+	if _, err := executeSessionRead(toolTestContext(), cap, nil, req, json.RawMessage(`{"sessionId":"own-session"}`)); err != nil {
+		t.Fatalf("executeSessionRead: %v", err)
+	}
+	if fakeReader.calls != 0 {
+		t.Fatalf("PaneReader.Read calls = %d, want 0 for the run's own session", fakeReader.calls)
+	}
+}
+
+// A sessionId naming a descendant with no `target` reads without minting
+// one — TargetView is only built on request (design §6.1: "on request a
+// target").
+func TestASessionReadWithNoTargetMintsNone(t *testing.T) {
+	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "own-session"}}, nil, nil)
+	fakeReader := &fakeDescendantReader{read: PaneRead{Classification: agentdriver.StateWorking}}
+	cap := &agenttools.SessionDescendantCapability{SessionReader: reader, PaneAccess: "fake-access", SessionReads: fakeReader}
+
+	out, err := executeSessionRead(toolTestContext(), cap, nil, &failingRequester{}, json.RawMessage(`{"sessionId":"worker-session"}`))
+	if err != nil {
+		t.Fatalf("executeSessionRead: %v", err)
+	}
+	if fakeReader.want != nil {
+		t.Fatalf("PaneReader.Read was asked for target kind %v, want nil (no target requested)", *fakeReader.want)
+	}
+	if strings.Contains(out, `"target"`) {
+		t.Fatalf("descendant read result = %s, want no target field when none was requested", out)
+	}
+}
+
+// An unrecognised `target` string is refused before PaneReader is ever
+// asked — the closed set (design §6.3) is enforced here, not left for the
+// helper to reject.
+func TestASessionReadWithAnUnknownTargetKindIsRefused(t *testing.T) {
+	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "own-session"}}, nil, nil)
+	fakeReader := &fakeDescendantReader{}
+	cap := &agenttools.SessionDescendantCapability{SessionReader: reader, PaneAccess: "fake-access", SessionReads: fakeReader}
+
+	_, err := executeSessionRead(toolTestContext(), cap, nil, &failingRequester{}, json.RawMessage(`{"sessionId":"worker-session","target":"nonsense"}`))
+	if err == nil {
+		t.Fatal("executeSessionRead accepted an unknown target kind")
+	}
+	if fakeReader.calls != 0 {
+		t.Fatalf("PaneReader.Read calls = %d, want 0 — an invalid target must refuse before asking the reader", fakeReader.calls)
+	}
+}
+
+// A descendant read with no PaneAccess/SessionReads wired (a build before
+// Task 8's composition-root wiring) refuses honestly rather than reaching
+// for a nil PaneReader.
+func TestASessionReadWithNoPaneAccessWiredRefusesTheDescendant(t *testing.T) {
+	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "own-session"}}, nil, nil)
+	cap := &agenttools.SessionDescendantCapability{SessionReader: reader}
+
+	if _, err := executeSessionRead(toolTestContext(), cap, nil, &failingRequester{}, json.RawMessage(`{"sessionId":"worker-session"}`)); err == nil {
+		t.Fatal("executeSessionRead succeeded with no PaneAccess/SessionReads wired")
+	}
+}
+
+// TestSessionReadDTOConformsToContract is the Go-struct half of AGENTS.md's
+// testing rule 5 for the descendant fields session.read's contract gained
+// (design §6.1, §6.3, §8, Task 8): sessionReadResult, filled with a target,
+// a menu, a pending message and a read barrier, marshals to something
+// contracts/tools/session.read.schema.json's own result shape accepts.
+// internal/toolendpoint's contract_test.go covers the other half — the
+// real result, off the real wire.
+func TestSessionReadDTOConformsToContract(t *testing.T) {
+	raw, err := os.ReadFile("../../contracts/tools/session.read.schema.json")
+	if err != nil {
+		t.Fatalf("read the contract: %v", err)
+	}
+	var doc struct {
+		Defs map[string]json.RawMessage `json:"$defs"`
+	}
+	if unmarshalErr := json.Unmarshal(raw, &doc); unmarshalErr != nil {
+		t.Fatalf("parse the contract: %v", unmarshalErr)
+	}
+	compiler := jsonschema.NewCompiler()
+	resource, err := jsonschema.UnmarshalJSON(strings.NewReader(string(doc.Defs["result"])))
+	if err != nil {
+		t.Fatalf("read $defs/result: %v", err)
+	}
+	if addErr := compiler.AddResource("session.read.result.json", resource); addErr != nil {
+		t.Fatalf("add the result schema: %v", addErr)
+	}
+	schema, err := compiler.Compile("session.read.result.json")
+	if err != nil {
+		t.Fatalf("compile the result schema: %v", err)
+	}
+
+	readBarrier := true
+	out := sessionReadResult{
+		SessionID:      "worker-session",
+		State:          "screen",
+		Source:         "helper",
+		Text:           "hello",
+		Classification: "free_text",
+		Target: &sessionTargetWire{
+			Token: "tok", TokenID: "tid", Kind: "menu",
+			Rows:        sessionRowRange{First: 2, Last: 5},
+			Region:      "",
+			ExpiresAtMs: 1234,
+			Menu: &sessionMenuWire{
+				Question: "Trust this folder?",
+				Options:  []string{"Yes, I trust this folder", "No, exit"},
+				Selected: 0,
+				Rows:     sessionRowRange{First: 2, Last: 5},
+				Body:     &sessionRowRange{First: 3, Last: 3},
+			},
+		},
+		PendingMessages: []sessionMessageWire{{ID: "m1", Namespace: "caller", Phase: "queued"}},
+		ReadBarrier:     &readBarrier,
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal DTO: %v", err)
+	}
+	var value any
+	if unmarshalErr := json.Unmarshal(encoded, &value); unmarshalErr != nil {
+		t.Fatalf("decode DTO json: %v", unmarshalErr)
+	}
+	if validateErr := schema.Validate(value); validateErr != nil {
+		t.Fatalf("session.read result does not satisfy its own contract: %v\npayload: %s", validateErr, encoded)
 	}
 }

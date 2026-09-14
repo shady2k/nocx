@@ -56,6 +56,7 @@ import (
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/masking"
+	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/skill"
 )
 
@@ -501,6 +502,25 @@ type effectKernel struct {
 	resolutions map[string]*skill.Resolution
 }
 
+// PaneAccessBinder mints, for ONE run, the DescendantPaneAccess and
+// PaneReader-backed SessionReads that run needs to reach the panes of
+// workers IT spawned (design §7.1, §7.3), plus the run's OWN controller
+// identity — the kernel's side of the same triple worker_auth.go's Admit
+// binds for the tool endpoint (ControllerIdentity, PaneAccess, and now
+// SessionReads alongside it). internal/app's composition root supplies the
+// real closure, over its own hub, PaneReader and session registry, called
+// fresh per run with THIS run's own runID (bound as KernelAuthority there)
+// — never a value fixed at start-up, because a run's own authority
+// interval is its own run. paneAccess/sessionReads are `any` for the
+// reason RunContext.PaneAccess already is: this package sits below
+// internal/app and cannot name either concrete type; identity is
+// session.Identity because RunContext.ControllerIdentity already is —
+// both packages import internal/session directly. A nil binder (a build
+// before Task 8's wiring, or a caller that never set one) leaves
+// everything zero, which every reader already treats as "no descendant
+// authority granted".
+type PaneAccessBinder func(runID, sessionID string) (paneAccess any, sessionReads any, identity session.Identity)
+
 // newEffectKernel builds the pipeline for one run. A schema that does
 // not compile is a broken declaration — the run fails here, loudly, rather
 // than at the call. requester is the renderer-request seam for
@@ -534,6 +554,20 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 	if len(seams) > 0 {
 		runSeams = seams[0]
 	}
+	// PaneAccess/SessionReads/ControllerIdentity are bound HERE, for this
+	// run's OWN runID — never inferred from a call's parameters (design
+	// §7.1) — the kernel's side of the same binding worker_auth.go's Admit
+	// does for the tool endpoint (nocx-6q1uh.8's second obligation). A run
+	// with no binder wired (a build before Task 8's composition-root
+	// wiring, or a caller that never set one) leaves everything zero,
+	// which every reader of them must already treat as "no descendant
+	// authority granted" — the same safe default PaneAccess already
+	// documents.
+	var paneAccess, sessionReads any
+	var controllerIdentity session.Identity
+	if runSeams.paneAccessBinder != nil {
+		paneAccess, sessionReads, controllerIdentity = runSeams.paneAccessBinder(runID, sessionID)
+	}
 	m := &effectKernel{
 		log:         logger,
 		grant:       grant,
@@ -551,6 +585,9 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 			Session:               sessionID,
 			AutomaticSessionItems: append([]string(nil), attached.AutomaticItems...),
 			MarkedSessionWindows:  markedWindows(attached.MarkedWindows),
+			ControllerIdentity:    controllerIdentity,
+			PaneAccess:            paneAccess,
+			SessionReads:          sessionReads,
 		},
 		resolutions: make(map[string]*skill.Resolution),
 		validators:  make(map[string]*jsonschema.Schema, len(registry.All())),
@@ -1671,7 +1708,7 @@ func (m *effectKernel) run(decl agenttools.Tool, ctx context.Context, capability
 	runCtx = withToolBound(runCtx, decl.ResultBound)
 	switch decl.Executes {
 	case agenttools.Dynamic:
-		reader, ok := capability.(*agenttools.SessionReader)
+		reader, ok := capability.(*agenttools.SessionDescendantCapability)
 		if !ok {
 			return "", fmt.Errorf("tool %q: capability is %T, not dynamic session capability", decl.Name, capability)
 		}

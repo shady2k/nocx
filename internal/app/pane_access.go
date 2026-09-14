@@ -22,6 +22,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/monoclock"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/toolendpoint"
 	"github.com/shady2k/nocx/internal/workers"
@@ -35,17 +37,42 @@ import (
 // against the wrong clock the moment either side's wall clock stepped.
 type Nanos int64
 
-// paneHelpers is the one helper wire operation revocation needs. Task 5
-// supplies the real implementation over helperclient.Client (which does not
-// have this method yet); tests supply a fake that can block, refuse, or
-// answer immediately, so revoke's waiting behaviour is fully exercisable
-// without a real helper process.
+// systemMonoClock is the production monotonicClock: internal/monoclock's
+// real CLOCK_MONOTONIC (or Darwin's mach_continuous_time-based equivalent)
+// reading, narrowed to the Nanos type this package compares commitBy
+// deadlines against. It is the Task 5 implementation pane_access_test.go's
+// fakePaneClock stands in for.
+type systemMonoClock struct{}
+
+func (systemMonoClock) Now() Nanos { return Nanos(monoclock.Now()) }
+
+// paneHelpers is the per-session helper wire operations revocation and
+// session.read both need. AccessBump is revocation's own (§7.2); Snapshot
+// and Target are session.read's read path (§6.1) — added here rather than
+// as a second lookup interface because both questions resolve through the
+// SAME per-session helper handle (paneHelperLookup.HelperFor already
+// answers "which helper holds this pane's terminal", and a PaneReader
+// built over a second, independent answer to that question would be a
+// second owner of it). Task 5/8 supply the real implementation over
+// helperclient.Client; tests supply a fake that can block, refuse, or
+// answer immediately, so both revoke's waiting behaviour and a read's
+// snapshot/mint sequence are fully exercisable without a real helper
+// process.
 type paneHelpers interface {
 	// AccessBump asks the session's owner to move its access epoch past
 	// above, and reports the epoch that resulted. It is expected to block
 	// until every intent the owner holds older than the bump is terminal
 	// (design §7.2) — that blocking IS the barrier revoke waits on.
 	AccessBump(ctx context.Context, sessionID string, above uint64) (epoch uint64, err error)
+	// Snapshot asks the session's runtime for a consistent read of its
+	// screen (design §6.1): the frame a PaneReader classifies, and the
+	// facts (access epoch, read barrier) a target minted from it inherits.
+	Snapshot(ctx context.Context, sessionID string) (proto.SnapshotResult, error)
+	// Target mints a one-shot, signed target from a retained snapshot —
+	// always against the SAME snapshotId a prior Snapshot call answered,
+	// never re-derived, so classification, rows and digest describe one
+	// frame (design §6.1).
+	Target(ctx context.Context, sessionID string, p proto.TargetParams) (proto.TargetResult, error)
 }
 
 // paneHelperLookup finds the helper that owns a session's pane — the same
@@ -68,19 +95,47 @@ type paneHelperLookup interface {
 // design genuinely has to wait something out.
 type monotonicClock interface{ Now() Nanos }
 
-// AuthorityInterval names which of the two adapters bound a
-// DescendantPaneAccess (spec §7.1: the tool endpoint's admission, or the
-// kernel's own run) and the interval within it, so a caller inspecting an
-// authority it was handed can tell which policy gate stands behind it.
-type AuthorityInterval struct {
-	// Kind is "endpoint" or "kernel".
-	Kind string
-	// AdmissionEpoch is the endpoint admission's interval. Zero when Kind
-	// is not "endpoint".
+// Authority names which of the two adapters bound a DescendantPaneAccess
+// (spec §7.1: the tool endpoint's admission, or the kernel's own run) and
+// the interval within it, so a caller inspecting an authority it was
+// handed can tell which policy gate stands behind it.
+//
+// It is a SEALED SUM — EndpointAuthority and KernelAuthority, and nothing
+// else may implement authoritySealed from outside this package — rather
+// than one struct carrying a string "Kind" label. A label is a claim
+// nothing checks: nocx-6q1uh.13a's adversarial pass bound the same
+// controller under Kind "endpoint" and Kind "kernel" and found every
+// downstream Resolve treated the two identically, because nothing ever
+// read Kind below Bind. Two distinct types close that gap at compile time:
+// a consumer that only makes sense for one adapter's own interval names
+// the type it needs (AsEndpoint/AsKernel below) and is refused the other
+// by a failed assertion, not by remembering to compare a string.
+type Authority interface {
+	// authoritySealed is unexported so only this package may add a third
+	// variant — the same closure agentdriver's State enum and workers'
+	// Effect set already rely on for their own "nothing else may answer
+	// this question" guarantee.
+	authoritySealed()
+}
+
+// EndpointAuthority is a DescendantPaneAccess bound by the tool endpoint's
+// admission (worker_auth.go's Admit): AdmissionEpoch names the admission
+// interval whose retirement ends this access too (retire, §7.2).
+type EndpointAuthority struct {
 	AdmissionEpoch toolendpoint.AdmissionEpoch
-	// RunID is the kernel run's id. Empty when Kind is not "kernel".
+}
+
+func (EndpointAuthority) authoritySealed() {}
+
+// KernelAuthority is a DescendantPaneAccess bound by the kernel for one of
+// its own runs (design §7.3: the assistant acting over workers IT
+// spawned): RunID names the run whose own policy gate covers every call
+// made under it.
+type KernelAuthority struct {
 	RunID string
 }
+
+func (KernelAuthority) authoritySealed() {}
 
 // DescendantPaneAccess is the capability bound before dispatch by the
 // adapter that authenticated the caller — never inferred from a call's own
@@ -91,7 +146,7 @@ type DescendantPaneAccess struct {
 	hub        *paneAccessHub
 	controller string
 	identity   session.Identity
-	authority  AuthorityInterval
+	authority  Authority
 }
 
 // Resolve asks whether sessionID belongs to the bound controller's subtree
@@ -125,11 +180,34 @@ func (a *DescendantPaneAccess) Identity() session.Identity {
 
 // Authority is which adapter bound this capability, and under what
 // interval.
-func (a *DescendantPaneAccess) Authority() AuthorityInterval {
+func (a *DescendantPaneAccess) Authority() Authority {
 	if a == nil {
-		return AuthorityInterval{}
+		return nil
 	}
 	return a.authority
+}
+
+// AsEndpoint returns the endpoint admission this access was bound under,
+// and false when it was bound by the kernel instead (or a is nil/unbound).
+// A consumer that only makes sense for the endpoint's own interval — for
+// instance, one that must close when THAT admission retires — asks this
+// rather than comparing a label nothing enforced: the wrong variant is
+// refused here, at the type, by the failed assertion (nocx-6q1uh.13a).
+func (a *DescendantPaneAccess) AsEndpoint() (EndpointAuthority, bool) {
+	if a == nil {
+		return EndpointAuthority{}, false
+	}
+	ep, ok := a.authority.(EndpointAuthority)
+	return ep, ok
+}
+
+// AsKernel is AsEndpoint's counterpart for the kernel's own run interval.
+func (a *DescendantPaneAccess) AsKernel() (KernelAuthority, bool) {
+	if a == nil {
+		return KernelAuthority{}, false
+	}
+	k, ok := a.authority.(KernelAuthority)
+	return k, ok
 }
 
 // paneAccessHub is the coordinator-side half of revocation that cannot be
@@ -174,7 +252,7 @@ func newPaneAccessHub(registrar *workers.Registrar, lookup paneHelperLookup, clo
 // and authority interval. Called by the adapter that authenticated the
 // caller, before dispatch (spec §7.1) — never by a tool, and never from a
 // call's own parameters.
-func (h *paneAccessHub) Bind(controller string, identity session.Identity, a AuthorityInterval) *DescendantPaneAccess {
+func (h *paneAccessHub) Bind(controller string, identity session.Identity, a Authority) *DescendantPaneAccess {
 	return &DescendantPaneAccess{hub: h, controller: controller, identity: identity, authority: a}
 }
 

@@ -1527,7 +1527,8 @@ func New(opts ...Option) (*App, error) {
 	// — cmd/nocx-server is built CGO_ENABLED=0 and the one emulator is beside
 	// each PTY — so the frame every consumer below acts on is a question asked
 	// of the process that holds the terminal.
-	paneViews := paneview.NewStore(logger, newPaneScreen(slogger, sess, localOpener, helperReg))
+	screenSource := newPaneScreen(slogger, sess, localOpener, helperReg)
+	paneViews := paneview.NewStore(logger, screenSource)
 	// The worker's rendezvous, built before the enroller because it is what the
 	// enroller notifies (nocx-dkawo.7). An enrolment is the ONE moment nocx
 	// knows an agent started rather than inferring it, so a registration
@@ -2284,6 +2285,33 @@ func New(opts ...Option) (*App, error) {
 	if toolAuthorizerErr != nil {
 		return nil, fmt.Errorf("tool authorizer: %w", toolAuthorizerErr)
 	}
+	// Descendant-pane authority and its helper-backed read path (design §7,
+	// §6.1, Task 8). The hub resolves reach through workerRecord and finds
+	// each session's helper through screenSource — the SAME lookup a
+	// screen read already uses (panescreen.go's owner), never a second
+	// derivation of "which helper holds this pane's terminal" — and bounds
+	// an unacknowledged access-epoch bump by the real monotonic clock.
+	// descendantPaneReader mints targets over that same hub's helper lookup
+	// and classifies with paneDrivers, the SAME agent rule registry the
+	// watcher and the calibration already share (paneWatch is also this
+	// reader's answer for "what agent does this pane run").
+	accessHub := newPaneAccessHub(workerRecord, screenSource, systemMonoClock{})
+	toolAuthorizer.BindPaneAccess(accessHub)
+	descendantPaneReader := newPaneReader(accessHub, paneWatch, paneDrivers)
+	toolAuthorizer.BindSessionReads(descendantPaneReader)
+	// The kernel's own side of the same binding (design §7.3): a
+	// coordinator run's session.read naming a worker IT spawned reaches
+	// this for its own runID, bound fresh per run as KernelAuthority —
+	// never a value fixed here at start-up, because a run's own authority
+	// interval is its own run.
+	tp.SetPaneAccessBinder(func(runID, sessionID string) (any, any, session.Identity) {
+		var identity session.Identity
+		if s, err := sess.Get(session.ID(sessionID)); err == nil {
+			identity = s.Identity()
+		}
+		access := accessHub.Bind(sessionID, identity, KernelAuthority{RunID: runID})
+		return access, descendantPaneReader, identity
+	})
 	workerSup.exited = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, e workers.Exit) {
 		if _, err := workerRecord.Exited(ctx, id, l, e); err != nil {
 			logger.Warn("worker: a participant's exit was not recorded",

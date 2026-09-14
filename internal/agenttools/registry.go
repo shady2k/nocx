@@ -107,6 +107,16 @@ type RunContext struct {
 	// wiring), which every reader of it must treat as "no descendant
 	// authority", never as a coordinator's own pane.
 	PaneAccess any
+	// SessionReads is session.read's helper-backed read path for a
+	// sessionId naming one of PaneAccess's descendants (assistant.PaneReader,
+	// design §6.1, Task 8): a single, composition-root-level value — unlike
+	// PaneAccess, which is minted fresh per call — bound by the same
+	// adapter alongside PaneAccess. `any` for the identical layering reason
+	// PaneAccess is `any`: internal/assistant, which calls it, sits below
+	// internal/app, which builds the one production implementation. Nil
+	// means no adapter bound one yet, which every sessionId naming a
+	// descendant must then refuse rather than guess at.
+	SessionReads any
 }
 
 // MarkedSessionWindow is one person-marked row span: which item, and which
@@ -409,7 +419,7 @@ var declarations = []Declaration{
 	},
 	{
 		Name:             "session.read",
-		Description:      "Read an item in a terminal session, or the screen now when no item id is supplied; the answer carries whether the item is running or exited and its exit code when it has one. A full-screen program returns the current alternate screen, not a window into scrollback.",
+		Description:      "Read a terminal session's screen: your own pane when sessionId is omitted or names it, or a worker you spawned (or one of its own workers) by its sessionId. Reading your own pane can also name an item id to read a recorded block instead of the current screen. Reading a descendant carries its classification (what its screen is inviting) and, when target names a kind (menu, input, working or region), a target you can spend with session.keys or session.message.",
 		Effect:           []content.Effect{content.EffectObserve},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
@@ -419,7 +429,7 @@ var declarations = []Declaration{
 		ResolveResources: resourceSession,
 		Executes:         Dynamic,
 		Params:           "session.read.schema.json",
-		Narrow:           narrowSession,
+		Narrow:           narrowDescendants,
 	},
 	{
 		Name:        "session.run",

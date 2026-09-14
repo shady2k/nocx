@@ -700,6 +700,10 @@ type agentHandlers struct {
 	// about (nocx-dkawo.8). Nil until the composition root wires one, which
 	// is what an unopened content store leaves.
 	workerStore assistant.WorkerRecord
+	// paneAccessBinder mints a run's DescendantPaneAccess/SessionReads
+	// (assistant.PaneAccessBinder, design §7.1, §7.3, Task 8). Nil is the
+	// honest shape for a build with no composition-root wiring yet.
+	paneAccessBinder assistant.PaneAccessBinder
 	// scripts reads the whole of a file a proposed command names, so the
 	// approval question can carry the script and not only its name
 	// (nocx-872jc.3). The server implements it; see ws_script.go for what
@@ -1547,6 +1551,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		// run fence and the tool's resolver name the same string without
 		// either restating the other.
 		WorkerEnvironment: content.EnvironmentIDFor(content.EnvLocal, ""),
+		PaneAccessBinder:  h.paneAccessBinder,
 		Scripts:           h.scripts,
 		// The run's OWN cwd — the directory this question carried and the
 		// ledger recorded with it — so `bash deploy.sh` in the approval
@@ -3023,8 +3028,8 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 			credentials: credentials, client: client, askSub: askSub,
 			fetcher: s.agentFetcher, attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, expansions: s, scripts: s, knownMaterial: s.agentKnownMaterial,
-			workerStore: s.workerStore,
-			approvals:   s.agentApprovals, pendingRuns: s.pendingRuns,
+			workerStore: s.workerStore, paneAccessBinder: s.paneAccessBinder,
+			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
 			pendingRunsMu:        &s.pendingRunsMu,
 			personalInstructions: s.personalInstructionsText, skillsEnabled: s.skillsEnabled,
 			sessionPolicy: s.sessionPolicy, globalPolicy: s.agentPolicy,

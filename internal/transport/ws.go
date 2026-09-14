@@ -676,6 +676,13 @@ type WSServer struct {
 	// tools refusing with a sentence rather than starting a worker into
 	// nothing.
 	workerStore assistant.WorkerRecord
+	// paneAccessBinder mints a run's DescendantPaneAccess/SessionReads
+	// (design §7.1, §7.3, Task 8) — the kernel's side of the binding
+	// worker_auth.go's Admit does for the tool endpoint. Wired by the
+	// composition root; nil leaves every sessionId naming a descendant
+	// refused, which is the honest answer for a build with no hub wired
+	// yet.
+	paneAccessBinder assistant.PaneAccessBinder
 
 	// gitMu guards gitBindings and gitBySession: the transport's own
 	// bookkeeping for bindings it issued (internal/git exposes neither a
@@ -4051,3 +4058,11 @@ func requestTag(wconn *wsConn, req jsonrpcRequest) string {
 // among them — so it cannot exist before the server does. The window before
 // this line is empty, because no run can have been asked yet.
 func (s *WSServer) SetWorkerRecord(w assistant.WorkerRecord) { s.workerStore = w }
+
+// SetPaneAccessBinder wires the kernel's side of descendant-pane authority
+// (design §7.1, §7.3, Task 8): a coordinator run's session.read naming a
+// worker it spawned reaches PaneAccessBinder for its own runID. A setter
+// for the same reason SetWorkerRecord is one — the binder closes over the
+// composition root's hub and PaneReader, which do not exist before the
+// server does.
+func (s *WSServer) SetPaneAccessBinder(b assistant.PaneAccessBinder) { s.paneAccessBinder = b }

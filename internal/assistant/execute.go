@@ -59,6 +59,7 @@ var executors = map[string]func(ctx context.Context, cap agenttools.Capability, 
 	"files.edit":       executeFilesEdit,
 	"files.create":     executeFilesCreate,
 	"session.list":     executeSessionListTool,
+	"session.read":     executeSessionReadTool,
 	"notes.search":     executeNotesSearch,
 	"notes.create":     executeNotesCreate,
 	"notes.update":     executeNotesUpdate,
@@ -134,6 +135,11 @@ type toolSeams struct {
 	// is a constant: the spawner opens a local session, so a parameter would
 	// let the model name an environment nothing could deliver.
 	workerEnvironment string
+	// paneAccessBinder mints THIS run's DescendantPaneAccess/SessionReads
+	// (PaneAccessBinder, kernel.go) — nil is the honest shape for a caller
+	// that never wired one, which leaves every sessionId naming a
+	// descendant refused rather than guessed at.
+	paneAccessBinder PaneAccessBinder
 }
 
 type noteSearchRow struct {
@@ -901,6 +907,23 @@ func executeSessionListTool(ctx context.Context, cap agenttools.Capability, args
 		return "", fmt.Errorf("session.list: capability is %T, not *agenttools.SessionReader", cap)
 	}
 	return executeSessionList(ctx, reader, seams.sessions, args)
+}
+
+// executeSessionReadTool is session.read's InGo-executor-map entry — the
+// tool ENDPOINT's path (runDeclaredTool consults this map regardless of the
+// declaration's own Executes, unlike the kernel's dispatch switch). It has
+// no renderer requester of its own (toolSeams carries none: an external
+// tool-endpoint connection has no renderer attached), so the run's own pane
+// falls back to the same "no renderer requester is wired" refusal any other
+// requester-less caller already gets; a sessionId naming a descendant is
+// unaffected, since PaneReader travels on the capability itself rather than
+// through a requester.
+func executeSessionReadTool(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	reader, ok := cap.(*agenttools.SessionDescendantCapability)
+	if !ok {
+		return "", fmt.Errorf("session.read: capability is %T, not *agenttools.SessionDescendantCapability", cap)
+	}
+	return executeSessionRead(ctx, reader, seams.sessions, nil, args)
 }
 
 // filesReadResult is the tool's return: total (the file's size), the window

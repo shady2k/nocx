@@ -25,6 +25,7 @@ import {
 } from './unresolved-redactions'
 import type { SubmitPlan } from './submit'
 import type { ModelChipState } from './agent-readiness'
+import { cwdLabel } from './cwd-label'
 
 /**
  * The indent a pasted command arrives with, when it arrives at the very
@@ -611,12 +612,9 @@ export class CommandEditor {
     )
   }
 
-  /** Update the cwd chip text. Uses the same short directoryLabel shape. */
+  /** Update the cwd chip text — the same short form a block header shows. */
   setCwd(cwd: string): void {
-    const path = cwd.trim().replace(/\/+$/, '') || '~'
-    const parts = path.split('/').filter(Boolean)
-    const label = path === '~' || parts.length === 0 ? path : parts.slice(-2).join('/')
-    this.cwdChip.textContent = `📁 ${label}`
+    this.cwdChip.textContent = `📁 ${cwdLabel(cwd)}`
   }
 
   /**

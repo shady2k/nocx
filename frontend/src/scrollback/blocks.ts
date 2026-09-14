@@ -26,6 +26,8 @@ import { toolCallTitle } from './tool-call-title'
 import { paintShellInto } from './shell-paint'
 import { mountDumpPanel } from '../ui/dump-panel'
 import { decorateLinks } from '../terminal-links/decorate'
+import { cwdLabel } from '../cwd-label'
+import { createBadge } from '../ui/badge-element'
 // ── Clipboard helper ────────────────────────────────────────────────────────
 
 async function copyToClipboardImpl(text: string): Promise<void> {
@@ -709,15 +711,6 @@ function settleHeaderRight(
   }
 }
 
-// ── CWD display ────────────────────────────────────────────────────────────
-
-function cwdLabel(cwd: string): string {
-  const path = cwd.trim().replace(/\/+$/, '') || '~'
-  const parts = path.split('/').filter(Boolean)
-  if (path === '~' || parts.length === 0) return path
-  return parts.slice(-2).join('/')
-}
-
 /**
  * Create the header row for a block — flat, warp-style (P0-1).
  * No card background, no pill/chip styling. Plain muted small text.
@@ -747,11 +740,8 @@ function createHeader(
   // all; only a non-human author is worth saying out loud. Never a
   // hand-rolled chip: this is the kit's badge, placed like any other chip.
   if (author !== 'shell') {
-    const mark = document.createElement('span')
-    mark.className = 'ui-badge'
-    mark.dataset.tone = 'info'
+    const mark = createBadge({ text: author, tone: 'info' })
     mark.dataset.author = author
-    mark.textContent = author
     chipsRow.appendChild(mark)
   }
 

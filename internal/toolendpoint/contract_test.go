@@ -324,7 +324,22 @@ func TestGroupEndpoint_CatalogueUsesAdmittedGrantAndIgnoresParams(t *testing.T) 
 	if err := json.Unmarshal(response.Result, &result); err != nil {
 		t.Fatalf("decode catalogue result: %v", err)
 	}
-	expected := registry.ForGrant(grant)
+	// Not registry.ForGrant(grant) directly: this dispatcher's own
+	// orchestrationMethodNames allowlist refuses session.list, session.run
+	// and session.wait even though ForGrant's resource/effect projection
+	// permits them under this grant shape, and Catalogue's own job
+	// (nocx-6q1uh.16, internal/assistant/dispatch.go) is to filter exactly
+	// those out before this test's "expected" set is built — asserting
+	// against the unfiltered projection would reintroduce the mismatch this
+	// endpoint used to ship (tools.catalogue offering a tool Dispatch then
+	// refused with ErrUnreachableMethod). This test's own job is the wire
+	// shape and the admitted-grant/ignored-params behavior below, not
+	// re-deriving Catalogue's admission rules a second time.
+	cataloguer, ok := dispatcher.(assistant.ToolCatalogue)
+	if !ok {
+		t.Fatalf("dispatcher does not implement assistant.ToolCatalogue")
+	}
+	expected := cataloguer.Catalogue(grant)
 	if len(result.Tools) != len(expected) {
 		t.Fatalf("catalogue has %d tools, want %d", len(result.Tools), len(expected))
 	}

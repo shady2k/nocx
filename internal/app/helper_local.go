@@ -1243,11 +1243,34 @@ type hostedOpeners struct {
 // The claim travels BOTH ways, because both spawns are irreversible: a repeat
 // that reaches either helper must answer with the session the first attempt made
 // rather than fork a second shell.
+//
+// # THE INTERVAL, BOTH ENDS NAMED (nocx-k6p18.35)
+//
+// Asking the far host's own helper begins with a platform PROBE, and a probe is
+// a dial: it authenticates to ask one question. It OPENS the interval by taking
+// a pooled reference on the destination (probeHelperPlatformHeld) and it CLOSES
+// at the deferred release below, which runs only after the arm that actually
+// opened the pane has taken a reference of its own — `spawn-ssh` on this
+// machine's helper for a destination the far host's helper declined, which is
+// the ordinary password host, and the far helper's lane for one it serves.
+//
+// Releasing it at either helper's own edge instead — which is what the decline
+// used to do, one `unlease` before this function's second arm ran — makes that
+// second arm's acquisition a fresh dial, because the unlease was the pool's last
+// reference and the connection closed with it: two authentications on somebody
+// else's host for one pane. Holding it makes the acquisition a cache hit on the
+// same ref-counted entry, and the host authenticates once.
+//
+// hold is nil whenever no lease was taken (a local destination never reaches
+// here, and a refusal to hand one out returns no hold), and release is safe on
+// nil and idempotent — so no arm below tests for either.
 func (h *hostedOpeners) OpenHosted(ctx context.Context, cfg session.Config, claim string) (transport.HostedSessionOpen, bool, error) {
 	if cfg.Kind == session.KindLocal {
 		return h.local.OpenHosted(ctx, cfg, claim)
 	}
-	if opened, selected, err := h.remote.OpenHosted(ctx, cfg, claim); selected {
+	opened, hold, selected, err := h.remote.openHoldingLease(ctx, cfg, claim)
+	defer hold.release()
+	if selected {
 		return opened, true, err
 	}
 	return h.local.OpenHosted(ctx, cfg, claim)

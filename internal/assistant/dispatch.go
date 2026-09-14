@@ -129,8 +129,8 @@ func NewToolDispatcher(registry agenttools.Registry, workerStore WorkerRecord, e
 	if err != nil {
 		return nil, err
 	}
-	allowed := make(map[string]struct{}, len(workerMethodNames))
-	for _, name := range workerMethodNames {
+	allowed := make(map[string]struct{}, len(orchestrationMethodNames))
+	for _, name := range orchestrationMethodNames {
 		allowed[name] = struct{}{}
 	}
 	return &dispatchOperation{
@@ -147,13 +147,25 @@ func NewToolDispatcher(registry agenttools.Registry, workerStore WorkerRecord, e
 	}, nil
 }
 
-// workerMethodNames describes the current worker surface, not a general authority
-// allowlist. Applying the reachability gate to every tool was measured to make
-// 11 existing tests fail: git.status and skill mutations deliberately record
-// the execution attempt before capability refusal so the refusal stays
-// auditable, while worker methods have no such requirement today. The general
-// case remains undecided; this list must not become a second effect/name policy.
-var workerMethodNames = [...]string{
+// orchestrationMethodNames describes the current worker/orchestration
+// surface, not a general authority allowlist. Applying the reachability gate
+// to every tool was measured to make 11 existing tests fail: git.status and
+// skill mutations deliberately record the execution attempt before
+// capability refusal so the refusal stays auditable, while these methods
+// have no such requirement today. The general case remains undecided; this
+// list must not become a second effect/name policy.
+//
+// Renamed from workerMethodNames (nocx-6q1uh.8, design §4.1): session.read
+// is not a worker's own call, but the tool endpoint's dispatcher (built by
+// NewToolDispatcher below) is the one place that needs an allowlist at all,
+// and it is the SAME allowlist both the coordinator's and a worker's calls
+// go through — "worker" undersold what it was already gating. session.keys
+// and session.message are listed here too, ahead of their own tasks (9,
+// 10): this is the one place their names belong, and the registry simply
+// has no row for them yet, exactly as it had none for session.read before
+// this task — a name here with no matching declaration is inert, never
+// reachable through Lookup.
+var orchestrationMethodNames = [...]string{
 	"workers.spawn",
 	"workers.say",
 	"workers.wait",
@@ -171,13 +183,23 @@ var workerMethodNames = [...]string{
 	// narrows to the other capability entirely, and no grant that reaches
 	// those five reaches this one.
 	"workers.inbox",
+	// The session surface (nocx-6q1uh, design §4.1): a descendant's pane,
+	// read, written to with one step under a target, or sent a message.
+	// Both callers reach these through DescendantPaneAccess; the endpoint's
+	// catalogue already offered session.read via ForGrant before this
+	// allowlist did (nocx-6q1uh.8's own finding — catalogue offers what
+	// dispatch refuses), which is the gap this addition closes.
+	"session.read",
+	"session.keys",
+	"session.message",
 }
 
-// isWorkerMethod selects the current worker surface for the reachability behavior;
-// it does not decide authority, which remains declaration- and grant-owned.
-func isWorkerMethod(name string) bool {
-	for _, workerName := range workerMethodNames {
-		if name == workerName {
+// isOrchestrationMethod selects the current worker/orchestration surface for
+// the reachability behavior; it does not decide authority, which remains
+// declaration- and grant-owned.
+func isOrchestrationMethod(name string) bool {
+	for _, orchestrationName := range orchestrationMethodNames {
+		if name == orchestrationName {
 			return true
 		}
 	}
@@ -280,7 +302,7 @@ func (d *dispatchOperation) prepare(invocation ToolInvocation, transform dispatc
 	// their historical attempt-before-capability behavior (notably
 	// git.status and skill mutations), so this shared operation only applies
 	// the reachability gate to the worker surface in this refactor.
-	if isWorkerMethod(prepared.decl.Name) && !methodReachable(d.registry, invocation.Grant, prepared.decl.Name) {
+	if isOrchestrationMethod(prepared.decl.Name) && !methodReachable(d.registry, invocation.Grant, prepared.decl.Name) {
 		return preparedInvocation{}, fmt.Errorf("%w: %q", ErrUnreachableMethod, prepared.decl.Name)
 	}
 	return prepared, nil

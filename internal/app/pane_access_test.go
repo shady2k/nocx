@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/peerpin"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/toolendpoint"
@@ -49,6 +50,17 @@ func (h *fakeHelper) AccessBump(ctx context.Context, sessionID string, above uin
 		}
 	}
 	return h.epoch, h.err
+}
+
+// Snapshot and Target are not exercised by revoke's own tests (they cover
+// AccessBump alone); these satisfy paneHelpers so fakeHelper stays the one
+// fake for revocation's tests without a second, unused implementation.
+func (h *fakeHelper) Snapshot(context.Context, string) (proto.SnapshotResult, error) {
+	return proto.SnapshotResult{}, errors.New("fakeHelper: Snapshot not configured")
+}
+
+func (h *fakeHelper) Target(context.Context, string, proto.TargetParams) (proto.TargetResult, error) {
+	return proto.TargetResult{}, errors.New("fakeHelper: Target not configured")
 }
 
 // fakeLookup answers HelperFor from a fixed table, for a session whose
@@ -133,8 +145,9 @@ func TestAdmitBindsTheSessionsOwnIdentityAndPaneAccess(t *testing.T) {
 	if access.Identity() != sess.Identity() {
 		t.Fatalf("bound identity = %+v, want %+v", access.Identity(), sess.Identity())
 	}
-	if authority := access.Authority(); authority.Kind != "endpoint" || authority.AdmissionEpoch == 0 {
-		t.Fatalf("authority = %+v, want an endpoint kind with a nonzero admission epoch", authority)
+	ep, ok := access.Authority().(EndpointAuthority)
+	if !ok || ep.AdmissionEpoch == 0 {
+		t.Fatalf("authority = %+v, want an EndpointAuthority with a nonzero admission epoch", access.Authority())
 	}
 }
 
@@ -237,7 +250,7 @@ func TestDescendantPaneAccessResolvesThroughTheBoundRegistrar(t *testing.T) {
 	}
 	hub := newPaneAccessHub(registrar, nil, nil)
 	access := hub.Bind("sess-C", session.Identity{InstanceID: "backend-A", Epoch: 1},
-		AuthorityInterval{Kind: "endpoint", AdmissionEpoch: 7})
+		EndpointAuthority{AdmissionEpoch: 7})
 
 	reach, err := access.Resolve(ctx, string(w1.Participant.ID), workers.EffectObserve)
 	if err != nil {

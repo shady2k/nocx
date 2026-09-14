@@ -95,7 +95,7 @@ type workerAuthRevoker interface {
 // invocation's RunContext.PaneAccess stays nil, which every reader of it
 // must already treat as "no descendant authority granted".
 type workerAuthPaneAccessBinder interface {
-	Bind(controller string, identity session.Identity, authority AuthorityInterval) *DescendantPaneAccess
+	Bind(controller string, identity session.Identity, authority Authority) *DescendantPaneAccess
 }
 
 // The slot is the coordinator seat, not a conversation gate. M1 makes talk
@@ -165,6 +165,14 @@ type toolAuthorizer struct {
 	// session's calls carry (workerAuthPaneAccessBinder). Nil until Task
 	// 5/8 give the hub real helper and clock implementations to bind.
 	paneAccess workerAuthPaneAccessBinder
+	// sessionReads is session.read's helper-backed read path for a
+	// descendant (assistant.PaneReader, Task 8), handed to every admitted
+	// invocation alongside paneAccess: the two travel together because a
+	// PaneAccess with nowhere to route a read is as unusable as a
+	// PaneReader nothing has authorized. Nil until the composition root
+	// wires it, which every reader of RunContext.SessionReads must already
+	// treat as "no descendant read path bound".
+	sessionReads any
 }
 
 // BindRevoker wires the subtree revocation retire triggers. Called once at
@@ -186,6 +194,20 @@ func (a *toolAuthorizer) BindPaneAccess(b workerAuthPaneAccessBinder) {
 		return
 	}
 	a.paneAccess = b
+}
+
+// BindSessionReads wires session.read's helper-backed path for a
+// descendant (assistant.PaneReader). Left unwired until the composition
+// root has a real one to hand over (Task 8) — see internal/app/session_targets.go.
+// r is `any` for the same reason RunContext.SessionReads is: this package
+// (app) is where the concrete type is known, but the binder is called from
+// composition-root wiring that constructs it via the same seam PaneAccess
+// uses.
+func (a *toolAuthorizer) BindSessionReads(r any) {
+	if a == nil {
+		return
+	}
+	a.sessionReads = r
 }
 
 // BindSessionAdmissions implements toolendpoint.SessionAdmissionBinder.
@@ -494,7 +516,10 @@ func (a *toolAuthorizer) Admit(peer toolendpoint.Peer, publish func(session stri
 	invocation.RunContext.ControllerIdentity = admittedSession.Identity()
 	if a.paneAccess != nil {
 		invocation.RunContext.PaneAccess = a.paneAccess.Bind(string(admitted), admittedSession.Identity(),
-			AuthorityInterval{Kind: "endpoint", AdmissionEpoch: epoch})
+			EndpointAuthority{AdmissionEpoch: epoch})
+	}
+	if a.sessionReads != nil {
+		invocation.RunContext.SessionReads = a.sessionReads
 	}
 	if !publish(string(admitted), epoch) {
 		release()

@@ -372,3 +372,73 @@ func TestAttemptRecordingDispatcherFinishTimeoutBoundsAWedgedLedger(t *testing.T
 		t.Fatal("dispatch error = nil, want the bound to surface as an error since the ledger write never actually finished")
 	}
 }
+
+// TestTheCatalogueOffersExactlyWhatDispatchAccepts is nocx-6q1uh.8's own
+// acceptance criterion (design §4.1): "the endpoint's catalogue and dispatch
+// consume the same bound capability, so the catalogue offers exactly what
+// dispatch accepts" — checked for both the coordinator's tool-endpoint
+// dispatcher (NewToolDispatcher, allowed=orchestrationMethodNames) and the
+// kernel's own (no allowlist beyond ForGrant+Narrow, exactly as
+// callsCarrier.Declare/Invoke share one ForGrant projection by
+// construction — carrier.go: Declare offers ForGrant(grant), and nothing
+// past it can invoke a name Declare did not offer).
+//
+// Scoped to the orchestration surface (workers.* and session.read) rather
+// than the whole registry, deliberately: registry.ForGrant already offers
+// session.list, session.run and session.wait under this same grant shape
+// (TestGroupEndpoint_CatalogueUsesAdmittedGrantAndIgnoresParams in
+// internal/toolendpoint counts them into its own "expected" set), while
+// the tool endpoint's dispatcher has never accepted any of the three — a
+// mismatch that predates this task and that this task was not asked to
+// fix. Asserting equality over the whole registry here would make this
+// test a second, accidental owner of THEIR reachability instead of
+// session.read's, and would be a false claim today. Found while
+// implementing nocx-6q1uh.8; worth its own bead.
+func TestTheCatalogueOffersExactlyWhatDispatchAccepts(t *testing.T) {
+	reg, err := agenttools.Assemble(toolsDirFS(t))
+	if err != nil {
+		t.Fatalf("assemble tools: %v", err)
+	}
+	grant := workerGrantForTest()
+	names := []string{
+		"workers.spawn", "workers.say", "workers.wait", "workers.holdings",
+		"workers.close", "workers.screen", "workers.answer", "workers.inbox",
+		"session.read",
+	}
+
+	check := func(t *testing.T, dispatcher ToolDispatcher) {
+		t.Helper()
+		cataloguer, ok := dispatcher.(ToolCatalogue)
+		if !ok {
+			t.Fatalf("dispatcher does not implement ToolCatalogue")
+		}
+		offered := map[string]bool{}
+		for _, tool := range cataloguer.Catalogue(grant) {
+			offered[tool.Name] = true
+		}
+		for _, name := range names {
+			_, dispatchErr := dispatcher.Dispatch(workerInvocationForTest(name, grant, `{}`))
+			// "Accepted" means dispatch did not refuse the METHOD itself —
+			// unreachable for this grant, or not a declared method at all.
+			// A failure past that gate (invalid args, no renderer wired in
+			// this test harness) is a fact about the CALL, not about
+			// whether the method is offered, and is deliberately not
+			// treated as a mismatch here.
+			accepted := !errors.Is(dispatchErr, ErrUnreachableMethod) && !errors.Is(dispatchErr, ErrUnknownMethod)
+			if offered[name] != accepted {
+				t.Fatalf("%s: catalogue offers=%v, dispatch accepts=%v (dispatch err=%v)", name, offered[name], accepted, dispatchErr)
+			}
+		}
+	}
+
+	t.Run("coordinator grant, tool endpoint dispatcher", func(t *testing.T) {
+		check(t, toolDispatcherForTest(t, &fakeWorkerRecord{}))
+	})
+	t.Run("kernel dispatcher, no allowlist beyond ForGrant", func(t *testing.T) {
+		validators, results, compileErr := compileDispatchSchemas(reg)
+		if compileErr != nil {
+			t.Fatalf("compile dispatch schemas: %v", compileErr)
+		}
+		check(t, &dispatchOperation{registry: reg, validators: validators, results: results})
+	})
+}

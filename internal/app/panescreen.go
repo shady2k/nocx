@@ -17,6 +17,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agentcapture"
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
+	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/paneview"
 	"github.com/shady2k/nocx/internal/session"
 )
@@ -146,6 +147,47 @@ func (p *paneScreen) owner(ctx context.Context, paneID string) (*helperclient.Cl
 		return h.screenClient(ctx, paneID)
 	}
 	return nil, helperclient.HostSessionID{}, fmt.Errorf("%w: %s", errNoPaneRuntime, paneID)
+}
+
+// HelperFor implements paneHelperLookup (pane_access.go): the same question
+// owner answers for a screen read, wrapped for the ops revocation and
+// session.read both need (AccessBump, Snapshot, Target) — never a second
+// derivation of "which helper holds this pane's terminal". ok is false for
+// exactly the same reason owner returns errNoPaneRuntime: a session nothing
+// holds any more has no helper to ask.
+func (p *paneScreen) HelperFor(ctx context.Context, sessionID string) (paneHelpers, bool) {
+	c, id, err := p.owner(ctx, sessionID)
+	if err != nil {
+		return nil, false
+	}
+	return helperPaneClient{client: c, id: id}, true
+}
+
+// helperPaneClient adapts a helper's wire client to paneHelpers for ONE
+// session's HostSessionID, resolved once by HelperFor above. The sessionID
+// parameter each method still takes is part of the paneHelpers contract
+// (a single implementation could in principle serve several sessions); this
+// adapter is bound to one and ignores it.
+type helperPaneClient struct {
+	client *helperclient.Client
+	id     helperclient.HostSessionID
+}
+
+func (h helperPaneClient) AccessBump(ctx context.Context, _ string, above uint64) (uint64, error) {
+	result, err := h.client.AccessBump(ctx, h.id, above)
+	if err != nil {
+		return 0, err
+	}
+	return result.Epoch, nil
+}
+
+func (h helperPaneClient) Snapshot(ctx context.Context, _ string) (proto.SnapshotResult, error) {
+	return h.client.Snapshot(ctx, h.id)
+}
+
+func (h helperPaneClient) Target(ctx context.Context, _ string, p proto.TargetParams) (proto.TargetResult, error) {
+	p.Session = proto.HostSessionID{Generation: proto.GenerationID(h.id.Generation), Session: h.id.Session}
+	return h.client.Target(ctx, p)
 }
 
 // paneReplay is the calibration replay, over the LOCAL helper.

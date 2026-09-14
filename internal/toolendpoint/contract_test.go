@@ -9,15 +9,44 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	tools "github.com/shady2k/nocx/contracts/tools"
+	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/paneview"
+	"github.com/shady2k/nocx/internal/sessionruntime"
 	"github.com/shady2k/nocx/internal/workers"
 )
+
+// contractPaneReader is session.read's assistant.PaneReader over the real
+// endpoint (nocx-6q1uh.8): internal/toolendpoint cannot construct
+// internal/app's real one (app depends on assistant and toolendpoint, not
+// the reverse), so this fake stands in — the same shape RunContext.SessionReads
+// carries it in production, asserted back to assistant.PaneReader at
+// assistant's own point of use.
+type contractPaneReader struct{}
+
+func (contractPaneReader) Read(_ context.Context, _ any, _ string, want *sessionruntime.TargetKind, _ *sessionruntime.RowRange) (assistant.PaneRead, error) {
+	read := assistant.PaneRead{
+		Frame:          paneview.Frame{Rows: 1, Cols: 2, Lines: [][]paneview.Cell{{{Text: "h"}, {Text: "i"}}}},
+		Classification: agentdriver.StateFreeText,
+		ReadBarrier:    true,
+	}
+	if want != nil {
+		read.Target = &assistant.TargetView{
+			Token: "tok-1", TokenID: "tid-1", Kind: *want,
+			Rows:      sessionruntime.RowRange{First: 0, Last: 0},
+			Region:    "hi",
+			ExpiresAt: time.Now().Add(time.Minute),
+		}
+	}
+	return read, nil
+}
 
 const toolContractDir = "../../contracts/tools"
 
@@ -170,6 +199,16 @@ func TestGroupEndpoint_OverTheWireConformsToContract(t *testing.T) {
 		RunContext: agenttools.RunContext{
 			RunID:   "run-1",
 			Session: "session-1",
+			// PaneAccess/SessionReads (nocx-6q1uh.8, design §7.1): `any`
+			// stand-ins for internal/app's real DescendantPaneAccess and
+			// PaneReader, exactly the shape RunContext carries them in —
+			// this test cannot name either concrete type (toolendpoint
+			// depends on assistant, not on app), which is the point:
+			// session.read with a sessionId naming a descendant reaches
+			// them through the SAME capability every other method reaches
+			// its own seams through.
+			PaneAccess:   "fake-pane-access",
+			SessionReads: contractPaneReader{},
 		},
 		Grant: contractGrant(),
 	}}
@@ -195,6 +234,11 @@ func TestGroupEndpoint_OverTheWireConformsToContract(t *testing.T) {
 		{method: "workers.close", params: `{"worker":"worker-1"}`, result: "workers.close"},
 		{method: "workers.screen", params: `{"worker":"worker-1"}`, result: "workers.screen"},
 		{method: "workers.answer", params: `{"worker":"worker-1","option":"Yes, I trust this folder"}`, result: "workers.answer"},
+		// A descendant's pane, read through the helper-backed path this
+		// task adds (nocx-6q1uh.8): sessionId differs from the admitted
+		// session, so this exercises PaneReader over the real endpoint,
+		// never RendererRequester (there is none wired here at all).
+		{method: "session.read", params: `{"sessionId":"worker-session-1","target":"region"}`, result: "session.read"},
 	}
 
 	for i, tc := range cases {

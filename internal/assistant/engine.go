@@ -422,6 +422,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 			workerEnvironment: p.WorkerEnvironment,
 			scripts:           p.Scripts,
 			cwd:               p.Cwd,
+			paneAccessBinder:  p.PaneAccessBinder,
 		})
 		if err != nil {
 			return err

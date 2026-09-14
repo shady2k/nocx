@@ -54,7 +54,11 @@ func submitTokenIntent(t *testing.T, hs *hostSession, control sessionruntime.Con
 
 func TestACommitPointSpendsATokenExactlyOnce(t *testing.T) {
 	clock := newFakeClock()
-	proc := newScriptedProcess("")
+	// rawReaderFakeProcess (owner_adversarial_test.go), not newScriptedProcess
+	// (nocx-6q1uh.15): this test drives an intent all the way to a real write,
+	// which needs a session WITH a read barrier — commitIntent refuses
+	// ErrNoReadBarrier before Admit is ever asked otherwise.
+	proc := newRawReaderFakeProcess()
 	rt := pumpRuntime(t, proc)
 	hs := &hostSession{
 		proc:    proc,
@@ -105,7 +109,7 @@ func TestACommitPointSpendsATokenExactlyOnce(t *testing.T) {
 			replay.State, replay.BytesWritten, first.State, first.BytesWritten)
 	}
 	select {
-	case again := <-proc.written:
+	case again := <-proc.writeNotify:
 		t.Fatalf("the replay wrote to the program a second time: %q", again)
 	default:
 	}
@@ -119,7 +123,7 @@ func TestACommitPointSpendsATokenExactlyOnce(t *testing.T) {
 			refused.State, refused.Err)
 	}
 	select {
-	case again := <-proc.written:
+	case again := <-proc.writeNotify:
 		t.Fatalf("the refused attempt wrote to the program: %q", again)
 	default:
 	}

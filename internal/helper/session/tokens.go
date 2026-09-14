@@ -470,9 +470,10 @@ func checkToken(t Token) func(sessionruntime.Snapshot) error {
 	}
 }
 
-// tokenGate is this book's hook into the owner's own bookkeeping: Verify,
-// then Consume, then the access-epoch and commitBy checks, all decided
-// before an intent is ever admitted to the runtime's queue.
+// tokenGate is this book's hook into the owner's own bookkeeping: the
+// read-barrier check, then Verify, then Consume, then the access-epoch and
+// commitBy checks, all decided before an intent is ever admitted to the
+// runtime's queue.
 //
 // It runs AT RECEIPT (owner.go's run(), the moment an itemIntent carrying a
 // token comes off o.incoming) rather than at the intent's turn in the
@@ -497,6 +498,32 @@ func checkToken(t Token) func(sessionruntime.Snapshot) error {
 // because by construction nothing reaches o.pending as an itemIntent without
 // having already cleared this gate.
 func (o *sessionOwner) tokenGate(it ownerItem, pi *pendingIntent) (handled bool) {
+	// The read-barrier check runs BEFORE Verify or Consume, and unlike every
+	// other refusal in this method it touches no token-book state at all —
+	// spec §5.2's no_read_barrier is a fact about the SESSION (hasReadBarrier
+	// is o.mode(), fixed for the owner's whole life by what o.proc is), never
+	// about this particular token or attempt, so a session that lacks a
+	// barrier today lacks it on every future attempt too. Refusing here
+	// without consuming is the deliberate choice between spec §6.2's two
+	// readings of "a refusal is recorded": consuming and then recording a
+	// terminal `refused` result would make the refusal replayable exactly
+	// once, like any other spent token, but it would also leave a live
+	// commit-point barrier (the token's binding) sitting on a session that
+	// wrote nothing and never will — the barrier's whole reason to exist is
+	// to keep a second write from landing against evidence the first one
+	// already consumed, and no write happened here. Never consuming means
+	// the caller gets the SAME clear refusal every time it retries, with
+	// nothing left wedged in the book — never the "in_progress" forever that
+	// resulted when commitIntent's own hasReadBarrier check (owner.go) was
+	// the only one, reached only after Consume had already bound the slot
+	// (the defect this task fixes:
+	// TestNoReadBarrierRefusesATokenAtReceiptButNeverRecordsItsOutcome,
+	// owner_adversarial_test.go, updated alongside this to expect exactly
+	// this: no slot ever bound, and a retry sees the same refusal again).
+	if !o.hasReadBarrier() {
+		o.resolve(it, ownerResult{State: sessionruntime.IntentStateRefused, Err: ErrNoReadBarrier})
+		return true
+	}
 	tb := o.tokens
 	if tb == nil {
 		// A token arrived before SetTokens ran — a construction ordering
@@ -558,10 +585,14 @@ func (o *sessionOwner) tokenGate(it ownerItem, pi *pendingIntent) (handled bool)
 
 // recordTokenOutcome writes res to pi's token, if pi carries one and a book
 // is bound — a no-op for every intent that carries no token at all (Task 2's
-// own tests, still). It runs from every place commitIntent or finishItem
-// settles a token-bearing intent's fate: Admit refusing, Commit's check
-// refusing (stale_target, incomparable, or anything else pi.Check names),
-// and the write itself completing, failing or falling short.
+// own tests, still). It runs from every place commitIntent, finishItem or
+// beginClosing settles a token-bearing intent's fate once tokenGate has
+// already bound its token: Admit refusing, Commit's check refusing
+// (stale_target, incomparable, or anything else pi.Check names), the write
+// itself completing, failing or falling short, and the owner closing with the
+// intent still queued. tokenGate's OWN early refusals (forged, expired,
+// token_spent, no_read_barrier, ...) never reach here, because none of them
+// ever bind the token in the first place.
 func (o *sessionOwner) recordTokenOutcome(pi *pendingIntent, res ownerResult) {
 	if o.tokens == nil || pi.Token.ID == (TokenID{}) {
 		return

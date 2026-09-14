@@ -33,6 +33,22 @@ type ownerFakeProcess struct {
 	readErr  error
 	readDone bool
 
+	// rawQueue/rawReady/rawEOFSet/rawEOFErr are the [rawReader] half of this
+	// fixture (nocx-6q1uh.15): produce and endRead feed BOTH this and the
+	// plain io.Reader fields above, because commitIntent (owner.go) refuses
+	// every state-changing intent ErrNoReadBarrier on a Process that answers
+	// only through Read (owner_ssh.go's hasReadBarrier) — which every
+	// intent-bearing test built over this fixture needs to NOT be true, the
+	// same way a real local PTY (internal/pty.LocalPty) is not. The pattern
+	// mirrors rawReaderFakeProcess (owner_adversarial_test.go): a queue and a
+	// readiness signal that carries no data of its own, so WaitReadable
+	// consumes nothing and every byte is still delivered exactly once,
+	// through RawReadUntilAgain.
+	rawQueue  [][]byte
+	rawReady  chan struct{}
+	rawEOFSet bool
+	rawEOFErr error
+
 	// writeGate, when non-nil, parks a Write until it closes; writeEntered
 	// (if set alongside it) is closed the moment that Write is entered, so a
 	// test can wait for "the write is blocked" as an observable event rather
@@ -53,12 +69,16 @@ type ownerFakeProcess struct {
 
 func newOwnerFakeProcess() *ownerFakeProcess {
 	return &ownerFakeProcess{
-		readCh:  make(chan []byte, 64),
-		closeCh: make(chan struct{}),
-		pid:     4242,
+		readCh:   make(chan []byte, 64),
+		rawReady: make(chan struct{}, 1),
+		closeCh:  make(chan struct{}),
+		pid:      4242,
 	}
 }
 
+// Read is never called by the owner over this fixture: mode() (owner_ssh.go)
+// picks rawReader first, and this fixture implements it. It exists only to
+// satisfy io.Reader (Process embeds io.ReadWriteCloser).
 func (p *ownerFakeProcess) Read(b []byte) (int, error) {
 	chunk, ok := <-p.readCh
 	if !ok {
@@ -73,11 +93,25 @@ func (p *ownerFakeProcess) Read(b []byte) (int, error) {
 	return copy(b, chunk), nil
 }
 
-// produce delivers one chunk to the next Read.
-func (p *ownerFakeProcess) produce(b []byte) { p.readCh <- append([]byte(nil), b...) }
+func (p *ownerFakeProcess) wakeRaw() {
+	select {
+	case p.rawReady <- struct{}{}:
+	default:
+	}
+}
+
+// produce delivers one chunk to the next Read AND to the next raw drain —
+// see rawQueue's doc above for why both.
+func (p *ownerFakeProcess) produce(b []byte) {
+	p.readCh <- append([]byte(nil), b...)
+	p.mu.Lock()
+	p.rawQueue = append(p.rawQueue, append([]byte(nil), b...))
+	p.mu.Unlock()
+	p.wakeRaw()
+}
 
 // endRead closes the read side: this and every later Read answer err (or
-// io.EOF, if err is nil).
+// io.EOF, if err is nil), and the next raw drain reports the same eof/err.
 func (p *ownerFakeProcess) endRead(err error) {
 	p.mu.Lock()
 	if p.readDone {
@@ -86,9 +120,53 @@ func (p *ownerFakeProcess) endRead(err error) {
 	}
 	p.readDone = true
 	p.readErr = err
+	p.rawEOFSet = true
+	p.rawEOFErr = err
 	p.mu.Unlock()
 	close(p.readCh)
+	p.wakeRaw()
 }
+
+// WaitReadable blocks until produce or endRead has something waiting, or ctx
+// ends — it consumes nothing itself (rawReady carries no data), matching a
+// real local PTY's readiness half (spec §5.2).
+func (p *ownerFakeProcess) WaitReadable(ctx context.Context) error {
+	select {
+	case <-p.rawReady:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// RawReadUntilAgain delivers everything queued since the last drain, whole,
+// and reports eof in the SAME call once endRead has run — never deferred to
+// a later drain, because rawReady's single-slot buffer can already have
+// collapsed a produce-then-endRead pair (owner_test.go's own
+// TestExitWithUnreadTailIngestsTheTail: both calls back to back) into the one
+// signal this call is answering, and nothing would wake a further drain to
+// report it. Mirrors rawReaderFakeProcess's own RawReadUntilAgain
+// (owner_adversarial_test.go) for exactly this reason.
+func (p *ownerFakeProcess) RawReadUntilAgain(_ []byte, deliver func([]byte)) (eof bool, err error) {
+	p.mu.Lock()
+	q := p.rawQueue
+	p.rawQueue = nil
+	eofSet := p.rawEOFSet
+	eofErr := p.rawEOFErr
+	p.mu.Unlock()
+	for _, chunk := range q {
+		deliver(chunk)
+	}
+	if eofSet {
+		if eofErr == nil {
+			eofErr = io.EOF
+		}
+		return true, eofErr
+	}
+	return false, nil
+}
+
+var _ rawReader = (*ownerFakeProcess)(nil)
 
 func (p *ownerFakeProcess) Write(b []byte) (int, error) {
 	p.mu.Lock()

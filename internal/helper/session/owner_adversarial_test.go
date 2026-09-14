@@ -11,23 +11,25 @@ package session
 // newIntentTestSession, mintRegionToken, submitIntent, submitBump,
 // awaitResult) rather than re-deriving them.
 //
-// One fixture is new here: rawReaderFakeProcess. Every existing fixture in
-// this package (ownerFakeProcess, scriptedProcess, blockingProcess) omits
-// the rawReader interface (WaitReadable/RawReadUntilAgain) that owner.go's
-// mode()/hasReadBarrier() use to decide "local PTY versus SSH channel"
-// (spec §5.2). commitIntent (owner.go) refuses ErrNoReadBarrier for EVERY
-// itemIntent — not only a token-bearing one — before Admit is ever asked,
-// unconditionally, as the very first thing it does. Since none of the
-// existing fixtures implement rawReader, hasReadBarrier() answers false for
-// all of them, which means: by this package's own logic, every intent
-// submitted over any of owner_test.go's, intent_test.go's or
-// commit_point_test.go's process fixtures should be refused no_read_barrier
-// — contradicting nearly every assertion those files make about intents
+// One fixture is new here: rawReaderFakeProcess. When this file was first
+// written, EVERY fixture in this package (ownerFakeProcess, scriptedProcess,
+// blockingProcess) omitted the rawReader interface (WaitReadable/
+// RawReadUntilAgain) that owner.go's mode()/hasReadBarrier() use to decide
+// "local PTY versus SSH channel" (spec §5.2), so commitIntent (owner.go)
+// refused ErrNoReadBarrier for EVERY itemIntent — not only a token-bearing
+// one — before Admit was ever asked, contradicting nearly every assertion
+// owner_test.go, intent_test.go and commit_point_test.go make about intents
 // reaching Executed, Refused-for-a-different-reason, or a check function
-// ever running at all. See this task's report for the full argument; this
-// file's own TestNoReadBarrierRefusesATokenAtReceiptButNeverRecordsItsOutcome
-// turns the same fact into a deliberate test instead, and every OTHER test
-// below that needs an intent to actually commit is built over
+// ever running at all. nocx-6q1uh.15 fixed the FIXTURES rather than the
+// production gate: ownerFakeProcess (owner_test.go) and blockingProcess
+// (intent_test.go) now implement rawReader faithfully, and the bare
+// *scriptedProcess call sites that needed a barrier were switched to
+// rawReaderFakeProcess instead — never scriptedProcess itself, which stays
+// without one on purpose (see the next paragraph). This file's own
+// TestNoReadBarrierRefusesATokenAtReceiptButNeverRecordsItsOutcome, directly
+// below, is the one test that still needs a session with NO barrier, and it
+// keeps using bare *scriptedProcess for exactly that reason — every OTHER
+// test below that needs an intent to actually commit is built over
 // rawReaderFakeProcess so it is not itself standing on the same gap.
 
 import (
@@ -69,6 +71,14 @@ type rawReaderFakeProcess struct {
 	writeGate    chan struct{}
 	writeEntered chan struct{}
 	written      [][]byte
+	// writeNotify publishes every Write's payload for [awaitWrite]
+	// (nocx-6q1uh.15: commit_point_test.go's own TestACommitPointSpendsATokenExactlyOnce
+	// needs to wait for a write it does not otherwise control the timing of,
+	// which written's slice alone cannot do without a duration-based poll —
+	// AGENTS.md, "no test depends on timing"). It mirrors scriptedProcess's
+	// own written channel (runtime_test.go) rather than inventing a second
+	// shape for the same idea.
+	writeNotify chan []byte
 
 	closed  bool
 	closeCh chan struct{}
@@ -77,9 +87,10 @@ type rawReaderFakeProcess struct {
 
 func newRawReaderFakeProcess() *rawReaderFakeProcess {
 	return &rawReaderFakeProcess{
-		ready:   make(chan struct{}, 1),
-		closeCh: make(chan struct{}),
-		pid:     6060,
+		ready:       make(chan struct{}, 1),
+		closeCh:     make(chan struct{}),
+		writeNotify: make(chan []byte, 64),
+		pid:         6060,
 	}
 }
 
@@ -164,10 +175,28 @@ func (p *rawReaderFakeProcess) Write(b []byte) (int, error) {
 	if gate != nil {
 		<-gate
 	}
+	payload := append([]byte(nil), b...)
 	p.mu.Lock()
-	p.written = append(p.written, append([]byte(nil), b...))
+	p.written = append(p.written, payload)
 	p.mu.Unlock()
+	select {
+	case p.writeNotify <- payload:
+	default:
+	}
 	return len(b), nil
+}
+
+// awaitWrite waits for the next thing this process was written, the same
+// observable-event shape scriptedProcess.awaitWrite (runtime_test.go) gives.
+func (p *rawReaderFakeProcess) awaitWrite(t *testing.T) []byte {
+	t.Helper()
+	select {
+	case w := <-p.writeNotify:
+		return w
+	case <-time.After(hangLimit):
+		t.Fatal("the session never wrote an answer back to the program")
+		return nil
+	}
 }
 
 func (p *rawReaderFakeProcess) blockNextWrite() (waitEntered <-chan struct{}, release func()) {
@@ -507,26 +536,34 @@ func TestEveryShortWritePrefixLengthReportsExactBytesWritten(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestNoReadBarrierRefusesATokenAtReceiptButNeverRecordsItsOutcome is this
-// task's flagship finding. scriptedProcess (runtime_test.go) is the same
-// barrier-less fixture ssh_owner_test.go's real-SSH tests independently
-// confirm hasReadBarrier() answers false for (owner_ssh.go's mode()); using
-// it here is deliberate, not an oversight — see this file's own package doc.
+// task's flagship finding, UPDATED for nocx-6q1uh.15's fix: it pinned down a
+// wedge (below) and now pins down its absence. scriptedProcess
+// (runtime_test.go) is the same barrier-less fixture ssh_owner_test.go's
+// real-SSH tests independently confirm hasReadBarrier() answers false for
+// (owner_ssh.go's mode()); using it here is deliberate, not an oversight —
+// see this file's own package doc.
 //
-// tokenGate (tokens.go) runs AT RECEIPT, the moment an itemIntent carrying a
-// token comes off o.incoming, and Consume binds the token to its canonical
-// intent right there — before the item is ever queued, and therefore before
-// commitIntent (owner.go) gets a chance to check hasReadBarrier() at all.
-// commitIntent's own no_read_barrier branch resolves the caller and RETURNS
-// without ever calling recordTokenOutcome. The result: the token is spent
-// (its slot is bound) but its outcome is never recorded, so
-// session.intent.status can never answer anything but "in_progress" for it,
-// forever, and a same-token retry gets stuck the same way — tokenGate's own
-// Consume sees a bound-but-unrecorded slot and answers in_progress without
-// ever reaching commitIntent's refusal a second time either. Spec §6.2 only
-// ever describes two outcomes after a first attempt — "recorded" or
-// "in_progress" while genuinely in flight — never a token permanently wedged
-// behind a refusal decided in a single synchronous step with nothing left to
-// finish.
+// The original defect: tokenGate (tokens.go) ran Consume — binding the token
+// to its canonical intent — before commitIntent (owner.go) ever got a chance
+// to check hasReadBarrier(), so a no_read_barrier refusal at commitIntent
+// left the slot bound but recorded nothing (commitIntent's own refusal
+// RETURNED without calling recordTokenOutcome). session.intent.status could
+// then never answer anything but "in_progress" for that token, forever, and
+// a same-token retry got stuck the same way: tokenGate's own Consume saw a
+// bound-but-unrecorded slot and answered in_progress without ever reaching
+// commitIntent's refusal a second time.
+//
+// The fix moves the read-barrier check to the FRONT of tokenGate itself,
+// before Verify or Consume ever run (spec §5.2 is a fact about the SESSION,
+// fixed for its whole life, never about this attempt), and chooses "never
+// consume" over "consume and record a terminal refused result" (spec §6.2's
+// two readings of "a refusal is recorded"): a session with no barrier can
+// never honour ANY future attempt on this token either, so binding it would
+// only spend a one-shot resource on a write that never happened. The
+// observable consequence, asserted below: the token is never bound at all
+// (Status answers "unknown", the same as a token nothing has ever touched),
+// and a retry of the same token+intent gets the SAME refusal again — not
+// wedged, and not admitted into a queue nothing will ever service.
 func TestNoReadBarrierRefusesATokenAtReceiptButNeverRecordsItsOutcome(t *testing.T) {
 	proc := newScriptedProcess("")
 	hs, control := newIntentTestSession(t, proc)
@@ -557,23 +594,23 @@ func TestNoReadBarrierRefusesATokenAtReceiptButNeverRecordsItsOutcome(t *testing
 		t.Fatalf("a no_read_barrier refusal reported %d bytes written, want 0", res.BytesWritten)
 	}
 
-	// The bug: the slot is bound (Consume ran at receipt) but never
-	// recorded (commitIntent's own refusal skipped recordTokenOutcome), so
-	// status answers in_progress forever rather than the refusal a caller
-	// just received.
-	if state, r := hs.tokens.Status(tok.ID); state != "in_progress" || r != nil {
-		t.Fatalf("status after a no_read_barrier refusal: got (%q, %v) — if this now answers "+
-			"(\"recorded\", a refused result) instead, the defect this test exists to pin down "+
-			"has been fixed; update this test's expectation rather than deleting it", state, r)
+	// Fixed: the read-barrier check runs before Consume ever binds the
+	// token, so the slot is never touched at all — Status answers exactly
+	// what it would for a token nothing has ever attempted to spend.
+	if state, r := hs.tokens.Status(tok.ID); state != "unknown" || r != nil {
+		t.Fatalf("status after a no_read_barrier refusal: got (%q, %v), want (\"unknown\", nil) — "+
+			"a refusal decided before Consume ever ran must leave the token entirely untouched",
+			state, r)
 	}
 
-	// A retry of the SAME token+intent does not get a fresh chance at the
-	// refusal either — tokenGate's own Consume sees the bound-but-unrecorded
-	// slot and answers in_progress without ever reaching commitIntent again.
+	// A retry of the SAME token+intent gets the SAME refusal again, never
+	// stuck behind a bound-but-unrecorded slot and never admitted into a
+	// queue nothing will ever service: the read-barrier check runs first
+	// every time, and this session's lack of one never changes.
 	retry := awaitResult(t, submitIntent(t, hs, control, tok, "hi", math.MaxInt64))
-	if retry.State != sessionruntime.IntentStateAdmitted {
-		t.Fatalf("retry of the same token+intent: got %v, want Admitted (the wire's in_progress) — "+
-			"the token is irrecoverably stuck, never refused again and never executed", retry.State)
+	if retry.State != sessionruntime.IntentStateRefused || !errors.Is(retry.Err, ErrNoReadBarrier) {
+		t.Fatalf("retry of the same token+intent: got state=%v err=%v, want refused/ErrNoReadBarrier again",
+			retry.State, retry.Err)
 	}
 }
 

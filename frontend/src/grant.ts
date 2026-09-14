@@ -1,5 +1,7 @@
 import { grantRows, type GrantBlock } from './ask-entry'
 import { FloatingPanel, type FloatingPanelRow } from './ui/floating-panel'
+import { createIconButton } from './ui/icon-button-element'
+import { CloseIcon } from './ui/icons'
 
 export type { GrantBlock }
 
@@ -175,23 +177,24 @@ export class GrantController {
   }
 
   private dismissButton(itemId: string): HTMLButtonElement {
-    const button = document.createElement('button')
-    button.type = 'button'
-    button.className = 'ui-context-menu__item'
-    button.dataset.action = 'dismiss-grant'
-    button.dataset.itemId = itemId
-    button.setAttribute('aria-label', 'Dismiss this mark')
-    button.textContent = '×'
-    button.addEventListener('mousedown', (event) => event.stopPropagation())
-    button.addEventListener('click', (event) => {
-      event.stopPropagation()
-      this.blocks = this.blocks.filter((grant) => grant.itemId !== itemId)
-      this.repaintBlocks()
-      this.updateChip()
-      this.onChange?.(this.blocks)
-      if (this.blocks.length === 0 && this.automaticBlock === null) this.panel.hide()
-      else this.renderPanel()
+    // The kit's icon button, not a context-menu row class borrowed for a lone ×:
+    // the row's identity belongs to ContextMenu, and a glyph is not an icon.
+    const button = createIconButton({
+      size: 'xs',
+      ariaLabel: 'Dismiss this mark',
+      icon: () => CloseIcon({}) as Element,
+      attrs: { 'data-action': 'dismiss-grant', 'data-item-id': itemId },
+      onClick: (event) => {
+        event.stopPropagation()
+        this.blocks = this.blocks.filter((grant) => grant.itemId !== itemId)
+        this.repaintBlocks()
+        this.updateChip()
+        this.onChange?.(this.blocks)
+        if (this.blocks.length === 0 && this.automaticBlock === null) this.panel.hide()
+        else this.renderPanel()
+      },
     })
+    button.addEventListener('mousedown', (event) => event.stopPropagation())
     return button
   }
 

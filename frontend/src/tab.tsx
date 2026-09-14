@@ -1,7 +1,7 @@
 import { Show } from 'solid-js'
 import { IconButton } from './ui/icon-button'
 import { TAB_DRAG_TYPE } from './layout/strip-drag'
-import { PinIcon } from './ui/icons'
+import { CloseIcon, PinIcon, PlusIcon } from './ui/icons'
 import type { PaneActivity, PaneActivitySource } from './pane-observation'
 
 /**
@@ -298,7 +298,7 @@ export function Tab(props: TabProps) {
           }}
           square
         >
-          {'+'}
+          <PlusIcon />
         </IconButton>
       </Show>
       <IconButton
@@ -309,7 +309,7 @@ export function Tab(props: TabProps) {
           props.onClose(props.paneId)
         }}
       >
-        {'\u00d7'}
+        <CloseIcon />
       </IconButton>
       <div
         class="nocx-tab-indicator"

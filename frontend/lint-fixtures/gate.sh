@@ -245,6 +245,31 @@ if [ "$integrity_theme_hits" -ne 1 ]; then
   exit 1
 fi
 
+# ── Glyph-icons fixture check (nocx-9bpeq.5) ─────────────────────────────
+# A character written as an element's text where an icon belongs. The fixture's
+# three intentional uses must fire; a multiplication sign in a title and a glyph
+# constant compared against a screen must stay silent, because a rule that
+# reported those would be turned off. No path is exempt — the block header's ⋮
+# lived in a file the raw-control lint exempts.
+glyph_check=$(node "${fixture_dir}/check-glyph-icons.mjs" \
+  "${fixture_dir}/glyph-icons-fixture/glyphs.tsx" 2>&1 || true)
+
+glyph_hits=$(echo "$glyph_check" | grep -c '^lint-fixtures/glyph-icons-fixture' || true)
+if [ "$glyph_hits" -ne 3 ]; then
+  echo "GLYPH-ICONS GATE FAILED — expected exactly 3 glyph icons in the fixture, got ${glyph_hits}"
+  exit 1
+fi
+
+if echo "$glyph_check" | grep -q 'PARSE ERROR'; then
+  echo "GLYPH-ICONS GATE FAILED — the fixture did not parse"
+  exit 1
+fi
+
+if ! node "${fixture_dir}/check-glyph-icons.mjs" >/dev/null 2>&1; then
+  echo "GLYPH-ICONS GATE FAILED — the rule reports un-baselined glyphs on the real tree"
+  exit 1
+fi
+
 # ── Kit identity fixture check ──────────────────────────────────────────────
 # The AST scanner must find the expected classes and not pick up comment-only
 # or querySelector patterns. See check-kit-identities.mjs.
@@ -362,5 +387,5 @@ if [ -z "$ts_reactivity" ]; then
   exit 1
 fi
 
-echo "OK — all 10 lint rules fired; kit identities verified; CSS colour + integrity + row-grammar + error-vocabulary + menu-icons verified (11 integrity rules)"
+echo "OK — all 10 lint rules fired; kit identities verified; CSS colour + integrity + row-grammar + error-vocabulary + menu-icons + glyph-icons verified (11 integrity rules)"
 exit 0

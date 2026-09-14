@@ -49,6 +49,7 @@ import { Button } from '../ui/button'
 import { CodeBlock } from '../ui/code-block'
 import { Dialog } from '../ui/dialog'
 import { IconButton } from '../ui/icon-button'
+import { CloseIcon } from '../ui/icons'
 import { MarkerList, type MarkerListItem } from '../ui/marker-list'
 import { Stack } from '../ui/stack'
 import { StatusCard } from '../ui/status-card'
@@ -164,7 +165,7 @@ function IntegrationNotice(props: IntegrationNoticeProps): JSX.Element {
                 </Button>
                 {/* And this one answers only the card in front of the user. */}
                 <IconButton ariaLabel="Dismiss" size="sm" onClick={() => props.onDismiss()}>
-                  {'×'}
+                  <CloseIcon />
                 </IconButton>
               </Toolbar>
             }

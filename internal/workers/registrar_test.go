@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/session"
 )
 
 var errInjected = errors.New("injected fault")
@@ -513,6 +514,17 @@ func testLiveness() Liveness {
 	}
 }
 
+// testControllerIdentity is a fixture controller incarnation for tests that
+// need SOME identity and are not about which one. Its epoch (7) is
+// deliberately the same number testLiveness gives the PARTICIPANT's liveness
+// epoch — same digit, two different sessions, so a test that confused the
+// two would not be caught by their values differing. The identity test that
+// actually asserts the distinction (TestADelegationRecordsTheControllers
+// IdentityNotTheParticipants) uses its own, separate values instead.
+func testControllerIdentity() session.Identity {
+	return session.Identity{InstanceID: "backend-A", Epoch: 7}
+}
+
 func newHarness(t *testing.T) *harness { return newHarnessBound(t, 2) }
 
 // newHarnessBound is newHarness with the participant bound named, so a
@@ -907,6 +919,57 @@ func TestFaultAtEveryBoundaryConverges(t *testing.T) {
 				t.Fatalf("retry state = %q, want %q", got.State, StateLive)
 			}
 		})
+	}
+}
+
+// The defect this guards (nocx-bm99e): Delegation carried a field named as
+// the controller's own incarnation and filled from the PARTICIPANT's
+// liveness epoch instead — a different session with a different incarnation
+// history. Nothing read it, which is the only reason it survived: a test
+// that asserted the field's own name against its own value would have
+// failed on day one. This test gives the controller and the participant
+// DIFFERENT epochs on purpose (7 vs. 3), so a delegation that stored either
+// number in the other's place is caught by the value, not by chance.
+func TestADelegationRecordsTheControllersIdentityNotTheParticipants(t *testing.T) {
+	h := newHarness(t)
+	controllerIdentity := session.Identity{InstanceID: "I1", Epoch: 7}
+	h.enrol.live = Liveness{
+		BackendInstance: "backend-A",
+		SessionID:       "sess-worker",
+		Epoch:           3, // the PARTICIPANT's own liveness epoch — must never
+		// end up on ControllerIdentity.
+		Lane:         "lane-1",
+		Attempt:      1,
+		OutputOffset: 0,
+	}
+
+	reg, err := h.reg.Register(context.Background(), RegisterRequest{
+		Group:               testGroup,
+		CoordinatorSession:  coordSession,
+		CoordinatorIdentity: controllerIdentity,
+		Role:                RoleWorker,
+		Task:                "read AGENTS.md and report",
+		Environment:         "env-local",
+		CreatedByRunID:      "run-42",
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	got, err := h.store.Delegation(context.Background(), reg.Participant.ID)
+	if err != nil {
+		t.Fatalf("read the delegation back: %v", err)
+	}
+	if got.ControllerIdentity != controllerIdentity {
+		t.Fatalf("controller identity = %+v, want %+v", got.ControllerIdentity, controllerIdentity)
+	}
+	if got.ControllerIdentity.Epoch == h.enrol.live.Epoch {
+		t.Fatalf("controller identity epoch (%d) equals the participant's liveness epoch (%d) — "+
+			"either this fixture stopped separating them, or the field was filled from the wrong session",
+			got.ControllerIdentity.Epoch, h.enrol.live.Epoch)
+	}
+	if got.Generation != 1 {
+		t.Fatalf("generation = %d, want 1 at creation", got.Generation)
 	}
 }
 

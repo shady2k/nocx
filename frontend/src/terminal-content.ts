@@ -158,6 +158,9 @@ import { createSignal, type Setter } from 'solid-js'
 import { ResizeHandle } from './ui/resize-handle'
 import { IconButton } from './ui/icon-button'
 import { CloseIcon } from './ui/icons'
+import { createPaneContext, updatePaneContext, type PaneContextFacts } from './ui/pane-context'
+import { createProcessBar, updateProcessBar } from './ui/process-bar'
+import { cwdLabel } from './cwd-label'
 import { secretReference } from './secret-reference'
 import { hasSecretReference } from './snippets/resolve'
 import { LOCAL_TARGET_ID } from './ports-client'
@@ -715,6 +718,15 @@ export class TerminalContent extends BasePaneContent {
   private _setSummonAnswersHeight: Setter<number> | null = null
   private _summonEditorHome: { parent: Node; nextSibling: ChildNode | null } | null = null
   private scrollback: ScrollbackController | null = null
+  /** The pane context strip, above `.scrollback-layout` (decision §1 item
+   *  3). Facts pushed from the same seam that already feeds the composer's
+   *  PromptContext (`_applyEnvironmentView`, `_onHomeKnown`,
+   *  `_onBranchChanged`) — see `_syncPaneContext`. */
+  private paneContext: HTMLElement | null = null
+  /** The running-state footer (decision §1, "Running-state gap"), mounted
+   *  once beside the composer and shown/hidden by `_syncLifecycleOwnership`
+   *  — never both surfaces visible at once. */
+  private processBar: HTMLElement | null = null
   private dumpSource: DumpSource | null = null
   private ledger: CommandLedger | null = null
   /** The vault RPC client, built over this tab's WS client (the shared
@@ -1772,6 +1784,7 @@ export class TerminalContent extends BasePaneContent {
       this.hooks.onPortsTargetChange?.()
     }
     this._syncWhereSources(view.cwd, view.cwdVerified, view.isLocal)
+    this._syncPaneContext()
   }
 
   /** This session's home, read fresh rather than mirrored (nocx-9bpeq.16):
@@ -1885,14 +1898,57 @@ export class TerminalContent extends BasePaneContent {
     for (const rec of this.scrollback?.blockManager.blocks ?? []) {
       setBlockWhere(rec.el, { home, branch: this._blockBranch.get(rec.id) })
     }
+    this._syncPaneContext()
   }
 
   /** The pane's branch changed (nocx-9bpeq.16, spec §3): only the composer
    *  hears about it. A block's prompt line is what the pane knew AT
    *  SUBMIT — history, never revised — so this must never touch
-   *  `blockManager.blocks`; that is `_recordBlockWhere`'s moment alone. */
+   *  `blockManager.blocks`; that is `_recordBlockWhere`'s moment alone. The
+   *  pane context strip is chrome, not history, so it hears every change
+   *  the same way the composer does (decision §1 item 3). */
   private _onBranchChanged(branch: string | undefined): void {
     this.editor?.setWhereFacts({ home: this.currentHome(), branch })
+    this._syncPaneContext()
+  }
+
+  /** Push the pane's current identity into its PaneContext strip (decision
+   *  2026-09-15-terminal-screen-mockup-decision.md §1 item 3) — the exact
+   *  facts already pushed to the composer's PromptContext
+   *  (`_applyEnvironmentView`, `_onHomeKnown`, `_onBranchChanged`), read
+   *  fresh rather than cached a second time. `program` is chosen from the
+   *  renderer's own buffer report (`this.scrollback.mode`), never a
+   *  heuristic over the byte stream (AD-6): an alt-screen program takes
+   *  the pane and this strip switches with it, in both directions, from
+   *  the same `renderer.onBufferChange` callback that drives
+   *  `enterFullscreen`/`exitFullscreen`.
+   *
+   *  Session actions (the mockup's `02` trailing control) is deliberately
+   *  NOT wired here yet: the decision record asks this strip to "expose
+   *  clearly" the existing native-input escape, and no such menu exists
+   *  in this tree to point it at — inventing one would be exactly the
+   *  "invented activity" AGENTS.md forbids. `createPaneContext`'s
+   *  `onSessionActions` slot is ready for whichever pane-management
+   *  surface owns that escape once it exists. */
+  private _syncPaneContext(): void {
+    const el = this.paneContext
+    if (!el) return
+    if (this.scrollback?.mode === 'fullscreen') {
+      const target = this.inputOwner() === 'pty' ? this.programTitle || undefined : undefined
+      const facts: PaneContextFacts = {
+        kind: 'program',
+        program: this.programTitle || this.cwdTitle,
+        path: cwdLabel(this._cwd, this.currentHome()),
+        keyboardTarget: target,
+      }
+      updatePaneContext(el, facts)
+      return
+    }
+    const path = cwdLabel(this._cwd, this.currentHome())
+    const facts: PaneContextFacts = this._host
+      ? { kind: 'remote', host: this.hostLabel(), path }
+      : { kind: 'local', path, branch: this.branchSource?.branch() }
+    updatePaneContext(el, facts)
   }
 
   /** Give a just-opened command block the where-facts known right now, and
@@ -2094,12 +2150,24 @@ export class TerminalContent extends BasePaneContent {
         runningActions: this.runningActions,
       })
 
+      // ── Pane context strip (decision 2026-09-15-terminal-screen-mockup-
+      // decision.md §1 item 3) — chrome above the transcript, never a row
+      // inside it. Inserted BEFORE scrollbackLayout rather than at
+      // `target.firstChild`: the controller's own constructor already
+      // claimed that slot (`opts.pane.insertBefore(this.scrollbackLayout,
+      // opts.pane.firstChild)`), so this is the one ordering that puts the
+      // strip ABOVE the layout without racing it.
+      this.paneContext = createPaneContext({ kind: 'local', path: '~' })
+      target.insertBefore(this.paneContext, this.scrollback.scrollbackLayout)
+
       log.info('nocx: mounting renderer')
       await renderer.mount(this.scrollback.mountTarget)
 
       if (signal.aborted) {
         renderer.dispose()
         this.scrollback.dispose()
+        this.paneContext?.remove()
+        this.paneContext = null
         this._readyResolve(false)
         return
       }
@@ -2656,6 +2724,20 @@ export class TerminalContent extends BasePaneContent {
       // state a Run pane is in, and the one the row was built for.
       this.renderTargetChips()
       this.editor.mount(target)
+      // The running-state footer (decision §1, "Running-state gap"):
+      // mounted once, right after the composer it replaces, and hidden
+      // until `_syncLifecycleOwnership` decides an ordinary running
+      // command owns the pane. `onStop` is the SAME stop owner the
+      // running block's own Stop uses; `onInterrupt` is the deliberately
+      // DIFFERENT intent the decision record's semantic-mismatch note
+      // requires.
+      this.processBar = createProcessBar({
+        onSendInput: () => this.takeKeyboardToGrid(),
+        onStop: () => this.runningActions.stop(),
+        onInterrupt: () => this.signalActiveCommand('interrupt'),
+      })
+      this.processBar.hidden = true
+      target.appendChild(this.processBar)
       // Whatever this pane's where-sources already know — a reconnect can
       // land here with the session's home already resolved by another
       // pane on the same session (nocx-9bpeq.16). `_syncWhereSources`
@@ -2785,6 +2867,10 @@ export class TerminalContent extends BasePaneContent {
         this.editor.dispose()
         renderer.dispose()
         this.scrollback.dispose()
+        this.paneContext?.remove()
+        this.paneContext = null
+        this.processBar?.remove()
+        this.processBar = null
         this._readyResolve(false)
         return
       }
@@ -2893,6 +2979,11 @@ export class TerminalContent extends BasePaneContent {
             this.scrollback?.setRunning()
           }
         }
+        // AFTER the transition, not before: `_syncPaneContext` reads
+        // `this.scrollback.mode`, which `enterFullscreen`/`exitFullscreen`
+        // above just set — reading it earlier would show the strip the
+        // buffer it is LEAVING, one event late.
+        this._syncPaneContext()
       })
 
       // Match the shell's one-shot recovery fence in the render stream — an
@@ -6718,6 +6809,31 @@ export class TerminalContent extends BasePaneContent {
     // projection has shown or hidden the editor so recovery actions cannot
     // describe the state from before this reconciliation.
     this._updateCapability()
+    this._syncProcessBar(summoned)
+  }
+
+  /** ProcessBar's own visibility policy (decision §1, "Running-state gap"):
+   *  shown for ORDINARY running — `hasRunningCommand()`, never a heuristic
+   *  over recognized output text — and omitted whenever the composer would
+   *  instead be an overlay (`summoned`), the buffer is alternate (an
+   *  alt-screen program takes the pane, and `02` carries no such footer),
+   *  or the person's own native-input latch is on. Never both the
+   *  composer and this bar visible at once: `show` above and this policy
+   *  are complementary by construction — a summoned/native/alt-screen
+   *  pane that is NOT showing the editor still does not get the bar,
+   *  because none of those are "ordinary running". */
+  private _syncProcessBar(summoned: boolean): void {
+    const bar = this.processBar
+    if (!bar) return
+    const visible =
+      this.hasRunningCommand() &&
+      !summoned &&
+      !this.nativeMode &&
+      this.lifecycle.buffer === 'normal'
+    bar.hidden = !visible
+    if (visible) {
+      updateProcessBar(bar, { inputAvailable: this.session !== null })
+    }
   }
 
   /** A selection is a quote and a grant whose window follows the selected
@@ -6852,6 +6968,10 @@ export class TerminalContent extends BasePaneContent {
     this.recall?.destroy()
     this.recall = null
     this.scrollback?.dispose()
+    this.paneContext?.remove()
+    this.paneContext = null
+    this.processBar?.remove()
+    this.processBar = null
     this.destroyReceipt()
     this.clearGrants()
     this.grantController?.destroy()

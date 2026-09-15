@@ -13,8 +13,11 @@
      neither focus nor mode, so it said nothing (spec §1). */
   border-top: 1px solid var(--color-divider);
   /* The pane no longer insets its children (nocx-9bpeq.8): the composer is a
-     row and carries the ledger's gutter itself. */
-  padding: 10px var(--pane-inline-padding) 12px;
+     row and carries the ledger's gutter itself. Tokens only (spec
+     2026-09-15 §6) — the old rule was two literal pixel values either side
+     of a token, which is how a surface starts drifting off the scale one
+     rule at a time. */
+  padding: var(--space-3) var(--pane-inline-padding);
 }
 
 .nocx-summon-stack > .nocx-editor[data-placement='overlay'] {
@@ -128,10 +131,37 @@
    the prompt may take the room it needs, but never so much that the block it
    belongs to disappears. MAX_ROWS in editor.ts is the same cap — the row
    count is what fires `resized`, so a CSS box that keeps growing past it
-   stops telling the scrollback to follow. */
+   stops telling the scrollback to follow.
+
+   BORDER-BOX, on purpose: the visible field (spec §6) adds a 1px border to
+   this same element (below), and the 30-row cap above was measured against
+   the padding alone. Border-box keeps the border inside that budget instead
+   of adding 2px on top of it, so MAX_ROWS in editor.ts and this calc still
+   agree at the cap. */
 .nocx-editor .cm-editor {
   font-size: var(--font-size-terminal);
   max-height: min(50vh, calc(36em + 6px));
+  box-sizing: border-box;
+}
+
+/* The visible input field (spec §6, amending base spec §5.1's "no border"):
+   the CM6 editor and the ModeIndicator gutter sit inside one box, because
+   the indicator IS a gutter of this very element — there is nothing else to
+   wrap. `.nocx-editor-field` (editor.ts) is a styling hook onto CM6's own
+   `.cm-editor`, kept separate from the rule above so the two concerns (the
+   growth cap, the visible box) stay independently readable. No raised
+   surface in a row (base spec §7) — the background is the terminal's own. */
+.nocx-editor .nocx-editor-field {
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-md);
+  background: var(--terminal-background);
+}
+
+/* CM6 marks the focused editor with its own class — precise, and it needs
+   no second focus-tracking mechanism (spec §5.3: the caret and this border
+   are the only focus indicators). */
+.nocx-editor .nocx-editor-field.cm-focused {
+  border-color: var(--color-accent);
 }
 
 .nocx-editor .cm-scroller {

@@ -27,7 +27,11 @@ import type { SubmitPlan } from './submit'
 import type { ModelChipState } from './agent-readiness'
 import { cwdLabel } from './cwd-label'
 import { createButton } from './ui/button-element'
-import { createMeta, updateMeta, type MetaPart } from './ui/meta'
+import {
+  createPromptContext,
+  updatePromptContext,
+  type PromptContextFacts,
+} from './ui/prompt-context'
 
 /**
  * The indent a pasted command arrives with, when it arrives at the very
@@ -172,9 +176,22 @@ export class CommandEditor {
    *  the controls for the target Enter reaches. */
   private context: HTMLElement
   private controls: HTMLElement
-  /** One kit Meta: host (strong, remote only) · directory. */
-  private contextMeta: HTMLSpanElement
+  /** The one prompt-line primitive (spec 2026-09-15 §2, §6): host (strong,
+   *  remote only) · path · branch, dimmed while unfocused. The SAME
+   *  primitive a block's header draws (scrollback/blocks.ts), so the
+   *  composer and a finished block cannot start naming "where" two ways
+   *  (AD-8). */
+  private contextEl: HTMLSpanElement
   private _cwd = '~'
+  /** This session's home, once nocx-9bpeq.16 wires a source in — undefined
+   *  until then, which cwdLabel already reads as "show the absolute path"
+   *  (never a guessed `~`). Set only via setWhereFacts. */
+  private _home?: string
+  /** The pane's branch when the pending command was queried against it —
+   *  undefined with no source, no repository, or consent required (spec
+   *  §3): ambient decoration, never a derivation of its own. Set only via
+   *  setWhereFacts. */
+  private _branch?: string
   private _focused = false
   /** Recovery action chip — hidden in the healthy state, shows one action
    *  label in an exception state. The chip IS the action: one click, no
@@ -325,8 +342,9 @@ export class CommandEditor {
 
     this.context = document.createElement('div')
     this.context.className = 'nocx-editor-context'
-    this.contextMeta = createMeta(['~'], { tone: 'dim', title: '~' })
-    this.context.append(this.contextMeta)
+    this.contextEl = createPromptContext({ path: '~' }, { tone: 'dim' })
+    this.contextEl.title = '~'
+    this.context.append(this.contextEl)
 
     this.controls = document.createElement('div')
     this.controls.className = 'nocx-editor-controls'
@@ -484,6 +502,12 @@ export class CommandEditor {
     this.view.contentDOM.classList.add('nocx-editor-input')
     this.view.contentDOM.spellcheck = false
     this.view.contentDOM.setAttribute('autocapitalize', 'off')
+    // The visible input field (spec §6): the ModeIndicator lives in this
+    // view's own gutter, so `.cm-editor` ALREADY contains both it and the
+    // content — there is no second element to introduce. This class is
+    // only a stable styling hook onto that existing element, so
+    // composer.css never has to name a CodeMirror-owned class directly.
+    this.view.dom.classList.add('nocx-editor-field')
 
     // Key handling: capture on the card, so our decisions run before CM6's
     // own contentDOM handlers no matter what keymap the caller installs
@@ -614,19 +638,34 @@ export class CommandEditor {
     this.renderContext()
   }
 
+  /** The home and branch nocx-9bpeq.16 feeds in once a source reports one
+   *  (spec 2026-09-15 §3's composer seam — scrollback/blocks.ts's
+   *  `setBlockWhere` is the block's half of the same seam). Stored so the
+   *  cwd/location setters above keep re-rendering through the same facts
+   *  without the caller having to repeat them on every cwd change. Nothing
+   *  calls this yet; nocx-9bpeq.16 wires the sources in. */
+  setWhereFacts(facts: { home?: string; branch?: string }): void {
+    this._home = facts.home
+    this._branch = facts.branch
+    this.renderContext()
+  }
+
   /** The context's one writer: host (strong — it answers "where does Enter
-   *  go", spec §5.2) · directory, dimmed when the composer is not focused. The
-   *  host is routed from the one locationLine derivation; empty for a local
-   *  session, where its absence is the information. ADR-0024 §6: no stream
-   *  sequence promotes or revokes it. */
+   *  go", spec §5.2) · path · branch, dimmed when the composer is not
+   *  focused (spec §6: `tone: 'dim'` unfocused, `'normal'` focused — CM6's
+   *  own focus state, not a second mechanism). The host is routed from the
+   *  one locationLine derivation; empty for a local session, where its
+   *  absence is the information. ADR-0024 §6: no stream sequence promotes
+   *  or revokes it. */
   private renderContext(): void {
-    const parts: MetaPart[] = this._location
-      ? [{ text: this._location, emphasis: 'strong' }, cwdLabel(this._cwd)]
-      : [cwdLabel(this._cwd)]
-    updateMeta(this.contextMeta, parts, {
-      tone: this._focused ? 'muted' : 'dim',
-      title: this._cwd,
-    })
+    const facts: PromptContextFacts = { path: cwdLabel(this._cwd, this._home) }
+    if (this._location) {
+      facts.host = this._location
+      facts.hostStrong = true
+    }
+    if (this._branch) facts.branch = this._branch
+    updatePromptContext(this.contextEl, facts, { tone: this._focused ? 'normal' : 'dim' })
+    this.contextEl.title = this._cwd
   }
 
   // ── keyboard ──────────────────────────────────────────────────────────

@@ -879,13 +879,6 @@ function placeHeaderChip(right: Element, chip: Element): void {
   right.insertBefore(chip, right.querySelector('[data-block-actions]'))
 }
 
-/**
- * Build the "⋮" overflow menu button + dropdown (P2-9, P1-6 fix).
- * The menu is rendered as a child of document.body with position:fixed
- * so it floats above ALL blocks and scroll containers. Position is
- * calculated from the button's bounding rect. Closes on outside click
- * and Escape key.
- */
 /** Fetch the DURABLE text of one answer entry, or null when it is not
  *  stored any more. Injected, never constructed here: this module has no
  *  socket, and the one that does is wired at the composition root. */
@@ -919,6 +912,16 @@ export interface RunningBlockActions {
 
 const overflowMenuClosers = new WeakMap<HTMLElement, () => void>()
 
+/**
+ * Build the block's "⋮" (nocx-9bpeq.5): a kit IconButton whose click mounts
+ * the kit ContextMenu as a render island — created on open, disposed on
+ * close — rather than the hand-rolled position:fixed dropdown this once was.
+ * The menu itself positions and dismisses itself (ContextMenu's own anchor,
+ * clamp and outside-click/Escape handling); this function only decides which
+ * items apply to this block (copy, wrap, grant, stop, show dump) and reopens
+ * them fresh on every open, since a running block's actions change block to
+ * block.
+ */
 function buildOverflowMenu(
   blockEl: HTMLElement,
   command: string,

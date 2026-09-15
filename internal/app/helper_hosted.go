@@ -42,6 +42,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // hostedSpawn is the three acts, with the seams they need and nothing that
@@ -178,6 +179,24 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		abortLifecycleNow()
 		_ = h.client.CloseSession(ctx, entry.HostSessionID)
 		return hostedSpawnResult{}, err
+	}
+
+	// THE HELPER'S OWN KEEPALIVE PROBER, RELAYED (nocx-y6fh7 item 6). A local
+	// pane has no far end to probe (cfg.Host is empty, by the same rule
+	// readopt's own comment states — a local carrier reports no destination),
+	// so the wire notification never arrives for one and this is a no-op
+	// registration rather than a local/remote branch to keep in step by
+	// hand. ObserveHost is the SAME producer the coordinator's own
+	// non-helper dials have always fed (hostLivenessObserver); a helper's
+	// notification is just a second producer for the one function that
+	// decides what either means.
+	if cfg.Host != "" {
+		attached.OnLiveness(func(responsive bool, roundTripMS int64) {
+			h.registry.ObserveHost(cfg.Host, ssh.Reachability{
+				Responsive: responsive,
+				RoundTrip:  time.Duration(roundTripMS) * time.Millisecond,
+			})
+		})
 	}
 
 	sess, err := h.registry.Adopt(ctx, cfg, session.ID(entry.HostSessionID.Session), attached)

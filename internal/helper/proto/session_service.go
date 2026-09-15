@@ -165,6 +165,21 @@ const (
 	// only an inventory field because a reader waiting on a command must not
 	// have to poll to learn it finished.
 	EventSessionExit = "exit"
+	// EventSessionLiveness is what an ssh session's own keepalive prober
+	// learned about the far end since the last time it checked. Its params
+	// are a SessionLiveness (nocx-y6fh7 item 6).
+	//
+	// It is a NOTIFICATION, on the same reasoning EventSessionExit already
+	// gives: the party that can observe this is the helper — it holds the
+	// connection since ADR-0057 — and a coordinator polling for it would be
+	// asking a question the answer to which is "nothing has changed" almost
+	// every time. A session's terminal death is still reported through
+	// EventSessionExit exactly as any other end is (the prober closes the
+	// transport when it gives up, which is the ordinary channel-closed path
+	// every other exit takes); this event is for the NON-terminal half — the
+	// far end answering late, or not at all yet — which has no "the process
+	// ended" fact to ride.
+	EventSessionLiveness = "liveness"
 )
 
 // Notification is the payload of a TypeNotify frame: a service, an event and
@@ -496,6 +511,26 @@ type SSHSpawnParams struct {
 	// SpawnParams states: a repeat answers with the session the first one made
 	// rather than forking a second remote shell.
 	IdempotencyKey string `json:"idempotencyKey,omitempty"`
+	// KeepaliveIntervalMS is how often, in milliseconds, THIS HELPER probes
+	// the far end once the channel is open. Zero means no probing at all.
+	//
+	// It travels here because the helper is the party that now HOLDS the ssh
+	// connection (ADR-0057): the coordinator has no transport of its own left
+	// to probe, so "how often" is a fact this spawn must carry rather than a
+	// setting the far side of the wire could apply on its own — the same
+	// reason Shell and DesiredMode travel per spawn rather than living in the
+	// helper's own defaults. Zero is a real, honest state (a profile with no
+	// interval configured), not a gap: nocx-y6fh7 item 6 measured that the
+	// pre-ADR-0057 coordinator-side prober silently vanished for every
+	// helper-hosted pane once the dial moved here and nothing replaced it —
+	// ssh-reconnect.spec.ts's silent-death and slow-host journeys had nothing
+	// left probing at all.
+	KeepaliveIntervalMS int64 `json:"keepaliveIntervalMs,omitempty"`
+	// KeepaliveCountMax is the number of consecutive keepalive failures this
+	// helper tolerates before it gives up on the channel, on the same terms
+	// ssh.ConnectConfig.KeepaliveCountMax already states for the coordinator's
+	// own (non-helper) dials. Meaningless when KeepaliveIntervalMS is zero.
+	KeepaliveCountMax int `json:"keepaliveCountMax,omitempty"`
 }
 
 // SessionsParams asks for the inventory. The workspace filter is D15's
@@ -913,6 +948,30 @@ type SessionExitStatus struct {
 type SessionExit struct {
 	Session HostSessionID     `json:"session"`
 	Status  SessionExitStatus `json:"status"`
+}
+
+// SessionLiveness is the EventSessionLiveness notification's params: one
+// ssh session's keepalive prober reporting whether the far end answered this
+// round, and how long it took when it did.
+//
+// It names the session rather than the destination the way SessionExit does,
+// for the same reason: this is a fact about a PROCESS this generation is
+// answerable for, not about a host in the abstract. A helper that shares one
+// pooled connection across several sessions (AD-4) reports against whichever
+// session's own spawn armed the prober; nothing here claims the fact for
+// every session on that connection, which is the coordinator's own concern
+// to fan out if it chooses to (session.Reg.ObserveHost already does, keyed
+// by host, for the sessions it is told about).
+type SessionLiveness struct {
+	Session HostSessionID `json:"session"`
+	// Responsive is this round's verdict: the far end answered a keepalive
+	// request before the deadline, or it did not.
+	Responsive bool `json:"responsive"`
+	// RoundTripMS is how long an answered round took, in milliseconds. Zero
+	// (and omitted) means unresponsive, or a first round with nothing yet to
+	// measure — the same "no measurement" reading the coordinator's own
+	// direct dials already give this fact (ssh.Reachability.RoundTrip).
+	RoundTripMS int64 `json:"roundTripMs,omitempty"`
 }
 
 // AckResult is deliberately empty, like ResizeResult: the answer to "did the

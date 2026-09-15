@@ -40,6 +40,7 @@ import (
 	"net"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
@@ -98,6 +99,17 @@ type ShellSpec struct {
 	// session service's own default has already been applied by the caller.
 	Cols uint16
 	Rows uint16
+	// KeepaliveInterval and KeepaliveCountMax arm this channel's own pooled
+	// connection prober (nocx-y6fh7 item 6), on the terms
+	// ssh.PooledSpec's own fields already state. Zero disables it — the
+	// caller's honest default, never this package's.
+	KeepaliveInterval time.Duration
+	KeepaliveCountMax int
+	// OnLiveness receives every reachability change the prober reports for
+	// as long as the pooled connection this channel opened (or joined) is
+	// this channel's own — see acquirePooled's own note on what that means
+	// under AD-4 sharing. Nil is ordinary.
+	OnLiveness ssh.LivenessObserver
 }
 
 // ShellChannel is one interactive shell channel on a pooled connection, as an
@@ -170,7 +182,8 @@ func (s *Service) OpenShell(ctx context.Context, spec ShellSpec) (*ShellChannel,
 		return nil, err
 	}
 
-	pool, err := s.acquirePooled(ctx, conn, spec.Destination, spec.AcceptOnTrust, spec.HostKeyFingerprint)
+	pool, err := s.acquirePooled(ctx, conn, spec.Destination, spec.AcceptOnTrust, spec.HostKeyFingerprint,
+		spec.KeepaliveInterval, spec.KeepaliveCountMax, spec.OnLiveness)
 	if err != nil {
 		return nil, err
 	}

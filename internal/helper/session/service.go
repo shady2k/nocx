@@ -986,6 +986,12 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 	}
 	lg = lg.With("session", proto.SessionHex(raw))
 
+	// Minted before the dial so the liveness sink can name a session that
+	// does not exist as a *hostedSession yet — the same reason spawn's own
+	// exit watcher is armed against a raw id (finishSpawn) rather than
+	// waiting for one.
+	hostID := proto.HostSessionID{Generation: s.generation, Session: proto.SessionHex(raw)}
+
 	proc, err := s.sshSpawner.SpawnSSH(ctx, SSHSpawnRequest{
 		SessionID:          proto.SessionHex(raw),
 		Destination:        p.Destination,
@@ -1008,6 +1014,18 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 		Cols:             cols,
 		Rows:             rows,
 		Lifecycle:        p.Lifecycle,
+		// The helper is the party holding this connection (ADR-0057), so it
+		// is the only party that can arm a prober against it — nocx-y6fh7
+		// item 6. A dead connection needs no separate report: the prober
+		// gives up by closing the transport, which ends this session's
+		// channel exactly as any other end does, and notifyExit below
+		// carries it from there. This sink is for the non-terminal half —
+		// the far end answering late or not yet — which has no exit to ride.
+		KeepaliveInterval: time.Duration(p.KeepaliveIntervalMS) * time.Millisecond,
+		KeepaliveCountMax: p.KeepaliveCountMax,
+		OnLiveness: func(responsive bool, roundTrip time.Duration) {
+			s.notifyLiveness(hostID, responsive, roundTrip)
+		},
 	})
 	if err != nil {
 		s.mu.Lock()
@@ -1646,6 +1664,33 @@ func (s *Service) notifyExit(e proto.SessionExit) {
 			Service: proto.ServiceSession, Event: proto.EventSessionExit, Params: e,
 		}); err != nil {
 			s.log.Warn("exit notification not delivered", "session", e.Session.Session, "err", err)
+		}
+	}
+}
+
+// notifyLiveness tells every bound connection what an ssh session's own
+// keepalive prober just learned about the far end (nocx-y6fh7 item 6). It is
+// notifyExit's sibling and shares its whole argument: a coordinator watching
+// this session must hear it whether or not another coordinator also is, and
+// nothing here is durable state the way an exit's status is (the OLD grade
+// is simply superseded by the next probe, and a coordinator that missed one
+// round learns the current answer on the very next).
+func (s *Service) notifyLiveness(id proto.HostSessionID, responsive bool, roundTrip time.Duration) {
+	s.mu.Lock()
+	sinks := make([]Sink, 0, len(s.sinks))
+	for sink := range s.sinks {
+		sinks = append(sinks, sink)
+	}
+	s.mu.Unlock()
+	live := proto.SessionLiveness{Session: id, Responsive: responsive}
+	if responsive && roundTrip > 0 {
+		live.RoundTripMS = roundTrip.Milliseconds()
+	}
+	for _, sink := range sinks {
+		if err := sink.SendNotification(proto.Notification{
+			Service: proto.ServiceSession, Event: proto.EventSessionLiveness, Params: live,
+		}); err != nil {
+			s.log.Warn("liveness notification not delivered", "session", id.Session, "err", err)
 		}
 	}
 }

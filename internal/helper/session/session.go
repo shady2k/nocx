@@ -163,6 +163,28 @@ type SSHSpawnRequest struct {
 	// refused by name, or answered with a session whose lifecycle window does
 	// not exist and whose `adopt-lifecycle` is therefore null.
 	Lifecycle *proto.LifecycleLaunch
+	// KeepaliveInterval and KeepaliveCountMax arm this session's own prober,
+	// on exactly the terms ssh.ConnectConfig's fields already state for the
+	// coordinator's non-helper dials — zero disables it. They travel per
+	// request because the helper now holds the connection (ADR-0057) and has
+	// no profile of its own to read an interval from (nocx-y6fh7 item 6).
+	KeepaliveInterval time.Duration
+	KeepaliveCountMax int
+	// OnLiveness is called every time this session's prober learns something
+	// about the far end's reachability, for as long as the channel is open:
+	// whether it answered this round, and the round trip when it did (zero
+	// when it did not, or when nothing has been measured yet). Nil is
+	// ordinary — a caller that wants no observation (a probe, a test) passes
+	// none — and the spawner never invents a value to report through it.
+	//
+	// Spelled as two primitives rather than internal/ssh's own Reachability
+	// type on purpose: this file has no nocx_local_ssh build tag, and
+	// internal/ssh is in the untagged helper's forbidden dependency graph
+	// (internal/helper/deploy/dependency_test.go) — an ssh client must never
+	// reach the artifact written to somebody else's host. The tagged half
+	// (spawn_ssh.go) is where Reachability's two fields cross into these two
+	// arguments.
+	OnLiveness func(responsive bool, roundTrip time.Duration)
 }
 
 // SSHSpawner opens one shell channel on a far host and adapts it to Process.

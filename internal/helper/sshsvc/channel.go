@@ -57,6 +57,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
@@ -256,7 +257,7 @@ func (s *Service) takeChannel(id proto.ChannelID) *openChannel {
 // returning, so a refused subsystem does not leave a pool entry behind that
 // nothing owns.
 func (s *Service) dialChannel(ctx context.Context, conn *host.Host, p proto.OpenChannelParams) (*ssh.PooledConn, remoteEnd, error) {
-	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust, "")
+	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust, "", 0, 0, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -295,7 +296,13 @@ func (s *Service) dialChannel(ctx context.Context, conn *host.Host, p proto.Open
 // shell channel is the caller that pins one, which is why this is a parameter
 // rather than a second acquisition function: one connection per destination is
 // AD-4's rule and two paths to it would be two answers.
-func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SSHDestination, acceptOnTrust bool, fingerprint string) (*ssh.PooledConn, error) {
+// keepalive and onLiveness are read ONLY on a cache MISS — AD-4's own rule,
+// stated for this fact rather than assumed: a second caller sharing an
+// already-pooled connection joins a prober that is already running (or
+// running with none), armed by whoever dialed first. A shell channel is the
+// one caller that ever passes a non-nil onLiveness (nocx-y6fh7 item 6);
+// every other caller passes zero and nil, which is unchanged behaviour.
+func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SSHDestination, acceptOnTrust bool, fingerprint string, keepalive time.Duration, keepaliveCountMax int, onLiveness ssh.LivenessObserver) (*ssh.PooledConn, error) {
 	ep := endpointOf(d)
 	cfg, err := s.clientConfig(ctx, conn, ep, acceptOnTrust)
 	if err != nil {
@@ -309,12 +316,15 @@ func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SS
 		return nil, err
 	}
 	pool, err := s.client.AcquirePooled(ctx, ssh.PooledSpec{
-		Host:     ep.Host,
-		Port:     ep.Port,
-		User:     ep.User,
-		Identity: identityKey(d.Identity),
-		Config:   cfg,
-		Route:    route,
+		Host:              ep.Host,
+		Port:              ep.Port,
+		User:              ep.User,
+		Identity:          identityKey(d.Identity),
+		Config:            cfg,
+		Route:             route,
+		KeepaliveInterval: keepalive,
+		KeepaliveCountMax: keepaliveCountMax,
+		Liveness:          onLiveness,
 	})
 	if err != nil {
 		return nil, classifyChannelError(err)

@@ -195,6 +195,16 @@ func (r *Reg) Observe(ref Ref, obs Observation) bool {
 	return applied
 }
 
+// ObserveHost is observeHost, exported for a caller outside this package: a
+// helper-hosted ssh session's keepalive prober runs one process away
+// (ADR-0057, nocx-y6fh7 item 6), so what used to be wired in-process here
+// (hostLivenessObserver, still the producer for the coordinator's own
+// non-helper dials) now also has a caller in internal/app, translating a
+// proto.SessionLiveness notification into the same Reachability this
+// function has always taken. One production and one wire-fed producer,
+// both funnelled through the one function that decides what either means.
+func (r *Reg) ObserveHost(host string, reach ssh.Reachability) { r.observeHost(host, reach) }
+
 // observeHost applies what the keepalive prober learned about one machine to
 // every session running on it. It is the production producer of `unknown`.
 //

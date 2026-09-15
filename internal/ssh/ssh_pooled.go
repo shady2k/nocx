@@ -87,6 +87,16 @@ type PooledSpec struct {
 	// gone quiet is noticed on this side of the wire too. Zero disables it.
 	KeepaliveInterval time.Duration
 	KeepaliveCountMax int
+	// Liveness receives what the prober armed by KeepaliveInterval learns,
+	// exactly as ConnectConfig.Liveness does for the coordinator's own
+	// non-pooled dials (nocx-y6fh7 item 6: sshsvc's shell channel is the
+	// first pooled caller to actually want one — every other caller of
+	// AcquirePooled still passes nil, unchanged). Read only on a cache MISS,
+	// along with the interval and the count: a caller that joins an
+	// already-dialed pooled connection joins whatever prober (or none) the
+	// first caller armed, because there is one connection and therefore one
+	// prober, not one per reference.
+	Liveness LivenessObserver
 }
 
 // PooledHop is one intermediate host a connection is dialed through. It is the
@@ -282,7 +292,7 @@ func (rc *RealClient) AcquirePooled(ctx context.Context, spec PooledSpec) (*Pool
 			return nil, err
 		}
 		conn.fingerprint = fingerprint
-		stopKA, _ := startKeepalive(conn, spec.KeepaliveInterval, spec.KeepaliveCountMax, nil)
+		stopKA, _ := startKeepalive(conn, spec.KeepaliveInterval, spec.KeepaliveCountMax, spec.Liveness)
 		conn.setKeepaliveStop(stopKA)
 		return conn, nil
 	}

@@ -147,6 +147,56 @@ func TestInteractiveAuthAnswersAPasswordOnlyServerThroughTheSynthesizedPrompt(t 
 	}
 }
 
+// TestKeepaliveReportsAFailingRoundThenEndsTheSessionLikeAnyOtherExit is
+// nocx-y6fh7 item 6's own proof.
+//
+// A fixture that answers EVERY unrecognised global request with a fast,
+// explicit "false" (serveGlobalRequests' default case, which every other
+// spawn test in this file already dials against) is NOT unresponsive as far
+// as the prober is concerned: x/crypto/ssh's SendRequest reports that as a
+// completed round trip, and ssh_keepalive.go's sendProbe reads only err,
+// never the reply's own boolean — measured by running this test against
+// that ordinary fixture first and finding every report said responsive=true.
+// silenceKeepalive is what actually produces silence: no Reply at all, which
+// is what makes the prober's own budget time out.
+//
+// Two facts, in the order the prober itself produces them:
+//
+//  1. the round that times out reports EventSessionLiveness{Responsive:
+//     false} on its way out (ssh_keepalive.go's errProbeSilent branch) — the
+//     non-terminal half, which has no exit to ride and needed the new wire
+//     event;
+//  2. the SAME branch then closes the connection itself, which ends this
+//     session's channel exactly as any other end does, and is reported
+//     through the SAME EventSessionExit path TestAChannelLostMidSession
+//     already proves, needing no change here at all.
+func TestKeepaliveReportsAFailingRoundThenEndsTheSessionLikeAnyOtherExit(t *testing.T) {
+	f := newSSHFixture(t, "pw", "cat")
+	f.silenceKeepalive()
+	stand := newSSHStand(t, f, &sshCoordinator{
+		password: "pw", verdict: proto.HostKeyTrusted, fingerprint: f.fingerprint(),
+	})
+	p := stand.spawnParams(t, proto.SSHModeRaw)
+	p.KeepaliveIntervalMS = 20
+	p.KeepaliveCountMax = 1
+
+	entry := stand.mustSpawn(t, p)
+	id := proto.HostSessionID{
+		Generation: proto.GenerationID(entry.HostSessionID.Generation),
+		Session:    entry.HostSessionID.Session,
+	}
+
+	live := stand.exits.waitLiveness(t, id)
+	if live.Responsive {
+		t.Fatalf("the first liveness report says responsive=true; want false, since this fixture answers no keepalive request at all")
+	}
+
+	exit := stand.exits.waitExit(t, id)
+	if exit.Status.Code != -1 {
+		t.Fatalf("exit code = %d, want -1: the connection was closed by the prober giving up, not by the far command exiting", exit.Status.Code)
+	}
+}
+
 // contains reports whether a recorded op list names op.
 func contains(ops []string, op string) bool {
 	for _, seen := range ops {

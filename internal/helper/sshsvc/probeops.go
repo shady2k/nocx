@@ -141,7 +141,7 @@ func (s *Service) lease(ctx context.Context, p proto.LeaseParams) (proto.LeaseRe
 	if err := validateDestinationAddress(p.Destination); err != nil {
 		return proto.LeaseResult{}, err
 	}
-	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust, "")
+	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust, "", 0, 0, nil)
 	if err != nil {
 		return proto.LeaseResult{}, err
 	}

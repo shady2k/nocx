@@ -191,4 +191,20 @@ package proto
 // go unacknowledged forever. Two peers that disagree refuse each other at
 // hello in both directions, which is what makes the number the whole of the
 // compatibility story.
-const Version = "14"
+// This is 15 rather than 14 because the wire grew keepalive: `session
+// .spawn-ssh.params` gained `keepaliveIntervalMs` and `keepaliveCountMax`,
+// and the `session` service gained the `liveness` event (nocx-y6fh7 item 6).
+// The helper is the party holding the ssh connection since ADR-0057, so it
+// is the only party that can arm a prober against it at all — greenfield, so
+// there is no compatibility path for an older generation to fall back to: a
+// 14-helper silently runs no prober, which is exactly the defect measured
+// (ssh-reconnect.spec.ts:200 and :297, a silently dead or slow connection
+// offering nothing because nothing was watching it), and the params field
+// being additionalProperties:false means a 14-helper REJECTS the payload
+// outright rather than accepting it and ignoring the two fields — a
+// coordinator must learn it is talking to a generation with no keepalive at
+// hello, not by waiting out a silence the old helper was never going to
+// report. Two peers that disagree refuse each other at hello in both
+// directions, which is what makes the number the whole of the compatibility
+// story.
+const Version = "15"

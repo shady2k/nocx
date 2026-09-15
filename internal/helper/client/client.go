@@ -449,6 +449,23 @@ func (c *Client) sessionNotify(payload []byte) {
 		c.sessionExited(raw)
 	case proto.EventSessionReset:
 		c.sessionReset(raw)
+	case proto.EventSessionLiveness:
+		c.sessionLiveness(raw)
+	}
+}
+
+// sessionLiveness is EventSessionLiveness arriving: what an ssh session's own
+// keepalive prober just learned (nocx-y6fh7 item 6). Delivered to every
+// attachment on the session, on the same terms sessionExited already uses —
+// a fact about the session, not about one reader.
+func (c *Client) sessionLiveness(raw json.RawMessage) {
+	var live proto.SessionLiveness
+	if err := json.Unmarshal(raw, &live); err != nil {
+		c.log.Warn("malformed session liveness notification", "err", err)
+		return
+	}
+	for _, a := range c.attachedTo(live.Session.Session, "") {
+		a.reportLiveness(live.Responsive, live.RoundTripMS)
 	}
 }
 

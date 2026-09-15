@@ -326,6 +326,10 @@ type AttachedSession struct {
 	// holeObs is the coordinator's observer for a hole in this session's
 	// output — see OnOutputHole. Guarded by mu; fired outside it.
 	holeObs func(lost uint64, reason string)
+	// livenessObs is the coordinator's observer for this session's own
+	// keepalive prober (nocx-y6fh7 item 6) — see OnLiveness. Guarded by mu;
+	// fired outside it, on the same terms holeObs already is.
+	livenessObs func(responsive bool, roundTripMS int64)
 }
 
 // inbound is one item in an attachment's delivery order: bytes the wire
@@ -619,6 +623,27 @@ func (a *AttachedSession) OnOutputHole(f func(lost uint64, reason string)) {
 	a.mu.Lock()
 	a.holeObs = f
 	a.mu.Unlock()
+}
+
+// OnLiveness registers the coordinator's observer for this session's own
+// keepalive prober, exactly as OnOutputHole registers one for a hole: nil
+// means nobody is watching, and this is ordinary for a local pane, which the
+// helper never probes (session_service.go's own note on
+// EventSessionLiveness).
+func (a *AttachedSession) OnLiveness(f func(responsive bool, roundTripMS int64)) {
+	a.mu.Lock()
+	a.livenessObs = f
+	a.mu.Unlock()
+}
+
+// reportLiveness tells the observer what a liveness notification said.
+func (a *AttachedSession) reportLiveness(responsive bool, roundTripMS int64) {
+	a.mu.Lock()
+	obs := a.livenessObs
+	a.mu.Unlock()
+	if obs != nil {
+		obs(responsive, roundTripMS)
+	}
 }
 
 // reportHole tells the observer what the reset said was lost. A reset whose

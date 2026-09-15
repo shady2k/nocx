@@ -897,6 +897,15 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		// answered anything about this pane, which is why the interval that
 		// gives it meaning cannot be what mints it.
 		AgentToolToken: mintToolToken(),
+		// THE HELPER IS THE PARTY HOLDING THIS CONNECTION (ADR-0057), so it is
+		// the only party that can arm a prober against it — nocx-y6fh7 item 6.
+		// Read off the same resolved config sshOptionsFromConfig already
+		// carried these two fields onto (session.go's own comment on why
+		// KeepaliveInterval is the one that "cost a person their session"
+		// when it was silently dropped once already); a profile with none
+		// configured sends zero, honestly, and this helper starts no prober.
+		KeepaliveIntervalMS: cfg.Remote.KeepaliveInterval.Milliseconds(),
+		KeepaliveCountMax:   cfg.Remote.KeepaliveCountMax,
 	}
 	res, err := spawn.run(ctx, cfg, func(ctx context.Context, life *proto.LifecycleLaunch) (helperclient.SessionEntry, error) {
 		params.Lifecycle = life

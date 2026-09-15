@@ -61,6 +61,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/shellintegration"
+	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // ShellOpener is this spawner's seam on the ssh service: open one pane's
@@ -226,6 +227,15 @@ func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process
 		pane = nil
 	}
 
+	var onLiveness ssh.LivenessObserver
+	if req.OnLiveness != nil {
+		// Reachability's two fields cross into the untagged package's two
+		// primitives here, on the tagged side of the seam session.go's own
+		// comment on SSHSpawnRequest.OnLiveness names.
+		onLiveness = func(reach ssh.Reachability) {
+			req.OnLiveness(reach.Responsive, reach.RoundTrip)
+		}
+	}
 	ch, err := p.opener.OpenShell(ctx, sshsvc.ShellSpec{
 		Destination:        req.Destination,
 		AcceptOnTrust:      req.AcceptOnTrust,
@@ -233,6 +243,9 @@ func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process
 		Command:            command,
 		Cols:               req.Cols,
 		Rows:               req.Rows,
+		KeepaliveInterval:  req.KeepaliveInterval,
+		KeepaliveCountMax:  req.KeepaliveCountMax,
+		OnLiveness:         onLiveness,
 	})
 	if err != nil {
 		if pane != nil {

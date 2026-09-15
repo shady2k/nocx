@@ -200,6 +200,29 @@ type writeInterrupter interface {
 	InterruptWrite() error
 }
 
+// readInterrupter is writeInterrupter's read-side twin (nocx-6q1uh.18): it
+// forces a goroutine parked in WaitReadable to return, releasing whatever it
+// holds while parked. A local PTY's master answers it
+// (internal/pty.LocalPty.InterruptRead); an SSH channel has no WaitReadable
+// at all (it has no read barrier — owner_ssh.go), so it never needs one.
+//
+// It exists because internal/poll's SyscallConn().Read holds the file's own
+// read lock for the whole call, including while parked waiting, not only
+// while actually reading — so a readiness goroutine idling in WaitReadable
+// on a silent program holds exactly the lock drainLocal's own
+// RawReadUntilAgain needs. Before nocx-6q1uh.18, drainLocal called
+// RawReadUntilAgain unconditionally at every commit point (processHead's
+// "opportunistic extra drain") with no way to tell whether the readiness
+// goroutine was parked on that same lock — and when it was, on an idle
+// program, nothing was ever going to make the fd readable to release it:
+// the very item stuck behind the drain may have been the input that would
+// have prompted the program to answer. drainLocal now interrupts first,
+// waits for the readiness goroutine's own acknowledgement that it has left
+// WaitReadable (readableCh), and only then calls RawReadUntilAgain.
+type readInterrupter interface {
+	InterruptRead() error
+}
+
 // readEvent is one report from the fallback reader goroutine: a chunk, or —
 // once, as the last thing it ever sends — the error its blocking Read ended
 // on (io.EOF for an ordinary close).
@@ -281,6 +304,15 @@ type sessionOwner struct {
 	detachOnce   sync.Once
 	detached     atomic.Bool
 
+	// readinessResume is the owner's own "look again" signal to the
+	// readiness goroutine (nocx-6q1uh.18, spec §5.2): sent only after
+	// drainLocal has finished a read and no longer needs the master's read
+	// lock for itself. It always exists, whether or not this Process is a
+	// rawReader, the same way writeReq/writeRes always exist whether or not
+	// a writer ever blocks — nothing sends or receives on it for a Process
+	// read through runReaderGoroutine instead.
+	readinessResume chan struct{}
+
 	// --- run()'s own state; touched from nowhere else ----------------------
 	pending    []ownerItem
 	closing    bool
@@ -289,6 +321,20 @@ type sessionOwner struct {
 	eofSeen    bool
 	replyBytes int
 	nextFence  sessionruntime.Fence
+	// readableCh is where the readiness goroutine reports back, for a
+	// rawReader Process only (run creates it, and starts runReadiness, only
+	// then); nil otherwise, which makes the read on it in run's own select
+	// block forever — exactly like a case that is not there.
+	readableCh chan struct{}
+	// readinessParked is true whenever the readiness goroutine may
+	// currently be inside WaitReadable (spec §5.2) — which is to say, may be
+	// holding the master's SyscallConn read lock (internal/poll's fdMutex,
+	// held for the WHOLE call, including a parked wait) — and false
+	// whenever it is instead blocked on readinessResume, holding nothing.
+	// drainLocal is the only place this is read; run's own select and
+	// drainLocal itself are the only places it is written. Meaningless, and
+	// left at its zero value, for a Process with no rawReader seam.
+	readinessParked bool
 }
 
 // newSessionOwner builds the owner over a process that already exists and a
@@ -298,19 +344,20 @@ type sessionOwner struct {
 func newSessionOwner(proc Process, rt *sessionruntime.Session, win *window, log *slog.Logger) *sessionOwner {
 	readCtx, cancelRead := context.WithCancel(context.Background())
 	o := &sessionOwner{
-		proc:          proc,
-		rt:            rt,
-		win:           win,
-		log:           log,
-		incoming:      make(chan ownerItem, intentQueueMax),
-		closingSignal: make(chan struct{}),
-		stopped:       make(chan struct{}),
-		readCtx:       readCtx,
-		cancelRead:    cancelRead,
-		writeReq:      make(chan []byte),
-		writeRes:      make(chan writeOutcome, 1),
-		nowMono:       func() int64 { return int64(monoclock.Now()) },
-		detachSignal:  make(chan struct{}),
+		proc:            proc,
+		rt:              rt,
+		win:             win,
+		log:             log,
+		incoming:        make(chan ownerItem, intentQueueMax),
+		closingSignal:   make(chan struct{}),
+		stopped:         make(chan struct{}),
+		readCtx:         readCtx,
+		cancelRead:      cancelRead,
+		writeReq:        make(chan []byte),
+		writeRes:        make(chan writeOutcome, 1),
+		nowMono:         func() int64 { return int64(monoclock.Now()) },
+		detachSignal:    make(chan struct{}),
+		readinessResume: make(chan struct{}, 1),
 	}
 	// A fresh incarnation starts at epoch 1 (spec §7.2, §6.1): the zero
 	// value an unset atomic.Uint64 would otherwise report is not a real
@@ -341,11 +388,17 @@ func (o *sessionOwner) run() {
 
 	go o.runWriter()
 
-	var readableCh chan struct{}
 	var readEvents chan readEvent
 	if rr, ok := o.proc.(rawReader); ok {
-		readableCh = make(chan struct{}, 1)
-		go o.runReadiness(rr, readableCh)
+		o.readableCh = make(chan struct{}, 1)
+		// The readiness goroutine starts working the moment it is spawned
+		// (runReadiness's own loop calls WaitReadable first, before ever
+		// waiting to be told to) — so from this point on drainLocal must
+		// assume it may already be inside that call. Meaningless unless rr
+		// also answers readInterrupter (drainLocal's own doc): for anything
+		// else this is set but never consulted.
+		o.readinessParked = true
+		go o.runReadiness(rr, o.readableCh)
 	} else {
 		readEvents = make(chan readEvent, 1)
 		go o.runReaderGoroutine(readEvents)
@@ -380,7 +433,13 @@ func (o *sessionOwner) run() {
 			default:
 				o.pending = append(o.pending, it)
 			}
-		case <-readableCh:
+		case <-o.readableCh:
+			// The readiness goroutine has already left WaitReadable by the
+			// time it sends here — see runReadiness's own doc — so the lock
+			// drainLocal needs is free before this call, and drainLocal's
+			// own readinessParked check below is what stops it trying to
+			// receive a second signal that is never coming.
+			o.readinessParked = false
 			o.drainLocal()
 		case ev := <-readEvents:
 			o.handleReadEvent(ev)
@@ -460,6 +519,34 @@ func (o *sessionOwner) interruptWriter() {
 // is a no-op once EOF has been seen, and a no-op for a Process with no raw
 // read seam — that Process is read by runReaderGoroutine instead, which
 // delivers through readEvents rather than through this call.
+//
+// Before it ever calls RawReadUntilAgain, it makes sure the readiness
+// goroutine is not the one holding the master's read lock (nocx-6q1uh.18):
+// internal/poll's SyscallConn().Read holds that lock for the WHOLE call, a
+// parked wait included, so a readiness goroutine idling in WaitReadable on
+// a silent program holds exactly the lock this call needs next — and
+// processHead calls this UNCONDITIONALLY at every commit point (the
+// "opportunistic extra drain"), whether or not a readableCh signal is
+// pending, so that idle-program case is ordinary, not rare.
+//
+// That hazard is real only for a Process whose WaitReadable and
+// RawReadUntilAgain share a lock in the first place — today, a local PTY
+// (internal/pty.LocalPty), which is also the only rawReader that answers
+// readInterrupter. A test fixture implementing rawReader over plain
+// channels shares no such lock, and forcing this handshake on it anyway
+// would trade the real deadlock for a fake one: RawReadUntilAgain there
+// already returns at once with nothing to deliver, exactly as it always
+// has, so nothing needs to be interrupted or waited for. needsHandshake is
+// this call's own test for which case it is in, checked once per call
+// rather than assumed — the same value runReadiness's own doc names as
+// what chooses its shape.
+//
+// When it does apply: readinessParked says the readiness goroutine might
+// currently hold that lock, parked; this interrupts it (readInterrupter)
+// and blocks for its own acknowledgement — on readableCh, the exact channel
+// it always reports back on — before touching the fd itself. WaitReadable
+// always returns once its deadline is forced into the past, so this wait is
+// bounded even though it is a plain receive with no timeout of its own.
 func (o *sessionOwner) drainLocal() {
 	if o.eofSeen {
 		return
@@ -468,10 +555,39 @@ func (o *sessionOwner) drainLocal() {
 	if !ok {
 		return
 	}
+	ri, needsHandshake := rr.(readInterrupter)
+	if needsHandshake && o.readinessParked {
+		_ = ri.InterruptRead()
+		select {
+		case <-o.readableCh:
+			o.readinessParked = false
+		case <-o.readCtx.Done():
+			// The read side is being torn down from elsewhere (a forced
+			// stop's proc.Close, most likely): nothing this call could still
+			// drain is worth the lock, and readinessParked is left as-is —
+			// run is on its way out regardless.
+			return
+		}
+	}
 	buf := make([]byte, pageSize)
 	eof, err := rr.RawReadUntilAgain(buf, o.ingestOne)
 	if eof || err != nil {
 		o.finishRead(err)
+		return
+	}
+	if !needsHandshake {
+		return
+	}
+	// The drain is done and the lock is free again: tell the readiness
+	// goroutine it may go back to waiting. Sent, never merely queued and
+	// forgotten about — a resume that never arrives is a readiness goroutine
+	// that never looks again, and every future drain would then find
+	// readinessParked false when it is not, skipping the very interrupt it
+	// exists to perform.
+	o.readinessParked = true
+	select {
+	case o.readinessResume <- struct{}{}:
+	case <-o.readCtx.Done():
 	}
 }
 
@@ -479,17 +595,55 @@ func (o *sessionOwner) drainLocal() {
 // Process whose master supports it: it consumes nothing, ever — every read
 // is this owner's own, through drainLocal — and it exists only to wake the
 // owner when there is something to drain.
+//
+// Its shape depends on whether rr also answers readInterrupter — today,
+// whether it is a real local PTY or a test fixture (drainLocal's own doc
+// explains why the two cases differ):
+//
+//   - When it does: this never calls WaitReadable a second time on its own
+//     initiative (nocx-6q1uh.18). After every call — whether WaitReadable
+//     returned because the fd became readable or because drainLocal
+//     interrupted it to reclaim the lock — this reports back on readableCh
+//     and then waits to be told to look again. Without that pause, this
+//     goroutine could re-enter WaitReadable, and re-take the lock, in the
+//     window between sending its report and the owner acting on it — which
+//     is exactly the contention drainLocal's own interrupt-then-wait
+//     sequence depends on not happening. A non-nil error with the owner's
+//     readCtx still live is never this goroutine's own reason to stop: it
+//     means drainLocal's InterruptRead woke an ordinary parked wait, not a
+//     real shutdown. Only readCtx itself ending — cancelRead, from
+//     finishRead or run's own teardown — is.
+//   - When it does not: nothing drainLocal ever does can contend with this
+//     goroutine, so it keeps its ORIGINAL shape from before nocx-6q1uh.18 —
+//     report and look again at once, dropping a signal the owner has not
+//     yet caught up to (a full readableCh) rather than pausing for a resume
+//     that would never come, because nothing ever sends one down this path.
 func (o *sessionOwner) runReadiness(rr rawReader, readableCh chan<- struct{}) {
+	if _, needsHandshake := rr.(readInterrupter); !needsHandshake {
+		for {
+			if err := rr.WaitReadable(o.readCtx); err != nil {
+				return
+			}
+			select {
+			case readableCh <- struct{}{}:
+			default:
+			}
+		}
+	}
 	for {
-		if err := rr.WaitReadable(o.readCtx); err != nil {
+		err := rr.WaitReadable(o.readCtx)
+		if err != nil && o.readCtx.Err() != nil {
 			return
 		}
 		select {
 		case readableCh <- struct{}{}:
-		default:
-			// A signal is already pending; the owner has not caught up to it
-			// yet, and a second one would tell it nothing a drain has not
-			// already answered.
+		case <-o.readCtx.Done():
+			return
+		}
+		select {
+		case <-o.readinessResume:
+		case <-o.readCtx.Done():
+			return
 		}
 	}
 }

@@ -772,3 +772,77 @@ printf 'REPLY:%s\n' "$answer"
 		t.Fatal("the window is not closed after the shell exited")
 	}
 }
+
+// TestACommitPointDuringAnIdleReadinessWaitDoesNotDeadlock is the regression
+// test for nocx-6q1uh.18, on a real PTY: the merged-tree gate hung for 8+
+// minutes with the readiness goroutine parked in WaitReadable (idle
+// program, nothing to read) and the owner's own goroutine blocked in
+// RawReadUntilAgain, in drainLocal, called from processHead's unconditional
+// "opportunistic extra drain" for a queued item.
+//
+// The cause: internal/poll's SyscallConn().Read holds the master file's own
+// read lock for the WHOLE call it wraps, a parked wait included, not only
+// while a read(2) is actually in flight. WaitReadable and RawReadUntilAgain
+// both go through that call, on the SAME *os.File, so a readiness goroutine
+// idling in WaitReadable holds exactly the lock the owner's own drain needs
+// next — and on an idle program there is nothing left to make the fd
+// readable and release it: no output is coming until the program reads the
+// very input stuck behind this commit point, and the program cannot read
+// input this call has not yet been allowed to write.
+//
+// The shell here prints one line and then goes silent for several seconds
+// (its own sleep, not this test's) — the "idle for a while" the bead asks
+// for. The one line is this test's OBSERVABLE state change (win.changed()):
+// once it has arrived, the owner has already ingested it and — on the fixed
+// code — already told the readiness goroutine to resume, which very quickly
+// leaves it genuinely parked in WaitReadable on an fd with nothing further
+// to report until the shell wakes up. A client frame submitted into that
+// window reaches processHead's drain unconditionally, exactly the call that
+// used to hang forever; completion is watched on the submit's own result
+// channel, never on a duration — the outer timers below are failure
+// watchdogs, not the passing condition.
+func TestACommitPointDuringAnIdleReadinessWaitDoesNotDeadlock(t *testing.T) {
+	const script = `
+printf 'HELLO\n'
+sleep 5
+`
+	lp, err := pty.NewLocal(log.NewSlogAdapter(nil), pty.Config{
+		Command: "/bin/sh",
+		Args:    []string{"-c", script},
+		Cols:    80,
+		Rows:    24,
+	})
+	if err != nil {
+		t.Fatalf("start a real shell on a real pty: %v", err)
+	}
+	t.Cleanup(func() { _ = lp.Close() })
+
+	owner, _ := newTestOwner(t, lp)
+	go owner.run()
+	t.Cleanup(func() { owner.stop(true, time.Time{}) })
+
+	win := owner.win
+	changed := win.changed()
+	select {
+	case <-changed:
+		// "HELLO\n" has been ingested: the shell is now in its `sleep 5`,
+		// producing nothing further, and the readiness goroutine — resumed
+		// right after that ingest, drainLocal's own doc — has nothing left
+		// to do but park in WaitReadable for the rest of it.
+	case <-time.After(15 * time.Second):
+		t.Fatal("the shell's first line never arrived")
+	}
+
+	done, err := owner.submit(ownerItem{kind: itemClientFrame, payload: []byte("x")})
+	if err != nil {
+		t.Fatalf("submit a client frame: %v", err)
+	}
+	select {
+	case res := <-done:
+		if res.Err != nil {
+			t.Fatalf("the client frame did not complete: %v", res.Err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the commit point never completed: the owner appears to have deadlocked against the parked readiness wait")
+	}
+}

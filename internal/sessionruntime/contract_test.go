@@ -2097,10 +2097,18 @@ func TestUnknownCompletenessRefusalFailsWhenItsRuleIsRemoved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := admitKey(m, ctrl, []byte("l")); err != nil {
+	id, err := admitKey(m, ctrl, []byte("l"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, state, err := commitAndWrite(m, 0); err != nil || state != IntentStateExecuted {
+	// id, not 0: commitAndWrite(m, 0) asks IntentState for id 0, which
+	// nothing is ever admitted under (IntentStateNone is exactly "no such
+	// intent" — model_test.go's own IntentState) — a mismatch that reported
+	// state=none unconditionally, on ANY runtime, whatever the gate did.
+	// Naming the intent this test actually admitted is what makes
+	// IntentStateExecuted a claim about THAT commit rather than an id that
+	// was never in play.
+	if _, state, err := commitAndWrite(m, id); err != nil || state != IntentStateExecuted {
 		t.Fatalf("with rule %q removed the write must go through: state=%s err=%v",
 			ruleNames[ruleUnknownCompletenessRefusesWrites], intentStateName(state), err)
 	}

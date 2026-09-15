@@ -52,7 +52,12 @@ const (
 	// admitted intent and revokes control.
 	ruleFailRevokes
 	// ruleUnknownCompletenessRefusesWrites: while the runtime cannot say
-	// whether it holds the whole stream, it executes nothing.
+	// whether it holds the whole stream, it executes nothing — not only when
+	// nothing has been established yet (CompletenessUnknown), but in every
+	// state short of CompletenessComplete (nocx-6q1uh.18): output already
+	// lost (LostIngest, Evicted) or ingested without an authenticated
+	// boundary (NoFence) are each a different way of not holding a whole,
+	// validatable stream, and Commit refuses all four alike.
 	ruleUnknownCompletenessRefusesWrites
 	// ruleEncodeAgainstModes: a key is encoded against the modes the PROGRAM
 	// set, at execution, by the runtime.
@@ -412,7 +417,17 @@ func (m *model) Commit(i Intent, check func(Snapshot) error) ([]byte, error) {
 	if err := m.live(); err != nil {
 		return nil, err
 	}
-	if m.rules.on(ruleUnknownCompletenessRefusesWrites) && m.completeness == CompletenessUnknown {
+	// The gate is every state that is not [CompletenessComplete], not only
+	// [CompletenessUnknown] (nocx-6q1uh.18, mirroring runtime.go's own
+	// Commit): LostIngest and Evicted are bytes this incarnation once had
+	// that are now gone, and NoFence is ingest that is whole but has no
+	// authenticated boundary to validate a check function against — all
+	// three are exactly as unable to back a digest as the zero-value
+	// Unknown is. The rule's name stays the word the contract's schedules
+	// and mutation test already use for it; only the condition it guards
+	// widened, the same way runtime.go's did in nocx-6q1uh.15 without a new
+	// sentinel.
+	if m.rules.on(ruleUnknownCompletenessRefusesWrites) && m.completeness != CompletenessComplete {
 		return nil, ErrCompletenessUnknown
 	}
 	if len(m.queue) == 0 {

@@ -42,6 +42,13 @@ export interface ModeIndicatorOptions {
   tone: BadgeTone
   /** The registry's target id (data-target) — the id, never a derivation. */
   targetId: string
+  /** `'field'` — the composer's full-height leading segment beside CM6
+   *  (spec 2026-09-15 §4: 14px UI type, 12px inline padding, a 64px minimum
+   *  inline size, a trailing divider). Omitted keeps the base compact
+   *  look this component always had. Own every appearance difference in
+   *  mode-indicator.css under `data-variant='field'` — never a second
+   *  component. */
+  variant?: 'field'
   /** Every row the menu offers, in the order it lists them. One row when
    *  only one target is registered — the menu still opens; it is not
    *  gated on there being a choice. */
@@ -63,6 +70,7 @@ export function createModeIndicator(opts: ModeIndicatorOptions): HTMLButtonEleme
   btn.className = 'ui-badge ui-mode-indicator'
   btn.dataset.tone = opts.tone
   btn.dataset.target = opts.targetId
+  if (opts.variant) btn.dataset.variant = opts.variant
   btn.setAttribute('aria-haspopup', 'menu')
   btn.setAttribute('aria-expanded', 'false')
   btn.setAttribute('aria-label', `Enter goes to ${opts.word}. Click to choose.`)

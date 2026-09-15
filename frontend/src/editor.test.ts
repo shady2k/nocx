@@ -256,37 +256,41 @@ describe('CommandEditor', () => {
     expect(view.contentDOM.classList.contains('nocx-editor-input')).toBe(true)
   })
 
-  it('the visible input field is CM6’s own root — the gutter already holds the mode indicator (spec §6)', () => {
+  it('the field wrapper is an ancestor of CM6’s own root, never CM6’s root itself (spec 2026-09-15 §4)', () => {
     const { view, container } = setup()
-    // .nocx-editor-field is a styling hook onto .cm-editor itself, not a
-    // second wrapper: the ModeIndicator gutter (ask-entry.ts) is a CHILD of
-    // this same element, so it already contains both without introducing a
-    // new one (composer.css's border/radius/background target this class).
-    expect(view.dom.classList.contains('nocx-editor-field')).toBe(true)
-    expect(container.querySelector('.nocx-editor-field')).toBe(view.dom)
+    // The border-owning box is `.ui-composer-frame__field` (ui/composer-
+    // frame.ts) — an element CM6 never touches — not `.cm-editor` itself
+    // any more: see composer-frame.ts's file header for why (CM6 rewrites
+    // `.cm-editor`'s own class attribute, which is what made a class
+    // installed there fragile in round 3).
+    const field = container.querySelector('.ui-composer-frame__field')!
+    expect(field).not.toBeNull()
+    expect(field.contains(view.dom)).toBe(true)
+    expect(view.dom.classList.contains('nocx-editor-field')).toBe(false)
   })
 
-  it('the field class survives CM6’s own focus-driven class rewrite (round 3 regression)', () => {
-    // CM6 owns `.cm-editor`'s class attribute: `updateAttrs` recomputes it
-    // from the `editorAttributes` facet on every update whose derived
-    // string changed — in particular on the FIRST focus, which flips in
-    // `cm-focused` — via a blind `setAttribute('class', …)`. A class added
-    // by hand AFTER construction (`view.dom.classList.add(...)`) is not in
-    // that facet's output, so it survived only until the first such
-    // rewrite: present unfocused, gone the instant the field focused. The
-    // e2e suite caught it (border present unfocused, absent focused); a
-    // unit test that never dispatched a transaction after mount could not.
-    // `.nocx-editor-field` must therefore be installed as an
-    // `EditorView.editorAttributes` extension, whose `class` contribution
-    // CM6's own `combineAttrs` CONCATENATES rather than replaces.
-    const { view } = setup()
-    view.focus()
-    // Focus alone does not repaint the attribute — CM6 re-reads `hasFocus`
-    // and recomputes on its own next update cycle, so force one exactly as
-    // a real keystroke or the host's own dispatches would.
+  it('the field wrapper’s focus attribute is projected from the editor’s own focus notifications, never from CM6’s class (round 3 regression)', () => {
+    // Round 3's defect was a class added to `.cm-editor` by hand
+    // (`view.dom.classList.add(...)`) surviving only until CM6's own next
+    // `editorAttributes` recompute — present unfocused, gone the instant
+    // the field focused, because CM6 owns that attribute and rewrites it.
+    // The fix moved the border to an ancestor CM6 never writes to, driven
+    // by a plain DOM focusin/focusout listener instead — so this asserts
+    // the SAME border-affecting state survives a CM6 update cycle, without
+    // depending on CM6's own `cm-focused` class at all.
+    const { view, container } = setup()
+    const field = container.querySelector<HTMLElement>('.ui-composer-frame__field')!
+    expect(field.dataset.focused).toBe('false')
+    view.contentDOM.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
+    expect(field.dataset.focused).toBe('true')
+    // A CM6 update cycle (the same kind that flips CM6's own `cm-focused`)
+    // must not disturb this attribute — it is not derived from CM6's state.
     view.dispatch({})
-    expect(view.dom.classList.contains('cm-focused')).toBe(true) // the recompute actually ran
-    expect(view.dom.classList.contains('nocx-editor-field')).toBe(true)
+    expect(field.dataset.focused).toBe('true')
+    view.contentDOM.dispatchEvent(
+      new FocusEvent('focusout', { bubbles: true, relatedTarget: document.body }),
+    )
+    expect(field.dataset.focused).toBe('false')
   })
 
   it('multiline: the host is told when the capped row count changes', () => {
@@ -425,6 +429,64 @@ describe('CommandEditor', () => {
       expect((c as HTMLElement).dataset.variant).toBe('ghost')
       expect((c as HTMLElement).dataset.size).toBe('sm')
     }
+  })
+
+  // ── The submit control (spec 2026-09-15 §4) ───────────────────────────
+  describe('the submit control', () => {
+    const submitButton = (container: ParentNode): HTMLButtonElement =>
+      container.querySelector<HTMLButtonElement>('.ui-composer-frame__submit .ui-icon-button')!
+
+    it('is disabled on an empty draft and enabled once one exists, wearing the primary appearance only then', () => {
+      const { ed, container } = setup()
+      ed.show()
+      const btn = submitButton(container)
+      expect(btn.disabled).toBe(true)
+      expect(btn.dataset.variant).toBeUndefined()
+
+      ed.insertText('echo hi')
+      expect(btn.disabled).toBe(false)
+      expect(btn.dataset.variant).toBe('primary')
+
+      ed.clear()
+      expect(btn.disabled).toBe(true)
+      expect(btn.dataset.variant).toBeUndefined()
+    })
+
+    it('a whitespace-only draft leaves it disabled — matching the whitespace-only Enter rule', () => {
+      const { ed, container } = setup()
+      ed.show()
+      ed.insertText('   ')
+      expect(submitButton(container).disabled).toBe(true)
+    })
+
+    it('click calls submit() — the same atomic handoff Enter uses, and nothing else', () => {
+      const { ed, container, submit, order } = setup()
+      ed.show()
+      ed.insertText('echo hi')
+      submit.mockImplementation((d: string) => order.push(`visible@submit:${ed.isVisible}|${d}`))
+      submitButton(container).click()
+      expect(submit).toHaveBeenCalledWith('echo hi')
+      expect(order[0]).toBe('visible@submit:false|echo hi') // hidden BEFORE submit, same as Enter
+    })
+
+    it('the accessible name follows the active target — Run command by default, Send question once handoffToShell refuses', () => {
+      const { ed, container } = setup({ handoffToShell: () => false })
+      ed.show()
+      const btn = submitButton(container)
+      expect(btn.getAttribute('aria-label')).toBe('Send question')
+
+      // setTargetExtensions is the SAME seam terminal-content.ts already
+      // calls on every switch — re-reading handoffToShell() is what keeps
+      // the label in step without a second "which target" channel.
+      ed.setTargetExtensions([])
+      expect(btn.getAttribute('aria-label')).toBe('Send question')
+    })
+
+    it('defaults to Run command when handoffToShell is absent (every existing caller without it)', () => {
+      const { ed, container } = setup()
+      ed.show()
+      expect(submitButton(container).getAttribute('aria-label')).toBe('Run command')
+    })
   })
 
   it('rootContains returns true for the input surface and chrome (focus-bounce)', () => {

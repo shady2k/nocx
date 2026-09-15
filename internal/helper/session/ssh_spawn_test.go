@@ -116,34 +116,48 @@ func TestTheHelperOpensAShellOnTheFarHostAndTheSessionRuntimeAnswersIt(t *testin
 	}
 }
 
-// TestInteractiveAuthAnswersAPasswordOnlyServerThroughTheSynthesizedPrompt is
-// nocx-y6fh7 item 4's own proof: the interactive rung must reach a server
-// that speaks ONLY `password` (newSSHFixture registers no
+// TestInteractiveAuthAnswersAPasswordOnlyServerThroughTheConnectionPasswordAsk
+// is nocx-y6fh7 item 4's own proof, round 3: the interactive rung must reach
+// a server that speaks ONLY `password` (newSSHFixture registers no
 // KeyboardInteractiveCallback at all — the same shape as cmd/e2e-sshd and
 // most real sshd configurations), because that is what
-// connection-password.spec.ts:202 measured against a live helper before this
-// fix: "ssh: unable to authenticate, attempted methods [none], no supported
-// methods remain" — gossh never even asked its keyboard-interactive callback,
-// since the server's own supported-method list named only `password`.
+// connection-password.spec.ts:202 measured against a live helper before the
+// first fix: "ssh: unable to authenticate, attempted methods [none], no
+// supported methods remain" — gossh never even asked its keyboard-interactive
+// callback, since the server's own supported-method list named only
+// `password`.
 //
-// The profile names nothing (SSHAuthInteractive, no credential — exactly
-// resolveCredential's "ask a person" rung), and the person is the SAME
-// scripted coordinator every other spawn in this file uses, answering
-// through the ONE relay (OpPrompt) regardless of which ssh method the
-// server's challenge arrived on.
-func TestInteractiveAuthAnswersAPasswordOnlyServerThroughTheSynthesizedPrompt(t *testing.T) {
+// Round 3 narrows WHICH relay answers it: a bare `password` challenge is a
+// DIFFERENT reverse op from a server's own keyboard-interactive questions
+// (OpPasswordPrompt, not OpPrompt), and it carries the connection's own
+// identity — ConnectionName and ProfileID, echoed unchanged from the
+// destination this spawn named — so the coordinator can answer through its
+// existing "Password for {profile}" ask rather than a profile-blind box.
+func TestInteractiveAuthAnswersAPasswordOnlyServerThroughTheConnectionPasswordAsk(t *testing.T) {
 	f := newSSHFixture(t, "pw", "printf 'ALIVE\n'; cat")
 	coord := &sshCoordinator{password: "pw", verdict: proto.HostKeyTrusted, fingerprint: f.fingerprint()}
 	stand := newSSHStand(t, f, coord)
 
 	p := stand.spawnParams(t, proto.SSHModeRaw)
 	p.Destination.Identity = proto.SSHIdentity{Auth: proto.SSHAuthInteractive}
+	p.Destination.ConnectionName = "Password Proof"
+	p.Destination.ProfileID = "profile-pw-1"
 
 	if _, err := stand.spawn(t, p); err != nil {
 		t.Fatalf("spawn-ssh with the interactive rung against a password-only server: %v", err)
 	}
-	if asked := coord.asked(); !contains(asked, proto.OpPrompt) {
-		t.Fatalf("the helper never relayed a live ask to the coordinator; it asked %v", asked)
+	if asked := coord.asked(); contains(asked, proto.OpPrompt) {
+		t.Fatalf("a bare `password` challenge was relayed through OpPrompt; it must go through OpPasswordPrompt: %v", asked)
+	}
+	if asked := coord.asked(); !contains(asked, proto.OpPasswordPrompt) {
+		t.Fatalf("the helper never asked the coordinator's own connection-password ask; it asked %v", asked)
+	}
+	prompts := coord.passwordPromptsAsked()
+	if len(prompts) != 1 {
+		t.Fatalf("recorded %d password-prompt asks, want 1: %+v", len(prompts), prompts)
+	}
+	if prompts[0].Connection != "Password Proof" || prompts[0].ProfileID != "profile-pw-1" {
+		t.Fatalf("password-prompt params = %+v, want the connection's own identity echoed back", prompts[0])
 	}
 }
 
@@ -194,6 +208,15 @@ func TestKeepaliveReportsAFailingRoundThenEndsTheSessionLikeAnyOtherExit(t *test
 	exit := stand.exits.waitExit(t, id)
 	if exit.Status.Code != -1 {
 		t.Fatalf("exit code = %d, want -1: the connection was closed by the prober giving up, not by the far command exiting", exit.Status.Code)
+	}
+	// nocx-y6fh7 item 6, round 3: this exit must be distinguishable from the
+	// far side hanging up with no status at all (TestAChannelLostMidSession
+	// EndsTheSessionWithAStatus, which carries no cause and is unchanged) —
+	// the coordinator's ExitOutcome maps THIS one to Interrupted so the pane
+	// is offered the way back, and it can only do that if the wire names
+	// the cause.
+	if exit.Status.Cause != proto.ExitCauseKeepaliveLost {
+		t.Fatalf("exit cause = %q, want %q: a keepalive give-up is connection loss, not a bare exit", exit.Status.Cause, proto.ExitCauseKeepaliveLost)
 	}
 }
 

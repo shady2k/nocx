@@ -1394,7 +1394,7 @@ func (s *Service) closeSession(p proto.CloseSessionParams) error {
 	if err != nil {
 		return err
 	}
-	s.removeSession(hs)
+	s.removeSession(hs, "close-session")
 	return nil
 }
 
@@ -1406,7 +1406,21 @@ func (s *Service) closeSession(p proto.CloseSessionParams) error {
 // budget and key claim in the same critical section that removes it —
 // exactly closeSession's own contract, restated here as the single
 // implementation.
-func (s *Service) removeSession(hs *hostSession) {
+//
+// reason names WHICH of the three callers reached this session — logged
+// rather than left implicit, because the coordinator's own "session closed"
+// line is deliberately the SAME phrase for its own two verbs (Reg.Close and
+// Reg.EndSession, session.go's own comment), so this is the one place a
+// helper-hosted session's actual end can be told apart from a mere
+// coordinator detach at all (nocx-y6fh7 item D, round 3): "close-session"
+// means a coordinator explicitly asked (a pane leaving the layout, a shell
+// exit persisted, an explicit close, a failed open, a killed participant —
+// every proto.OpCloseSession caller collapses to this one reason on this
+// side of the wire, because the helper cannot see which of them asked);
+// "unclaimed-ttl" and "budget-pressure" are this helper's own housekeeping,
+// never a coordinator's doing.
+func (s *Service) removeSession(hs *hostSession, reason string) {
+	s.log.Info("helper: ending a host session", "session", hs.id.Session, "reason", reason)
 	hs.stop()
 
 	s.mu.Lock()
@@ -1454,7 +1468,7 @@ func (s *Service) sweepExpired() {
 			continue
 		}
 		if now.Sub(at) >= ttl {
-			s.removeSession(hs)
+			s.removeSession(hs, "unclaimed-ttl")
 		}
 	}
 }
@@ -1501,7 +1515,7 @@ func (s *Service) evictForBudget(reserved int64) {
 		if fits {
 			return
 		}
-		s.removeSession(c.hs)
+		s.removeSession(c.hs, "budget-pressure")
 	}
 }
 

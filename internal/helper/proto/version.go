@@ -207,4 +207,18 @@ package proto
 // report. Two peers that disagree refuse each other at hello in both
 // directions, which is what makes the number the whole of the compatibility
 // story.
+//
+// Nothing has shipped at 15, so the round that follows widens it rather than
+// bumping again (nocx-y6fh7, round 3): `ssh.destination` gained
+// `connectionName` and `profileId` — both echoed back unchanged on the new
+// `password-prompt` reverse op, which is how a person-asked PASSWORD
+// correlates to the connection it belongs to and reaches the coordinator's
+// existing "Password for {profile}" ask (ADR-0017) instead of the bare
+// `prompt` relay, which stays the server's own keyboard-interactive
+// questions and nothing else. And `session.spawn-ssh`'s exit status gained
+// `cause`, a closed set naming WHY a session ended: a keepalive giving up is
+// connection loss, not a clean exit, and `cause` is what lets ExitOutcome
+// tell that apart from the far side hanging up with no status at all
+// (TestAChannelLostMidSessionEndsTheSessionWithAStatus), which stays exactly
+// as it was.
 const Version = "15"

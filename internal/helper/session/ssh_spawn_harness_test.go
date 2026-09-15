@@ -1034,9 +1034,19 @@ type sshCoordinator struct {
 	// refusal with its own code, and not an internal error.
 	sealed bool
 
-	mu    sync.Mutex
-	ops   []string
-	trust []proto.TrustHostKeyParams
+	mu              sync.Mutex
+	ops             []string
+	trust           []proto.TrustHostKeyParams
+	passwordPrompts []proto.PasswordPromptParams
+}
+
+// passwordPromptsAsked reports the password-prompt requests this coordinator
+// answered, in order — the evidence that a connection's own profile identity
+// (nocx-y6fh7 item 4, round 3) crossed on the ask.
+func (c *sshCoordinator) passwordPromptsAsked() []proto.PasswordPromptParams {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]proto.PasswordPromptParams(nil), c.passwordPrompts...)
 }
 
 func (c *sshCoordinator) registry() *client.ReverseRegistry {
@@ -1061,15 +1071,25 @@ func (c *sshCoordinator) registry() *client.ReverseRegistry {
 			return nil, err
 		}
 		// The scripted coordinator's whole vocabulary for a live ask is the
-		// one secret it was built with (nocx-y6fh7 item 4): whatever the
-		// server's challenge asked — its own keyboard-interactive questions,
-		// or the synthesized single "Password:" question a bare `password`
-		// method carries — the answer is this fixture's password, in order.
+		// one secret it was built with (nocx-y6fh7 item 4): the server's own
+		// keyboard-interactive questions are answered with this fixture's
+		// password, in order.
 		answers := make([]string, len(p.Prompts))
 		for i := range answers {
 			answers[i] = c.password
 		}
 		return proto.PromptResult{Answers: answers}, nil
+	})
+	r.Register(proto.ServiceSSH, proto.OpPasswordPrompt, func(_ context.Context, raw json.RawMessage) (any, error) {
+		c.record(proto.OpPasswordPrompt)
+		var p proto.PasswordPromptParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		c.mu.Lock()
+		c.passwordPrompts = append(c.passwordPrompts, p)
+		c.mu.Unlock()
+		return proto.PasswordPromptResult{Password: c.password}, nil
 	})
 	r.Register(proto.ServiceSSH, proto.OpTrustHostKey, func(_ context.Context, raw json.RawMessage) (any, error) {
 		c.record(proto.OpTrustHostKey)

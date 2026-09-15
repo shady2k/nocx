@@ -16,6 +16,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -205,6 +206,43 @@ func oneShotWriteSession(t *testing.T) (*client.Client, *recordingConn, client.S
 	return c, rec, entry
 }
 
+// waitStableSnapshot reads snapshots until two consecutive reads agree on
+// the whole frame (content AND cursor — the same two facts checkToken's
+// digest covers), and returns the second of that agreeing pair.
+//
+// It is a WAIT ON OBSERVABLE STATE, not a duration (AGENTS.md: "a test may
+// not depend on timing... wait on an observable state change"): the shell
+// this test spawns is real and keeps producing output on its own schedule
+// for a while after the pty exists, and "nothing is still arriving" is
+// exactly what two identical reads in a row means. The deadline below is a
+// FAILSAFE against a shell that never settles, not the success condition —
+// the same shape every bounded wait elsewhere in this package already uses
+// (a select on an event with a t.Fatal on the side that only fires when
+// something is actually wrong).
+func waitStableSnapshot(t *testing.T, c *client.Client, id client.HostSessionID) proto.SnapshotResult {
+	t.Helper()
+	ctx := context.Background()
+	prev, err := c.Snapshot(ctx, id)
+	if err != nil {
+		t.Fatalf("client.Snapshot: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		time.Sleep(5 * time.Millisecond)
+		cur, err := c.Snapshot(ctx, id)
+		if err != nil {
+			t.Fatalf("client.Snapshot: %v", err)
+		}
+		if reflect.DeepEqual(cur.Frame, prev.Frame) {
+			return cur
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the shell's screen never settled within %s; last two frames still disagreed", 5*time.Second)
+		}
+		prev = cur
+	}
+}
+
 // TestTheOneShotWritePathConformsToItsContractOverTheWire drives one real
 // session through all five ops in the order a coordinator actually uses
 // them: read a snapshot, mint a target from it, spend the target, poll its
@@ -213,6 +251,7 @@ func oneShotWriteSession(t *testing.T) (*client.Client, *recordingConn, client.S
 func TestTheOneShotWritePathConformsToItsContractOverTheWire(t *testing.T) {
 	c, rec, entry := oneShotWriteSession(t)
 	ctx := context.Background()
+	var err error
 	session := proto.HostSessionID{
 		Generation: proto.GenerationID(entry.HostSessionID.Generation),
 		Session:    entry.HostSessionID.Session,
@@ -220,18 +259,28 @@ func TestTheOneShotWritePathConformsToItsContractOverTheWire(t *testing.T) {
 
 	// --- snapshot ---
 	snapParams := proto.SnapshotParams{Session: session}
-	if err := validateHelperJSON(loadHelperSchema(t, "session.snapshot.params.schema.json"), mustMarshal(t, snapParams)); err != nil {
+	if err = validateHelperJSON(loadHelperSchema(t, "session.snapshot.params.schema.json"), mustMarshal(t, snapParams)); err != nil {
 		t.Fatalf("snapshot params do not satisfy the contract: %v", err)
 	}
-	// ONE call, through the typed client method itself — snapshot ids are
-	// minted fresh per call (hs.snapNext++, session.go), so calling this op
-	// twice (once raw to capture the wire, once more through c.Snapshot)
-	// would compare two DIFFERENT live snapshots and always disagree; rec
-	// captures the SAME response c.Snapshot itself decoded.
-	clientSnap, err := c.Snapshot(ctx, entry.HostSessionID)
-	if err != nil {
-		t.Fatalf("client.Snapshot: %v", err)
-	}
+	// A real login shell keeps printing after the pty exists — a prompt
+	// redraw, a startup file's own output — asynchronously with everything
+	// this test does. Minting a target against a screen that is still
+	// settling races that output: the token's digest is taken from THIS
+	// read, checkToken (tokens.go) recomputes it from whatever the screen
+	// holds at commit, and content that arrived in between is an honest
+	// stale_target — the mechanism working as designed against an unquiet
+	// terminal, not a defect in it (measured: a handful of failures in
+	// several dozen runs, gone once the read waits for the shell to go
+	// quiet first). waitStableSnapshot is that wait: it reads until two
+	// consecutive reads agree, which is what "nothing is still arriving"
+	// actually means, rather than a duration nobody could size correctly
+	// for a shell's own startup files.
+	//
+	// Each call is still through the typed client method itself — snapshot
+	// ids are minted fresh per call (hs.snapNext++, session.go), so a raw
+	// capture of one and a decode of a different one would always disagree;
+	// rec captures the SAME response the STABLE call itself decoded.
+	clientSnap := waitStableSnapshot(t, c, entry.HostSessionID)
 	snapRaw := rec.lastResult(t)
 	if err = validateHelperJSON(loadHelperSchema(t, "session.snapshot.schema.json"), snapRaw); err != nil {
 		t.Fatalf("the snapshot result off the socket does not satisfy its contract:\n%v\n\npayload was:\n%s", err, snapRaw)

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -410,6 +411,31 @@ func TestAnIntentBehindABlockedClientFrameValidatesAtTheHead(t *testing.T) {
 // TestAClientFrameAndAnIntentNeverInterleave
 // ---------------------------------------------------------------------------
 
+// submitRetryingBusy resubmits on errBusy until the item is accepted.
+//
+// submit's own contract (owner.go) is that a full queue is answered at once
+// rather than by blocking, and `busy` is a NAMED wire refusal (tokens.go's
+// causeOf) a real caller is expected to retry — the same rung an agent's
+// intent submission answers with under load. This test drives 1000
+// unthrottled concurrent submitters against a 64-deep queue (intentQueueMax)
+// specifically to race the owner's ordering, and a transient `busy` there is
+// the documented behaviour of a queue that filled, not a defect in it — the
+// invariant this test asserts is ORDERING of what is accepted, never that a
+// bursty producer is never told to slow down. Retrying on the caller's own
+// side is therefore not a timing workaround; it is what the API asks of it.
+func submitRetryingBusy(o *sessionOwner, it ownerItem) (<-chan ownerResult, error) {
+	for {
+		done, err := o.submit(it)
+		if err == nil {
+			return done, nil
+		}
+		if !errors.Is(err, errBusy) {
+			return nil, err
+		}
+		runtime.Gosched()
+	}
+}
+
 // TestAClientFrameAndAnIntentNeverInterleave drives 1000 rounds of one client
 // frame immediately followed by one intent, submitted from a concurrent
 // goroutine so the two races the owner's queue against itself, and asserts
@@ -428,7 +454,7 @@ func TestAClientFrameAndAnIntentNeverInterleave(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			done, err := owner.submit(ownerItem{
+			done, err := submitRetryingBusy(owner, ownerItem{
 				kind:   itemIntent,
 				intent: &pendingIntent{Intent: keyIntent(rt, ctrl, "Enter")},
 			})
@@ -438,7 +464,7 @@ func TestAClientFrameAndAnIntentNeverInterleave(t *testing.T) {
 			}
 			<-done
 		}()
-		frameDone, err := owner.submit(ownerItem{kind: itemClientFrame, payload: []byte("F")})
+		frameDone, err := submitRetryingBusy(owner, ownerItem{kind: itemClientFrame, payload: []byte("F")})
 		if err != nil {
 			t.Fatalf("submit frame %d: %v", i, err)
 		}

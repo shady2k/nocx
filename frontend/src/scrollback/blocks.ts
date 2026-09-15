@@ -115,8 +115,11 @@ type FenceTimer = ReturnType<typeof setTimeout>
 /** A block status that has left `running` — the terminal set the DOM
  *  freeze and the block record share. The LOGICAL freeze produces it and
  *  hands it to the VISUAL freeze, so serialization is typed to follow a
- *  terminalized record. */
-export type FrozenStatus = 'success' | 'failure' | 'entered' | 'unknown'
+ *  terminalized record. `cancelled` (nocx-9bpeq.19) is the live path's own
+ *  outcome for a stopped command — unlike `unreconciled`, which the LIVE
+ *  path can never produce, this one now can: `freezeFromAttempt` derives it
+ *  from `BlockRecord.stopRequested`, never from the exit code alone. */
+export type FrozenStatus = 'success' | 'failure' | 'cancelled' | 'entered' | 'unknown'
 
 /** Where a block is, as its HEADER reports it (nocx-hoeq3).
  *
@@ -313,6 +316,15 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
         // the rule is about the STATUS and a later exit code arriving must
         // not silently start painting one.
         if (status === 'entered' || status === 'unreconciled' || exitCode === null) return null
+        // A command the person stopped is cancelled, never failed
+        // (nocx-9bpeq.19, spec 2026-09-14 §3.1/§3.3): the danger tint and
+        // the bar are for a program's OWN failure, and SIGINT's 130 (or the
+        // escalation ladder's own 143/137) is not that just because it is
+        // nonzero. `status` already carries the answer here — the block was
+        // built or frozen as 'cancelled' by the one place that knows
+        // (BlockManager.freezeFromAttempt) — so this checks it before ever
+        // looking at the code.
+        if (status === 'cancelled') return { outcome: 'cancelled', text: 'Stopped' }
         // Capital E (spec 2026-09-15 §4): the status group now reads in the
         // mono face beside the command line, where a lowercase word read as
         // a stray shell token rather than as the header's own word.
@@ -574,8 +586,26 @@ export interface BlockRecord {
    *  neither success nor failure, no exit code — the block the ssh command
    *  froze into when the remote session began. 'unknown' = the bound
    *  attempt was abandoned (ADR-0024 §5): frozen, never successful, no
-   *  reported exit code. */
-  status: 'running' | 'success' | 'failure' | 'entered' | 'unknown'
+   *  reported exit code. 'cancelled' = the person stopped it (nocx-9bpeq.19)
+   *  — SIGINT's 130 and the escalation ladder's own 143/137 are otherwise
+   *  indistinguishable from the program's own failure, since the backend's
+   *  completion fact (contracts/lifecycle.changed.schema.json's `attempt`)
+   *  states only `exitCode`, never a cause. */
+  status: 'running' | 'success' | 'failure' | 'cancelled' | 'entered' | 'unknown'
+  /** Whether THIS block's running command was sent a stop request through
+   *  nocx (nocx-9bpeq.19) — the Stop button or the ⋮ menu's Stop item,
+   *  never Ctrl+C's plain interrupt. Recorded by terminal-content.ts's
+   *  `signalActiveCommand` at the moment the gesture fires, before the
+   *  round trip: the backend states no "stopped by request" fact on a
+   *  completed attempt, and the completion notification can reach the
+   *  renderer before the signal call's own response does over the same
+   *  connection, so waiting for a confirmed `delivered` would still race a
+   *  freeze that got there first. Reverted to false if the outcome turns
+   *  out not to be `delivered` (nothing was actually done to the process),
+   *  so a stop that never happened cannot mislabel this block's real,
+   *  possibly much later, completion. Read once, by `freezeFromAttempt`,
+   *  to turn a nonzero exit into `cancelled` instead of `failure`. */
+  stopRequested: boolean
   /** Run once, after the VISUAL freeze has replaced `el`.
    *
    *  The two freezes are separate moments (u7uh.8): the logical one lands on
@@ -1591,11 +1621,14 @@ export function createRunningBlock(
 /**
  * Freeze a running block: replace it with a frozen version.
  *
- * `status` is the presentation, never derived from the exit code: 'entered'
- * (N6) freezes on environment entry — neither success nor failure, no exit
- * code — and the old exitCode === null → 'failure' mapping is exactly the
- * bug this must not inherit. The D path passes 'success'/'failure' from the
- * real code; entry passes 'entered' with a null code.
+ * `status` is the presentation, never derived from the exit code alone:
+ * 'entered' (N6) freezes on environment entry — neither success nor
+ * failure, no exit code — and the old exitCode === null → 'failure' mapping
+ * is exactly the bug this must not inherit. 'cancelled' (nocx-9bpeq.19) is
+ * the other exception: a nonzero exit the caller already knows was caused
+ * by a stop request through nocx, never derived here either. The D path
+ * passes 'success'/'failure'/'cancelled' from `freezeFromAttempt`'s own
+ * derivation; entry passes 'entered' with a null code.
  */
 export function freezeBlock(
   el: HTMLElement,
@@ -1609,7 +1642,7 @@ export function freezeBlock(
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
-  status: 'success' | 'failure' | 'entered' | 'unknown',
+  status: 'success' | 'failure' | 'cancelled' | 'entered' | 'unknown',
   author: CommandAuthor = 'shell',
   menuActions?: RunningBlockActions,
   entryId?: string,
@@ -2232,6 +2265,7 @@ export class BlockManager {
       outputStart,
       endLine: startLine,
       cReceived: false,
+      stopRequested: false,
       el,
     }
     this._blocks.push(rec)
@@ -2409,11 +2443,17 @@ export class BlockManager {
     if (attempt.state !== 'completed') return null
     if (this._attemptId !== attempt.id) return null
     const code = attempt.exitCode ?? null
-    const status = code === 0 ? 'success' : 'failure'
     const fence = attempt.fence
     const sighted = fence !== undefined ? this._fences.get(fence) : undefined
     const rec = this._runningBlock
     if (!rec) return null
+    // A nonzero exit is a failure UNLESS this block was sent a stop request
+    // through nocx (nocx-9bpeq.19): the backend's own completion fact never
+    // says why the process died — SIGINT's 130 and the escalation ladder's
+    // own 143/137 read exactly like a program's own failure otherwise —
+    // so `stopRequested` (set by terminal-content.ts's `signalActiveCommand`
+    // at the moment of the gesture) is the one fact that tells them apart.
+    const status = code === 0 ? 'success' : rec.stopRequested ? 'cancelled' : 'failure'
 
     if (this._pendingFence !== null) {
       // Another completion wants the slot while one is pending. The pty

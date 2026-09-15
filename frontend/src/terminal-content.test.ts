@@ -10593,6 +10593,146 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     }
   })
+
+  // ── a stopped command is cancelled, never failed (nocx-9bpeq.19) ─────────
+  //
+  // The backend's own completion fact (contracts/lifecycle.changed.
+  // schema.json's `attempt`) states only exitCode, completedAt and fence —
+  // never a cause — so SIGINT's 130 and a program's own exit 130 are
+  // otherwise indistinguishable. These two tests are the pairing the bead
+  // asks for: the SAME exit code, through the SAME completion path, reading
+  // two different ways depending on whether nocx actually sent the signal.
+
+  it('a command stopped through the pane settles as cancelled, never failed', async () => {
+    const client = makeClient()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      const handler = lifecycleHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('sleep 30')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-stop-19',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'sleep 30',
+        },
+      })
+      const rec = scrollbackFor(content).blockManager.runningBlock!
+      expect(rec).not.toBeNull()
+
+      // The REAL stop path: the Stop menu item, signalActiveCommand, the
+      // pane's session.signal — not a status flipped by hand.
+      itemNamed(runningBlockMenu(content), 'stop')!.click()
+      expect(signalsSent(content)).toEqual(['stop'])
+
+      // The escalation ladder's SIGINT rung. No fence: the completion
+      // carries none here, same as a real one the render-fence rendezvous
+      // has not sighted yet — the deferral window settles the visual freeze
+      // on its own (FENCE_DEFER_MS), which `rec.status` does not wait for.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-stop-19',
+          state: 'completed',
+          exitCode: 130,
+          completedAt: '2026-09-15T00:00:00Z',
+        },
+      })
+      expect(rec.status).toBe('cancelled')
+
+      await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
+      expect(rec.el.dataset.outcome).not.toBe('failure')
+      expect(rec.el.dataset.outcome).toBe('cancelled')
+      expect(rec.el.classList.contains('cmd-block')).toBe(true)
+      expect(
+        rec.el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])')
+          ?.textContent,
+      ).toBe('Stopped')
+    } finally {
+      restore()
+      teardown()
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    }
+  })
+
+  it('a program that exits 130 on its own, with no stop request, still reads as failure', async () => {
+    const client = makeClient()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      const handler = lifecycleHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('sh -c "exit 130"')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-self-19',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'sh -c "exit 130"',
+        },
+      })
+      const rec = scrollbackFor(content).blockManager.runningBlock!
+      expect(rec).not.toBeNull()
+
+      // No Stop, no ⋮ item, no session.signal at all — the SAME exit code
+      // the test above delivers, but nothing in nocx asked for it.
+      expect(signalsSent(content)).toEqual([])
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-self-19',
+          state: 'completed',
+          exitCode: 130,
+          completedAt: '2026-09-15T00:00:00Z',
+        },
+      })
+      expect(rec.status).toBe('failure')
+
+      await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
+      expect(rec.el.dataset.outcome).toBe('failure')
+      expect(
+        rec.el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])')
+          ?.textContent,
+      ).toBe('Exit 130')
+    } finally {
+      restore()
+      teardown()
+    }
+  })
 })
 
 // ═══════════════════════════════════════════════════════════════════════════

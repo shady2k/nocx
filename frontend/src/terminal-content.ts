@@ -6345,6 +6345,22 @@ export class TerminalContent extends BasePaneContent {
     const session = this.session
     if (session === null || !this.hasRunningCommand()) return
     const targetBlock = this.scrollback?.blockManager.runningBlock ?? null
+    // Recorded EAGERLY, before the round trip (nocx-9bpeq.19): the backend
+    // states no "stopped by request" fact on a completed attempt —
+    // contracts/lifecycle.changed.schema.json's `attempt` carries only
+    // `exitCode`, `completedAt` and `fence`, never a cause — so this is the
+    // renderer's own evidence, and the completion notification for this
+    // exact attempt can reach the renderer before session.signal's own
+    // response does, over the same connection. Waiting for a confirmed
+    // `delivered` would still lose that race to a freeze that got there
+    // first; marking at the gesture itself cannot, since nothing async has
+    // happened yet. Reverted below if the outcome turns out not to be
+    // `delivered` — a stop that never reached anything must not mislabel
+    // whatever this block eventually, possibly much later, completes with.
+    if (signal === 'stop' && targetBlock) targetBlock.stopRequested = true
+    const revertStopRequested = (): void => {
+      if (signal === 'stop' && targetBlock) targetBlock.stopRequested = false
+    }
     void session.signal(signal).then(
       (result) => {
         // A SWITCH, AND EXHAUSTIVE ON PURPOSE. The outcome set is closed by
@@ -6363,6 +6379,7 @@ export class TerminalContent extends BasePaneContent {
             }
             return
           case 'unsupported':
+            revertStopRequested()
             message =
               'This command is running on the remote host, which nocx cannot signal from here.'
             break
@@ -6371,14 +6388,17 @@ export class TerminalContent extends BasePaneContent {
             // not kill, Ctrl+C is precisely what the backend just sent, and
             // recommending the gesture that has already failed reads as the
             // app not knowing what it did.
+            revertStopRequested()
             message =
               'The command is still recorded as running and nocx could not stop it — the program shares the shell it was started from, so stopping it by force would take the shell too. Use the program’s own way out.'
             break
           case 'nothing-running':
+            revertStopRequested()
             message = 'Nothing is running in this pane any more, so there was nothing to stop.'
             break
           default: {
             const unreachable: never = result.outcome
+            revertStopRequested()
             log.warn('nocx: session.signal returned an outcome this build does not know', {
               outcome: String(unreachable),
             })
@@ -6388,6 +6408,7 @@ export class TerminalContent extends BasePaneContent {
         showToast({ level: 'warning', message })
       },
       (err: unknown) => {
+        revertStopRequested()
         log.warn('nocx: session.signal failed', {
           message: err instanceof Error ? err.message : String(err),
         })
@@ -7289,14 +7310,29 @@ export class TerminalContent extends BasePaneContent {
     }
     const body = {
       exitCode: rec.exitCode,
-      status: rec.status === 'running' ? ('unknown' as const) : rec.status,
+      // `AgentRunCompletion.status` deliberately has no 'cancelled' of its
+      // own (run-command.ts): "the stopped fact is explicit renderer
+      // evidence and is never inferred from the exit code" is the SAME
+      // separation nocx-9bpeq.19 draws for the block header, the other
+      // direction — the model reads the raw exit-code truth (nonzero, so
+      // 'failure') plus `stopped` below, rather than one word standing in
+      // for both facts the way the header's `data-outcome` does.
+      status:
+        rec.status === 'running'
+          ? ('unknown' as const)
+          : rec.status === 'cancelled'
+            ? ('failure' as const)
+            : rec.status,
       stopped: waiter.stopped,
       total: lines.length,
       start: 0,
       end,
       text: lines.slice(0, end).join('\n'),
     }
-    if (rec.status !== 'success' && rec.status !== 'failure') {
+    // A cancelled block completed exactly like any other — history.record
+    // already ran for it — so it waits for the stored entry the same way
+    // success/failure do; only 'entered'/'unknown' never got one.
+    if (rec.status !== 'success' && rec.status !== 'failure' && rec.status !== 'cancelled') {
       this.runEntryIds.delete(waiter.ledgerId)
       waiter.resolve({ entryId: '', ...body })
       return

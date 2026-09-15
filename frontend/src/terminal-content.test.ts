@@ -4972,10 +4972,17 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
 
   const cardIn = (tab: { pane: HTMLElement }) => tab.pane.querySelector('.nocx-integration-notice')
 
+  // A button's label is its visible text, or — for an icon-only control like
+  // the dismiss cross — its accessible name (aria-label). A glyph is not text
+  // (nocx-9bpeq.5): the cross renders a CloseIcon now, so textContent alone
+  // would read as empty rather than as the button it is.
+  const buttonLabel = (b: HTMLButtonElement): string =>
+    (b.textContent ?? '').trim() || (b.getAttribute('aria-label') ?? '')
+
   /** Press one of the card's own actions, by the label the user reads. */
   const press = (tab: { pane: HTMLElement }, label: string): void => {
     const found = [...cardIn(tab)!.querySelectorAll('button')].find(
-      (b) => (b.textContent ?? '').trim() === label,
+      (b) => buttonLabel(b) === label,
     )
     if (!found) throw new Error(`no card action labelled ${label}`)
     found.click()
@@ -5038,7 +5045,7 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
       expect(first.tab.pane.querySelector('.ui-status-card__title')!.textContent).toBe(
         'Not integrated',
       )
-      press(first.tab, '×')
+      press(first.tab, 'Dismiss')
     } finally {
       first.teardown()
     }
@@ -5091,7 +5098,7 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
     )
     try {
       publish(client)
-      press(tab, '×')
+      press(tab, 'Dismiss')
       expect(cardIn(tab)).toBeNull()
       publish(client)
       expect(cardIn(tab)).toBeNull()
@@ -5111,7 +5118,7 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
     )
     try {
       publish(client)
-      press(tab, '×')
+      press(tab, 'Dismiss')
       publish(client, { status: 'lost', reason: 'channel-lost' })
       expect(cardIn(tab)).not.toBeNull()
     } finally {
@@ -5206,7 +5213,7 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
     )
     try {
       publish(client)
-      press(tab, '×')
+      press(tab, 'Dismiss')
       expect(cardIn(tab)).toBeNull()
       // The mark is the state of the session, not a notification: dismissing
       // the card says nothing about whether the session is integrated.
@@ -5246,7 +5253,7 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
     const first = await mountTerminal(makeClipboard(), { attachToDocument: true }, clientA)
     try {
       publish(clientA)
-      press(first.tab, '×')
+      press(first.tab, 'Dismiss')
     } finally {
       first.teardown()
     }

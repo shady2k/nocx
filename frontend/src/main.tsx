@@ -76,6 +76,7 @@ import { registerSkillSurface } from './skill-view'
 import { registerTerminalLinks } from './terminal-links'
 import type { LinkPathProbe } from './terminal-links/open'
 import { createSessionHomeSource } from './where/session-home'
+import { createBranchSource } from './where/branch-source'
 import type { FilesStatError } from './generated/files.stat.error'
 import { createUrlOpener } from './open-url'
 import { createFilesView, FILES_VIEW_ID } from './files/files-view'
@@ -929,6 +930,19 @@ function main(): void {
     notify: (message) => showToast({ message, level: 'warning' }),
     sessionHome,
   })
+  // nocx-9bpeq.16 wires the two sources into the prompt line: the ONE
+  // session-home instance above (so a session's home is opened once, no
+  // matter which pane or the link opener asks first), and a branch-source
+  // FACTORY — never a shared instance, because a branch source is
+  // per-pane (where/branch-source.ts's own header comment) — bound to the
+  // same tracked git open/close the panel's own binding-liveness registry
+  // already watches, so an ambient branch read participates in it too.
+  tm.sessionHome = sessionHome
+  tm.createBranchSource = () =>
+    createBranchSource({
+      open: (sessionId, cwd) => gitServicesTracked.open(sessionId, cwd),
+      close: (bindingId) => gitServicesTracked.close(bindingId),
+    })
   const gitView = createGitView({
     services: gitServicesTracked,
     store: gitStore,

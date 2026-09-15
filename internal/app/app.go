@@ -144,6 +144,25 @@ type App struct {
 	// which generation was installed, and Shutdown is what releases its
 	// connection — the sessions behind it survive both, which is the epic.
 	localHelper *localHelperOpener
+	// sessionReconciler and sessionRoutes are reconcileSessions's own two
+	// inputs (nocx-73aln), held here rather than closed over at New because
+	// the CALL moved to Start. A REMOTE session's re-adoption dials THIS
+	// machine's own local helper for its lane's carrier
+	// (nocx-50w7p.10 — the coordinator itself opens no ssh exec lane any
+	// more), and that carrier answers nothing until installLocalHelper has
+	// run: before it, localHelperOpener.installed is empty and every such
+	// lane refuses with "this machine's nocx helper is not installed" — the
+	// refusal a re-adoption attempt met at New, silently, because New runs
+	// before Start installs anything. A carried-over LOCAL session was
+	// unaffected (its ask dials the generation the binding names, on a probe
+	// connection that may not start one — routeDir's own doc), which is why
+	// this went unnoticed until a REMOTE one crossed a restart. Reconciling
+	// from Start, after installLocalHelper and still before Transport.Start
+	// begins listening, keeps the "the pass finishes before a client can ask"
+	// invariant reconcileSessions's own doc names, while giving it a carrier
+	// that can actually answer.
+	sessionReconciler content.SessionReconciler
+	sessionRoutes     hostRouteResolver
 	// paneViews is the store every observation, typing decision and worker
 	// read goes through (nocx-ygxjv.3): the composition root's object, held
 	// here for the same reason the enroller and the registry are.
@@ -2347,17 +2366,26 @@ func New(opts ...Option) (*App, error) {
 	// The route is the local opener itself, which already owns every fact of
 	// this machine: the endpoint directory Start's install and the ask both
 	// need, the generations it may dial, and the ONE connection to this
-	// machine's daemon that every pane — and every frame read — rides. The
-	// GENERATION comes off each binding rather than from here: a session is
-	// judged by the daemon it was spawned by, and the install that would name
-	// the current one has not run yet at this line (Start does it).
-	reconcileSessions(ctx, contentDB.Reconcile(),
-		helperReg.inventories(),
-		&readoptPass{
-			registry: helperReg, routes: resolver, adopter: tp,
-			local: localOpener,
-		},
-		content.DefaultUnreconciledRetention, slogger)
+	// machine's daemon that every pane — and every frame read — rides.
+	//
+	// THE CALL ITSELF RUNS FROM START, NOT HERE (nocx-73aln). It used to run
+	// at this line, on the reasoning that only the GENERATION a verdict is
+	// judged by comes off each binding rather than off this process's own
+	// install — true for judging, but nocx-50w7p.10 later made a REMOTE
+	// session's re-adoption also OPEN A LANE through this machine's own local
+	// helper, and opening a lane needs that helper's connection, which needs
+	// its generation to be the one Start's installLocalHelper puts on disk.
+	// Running reconciliation here asked a carrier that could not yet answer
+	// for anything remote, and it failed silently: `unknown`, never a crash,
+	// so nothing but a fresh coordinator missing a still-running session ever
+	// showed it. New stays a wiring method — installing here is the "brain
+	// method" nocx-ie23r.5 already refused for this same opener — so the
+	// inputs are captured now and the call moves to Start, after
+	// installLocalHelper and still before Transport.Start begins listening,
+	// which keeps the "the pass finishes before a client can ask" invariant
+	// this pass has always needed.
+	sessionReconciler := contentDB.Reconcile()
+	sessionRoutes := hostRouteResolver(resolver)
 
 	app := &App{
 		Logger:              logger,
@@ -2380,6 +2408,8 @@ func New(opts ...Option) (*App, error) {
 		helperRegistry:      helperReg,
 		helperArtifacts:     localHelperArtifacts(o),
 		localHelper:         localOpener,
+		sessionReconciler:   sessionReconciler,
+		sessionRoutes:       sessionRoutes,
 		paneViews:           paneViews,
 		logFilePath:         logFilePath,
 		logFile:             logFile,
@@ -2716,6 +2746,21 @@ func (a *App) Start(ctx context.Context) error {
 		}
 		a.installLocalHelper(ctx, home)
 	}
+
+	// nocx-73aln: reconciliation runs from here now, once installLocalHelper
+	// above has had its chance to put this machine's own generation on disk
+	// (see the App.sessionReconciler/sessionRoutes fields for why it moved).
+	// Unconditional, exactly as it always was at New: a home directory this
+	// process could not resolve leaves the LOCAL route broken —
+	// installLocalHelper already warned above — never a reason to skip
+	// judging every OTHER carried-over session too, and the pass still
+	// finishes before Transport.Start below lets a client ask.
+	reconcileSessions(ctx, a.sessionReconciler, a.helperRegistry.inventories(),
+		&readoptPass{
+			registry: a.helperRegistry, routes: a.sessionRoutes, adopter: a.Transport,
+			local: a.localHelper,
+		},
+		content.DefaultUnreconciledRetention, a.slogger)
 
 	return a.Transport.Start(ctx)
 }

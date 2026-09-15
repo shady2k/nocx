@@ -282,9 +282,21 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 	c, outcome, connectErr := h.connectLocked(ctx)
 	h.mu.Unlock()
 	if connectErr != nil {
+		// nocx-73aln: this is the ONLY place a re-adoption's own connect
+		// failure reached a log line before — `unknown`'s cause and detail
+		// went to the store and nowhere else, so a re-adoption that failed at
+		// startup, for any reason, was invisible until a person opened a UI
+		// surface that reads unreconciled sessions. Warn, not Debug: the
+		// session this binding names is still running somewhere and this
+		// coordinator just failed to reach it.
+		rp.registry.log.Warn("re-adopting a session across a restart: could not reach its helper",
+			"session_id", p.SessionID, "generation", p.Generation, "host", p.Host, "error", connectErr)
 		return nil, fmt.Errorf("connect the helper holding this session: %w", connectErr)
 	}
 	if outcome.State != "" {
+		rp.registry.log.Warn("re-adopting a session across a restart: the helper refused",
+			"session_id", p.SessionID, "generation", p.Generation, "host", p.Host,
+			"state", outcome.State, "message", outcome.Message)
 		// A §6 refusal — a version or content mismatch, an exec the host
 		// refused, no helper serving that generation any more. Each is a
 		// reason nobody could be ASKED, so each is `unknown`. In particular
@@ -303,6 +315,8 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 		h.mu.Unlock()
 		return nil, fmt.Errorf("ask the helper holding this session what it holds: %w", err)
 	}
+	rp.registry.log.Debug("re-adopting a session across a restart: the helper's inventory",
+		"want_generation", p.Generation, "want_session", p.SessionID, "entries", entrySummaries(entries))
 
 	// THE ANSWER IS CAPTURED, not re-asked. The inventory handed back answers
 	// from the entries this one call returned, so the fact a verdict is
@@ -542,6 +556,18 @@ func (rp *readoptPass) readoptLocal(ctx context.Context, p content.PendingSessio
 // refused here and left to a route that cannot judge it either.
 func isLocalBinding(p content.PendingSession) bool {
 	return p.Generation != "" && p.HelperCommand == ""
+}
+
+// entrySummaries is nocx-73aln's diagnostic: one line per entry a helper's
+// `sessions` op answered with, so a mismatch between what a binding names and
+// what the helper actually holds is a measurement rather than a guess.
+func entrySummaries(entries []client.SessionEntry) []string {
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, fmt.Sprintf("generation=%s session=%s exited=%t",
+			e.HostSessionID.Generation, e.HostSessionID.Session, e.Exit != nil))
+	}
+	return out
 }
 
 // readopt is the attach-and-adopt half, and it is deliberately the same half

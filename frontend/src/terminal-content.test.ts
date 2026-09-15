@@ -4981,9 +4981,7 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
 
   /** Press one of the card's own actions, by the label the user reads. */
   const press = (tab: { pane: HTMLElement }, label: string): void => {
-    const found = [...cardIn(tab)!.querySelectorAll('button')].find(
-      (b) => buttonLabel(b) === label,
-    )
+    const found = [...cardIn(tab)!.querySelectorAll('button')].find((b) => buttonLabel(b) === label)
     if (!found) throw new Error(`no card action labelled ${label}`)
     found.click()
   }

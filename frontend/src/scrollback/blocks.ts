@@ -2423,6 +2423,9 @@ export class BlockManager {
    *  is what owns it, rather than a listener that outlives every command
    *  this manager will ever run. */
   private _tickerVisibility: (() => void) | null = null
+  /** The document the visibility listener went onto — the block's own, so
+   *  removing it never reaches for a global `document` that may be gone. */
+  private _tickerDocument: Document | null = null
 
   private _startTicker(el: HTMLElement): void {
     this._stopTicker()
@@ -2441,6 +2444,14 @@ export class BlockManager {
     let meta: HTMLSpanElement | null = null
 
     const paint = (): void => {
+      // The block left the document — its pane was torn down without this
+      // manager being told, or (in a test) the whole window closed under a
+      // still-running block. Nothing is left to paint; stop the timer rather
+      // than write into a DOM that is gone.
+      if (!el.isConnected || el.ownerDocument.defaultView === null) {
+        this._stopTicker()
+        return
+      }
       const elapsed = this._now() - started
       if (elapsed < DURATION_FLOOR_MS) return
       if (meta) {
@@ -2481,7 +2492,8 @@ export class BlockManager {
       if (this._appVisibility.visible()) resume()
       else pause()
     }
-    document.addEventListener('visibilitychange', this._tickerVisibility)
+    this._tickerDocument = el.ownerDocument
+    this._tickerDocument.addEventListener('visibilitychange', this._tickerVisibility)
     if (this._appVisibility.visible()) resume()
     else paint()
   }
@@ -2492,8 +2504,9 @@ export class BlockManager {
       this._ticker = null
     }
     if (this._tickerVisibility !== null) {
-      document.removeEventListener('visibilitychange', this._tickerVisibility)
+      this._tickerDocument?.removeEventListener('visibilitychange', this._tickerVisibility)
       this._tickerVisibility = null
+      this._tickerDocument = null
     }
   }
   freezeBlock(getLine: GetLineFn, endLine: number, exitCode: number | null): BlockRecord | null {

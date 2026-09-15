@@ -17,9 +17,17 @@
 // Every assertion here reads DOCUMENT ORDER and the text a person actually
 // reads, because that is the claim the product is making.
 
-import { describe, it, expect } from 'vitest'
+import { afterEach, describe, it, expect } from 'vitest'
 import { BlockManager } from './blocks'
 import { CommandSnapshotStore } from '../command-snapshot'
+
+// Every manager a test built is disposed after it: a block still running when
+// the test ends keeps its 100ms duration ticker alive, and that timer would
+// otherwise fire into a torn-down jsdom (`document is not defined`).
+const managers: BlockManager[] = []
+afterEach(() => {
+  for (const m of managers.splice(0)) m.dispose()
+})
 
 function newManager(sessionName?: (id: string) => string | null) {
   const inner = document.createElement('div')
@@ -30,6 +38,7 @@ function newManager(sessionName?: (id: string) => string | null) {
     snapshotStore: new CommandSnapshotStore(),
     sessionName,
   })
+  managers.push(manager)
   return { inner, manager }
 }
 

@@ -20,6 +20,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/session"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // fakeClock is the injected clock seam: Advance moves it without anybody
@@ -251,4 +252,59 @@ func TestASpawnNeverEvictsAnExitedSessionACoordinatorIsAttachedTo(t *testing.T) 
 	if next.Session.Session == "" {
 		t.Fatal("a spawn after the attachment was released was still refused")
 	}
+}
+
+// TestTheScheduledSweepReleasesAnOrphanedSessionOnItsOwn is nocx-isjh4's
+// coordinator review, gap 2: a sweep that only ran when WindowBytesInUse,
+// the inventory or a spawn happened to be asked something never runs at all
+// for a helper nobody calls again — exactly the orphan case D-amendment 3
+// exists for, and memory would be held indefinitely. The Service now runs
+// sweepExpired on ITS OWN schedule (Options.SweepInterval), started with
+// the Service and stopped by Close.
+//
+// The wait below is on OBSERVABLE STATE — WindowBytesInUse settling to
+// zero — polled with a bound, never a fixed sleep-then-assert: a session
+// that never expires (a defect in sweepExpired itself, not in the
+// schedule) fails this test exactly as slowly as the timeout, and nothing
+// here depends on how fast this machine happens to be.
+func TestTheScheduledSweepReleasesAnOrphanedSessionOnItsOwn(t *testing.T) {
+	spawner := &fakeSpawner{}
+	sink := newSink()
+	clock := newFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	const windowBytes = 2 * 64 << 10 // 128 KiB, D8's floor (session.go)
+	svc := session.New(session.Options{
+		Generation: "gen-under-test",
+		Spawner:    spawner,
+		Log:        discardLog(),
+		Now:        clock.Now,
+		Limits: session.Limits{
+			DefaultWindowBytes:  windowBytes,
+			MinWindowBytes:      windowBytes,
+			MaxWindowBytes:      windowBytes,
+			BudgetBytes:         windowBytes,
+			UnclaimedSessionTTL: time.Hour,
+		},
+		// Real wall-clock time, deliberately short — this is the SCHEDULE,
+		// answered independently of the fake clock, which only ever answers
+		// what sweepExpired compares a session's age against.
+		SweepInterval: 5 * time.Millisecond,
+	})
+	release := bindTo(svc, sink)
+	t.Cleanup(func() {
+		release()
+		svc.Close()
+	})
+
+	spawnOne(t, svc)
+	spawner.last().exit(nil)
+	awaitExitCount(t, sink, 1)
+
+	// Already past the TTL on the fake clock before any tick of the real
+	// schedule has a chance to look — so the very first scheduled tick is
+	// what has to notice, with nobody in this test calling anything that
+	// would sweep it by hand.
+	clock.Advance(2 * time.Hour)
+
+	waittest.WaitFor(t, "the scheduled sweep to release the orphaned session's budget",
+		func() bool { return svc.WindowBytesInUse() == 0 })
 }

@@ -127,13 +127,21 @@ type Limits struct {
 	// UnclaimedSessionTTL bounds how long an exited session may sit unclaimed
 	// before the helper closes it on its own, budget released, key claim
 	// released — through the same closer eviction and closeSession use. It
-	// exists because a helper process lingers as long as it holds any
-	// session (proto's generation liveness), so one abandoned exited session
-	// would otherwise pin both its 4 MiB and the whole process indefinitely
-	// (nocx-isjh4, owner amendment 2026-09-15). It is evaluated lazily,
-	// against the Service's own clock seam (s.now) — the helper runs no
-	// timer of its own and decides nothing about a block's result, exactly
-	// as D5 already required of it.
+	// exists because one abandoned exited session would otherwise pin its
+	// window budget indefinitely (nocx-isjh4, owner amendment 2026-09-15).
+	//
+	// IT DOES NOT MAKE THE PROCESS EXIT, and nothing else does either — checked
+	// rather than assumed (nocx-isjh4, coordinator review 2026-09-15):
+	// cmd/nocx-helper's serve() runs endpoint.Serve's accept loop until its ctx
+	// is cancelled (SIGINT/SIGTERM) or a fatal bind/accept error, with no read
+	// of the session count anywhere in that loop. So a generation with zero
+	// sessions is memory this closer bounds, not a process anything here
+	// reaps; the process's own lifetime is an external decision (whatever
+	// started it, or a person) both before and after this bead. Compared
+	// against the Service's clock seam (s.now); the SCHEDULE that evaluates it
+	// is a real-time ticker (SweepInterval below) rather than the injectable
+	// clock, because D5 forbids the helper deciding anything about a block's
+	// result, not running a timer — see SweepInterval's own doc.
 	UnclaimedSessionTTL time.Duration
 }
 
@@ -224,7 +232,25 @@ type Options struct {
 	// Now and NewID are seams for tests. Production leaves them nil.
 	Now   func() time.Time
 	NewID func() ([16]byte, error)
+	// SweepInterval is how often the unclaimed-session sweep (sweepExpired)
+	// runs ON ITS OWN, independent of any caller asking WindowBytesInUse,
+	// the inventory or a spawn (nocx-isjh4, owner review 2026-09-15): those
+	// lazy call sites never fire for a helper nobody calls again, which is
+	// exactly the orphan case amendment 3 exists for. Zero (the production
+	// default) uses defaultSweepInterval; tests that want to observe the
+	// scheduled sweep fire set it small and wait on state, never on a
+	// duration — the interval is real wall-clock time, D5's own clock
+	// seam (Now) is what the sweep still measures a session's age against.
+	SweepInterval time.Duration
 }
+
+// defaultSweepInterval is how often production runs the scheduled sweep. It
+// is independent of UnclaimedSessionTTL (default 24h): running far more
+// often than sessions actually expire costs one cheap map walk apiece, and
+// running less often would let an orphaned session's memory and the
+// process's own liveness (see Service.Close's doc on why the helper cares)
+// outlive its TTL by up to a whole interval.
+const defaultSweepInterval = 10 * time.Minute
 
 // Service is the helper's `session` service.
 type Service struct {
@@ -237,6 +263,15 @@ type Service struct {
 	limits     Limits
 	now        func() time.Time
 	newID      func() ([16]byte, error)
+	// sweepStop ends the scheduled sweep goroutine (nocx-isjh4); closed
+	// exactly once, by sweepStopOnce, from Close.
+	sweepStop     chan struct{}
+	sweepStopOnce sync.Once
+	// sweepDone closes when the scheduled sweep goroutine has actually
+	// returned, so Close can wait for it rather than leaving it to exit on
+	// its own time — the same shape every other owned goroutine in this
+	// service (watchExit, the output pumps) is stopped by, via hs.stop.
+	sweepDone chan struct{}
 
 	mu       sync.Mutex
 	sessions map[string]*hostSession
@@ -290,6 +325,8 @@ func New(opts Options) *Service {
 		sessions:   make(map[string]*hostSession),
 		keys:       make(map[string]*keyClaim),
 		sinks:      make(map[Sink]struct{}),
+		sweepStop:  make(chan struct{}),
+		sweepDone:  make(chan struct{}),
 	}
 	if s.screen == nil {
 		s.screen = defaultScreen
@@ -303,7 +340,39 @@ func New(opts Options) *Service {
 	if s.newID == nil {
 		s.newID = randomID
 	}
+	interval := opts.SweepInterval
+	if interval <= 0 {
+		interval = defaultSweepInterval
+	}
+	// RUN ON ITS OWN SCHEDULE, not only when a caller happens to ask
+	// something (nocx-isjh4, owner review): a helper nobody calls again is
+	// exactly the orphan case D-amendment 3 exists for, and WindowBytesInUse/
+	// inventory/spawn never fire for it. The interval is real wall-clock
+	// time — a ticker, not the injectable Now — because scheduling WHEN to
+	// look is a different question from what a session's age is measured
+	// against once looked at; sweepExpired still measures age with s.now
+	// alone, so a test can drive that half with a fake clock and this half
+	// with a real, short interval, without the two seams touching each other.
+	go s.sweepLoop(interval)
 	return s
+}
+
+// sweepLoop runs sweepExpired on a fixed real-time schedule until Close
+// stops it. It is a goroutine because the service otherwise starts none of
+// its own — spawn's watchers and pumps are per-session — and this is the
+// one piece of upkeep no session's own lifecycle can be asked to carry.
+func (s *Service) sweepLoop(interval time.Duration) {
+	defer close(s.sweepDone)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.sweepStop:
+			return
+		case <-ticker.C:
+			s.sweepExpired()
+		}
+	}
 }
 
 // Bind adds sink to the connections this service speaks on and returns the
@@ -344,7 +413,16 @@ func (s *Service) Bind(sink Sink) (release func()) {
 // Close ends every session this helper holds. It is process shutdown, not a
 // caller's request: ending one session deliberately is close-session and is
 // nocx-k6p18.7's verb.
+//
+// It also stops the scheduled sweep goroutine (nocx-isjh4) and waits for it
+// to actually exit, the same way every other goroutine this service owns is
+// stopped by hs.stop below — a Close that returned while the sweep was still
+// running could race a caller's own read of a Service it was just told is
+// finished with.
 func (s *Service) Close() {
+	s.sweepStopOnce.Do(func() { close(s.sweepStop) })
+	<-s.sweepDone
+
 	s.mu.Lock()
 	live := s.live()
 	s.sessions = make(map[string]*hostSession)
@@ -1314,14 +1392,17 @@ func (s *Service) removeSession(hs *hostSession) {
 }
 
 // sweepExpired closes every exited, unattached session whose exit is at
-// least UnclaimedSessionTTL old (nocx-isjh4, owner amendment 3). The helper
-// runs no timer of its own — D5 already forbids it deciding anything about a
-// block's result — so the "timer" is this comparison against s.now(),
-// evaluated lazily wherever staleness would otherwise be observable:
-// WindowBytesInUse, the inventory read, and before a spawn's own budget
-// check (which is also evictForBudget's first move, so a spawn that fits
-// once TTL'd sessions are gone never reaches eviction-under-pressure at
-// all).
+// least UnclaimedSessionTTL old (nocx-isjh4, owner amendment 3). D5 forbids
+// the helper deciding anything about a block's result, not running a timer
+// (coordinator review, 2026-09-15) — so what "the timer" measures is still
+// only this comparison against s.now(), but WHEN it is evaluated is now
+// twofold: on sweepLoop's own real-time schedule (SweepInterval, started
+// with the Service and stopped by Close) so an unclaimed session is bounded
+// even on a helper nobody ever calls again, and lazily wherever staleness
+// would otherwise be observable in the meantime — WindowBytesInUse, the
+// inventory read, and before a spawn's own budget check (which is also
+// evictForBudget's first move, so a spawn that fits once TTL'd sessions are
+// gone never reaches eviction-under-pressure at all).
 //
 // A LIVE shell is never touched: exitInfo reports exited=false for one, and
 // this never calls removeSession for it. Neither is an exited session a

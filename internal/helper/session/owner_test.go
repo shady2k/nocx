@@ -780,27 +780,31 @@ printf 'REPLY:%s\n' "$answer"
 // RawReadUntilAgain, in drainLocal, called from processHead's unconditional
 // "opportunistic extra drain" for a queued item.
 //
-// The cause: internal/poll's SyscallConn().Read holds the master file's own
-// read lock for the WHOLE call it wraps, a parked wait included, not only
-// while a read(2) is actually in flight. WaitReadable and RawReadUntilAgain
-// both go through that call, on the SAME *os.File, so a readiness goroutine
-// idling in WaitReadable holds exactly the lock the owner's own drain needs
-// next — and on an idle program there is nothing left to make the fd
-// readable and release it: no output is coming until the program reads the
-// very input stuck behind this commit point, and the program cannot read
-// input this call has not yet been allowed to write.
+// The original cause: internal/poll's SyscallConn().Read holds the master
+// file's own read lock for the WHOLE call it wraps, a parked wait included,
+// not only while a read(2) is actually in flight. WaitReadable and
+// RawReadUntilAgain both went through that call, on the SAME *os.File, so a
+// readiness goroutine idling in WaitReadable held exactly the lock the
+// owner's own drain needed next — and on an idle program there was nothing
+// left to make the fd readable and release it: no output was coming until
+// the program read the very input stuck behind this commit point, and the
+// program could not read input this call had not yet been allowed to write.
+// A first fix (fd99a9d1, an interrupt-then-wait handshake between the two
+// goroutines) did not hold up: it still serialised them through the same
+// call, and this exact test hung again against it. The fix that stuck moves
+// WaitReadable off the master *os.File entirely, onto a dup fd and a
+// self-pipe polled directly (internal/pty.LocalPty.WaitReadable's own doc),
+// so the two goroutines share nothing left to contend over.
 //
 // The shell here prints one line and then goes silent for several seconds
 // (its own sleep, not this test's) — the "idle for a while" the bead asks
 // for. The one line is this test's OBSERVABLE state change (win.changed()):
-// once it has arrived, the owner has already ingested it and — on the fixed
-// code — already told the readiness goroutine to resume, which very quickly
-// leaves it genuinely parked in WaitReadable on an fd with nothing further
-// to report until the shell wakes up. A client frame submitted into that
-// window reaches processHead's drain unconditionally, exactly the call that
-// used to hang forever; completion is watched on the submit's own result
-// channel, never on a duration — the outer timers below are failure
-// watchdogs, not the passing condition.
+// once it has arrived, the readiness goroutine is very quickly back to
+// waiting on an fd with nothing further to report until the shell wakes up.
+// A client frame submitted into that window reaches processHead's drain
+// unconditionally, exactly the call that used to hang forever; completion
+// is watched on the submit's own result channel, never on a duration — the
+// outer timers below are failure watchdogs, not the passing condition.
 func TestACommitPointDuringAnIdleReadinessWaitDoesNotDeadlock(t *testing.T) {
 	const script = `
 printf 'HELLO\n'

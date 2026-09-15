@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -34,6 +35,26 @@ type LocalPty struct {
 	// status — from a teardown that never let the process report one.
 	waitErr error
 	waitSet bool
+
+	// readyFd, wakeR and wakeW are WaitReadable's own machinery (nocx-6q1uh.18),
+	// never touched by RawReadUntilAgain: readyFd is a unix.Dup of the
+	// master's fd, held open ONLY so WaitReadable can unix.Poll it without
+	// ever going through (*os.File).SyscallConn().Read — the call that used
+	// to hold the master file's own read lock for the whole wait, which is
+	// the lock RawReadUntilAgain (via the SAME call, on the SAME file) needed
+	// next and could never get while a readiness wait was parked on an idle
+	// program. wakeR/wakeW are a self-pipe: WakeReadiness writes one byte to
+	// wakeW to unpark a WaitReadable blocked in the kernel's poll(2), which
+	// no context cancellation reaches on its own — ctx is not part of the
+	// syscall. Set once, at construction, in NewLocal; read-only afterward
+	// except for the close in Close.
+	readyFd int
+	wakeR   int
+	wakeW   int
+	// wakeClosed is set just before wakeW is closed (Close, holding mu), so a
+	// WakeReadiness racing a concurrent Close does not write to a descriptor
+	// number the kernel may already have reused for something else.
+	wakeClosed atomic.Bool
 }
 
 // localeVars are checked in POSIX precedence order; any one of them present
@@ -162,11 +183,38 @@ func NewLocal(logger log.Logger, cfg Config) (*LocalPty, error) {
 		return nil, err
 	}
 
+	// The readiness dup and the wake pipe (nocx-6q1uh.18): see the LocalPty
+	// field doc for why WaitReadable needs a fd of its own rather than going
+	// through f's SyscallConn like RawReadUntilAgain does. f.Fd() is safe to
+	// call here — it never reverts the master to blocking, exactly as
+	// Resize's own pty.Setsize(lp.file, ...) already relies on (see that
+	// method's doc and master_nonblock_{linux,darwin}.go's longer note on
+	// the same mechanism) — because openMaster set O_NONBLOCK on the raw fd
+	// before this file was ever wrapped, so os.NewFile never marked it as a
+	// descriptor Go itself must revert on a raw-fd escape.
+	readyFd, err := unix.Dup(int(f.Fd()))
+	if err != nil {
+		_ = f.Close()
+		reapAfterFailedSetup(cmd)
+		return nil, fmt.Errorf("pty: dup the master for readiness polling: %w", err)
+	}
+	unix.CloseOnExec(readyFd)
+	wakeR, wakeW, err := newWakePipe()
+	if err != nil {
+		_ = unix.Close(readyFd)
+		_ = f.Close()
+		reapAfterFailedSetup(cmd)
+		return nil, fmt.Errorf("pty: open the readiness wake pipe: %w", err)
+	}
+
 	lp := &LocalPty{
-		log:  logger,
-		cmd:  cmd,
-		file: f,
-		done: make(chan struct{}),
+		log:     logger,
+		cmd:     cmd,
+		file:    f,
+		done:    make(chan struct{}),
+		readyFd: readyFd,
+		wakeR:   wakeR,
+		wakeW:   wakeW,
 	}
 
 	go func() {
@@ -241,6 +289,22 @@ func startWithSize(cmd *exec.Cmd, ws *pty.Winsize) (master *os.File, err error) 
 	return master, nil
 }
 
+// reapAfterFailedSetup is NewLocal's own cleanup for the narrow window
+// between a successful cmd.Start() (inside startWithSize) and the readiness
+// dup/wake-pipe setup that follows it: a failure there returns an error
+// before the exit-watcher goroutine (NewLocal, below) is ever started, so
+// nothing would otherwise call cmd.Wait() and the started child becomes an
+// unreaped zombie the moment it exits. Best-effort and silent: this is
+// already an error path (an out-of-descriptors machine, most likely), and
+// there is no caller left to report a second failure to.
+func reapAfterFailedSetup(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+}
+
 // RawReadUntilAgain reads everything currently available off the master,
 // through the runtime poller rather than a blocking Read: it issues raw,
 // non-blocking read(2) calls over SyscallConn().Read, handing each one's
@@ -258,17 +322,12 @@ func startWithSize(cmd *exec.Cmd, ws *pty.Winsize) (master *os.File, err error) 
 // call: buf is reused for the next chunk read within the same call.
 //
 // It always starts by clearing any read deadline left on the file, whether
-// or not one is set. A caller that just used InterruptRead to force a
-// parked WaitReadable to give up the master's read lock (nocx-6q1uh.18)
-// leaves that deadline expired behind it — WaitReadable's own defer clears
-// it again on ITS way out, but only if it is the thing that runs next; when
-// the readiness goroutine is not currently waiting on this fd at all (it is
-// blocked on the owner's resume signal instead, having already reported
-// back), nothing else will. An expired deadline still on the file when this
-// call begins would make it fail before a single byte is drained — the
-// exact "answered before read(2) is ever issued" hazard the note above
-// warns against, self-inflicted by the caller's own prior interrupt rather
-// than by a probe.
+// or not one is set — belt and braces against a deadline some other caller
+// left behind; ordinary operation never sets one on lp.file's read side any
+// more (nocx-6q1uh.18: WaitReadable polls a SEPARATE dup fd, below, and
+// never touches this file's own deadline or its SyscallConn at all, which is
+// exactly what stops it sharing internal/poll's read lock with this call in
+// the first place).
 func (lp *LocalPty) RawReadUntilAgain(buf []byte, deliver func([]byte)) (eof bool, err error) {
 	if err := lp.file.SetReadDeadline(time.Time{}); err != nil {
 		return false, err
@@ -315,44 +374,125 @@ func (lp *LocalPty) RawReadUntilAgain(buf []byte, deliver func([]byte)) (eof boo
 // read(2) against this fd (RawReadUntilAgain, above) and no byte is ever
 // consumed by the goroutine that merely noticed readiness.
 //
-// The mechanism is SyscallConn().Read's own contract: the callback returning
-// false (without touching the fd) tells the runtime poller "not satisfied
-// yet — wait for a read-ready event and call me again", and this returns
-// the moment that second call arrives, having issued no read(2) at all.
+// # Why this does not go through the master file's own SyscallConn (nocx-6q1uh.18)
+//
+// The previous shape did — rc.Read's callback returning false parks the
+// caller in the runtime poller until the fd is readable — and it deadlocked
+// the merged-tree gate for 8+ minutes: internal/poll's SyscallConn().Read
+// holds the file's OWN read lock (fdMutex) for the whole call, a parked wait
+// included, not only while a read(2) is actually in flight. RawReadUntilAgain
+// goes through that same call on the SAME *os.File, so a goroutine idling in
+// this method on an idle program held exactly the lock the owner's own drain
+// needed next, and nothing was ever going to make the fd readable to release
+// it: the program was silent precisely because nobody had drained the input
+// that might have prompted it to answer. A prior fix (fd99a9d1) tried
+// forcing the parked wait to give the lock back with a deadline-in-the-past
+// handshake; it did not hold up — the handshake itself still serialised the
+// two goroutines through the same lock, RawReadUntilAgain during the
+// interrupt-then-wait window included, and the merged-tree gate hung again.
+//
+// So this method never touches lp.file at all. readyFd is a unix.Dup of the
+// master's underlying fd, opened once at construction (NewLocal) and never
+// read from or written to — its only use is as a SECOND, independent
+// descriptor onto the SAME open file description, wrapped in nothing that
+// Go's own poller keeps a lock over. unix.Poll blocks in the kernel directly
+// on readyFd, exactly as poll(2) blocks on any pollable descriptor — a real
+// PTY master included: it is a character device with a normal driver
+// read-queue on both platforms this ships for, so poll(2) reports POLLIN
+// for it the same way it does for a pipe or a socket (POSIX.1-2017 poll(),
+// "Regular files shall always poll TRUE for reading"; a pty master falls
+// under "any other file" whose driver defines its own poll method — the
+// pty line discipline's does, on both Linux's drivers/tty/pty.c and Darwin's
+// XNU pty driver, and it is what select(2)/kqueue on a pty master have
+// always relied on).
+//
+// wakeR is the read end of a self-pipe (NewLocal, newWakePipe): the second
+// fd unix.Poll waits on, so a cancelled ctx or a Close can wake a parked
+// call — ctx cancellation is not itself part of the poll(2) syscall, unlike
+// SyscallConn().Read's deadline mechanism, so it has to be delivered this
+// way. Readable on wakeR is drained and, only if ctx is already done,
+// reported as ctx's own error; otherwise it is a spurious wake (WakeReadiness
+// called with no real cancellation behind it, or Close doing the same on its
+// way out) and this returns nil — harmless, because the owner's next
+// RawReadUntilAgain simply finds nothing and answers EAGAIN at once.
 func (lp *LocalPty) WaitReadable(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	rc, scErr := lp.file.SyscallConn()
-	if scErr != nil {
-		return scErr
+	fds := []unix.PollFd{
+		{Fd: int32(lp.readyFd), Events: unix.POLLIN}, //nolint:gosec // an fd is never near int32's range
+		{Fd: int32(lp.wakeR), Events: unix.POLLIN},   //nolint:gosec // an fd is never near int32's range
 	}
-	// Cancellation reaches a wait already parked in the runtime poller the
-	// same way InterruptWrite reaches a blocked write: a deadline in the
-	// past on the pollable file, set from outside this goroutine. It is
-	// always cleared afterward, on every path, so a later wait or read is
-	// never affected by a cancellation this one answered.
-	stop := context.AfterFunc(ctx, func() {
-		_ = lp.file.SetReadDeadline(time.Unix(1, 0))
-	})
-	defer stop()
-	defer func() { _ = lp.file.SetReadDeadline(time.Time{}) }()
+	for {
+		fds[0].Revents, fds[1].Revents = 0, 0
+		_, err := unix.Poll(fds, -1)
+		if err != nil {
+			if errors.Is(err, unix.EINTR) {
+				continue
+			}
+			return err
+		}
+		if fds[1].Revents != 0 {
+			lp.drainWake()
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			return nil
+		}
+		if fds[0].Revents != 0 {
+			// Readable, POLLHUP and POLLERR alike: any of the three means
+			// RawReadUntilAgain has something to say about this fd next —
+			// bytes, EOF or the read error itself — and none of them is this
+			// method's to interpret.
+			return nil
+		}
+		// Neither fd reported anything: not expected with an infinite
+		// timeout, but poll(2) permits a spurious return, so loop rather
+		// than assume.
+	}
+}
 
-	first := true
-	waitErr := rc.Read(func(uintptr) bool {
-		if first {
-			first = false
-			return false
+// drainWake empties the wake pipe after a readable report on it, so the next
+// WakeReadiness (a real cancellation, or another spurious one) is what makes
+// it readable again rather than a byte left over from this one.
+func (lp *LocalPty) drainWake() {
+	var b [64]byte
+	for {
+		n, err := unix.Read(lp.wakeR, b[:])
+		if err != nil || n < len(b) {
+			return
 		}
-		return true
-	})
-	if waitErr != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		return waitErr
 	}
-	return nil
+}
+
+// WakeReadiness unparks a goroutine currently blocked in WaitReadable,
+// without itself deciding whether that was a real cancellation or a spurious
+// nudge — WaitReadable checks ctx itself once woken (nocx-6q1uh.18). The
+// owner calls this whenever it cancels readCtx, because ctx cancellation
+// alone never reaches a call already inside the kernel's poll(2); Close
+// calls it too, before closing the fds this method's write would otherwise
+// find already gone.
+//
+// Always safe to call, including after Close: wakeClosed is checked first,
+// and any write that still races a concurrent close is left to fail with
+// EBADF and be ignored — there is nothing further to wake once the fds are
+// gone. A full pipe (EAGAIN) means a wake is already pending and is treated
+// the same way: nothing further to do.
+func (lp *LocalPty) WakeReadiness() {
+	if lp.wakeClosed.Load() {
+		return
+	}
+	for {
+		_, err := unix.Write(lp.wakeW, []byte{0})
+		switch {
+		case err == nil, errors.Is(err, unix.EAGAIN):
+			return
+		case errors.Is(err, unix.EINTR):
+			continue
+		default:
+			return
+		}
+	}
 }
 
 // InterruptWrite unblocks a Write in flight on this master, the way spec
@@ -363,31 +503,6 @@ func (lp *LocalPty) WaitReadable(ctx context.Context) error {
 // deadline.
 func (lp *LocalPty) InterruptWrite() error {
 	return lp.file.SetWriteDeadline(time.Unix(1, 0))
-}
-
-// InterruptRead is InterruptWrite's read-side twin (nocx-6q1uh.18): a read
-// deadline set in the past on the pollable file, which forces a goroutine
-// currently parked in WaitReadable to return at once instead of waiting for
-// the master to actually become readable.
-//
-// It exists because internal/poll's SyscallConn().Read holds the file's
-// read lock (fdMutex) for the WHOLE call, including while parked waiting —
-// not only while actually reading. WaitReadable and RawReadUntilAgain both
-// go through that same call, so a goroutine idling in WaitReadable on a
-// silent program holds exactly the lock a drain's RawReadUntilAgain needs,
-// and nothing was ever going to make the fd readable on its own: the
-// program is silent precisely because nobody has drained the input that
-// might have prompted it to answer. RawReadUntilAgain would then block on
-// that lock forever. InterruptRead is how a caller reclaims the lock before
-// asking for it: wake the parked wait, let it return and release the lock,
-// THEN drain.
-//
-// It is always safe to call: a WaitReadable that has already returned finds
-// nothing blocked, and re-arms an already-expired deadline harmlessly —
-// RawReadUntilAgain's own first step clears it again before it would ever
-// affect a read.
-func (lp *LocalPty) InterruptRead() error {
-	return lp.file.SetReadDeadline(time.Unix(1, 0))
 }
 
 // Shell is the binary this pty actually started, as exec resolved it: an
@@ -491,7 +606,20 @@ func (lp *LocalPty) Close() error {
 	// hangs up its own jobs. The master is closed afterwards, so a shell that
 	// wants to write on the way out still has somewhere to write.
 	_ = lp.hangupProcessGroup()
-	return lp.file.Close()
+
+	// Wake a WaitReadable parked in the kernel's poll(2) BEFORE the fds it is
+	// polling go away (nocx-6q1uh.18): a closed descriptor still reported by
+	// a poll already in flight is not a hazard poll(2) itself minds
+	// (POLLNVAL is a defined outcome), but there is no reason to race it when
+	// asking politely first costs nothing. wakeClosed goes true only after
+	// the wake fds are actually closed, so this call still finds them open.
+	lp.WakeReadiness()
+	err := lp.file.Close()
+	lp.wakeClosed.Store(true)
+	_ = unix.Close(lp.readyFd)
+	_ = unix.Close(lp.wakeR)
+	_ = unix.Close(lp.wakeW)
+	return err
 }
 
 // Resize takes the same lock Close does, because both reach the master's file

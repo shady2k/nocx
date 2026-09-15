@@ -263,3 +263,72 @@ func TestNewLocal_LogsTheShellItResolved(t *testing.T) {
 		t.Errorf("the line names neither the shell nor its source:\n%s", line)
 	}
 }
+
+// TestWaitReadableReturnsWhenWokenWithoutHoldingTheDrainLock is the
+// regression test for nocx-6q1uh.18 on a real PTY: a goroutine parked in
+// WaitReadable on a silent program used to hold the master file's own read
+// lock (internal/poll's SyscallConn().Read semantics) for as long as it
+// stayed parked, which is exactly the lock RawReadUntilAgain needed next —
+// so a drain called from a second goroutine, on the same idle program,
+// blocked forever. WaitReadable no longer touches the master file at all
+// (its own doc explains the dup-fd-plus-self-pipe mechanism), so this
+// proves both halves of that fix at once: RawReadUntilAgain succeeds while
+// a wait is parked, and WakeReadiness is what unparks that wait afterward.
+//
+// No sleep synchronises the two goroutines, deliberately (AGENTS.md, "a
+// test may not depend on timing"): the drain below must succeed whether or
+// not the WaitReadable goroutine has already reached its own poll(2) call,
+// precisely because nothing is shared between them any more; and
+// WakeReadiness's byte sits in the wake pipe until read regardless of
+// whether the poll(2) call has started yet, so ordering cannot make it
+// arrive too early to be seen.
+func TestWaitReadableReturnsWhenWokenWithoutHoldingTheDrainLock(t *testing.T) {
+	lp, err := NewLocal(log.NewSlogAdapter(nil), Config{
+		Command: "/bin/sh",
+		Args:    []string{"-c", "sleep 30"},
+		Cols:    80,
+		Rows:    24,
+	})
+	if err != nil {
+		t.Fatalf("NewLocal: %v", err)
+	}
+	t.Cleanup(func() { _ = lp.Close() })
+
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- lp.WaitReadable(context.Background()) }()
+
+	// The observable assertion that the deadlock is gone: on the broken
+	// code this call never returns.
+	var got []byte
+	buf := make([]byte, 4096)
+	eof, err := lp.RawReadUntilAgain(buf, func(p []byte) { got = append(got, p...) })
+	if err != nil {
+		t.Fatalf("RawReadUntilAgain while a readiness wait may be parked: %v", err)
+	}
+	if eof {
+		t.Fatalf("RawReadUntilAgain reported eof against a program that has not exited")
+	}
+	if len(got) != 0 {
+		t.Fatalf("a silent program (`sleep 30`) produced %d bytes, want 0", len(got))
+	}
+
+	select {
+	case err := <-waitDone:
+		t.Fatalf("WaitReadable returned (err=%v) before the fd was readable and before anything woke it", err)
+	default:
+		// Nothing has made the fd readable and nothing has woken it yet, so
+		// it is still parked — whether already inside the poll(2) call or
+		// about to enter it, WakeReadiness below reaches it either way.
+	}
+
+	lp.WakeReadiness()
+
+	select {
+	case err := <-waitDone:
+		if err != nil {
+			t.Fatalf("WaitReadable returned %v after WakeReadiness, want nil: ctx was never cancelled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("WakeReadiness did not unpark a WaitReadable parked on a silent program")
+	}
+}

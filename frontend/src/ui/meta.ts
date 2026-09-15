@@ -9,7 +9,7 @@
 // Identity `ui-meta`; variance on data-tone, data-column and a part's
 // data-emphasis. A surface places it and never repaints it (ui/README).
 
-export type MetaTone = 'muted' | 'dim' | 'danger' | 'accent'
+type MetaTone = 'muted' | 'dim' | 'danger' | 'accent'
 export type MetaPart = string | { text: string; emphasis?: 'strong' }
 
 export interface MetaOptions {

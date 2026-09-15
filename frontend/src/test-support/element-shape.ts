@@ -7,7 +7,7 @@
 // emitters can be compared for exact agreement. Event listeners are not part of
 // it (Solid delegates them; nothing in the DOM says so).
 
-export interface ElementShape {
+interface ElementShape {
   tag: string
   attrs: Array<[string, string]>
   children: Array<ElementShape | string>
@@ -16,7 +16,7 @@ export interface ElementShape {
 /** The shape of one node: an element's tag, sorted attributes and children,
  *  or `#text:<content>` for a text node. Comment nodes (Solid leaves markers
  *  for some control flow) are dropped. */
-export function elementShape(node: Node): ElementShape | string {
+function elementShape(node: Node): ElementShape | string {
   if (node.nodeType === Node.TEXT_NODE) return `#text:${node.textContent ?? ''}`
   const el = node as Element
   const attrs = Array.from(el.attributes)

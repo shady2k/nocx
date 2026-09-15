@@ -85,24 +85,44 @@ func sessionGrant(sessionID string, policy content.EffectPolicy) content.Grant {
 	return policy.AsGrant([]content.GrantScope{{Kind: content.ResourceSession, ID: sessionID}})
 }
 
-// The session resource is resolved from the run's grant. An explicit
-// sessionId is invalid model input, while an omitted one reaches the pane.
-func TestMiddleware_ReadScreenUsesGrantSessionAndRejectsModelSessionID(t *testing.T) {
+// The session resource is resolved from the run's grant, and the model
+// cannot choose a different pane by naming a session id — the promise T8
+// restated rather than removed (design §4.1's schema, §7.1, §11 "kept,
+// deliberately"). In THIS middleware configuration no PaneAccess is bound
+// (no controller relationship at all), so a sessionId naming anything other
+// than the grant's own session is refused before it reaches the renderer or
+// PaneReader — TestASessionIdNamingADescendantNeverCallsTheRenderer in
+// session_test.go covers the case where PaneAccess IS bound and the named
+// session is a real descendant. Naming the grant's own session id
+// explicitly is not "a different pane": the schema says omitting sessionId
+// or naming your own session both read your own pane, so both go through
+// the renderer exactly alike.
+func TestMiddleware_ReadScreenRejectsASessionIDThisRunHasNoAuthorityOver(t *testing.T) {
 	grant := sessionGrant("session-a", autonomousMatrix())
 	req := &recordingRequester{body: liveFrameBody("x")}
 	mw := middlewareForWithRequester(t, grant, &fakeLedger{}, nil, req)
 
-	if _, err := wrappedEndpoint(mw, "session.read", "c1", `{"sessionId":"session-a"}`); err == nil {
-		t.Fatal("session.read with sessionId succeeded; want schema refusal")
+	_, err := wrappedEndpoint(mw, "session.read", "c1", `{"sessionId":"session-b"}`)
+	if err == nil {
+		t.Fatal("session.read naming a session this run has no authority over succeeded; want a refusal")
+	}
+	if !strings.Contains(err.Error(), "not this run's own session") {
+		t.Fatalf("error = %v, want the no-descendant-authority refusal", err)
+	}
+	if calls := req.calls(); len(calls) != 0 {
+		t.Fatalf("a session id this run has no authority over reached the renderer: %+v", calls)
 	}
 
-	out, err := wrappedEndpoint(mw, "session.read", "c2", `{}`)
+	if _, sameErr := wrappedEndpoint(mw, "session.read", "c2", `{"sessionId":"session-a"}`); sameErr != nil {
+		t.Fatalf("session.read naming the grant's own session: %v", sameErr)
+	}
+	out, err := wrappedEndpoint(mw, "session.read", "c3", `{}`)
 	if err != nil {
 		t.Fatalf("session.read without sessionId: %v", err)
 	}
 	calls := req.calls()
-	if len(calls) != 1 || calls[0].sessionID != "session-a" {
-		t.Fatalf("requester asked %+v, want exactly one read of session-a", calls)
+	if len(calls) != 2 || calls[0].sessionID != "session-a" || calls[1].sessionID != "session-a" {
+		t.Fatalf("requester asked %+v, want two reads of session-a — naming it explicitly and omitting it alike", calls)
 	}
 	if !strings.Contains(out, `"text":"x"`) {
 		t.Fatalf("result %q lacks the frame's text", out)

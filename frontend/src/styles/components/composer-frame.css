@@ -35,14 +35,7 @@
   position: relative;
   box-sizing: border-box;
   display: grid;
-  /* 64px is spec §3's `--terminal-mode-segment-width` (task A, tokens.css)
-     as a literal: the token does not exist in this worktree yet (task A's
-     exclusive file), and `var(--x, 64px)` where no stylesheet ever declares
-     `--x` fails the undefined-var integrity check rather than silently
-     degrading — the check is right that such a reference is dead weight,
-     not a genuine fallback. Until A lands the token, swap this literal for
-     `var(--terminal-mode-segment-width)` in the same edit. */
-  grid-template-columns: minmax(64px, max-content) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(var(--terminal-mode-segment-width), max-content) minmax(0, 1fr) auto;
   align-items: center;
   min-height: var(--control-height-lg);
   border: 1px solid var(--color-border);
@@ -91,22 +84,4 @@
   display: flex;
   align-items: center;
   padding: var(--composer-submit-clearance);
-}
-
-/* Until A lands IconButton's own typed `primary` appearance (spec §4: "a
-   typed primary appearance if the component does not yet expose one" —
-   icon-button.tsx/icon-button.css are task A's exclusive files): a scoped
-   placeholder so the submit control does not ship colourless meanwhile.
-   Mirrors Button's own `data-variant='primary'` convention exactly
-   (button.css: `background: var(--color-accent); color: var(--color-
-   canvas)`) so the eventual real rule in icon-button.css can simply replace
-   this one with the same values. Remove this block once icon-button.css
-   defines `.ui-icon-button[data-variant='primary']` itself. */
-.ui-icon-button[data-variant='primary'] {
-  background: var(--color-accent);
-  color: var(--color-canvas);
-}
-
-.ui-icon-button[data-variant='primary']:hover {
-  background: var(--color-accent-hover);
 }

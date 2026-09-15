@@ -577,12 +577,16 @@ export class CommandEditor {
    *  of this button's state; `disabled` governs pointer activation only).
    *  The `primary` appearance (spec §4: filled blue, vs. the subdued
    *  default arrow) is applied only while enabled, so an empty field never
-   *  wears an affordance it would refuse. */
+   *  wears an affordance it would refuse. `data-appearance`, not
+   *  `data-variant`: IconButton's own typed `primary` register
+   *  (icon-button.tsx/icon-button.css, landed round 2) reads that
+   *  attribute — `data-variant` was this file's placeholder name for it
+   *  before the real one existed. */
   private updateSubmitEnabled(text: string): void {
     const hasDraft = text.trim() !== ''
     this.submitButton.disabled = !hasDraft
-    if (hasDraft) this.submitButton.dataset.variant = 'primary'
-    else delete this.submitButton.dataset.variant
+    if (hasDraft) this.submitButton.dataset.appearance = 'primary'
+    else delete this.submitButton.dataset.appearance
   }
 
   /** The submit control's accessible name follows the active target (spec

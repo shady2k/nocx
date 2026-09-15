@@ -1,27 +1,12 @@
 /* PaneContext (ui/README table) — the strip naming a pane before its
    transcript starts (decision 2026-09-15-terminal-screen-mockup-decision.md
-   §1 item 3): `folder ~/repos/nocx │ branch main`. Chrome, not a transcript
+   §1 item 3): `folder ~/repos/nocx on ⎇ main`. Chrome, not a transcript
    row — it sits above `.scrollback-layout` and never scrolls with it.
 
-   HEIGHT IS A NEW TOKEN A HAS NOT LANDED YET (§3's shared contract:
-   `--terminal-context-height` / `--terminal-split-context-height`).
-   `check-css-integrity.mjs`'s `undefined-var` rule fails the build on a
-   `var()` fallback for a property NO stylesheet declares and no script
-   sets (nocx-9bpeq.2's six `--radius-*` references) — a bare fallback is
-   not a legal way to depend on a token another task has not landed, so
-   this component declares both for real, at the values §3 specifies, and
-   drops the declaration the moment A's tokens.css carries the same names:
-   a duplicate at the same value is harmless, a stale one masking A's
-   update is not. `--color-terminal-chrome` (§3's other new token for this
-   component) is NOT declared the same way: a single value here could not
-   vary by theme the way A's per-theme tokens.css entry will, so this
-   reads the existing `--color-chrome` directly instead of inventing a
-   single-valued stand-in for a token whose whole point is per-theme
-   variance — swap to `--color-terminal-chrome` once A lands it. */
-:root {
-  --terminal-context-height: 40px;
-  --terminal-split-context-height: 44px;
-}
+   The where-line itself (path/host/branch) is PromptContext's own
+   `chrome` presentation (prompt-context.css's
+   `[data-presentation='chrome']` rule) — this file owns placement and the
+   leading icon/trailing slots only, never a second path/branch paint. */
 
 .ui-pane-context {
   flex: none;
@@ -30,7 +15,7 @@
   height: var(--terminal-context-height);
   padding-inline: var(--pane-inline-padding);
   gap: var(--space-2);
-  background: var(--color-chrome);
+  background: var(--color-terminal-chrome);
   border-bottom: 1px solid var(--color-divider);
   font-family: var(--font-family-ui);
   font-size: var(--font-size-sm);
@@ -62,39 +47,24 @@
   color: var(--color-text-muted);
 }
 
-/* Local path, remote host and the program name all read MUTED here —
-   the opposite of PromptContext's accent path/branch inside a block or the
-   composer (prompt-context.css). Two different questions get two
-   registers: "which pane is this" is chrome, quieter than "what will
-   Enter run" (spec: "Local path and branch in this chrome variant are
-   muted, matching the image; prompt lines inside blocks remain accent"). */
-.ui-pane-context__path,
-.ui-pane-context__host,
-.ui-pane-context__branch,
+/* The program name — `program` kind's own leading label; PromptContext
+   (whereLine) draws everything about path/host/branch, so this is the one
+   text part PaneContext still paints itself. */
 .ui-pane-context__program {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
   min-width: 0;
   color: var(--color-text-muted);
-}
-
-.ui-pane-context__path,
-.ui-pane-context__branch {
-  font-family: var(--font-family-mono);
-  font-size: var(--font-size-terminal);
-}
-
-.ui-pane-context__host,
-.ui-pane-context__program {
   font-weight: 500;
 }
 
-.ui-pane-context__divider {
-  flex: none;
-  width: 1px;
-  height: 14px;
-  background: var(--color-divider);
+/* PromptContext ellipsizes at its OWN edge (prompt-context.css) but has no
+   opinion on how much of the row it may claim — that is a layout question
+   for whichever surface places it. `min-width: 0` lets it shrink inside
+   this row's flex layout instead of forcing the strip wider. */
+.ui-pane-context > .ui-prompt-context {
+  min-width: 0;
 }
 
 .ui-pane-context__trailing {

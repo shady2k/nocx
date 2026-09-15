@@ -127,24 +127,6 @@
 @import './styles/surfaces/command-block.css';
 @import './styles/surfaces/composer.css';
 
-/* TEMPORARY VALUE OVERRIDES — decision 2026-09-15-terminal-screen-mockup-
-   decision.md §1 item 10 and §3's shared contract raise `--tab-height` to
-   44px and `--activity-bar-width` to 56px, but both tokens ALREADY EXIST
-   in tokens.css (at 38px/48px) — the shared-kit task's (A) exclusive file,
-   not landed in this tree this round. A `var(--x, fallback)` default only
-   applies while `--x` is UNDEFINED, so it cannot carry a value change for a
-   token that already has one; unlike the brand-new tokens this pass adds
-   (`--terminal-context-height` etc., see pane-context.css/process-bar.css),
-   these two need an actual override. `style.css` is this task's own file
-   (decision §4), so the override lives here rather than reaching into A's
-   tokens.css — delete this block the moment A's tokens.css carries the
-   real values; a duplicate definition at the same value is harmless but a
-   stale one masking A's update is not. */
-:root {
-  --tab-height: 44px;
-  --activity-bar-width: 56px;
-}
-
 /* ── App body row: strip | panes | sidebar | activity bar ─────────────── */
 
 #body {

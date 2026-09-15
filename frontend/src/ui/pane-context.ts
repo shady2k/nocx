@@ -1,7 +1,7 @@
 // PaneContext — the strip that names a pane before its transcript starts
 // (decision 2026-09-15-terminal-screen-mockup-decision.md §1 item 3):
-// `folder ~/repos/nocx │ branch main` in `01`, a local/remote pane identity
-// in `03`, and the foreground-program/input-owner readout in `02`. Mounted
+// `folder ~/repos/nocx on ⎇ main` in `01`, a local/remote pane identity in
+// `03`, and the foreground-program/input-owner readout in `02`. Mounted
 // once per terminal pane, immediately above `.scrollback-layout` — chrome,
 // never a transcript row, so a failed block's rail and a selection tint
 // never reach it and it never scrolls with the blocks.
@@ -13,17 +13,19 @@
 // Identity `ui-pane-context`; variance on data-kind, data-split and
 // data-active. A surface places it and never repaints it (ui/README).
 //
-// NOT PromptContext underneath. The decision record's §1 item 3 assigns
-// PromptContext's `chrome` presentation to the shared-kit task (A); this
-// component is the layout task's (D) own file, and A's variant does not
-// exist yet in this tree. Rendering the muted path/branch parts locally
-// here — instead of leaving the strip broken, or reaching into A's
-// exclusive prompt-context.ts — is the "temporary local fallback" the
-// wave's common rules allow. `/* until A lands PromptContext's chrome
-// presentation */` marks the one spot that should be replaced with
-// `createPromptContext(facts, { presentation: 'chrome' })` once it exists.
+// The where-line is PromptContext's `chrome` presentation
+// (`ui/prompt-context.ts`, landed round 2 by the shared-kit task): this
+// component supplies the leading identity icon (folder/server) and the
+// program/trailing slots, PromptContext owns the ONE formatted
+// path/host/branch line so a block, the composer and this chrome strip
+// cannot start naming "where" three ways (AD-8). Round 1 rendered a muted
+// path/branch locally here, before that presentation existed; integration
+// replaced it with the real primitive below — see prompt-context.css's own
+// `[data-presentation='chrome']` rule for why the colours differ from a
+// block's accent prompt line without a second component.
 
-import { FolderIcon, GitBranchIcon, ServerIcon, KeyboardIcon, iconElement } from './icons'
+import { KeyboardIcon, ServerIcon, FolderIcon, iconElement } from './icons'
+import { createPromptContext, type PromptContextFacts } from './prompt-context'
 
 // Not exported: nothing outside this module names the kind independently
 // of `PaneContextFacts.kind` — an exported alias with no external caller is
@@ -35,10 +37,10 @@ export interface PaneContextFacts {
    *  alternate-screen/foreground-program presentation (`02`); `local` and
    *  `remote` are the ordinary and SSH-child presentations (`01`, `03`). */
   kind: PaneContextKind
-  /** The short path (`cwdLabel`'s own answer) — shown for `local` and
-   *  `remote`. Never fetched here: the caller (TerminalContent) already
-   *  derives it for the composer and a block's own prompt line, and a
-   *  second derivation is exactly what nocx-9bpeq.16 exists to prevent. */
+  /** The short path (`cwdLabel`'s own answer) — shown for every kind.
+   *  Never fetched here: the caller (TerminalContent) already derives it
+   *  for the composer and a block's own prompt line, and a second
+   *  derivation is exactly what nocx-9bpeq.16 exists to prevent. */
   path?: string
   /** The branch known right now — `local` only; a remote pane's shell is
    *  not walked for one (spec §3, `_syncWhereSources`'s own `isLocal`
@@ -78,39 +80,28 @@ function textPart(cls: string, text: string): HTMLSpanElement {
   return el
 }
 
-function verticalDivider(): HTMLSpanElement {
-  const el = document.createElement('span')
-  el.className = 'ui-pane-context__divider'
-  el.setAttribute('aria-hidden', 'true')
-  return el
+/** The where-line, in PaneContext's own chrome register: PromptContext's
+ *  `chrome` presentation reads path/branch muted instead of accent, and
+ *  `host` reads muted already in every presentation — so `remote`'s
+ *  `user@host:path` and `local`'s `path on branch` are both exactly the
+ *  same primitive the composer and a block use, never a second format
+ *  invented here. */
+function whereLine(facts: PaneContextFacts): HTMLElement {
+  const promptFacts: PromptContextFacts = { path: facts.path ?? '~' }
+  if (facts.kind === 'remote' && facts.host) promptFacts.host = facts.host
+  if (facts.kind !== 'remote' && facts.branch) promptFacts.branch = facts.branch
+  return createPromptContext(promptFacts, { presentation: 'chrome' })
 }
 
-/** `local`/`remote`: identity icon, optional host, muted path, and — local
- *  only — a divider plus the branch. Built locally rather than through
- *  PromptContext (see the file header): both parts read muted here, which
- *  is the opposite of PromptContext's own accent path/branch, because a
- *  block's prompt line and this chrome answer two different questions
- *  (spec: "prompt lines inside blocks remain accent"). */
+/** `local`/`remote`: identity icon, then the PromptContext where-line. */
 function buildIdentity(facts: PaneContextFacts): HTMLElement[] {
-  const children: HTMLElement[] = []
   const icon = iconElement(facts.kind === 'remote' ? ServerIcon : FolderIcon)
   icon.classList.add('ui-pane-context__icon')
-  children.push(icon as unknown as HTMLElement)
-  if (facts.kind === 'remote' && facts.host) {
-    children.push(textPart('ui-pane-context__host', facts.host))
-  }
-  children.push(textPart('ui-pane-context__path', facts.path ?? '~'))
-  if (facts.kind === 'local' && facts.branch) {
-    children.push(verticalDivider())
-    const branchIcon = iconElement(GitBranchIcon)
-    branchIcon.classList.add('ui-pane-context__icon')
-    children.push(branchIcon as unknown as HTMLElement)
-    children.push(textPart('ui-pane-context__branch', facts.branch))
-  }
-  return children
+  return [icon as unknown as HTMLElement, whereLine(facts)]
 }
 
-/** `02`: the foreground program's own name on the leading edge, and —
+/** `02`: the foreground program's own name on the leading edge, its path
+ *  through the same where-line PromptContext draws elsewhere, and —
  *  trailing — who owns the keyboard right now plus the Session actions
  *  escape. Neither TUI internals nor a second status line (spec §5): this
  *  reads facts TerminalContent already has, and draws no program state of
@@ -118,7 +109,7 @@ function buildIdentity(facts: PaneContextFacts): HTMLElement[] {
 function buildProgram(facts: PaneContextFacts, actions: PaneContextActions): HTMLElement[] {
   const children: HTMLElement[] = []
   children.push(textPart('ui-pane-context__program', facts.program ?? ''))
-  if (facts.path) children.push(textPart('ui-pane-context__path', facts.path))
+  if (facts.path) children.push(whereLine(facts))
   const trailing = document.createElement('span')
   trailing.className = 'ui-pane-context__trailing'
   if (facts.keyboardTarget) {

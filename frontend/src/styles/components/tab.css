@@ -52,20 +52,13 @@
      THE FLOOR IS WHERE THE LABEL STOPS BEING A LABEL, and 96px was below it:
      with eleven tabs open every one of them shrank to the floor and read
      `ho…`, which is a strip that has kept its geometry and thrown away its
-     content. 184px is the narrowest a tab can be and still show enough of a
-     path or a command to tell it from its neighbour — raised from 150px by
-     decision 2026-09-15-terminal-screen-mockup-decision.md §1 item 10, which
-     keeps the existing 220px ceiling. Past the floor the row SCROLLS
+     content. 184px (`--terminal-tab-min-width`, tokens.css) is the
+     narrowest a tab can be and still show enough of a path or a command to
+     tell it from its neighbour — raised from a literal 150px by decision
+     2026-09-15-terminal-screen-mockup-decision.md §1 item 10, which keeps
+     the existing 220px ceiling. Past the floor the row SCROLLS
      (tab-strip.css) rather than shrinking further — an unreadable tab on
-     screen is worth less than a readable one a wheel-click away.
-
-     `--terminal-tab-min-width` is a NEW token the decision record's §3
-     assigns to tokens.css (A's exclusive file, not landed in this tree yet);
-     declared here instead of duplicated as a bare 184px so the one caller
-     that needs it has a name for it, and so the value moves to tokens.css
-     with a one-line change once A's token exists — see pane-context.css's
-     note on the same kind of temporary local token. */
-  --terminal-tab-min-width: 184px;
+     screen is worth less than a readable one a wheel-click away. */
   flex: 0 1 auto;
   min-width: var(--terminal-tab-min-width);
   max-width: 220px;

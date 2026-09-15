@@ -554,11 +554,24 @@
      (.cmd-output above, one source for both). Without it the region was 8px
      shorter than the body that replaces it, and the scrollback — which hangs
      from its bottom edge — moved by that much at every freeze. The controller
-     never hard-codes the 8: it reads the padding off this element and sizes
-     the box to content + padding, so this rule stays the only place the
-     number lives. `padding-block`, never the shorthand: the shorthand's `0`
-     would reset the row inset. */
-  padding-block: var(--cmd-output-pad-top) var(--cmd-output-pad-bottom);
+     never hard-codes the numbers: `_bodyPaddingPx()` reads the padding off
+     this element and sizes the box to content + padding, so this rule stays
+     the only place they live. `padding-block`, never the shorthand: the
+     shorthand's `0` would reset the row inset.
+
+     THE BOTTOM ALSO CARRIES `--terminal-block-trailing-space` (spec
+     2026-09-15-terminal-screen-mockup-decision.md §1 item 5's running/frozen
+     seam — command-block.css's own comment on `.cmd-block.cmd-block-running`
+     names this rule as where its half of the accounting belongs). A frozen
+     block pays that space OUTSIDE `.cmd-output`, on `.cmd-block` itself
+     (command-block.css); this region has no such outer box while running —
+     it IS the body, full stop — so its own bottom padding is where the same
+     total has to be paid, or a running block's trailing air is 16px short of
+     the frozen block it becomes and the freeze reads as a shrink. Only the
+     BOTTOM grows: the top pad is unchanged, so the first output row's
+     baseline is identical live and frozen. */
+  padding-block: var(--cmd-output-pad-top)
+    calc(var(--cmd-output-pad-bottom) + var(--terminal-block-trailing-space));
   /* The containing block for the running command's "working, nothing
      written yet" stand-in (nocx-vnirv.1) — see the rule below. */
   position: relative;

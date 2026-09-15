@@ -28,7 +28,11 @@ poll interval, with no reload; clicking the stage opens its graph.
 - Editing the backlog from the screen. The screen only reads.
 - "Origin has backlog changes this host has not pulled" (needs `git fetch` on the host; its
   own task).
-- Hosts without the helper. The screen is not offered for them at all (owner's decision).
+- Hosts without the helper. The screen is not offered for them at all (owner's decision), and
+  per ADR-0068 no status surface ever offers, starts or requests installing the helper.
+- Remote projects need the far helper bound to its destination, not to a session
+  (`nocx-522al`, owner's decision 2026-09-15). Local projects do not wait for it; the remote
+  half of this stage is planned after that epic.
 - Keeping the project list identical on both of the owner's laptops. That arrives with one
   backend on the VM (`nocx-xn63t.2`, related, not blocking) and is not built separately.
 - A canvas. Rejected with the owner: no pan/zoom surface, no draggable nodes.
@@ -39,8 +43,15 @@ poll interval, with no reload; clicking the stage opens its graph.
   notification are control-plane JSON-RPC; nothing new rides the data plane.
 - **AD-2** — one Go codebase. Running `br` on a remote host is code compiled into the helper
   build, the same way git is; no second implementation.
-- **AD-5 / ADR-0034** — the helper is installed by consent, per machine. The screen depends on
-  it for remote hosts and never deploys it.
+- **AD-5 / ADR-0034 / ADR-0068** — the helper is installed by consent, keyed by the
+  machine's host-key fingerprint, and decided only on the saved connection or at connect.
+  The screen depends on it for remote hosts, never deploys it, and on a connection set
+  without it says so and names that connection setting.
+- **ADR-0057** — on this machine every pane is helper-hosted. Local `br` still runs in the
+  backend's own process tree, as local git does.
+- **Base branch** — `feat/agent-orchestration` (at `cc63918b`, 596 commits ahead of `main`):
+  its `app.go`, helper registry, transport and `content.db` schema (version 18) are what this
+  is built on. Implementation happens on `feat/status-screen`, cut from it.
 - **AD-6** — the backend never sniffs the byte stream. Project discovery reads the command
   ledger's recorded `cwd`, which comes from shell-integration facts, not from terminal bytes.
 - **AD-8** — every module behind an interface, wired at one composition root. A new
@@ -83,59 +94,63 @@ nocx today that is most of them, and the number is shown, not hidden.
 
 ## 4. Reading `br`
 
-### 4.1 Commands, never files
+### 4.1 Structure from the export, freshness and claims from commands
 
-The adapter runs `br` with `--json` on the host that holds the repository. It never opens
-`br`'s database (its engine is `frankensqlite` with its own sidecars) and never parses
-`.beads/issues.jsonl` itself.
+Decided with the owner 2026-09-15, after measuring on the nocx backlog (3781 issues, 241
+epics). `br list` does not carry an issue's parent; only `br show` carries the parent and
+the typed relations, at about 0.2 s an issue, batching included (500 ids 36 s, the whole
+backlog 3 min 53 s). A model built from commands alone would take about a minute per change.
+`.beads/issues.jsonl` parses whole in 0.1 s, and each of its rows is the `Issue` object
+`br schema issue` documents, typed `dependencies` included. So:
 
-| need                                          | command                                                                                                             |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| freshness and change marker                   | `br sync --status --json` (`jsonl_content_hash`, `last_export_time`, `dirty_count`, `db_newer`, `workspace_health`) |
-| what changed since the last mark              | `br list --status all --sort updated_at --limit N --json`, newest first, until older than the mark                  |
-| one issue: parent, typed relations, rollup    | `br show <id> --json`                                                                                               |
-| a dependency graph                            | `br graph <id> [--dependencies] --json` (nodes and edges)                                                           |
-| the whole backlog's components, once per load | `br graph --all --json`                                                                                             |
-| stale claims                                  | `br coordination status --json` (per-claim classification and thresholds)                                           |
-| blocked issues                                | `br blocked --json`                                                                                                 |
-| milestone roots                               | `br list --label milestone --status all --json`                                                                     |
+| need                             | source                                                                                                         |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| where the export is              | `br info --json` → `jsonl_path` (the main checkout's, never a worktree's copy)                                 |
+| freshness and change marker      | `br sync --status --json` → `jsonl_content_hash`, `dirty_count`, `db_newer`, `jsonl_newer`, `workspace_health` |
+| issues, parents, typed relations | the export file at `jsonl_path`, each row validated against `br schema issue`                                  |
+| stale claims                     | `br coordination status --json`                                                                                |
 
-The set is closed in code, command and flags together. `br capabilities --json` classifies
-`list`, `show`, `blocked`, `coordination` and `schema` as `read`, but `sync` and `graph` as
-`mixed` (checked with br 0.5.10), so the class of a subcommand is not enough on its own. The
-rule is instead: each entry is a command plus the flags that make it read-only
-(`sync --status` is documented as "read-only"; `graph` without `--dot` only renders), and a
-test runs the whole set in a scratch workspace and asserts that `br sync --status` reports
-the same `jsonl_content_hash` and `dirty_count` before and after — no write happened. A
-future edit cannot add a write without failing it.
+Every `br` invocation carries `--no-auto-import --no-auto-flush --allow-stale`, so a read
+never imports a pulled export into the database or writes the export — both are writes. A
+`jsonl_newer` export (pulled, not imported) is shown as it is, with that stated.
 
-Measured on the nocx backlog (3777 issues): `br sync --status --json` and a one-row
-`br list` each take 0.09 s.
+**Reading the export is verified, not trusted.** `jsonl_content_hash` is the SHA-256 of the
+file (measured: identical). The reader hashes the bytes it read; only a match is parsed. A
+mismatch means the file was rewritten mid-read; the bytes are discarded and the next poll
+tries again, so a torn read never reaches the model.
+
+The command set is closed in code, command and flags together. `br capabilities --json`
+classifies `coordination` as `read` but `sync` as `mixed` (br 0.5.10), so the class alone is
+not enough: each entry is a command plus the flags that make it read-only, and a test runs
+the whole set — including against a workspace whose export is newer than its database —
+and asserts that `br sync --status` reports the same `jsonl_content_hash` and `dirty_count`
+before and after.
+
+`br graph --json` is not used: its edges are bare `[from, to]` pairs with no type, and its
+walk follows every relation, parent-child included.
 
 ### 4.2 Contract checks
 
-Every `br` response the adapter decodes is validated against `br schema <target>` in tests,
-so a `br` upgrade that changes a shape fails a test rather than rendering an empty screen.
-At runtime a response that does not decode is a visible tracker error (§8), never a partial
-model.
+The export's rows are validated against `br schema issue`, `br sync --status` against its
+envelope in `br schema commands`, `br coordination status` against
+`br schema coordination-status`. Tests pin those schemas as fixtures taken from the `br`
+version in use and fail when a newer `br` changes them. At runtime an export row or a
+response that does not decode is a visible tracker error (§8), never a partial model.
 
 ### 4.3 Change detection
 
 Per project location, a poll:
 
 1. `br sync --status --json`. Hash unchanged → nothing.
-2. Hash changed → `br list` by `updated_at` back to the previous mark; `br show` for those
-   ids; `br graph` for the milestone they sit under if an open view shows it.
-3. Compare the new id set with the previous one: an id that disappeared is a deletion. (A
-   deleted issue is absent from `br list --status all`; it does change the hash.)
-4. Build the next snapshot completely, then publish it as a new revision. A read that fails
+2. Hash changed → read the export, verify its SHA-256 against the hash, parse.
+3. Diff the new snapshot against the previous one by id: created, status changes (taken,
+   closed, reopened, deferred), deleted (an id that disappeared), and `blocks` edges gained
+   or lost (blocked, unblocked). These are the feed's events.
+4. Build the next model completely, then publish it as a new revision. A read that fails
    halfway publishes nothing.
 
-Measured in a scratch `br` workspace, 2026-09-15: every write changes the hash — create,
-dependency add and remove, comment, delete. Adding or removing a dependency bumps
-`updated_at` of the dependent issue only, which is where the edge is stored, so step 2 sees
-it. `dirty_count > 0` or `db_newer: true` means the export is behind the database; the data
-is still shown, with that stated (§8).
+`dirty_count > 0` or `db_newer: true` means the export is behind the database; the data is
+still shown, with that stated (§8).
 
 Cadence: every 5 s per location while any client has read a `status.*` method in the last
 60 s, every 60 s otherwise. The backend learns "a view is open" from those reads, not from a
@@ -146,24 +161,47 @@ previous one.
 
 `internal/tracker` mirrors `internal/git`:
 
-- `tracker` — the port: `Tracker` with `Status`, `Changed`, `Show`, `Graph`, `Milestones`,
-  `Stale`, `Blocked`, in the §3 vocabulary.
-- `tracker/brspawn` — argv for the closed command set and decoding of `br` JSON. Linked only
-  by code that runs `br`: the local adapter and the helper build.
-- `tracker/local` — runs `br` on this machine.
-- `tracker/helper` — the client over the helper. It sends a named operation and typed
-  arguments; the helper builds argv. The client never builds argv.
-- `tracker/registry` — chooses local or helper for a location's host, as
-  `internal/git/registry` does, and refuses a host with no helper.
+- `tracker` — the port: `Tracker` with `Status`, `Locate`, `ReadExport(expectHash)` and
+  `Claims`, and the decoded types in the §3 vocabulary.
+- `tracker/brspawn` — argv for the closed command set and decoding of `br` JSON and export
+  rows. Linked only by code that runs `br`: the local adapter and the helper build.
+- `tracker/local` — runs `br` on this machine through `proc.Supervisor` (no shell, own
+  process group, bounded output, a deadline, a non-zero exit as an error), extended to keep
+  a bounded stderr so a refusal can be shown; `br` resolved on the child's `PATH`.
+- `tracker/helper` and a helper service `tracker` — the client over the far helper and the
+  service beside `hostsvc` that runs `tracker/local` on the host, the SHA-256 check included.
+  Each poll carries the status only; the export crosses the wire only when the hash changed
+  and verified on the host. Whether whole-file transfer per change is too costly is decided
+  by measurement when that half is planned. A new service raises `proto.Version` (14 on the
+  base branch). Reached through the destination-bound far helper of `nocx-522al`, never
+  through a session's helper.
 
-The helper gains the `br` operations under the same rules as its git operations. A host
-whose `br` is missing answers "no br", which is a result, not an error path.
+A host whose `br` is missing answers "no br", which is a result, not an error path.
+
+The remote half (`tracker/helper`, the service, the version bump) is planned after
+`nocx-522al`. Everything else in this document works for local projects without it.
+
+### 4.5 Identifying a repository
+
+- **Root:** the git plane's existing `RepoFactory.Open(ctx, cwd)` → `OpenOutcome.Toplevel`.
+- **Origin:** `Repo.RemoteURL` is NOT the origin — it is the remote the current branch
+  tracks, and `ErrNoRemote` on a detached head. The git plane gains `OriginURL(ctx)`, built on
+  its existing `remoteURL(ctx, "origin")`; a repository with no `origin` has no project
+  identity and is not shown.
+- **Normalization:** `internal/tracker` normalizes an origin URL to `host/owner/repo`
+  (scp form `git@host:owner/repo.git`, `ssh://`, `https://`, trailing `.git`, case of the
+  host). The renderer's `frontend/src/git/git-remote-url.ts` converts a remote into a web
+  link for three forges; it answers a different question (a URL to open, not an identity to
+  compare) and cannot run in the backend, so the Go normalizer says so in its comment.
 
 ## 5. Which projects appear
 
 There is no list to maintain. Projects come from where the owner already works.
 
-1. **Candidates** — distinct `(host, cwd)` pairs from the command ledger in `content.db`.
+1. **Candidates** — distinct `(environment, cwd)` pairs from the command ledger in
+   `content.db`. The ledger has no such query today; `LedgerRepository` gains one
+   (`DistinctCwds`), bounded and ordered by the most recent entry. A local environment is
+   `Kind == local`; a remote one is `ssh` with its endpoint.
 2. **Resolution** — for each pair, on that host (locally or through the helper): the git
    root, whether `.beads` exists, the normalized origin
    (`github.com/owner/repo`). Pairs on a host with no helper are skipped.
@@ -184,7 +222,8 @@ There is no list to maintain. Projects come from where the owner already works.
 
 ## 6. What nocx stores
 
-In `content.db`, under ADR-0055:
+In `content.db`, under ADR-0055, as one rung from version 18 to 19 with its frozen
+`testdata/schema_v18.sql`, pinned shape digest and historical object names:
 
 - `status_locations` — origin, host, path, first seen, last seen, how found (ledger / manual),
   last confirmed state (present / gone / unreachable / no helper / no br).
@@ -217,16 +256,16 @@ generated from them.
 Every external call has a failure path with a test and a paired "on a normal machine it
 succeeds" test.
 
-| what happened                                        | what the user sees                                                                                              |
-| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `br` returns an error, or JSON that fails its schema | the card says "the tracker answered outside its contract" with the error; the last snapshot stays, marked stale |
-| `dirty_count > 0` or `db_newer`                      | "the tracker's export is behind its database"; data shown                                                       |
-| host unreachable                                     | the location stays: "host unreachable since HH:MM"; data stale; polling continues and recovers by itself        |
-| helper gone from a host                              | the location stays: "no helper on this host"                                                                    |
-| repository removed from one host                     | that location is dropped; the card uses the others                                                              |
-| removed from every host                              | the project leaves the screen                                                                                   |
-| found in the ledger, no `br` there                   | not shown                                                                                                       |
-| a read fails halfway                                 | no new revision; the previous one stays                                                                         |
+| what happened                                                | what the user sees                                                                                                          |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| `br` returns an error, or JSON that fails its schema         | the card says "the tracker answered outside its contract" with the error; the last snapshot stays, marked stale             |
+| `dirty_count > 0` or `db_newer`                              | "the tracker's export is behind its database"; data shown                                                                   |
+| host unreachable                                             | the location stays: "host unreachable since HH:MM"; data stale; polling continues and recovers by itself                    |
+| helper gone from a host, or the connection is set without it | the location stays: "this connection is set without the helper", naming the connection setting (ADR-0068); no install offer |
+| repository removed from one host                             | that location is dropped; the card uses the others                                                                          |
+| removed from every host                                      | the project leaves the screen                                                                                               |
+| found in the ledger, no `br` there                           | not shown                                                                                                                   |
+| a read fails halfway                                         | no new revision; the previous one stays                                                                                     |
 
 ## 9. Security
 
@@ -255,8 +294,20 @@ Layout chosen by the owner from the mockups:
 
 Dependency tiers (graph 2) and agent cards (timeline 3) are not built.
 
-The graph layout algorithm is a dependency on a layout library chosen at planning time;
-it must load within the CSP and must not bring a second component model into the Solid app.
+The screen is named **Status** in the product. "Overview" is already the workspace overview
+(`frontend/src/overview/`), and the two must not share a word.
+
+**No layout library.** The frontend has none (no dagre, elkjs, xyflow, d3), and one graph
+level is 5–15 nodes. The graph component lays out in layers left to right itself: a node's
+column is the length of its longest chain of in-level blockers, rows are ordered to reduce
+crossings by one barycentre pass, and edges are drawn as SVG paths whose stroke comes from
+tokens (`check-css-colors` forbids literals). It is a kit component (`ui-dependency-graph`)
+with its own CSS file, test and README row.
+
+**The roadmap tree needs a kit variant.** `TreeRow` accepts only the file tree's kinds
+(`regular | dir | symlink | other | unreadable`) and picks folder and file glyphs from them.
+The tree gains a typed variant for tracker nodes (milestone, epic, feature, task, bug,
+chore) in the kit rather than a second tree row in the surface.
 
 ## 11. Tests
 
@@ -265,13 +316,16 @@ it must load within the CSP and must not bring a second component model into the
 3. **Contracts** — `_DTOConformsToContract` and `_OverTheWireConformsToContract` for every
    method; `br` responses validated against `br schema`.
 4. **Derivation** — table tests for milestone, stage, not decomposed, outside any milestone,
-   blocked outside the stage, and event kinds, on backlogs built by running the real `br`
-   in a temporary workspace, never on hand-written JSON.
+   blocked outside the stage, and event kinds, on exports produced by the real `br` in a
+   temporary workspace (committed as fixtures by a generator, regenerated when `br` changes),
+   never on hand-written JSON.
 5. **Discovery and forgetting** — two hosts with one origin: removing one location keeps the
    project; removing both forgets it; an unreachable host drops nothing.
-6. **Read-only** — every entry of the command set runs against a scratch `br` workspace, and
+6. **Read-only** — every entry of the command set runs against a scratch `br` workspace (one of them with an export newer than its database), and
    `jsonl_content_hash` and `dirty_count` from `br sync --status` are unchanged afterwards.
-7. **Renderer** — through what a user reaches: the overview lists a project from its initial
+7. **Torn export** — an export rewritten between the status read and the file read (its
+   SHA-256 does not match) publishes no revision; the next poll with a matching file does.
+8. **Renderer** — through what a user reaches: the overview lists a project from its initial
    state, clicking a stage opens its graph, a new revision updates the card.
 
 ## 12. Filed alongside

@@ -171,6 +171,11 @@ describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () 
   })
 
   it('the composer carries the gutter itself', () => {
-    expect(shipped('.nocx-editor', 'padding')).toBe('10px var(--pane-inline-padding) 12px')
+    // Tokenised in nocx-9bpeq.15 (spec 2026-09-15 §6): the two literal
+    // pixel values either side of the token were how this rule started
+    // drifting off the scale. The fact this guards is unchanged — the
+    // composer states its OWN `--pane-inline-padding`, same as every other
+    // row (fact 3 above).
+    expect(shipped('.nocx-editor', 'padding')).toBe('var(--space-3) var(--pane-inline-padding)')
   })
 })

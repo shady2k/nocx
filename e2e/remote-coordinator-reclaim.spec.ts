@@ -772,14 +772,24 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
     await expect(endedRow).toHaveCount(1, { timeout: 60_000 })
     await expect(endedRow).toContainText(/ended/)
 
-    // And the host agrees, from its own record of the process it owned.
+    // And the host agrees — by having let the session go. Closer 2
+    // (nocx-isjh4) changed what "the host agrees" means here: once the
+    // coordinator has RECORDED a shell's exit and closed its block — which
+    // the bell row just proved above — it calls EndSession, and the helper
+    // keeps an exited session's row only for as long as no coordinator has
+    // taken the result. So the host's own agreement is no longer a
+    // lingering `exit.code` this test can poll for after the fact; it is
+    // the row's ABSENCE, the same release `sessions.live` and
+    // `sessions.inventory` show for every session a coordinator has
+    // finished with. Polled on that state, not on a duration, because the
+    // release races the bell row above by an amount this test does not
+    // control.
     await expect
       .poll(
-        async () =>
-          helperSession(await inventory(endpoint), liveBefore.sessionId)?.exit?.code ?? null,
-        { timeout: 60_000, message: 'the helper never reported the build a real exit status' },
+        async () => helperSession(await inventory(endpoint), liveBefore.sessionId) !== undefined,
+        { timeout: 60_000, message: 'the host still lists a session it has already ended' },
       )
-      .toBe(EXIT_CODE)
+      .toBe(false)
 
     console.log(
       `remote reclaim: windowBytes=${hostBefore.launch.windowBytes} detachedBytes=${detachedBytes} ` +

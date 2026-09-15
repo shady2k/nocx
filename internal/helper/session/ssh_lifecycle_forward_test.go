@@ -116,9 +116,25 @@ func (c *coordinatorPaneLifecycle) bridge(attached *client.AttachedSession) {
 
 // mustAttach attaches to a session with the lifecycle stream requested, which
 // is what a coordinator does before it can read anything a session produces.
+//
+// The subscriber id is minted fresh per call, crypto/rand like
+// hostedSpawn.run's own (internal/app/helper_hosted.go) — not the single
+// hardcoded "ab...ab" this used to send every time. The client keys its own
+// attachment bookkeeping by subscriber id (sessions.go's Attach), so a test
+// that calls mustAttach twice — TestAWriterBlockedOnAZeroWindowIsDetachedAnd
+// TheSessionCloses attaches a stuck session and a sibling on the same
+// connection — got the CLIENT's own "helper session subscriber already
+// attached" refusal on the second call, before the request ever reached the
+// helper: two live attachments were never one subscriber's replay of the
+// same id, they were two different sessions that happened to share a
+// constant nothing in this test asked them to share.
 func (s *sshStand) mustAttach(t *testing.T, entry client.SessionEntry) *client.AttachedSession {
 	t.Helper()
-	subscriber := proto.SubscriberID(strings.Repeat("ab", 16))
+	var subscriberRaw [16]byte
+	if _, err := rand.Read(subscriberRaw[:]); err != nil {
+		t.Fatalf("mint a subscriber id: %v", err)
+	}
+	subscriber := proto.SubscriberID(hex.EncodeToString(subscriberRaw[:]))
 	attached, err := s.client.Attach(context.Background(), proto.AttachParams{
 		Subscriber: subscriber,
 		Session: proto.HostSessionID{

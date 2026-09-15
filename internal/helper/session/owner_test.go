@@ -768,8 +768,27 @@ printf 'REPLY:%s\n' "$answer"
 	case <-time.After(30 * time.Second):
 		t.Fatal("the shell never exited")
 	}
-	if !win.isClosed() {
-		t.Fatal("the window is not closed after the shell exited")
+
+	// lp.Done firing is the PROCESS being reaped, never a promise that this
+	// owner has finished draining it: spec §5.7's own tail-drain step keeps
+	// reading "until EOF" after termination, and everything the flood wrote
+	// but this owner had not yet read off the kernel's own pty buffer still
+	// has to pass through the real VT emulator (Session.Ingest) before
+	// RawReadUntilAgain ever reaches the EIO Linux answers once the slave
+	// closes and finishRead closes the window. A bare isClosed() check right
+	// here asserted a synchrony the design never promises — exactly the
+	// "wait on a duration, not a state change" mistake AGENTS.md's testing
+	// rules forbid, just spelled as "no wait at all" — so wait on the SAME
+	// observable the watchdog loop above already uses, win.changed(), until
+	// isClosed() actually reports true.
+	closeDeadline := time.After(15 * time.Second)
+	for !win.isClosed() {
+		changed := win.changed()
+		select {
+		case <-changed:
+		case <-closeDeadline:
+			t.Fatal("the window is not closed after the shell exited")
+		}
 	}
 }
 

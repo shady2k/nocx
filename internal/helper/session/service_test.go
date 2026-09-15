@@ -1053,6 +1053,16 @@ func TestTheServiceIsNamedAfterTheReservedNameAndTakesNoArgv(t *testing.T) {
 		// emulator. Both take scalars and a session handle, so neither
 		// carries a free-form []string past the registration rule below.
 		proto.OpScreen: true, proto.OpReplay: true,
+		// The session surface's one-shot write path (nocx-6q1uh.6, spec §6):
+		// a consistent read, a signed target minted from it, the write
+		// itself, a non-mutating status poll for the same token, and the
+		// access-epoch bump a revocation sends ahead of a session's queued
+		// intents (§7.2). service.go registers all five (registerOps) —
+		// this list is what the test itself enumerates ops against, so it
+		// went stale the moment that task added them, reporting every one
+		// of them "undeclared" rather than reporting an actual gap.
+		proto.OpSnapshot: true, proto.OpTarget: true, proto.OpIntent: true,
+		proto.OpIntentStatus: true, proto.OpAccessBump: true,
 	}
 	for _, op := range svc.Ops() {
 		if !want[op] {

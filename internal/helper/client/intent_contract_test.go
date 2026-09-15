@@ -14,10 +14,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/helper/session"
 )
 
 // TestTheOneShotWritePathDTOsConformToTheirContracts builds the ten shapes
@@ -73,14 +78,131 @@ func TestTheOneShotWritePathDTOsConformToTheirContracts(t *testing.T) {
 	}
 }
 
+// recordingConn wraps a client.HelperConn and records the Result of the
+// most recent session.Response frame the client's own read pump has
+// decoded off Stdout() — the exact bytes ONE client call (c.Snapshot,
+// c.Target, ...) actually received, not a second, independent round trip.
+//
+// Snapshot and target are minted fresh every call (hs.snapNext++,
+// tokenBook.Mint's own random id), so calling an op once through a raw
+// c.Call to capture the wire and AGAIN through its typed client method —
+// TestTheOneShotWritePathConformsToItsContractOverTheWire used to do
+// exactly that — necessarily gets two DIFFERENT snapshots or tokens: the
+// mismatch it then reported ("client.Snapshot decoded snapshotId 2, the
+// wire carried 1") was two live resources, never a decode defect. Recording
+// the SAME call's own bytes instead of a second call is what proves
+// client.Snapshot/client.Target decode what the wire actually sent.
+type recordingConn struct {
+	client.HelperConn
+	stdout io.Reader
+
+	mu     sync.Mutex
+	result json.RawMessage
+	have   bool
+}
+
+func newRecordingConn(base client.HelperConn) *recordingConn {
+	r := &recordingConn{HelperConn: base}
+	pr, pw := io.Pipe()
+	dec := proto.NewDecoder(func(t proto.FrameType, _, _ uint32, payload []byte) {
+		if t != proto.TypeResponse {
+			return
+		}
+		var resp proto.Response
+		if err := json.Unmarshal(payload, &resp); err != nil || resp.Result == nil {
+			return
+		}
+		r.mu.Lock()
+		r.result = append(json.RawMessage(nil), resp.Result...)
+		r.have = true
+		r.mu.Unlock()
+	}, nil)
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := base.Stdout().Read(buf)
+			if n > 0 {
+				// Fed to the decoder BEFORE the copy reaches pw: pw.Write
+				// blocks until the client's own read pump reads from pr, so
+				// by the time that pump can possibly act on these bytes,
+				// dec.Feed has already recorded whatever response they
+				// completed.
+				_ = dec.Feed(buf[:n]) // never returns an error (frame.go's own doc)
+				if _, werr := pw.Write(buf[:n]); werr != nil {
+					return
+				}
+			}
+			if err != nil {
+				_ = pw.CloseWithError(err)
+				return
+			}
+		}
+	}()
+	r.stdout = pr
+	return r
+}
+
+func (r *recordingConn) Stdout() io.Reader { return r.stdout }
+
+// lastResult answers the most recently decoded response's raw result bytes.
+// It must be called right after the client call whose wire bytes it is
+// meant to capture — calls in this test are strictly sequential, so there
+// is never more than one response in flight to be ambiguous about.
+func (r *recordingConn) lastResult(t *testing.T) json.RawMessage {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.have {
+		t.Fatal("no response recorded yet")
+	}
+	return r.result
+}
+
+// hostedSessionsRecording is hostedSessions (session_service_contract_test.go)
+// with its HelperConn wrapped in a recordingConn, so a test can validate the
+// schema of the exact bytes a typed client method (c.Snapshot, c.Target, ...)
+// itself decoded, rather than a second call's.
+func hostedSessionsRecording(t *testing.T) (*client.Client, *recordingConn) {
+	t.Helper()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := session.New(session.Options{
+		Generation: "testhash",
+		Spawner:    session.NewLocalSpawner(log, session.Shell{Path: "/bin/sh"}, ""),
+		Inspector:  session.NewInspector(),
+		Log:        log,
+		Limits:     session.DefaultLimits(),
+	})
+	t.Cleanup(svc.Close)
+
+	base := newFakeConn(func(in io.Reader, out io.Writer) int {
+		h := hostFor(in, out, log)
+		h.Register(svc)
+		release := svc.Bind(h)
+		defer release()
+		if err := h.Serve(context.Background()); err != nil {
+			return 1
+		}
+		return 0
+	})
+	rec := newRecordingConn(base)
+	c, err := client.Dial(context.Background(), client.Config{
+		Exec: rec, Command: "/opt/nocx-helper", ExpectHash: "testhash", SentinelTTL: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c, rec
+}
+
 // oneShotWriteSession spawns a real shell through the real session service —
 // the same seam spawnOverTheWire (screen_contract_test.go) uses — and hands
-// back the client and the spawned entry.
-func oneShotWriteSession(t *testing.T) (*client.Client, client.SessionEntry) {
+// back the client, its recorder and the spawned entry.
+func oneShotWriteSession(t *testing.T) (*client.Client, *recordingConn, client.SessionEntry) {
 	t.Helper()
-	c := hostedSessions(t)
+	c, rec := hostedSessionsRecording(t)
 	entry := spawnOverTheWire(t, c)
-	return c, entry
+	return c, rec, entry
 }
 
 // TestTheOneShotWritePathConformsToItsContractOverTheWire drives one real
@@ -89,7 +211,7 @@ func oneShotWriteSession(t *testing.T) (*client.Client, client.SessionEntry) {
 // status, then bump the session's access epoch — validating the raw bytes
 // off the socket against each op's own schema at every step.
 func TestTheOneShotWritePathConformsToItsContractOverTheWire(t *testing.T) {
-	c, entry := oneShotWriteSession(t)
+	c, rec, entry := oneShotWriteSession(t)
 	ctx := context.Background()
 	session := proto.HostSessionID{
 		Generation: proto.GenerationID(entry.HostSessionID.Generation),
@@ -101,15 +223,21 @@ func TestTheOneShotWritePathConformsToItsContractOverTheWire(t *testing.T) {
 	if err := validateHelperJSON(loadHelperSchema(t, "session.snapshot.params.schema.json"), mustMarshal(t, snapParams)); err != nil {
 		t.Fatalf("snapshot params do not satisfy the contract: %v", err)
 	}
-	var snapRaw json.RawMessage
-	if err := c.Call(ctx, proto.ServiceSession, proto.OpSnapshot, snapParams, &snapRaw); err != nil {
-		t.Fatalf("snapshot: %v", err)
+	// ONE call, through the typed client method itself — snapshot ids are
+	// minted fresh per call (hs.snapNext++, session.go), so calling this op
+	// twice (once raw to capture the wire, once more through c.Snapshot)
+	// would compare two DIFFERENT live snapshots and always disagree; rec
+	// captures the SAME response c.Snapshot itself decoded.
+	clientSnap, err := c.Snapshot(ctx, entry.HostSessionID)
+	if err != nil {
+		t.Fatalf("client.Snapshot: %v", err)
 	}
-	if err := validateHelperJSON(loadHelperSchema(t, "session.snapshot.schema.json"), snapRaw); err != nil {
+	snapRaw := rec.lastResult(t)
+	if err = validateHelperJSON(loadHelperSchema(t, "session.snapshot.schema.json"), snapRaw); err != nil {
 		t.Fatalf("the snapshot result off the socket does not satisfy its contract:\n%v\n\npayload was:\n%s", err, snapRaw)
 	}
 	var snap proto.SnapshotResult
-	if err := json.Unmarshal(snapRaw, &snap); err != nil {
+	if err = json.Unmarshal(snapRaw, &snap); err != nil {
 		t.Fatalf("decode snapshot: %v", err)
 	}
 	if snap.AccessEpoch != 1 {
@@ -117,10 +245,6 @@ func TestTheOneShotWritePathConformsToItsContractOverTheWire(t *testing.T) {
 	}
 	if !snap.ReadBarrier {
 		t.Error("a local session's snapshot reports readBarrier = false, want true")
-	}
-	clientSnap, err := c.Snapshot(ctx, entry.HostSessionID)
-	if err != nil {
-		t.Fatalf("client.Snapshot: %v", err)
 	}
 	if clientSnap.SnapshotID != snap.SnapshotID {
 		t.Errorf("client.Snapshot decoded snapshotId %d, the wire carried %d", clientSnap.SnapshotID, snap.SnapshotID)
@@ -134,20 +258,21 @@ func TestTheOneShotWritePathConformsToItsContractOverTheWire(t *testing.T) {
 	if err = validateHelperJSON(loadHelperSchema(t, "session.target.params.schema.json"), mustMarshal(t, targetParams)); err != nil {
 		t.Fatalf("target params do not satisfy the contract: %v", err)
 	}
-	var targetRaw json.RawMessage
-	if err = c.Call(ctx, proto.ServiceSession, proto.OpTarget, targetParams, &targetRaw); err != nil {
-		t.Fatalf("target: %v", err)
+	// ONE call again, for the same reason as snapshot above: a token id is
+	// minted fresh per Mint (tokens.go, drawn at random), so a second,
+	// independent c.Target call can never carry the same tokenId the first
+	// one did — rec captures the bytes THIS call actually received.
+	clientTarget, err := c.Target(ctx, targetParams)
+	if err != nil {
+		t.Fatalf("client.Target: %v", err)
 	}
+	targetRaw := rec.lastResult(t)
 	if err = validateHelperJSON(loadHelperSchema(t, "session.target.schema.json"), targetRaw); err != nil {
 		t.Fatalf("the target result off the socket does not satisfy its contract:\n%v\n\npayload was:\n%s", err, targetRaw)
 	}
 	var target proto.TargetResult
 	if err = json.Unmarshal(targetRaw, &target); err != nil {
 		t.Fatalf("decode target: %v", err)
-	}
-	clientTarget, err := c.Target(ctx, targetParams)
-	if err != nil {
-		t.Fatalf("client.Target: %v", err)
 	}
 	if clientTarget.TokenID != target.TokenID {
 		t.Errorf("client.Target decoded tokenId %q, the wire carried %q", clientTarget.TokenID, target.TokenID)

@@ -617,9 +617,16 @@ func (o *sessionOwner) recordTokenOutcome(pi *pendingIntent, res ownerResult) {
 
 // resultFromStored turns a tokenBook-recorded result back into an
 // ownerResult (spec §6.2: a same-token, same-intent replay answers the SAME
-// thing the original attempt did). Its Err carries the cause string rather
-// than the original error value, which the book never keeps — only the
-// compact record does.
+// thing the original attempt did). Its Err is errFromCause's own sentinel
+// for r.Cause — the SAME value a fresh refusal would have carried — rather
+// than a %s-formatted reconstruction: this used to be fmt.Errorf("session:
+// %s", r.Cause), which wraps nothing, so errors.Is against a sentinel could
+// never match a replayed or receipt-rechecked result (nocx-6q1uh.18,
+// TestAnIntentPastCommitByIsRefused and
+// TestABumpAcknowledgesOnlyAfterOlderIntentsAreTerminal both caught it: a
+// commit-deadline or access-revoked refusal decided here — tokenGate's own
+// epoch and commitBy rechecks, tokens.go — reported Refused with an error
+// nothing outside this file could ever errors.Is against).
 func resultFromStored(r storedResult) ownerResult {
 	res := ownerResult{
 		State:        ownerStateFromName(r.State),
@@ -627,15 +634,55 @@ func resultFromStored(r storedResult) ownerResult {
 		FenceAfter:   sessionruntime.Fence(r.FenceAfter),
 	}
 	if r.Cause != "" {
-		res.Err = fmt.Errorf("session: %s", r.Cause)
-		// Cause is the clean spelling causeOf(res.Err) can never recover
-		// from the line above (a %s-formatted error wraps nothing, so
-		// errors.Is against a sentinel never matches) — see ownerResult's
-		// own doc. A caller rendering the wire result reads this field
+		res.Err = errFromCause(r.Cause)
+		// Cause is read back directly rather than recomputed from Err via
+		// causeOf, so it survives even for a cause errFromCause does not
+		// recognise (its own generic fallback wraps nothing sentinel-shaped
+		// either). A caller rendering the wire result reads this field
 		// first, which is also how it tells a REPLAY from a fresh refusal.
 		res.Cause = r.Cause
 	}
 	return res
+}
+
+// errFromCause is causeOf's own inverse: the one sentinel a stored cause
+// names, so a replay's ownerResult.Err is literally the same error value a
+// fresh refusal for that cause carries — not merely a string that reads the
+// same. Keep it in step with causeOf below; a cause with no sentinel here
+// (no_read_barrier and would_submit have none yet, causeOf's own doc) falls
+// back to a plain error carrying the cause text, same as before this
+// existed.
+func errFromCause(cause string) error {
+	switch cause {
+	case "forged":
+		return ErrForged
+	case "expired":
+		return ErrExpired
+	case "token_spent":
+		return ErrTokenSpent
+	case "snapshot_gone":
+		return ErrSnapshotGone
+	case "capacity":
+		return ErrCapacity
+	case "incomparable":
+		return errIncomparable
+	case "stale_target":
+		return errStaleTarget
+	case "access_revoked":
+		return errAccessRevoked
+	case "commit_deadline":
+		return errCommitDeadline
+	case "completeness_unknown":
+		return sessionruntime.ErrCompletenessUnknown
+	case "cannot_encode":
+		return sessionruntime.ErrIntentUnsupported
+	case "closing":
+		return errOwnerClosing
+	case "busy":
+		return errBusy
+	default:
+		return fmt.Errorf("session: %s", cause)
+	}
 }
 
 // causeOf names an error in the wire's refusal vocabulary (spec §6.5) for

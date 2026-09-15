@@ -25,6 +25,7 @@ import { createLinkOpener } from './open'
 import type { LinkOpener } from './open'
 import { createLivePolicy } from './live'
 import { trackLinkModifier, type ArmedTracker } from './armed'
+import { createSessionHomeSource } from '../where/session-home'
 import type { FilesOpenResult } from '../generated/files.open'
 import type { FileViewerTarget } from '../file-viewer'
 import type { ActiveOrigin } from '../pane-content'
@@ -72,12 +73,15 @@ function harness(): {
   const opened: Array<FileViewerTarget & { line?: number }> = []
   const urls: string[] = []
   const directories: string[] = []
+  const sessionHome = createSessionHomeSource({
+    openBinding: () => Promise.resolve(BINDING),
+    onBindingLiveness: () => () => {},
+  })
   const opener = createLinkOpener({
     openUrl: (url) => {
       urls.push(url)
       return Promise.resolve()
     },
-    openBinding: () => Promise.resolve(BINDING),
     pathKind: (_bindingId, path) =>
       Promise.resolve({
         kind: path === '/Users/a/repo/build' ? ('directory' as const) : ('file' as const),
@@ -88,7 +92,7 @@ function harness(): {
     },
     openViewer: (t) => opened.push(t),
     notify: () => {},
-    onBindingLiveness: () => () => {},
+    sessionHome,
   })
   return { opened, urls, directories, armed: trackLinkModifier(), opener }
 }

@@ -23,6 +23,7 @@
 import type { FilesOpenResult } from '../generated/files.open'
 import type { ActiveOrigin } from '../pane-content'
 import type { FileViewerTarget } from '../file-viewer'
+import type { SessionHomeSource } from '../where/session-home'
 import type { LinkTarget } from './detect'
 import { resolvePath } from './resolve'
 
@@ -40,9 +41,6 @@ export type LinkPathProbe =
 export interface LinkOpenDeps {
   /** Hand a url to the system browser (shell.openUrl). */
   readonly openUrl: (url: string) => Promise<unknown>
-  /** files.open for one session — the binding every later files.* call
-   *  echoes. `rootPath` is the panel's starting directory, not a sandbox. */
-  readonly openBinding: (sessionId: string, rootPath?: string) => Promise<FilesOpenResult>
   /** Classify a path with one files.stat call, without changing the Files
    *  panel. */
   readonly pathKind: (bindingId: string, path: string) => Promise<LinkPathProbe>
@@ -57,63 +55,22 @@ export interface LinkOpenDeps {
   readonly openViewer: (target: FileViewerTarget & { line?: number }) => void
   /** Tell the user why nothing opened. */
   readonly notify: (message: string) => void
-  /** Subscribe to a binding's liveness, so a dead one is not handed out
-   *  again. Same seam the viewer uses; the composition root owns it. */
-  readonly onBindingLiveness: (bindingId: string, cb: (live: boolean) => void) => () => void
+  /** The session's one files.open binding and derived home (nocx-9bpeq.13,
+   *  spec §3) — shared with the prompt line and any other where-consumer, so
+   *  the opener never mints a binding of its own: a binding holds a provider
+   *  and, for ssh, a pooled connection reference, and a second one per
+   *  consumer would leak both at the rate consumers ask. The composition
+   *  root builds it once and hands the same instance to every consumer. */
+  readonly sessionHome: SessionHomeSource
 }
 
 export interface LinkOpener {
   readonly open: (target: LinkTarget, origin: Omit<ActiveOrigin, 'paneId'> | null) => Promise<void>
 }
 
-/**
- * The home directory a binding's root reveals, or undefined.
- *
- * Both providers abbreviate a path under home to `~…` for DISPLAY (see
- * `displayOf` in internal/filesystem/local and its sftp twin). That
- * abbreviation is the only statement about home that already crosses the
- * wire, so `~/…` is expanded by reading it back off a binding we open
- * anyway, rather than by adding a round trip or a field to ask "what is
- * home" — the answer was already in the reply.
- */
-export function homeFromRoot(root: FilesOpenResult['root']): string | undefined {
-  const { path, display } = root
-  if (display === '~') return path
-  if (!display.startsWith('~/')) return undefined
-  const tail = display.slice(1) // '/repo'
-  if (!path.endsWith(tail)) return undefined
-  const home = path.slice(0, path.length - tail.length)
-  return home === '' ? undefined : home
-}
-
 export function createLinkOpener(deps: LinkOpenDeps): LinkOpener {
-  // One binding per session, not one per click: a binding holds a provider
-  // and, for ssh, a pooled connection reference, so minting one for every
-  // clicked path would leak both at the rate the user clicks. Dropped the
-  // moment the liveness seam says the binding died, which is what keeps a
-  // reconnected session from being handed the id of a binding that is gone.
-  const bindings = new Map<string, Promise<FilesOpenResult>>()
-  const homes = new Map<string, string>()
-
   function bindingFor(origin: Omit<ActiveOrigin, 'paneId'>): Promise<FilesOpenResult> {
-    const cached = bindings.get(origin.sessionId)
-    if (cached !== undefined) return cached
-    const rootPath = origin.cwdVerified && origin.cwd !== null ? origin.cwd : undefined
-    const pending = deps.openBinding(origin.sessionId, rootPath).then((res) => {
-      const home = homeFromRoot(res.root)
-      if (home !== undefined) homes.set(origin.sessionId, home)
-      deps.onBindingLiveness(res.bindingId, (live) => {
-        if (!live && bindings.get(origin.sessionId) === pending) bindings.delete(origin.sessionId)
-      })
-      return res
-    })
-    // A rejected open must not be remembered: the next click would await the
-    // same failed promise forever and the user would never get a second try.
-    pending.catch(() => {
-      if (bindings.get(origin.sessionId) === pending) bindings.delete(origin.sessionId)
-    })
-    bindings.set(origin.sessionId, pending)
-    return pending
+    return deps.sessionHome.ensure(origin.sessionId, origin.cwd, origin.cwdVerified)
   }
 
   async function openPath(
@@ -130,7 +87,7 @@ export function createLinkOpener(deps: LinkOpenDeps): LinkOpener {
     const resolved = resolvePath(target, {
       cwd: origin.cwd ?? '',
       cwdVerified: origin.cwdVerified,
-      home: homes.get(origin.sessionId),
+      home: deps.sessionHome.home(origin.sessionId),
     })
     if (!resolved.ok) {
       deps.notify(

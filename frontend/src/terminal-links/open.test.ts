@@ -3,7 +3,8 @@
 // message — the one outcome that is not allowed is silence, which is what
 // clicking a path in nocx did before this existed.
 import { describe, expect, it, vi } from 'vitest'
-import { createLinkOpener, homeFromRoot, type LinkOpenDeps, type LinkPathProbe } from './open'
+import { createLinkOpener, type LinkOpenDeps, type LinkPathProbe } from './open'
+import { createSessionHomeSource, type SessionHomeDeps } from '../where/session-home'
 import type { FilesOpenResult } from '../generated/files.open'
 import type { ActiveOrigin } from '../pane-content'
 
@@ -31,43 +32,43 @@ const origin: Omit<ActiveOrigin, 'paneId'> = {
   machine: 'This machine',
 }
 
-function deps(over: Partial<LinkOpenDeps> = {}): LinkOpenDeps & {
+// The session-home source is shared wiring now (where/session-home.ts,
+// nocx-9bpeq.13): these tests build a real one from the same
+// openBinding/onBindingLiveness doubles the opener used to own directly, so
+// every existing assertion about binding reuse, liveness and cache-on-
+// rejection keeps exercising the same behaviour through its new owner.
+function deps(over: Partial<LinkOpenDeps> & Partial<SessionHomeDeps> = {}): LinkOpenDeps & {
   viewed: Parameters<LinkOpenDeps['openViewer']>[0][]
   said: string[]
   revealed: string[]
+  openBinding: SessionHomeDeps['openBinding']
+  onBindingLiveness: SessionHomeDeps['onBindingLiveness']
 } {
   const viewed: Parameters<LinkOpenDeps['openViewer']>[0][] = []
   const said: string[] = []
   const revealed: string[] = []
+  const { openBinding, onBindingLiveness, ...rest } = over
+  const resolvedOpenBinding = openBinding ?? vi.fn(() => Promise.resolve(openResult()))
+  const resolvedOnBindingLiveness = onBindingLiveness ?? (() => () => {})
+  const sessionHome = createSessionHomeSource({
+    openBinding: resolvedOpenBinding,
+    onBindingLiveness: resolvedOnBindingLiveness,
+  })
   return {
     viewed,
     said,
     revealed,
+    openBinding: resolvedOpenBinding,
+    onBindingLiveness: resolvedOnBindingLiveness,
     openUrl: vi.fn(() => Promise.resolve()),
-    openBinding: vi.fn(() => Promise.resolve(openResult())),
     pathKind: vi.fn(() => Promise.resolve<LinkPathProbe>({ kind: 'file' })),
     openDirectory: vi.fn(() => Promise.resolve(false)),
     openViewer: (t) => viewed.push(t),
     notify: (m) => said.push(m),
-    onBindingLiveness: () => () => {},
-    ...over,
+    sessionHome,
+    ...rest,
   }
 }
-
-describe('homeFromRoot', () => {
-  it('reads home off the provider’s own tilde abbreviation', () => {
-    expect(homeFromRoot(root('/Users/a/repo', '~/repo'))).toBe('/Users/a')
-    expect(homeFromRoot(root('/Users/a', '~'))).toBe('/Users/a')
-  })
-
-  it('answers nothing for a root outside home', () => {
-    expect(homeFromRoot(root('/etc', '/etc'))).toBeUndefined()
-  })
-
-  it('answers nothing when the abbreviation does not fit the path', () => {
-    expect(homeFromRoot(root('/x', '~/a/very/long/thing'))).toBeUndefined()
-  })
-})
 
 describe('createLinkOpener — urls', () => {
   it('hands an http url to the system browser', async () => {

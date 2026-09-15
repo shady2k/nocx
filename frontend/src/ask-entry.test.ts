@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
-import { grantBlockFromElement, grantBlockFromSelection } from './ask-entry'
+import { grantBlockFromElement, grantBlockFromSelection, TARGET_MENU_ITEMS } from './ask-entry'
 import { createAnswerBody } from './scrollback/answer-body'
 import { CommandSnapshotStore } from './command-snapshot'
 
@@ -249,5 +249,18 @@ describe('marks inside the frozen screen (nocx-hp8p2.7)', () => {
   it('offers nothing when no frozen screen is attached', () => {
     const frame = frameOf(['a', 'b', 'c'])
     expect(grantBlockFromSelection(selectRows(frame, 0, 1), null)).toBeNull()
+  })
+})
+
+describe('the target menu (spec 2026-09-15 §6)', () => {
+  it('lists one row per entry this module already knows, by its presentation word', () => {
+    // TARGET_PRESENTATION is the indicator's own vocabulary — the module
+    // has no live handle on InputTargetRegistry, only the toggle it is
+    // handed — so this is "the registry the gutter already knows" the spec
+    // names, table-driven and exported so it is a plain unit under test.
+    expect(TARGET_MENU_ITEMS).toEqual([
+      { targetId: 'shell', word: 'Run' },
+      { targetId: 'agent', word: 'Ask' },
+    ])
   })
 })

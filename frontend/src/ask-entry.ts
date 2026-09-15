@@ -6,7 +6,7 @@
 import { StateEffect, type Extension } from '@codemirror/state'
 import { EditorView, GutterMarker, ViewPlugin, gutter } from '@codemirror/view'
 import type { BadgeTone } from './ui/badge'
-import { createModeIndicator } from './ui/mode-indicator'
+import { createModeIndicator, type ModeIndicatorMenuItem } from './ui/mode-indicator'
 import { blockKindRules, type BlockKind } from './scrollback/blocks'
 
 export interface GrantBlock {
@@ -144,6 +144,17 @@ function targetPresentation(targetId: string, label: string): { word: string; to
   return TARGET_PRESENTATION[targetId] ?? { word: label, tone: 'neutral' }
 }
 
+/** The menu's rows (spec 2026-09-15 §6): one per entry this module already
+ *  knows about, in TARGET_PRESENTATION's own order. This is "the registry
+ *  the gutter already knows" — the indicator has no live handle on
+ *  InputTargetRegistry (it is handed a toggle, not the registry itself),
+ *  and this vocabulary is the one it does own. Exported so the derivation
+ *  is a plain, table-driven unit under test rather than something only
+ *  visible through a mounted CM6 gutter. */
+export const TARGET_MENU_ITEMS: ModeIndicatorMenuItem[] = Object.entries(TARGET_PRESENTATION).map(
+  ([targetId, presentation]) => ({ targetId, word: presentation.word }),
+)
+
 class TargetMarker extends GutterMarker {
   constructor(
     private readonly word: string,
@@ -164,7 +175,17 @@ class TargetMarker extends GutterMarker {
       word: this.word,
       tone: this.tone,
       targetId: this.targetId,
-      onClick: this.onToggle,
+      items: TARGET_MENU_ITEMS,
+      // The registry's switch is binary today (register() only ever sees
+      // shell and agent), so "pick a target" and "toggle away from the
+      // active one" are the same operation — picking the row that is
+      // already active is the one case that must NOT toggle, or choosing
+      // "Run" while already on Run would flip to Ask underneath the
+      // person. A future third target would need the registry's own
+      // setActive here instead; nothing in this module can reach it yet.
+      onSelect: (targetId) => {
+        if (targetId !== this.targetId) this.onToggle()
+      },
     })
   }
 }

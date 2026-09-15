@@ -256,6 +256,16 @@ describe('CommandEditor', () => {
     expect(view.contentDOM.classList.contains('nocx-editor-input')).toBe(true)
   })
 
+  it('the visible input field is CM6’s own root — the gutter already holds the mode indicator (spec §6)', () => {
+    const { view, container } = setup()
+    // .nocx-editor-field is a styling hook onto .cm-editor itself, not a
+    // second wrapper: the ModeIndicator gutter (ask-entry.ts) is a CHILD of
+    // this same element, so it already contains both without introducing a
+    // new one (composer.css's border/radius/background target this class).
+    expect(view.dom.classList.contains('nocx-editor-field')).toBe(true)
+    expect(container.querySelector('.nocx-editor-field')).toBe(view.dom)
+  })
+
   it('multiline: the host is told when the capped row count changes', () => {
     const resized = vi.fn()
     const { ed } = setup({ resized })
@@ -315,9 +325,9 @@ describe('CommandEditor', () => {
   })
 
   const context = (container: ParentNode) =>
-    container.querySelector<HTMLElement>('.nocx-editor-context .ui-meta')!
+    container.querySelector<HTMLElement>('.nocx-editor-context .ui-prompt-context')!
 
-  it('the context is one kit Meta naming the directory (spec §5.2)', () => {
+  it('the context is one PromptContext naming the directory (spec 2026-09-15 §2, §6)', () => {
     const { ed, container } = setup()
     ed.show()
     expect(context(container).textContent).toContain('~')
@@ -344,15 +354,32 @@ describe('CommandEditor', () => {
     expect(context(container).querySelector('[data-emphasis="strong"]')).toBeNull()
   })
 
-  it('the context dims when focus leaves the composer and returns when it comes back', () => {
+  it('the context dims when focus leaves the composer and normalises when it comes back (spec §6)', () => {
     const { ed, view, container } = setup()
     ed.show()
     view.contentDOM.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
-    expect(context(container).dataset.tone).toBe('muted')
+    expect(context(container).dataset.tone).toBe('normal')
     view.contentDOM.dispatchEvent(
       new FocusEvent('focusout', { bubbles: true, relatedTarget: document.body }),
     )
     expect(context(container).dataset.tone).toBe('dim')
+  })
+
+  it('setWhereFacts shows the branch and re-derives the path against the reported home', () => {
+    const { ed, container } = setup()
+    ed.show()
+    ed.setCwd('/home/dev/repos/nocx')
+    ed.setWhereFacts({ home: '/home/dev', branch: 'main' })
+    const text = context(container).textContent
+    expect(text).toContain('~/repos/nocx')
+    expect(context(container).querySelector('[data-part="branch"]')?.textContent).toBe('main')
+  })
+
+  it('setWhereFacts with no branch shows a bare path (spec §3: no source, no branch)', () => {
+    const { ed, container } = setup()
+    ed.show()
+    ed.setWhereFacts({})
+    expect(context(container).querySelector('[data-part="branch"]')).toBeNull()
   })
 
   it('the chrome row holds no clock (spec §5.4)', () => {

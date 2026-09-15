@@ -889,9 +889,20 @@ func (o *sessionOwner) inputFence() sessionruntime.Fence {
 // never handed a session whose goroutines are still deciding its fate.
 func (o *sessionOwner) stop(graceful bool, deadline time.Time) (tailLost bool) {
 	o.closeOnce.Do(func() { close(o.closingSignal) })
-	if graceful || deadline.IsZero() {
-		<-o.stopped
-		return false
+	// Spec §5.7: a stop always has a deadline. No caller may wait on an EOF
+	// the process can never be asked to produce: a process that answers a
+	// signal (a local PTY, SIGHUP) gets stopGrace for its tail; one that
+	// cannot be asked (an ssh channel, a test double) is closed at once.
+	// graceful only chooses whether the tail is wanted, never whether the
+	// wait is bounded.
+	_, askable := o.proc.(ProcessGroupSignaller)
+	promisedTail := true
+	if deadline.IsZero() {
+		deadline = time.Now()
+		promisedTail = askable && graceful
+		if promisedTail {
+			deadline = deadline.Add(stopGrace)
+		}
 	}
 	timer := time.NewTimer(time.Until(deadline))
 	defer timer.Stop()
@@ -911,6 +922,6 @@ func (o *sessionOwner) stop(graceful bool, deadline time.Time) (tailLost bool) {
 			o.triggerDetach()
 		}
 		<-o.stopped
-		return true
+		return promisedTail
 	}
 }

@@ -1013,16 +1013,7 @@ func (s *hostSession) stop() {
 	s.stopped = true
 	s.mu.Unlock()
 	s.releaseConnection(nil)
-	// Spec §5.7: a stop always has a deadline. A process that can be asked to
-	// end (a local PTY answers SIGHUP) gets stopGrace to deliver its tail; one
-	// that cannot be asked — an ssh channel, whose far side may never send EOF
-	// — is closed at once. A graceful stop with no deadline waited for an EOF
-	// that such a process never sends, and every session close hung on it.
-	deadline := time.Now()
-	if _, ok := s.proc.(ProcessGroupSignaller); ok {
-		deadline = deadline.Add(stopGrace)
-	}
-	if tailLost := s.owner.stop(false, deadline); tailLost {
+	if tailLost := s.owner.stop(true, time.Time{}); tailLost {
 		s.log.Warn("session owner: the drain did not reach EOF before shutdown", "session", s.id.Session)
 	}
 	// A graceful stop with no deadline never itself forces the detach path

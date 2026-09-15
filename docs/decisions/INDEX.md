@@ -91,7 +91,7 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0031 | [Vault reset counts and clears every secret-reference holder](0031-vault-reset-counts-every-secret-reference-holder.md)                                       | Accepted                                                                  |
 | 0032 | [The vault raises its own unlock](0032-the-vault-raises-its-own-unlock.md)                                                                                    | Accepted                                                                  |
 | 0033 | [`auto` is the name for "not yet answered"](0033-auto-is-the-name-for-not-yet-answered.md)                                                                    | Accepted (2026-08-15)                                                     |
-| 0034 | [Consent to deploy the helper belongs to the machine](0034-consent-belongs-to-the-machine-not-the-connection.md)                                              | Accepted                                                                  |
+| 0034 | [Consent to deploy the helper belongs to the machine](0034-consent-belongs-to-the-machine-not-the-connection.md)                                              | Accepted (Git-panel ask superseded by ADR-0068)                           |
 | 0035 | [The AppImage carries WebKitGTK's helper processes](0035-appimage-carries-webkits-helper-processes.md)                                                        | Accepted                                                                  |
 | 0036 | [An HTTP upload route beside the WebSocket](0036-an-http-upload-route-beside-the-websocket.md)                                                                | Accepted (2026-08-21)                                                     |
 | 0037 | [An HTTP download route beside the WebSocket](0037-an-http-download-route-beside-the-websocket.md)                                                            | Accepted (2026-08-22)                                                     |
@@ -125,6 +125,7 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0065 | [The emulator a program talks to is not the emulator that watches it](0065-the-emulator-a-program-talks-to.md)                                                | Accepted (2026-09-13; supersedes ADR-0041's choice)                       |
 | 0066 | [One emulator, and it is the backend's](0066-one-emulator-and-it-is-the-backends.md)                                                                          | Accepted (2026-09-12; supersedes parts of AD-1/6/9/10 and ADR-0001/2/8/9) |
 | 0067 | [A write into a descendant's pane is one step under a helper-minted target](0067-a-write-into-a-descendants-pane-is-one-step-under-a-helper-minted-target.md) | Accepted (2026-09-14; supersedes ADR-0064 §1 and ADR-0029)                |
+| 0068 | [The helper is decided by the connection, never by a feature](0068-the-helper-is-decided-by-the-connection-never-by-a-feature.md)                             | Accepted (2026-09-15; supersedes remote-helper D8)                        |
 
 ## Adding one
 

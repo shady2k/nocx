@@ -72,3 +72,21 @@ button.ui-mode-indicator[data-tone] {
   flex: 0 0 auto;
   color: inherit;
 }
+
+/* The `field` variant (spec 2026-09-15 §4): the composer's full-height
+   leading segment, beside CM6 rather than inside its own gutter (ask-
+   entry.ts). ComposerFrame's field grid (composer-frame.css) supplies the
+   `align-self: stretch` that makes this segment span the field's full
+   height and the 64px minimum COLUMN width; this variant supplies only the
+   control's own padding and type, which is what a placement rule may not.
+   The 14px chevron and the trailing divider need no override here — the
+   base rules above already draw both at that size. */
+.ui-mode-indicator[data-variant='field'] {
+  box-sizing: border-box;
+  padding-inline: var(--space-3);
+  /* 64px literal until task A lands `--terminal-mode-segment-width` in
+     tokens.css — see composer-frame.css's own note on the same number for
+     why this is not `var(--x, 64px)` meanwhile. */
+  min-width: 64px;
+  font-size: var(--font-size-terminal);
+}

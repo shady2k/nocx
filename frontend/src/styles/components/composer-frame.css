@@ -1,0 +1,112 @@
+/* ComposerFrame (ui/README table, ui/composer-frame.ts) — the composer's
+   outer inset card and inner bordered field (decision record
+   .internal/specs/2026-09-15-terminal-screen-mockup-decision.md §4). Placed
+   by composer.css (the surface: it puts `.nocx-editor` around this and
+   never repaints it); every appearance declaration for the card and the
+   field lives here. */
+
+.ui-composer-frame {
+  display: flex;
+  flex-direction: column;
+  /* Outer margin: inline and bottom only (spec §3's `--terminal-card-margin`
+     — this equals the existing --space-3, so no new token is spent on it).
+     No top margin: the card is the pane's flex sibling below the scroller,
+     and the pane's own rhythm supplies whatever gap belongs above it. */
+  margin: 0 var(--space-3) var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-divider);
+  border-radius: var(--control-radius-lg);
+  background: var(--terminal-background);
+}
+
+/* The field: the target switch, CM6 and submit share ONE border (spec §6 —
+   the e2e suite reads it as the nearest common ancestor of
+   `.ui-mode-indicator` and `.cm-editor`, inside `.nocx-editor`).
+
+   A GRID, not a flex row: `.cm-editor` carries its own forced
+   `display: flex !important; flex-direction: column` from CM6's base theme,
+   which is exactly what fought a flex row's cross-axis centring here before
+   (round 18 of the composer surface: `align-items: center` on a flex parent
+   shrank CM6's own child to its content width instead of centring the row).
+   A grid row's `align-items` centres the GRID ITEM as a box from the
+   outside; it never reaches inside `.cm-editor` to renegotiate ITS internal
+   flex direction, so the same problem cannot recur here. */
+.ui-composer-frame__field {
+  position: relative;
+  box-sizing: border-box;
+  display: grid;
+  /* 64px is spec §3's `--terminal-mode-segment-width` (task A, tokens.css)
+     as a literal: the token does not exist in this worktree yet (task A's
+     exclusive file), and `var(--x, 64px)` where no stylesheet ever declares
+     `--x` fails the undefined-var integrity check rather than silently
+     degrading — the check is right that such a reference is dead weight,
+     not a genuine fallback. Until A lands the token, swap this literal for
+     `var(--terminal-mode-segment-width)` in the same edit. */
+  grid-template-columns: minmax(64px, max-content) minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: var(--control-height-lg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-md);
+  background: var(--terminal-background);
+}
+
+/* CM6 owns `.cm-editor`'s own class attribute (file header, composer-frame.ts)
+   — the border lives here instead, driven by the typed attribute
+   CommandEditor projects from its EXISTING focus notifications (root
+   focusin/focusout), never from CM6's `cm-focused`. */
+.ui-composer-frame__field[data-focused='true'] {
+  border-color: var(--color-accent);
+}
+
+/* The target switch: ask-entry.ts mounts it as this field's first child (a
+   preceding sibling of `.ui-composer-frame__editor`), which is what puts it
+   in the grid's leading column by construction — no dedicated slot element
+   is needed for that placement. A FULL-HEIGHT leading segment (spec §4),
+   stretching with the field even as a multiline draft grows it; its own
+   padding and minimum width are mode-indicator.css's `field` variant — this
+   rule supplies only the grid alignment a placement rule may supply. */
+.ui-composer-frame__field > .ui-mode-indicator[data-variant='field'] {
+  align-self: stretch;
+}
+
+/* CM6's mount parent (the EditorView's `parent:`) — a stable, non-CM6-owned
+   element, so the grid's second column never depends on which class
+   `.cm-editor` currently wears. `min-width: 0` is the grid sibling of
+   `.cm-scroller`'s rule of the same name (composer.css): without it a grid
+   item's default auto minimum keeps the column from shrinking to wrap. */
+.ui-composer-frame__editor {
+  min-width: 0;
+}
+
+/* The submit control stays pinned near the FIRST input line even once a
+   multiline draft grows the field (spec §4: "its button stays aligned to
+   the first input line in multiline mode") — `align-self: start`, never the
+   field's own centring, which would chase the growing box down with it.
+   `--composer-submit-clearance` is this component's own private constant
+   (spec anchor: "24 px square, with 6 px clearance") — nothing else needs
+   this exact number, so it is not a shared token. */
+.ui-composer-frame__submit {
+  --composer-submit-clearance: 6px;
+  align-self: start;
+  display: flex;
+  align-items: center;
+  padding: var(--composer-submit-clearance);
+}
+
+/* Until A lands IconButton's own typed `primary` appearance (spec §4: "a
+   typed primary appearance if the component does not yet expose one" —
+   icon-button.tsx/icon-button.css are task A's exclusive files): a scoped
+   placeholder so the submit control does not ship colourless meanwhile.
+   Mirrors Button's own `data-variant='primary'` convention exactly
+   (button.css: `background: var(--color-accent); color: var(--color-
+   canvas)`) so the eventual real rule in icon-button.css can simply replace
+   this one with the same values. Remove this block once icon-button.css
+   defines `.ui-icon-button[data-variant='primary']` itself. */
+.ui-icon-button[data-variant='primary'] {
+  background: var(--color-accent);
+  color: var(--color-canvas);
+}
+
+.ui-icon-button[data-variant='primary']:hover {
+  background: var(--color-accent-hover);
+}

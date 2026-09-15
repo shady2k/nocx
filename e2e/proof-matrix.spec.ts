@@ -964,8 +964,10 @@ test.describe('Meta computed colour', () => {
     test(`muted and danger compute to their tokens in ${theme}`, async ({ page }) => {
       const result = await page.evaluate(async (themeId) => {
         document.documentElement.setAttribute('data-theme', themeId)
-        const { createMeta } =
-          (await import('/src/ui/meta.ts')) as typeof import('../frontend/src/ui/meta')
+        // A URL the stand's vite serves, not a module this tsconfig resolves: held
+        // in a variable so the e2e typecheck does not try to find it on disk.
+        const metaUrl = '/src/ui/meta.ts'
+        const { createMeta } = (await import(metaUrl)) as typeof import('../frontend/src/ui/meta')
         const host = document.createElement('div')
         document.body.append(host)
         const muted = createMeta(['repos/nocx'])

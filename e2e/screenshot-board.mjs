@@ -8,6 +8,9 @@
 // is somebody's own session, so this script opens its OWN tab and closes it,
 // and switches themes with the attribute only — the persisted ui.theme setting
 // is theirs and is never written.
+// The callbacks handed to page.evaluate / waitForFunction run in the page, not in
+// Node, so these two browser globals are real there.
+/* global document, getComputedStyle */
 import { chromium } from 'playwright'
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'

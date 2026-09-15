@@ -62,16 +62,16 @@
   align-items: center;
   gap: var(--space-2);
   font-family: var(--font-family-ui);
-  font-size: var(--font-size-lg);
+  font-size: var(--font-size-sm);
   line-height: var(--terminal-ui-line-height);
 }
 .ui-prompt-context[data-presentation='composer'] svg {
-  width: var(--icon-size-lg);
-  height: var(--icon-size-lg);
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
   margin-right: 0;
 }
 .ui-prompt-context[data-presentation='composer'] .ui-prompt-context__part[data-part='on'] {
-  height: var(--icon-size-lg);
+  height: var(--icon-size-sm);
   border-left: 1px solid var(--color-divider);
   margin-inline: var(--space-2);
 }

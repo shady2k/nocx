@@ -4501,7 +4501,9 @@ describe('setBlockWhere', () => {
     expect(after).toBe(before) // restated in place, not replaced
     expect(after?.textContent).toBe('~/repos/nocx')
     expect(after?.querySelector('[data-part="path"]')?.textContent).toBe('~/repos/nocx')
-    expect(after?.querySelector('[data-part="branch"]')?.textContent).toBe('main')
+    // A finished block keeps its branch in the prompt line's title, not
+    // inline: the history reads path-only, as the reference screen does.
+    expect(after?.getAttribute('title')).toBe('~/repos/nocx · main')
   })
 
   it('keeps the location it was built with when restating for a home', () => {

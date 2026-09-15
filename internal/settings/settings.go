@@ -924,8 +924,9 @@ var UITheme = MustRegisterSelect(SelectSpec{
 	Label:       "Theme",
 	Description: "The colour theme applied to the UI and terminal panes. Changing the theme repaints all open terminals in place without restarting them.",
 	DataClass:   PublicConfig,
-	Default:     "tokyo-night",
+	Default:     "graphite",
 	Options: []SelectOption{
+		{Value: "graphite", Label: "Graphite"},
 		{Value: "tokyo-night", Label: "Tokyo Night"},
 		{Value: "light", Label: "Light"},
 		{Value: "ayu-dark", Label: "Ayu Dark"},

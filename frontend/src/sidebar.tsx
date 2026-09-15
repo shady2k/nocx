@@ -507,7 +507,7 @@ function SidebarSolid(props: SidebarSolidProps) {
               count() === 0 ? view.title : `${view.title} — ${count()} ${COUNT_WORD[kind()]}`
             return (
               <IconButton
-                size="rail"
+                size="lg"
                 selected={
                   view.id === props.state.sidebar.activeViewId && !props.state.sidebar.collapsed
                 }
@@ -561,7 +561,7 @@ function SidebarSolid(props: SidebarSolidProps) {
         <For each={props.actions}>
           {(action) => (
             <IconButton
-              size="rail"
+              size="lg"
               data-action={action.id}
               title={action.title}
               ariaLabel={action.title}

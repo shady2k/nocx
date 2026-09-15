@@ -3013,14 +3013,16 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
       )
       const block = withScrollback.scrollback.blockManager.runningBlock
       expect(block).not.toBeNull()
-      expect(partText(block!.el, 'branch')).toBe('main')
+      const blockTitle = () => block!.el.querySelector('.ui-prompt-context')?.getAttribute('title')
+      expect(blockTitle()).toContain('main')
 
       // The branch changes after the command was submitted (a `git
       // checkout`, say) — the composer hears about it; the block's line
       // is history and does not.
       branchSource.publish('feature')
       expect(partText(editorOf(content).root, 'branch')).toBe('feature')
-      expect(partText(block!.el, 'branch')).toBe('main')
+      expect(blockTitle()).toContain('main')
+      expect(blockTitle()).not.toContain('feature')
     } finally {
       teardown()
     }

@@ -20,6 +20,9 @@ export interface ComposerFrameHandle {
   setFocused(focused: boolean): void
   /** Update the Enter hint when the input target changes. */
   setSubmitHint(text: string): void
+  /** The target-switch chord's hint, e.g. `⌘↵ ask` — what the
+   *  ⌘/Ctrl+Enter chord does from the target currently active. */
+  setSwitchHint(text: string): void
   /** Remove the frame from its parent. CommandEditor's own `dispose()`
    *  still owns the CM6 view, the chrome row and every listener it
    *  installed; this is only the frame's own DOM teardown. */
@@ -47,11 +50,13 @@ export function createComposerFrame(chrome: HTMLElement): ComposerFrameHandle {
   field.append(editor, submit)
   const hint = document.createElement('div')
   hint.className = 'ui-composer-frame__hint'
-  for (const text of ['Enter to run', 'Shift+Enter for newline']) {
-    const part = document.createElement('span')
-    part.textContent = text
-    hint.appendChild(part)
-  }
+  const submitHint = document.createElement('span')
+  paintHint(submitHint, '↵ run')
+  const switchHint = document.createElement('span')
+  switchHint.dataset.hint = 'switch'
+  const newlineHint = document.createElement('span')
+  paintHint(newlineHint, '⇧↵ newline')
+  hint.append(submitHint, switchHint, newlineHint)
   root.append(chrome, field, hint)
 
   return {
@@ -63,10 +68,37 @@ export function createComposerFrame(chrome: HTMLElement): ComposerFrameHandle {
       field.dataset.focused = focused ? 'true' : 'false'
     },
     setSubmitHint(text: string): void {
-      if (hint.firstChild) hint.firstChild.textContent = text
+      paintHint(submitHint, text)
+    },
+    setSwitchHint(text: string): void {
+      paintHint(switchHint, text)
+      switchHint.hidden = text === ''
     },
     dispose(): void {
       root.remove()
     },
   }
+}
+
+/** Write a hint, holding every key symbol to one mono cell. The mono face has
+ *  no ↵ ⇧ ⌘ of its own, so the browser borrows them from a symbol font whose
+ *  advances differ, and `↵ run` stops lining up with `Ctrl↵ ask`. A symbol
+ *  therefore sits in its own `__key` box one `ch` wide; the text stays
+ *  `textContent`, so a reader hears the same words. */
+function paintHint(host: HTMLElement, text: string): void {
+  host.replaceChildren()
+  let run = ''
+  for (const ch of text) {
+    if (/[\u2190-\u23ff]/.test(ch)) {
+      if (run) host.append(run)
+      run = ''
+      const key = document.createElement('span')
+      key.className = 'ui-composer-frame__key'
+      key.textContent = ch
+      host.append(key)
+    } else {
+      run += ch
+    }
+  }
+  if (run) host.append(run)
 }

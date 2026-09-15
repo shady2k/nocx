@@ -18,6 +18,7 @@
 // decide exactly as they did on the textarea. Binding these keys as a CM6
 // keymap at Prec.highest is W2's job; W1 only preserves today's behaviour.
 
+import { currentPlatform } from './platform'
 import { Compartment, EditorState, Extension } from '@codemirror/state'
 import { drawSelection, EditorView, keymap } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
@@ -616,7 +617,12 @@ export class CommandEditor {
     const label = toShell ? 'Run command' : 'Send question'
     this.submitButton.setAttribute('aria-label', label)
     this.submitButton.title = label
-    this.frame.setSubmitHint(toShell ? 'Enter to run' : 'Enter to ask')
+    this.frame.setSubmitHint(toShell ? '↵ run' : '↵ ask')
+    // The ⌘/Ctrl+Enter chord flips where Enter goes (ADR-0004 §3); the hint
+    // names what it does from here. The mark follows the host the person is
+    // typing on: ⌘ on macOS, Ctrl elsewhere.
+    const chord = currentPlatform() === 'darwin' ? '⌘↵' : 'Ctrl↵'
+    this.frame.setSwitchHint(`${chord} ${toShell ? 'ask' : 'run'}`)
   }
 
   /** Install the extensions of the target Enter currently goes to. Called

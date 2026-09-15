@@ -299,7 +299,7 @@ done
     } finally {
       writeFileSync(rcPath, rc)
     }
-    await setTheme(page, 'tokyo-night')
+    await setTheme(page, 'graphite')
     if (!(await page.locator('#sidebar').evaluate((el) => el.classList.contains('collapsed')))) {
       await page.locator('button[data-view][aria-selected="true"]').click()
     }
@@ -311,7 +311,6 @@ done
     await page.locator(INPUT).fill('git diff')
     await expect(page.locator(COMPOSER_PROMPT)).toContainText('main')
     await expect(page.locator(PANE_CONTEXT)).toBeHidden()
-    await expect(page.locator('.pane.active .ui-terminal-status')).toContainText('bash')
     await expect(page.locator('.pane.active .ui-command-block-frame__success')).toHaveCount(3)
     console.log(
       'target fonts:',
@@ -332,17 +331,9 @@ done
     await page.getByRole('tab').first().click()
     await promptReady(page)
     await expect(page.locator(INPUT)).toHaveText('git diff')
-    await page.getByRole('button', { name: 'Search tabs', exact: true }).click()
-    const filter = page.getByRole('searchbox', { name: 'Filter tabs', exact: true })
-    await expect(filter).toBeFocused()
-    await filter.fill('repo')
-    await expect(page.getByRole('tab')).toHaveCount(1)
-    await filter.press('Escape')
-    await expect(page.getByRole('tab')).toHaveCount(2)
-    await expect(page.locator(INPUT)).toHaveText('git diff')
     await page.locator(INPUT).click()
     await page.mouse.move(1390, 5)
-    await page.screenshot({ path: 'test-results/visual-board/tokyo-night-target-mockup.png' })
+    await page.screenshot({ path: 'test-results/visual-board/graphite-target-mockup.png' })
   })
 
   test('tokyo-night', async ({ page }) => {

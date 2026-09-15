@@ -188,7 +188,7 @@
      to lift it off whatever it covers. Reserving 24px for something invisible
      was 24px taken from every label in the strip, permanently, and it is what
      turned a narrow tab into `ho…`. */
-  margin: 0 var(--space-6) 0 var(--space-6);
+  margin: 0 8px 0 20px;
 }
 
 /* The title and the agent-status dot share one line, so the vertical row's label
@@ -210,7 +210,7 @@
   /* Body size. A tab's title is the strip's primary label — the thing you read to
      choose a tab — so it sits at the base of the scale rather than a step below
      it; `sm` (12.25px at the current base) reads as fine print. */
-  font-size: var(--font-size-lg);
+  font-size: var(--font-size-md);
 }
 
 /* ── Indicators (active top bar / activity bottom bar) ───────────────── */

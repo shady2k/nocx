@@ -29,6 +29,10 @@
      the nearest fit; see tokyo-night.css for the full rationale. Every
      theme sets this explicitly (ADR-0013 §4). */
   --color-terminal-chrome: #2c313a;
+  /* A filled control resting ON the terminal-chrome card — the composer's
+     Run segment and submit button: one step from the card toward the text,
+     so it reads as a control in every theme, dark or light. */
+  --color-control-fill: #3c414a;
   --color-surface-sunken: #21252b;
   --color-tab-active: #282c34;
   --color-surface: #2c313a;
@@ -59,7 +63,7 @@
      theme file the single place a theme's values live. */
   --font-family-ui: ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif;
   --font-family-mono:
-    'DejaVu Sans Mono', Menlo, 'Liberation Mono', 'Apple Color Emoji', 'Apple Symbols', monospace;
+    ui-monospace, 'SF Mono', Menlo, Monaco, 'Apple Color Emoji', 'Apple Symbols', monospace;
 
   /* ── Interaction states — assigned, not derived ──────────────────────
      ADR-0013 §3.1: state colours are assigned per theme rather than derived

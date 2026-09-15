@@ -1,36 +1,53 @@
-/* Default dark theme: neutral terminal surfaces with Tokyo Night ANSI accents. */
+/* ── Tokyo Night theme — the current palette, extracted from 27 hex values
+   ADR-0013 §2. All colour literals live here and only here. */
 
-/* Tokyo Night is the default theme, so it is the one file allowed a bare
-   `:root` block — what applies before `data-theme` is set, and if bootstrap
-   ever fails to set it. The attribute selector is written `:root[data-theme=…]`
-   (specificity 0,2,0) rather than `[data-theme=…]` (0,1,0) so that every
-   attribute-scoped theme outranks this default whatever order the files are
-   imported in. Import order deciding which theme wins is how a missing
-   @import passed for a working theme switch (nocx-u7wq.2). */
-:root,
 :root[data-theme='tokyo-night'] {
   /* ── UI colour tokens (§2.1) ─────────────────────────────────────── */
-  --color-canvas: #111316;
+  --color-canvas: #1a1b26;
 
-  --color-chrome: #17191d;
-  --color-chrome-rail: #1b1e23;
-
-  --color-terminal-chrome: #1a1d22;
-  --color-surface-sunken: #181b20;
-  --color-tab-active: #252a35;
-  --color-surface: #1a1d22;
-  --color-surface-hover: #23272e;
-  --color-surface-raised: #30353e;
-  --color-text: #d8dce5;
-  --color-text-muted: #979fac;
-  --color-text-dim: #9ba4b3;
-  --color-border: #626d82;
+  /* Chrome sits *behind* content and is deliberately darker than the canvas —
+     the tab bar, the vertical strip and the settings rail. The token migration
+     first collapsed these into --color-canvas; a computed-colour diff caught it
+     and they were restored, because flattening chrome into content is a design
+     change, not a refactor. (--color-chrome-rail differs from --color-chrome by
+     2/255 in one channel, which is almost certainly accidental and would be a
+     safe convergence to make deliberately later.) */
+  --color-chrome: #0e0f15;
+  --color-chrome-rail: #111219;
+  /* The terminal screen's OWN chrome band — the pane context strip and the
+     running process footer (mockup decision 2026-09-15 §1.9, §3) — is a
+     third role, deliberately not --color-chrome above. The mockups' context
+     and footer bands read LIGHTER than the terminal ground beneath them;
+     --color-chrome here is darker than --color-canvas (the shell's own
+     chrome-behind-content direction, unrelated and correct for what it
+     paints — the tab bar, the rail). Reusing it for the terminal band would
+     have painted context/footer chrome darker than the terminal ground,
+     the wrong direction the mockups draw. This is exactly this theme's
+     --color-surface value (#1f2335, already lighter than --terminal-
+     background/--color-canvas #1a1b26) — the nearest existing hue with the
+     right relationship, not a new colour invented for this pass. Every
+     theme sets this explicitly (12 files); a component never falls back to
+     a literal near it (ADR-0013 §4). */
+  --color-terminal-chrome: #1f2335;
+  /* A filled control resting ON the terminal-chrome card — the composer's
+     Run segment and submit button: one step from the card toward the text,
+     so it reads as a control in every theme, dark or light. */
+  --color-control-fill: #2d3246;
+  --color-surface-sunken: #24283b;
+  --color-tab-active: #1f2235;
+  --color-surface: #1f2335;
+  --color-surface-hover: #1f2030;
+  --color-surface-raised: #2b3049;
+  --color-text: #c0caf5;
+  --color-text-muted: #a9b1d6;
+  --color-text-dim: #9098bd;
+  --color-border: #5f6590;
   /* Hairline between regions — rail, tab bar, panel edges. Split from
      --color-border because the two answer different questions: a control
      outline has to be findable (WCAG 1.4.11, 3:1 against the canvas), a
      divider only has to be a seam. Raising border to meet 3:1 dragged every
      divider up with it and the shell looked wireframed. */
-  --color-divider: #292f39;
+  --color-divider: #2a2b3d;
   --color-accent: #7aa2f7;
 
   /* ── Additional semantic colours (§2.2) ──────────────────────────── */
@@ -52,7 +69,7 @@
      whole app in the UA serif fallback (nocx-u7wq.1). */
   --font-family-ui: ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif;
   --font-family-mono:
-    'DejaVu Sans Mono', Menlo, 'Liberation Mono', 'Apple Color Emoji', 'Apple Symbols', monospace;
+    ui-monospace, 'SF Mono', Menlo, Monaco, 'Apple Color Emoji', 'Apple Symbols', monospace;
 
   /* ── Interaction states — assigned, not derived ──────────────────────
      ADR-0013 §3 proposed deriving these centrally with color-mix(). The
@@ -65,8 +82,8 @@
   --color-accent-hover: #89b4fa;
   --color-accent-active: #89b4fa;
   --color-accent-disabled: rgba(122, 162, 247, 0.6);
-  --color-surface-hover: #23272e;
-  --color-surface-active: #292f39;
+  --color-surface-hover: #1f2030;
+  --color-surface-active: #2a2b3d;
   --color-surface-disabled: rgba(31, 35, 53, 0.7);
   --color-success-hover: #b9d870;
   --color-danger-hover: rgba(247, 118, 142, 0.1);
@@ -84,20 +101,20 @@
 
      ANSI 0-15 are theme colours. Indices 16-255 and truecolor stay
      algorithmic in the terminal itself: those are content, not theme. */
-  --terminal-background: #111316;
-  --terminal-foreground: #d8dce5;
-  --terminal-cursor: #d8dce5;
-  --terminal-cursor-accent: #111316;
+  --terminal-background: #1a1b26;
+  --terminal-foreground: #c0caf5;
+  --terminal-cursor: #c0caf5;
+  --terminal-cursor-accent: #1a1b26;
   --terminal-selection: #364a82;
 
-  --terminal-ansi-0: #111316;
+  --terminal-ansi-0: #1a1b26;
   --terminal-ansi-1: #f7768e;
   --terminal-ansi-2: #9ece6a;
   --terminal-ansi-3: #e0af68;
   --terminal-ansi-4: #7aa2f7;
   --terminal-ansi-5: #bb9af7;
   --terminal-ansi-6: #7dcfff;
-  --terminal-ansi-7: #979fac;
+  --terminal-ansi-7: #a9b1d6;
   --terminal-ansi-8: #414868;
   --terminal-ansi-9: #f7768e;
   --terminal-ansi-10: #9ece6a;
@@ -105,7 +122,7 @@
   --terminal-ansi-12: #7aa2f7;
   --terminal-ansi-13: #bb9af7;
   --terminal-ansi-14: #7dcfff;
-  --terminal-ansi-15: #d8dce5;
+  --terminal-ansi-15: #c0caf5;
 
   /* ── The workspace palette (nocx-2mipw) ────────────────────────────────
      Nine hues a user picks from to identify a workspace. They are repeated

@@ -61,7 +61,7 @@ const css = createRequire(import.meta.url)('css-tree')
  * order the files are imported in. Relying on import order is what makes a
  * missing @import look like a working theme switch.
  */
-const DEFAULT_THEME_FILE = 'tokyo-night.css'
+const DEFAULT_THEME_FILE = 'graphite.css'
 
 /**
  * Custom properties written by code rather than by a stylesheet, or read by

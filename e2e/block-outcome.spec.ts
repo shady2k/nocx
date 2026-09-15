@@ -9,6 +9,7 @@ import { test, expect, promptReady } from './harness'
 import type { Page } from './harness'
 
 const THEMES = [
+  'graphite',
   'tokyo-night',
   'light',
   'ayu-dark',

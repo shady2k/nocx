@@ -1,8 +1,8 @@
-@import './styles/components/terminal-status.css';
 /* Every stylesheet under styles/ must appear here — `npm run lint` fails on a
    file nothing imports, because a stylesheet that is merely never loaded looks
    exactly like one that is loaded and overridden (nocx-u7wq.4). */
 @import './styles/tokens.css';
+@import './styles/themes/graphite.css';
 @import './styles/themes/tokyo-night.css';
 @import './styles/themes/light.css';
 /* The ported catalogue. Order within the block carries no meaning — every one of
@@ -399,10 +399,8 @@
      `.pane`'s --color-canvas — the one theme where that differs from
      --terminal-background is `light`, which is exactly where the block rows
      read grey instead of white. This box spans the whole history + live
-     region, including the space below a short transcript that does not fill
-     the pane (`.scrollback-inner` is top-aligned now — decision
-     2026-09-15-terminal-screen-mockup-decision.md §1 item 1 — so that space
-     sits below the last block, not above it), so painting it here covers
+     region, including the empty space above bottom-anchored blocks
+     (`.scrollback-inner`'s `margin-top: auto`), so painting it here covers
      that too. `.pane` itself stays on --color-canvas: Settings, the API
      workbench and the skill view are `.pane-manager`, not this class. */
   background: var(--terminal-background);
@@ -472,32 +470,14 @@
   overflow: visible;
 }
 
-/* TOP-ALIGNED (decision 2026-09-15-terminal-screen-mockup-decision.md §1
-   item 1). Used to carry `margin-top: auto`, which pushed a short transcript
-   to the SCROLLER'S bottom edge — the previous implementation's own choice,
-   never a requirement `ScrollbackController`'s FLIP settle (`_glide`) or its
-   follow machinery depended on: both measure `.scrollback-inner`'s actual
-   painted position before and after a mutation and play back whatever moved,
-   which works identically whichever edge the stack starts from. Top
-   alignment is a strict improvement for the common case the settle exists
-   to smooth over: a short transcript that still fits `.scrollback-area`
-   never changes its own top-of-scroller position when a block opens or
-   freezes (nothing above it moves), so `_glide`'s measured `dy` is already
-   under the "below a pixel there is nothing to watch" threshold and no
-   settle plays at all — see the controller's own comments on `_glide` and
-   `scrollToBottomIfFollowing` for the overflowing case, where the settle
-   still runs because growing content still changes `scrollTop`.
-   `flex: 0 0 auto` (rather than the default `0 1 auto`) says explicitly
-   that this item never grows past its content and never shrinks below it,
-   which is what leaves the remainder of `.scrollback-area`'s height below
-   the last block for a short transcript, exactly where `03`'s own screenshot
-   shows it — an idle space between output and the composer, not above the
-   first prompt. */
+/* BOTTOM-ANCHORED: a short transcript hangs from the scroller's bottom edge,
+   right above the composer, the way output leaves a terminal. The owner tried
+   the top-aligned transcript of the 2026-09-15 mockup pass on the running app
+   and asked for this back (2026-09-15). */
 .scrollback-inner {
   display: flex;
   flex-direction: column;
-  flex: 0 0 auto;
-  margin-top: 0;
+  margin-top: auto;
 }
 
 /* EVERY ROW WEARS THE GUTTER, AND THE STACK DOES NOT (nocx-9bpeq.8).

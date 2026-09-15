@@ -28,13 +28,20 @@
 .ui-composer-frame__hint {
   display: flex;
   gap: var(--space-4);
-  margin-top: var(--space-3);
-  font-family: var(--font-family-ui);
-  font-size: var(--font-size-md);
+  margin-top: var(--space-2);
+  /* Key hints in the draft's own mono face, keys as their symbols, quieter
+     than the dim text ramp — Warp's register (owner, 2026-09-15): they are
+     there to be found, not read. */
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
   line-height: var(--terminal-ui-line-height);
   color: var(--color-text-dim);
+  opacity: 0.7;
 }
-.ui-composer-frame__hint > span + span {
-  border-left: 1px solid var(--color-border);
-  padding-left: var(--space-4);
+
+/* One mono cell per key symbol (composer-frame.ts paintHint). */
+.ui-composer-frame__key {
+  display: inline-block;
+  width: 1ch;
+  text-align: center;
 }

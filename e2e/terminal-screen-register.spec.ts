@@ -33,6 +33,7 @@ const FAIL = 'false #t9-fail'
  *  frontend's module graph into Playwright's Node process (harness.ts says why).
  *  The sanity test reads the source and fails if the two drift. */
 const THEMES = [
+  'graphite',
   'tokyo-night',
   'light',
   'ayu-dark',

@@ -200,6 +200,8 @@ describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () 
     // deliberately narrower than the ledger's 24px row inset (the mockup's
     // own "10-12 px external gutter" for the card, not the row's).
     expect(shipped('.nocx-editor', 'padding')).toBeNull()
-    expect(shipped('.ui-composer-frame', 'margin')).toBe('0 var(--space-3) var(--space-3)')
+    expect(shipped('.ui-composer-frame', 'margin')).toBe(
+      '0 var(--terminal-card-margin) var(--terminal-card-margin)',
+    )
   })
 })

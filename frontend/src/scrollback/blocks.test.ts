@@ -747,7 +747,9 @@ describe('BlockManager', () => {
       const duration = rec.el.querySelector<HTMLElement>(
         ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]',
       )
-      expect(duration?.textContent).toBe('0s')
+      // Tenths of a second, not whole seconds (spec 2026-09-15 §1.7): the
+      // ticker paints immediately on start, at the current elapsed time.
+      expect(duration?.textContent).toBe('0.0s')
 
       fixedNow = 66_250
       vi.advanceTimersByTime(1000)
@@ -3537,7 +3539,10 @@ describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-
     const el = settledCommand(27, 0)
     expect(el.dataset.outcome).toBe('success')
     expect(status(el)).toBeNull()
-    expect(duration(el)?.textContent).toBe('27ms')
+    // Tenths of a second, not milliseconds (spec 2026-09-15 §1.7): the
+    // precise figure this rounds away is the Meta's `title` instead.
+    expect(duration(el)?.textContent).toBe('0.0s')
+    expect(duration(el)?.title).toBe('27ms')
   })
 
   it('a command that failed says so in the danger tone, and the row is marked failed', () => {
@@ -3665,7 +3670,7 @@ describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-
     )
     const spinner = el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-spinner')
     expect(spinner?.getAttribute('data-size')).toBe('sm')
-    expect(duration(el)?.textContent).toBe('0s')
+    expect(duration(el)?.textContent).toBe('0.0s')
     expect(el.dataset.outcome).toBeUndefined()
   })
 
@@ -3711,7 +3716,7 @@ describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-
     expect(right.querySelector('.ui-meta__sep')).toBeNull()
     const kids = metaAndSepChildren(right)
     expect(kids).toHaveLength(1)
-    expect(kids[0].textContent).toBe('27ms')
+    expect(kids[0].textContent).toBe('0.0s')
   })
 
   it('a running block reads Running, a separator, then the elapsed time — the same shape a settled block uses', () => {
@@ -3729,7 +3734,7 @@ describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-
     expect(kids.map((c) => c.className)).toEqual(['ui-meta', 'ui-meta__sep', 'ui-meta'])
     expect(kids[0].textContent).toBe('Running')
     expect((kids[0] as HTMLElement).dataset.tone).toBe('accent')
-    expect(kids[2].textContent).toBe('0s')
+    expect(kids[2].textContent).toBe('0.0s')
     expect((kids[2] as HTMLElement).dataset.column).toBe('duration')
   })
 })
@@ -4242,9 +4247,10 @@ describe('the running block header Stop control', () => {
     expect(btn).not.toBeNull()
     expect(btn?.querySelector('svg')).not.toBeNull()
     expect(btn?.textContent).toBe('Stop')
-    // A kit Button, not an IconButton: command-block.css's hover/selection-
-    // only opacity rule keys on `.ui-icon-button` (the ⋮'s own identity), so
-    // this control never inherits that treatment and stays always visible.
+    // A kit Button, not an IconButton: command-block-frame.css's hover/
+    // selection-only opacity rule keys on `.ui-icon-button` (the ⋮'s own
+    // identity), so this control never inherits that treatment and stays
+    // always visible.
     expect(btn?.classList.contains('ui-icon-button')).toBe(false)
   })
 

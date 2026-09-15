@@ -27,8 +27,9 @@ import { mountDumpPanel } from '../ui/dump-panel'
 import { decorateLinks } from '../terminal-links/decorate'
 import { cwdLabel } from '../cwd-label'
 import { createBadge } from '../ui/badge-element'
-import { createMeta, createMetaSeparator, updateMeta } from '../ui/meta'
+import { createMeta, createMetaSeparator, updateMeta, type MetaOptions } from '../ui/meta'
 import { createSpinner } from '../ui/spinner-element'
+import { createCommandBlockFrame, setHeaderInProgress } from '../ui/command-block-frame'
 import { createComponent } from 'solid-js'
 import { render } from 'solid-js/web'
 import { ContextMenu, type ContextMenuItem } from '../ui/context-menu'
@@ -681,36 +682,68 @@ function div(className: string, ...children: (string | HTMLElement)[]): HTMLElem
 // ── Duration formatters ────────────────────────────────────────────────────
 
 /**
- * The elapsed time of a command that is still running.
- *
- * Whole seconds, unlike the finished-command format. The ticker fires once a
- * second, so a tenths digit could only ever read `.0` — a decimal place that
- * never varies is not precision, it is noise that makes the number wider and
- * harder to read at a glance.
+ * The elapsed time of a command that is still running (spec 2026-09-15
+ * §1.7): one decimal below a minute — `Running · 12.4s`, ticking at
+ * `--ticker: 100ms` (BlockManager._startTicker) rather than the whole-second
+ * cadence the mockup's number could not otherwise show. A minute or more
+ * keeps the coarser `Nm Ns` shape: a decimal digit on a multi-minute figure
+ * would read as false precision for a wait that long.
  */
 function formatRunningDuration(ms: number): string {
-  if (ms < 60000) return `${Math.floor(ms / 1000)}s`
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
   const min = Math.floor(ms / 60000)
   const sec = Math.floor((ms % 60000) / 1000)
   return `${min}m ${sec}s`
 }
 
+/**
+ * A finished command's duration, normalized to tenths of a second below a
+ * minute (spec 2026-09-15 §1.7: `49ms` → `0.0s`, `113ms` → `0.1s`) rather
+ * than the millisecond figure the header used to show — one register for
+ * every finished duration, whatever its actual size, instead of a unit that
+ * changes at the 1000ms boundary. The precise millisecond figure this
+ * rounds away is not lost: `durationMeta` below carries it as the Meta's
+ * `title`, via `formatDurationTitle`.
+ */
 function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms.toFixed(0)}ms`
   if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
   const min = Math.floor(ms / 60000)
   const sec = ((ms % 60000) / 1000).toFixed(0)
   return `${min}m ${sec}s`
 }
 
+/** The exact figure `formatDuration`'s tenths rounds away — a hover/title
+ *  value only, never the header's own text (spec 2026-09-15 §1.7). */
+function formatDurationTitle(ms: number): string {
+  return `${ms.toFixed(0)}ms`
+}
+
 // ── The header's right-hand group and the block's outcome: one owner ───────
 
-/** THE duration fact, for every kind and both states that show one. The
- *  TEXT is the caller's: a running command shows whole seconds, a finished one
- *  the precise figure (nocx-hoeq3). The column variance keeps durations in a
- *  tabular column across blocks. */
-function durationMeta(text: string): HTMLSpanElement {
-  return createMeta([text], { tone: 'muted', column: 'duration', size: 'sm' })
+/** `size: 'terminal'` is task A's addition to Meta (decision record
+ *  2026-09-15 §3): the header's status group reads at the body size —
+ *  `--font-size-terminal`, a 20px line box, tabular figures — rather than
+ *  the 12.25px mono `sm` variant this replaces (§1.7). `MetaOptions` only
+ *  types `'sm'` until A's `ui/meta.ts` lands; `createMeta`/`createMeta-
+ *  Separator` already accept any string for `size` at runtime (`fill` in
+ *  meta.ts writes it straight to a dataset), so this is a TYPE-LEVEL bridge
+ *  only, never a second implementation of the variant — that stays owned by
+ *  meta.css. Remove once A merges and `'terminal'` is a real member of
+ *  `MetaOptions['size']`. */
+const META_SIZE_TERMINAL = 'terminal' as unknown as NonNullable<MetaOptions['size']>
+
+/** THE duration fact, for every kind and both states that show one. The TEXT
+ *  is the caller's: a running command's ticks (formatRunningDuration) or a
+ *  finished one's tenths (formatDuration, nocx-hoeq3, spec 2026-09-15 §1.7).
+ *  `titleMs`, when given, is the precise figure the tenths display rounds
+ *  away — a finished duration's own; a running duration re-derives its
+ *  title from the live clock instead (BlockManager._startTicker) and passes
+ *  none. The column variance keeps durations in a tabular column across
+ *  blocks. */
+function durationMeta(text: string, titleMs?: number): HTMLSpanElement {
+  const opts: MetaOptions = { tone: 'muted', column: 'duration', size: META_SIZE_TERMINAL }
+  if (titleMs !== undefined) opts.title = formatDurationTitle(titleMs)
+  return createMeta([text], opts)
 }
 
 /**
@@ -729,8 +762,15 @@ export function settleBlockOutcome(
   durationMs: number | null,
   outcome: BlockOutcome,
 ): void {
-  const right = block.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')
-  if (!right) return
+  const header = block.querySelector<HTMLElement>(':scope > .cmd-header')
+  const right = header?.querySelector<HTMLElement>(':scope > .cmd-header-right')
+  if (!header || !right) return
+  // The status region no longer spans both text lines once the block has
+  // an outcome of its own — settled always aligns with the command band
+  // alone (spec 2026-09-15 §1.7). Idempotent, like the rest of this
+  // function: a second settle restates `false` rather than needing to
+  // check whether it was already set.
+  setHeaderInProgress(header, false)
   for (const stale of right.querySelectorAll(
     // `.ui-meta__sep` is the standalone separator this function places
     // between the word and the duration (spec 2026-09-15 §4) — a second
@@ -761,7 +801,7 @@ export function settleBlockOutcome(
   const chips: Element[] = []
   for (const slot of rules.chips) {
     if (slot === 'duration') {
-      if (durationMs !== null) chips.push(durationMeta(formatDuration(durationMs)))
+      if (durationMs !== null) chips.push(durationMeta(formatDuration(durationMs), durationMs))
       continue
     }
     const spec = rules.terminal(outcome)
@@ -772,20 +812,27 @@ export function settleBlockOutcome(
     // instead.
     if (spec.outcome === 'success') continue
     chips.push(
-      createMeta([spec.text], { tone: spec.outcome === 'failure' ? 'danger' : 'dim', size: 'sm' }),
+      createMeta([spec.text], {
+        tone: spec.outcome === 'failure' ? 'danger' : 'dim',
+        size: META_SIZE_TERMINAL,
+      }),
     )
   }
   chips.forEach((chip, i) => {
-    if (i > 0) placeHeaderChip(right, createMetaSeparator({ size: 'sm' }))
+    if (i > 0) placeHeaderChip(right, createMetaSeparator({ size: META_SIZE_TERMINAL }))
     placeHeaderChip(right, chip)
   })
 }
 
 /**
- * Create the header row for a block (spec 2026-09-14 §3): a meta row — where,
- * then the right-hand group — above the command. Metadata is text, not chips.
- * A settled block's outcome is NOT decided here: the builder calls
- * settleBlockOutcome once the header is attached, so there is one owner.
+ * Create the header row for a block (spec 2026-09-14 §3, geometry amended
+ * 2026-09-15 §1.7): a two-line grid — a meta row (where), then the
+ * command/question line — with the status region beside the command band
+ * for a settled block and spanning both lines, centered, while work is in
+ * progress (CommandBlockFrame; `setHeaderInProgress` below decides which).
+ * Metadata is text, not chips. A settled block's outcome is NOT decided
+ * here: the builder calls settleBlockOutcome once the header is attached,
+ * so there is one owner.
  */
 function createHeader(
   kind: BlockKind,
@@ -796,9 +843,8 @@ function createHeader(
   store: CommandSnapshotStore,
   author: CommandAuthor = 'shell',
 ): HTMLElement {
-  const header = div('cmd-header')
+  const { header, metaRow, status: right } = createCommandBlockFrame()
   const rules = blockKindRules(kind)
-  const metaRow = div('cmd-header-meta')
 
   // Who ran it, when it was not the human (design §3.1, nocx-iadtt): the
   // kit's badge in its info tone — the same "informational provenance"
@@ -823,8 +869,6 @@ function createHeader(
   if (location) promptFacts.host = location
   metaRow.appendChild(createPromptContext(promptFacts))
 
-  const right = div('cmd-header-right')
-
   if (status === 'running') {
     // The elapsed time, ticking, beside the kit spinner. It used to appear
     // only once the command had finished, which is the one moment you no
@@ -838,8 +882,8 @@ function createHeader(
     // ask kind's own in-progress word below (AD-8: one shape for "in
     // progress").
     right.appendChild(createSpinner({ label: 'Running', size: 'sm' }))
-    right.appendChild(createMeta(['Running'], { tone: 'accent', size: 'sm' }))
-    right.appendChild(createMetaSeparator({ size: 'sm' }))
+    right.appendChild(createMeta(['Running'], { tone: 'accent', size: META_SIZE_TERMINAL }))
+    right.appendChild(createMetaSeparator({ size: META_SIZE_TERMINAL }))
     right.appendChild(durationMeta(formatRunningDuration(0)))
   } else if (status === 'waiting' && rules.statusChips) {
     // The kind's own in-progress vocabulary: the ask block says it is
@@ -855,16 +899,28 @@ function createHeader(
     const waiting = document.createElement('span')
     waiting.className = 'cmd-header-waiting'
     waiting.appendChild(createSpinner({ label: rules.statusChips.inProgress, size: 'sm' }))
-    waiting.appendChild(createMeta([rules.statusChips.inProgress], { tone: 'accent', size: 'sm' }))
+    waiting.appendChild(
+      createMeta([rules.statusChips.inProgress], { tone: 'accent', size: META_SIZE_TERMINAL }),
+    )
     right.appendChild(waiting)
   }
   // A settled block's outcome is filled in later, by settleBlockOutcome,
   // once this header is attached to its block — there is no branch here for
   // it, on purpose: there is exactly one place that writes it.
 
-  metaRow.appendChild(right)
+  // The status region spans both text lines, centered, exactly while there
+  // is a WORD in progress to show beside the spinner (running, or the ask
+  // kind's own waiting vocabulary) — never derived from whether `right`
+  // happens to be empty, so an ask block with no statusChips (none exists
+  // today, but BLOCK_KIND_RULES allows it) reads as settled from the start
+  // rather than centering on an empty box.
+  setHeaderInProgress(
+    header,
+    status === 'running' || (status === 'waiting' && rules.statusChips !== null),
+  )
+
   header.appendChild(metaRow)
-  // ── Header text (below the meta row) ────────────────────────────────
+  // ── Header text (beside the meta row) ───────────────────────────────
   // The grammar is the kind's (nocx-ex636): a command header carries the
   // same syntactic highlight pass as the live editor (same lexer, same
   // classes — see shell-highlight.ts); a question is prose and renders
@@ -913,6 +969,13 @@ function createHeader(
   } else {
     header.appendChild(cmdSpan)
   }
+
+  // The status region is the header's own THIRD grid child, appended last:
+  // command-block-frame.css places it by grid-column/row, not by DOM order,
+  // so this only has to keep it reachable — never before the command line,
+  // since neither it nor the meta row hold anything the button focus order
+  // would need to precede (nocx-hoeq3).
+  header.appendChild(right)
 
   return header
 }
@@ -1892,6 +1955,29 @@ export class BlockManager {
   private _own(el: HTMLElement, before: ChildNode | null): void {
     this._scrollbackInner.insertBefore(el, before)
     this._owned.add(el)
+    this._refreshFirstEntry()
+  }
+
+  /** Keep exactly one top-level entry marked as the transcript's FIRST
+   *  (spec 2026-09-15 §1.5): assigned structurally, here, whenever the
+   *  stack's own membership changes — never recomputed from scroll offset
+   *  or viewport visibility, and never left to `:first-child`, which is not
+   *  a general test for "first visible command" (a restore boundary, a
+   *  reconnect line and a command block are three different element types
+   *  sharing one leading position). `.cmd-block` and `.scrollback-restore-
+   *  boundary` are the only "entries" for this purpose — the live region is
+   *  a sibling that never carries the leading rule, and a block nested
+   *  inside a turn is not a TOP-LEVEL entry at all. */
+  private _refreshFirstEntry(): void {
+    const first = this._scrollbackInner.querySelector<HTMLElement>(
+      ':scope > .cmd-block, :scope > .scrollback-restore-boundary',
+    )
+    for (const marked of this._scrollbackInner.querySelectorAll<HTMLElement>(
+      ':scope > [data-first-entry]',
+    )) {
+      if (marked !== first) delete marked.dataset.firstEntry
+    }
+    if (first) first.dataset.firstEntry = 'true'
   }
 
   /** WHERE THE LIVE REGION BELONGS (nocx-hp8p2.8).
@@ -1967,6 +2053,12 @@ export class BlockManager {
   private _reown(oldEl: HTMLElement, newEl: HTMLElement): void {
     this._owned.delete(oldEl)
     this._owned.add(newEl)
+    // The running element carried `data-first-entry` when it was the
+    // transcript's leading entry; `freezeBlock` built `newEl` from scratch
+    // and does not know that, so the mark must be recomputed here rather
+    // than copied — a copy would go stale the day two elements can freeze
+    // at once.
+    this._refreshFirstEntry()
   }
   /** The "working, nothing written yet" stand-in for the RUNNING command,
    *  inside the live region, where the first output line will be written
@@ -2276,13 +2368,20 @@ export class BlockManager {
   }
 
   /**
-   * Tick the running block's duration chip once a second.
+   * Tick the running block's duration chip at the tenth-second cadence its
+   * display needs (spec 2026-09-15 §1.7: `Running · 12.4s`) — 100ms, not
+   * the old once-a-second interval a decimal digit could never have shown.
    *
-   * One timer for the one running block, cleared the moment it stops running —
-   * there is never more than one, so this cannot accumulate the way a per-block
-   * timer would.
+   * One timer for the one running block, cleared the moment it stops running
+   * — there is never more than one, so this cannot accumulate the way a
+   * per-block timer would.
    */
   private _ticker: ReturnType<typeof setInterval> | null = null
+  /** The tab-visibility listener the running ticker installs — a fresh one
+   *  per command, so the timer's own lifetime (`_startTicker`/`_stopTicker`)
+   *  is what owns it, rather than a listener that outlives every command
+   *  this manager will ever run. */
+  private _tickerVisibility: (() => void) | null = null
 
   private _startTicker(el: HTMLElement): void {
     this._stopTicker()
@@ -2291,19 +2390,47 @@ export class BlockManager {
     )
     const started = this._cmdStartTime
     if (!meta || started === null) return
-    this._ticker = setInterval(() => {
+
+    const paint = (): void => {
       updateMeta(meta, [formatRunningDuration(this._now() - started)], {
         tone: 'muted',
         column: 'duration',
-        size: 'sm',
+        size: META_SIZE_TERMINAL,
       })
-    }, 1000)
+    }
+    // A hidden tab gains nothing from repainting ten times a second — this
+    // PAUSES the timer itself rather than merely skipping the paint inside
+    // it, and `visibilitychange` repaints once, immediately, on return
+    // (`document.hidden` is the same signal wake-report and the
+    // terminal-link disarm timer already read off `document`).
+    const resume = (): void => {
+      if (this._ticker !== null) return
+      paint()
+      this._ticker = setInterval(paint, 100)
+    }
+    const pause = (): void => {
+      if (this._ticker === null) return
+      clearInterval(this._ticker)
+      this._ticker = null
+    }
+    this._tickerVisibility = () => {
+      if (document.hidden) pause()
+      else resume()
+    }
+    document.addEventListener('visibilitychange', this._tickerVisibility)
+    if (document.hidden) paint()
+    else resume()
   }
 
   private _stopTicker(): void {
-    if (this._ticker === null) return
-    clearInterval(this._ticker)
-    this._ticker = null
+    if (this._ticker !== null) {
+      clearInterval(this._ticker)
+      this._ticker = null
+    }
+    if (this._tickerVisibility !== null) {
+      document.removeEventListener('visibilitychange', this._tickerVisibility)
+      this._tickerVisibility = null
+    }
   }
   freezeBlock(getLine: GetLineFn, endLine: number, exitCode: number | null): BlockRecord | null {
     const rec = this._runningBlock

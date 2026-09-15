@@ -49,3 +49,10 @@
   min-width: 3.25rem;
   text-align: end;
 }
+
+/* The command block's status group (spec 2026-09-15 §4): mono, and readable
+   beside the mono command line rather than the UI font's smallest size. */
+.ui-meta[data-size='sm'] {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+}

@@ -24,6 +24,17 @@
      will land. The controls that really are clickable (the ⋮ button, the menu
      items) keep their own `cursor: pointer` (nocx-6w4z). */
   position: relative;
+  /* Bottom of the block, before the next one's hairline (spec 2026-09-15 §5).
+     Block-direction only — the inline gutter stays on `.scrollback-inner > *`
+     (T8, nocx-9bpeq.8) and is never duplicated here. */
+  padding-bottom: var(--space-4);
+}
+
+/* A tool call reads as a margin note (ADR-0040, ADR-0028 decision 4), and
+   the general block's bottom air would undo that tightness — it keeps its
+   own, matching the header's own tight bottom below. */
+.cmd-block[data-block-kind='tool'] {
+  padding-bottom: 2px;
 }
 
 .cmd-block:first-child {
@@ -68,10 +79,11 @@
 .cmd-header {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  /* Bottom: the gap between the command and what it printed, on the header
-     because a running block has no .cmd-output. Top: the row's rhythm (§8). */
-  padding: var(--space-2) 0 var(--space-3);
+  /* Prompt line to command row (spec 2026-09-15 §5). */
+  gap: var(--space-1);
+  /* Bottom: command row to output, on the header because a running block has
+     no .cmd-output. Top: the block's own top rhythm (§8, amended §5). */
+  padding: var(--space-3) 0 var(--space-2);
   pointer-events: auto;
   -webkit-user-select: none;
   user-select: none;
@@ -112,12 +124,30 @@
   opacity: 1;
 }
 
+/* The command row (spec 2026-09-15 §4): the sigil sits BESIDE the command
+   text as one row, never inside it — `.cmd-header-text` (copy, selection,
+   `blockCommandText`) reads exactly the command, whatever sits beside it. */
+.cmd-header-command {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.cmd-header-sigil {
+  flex: 0 0 auto;
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+  color: var(--color-text-muted);
+}
+
 .cmd-header-text {
   font-family: var(--font-family-mono);
   font-size: var(--font-size-terminal);
   color: var(--color-text);
   white-space: pre-wrap;
   overflow-wrap: break-word;
+  min-width: 0;
   -webkit-user-select: text;
   user-select: text;
 }

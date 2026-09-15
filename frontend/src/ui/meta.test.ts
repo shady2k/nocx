@@ -91,6 +91,13 @@ describe('createMeta — the DOM contract', () => {
     expect(plain.hasAttribute('data-column')).toBe(false)
     expect(plain.hasAttribute('title')).toBe(false)
   })
+
+  it('carries the sm size when asked, and not otherwise (spec 2026-09-15 §4)', () => {
+    const sm = createMeta(['Exit 1'], { size: 'sm' })
+    expect(sm.dataset.size).toBe('sm')
+    const plain = createMeta(['Exit 1'])
+    expect(plain.hasAttribute('data-size')).toBe(false)
+  })
 })
 
 describe('updateMeta — the same element, restated', () => {
@@ -130,6 +137,12 @@ describe('meta.css — tokens only, and legible where the terminal screen puts i
     expect(ruleFor(css, ".ui-meta__part[data-emphasis='strong']")).toContain(
       'color: var(--color-text)',
     )
+  })
+
+  it('the sm size reads in the mono face at --font-size-sm (spec 2026-09-15 §4)', () => {
+    const sm = ruleFor(css, ".ui-meta[data-size='sm']")
+    expect(sm).toContain('font-family: var(--font-family-mono)')
+    expect(sm).toContain('font-size: var(--font-size-sm)')
   })
 
   it.each(themes)('%s: muted and dim reach 4.5:1 on the terminal ground', (file) => {

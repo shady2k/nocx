@@ -86,9 +86,14 @@ const SHADOW_WINDOW = 0.2
 export const DEFAULT_LEDGES: readonly LedgeSource[] = [
   { selector: '.tabbar', edge: 'bottom' },
   { selector: '.pane.active .cmd-block', edge: 'top' },
-  // The meta a block wears (spec 2026-09-14 §5.5). The composer is not a
-  // ledge: the animal does not stand where the caret is.
+  // The meta a block wears (spec 2026-09-14 §5.5): the header's right-hand
+  // status group stayed a Meta, so this ledge stays. The composer is not a
+  // ledge either way: the animal does not stand where the caret is.
   { selector: '.pane.active .cmd-block .ui-meta', edge: 'top' },
+  // The where-line moved from Meta to PromptContext (spec 2026-09-15 §2),
+  // and its ledge follows it — the prompt line is still terrain the same
+  // way the old where-meta was.
+  { selector: '.pane.active .cmd-block .ui-prompt-context', edge: 'top' },
 ]
 
 export function timingFrom(pack: PetPack, loaded: LoadedPack | null = null): PetTiming {

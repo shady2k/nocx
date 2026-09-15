@@ -27,13 +27,27 @@ import { mountDumpPanel } from '../ui/dump-panel'
 import { decorateLinks } from '../terminal-links/decorate'
 import { cwdLabel } from '../cwd-label'
 import { createBadge } from '../ui/badge-element'
-import { createMeta, updateMeta, type MetaPart } from '../ui/meta'
+import { createMeta, updateMeta } from '../ui/meta'
 import { createSpinner } from '../ui/spinner-element'
 import { createComponent } from 'solid-js'
 import { render } from 'solid-js/web'
 import { ContextMenu, type ContextMenuItem } from '../ui/context-menu'
 import { createIconButton } from '../ui/icon-button-element'
-import { ArrowDownUpIcon, CopyIcon, FileIcon, MoreIcon, PinIcon, SquareIcon } from '../ui/icons'
+import { createButton } from '../ui/button-element'
+import {
+  ArrowDownUpIcon,
+  ChevronRightIcon,
+  CopyIcon,
+  FileIcon,
+  MoreIcon,
+  PinIcon,
+  SquareIcon,
+} from '../ui/icons'
+import {
+  createPromptContext,
+  updatePromptContext,
+  type PromptContextFacts,
+} from '../ui/prompt-context'
 // ── Clipboard helper ────────────────────────────────────────────────────────
 
 async function copyToClipboardImpl(text: string): Promise<void> {
@@ -295,9 +309,12 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
         // the rule is about the STATUS and a later exit code arriving must
         // not silently start painting one.
         if (status === 'entered' || status === 'unreconciled' || exitCode === null) return null
+        // Capital E (spec 2026-09-15 §4): the status group now reads in the
+        // mono face beside the command line, where a lowercase word read as
+        // a stray shell token rather than as the header's own word.
         return exitCode === 0
           ? { outcome: 'success', text: 'ok' }
-          : { outcome: 'failure', text: `exit ${exitCode}` }
+          : { outcome: 'failure', text: `Exit ${exitCode}` }
       },
     },
   },
@@ -658,7 +675,7 @@ function formatDuration(ms: number): string {
  *  the precise figure (nocx-hoeq3). The column variance keeps durations in a
  *  tabular column across blocks. */
 function durationMeta(text: string): HTMLSpanElement {
-  return createMeta([text], { tone: 'muted', column: 'duration' })
+  return createMeta([text], { tone: 'muted', column: 'duration', size: 'sm' })
 }
 
 /**
@@ -699,7 +716,10 @@ export function settleBlockOutcome(
     if (spec.outcome === 'success') continue
     placeHeaderChip(
       right,
-      createMeta([spec.text], { tone: spec.outcome === 'failure' ? 'danger' : 'dim' }),
+      createMeta([spec.text], {
+        tone: spec.outcome === 'failure' ? 'danger' : 'dim',
+        size: 'sm',
+      }),
     )
   }
 }
@@ -734,13 +754,17 @@ function createHeader(
     metaRow.appendChild(mark)
   }
 
-  // WHERE: host (when not this machine, nocx-6w4z) and directory, one Meta,
-  // so the pair has one ellipsis and reads as one fact. No icon: the row is
-  // text.
-  const where: MetaPart[] = []
-  if (location) where.push(location)
-  if (cwd) where.push(cwdLabel(cwd))
-  if (where.length > 0) metaRow.appendChild(createMeta(where, { tone: 'muted' }))
+  // WHERE: the prompt line (spec 2026-09-15 §2) — host (when not this
+  // machine, nocx-6w4z), the short path, and the branch once a source
+  // reports one (nocx-9bpeq.13 wires that in; `setBlockWhere` below is the
+  // seam). The block records what it was BUILT with — cwd and location — so
+  // a later `setBlockWhere` can re-render the line in place without asking
+  // the caller to keep them around a second time.
+  header.dataset.cwd = cwd
+  header.dataset.location = location
+  const promptFacts: PromptContextFacts = { path: cwdLabel(cwd) }
+  if (location) promptFacts.host = location
+  metaRow.appendChild(createPromptContext(promptFacts))
 
   const right = div('cmd-header-right')
 
@@ -765,7 +789,7 @@ function createHeader(
     const waiting = document.createElement('span')
     waiting.className = 'cmd-header-waiting'
     waiting.appendChild(createSpinner({ label: rules.statusChips.inProgress, size: 'sm' }))
-    waiting.appendChild(createMeta([rules.statusChips.inProgress], { tone: 'accent' }))
+    waiting.appendChild(createMeta([rules.statusChips.inProgress], { tone: 'accent', size: 'sm' }))
     right.appendChild(waiting)
   }
   // A settled block's outcome is filled in later, by settleBlockOutcome,
@@ -808,9 +832,43 @@ function createHeader(
       else cmdSpan.textContent = '(empty)'
     }
   }
-  header.appendChild(cmdSpan)
+  // The sigil (spec 2026-09-15 §4): the mockup's `›`, as the kit's chevron
+  // rather than a text glyph, for the command kind only — ask and tool rows
+  // keep the anatomy they already have. It sits BESIDE `.cmd-header-text` in
+  // its own row wrapper, never inside it, so the command's own text —
+  // copy, selection, `blockCommandText` — reads exactly what it read before.
+  if (kind === 'command') {
+    const commandRow = div('cmd-header-command')
+    const sigil = ChevronRightIcon({}) as SVGElement
+    sigil.classList.add('cmd-header-sigil')
+    commandRow.appendChild(sigil)
+    commandRow.appendChild(cmdSpan)
+    header.appendChild(commandRow)
+  } else {
+    header.appendChild(cmdSpan)
+  }
 
   return header
+}
+
+/**
+ * Restate a block's prompt line in place (spec 2026-09-15 §3 seam): once a
+ * home or branch source reports one, without asking the caller to keep the
+ * block's cwd and location around a second time — the header already carries
+ * them, from the moment it was built.
+ */
+export function setBlockWhere(block: HTMLElement, facts: { home?: string; branch?: string }): void {
+  const header = block.querySelector<HTMLElement>(':scope > .cmd-header')
+  const promptEl = header?.querySelector<HTMLSpanElement>(
+    ':scope > .cmd-header-meta > .ui-prompt-context',
+  )
+  if (!header || !promptEl) return
+  const cwd = header.dataset.cwd ?? ''
+  const location = header.dataset.location ?? ''
+  const promptFacts: PromptContextFacts = { path: cwdLabel(cwd, facts.home) }
+  if (location) promptFacts.host = location
+  if (facts.branch) promptFacts.branch = facts.branch
+  updatePromptContext(promptEl, promptFacts)
 }
 
 /**
@@ -1397,12 +1455,37 @@ export function createRunningBlock(
   if (command && findReferences(command).length > 0) wrapper.dataset.recordedCommand = command
 
   const header = createHeader('command', command, cwd, location, 'running', store, author)
+  const right = header.querySelector('.cmd-header-right')
+
+  // Stop, the visible door (spec 2026-09-15 §4): the ⋮ menu keeps its own
+  // Stop item as the second door to the same handler, below. Present only
+  // while the actions actually belong to THIS block — the same guard the
+  // menu item uses — and always visible (not opacity-hidden like ⋮), so it
+  // never asks a person to discover it by hovering. `data-block-actions` is
+  // the ⋮ button's own escape hatch from block-selection and the pane's
+  // focus-bounce listener (`wireBlockSelection` below, terminal-content.ts);
+  // reusing it here is the SAME mechanism, not a second one.
+  if (right && running?.isActive(wrapper)) {
+    const stop = createButton({
+      label: 'Stop',
+      ariaLabel: 'Stop',
+      variant: 'default',
+      size: 'sm',
+      onClick: (e) => {
+        e.stopPropagation()
+        e.preventDefault()
+        if (running.isActive(wrapper)) running.stop()
+      },
+    })
+    stop.prepend(SquareIcon({}) as Element)
+    stop.setAttribute('data-block-actions', '')
+    right.appendChild(stop)
+  }
 
   // Overflow menu — copying the command, plus what can be done ABOUT the
   // command while it is still running (nocx-92gfl, nocx-23rph).
   // Always the LAST element of header-right (owner directive).
   const overflow = buildOverflowMenu(wrapper, command, undefined, undefined, running)
-  const right = header.querySelector('.cmd-header-right')
   if (right) right.appendChild(overflow)
 
   wrapper.appendChild(header)
@@ -2084,6 +2167,7 @@ export class BlockManager {
       updateMeta(meta, [formatRunningDuration(this._now() - started)], {
         tone: 'muted',
         column: 'duration',
+        size: 'sm',
       })
     }, 1000)
   }

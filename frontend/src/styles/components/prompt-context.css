@@ -1,0 +1,62 @@
+/* PromptContext (ui/README table) — the terminal screen's prompt line (spec
+   2026-09-15 §2): `~/repos/nocx on ⎇ main`. Mono face, one line, ellipsis at
+   its own edge — the same register the command row below it reads in.
+   Colours are tokens only (ADR-0013 §4); there is deliberately no
+   background, border or padding here — this is text, like Meta. */
+
+.ui-prompt-context {
+  display: inline-block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* The composer while it is not focused (base spec §5.3): the whole line one
+   step quieter. Opacity, not a second colour per part — the line carries
+   several hues at once (muted host, accent path, accent branch), and a
+   single "dim" colour would collapse a distinction the line exists to keep. */
+.ui-prompt-context[data-tone='dim'] {
+  opacity: 0.75;
+}
+
+.ui-prompt-context__part[data-part='host'] {
+  color: var(--color-text-muted);
+}
+
+/* The composer's safety question — "where does Enter go" — reads at normal
+   text colour instead of muted; a finished block's host is history and
+   never sets this (base spec §5.2, matching Meta's own strong emphasis). */
+.ui-prompt-context__part[data-part='host'][data-emphasis='strong'] {
+  color: var(--color-text);
+}
+
+.ui-prompt-context__colon {
+  color: var(--color-text-muted);
+}
+
+.ui-prompt-context__part[data-part='path'] {
+  color: var(--color-accent);
+}
+
+.ui-prompt-context__part[data-part='on'] {
+  color: var(--color-text-muted);
+}
+
+.ui-prompt-context__part[data-part='branch'] {
+  color: var(--color-accent);
+}
+
+.ui-prompt-context svg {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+  vertical-align: -2px;
+  color: var(--color-text-muted);
+  flex: 0 0 auto;
+}

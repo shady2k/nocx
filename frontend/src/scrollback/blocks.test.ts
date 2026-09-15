@@ -18,6 +18,7 @@ import {
   blockKindRules,
   FENCE_DEFER_MS,
   settleBlockOutcome,
+  setBlockWhere,
   type BlockKind,
 } from './blocks'
 import { clampMenuPosition } from '../ui/menu-geometry'
@@ -66,7 +67,7 @@ describe('createRunningBlock', () => {
     expect(text?.textContent).toBe('ls -la')
   })
 
-  it('includes cwd in the header, as the where Meta’s own text', () => {
+  it('includes cwd in the header, as the prompt line’s own text (spec 2026-09-15 §2)', () => {
     const container = document.createElement('div')
     const el = createRunningBlock(
       1,
@@ -78,9 +79,11 @@ describe('createRunningBlock', () => {
       freshStore(),
     )
     const where = el.querySelector<HTMLElement>(
-      ':scope > .cmd-header > .cmd-header-meta > .ui-meta',
+      ':scope > .cmd-header > .cmd-header-meta > .ui-prompt-context',
     )
-    expect(where?.textContent).toBe('dev/projects')
+    // No home is known yet at this seam (nocx-9bpeq.13 wires one in), so the
+    // path is shown in full rather than guessed short.
+    expect(where?.textContent).toBe('/home/dev/projects')
   })
 
   it('shows a spinner for running state', () => {
@@ -206,7 +209,7 @@ describe('createCommandBlock', () => {
     const exit = el.querySelector(
       ':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])',
     )
-    expect(exit?.textContent).toBe('exit 1')
+    expect(exit?.textContent).toBe('Exit 1')
   })
 
   it('includes serialized output', () => {
@@ -442,9 +445,9 @@ describe('createCommandBlock', () => {
       'shell',
     )
     const where = el.querySelector<HTMLElement>(
-      ':scope > .cmd-header > .cmd-header-meta > .ui-meta',
+      ':scope > .cmd-header > .cmd-header-meta > .ui-prompt-context',
     )
-    expect(where?.textContent).toBe('user/repos')
+    expect(where?.textContent).toBe('/home/user/repos')
     expect(where?.textContent).not.toMatch(/\p{Extended_Pictographic}/u)
   })
 })
@@ -882,10 +885,10 @@ describe('BlockManager', () => {
     expect(restored.classList.contains('cmd-block-unreconciled')).toBe(false)
     expect(restored.dataset.restoredStatus).toBe('failure')
     expect(restored.dataset.outcome).toBe('failure')
-    expect(status(restored)?.textContent).toBe('exit 7')
+    expect(status(restored)?.textContent).toBe('Exit 7')
     expect(duration(restored)?.textContent).toBe('1.2s')
     expect(manager.completeRestoredBlock('entry-restored', 0, 0)).toBe(false)
-    expect(status(restored)?.textContent).toBe('exit 7')
+    expect(status(restored)?.textContent).toBe('Exit 7')
 
     expect(manager.completeRestoredBlock('1', 0, 0)).toBe(false)
     expect(manager.blocks.find((block) => block.command === 'live')?.status).toBe('running')
@@ -3485,7 +3488,7 @@ describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-
   it('a command that failed says so in the danger tone, and the row is marked failed', () => {
     const el = settledCommand(5, 1)
     expect(el.dataset.outcome).toBe('failure')
-    expect(status(el)?.textContent).toBe('exit 1')
+    expect(status(el)?.textContent).toBe('Exit 1')
     expect(status(el)?.dataset.tone).toBe('danger')
   })
 
@@ -3534,7 +3537,7 @@ describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-
     completeRestoredLike(el, 2, 40)
     expect(el.dataset.outcome).toBe('failure')
     expect(el.querySelectorAll(':scope > .cmd-header .cmd-header-right > .ui-meta').length).toBe(2)
-    expect(status(el)?.textContent).toBe('exit 2')
+    expect(status(el)?.textContent).toBe('Exit 2')
   })
 
   it('the ⋮ stays last in the group whatever settles after it', () => {
@@ -3543,7 +3546,7 @@ describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-
     expect(right.lastElementChild?.classList.contains('ui-icon-button')).toBe(true)
   })
 
-  it('the where-meta names host and directory as one element, and never an emoji', () => {
+  it('the prompt line names host and path as one element, and never an emoji (spec 2026-09-15 §2)', () => {
     const el = createCommandBlock(
       'command',
       1,
@@ -3560,12 +3563,11 @@ describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-
       'shell',
     )
     const where = el.querySelector<HTMLElement>(
-      ':scope > .cmd-header > .cmd-header-meta > .ui-meta',
+      ':scope > .cmd-header > .cmd-header-meta > .ui-prompt-context',
     )!
-    expect([...where.querySelectorAll('.ui-meta__part')].map((p) => p.textContent)).toEqual([
-      'dev@staging',
-      'app/current',
-    ])
+    expect(
+      [...where.querySelectorAll('.ui-prompt-context__part')].map((p) => p.textContent),
+    ).toEqual(['dev@staging', '/srv/app/current'])
     expect(where.textContent).not.toMatch(/\p{Extended_Pictographic}/u)
   })
 
@@ -3998,5 +4000,215 @@ describe('a tool call expands to what was sent and what came back (nocx-hp8p2.13
     const h = manager.addAnswerBlock('q', '/')
     h.toolCall(call())
     expect(disclosureOf(h)).toBeNull()
+  })
+})
+
+// ── The command row's sigil (spec 2026-09-15 §4, nocx-9bpeq.12) ───────────
+describe('the command row sigil', () => {
+  const c = (): HTMLElement => document.createElement('div')
+
+  it('a command block draws the sigil before the command text, as a decorative glyph', () => {
+    const el = createCommandBlock(
+      'command',
+      1,
+      'go test ./internal/session',
+      '~',
+      '',
+      '',
+      10,
+      0,
+      'success',
+      c,
+      noopSelect,
+      freshStore(),
+      'shell',
+    )
+    const row = el.querySelector<HTMLElement>(':scope > .cmd-header > .cmd-header-command')
+    expect(row).not.toBeNull()
+    const children = [...row!.children]
+    const sigil = row!.querySelector('svg')
+    const text = row!.querySelector('.cmd-header-text')
+    expect(sigil).not.toBeNull()
+    expect(sigil?.getAttribute('aria-hidden')).toBe('true')
+    expect(children.indexOf(sigil!)).toBeLessThan(children.indexOf(text!))
+  })
+
+  it('ask and tool kinds keep their row as it was — no sigil, no wrapper', () => {
+    const inner = document.createElement('div')
+    document.body.appendChild(inner)
+    const manager = new BlockManager(inner, document.createElement('div'), {
+      snapshotStore: freshStore(),
+    })
+    const h = manager.addAnswerBlock('q', '/')
+    expect(h.el.querySelector('.cmd-header-command')).toBeNull()
+    expect(h.el.querySelector('.cmd-header-sigil')).toBeNull()
+  })
+
+  it('the sigil never changes what blockCommandText reads', () => {
+    const el = createCommandBlock(
+      'command',
+      1,
+      'echo hello',
+      '~',
+      '',
+      '',
+      10,
+      0,
+      'success',
+      c,
+      noopSelect,
+      freshStore(),
+      'shell',
+    )
+    expect(blockCommandText(el)).toBe('echo hello')
+    expect(el.querySelector('.cmd-header-text')?.textContent).toBe('echo hello')
+  })
+})
+
+// ── The running block's Stop control (spec 2026-09-15 §4, nocx-9bpeq.12) ──
+describe('the running block header Stop control', () => {
+  it('is absent when no running actions were injected', () => {
+    const container = document.createElement('div')
+    const el = createRunningBlock(1, 'sleep 10', '~', '', () => container, noopSelect, freshStore())
+    expect(el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-button')).toBeNull()
+  })
+
+  it('is present, with the square icon and the word Stop, while the block is active', () => {
+    const container = document.createElement('div')
+    const stop = vi.fn()
+    const el = createRunningBlock(
+      1,
+      'sleep 10',
+      '~',
+      '',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+      { stop, isActive: () => true },
+    )
+    const right = el.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')!
+    const btn = right.querySelector<HTMLButtonElement>(':scope > .ui-button')
+    expect(btn).not.toBeNull()
+    expect(btn?.querySelector('svg')).not.toBeNull()
+    expect(btn?.textContent).toBe('Stop')
+    // A kit Button, not an IconButton: command-block.css's hover/selection-
+    // only opacity rule keys on `.ui-icon-button` (the ⋮'s own identity), so
+    // this control never inherits that treatment and stays always visible.
+    expect(btn?.classList.contains('ui-icon-button')).toBe(false)
+  })
+
+  it('is absent when the actions do not consider this block active', () => {
+    const container = document.createElement('div')
+    const el = createRunningBlock(
+      1,
+      'sleep 10',
+      '~',
+      '',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+      { stop: vi.fn(), isActive: () => false },
+    )
+    expect(el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-button')).toBeNull()
+  })
+
+  it('calls stop() only while the block is still active, and never selects the block', () => {
+    const container = document.createElement('div')
+    const stop = vi.fn()
+    let active = true
+    const el = createRunningBlock(
+      1,
+      'sleep 10',
+      '~',
+      '',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+      { stop, isActive: () => active },
+    )
+    document.body.appendChild(el)
+    const btn = el.querySelector<HTMLButtonElement>(
+      ':scope > .cmd-header .cmd-header-right > .ui-button',
+    )!
+
+    // The same escape hatch the ⋮ button uses (blocks.ts wireBlockSelection,
+    // terminal-content.ts's focus-bounce exception) — reused, not duplicated.
+    expect(btn.getAttribute('data-block-actions')).toBe('')
+    btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+    expect(el.classList.contains('cmd-block-selected')).toBe(false)
+
+    btn.click()
+    expect(stop).toHaveBeenCalledTimes(1)
+
+    active = false
+    btn.click()
+    expect(stop).toHaveBeenCalledTimes(1)
+    el.remove()
+  })
+})
+
+// ── setBlockWhere — the prompt line restated in place (spec 2026-09-15 §3
+// seam, nocx-9bpeq.12) ─────────────────────────────────────────────────────
+describe('setBlockWhere', () => {
+  const c = (): HTMLElement => document.createElement('div')
+
+  it('re-renders the prompt line with a home and a branch, on the SAME element', () => {
+    const el = createCommandBlock(
+      'command',
+      1,
+      'git status',
+      '/home/dev/repos/nocx',
+      '',
+      '',
+      10,
+      0,
+      'success',
+      c,
+      noopSelect,
+      freshStore(),
+      'shell',
+    )
+    const before = el.querySelector('.ui-prompt-context')
+    expect(before?.textContent).toBe('/home/dev/repos/nocx')
+
+    setBlockWhere(el, { home: '/home/dev', branch: 'main' })
+
+    const after = el.querySelector('.ui-prompt-context')
+    expect(after).toBe(before) // restated in place, not replaced
+    expect(after?.textContent).toBe('~/repos/nocxonmain')
+    expect(after?.querySelector('[data-part="path"]')?.textContent).toBe('~/repos/nocx')
+    expect(after?.querySelector('[data-part="branch"]')?.textContent).toBe('main')
+  })
+
+  it('keeps the location it was built with when restating for a home', () => {
+    const el = createCommandBlock(
+      'command',
+      1,
+      'deploy',
+      '/srv/www',
+      'user@server',
+      '',
+      10,
+      0,
+      'success',
+      c,
+      noopSelect,
+      freshStore(),
+      'shell',
+    )
+    setBlockWhere(el, { branch: 'release' })
+    const where = el.querySelector('.ui-prompt-context')!
+    expect(where.querySelector('[data-part="host"]')?.textContent).toBe('user@server')
+    expect(where.querySelector('[data-part="branch"]')?.textContent).toBe('release')
+  })
+
+  it('does nothing to a block with no prompt line to restate', () => {
+    const el = document.createElement('div')
+    el.className = 'cmd-block'
+    expect(() => setBlockWhere(el, { branch: 'main' })).not.toThrow()
   })
 })

@@ -714,6 +714,33 @@ stop that loop.
 
 Prefer more, smaller epics — "handed over whole" and "large area" cannot both hold.
 
+### A feature is a root epic, and its stages are its children
+
+The owner thinks in features — "replace herdr" — and a feature is larger than an epic. By
+2026-09-15 that one was about twenty epics with no common parent (2 of 229 epics in the
+tracker had one), joined by `discovered-from`, which sums nothing. Nobody could say how
+far away it was, because the question had no object.
+
+- **A feature is one root epic whose DONE WHEN is what the owner can do**, and its direct
+  children are stages, each an epic. The epics, bugs and chores that do the work hang under
+  the stage they serve, with `parent-child`. Epics nest; `rollup` counts every descendant.
+- **Where it stands is a command, not a paragraph:** `scripts/feature-status.sh <root>`.
+  It is computed from the edges, so it is exactly as true as they are.
+- **Work found on a feature's path gets its parent in the same minute it is filed** — under
+  the stage it blocks or serves. A bug on the path is a child of that stage, per "where a
+  bug goes" above. An existing bead the status lists as "blocked by, outside this stage" is
+  on the path too: give it the parent, or remove an edge that no longer holds.
+- **One parent.** An epic two features need stays under one and is `related` to the other.
+- **"Not decomposed" means the size is unknown, not small.** The status lists open epics
+  with no children separately for that reason. On a feature's path, break those down before
+  building further; until then nobody can say how much is left.
+- **Never put a `blocks` edge on a root or a stage.** A blocked parent hides every child
+  from `br ready` — measured 2026-09-15: `nocx-afgkj.1` has no edge of its own, and it is
+  absent from `br ready` because `nocx-afgkj` is blocked. Put the edge on the leaf.
+- **A change of scope says what it does to the root's DONE WHEN.** A spec or brainstorm that
+  adds epics to a feature either changes that criterion, with the owner, or files them under
+  an existing stage or deferred (`br defer`) — never beside the feature.
+
 ## Git authority
 
 Agents have **standing authority to commit and push**. Allowed without asking: `git commit`,

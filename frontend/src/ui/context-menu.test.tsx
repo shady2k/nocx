@@ -288,7 +288,13 @@ describe('ContextMenu', () => {
         x={10}
         y={20}
         items={items({
-          copy: { id: 'copy', label: 'Copy path', onSelect: () => order.push('select') },
+          copy: {
+            id: 'copy',
+            label: 'Copy path',
+            onSelect: () => {
+              order.push('select')
+            },
+          },
         })}
         onClose={() => order.push('close')}
       />

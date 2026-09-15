@@ -77,7 +77,7 @@ describe('the exact moment, for the hover behind the label', () => {
     const format = vi
       .spyOn(Intl, 'DateTimeFormat')
       .mockImplementation(
-        (locales?: string | string[], options?: Intl.DateTimeFormatOptions) =>
+        (locales?: Intl.LocalesArgument, options?: Intl.DateTimeFormatOptions) =>
           new RealFormat(locales ?? 'ru-RU', options),
       )
     const toLocale = vi.spyOn(Date.prototype, 'toLocaleString').mockImplementation(function (

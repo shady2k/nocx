@@ -69,7 +69,7 @@ async function commandFinished(page: Page, title: string): Promise<void> {
   await expect(block).toHaveAttribute('data-outcome', 'failure', { timeout: 30_000 })
   await expect(
     block.locator(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
-  ).toHaveText('exit 1', {
+  ).toHaveText('Exit 1', {
     timeout: 30_000,
   })
 }

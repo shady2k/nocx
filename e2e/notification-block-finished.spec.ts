@@ -223,7 +223,7 @@ test('a command that finished is waiting in the notification centre, and a failu
   await expect(badBlock).toHaveAttribute('data-outcome', 'failure')
   await expect(
     badBlock.locator(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
-  ).toHaveText('exit 1')
+  ).toHaveText('Exit 1')
 
   const badRow = page.locator(UNREAD_ROW).filter({ hasText: `${BAD} failed` })
   await expect(badRow).toHaveCount(1, { timeout: 30_000 })

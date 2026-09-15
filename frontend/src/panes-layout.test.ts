@@ -1073,7 +1073,9 @@ describe('an inline ssh comes back local, and its blocks still say where they ra
     // The second tab's past, drawn when the person switches to it.
     manager.activateByIndex(1)
     const location = await vi.waitFor(() => {
-      const el = panes.querySelector('[data-restored="true"] .cmd-header-meta .ui-meta__part')
+      const el = panes.querySelector(
+        '[data-restored="true"] .cmd-header-meta .ui-prompt-context [data-part="host"]',
+      )
       expect(el).not.toBeNull()
       return el!
     })

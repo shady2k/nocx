@@ -50,7 +50,7 @@ test('success is silent, failure is legible, in every theme', async ({ page }) =
   await expect(ok).toHaveAttribute('data-outcome', 'success')
   await expect(statusOf(ok)).toHaveCount(0)
   await expect(bad).toHaveAttribute('data-outcome', 'failure')
-  await expect(statusOf(bad)).toHaveText('exit 1')
+  await expect(statusOf(bad)).toHaveText('Exit 1')
 
   for (const theme of THEMES) {
     await page.evaluate((t) => document.documentElement.setAttribute('data-theme', t), theme)

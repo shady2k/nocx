@@ -176,7 +176,7 @@ describe('a turn draws the blocks it caused, in order', () => {
     expect(
       cmd.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])')
         ?.textContent,
-    ).toBe('exit 3')
+    ).toBe('Exit 3')
     // Selecting it selects IT, not the turn that contains it.
     cmd.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
     expect(inner.querySelectorAll('.cmd-block-selected')).toHaveLength(1)

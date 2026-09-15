@@ -2496,7 +2496,7 @@ describe('the SSH block header keeps its where-meta left and the right group rig
     )
     const metaRow = el.querySelector('.cmd-header-meta')
     expect(metaRow).not.toBeNull()
-    const where = metaRow?.querySelector(':scope > .ui-meta')
+    const where = metaRow?.querySelector(':scope > .ui-prompt-context')
     const right = metaRow?.querySelector(':scope > .cmd-header-right')
     expect(where).not.toBeNull()
     expect(right).not.toBeNull()
@@ -2504,11 +2504,12 @@ describe('the SSH block header keeps its where-meta left and the right group rig
     const order = [...(metaRow as HTMLElement).children]
     expect(order.indexOf(where as HTMLElement)).toBeLessThan(order.indexOf(right as HTMLElement))
 
-    // Where reads host then directory, as one Meta.
-    const parts = [...(where as HTMLElement).querySelectorAll('.ui-meta__part')].map(
+    // Where reads host then directory, as one PromptContext (spec 2026-09-15
+    // §2). No home is known at this seam, so the path is the absolute one.
+    const parts = [...(where as HTMLElement).querySelectorAll('.ui-prompt-context__part')].map(
       (p) => p.textContent,
     )
-    expect(parts).toEqual(['user@server', 'srv/www'])
+    expect(parts).toEqual(['user@server', '/srv/www'])
 
     // The right group holds what belongs on the right: the duration, and —
     // success being silent (spec 2026-09-14 §3.1) — no status word.
@@ -2534,7 +2535,7 @@ describe('the SSH block header keeps its where-meta left and the right group rig
       'shell',
     )
     const metaRow = el.querySelector('.cmd-header-meta')
-    const where = metaRow?.querySelector(':scope > .ui-meta')
+    const where = metaRow?.querySelector(':scope > .ui-prompt-context')
     const right = metaRow?.querySelector(':scope > .cmd-header-right')
     expect(where).not.toBeNull()
     expect(right).not.toBeNull()
@@ -12944,7 +12945,7 @@ describe('replayed completion restores a durable block outcome (nocx-gm21o)', ()
           ':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])',
         )?.textContent,
         'the restored block still reads unknown after its completion replayed',
-      ).toBe('exit 7')
+      ).toBe('Exit 7')
     } finally {
       teardown()
     }

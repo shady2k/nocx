@@ -123,3 +123,27 @@
 .ui-icon-button[data-square='true'] {
   border-radius: 0;
 }
+
+/* ── Primary — accent-filled (spec 2026-09-15 §1.2, §3) ─────────────────
+   The one appearance variant besides the default transparent affordance: a
+   control that SUBMITS rather than merely acts, first needed by the
+   composer's submit arrow (ComposerFrame, a different task's file — this
+   identity only supplies the appearance it places). Composes with any
+   `data-size`; the frame places width/height, this owns fill and ink. */
+.ui-icon-button[data-appearance='primary'] {
+  background: var(--color-accent);
+  color: var(--color-canvas);
+}
+
+.ui-icon-button[data-appearance='primary']:hover {
+  background: var(--color-accent-hover);
+  color: var(--color-canvas);
+}
+
+/* The generic `:disabled` rule above already dims this by opacity — the
+   accent fill dims with it rather than disappearing under a neutral one,
+   which would read as "not filled" instead of "filled but inert". */
+.ui-icon-button[data-appearance='primary']:disabled {
+  background: var(--color-accent);
+  color: var(--color-canvas);
+}

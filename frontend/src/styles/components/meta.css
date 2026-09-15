@@ -50,11 +50,25 @@
   text-align: end;
 }
 
-/* The command block's status group (spec 2026-09-15 §4): mono, and readable
-   beside the mono command line rather than the UI font's smallest size. */
+/* Mono, and readable beside a mono command line rather than the UI font's
+   smallest size — one step below the terminal-sized `terminal` variant
+   below, for a consumer that wants that face without matching the command
+   line's own size. */
 .ui-meta[data-size='sm'] {
   font-family: var(--font-family-mono);
   font-size: var(--font-size-sm);
+}
+
+/* The command block's status group, at its FINAL size (spec 2026-09-15
+   §1.7, §1.8, §3, superseding the smaller mono Meta the September 15 base
+   spec had it at — see §2's replacement table): the terminal body's own
+   size, not a step toward it, with an explicit 20px line box so
+   `Exit 1 · 1.2s` sits on the command's own baseline instead of a caption
+   above it. Tabular figures are already the base rule's. */
+.ui-meta[data-size='terminal'] {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-terminal);
+  line-height: var(--terminal-ui-line-height);
 }
 
 /* The separator between two Metas standing as separate elements
@@ -69,4 +83,10 @@
 .ui-meta__sep[data-size='sm'] {
   font-family: var(--font-family-mono);
   font-size: var(--font-size-sm);
+}
+
+.ui-meta__sep[data-size='terminal'] {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-terminal);
+  line-height: var(--terminal-ui-line-height);
 }

@@ -10,6 +10,16 @@
 
   --color-chrome: #d6dae1;
   --color-chrome-rail: #dee1e7;
+  /* The terminal screen's own chrome band (pane context strip, running
+     process footer — mockup decision 2026-09-15 §1.9, §3), same role as
+     tokyo-night.css's terminal-chrome comment explains in full. Light's
+     --terminal-background is white and equal to --color-surface (§1.9's
+     "Light's white terminal ground is correct... and must not become the
+     gray application canvas"), so surface cannot supply a distinct chrome
+     band here — --color-canvas is the nearest existing hue that reads as a
+     band against a white terminal ground, exactly as the mockup's light
+     capture shows. Every theme sets this explicitly (ADR-0013 §4). */
+  --color-terminal-chrome: #e6e8ed;
   --color-surface-sunken: #e4e7ec;
   --color-tab-active: #ffffff;
   --color-surface: #ffffff;

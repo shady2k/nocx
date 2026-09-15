@@ -79,6 +79,16 @@ describe('createPromptContext — the DOM contract', () => {
     expect(createPromptContext({ path: '~' }, { tone: 'dim' }).dataset.tone).toBe('dim')
     expect(createPromptContext({ path: '~' }, { tone: 'normal' }).dataset.tone).toBe('normal')
   })
+
+  it('presentation defaults to prompt, and chrome is stated when asked (PaneContext, round 20)', () => {
+    expect(createPromptContext({ path: '~' }).dataset.presentation).toBe('prompt')
+    expect(
+      createPromptContext({ path: '~' }, { presentation: 'prompt' }).dataset.presentation,
+    ).toBe('prompt')
+    expect(
+      createPromptContext({ path: '~' }, { presentation: 'chrome' }).dataset.presentation,
+    ).toBe('chrome')
+  })
 })
 
 describe('updatePromptContext — the same element, restated in place', () => {
@@ -94,6 +104,12 @@ describe('updatePromptContext — the same element, restated in place', () => {
     expect(el.querySelector('[data-part="branch"]')).toBeNull()
     expect(el.querySelector('svg')).toBeNull()
     expect(el.className).toBe('ui-prompt-context')
+  })
+
+  it('restates presentation too, defaulting back to prompt when not given again (round 20)', () => {
+    const el = createPromptContext({ path: '~/a' }, { presentation: 'chrome' })
+    updatePromptContext(el, { path: '~/b' })
+    expect(el.dataset.presentation).toBe('prompt')
   })
 })
 
@@ -128,6 +144,21 @@ describe('prompt-context.css — tokens only, mono, one line', () => {
     expect(ruleFor(css, ".ui-prompt-context__part[data-part='branch']")).toContain(
       'color: var(--color-accent)',
     )
+  })
+
+  it('the chrome presentation mutes path and branch — PaneContext, spec 2026-09-15 §1.3 (round 20)', () => {
+    expect(
+      ruleFor(
+        css,
+        ".ui-prompt-context[data-presentation='chrome'] .ui-prompt-context__part[data-part='path']",
+      ),
+    ).toContain('color: var(--color-text-muted)')
+    expect(
+      ruleFor(
+        css,
+        ".ui-prompt-context[data-presentation='chrome'] .ui-prompt-context__part[data-part='branch']",
+      ),
+    ).toContain('color: var(--color-text-muted)')
   })
 
   it('the colon and "on" are muted, like the host', () => {

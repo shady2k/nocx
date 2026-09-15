@@ -787,7 +787,12 @@ func (r *Reg) EndSession(id ID) error {
 		return fmt.Errorf("session not found: %s", id)
 	}
 
-	s.log.Info("session ended", "id", string(id))
+	// Logged as "session closed" — the same phrase Close uses — because a log
+	// reader asking "did this session's row leave the registry" (worker_trace_
+	// test.go's own check, among others) cares that it did, not which of the
+	// two verbs did it; the verb split is a today's-caller distinction, not a
+	// second vocabulary for one outcome.
+	s.log.Info("session closed", "id", string(id))
 	err := s.EndSession()
 	if r.usageTracker != nil && s.profileID != "" {
 		r.usageTracker.SessionClosed(s.profileID)

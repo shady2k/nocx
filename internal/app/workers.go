@@ -110,11 +110,16 @@ type paneMinter interface {
 	PaneCwd(ctx context.Context, paneID string) (string, error)
 }
 
-// sessionCloser ends a session by id. The registry's own Close, named as the
-// one thing a compensation needs.
+// sessionCloser ends a session by id. The registry's own EndSession, named
+// as the one thing a compensation needs — never Close: a worker being
+// killed (Kill) or a task being closed (workerCloser.Close) is exactly a
+// caller that knows nobody will ever hold that pane's session again, and a
+// helper-hosted one left merely detached would keep its window budget
+// reserved forever (nocx-isjh4) — the leak worker lifecycle is where
+// orchestration would hit hardest, opening and closing panes by the dozen.
 type sessionCloser interface {
 	Get(id session.ID) (session.Session, error)
-	Close(id session.ID) error
+	EndSession(id session.ID) error
 }
 
 // integrationAwaiterSeam is the spawner's narrow view of the transport's
@@ -461,7 +466,10 @@ func (s spawnedParticipant) Kill(ctx context.Context) error {
 	var errs []error
 	if s.sess != nil {
 		if _, getErr := s.sessions.Get(s.sess.ID()); getErr == nil {
-			if closeErr := s.sessions.Close(s.sess.ID()); closeErr != nil {
+			// EndSession, not Close (nocx-isjh4): a killed participant's pane
+			// is never coming back, so a helper-hosted session releases its
+			// window budget here rather than only detaching.
+			if closeErr := s.sessions.EndSession(s.sess.ID()); closeErr != nil {
 				errs = append(errs, fmt.Errorf("close session: %w", closeErr))
 			}
 		}
@@ -1126,7 +1134,9 @@ func (c *workerCloser) Close(_ context.Context, p workers.Participant) error {
 			"participant", string(p.ID), "session_id", string(sid))
 		return nil
 	}
-	if err := c.sessions.Close(sid); err != nil {
+	// EndSession, not Close (nocx-isjh4): the same reasoning as Kill's —
+	// nobody will ever hold this participant's pane again.
+	if err := c.sessions.EndSession(sid); err != nil {
 		return fmt.Errorf("worker close: %w", err)
 	}
 	c.log.Info("worker participant closed", "participant", string(p.ID), "session_id", string(sid))

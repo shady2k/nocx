@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { render, cleanup } from '@solidjs/testing-library'
-import { Button, type ButtonSize, type ButtonVariant } from './button'
+import { Button } from './button'
 import { createButton, type CreateButtonOptions } from './button-element'
 
 afterEach(() => cleanup())
@@ -42,8 +42,8 @@ describe('createButton is the Button, emitted without Solid (spec §6.2)', () =>
       const { container } = render(() => (
         <Button
           onClick={vi.fn()}
-          variant={c.variant as ButtonVariant | undefined}
-          size={c.size as ButtonSize | undefined}
+          variant={c.variant}
+          size={c.size}
           truncate={c.truncate}
           title={c.title}
           ariaLabel={c.ariaLabel}

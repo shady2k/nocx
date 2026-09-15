@@ -1102,7 +1102,7 @@ describe('overflow menu (P1-6)', () => {
     document.body.removeChild(container)
   })
 
-  it('closes menu on outside click', async () => {
+  it('closes menu on outside click', () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
     const el = createCommandBlock(

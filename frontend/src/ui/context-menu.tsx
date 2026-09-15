@@ -210,40 +210,52 @@ export function ContextMenu(props: ContextMenuProps) {
             <div class="ui-context-menu__header">{props.header}</div>
           </Show>
           <For each={props.items}>
-            {(item) => (
-              <button
-                type="button"
-                class="ui-context-menu__item"
-                role="menuitem"
-                data-item-id={item.id}
-                disabled={busy() === item.id}
-                data-busy={busy() === item.id ? '' : undefined}
-                onClick={() => {
-                  if (busy() !== null) return
-                  if (item.busyLabel === undefined) {
-                    releaseFocus()
-                    props.onClose()
-                    void item.onSelect()
-                    return
-                  }
-                  setBusy(item.id)
-                  void Promise.resolve(item.onSelect()).finally(() => {
-                    setBusy(null)
-                    releaseFocus()
-                    props.onClose()
-                  })
-                }}
-              >
-                <span class="ui-context-menu__icon" aria-hidden="true">
-                  <Show when={item.icon} keyed>
-                    {(Icon) => <Icon />}
-                  </Show>
-                </span>
-                <span class="ui-context-menu__label">
-                  {busy() === item.id ? item.busyLabel : item.label}
-                </span>
-              </button>
-            )}
+            {(item) => {
+              // Named and referenced bare at onClick={activate} (not wrapped in
+              // another arrow): solid/reactivity only exempts reactive prop/signal
+              // reads inside a function it can match exactly against a tracked
+              // scope — a native element's event-handler attribute, here, the
+              // same way it exempts releaseFocus() and props.onClose() called
+              // directly above. A `.finally(() => { ...props.onClose()... })`
+              // introduces a fresh, unnamed function the rule cannot place, so
+              // `settle` gives it a name and `.finally(settle)` passes it bare.
+              const settle = (): void => {
+                setBusy(null)
+                releaseFocus()
+                props.onClose()
+              }
+              const activate = (): void => {
+                if (busy() !== null) return
+                if (item.busyLabel === undefined) {
+                  releaseFocus()
+                  props.onClose()
+                  void item.onSelect()
+                  return
+                }
+                setBusy(item.id)
+                void Promise.resolve(item.onSelect()).finally(settle)
+              }
+              return (
+                <button
+                  type="button"
+                  class="ui-context-menu__item"
+                  role="menuitem"
+                  data-item-id={item.id}
+                  disabled={busy() === item.id}
+                  data-busy={busy() === item.id ? '' : undefined}
+                  onClick={activate}
+                >
+                  <span class="ui-context-menu__icon" aria-hidden="true">
+                    <Show when={item.icon} keyed>
+                      {(Icon) => <Icon />}
+                    </Show>
+                  </span>
+                  <span class="ui-context-menu__label">
+                    {busy() === item.id ? item.busyLabel : item.label}
+                  </span>
+                </button>
+              )
+            }}
           </For>
         </div>
       </Portal>

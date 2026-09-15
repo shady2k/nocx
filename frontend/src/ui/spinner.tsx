@@ -11,10 +11,12 @@
  * repaint it.
  */
 
+export type SpinnerSize = 'sm' | 'md'
+
 export interface SpinnerProps {
   /** Accessible name for the loading state, announced via role="status". */
   label: string
-  size?: 'sm' | 'md'
+  size?: SpinnerSize
 }
 
 export function Spinner(props: SpinnerProps) {

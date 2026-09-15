@@ -58,6 +58,7 @@ html {
   --icon-size-sm: 14px;
   --icon-size-md: 16px;
   --icon-size-lg: 20px;
+  --icon-size-rail: 26px;
   /* The scale was set while the whole shell was monospace, where SF Mono's
      larger x-height makes 12/14 read bigger than it measures. In a
      proportional UI font the same numbers read small, so every step moves up
@@ -75,35 +76,14 @@ html {
   /* Terminal text — deliberately px, see header comment. MUST equal
      frontend/src/renderers/font.ts::FONT_SIZE. Protected by unit test and
      CSS integrity rule. */
-  --font-size-terminal: 14px;
+  --font-size-terminal: 18px;
 
-  /* ── Shell layout (§2.5) ────────────────────────────────────────────
-     There is deliberately no --sidebar-width here: the sidebar's width is
-     UI state in the uistate document (ADR-0048), applied inline as
-     --sidebar-width by frontend/src/sidebar-width.ts. A second declaration
-     of the same number would be the dead twin this token used to be.
+  --activity-bar-width: 62px;
+  --tab-height: 52px;
 
-     56px/44px (mockup decision 2026-09-15 §3, §1.10): the mockups' rail and
-     tab strip read larger than the values these carried before that pass —
-     48px/38px undersold both against the normalized mockup measurements. The
-     consumers (`.activity-bar`, `.tabbar`) are D's files; this is the one
-     shared number both read, so a worker changing either cannot also
-     silently pick its own. */
-  --activity-bar-width: 56px;
-  --tab-height: 44px;
-  /* 184px minimum for a horizontal tab (spec §3, §1.10); the existing 220px
-     cap is unchanged and lives with the tab strip's own CSS, not here. */
-  --terminal-tab-min-width: 184px;
-  /* The ledger's side gutter. Rows carry it (style.css `.scrollback-inner > *`,
-     `.nocx-summon-answers > *`, `.nocx-editor`), not the pane, so a row can paint
-     to the edge (spec 2026-09-14 §4, nocx-9bpeq.8).
+  --terminal-tab-min-width: 212px;
 
-     24px (mockup decision 2026-09-15 §1.5, §3): the prior 16px read as edge-
-     to-edge rows in the mockup comparison; every inset (transcript rules,
-     the failure rail's clearance, the pane context strip's padding) is
-     measured from this same gutter so the ledger has one inset, not several
-     coincidentally-equal ones. */
-  --pane-inline-padding: var(--space-6);
+  --pane-inline-padding: 36px;
 
   /* A command block's BODY padding. Named here because two surfaces wear it:
      the frozen `.cmd-output` and the live region that becomes it. They must
@@ -113,17 +93,12 @@ html {
   --cmd-output-pad-top: 2px;
   --cmd-output-pad-bottom: 6px;
 
-  /* ── Terminal screen shared geometry (mockup decision 2026-09-15 §3) ────
-     Frozen here so B/C/D consume one set of names instead of each rounding
-     its own. `--font-size-terminal` above already carries the "keep 14px, no
-     renderer font change" line from the same table. */
-
   /* The line box for app-owned prompt/command/status TEXT — not terminal
      output itself, which keeps xterm's own measured cell height. Applying
      this where the terminal renderer's line-height belongs would fight
      AD-6's cell-metric ownership; it is for the chrome built around that
      content. */
-  --terminal-ui-line-height: 20px;
+  --terminal-ui-line-height: 27px;
   /* PaneContext (spec §1.3): 40px for a single pane, 44px once a pane shows
      split/remote identity alongside the local one. */
   --terminal-context-height: 40px;
@@ -131,10 +106,9 @@ html {
   /* ProcessBar (spec's running-state gap): the row-cost the owner accepted
      for a truthful, always-visible running footer. */
   --terminal-process-bar-height: 56px;
-  /* ComposerFrame's outer card (spec §1.2): 12px on every side that matters
-     — inline/bottom margin from the pane, and the padding inside the card. */
-  --terminal-card-margin: var(--space-3);
-  --terminal-card-padding: var(--space-3);
+
+  --terminal-card-margin: var(--space-6);
+  --terminal-card-padding: var(--space-4);
   /* Block rhythm (spec §1.5): the prompt-to-command gap, and the gap folding
      the header's own space into the space before output — "include rather
      than duplicate existing header gap", so a consumer does not add both. */
@@ -153,14 +127,17 @@ html {
   /* ComposerFrame's Run segment (spec §1.2): the minimum width a full-height
      mode column reserves beside the CM6 field, so a wrapped/continuation
      line still begins after the same segment by construction. */
-  --terminal-mode-segment-width: 64px;
+  --terminal-mode-segment-width: 96px;
+  --terminal-composer-control-size: 44px;
+  --terminal-status-height: 38px;
+  --font-size-base: 14px;
 
   /* Space the tab bar must leave clear on its leading edge for window controls
      the host draws over it. Zero everywhere by default — only macOS puts its
      traffic lights inside the content area, and reserving the notch on Linux
      or in a browser leaves a gap with nothing in it. `platform.ts` publishes
      `data-platform`, and the rule below is the only thing that opts in. */
-  --titlebar-inset-start: 0px;
+  --titlebar-inset-start: 66px;
 }
 
 /* 78px was calibrated for `mac.TitleBarHiddenInset()`, which pushes the traffic

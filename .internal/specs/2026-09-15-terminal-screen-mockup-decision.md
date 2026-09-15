@@ -1,3 +1,14 @@
+> **Owner amendment, 2026-09-15 (nocx-9bpeq):** The main-screen reference is
+> `exec-ddc90525-6b9a-444f-baf1-5041ede21432.png`. It supersedes the normal-pane
+> context strip, silent success, outlined inner field and upward submit arrow
+> below. Normal history begins below the tabs; successful commands show a check
+> beside their measured duration; the composer has a filled Run segment, an open
+> input row, an outlined right arrow and keyboard hints. A slim footer presents
+> the launched shell and the UTF-8 stream encoding. Program context remains for
+> alternate-screen content, and the running footer retains distinct Stop and
+> Interrupt actions. Font family/size and neutral theme values are authorized
+> in this pass; live and frozen cell metrics must remain synchronized.
+
 # The terminal screen follows the mockups — decision and plan
 
 - **Status:** owner decision 2026-09-15 ("follow the mockups"); analysis by a read-only codex consult (gpt-6-astra), adopted by the coordinator

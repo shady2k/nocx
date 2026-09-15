@@ -32,6 +32,8 @@ export interface SearchFieldProps {
   onKeyDown?: (e: KeyboardEvent) => void
 }
 
+// Bind keys at the input: a caller may remove it and move focus on Escape.
+// Document-level terminal shortcuts must not see that already-consumed key.
 export function SearchField(props: SearchFieldProps) {
   const onInput = (e: Event) => {
     const target = e.currentTarget as HTMLInputElement
@@ -50,7 +52,7 @@ export function SearchField(props: SearchFieldProps) {
         placeholder={props.placeholder ?? ''}
         aria-label={props.ariaLabel ?? undefined}
         disabled={props.disabled === true}
-        onKeyDown={(e) => props.onKeyDown?.(e)}
+        on:keydown={(e) => props.onKeyDown?.(e)}
         onInput={onInput}
       />
     </span>

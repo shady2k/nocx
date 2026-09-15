@@ -1,7 +1,9 @@
+import { iconElement, CheckIcon } from './icons'
+
 // CommandBlockFrame — the passive kit shell around a command block's header
 // (decision record 2026-09-15 §1.5/§1.7, §4 task B). It owns DOM structure
 // for the header's grid — a meta line, the command/question line beside it,
-// and a status region that reads even with the command line once the block
+// and a status region that reads even with the path line once the block
 // has settled and spans both lines, centered, while work is in progress —
 // and the `ui-command-block-frame` identity that carries that layout in
 // styles/components/command-block-frame.css.
@@ -56,7 +58,7 @@ export function createCommandBlockFrame(): CommandBlockFrameSlots {
 
 /**
  * Mark the header's status region as spanning BOTH text lines, centered,
- * rather than sitting even with the command line alone (spec §1.7): a
+ * rather than sitting even with the path line alone (spec §1.7): a
  * running command's spinner + `Running · 12.4s` + Stop, or the ask kind's
  * own "thinking" word share this one shape (AD-8 — one owner for "this
  * block is in progress"). Set once, structurally, by whoever builds or
@@ -66,4 +68,14 @@ export function createCommandBlockFrame(): CommandBlockFrameSlots {
 export function setHeaderInProgress(header: HTMLElement, inProgress: boolean): void {
   if (inProgress) header.dataset.headerProgress = 'true'
   else delete header.dataset.headerProgress
+}
+
+/** A successful command's accessible mark, paired with its measured duration. */
+export function createCommandSuccess(): HTMLElement {
+  const el = document.createElement('span')
+  el.className = 'ui-command-block-frame__success'
+  el.setAttribute('aria-label', 'Succeeded')
+  const icon = iconElement(CheckIcon)
+  el.appendChild(icon)
+  return el
 }

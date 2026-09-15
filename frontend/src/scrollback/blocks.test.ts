@@ -3591,15 +3591,16 @@ describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-
       ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]',
     )
 
-  it('a command that succeeded says how long it took and nothing about how it went', () => {
+  it('a command that succeeded shows a check and its measured duration', () => {
     const el = settledCommand(27, 0)
     expect(el.dataset.outcome).toBe('success')
     expect(status(el)).toBeNull()
+    expect(el.querySelector('[aria-label="Succeeded"]')).not.toBeNull()
     // Below a tenth of a second the figure reads `<0.1s` (spec 2026-09-15
     // §1.7 round 3) — `0.0s` read as "took no time" or "the timer is
     // broken" to a person watching it. The precise millisecond figure
     // this rounds away is the Meta's `title` instead.
-    expect(duration(el)?.textContent).toBe('<0.1s')
+    expect(duration(el)?.textContent).toBe('27ms')
     expect(duration(el)?.title).toBe('27ms')
   })
 
@@ -3773,7 +3774,7 @@ describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-
     expect(kids[2].textContent).toBe('1.5s')
   })
 
-  it('a successful command is silent: the duration stands alone, with no separator at all', () => {
+  it('a successful command pairs a check with duration, without a separator', () => {
     const el = settledCommand(27, 0)
     const right = el.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')!
     expect(right.querySelector('.ui-meta__sep')).toBeNull()
@@ -3781,7 +3782,7 @@ describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-
     expect(kids).toHaveLength(1)
     // Below a tenth of a second: `<0.1s`, not `0.0s` (spec 2026-09-15 §1.7
     // round 3).
-    expect(kids[0].textContent).toBe('<0.1s')
+    expect(kids[0].textContent).toBe('27ms')
   })
 
   it('a running block reads bare "Running" until the first tenth of a second elapses', () => {
@@ -4498,7 +4499,7 @@ describe('setBlockWhere', () => {
 
     const after = el.querySelector('.ui-prompt-context')
     expect(after).toBe(before) // restated in place, not replaced
-    expect(after?.textContent).toBe('~/repos/nocxonmain')
+    expect(after?.textContent).toBe('~/repos/nocx')
     expect(after?.querySelector('[data-part="path"]')?.textContent).toBe('~/repos/nocx')
     expect(after?.querySelector('[data-part="branch"]')?.textContent).toBe('main')
   })
@@ -4522,7 +4523,7 @@ describe('setBlockWhere', () => {
     setBlockWhere(el, { branch: 'release' })
     const where = el.querySelector('.ui-prompt-context')!
     expect(where.querySelector('[data-part="host"]')?.textContent).toBe('user@server')
-    expect(where.querySelector('[data-part="branch"]')?.textContent).toBe('release')
+    expect(where.querySelector('[data-part="branch"]')).toBeNull()
   })
 
   it('does nothing to a block with no prompt line to restate', () => {

@@ -112,7 +112,7 @@
   outline: none;
   font-family: var(--font-family-mono);
   font-size: var(--font-size-terminal);
-  line-height: 1.2;
+  line-height: var(--terminal-ui-line-height);
   resize: none;
   padding: 2px 8px 4px;
   white-space: pre-wrap;
@@ -123,8 +123,7 @@
 /* CodeMirror 6 surface (ADR-0010). Auto-grow is layout, not arithmetic: the
    box grows with its content and scrolls past the cap (spec §Decision 3).
 
-   The cap is 30 lines — 30 × line-height 1.2 × font-size (the em in the calc
-   resolves against .cm-editor's font-size) plus the 6px vertical padding,
+   The cap is 30 lines at the shared terminal UI line height plus the 6px vertical padding,
    border-box — and never more than half the pane. Ten lines was the original
    cap and it is too tight for the thing people actually paste: a curl with a
    JSON body is twenty lines, and it arrived as a small scrolling window onto
@@ -141,29 +140,15 @@
    agree at the cap. */
 .nocx-editor .cm-editor {
   font-size: var(--font-size-terminal);
-  max-height: min(50vh, calc(36em + 6px));
+  max-height: min(50vh, calc(30 * var(--terminal-ui-line-height) + 6px));
   box-sizing: border-box;
 }
 
-/* THE FIELD'S BORDER MOVED (spec 2026-09-15 §4): it used to be a styling
-   hook onto CM6's OWN `.cm-editor` (`.nocx-editor-field`, installed via
-   `EditorView.editorAttributes` because CM6 rewrites `.cm-editor`'s class
-   attribute on every focus change and a plain `classList.add` did not
-   survive it). The target switch now has its own leading grid column
-   BESIDE `.cm-editor` rather than a gutter inside it (ask-entry.ts), so the
-   box that needs one shared border is no longer `.cm-editor` at all — it is
-   `.ui-composer-frame__field`, an ancestor of both the switch and
-   `.cm-editor`, owned by the kit (styles/components/composer-frame.css).
-   This surface no longer needs an `.nocx-editor-field` hook, the
-   `justify-content` centring trick CM6's forced `display: flex !important;
-   flex-direction: column` on `.cm-editor` used to require, or a focus rule
-   here: `.ui-composer-frame__field[data-focused]` reads a typed attribute
-   CommandEditor projects from its own focusin/focusout listeners, never
-   from CM6's `cm-focused`. */
-
+/* The kit card owns the only border. CM6 and the mode switch occupy
+   separate columns in the card's open input row. */
 .nocx-editor .cm-scroller {
   font-family: var(--font-family-mono);
-  line-height: 1.2;
+  line-height: var(--terminal-ui-line-height);
   overflow-y: auto;
   /* THE COMPOSER WRAPS, SO IT NEVER SCROLLS SIDEWAYS — and saying so is what
      keeps it one height. CM6 ships `.cm-scroller { overflow-x: auto }` for the

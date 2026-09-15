@@ -56,7 +56,7 @@
      the single place a theme's values live. */
   --font-family-ui: ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif;
   --font-family-mono:
-    ui-monospace, 'SF Mono', Menlo, Monaco, 'Apple Color Emoji', 'Apple Symbols', monospace;
+    'DejaVu Sans Mono', Menlo, 'Liberation Mono', 'Apple Color Emoji', 'Apple Symbols', monospace;
 
   /* ── Interaction states — assigned, not derived ──────────────────────
      ADR-0013 §3 proposed deriving these centrally with color-mix(). The

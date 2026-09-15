@@ -29,7 +29,11 @@ import { cwdLabel } from '../cwd-label'
 import { createBadge } from '../ui/badge-element'
 import { createMeta, createMetaSeparator, updateMeta, type MetaOptions } from '../ui/meta'
 import { createSpinner } from '../ui/spinner-element'
-import { createCommandBlockFrame, setHeaderInProgress } from '../ui/command-block-frame'
+import {
+  createCommandBlockFrame,
+  createCommandSuccess,
+  setHeaderInProgress,
+} from '../ui/command-block-frame'
 import { markShellCommand } from '../ui/shell-command'
 import { createAppVisibility, type AppVisibility } from '../app-visible'
 import { createComponent } from 'solid-js'
@@ -712,19 +716,10 @@ function formatRunningDuration(ms: number): string {
  *  cannot drift to different figures. */
 const DURATION_FLOOR_MS = 100
 
-/**
- * A finished command's duration, normalized to tenths of a second below a
- * minute (spec 2026-09-15 §1.7 round 3: `113ms` → `0.1s`) rather than the
- * millisecond figure the header used to show — one register for every
- * finished duration, whatever its actual size, instead of a unit that
- * changes at the 1000ms boundary. Below `DURATION_FLOOR_MS` the tenths
- * figure would read `0.0s` — indistinguishable from "took no time" — so
- * that range reads `<0.1s` instead: still bounded, never a false zero. The
- * precise millisecond figure this rounds away is not lost: `durationMeta`
- * below carries it as the Meta's `title`, via `formatDurationTitle`.
- */
+/** Finished durations use milliseconds below a second, then tenths of seconds.
+ * The exact millisecond value remains available in the title. */
 function formatDuration(ms: number): string {
-  if (ms < DURATION_FLOOR_MS) return '<0.1s'
+  if (ms < 1000) return `${Math.round(ms)}ms`
   if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
   const min = Math.floor(ms / 60000)
   const sec = ((ms % 60000) / 1000).toFixed(0)
@@ -775,7 +770,7 @@ export function settleBlockOutcome(
   const right = header?.querySelector<HTMLElement>(':scope > .cmd-header-right')
   if (!header || !right) return
   // The status region no longer spans both text lines once the block has
-  // an outcome of its own — settled always aligns with the command band
+  // an outcome of its own — settled always aligns with the path line
   // alone (spec 2026-09-15 §1.7). Idempotent, like the rest of this
   // function: a second settle restates `false` rather than needing to
   // check whether it was already set.
@@ -793,7 +788,7 @@ export function settleBlockOutcome(
     // fires there in practice — it is here for whatever settles a block
     // WITHOUT replacing it, present or future, rather than something only
     // the common path is trusted to get right.
-    ':scope > .ui-meta, :scope > .ui-meta__sep, :scope > .ui-spinner, :scope > .cmd-header-waiting, :scope > .ui-button[data-block-control]',
+    ':scope > .ui-command-block-frame__success, :scope > .ui-meta, :scope > .ui-meta__sep, :scope > .ui-spinner, :scope > .cmd-header-waiting, :scope > .ui-button[data-block-control]',
   )) {
     stale.remove()
   }
@@ -816,10 +811,12 @@ export function settleBlockOutcome(
     const spec = rules.terminal(outcome)
     if (!spec) continue
     block.dataset.outcome = spec.outcome
-    // Success is silent (spec 2026-09-14 §3.1): no element and no
-    // separator either — `data-outcome` is what an e2e spec waits on
-    // instead.
-    if (spec.outcome === 'success') continue
+    // The target shows a check beside a successful command duration.
+    // Other block kinds retain their own outcome vocabulary.
+    if (spec.outcome === 'success') {
+      if (kind === 'command') chips.push(createCommandSuccess())
+      continue
+    }
     chips.push(
       createMeta([spec.text], {
         tone: spec.outcome === 'failure' ? 'danger' : 'dim',
@@ -828,7 +825,8 @@ export function settleBlockOutcome(
     )
   }
   chips.forEach((chip, i) => {
-    if (i > 0) placeHeaderChip(right, createMetaSeparator({ size: 'terminal' }))
+    if (i > 0 && block.dataset.outcome !== 'success')
+      placeHeaderChip(right, createMetaSeparator({ size: 'terminal' }))
     placeHeaderChip(right, chip)
   })
 }
@@ -876,7 +874,7 @@ function createHeader(
   header.dataset.location = location
   const promptFacts: PromptContextFacts = { path: cwdLabel(cwd) }
   if (location) promptFacts.host = location
-  metaRow.appendChild(createPromptContext(promptFacts))
+  metaRow.appendChild(createPromptContext(promptFacts, { presentation: 'history' }))
 
   if (status === 'running') {
     // The elapsed time, ticking, beside the kit spinner. It used to appear
@@ -1022,7 +1020,7 @@ export function setBlockWhere(block: HTMLElement, facts: { home?: string; branch
   const promptFacts: PromptContextFacts = { path: cwdLabel(cwd, facts.home) }
   if (location) promptFacts.host = location
   if (facts.branch) promptFacts.branch = facts.branch
-  updatePromptContext(promptEl, promptFacts)
+  updatePromptContext(promptEl, promptFacts, { presentation: 'history' })
 }
 
 /**

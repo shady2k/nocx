@@ -1,3 +1,4 @@
+@import './styles/components/terminal-status.css';
 /* Every stylesheet under styles/ must appear here — `npm run lint` fails on a
    file nothing imports, because a stylesheet that is merely never loaded looks
    exactly like one that is loaded and overridden (nocx-u7wq.4). */
@@ -510,7 +511,7 @@
 
    The grid is fitted INSIDE this inset: `usableViewport` subtracts the live
    row's computed inline padding from the scroller's clientWidth. */
-.scrollback-inner > * {
+.scrollback-inner > :not(.cell-metric-probe) {
   box-sizing: border-box;
   padding-inline: var(--pane-inline-padding);
 }

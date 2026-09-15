@@ -34,7 +34,7 @@ import type { ModelChipState } from './agent-readiness'
 import { cwdLabel } from './cwd-label'
 import { createButton } from './ui/button-element'
 import { createIconButton } from './ui/icon-button-element'
-import { ArrowUpIcon, iconElement } from './ui/icons'
+import { ArrowRightIcon, iconElement } from './ui/icons'
 import { createComposerFrame, type ComposerFrameHandle } from './ui/composer-frame'
 import { markShellCommand } from './ui/shell-command'
 import {
@@ -369,7 +369,7 @@ export class CommandEditor {
 
     this.context = document.createElement('div')
     this.context.className = 'nocx-editor-context'
-    this.contextEl = createPromptContext({ path: '~' }, { tone: 'dim' })
+    this.contextEl = createPromptContext({ path: '~' }, { tone: 'dim', presentation: 'composer' })
     this.contextEl.title = '~'
     this.context.append(this.contextEl)
 
@@ -568,7 +568,7 @@ export class CommandEditor {
     // in submit()/commit() below are the ONLY path a click can reach.
     this.submitButton = createIconButton({
       ariaLabel: 'Run command',
-      icon: () => iconElement(ArrowUpIcon),
+      icon: () => iconElement(ArrowRightIcon),
       size: 'sm',
       onClick: () => this.submit(),
     })
@@ -598,18 +598,12 @@ export class CommandEditor {
    *  changes nothing about the existing keyboard behaviour for an empty
    *  Enter (submit() below still runs its own empty-doc branch regardless
    *  of this button's state; `disabled` governs pointer activation only).
-   *  The `primary` appearance (spec §4: filled blue, vs. the subdued
-   *  default arrow) is applied only while enabled, so an empty field never
-   *  wears an affordance it would refuse. `data-appearance`, not
-   *  `data-variant`: IconButton's own typed `primary` register
-   *  (icon-button.tsx/icon-button.css, landed round 2) reads that
-   *  attribute — `data-variant` was this file's placeholder name for it
-   *  before the real one existed. */
+   *  The outlined submit control keeps its shape in both states; disabled
+   *  opacity communicates that an empty draft cannot be clicked. */
   private updateSubmitEnabled(text: string): void {
     const hasDraft = text.trim() !== ''
     this.submitButton.disabled = !hasDraft
-    if (hasDraft) this.submitButton.dataset.appearance = 'primary'
-    else delete this.submitButton.dataset.appearance
+    this.submitButton.dataset.appearance = 'submit'
   }
 
   /** The submit control's accessible name follows the active target (spec
@@ -622,6 +616,7 @@ export class CommandEditor {
     const label = toShell ? 'Run command' : 'Send question'
     this.submitButton.setAttribute('aria-label', label)
     this.submitButton.title = label
+    this.frame.setSubmitHint(toShell ? 'Enter to run' : 'Enter to ask')
   }
 
   /** Install the extensions of the target Enter currently goes to. Called
@@ -778,7 +773,10 @@ export class CommandEditor {
       facts.hostStrong = true
     }
     if (this._branch) facts.branch = this._branch
-    updatePromptContext(this.contextEl, facts, { tone: this._focused ? 'normal' : 'dim' })
+    updatePromptContext(this.contextEl, facts, {
+      tone: this._focused ? 'normal' : 'dim',
+      presentation: 'composer',
+    })
     this.contextEl.title = this._cwd
   }
 

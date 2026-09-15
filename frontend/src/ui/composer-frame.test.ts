@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
 // ComposerFrame (spec 2026-09-15 §4): the composer's outer inset card and
-// inner bordered field. editor.ts is the one real caller; these tests assert
+// open input row and keyboard hints. editor.ts is the one real caller; these tests assert
 // the structural contract other files depend on — root/field/editor/submit
 // identity, slot order, and the typed focus projection — without pulling in
 // CM6 (editor.test.ts and ask-entry.test.ts each cover their own half of
@@ -16,7 +16,10 @@ describe('createComposerFrame', () => {
     const frame = createComposerFrame(chrome)
 
     expect(frame.root.classList.contains('ui-composer-frame')).toBe(true)
-    expect([...frame.root.children]).toEqual([chrome, frame.field])
+    expect([...frame.root.children].slice(0, 2)).toEqual([chrome, frame.field])
+    expect(frame.root.textContent).toContain('Enter to run')
+    frame.setSubmitHint('Enter to ask')
+    expect(frame.root.textContent).toContain('Enter to ask')
   })
 
   it('never repaints the caller’s chrome — it does not touch its class, attributes or children', () => {

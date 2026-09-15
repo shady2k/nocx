@@ -147,3 +147,21 @@
   background: var(--color-accent);
   color: var(--color-canvas);
 }
+
+.ui-icon-button[data-appearance='submit'] {
+  width: var(--terminal-composer-control-size);
+  height: var(--terminal-composer-control-size);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--control-radius-lg);
+  color: var(--color-text);
+  background: var(--color-surface-hover);
+}
+.ui-icon-button[data-appearance='submit'] > svg {
+  width: var(--icon-size-lg);
+  height: var(--icon-size-lg);
+}
+
+.ui-icon-button[data-size='rail'] > svg {
+  width: var(--icon-size-rail);
+  height: var(--icon-size-rail);
+}

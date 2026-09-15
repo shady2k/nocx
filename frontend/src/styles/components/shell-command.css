@@ -17,6 +17,7 @@
    element — this file and the generic `.tok-*` block in style.css do). */
 
 .ui-shell-command .tok-command {
+  font-weight: 600;
   color: var(--color-accent);
 }
 

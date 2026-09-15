@@ -141,8 +141,10 @@ describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () 
     // boundary and the live region — so a frozen column and the live column
     // cannot sit on different edges, and a block nested in a turn (not a
     // child of the stack) gets none.
-    expect(shipped('.scrollback-inner > *', 'padding-inline')).toBe('var(--pane-inline-padding)')
-    expect(shipped('.scrollback-inner > *', 'box-sizing')).toBe('border-box')
+    expect(shipped('.scrollback-inner > :not(.cell-metric-probe)', 'padding-inline')).toBe(
+      'var(--pane-inline-padding)',
+    )
+    expect(shipped('.scrollback-inner > :not(.cell-metric-probe)', 'box-sizing')).toBe('border-box')
     // Every one of these is a direct child of `.scrollback-inner` at equal
     // specificity to that row rule (one class each): `.cmd-block` (every
     // kind), the live region and `.scrollback-restore-boundary` ("Previous

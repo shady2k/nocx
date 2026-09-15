@@ -18,7 +18,7 @@ export interface IconButtonElementOptions {
   selected?: boolean
   square?: boolean
   /** See icon-button.tsx — the accent-filled submit register. */
-  appearance?: 'default' | 'primary'
+  appearance?: 'default' | 'primary' | 'submit'
   railIndicator?: boolean
   disabled?: boolean
   title?: string
@@ -34,7 +34,7 @@ export function createIconButton(opts: IconButtonElementOptions): HTMLButtonElem
   btn.dataset.size = opts.size ?? 'md'
   if (opts.selected === true) btn.setAttribute('aria-selected', 'true')
   if (opts.square === true) btn.dataset.square = 'true'
-  if (opts.appearance === 'primary') btn.dataset.appearance = 'primary'
+  if (opts.appearance && opts.appearance !== 'default') btn.dataset.appearance = opts.appearance
   if (opts.railIndicator === true) btn.dataset.railIndicator = 'true'
   btn.setAttribute('aria-label', opts.ariaLabel)
   btn.disabled = opts.disabled === true

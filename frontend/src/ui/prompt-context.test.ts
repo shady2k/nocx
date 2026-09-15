@@ -137,12 +137,12 @@ describe('prompt-context.css — tokens only, mono, one line', () => {
     ).toContain('color: var(--color-text)')
   })
 
-  it('the path and the branch read in the accent colour', () => {
+  it('the path and the branch read as muted context', () => {
     expect(ruleFor(css, ".ui-prompt-context__part[data-part='path']")).toContain(
-      'color: var(--color-accent)',
+      'color: var(--color-text-muted)',
     )
     expect(ruleFor(css, ".ui-prompt-context__part[data-part='branch']")).toContain(
-      'color: var(--color-accent)',
+      'color: var(--color-text-muted)',
     )
   })
 

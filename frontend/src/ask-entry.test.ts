@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest'
-import { grantBlockFromElement, grantBlockFromSelection, TARGET_MENU_ITEMS } from './ask-entry'
+import { describe, expect, it, vi } from 'vitest'
+import { EditorState } from '@codemirror/state'
+import { EditorView } from '@codemirror/view'
+import {
+  grantBlockFromElement,
+  grantBlockFromSelection,
+  TARGET_MENU_ITEMS,
+  TargetIndicator,
+} from './ask-entry'
 import { createAnswerBody } from './scrollback/answer-body'
 import { CommandSnapshotStore } from './command-snapshot'
 
@@ -262,5 +269,108 @@ describe('the target menu (spec 2026-09-15 §6)', () => {
       { targetId: 'shell', word: 'Run' },
       { targetId: 'agent', word: 'Ask' },
     ])
+  })
+})
+
+describe('TargetIndicator mounts beside CM6, not in a CM6 gutter (spec 2026-09-15 §4)', () => {
+  /** A minimal stand-in for the slice of ComposerFrame this indicator cares
+   *  about: a field with CM6's mount parent already inside it, exactly the
+   *  shape editor.ts builds before constructing the EditorView (composer-
+   *  frame.ts). */
+  function fieldStand(): { field: HTMLElement; editorSlot: HTMLElement; submitSlot: HTMLElement } {
+    const field = document.createElement('div')
+    field.className = 'ui-composer-frame__field'
+    const editorSlot = document.createElement('div')
+    editorSlot.className = 'ui-composer-frame__editor'
+    const submitSlot = document.createElement('div')
+    submitSlot.className = 'ui-composer-frame__submit'
+    field.append(editorSlot, submitSlot)
+    document.body.appendChild(field)
+    return { field, editorSlot, submitSlot }
+  }
+
+  it('mounts as the field’s leading child, ahead of CM6’s own editor slot', () => {
+    const { field, editorSlot, submitSlot } = fieldStand()
+    const indicator = new TargetIndicator(() => {})
+    const view = new EditorView({
+      state: EditorState.create({ extensions: [indicator.extension()] }),
+      parent: editorSlot,
+    })
+
+    const button = field.firstElementChild as HTMLButtonElement
+    expect(button.classList.contains('ui-mode-indicator')).toBe(true)
+    expect(button.dataset.variant).toBe('field')
+    expect(button.textContent).toBe('Run')
+    expect([...field.children]).toEqual([button, editorSlot, submitSlot])
+
+    view.destroy()
+    field.remove()
+  })
+
+  it('destroying the CM6 view unmounts the control — no orphan left in a field it no longer owns', () => {
+    const { field, editorSlot } = fieldStand()
+    const indicator = new TargetIndicator(() => {})
+    const view = new EditorView({
+      state: EditorState.create({ extensions: [indicator.extension()] }),
+      parent: editorSlot,
+    })
+    expect(field.querySelector('.ui-mode-indicator')).not.toBeNull()
+    view.destroy()
+    expect(field.querySelector('.ui-mode-indicator')).toBeNull()
+    field.remove()
+  })
+
+  it('set() repaints the SAME leading position — no duplicate, no reorder', () => {
+    const { field, editorSlot, submitSlot } = fieldStand()
+    const indicator = new TargetIndicator(() => {})
+    const view = new EditorView({
+      state: EditorState.create({ extensions: [indicator.extension()] }),
+      parent: editorSlot,
+    })
+
+    indicator.set('agent', 'Agent')
+    expect(field.children.length).toBe(3)
+    const button = field.firstElementChild as HTMLButtonElement
+    expect(button.textContent).toBe('Ask')
+    expect(button.dataset.target).toBe('agent')
+    expect([...field.children]).toEqual([button, editorSlot, submitSlot])
+
+    view.destroy()
+    field.remove()
+  })
+
+  it('picking a different row calls toggle(); picking the already-active row does not', () => {
+    const { editorSlot } = fieldStand()
+    const toggle = vi.fn()
+    const indicator = new TargetIndicator(toggle)
+    const view = new EditorView({
+      state: EditorState.create({ extensions: [indicator.extension()] }),
+      parent: editorSlot,
+    })
+    const button = editorSlot.parentElement!.firstElementChild as HTMLButtonElement
+    button.click()
+    const ask = [...document.querySelectorAll('[role="menuitem"]')].find(
+      (i) => i.textContent === 'Ask',
+    ) as HTMLButtonElement
+    ask.click()
+    expect(toggle).toHaveBeenCalledTimes(1)
+
+    view.destroy()
+    editorSlot.parentElement?.remove()
+  })
+
+  it('with no ComposerFrame field as an ancestor, the extension mounts nothing (defensive, never throws)', () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const indicator = new TargetIndicator(() => {})
+    expect(() => {
+      const view = new EditorView({
+        state: EditorState.create({ extensions: [indicator.extension()] }),
+        parent: container,
+      })
+      view.destroy()
+    }).not.toThrow()
+    expect(container.querySelector('.ui-mode-indicator')).toBeNull()
+    container.remove()
   })
 })

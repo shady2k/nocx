@@ -194,4 +194,33 @@ describe('createModeIndicator', () => {
     expect(el.dataset.tone).toBe('warning')
     expect(el.dataset.target).toBe('recall')
   })
+
+  // The `field` variant (spec 2026-09-15 §4): the composer's full-height
+  // leading segment beside CM6, mounted by ask-entry.ts's TargetIndicator.
+  it('carries no data-variant by default — the base compact look this component always had', () => {
+    const el = createModeIndicator({
+      word: 'Run',
+      tone: 'neutral',
+      targetId: 'shell',
+      items: RUN_ASK_ITEMS,
+      onSelect: () => {},
+    })
+    expect(el.dataset.variant).toBeUndefined()
+  })
+
+  it('the field variant sets data-variant="field", and changes nothing else about the control', () => {
+    const el = createModeIndicator({
+      word: 'Run',
+      tone: 'neutral',
+      targetId: 'shell',
+      items: RUN_ASK_ITEMS,
+      variant: 'field',
+      onSelect: () => {},
+    })
+    expect(el.dataset.variant).toBe('field')
+    expect(el.textContent).toBe('Run')
+    expect(el.dataset.tone).toBe('neutral')
+    expect(el.dataset.target).toBe('shell')
+    expect(el.querySelector('.ui-mode-indicator__divider')).not.toBeNull()
+  })
 })

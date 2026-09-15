@@ -617,8 +617,13 @@ describe('the editor never copies on selection (nocx-w7h.17)', () => {
 // could never land. No existing describe block in this file names this
 // listener, so both directions are asserted here: the exception, and that it
 // is still exactly as narrow as the receipt's.
+//
+// The check keys on `data-block-control` (nocx-9bpeq.12 round 6), not
+// `data-block-actions` — the latter is the ⋮'s own identity alone, and a
+// running block's Stop control shares only the former, the attribute this
+// guard and block-selection actually care about.
 describe('the focus bounce yields to a block’s own actions control (nocx-9bpeq.1)', () => {
-  it('focusing [data-block-actions] with the editor visible keeps focus there', async () => {
+  it('focusing [data-block-control] with the editor visible keeps focus there', async () => {
     const { ed, content, tab, teardown } = await mountTerminal(makeClipboard(), {
       attachToDocument: true,
     })
@@ -628,7 +633,7 @@ describe('the focus bounce yields to a block’s own actions control (nocx-9bpeq
       expect(ed.isVisible).toBe(true)
 
       const actions = document.createElement('button')
-      actions.setAttribute('data-block-actions', '')
+      actions.setAttribute('data-block-control', '')
       tab.pane.appendChild(actions)
 
       actions.focus()

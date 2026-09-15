@@ -10669,10 +10669,18 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       itemNamed(runningBlockMenu(content), 'stop')!.click()
       expect(signalsSent(content)).toEqual(['stop'])
 
-      // The escalation ladder's SIGINT rung. No fence: the completion
-      // carries none here, same as a real one the render-fence rendezvous
-      // has not sighted yet — the deferral window settles the visual freeze
-      // on its own (FENCE_DEFER_MS), which `rec.status` does not wait for.
+      // The escalation ladder's SIGINT rung. `fence` is REQUIRED here, not
+      // decorative: lifecycle/state.ts's own `freezeBlock` — the gate
+      // terminal-content.ts's `freezeBlock` callback calls before it will
+      // even reach `scrollback.freezeFromAttempt` at all — refuses an
+      // attempt with `fence === undefined` outright (ADR-0024 §7), so
+      // omitting it here left `freezeFromAttempt` never called and
+      // `rec.status` stuck at 'running'. A real authenticated completion
+      // always carries one (contracts/lifecycle.changed.schema.json:
+      // "Present exactly when state is completed"); this is unsighted here
+      // on purpose, so the deferral window (FENCE_DEFER_MS) is what settles
+      // the visual freeze, exactly as a fence still in flight over the pty
+      // would — `rec.status` does not wait for it either way.
       handler({
         lane: 'lane-1',
         lifecycle: 'running',
@@ -10683,6 +10691,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           state: 'completed',
           exitCode: 130,
           completedAt: '2026-09-15T00:00:00Z',
+          fence: '9'.repeat(64),
         },
       })
       expect(rec.status).toBe('cancelled')
@@ -10737,6 +10746,10 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       // No Stop, no ⋮ item, no session.signal at all — the SAME exit code
       // the test above delivers, but nothing in nocx asked for it.
       expect(signalsSent(content)).toEqual([])
+      // `fence` required — see the sibling test's comment: without it,
+      // lifecycle/state.ts's `freezeBlock` refuses the completion before
+      // `freezeFromAttempt` is ever called, and `rec.status` never leaves
+      // 'running'.
       handler({
         lane: 'lane-1',
         lifecycle: 'running',
@@ -10747,6 +10760,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           state: 'completed',
           exitCode: 130,
           completedAt: '2026-09-15T00:00:00Z',
+          fence: '1'.repeat(64),
         },
       })
       expect(rec.status).toBe('failure')

@@ -193,7 +193,9 @@ describe('the Ask token is a field-grid segment, not text in the input (nocx-ex6
     expect(indicator).toBeDefined()
     expect(indicator!.body).not.toMatch(/margin-right/)
     const fieldVariant = RULES.find((r) =>
-      r.selectors.includes(".ui-mode-indicator[data-variant='field']"),
+      // `button.` ties the badge's own `button.ui-mode-indicator[data-tone]`
+      // reset on specificity, so source order lets the variant win.
+      r.selectors.includes("button.ui-mode-indicator[data-variant='field']"),
     )
     expect(fieldVariant).toBeDefined()
     expect(fieldVariant!.body).toMatch(/padding-inline\s*:\s*var\(--space-3\)/)

@@ -127,6 +127,11 @@ test('Stop is a visible, keyboard-reachable button on the running row', async ({
   const outcome = await block.getAttribute('data-outcome')
   expect(outcome).not.toBeNull()
   expect(outcome).not.toBe('success')
+  // nocx-9bpeq.19: a command stopped through this button is cancelled, never
+  // failed — the danger tint and the bar are for a program's OWN failure,
+  // and SIGINT's exit status is not that just because it is nonzero.
+  expect(outcome).not.toBe('failure')
+  expect(outcome).toBe('cancelled')
   await expect(block.getByRole('button', { name: 'Stop' })).toHaveCount(0)
 })
 

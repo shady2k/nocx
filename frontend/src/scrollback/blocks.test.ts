@@ -1682,6 +1682,56 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     expect(frozen!.el.dataset.blockId).toBeUndefined()
   })
 
+  it('a stop request turns a nonzero exit into cancelled, never failure (nocx-9bpeq.19)', () => {
+    // The backend's own completion fact states only exitCode (contracts/
+    // lifecycle.changed.schema.json's `attempt`), never a cause — SIGINT's
+    // 130 reads exactly like a program's own failure otherwise.
+    // `stopRequested` is set by terminal-content.ts's `signalActiveCommand`
+    // at the moment of the gesture; this test sets it directly to isolate
+    // freezeFromAttempt's OWN derivation from that wiring.
+    const rec = manager.startBlock('sleep 30', '~', 0)
+    manager.bindAttempt('att-1')
+    rec.stopRequested = true
+    manager.sightFence(FENCE, 8)
+    const frozen = manager.freezeFromAttempt(
+      attempt({ exitCode: 130 }),
+      () => undefined,
+      8,
+      () => 9,
+    )
+    expect(frozen).not.toBeNull()
+    expect(frozen!.status).toBe('cancelled')
+    expect(frozen!.exitCode).toBe(130)
+    expect(frozen!.el.dataset.outcome).not.toBe('failure')
+    expect(frozen!.el.dataset.outcome).toBe('cancelled')
+    expect(
+      frozen!.el.querySelector(
+        ':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])',
+      )?.textContent,
+    ).toBe('Stopped')
+  })
+
+  it('the SAME nonzero exit reads as failure when no stop was requested — the pairing case (nocx-9bpeq.19)', () => {
+    const rec = manager.startBlock('sleep 30', '~', 0)
+    manager.bindAttempt('att-1')
+    expect(rec.stopRequested).toBe(false)
+    manager.sightFence(FENCE, 8)
+    const frozen = manager.freezeFromAttempt(
+      attempt({ exitCode: 130 }),
+      () => undefined,
+      8,
+      () => 9,
+    )
+    expect(frozen).not.toBeNull()
+    expect(frozen!.status).toBe('failure')
+    expect(frozen!.el.dataset.outcome).toBe('failure')
+    expect(
+      frozen!.el.querySelector(
+        ':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])',
+      )?.textContent,
+    ).toBe('Exit 130')
+  })
+
   it('freezeFromAttempt refuses a non-completed attempt — an open attempt cannot freeze a block', () => {
     manager.startBlock('make', '~', 0)
     manager.bindAttempt('att-1')
@@ -3495,6 +3545,33 @@ describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-
     expect(el.dataset.outcome).toBe('failure')
     expect(status(el)?.textContent).toBe('Exit 1')
     expect(status(el)?.dataset.tone).toBe('danger')
+  })
+
+  it('a command the person stopped reads cancelled, dim, with no danger tint (nocx-9bpeq.19)', () => {
+    // Built with status 'cancelled' directly — BlockManager.freezeFromAttempt
+    // is what derives it from `stopRequested` (see its own tests); this
+    // isolates BLOCK_KIND_RULES.command's own reading of that status, spec
+    // 2026-09-14 §3.1/§3.3: a cancelled command is something the person did,
+    // never the danger tint a program's own failure gets.
+    const el = createCommandBlock(
+      'command',
+      1,
+      'sleep 30',
+      '~',
+      '',
+      '',
+      1200,
+      130,
+      'cancelled',
+      () => document.createElement('div'),
+      noopSelect,
+      freshStore(),
+      'shell',
+    )
+    expect(el.dataset.outcome).not.toBe('failure')
+    expect(el.dataset.outcome).toBe('cancelled')
+    expect(status(el)?.textContent).toBe('Stopped')
+    expect(status(el)?.dataset.tone).toBe('dim')
   })
 
   it('a turn uses its own words through the same function', () => {

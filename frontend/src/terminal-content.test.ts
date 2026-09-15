@@ -2610,8 +2610,9 @@ describe('summoned editor overlay stylesheet contract (nocx-92gfl)', () => {
     expect(stack).not.toBe('')
     expect(frame).not.toBe('')
     // The stack owns every row it occupies. Its ground makes the frozen
-    // capture behind it no longer a second painter of those rows.
-    expect(stack).toMatch(/background\s*:\s*var\(--color-canvas\)/)
+    // capture behind it no longer a second painter of those rows, and it is
+    // the terminal screen's one ground (spec 2026-09-14 §7), not the canvas.
+    expect(stack).toMatch(/background\s*:\s*var\(--terminal-background\)/)
     expect(stack).toMatch(/z-index\s*:\s*10/)
     expect(frame).toMatch(/z-index\s*:\s*1/)
   })

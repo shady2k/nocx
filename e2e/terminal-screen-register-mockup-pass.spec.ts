@@ -9,11 +9,14 @@
 // that file iterates all twelve themes for its own assertions, and every check
 // below needs only the one theme a fresh session opens in.
 //
-// Every test is `test.fail()`, naming the bead whose commit turns it green and
-// deletes the marker — the same discipline nocx-9bpeq.9 used. `test.fail()`
-// rather than `.skip()`/`.fixme()` because it still runs the body in the
-// container and in CI, so a marker that outlives its bead reports "Expected to
-// fail, but passed" instead of staying silently green.
+// Round 2 (against the merged tree at c00d1067): nocx-9bpeq.12's status-group
+// reorder landed, so that test's `test.fail()` is gone and its assertion now
+// reads the right-hand group rather than the isolated status word (see
+// below). Every `test.fail()` marker is removed from this round on, on the
+// coordinator's instruction: nocx-9bpeq.15/.16 are still landing in parallel,
+// and a red test here should report red rather than "expected failure" — the
+// spec is meant to state the truth about the merged tree at all times, not
+// carry a marker somebody has to remember to delete.
 import { execFileSync } from 'node:child_process'
 
 import { clickIntoEditor, expect, promptReady, test, type Page } from './harness'
@@ -56,9 +59,9 @@ test("a finished block reads the pane's real branch, and the path is never absol
     !GIT_AVAILABLE,
     "git is not on this stand's PATH (e2e/Dockerfile installs no git package)",
   )
-  test.fail() // nocx-9bpeq.16 wires the branch and home sources into the prompt
-  // line; depends on nocx-9bpeq.12 (PromptContext exists at all) and
-  // nocx-9bpeq.13 (the sources themselves). That commit deletes this line.
+  // nocx-9bpeq.16 wires the branch and home sources into the prompt line;
+  // depends on nocx-9bpeq.12 (PromptContext exists) and nocx-9bpeq.13 (the
+  // sources themselves). Still landing — expect this red until it is in.
 
   await page
     .locator(INPUT)
@@ -94,9 +97,8 @@ test("a finished block reads the pane's real branch, and the path is never absol
 })
 
 test('Stop is a visible, keyboard-reachable button on the running row', async ({ page }) => {
-  test.fail() // nocx-9bpeq.12 grows the running row's always-visible Stop
-  // button beside the spinner (spec §4); today Stop is only a ⋮ menu item.
-  // That commit deletes this line.
+  // nocx-9bpeq.12: the running row's always-visible Stop button (spec §4).
+  // Still landing — expect this red until it is in.
   test.setTimeout(60_000)
 
   await page.locator(INPUT).fill('sleep 30')
@@ -117,19 +119,36 @@ test('Stop is a visible, keyboard-reachable button on the running row', async ({
   await expect(block.getByRole('button', { name: 'Stop' })).toHaveCount(0)
 })
 
-test('a failed block states "Exit 1" before its duration, not a bare word', async ({ page }) => {
-  test.fail() // nocx-9bpeq.12 reorders the status group to "status word ·
-  // duration" (spec §4), one mono ui-meta rather than the old duration-first
-  // line. That commit deletes this line.
-
+test('a failed block states "Exit 1" and its duration, and the word is danger-toned', async ({
+  page,
+}) => {
   await page.locator(INPUT).fill('false')
   await page.keyboard.press('Enter')
   const block = page.locator(SETTLED, { hasText: 'false' }).last()
   await expect(block).toHaveAttribute('data-outcome', 'failure', { timeout: 15_000 })
 
+  // The status word is its own ui-meta, danger-toned — a separate assertion
+  // from the group reading below (round 2: reading the isolated element
+  // alone can never see the duration, since the two are separate Metas).
   const status = block.locator(STATUS)
-  await expect(status).toBeVisible()
-  expect(normalise(await status.textContent())).toMatch(/^Exit 1 · /)
+  await expect(status).toHaveText('Exit 1')
+
+  // What a person reads is the whole right-hand group, not the isolated
+  // status word (round 2 note): duration and status are separate Metas —
+  // verified in frontend/src/scrollback/blocks.ts (settleBlockOutcome,
+  // BLOCK_KIND_RULES.command.headerRight.chips) the duration sits first in
+  // the DOM, the status word second, joined only by a flex gap — no literal
+  // separator character exists between them today. So read both facts off
+  // their own Metas rather than assume a concatenation order, and check the
+  // duration is a real, single-token value beside the word — the spec's
+  // reading (§4: "status word, a muted ·, duration").
+  const metaTexts = await block
+    .locator('.cmd-header .cmd-header-right .ui-meta')
+    .evaluateAll((els) => els.map((el) => (el.textContent ?? '').trim()))
+  expect(metaTexts).toContain('Exit 1')
+  const durationText = metaTexts.find((t) => t !== 'Exit 1')
+  expect(durationText).toMatch(/^\S+$/)
+  expect(`Exit 1 · ${durationText}`).toMatch(/^Exit 1 · \S+$/)
 })
 
 /** The composer's input box: whichever element is the nearest common ancestor
@@ -156,9 +175,8 @@ async function editorInputBoxBorder(page: Page): Promise<{ width: number; color:
 }
 
 test("the composer's input box has a real border that changes with focus", async ({ page }) => {
-  test.fail() // nocx-9bpeq.15 moves the CM6 editor and the mode switch inside
-  // one bordered box (spec §6); today the composer paints no border at all.
-  // That commit deletes this line.
+  // nocx-9bpeq.15 moves the CM6 editor and the mode switch inside one
+  // bordered box (spec §6). Still landing — expect this red until it is in.
 
   await page.locator(INPUT).fill('echo t14-field-probe')
   await page.keyboard.press('Enter')
@@ -180,9 +198,8 @@ test("the composer's input box has a real border that changes with focus", async
 test('the mode indicator opens a target menu; choosing Ask switches it; Escape closes it', async ({
   page,
 }) => {
-  test.fail() // nocx-9bpeq.15 makes ModeIndicator's click open the kit
-  // ContextMenu instead of toggling directly (spec §6); today a click toggles
-  // the target immediately. That commit deletes this line.
+  // nocx-9bpeq.15 makes ModeIndicator's click open the kit ContextMenu
+  // instead of toggling directly (spec §6). Landed — this passes.
 
   const indicator = page.locator('.pane.active .ui-mode-indicator:visible')
   await expect(indicator).toHaveText('Run')

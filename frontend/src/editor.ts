@@ -383,6 +383,7 @@ export class CommandEditor {
       label: '',
       variant: 'ghost',
       size: 'sm',
+      mono: true,
       onClick: () => this._recoveryOnClick?.(),
     })
     this.recoveryChip.dataset.control = 'recovery'
@@ -397,6 +398,7 @@ export class CommandEditor {
       variant: 'ghost',
       size: 'sm',
       truncate: true,
+      mono: true,
       onClick: () => {
         const page = this._modelChipTargets.endpoint
         if (page) this._onModelChipClick?.(page)
@@ -410,6 +412,7 @@ export class CommandEditor {
       variant: 'ghost',
       size: 'sm',
       truncate: true,
+      mono: true,
       onClick: () => {
         const page = this._modelChipTargets.model
         if (page) this._onModelChipClick?.(page)
@@ -425,6 +428,7 @@ export class CommandEditor {
       variant: 'ghost',
       size: 'sm',
       truncate: true,
+      mono: true,
       onClick: () => this._onGrantChipClick?.(),
     })
     this.grantChip.dataset.control = 'grant'

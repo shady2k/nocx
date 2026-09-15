@@ -18,6 +18,7 @@ const CASES: ReadonlyArray<Omit<CreateButtonOptions, 'onClick'>> = [
     ariaLabel: 'Answers with openrouter. Open Endpoints.',
   },
   { label: 'm-a', variant: 'ghost', size: 'sm', truncate: true, disabled: true },
+  { label: 'deepseek/v4', variant: 'ghost', size: 'sm', truncate: true, mono: true },
   { label: 'Plain' },
   { label: 'Primary', variant: 'primary' },
 ]
@@ -31,6 +32,7 @@ describe('createButton is the Button, emitted without Solid (spec §6.2)', () =>
           variant={c.variant}
           size={c.size}
           truncate={c.truncate}
+          mono={c.mono}
           title={c.title}
           ariaLabel={c.ariaLabel}
           disabled={c.disabled}

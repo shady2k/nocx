@@ -17,6 +17,7 @@ export interface CreateButtonOptions {
   variant?: ButtonVariant
   size?: ButtonSize
   truncate?: boolean
+  mono?: boolean
   title?: string
   ariaLabel?: string
   disabled?: boolean
@@ -29,6 +30,7 @@ export function createButton(opts: CreateButtonOptions): HTMLButtonElement {
   el.dataset.variant = opts.variant ?? 'default'
   if (opts.size && opts.size !== 'md') el.dataset.size = opts.size
   if (opts.truncate === true) el.dataset.truncate = 'true'
+  if (opts.mono === true) el.dataset.mono = 'true'
   el.type = 'button'
   el.disabled = opts.disabled === true
   el.title = opts.title ?? ''

@@ -85,6 +85,12 @@ export interface ButtonProps {
    * the whole value in `title` and the accessible name.
    */
   truncate?: boolean
+  /**
+   * The composer's hint register: the terminal's mono face at sm, dim until
+   * hovered (owner review, 2026-09-15) — so the context row's controls read
+   * like the key hints under the draft.
+   */
+  mono?: boolean
 }
 
 /**
@@ -118,6 +124,7 @@ export function Button(props: ButtonAttrs) {
     'selected',
     'tabIndex',
     'truncate',
+    'mono',
   ] as const
   const [local, rest] = splitProps(props, knownKeys)
   return (
@@ -127,6 +134,7 @@ export function Button(props: ButtonAttrs) {
       data-secondary={local.secondary !== undefined ? 'true' : undefined}
       {...(local.size && local.size !== 'md' ? { 'data-size': local.size } : {})}
       data-truncate={local.truncate === true ? 'true' : undefined}
+      data-mono={local.mono === true ? 'true' : undefined}
       type={local.type ?? 'button'}
       disabled={local.disabled === true}
       aria-selected={local.selected === true ? 'true' : undefined}

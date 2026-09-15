@@ -350,3 +350,16 @@
   white-space: normal;
   overflow-wrap: anywhere;
 }
+
+/* ── Mono — the composer's hint register (owner review 2026-09-15) ───────
+   The context row's controls in the same face, size and ink as the key hints
+   under the draft (composer-frame.css). After ghost and sm (equal
+   specificity) so its face, size and colour win. */
+.ui-button[data-mono='true'] {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-dim);
+}
+.ui-button[data-mono='true']:hover:not(:disabled) {
+  color: var(--color-text-muted);
+}

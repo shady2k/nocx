@@ -61,8 +61,10 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  font-family: var(--font-family-ui);
+  /* The key hints' register (composer-frame.css): mono, sm, dim. */
+  font-family: var(--font-family-mono);
   font-size: var(--font-size-sm);
+  color: var(--color-text-dim);
   line-height: var(--terminal-ui-line-height);
 }
 .ui-prompt-context[data-presentation='composer'] svg {
@@ -74,4 +76,10 @@
   height: var(--icon-size-sm);
   border-left: 1px solid var(--color-divider);
   margin-inline: var(--space-2);
+}
+
+/* Every part and icon of the composer's line in the same dim ink. */
+.ui-prompt-context[data-presentation='composer'] .ui-prompt-context__part,
+.ui-prompt-context[data-presentation='composer'] svg {
+  color: var(--color-text-dim);
 }

@@ -66,6 +66,11 @@ type OpenService interface {
 	// that forks a local process is not a seam that connects to a host.
 	Open(ctx context.Context, cfg session.Config) (session.Session, error)
 	Close(id session.ID) error
+	// EndSession is Close's sibling for a caller that knows nobody will ever
+	// hold this session — an open that adopted a helper-hosted session and
+	// then failed a later step of its own (nocx-isjh4). See
+	// session.Reg.EndSession.
+	EndSession(id session.ID) error
 }
 
 // OpenOperation is the typed operation for the "open" control method, and
@@ -160,4 +165,11 @@ func (s *openService) Close(id session.ID) error {
 		return err
 	}
 	return s.registry.Close(id)
+}
+
+func (s *openService) EndSession(id session.ID) error {
+	if err := s.guard.check(); err != nil {
+		return err
+	}
+	return s.registry.EndSession(id)
 }

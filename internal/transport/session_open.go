@@ -532,8 +532,12 @@ func (o *sessionOpener) recordHostedBinding(ctx context.Context, sess session.Se
 	if hosted.AbortLifecycle != nil {
 		hosted.AbortLifecycle()
 	}
+	// EndSession, not Close: this open has already failed as a whole, so
+	// nobody will ever hold sess — leaving it merely detached would strand
+	// a helper-hosted session's window budget with no coordinator ever
+	// coming back for it (nocx-isjh4).
 	_ = o.op.Run(ctx, func(_ context.Context, svc capability.OpenService) error {
-		return svc.Close(sess.ID())
+		return svc.EndSession(sess.ID())
 	})
 	return fmt.Errorf("recording the helper binding: %w", err)
 }
@@ -602,9 +606,14 @@ func (o *sessionOpener) releaseClaim(ctx context.Context, claim string) {
 // a ring that could not be created because the server is shutting down — ends
 // the session rather than leaking it, without holding the capability seam
 // itself.
+//
+// EndSession, not Close (nocx-isjh4): the caller here always failed to
+// finish adopting the session it just produced, so nobody will ever attach
+// to it — a helper-hosted session left merely detached here would hold its
+// window budget for no coordinator that is ever coming back.
 func (o *sessionOpener) close(ctx context.Context, id session.ID) {
 	_ = o.op.Run(ctx, func(_ context.Context, svc capability.OpenService) error {
-		return svc.Close(id)
+		return svc.EndSession(id)
 	})
 }
 

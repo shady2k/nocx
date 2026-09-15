@@ -22,7 +22,7 @@
 import { createComponent } from 'solid-js'
 import { render } from 'solid-js/web'
 import type { BadgeTone } from './badge'
-import { ChevronDownIcon, CheckCircleIcon } from './icons'
+import { ChevronDownIcon, CheckCircleIcon, iconElement } from './icons'
 import { ContextMenu, type ContextMenuItem } from './context-menu'
 
 export interface ModeIndicatorMenuItem {
@@ -80,10 +80,12 @@ export function createModeIndicator(opts: ModeIndicatorOptions): HTMLButtonEleme
   divider.setAttribute('aria-hidden', 'true')
   btn.append(divider)
 
-  // A detached icon component called outside a Solid root returns a plain
-  // SVGElement (ui/README, the same pattern PromptContext's GitBranchIcon
-  // and the block header's ChevronRightIcon use).
-  const chevron = ChevronDownIcon({}) as SVGElement
+  // `iconElement` (ui/icons/icon-element.ts) resolves a detached icon
+  // regardless of ambient Solid state — the same pattern PromptContext's
+  // GitBranchIcon and the block header's ChevronRightIcon use, needed
+  // because ChevronDownIcon can be called both this bare way and, in
+  // principle, uncalled as a menu item's `icon` (nocx-9bpeq.12 round 3).
+  const chevron = iconElement(ChevronDownIcon)
   chevron.classList.add('ui-mode-indicator__chevron')
   btn.append(chevron)
 

@@ -39,6 +39,7 @@ import {
   ChevronRightIcon,
   CopyIcon,
   FileIcon,
+  iconElement,
   MoreIcon,
   PinIcon,
   SquareIcon,
@@ -839,7 +840,7 @@ function createHeader(
   // copy, selection, `blockCommandText` — reads exactly what it read before.
   if (kind === 'command') {
     const commandRow = div('cmd-header-command')
-    const sigil = ChevronRightIcon({}) as SVGElement
+    const sigil = iconElement(ChevronRightIcon)
     sigil.classList.add('cmd-header-sigil')
     commandRow.appendChild(sigil)
     commandRow.appendChild(cmdSpan)
@@ -1004,7 +1005,7 @@ function buildOverflowMenu(
   const btn = createIconButton({
     size: 'xs',
     ariaLabel: 'Block actions',
-    icon: () => MoreIcon({}) as Element,
+    icon: () => iconElement(MoreIcon),
     attrs: { 'data-block-actions': '' },
     onClick: (e) => {
       e.stopPropagation()
@@ -1484,10 +1485,14 @@ export function createRunningBlock(
     // Rebuilt explicitly rather than `.prepend()`-ing onto the text node
     // `createButton` already gave it (round 2, nocx-9bpeq.12): the icon and
     // the label are two separate elements, replacing the button's content
-    // outright — the same shape mode-indicator.ts already uses for an icon
-    // beside text built outside a Solid root (`ChevronDownIcon({})`, a named
-    // const, then appended), rather than mutating a non-empty node in place.
-    const icon = SquareIcon({}) as Element
+    // outright. `iconElement` (round 3) is what actually resolves the icon:
+    // SquareIcon is ALSO passed uncalled as `icon: SquareIcon` to the ⋮
+    // menu's Stop item below, and the first time Solid renders it there
+    // permanently marks the underlying function so a later bare call
+    // returns an HMR-proxy accessor instead of an element (see
+    // ui/icons/icon-element.ts's header) — order-dependent on which test
+    // opened that menu first.
+    const icon = iconElement(SquareIcon)
     const label = document.createElement('span')
     label.textContent = 'Stop'
     stop.replaceChildren(icon, label)

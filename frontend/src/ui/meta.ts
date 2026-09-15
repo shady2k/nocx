@@ -21,6 +21,11 @@ export interface MetaOptions {
   column?: 'duration'
   /** Hover detail — the start time on a duration. */
   title?: string
+  /** `sm` reads in the mono face at `--font-size-sm` instead of the UI face
+   *  at `--font-size-2xs` — the command block's status group (spec
+   *  2026-09-15 §4), which sits beside the mono command line and reads
+   *  wrong in the UI font at that size. */
+  size?: 'sm'
 }
 
 const SEPARATOR = ' · '
@@ -31,6 +36,8 @@ function fill(el: HTMLSpanElement, parts: readonly MetaPart[], opts: MetaOptions
   else el.dataset.column = opts.column
   if (opts.title === undefined) el.removeAttribute('title')
   else el.title = opts.title
+  if (opts.size === undefined) el.removeAttribute('data-size')
+  else el.dataset.size = opts.size
 
   const children: HTMLSpanElement[] = []
   parts.forEach((part, i) => {

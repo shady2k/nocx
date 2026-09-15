@@ -190,8 +190,11 @@
   bottom: 0;
   z-index: 10;
   /* The stack owns the rows it occupies. Its opaque ground stops the frozen
-     frame underneath from painting through the answer. */
-  background: var(--color-canvas);
+     frame underneath from painting through the answer — and it sits over the
+     terminal screen, so that ground is --terminal-background (spec §7), not
+     the canvas; .nocx-summon-answers below paints nothing of its own and
+     inherits it. */
+  background: var(--terminal-background);
   /* THE VISIBLE SEAM. The kit's separator is transparent at rest by design —
      "the pane border beside it is the visible seam" — so a surface that
      places one owes it that border, or the person is handed a six-pixel
@@ -383,6 +386,17 @@
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
+  /* The terminal screen's one ground (spec §7), not the canvas: history rows
+     and the live region paint `transparent` (command-block.css, the xterm
+     live container) and composite to whatever sits behind them, which was
+     `.pane`'s --color-canvas — the one theme where that differs from
+     --terminal-background is `light`, which is exactly where the block rows
+     read grey instead of white. This box spans the whole history + live
+     region, including the empty space above bottom-anchored blocks
+     (`.scrollback-inner`'s `margin-top: auto`), so painting it here covers
+     that too. `.pane` itself stays on --color-canvas: Settings, the API
+     workbench and the skill view are `.pane-manager`, not this class. */
+  background: var(--terminal-background);
   /* THE SCROLLBAR IS THE PANE'S TRAILING EDGE, NOT AN OBJECT NEAR IT. The
      pane used to inset its children and this layout cancelled the trailing
      half so the stable gutter the thumb is drawn in stopped flush against

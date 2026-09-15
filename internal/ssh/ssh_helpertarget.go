@@ -137,6 +137,18 @@ type DialEndpoint struct {
 	// is this package's rule: a helper that re-derived either would be a second
 	// answer to "which machine is this".
 	KnownHostsAddr string
+	// ConnectionName and ProfileID name the saved connection this endpoint
+	// was resolved from — the coordinator's own values, carried through so
+	// a helper-hosted dial's interactive rung can echo them back on a
+	// password ask (nocx-y6fh7 item 4, round 3), whichever of this
+	// package's several destination-resolving callers (a pane's own spawn,
+	// the shell-integration publish, a probe lease, a proxied channel) built
+	// this endpoint — ONE resolution, here, rather than a second stamping
+	// at each call site. Both empty for a hop: a jump host is not a saved
+	// connection a person's remember checkbox could bind to, and for a
+	// direct-host open, which names no profile at all.
+	ConnectionName string
+	ProfileID      string
 }
 
 // DialTarget is everything a helper needs to open a connection, and nothing it
@@ -204,6 +216,14 @@ func (rc *RealClient) resolveDialEndpoint(
 		Host: resolved.hostName,
 		Port: resolved.port,
 		User: resolved.user,
+		// Read off cfg directly rather than a caller's claim: this IS the
+		// connection.Resolver's own value when cfg is a profile's config
+		// (buildConfig sets both), and the zero value for a hop built with
+		// no such option (jumpConnectConfig's flat fallback) or a
+		// direct-host open — both real states, not gaps (nocx-y6fh7 item 4,
+		// round 3).
+		ConnectionName: cfg.ConnectionName,
+		ProfileID:      cfg.ProfileID,
 	}
 	if err := rc.resolveCredential(ctx, resolved, cfg, &endpoint); err != nil {
 		return DialEndpoint{}, err
@@ -572,6 +592,8 @@ func WireDestination(t DialTarget) proto.SSHDestination {
 		User:           t.User,
 		Identity:       WireIdentity(t.DialEndpoint),
 		KnownHostsAddr: t.KnownHostsAddr,
+		ConnectionName: t.ConnectionName,
+		ProfileID:      t.ProfileID,
 	}
 	if len(t.Route) == 0 {
 		return d

@@ -205,6 +205,23 @@ const (
 	// has nothing to present and says so rather than guessing at an empty
 	// answer, which a server would read as a wrong password.
 	OpPrompt = "prompt"
+	// OpPasswordPrompt asks the coordinator's OWN connection-password ask
+	// for the one live person who is this connection's credential, when the
+	// server's challenge is a bare `password` request rather than a
+	// keyboard-interactive one (nocx-y6fh7 item 4, round 3).
+	//
+	// It is a DIFFERENT reverse op from OpPrompt, deliberately, rather than
+	// a second spelling of the same relay: a password ask CORRELATES to the
+	// connection it belongs to (Connection, ProfileID — both echoed back
+	// from proto.SSHDestination, which the coordinator itself resolved and
+	// therefore already knows), so it reaches the person through the SAME
+	// requester a direct dial's own prompt rung uses — the "Password for
+	// {profile}" dialog with its remember checkbox (ADR-0017) — one owner
+	// for "ask this connection's password" whichever path asks. OpPrompt
+	// stays the server's own keyboard-interactive questions, which travel
+	// with no profile and have no remember concept: a verification code is
+	// never a thing to bind to a connection.
+	OpPasswordPrompt = "password-prompt"
 	// OpTrustHostKey records a key the coordinator has already decided to
 	// accept. The DECISION is not made here: it travels in ProbeParams
 	// .AcceptOnTrust, set by the caller that has asked whatever it asks before
@@ -525,6 +542,36 @@ type PromptResult struct {
 	Answers []string `json:"answers"`
 }
 
+// PasswordPromptParams asks the coordinator's own connection-password ask
+// for the ONE live person who is this connection's credential, over the
+// interactive rung's bare `password` method (nocx-y6fh7 item 4, round 3).
+//
+// Host, Port and User are what the ask is about, exactly as PromptParams
+// carries them for the same reason. Connection and ProfileID are what makes
+// this op different from PromptParams: they correlate the ask to the
+// connection it belongs to, so the coordinator answers through the SAME
+// requester a direct dial's own prompt rung uses rather than a bare "enter
+// password" box with nothing to name.
+type PasswordPromptParams struct {
+	// Connection is the saved profile's display name, echoed from
+	// SSHDestination.ConnectionName. Empty for a destination with no saved
+	// profile.
+	Connection string `json:"connection,omitempty"`
+	// ProfileID is the saved profile's id, echoed from
+	// SSHDestination.ProfileID. Empty for a destination with no saved
+	// profile — the ask then falls back to the bare wire requester, which
+	// has no profile to bind a remember to.
+	ProfileID string `json:"profileId,omitempty"`
+	Host      string `json:"host"`
+	Port      int    `json:"port"`
+	User      string `json:"user"`
+}
+
+// PasswordPromptResult carries the password a person typed.
+type PasswordPromptResult struct {
+	Password string `json:"password"`
+}
+
 // VerifyHostKeyParams asks what to make of a host key the helper was just
 // offered during a handshake.
 type VerifyHostKeyParams struct {
@@ -643,6 +690,19 @@ type SSHDestination struct {
 	// is this" (AD-8). Empty means the dial address is the storage identity,
 	// which is the direct route's answer and the only one a hop can have.
 	KnownHostsAddr string `json:"knownHostsAddr,omitempty"`
+	// ConnectionName is the saved profile's display name, and ProfileID its
+	// id — both the COORDINATOR's own values, echoed back unchanged on
+	// OpPasswordPrompt so a person-asked password correlates to the
+	// connection it belongs to without a second lookup (nocx-y6fh7 item 4,
+	// round 3: the coordinator that resolved this destination is the same
+	// one that will answer the ask, so it puts what it already knows on the
+	// request rather than asking the helper to look anything up). Both
+	// empty for a destination with no saved profile — a jump hop, or a
+	// direct host this connection names inline — which is a real state and
+	// not a gap: such an ask falls back to the bare wire prompt with no
+	// profile to bind a remember to.
+	ConnectionName string `json:"connectionName,omitempty"`
+	ProfileID      string `json:"profileId,omitempty"`
 }
 
 // SSHHop is one INTERMEDIATE host a destination is reached through: a

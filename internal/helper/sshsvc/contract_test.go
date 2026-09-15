@@ -134,6 +134,16 @@ func TestTheSSHServiceOpsConformToTheirContractsOverTheWire(t *testing.T) {
 	if _, err := stand.probe(t, withPrompt); err != nil {
 		t.Fatalf("keyboard-interactive probe: %v", err)
 	}
+	// A SECOND fixture that offers no keyboard-interactive rung at all (no
+	// kbdPassword set): a bare `password` challenge, which the interactive
+	// rung answers through the DIFFERENT reverse op `password-prompt`
+	// (nocx-y6fh7 item 4, round 3) rather than `prompt`.
+	f2 := newFixture(t, "pw", key.signer)
+	withPassword := interactiveProbeParams(t, f2)
+	withPassword.AcceptOnTrust = true
+	if _, err := stand.probe(t, withPassword); err != nil {
+		t.Fatalf("password-only interactive probe: %v", err)
+	}
 
 	// ── what the COORDINATOR sent ──────────────────────────────────────
 	probeParams := loadHelperSchema(t, "ssh.probe.params.schema.json")
@@ -148,8 +158,8 @@ func TestTheSSHServiceOpsConformToTheirContractsOverTheWire(t *testing.T) {
 		}
 		probes++
 	}
-	if probes != 3 {
-		t.Fatalf("recorded %d probe requests, want 3 (password, key, keyboard-interactive)", probes)
+	if probes != 4 {
+		t.Fatalf("recorded %d probe requests, want 4 (password, key, keyboard-interactive, password-only interactive)", probes)
 	}
 
 	// ── what the HELPER answered, forward direction ────────────────────
@@ -162,8 +172,8 @@ func TestTheSSHServiceOpsConformToTheirContractsOverTheWire(t *testing.T) {
 		}
 		results++
 	}
-	if results != 3 {
-		t.Fatalf("recorded %d probe results, want 3 (password, key, keyboard-interactive)", results)
+	if results != 4 {
+		t.Fatalf("recorded %d probe results, want 4 (password, key, keyboard-interactive, password-only interactive)", results)
 	}
 
 	// ── what the HELPER asked, reverse direction ───────────────────────
@@ -171,18 +181,20 @@ func TestTheSSHServiceOpsConformToTheirContractsOverTheWire(t *testing.T) {
 	// by CORRELATION and not by guessing which result shape a payload looks
 	// like.
 	reverseParams := map[string]*jsonschema.Schema{
-		proto.OpSecret:        loadHelperSchema(t, "ssh.secret.params.schema.json"),
-		proto.OpSign:          loadHelperSchema(t, "ssh.sign.params.schema.json"),
-		proto.OpVerifyHostKey: loadHelperSchema(t, "ssh.verify-host-key.params.schema.json"),
-		proto.OpTrustHostKey:  loadHelperSchema(t, "ssh.trust-host-key.params.schema.json"),
-		proto.OpPrompt:        loadHelperSchema(t, "ssh.prompt.params.schema.json"),
+		proto.OpSecret:         loadHelperSchema(t, "ssh.secret.params.schema.json"),
+		proto.OpSign:           loadHelperSchema(t, "ssh.sign.params.schema.json"),
+		proto.OpVerifyHostKey:  loadHelperSchema(t, "ssh.verify-host-key.params.schema.json"),
+		proto.OpTrustHostKey:   loadHelperSchema(t, "ssh.trust-host-key.params.schema.json"),
+		proto.OpPrompt:         loadHelperSchema(t, "ssh.prompt.params.schema.json"),
+		proto.OpPasswordPrompt: loadHelperSchema(t, "ssh.password-prompt.params.schema.json"),
 	}
 	reverseResults := map[string]*jsonschema.Schema{
-		proto.OpSecret:        loadHelperSchema(t, "ssh.secret.schema.json"),
-		proto.OpSign:          loadHelperSchema(t, "ssh.sign.schema.json"),
-		proto.OpVerifyHostKey: loadHelperSchema(t, "ssh.verify-host-key.schema.json"),
-		proto.OpTrustHostKey:  loadHelperSchema(t, "ssh.trust-host-key.schema.json"),
-		proto.OpPrompt:        loadHelperSchema(t, "ssh.prompt.schema.json"),
+		proto.OpSecret:         loadHelperSchema(t, "ssh.secret.schema.json"),
+		proto.OpSign:           loadHelperSchema(t, "ssh.sign.schema.json"),
+		proto.OpVerifyHostKey:  loadHelperSchema(t, "ssh.verify-host-key.schema.json"),
+		proto.OpTrustHostKey:   loadHelperSchema(t, "ssh.trust-host-key.schema.json"),
+		proto.OpPrompt:         loadHelperSchema(t, "ssh.prompt.schema.json"),
+		proto.OpPasswordPrompt: loadHelperSchema(t, "ssh.password-prompt.schema.json"),
 	}
 	opByID := map[uint64]string{}
 	asked := map[string]bool{}

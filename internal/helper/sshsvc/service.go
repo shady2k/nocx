@@ -589,6 +589,13 @@ type dialEndpoint struct {
 	// KnownHostsAddr is the storage identity the coordinator gave for this
 	// endpoint; empty means the dial address.
 	KnownHostsAddr string
+	// ConnectionName and ProfileID correlate a password ask back to the
+	// connection it is for (nocx-y6fh7 item 4, round 3), echoed unchanged
+	// from proto.SSHDestination. Both empty for a hop, which carries no
+	// such fields at all — a jump host is not a saved connection a person's
+	// remember checkbox could bind to.
+	ConnectionName string
+	ProfileID      string
 }
 
 // addr is the dial address of one endpoint.
@@ -609,6 +616,7 @@ func endpointOf(d proto.SSHDestination) dialEndpoint {
 	return dialEndpoint{
 		Host: d.Host, Port: d.Port, User: d.User,
 		Identity: d.Identity, KnownHostsAddr: d.KnownHostsAddr,
+		ConnectionName: d.ConnectionName, ProfileID: d.ProfileID,
 	}
 }
 
@@ -666,7 +674,13 @@ func (s *Service) routeOf(ctx context.Context, conn *host.Host, d proto.SSHDesti
 // only ever sees an answer once a person has given one. Offering both is what
 // "ask a person, whichever method the server speaks" means when the server's
 // own supported set (`password`, `keyboard-interactive`) is unknown until the
-// handshake states it.
+// handshake states it. Which RELAY a method asks through differs, and it is
+// the point rather than an inconsistency: `keyboard-interactive` carries the
+// server's own questions with no connection behind them (OpPrompt), while a
+// bare `password` challenge is a question about THIS connection's own
+// credential and is asked through the coordinator's connection-password
+// requester instead (OpPasswordPrompt, round 3) — one relay per subject, not
+// two relays for one.
 func (s *Service) clientConfig(ctx context.Context, conn *host.Host, ep dialEndpoint, acceptOnTrust bool) (*gossh.ClientConfig, error) {
 	auth, err := s.authMethods(ctx, conn, ep)
 	if err != nil {
@@ -715,27 +729,23 @@ func (s *Service) authMethods(ctx context.Context, conn *host.Host, ep dialEndpo
 
 	case proto.SSHAuthInteractive:
 		// The rung a PERSON answers, on whichever of the server's two
-		// password-shaped methods it actually offers. The server's own
-		// keyboard-interactive questions travel to the coordinator verbatim;
-		// this process never invents a question and never stores an answer.
+		// password-shaped methods it actually offers — each through its OWN
+		// relay, because the two are different questions with different
+		// owners (clientConfig's own comment): the server's own
+		// keyboard-interactive questions travel to the coordinator verbatim
+		// through OpPrompt, and a bare `password` challenge — which carries
+		// no question of its own, RFC 4252 §8's challenge is bare — is asked
+		// through the coordinator's own connection-password ask
+		// (askPassword, OpPasswordPrompt), the same one a direct dial's
+		// prompt rung uses, so it reaches the "Password for {profile}"
+		// dialog with its remember checkbox rather than a bare box with no
+		// connection to name (nocx-y6fh7 item 4, round 3).
 		return []gossh.AuthMethod{
 			gossh.KeyboardInteractive(func(_, _ string, questions []string, echos []bool) ([]string, error) {
 				return s.askInteractive(ctx, conn, ep, questions, echos)
 			}),
-			// `password` carries no question of its own — RFC 4252 §8's
-			// challenge is bare — so the ONE question a person is asked here
-			// is synthesized rather than read off the wire: "Password:",
-			// not echoed. It is still the same person answering the same
-			// relay, not a second credential.
 			gossh.PasswordCallback(func() (string, error) {
-				answers, err := s.askInteractive(ctx, conn, ep, []string{"Password:"}, []bool{false})
-				if err != nil {
-					return "", err
-				}
-				if len(answers) != 1 {
-					return "", internalRefusal("the coordinator answered %d questions for one password prompt", len(answers))
-				}
-				return answers[0], nil
+				return s.askPassword(ctx, conn, ep)
 			}),
 		}, nil
 
@@ -806,6 +816,31 @@ func (s *Service) askInteractive(ctx context.Context, conn *host.Host, ep dialEn
 			"the coordinator answered %d of %d prompts", len(out.Answers), len(prompts))
 	}
 	return out.Answers, nil
+}
+
+// askPassword asks the coordinator's OWN connection-password ask for the one
+// live person who is this connection's credential, over the interactive
+// rung's bare `password` method (nocx-y6fh7 item 4, round 3).
+//
+// It is a DIFFERENT reverse op from askInteractive/OpPrompt on purpose: a
+// password ask correlates to the connection it belongs to (ep.ConnectionName,
+// ep.ProfileID, both echoed from the destination the coordinator itself
+// resolved), so the coordinator answers it through the SAME requester a
+// direct dial's own prompt rung uses — the "Password for {profile}" dialog
+// with its remember checkbox (ADR-0017) — rather than inventing a second,
+// profile-blind box for one question. OpPrompt stays the server's own
+// keyboard-interactive questions, which carry no profile and no remember
+// concept at all.
+func (s *Service) askPassword(ctx context.Context, conn *host.Host, ep dialEndpoint) (string, error) {
+	var out proto.PasswordPromptResult
+	if err := conn.Ask(ctx, proto.ServiceSSH, proto.OpPasswordPrompt, proto.PasswordPromptParams{
+		Connection: ep.ConnectionName,
+		ProfileID:  ep.ProfileID,
+		Host:       ep.Host, Port: ep.Port, User: ep.User,
+	}, &out); err != nil {
+		return "", askRefusal(err)
+	}
+	return out.Password, nil
 }
 
 // reverseSigner is a gossh.Signer whose private half is the coordinator's.

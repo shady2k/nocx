@@ -174,6 +174,16 @@
           "description": "The address this destination's host key is STORED under \u2014 the coordinator's own storage identity for it, which is NOT the dial address when the destination is reached through a jump host. The derivation is the coordinator's (known_hosts is its file and the route digest is its rule), and it travels with the destination so a helper cannot look up a line nobody wrote. Empty means the dial address, which is the direct route's answer.",
           "type": "string",
           "minLength": 1
+        },
+        "connectionName": {
+          "description": "The saved profile's display name, both fields the COORDINATOR's own value and echoed back unchanged on `password-prompt` (nocx-y6fh7 item 4, round 3): the coordinator that resolved this destination is the same one that will answer a password ask, so it puts what it already knows on the request rather than asking the helper to look anything up. Empty for a destination with no saved profile.",
+          "type": "string",
+          "minLength": 1
+        },
+        "profileId": {
+          "description": "The saved profile's id, for the same reason and by the same rule as connectionName.",
+          "type": "string",
+          "minLength": 1
         }
       }
     },

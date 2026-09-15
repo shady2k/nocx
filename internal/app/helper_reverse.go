@@ -72,9 +72,20 @@ func helperReverseHandlers(client *ssh.RealClient, secrets credential.Resolver, 
 	r.Register(proto.ServiceSSH, proto.OpSecret, h.secret)
 	r.Register(proto.ServiceSSH, proto.OpSign, h.sign)
 	r.Register(proto.ServiceSSH, proto.OpPrompt, h.prompt)
+	r.Register(proto.ServiceSSH, proto.OpPasswordPrompt, h.passwordPrompt)
 	r.Register(proto.ServiceSSH, proto.OpVerifyHostKey, h.verifyHostKey)
 	r.Register(proto.ServiceSSH, proto.OpTrustHostKey, h.trustHostKey)
 	return r
+}
+
+// profilePasswordAsker is what correlates a person-asked password to the
+// connection it belongs to: the SAME resolver a direct dial's own prompt
+// rung uses (*connection.Resolver.AskerFor), so a helper-relayed password ask
+// binds its remember (ADR-0017) to the right profile exactly as a direct
+// dial's does — one owner for "ask this connection's password", not a
+// second, remember-blind implementation for the helper path.
+type profilePasswordAsker interface {
+	AskerFor(profileID string) ssh.ConnectionPasswordRequester
 }
 
 // helperPrompt is the coordinator's answer to a helper that needs a PERSON: the
@@ -92,7 +103,14 @@ func helperReverseHandlers(client *ssh.RealClient, secrets credential.Resolver, 
 type helperPrompt struct {
 	mu    sync.RWMutex
 	asker ssh.ConnectionPasswordRequester
-	log   *slog.Logger
+	// profiles is the per-profile asker factory (*connection.Resolver), set
+	// once more, later still, for the composition root's own reason
+	// set's comment gives: the resolver is built after the transport is
+	// (nocx-y6fh7 item 4, round 3). Nil is legitimate — a password ask with
+	// no profile id, or a coordinator built without one — and falls back to
+	// the bare wire ask below.
+	profiles profilePasswordAsker
+	log      *slog.Logger
 }
 
 // set records the asker once the transport is built.
@@ -100,6 +118,28 @@ func (p *helperPrompt) set(asker ssh.ConnectionPasswordRequester) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.asker = asker
+}
+
+// setProfiles records the per-profile asker factory once the connection
+// resolver is built.
+func (p *helperPrompt) setProfiles(profiles profilePasswordAsker) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.profiles = profiles
+}
+
+// askerForPassword picks the correlated per-profile asker when a profile id
+// travelled with the request — ADR-0017's remember then binds to THAT
+// profile, exactly as a direct dial's own prompt rung does — falling back to
+// the bare wire ask (this holder itself) when there is no profile to bind to
+// or no resolver wired yet.
+func (p *helperPrompt) askerForPassword(profileID string) ssh.ConnectionPasswordRequester {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if profileID != "" && p.profiles != nil {
+		return p.profiles.AskerFor(profileID)
+	}
+	return p
 }
 
 // RequestConnectionPassword is the ssh package's own seam, unchanged: it is
@@ -333,6 +373,52 @@ func (h *helperReverse) prompt(ctx context.Context, raw json.RawMessage) (any, e
 		answers = append(answers, answer.Password)
 	}
 	return proto.PromptResult{Answers: answers}, nil
+}
+
+// passwordPrompt asks the coordinator's OWN connection-password ask for the
+// person who is answering a bare `password` challenge on the interactive
+// rung (nocx-y6fh7 item 4, round 3).
+//
+// It is a SEPARATE handler from prompt, deliberately, rather than the same
+// relay branching on shape: this ask correlates to the connection it is
+// for (p.Connection, p.ProfileID, both the coordinator's own values echoed
+// back unchanged) and answers through askerForPassword, which is the SAME
+// requester a direct dial's own prompt rung uses — one owner for "ask this
+// connection's password", with the "Password for {profile}" dialog and its
+// remember checkbox (ADR-0017) rather than a second, profile-blind box.
+func (h *helperReverse) passwordPrompt(ctx context.Context, raw json.RawMessage) (any, error) {
+	var p proto.PasswordPromptParams
+	if err := decodeReverseParams(raw, &p); err != nil {
+		return nil, err
+	}
+	if p.Host == "" || p.User == "" {
+		return nil, badReverseParams("the password prompt names no host or account")
+	}
+	if p.Port <= 0 || p.Port > 65535 {
+		return nil, badReverseParams(fmt.Sprintf("the password prompt names port %d", p.Port))
+	}
+	if h.prompts == nil {
+		return nil, &proto.Refusal{
+			Code:    proto.ErrCodeNoAuthChannel,
+			Message: "no prompt can be raised: this coordinator is not connected to a renderer",
+		}
+	}
+	asker := h.prompts.askerForPassword(p.ProfileID)
+	answer, err := asker.RequestConnectionPassword(ctx, ssh.PasswordRequest{
+		Connection: p.Connection,
+		User:       p.User,
+		Host:       p.Host,
+		// The interactive rung resolves only when the profile named NOTHING
+		// stored (resolveCredential's own rule), so a password ask that
+		// reaches here always means the same thing a direct dial's prompt
+		// rung means the first time it fires — never "the stored one was
+		// rejected", which this rung cannot produce.
+		Reason: "no password is stored for this connection",
+	})
+	if err != nil {
+		return nil, h.promptRefusal(ctx, err)
+	}
+	return proto.PasswordPromptResult{Password: answer.Password}, nil
 }
 
 // promptRefusal types a failed ask for the helper.

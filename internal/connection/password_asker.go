@@ -111,10 +111,10 @@ func accountName(user, host string) string {
 	return user + "@" + host
 }
 
-// askerFor binds the shared resolver to one profile so RequestConnectionPassword
+// AskerFor binds the shared resolver to one profile so RequestConnectionPassword
 // knows which profile to update on remember. The profile id is decided here,
 // at resolution time, never re-derived from the wire request.
-func (r *Resolver) askerFor(profileID string) ssh.ConnectionPasswordRequester {
+func (r *Resolver) AskerFor(profileID string) ssh.ConnectionPasswordRequester {
 	return &passwordAsker{r: r, profileID: profileID}
 }
 

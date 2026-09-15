@@ -801,10 +801,11 @@ type coordinator struct {
 	promptAnswers []string
 	promptRefusal *proto.Refusal
 
-	mu      sync.Mutex
-	ops     []string
-	trust   []proto.TrustHostKeyParams
-	prompts []proto.PromptParams
+	mu              sync.Mutex
+	ops             []string
+	trust           []proto.TrustHostKeyParams
+	prompts         []proto.PromptParams
+	passwordPrompts []proto.PasswordPromptParams
 }
 
 func (c *coordinator) registry() *client.ReverseRegistry {
@@ -852,6 +853,28 @@ func (c *coordinator) registry() *client.ReverseRegistry {
 			return nil, &proto.Refusal{Code: proto.ErrCodeInternal, Message: "this coordinator was asked something nobody scripted"}
 		}
 		return proto.PromptResult{Answers: answers}, nil
+	})
+	r.Register(proto.ServiceSSH, proto.OpPasswordPrompt, func(_ context.Context, raw json.RawMessage) (any, error) {
+		c.record(proto.OpPasswordPrompt)
+		var p proto.PasswordPromptParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		c.mu.Lock()
+		c.passwordPrompts = append(c.passwordPrompts, p)
+		refusal := c.promptRefusal
+		c.mu.Unlock()
+		// The same scripted refusal OpPrompt honours: a coordinator with
+		// nobody to ask, or a person who dismissed the question, answers
+		// this ask exactly as it answers a keyboard-interactive one — a
+		// gossh client that failed one password-shaped method tries the
+		// other next (client_auth.go treats a method's error as an
+		// ordinary failure, not a fatal one), so a test scripting a refusal
+		// must see it on whichever method the server actually challenges.
+		if refusal != nil {
+			return nil, refusal
+		}
+		return proto.PasswordPromptResult{Password: c.password}, nil
 	})
 	r.Register(proto.ServiceSSH, proto.OpVerifyHostKey, func(_ context.Context, _ json.RawMessage) (any, error) {
 		c.record(proto.OpVerifyHostKey)

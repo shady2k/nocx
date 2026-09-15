@@ -859,6 +859,14 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		}
 	}
 	params := proto.SSHSpawnParams{
+		// ConnectionName and ProfileID ride on WireDestination itself now
+		// (internal/ssh's resolveDialEndpoint reads them off the resolved
+		// config), so every destination this coordinator builds — this
+		// spawn, the shell-integration publish before it, a probe lease, a
+		// proxied channel — carries the SAME identity from ONE resolution,
+		// rather than each caller stamping its own copy (nocx-y6fh7 item 4,
+		// round 3: the publish's own destination was the one that reached a
+		// person first, and it had no such stamp until this moved here).
 		Destination: ssh.WireDestination(target),
 		// The two facts the far launcher is built for, read off the config the
 		// registry accepted rather than off the caller's spec: the shell pin a

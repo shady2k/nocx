@@ -2143,6 +2143,11 @@ func New(opts ...Option) (*App, error) {
 		connection.WithRemoteInstaller(remoteInstaller),
 	)
 	tp.SetProfileResolver(resolver)
+	// The helper's own password ask (nocx-y6fh7 item 4, round 3) correlates
+	// to a profile through the SAME resolver: set here, once the resolver
+	// exists, for the reason helperPrompt.set already gives — the resolver
+	// is built after helperReverseHandlers is wired.
+	helperPrompts.setProfiles(resolver)
 	// The same resolver the transport uses, handed to the API route table.
 	// It is set here rather than at construction for the reason the
 	// transport's own holder gives: the resolver needs the transport (the

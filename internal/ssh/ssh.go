@@ -581,6 +581,14 @@ type ConnectConfig struct {
 	// password prompt can name which connection it is asking about
 	// (nocx-s8jn). Empty for direct-host opens, which never raise prompts.
 	ConnectionName string
+	// ProfileID is the saved profile's id, carried alongside ConnectionName
+	// for the same reason and by the same rule (nocx-y6fh7 item 4, round 3):
+	// a helper-hosted dial's own interactive rung echoes both back on its
+	// password ask, so the coordinator can bind a remembered password to
+	// the right profile (ADR-0017) whichever of this package's many
+	// destination-resolving callers the ask travelled through. Empty for a
+	// direct-host open, which has no profile to bind to.
+	ProfileID string
 
 	// PasswordRequester asks the user for a connection password when the
 	// server challenges and no stored material can answer. It powers the
@@ -777,6 +785,12 @@ func WithAuthMode(mode string) ConnectOption {
 // is asking about (nocx-s8jn). Empty for direct-host opens.
 func WithConnectionName(name string) ConnectOption {
 	return func(c *ConnectConfig) { c.ConnectionName = name }
+}
+
+// WithProfileID sets the profile id the connection was opened from,
+// alongside WithConnectionName and for the same reason.
+func WithProfileID(id string) ConnectOption {
+	return func(c *ConnectConfig) { c.ProfileID = id }
 }
 
 // WithPasswordRequester wires the connection-password ask into the

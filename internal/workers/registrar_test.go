@@ -76,6 +76,18 @@ func (m *memStore) opLog() []string {
 	return append([]string(nil), m.ops...)
 }
 
+// count reads one kind's tally under m.mu. hit() only ever mutates m.counts
+// while holding the lock, so a reader that does not take it (the direct
+// h.store.counts[...] index newHarnessBound used to use for newID) races
+// with every concurrent store call — including the ones a concurrent
+// Revoke makes while this same harness is mid-Register in another
+// goroutine (nocx-6q1uh.18). This is the one lock-holding way to read it.
+func (m *memStore) count(kind string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.counts[kind]
+}
+
 // hit records the call and reports whether this one is the faulted ordinal.
 // The caller holds no lock.
 func (m *memStore) hit(kind string) error {
@@ -571,7 +583,7 @@ func newHarnessBound(t *testing.T, bound int) *harness {
 		WithEnrolmentDeadline(50*time.Millisecond),
 	)
 	h.reg.newID = func() ParticipantID {
-		return ParticipantID(fmt.Sprintf("p-%d", h.store.counts["commitprepared"]+1))
+		return ParticipantID(fmt.Sprintf("p-%d", h.store.count("commitprepared")+1))
 	}
 	h.reg.now = func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }
 	if err := h.store.EnsureGroup(context.Background(), testGroup, coordSession); err != nil {

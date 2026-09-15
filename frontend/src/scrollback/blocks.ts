@@ -934,7 +934,11 @@ export function blockCommandText(blockEl: HTMLElement): string {
  *  the order by using this, instead of learning the button's position by
  *  luck. */
 function placeHeaderChip(right: Element, chip: Element): void {
-  right.insertBefore(chip, right.querySelector('[data-block-actions]'))
+  // `.ui-icon-button` narrows this to the ⋮ specifically: a running block's
+  // Stop control (nocx-9bpeq.12) carries `data-block-actions` too — the same
+  // block-selection/focus-bounce escape hatch, reused rather than duplicated
+  // — so the bare attribute alone no longer picks out one element.
+  right.insertBefore(chip, right.querySelector('.ui-icon-button[data-block-actions]'))
 }
 
 /** Fetch the DURABLE text of one answer entry, or null when it is not
@@ -1477,7 +1481,16 @@ export function createRunningBlock(
         if (running.isActive(wrapper)) running.stop()
       },
     })
-    stop.prepend(SquareIcon({}) as Element)
+    // Rebuilt explicitly rather than `.prepend()`-ing onto the text node
+    // `createButton` already gave it (round 2, nocx-9bpeq.12): the icon and
+    // the label are two separate elements, replacing the button's content
+    // outright — the same shape mode-indicator.ts already uses for an icon
+    // beside text built outside a Solid root (`ChevronDownIcon({})`, a named
+    // const, then appended), rather than mutating a non-empty node in place.
+    const icon = SquareIcon({}) as Element
+    const label = document.createElement('span')
+    label.textContent = 'Stop'
+    stop.replaceChildren(icon, label)
     stop.setAttribute('data-block-actions', '')
     right.appendChild(stop)
   }

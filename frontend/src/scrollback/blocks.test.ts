@@ -2046,10 +2046,15 @@ function captureClipboard(): string[] {
   return copied
 }
 
-/** Open one block's ⋮ menu and return it. */
+/** Open one block's ⋮ menu and return it.
+ *
+ *  `.ui-icon-button[data-block-actions]` rather than the bare attribute: a
+ *  running block's Stop control (nocx-9bpeq.12) carries the same attribute
+ *  — the block-selection/focus-bounce escape hatch, reused rather than
+ *  duplicated — so the plain attribute selector no longer names one element. */
 function openBlockMenu(blockEl: HTMLElement): HTMLElement {
   blockEl
-    .querySelector<HTMLElement>('[data-block-actions]')!
+    .querySelector<HTMLElement>('.ui-icon-button[data-block-actions]')!
     .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
   return document.body.querySelector<HTMLElement>('[data-testid="block-actions-menu"]')!
 }
@@ -2689,7 +2694,7 @@ describe('the block overflow menu stays in the viewport', () => {
     const el = createRunningBlock(1, 'make', '~', '', () => container, noopSelect, freshStore())
     container.appendChild(el)
     const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
-    el.querySelector<HTMLElement>('[data-block-actions]')!.click()
+    el.querySelector<HTMLElement>('.ui-icon-button[data-block-actions]')!.click()
     const menu = document.querySelector<HTMLElement>('[data-testid="block-actions-menu"]')!
     // Portalled at body level: out of flow, so the block underneath never
     // moves to make room, and nothing in the open path scrolls the page.
@@ -3589,8 +3594,12 @@ describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-
 })
 
 describe('the block grant menu action', () => {
+  // `.ui-icon-button[data-block-actions]`, not the bare attribute: a running
+  // block's Stop control shares the attribute (the same block-selection/
+  // focus-bounce escape hatch), so the plain selector no longer names one
+  // element once both are present.
   const menuItems = (el: HTMLElement): HTMLElement[] => {
-    el.querySelector<HTMLElement>('[data-block-actions]')!.click()
+    el.querySelector<HTMLElement>('.ui-icon-button[data-block-actions]')!.click()
     return Array.from(
       document.querySelectorAll<HTMLElement>(
         '[data-testid="block-actions-menu"] .ui-context-menu__item',

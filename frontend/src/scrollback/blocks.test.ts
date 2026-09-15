@@ -30,6 +30,7 @@ import { setCurrentTheme, _resetThemeState } from '../renderers/theme-adapter'
 import { CommandSnapshotStore } from '../command-snapshot'
 import { mintDomain, type IntegrationDomain } from '../lifecycle/domains'
 import type { ExecutionAttempt } from '../lifecycle/state'
+import type { AppVisibility } from '../app-visible'
 
 /** Helper: returns a container supplier that references the given element. */
 function makeContainer(el: HTMLElement): () => HTMLElement {
@@ -760,6 +761,59 @@ describe('BlockManager', () => {
       expect(rec.el).toBe(inner.children[0])
       expect(inner.children).toHaveLength(2)
     } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // `document.hidden` has one owner, app-visible.ts (grant.test.ts's "keeps
+  // direct document visibility reads in the app visibility module"), so the
+  // ticker's pause/resume reads it through an injected `AppVisibility`
+  // rather than the real `document` — which is what makes this behaviour
+  // testable at all without redefining a read-only property on jsdom's
+  // `document`.
+  it('pauses the ticker while hidden and repaints once, immediately, on return', () => {
+    vi.useFakeTimers()
+    let localInner: HTMLElement | undefined
+    let localManager: BlockManager | undefined
+    try {
+      let hidden = false
+      const appVisibility: AppVisibility = {
+        visible: () => !hidden,
+        destroy: () => {},
+      }
+      localInner = document.createElement('div')
+      const localXterm = document.createElement('div')
+      localInner.appendChild(localXterm)
+      document.body.appendChild(localInner)
+      localManager = new BlockManager(localInner, localXterm, {
+        now: () => fixedNow,
+        snapshotStore: freshStore(),
+        appVisibility,
+      })
+      const rec = localManager.startBlock('find /', '~', 10)
+      const durationSelector =
+        ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]'
+
+      hidden = true
+      document.dispatchEvent(new Event('visibilitychange'))
+      fixedNow = 5_000
+      vi.advanceTimersByTime(5000)
+      // A hidden tab gains nothing from repainting: the interval itself is
+      // paused, not merely the paint inside it, so this never wrote a
+      // duration a person would never have seen anyway.
+      expect(rec.el.querySelector(durationSelector)).toBeNull()
+
+      hidden = false
+      fixedNow = 13_300 // started at 1000 (beforeEach) — 12.3s elapsed
+      document.dispatchEvent(new Event('visibilitychange'))
+      // Repaints immediately on return — before the next scheduled tick,
+      // and at the CURRENT elapsed time, not a stale one from before the
+      // tab was hidden.
+      const duration = rec.el.querySelector<HTMLElement>(durationSelector)
+      expect(duration?.textContent).toBe('12.3s')
+    } finally {
+      localManager?.dispose()
+      localInner?.remove()
       vi.useRealTimers()
     }
   })

@@ -32,7 +32,14 @@ function contrast(a: string, b: string): number {
 
 /** The declaration block of the first rule whose selector is exactly `selector`. */
 function ruleFor(cssText: string, selector: string): string {
-  for (const block of cssText.split('}')) {
+  // Strip comments first: meta.css documents nearly every rule with one
+  // directly above it (the file-header comment above .ui-meta, the "safety
+  // question" comment above .ui-meta__part[data-emphasis='strong']), and a
+  // comment immediately preceding a rule has no '{' of its own to split on,
+  // so it merges into that rule's "head" and the selector never matches
+  // exactly.
+  const withoutComments = cssText.replace(/\/\*[\s\S]*?\*\//g, '')
+  for (const block of withoutComments.split('}')) {
     const [head, body] = block.split('{')
     if (
       head

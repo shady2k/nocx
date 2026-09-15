@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@solidjs/testing-library'
 import { Button, type ButtonProps } from './button'
@@ -244,7 +245,10 @@ describe('Button truncate (nocx-9bpeq.7)', () => {
   })
 
   it('the stylesheet ellipsises a small truncating button on one line', () => {
-    const css = readFileSync(new URL('../styles/components/button.css', import.meta.url), 'utf8')
+    const css = readFileSync(
+      resolve(import.meta.dirname ?? '.', '..', 'styles/components/button.css'),
+      'utf8',
+    )
     const rule =
       /\.ui-button\[data-size='sm'\]\[data-truncate='true'\]\s*\{([^}]*)\}/.exec(css)?.[1] ?? ''
     expect(rule).toMatch(/text-overflow:\s*ellipsis/)

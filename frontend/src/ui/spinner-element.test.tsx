@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 // The vanilla Spinner is the Solid one's twin, and the pair is held together
 // by this test rather than by care (spec 2026-09-14 §6.2): a variance added to
 // one side only must fail here, not on the day a surface notices.

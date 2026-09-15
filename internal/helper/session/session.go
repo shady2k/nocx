@@ -339,7 +339,26 @@ type hostSession struct {
 	writerAtt   proto.AttachmentID
 	epoch       proto.LeaseEpoch
 	exit        *proto.SessionExitStatus
-	stopped     bool
+	// exitedAt is when watchExit recorded exit, on the Service's clock seam
+	// (s.now, never wall time directly) — what the unclaimed-session TTL and
+	// eviction-under-pressure measure age against (nocx-isjh4). Zero while
+	// exit is nil.
+	exitedAt time.Time
+	stopped  bool
+}
+
+// exitInfo reports, under one lock, whether this session's shell has exited,
+// when, and whether a coordinator currently holds an attachment on it. The
+// three are read together because expiry and eviction both ask exactly one
+// question of a session — "is this an exited session nobody can still need"
+// — and a caller comparing three separately-timed reads could see one that
+// exited and was then attached, or was attached and then detached, as
+// something it never actually was at any single instant (nocx-isjh4,
+// amendments 3 and 4).
+func (s *hostSession) exitInfo() (exited bool, at time.Time, attached bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.exit != nil, s.exitedAt, len(s.attachments) > 0
 }
 
 // pump is gone (nocx-6q1uh.3): reading, ingesting and delivering to the
@@ -406,7 +425,8 @@ func (s *hostSession) lifecyclePump(stream io.ReadWriteCloser) {
 func (s *hostSession) watchExit(now func() time.Time, notify func(proto.SessionExit)) {
 	<-s.proc.Done()
 	err, _ := s.proc.WaitErr()
-	status := proto.SessionExitStatus{Code: 0, At: proto.FormatTime(now())}
+	exitedAt := now()
+	status := proto.SessionExitStatus{Code: 0, At: proto.FormatTime(exitedAt)}
 	if err != nil {
 		status.Code = -1
 		var coder interface{ ExitCode() int }
@@ -420,6 +440,7 @@ func (s *hostSession) watchExit(now func() time.Time, notify func(proto.SessionE
 	}
 	s.mu.Lock()
 	s.exit = &status
+	s.exitedAt = exitedAt
 	s.mu.Unlock()
 
 	// What the window actually cost, said once per session. D8 names the cost

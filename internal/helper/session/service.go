@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -113,22 +114,44 @@ type Limits struct {
 	MaxWindowBytes int64
 	// BudgetBytes is the helper-wide aggregate. The worst case on a host is
 	// its live session count times the bound, in the helper's memory, on a VM
-	// that may be small — so the sum is bounded too, and the eviction rule is
-	// stated rather than left implicit: nothing is evicted, the SPAWN is
-	// refused. Killing somebody's running shell to make room for a new one is
-	// not a memory-management decision the helper is entitled to take.
+	// that may be small — so the sum is bounded too. A LIVE shell is never
+	// evicted to make room for a new one — killing somebody's running shell
+	// for that reason is not a memory-management decision the helper is
+	// entitled to take, and that half of the original rule stands. What no
+	// longer holds is "nothing is evicted": an EXITED session nobody has
+	// attached to since is not somebody's running work, and a spawn that
+	// would otherwise be refused first closes those, oldest exit first,
+	// before it is refused (nocx-isjh4, owner decision 2026-09-15,
+	// amendment 4).
 	BudgetBytes int64
+	// UnclaimedSessionTTL bounds how long an exited session may sit unclaimed
+	// before the helper closes it on its own, budget released, key claim
+	// released — through the same closer eviction and closeSession use. It
+	// exists because a helper process lingers as long as it holds any
+	// session (proto's generation liveness), so one abandoned exited session
+	// would otherwise pin both its 4 MiB and the whole process indefinitely
+	// (nocx-isjh4, owner amendment 2026-09-15). It is evaluated lazily,
+	// against the Service's own clock seam (s.now) — the helper runs no
+	// timer of its own and decides nothing about a block's result, exactly
+	// as D5 already required of it.
+	UnclaimedSessionTTL time.Duration
 }
+
+// unclaimedSessionTTLDefault is D-amendment 3's number: a session nobody has
+// claimed within a day of its shell exiting is not going to be, and is closed
+// so its budget and the helper's own liveness are not spent on it forever.
+const unclaimedSessionTTLDefault = 24 * time.Hour
 
 // DefaultLimits are D8's numbers: a 4 MiB default raised from the coordinator
 // ring's shipped 256 KiB, a floor four times the credit limit, a ceiling that
 // bounds one corrupted value, and an aggregate that bounds the sum.
 func DefaultLimits() Limits {
 	return Limits{
-		DefaultWindowBytes: 4 << 20,
-		MinWindowBytes:     4 * creditLimit,
-		MaxWindowBytes:     64 << 20,
-		BudgetBytes:        512 << 20,
+		DefaultWindowBytes:  4 << 20,
+		MinWindowBytes:      4 * creditLimit,
+		MaxWindowBytes:      64 << 20,
+		BudgetBytes:         512 << 20,
+		UnclaimedSessionTTL: unclaimedSessionTTLDefault,
 	}
 }
 
@@ -145,6 +168,9 @@ func (l Limits) withDefaults() Limits {
 	}
 	if l.BudgetBytes <= 0 {
 		l.BudgetBytes = d.BudgetBytes
+	}
+	if l.UnclaimedSessionTTL <= 0 {
+		l.UnclaimedSessionTTL = d.UnclaimedSessionTTL
 	}
 	// D8's floor is ENFORCED, not merely documented, and the reason is
 	// measurable rather than aesthetic. The per-subscriber pump runs at most
@@ -337,7 +363,13 @@ func (s *Service) Close() {
 
 // WindowBytesInUse is the aggregate this helper has committed. Exported so the
 // budget can be asserted on rather than inferred from behaviour.
+//
+// It sweeps expired sessions first (nocx-isjh4): this is one of the places a
+// caller — a test with a fake clock, or a coordinator asking mid-session —
+// observes staleness, so it is one of the places that observation is made
+// true rather than merely eventually true.
 func (s *Service) WindowBytesInUse() int64 {
+	s.sweepExpired()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.budget
@@ -692,6 +724,13 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		reserved += bound
 	}
 
+	// Eviction under pressure (nocx-isjh4): closes exited, unattached
+	// sessions oldest-exit-first when reserved would not otherwise fit,
+	// BEFORE the refusal below is decided — so a spawn that fits once they
+	// are gone never sees ErrBudget at all. A live shell, or an exited
+	// session a coordinator still holds, is never touched here.
+	s.evictForBudget(reserved)
+
 	s.mu.Lock()
 	committed := s.budget
 	if committed+reserved > s.limits.BudgetBytes {
@@ -828,6 +867,11 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 	if p.Lifecycle != nil {
 		reserved += bound
 	}
+
+	// See spawn's identical step: eviction under pressure runs before the
+	// refusal below is decided (nocx-isjh4).
+	s.evictForBudget(reserved)
+
 	s.mu.Lock()
 	committed := s.budget
 	if committed+reserved > s.limits.BudgetBytes {
@@ -1241,20 +1285,110 @@ func (s *Service) closeSession(p proto.CloseSessionParams) error {
 	if err != nil {
 		return err
 	}
+	s.removeSession(hs)
+	return nil
+}
+
+// removeSession is the one closer behind closeSession, the unclaimed-session
+// expiry sweep and eviction under budget pressure (nocx-isjh4): three
+// CALLERS of one closer, never three closers that could drift apart the way
+// AGENTS.md warns a second implementation always does. It ends the PTY
+// first, then removes the inventory row and releases the reserved window
+// budget and key claim in the same critical section that removes it —
+// exactly closeSession's own contract, restated here as the single
+// implementation.
+func (s *Service) removeSession(hs *hostSession) {
 	hs.stop()
 
 	s.mu.Lock()
-	if current, ok := s.sessions[p.Session.Session]; ok && current == hs {
-		delete(s.sessions, p.Session.Session)
+	if current, ok := s.sessions[hs.id.Session]; ok && current == hs {
+		delete(s.sessions, hs.id.Session)
 		if hs.key != "" {
-			if claim, held := s.keys[hs.key]; held && claim.session == p.Session.Session {
+			if claim, held := s.keys[hs.key]; held && claim.session == hs.id.Session {
 				delete(s.keys, hs.key)
 			}
 		}
 		s.budget -= hs.launch.WindowBytes() + hs.lifecycleBudget
 	}
 	s.mu.Unlock()
-	return nil
+}
+
+// sweepExpired closes every exited, unattached session whose exit is at
+// least UnclaimedSessionTTL old (nocx-isjh4, owner amendment 3). The helper
+// runs no timer of its own — D5 already forbids it deciding anything about a
+// block's result — so the "timer" is this comparison against s.now(),
+// evaluated lazily wherever staleness would otherwise be observable:
+// WindowBytesInUse, the inventory read, and before a spawn's own budget
+// check (which is also evictForBudget's first move, so a spawn that fits
+// once TTL'd sessions are gone never reaches eviction-under-pressure at
+// all).
+//
+// A LIVE shell is never touched: exitInfo reports exited=false for one, and
+// this never calls removeSession for it. Neither is an exited session a
+// coordinator still holds an attachment on — it may be mid-read of the
+// result it came back for, which is exactly the case D5's surviving half
+// exists to protect.
+func (s *Service) sweepExpired() {
+	now := s.now()
+	ttl := s.limits.UnclaimedSessionTTL
+	s.mu.Lock()
+	candidates := s.live()
+	s.mu.Unlock()
+	for _, hs := range candidates {
+		exited, at, attached := hs.exitInfo()
+		if !exited || attached {
+			continue
+		}
+		if now.Sub(at) >= ttl {
+			s.removeSession(hs)
+		}
+	}
+}
+
+// evictForBudget runs sweepExpired first — a session already past its TTL is
+// freed before a live one is ever considered for by-pressure eviction — and
+// then, only if reserved still would not fit the aggregate budget, closes
+// exited, unattached sessions oldest-exit-first until it does or none are
+// left eligible (nocx-isjh4, owner amendment 4). It never touches a live
+// shell or an exited session a coordinator is attached to; the caller's own
+// budget check after this returns is what actually refuses the spawn, so
+// eviction that could not free enough still leaves the spawn's normal
+// refusal in force.
+func (s *Service) evictForBudget(reserved int64) {
+	s.sweepExpired()
+
+	s.mu.Lock()
+	fits := s.budget+reserved <= s.limits.BudgetBytes
+	candidates := s.live()
+	s.mu.Unlock()
+	if fits {
+		return
+	}
+
+	type evictable struct {
+		hs   *hostSession
+		at   time.Time
+		size int64
+	}
+	var pool []evictable
+	for _, hs := range candidates {
+		exited, at, attached := hs.exitInfo()
+		if !exited || attached {
+			continue
+		}
+		pool = append(pool, evictable{hs: hs, at: at, size: hs.launch.WindowBytes() + hs.lifecycleBudget})
+	}
+	sort.Slice(pool, func(i, j int) bool { return pool[i].at.Before(pool[j].at) })
+
+	for _, c := range pool {
+		s.mu.Lock()
+		fits = s.budget+reserved <= s.limits.BudgetBytes
+		s.mu.Unlock()
+		if fits {
+			return
+		}
+		s.removeSession(c.hs)
+	}
 }
 
 const maxSignal = 64
@@ -1315,6 +1449,12 @@ func (s *Service) clamp(want int64) int64 {
 // can answer. The workspace filter is D15's reservation on the read side and
 // is empty in every level-1 call.
 func (s *Service) inventory(p proto.SessionsParams) proto.SessionsResult {
+	// Swept first (nocx-isjh4): a coordinator asking what this helper holds
+	// must not be answered with a row that has already outlived its
+	// unclaimed TTL, and a test advancing a fake clock and then reading the
+	// inventory is asking exactly that question.
+	s.sweepExpired()
+
 	s.mu.Lock()
 	live := s.live()
 	s.mu.Unlock()

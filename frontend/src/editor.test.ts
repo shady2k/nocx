@@ -266,6 +266,29 @@ describe('CommandEditor', () => {
     expect(container.querySelector('.nocx-editor-field')).toBe(view.dom)
   })
 
+  it('the field class survives CM6’s own focus-driven class rewrite (round 3 regression)', () => {
+    // CM6 owns `.cm-editor`'s class attribute: `updateAttrs` recomputes it
+    // from the `editorAttributes` facet on every update whose derived
+    // string changed — in particular on the FIRST focus, which flips in
+    // `cm-focused` — via a blind `setAttribute('class', …)`. A class added
+    // by hand AFTER construction (`view.dom.classList.add(...)`) is not in
+    // that facet's output, so it survived only until the first such
+    // rewrite: present unfocused, gone the instant the field focused. The
+    // e2e suite caught it (border present unfocused, absent focused); a
+    // unit test that never dispatched a transaction after mount could not.
+    // `.nocx-editor-field` must therefore be installed as an
+    // `EditorView.editorAttributes` extension, whose `class` contribution
+    // CM6's own `combineAttrs` CONCATENATES rather than replaces.
+    const { view } = setup()
+    view.focus()
+    // Focus alone does not repaint the attribute — CM6 re-reads `hasFocus`
+    // and recomputes on its own next update cycle, so force one exactly as
+    // a real keystroke or the host's own dispatches would.
+    view.dispatch({})
+    expect(view.dom.classList.contains('cm-focused')).toBe(true) // the recompute actually ran
+    expect(view.dom.classList.contains('nocx-editor-field')).toBe(true)
+  })
+
   it('multiline: the host is told when the capped row count changes', () => {
     const resized = vi.fn()
     const { ed } = setup({ resized })

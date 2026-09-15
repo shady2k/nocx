@@ -121,12 +121,13 @@ test('a running upload is visible and cancellable with the sidebar collapsed', a
     // an operations bug.
     await page.keyboard.type(`cd ${destDir}`)
     await page.keyboard.press('Enter')
-    await expect(page.locator('.pane.active .nocx-editor-context .ui-meta')).toContainText(
-      destBase,
-      {
-        timeout: 60_000,
-      },
-    )
+    // The where-line: a kit Meta before nocx-9bpeq.15, now the same
+    // PromptContext primitive a block's header draws (spec 2026-09-15 §2).
+    await expect(
+      page.locator('.pane.active .nocx-editor-context .ui-prompt-context'),
+    ).toContainText(destBase, {
+      timeout: 60_000,
+    })
     const panel = page.locator(FILES_PANEL)
     await expect(panel).toBeVisible({ timeout: 15_000 })
     await expect(page.locator(TREE_ROW, { hasText: destBase })).toHaveAttribute(

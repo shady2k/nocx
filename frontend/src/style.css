@@ -393,8 +393,10 @@
      `.pane`'s --color-canvas — the one theme where that differs from
      --terminal-background is `light`, which is exactly where the block rows
      read grey instead of white. This box spans the whole history + live
-     region, including the empty space above bottom-anchored blocks
-     (`.scrollback-inner`'s `margin-top: auto`), so painting it here covers
+     region, including the space below a short transcript that does not fill
+     the pane (`.scrollback-inner` is top-aligned now — decision
+     2026-09-15-terminal-screen-mockup-decision.md §1 item 1 — so that space
+     sits below the last block, not above it), so painting it here covers
      that too. `.pane` itself stays on --color-canvas: Settings, the API
      workbench and the skill view are `.pane-manager`, not this class. */
   background: var(--terminal-background);
@@ -423,12 +425,17 @@
   flex-direction: column;
 }
 
-/* While the pane is settling into a new shape, the stack is displaced
-   downward by the amount the glide is hiding (scrollback/controller.ts
-   `_glide`), and the stack hangs from this box's bottom edge — so those
-   pixels are past it and the scroller reports itself scrollable. The bar
-   flashed on every command. `hidden` keeps the scroll offset and keeps this a
-   scroll container, and the stable gutter above means no width moves. */
+/* While the pane is settling into a new shape, the stack is displaced by the
+   amount the glide is hiding (scrollback/controller.ts `_glide`) — downward
+   while the transcript overflows the scroller and the settle plays back a
+   scrollTop change the person was following (decision §1 item 1: a short
+   transcript that still fits the pane has nothing to compensate, since its
+   top-aligned position does not move when a block opens or freezes). Either
+   way the displaced pixels can land past this box's bottom edge for the
+   ~140ms the glide runs, and the scroller reports itself scrollable for
+   them. The bar flashed on every command. `hidden` keeps the scroll offset
+   and keeps this a scroll container, and the stable gutter above means no
+   width moves. */
 .scrollback-area.is-settling {
   overflow-y: hidden;
 }
@@ -459,10 +466,32 @@
   overflow: visible;
 }
 
+/* TOP-ALIGNED (decision 2026-09-15-terminal-screen-mockup-decision.md §1
+   item 1). Used to carry `margin-top: auto`, which pushed a short transcript
+   to the SCROLLER'S bottom edge — the previous implementation's own choice,
+   never a requirement `ScrollbackController`'s FLIP settle (`_glide`) or its
+   follow machinery depended on: both measure `.scrollback-inner`'s actual
+   painted position before and after a mutation and play back whatever moved,
+   which works identically whichever edge the stack starts from. Top
+   alignment is a strict improvement for the common case the settle exists
+   to smooth over: a short transcript that still fits `.scrollback-area`
+   never changes its own top-of-scroller position when a block opens or
+   freezes (nothing above it moves), so `_glide`'s measured `dy` is already
+   under the "below a pixel there is nothing to watch" threshold and no
+   settle plays at all — see the controller's own comments on `_glide` and
+   `scrollToBottomIfFollowing` for the overflowing case, where the settle
+   still runs because growing content still changes `scrollTop`.
+   `flex: 0 0 auto` (rather than the default `0 1 auto`) says explicitly
+   that this item never grows past its content and never shrinks below it,
+   which is what leaves the remainder of `.scrollback-area`'s height below
+   the last block for a short transcript, exactly where `03`'s own screenshot
+   shows it — an idle space between output and the composer, not above the
+   first prompt. */
 .scrollback-inner {
   display: flex;
   flex-direction: column;
-  margin-top: auto;
+  flex: 0 0 auto;
+  margin-top: 0;
 }
 
 /* EVERY ROW WEARS THE GUTTER, AND THE STACK DOES NOT (nocx-9bpeq.8).
@@ -760,10 +789,11 @@
      scrollback/cell-metric.ts; `1.2em` was here before it and was a guess at
      a number only the renderer can measure. The vertical miss is felt rather
      than seen: the frozen block replaces the live region at the end of every
-     command, so a pitch that disagrees with the grid's changes the pane's
-     height at that moment and the scrollback — which hangs from its bottom
-     edge — moves. The fallback keeps the old guess for a session whose
-     renderer has not measured yet. */
+     command, so a pitch that disagrees with the grid changes the stack's
+     total height at that moment, and the settle glide
+     (scrollback/controller.ts `_glide`) has something to play back that a
+     correct pitch would not have given it. The fallback keeps the old guess
+     for a session whose renderer has not measured yet. */
   min-height: var(--term-cell-height, 1.2em);
   line-height: var(--term-cell-height, 1.2em);
   /* N frozen columns must occupy exactly N × the terminal's cell width

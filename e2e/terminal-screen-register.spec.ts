@@ -135,6 +135,10 @@ async function setTheme(page: Page, id: string): Promise<void> {
   await page.waitForFunction((t) => document.documentElement.getAttribute('data-theme') === t, id)
   await page.keyboard.press('Meta+w')
   await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('')
+  // The Settings click leaves the pointer wherever the nav item was, which is over
+  // the terminal once Settings closes — and a hovered row takes the hover tint as
+  // its ground (spec §3.3). Park it on the tab strip again, as twoBlocks does.
+  await page.mouse.move(1, 1)
 }
 
 /** Open the app and leave one successful and one failed block settled above an idle composer. */

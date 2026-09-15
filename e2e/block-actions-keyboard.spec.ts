@@ -18,9 +18,14 @@ const ACTIONS = '[data-block-actions]'
 const MENU = '[data-testid="block-actions-menu"]'
 const ITEM = `${MENU} .ui-context-menu__item`
 
+/** Run one command and wait for its block to settle and the prompt to own input
+ *  again — typing the next command while this one runs would race the keys
+ *  against the composer's hide, and a test may not depend on that timing. */
 async function runCommand(page: import('./harness').Page, text: string): Promise<void> {
   await page.keyboard.type(text)
   await page.keyboard.press('Enter')
+  await expect(page.locator(BLOCK).filter({ hasText: text })).toHaveCount(1, { timeout: 15_000 })
+  await promptReady(page)
 }
 
 test.describe('block actions from the keyboard', () => {

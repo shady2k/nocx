@@ -345,3 +345,15 @@
   white-space: normal;
   overflow-wrap: anywhere;
 }
+
+.ui-button[data-variant='wordmark'] {
+  border: 0;
+  background: transparent;
+  color: var(--color-text);
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-md);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  padding-inline: var(--space-6);
+  height: var(--tab-height);
+}

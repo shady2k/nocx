@@ -160,6 +160,7 @@ import { IconButton } from './ui/icon-button'
 import { CloseIcon } from './ui/icons'
 import { createPaneContext, updatePaneContext, type PaneContextFacts } from './ui/pane-context'
 import { createProcessBar, updateProcessBar } from './ui/process-bar'
+import { createTerminalStatus, updateTerminalStatus } from './ui/terminal-status'
 import { cwdLabel } from './cwd-label'
 import { secretReference } from './secret-reference'
 import { hasSecretReference } from './snippets/resolve'
@@ -723,6 +724,7 @@ export class TerminalContent extends BasePaneContent {
    *  PromptContext (`_applyEnvironmentView`, `_onHomeKnown`,
    *  `_onBranchChanged`) — see `_syncPaneContext`. */
   private paneContext: HTMLElement | null = null
+  private terminalStatus: HTMLElement | null = null
   /** The running-state footer (decision §1, "Running-state gap"), mounted
    *  once beside the composer and shown/hidden by `_syncLifecycleOwnership`
    *  — never both surfaces visible at once. */
@@ -1739,7 +1741,9 @@ export class TerminalContent extends BasePaneContent {
     this._host = view.host
     this._user = view.user
     this.programTitle = view.programTitle
-    this.cwdTitle = directoryLabel(view.cwd)
+    this.cwdTitle = this.currentHome()
+      ? cwdLabel(view.cwd, this.currentHome())
+      : directoryLabel(view.cwd)
     this.editor?.setCwd(view.cwd)
     this.onTooltipChange(
       view.host
@@ -1894,6 +1898,8 @@ export class TerminalContent extends BasePaneContent {
    *  blocks are not command records and are out of this loop's reach —
    *  `blockManager.blocks` names only what it can reach. */
   private _onHomeKnown(home: string): void {
+    this.cwdTitle = cwdLabel(this._cwd, home)
+    this.pushTitle()
     this.editor?.setWhereFacts({ home, branch: this.branchSource?.branch() })
     for (const rec of this.scrollback?.blockManager.blocks ?? []) {
       setBlockWhere(rec.el, { home, branch: this._blockBranch.get(rec.id) })
@@ -1933,6 +1939,7 @@ export class TerminalContent extends BasePaneContent {
   private _syncPaneContext(): void {
     const el = this.paneContext
     if (!el) return
+    el.hidden = this.scrollback?.mode !== 'fullscreen'
     if (this.scrollback?.mode === 'fullscreen') {
       const target = this.inputOwner() === 'pty' ? this.programTitle || undefined : undefined
       const facts: PaneContextFacts = {
@@ -2158,6 +2165,7 @@ export class TerminalContent extends BasePaneContent {
       // opts.pane.firstChild)`), so this is the one ordering that puts the
       // strip ABOVE the layout without racing it.
       this.paneContext = createPaneContext({ kind: 'local', path: '~' })
+      this.paneContext.hidden = true
       target.insertBefore(this.paneContext, this.scrollback.scrollbackLayout)
 
       log.info('nocx: mounting renderer')
@@ -2738,6 +2746,12 @@ export class TerminalContent extends BasePaneContent {
       })
       this.processBar.hidden = true
       target.appendChild(this.processBar)
+      // IPC's UTF8StreamDecoder always decodes this stream as UTF-8.
+      this.terminalStatus = createTerminalStatus({
+        shell: this._integration?.shell,
+        encoding: 'UTF-8',
+      })
+      target.appendChild(this.terminalStatus)
       // Whatever this pane's where-sources already know — a reconnect can
       // land here with the session's home already resolved by another
       // pane on the same session (nocx-9bpeq.16). `_syncWhereSources`
@@ -2869,6 +2883,8 @@ export class TerminalContent extends BasePaneContent {
         this.scrollback.dispose()
         this.paneContext?.remove()
         this.paneContext = null
+        this.terminalStatus?.remove()
+        this.terminalStatus = null
         this.processBar?.remove()
         this.processBar = null
         this._readyResolve(false)
@@ -5211,6 +5227,9 @@ export class TerminalContent extends BasePaneContent {
     // logic or clear the loss mark (nocx-ictcq).
     if (this._sessionExited) return
     this._integration = fact
+    if (this.terminalStatus) {
+      updateTerminalStatus(this.terminalStatus, { shell: fact.shell, encoding: 'UTF-8' })
+    }
     this._updateCapability()
     if (!isDegraded(fact)) {
       // Recovered, or never failed. The card belongs to the state that
@@ -6831,6 +6850,8 @@ export class TerminalContent extends BasePaneContent {
       !this.nativeMode &&
       this.lifecycle.buffer === 'normal'
     bar.hidden = !visible
+    if (this.terminalStatus)
+      this.terminalStatus.hidden = visible || this.lifecycle.buffer !== 'normal'
     if (visible) {
       updateProcessBar(bar, { inputAvailable: this.session !== null })
     }
@@ -6970,6 +6991,8 @@ export class TerminalContent extends BasePaneContent {
     this.scrollback?.dispose()
     this.paneContext?.remove()
     this.paneContext = null
+    this.terminalStatus?.remove()
+    this.terminalStatus = null
     this.processBar?.remove()
     this.processBar = null
     this.destroyReceipt()

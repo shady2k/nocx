@@ -96,7 +96,7 @@ test("a finished block reads the pane's real branch, and the path is never absol
   await expect(context).toBeVisible()
   const text = normalise(await context.textContent())
   expect(text).toContain('~/repo')
-  expect(text).toContain('main')
+  await expect(context).toHaveAttribute('title', /main/)
 
   const pathPart = context.locator('[data-part="path"]')
   const pathText = normalise(await pathPart.textContent())
@@ -191,7 +191,7 @@ async function editorInputBoxBorder(page: Page): Promise<{ width: number; color:
   })
 }
 
-test("the composer's input box has a real border that changes with focus", async ({ page }) => {
+test("the composer's card contains an open input row", async ({ page }) => {
   // nocx-9bpeq.15 moves the CM6 editor and the mode switch inside one
   // bordered box (spec §6) — landed as ComposerFrame's field
   // (composer-frame.css), the common ancestor `editorInputBoxBorder`
@@ -206,12 +206,14 @@ test("the composer's input box has a real border that changes with focus", async
 
   await clickIntoEditor(page)
   const focused = await editorInputBoxBorder(page)
-  expect(focused.width).toBeGreaterThanOrEqual(1)
+  expect(focused.width).toBe(0)
+  const card = page.locator('.pane.active .ui-composer-frame')
+  expect(await card.evaluate((el) => parseFloat(getComputedStyle(el).borderTopWidth))).toBe(1)
 
   // Blur by clicking a settled block, as the spec's own phrase for it.
   await page.locator(SETTLED).first().click()
   const blurred = await editorInputBoxBorder(page)
-  expect(blurred.color).not.toBe(focused.color)
+  expect(blurred.width).toBe(0)
 })
 
 test('the mode indicator opens a target menu; choosing Ask switches it; Escape closes it', async ({

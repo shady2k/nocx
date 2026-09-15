@@ -590,7 +590,7 @@ const nocxPlugin = {
         return {
           // Check SVG fill/stroke attributes
           JSXAttribute(node) {
-            if (!node.name || !node.name.name) return
+            if (node.name.type !== 'JSXIdentifier') return
             const attrName = node.name.name.toLowerCase()
             if (attrName !== 'fill' && attrName !== 'stroke') return
 

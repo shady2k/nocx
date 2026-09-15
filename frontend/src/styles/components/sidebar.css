@@ -7,6 +7,7 @@
   display: flex;
   flex-direction: column;
   height: 100%;
+  background: var(--color-chrome-rail);
 }
 
 .activity-bar-zone {
@@ -42,21 +43,6 @@
 .activity-bar .ui-icon-button {
   width: 100%;
   height: var(--activity-bar-width);
-}
-
-/* The mockup's rail reads 22–24px glyphs against IconButton's own `lg`
-   (20px, `--icon-size-lg`) — already the largest size IconButton exposes
-   (icon-button.tsx's `IconButtonSize`). Widening `--icon-size-lg` itself
-   would be a global recolor of every `lg` icon in the app for one rail's
-   sake, which the decision record explicitly rejects ("add a scoped kit
-   icon-size variant, rather than enlarging `--icon-size-lg` globally").
-   That variant is shared-kit's own (icon-button.tsx/css, task A) and does
-   not exist in this tree yet, so this is the layout-owned equivalent scoped
-   to the one surface that needs it — a candidate for deletion once A adds
-   a real `xl` IconButtonSize. */
-.activity-bar .ui-icon-button svg {
-  width: 22px;
-  height: 22px;
 }
 
 /* ── What a view's icon says about work behind it (nocx-hbdw4.1) ──────────

@@ -214,10 +214,11 @@ test('the probes this spec stands on measure what they claim', async ({ page }) 
   expect(kitIdentities().has('ui-button')).toBe(true)
 })
 
-test('a successful command says nothing about its outcome', async ({ page }) => {
+test('a successful command shows a check without an extra status word', async ({ page }) => {
   await twoBlocks(page)
   const header = page.locator(SETTLED, { hasText: OK }).locator('.cmd-header')
   await expect(header.locator('[data-tone="danger"], [data-tone="dim"]')).toHaveCount(0)
+  await expect(header.locator('[aria-label="Succeeded"]')).toBeVisible()
   const words = await header.evaluate((h) =>
     [...h.querySelectorAll('*')]
       .filter((el) => el.children.length === 0)

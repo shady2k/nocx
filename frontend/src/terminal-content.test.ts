@@ -8117,7 +8117,7 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
         instant.querySelector(
           ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]',
         )?.textContent,
-      ).toBe('<0.1s')
+      ).toBe('0ms')
     } finally {
       teardown()
     }

@@ -73,26 +73,20 @@ button.ui-mode-indicator[data-tone] {
   color: inherit;
 }
 
-/* The `field` variant (spec 2026-09-15 §4): the composer's full-height
-   leading segment, beside CM6 rather than inside its own gutter (ask-
-   entry.ts). ComposerFrame's field grid (composer-frame.css) supplies the
-   `align-self: stretch` that makes this segment span the field's full
-   height and the 64px minimum COLUMN width; this variant supplies only the
-   control's own padding and type, which is what a placement rule may not.
-   The 14px chevron and the trailing divider need no override here — the
-   base rules above already draw both at that size. */
-/* `button.` prefixed, matching the tone-reset rule's own element+class+
-   attribute specificity (0,2,1) above it: without it, `button.ui-mode-
-   indicator[data-tone] { padding: 0 }` (line 27) OUTRANKS a bare
-   `.ui-mode-indicator[data-variant='field']` (0,2,0) regardless of source
-   order, and this rule's `padding-inline` never wins — measured against
-   `03-split-and-files.png`, where the round-1 shape put "Run ⌄" flush
-   against the field's left border instead of inset. Tied specificity here
-   is broken by source order (this rule is later in the file), which is
-   what makes `padding-inline` win now. */
+/* The composer switch is a filled, rounded segment on the first input row. */
 button.ui-mode-indicator[data-variant='field'] {
   box-sizing: border-box;
-  padding-inline: var(--space-3);
+  padding-inline: var(--space-4);
   min-width: var(--terminal-mode-segment-width);
-  font-size: var(--font-size-terminal);
+  height: var(--terminal-composer-control-size);
+  justify-content: space-between;
+  gap: var(--space-3);
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-lg);
+  border-radius: var(--control-radius-lg);
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+.ui-mode-indicator[data-variant='field'] .ui-mode-indicator__divider {
+  display: none;
 }

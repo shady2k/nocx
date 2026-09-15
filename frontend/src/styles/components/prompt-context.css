@@ -1,17 +1,4 @@
-/* PromptContext (ui/README table) — the terminal screen's prompt line (spec
-   2026-09-15 §2): `~/repos/nocx on ⎇ main`. Mono face, one line, ellipsis at
-   its own edge — the same register the command row below it reads in.
-   Colours are tokens only (ADR-0013 §4); there is deliberately no
-   background, border or padding here — this is text, like Meta.
-
-   FONT SIZE (round 18, mockup pass): the mockups draw the prompt line at the
-   SAME size as the command text below it — `~/repos/nocx on main` and
-   `git diff --stat` read as one register, not a caption over a headline. The
-   base spec's `--font-size-sm` read small and grey against the terminal's
-   own 14px, which is what the owner's screenshot called "a tiny accent ~".
-   `--font-size-terminal` is the token `.cmd-header-text` already uses for
-   the command row, so this is the same size, not a new one — the mockup
-   wins over the base spec's literal token name here (spec §2 amended). */
+/* One context vocabulary: muted history paths, folder/path/branch composer context and program chrome. */
 .ui-prompt-context {
   display: inline-block;
   min-width: 0;
@@ -26,10 +13,6 @@
   user-select: none;
 }
 
-/* The composer while it is not focused (base spec §5.3): the whole line one
-   step quieter. Opacity, not a second colour per part — the line carries
-   several hues at once (muted host, accent path, accent branch), and a
-   single "dim" colour would collapse a distinction the line exists to keep. */
 .ui-prompt-context[data-tone='dim'] {
   opacity: 0.75;
 }
@@ -38,9 +21,6 @@
   color: var(--color-text-muted);
 }
 
-/* The composer's safety question — "where does Enter go" — reads at normal
-   text colour instead of muted; a finished block's host is history and
-   never sets this (base spec §5.2, matching Meta's own strong emphasis). */
 .ui-prompt-context__part[data-part='host'][data-emphasis='strong'] {
   color: var(--color-text);
 }
@@ -50,32 +30,18 @@
 }
 
 .ui-prompt-context__part[data-part='path'] {
-  color: var(--color-accent);
+  color: var(--color-text-muted);
 }
 
-/* `margin-inline` is the only spacing in this whole component — every part
-   is a bare <span> with no whitespace text node between it and its sibling
-   (fill(), prompt-context.ts), so the elements read hard-adjacent without
-   it. Found by looking at a rendered screenshot rather than at
-   `textContent`: the e2e register spec's `.toContain('main')` still passes
-   on "~/repoonmain" because an SVG icon contributes nothing to
-   `textContent`, so a substring check cannot see the missing space either
-   side of it (round 18, mockup pass). `on` is the one part with a sibling
-   on both sides whenever a branch is known, so it carries both gaps. */
 .ui-prompt-context__part[data-part='on'] {
   color: var(--color-text-muted);
   margin-inline: 0.35em;
 }
 
 .ui-prompt-context__part[data-part='branch'] {
-  color: var(--color-accent);
+  color: var(--color-text-muted);
 }
 
-/* PaneContext's presentation (spec 2026-09-15 §1.3): path and branch read
-   muted rather than accent, matching the mockup's chrome band — a block's
-   or the composer's own prompt line (the default `prompt` presentation)
-   keeps its accent path/branch unchanged. `host`/`colon`/`on` are already
-   muted in every presentation, so only the two accent parts need a rule. */
 .ui-prompt-context[data-presentation='chrome'] .ui-prompt-context__part[data-part='path'],
 .ui-prompt-context[data-presentation='chrome'] .ui-prompt-context__part[data-part='branch'] {
   color: var(--color-text-muted);
@@ -87,7 +53,25 @@
   vertical-align: -2px;
   color: var(--color-text-muted);
   flex: 0 0 auto;
-  /* The gap before `branch` — `on`'s own right margin above is the gap
-     before this icon. */
+
   margin-right: 0.3em;
+}
+
+.ui-prompt-context[data-presentation='composer'] {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-lg);
+  line-height: var(--terminal-ui-line-height);
+}
+.ui-prompt-context[data-presentation='composer'] svg {
+  width: var(--icon-size-lg);
+  height: var(--icon-size-lg);
+  margin-right: 0;
+}
+.ui-prompt-context[data-presentation='composer'] .ui-prompt-context__part[data-part='on'] {
+  height: var(--icon-size-lg);
+  border-left: 1px solid var(--color-divider);
+  margin-inline: var(--space-2);
 }

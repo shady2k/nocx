@@ -436,20 +436,20 @@ describe('CommandEditor', () => {
     const submitButton = (container: ParentNode): HTMLButtonElement =>
       container.querySelector<HTMLButtonElement>('.ui-composer-frame__submit .ui-icon-button')!
 
-    it('is disabled on an empty draft and enabled once one exists, wearing the primary appearance only then', () => {
+    it('is disabled on an empty draft and enabled once one exists, keeping the outlined submit appearance', () => {
       const { ed, container } = setup()
       ed.show()
       const btn = submitButton(container)
       expect(btn.disabled).toBe(true)
-      expect(btn.dataset.appearance).toBeUndefined()
+      expect(btn.dataset.appearance).toBe('submit')
 
       ed.insertText('echo hi')
       expect(btn.disabled).toBe(false)
-      expect(btn.dataset.appearance).toBe('primary')
+      expect(btn.dataset.appearance).toBe('submit')
 
       ed.clear()
       expect(btn.disabled).toBe(true)
-      expect(btn.dataset.appearance).toBeUndefined()
+      expect(btn.dataset.appearance).toBe('submit')
     })
 
     it('a whitespace-only draft leaves it disabled — matching the whitespace-only Enter rule', () => {

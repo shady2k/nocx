@@ -79,3 +79,7 @@
   color: var(--color-text-muted);
   white-space: nowrap;
 }
+
+.ui-pane-context[hidden] {
+  display: none;
+}

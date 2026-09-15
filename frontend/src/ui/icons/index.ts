@@ -45,3 +45,5 @@ export { default as StickyNoteIcon } from './StickyNoteIcon'
 export { default as ChevronRightIcon } from './ChevronRightIcon'
 export { default as GitBranchIcon } from './GitBranchIcon'
 export { iconElement } from './icon-element'
+
+export { default as CheckIcon } from './CheckIcon'

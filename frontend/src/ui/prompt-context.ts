@@ -11,7 +11,7 @@
 // Identity `ui-prompt-context`; variance on data-tone and a part's
 // data-emphasis. A surface places it and never repaints it (ui/README).
 
-import { GitBranchIcon, iconElement } from './icons'
+import { FolderIcon, GitBranchIcon, iconElement } from './icons'
 
 export interface PromptContextFacts {
   /** Where the command ran or will run — undefined/empty for this machine.
@@ -34,13 +34,9 @@ export interface PromptContextOptions {
   /** `dim` steps the whole line down one register — the composer while it is
    *  not focused (base spec §5.3). */
   tone?: 'normal' | 'dim'
-  /** `chrome` is PaneContext's presentation (mockup decision 2026-09-15
-   *  §1.3, §3): path and branch read muted, matching the mockup's chrome
-   *  band, instead of the accent colour a block's or the composer's prompt
-   *  line uses. `prompt` — the default, and every call before this one —
-   *  is unchanged. Formatting still stays `cwdLabel`; this only changes
-   *  which colour the SAME facts paint with, never what is fetched. */
-  presentation?: 'prompt' | 'chrome'
+  /** Composer adds folder/branch icons and a divider. History keeps the branch
+   *  in the hover title; chrome and prompt render inline context facts. */
+  presentation?: 'prompt' | 'chrome' | 'composer' | 'history'
 }
 
 function part(name: string, text: string, strong: boolean): HTMLSpanElement {
@@ -56,7 +52,11 @@ function fill(el: HTMLSpanElement, facts: PromptContextFacts, opts: PromptContex
   el.dataset.tone = opts.tone ?? 'normal'
   el.dataset.presentation = opts.presentation ?? 'prompt'
 
+  if (opts.presentation === 'history' && facts.branch) el.title = `${facts.path} · ${facts.branch}`
+  else el.removeAttribute('title')
+
   const children: Element[] = []
+  if (opts.presentation === 'composer') children.push(iconElement(FolderIcon))
   if (facts.host) {
     children.push(part('host', facts.host, facts.hostStrong === true))
     const colon = document.createElement('span')
@@ -66,8 +66,8 @@ function fill(el: HTMLSpanElement, facts: PromptContextFacts, opts: PromptContex
     children.push(colon)
   }
   children.push(part('path', facts.path, false))
-  if (facts.branch) {
-    children.push(part('on', 'on', false))
+  if (facts.branch && opts.presentation !== 'history') {
+    children.push(part('on', opts.presentation === 'composer' ? '' : 'on', false))
     children.push(iconElement(GitBranchIcon))
     children.push(part('branch', facts.branch, false))
   }

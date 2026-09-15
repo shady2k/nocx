@@ -21,6 +21,7 @@ import {
   PinIcon,
   PlugIcon,
   PlusIcon,
+  SearchIcon,
   StickyNoteIcon,
   TextQuoteIcon,
 } from './ui/icons'
@@ -342,6 +343,7 @@ abstract class TabStripBase implements TabStrip {
         activeId: number
       }>({ records: {}, activeId: -1 })
       const [searchQuery, setSearchQuery] = createSignal('')
+      const [searchOpen, setSearchOpen] = createSignal(false)
       // The tab menu: which tab it belongs to and where it was opened. One
       // menu for the whole strip rather than one per row — a menu is a
       // singleton on screen, and a component per tab would be N listeners
@@ -812,13 +814,14 @@ abstract class TabStripBase implements TabStrip {
               as what it is: the head of the row of workspaces. */}
           <Show when={this.orientation === 'horizontal'}>
             <div class="tabstrip-lead">
-              <IconButton
+              <Button
+                variant="wordmark"
                 ariaLabel="Show all workspaces"
                 title="Show all workspaces"
                 onClick={() => this.onOpenOverview?.()}
               >
-                <LayersIcon />
-              </IconButton>
+                NOCX
+              </Button>
             </div>
           </Show>
           <div
@@ -993,6 +996,37 @@ abstract class TabStripBase implements TabStrip {
               </IconButton>
             </div>
             <div class="tabbar-spacer" />
+            <Show when={searchOpen()}>
+              <SearchField
+                value={searchQuery()}
+                onInput={setSearchQuery}
+                placeholder="Filter tabs…"
+                ariaLabel="Filter tabs"
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    setSearchQuery('')
+                    setSearchOpen(false)
+                    container
+                      .querySelector<HTMLButtonElement>('[aria-label="Search tabs"]')
+                      ?.focus()
+                  }
+                }}
+              />
+            </Show>
+            <div class="tabstrip-actions">
+              <IconButton
+                ariaLabel="Search tabs"
+                onClick={() => {
+                  setSearchOpen(!searchOpen())
+                  if (searchOpen()) container.querySelector<HTMLInputElement>('input')?.focus()
+                  else setSearchQuery('')
+                }}
+              >
+                <SearchIcon />
+              </IconButton>
+            </div>
           </Show>
           {/* The strip's trailing edge. Placed absolutely against the strip
               (tab-strip.css) rather than as a flex item, because the strip is

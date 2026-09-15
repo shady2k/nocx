@@ -174,4 +174,23 @@ test.describe('visual board (nocx-9bpeq.18)', () => {
     await setTheme(page, 'light')
     await paintBoard(page, 'light')
   })
+
+  // Task C's own check (composer card/field, spec 2026-09-15 §4): a
+  // multiline draft, where the target switch must STRETCH with the growing
+  // field while the submit control stays pinned to the first input line
+  // rather than chasing the box down. D owns this board's final form; this
+  // is a small, task-named addition.
+  test('composer-multiline', async ({ page }) => {
+    await page.goto('/')
+    await promptReady(page)
+    await clickIntoEditor(page)
+    await page.locator(INPUT).click()
+    await page.keyboard.type('first line')
+    await page.keyboard.press('Shift+Enter')
+    await page.keyboard.type('second line')
+    await page.keyboard.press('Shift+Enter')
+    await page.keyboard.type('third line')
+    await expect(page.locator(INPUT)).toContainText('third line')
+    await page.screenshot({ path: 'test-results/visual-board/tokyo-night-composer-multiline.png' })
+  })
 })

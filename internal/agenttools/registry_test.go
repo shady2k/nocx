@@ -158,6 +158,53 @@ const sessionReadSchema = `{
   }}
 }`
 
+// sessionKeysSchema is session.keys' fixture: one step under a target,
+// authorized by sessionId and tokenId.
+const sessionKeysSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "tokenId"],
+  "properties": {
+    "sessionId": {"type": "string"},
+    "tokenId": {"type": "string"},
+    "key": {"type": "string"},
+    "text": {"type": "string"},
+    "option": {"type": "string"}
+  },
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["sessionId", "state"],
+    "properties": {
+      "sessionId": {"type": "string"},
+      "state": {"type": "string"}
+    }
+  }}
+}`
+
+// sessionMessageSchema is session.message's fixture: the send form
+// (sessionId, text, when, id) and the disjoint cancel form (sessionId,
+// cancel) live in one schema, as the real contract does.
+const sessionMessageSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId"],
+  "properties": {
+    "sessionId": {"type": "string"},
+    "text": {"type": "string"},
+    "when": {"type": "string", "enum": ["free", "now"]},
+    "id": {"type": "string"},
+    "tokenId": {"type": "string"},
+    "cancel": {"type": "string"}
+  },
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["sessionId"],
+    "properties": {"sessionId": {"type": "string"}}
+  }}
+}`
+
 const runSchema = `{
   "type": "object",
   "additionalProperties": false,
@@ -578,6 +625,8 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		"git.status.schema.json":       gitStatusSchema,
 		"session.list.schema.json":     sessionListSchema,
 		"session.read.schema.json":     sessionReadSchema,
+		"session.keys.schema.json":     sessionKeysSchema,
+		"session.message.schema.json":  sessionMessageSchema,
 		"files.edit.schema.json":       filesEditSchema,
 		"files.create.schema.json":     filesCreateSchema,
 		"session.run.schema.json":      runSchema,
@@ -657,14 +706,18 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	if !reflect.DeepEqual(sessionObserve, wantSession) {
 		t.Fatalf("ForGrant(observe+session) = %v, want exactly %v", sessionObserve, wantSession)
 	}
-	// The session.run row's set includes mutate-destructive + session. A grant
-	// carrying exactly that effect and kind offers exactly session.run and
-	// workers.close; an observe grant also offers session.run because observe is
-	// another reachable member, and does NOT offer workers.close, which declares
-	// mutate-destructive alone. That asymmetry is the point: ending a worker
-	// is not something a run permitted only to look may do.
+	// The session.run row's set includes mutate-destructive + session, and so
+	// do session.keys and session.message (each declares mutate-destructive
+	// alone: a written key or a delivered message reaches the worker and is
+	// not reversible from here). A grant carrying exactly that effect and
+	// kind offers exactly those three plus workers.close; an observe grant
+	// also offers session.run because observe is another reachable member,
+	// and does NOT offer workers.close, session.keys or session.message,
+	// which declare mutate-destructive alone. That asymmetry is the point:
+	// ending a worker, or writing to one, is not something a run permitted
+	// only to look may do.
 	runGrant := grant([]content.Effect{content.EffectMutateDestructive}, content.ResourceSession)
-	wantDestructive := []string{"session.run", "workers.close"}
+	wantDestructive := []string{"session.keys", "session.message", "session.run", "workers.close"}
 	if got := toolNames(reg.ForGrant(runGrant)); !reflect.DeepEqual(got, wantDestructive) {
 		t.Fatalf("ForGrant(mutate-destructive+session) = %v, want exactly %v", got, wantDestructive)
 	}
@@ -740,6 +793,8 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		"git.status.schema.json":       gitStatusSchema,
 		"session.list.schema.json":     sessionListSchema,
 		"session.read.schema.json":     sessionReadSchema,
+		"session.keys.schema.json":     sessionKeysSchema,
+		"session.message.schema.json":  sessionMessageSchema,
 		"files.edit.schema.json":       filesEditSchema,
 		"files.create.schema.json":     filesCreateSchema,
 		"session.run.schema.json":      runSchema,

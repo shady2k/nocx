@@ -71,6 +71,16 @@
   color: var(--color-accent);
 }
 
+/* PaneContext's presentation (spec 2026-09-15 §1.3): path and branch read
+   muted rather than accent, matching the mockup's chrome band — a block's
+   or the composer's own prompt line (the default `prompt` presentation)
+   keeps its accent path/branch unchanged. `host`/`colon`/`on` are already
+   muted in every presentation, so only the two accent parts need a rule. */
+.ui-prompt-context[data-presentation='chrome'] .ui-prompt-context__part[data-part='path'],
+.ui-prompt-context[data-presentation='chrome'] .ui-prompt-context__part[data-part='branch'] {
+  color: var(--color-text-muted);
+}
+
 .ui-prompt-context svg {
   width: var(--icon-size-sm);
   height: var(--icon-size-sm);

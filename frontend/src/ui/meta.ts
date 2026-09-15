@@ -24,8 +24,15 @@ export interface MetaOptions {
   /** `sm` reads in the mono face at `--font-size-sm` instead of the UI face
    *  at `--font-size-2xs` — the command block's status group (spec
    *  2026-09-15 §4), which sits beside the mono command line and reads
-   *  wrong in the UI font at that size. */
-  size?: 'sm'
+   *  wrong in the UI font at that size.
+   *
+   *  `terminal` is that same status group's FINAL size (spec §1.7, §1.8,
+   *  §3): `--font-size-terminal` — the terminal body's own size, not a step
+   *  toward it — with an explicit 20px line box (`--terminal-ui-line-height`)
+   *  and tabular figures, so `Exit 1 · 1.2s` reads at the command's own
+   *  baseline rather than a caption above it. `sm` stays exactly what it
+   *  was for its other consumers. */
+  size?: 'sm' | 'terminal'
 }
 
 const SEPARATOR = ' · '
@@ -40,7 +47,7 @@ const SEPARATOR = ' · '
  *  the separator already inherits that Meta's face through the cascade
  *  (the reason `fill` below never sets it); standing alone between two
  *  Metas, there is no such ancestor to inherit from. */
-export function createMetaSeparator(opts: { size?: 'sm' } = {}): HTMLSpanElement {
+export function createMetaSeparator(opts: { size?: 'sm' | 'terminal' } = {}): HTMLSpanElement {
   const sep = document.createElement('span')
   sep.className = 'ui-meta__sep'
   sep.setAttribute('aria-hidden', 'true')

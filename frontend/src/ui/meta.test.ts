@@ -98,6 +98,13 @@ describe('createMeta — the DOM contract', () => {
     const plain = createMeta(['Exit 1'])
     expect(plain.hasAttribute('data-size')).toBe(false)
   })
+
+  it("carries the terminal size when asked — the command block status group's final size (round 20)", () => {
+    const terminal = createMeta(['Exit 1'], { size: 'terminal' })
+    expect(terminal.dataset.size).toBe('terminal')
+    const plain = createMeta(['Exit 1'])
+    expect(plain.hasAttribute('data-size')).toBe(false)
+  })
 })
 
 describe('createMetaSeparator — the standalone dot between two Metas (spec 2026-09-15 §4)', () => {
@@ -113,6 +120,11 @@ describe('createMetaSeparator — the standalone dot between two Metas (spec 202
   it('carries the sm size only when asked — the standalone case with no Meta ancestor to inherit from', () => {
     const sm = createMetaSeparator({ size: 'sm' })
     expect(sm.dataset.size).toBe('sm')
+  })
+
+  it('carries the terminal size the same way (round 20)', () => {
+    const terminal = createMetaSeparator({ size: 'terminal' })
+    expect(terminal.dataset.size).toBe('terminal')
   })
 })
 
@@ -161,6 +173,13 @@ describe('meta.css — tokens only, and legible where the terminal screen puts i
     expect(sm).toContain('font-size: var(--font-size-sm)')
   })
 
+  it('the terminal size reads in the mono face at the terminal body size, with an explicit 20px line box (round 20)', () => {
+    const terminal = ruleFor(css, ".ui-meta[data-size='terminal']")
+    expect(terminal).toContain('font-family: var(--font-family-mono)')
+    expect(terminal).toContain('font-size: var(--font-size-terminal)')
+    expect(terminal).toContain('line-height: var(--terminal-ui-line-height)')
+  })
+
   it('the standalone separator is always muted, whatever tone the word beside it takes', () => {
     expect(ruleFor(css, '.ui-meta__sep')).toContain('color: var(--color-text-muted)')
   })
@@ -169,6 +188,13 @@ describe('meta.css — tokens only, and legible where the terminal screen puts i
     const sm = ruleFor(css, ".ui-meta__sep[data-size='sm']")
     expect(sm).toContain('font-family: var(--font-family-mono)')
     expect(sm).toContain('font-size: var(--font-size-sm)')
+  })
+
+  it('the standalone separator carries the terminal size too, matching its siblings (round 20)', () => {
+    const terminal = ruleFor(css, ".ui-meta__sep[data-size='terminal']")
+    expect(terminal).toContain('font-family: var(--font-family-mono)')
+    expect(terminal).toContain('font-size: var(--font-size-terminal)')
+    expect(terminal).toContain('line-height: var(--terminal-ui-line-height)')
   })
 
   it.each(themes)('%s: muted and dim reach 4.5:1 on the terminal ground', (file) => {

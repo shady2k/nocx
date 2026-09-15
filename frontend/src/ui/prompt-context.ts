@@ -34,6 +34,13 @@ export interface PromptContextOptions {
   /** `dim` steps the whole line down one register — the composer while it is
    *  not focused (base spec §5.3). */
   tone?: 'normal' | 'dim'
+  /** `chrome` is PaneContext's presentation (mockup decision 2026-09-15
+   *  §1.3, §3): path and branch read muted, matching the mockup's chrome
+   *  band, instead of the accent colour a block's or the composer's prompt
+   *  line uses. `prompt` — the default, and every call before this one —
+   *  is unchanged. Formatting still stays `cwdLabel`; this only changes
+   *  which colour the SAME facts paint with, never what is fetched. */
+  presentation?: 'prompt' | 'chrome'
 }
 
 function part(name: string, text: string, strong: boolean): HTMLSpanElement {
@@ -47,6 +54,7 @@ function part(name: string, text: string, strong: boolean): HTMLSpanElement {
 
 function fill(el: HTMLSpanElement, facts: PromptContextFacts, opts: PromptContextOptions): void {
   el.dataset.tone = opts.tone ?? 'normal'
+  el.dataset.presentation = opts.presentation ?? 'prompt'
 
   const children: Element[] = []
   if (facts.host) {

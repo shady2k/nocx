@@ -18,6 +18,11 @@ const CASES: Array<[string, Omit<IconButtonElementOptions, 'icon'>, SolidCase]> 
   ['sm', { ariaLabel: 'Close', size: 'sm' }, { ariaLabel: 'Close', size: 'sm' }],
   ['lg', { ariaLabel: 'Close', size: 'lg' }, { ariaLabel: 'Close', size: 'lg' }],
   ['selected', { ariaLabel: 'Files', selected: true }, { ariaLabel: 'Files', selected: true }],
+  [
+    'primary appearance',
+    { ariaLabel: 'Send', appearance: 'primary' },
+    { ariaLabel: 'Send', appearance: 'primary' },
+  ],
   ['square', { ariaLabel: 'Close', square: true }, { ariaLabel: 'Close', square: true }],
   [
     'rail indicator',

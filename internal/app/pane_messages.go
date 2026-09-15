@@ -346,6 +346,14 @@ func (m *paneMessages) Send(ctx context.Context, access any, sessionID, text, wh
 	if err != nil {
 		return assistant.MessageView{}, err
 	}
+	// EnqueueTask's own doc (below) already found this once for namespace
+	// "nocx": sessionID here is whatever the caller named the pane by
+	// (workers.ParticipantID for an ordinary session.message call), and
+	// every step below — the queue, the delivery, the mint the pane reader
+	// spends — is keyed by the descendant's REAL backend session instead.
+	// reach.SessionID is that real id, Resolve's own translation already
+	// applied.
+	sessionID = reach.SessionID
 
 	targetKind := sessionruntime.TargetKind("")
 	if when == "now" {
@@ -484,6 +492,10 @@ func (m *paneMessages) Cancel(ctx context.Context, access any, sessionID, id str
 	if err != nil {
 		return assistant.CancelResult{}, err
 	}
+	// Send's own note applies here identically: the queue Cancel looks up
+	// is keyed by the descendant's real session (reach.SessionID), not by
+	// whatever id the caller named it with.
+	sessionID = reach.SessionID
 	key := buildMessageKey(da, reach, "caller", id)
 
 	q := m.queueFor(sessionID)

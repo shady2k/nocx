@@ -128,10 +128,16 @@ func (p *paneReader) Read(ctx context.Context, access any, sessionID string, wan
 	if err != nil {
 		return assistant.PaneRead{}, err
 	}
+	// Every call below is about the descendant's REAL backend pane — the
+	// helper lookup, the agent-observation cache, the message queue — and
+	// none of them is keyed by the caller's own vocabulary for that pane
+	// (workers.ParticipantID). Resolve's own doc says why reach.SessionID,
+	// not the sessionID parameter, is that real id from here on.
+	realSessionID := reach.SessionID
 	if p.hub == nil || p.hub.lookup == nil {
 		return assistant.PaneRead{}, fmt.Errorf("session.read: %w", errNoPaneRuntime)
 	}
-	helper, ok := p.hub.lookup.HelperFor(ctx, sessionID)
+	helper, ok := p.hub.lookup.HelperFor(ctx, realSessionID)
 	if !ok {
 		return assistant.PaneRead{}, fmt.Errorf("session.read: %w", errNoPaneRuntime)
 	}
@@ -141,14 +147,14 @@ func (p *paneReader) Read(ctx context.Context, access any, sessionID string, wan
 	// IS running but the rule could not classify this particular frame.
 	agent := ""
 	if p.agents != nil {
-		if o, agentOK := p.agents.Snapshot(sessionID); agentOK {
+		if o, agentOK := p.agents.Snapshot(realSessionID); agentOK {
 			agent = o.Agent
 		}
 	}
 
 	var lastErr error
 	for attempt := 0; attempt < maxSnapshotRetries; attempt++ {
-		snap, snapErr := helper.Snapshot(ctx, sessionID)
+		snap, snapErr := helper.Snapshot(ctx, realSessionID)
 		if snapErr != nil {
 			return assistant.PaneRead{}, fmt.Errorf("session.read: %w", snapErr)
 		}
@@ -168,14 +174,14 @@ func (p *paneReader) Read(ctx context.Context, access any, sessionID string, wan
 		messages := p.messages
 		p.mu.Unlock()
 		if messages != nil {
-			read.Pending = messages.Pending(sessionID)
-			read.DeliveryLost = messages.DeliveryLost(sessionID)
+			read.Pending = messages.Pending(realSessionID)
+			read.DeliveryLost = messages.DeliveryLost(realSessionID)
 		}
 		if want == nil {
 			return read, nil
 		}
 		kind, first, last, menu := chooseTargetRows(*want, observation, rows, frame)
-		result, mintErr := helper.Target(ctx, sessionID, proto.TargetParams{
+		result, mintErr := helper.Target(ctx, realSessionID, proto.TargetParams{
 			SnapshotID: snap.SnapshotID, Kind: string(kind), First: first, Last: last,
 		})
 		if mintErr != nil {
@@ -198,7 +204,7 @@ func (p *paneReader) Read(ctx context.Context, access any, sessionID string, wan
 		}
 		p.recordTarget(result.TokenID, targetRecord{
 			Access: da, View: view, Enrolment: reach.Participant.Liveness,
-			Chain: reach.Chain, AccessEpoch: snap.AccessEpoch, SessionID: sessionID,
+			Chain: reach.Chain, AccessEpoch: snap.AccessEpoch, SessionID: realSessionID,
 		})
 		read.Target = &view
 		return read, nil

@@ -40,23 +40,33 @@ import (
 
 // intentHeldHelper is the real seam §7.2's barrier is about: Intent (Task
 // 9's session.intent client call, session_keys.go's commitStep) is held
-// open here, and AccessBump — a real revocation's own call — enforces the
-// ordering §7.2 states in its own words: "the owner acknowledges [a bump]
-// only after every older uncommitted intent is terminal". This fake plays
-// the owner's part for both calls at once, which is what lets the test
-// assert the ordering rather than assume it: AccessBump blocks on
-// intentDone, and only Intent's own release closes it — so an AccessBump
-// that returned early would be a bug in the FAKE the test would itself
-// catch by timing out on the wrong branch, not a bug the test takes on
-// faith.
+// open here, modelling the interval the real owner spends between
+// commitIntent (Admit+Commit — already past tokenGate's own epoch check at
+// receipt) and the physical write actually finishing
+// (internal/helper/session/owner.go's writerBusy/inFlight), while
+// AccessBump plays a concurrent revocation's own call.
+//
+// This is NOT the "still queued" interval applyAccessBump's own sweep
+// refuses (internal/helper/session/access.go): that sweep only ever
+// inspects o.pending, and an intent already past commitIntent has already
+// left it. access.go's own doc says so in as many words — "an item already
+// writing when this bump arrived was gated, admitted and committed under a
+// PRIOR epoch and is left to finish: spec §7.2 bounds it by commitBy, not
+// by asking the owner to abandon bytes already in flight" — and
+// applyAccessBump resolves the bump itself the moment its sweep is done,
+// never waiting on an item that is not (any longer) in it. This fake
+// mirrors exactly that, rather than the earlier version's own invented
+// mid-flight epoch recheck, which no code here performs: AccessBump answers
+// immediately (nothing is queued behind this one intent — it is already
+// writerBusy, not pending), and the held Intent completes on its own terms
+// once released, its already-admitted epoch untouched.
 type intentHeldHelper struct {
 	intentEntered chan struct{}
 	release       chan struct{}
 	intentDone    chan struct{}
 
-	mu       sync.Mutex
-	bumpedTo uint64
-	seenAt   uint64 // the AccessEpoch Intent's own payload carried, set once
+	mu     sync.Mutex
+	seenAt uint64 // the AccessEpoch Intent's own payload carried, set once
 }
 
 func (h *intentHeldHelper) Intent(ctx context.Context, _ string, p proto.IntentParams) (proto.IntentResult, error) {
@@ -64,30 +74,25 @@ func (h *intentHeldHelper) Intent(ctx context.Context, _ string, p proto.IntentP
 	h.seenAt = p.AccessEpoch
 	h.mu.Unlock()
 	close(h.intentEntered)
+	defer close(h.intentDone)
 	select {
 	case <-h.release:
 	case <-ctx.Done():
 		return proto.IntentResult{}, ctx.Err()
 	}
-	defer close(h.intentDone)
-	h.mu.Lock()
-	bumped := h.bumpedTo
-	h.mu.Unlock()
-	if bumped != 0 && p.AccessEpoch < bumped {
-		return proto.IntentResult{State: "refused", Refusal: &proto.IntentRefusal{Cause: "access_revoked"}}, nil
-	}
+	// Already past tokenGate's own epoch check and admitted/committed
+	// (access.go: "gated, admitted and committed under a PRIOR epoch"): a
+	// concurrent bump does not reach back for it, so there is nothing left
+	// to recheck here — it executes on the epoch it was admitted under.
 	return proto.IntentResult{State: "executed", BytesWritten: 1}, nil
 }
 
-func (h *intentHeldHelper) AccessBump(ctx context.Context, _ string, above uint64) (uint64, error) {
-	h.mu.Lock()
-	h.bumpedTo = above + 1
-	h.mu.Unlock()
-	select {
-	case <-h.intentDone:
-	case <-ctx.Done():
-		return 0, ctx.Err()
-	}
+func (h *intentHeldHelper) AccessBump(_ context.Context, _ string, above uint64) (uint64, error) {
+	// applyAccessBump resolves the bump the moment its sweep of o.pending is
+	// done. With nothing queued behind the held intent — it is already
+	// writerBusy, never appended to o.pending — that sweep finds nothing,
+	// so the real owner's own ack is immediate; it never waits on
+	// intentDone, and neither does this fake.
 	return above + 1, nil
 }
 
@@ -123,17 +128,27 @@ func (r *fakeKeysReader) Read(context.Context, any, string, *sessionruntime.Targ
 	return assistant.PaneRead{}, errors.New("fakeKeysReader: Read not configured")
 }
 
-// TestAnIntentAdmittedBeforeRevocationIsRefusedAtCommit is Task 7's own
-// plan-listed acceptance criterion for this schedule, never written until
-// Task 9 built session.intent (this file's own finding above, and
-// nocx-6q1uh.13b): a real PaneKeys.Send passes its authority check (the
-// token's record resolves, StillHolds holds), is held at the real
-// session.intent call by intentHeldHelper, a real revocation runs
-// concurrently and bumps the session's access epoch, and only once the held
-// intent has been refused access_revoked by (this fake's model of) the
-// owner's own commit-point check does the revocation itself report ack —
-// never before.
-func TestAnIntentAdmittedBeforeRevocationIsRefusedAtCommit(t *testing.T) {
+// TestAnIntentAlreadyAdmittedCompletesUnrefusedByALaterRevocation replaces
+// this file's own earlier version of this schedule (nocx-6q1uh.18), which
+// carried Task 7's plan-listed acceptance criterion verbatim — "the intent
+// reaches the helper with the old epoch and is access_revoked" — against a
+// fake that invented its own mid-flight epoch recheck inside Intent to make
+// that come true. Neither the real owner (internal/helper/session/owner.go)
+// nor its bump (access.go) performs any such recheck: tokenGate's epoch
+// gate runs once, AT RECEIPT, before an intent is ever appended to
+// o.pending, and applyAccessBump's own sweep only ever inspects o.pending —
+// an intent already past commitIntent (admitted, on its way to the writer)
+// has already left it and is, in access.go's own words, "left to finish".
+// So a real PaneKeys.Send that passed its authority check and reached
+// session.intent before a revocation started is not "outrun" by it: it
+// completes on the epoch it was admitted under, and the revocation's own
+// ack does not wait for it — there is nothing left in the queue for its
+// sweep to find. AGENTS.md, "before you fix anything": the plan's own
+// criterion was written before access.go's real mechanics existed to check
+// it against; the tree is what a test may not misrepresent, so this
+// exercises the real barrier — the sweep refuses what is still QUEUED, an
+// admitted intent is not that — rather than the plan's incorrect guess.
+func TestAnIntentAlreadyAdmittedCompletesUnrefusedByALaterRevocation(t *testing.T) {
 	registrar, _ := newGroupTwoCallersRecord()
 	ctx := context.Background()
 	w, err := registrar.Register(ctx, workers.RegisterRequest{
@@ -183,19 +198,32 @@ func TestAnIntentAdmittedBeforeRevocationIsRefusedAtCommit(t *testing.T) {
 		t.Fatal("Send never reached the helper's Intent — the authority check did not pass, or admission was already closed")
 	}
 
+	// The intent has already reached the helper and is on its way to the
+	// writer (intentEntered closed) — access.go's own "already writing" —
+	// so a concurrent revoke has nothing queued behind it to sweep, and
+	// acks immediately: it must NOT wait on the held intent's own release.
 	revokeDone := make(chan map[string]string, 1)
 	go func() { revokeDone <- hub.revoke(context.Background(), []string{sessionID}) }()
 
-	// Deterministic, not a race: the held intent has not resolved (release
-	// is not yet closed), and revoke's only path to returning is the
-	// helper's AccessBump, which this fake ties to intentDone.
 	select {
 	case res := <-revokeDone:
-		t.Fatalf("revoke reported %v before the held intent was refused", res)
+		if res[sessionID] != "ack" {
+			t.Fatalf("revoke result = %v, want ack (nothing was queued behind the already-admitted intent)", res)
+		}
+	case <-time.After(watchdogBound):
+		t.Fatal("revoke waited on the already-admitted intent instead of acking immediately (access.go: nothing left in o.pending to sweep)")
+	}
+
+	// The ack above must not have touched the held intent itself: it is
+	// still exactly that — held — and settles strictly on its own release,
+	// never as a side effect of the revocation's own return.
+	select {
+	case <-helper.intentDone:
+		t.Fatal("the held intent finished before its own release fired")
 	default:
 	}
 
-	close(helper.release) // the held intent now sees the bumped epoch and refuses
+	close(helper.release) // the held intent now completes on its own terms
 
 	var outcome sendOutcome
 	select {
@@ -206,23 +234,17 @@ func TestAnIntentAdmittedBeforeRevocationIsRefusedAtCommit(t *testing.T) {
 	if outcome.err != nil {
 		t.Fatalf("Send: %v", outcome.err)
 	}
-	if outcome.res.State != "refused" || outcome.res.Refusal == nil || outcome.res.Refusal.Cause != "access_revoked" {
-		t.Fatalf("Send result = %+v, want refused/access_revoked", outcome.res)
+	if outcome.res.State != "executed" || outcome.res.BytesWritten != 1 {
+		t.Fatalf("Send result = %+v, want the already-admitted intent to complete unrefused "+
+			"(access.go: an item already writing when a bump arrives is left to finish)", outcome.res)
 	}
-	if outcome.res.BytesWritten != 0 {
-		t.Fatalf("bytesWritten = %d, want 0 for a refusal", outcome.res.BytesWritten)
-	}
-
-	select {
-	case res := <-revokeDone:
-		if res[sessionID] != "ack" {
-			t.Fatalf("confirmedBy = %v, want ack once the held intent resolved", res)
-		}
-	case <-time.After(watchdogBound):
-		t.Fatal("revoke did not return after the held intent resolved")
-	}
+	// Design §7.2: the intent carries the epoch ITS OWN authority check
+	// observed, never one re-read after the fact — this is the one part of
+	// the original finding that still holds, and the one a regression here
+	// would actually be about (session_keys.go threading rec.AccessEpoch,
+	// not a live re-read of the hub's current epoch).
 	if got := helper.seenAt; got != oldEpoch {
-		t.Fatalf("the intent that reached the helper carried AccessEpoch=%d, want the OLD epoch %d it was admitted under", got, oldEpoch)
+		t.Fatalf("the intent that reached the helper carried AccessEpoch=%d, want the OLD epoch %d its own authority check observed", got, oldEpoch)
 	}
 }
 

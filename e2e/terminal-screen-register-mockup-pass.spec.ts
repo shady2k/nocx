@@ -128,27 +128,28 @@ test('a failed block states "Exit 1" and its duration, and the word is danger-to
   await expect(block).toHaveAttribute('data-outcome', 'failure', { timeout: 15_000 })
 
   // The status word is its own ui-meta, danger-toned — a separate assertion
-  // from the group reading below (round 2: reading the isolated element
-  // alone can never see the duration, since the two are separate Metas).
+  // from the group reading below.
   const status = block.locator(STATUS)
   await expect(status).toHaveText('Exit 1')
 
-  // What a person reads is the whole right-hand group, not the isolated
-  // status word (round 2 note): duration and status are separate Metas —
-  // verified in frontend/src/scrollback/blocks.ts (settleBlockOutcome,
-  // BLOCK_KIND_RULES.command.headerRight.chips) the duration sits first in
-  // the DOM, the status word second, joined only by a flex gap — no literal
-  // separator character exists between them today. So read both facts off
-  // their own Metas rather than assume a concatenation order, and check the
-  // duration is a real, single-token value beside the word — the spec's
-  // reading (§4: "status word, a muted ·, duration").
-  const metaTexts = await block
-    .locator('.cmd-header .cmd-header-right .ui-meta')
-    .evaluateAll((els) => els.map((el) => (el.textContent ?? '').trim()))
-  expect(metaTexts).toContain('Exit 1')
-  const durationText = metaTexts.find((t) => t !== 'Exit 1')
-  expect(durationText).toMatch(/^\S+$/)
-  expect(`Exit 1 · ${durationText}`).toMatch(/^Exit 1 · \S+$/)
+  // What a person reads is the whole right-hand group, IN DOM ORDER — never
+  // composed by the test itself, which would pass on any order including
+  // the wrong one. Round 3: verified in frontend/src/scrollback/blocks.ts
+  // (settleBlockOutcome, BLOCK_KIND_RULES.command.headerRight.chips) that
+  // today's DOM order is duration then word, joined by a flex gap with no
+  // separator character at all — a defect against spec §4, now being fixed
+  // by nocx-9bpeq.12 alongside the `ui-meta__sep` separator this regex
+  // expects. So this is RED until that lands, and rightly so: no
+  // test.fail() masks it. Buttons (Stop while running, ⋮ always) are
+  // excluded by cloning the group and removing them before reading text;
+  // whitespace is normalised so the separator's own spacing does not
+  // matter.
+  const groupText = await block.locator('.cmd-header .cmd-header-right').evaluate((el) => {
+    const clone = el.cloneNode(true) as HTMLElement
+    clone.querySelectorAll('button').forEach((b) => b.remove())
+    return clone.textContent ?? ''
+  })
+  expect(normalise(groupText)).toMatch(/^Exit 1\s*·\s*\S+$/)
 })
 
 /** The composer's input box: whichever element is the nearest common ancestor

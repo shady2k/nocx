@@ -744,16 +744,18 @@ describe('BlockManager', () => {
     vi.useFakeTimers()
     try {
       const rec = manager.startBlock('find /', '~', 10)
-      const duration = rec.el.querySelector<HTMLElement>(
-        ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]',
-      )
-      // Tenths of a second, not whole seconds (spec 2026-09-15 §1.7): the
-      // ticker paints immediately on start, at the current elapsed time.
-      expect(duration?.textContent).toBe('0.0s')
+      const durationSelector =
+        ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]'
+      // The ticker paints immediately on start, at the current elapsed
+      // time (zero) — below one tenth of a second the duration figure
+      // does not exist yet at all, only the bare "Running" word (spec
+      // 2026-09-15 §1.7 round 3).
+      expect(rec.el.querySelector(durationSelector)).toBeNull()
 
       fixedNow = 66_250
       vi.advanceTimersByTime(1000)
 
+      const duration = rec.el.querySelector<HTMLElement>(durationSelector)
       expect(duration?.textContent).toBe('1m 5s')
       expect(rec.el).toBe(inner.children[0])
       expect(inner.children).toHaveLength(2)
@@ -3539,9 +3541,11 @@ describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-
     const el = settledCommand(27, 0)
     expect(el.dataset.outcome).toBe('success')
     expect(status(el)).toBeNull()
-    // Tenths of a second, not milliseconds (spec 2026-09-15 §1.7): the
-    // precise figure this rounds away is the Meta's `title` instead.
-    expect(duration(el)?.textContent).toBe('0.0s')
+    // Below a tenth of a second the figure reads `<0.1s` (spec 2026-09-15
+    // §1.7 round 3) — `0.0s` read as "took no time" or "the timer is
+    // broken" to a person watching it. The precise millisecond figure
+    // this rounds away is the Meta's `title` instead.
+    expect(duration(el)?.textContent).toBe('<0.1s')
     expect(duration(el)?.title).toBe('27ms')
   })
 
@@ -3658,7 +3662,7 @@ describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-
     expect(where.textContent).not.toMatch(/\p{Extended_Pictographic}/u)
   })
 
-  it('a running block shows the kit spinner and a ticking duration', () => {
+  it('a running block shows the kit spinner and no duration figure yet', () => {
     const el = createRunningBlock(
       1,
       'sleep 10',
@@ -3670,7 +3674,12 @@ describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-
     )
     const spinner = el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-spinner')
     expect(spinner?.getAttribute('data-size')).toBe('sm')
-    expect(duration(el)?.textContent).toBe('0.0s')
+    // Built with no ticker attached, so elapsed time never advances past
+    // the one-tenth-of-a-second floor (BlockManager._startTicker is what
+    // adds the duration once it does) — a figure that can only ever read
+    // `0.0s` would say "this took no time" rather than "not yet measured"
+    // (spec 2026-09-15 §1.7 round 3).
+    expect(duration(el)).toBeNull()
     expect(el.dataset.outcome).toBeUndefined()
   })
 
@@ -3716,10 +3725,16 @@ describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-
     expect(right.querySelector('.ui-meta__sep')).toBeNull()
     const kids = metaAndSepChildren(right)
     expect(kids).toHaveLength(1)
-    expect(kids[0].textContent).toBe('0.0s')
+    // Below a tenth of a second: `<0.1s`, not `0.0s` (spec 2026-09-15 §1.7
+    // round 3).
+    expect(kids[0].textContent).toBe('<0.1s')
   })
 
-  it('a running block reads Running, a separator, then the elapsed time — the same shape a settled block uses', () => {
+  it('a running block reads bare "Running" until the first tenth of a second elapses', () => {
+    // Built with no ticker attached (BlockManager._startTicker owns the
+    // elapsed clock), so this is exactly the "not yet reached 0.1s" state
+    // (spec 2026-09-15 §1.7 round 3): the word alone, no separator and no
+    // figure that could only ever read `0.0s`.
     const el = createRunningBlock(
       1,
       'sleep 30',
@@ -3731,11 +3746,9 @@ describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-
     )
     const right = el.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')!
     const kids = metaAndSepChildren(right)
-    expect(kids.map((c) => c.className)).toEqual(['ui-meta', 'ui-meta__sep', 'ui-meta'])
+    expect(kids.map((c) => c.className)).toEqual(['ui-meta'])
     expect(kids[0].textContent).toBe('Running')
     expect((kids[0] as HTMLElement).dataset.tone).toBe('accent')
-    expect(kids[2].textContent).toBe('0.0s')
-    expect((kids[2] as HTMLElement).dataset.column).toBe('duration')
   })
 })
 

@@ -100,9 +100,14 @@ The adapter runs `br` with `--json` on the host that holds the repository. It ne
 | blocked issues                                | `br blocked --json`                                                                                                 |
 | milestone roots                               | `br list --label milestone --status all --json`                                                                     |
 
-The set is closed in code. Every command in it is one `br capabilities --json` reports as
-`operation: read`; a test asserts that, so a future edit cannot add a write. `br sync` is
-invoked only with `--status`.
+The set is closed in code, command and flags together. `br capabilities --json` classifies
+`list`, `show`, `blocked`, `coordination` and `schema` as `read`, but `sync` and `graph` as
+`mixed` (checked with br 0.5.10), so the class of a subcommand is not enough on its own. The
+rule is instead: each entry is a command plus the flags that make it read-only
+(`sync --status` is documented as "read-only"; `graph` without `--dot` only renders), and a
+test runs the whole set in a scratch workspace and asserts that `br sync --status` reports
+the same `jsonl_content_hash` and `dirty_count` before and after — no write happened. A
+future edit cannot add a write without failing it.
 
 Measured on the nocx backlog (3777 issues): `br sync --status --json` and a one-row
 `br list` each take 0.09 s.
@@ -225,8 +230,8 @@ succeeds" test.
 
 ## 9. Security
 
-- Read-only by construction: the closed command set of §4.1, checked against
-  `br capabilities`.
+- Read-only by construction: the closed command-and-flags set of §4.1, proven by running it
+  against a scratch workspace whose `br sync --status` does not change.
 - The helper builds argv from a named operation and typed arguments; issue ids never become
   shell text.
 - The helper runs `br` only inside a repository path that came from the ledger or from the
@@ -264,7 +269,8 @@ it must load within the CSP and must not bring a second component model into the
    in a temporary workspace, never on hand-written JSON.
 5. **Discovery and forgetting** — two hosts with one origin: removing one location keeps the
    project; removing both forgets it; an unreachable host drops nothing.
-6. **Read-only** — the command set is a subset of `br capabilities` `read` operations.
+6. **Read-only** — every entry of the command set runs against a scratch `br` workspace, and
+   `jsonl_content_hash` and `dirty_count` from `br sync --status` are unchanged afterwards.
 7. **Renderer** — through what a user reaches: the overview lists a project from its initial
    state, clicking a stage opens its graph, a new revision updates the card.
 

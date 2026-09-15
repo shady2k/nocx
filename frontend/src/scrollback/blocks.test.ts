@@ -4107,20 +4107,38 @@ describe('the running block header Stop control', () => {
     expect(btn?.classList.contains('ui-icon-button')).toBe(false)
   })
 
-  it('is absent when the actions do not consider this block active', () => {
+  it('is present even when isActive is false AT CONSTRUCTION — the real manager assigns runningBlock only after this call returns (round 4, nocx-9bpeq.12)', () => {
+    // terminal-content.ts's real `runningActions.isActive` reads
+    // `blockManager.runningBlock`, and `BlockManager.startBlock` assigns
+    // that only AFTER `createRunningBlock` returns (scrollback/blocks.ts).
+    // So the real app's isActive is UNCONDITIONALLY false for the very
+    // block being built, right up until construction finishes — an
+    // `isActive: () => true` fixture never exercises that, and a `sleep 30`
+    // in e2e showed the button never appearing because of exactly this: the
+    // button's presence must not be gated on isActive at construction.
     const container = document.createElement('div')
+    const stop = vi.fn()
+    let assigned = false
     const el = createRunningBlock(
       1,
-      'sleep 10',
+      'sleep 30',
       '~',
       '',
       () => container,
       noopSelect,
       freshStore(),
       'shell',
-      { stop: vi.fn(), isActive: () => false },
+      { stop, isActive: () => assigned },
     )
-    expect(el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-button')).toBeNull()
+    // The moment `startBlock` would assign `this._runningBlock = rec`.
+    assigned = true
+
+    const btn = el.querySelector<HTMLButtonElement>(
+      ':scope > .cmd-header .cmd-header-right > .ui-button',
+    )
+    expect(btn).not.toBeNull()
+    btn!.click()
+    expect(stop).toHaveBeenCalledTimes(1)
   })
 
   it('calls stop() only while the block is still active, and never selects the block', () => {
@@ -4157,6 +4175,26 @@ describe('the running block header Stop control', () => {
     btn.click()
     expect(stop).toHaveBeenCalledTimes(1)
     el.remove()
+  })
+
+  it('is removed once the block settles, whatever settles it (round 4, nocx-9bpeq.12)', () => {
+    const el = createRunningBlock(
+      1,
+      'sleep 30',
+      '~',
+      '',
+      () => document.createElement('div'),
+      noopSelect,
+      freshStore(),
+      'shell',
+      { stop: vi.fn(), isActive: () => true },
+    )
+    const right = el.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')!
+    expect(right.querySelector('.ui-button')).not.toBeNull()
+
+    settleBlockOutcome(el, 'command', 1200, { status: 'success', exitCode: 0 })
+
+    expect(right.querySelector('.ui-button')).toBeNull()
   })
 })
 

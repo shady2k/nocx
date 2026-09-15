@@ -698,7 +698,14 @@ export function settleBlockOutcome(
   const right = block.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')
   if (!right) return
   for (const stale of right.querySelectorAll(
-    ':scope > .ui-meta, :scope > .ui-spinner, :scope > .cmd-header-waiting',
+    // `.ui-button[data-block-actions]` is the running Stop control
+    // (nocx-9bpeq.12): a settled block has no Stop, whatever kind or path
+    // settled it. The ordinary freeze path discards the whole running
+    // element rather than mutating it, so this never fires there in
+    // practice — it is here for whatever settles a block WITHOUT replacing
+    // it, present or future, rather than something only the common path
+    // is trusted to get right.
+    ':scope > .ui-meta, :scope > .ui-spinner, :scope > .cmd-header-waiting, :scope > .ui-button[data-block-actions]',
   )) {
     stale.remove()
   }
@@ -1463,14 +1470,24 @@ export function createRunningBlock(
   const right = header.querySelector('.cmd-header-right')
 
   // Stop, the visible door (spec 2026-09-15 §4): the ⋮ menu keeps its own
-  // Stop item as the second door to the same handler, below. Present only
-  // while the actions actually belong to THIS block — the same guard the
-  // menu item uses — and always visible (not opacity-hidden like ⋮), so it
-  // never asks a person to discover it by hovering. `data-block-actions` is
-  // the ⋮ button's own escape hatch from block-selection and the pane's
+  // Stop item as the second door to the same handler, below. Built whenever
+  // running actions are injected at all (round 4, nocx-9bpeq.12) — NOT
+  // gated on `running.isActive(wrapper)` here, because in the real app
+  // (terminal-content.ts's `runningActions.isActive`) that reads
+  // `blockManager.runningBlock`, which this very call is IN THE MIDDLE OF
+  // setting (`startBlock` assigns it only after `createRunningBlock`
+  // returns) — so at construction it is always false and the button was
+  // never built at all, on every real running command; a unit test that
+  // injected `isActive: () => true` unconditionally missed this because it
+  // never asked what the real manager answers DURING construction. Whether
+  // the button DOES anything is still gated on `isActive` at CLICK time,
+  // below, which is the fact that can legitimately change after the block
+  // exists. Always visible (not opacity-hidden like ⋮), so it never asks a
+  // person to discover it by hovering. `data-block-actions` is the ⋮
+  // button's own escape hatch from block-selection and the pane's
   // focus-bounce listener (`wireBlockSelection` below, terminal-content.ts);
   // reusing it here is the SAME mechanism, not a second one.
-  if (right && running?.isActive(wrapper)) {
+  if (right && running) {
     const stop = createButton({
       label: 'Stop',
       ariaLabel: 'Stop',

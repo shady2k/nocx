@@ -2,7 +2,7 @@ import { grantRows, type GrantBlock } from './ask-entry'
 import { FloatingPanel, type FloatingPanelRow } from './ui/floating-panel'
 import { createIconButton } from './ui/icon-button-element'
 import { createButton } from './ui/button-element'
-import { CloseIcon } from './ui/icons'
+import { CloseIcon, iconElement } from './ui/icons'
 
 export type { GrantBlock }
 
@@ -188,7 +188,7 @@ export class GrantController {
     const button = createIconButton({
       size: 'xs',
       ariaLabel: 'Dismiss this mark',
-      icon: () => CloseIcon({}) as Element,
+      icon: () => iconElement(CloseIcon),
       attrs: { 'data-action': 'dismiss-grant', 'data-item-id': itemId },
       onClick: (event) => {
         event.stopPropagation()

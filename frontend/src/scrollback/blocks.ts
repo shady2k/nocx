@@ -31,6 +31,7 @@ import { createMeta, createMetaSeparator, updateMeta, type MetaOptions } from '.
 import { createSpinner } from '../ui/spinner-element'
 import { createCommandBlockFrame, setHeaderInProgress } from '../ui/command-block-frame'
 import { markShellCommand } from '../ui/shell-command'
+import { createAppVisibility, type AppVisibility } from '../app-visible'
 import { createComponent } from 'solid-js'
 import { render } from 'solid-js/web'
 import { ContextMenu, type ContextMenuItem } from '../ui/context-menu'
@@ -1857,6 +1858,17 @@ export interface BlockManagerOpts {
    *  manager opens; this manager neither summons nor signals anything.
    *  Absent in a bare-bones embedding, and then the menu is what it was. */
   runningActions?: RunningBlockActions
+  /** The document's visibility, for the running duration ticker
+   *  (`_startTicker`): the app has ONE owner for `document.hidden`
+   *  (app-visible.ts — "panels must not read document.hidden themselves or
+   *  each invent a subtly different gate"; enforced by grant.test.ts's
+   *  "keeps direct document visibility reads in the app visibility
+   *  module"), so this manager reads it through that module too rather
+   *  than a second raw read. Defaults to a fresh `createAppVisibility()`
+   *  when absent; a caller that already holds the application's one
+   *  instance (sidebar.tsx) may pass it instead. Injectable mainly so a
+   *  test can supply a fake without touching the real `document`. */
+  appVisibility?: AppVisibility
 }
 
 export class BlockManager {
@@ -1903,6 +1915,11 @@ export class BlockManager {
   /** Reads back what a tool call returned — see BlockManagerOpts. */
   private _toolResult?: ToolResultSource
   private _runningActions?: RunningBlockActions
+  /** The one owner of `document.hidden` (app-visible.ts) — see
+   *  BlockManagerOpts.appVisibility. Owned by this manager when the caller
+   *  did not supply one, so `dispose()` destroys it exactly then. */
+  private _appVisibility: AppVisibility
+  private _ownsAppVisibility: boolean
   /** The attempt id the running block is bound to (ADR-0024 §7 projection).
    *  Set when the published running fact binds the block; cleared when the
    *  block freezes or the scrollback is cleared. */
@@ -1969,6 +1986,8 @@ export class BlockManager {
     this._dump = opts.dump
     this._toolResult = opts.toolResult
     this._runningActions = opts.runningActions
+    this._ownsAppVisibility = opts.appVisibility === undefined
+    this._appVisibility = opts.appVisibility ?? createAppVisibility()
   }
 
   /** THE ONE DOOR into `.scrollback-inner`. Everything this manager shows
@@ -2441,9 +2460,15 @@ export class BlockManager {
     }
     // A hidden tab gains nothing from repainting ten times a second — this
     // PAUSES the timer itself rather than merely skipping the paint inside
-    // it, and `visibilitychange` repaints once, immediately, on return
-    // (`document.hidden` is the same signal wake-report and the
-    // terminal-link disarm timer already read off `document`).
+    // it, and `visibilitychange` repaints once, immediately, on return.
+    // The BOOLEAN comes from `this._appVisibility` (app-visible.ts), the
+    // app's one owner of `document.hidden` — never a second raw read here
+    // (grant.test.ts's "keeps direct document visibility reads in the app
+    // visibility module"). Listening to `visibilitychange` directly is
+    // still fine (dispatcher.ts, wake-report.ts and terminal-links/
+    // armed.ts each do too, for their own different lifecycle questions,
+    // per app-visible.ts's own header comment) — only the VALUE has one
+    // owner, not the event.
     const resume = (): void => {
       if (this._ticker !== null) return
       paint()
@@ -2455,12 +2480,12 @@ export class BlockManager {
       this._ticker = null
     }
     this._tickerVisibility = () => {
-      if (document.hidden) pause()
-      else resume()
+      if (this._appVisibility.visible()) resume()
+      else pause()
     }
     document.addEventListener('visibilitychange', this._tickerVisibility)
-    if (document.hidden) paint()
-    else resume()
+    if (this._appVisibility.visible()) resume()
+    else paint()
   }
 
   private _stopTicker(): void {
@@ -3136,5 +3161,10 @@ export class BlockManager {
 
   dispose(): void {
     this.clearAll()
+    // Only when THIS manager created its own instance (BlockManagerOpts.
+    // appVisibility absent): a caller-supplied one — the application's
+    // shared instance (sidebar.tsx) — outlives any one manager and is not
+    // this manager's to tear down.
+    if (this._ownsAppVisibility) this._appVisibility.destroy()
   }
 }

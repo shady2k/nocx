@@ -111,6 +111,7 @@ func (o *sessionOwner) performDetach() {
 	}
 	o.inFlight = nil
 	o.writerBusy = false
+	o.inFlightFlag.Store(false)
 	o.resolve(fi.item, ownerResult{
 		State:      sessionruntime.IntentStateFailed,
 		FenceAfter: fi.fence,

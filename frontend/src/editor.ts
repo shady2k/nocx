@@ -574,6 +574,18 @@ export class CommandEditor {
     })
     this.frame.submit.appendChild(this.submitButton)
     this.updateSubmitEnabled('')
+    // Establish the correct initial label from `actions` directly, rather
+    // than leaving the button's construction-time default ('Run command')
+    // to stand until the host's first setTargetExtensions() call. Every
+    // current caller happens to call setTargetExtensions immediately after
+    // constructing the editor (terminal-content.ts), so this was never
+    // visibly wrong in the shipped app — but it made the button's
+    // correctness an implicit ordering contract with the caller instead of
+    // a fact this class establishes about itself. A host constructed with a
+    // non-default active target (or a future caller that defers the first
+    // setTargetExtensions) would otherwise show "Run command" while Enter
+    // actually asks a question, until the next switch repainted it.
+    this.updateSubmitLabel()
 
     // Key handling: capture on the card, so our decisions run before CM6's
     // own contentDOM handlers no matter what keymap the caller installs

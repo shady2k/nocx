@@ -281,6 +281,10 @@ func newS14RealStand(t *testing.T, mockDir, stateDir string) *s14RealStand {
 	// first (see its own doc).
 	screen := newPaneScreen(slogger, reg, local, nil)
 	hub := newPaneAccessHub(record, screen, systemMonoClock{})
+	// See newS14Stand's own note (session_surface_happypath_test.go): a
+	// caller names a descendant by workers.spawn's participant id, and
+	// Resolve needs enrol's translation to reach its real backend session.
+	hub.BindParticipants(enrol)
 	reader := newPaneReader(hub, realWatch, paneDrivers)
 	keysImpl := newPaneKeys(reader, hub)
 	messagesImpl := newPaneMessages(keysImpl, reader, hub, paneDrivers, time.Now())
@@ -330,7 +334,18 @@ func newS14RealStand(t *testing.T, mockDir, stateDir string) *s14RealStand {
 		t.Fatalf("open coordinator session: %v", err)
 	}
 	coord := coordOpened.Session
-	if err := reg.RecordOwnedProcessPID(coord.ID(), coordOpened.OwnedProcessPID); err != nil {
+	// The admitting pid is THIS TEST PROCESS's own, not the real shell's
+	// (coordOpened.OwnedProcessPID) that the real local helper just forked:
+	// the MCP client below dials the tool endpoint's unix socket directly
+	// from this process, so admittedPeer's local arm pins peer.PID against
+	// whatever root is recorded here (worker_auth.go's admittedPeer) — a
+	// root naming the real shell would leave this process outside that
+	// tree and every workers.spawn call would refuse ErrNotEnrolled, which
+	// is exactly what this stand did before this fix. newS14Stand
+	// (session_surface_happypath_test.go) already records os.Getpid() for
+	// the identical reason, over its own fake PTY factory instead of a real
+	// helper's.
+	if err := reg.RecordOwnedProcessPID(coord.ID(), os.Getpid()); err != nil {
 		t.Fatalf("record coordinator root: %v", err)
 	}
 	if err := grid.Watch(string(coord.ID()), 80, 24); err != nil {

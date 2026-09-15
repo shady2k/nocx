@@ -151,6 +151,20 @@ func (s workerAuthSessionOverride) ID() session.ID {
 	return s.Session.ID()
 }
 
+// Identity answers the same way ID does: fall back to the embedded session
+// when there is one, and answer the zero value when there is none, rather
+// than promoting a nil embedded interface's method set into a nil pointer
+// dereference. Admit (worker_auth.go) reads Identity() unconditionally on
+// every admitted session — real sessions always have one, so a fixture built
+// without one supplies the answer itself instead of leaving the promotion to
+// panic the caller that asks.
+func (s workerAuthSessionOverride) Identity() session.Identity {
+	if s.Session == nil {
+		return session.Identity{}
+	}
+	return s.Session.Identity()
+}
+
 func (s workerAuthSessionOverride) Kind() session.Kind { return s.kind }
 func (s workerAuthSessionOverride) Host() string       { return s.host }
 

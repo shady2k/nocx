@@ -2268,6 +2268,15 @@ func New(opts ...Option) (*App, error) {
 	// watcher and the calibration already share (paneWatch is also this
 	// reader's answer for "what agent does this pane run").
 	accessHub := newPaneAccessHub(workerRecord, screenSource, systemMonoClock{})
+	// A caller of session.read/keys/message names a descendant by
+	// workers.spawn's own "id" (workers.ParticipantID,
+	// contracts/tools/workers.spawn.schema.json's result) — the only id it
+	// is ever given — while Resolve and every helper call beneath it are
+	// keyed by that pane's REAL backend session
+	// (paneAccessParticipants' own doc, pane_access.go). workerEnrol is the
+	// one place this backend already tracks that translation globally, for
+	// every participant regardless of nesting depth.
+	accessHub.BindParticipants(workerEnrol)
 	toolAuthorizer.BindPaneAccess(accessHub)
 	descendantPaneReader := newPaneReader(accessHub, paneWatch, paneDrivers)
 	toolAuthorizer.BindSessionReads(descendantPaneReader)

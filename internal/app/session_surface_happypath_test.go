@@ -498,6 +498,13 @@ func newS14Stand(t *testing.T) *s14Stand {
 	// the file doc for exactly what that substitutes and what it does not.
 	helper := newS14FakeHelper(t, paneDrivers)
 	hub := newPaneAccessHub(record, helper, systemMonoClock{})
+	// The real composition root's own wiring (app.go): a caller names a
+	// descendant by workers.spawn's participant id, never its real backend
+	// session, so Resolve needs enrol's own translation to find it — exactly
+	// why s14Spawn aliases the fake helper onto BOTH spellings (this file's
+	// doc on s14FakeHelper), because production code resolves through this
+	// binding rather than ever seeing the participant id again downstream.
+	hub.BindParticipants(enrol)
 	reader := newPaneReader(hub, realWatch, paneDrivers)
 	keysImpl := newPaneKeys(reader, hub)
 	messagesImpl := newPaneMessages(keysImpl, reader, hub, paneDrivers, time.Now())

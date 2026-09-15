@@ -119,6 +119,27 @@ func newFakeMsgReader(boxText string) *fakeMsgReader {
 	}
 }
 
+// mintInputTarget mints a target through reader.Read exactly as a caller's
+// own prior session.read would (design §8.1: "when=now requires an input or
+// working target"), and returns its tokenID — empty when the box was not
+// currently identifiable as sessionruntime.TargetInput, which is the same
+// case a real session.read leaves a caller with no tokenId to present.
+// pane_messages.go's Send validates this tokenId before ever building a
+// message record, so every "now" send below must mint one first: a caller
+// that never read one is not a caller the production code admits.
+func mintInputTarget(t *testing.T, reader *fakeMsgReader, access any, sessionID string) string {
+	t.Helper()
+	want := sessionruntime.TargetInput
+	read, err := reader.Read(context.Background(), access, sessionID, &want, nil)
+	if err != nil {
+		t.Fatalf("mint input target: %v", err)
+	}
+	if read.Target == nil {
+		return ""
+	}
+	return read.Target.TokenID
+}
+
 func (r *fakeMsgReader) setBox(text string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -271,7 +292,8 @@ func TestARepeatedIDReturnsTheRecordedPhase(t *testing.T) {
 	keys := happyKeys(reader, "hello")
 	pm := newTestPaneMessages(t, hub, reader, keys)
 
-	first, err := pm.Send(context.Background(), access, sessionID, "hello", "now", "id-1", "")
+	token := mintInputTarget(t, reader, access, sessionID)
+	first, err := pm.Send(context.Background(), access, sessionID, "hello", "now", "id-1", token)
 	if err != nil {
 		t.Fatalf("first send: %v", err)
 	}
@@ -280,7 +302,12 @@ func TestARepeatedIDReturnsTheRecordedPhase(t *testing.T) {
 	}
 	pastesBefore := keys.callCount()
 
-	second, err := pm.Send(context.Background(), access, sessionID, "hello", "now", "id-1", "")
+	// The idempotent replay is answered from the record before the tokenId
+	// is ever consulted for a live target — same key, same hash — but a
+	// "now" send still requires ONE, so a fresh mint stands in for whatever
+	// tokenId the retrying caller's own second session.read would have named.
+	token2 := mintInputTarget(t, reader, access, sessionID)
+	second, err := pm.Send(context.Background(), access, sessionID, "hello", "now", "id-1", token2)
 	if err != nil {
 		t.Fatalf("repeated send: %v", err)
 	}
@@ -298,10 +325,12 @@ func TestAReusedIDWithADifferentPayloadIsRefused(t *testing.T) {
 	keys := happyKeys(reader, "hello")
 	pm := newTestPaneMessages(t, hub, reader, keys)
 
-	if _, err := pm.Send(context.Background(), access, sessionID, "hello", "now", "id-1", ""); err != nil {
+	token := mintInputTarget(t, reader, access, sessionID)
+	if _, err := pm.Send(context.Background(), access, sessionID, "hello", "now", "id-1", token); err != nil {
 		t.Fatalf("first send: %v", err)
 	}
-	if _, err := pm.Send(context.Background(), access, sessionID, "goodbye", "now", "id-1", ""); err == nil {
+	token2 := mintInputTarget(t, reader, access, sessionID)
+	if _, err := pm.Send(context.Background(), access, sessionID, "goodbye", "now", "id-1", token2); err == nil {
 		t.Fatal("send with the same id and a different payload succeeded, want id_reused")
 	}
 }
@@ -334,10 +363,14 @@ func TestKeysDifferingOnlyInControllerIdentityOrAdmissionEpochOrParticipantIncar
 	sessA := register(controllerA)
 	accessEpoch1 := hub.Bind(controllerA, session.Identity{InstanceID: "backend-A", Epoch: 1}, EndpointAuthority{AdmissionEpoch: 1})
 	accessEpoch2 := hub.Bind(controllerA, session.Identity{InstanceID: "backend-A", Epoch: 1}, EndpointAuthority{AdmissionEpoch: 2})
-	if _, err := pm.Send(ctx, accessEpoch1, sessA, "hi", "now", "same-id", ""); err != nil {
+	// Each distinct access below is minted its OWN tokenId: the fake reader
+	// records a target against the exact access it was minted under
+	// (rec.Access != da refuses a token minted under someone else's), the
+	// same binding a real session.read would carry.
+	if _, err := pm.Send(ctx, accessEpoch1, sessA, "hi", "now", "same-id", mintInputTarget(t, reader, accessEpoch1, sessA)); err != nil {
 		t.Fatalf("send under epoch 1: %v", err)
 	}
-	if _, err := pm.Send(ctx, accessEpoch2, sessA, "hi", "now", "same-id", ""); err != nil {
+	if _, err := pm.Send(ctx, accessEpoch2, sessA, "hi", "now", "same-id", mintInputTarget(t, reader, accessEpoch2, sessA)); err != nil {
 		t.Fatalf("send under epoch 2 with the same id collided with epoch 1's record: %v", err)
 	}
 
@@ -345,13 +378,13 @@ func TestKeysDifferingOnlyInControllerIdentityOrAdmissionEpochOrParticipantIncar
 	controllerB := "sess-collide-B"
 	sessB := register(controllerB)
 	accessB := hub.Bind(controllerB, session.Identity{InstanceID: "backend-A", Epoch: 1}, EndpointAuthority{AdmissionEpoch: 1})
-	if _, err := pm.Send(ctx, accessB, sessB, "hi", "now", "same-id", ""); err != nil {
+	if _, err := pm.Send(ctx, accessB, sessB, "hi", "now", "same-id", mintInputTarget(t, reader, accessB, sessB)); err != nil {
 		t.Fatalf("send under a different controller with the same id collided: %v", err)
 	}
 
 	// Different backend identity (session.Identity), same controller and epoch.
 	accessIdentity2 := hub.Bind(controllerA, session.Identity{InstanceID: "backend-B", Epoch: 1}, EndpointAuthority{AdmissionEpoch: 1})
-	if _, err := pm.Send(ctx, accessIdentity2, sessA, "hi", "now", "same-id", ""); err != nil {
+	if _, err := pm.Send(ctx, accessIdentity2, sessA, "hi", "now", "same-id", mintInputTarget(t, reader, accessIdentity2, sessA)); err != nil {
 		t.Fatalf("send under a different session.Identity with the same id collided: %v", err)
 	}
 }
@@ -364,7 +397,12 @@ func TestTextInTheBoxRefusesThePaste(t *testing.T) {
 	keys := happyKeys(reader, "hello")
 	pm := newTestPaneMessages(t, hub, reader, keys)
 
-	view, err := pm.Send(context.Background(), access, sessionID, "hello", "now", "id-1", "")
+	// A session.read minted before the text was typed still names a live
+	// input target — minting never inspects box content, only the target
+	// kind — so the refusal below comes from pasteReady's own fresh mint
+	// reading the box's current (non-empty) text, not from this gate.
+	token := mintInputTarget(t, reader, access, sessionID)
+	view, err := pm.Send(context.Background(), access, sessionID, "hello", "now", "id-1", token)
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -382,11 +420,18 @@ func TestTextInTheBoxRefusesThePaste(t *testing.T) {
 func TestAMenuAppearingBeforeThePasteRefusesTooWhenNow(t *testing.T) {
 	hub, access, sessionID := newMessagesTestAccess(t, "menu-before")
 	reader := newFakeMsgReader("")
-	reader.setAvailable("")
 	keys := happyKeys(reader, "hello")
 	pm := newTestPaneMessages(t, hub, reader, keys)
 
-	view, err := pm.Send(context.Background(), access, sessionID, "hello", "now", "id-1", "")
+	// The caller's own session.read minted this tokenId while the box was
+	// still identifiable; the menu covers it only AFTER that read returns —
+	// so Send's own tokenId gate is satisfied, and the refusal below comes
+	// from pasteReady's fresh mint (design §8.2 step 1) finding no target of
+	// the wanted kind any more, exactly as "someone is typing" does.
+	token := mintInputTarget(t, reader, access, sessionID)
+	reader.setAvailable("")
+
+	view, err := pm.Send(context.Background(), access, sessionID, "hello", "now", "id-1", token)
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -435,7 +480,8 @@ func TestAMessageDuringATurnIsSubmitted(t *testing.T) {
 	keys := happyKeys(reader, "hello there")
 	pm := newTestPaneMessages(t, hub, reader, keys)
 
-	view, err := pm.Send(context.Background(), access, sessionID, "hello there", "now", "id-1", "")
+	token := mintInputTarget(t, reader, access, sessionID)
+	view, err := pm.Send(context.Background(), access, sessionID, "hello there", "now", "id-1", token)
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -492,7 +538,8 @@ func TestAnEchoThatNeverAppearsLeavesPartialAndNoEnter(t *testing.T) {
 	pm := newTestPaneMessages(t, hub, reader, keys)
 	pm.echoWait = 5 * time.Millisecond
 
-	view, err := pm.Send(context.Background(), access, sessionID, "hello", "now", "id-1", "")
+	token := mintInputTarget(t, reader, access, sessionID)
+	view, err := pm.Send(context.Background(), access, sessionID, "hello", "now", "id-1", token)
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -511,11 +558,6 @@ func TestAnEchoThatNeverAppearsLeavesPartialAndNoEnter(t *testing.T) {
 func TestAMenuBetweenPasteAndEnterRefusesTheEnter(t *testing.T) {
 	hub, access, sessionID := newMessagesTestAccess(t, "menu-between")
 	reader := newFakeMsgReader("")
-	// Mint order for one delivery: pasteReady (#1), pasteStep (#2),
-	// waitForEcho's first (successful) read (#3), enterStep (#4) — the
-	// menu appears starting at #4, after the echo was already confirmed.
-	reader.flipAfterMints = 3
-	reader.flippedAvailable = ""
 	keys := &fakeMsgKeys{
 		pasteResult: assistant.KeysResult{State: "executed", BytesWritten: 5},
 		enterResult: assistant.KeysResult{State: "executed"},
@@ -527,7 +569,16 @@ func TestAMenuBetweenPasteAndEnterRefusesTheEnter(t *testing.T) {
 	}
 	pm := newTestPaneMessages(t, hub, reader, keys)
 
-	view, err := pm.Send(context.Background(), access, sessionID, "hello", "now", "id-1", "")
+	// Mint order: this test's own session.read (#1) — a "now" send needs
+	// its tokenId — then, inside the delivery, pasteReady (#2), pasteStep
+	// (#3), waitForEcho's first (successful) read (#4), enterStep (#5) —
+	// the menu appears starting at #5, after the echo was already
+	// confirmed.
+	token := mintInputTarget(t, reader, access, sessionID)
+	reader.flipAfterMints = 4
+	reader.flippedAvailable = ""
+
+	view, err := pm.Send(context.Background(), access, sessionID, "hello", "now", "id-1", token)
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -609,7 +660,8 @@ func TestCancelAfterClaimIsTooLateAndThePasteIsWritten(t *testing.T) {
 	}
 	pmUnderTest = newTestPaneMessages(t, hub, reader, keys)
 
-	view, err := pmUnderTest.Send(context.Background(), access, sessionID, "hello", "now", "id-1", "")
+	token := mintInputTarget(t, reader, access, sessionID)
+	view, err := pmUnderTest.Send(context.Background(), access, sessionID, "hello", "now", "id-1", token)
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -666,7 +718,8 @@ func TestRevocationAfterPasteLeavesPartialAndTakesNoFurtherStep(t *testing.T) {
 	}
 	pm := newTestPaneMessages(t, hub, reader, keys)
 
-	view, err := pm.Send(ctx, access, sessionID, "hello", "now", "id-1", "")
+	token := mintInputTarget(t, reader, access, sessionID)
+	view, err := pm.Send(ctx, access, sessionID, "hello", "now", "id-1", token)
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -697,7 +750,8 @@ func TestACallerDisconnectDoesNotCancelADelivery(t *testing.T) {
 	}
 	pm := newTestPaneMessages(t, hub, reader, keys)
 
-	view, err := pm.Send(ctx, access, sessionID, "hello", "now", "id-1", "")
+	token := mintInputTarget(t, reader, access, sessionID)
+	view, err := pm.Send(ctx, access, sessionID, "hello", "now", "id-1", token)
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -724,7 +778,8 @@ func TestARestartReportsDeliveryStateLost(t *testing.T) {
 	keys := happyKeys(reader, "hi")
 	before := time.Now()
 	pm1 := newPaneMessages(keys, reader, hub, messagesTestRules(t), before)
-	if _, err := pm1.Send(context.Background(), access, sessionID, "hi", "now", "id-1", ""); err != nil {
+	token := mintInputTarget(t, reader, access, sessionID)
+	if _, err := pm1.Send(context.Background(), access, sessionID, "hi", "now", "id-1", token); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	if lost := pm1.DeliveryLost(sessionID); lost != nil {

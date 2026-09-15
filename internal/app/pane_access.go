@@ -97,6 +97,24 @@ type paneHelperLookup interface {
 	HelperFor(ctx context.Context, sessionID string) (paneHelpers, bool)
 }
 
+// paneAccessParticipants answers a participant's own liveness — in
+// particular its real backend session id — from the id workers.spawn and
+// workers.holdings hand a coordinator (workers.ParticipantID), which is the
+// ONLY id a coordinator ever has for a descendant. *workers.Registrar
+// exposes no public lookup from a bare participant id to its Liveness (only
+// ParticipantBySession, keyed by the real session id Resolve must produce
+// in the first place); *workerEnrolments (workers.go) already tracks this
+// globally, for every participant regardless of nesting depth, because it
+// is what Await already needed. Nil is a legitimate build (a test that
+// binds no participant lookup): resolveRealSessionID then passes sessionID
+// through unchanged, which is correct for every fixture whose fake spawner
+// sets Liveness.SessionID equal to the participant id in the first place
+// (worker_two_callers_test.go's newGroupTwoCallersRecord, and everything
+// built over it).
+type paneAccessParticipants interface {
+	livenessOf(p workers.ParticipantID) (workers.Liveness, bool)
+}
+
 // monotonicClock is Now() on CLOCK_MONOTONIC (or the Darwin equivalent),
 // narrowed to what revoke needs: a reading to compare a recorded commitBy
 // against. Task 5 supplies the real clock; a fake lets a test drive "the
@@ -166,11 +184,25 @@ type DescendantPaneAccess struct {
 // it — an authority nothing bound to a live record — answers the same way
 // a caller that cannot reach anything does: not reachable, never a panic
 // and never a different error a caller would have to special-case.
+//
+// sessionID, as it arrives here, is whatever the CALLER named the
+// descendant by — contracts/tools/session.read.schema.json: "name a worker
+// you spawned ... to read a descendant's pane", and workers.spawn's own
+// result names that value "the worker's id", i.e. workers.ParticipantID.
+// Registrar.Resolve is keyed by the real backend session id instead
+// (internal/workers/access_test.go's own TestAGrandchildIsReachableAnd
+// ANeighbourIsNot resolves by a session id it deliberately keeps distinct
+// from the participant id), so this translates before ever calling it —
+// see resolveRealSessionID. The Reach this returns therefore carries the
+// REAL session id in Reach.SessionID; a caller that goes on to read this
+// pane's screen or spend a target must use THAT, not its own original
+// sessionID, for every subsequent helper call (paneReader.Read,
+// paneMessages.Send already do).
 func (a *DescendantPaneAccess) Resolve(ctx context.Context, sessionID string, e workers.Effect) (workers.Reach, error) {
 	if a == nil || a.hub == nil || a.hub.registrar == nil {
 		return workers.Reach{}, workers.ErrNotReachable
 	}
-	return a.hub.registrar.Resolve(ctx, a.controller, sessionID, e)
+	return a.hub.registrar.Resolve(ctx, a.controller, a.hub.resolveRealSessionID(sessionID), e)
 }
 
 // Controller is the bound session every Resolve on this capability is about.
@@ -234,9 +266,10 @@ func (a *DescendantPaneAccess) AsKernel() (KernelAuthority, bool) {
 // guards only this hub's own bookkeeping (pending, epochs, commitBy), and
 // every helper call happens with mu released.
 type paneAccessHub struct {
-	registrar *workers.Registrar
-	lookup    paneHelperLookup
-	clock     monotonicClock
+	registrar    *workers.Registrar
+	lookup       paneHelperLookup
+	clock        monotonicClock
+	participants paneAccessParticipants
 
 	mu       sync.Mutex
 	pending  map[string]bool
@@ -265,6 +298,29 @@ func newPaneAccessHub(registrar *workers.Registrar, lookup paneHelperLookup, clo
 // call's own parameters.
 func (h *paneAccessHub) Bind(controller string, identity session.Identity, a Authority) *DescendantPaneAccess {
 	return &DescendantPaneAccess{hub: h, controller: controller, identity: identity, authority: a}
+}
+
+// BindParticipants wires the participant-id -> liveness lookup Resolve
+// needs (paneAccessParticipants' own doc). Composition-root-only, like the
+// other Bind* calls pane_access.go's file doc names — never per-call.
+func (h *paneAccessHub) BindParticipants(p paneAccessParticipants) {
+	h.participants = p
+}
+
+// resolveRealSessionID is Resolve's own translation step: see
+// paneAccessParticipants' doc for why it exists and why "not found" passes
+// sessionID through unchanged rather than refusing here — that refusal is
+// Registrar.Resolve's own to make, from ParticipantBySession, so a genuinely
+// unreachable id still answers ErrNotReachable rather than some other
+// sentence about a lookup this function is not authoritative over.
+func (h *paneAccessHub) resolveRealSessionID(sessionID string) string {
+	if h.participants == nil {
+		return sessionID
+	}
+	if l, ok := h.participants.livenessOf(workers.ParticipantID(sessionID)); ok && l.SessionID != "" {
+		return l.SessionID
+	}
+	return sessionID
 }
 
 // noteCommitBy records the latest commitBy this coordinator has sent an

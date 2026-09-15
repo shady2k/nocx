@@ -81,7 +81,16 @@ button.ui-mode-indicator[data-tone] {
    control's own padding and type, which is what a placement rule may not.
    The 14px chevron and the trailing divider need no override here — the
    base rules above already draw both at that size. */
-.ui-mode-indicator[data-variant='field'] {
+/* `button.` prefixed, matching the tone-reset rule's own element+class+
+   attribute specificity (0,2,1) above it: without it, `button.ui-mode-
+   indicator[data-tone] { padding: 0 }` (line 27) OUTRANKS a bare
+   `.ui-mode-indicator[data-variant='field']` (0,2,0) regardless of source
+   order, and this rule's `padding-inline` never wins — measured against
+   `03-split-and-files.png`, where the round-1 shape put "Run ⌄" flush
+   against the field's left border instead of inset. Tied specificity here
+   is broken by source order (this rule is later in the file), which is
+   what makes `padding-inline` win now. */
+button.ui-mode-indicator[data-variant='field'] {
   box-sizing: border-box;
   padding-inline: var(--space-3);
   min-width: var(--terminal-mode-segment-width);

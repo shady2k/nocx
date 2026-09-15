@@ -36,6 +36,7 @@ import { createButton } from './ui/button-element'
 import { createIconButton } from './ui/icon-button-element'
 import { ArrowUpIcon, iconElement } from './ui/icons'
 import { createComposerFrame, type ComposerFrameHandle } from './ui/composer-frame'
+import { markShellCommand } from './ui/shell-command'
 import {
   createPromptContext,
   updatePromptContext,
@@ -550,6 +551,16 @@ export class CommandEditor {
     this.view.contentDOM.classList.add('nocx-editor-input')
     this.view.contentDOM.spellcheck = false
     this.view.contentDOM.setAttribute('autocapitalize', 'off')
+    // The terminal-command presentation (spec §1.6): the same `.tok-*`
+    // tokens a block's header paints (blocks.ts's own `markShellCommand`
+    // call), scoped here to the editor's owning host — `contentDOM` IS
+    // `.cm-content`, the ancestor the shell tokenizer already decorates —
+    // so a draft's `git checkout -b feat/fonts` reads with the same accent
+    // executable / body-text arguments a settled block does, never the
+    // generic `.tok-*` rainbow. Applied once, unconditionally: with Ask
+    // active there are no `.tok-*` spans inside this host to repaint, so
+    // marking it costs nothing and needs no per-target toggle.
+    markShellCommand(this.view.contentDOM)
 
     // The submit control (spec §4): an IconButton calling `submit()` only —
     // it never writes to the session directly, so the existing secret

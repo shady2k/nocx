@@ -256,7 +256,23 @@ func startWithSize(cmd *exec.Cmd, ws *pty.Winsize) (master *os.File, err error) 
 //
 // deliver is called with a slice into buf and must not retain it past the
 // call: buf is reused for the next chunk read within the same call.
+//
+// It always starts by clearing any read deadline left on the file, whether
+// or not one is set. A caller that just used InterruptRead to force a
+// parked WaitReadable to give up the master's read lock (nocx-6q1uh.18)
+// leaves that deadline expired behind it — WaitReadable's own defer clears
+// it again on ITS way out, but only if it is the thing that runs next; when
+// the readiness goroutine is not currently waiting on this fd at all (it is
+// blocked on the owner's resume signal instead, having already reported
+// back), nothing else will. An expired deadline still on the file when this
+// call begins would make it fail before a single byte is drained — the
+// exact "answered before read(2) is ever issued" hazard the note above
+// warns against, self-inflicted by the caller's own prior interrupt rather
+// than by a probe.
 func (lp *LocalPty) RawReadUntilAgain(buf []byte, deliver func([]byte)) (eof bool, err error) {
+	if err := lp.file.SetReadDeadline(time.Time{}); err != nil {
+		return false, err
+	}
 	rc, scErr := lp.file.SyscallConn()
 	if scErr != nil {
 		return false, scErr
@@ -347,6 +363,31 @@ func (lp *LocalPty) WaitReadable(ctx context.Context) error {
 // deadline.
 func (lp *LocalPty) InterruptWrite() error {
 	return lp.file.SetWriteDeadline(time.Unix(1, 0))
+}
+
+// InterruptRead is InterruptWrite's read-side twin (nocx-6q1uh.18): a read
+// deadline set in the past on the pollable file, which forces a goroutine
+// currently parked in WaitReadable to return at once instead of waiting for
+// the master to actually become readable.
+//
+// It exists because internal/poll's SyscallConn().Read holds the file's
+// read lock (fdMutex) for the WHOLE call, including while parked waiting —
+// not only while actually reading. WaitReadable and RawReadUntilAgain both
+// go through that same call, so a goroutine idling in WaitReadable on a
+// silent program holds exactly the lock a drain's RawReadUntilAgain needs,
+// and nothing was ever going to make the fd readable on its own: the
+// program is silent precisely because nobody has drained the input that
+// might have prompted it to answer. RawReadUntilAgain would then block on
+// that lock forever. InterruptRead is how a caller reclaims the lock before
+// asking for it: wake the parked wait, let it return and release the lock,
+// THEN drain.
+//
+// It is always safe to call: a WaitReadable that has already returned finds
+// nothing blocked, and re-arms an already-expired deadline harmlessly —
+// RawReadUntilAgain's own first step clears it again before it would ever
+// affect a read.
+func (lp *LocalPty) InterruptRead() error {
+	return lp.file.SetReadDeadline(time.Unix(1, 0))
 }
 
 // Shell is the binary this pty actually started, as exec resolved it: an

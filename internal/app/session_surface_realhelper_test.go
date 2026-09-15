@@ -92,7 +92,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/paneobserve"
-	"github.com/shady2k/nocx/internal/paneview/paneviewtest"
+	"github.com/shady2k/nocx/internal/paneview"
 	"github.com/shady2k/nocx/internal/peerpin"
 	"github.com/shady2k/nocx/internal/procwatch"
 	"github.com/shady2k/nocx/internal/session"
@@ -164,10 +164,42 @@ func (c *s14PinChannel) Resize(context.Context, uint16, uint16, uint16, uint16) 
 
 func (c *s14PinChannel) Done() <-chan struct{} { return c.done }
 
+// s14AdmissionRootSessionID is the fixed id the admission-root session below
+// (over an s14PinChannel) is Adopted under. Named once so the two places
+// that must agree on it — the Adopt call and s14ExemptScreen's exemption —
+// cannot drift apart the way two string literals would.
+const s14AdmissionRootSessionID = "s14-real-admission-root"
+
+// s14ExemptScreen answers paneview.Source over the real screen source,
+// except for one session id it declares always available with an empty
+// frame — nocx-gantk's fix for the admission-root session, which is
+// deliberately never opened through the real local helper (see
+// s14PinChannel's own doc) and so has no runtime the real source could ever
+// find an owner for. It still has to be "watched" (worker_auth.go's
+// admission check reads enrolments.Watched for every admitted peer, this
+// stand's own root included), which is the one thing this wrapper buys it.
+type s14ExemptScreen struct {
+	paneview.Source
+	exempt string
+}
+
+func (s *s14ExemptScreen) Available(paneID string) error {
+	if paneID == s.exempt {
+		return nil
+	}
+	return s.Source.Available(paneID)
+}
+
+func (s *s14ExemptScreen) Screen(paneID string) (paneview.Frame, error) {
+	if paneID == s.exempt {
+		return paneview.Frame{}, nil
+	}
+	return s.Source.Screen(paneID)
+}
+
 type s14RealStand struct {
 	reg      *session.Reg
 	tp       *transport.WSServer
-	grid     *paneviewtest.Views
 	store    *workers.MemoryStore
 	record   *workers.Registrar
 	endpoint *toolendpoint.Endpoint
@@ -219,7 +251,6 @@ func newS14RealStand(t *testing.T, mockDir, stateDir string) *s14RealStand {
 	t.Cleanup(func() { _ = db.Close() })
 
 	lanes := newSessionRegistry()
-	grid := paneviewtest.NewViews(logger)
 
 	// NO LOCAL PTY FACTORY (nil): app.go's own composition root comment on
 	// this exact call is the reason — every local open reaches the helper or
@@ -232,15 +263,42 @@ func newS14RealStand(t *testing.T, mockDir, stateDir string) *s14RealStand {
 	local.registry = reg
 	t.Cleanup(local.close)
 
+	// THE REAL SCREEN SOURCE (nocx-gantk), not a byte-fed fake: app.go's own
+	// composition root builds paneWatch and paneScreens over the SAME pair
+	// (newPaneScreen wrapped in paneview.NewStore) for exactly this reason —
+	// a helper-hosted pane's content lives in the helper's own emulator
+	// (ADR-0066) and is read from it live, never fed in by hand. Before this
+	// fix the pane-readiness axis (paneobserve, below) read a
+	// paneviewtest.Views that nothing in this file ever called Feed on, so
+	// every worker's pane classified as StateUnknown forever and
+	// workers.spawn timed out waiting for it to become typable — the whole
+	// point of this test using a real helper was defeated by a fake source
+	// standing in for the one thing that has to be real to prove it. This
+	// file's own doc already claimed paneScreen/helperPaneClient were in use
+	// (they are, for session.read/session.keys via `screen` below) but
+	// paneobserve and WithPaneScreens were wired to the fake anyway.
+	screen := newPaneScreen(slogger, reg, local, nil)
+	// s14AdmissionRootSessionID (below) is exempted: it is a synthetic
+	// session, adopted directly over an s14PinChannel rather than opened
+	// through the real local helper (see its own comment, further down, on
+	// why it must not be), so paneScreen.owner can never find a real
+	// generation holding it. It still has to be "watched" — worker_auth.go's
+	// admission check reads enrolments.Watched(sid) for every admitted
+	// peer, this stand's own root included — so the real source is wrapped
+	// rather than used bare, exempting the one id that will never be real.
+	paneViews := paneview.NewStore(logger, &s14ExemptScreen{
+		Source: screen, exempt: s14AdmissionRootSessionID,
+	})
+
 	enrol := newWorkerEnrolments(logger, reg)
 
 	paneDrivers, driversErr := agentdriver.NewRegistry(agentdriver.Claude())
 	if driversErr != nil {
 		t.Fatalf("pane drivers: %v", driversErr)
 	}
-	realWatch := paneobserve.New(logger, grid.Store, paneDrivers, paneobserve.Config{})
+	realWatch := paneobserve.New(logger, paneViews, paneDrivers, paneobserve.Config{})
 
-	paneEnrol, err := newPaneEnroller(logger, lanes, grid.Store, realWatch, allowPaneApproval{})
+	paneEnrol, err := newPaneEnroller(logger, lanes, paneViews, realWatch, allowPaneApproval{})
 	if err != nil {
 		t.Fatalf("pane enroller: %v", err)
 	}
@@ -256,11 +314,25 @@ func newS14RealStand(t *testing.T, mockDir, stateDir string) *s14RealStand {
 	// stand (factory.kernel = pub); the real local opener is the same seam
 	// here (app.go's own "localOpener.kernel = lifecyclePub").
 	local.kernel = pub
+	// THE OTHER HALF OF A LOCAL PANE'S LANE REGISTRATION (nocx-gantk).
+	// helper_local.go's OpenHosted calls this for EVERY local-hosted pane
+	// whenever it gets a lifecycle lane, not only a nested sudo/su child
+	// domain — app.go's own composition root wires it for exactly this
+	// reason ("A HELPER-HOSTED LOCAL PANE REGISTERS THE SAME TWO FACTS, by
+	// two seams rather than one closure"). Without it `lanes` (the
+	// lane→session map paneEnroller.Enrol reads) never learns of ANY
+	// pane's lane, local or nested, and every agent_enrol this stand's
+	// mock claude sends is refused with "the lane maps to no session" —
+	// which is what made workers.spawn time out waiting for an enrolment
+	// that could never arrive, on the very first worker this test spawns.
+	local.noteChildDomainParent = func(_ lifecycle.TransportID, lane lifecycle.LaneID, sid string) {
+		lanes.register(lane, sid)
+	}
 
 	hosted := &hostedOpeners{local: local} // remote is nil: this test opens no ssh pane
 	tp := transport.NewWSServer(logger, reg,
 		transport.WithHelperSessionOpener(hosted),
-		transport.WithPaneScreens(grid.Store),
+		transport.WithPaneScreens(paneViews),
 		transport.WithPaneObserver(realWatch),
 	)
 	realWatch.SetEmitter(tp.EmitPaneObservation)
@@ -311,8 +383,8 @@ func newS14RealStand(t *testing.T, mockDir, stateDir string) *s14RealStand {
 	// *paneScreen and helperPaneClient, talking a real *helperclient.Client
 	// to the real daemon `local` connects to. remote is nil: every session
 	// this test opens is local, and paneScreen.owner asks the local opener
-	// first (see its own doc).
-	screen := newPaneScreen(slogger, reg, local, nil)
+	// first (see its own doc). The SAME screen built above feeds both this
+	// hub and paneobserve/WithPaneScreens — one real source, not two.
 	hub := newPaneAccessHub(record, screen, systemMonoClock{})
 	// See newS14Stand's own note (session_surface_happypath_test.go): a
 	// caller names a descendant by workers.spawn's participant id, and
@@ -325,7 +397,7 @@ func newS14RealStand(t *testing.T, mockDir, stateDir string) *s14RealStand {
 	record.SetTaskQueue(messagesImpl)
 
 	registry := toolRegistry(t)
-	auth, err := newToolAuthorizer(peerpin.SystemPinner{}, reg, grid, record, workerTestWorkspace, allowWorkerApproval{})
+	auth, err := newToolAuthorizer(peerpin.SystemPinner{}, reg, paneViews, record, workerTestWorkspace, allowWorkerApproval{})
 	if err != nil {
 		t.Fatalf("tool authorizer: %v", err)
 	}
@@ -367,7 +439,7 @@ func newS14RealStand(t *testing.T, mockDir, stateDir string) *s14RealStand {
 		t.Fatalf("open coordinator session: %v", err)
 	}
 	coord := coordOpened.Session
-	if watchErr := grid.Watch(string(coord.ID()), 80, 24); watchErr != nil {
+	if watchErr := paneViews.Enrol(string(coord.ID())); watchErr != nil {
 		t.Fatalf("enrol coordinator pane: %v", watchErr)
 	}
 
@@ -393,14 +465,14 @@ func newS14RealStand(t *testing.T, mockDir, stateDir string) *s14RealStand {
 	// (composed with a nil one, on purpose — see this function's own doc),
 	// so it mints this one session for exactly that purpose instead.
 	pinCh := &s14PinChannel{done: make(chan struct{})}
-	pinSess, err := reg.Adopt(ctx, session.Config{Cols: 80, Rows: 24}, session.ID("s14-real-admission-root"), pinCh)
+	pinSess, err := reg.Adopt(ctx, session.Config{Cols: 80, Rows: 24}, session.ID(s14AdmissionRootSessionID), pinCh)
 	if err != nil {
 		t.Fatalf("adopt admission-root session: %v", err)
 	}
 	if recordErr := reg.RecordOwnedProcessPID(pinSess.ID(), os.Getpid()); recordErr != nil {
 		t.Fatalf("record admission root: %v", recordErr)
 	}
-	if watchErr := grid.Watch(string(pinSess.ID()), 80, 24); watchErr != nil {
+	if watchErr := paneViews.Enrol(string(pinSess.ID())); watchErr != nil {
 		t.Fatalf("enrol admission-root pane: %v", watchErr)
 	}
 
@@ -413,13 +485,13 @@ func newS14RealStand(t *testing.T, mockDir, stateDir string) *s14RealStand {
 			open, err := store.NonTerminal(context.Background(), workers.ID(coord.ID()))
 			return err == nil && len(open) == 0
 		})
-		grid.Withdraw(string(coord.ID()))
-		grid.Withdraw(string(pinSess.ID()))
+		paneViews.Withdraw(string(coord.ID()))
+		paneViews.Withdraw(string(pinSess.ID()))
 		_ = tp.Stop(context.Background())
 	})
 
 	return &s14RealStand{
-		reg: reg, tp: tp, grid: grid, store: store, record: record,
+		reg: reg, tp: tp, store: store, record: record,
 		endpoint: endpoint, local: local, stateDir: stateDir, coord: coord,
 	}
 }

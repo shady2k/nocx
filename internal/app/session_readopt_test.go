@@ -851,6 +851,70 @@ func TestASessionThatEndedWhileNocxWasAwayCarriesTheHostsExitStatus(t *testing.T
 	}
 }
 
+// TestAReadoptedAlreadyExitedSessionReleasesItsHelperWindow is nocx-isjh4's
+// closer 2, other door: a session whose shell died while no coordinator was
+// attached does not go on holding its helper window forever just because
+// the coordinator that eventually reads it got there through a re-adopt
+// rather than a live attach.
+//
+// It is the SAME scenario as
+// TestASessionThatEndedWhileNocxWasAwayCarriesTheHostsExitStatus, with one
+// difference that matters for what this test can observe: the adopter here
+// is a REAL *transport.WSServer, not stubAdopter — stubAdopter deliberately
+// never starts pumpToRing/monitorExit (its own doc: it exists to isolate
+// sessionReadopter's reconciliation logic from the transport), so it is
+// blind to exactly the mechanism this bead adds. AdoptExitStatus names the
+// offset this stream can never advance past; once this attachment's own
+// reader reaches it (driven by the REAL pumpToRing this WSServer starts),
+// Done fires and monitorExit runs EndSession through the ordinary path —
+// the same closer a shell exiting under a live coordinator already used.
+func TestAReadoptedAlreadyExitedSessionReleasesItsHelperWindow(t *testing.T) {
+	const exitCode = 7
+	spawner := &scriptedSpawner{}
+	svc := helpersession.New(helpersession.Options{
+		Generation: proto.GenerationID(syntheticArtifactHash),
+		Spawner:    spawner,
+		Log:        discardLogger(),
+	})
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	first := newCoordinator(t, provider)
+	binding := openHostedFixture(t, first, "pane-1")
+	first.quit()
+
+	spawner.exitWith(t, exitCode)
+	waitForHelperExit(t, svc, binding)
+
+	second := newCoordinator(t, provider)
+	tp := transport.NewWSServer(log.NewSlogAdapter(discardLogger()), second.sess)
+	t.Cleanup(func() { _ = tp.Stop(context.Background()) })
+
+	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
+	pass := &readoptPass{registry: second.reg, routes: routesFor(binding), adopter: tp}
+	reconcileSessions(context.Background(), rec, second.reg.inventories(), pass, time.Hour, quietLogger())
+
+	if len(rec.applied) != 1 || rec.applied[0].Verdict != content.VerdictLive {
+		t.Fatalf("verdict = %+v, want live: the helper still holds this session", rec.applied)
+	}
+	if _, err := second.sess.Get(session.ID(binding.SessionID)); err != nil {
+		t.Fatalf("the finished session was not taken back: %v", err)
+	}
+
+	// The wait is on observable state — the helper's own aggregate budget —
+	// polled with a bound: draining runs on the coordinator's own read-pump
+	// goroutine and has no other signal this test can watch.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if used := svc.WindowBytesInUse(); used == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the re-adopted, already-exited session never released its helper window "+
+				"(window bytes in use = %d)", svc.WindowBytesInUse())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // waitForHelperExit polls the daemon's own inventory until it reports the
 // status. Not a sleep: the entry carrying an exit is the observable event.
 func waitForHelperExit(t *testing.T, svc *helpersession.Service, p content.PendingSession) {

@@ -299,8 +299,16 @@ type AttachedSession struct {
 	// exitMu guards the immutable helper status. The notification records a
 	// snapshot before finish closes done, and WaitErr keeps returning it after
 	// close so the session layer can classify the complete interval.
-	exitMu          sync.Mutex
-	exit            *ExitStatus
+	exitMu sync.Mutex
+	exit   *ExitStatus
+	// exitFinalOffset is set only by AdoptExitStatus (nocx-isjh4): the
+	// window offset a RE-ADOPTED, already-exited session can never advance
+	// past, because the shell that would have advanced it is already gone.
+	// Guarded alongside exit; nil for every other session, including one
+	// that exits normally while THIS attachment is live (that path ends
+	// through sessionExited/finish directly and needs no target — there is
+	// always more that COULD arrive until the process is observed to end).
+	exitFinalOffset *proto.StreamOffset
 	offset          proto.StreamOffset
 	lifecycleOffset proto.StreamOffset
 	// pendingReset and pendingLifecycleReset count the live resets that have
@@ -651,13 +659,61 @@ func (a *AttachedSession) reportHole(gap *proto.Gap) {
 // number with one owner, not two answers to "how did it end". It is refused
 // once a status is already recorded, so a notification that does arrive is
 // never overwritten by a staler inventory read.
-func (a *AttachedSession) AdoptExitStatus(status ExitStatus) {
+//
+// finalOffset is the SAME inventory row's window frontier (SessionEntry.
+// Window.Written) — the offset this stream can never advance past, because
+// the shell that would have advanced it is already gone. "Reads whatever the
+// window kept, and reaches EOF" above describes the intent, not what Read
+// does on its own: take() (this file) returns only on new data or on
+// a.done, and nothing closes a.done for this attachment without this call —
+// so before this fix a coordinator that re-adopted an already-exited,
+// unattached session hung its reader forever instead of reaching EOF, and
+// neither monitorExit nor EndSession ever ran for it (nocx-isjh4, closer 2's
+// other door; found in review, not by a wire change — SessionEntry already
+// carries Window on the existing wire). checkFullyDrained below is what
+// actually closes a.done, once this attachment's own read cursor reaches
+// finalOffset — called here for the (rare) case nothing is left to read at
+// all, and again after every Read that moves the cursor toward it.
+func (a *AttachedSession) AdoptExitStatus(status ExitStatus, finalOffset proto.StreamOffset) {
 	a.exitMu.Lock()
-	if a.exit == nil {
+	already := a.exit != nil
+	if !already {
 		snapshot := status
 		a.exit = &snapshot
+		target := finalOffset
+		a.exitFinalOffset = &target
 	}
 	a.exitMu.Unlock()
+	if !already {
+		a.checkFullyDrained()
+	}
+}
+
+// checkFullyDrained ends this attachment's session (nocx-isjh4) once its own
+// read cursor has reached the point AdoptExitStatus named as the offset an
+// already-exited session's window will never advance past. A no-op when no
+// exit was ever adopted here (exitFinalOffset nil) — a session whose shell
+// exits while this coordinator holds it ends through sessionExited/finish
+// directly, with no target to compare against, because "more could still
+// arrive" is true right up to that notification.
+//
+// Finishing here reaches the SAME monitorExit path a live coordinator's own
+// shell exit does (both close a.done through finish), so a re-adopted,
+// already-exited session releases its helper session exactly as closer 2
+// already does for the case where a coordinator was attached the whole time.
+func (a *AttachedSession) checkFullyDrained() {
+	a.exitMu.Lock()
+	target := a.exitFinalOffset
+	a.exitMu.Unlock()
+	if target == nil {
+		return
+	}
+	a.mu.Lock()
+	reached := a.offset >= *target
+	a.mu.Unlock()
+	if reached {
+		a.finish()
+	}
 }
 
 func (a *AttachedSession) recordExit(status proto.SessionExitStatus) {
@@ -740,6 +796,11 @@ func (a *AttachedSession) Read(p []byte) (int, error) {
 			}
 		}
 	}
+	// Checked on every Read, not only when it moves the cursor: a caller
+	// that reads with a zero-length buffer or hits a reset-only item still
+	// deserves the check, and checkFullyDrained is itself a no-op unless
+	// AdoptExitStatus named a target (nocx-isjh4).
+	a.checkFullyDrained()
 	return n, nil
 }
 

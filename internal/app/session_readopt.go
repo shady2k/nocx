@@ -638,7 +638,13 @@ func (rp *readoptPass) readopt(
 		// been holding all along (nocx-k6p18.23). Carried BEFORE the adopt so
 		// the session can never be observed without it.
 		if entry.Exit != nil {
-			attached.AdoptExitStatus(*entry.Exit)
+			// The window frontier travels WITH the exit status (nocx-isjh4):
+			// entry.Window.Written is the offset this stream can never
+			// advance past now that the shell that would have advanced it is
+			// gone, and it is what lets this attachment reach EOF/Done on
+			// its own once it has actually read that far, instead of
+			// hanging forever waiting for bytes that will never come.
+			attached.AdoptExitStatus(*entry.Exit, proto.StreamOffset(entry.Window.Written))
 		}
 		if !attached.WriteGranted() {
 			// Another coordinator is holding this session's one write

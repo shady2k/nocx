@@ -277,8 +277,50 @@ type Pred struct {
 type Extractor struct {
 	Name    string `json:"name"`
 	Pattern string `json:"pattern"`
+	// States restricts this extractor to frames the branch walk decided as
+	// one of these — empty means every state, which was every extractor's
+	// only behaviour before nocx-6q1uh.18 and is still right for one that
+	// reads chrome present regardless of state (subagents, transcript).
+	//
+	// It exists because Observation.Menu() already filters the menu and
+	// menuBelow extractors' YIELD by state (permission_choice or
+	// modal_choice), but the raw Extras a caller with no rule for that
+	// filter — paneobserve, explain, and a test reading Observe() directly —
+	// see the extractor's output on every screen its anchor binds on. The
+	// claude document's "cursor" anchor binds on every frame by design (its
+	// own doc comment), so an extractor anchored there emitted a menu's rows
+	// even with no menu drawn: TestARuleThatExtractsNothingObservesTheScalar
+	// AndNoExtras and TestAPanelRowTheAgentPrintedIntoItsTranscriptIsNotExtracted
+	// both caught it on ordinary free_text and working frames. Extras exist
+	// so a reader can tell "the panel is not on screen" from "the panel is
+	// on screen and says nothing" (extract's own doc comment); an extra that
+	// names a menu on a screen with no menu breaks exactly that contract,
+	// and Menu()'s own state filter cannot repair a fact already reported to
+	// a caller that never calls Menu().
+	//
+	// This is applied in decide()'s wake, after the state is final — the
+	// same ordering Observe already promises ("the state is decided BEFORE
+	// any extractor runs") — so gating on it cannot let an extractor's own
+	// presence or absence move the state; it only narrows which of the
+	// state's own extractors are allowed to have read anything.
+	States []State `json:"states,omitempty"`
 
 	RegionSpec
+}
+
+// runsIn answers whether this extractor is permitted to read a frame the
+// branch walk decided as st. Empty States means every state, matching every
+// extractor's behaviour before this field existed.
+func (e Extractor) runsIn(st State) bool {
+	if len(e.States) == 0 {
+		return true
+	}
+	for _, s := range e.States {
+		if s == st {
+			return true
+		}
+	}
+	return false
 }
 
 // compiledExtractor is an Extractor with its pattern already compiled. A
@@ -365,7 +407,8 @@ func (d documentDriver) Observe(f paneview.Frame) Observation {
 		return Observation{State: StateUnknown, InputBox: noRowSpan, MenuZone: noRowSpan}
 	}
 	anchors := d.bindAnchors(f)
-	obs := Observation{State: d.decide(f, anchors, nil), Extras: d.extract(f, anchors)}
+	state := d.decide(f, anchors, nil)
+	obs := Observation{State: state, Extras: d.extract(f, anchors, state)}
 	obs.InputBox = betweenAnchors(f, anchors, d.doc.InputBox)
 	obs.MenuZone = menuZoneSpan(f, anchors, d.doc.MenuZone)
 	return obs
@@ -497,14 +540,22 @@ func (d documentDriver) decide(f paneview.Frame, anchors bound, tr *trace) State
 	return d.doc.Default
 }
 
-// extract runs every extractor whose anchor bound, in document order. An
-// extractor that matched no row contributes NOTHING — not an empty entry —
-// because a reader must be able to tell "the panel is not on screen" from "the
-// panel is on screen and says nothing", and only the first of those is true
-// here.
-func (d documentDriver) extract(f paneview.Frame, anchors bound) []Extra {
+// extract runs every extractor whose anchor bound AND whose States (if any)
+// names the state decide() already reached, in document order. An extractor
+// that matched no row contributes NOTHING — not an empty entry — because a
+// reader must be able to tell "the panel is not on screen" from "the panel is
+// on screen and says nothing", and only the first of those is true here.
+//
+// state is read, never written: decide() has already run by the time extract
+// is called (Observe and Explain both sequence it that way), so narrowing an
+// extractor by state can only remove what a caller sees, never move the
+// verdict extract itself has no say in.
+func (d documentDriver) extract(f paneview.Frame, anchors bound, state State) []Extra {
 	var out []Extra
 	for _, e := range d.extractors {
+		if !e.spec.runsIn(state) {
+			continue
+		}
 		row, ok := anchors[e.spec.Anchor]
 		if !ok {
 			continue
@@ -741,6 +792,11 @@ func (d Document) validate() error {
 		}
 		if !seen[e.Anchor] {
 			return fmt.Errorf("agentdriver: extractor %q reads from %q, which no anchor binds", e.Name, e.Anchor)
+		}
+		for _, s := range e.States {
+			if !s.Valid() {
+				return fmt.Errorf("agentdriver: extractor %q names state %q, which is not a state", e.Name, s)
+			}
 		}
 		if len(e.SkipStatusGlyphs) > 0 && !e.Up {
 			return fmt.Errorf("agentdriver: extractor %q steps over a status stack without reading up; a status stack is only ever between an anchor and the agent's output ABOVE it", e.Name)

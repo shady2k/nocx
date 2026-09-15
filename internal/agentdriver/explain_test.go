@@ -176,10 +176,25 @@ func TestExplainReportsWhereAnchorsBound(t *testing.T) {
 // TestExplainMarksAnUnboundAnchorAbsent, from the other side: an anchor that
 // did not bind is ABSENT rather than bound at row zero, because row zero is a
 // real row and a view that draws one there points at the wrong line.
+//
+// The cursor (and belowCursor, computed from it) is excluded from this walk
+// rather than folded into it: AnchorSpec.Kind's own doc comment makes a
+// "cursor" anchor bind at Frame.CursorY on every real frame, so it is never
+// absent the way the chrome anchors below it are, and a promise this test
+// makes about detected chrome is not a promise about the terminal's own
+// cursor. AnchorReading.FromCursor is what lets the two be told apart without
+// the explanation lying about a binding that genuinely happened
+// (nocx-6q1uh.18).
 func TestExplainMarksAnUnboundAnchorAbsent(t *testing.T) {
 	f := screen(t, 40, 6, []string{"nothing here is claude chrome"}, 0, 1)
 	e := registry(t).Explain("claude", f)
 	for _, a := range e.Anchors {
+		if a.FromCursor {
+			if !a.Bound {
+				t.Fatalf("cursor-rooted anchor %q did not bind; it is supposed to on every real frame", a.Name)
+			}
+			continue
+		}
 		if a.Bound {
 			t.Fatalf("anchor %q bound at row %d on a screen with no claude chrome", a.Name, a.Row)
 		}

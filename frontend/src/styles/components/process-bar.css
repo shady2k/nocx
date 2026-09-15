@@ -1,20 +1,7 @@
 /* ProcessBar (ui/README table) — the running-state footer (decision
    2026-09-15-terminal-screen-mockup-decision.md §1, "Running-state gap"):
    a 56px non-growing sibling below `.scrollback-layout`, replacing the
-   composer for the row-cost the owner accepted rather than reserving both.
-
-   `--terminal-process-bar-height` is a new token A's tokens.css has not
-   landed yet (§3's shared contract). `check-css-integrity.mjs`'s
-   `undefined-var` rule fails the build on a `var()` fallback for a
-   property no stylesheet declares and no script sets, so this is a real
-   declaration at §3's own value rather than a bare fallback — see
-   pane-context.css's longer note on the same constraint, including why
-   `--color-terminal-chrome` (this bar's other new §3 token) is left
-   undeclared here and the existing `--color-chrome` used directly
-   instead. */
-:root {
-  --terminal-process-bar-height: 56px;
-}
+   composer for the row-cost the owner accepted rather than reserving both. */
 
 .ui-process-bar {
   flex: none;
@@ -23,7 +10,7 @@
   justify-content: space-between;
   height: var(--terminal-process-bar-height);
   padding-inline: var(--pane-inline-padding);
-  background: var(--color-chrome);
+  background: var(--color-terminal-chrome);
   border-top: 1px solid var(--color-divider);
   font-family: var(--font-family-ui);
   font-size: var(--font-size-sm);

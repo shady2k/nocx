@@ -71,3 +71,26 @@ func (s *Service) TestForceStop(id proto.HostSessionID, deadline time.Time) (tai
 	tailLost = hs.owner.stop(false, deadline)
 	return tailLost, hs.owner.writerDetached(), nil
 }
+
+// writeInFlight is the read side of owner.go's inFlightFlag — no production
+// caller needs it yet, only this file's own TestWriteInFlight, so it lives
+// here rather than beside inFlightFlag's writers (writeStart, completeWrite,
+// performDetach) in owner.go/owner_ssh.go.
+func (o *sessionOwner) writeInFlight() bool {
+	return o.inFlightFlag.Load()
+}
+
+// TestWriteInFlight reports whether id's owner currently has a write
+// dispatched to its writer (writeInFlight, above): a caller driving a write
+// over the real wire, on its own goroutine, has no other way to know the
+// write has actually reached the writer rather than still being framed, in
+// transit over the socket, or waiting behind stop's own admission check
+// (submit's closingSignal case) — and TestForceStop must never be called
+// before that is true, or it finds nothing in flight to detach.
+func (s *Service) TestWriteInFlight(id proto.HostSessionID) bool {
+	hs, ferr := s.find(id)
+	if ferr != nil {
+		return false
+	}
+	return hs.owner.writeInFlight()
+}

@@ -131,6 +131,45 @@ func TestAWriterBlockedOnAZeroWindowIsDetachedAndTheSessionCloses(t *testing.T) 
 	stuck := make([]byte, 4<<20)
 	go func() { _, _ = stuckAttached.Write(stuck) }()
 
+	// TestForceStop must not fire before the write above is the one truly
+	// stuck: submit's own admission check (owner.go) refuses a NEW write
+	// the instant stop's closingSignal closes, and closingSignal closes
+	// before this goroutine's first byte has even been framed — every
+	// time, in practice, since a `go` statement only schedules its
+	// goroutine rather than running it ahead of the caller's next line. A
+	// forced stop that wins that race finds nothing in o.inFlight, and
+	// performDetach — correctly, by its own contract — reports no detach
+	// for a write that was never dispatched.
+	//
+	// AttachedSession.Write (68c50b62) cuts the 4 MiB into consecutive
+	// ≤1 MiB session frames, and the first two land well inside the far
+	// side's 2 MiB grant: each becomes briefly in flight (writeStart) and
+	// resolves at once, long before it could ever be mistaken for stuck. So
+	// TestWriteInFlight going true is not by itself proof of the one this
+	// test wants — only a write still in flight after it had every chance
+	// to finish quickly is: the fixture's own zero-window design (§5.7
+	// above) means the genuinely stuck chunk never lets go on its own, so
+	// confirming "still true" a moment later can never itself be a race —
+	// a false "still true" would require an ordinary local write to keep
+	// running for 25ms, on data an order of magnitude smaller than what a
+	// single loopback syscall moves without blocking.
+	inFlightDeadline := time.After(5 * time.Second)
+	for {
+		select {
+		case <-inFlightDeadline:
+			t.Fatal("the write never reached the owner's writer: nothing to force-stop against")
+		default:
+		}
+		if !stand.sessions.TestWriteInFlight(stuckID) {
+			time.Sleep(2 * time.Millisecond)
+			continue
+		}
+		time.Sleep(25 * time.Millisecond)
+		if stand.sessions.TestWriteInFlight(stuckID) {
+			break // still in flight a moment later: this is the stuck chunk.
+		}
+	}
+
 	tailLost, writerDetached, err := stand.sessions.TestForceStop(stuckID, time.Now().Add(5*time.Second))
 	if err != nil {
 		t.Fatalf("force stop: %v", err)

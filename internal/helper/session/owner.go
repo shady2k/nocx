@@ -295,6 +295,20 @@ type sessionOwner struct {
 	detachOnce   sync.Once
 	detached     atomic.Bool
 
+	// inFlightFlag publishes whether writerBusy/inFlight are currently
+	// non-empty, for a caller outside run()'s own goroutine that needs to
+	// know a write has actually reached the writer before it acts on that —
+	// an atomic for the same reason completedFence is. writeStart,
+	// completeWrite and performDetach (owner_ssh.go) are its only writers,
+	// each right where they touch writerBusy/inFlight themselves. Its only
+	// reader today is owner_ssh_export_test.go's writeInFlight/
+	// TestWriteInFlight (the nocx_local_ssh test bridge) — a production
+	// caller does not exist yet, and the field is still on this struct
+	// rather than in that test file because it is written from run()'s own
+	// goroutine alongside writerBusy/inFlight, the same as completedFence
+	// and detached beside it.
+	inFlightFlag atomic.Bool
+
 	// --- run()'s own state; touched from nowhere else ----------------------
 	pending    []ownerItem
 	closing    bool
@@ -811,6 +825,7 @@ func (o *sessionOwner) writeStart(it ownerItem, payload []byte) {
 	}
 	o.writerBusy = true
 	o.inFlight = &inFlightItem{item: it, fence: fence}
+	o.inFlightFlag.Store(true)
 	o.writeReq <- payload
 }
 
@@ -833,6 +848,7 @@ func (o *sessionOwner) completeWrite(res writeOutcome) {
 	o.writerBusy = false
 	fi := o.inFlight
 	o.inFlight = nil
+	o.inFlightFlag.Store(false)
 	o.finishItem(fi.item, fi.fence, res)
 }
 

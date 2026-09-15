@@ -131,6 +131,39 @@ func s14RealBuildMock(t *testing.T) string {
 // difference between the two tests is a difference in the helper seam and
 // nothing else. ──────────────────────────────────────────────────────────────
 
+// s14PinChannel is a session.Channel over no real process: newS14RealStand
+// Adopts one directly (never through the real local helper, so
+// helper_local.go's own RecordOwnedProcessPID call never touches it) purely
+// so this test's admission root can be os.Getpid() with nothing to collide
+// with — see newS14RealStand's own doc on the session it backs. Nothing
+// reads or writes it; Read blocks on Close so the session's own read paths
+// see EOF rather than a busy loop, and Close is idempotent because
+// reg.Close's own cleanup sweep may reach it after this stand's explicit one
+// already has.
+type s14PinChannel struct {
+	done chan struct{}
+}
+
+func (c *s14PinChannel) Read([]byte) (int, error) {
+	<-c.done
+	return 0, io.EOF
+}
+
+func (c *s14PinChannel) Write(p []byte) (int, error) { return len(p), nil }
+
+func (c *s14PinChannel) Close() error {
+	select {
+	case <-c.done:
+	default:
+		close(c.done)
+	}
+	return nil
+}
+
+func (c *s14PinChannel) Resize(context.Context, uint16, uint16, uint16, uint16) error { return nil }
+
+func (c *s14PinChannel) Done() <-chan struct{} { return c.done }
+
 type s14RealStand struct {
 	reg      *session.Reg
 	tp       *transport.WSServer
@@ -334,22 +367,41 @@ func newS14RealStand(t *testing.T, mockDir, stateDir string) *s14RealStand {
 		t.Fatalf("open coordinator session: %v", err)
 	}
 	coord := coordOpened.Session
-	// The admitting pid is THIS TEST PROCESS's own, not the real shell's
-	// (coordOpened.OwnedProcessPID) that the real local helper just forked:
-	// the MCP client below dials the tool endpoint's unix socket directly
-	// from this process, so admittedPeer's local arm pins peer.PID against
-	// whatever root is recorded here (worker_auth.go's admittedPeer) — a
-	// root naming the real shell would leave this process outside that
-	// tree and every workers.spawn call would refuse ErrNotEnrolled, which
-	// is exactly what this stand did before this fix. newS14Stand
-	// (session_surface_happypath_test.go) already records os.Getpid() for
-	// the identical reason, over its own fake PTY factory instead of a real
-	// helper's.
-	if err := reg.RecordOwnedProcessPID(coord.ID(), os.Getpid()); err != nil {
-		t.Fatalf("record coordinator root: %v", err)
+	if watchErr := grid.Watch(string(coord.ID()), 80, 24); watchErr != nil {
+		t.Fatalf("enrol coordinator pane: %v", watchErr)
 	}
-	if err := grid.Watch(string(coord.ID()), 80, 24); err != nil {
-		t.Fatalf("enrol coordinator pane: %v", err)
+
+	// admittedPeer (worker_auth.go) pins peer.PID against a session's OWN
+	// recorded root, and coord.ID() already has one: helper_local.go's own
+	// RecordOwnedProcessPID call recorded the real forked shell's pid the
+	// instant OpenSession returned above — the correct root for THAT pane's
+	// own descendants. RecordOwnedProcessPID refuses a second, DIFFERENT
+	// pid for the same session outright (internal/session/session.go), so
+	// this stand cannot also record os.Getpid() there: it collided
+	// (nocx-6q1uh.18's own failing run — "owned process pid already
+	// recorded for session"). The MCP client below dials the tool
+	// endpoint's unix socket directly from THIS TEST PROCESS, never from a
+	// descendant of that shell, so admittedPeer's walk from peer.PID up the
+	// process tree can never reach the shell's pid either way — it needs a
+	// root of its own. A session Adopted directly, never handed to the real
+	// local helper, is never touched by helper_local.go's own recording
+	// call, so it can carry os.Getpid() as an admission root with nothing
+	// to collide with — "a separate coordinator session the helper never
+	// enrolled". newS14Stand (session_surface_happypath_test.go) reaches
+	// this same os.Getpid() root over its own fake PTY factory, which never
+	// records a pid at all; this stand has no fake factory to lean on
+	// (composed with a nil one, on purpose — see this function's own doc),
+	// so it mints this one session for exactly that purpose instead.
+	pinCh := &s14PinChannel{done: make(chan struct{})}
+	pinSess, err := reg.Adopt(ctx, session.Config{Cols: 80, Rows: 24}, session.ID("s14-real-admission-root"), pinCh)
+	if err != nil {
+		t.Fatalf("adopt admission-root session: %v", err)
+	}
+	if recordErr := reg.RecordOwnedProcessPID(pinSess.ID(), os.Getpid()); recordErr != nil {
+		t.Fatalf("record admission root: %v", recordErr)
+	}
+	if watchErr := grid.Watch(string(pinSess.ID()), 80, 24); watchErr != nil {
+		t.Fatalf("enrol admission-root pane: %v", watchErr)
 	}
 
 	t.Cleanup(func() {
@@ -362,6 +414,7 @@ func newS14RealStand(t *testing.T, mockDir, stateDir string) *s14RealStand {
 			return err == nil && len(open) == 0
 		})
 		grid.Withdraw(string(coord.ID()))
+		grid.Withdraw(string(pinSess.ID()))
 		_ = tp.Stop(context.Background())
 	})
 

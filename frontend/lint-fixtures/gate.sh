@@ -152,9 +152,16 @@ if [ "$(echo "$integrity_check" | grep -c '"rule":"bare-type-selector"')" -ne 1 
   exit 1
 fi
 
-# A var() with a fallback is legitimate; reporting it would make the rule noise.
-if echo "$integrity_check" | grep -q 'fixture-also-never-declared'; then
-  echo "CSS INTEGRITY GATE FAILED — var() with a fallback was reported as undefined"
+# A fallback no longer exempts a property nothing declares and no source sets
+# (nocx-9bpeq.2): --fixture-also-never-declared must fire, --fixture-runtime-width
+# (a fallback to a property runtime-property.ts sets via setProperty) must not.
+if ! echo "$integrity_check" | grep -q 'fixture-also-never-declared'; then
+  echo "CSS INTEGRITY GATE FAILED — var() with a fallback to a property nothing declares or sets was not reported"
+  exit 1
+fi
+
+if echo "$integrity_check" | grep -q 'fixture-runtime-width'; then
+  echo "CSS INTEGRITY GATE FAILED — var() with a fallback to a property a source file sets was reported as undefined"
   exit 1
 fi
 

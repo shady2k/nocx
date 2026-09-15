@@ -21,7 +21,6 @@ import (
 
 	"github.com/shady2k/nocx/internal/agentcapture"
 	"github.com/shady2k/nocx/internal/agentdriver"
-	"github.com/shady2k/nocx/internal/agenttyping"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/paneobserve"
@@ -32,10 +31,15 @@ import (
 )
 
 // taskDeliveryStand is a real session registry over stub ptys, a recorded-
-// calls tab store, and the real observation + typing seams a production
-// spawner is wired to (app.go's readiness: paneWatch, typist: paneTyping) —
-// so what is asserted here is what the shipped gate does, not what a double
-// of it was told to do.
+// calls tab store, and the real observation seam a production spawner is
+// wired to (app.go's readiness: paneWatch) — so what is asserted here is
+// what the shipped wait does, not what a double of it was told to do. It
+// builds no TaskQueue: Task 11 moved actual delivery to
+// internal/workers.Registrar (see workers.TaskQueue's own doc for why), and
+// these tests exercise workerSpawner.Spawn/deliverTask directly, never
+// through a Registrar — that seam has its own coverage
+// (internal/workers/registrar_taskqueue_test.go) and
+// internal/app/pane_messages_test.go's own delivery mechanics.
 type taskDeliveryStand struct {
 	reg     *session.Reg
 	ptys    *workerTestPTYFactory
@@ -46,13 +50,8 @@ type taskDeliveryStand struct {
 	watch   *paneobserve.Watcher
 	enrol   *workerEnrolments
 	spawner *workerSpawner
-	// owed is the SAME set spawner marks a question against, so a test that
-	// answers through a workerAnswerer built over this stand (answerStand,
-	// worker_answer_test.go) pays the identical debt Spawn left, rather than
-	// a second instance that happens to agree by construction.
-	owed *owedTasks
-	sup  *workerSupervisor
-	log  log.Logger
+	sup     *workerSupervisor
+	log     log.Logger
 }
 
 func newTaskDeliveryStand(t *testing.T) *taskDeliveryStand {
@@ -78,97 +77,22 @@ func newTaskDeliveryStand(t *testing.T) *taskDeliveryStand {
 	// tests read Snapshot directly, so a recording emitter is enough to make
 	// Sweep commit a classification.
 	watch.SetEmitter(func(paneobserve.Observation) {})
-	typist := newPaneTypist(logger, grid.Store, rules, verifiedClaude(t), watch, reg)
 	enrol := newWorkerEnrolments(logger, reg)
-	owed := newOwedTasks()
-	sup := &workerSupervisor{sessions: reg, owed: owed, log: logger}
+	sup := &workerSupervisor{sessions: reg, log: logger}
 	spawner := &workerSpawner{
 		layout:     tabs,
 		opener:     opener,
 		sessions:   reg,
 		enrolments: enrol,
 		readiness:  watch,
-		typist:     typist,
 		workspace:  "ws-test",
-		owed:       owed,
 		log:        logger,
 	}
 	return &taskDeliveryStand{
 		reg: reg, ptys: ptys, tabs: tabs, opener: opener,
 		grid: grid, rules: rules, watch: watch, enrol: enrol, spawner: spawner,
-		owed: owed, sup: sup, log: logger,
+		sup: sup, log: logger,
 	}
-}
-
-// realTypist is the stand's typing gate, asserted back to its concrete type
-// so a caller can hand it to a workerAnswerer as both paneChooser (Choose)
-// and paneTypist (Submit) — the one gate, never two.
-func (s *taskDeliveryStand) realTypist(t *testing.T) *agenttyping.Typist {
-	t.Helper()
-	typist, ok := s.spawner.typist.(*agenttyping.Typist)
-	if !ok {
-		t.Fatalf("the stand's typist is %T, want the real gate", s.spawner.typist)
-	}
-	return typist
-}
-
-// answerer is a workerAnswerer wired exactly as app.go wires the shipped
-// one: the real gate for both Choose and Submit, the real grid, and this
-// stand's OWN owed set and watcher — the same ones spawner marks a question
-// against, so an owed task answered through this answerer pays the identical
-// debt Spawn left (nocx-f545a.7). classify is the watcher's LIVE Classify,
-// never its cache — see paneClassifier's own doc (workers.go) for why the
-// answer path cannot read Snapshot the way deliverTask does at spawn.
-// answerer is a workerAnswerer wired exactly as app.go wires the shipped
-// one, plus settledClock (worker_answer_test.go): every test in this package
-// that does not itself exercise the nocx-f545a.8 settle wait gets a clock
-// that already reports the menu settled by its answerer's SECOND poll,
-// rather than either waiting out the real menuSettle interval (menuSettle's
-// own doc) or shrinking that interval globally, which would hide the gate
-// this bead adds from every one of them.
-func (s *taskDeliveryStand) answerer(t *testing.T) *workerAnswerer {
-	t.Helper()
-	typist := s.realTypist(t)
-	return &workerAnswerer{
-		screens: s.grid.Store, typist: typist,
-		owed: s.owed, classify: s.watch, typing: typist, log: s.log,
-		now: settledClock(),
-	}
-}
-
-// spawnStuckOnQuestion spawns a participant whose pane immediately shows the
-// real folder-trust question, off the real capture, so its task is left
-// owed (nocx-f545a.3) — the starting condition every owed-task test needs.
-// It returns the Spawned too, so a test asserting on Kill has the exact
-// value internal/workers.Registrar.compensate would call it on.
-func spawnStuckOnQuestion(t *testing.T, stand *taskDeliveryStand, participant workers.ParticipantID, task string) (session.ID, workers.Participant, workers.Spawned) {
-	t.Helper()
-	type outcome struct {
-		sp  workers.Spawned
-		err error
-	}
-	done := make(chan outcome, 1)
-	go func() {
-		sp, err := stand.spawner.Spawn(context.Background(), workers.SpawnRequest{
-			Participant: participant, Group: "worker-1", Task: task, Command: "claude",
-		})
-		done <- outcome{sp, err}
-	}()
-
-	sid := waitForNewSession(t, stand.reg)
-	stand.enrolWorkerPane(t, sid)
-	stand.feedCapture(t, sid, "claude-trust", 11000)
-	waittest.WaitFor(t, "the worker's pane to be classified as asking a question", func() bool {
-		stand.watch.Sweep()
-		o, ok := stand.watch.Snapshot(string(sid))
-		return ok && o.State == agentdriver.StatePermissionChoice
-	})
-
-	got := <-done
-	if got.err != nil {
-		t.Fatalf("Spawn refused a pane that was asking a question: %v", got.err)
-	}
-	return sid, workers.Participant{ID: participant, Liveness: workers.Liveness{SessionID: string(sid)}, Task: task}, got.sp
 }
 
 // enrolWorkerPane opens the pane's grid and observation exactly as
@@ -204,35 +128,6 @@ func (s *taskDeliveryStand) feedCapture(t *testing.T, sid session.ID, name strin
 	}
 }
 
-// repaintAsIdle resets sid's pane to a brand-new terminal (Withdraw then
-// Enrol, exactly as a real teardown-and-reopen would) and replays the same
-// idle capture TestASpawnWhosePaneBecomesFreeTextDeliversTheTask drives a
-// fresh pane to free_text with.
-//
-// A plain Feed of a SECOND, unrelated capture onto a pane that already holds
-// another one's escape state does not reliably reach free_text — measured
-// while writing the owed-task tests: the driver read the result as unknown,
-// because a capture's opening bytes assume a fresh terminal (alternate-screen
-// mode, saved cursor, application keypad) rather than whatever mode the trust
-// question's own capture left behind. Resetting the emulator before the
-// replay is what makes the frame this typist reads a screen the shipped rule
-// was actually written against, the same guarantee feedCapture's own doc
-// states for the untouched case.
-//
-// It neither Touches nor Sweeps the watcher — deliberately (nocx-f545a.7, a
-// review of 1ffd3a56): the answer path reads the pane LIVE
-// (paneobserve.Watcher.Classify, through workerAnswerer's classify field),
-// never from the watcher's cache, so there is nothing here for a Sweep to
-// need to have run before an owed task's own wait can see this repaint.
-func (s *taskDeliveryStand) repaintAsIdle(t *testing.T, sid session.ID) {
-	t.Helper()
-	s.grid.Withdraw(string(sid))
-	if err := s.grid.Watch(string(sid), participantCols, participantRows); err != nil {
-		t.Fatalf("re-enrol the worker's pane: %v", err)
-	}
-	s.feedCapture(t, sid, "claude-idle", 11000)
-}
-
 // waitForNewSession blocks until a session other than any already known
 // appears in the registry — the same pattern worker_spawn_axis_test.go and
 // worker_wake_test.go's register use, because the pane's own id is minted
@@ -249,26 +144,6 @@ func waitForNewSession(t *testing.T, reg *session.Reg) session.ID {
 	})
 	return sid
 }
-
-// fakePaneReadiness answers instantly, and its ready flag lies on purpose in
-// TestASubmitTheRealGateRefusesIsNotDefeatedByAFalseReadySignal — the whole
-// point of that test is that a caller's own (wrong) belief that a pane is
-// ready must not be enough to get bytes past agenttyping's own re-check.
-type fakePaneReadiness struct{ ready bool }
-
-func (f fakePaneReadiness) Snapshot(string) (paneobserve.Observation, bool) {
-	if !f.ready {
-		return paneobserve.Observation{}, false
-	}
-	return paneobserve.Observation{State: agentdriver.StateFreeText}, true
-}
-
-// fixedOutcomeTypist answers every Submit with a canned Result, for asserting
-// how workerSpawner reacts to an outcome without needing the real gate to
-// produce it.
-type fixedOutcomeTypist struct{ res agenttyping.Result }
-
-func (f fixedOutcomeTypist) Submit(ctx context.Context, _, _ string) agenttyping.Result { return f.res }
 
 // fixedStateReadiness answers every Snapshot with the SAME state, forever —
 // what a pane looks like when nocx is reading it just fine and it simply
@@ -330,9 +205,20 @@ func (hangingTabs) DeleteTab(ctx context.Context, _ string, _ content.Replacemen
 // ambiguous.
 func (hangingTabs) PaneCwd(context.Context, string) (string, error) { return "", nil }
 
-// Criterion: a spawn whose pane becomes free_text submits the task text into
-// that pane, AFTER the command line and never in the same write.
-func TestASpawnWhosePaneBecomesFreeTextDeliversTheTask(t *testing.T) {
+// Criterion: a spawn whose pane becomes free_text succeeds, live, with its
+// task delivery reported as the zero value — workerSpawner.Spawn no longer
+// types anything itself (design §9, Task 11: the actual paste and Enter run
+// later, through internal/workers.Registrar's TaskQueue, once this
+// participant is live — see workers.TaskQueue's own doc for why that cannot
+// happen from inside Spawn). This test only has workerSpawner in isolation
+// (no Registrar, no TaskQueue), so it asserts what THIS layer does: nothing
+// is written to the pty beyond the command line. The end-to-end delivery —
+// the task actually reaching the pane once it is free — is
+// internal/workers/registrar_taskqueue_test.go's
+// TestRegisterEnqueuesTheTaskExactlyOnceAfterTheParticipantIsLive (the hook
+// fires) and internal/app/pane_messages_test.go's
+// TestAFreeMessageIsDeliveredWhenTheAgentIsFree (the queue delivers it).
+func TestASpawnWhosePaneBecomesFreeTextReportsNoDeliveryOfItsOwn(t *testing.T) {
 	stand := newTaskDeliveryStand(t)
 	const task = "please write to NOCX_AGENT_REPORT when you are done"
 
@@ -364,19 +250,20 @@ func TestASpawnWhosePaneBecomesFreeTextDeliversTheTask(t *testing.T) {
 	if got.sp == nil {
 		t.Fatal("Spawn returned no participant on a pane that reached free_text")
 	}
-
-	pty := stand.ptys.last()
-	waittest.WaitFor(t, "the task text to reach the pty", func() bool {
-		return strings.Contains(pty.read(), task)
-	})
-	full := pty.read()
-	cmdIdx := strings.Index(full, "claude\n")
-	taskIdx := strings.Index(full, task)
-	if cmdIdx < 0 {
-		t.Fatalf("the command line never reached the pty: %q", full)
+	deliverer, ok := got.sp.(workers.TaskDeliverer)
+	if !ok {
+		t.Fatalf("the spawned participant (%T) does not say what became of its task", got.sp)
 	}
-	if taskIdx < 0 || taskIdx < cmdIdx {
-		t.Fatalf("the task did not arrive strictly after the command line: %q", full)
+	if d := deliverer.TaskDelivery(); d != (workers.TaskDelivery{}) {
+		t.Fatalf("delivery = %+v, want the zero value: Spawn no longer types the task itself", d)
+	}
+
+	full := stand.ptys.last().read()
+	if strings.Contains(full, task) {
+		t.Fatalf("the task reached the pty from Spawn alone, with no Registrar/TaskQueue wired: %q", full)
+	}
+	if cmdIdx := strings.Index(full, "claude\n"); cmdIdx < 0 {
+		t.Fatalf("the command line never reached the pty: %q", full)
 	}
 }
 
@@ -417,96 +304,38 @@ func TestASpawnWhosePaneNeverBecomesTypableFailsAndCompensates(t *testing.T) {
 	}
 }
 
-// Criterion: the input seam decides, not the caller's own belief about
-// readiness. readiness here LIES and says the pane is free_text the instant
-// it is asked; the real grid shows the worker's agent asking for a permission
-// approval. The real gate must still refuse, and — the part a log line cannot
-// prove — nothing at all reaches the session's own pty.
+// TestASubmitTheRealGateRefusesIsNotDefeatedByAFalseReadySignal and
+// TestOutcomeTypedFromDeliveryIsARefusalNotADelivery used to assert that
+// deliverTask's own call into agenttyping.Typist.Submit could not be
+// defeated by a caller's wrong belief that a pane was ready, and that
+// OutcomeTyped (the text landed, the submit key did not) is a refusal and
+// not a delivery. deliverTask no longer calls Submit at all (design §9, Task
+// 11: delivery is now internal/workers.Registrar's TaskQueue, over
+// PaneKeys/PaneMessages, never agenttyping) — those two properties are
+// re-expressed where the mechanisms that still exist actually own them:
 //
-// This exercises deliverTask directly, against a session opened and enrolled
-// up front, rather than going through the full Spawn: the fake readiness
-// answers instantly, and racing it against Spawn's own session-minting and
-// compensation (which closes the session the moment the refusal is seen) left
-// nothing for a concurrent enrolment step to enrol before the call was
-// already over. Nothing here is faked past that: the grid, the rules, the
-// calibration and the typist are the same real gate agent.type and a wake
-// reach, and deliverTask is the same method Spawn calls.
-func TestASubmitTheRealGateRefusesIsNotDefeatedByAFalseReadySignal(t *testing.T) {
-	stand := newTaskDeliveryStand(t)
-	stand.spawner.readiness = fakePaneReadiness{ready: true}
+//   - "a caller's belief that a pane is ready is not enough to write into
+//     it" is agenttyping.Typist.Submit's own re-verification guarantee,
+//     asserted directly against the real gate in internal/agenttyping's own
+//     suite (TestAScreenThatChangesAfterTheTextStopsTheSubmitKey,
+//     TestAWriteIsRefusedWhenTheRuntimeCannotVouchForTheScreen) — untouched
+//     by this bead, since Submit itself is unchanged and workerWaker
+//     (workers.go) still reaches it for a wake.
+//   - "a step that only moves the box without confirming is not a
+//     submission" is deliverOne's own Enter-step handling
+//     (internal/app/pane_messages.go): an Enter whose result is not
+//     "executed" commits PhasePartial, never PhaseSubmitted — covered by
+//     internal/app/pane_messages_test.go's TestAMenuBetweenPasteAndEnterRefusesTheEnter
+//     and the general deliverOne path TestAFreeMessageIsDeliveredWhenTheAgentIsFree
+//     exercises for the confirmed case.
 
-	sess, err := stand.reg.Open(context.Background(), session.Config{
-		Kind: session.KindLocal, Cols: participantCols, Rows: participantRows,
-	})
-	if err != nil {
-		t.Fatalf("open a session for the pane: %v", err)
-	}
-	sid := sess.ID()
-	stand.enrolWorkerPane(t, sid)
-	stand.feedCapture(t, sid, "claude-permission", 49000)
-	f, ferr := stand.grid.Frame(string(sid))
-	if ferr != nil || stand.rules.Classify(wakeAgent, f) != agentdriver.StatePermissionChoice {
-		t.Fatalf("test setup did not reach a permission menu: frame err=%v state=%v",
-			ferr, stand.rules.Classify(wakeAgent, f))
-	}
-
-	_, deliverErr := stand.spawner.deliverTask(context.Background(), string(sid), "do the thing")
-	if deliverErr == nil {
-		t.Fatal("deliverTask succeeded even though the real gate should have refused the submit")
-	}
-	if !errors.Is(deliverErr, workers.ErrTaskSubmitRefused) {
-		t.Fatalf("error %v does not wrap ErrTaskSubmitRefused", deliverErr)
-	}
-	if errors.Is(deliverErr, workers.ErrPaneNeverTypable) {
-		t.Fatalf("error %v reads like the never-typable case; a false ready signal must not produce that sentence", deliverErr)
-	}
-
-	// THE INPUT SEAM, not a log line: nothing reached the pty at all — a
-	// refused grant never calls Accept, so there is no write in flight to
-	// race by waiting.
-	pty := stand.ptys.last()
-	if full := pty.read(); full != "" {
-		t.Fatalf("bytes reached the pty despite a real permission menu: %q", full)
-	}
-}
-
-// Criterion: OutcomeTyped is a refusal, not a delivery, and the spawn's error
-// carries the reason the submit failed.
-func TestOutcomeTypedFromDeliveryIsARefusalNotADelivery(t *testing.T) {
-	stand := newTaskDeliveryStand(t)
-	stand.spawner.readiness = fakePaneReadiness{ready: true}
-	stand.spawner.typist = fixedOutcomeTypist{res: agenttyping.Result{
-		Outcome: agenttyping.OutcomeTyped,
-		Reason:  "the text reached the input region and the submit key did not",
-	}}
-
-	_, err := stand.spawner.Spawn(context.Background(), workers.SpawnRequest{
-		Participant: "p-typed-only", Group: "worker-1", Task: "do the thing", Command: "claude",
-	})
-	if err == nil {
-		t.Fatal("Spawn succeeded on an OutcomeTyped submission, which starts no turn")
-	}
-	if !errors.Is(err, workers.ErrTaskSubmitRefused) {
-		t.Fatalf("error %v does not wrap ErrTaskSubmitRefused", err)
-	}
-	if !strings.Contains(err.Error(), "submit key did not") {
-		t.Fatalf("error %q does not carry the reason the submit failed", err)
-	}
-
-	created, deleted := stand.tabs.snapshot()
-	if len(created) != 1 || len(deleted) != 1 || created[0] != deleted[0] {
-		t.Fatalf("tabs created=%v deleted=%v, want the one created tab deleted and nothing else", created, deleted)
-	}
-}
-
-// Criterion: a spawner nobody wired a typing seam into (readiness and typist
-// both nil) proceeds without attempting delivery, exactly like
+// Criterion: a spawner nobody wired a readiness seam into proceeds without
+// attempting to confirm the pane became typable, exactly like
 // integrationAwaiterSeam's own absence case — the axis-gate and tab-bookkeeping
 // tests in worker_spawn_axis_test.go depend on this staying true.
-func TestASpawnerWithNoTypingSeamProceedsWithoutDeliveringTheTask(t *testing.T) {
+func TestASpawnerWithNoReadinessSeamProceedsWithoutConfirmingTypability(t *testing.T) {
 	stand := newTaskDeliveryStand(t)
 	stand.spawner.readiness = nil
-	stand.spawner.typist = nil
 
 	sp, err := stand.spawner.Spawn(context.Background(), workers.SpawnRequest{
 		Participant: "p-no-seam", Group: "worker-1", Task: "do the thing", Command: "claude",

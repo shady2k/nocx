@@ -82,8 +82,6 @@ var executors = map[string]func(ctx context.Context, cap agenttools.Capability, 
 	"workers.say":      executeWorkerSay,
 	"workers.wait":     executeWorkerWait,
 	"workers.close":    executeWorkerClose,
-	"workers.screen":   executeWorkerScreen,
-	"workers.answer":   executeWorkerAnswer,
 	"workers.inbox":    executeWorkerInbox,
 }
 

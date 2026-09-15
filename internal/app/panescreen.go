@@ -238,15 +238,3 @@ func (p paneReplay) Replay(ctx context.Context, header agentcapture.Header, chun
 	}
 	return frames, nil
 }
-
-// paneScreens is the app's view of the store (AD-8): the readers in this
-// package — the worker screener, the answerer's settle check and the menu
-// helpers — may READ a frame and may do nothing else with the interval.
-//
-// One method and not two: the question "is this pane watched" is asked by the
-// authorizer, which declares its own seam for it (workerAuthEnrolments), and a
-// reader that had to answer for the interval as well would be a second place
-// the interval could be decided.
-type paneScreens interface {
-	Frame(paneID string) (paneview.Frame, error)
-}

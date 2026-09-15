@@ -909,10 +909,10 @@ func rpcErrorFor(err error) (code int, message, reason string) {
 		return rpcDomainError, "worker request refused",
 			"that participant is yours, but its delegation is no longer active, so it can no longer be acted on. Call workers.holdings to see its state; a participant that has ended needs nothing further from you."
 	case errors.Is(err, workers.ErrTerminal):
-		// ENDED (nocx-f545a.4). workers.answer is the first call that is
-		// refused for a participant being over rather than tidied up after:
-		// there is no menu on a pane that has closed. Mapped rather than left
-		// to the default arm, whose sentence would call it a backend fault.
+		// ENDED (nocx-f545a.4): a fact arrived about a participant already
+		// over, refused for being over rather than tidied up after. Mapped
+		// rather than left to the default arm, whose sentence would call it
+		// a backend fault.
 		return rpcDomainError, "worker request refused",
 			"that worker has already ended, so there is nothing on its screen to answer. Call workers.holdings to see how it ended."
 	case errors.Is(err, workers.ErrPaneNeverTypable):

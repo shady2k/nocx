@@ -422,7 +422,18 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		// session.wait answers a question nocx asked about a command that is
 		// already running under an authority the person already granted, so
 		// it exercises none of its own (nocx-6dzxq).
-		"session.wait":     {content.EffectObserve},
+		"session.wait": {content.EffectObserve},
+		// MUTATE-DESTRUCTIVE: a step this call writes can confirm a menu
+		// option or paste text that reaches a descendant's agent, and
+		// neither comes back — the delegation effect (send-input) is
+		// resolved per call by DescendantPaneAccess.Resolve, a different
+		// question from this row's own content-policy classification
+		// (registry.go's own doc on the session.keys row).
+		"session.keys": {content.EffectMutateDestructive},
+		// MUTATE-DESTRUCTIVE for the same reason session.keys is: a
+		// delivered message reaches the descendant's agent and is not
+		// reversible from here.
+		"session.message":  {content.EffectMutateDestructive},
 		"files.edit":       {content.EffectMutateReversible},
 		"files.create":     {content.EffectMutateReversible},
 		"git.status":       {content.EffectObserve},
@@ -465,15 +476,6 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		// a message out of your own mailbox exercises no authority over
 		// anything but your own reading position.
 		"workers.inbox": {content.EffectObserve},
-		// OBSERVE for the screen (nocx-f545a.6): reading a held worker's pane
-		// is the delegation's EffectObserve, which a human takeover leaves in
-		// place, and it writes nothing anywhere.
-		"workers.screen": {content.EffectObserve},
-		// MUTATE-DESTRUCTIVE for the answer (nocx-f545a.4), for close's
-		// reason and one more: the option a coordinator names can approve a
-		// tool call in the worker, or trust a directory on the person's
-		// behalf, and a person who wants to be asked first has a row to say so.
-		"workers.answer": {content.EffectMutateDestructive},
 	}
 	if len(declarations) != 32 {
 		t.Fatalf("declaration count = %d, want 32", len(declarations))
@@ -601,10 +603,6 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		"workers.close.schema.json":    workerCloseSchema,
 		"workers.spawn.schema.json":    workerSpawnSchema,
 		"workers.inbox.schema.json":    workerInboxSchema,
-		// The screen takes one worker id, exactly the shape close takes
-		// (nocx-f545a.6), so close's fixture is the right one to assemble it.
-		"workers.screen.schema.json": workerCloseSchema,
-		"workers.answer.schema.json": workerCloseSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -655,9 +653,7 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	// workers.holdings joins them for the same reason session.wait did: it is
 	// an observe tool over a session, and "what is my session responsible
 	// for" is a question about the session the grant already named.
-	// workers.screen joins them too (nocx-f545a.6): observe, over the same
-	// session, and the record refuses any pane that session does not hold.
-	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "workers.holdings", "workers.say", "workers.wait", "workers.screen"}
+	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "workers.holdings", "workers.say", "workers.wait"}
 	if !reflect.DeepEqual(sessionObserve, wantSession) {
 		t.Fatalf("ForGrant(observe+session) = %v, want exactly %v", sessionObserve, wantSession)
 	}
@@ -668,8 +664,7 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	// mutate-destructive alone. That asymmetry is the point: ending a worker
 	// is not something a run permitted only to look may do.
 	runGrant := grant([]content.Effect{content.EffectMutateDestructive}, content.ResourceSession)
-	// workers.answer joins close here: mutate-destructive over a session.
-	wantDestructive := []string{"session.run", "workers.close", "workers.answer"}
+	wantDestructive := []string{"session.run", "workers.close"}
 	if got := toolNames(reg.ForGrant(runGrant)); !reflect.DeepEqual(got, wantDestructive) {
 		t.Fatalf("ForGrant(mutate-destructive+session) = %v, want exactly %v", got, wantDestructive)
 	}
@@ -770,10 +765,6 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		"workers.close.schema.json":    workerCloseSchema,
 		"workers.spawn.schema.json":    workerSpawnSchema,
 		"workers.inbox.schema.json":    workerInboxSchema,
-		// The screen takes one worker id, exactly the shape close takes
-		// (nocx-f545a.6), so close's fixture is the right one to assemble it.
-		"workers.screen.schema.json": workerCloseSchema,
-		"workers.answer.schema.json": workerCloseSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)

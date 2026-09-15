@@ -68,27 +68,17 @@ func TestAWriteIsRefusedWhenTheRuntimeCannotVouchForTheScreen(t *testing.T) {
 	}
 }
 
-// TestTheMenuPathIsGatedByTheSameClaim: answering a menu is a write, so the
-// permission is decided from a frame the runtime can vouch for as well. One
-// gate for both would be a second place the rule lived; this asserts the two
-// paths answer alike rather than that they share a function.
-func TestTheMenuPathIsGatedByTheSameClaim(t *testing.T) {
-	// A menu the rule identifies, with a runtime that cannot vouch for it.
-	menu := replay(t, "claude-permission", 49000)
-	menu.Completeness = sessionruntime.CompletenessNoFence
-	ty, _, q := typistOn(t, menu, verifiedFor(t))
-
-	got := ty.Choose(context.Background(), pane, "Yes")
-	if got.Outcome != agenttyping.OutcomeRefused {
-		t.Fatalf("outcome = %q, want a refusal", got.Outcome)
-	}
-	if !strings.Contains(got.Reason, "no authenticated boundary") {
-		t.Errorf("reason = %q, want it to name the claim", got.Reason)
-	}
-	if len(q.jobs) != 0 {
-		t.Error("a keystroke reached a menu's queue from a frame nobody can vouch for")
-	}
-}
+// TestTheMenuPathIsGatedByTheSameClaim used to assert that Typist.Choose
+// gated a menu answer on the same completeness claim as Type. Choose is
+// gone (design §9/§11, Task 11): a menu is now answered through
+// session.keys' option loop (design §6.4, Task 9), which is gated at the
+// SAME seam every other session.keys step already is — PaneKeys.Send, not
+// this package. That gate's own coverage is
+// internal/app/session_keys_test.go's option-loop suite
+// (TestAnOptionIsChosenOnAMenuThatRepaintsLate,
+// TestAnOptionLoopRefusesOscillation,
+// TestAnOptionAlreadySelectedConfirmsInOneStep) and its stale-target
+// refusal (TestAKeyUnderAChangedMenuWritesNothing) — not this package's.
 
 // idleFrame is the corpus's own idle screen — a pane positively identified as
 // free_text — so the only thing that can refuse below is the completeness

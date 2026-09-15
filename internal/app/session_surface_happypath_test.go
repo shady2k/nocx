@@ -63,8 +63,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/agentcalib"
-	"github.com/shady2k/nocx/internal/agentcapture/replaylocal"
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
@@ -437,9 +435,6 @@ func newS14Stand(t *testing.T) *s14Stand {
 		t.Fatalf("pane drivers: %v", driversErr)
 	}
 	realWatch := paneobserve.New(logger, grid.Store, paneDrivers, paneobserve.Config{})
-	calibStore := newHappyVerifiedClaudeCalibration(t)
-	paneCalibration := agentcalib.New(logger, nil, calibStore, paneDrivers, replaylocal.Replayer{})
-	paneTyping := newPaneTypist(logger, grid.Store, paneDrivers, paneCalibration, realWatch, reg)
 
 	paneEnrol, err := newPaneEnroller(logger, lanes, grid.Store, realWatch, allowPaneApproval{})
 	if err != nil {
@@ -483,7 +478,7 @@ func newS14Stand(t *testing.T) *s14Stand {
 	spawner := &workerSpawner{
 		layout: db.Layout(), opener: tp, sessions: reg, enrolments: enrol,
 		workspace: string(workspace.Default), log: logger,
-		readiness: realWatch, typist: paneTyping,
+		readiness: realWatch,
 	}
 	record := workers.NewRegistrar(store, spawner, enrol, sup,
 		workers.WithEnrolmentDeadline(20*time.Second),
@@ -507,6 +502,7 @@ func newS14Stand(t *testing.T) *s14Stand {
 	keysImpl := newPaneKeys(reader, hub)
 	messagesImpl := newPaneMessages(keysImpl, reader, hub, paneDrivers, time.Now())
 	reader.SetMessages(messagesImpl)
+	record.SetTaskQueue(messagesImpl)
 
 	registry := toolRegistry(t)
 	auth, err := newToolAuthorizer(peerpin.SystemPinner{}, reg, grid, record, workerTestWorkspace, allowWorkerApproval{})

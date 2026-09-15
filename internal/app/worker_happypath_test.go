@@ -446,11 +446,38 @@ type happyStand struct {
 	coord    session.Session
 	// paneWatch and typist are set only under withHappyStandRealTyping — the
 	// same paneobserve.Watcher and agenttyping.Typist the composition root
-	// builds, wired into workerSpawner's readiness/typist seams instead of
-	// leaving them nil (nocx-66gd0). nil for every other test, which keeps
-	// happyPaneWatch's cheaper recording in place for them.
+	// builds, wired into workerSpawner's readiness seam and happyTaskQueue
+	// instead of leaving them nil (nocx-66gd0). nil for every other test,
+	// which keeps happyPaneWatch's cheaper recording in place for them.
 	paneWatch *paneobserve.Watcher
 	typist    *agenttyping.Typist
+}
+
+// happyTaskQueue is newHappyStand's own workers.TaskQueue (Task 11), reaching
+// the SAME real readiness/typing stack withHappyStandRealTyping already
+// wires — never a second, faked answer to "may nocx write into this pane".
+// It is not the shipped internal/app.paneMessages: that one delivers through
+// a real helper's session.intent (design §8), and this stand runs no helper
+// at all (Task 14's own happypath extends this same newHappyStand with one).
+// What this stand's tests need from a TaskQueue is only "the task the
+// coordinator gave eventually reaches the pane once it is free", and
+// awaitFreeText plus the real Typist already answer that faithfully.
+type happyTaskQueue struct {
+	readiness paneReadiness
+	typist    paneTypist
+	log       log.Logger
+}
+
+func (q *happyTaskQueue) EnqueueTask(_ context.Context, _ string, participant workers.Participant, task string) error {
+	go func() {
+		paneID := participant.Liveness.SessionID
+		state, err := awaitFreeText(context.Background(), q.readiness, paneID, q.log, "worker spawn (happy stand)")
+		if err != nil || state != agentdriver.StateFreeText {
+			return
+		}
+		q.typist.Submit(context.Background(), paneID, task)
+	}()
+	return nil
 }
 
 type happyEndpointOwner struct{}
@@ -478,20 +505,11 @@ type happyStandConfig struct {
 	// realTyping asks the stand to wire the real pane-observation and
 	// typing stack (paneobserve.Watcher, agentdriver.Registry,
 	// agentcalib.Calibrations, agenttyping.Typist) into workerSpawner's
-	// readiness and typist seams, instead of leaving them nil. Only a test
-	// about nocx-66gd0's delivery gate needs this; it costs a real corpus
-	// replay and a background sweep goroutine that every other happy-path
-	// test has no reason to pay for.
+	// readiness seam and the record's TaskQueue (happyTaskQueue, below),
+	// instead of leaving them nil. Only a test about nocx-66gd0's delivery
+	// gate needs this; it costs a real corpus replay and a background sweep
+	// goroutine that every other happy-path test has no reason to pay for.
 	realTyping bool
-	// answering additionally wires workers.screen and workers.answer's own
-	// composition-root seams (workerScreener, workerAnswerer) onto the same
-	// real observation/typing stack realTyping builds, plus the shared
-	// owed-task debt workerSpawner and workerAnswerer both need to hand a
-	// spawn's untyped task to whichever answer finally frees it
-	// (nocx-f545a.7's shape, app.go's own wiring) — see
-	// withHappyStandAnswering. Implies realTyping: a screen or an answer
-	// with nothing real behind them would test nothing.
-	answering bool
 }
 
 // logger is the stand's own logger, and endpointSlog is the same sink the tool
@@ -528,18 +546,6 @@ func withHappyStandEnrolmentDeadline(d time.Duration) happyStandOption {
 // absence of an observer as licence to skip typing.
 func withHappyStandRealTyping() happyStandOption {
 	return func(c *happyStandConfig) { c.realTyping = true }
-}
-
-// withHappyStandAnswering wires workers.screen and workers.answer through the
-// same composition-root seams app.go builds — workerScreener and
-// workerAnswerer, over the real grid, watcher and typist realTyping already
-// wires in, plus one shared *owedTasks so a question workers.spawn left owed
-// is the SAME debt workerAnswerer pays once its answer is confirmed
-// (nocx-f545a.7). nocx-f545a.5's real-Claude check is the first caller: it
-// reads a stuck worker's screen and answers its folder-trust question through
-// exactly the tool surface a coordinator reaches.
-func withHappyStandAnswering() happyStandOption {
-	return func(c *happyStandConfig) { c.realTyping = true; c.answering = true }
 }
 
 // happyCalibStore is a calibration store holding one pre-verified set. It
@@ -753,30 +759,28 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 	spawner := &workerSpawner{layout: db.Layout(), opener: tp, sessions: reg, enrolments: enrol, workspace: string(workspace.Default), log: logger}
 	if cfg.realTyping {
 		spawner.readiness = realWatch
-		spawner.typist = paneTyping
 	}
 	recordOpts := []workers.Option{
 		workers.WithEnrolmentDeadline(cfg.deadline),
 		workers.WithLogger(logger),
 		workers.WithCloser(&workerCloser{sessions: reg, log: logger}),
 	}
-	if cfg.answering {
-		// The shared debt spawner marks and workerAnswerer pays, exactly as
-		// app.go's own workerOwed is shared between the two (nocx-f545a.7):
-		// two separate instances would let a question workers.spawn left
-		// owed go unpaid forever, because the answerer would be checking a
-		// debt nobody had marked on ITS OWN set.
-		owed := newOwedTasks()
-		spawner.owed = owed
-		recordOpts = append(recordOpts,
-			workers.WithScreener(&workerScreener{screens: grid, watch: realWatch}),
-			workers.WithAnswerer(&workerAnswerer{
-				screens: grid, typist: paneTyping,
-				owed: owed, classify: realWatch, typing: paneTyping, log: logger,
-			}),
-		)
-	}
 	record := workers.NewRegistrar(store, spawner, enrol, sup, recordOpts...)
+	if cfg.realTyping {
+		// Task 11's own delivery seam (design §9): the task is enqueued once
+		// this participant is live, exactly as app.go's own SetTaskQueue
+		// wires it, over a queue built for this stand rather than the full
+		// helper-backed session.message stack — this stand has no real
+		// helper runtime behind its panes at all (that is Task 14's own
+		// happypath, which extends this same newHappyStand for exactly that
+		// reason). happyTaskQueue reaches the SAME real typing gate
+		// (paneTyping) this stand already wires for readiness, so
+		// TestACoordinatorSpawnsAWorkerAndTypesItsTask's own assertion — the
+		// task lands in the pane as a bracketed paste and a submit key —
+		// still exercises a real gate rather than a double that only
+		// records a call.
+		record.SetTaskQueue(&happyTaskQueue{readiness: realWatch, typist: paneTyping, log: logger})
+	}
 	report.declare = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, d workers.Declaration) error {
 		_, declareErr := record.Declared(ctx, id, l, d)
 		return declareErr

@@ -8,9 +8,20 @@ package app
 // makes a positively identified question an ANSWER to the wait: the worker
 // goes live with its tab and session standing, nothing is typed into it, and
 // the registration is told what became of the task. These tests assert that
-// through the real observation and typing seams, off the real capture of that
-// question, and assert the other half too — a pane nocx cannot read still
-// fails, and now says in a value that it could not read it.
+// through the real observation seam, off the real capture of that question,
+// and assert the other half too — a pane nocx cannot read still fails, and
+// now says in a value that it could not read it.
+//
+// workerSpawner itself no longer types anything (design §9, Task 11): the
+// owed-task debt these tests used to exercise directly (mark/take/restore/
+// drop) is gone, replaced by a "when=free" session.message the message
+// queue delivers once the pane is free — internal/workers/registrar_task
+// queue_test.go covers "Register enqueues the task", and
+// internal/app/pane_messages_test.go covers the queue's own delivery
+// mechanics. What stays true here, and is what these tests assert, is that a
+// spawn meeting a question is not a failure: the participant goes live with
+// its tab and session standing, and nothing reaches the pane while the
+// question is up.
 
 import (
 	"context"
@@ -20,21 +31,9 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/agentdriver"
-	"github.com/shady2k/nocx/internal/agenttyping"
-	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/waittest"
 	"github.com/shady2k/nocx/internal/workers"
 )
-
-// mustNotTypeTypist fails the test if anything is submitted. A question is a
-// screen the real gate would refuse anyway; this makes "nocx never tried" the
-// assertion rather than "nocx tried and was stopped".
-type mustNotTypeTypist struct{ t *testing.T }
-
-func (m mustNotTypeTypist) Submit(ctx context.Context, pane, text string) agenttyping.Result {
-	m.t.Errorf("Submit(%q, %q) was called on a pane that is asking a question", pane, text)
-	return agenttyping.Result{PaneID: pane, Outcome: agenttyping.OutcomeRefused, Reason: "test: must not type"}
-}
 
 // Criterion, off the real corpus: the folder-trust question ends the spawn's
 // wait as an answer. The participant is live, keeps its tab and its session,
@@ -89,20 +88,22 @@ func TestASpawnWhosePaneAsksAQuestionGoesLiveWithItsTaskUntyped(t *testing.T) {
 	}
 }
 
-// Criterion: both kinds of question end the wait, and neither is typed into.
-// The typist here fails the test if it is called at all.
+// Criterion: both kinds of question end the wait, and neither is typed into
+// — workerSpawner itself no longer types anything at all (design §9, Task
+// 11), so this asserts the pty stays untouched rather than that a typist was
+// never called.
 func TestAQuestionOfEitherKindEndsTheWaitWithoutTypingAnything(t *testing.T) {
 	for _, state := range []agentdriver.State{agentdriver.StatePermissionChoice, agentdriver.StateModalChoice} {
 		t.Run(string(state), func(t *testing.T) {
 			stand := newTaskDeliveryStand(t)
 			stand.spawner.readiness = fixedStateReadiness{state: state}
-			stand.spawner.typist = mustNotTypeTypist{t: t}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
+			const task = "do the thing"
 			sp, err := stand.spawner.Spawn(ctx, workers.SpawnRequest{
 				Participant: workers.ParticipantID("p-" + string(state)), Group: "worker-1",
-				Task: "do the thing", Command: "claude",
+				Task: task, Command: "claude",
 			})
 			if err != nil {
 				t.Fatalf("Spawn refused a pane asking %q: %v", state, err)
@@ -120,6 +121,9 @@ func TestAQuestionOfEitherKindEndsTheWaitWithoutTypingAnything(t *testing.T) {
 			}
 			if _, deleted := stand.tabs.snapshot(); len(deleted) != 0 {
 				t.Fatalf("a question deleted the participant's tab: %v", deleted)
+			}
+			if full := stand.ptys.last().read(); strings.Contains(full, task) {
+				t.Fatalf("the task reached a pane that was asking a question: %q", full)
 			}
 		})
 	}
@@ -186,45 +190,18 @@ func TestAPaneNeverObservedIsAnUnreadableRefusal(t *testing.T) {
 	}
 }
 
-// ── the debt itself: marked at spawn, dropped at either closing event
-// other than an answer paying it (nocx-f545a.7) ────────────────────────────
-
-// Criterion: a spawn whose pane asks a question marks the participant's
-// task owed, and Kill — the compensation for every failure after the fork,
-// reached both by compensateSpawn here and by
-// internal/workers.Registrar.compensate for a later failure — drops that
-// debt, so a registration that never becomes a supervised participant does
-// not leave one nothing will ever clear.
-func TestKillDropsAnOwedTask(t *testing.T) {
-	stand := newTaskDeliveryStand(t)
-	sid, _, sp := spawnStuckOnQuestion(t, stand, "p-owed-kill-2", "do the thing")
-
-	if !stand.owed.take(sid) {
-		t.Fatal("the spawn did not mark its task owed")
-	}
-	stand.owed.mark(sid) // restore for Kill to find and drop
-
-	if err := sp.Kill(context.Background()); err != nil {
-		t.Fatalf("Kill: %v", err)
-	}
-	if stand.owed.take(sid) {
-		t.Fatal("Kill did not drop the participant's owed task")
-	}
-}
-
-// Criterion: the other closing event — the participant's session ending —
-// drops the same debt, from workerSupervisor.report, whether or not
-// anything downstream is wired to hear about the exit.
-func TestSupervisorReportDropsAnOwedTask(t *testing.T) {
-	stand := newTaskDeliveryStand(t)
-	sid := session.ID("sid-owed-report")
-	stand.owed.mark(sid)
-
-	stand.sup.report(context.Background(), workers.Participant{
-		ID: "p-owed-report", Liveness: workers.Liveness{SessionID: string(sid)},
-	}, workers.Exit{Cause: "exited"})
-
-	if stand.owed.take(sid) {
-		t.Fatal("workerSupervisor.report did not drop the participant's owed task")
-	}
-}
+// ── the debt is gone (design §9, Task 11) ──────────────────────────────────
+//
+// TestKillDropsAnOwedTask and TestSupervisorReportDropsAnOwedTask used to
+// assert that Kill and workerSupervisor.report each cleared the in-memory
+// owed-task debt for a participant that is gone — the closing events that
+// debt map's own doc named. There is no such debt to clear any more: the
+// task is a "when=free" session.message in internal/app.paneMessages' own
+// queue, and that queue already re-checks StillHolds(chain) on every
+// delivery attempt (pane_messages.go's deliverOne), so a participant whose
+// delegation the store no longer resolves — because Kill closed its session,
+// or its process exited — ends the delivery as PhaseRefused on its own, the
+// same way any other caller's "when=free" message does when its target goes
+// away. That termination path is internal/app/pane_messages_test.go's own
+// coverage (TestRevocationAfterPasteLeavesPartialAndTakesNoFurtherStep and
+// the StillHolds checks beside it), not this package's.

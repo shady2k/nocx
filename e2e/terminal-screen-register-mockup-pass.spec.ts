@@ -75,6 +75,17 @@ test("a finished block reads the pane's real branch, and the path is never absol
   })
   await promptReady(page)
 
+  // The branch source asks on a debounce after the verified cwd changes
+  // (spec §3), so it is not yet known the instant this block settles — a
+  // person sees it land in the composer before they type the next command,
+  // and the NEXT block records exactly what was known at ITS submit (§3: "a
+  // block records the branch the pane knew when the command was submitted").
+  // Waiting for the composer rather than a duration is what that spec text
+  // means in test form.
+  await expect(page.locator(`${COMPOSER_CHROME} ${PROMPT_CONTEXT}`)).toContainText('main', {
+    timeout: 15_000,
+  })
+
   await page.locator(INPUT).fill('true # t14-branch-probe')
   await page.keyboard.press('Enter')
   const block = page.locator(SETTLED, { hasText: 't14-branch-probe' })

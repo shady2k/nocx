@@ -233,9 +233,9 @@ type Options struct {
 	Now   func() time.Time
 	NewID func() ([16]byte, error)
 	// SweepInterval is how often the unclaimed-session sweep (sweepExpired)
-	// runs ON ITS OWN, independent of any caller asking WindowBytesInUse,
-	// the inventory or a spawn (nocx-isjh4, owner review 2026-09-15): those
-	// lazy call sites never fire for a helper nobody calls again, which is
+	// runs ON ITS OWN, independent of a caller asking the inventory or
+	// spawning (nocx-isjh4, owner review 2026-09-15): those two lazy call
+	// sites never fire for a helper nobody calls again, which is
 	// exactly the orphan case amendment 3 exists for. Zero (the production
 	// default) uses defaultSweepInterval; tests that want to observe the
 	// scheduled sweep fire set it small and wait on state, never on a
@@ -346,8 +346,9 @@ func New(opts Options) *Service {
 	}
 	// RUN ON ITS OWN SCHEDULE, not only when a caller happens to ask
 	// something (nocx-isjh4, owner review): a helper nobody calls again is
-	// exactly the orphan case D-amendment 3 exists for, and WindowBytesInUse/
-	// inventory/spawn never fire for it. The interval is real wall-clock
+	// exactly the orphan case D-amendment 3 exists for, and inventory/spawn
+	// (the two lazy hooks — WindowBytesInUse is a pure observer and sweeps
+	// nothing) never fire for it. The interval is real wall-clock
 	// time — a ticker, not the injectable Now — because scheduling WHEN to
 	// look is a different question from what a session's age is measured
 	// against once looked at; sweepExpired still measures age with s.now
@@ -442,12 +443,17 @@ func (s *Service) Close() {
 // WindowBytesInUse is the aggregate this helper has committed. Exported so the
 // budget can be asserted on rather than inferred from behaviour.
 //
-// It sweeps expired sessions first (nocx-isjh4): this is one of the places a
-// caller — a test with a fake clock, or a coordinator asking mid-session —
-// observes staleness, so it is one of the places that observation is made
-// true rather than merely eventually true.
+// It does NOT sweep (nocx-isjh4, coordinator review 2026-09-15): it has no
+// production caller — it exists for a caller to OBSERVE the budget, and an
+// observer that changes what it observes cannot tell a real effect from its
+// own side effect. TestTheScheduledSweepReleasesAnOrphanedSessionOnItsOwn
+// passed with the scheduled loop deleted entirely, because this method's own
+// sweep was doing the work the test meant to be checking — a defect in the
+// test caught by AGENTS.md's own rules 1 and 2, not a caveat to note and
+// move past. The sweep still runs lazily wherever a caller other than a pure
+// observer touches the service — inventory() and evictForBudget (spawn's own
+// budget check) — and on its own schedule (sweepLoop).
 func (s *Service) WindowBytesInUse() int64 {
-	s.sweepExpired()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.budget
@@ -1398,11 +1404,13 @@ func (s *Service) removeSession(hs *hostSession) {
 // only this comparison against s.now(), but WHEN it is evaluated is now
 // twofold: on sweepLoop's own real-time schedule (SweepInterval, started
 // with the Service and stopped by Close) so an unclaimed session is bounded
-// even on a helper nobody ever calls again, and lazily wherever staleness
-// would otherwise be observable in the meantime — WindowBytesInUse, the
-// inventory read, and before a spawn's own budget check (which is also
-// evictForBudget's first move, so a spawn that fits once TTL'd sessions are
-// gone never reaches eviction-under-pressure at all).
+// even on a helper nobody ever calls again, and lazily on the two paths a
+// caller can still change something through: the inventory read, and before
+// a spawn's own budget check (which is also evictForBudget's first move, so
+// a spawn that fits once TTL'd sessions are gone never reaches
+// eviction-under-pressure at all). NOT WindowBytesInUse: it has no
+// production caller and exists to observe the budget, so it must not be the
+// thing that changes it — see its own doc.
 //
 // A LIVE shell is never touched: exitInfo reports exited=false for one, and
 // this never calls removeSession for it. Neither is an exited session a

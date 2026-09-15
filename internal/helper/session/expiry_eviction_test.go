@@ -8,9 +8,13 @@ package session_test
 // coordinator is still attached to.
 //
 // Every test here drives a FAKE clock rather than sleeping: the "timer" is a
-// comparison against Service's own clock seam (s.now), evaluated lazily
-// wherever staleness would otherwise be observable — WindowBytesInUse, the
-// inventory read, and a spawn's own budget check.
+// comparison against Service's own clock seam (s.now), evaluated lazily on
+// the inventory read and before a spawn's own budget check.
+// WindowBytesInUse is deliberately NOT one of those two (nocx-isjh4,
+// coordinator review 2026-09-15): it has no production caller and exists
+// only to observe the budget, so every assertion here reads it AFTER a real
+// lazy or scheduled sweep has already run through the inventory, a spawn, or
+// sweepLoop — never as the thing that triggers one.
 
 import (
 	"context"
@@ -93,22 +97,27 @@ func TestAnExitedUnattachedSessionExpiresAfterItsTTLAndNotBefore(t *testing.T) {
 	spawner.last().exit(nil)
 	awaitExitCount(t, sink, 1)
 
+	// The inventory read is what sweeps (nocx-isjh4, coordinator review
+	// 2026-09-15): WindowBytesInUse is a pure observer with no production
+	// caller and must not change what it reports, so it is read AFTER the
+	// inventory call in both halves below — a passive confirmation of what
+	// the real lazy hook already did, never the thing doing it.
 	clock.Advance(ttl - time.Nanosecond)
-	if used := svc.WindowBytesInUse(); used == 0 {
-		t.Fatal("the session's budget was released a tick before its TTL elapsed")
-	}
 	inv := call[proto.SessionsResult](t, svc, proto.OpSessions, proto.SessionsParams{})
 	if len(inv.Sessions) != 1 {
 		t.Fatalf("the session left the inventory before its TTL elapsed: %+v", inv.Sessions)
 	}
+	if used := svc.WindowBytesInUse(); used == 0 {
+		t.Fatal("the session's budget was released a tick before its TTL elapsed")
+	}
 
 	clock.Advance(time.Nanosecond)
-	if used := svc.WindowBytesInUse(); used != 0 {
-		t.Fatalf("window bytes in use = %d once the TTL elapsed, want 0", used)
-	}
 	inv = call[proto.SessionsResult](t, svc, proto.OpSessions, proto.SessionsParams{})
 	if len(inv.Sessions) != 0 {
 		t.Fatalf("an unclaimed session outlived its TTL: %+v", inv.Sessions)
+	}
+	if used := svc.WindowBytesInUse(); used != 0 {
+		t.Fatalf("window bytes in use = %d once the TTL elapsed, want 0", used)
 	}
 }
 
@@ -255,18 +264,31 @@ func TestASpawnNeverEvictsAnExitedSessionACoordinatorIsAttachedTo(t *testing.T) 
 }
 
 // TestTheScheduledSweepReleasesAnOrphanedSessionOnItsOwn is nocx-isjh4's
-// coordinator review, gap 2: a sweep that only ran when WindowBytesInUse,
-// the inventory or a spawn happened to be asked something never runs at all
-// for a helper nobody calls again — exactly the orphan case D-amendment 3
-// exists for, and memory would be held indefinitely. The Service now runs
-// sweepExpired on ITS OWN schedule (Options.SweepInterval), started with
-// the Service and stopped by Close.
+// coordinator review, gap 2: a sweep that only ran when the inventory or a
+// spawn happened to be asked something never runs at all for a helper
+// nobody calls again — exactly the orphan case D-amendment 3 exists for,
+// and memory would be held indefinitely. The Service now runs sweepExpired
+// on ITS OWN schedule (Options.SweepInterval), started with the Service and
+// stopped by Close.
+//
+// FALSIFIABLE, NOT JUST PLAUSIBLE (nocx-isjh4, coordinator review
+// 2026-09-15): an earlier version of this test polled WindowBytesInUse to
+// observe the release, and WindowBytesInUse used to sweep on its own —
+// so the test passed even with sweepLoop's start commented out entirely,
+// proving nothing about the schedule. WindowBytesInUse is now a pure
+// observer (see its own doc) with no sweep of its own, so the ONLY thing
+// that can zero the budget in this test is the scheduled loop: nothing
+// else in this test ever calls the inventory or spawns again. Verified by
+// hand both ways — commenting out `go s.sweepLoop(interval)` in New makes
+// this test fail (timeout, budget never reaches zero); restoring it makes
+// it pass again — and recorded in the commit message and the report rather
+// than left as a claim nobody checked.
 //
 // The wait below is on OBSERVABLE STATE — WindowBytesInUse settling to
 // zero — polled with a bound, never a fixed sleep-then-assert: a session
-// that never expires (a defect in sweepExpired itself, not in the
-// schedule) fails this test exactly as slowly as the timeout, and nothing
-// here depends on how fast this machine happens to be.
+// that never expires (a defect in sweepExpired itself, or the schedule
+// never running at all) fails this test exactly as slowly as the timeout,
+// and nothing here depends on how fast this machine happens to be.
 func TestTheScheduledSweepReleasesAnOrphanedSessionOnItsOwn(t *testing.T) {
 	spawner := &fakeSpawner{}
 	sink := newSink()

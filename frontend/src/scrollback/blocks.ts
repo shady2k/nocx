@@ -689,6 +689,11 @@ function div(className: string, ...children: (string | HTMLElement)[]): HTMLElem
  * cadence the mockup's number could not otherwise show. A minute or more
  * keeps the coarser `Nm Ns` shape: a decimal digit on a multi-minute figure
  * would read as false precision for a wait that long.
+ *
+ * Never called below `DURATION_FLOOR_MS`: `_startTicker` shows bare
+ * "Running" instead until then (round 3) — this function has no `<0.1s`
+ * branch of its own because that state is the ABSENCE of a duration meta
+ * (and its separator) entirely, not a string this formatter could return.
  */
 function formatRunningDuration(ms: number): string {
   if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
@@ -697,16 +702,28 @@ function formatRunningDuration(ms: number): string {
   return `${min}m ${sec}s`
 }
 
+/** Below this, `Running · 0.0s` and a finished `0.0s` both read as "took no
+ *  time" or "the timer is broken" rather than as an honest measurement
+ *  (spec 2026-09-15 §1.7 round 3) — the mockup pass's own tenths precision
+ *  cannot represent anything smaller. Shared by `formatDuration`'s `<0.1s`
+ *  branch below and `BlockManager._startTicker`'s running-header threshold,
+ *  so the two readings of "not enough time has passed to say a number"
+ *  cannot drift to different figures. */
+const DURATION_FLOOR_MS = 100
+
 /**
  * A finished command's duration, normalized to tenths of a second below a
- * minute (spec 2026-09-15 §1.7: `49ms` → `0.0s`, `113ms` → `0.1s`) rather
- * than the millisecond figure the header used to show — one register for
- * every finished duration, whatever its actual size, instead of a unit that
- * changes at the 1000ms boundary. The precise millisecond figure this
- * rounds away is not lost: `durationMeta` below carries it as the Meta's
- * `title`, via `formatDurationTitle`.
+ * minute (spec 2026-09-15 §1.7 round 3: `113ms` → `0.1s`) rather than the
+ * millisecond figure the header used to show — one register for every
+ * finished duration, whatever its actual size, instead of a unit that
+ * changes at the 1000ms boundary. Below `DURATION_FLOOR_MS` the tenths
+ * figure would read `0.0s` — indistinguishable from "took no time" — so
+ * that range reads `<0.1s` instead: still bounded, never a false zero. The
+ * precise millisecond figure this rounds away is not lost: `durationMeta`
+ * below carries it as the Meta's `title`, via `formatDurationTitle`.
  */
 function formatDuration(ms: number): string {
+  if (ms < DURATION_FLOOR_MS) return '<0.1s'
   if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
   const min = Math.floor(ms / 60000)
   const sec = ((ms % 60000) / 1000).toFixed(0)
@@ -872,10 +889,16 @@ function createHeader(
     // or has already finished. `Running` in the accent tone, matching the
     // ask kind's own in-progress word below (AD-8: one shape for "in
     // progress").
+    //
+    // NO separator or duration here (spec 2026-09-15 §1.7 round 3): at
+    // build time elapsed is always zero, below `DURATION_FLOOR_MS`, and a
+    // figure that can only ever read `0.0s` says "took no time" rather than
+    // "not yet measured". `BlockManager._startTicker` inserts both, right
+    // before Stop/the ⋮, the moment elapsed actually crosses the floor —
+    // this header starts, and a block built with no ticker attached stays,
+    // bare "Running".
     right.appendChild(createSpinner({ label: 'Running', size: 'sm' }))
     right.appendChild(createMeta(['Running'], { tone: 'accent', size: 'terminal' }))
-    right.appendChild(createMetaSeparator({ size: 'terminal' }))
-    right.appendChild(durationMeta(formatRunningDuration(0)))
   } else if (status === 'waiting' && rules.statusChips) {
     // The kind's own in-progress vocabulary: the ask block says it is
     // thinking until the first delta lands, and the answer lifecycle removes
@@ -2386,18 +2409,35 @@ export class BlockManager {
 
   private _startTicker(el: HTMLElement): void {
     this._stopTicker()
-    const meta = el.querySelector<HTMLSpanElement>(
-      ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]',
-    )
+    const right = el.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')
     const started = this._cmdStartTime
-    if (!meta || started === null) return
+    if (!right || started === null) return
+
+    // Built LAZILY, the moment elapsed first crosses `DURATION_FLOOR_MS` —
+    // never at header-build time, when it is always zero (round 3: bare
+    // "Running" until there is a figure worth showing). Inserted right
+    // before Stop/the ⋮ (whichever comes first in DOM — Stop always
+    // precedes the ⋮ when both exist), the one place "Running · 12.4s
+    // [Stop] [⋮]" puts it; a plain `right.appendChild` would instead land
+    // it AFTER both, since they are appended by the caller once this
+    // header already exists (createRunningBlock).
+    let meta: HTMLSpanElement | null = null
 
     const paint = (): void => {
-      updateMeta(meta, [formatRunningDuration(this._now() - started)], {
-        tone: 'muted',
-        column: 'duration',
-        size: 'terminal',
-      })
+      const elapsed = this._now() - started
+      if (elapsed < DURATION_FLOOR_MS) return
+      if (meta) {
+        updateMeta(meta, [formatRunningDuration(elapsed)], {
+          tone: 'muted',
+          column: 'duration',
+          size: 'terminal',
+        })
+        return
+      }
+      const before = right.querySelector('[data-block-control], [data-block-actions]')
+      right.insertBefore(createMetaSeparator({ size: 'terminal' }), before)
+      meta = durationMeta(formatRunningDuration(elapsed))
+      right.insertBefore(meta, before)
     }
     // A hidden tab gains nothing from repainting ten times a second — this
     // PAUSES the timer itself rather than merely skipping the paint inside

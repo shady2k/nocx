@@ -8110,13 +8110,14 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
       ).toBeNull()
       // And the other fact still says itself out loud, so the absence above
       // reads as "unknown" and never as "the chip was dropped".
-      // Tenths of a second, not milliseconds (spec 2026-09-15 §1.7): the
-      // precise figure the tenths display rounds away is the Meta's title.
+      // Below a tenth of a second: `<0.1s`, not `0.0s` (spec 2026-09-15
+      // §1.7 round 3) — the precise figure the tenths display rounds away
+      // is the Meta's title instead.
       expect(
         instant.querySelector(
           ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]',
         )?.textContent,
-      ).toBe('0.0s')
+      ).toBe('<0.1s')
     } finally {
       teardown()
     }

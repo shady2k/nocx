@@ -119,7 +119,9 @@ base.describe('a finished turn can show its raw model dump (nocx-0mvpy.4)', () =
         timeout: 30_000,
       })
       await block.locator('[data-block-actions]').click()
-      await page.getByRole('button', { name: 'Show dump' }).click()
+      // The block menu is the kit ContextMenu (nocx-9bpeq.5): its rows carry
+      // role="menuitem", not role="button".
+      await page.getByRole('menuitem', { name: 'Show dump' }).click()
 
       const dialog = page.getByRole('dialog', { name: 'Model dump' })
       await expect(dialog).toBeVisible()

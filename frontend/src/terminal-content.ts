@@ -1739,9 +1739,7 @@ export class TerminalContent extends BasePaneContent {
     this._host = view.host
     this._user = view.user
     this.programTitle = view.programTitle
-    this.cwdTitle = this.currentHome()
-      ? cwdLabel(view.cwd, this.currentHome())
-      : directoryLabel(view.cwd)
+    this.cwdTitle = directoryLabel(view.cwd)
     this.editor?.setCwd(view.cwd)
     this.onTooltipChange(
       view.host
@@ -1896,8 +1894,6 @@ export class TerminalContent extends BasePaneContent {
    *  blocks are not command records and are out of this loop's reach —
    *  `blockManager.blocks` names only what it can reach. */
   private _onHomeKnown(home: string): void {
-    this.cwdTitle = cwdLabel(this._cwd, home)
-    this.pushTitle()
     this.editor?.setWhereFacts({ home, branch: this.branchSource?.branch() })
     for (const rec of this.scrollback?.blockManager.blocks ?? []) {
       setBlockWhere(rec.el, { home, branch: this._blockBranch.get(rec.id) })

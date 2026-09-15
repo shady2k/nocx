@@ -120,11 +120,11 @@ test('a file dropped on an SSH tab arrives on the far host', async ({ page }) =>
     // says it has. Asserted separately from the panel so a failure here reads
     // as "the shell never reported its directory" rather than as a tree bug.
     const remoteBase = path.basename(remoteHome)
-    // The where-line: a kit Meta before nocx-9bpeq.15, now the same
-    // PromptContext primitive a block's header draws (spec 2026-09-15 §2).
+    // The where-line reads the remote HOME as `~` once the session's home is
+    // known (nocx-9bpeq.13), so the reported directory is `host:~`.
     await expect(
       page.locator('.pane.active .nocx-editor-context .ui-prompt-context'),
-    ).toContainText(remoteBase, {
+    ).toContainText(':~', {
       timeout: 90_000,
     })
 

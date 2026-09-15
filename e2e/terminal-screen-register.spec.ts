@@ -26,7 +26,8 @@ const THEME_SELECT = '.ui-settings-row[data-key="ui.theme"] select'
 const FAILED_ROW = '.cmd-block[data-outcome="failure"]'
 const STATUS = '.cmd-header .ui-meta[data-tone="danger"]'
 const OK = 'true #t9-ok'
-const FAIL = 'false #t9-fail'
+// Prints before failing, so the failed block has output for its rail to run beside.
+const FAIL = 'echo failing; false #t9-fail'
 
 /** A mirror of KNOWN_THEME_IDS (frontend/src/renderers/theme-bootstrap.ts:48).
  *  Mirrored rather than imported: importing renderer source would pull the
@@ -239,9 +240,15 @@ test('a failed command is marked, and its status is legible in every theme', asy
     await expect(page.locator(status)).toHaveText(/Exit 1/)
     const ratio = await probe(page, 'textContrast', status)
     expect(ratio, `${theme}: status text contrast`).toBeGreaterThanOrEqual(4.5)
+    // The row keeps the terminal's ground; the failure is the rail beside its
+    // output (reference pass, owner review 2026-09-15).
     const ground = await probe(page, 'ground', FAILED_ROW)
-    const token = await probe(page, 'tokenColour', '--color-danger-surface')
-    expect(near(ground, token), `${theme}: failed row ground is --color-danger-surface`).toBe(true)
+    const terminal = await probe(page, 'tokenColour', '--terminal-background')
+    expect(near(ground, terminal), `${theme}: failed row keeps the terminal ground`).toBe(true)
+    const rail = await page
+      .locator(`${FAILED_ROW} > .cmd-output`)
+      .evaluate((el) => getComputedStyle(el, '::before').width)
+    expect(rail, `${theme}: failure rail is drawn`).toBe('4px')
   }
 })
 
@@ -306,7 +313,13 @@ test('history, live terminal and composer stand on one ground in every theme', a
     await setTheme(page, theme)
     const ground = await probe(page, 'tokenColour', '--terminal-background')
     expect(near(await probe(page, 'ground', okRow), ground), `${theme}: block row`).toBe(true)
-    expect(near(await probe(page, 'ground', COMPOSER), ground), `${theme}: composer`).toBe(true)
+    // The composer is a card on the terminal-chrome role, set apart from the
+    // history ground (reference pass, owner review 2026-09-15).
+    const card = await probe(page, 'tokenColour', '--color-terminal-chrome')
+    expect(
+      near(await probe(page, 'ground', `${COMPOSER} .ui-composer-frame`), card),
+      `${theme}: composer card`,
+    ).toBe(true)
   }
   // A builtin that waits: the live region exists only while something runs, and
   // `sleep` is not on every stand's PATH (pets.spec.ts).

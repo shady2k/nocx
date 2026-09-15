@@ -2,6 +2,9 @@
 .ui-composer-frame {
   display: flex;
   flex-direction: column;
+  /* The field below reshapes by the card's own width, not the viewport's: a
+     pane beside an open sidebar can be narrower than any viewport query. */
+  container-type: inline-size;
   margin: 0 var(--terminal-card-margin) var(--terminal-card-margin);
   padding: var(--terminal-card-padding);
   border: 1px solid var(--color-divider);
@@ -64,4 +67,23 @@
   font-family: var(--font-family-ui);
   font-size: var(--font-size-xs);
   line-height: 1;
+}
+
+/* A very narrow pane (a sidebar open in a small window): the Run segment gives
+   up its reserved width and the submit button steps aside — Enter still sends
+   — so the draft keeps a column it can be typed and clicked in. Measured: at a
+   124px pane the three columns and their gaps left the editor zero pixels and
+   pushed the submit button outside the card. */
+@container (max-width: 240px) {
+  .ui-composer-frame__field {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: var(--space-1);
+  }
+  .ui-composer-frame__submit {
+    display: none;
+  }
+  .ui-composer-frame__field > .ui-mode-indicator[data-variant='field'] {
+    min-width: 0;
+    padding-inline: var(--space-1);
+  }
 }

@@ -212,6 +212,14 @@ test.describe('command editor (nocx-4ff)', () => {
         const areaRect = area.getBoundingClientRect()
         return {
           editorHeight: Math.round(editor.getBoundingClientRect().height),
+          // The running footer (Process running · Send input · Interrupt · Stop)
+          // takes a row of its own while a command runs — the row cost the
+          // owner accepted with it (decision 2026-09-15, running state).
+          processBarHeight: Math.round(
+            document
+              .querySelector<HTMLElement>('.pane.active .ui-process-bar:not([hidden])')
+              ?.getBoundingClientRect().height ?? 0,
+          ),
           areaHeight: area.clientHeight,
           blockTop: block ? Math.round(block.getBoundingClientRect().top - areaRect.top) : -1,
           display: editor.style.display,
@@ -257,7 +265,9 @@ test.describe('command editor (nocx-4ff)', () => {
     expect(running.display).toBe('none')
     expect(running.editorHeight).toBe(0)
     expect(
-      Math.abs(running.areaHeight - (before.areaHeight + before.editorHeight)),
+      Math.abs(
+        running.areaHeight + running.processBarHeight - (before.areaHeight + before.editorHeight),
+      ),
     ).toBeLessThanOrEqual(1)
     // A short command starts where the prompt was, not at the top of the pane.
     expect(running.blockTop).toBeGreaterThan(running.areaHeight / 2)

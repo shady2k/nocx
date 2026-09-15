@@ -275,7 +275,7 @@
   right: 4px;
   top: 50%;
   transform: translateY(-50%);
-  opacity: 1;
+  opacity: 0;
   transition: opacity 0.15s;
 }
 
@@ -286,9 +286,11 @@
    person is actually looking at could hide its own close control, and
    Tabbing to it with no mouse in play never revealed it at all —
    `:focus-visible` on the button never got the chance to draw because the
-   ancestor's `opacity: 0` never lifted for keyboard approach. */
+   ancestor's `opacity: 0` never lifted for keyboard approach. The ACTIVE-tab
+   reveal is the horizontal strip's only: a vertical row's label runs to the
+   row edge and the mark stays hover-revealed there (nocx-lfsw4). */
 .nocx-tab:hover > .ui-icon-button,
-.nocx-tab[aria-selected='true'] > .ui-icon-button,
+.tabbar .nocx-tab[aria-selected='true'] > .ui-icon-button,
 .nocx-tab:focus-within > .ui-icon-button {
   opacity: 1;
 }

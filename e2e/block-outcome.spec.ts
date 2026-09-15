@@ -35,7 +35,9 @@ test('success is silent, failure is legible, in every theme', async ({ page }) =
   await page.goto('/')
   await promptReady(page)
   await run(page, 'true')
-  await run(page, 'false')
+  // It prints before failing: the failure rail runs beside a command's
+  // OUTPUT, so a failure with nothing to show carries only its Exit word.
+  await run(page, 'echo failing; false')
 
   const blocks = page.locator(
     '.pane.active .scrollback-inner > .cmd-block[data-block-kind="command"]',
@@ -69,7 +71,10 @@ test('success is silent, failure is legible, in every theme', async ({ page }) =
       )!
       const fg = lum(parse(getComputedStyle(status).color))
       const bg = lum(parse(getComputedStyle(block).backgroundColor))
-      const bar = getComputedStyle(block, '::before')
+      // The failure rail runs beside the OUTPUT only (reference pass, owner
+      // review 2026-09-15), so it is the output's pseudo-element, not the row's.
+      const output = block.querySelector(':scope > .cmd-output')!
+      const bar = getComputedStyle(output, '::before')
       return {
         ratio: (Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05),
         barWidth: bar.width,
@@ -80,8 +85,8 @@ test('success is silent, failure is legible, in every theme', async ({ page }) =
     })
     expect(measured.dangerSurfaceSet, theme).toBe(true)
     expect(measured.ratio, theme).toBeGreaterThanOrEqual(4.5)
-    // Not by colour alone: the bar is drawn.
-    expect(measured.barWidth, theme).toBe('3px')
+    // Not by colour alone: the rail is drawn.
+    expect(measured.barWidth, theme).toBe('4px')
   }
 })
 

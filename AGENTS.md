@@ -496,6 +496,18 @@ or the wrong behaviour exactly, say where it lives (`git diff origin/main...HEAD
 settles "did I bring this"), and then fix it. If a bead already owns it, work that bead —
 another "occurrence" note is worth less than one line of fix.
 
+**"A bead already tracks it" is not a reason to leave it either — and neither is "another
+epic owns it".** A bead is where the fix is recorded, not a licence to walk past the red.
+**The rule binds a coordinator exactly as hard as a worker:** a brief or a review never
+tells a worker to leave a failing test alone. If the worker found it, the worker fixes it or
+reports why it cannot; if it lands in a package someone else is mid-flight in, the
+coordinator dispatches the fix in the same minute and names who has it.
+
+> 2026-09-15 (`nocx-gantk`). A worker reported a real-helper test in `internal/app` red on
+> the unmodified baseline. The coordinator's review answered "tracked under
+> `nocx-6q1uh.14`, leave it alone" — and that bead named a different test. The failure was
+> filed nowhere, and the answer would have carried it into the merged tree.
+
 This is about BREAKAGE YOU HAVE ENCOUNTERED, and it does not license widening the task you
 were given. New work still comes off the queue, and a brief still means what it says. The
 distinction: nobody asked you to build the adjacent feature, and everybody expects you to

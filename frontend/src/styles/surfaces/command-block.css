@@ -39,14 +39,8 @@
   container-name: cmd-block;
   /* Bottom of the block, before the next one's separator (spec 2026-09-15
      §1.5). Block-direction only — the inline gutter stays on
-     `.scrollback-inner > *` (T8, nocx-9bpeq.8) and is never duplicated here.
-     `--terminal-block-trailing-space` is task A's token (§3 contract, 16px —
-     the same value `--space-4` already holds); `var(--space-4)` stands in
-     until it lands, rather than `var(--terminal-block-trailing-space,
-     var(--space-4))` — the repo's CSS-integrity gate
-     (check-css-integrity.mjs's `undefined-var` rule) refuses a var()
-     reference to a custom property nothing declares yet, fallback or not. */
-  padding-bottom: var(--space-4); /* until A lands: --terminal-block-trailing-space in tokens.css */
+     `.scrollback-inner > *` (T8, nocx-9bpeq.8) and is never duplicated here. */
+  padding-bottom: var(--terminal-block-trailing-space);
 }
 
 /* Running/frozen trailing-space seam (spec 2026-09-15 §1.5): a running

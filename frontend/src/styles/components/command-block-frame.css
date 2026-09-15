@@ -65,13 +65,7 @@
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
-  /* 20px — task A's `--terminal-ui-line-height` (§3 contract). Literal, not
-     `var(--terminal-ui-line-height, 20px)`: the repo's own CSS-integrity
-     gate (check-css-integrity.mjs's `undefined-var` rule) refuses a var()
-     reference to a custom property nothing declares yet, fallback or not —
-     believe the gate over the wave's own "reference it as if it existed"
-     guidance. Swap to the token once A's tokens.css lands. */
-  line-height: 20px; /* until A lands: --terminal-ui-line-height in tokens.css */
+  line-height: var(--terminal-ui-line-height);
 }
 
 /* Row 2: the command line (highlighted, with its sigil) for the command
@@ -102,7 +96,7 @@
 .cmd-header-text {
   font-family: var(--font-family-mono);
   font-size: var(--font-size-terminal);
-  line-height: 20px; /* until A lands: --terminal-ui-line-height in tokens.css */
+  line-height: var(--terminal-ui-line-height);
   color: var(--color-text);
   white-space: pre-wrap;
   overflow-wrap: break-word;
@@ -138,7 +132,7 @@
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
-  line-height: 20px; /* until A lands: --terminal-ui-line-height in tokens.css */
+  line-height: var(--terminal-ui-line-height);
 }
 
 .cmd-header[data-header-progress] .cmd-header-right {
@@ -216,15 +210,10 @@
   position: absolute;
   top: 0;
   bottom: 0;
-  /* Rail width (4px), then the gap back to the text at x=0 (the output's
-     own content edge, 8px) — both task A's tokens (§3 contract:
-     `--terminal-failure-rail-width` / `--terminal-failure-rail-gap`).
-     Literal, not `var(--name, fallback)`: the repo's CSS-integrity gate
-     (check-css-integrity.mjs's `undefined-var` rule) refuses a var()
-     reference to a custom property nothing declares yet, fallback or not.
-     Swap to the tokens once A's tokens.css lands. */
-  left: -12px; /* until A lands: -1 * (--terminal-failure-rail-gap + --terminal-failure-rail-width) */
-  width: 4px; /* until A lands: --terminal-failure-rail-width in tokens.css */
+  /* Rail width, then the gap back to the text at x=0 (the output's own
+     content edge) — task A's tokens (§3 contract). */
+  left: calc(-1 * (var(--terminal-failure-rail-gap) + var(--terminal-failure-rail-width)));
+  width: var(--terminal-failure-rail-width);
   background: var(--color-danger);
   pointer-events: none;
 }

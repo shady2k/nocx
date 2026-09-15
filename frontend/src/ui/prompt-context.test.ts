@@ -100,10 +100,14 @@ describe('updatePromptContext — the same element, restated in place', () => {
 describe('prompt-context.css — tokens only, mono, one line', () => {
   const css = readFileSync(CSS, 'utf8')
 
-  it('one line, ellipsis, the mono face at --font-size-sm', () => {
+  it('one line, ellipsis, the mono face at the command row’s own size (round 18)', () => {
     const base = ruleFor(css, '.ui-prompt-context')
     expect(base).toContain('font-family: var(--font-family-mono)')
-    expect(base).toContain('font-size: var(--font-size-sm)')
+    // --font-size-terminal, not --font-size-sm: the mockups draw the prompt
+    // line and the command line as one register (round 18, mockup pass) —
+    // --font-size-sm read as "a tiny accent ~" against the terminal's own
+    // 14px in the owner's screenshot.
+    expect(base).toContain('font-size: var(--font-size-terminal)')
     expect(base).toContain('white-space: nowrap')
     expect(base).toContain('text-overflow: ellipsis')
   })
@@ -131,6 +135,17 @@ describe('prompt-context.css — tokens only, mono, one line', () => {
     expect(ruleFor(css, ".ui-prompt-context__part[data-part='on']")).toContain(
       'color: var(--color-text-muted)',
     )
+  })
+
+  it('"on" and the glyph carry their own gaps — the parts are bare adjacent spans with no whitespace text node between them (round 18)', () => {
+    // Found by reading a screenshot, not by textContent: with the branch
+    // known the rendered line read "~/repoonmain" with no visible space
+    // around "on" or the glyph, because DOM-adjacency contributes nothing
+    // and no whitespace text node sits between the parts (fill(),
+    // prompt-context.ts). A textContent assertion cannot see this — an SVG
+    // icon contributes no text either — so this checks the CSS gap exists.
+    expect(ruleFor(css, ".ui-prompt-context__part[data-part='on']")).toContain('margin-inline')
+    expect(ruleFor(css, '.ui-prompt-context svg')).toContain('margin-right')
   })
 
   it('the branch glyph is sized off the icon-size token, not a literal', () => {

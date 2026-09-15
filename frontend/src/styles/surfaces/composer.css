@@ -162,13 +162,26 @@
    draw a taller field, so `--control-height-lg` (38px, the kit's own
    tallest control) is the floor here rather than a new literal, and it
    wins over the base spec's implied single-line height (spec §6 amended).
-   `display: flex` + `align-items: center` centres the ONE child CM6 mounts
-   here (`.cm-scroller`, which is CM6's own flex row of gutter + content)
-   inside that taller box for a short draft; a draft that grows past the cap
-   below sizes the box to its content as before, flex or not. */
+
+   CENTRING IS `justify-content`, NOT `align-items` — CM6's own base theme
+   already puts `.cm-editor { display: flex !important; flex-direction:
+   column }` on this exact element (measured in
+   @codemirror/view/dist/index.js), so `flex-direction` can never be
+   anything but column here and `align-items` governs the CROSS axis, which
+   in a column is HORIZONTAL. Setting `align-items: center` (round 18's
+   first attempt) shrank the one child CM6 mounts (`.cm-scroller`) to its
+   content width and centred THAT — the mode switch stayed pinned to the
+   field's left edge while the draft, now the trailing end of a shrunk row,
+   landed near the right edge with the gap between them where the field's
+   spare width used to be. `justify-content: center` is the column's MAIN
+   axis, i.e. vertical, and leaves `align-items` at its default `stretch` so
+   `.cm-scroller` keeps the full width it always had — the switch, the
+   divider and the draft stay adjacent, just centred as one row inside the
+   taller box. A draft that grows past the cap below still sizes the box to
+   its content, flex or not. */
 .nocx-editor .nocx-editor-field {
   display: flex;
-  align-items: center;
+  justify-content: center;
   min-height: var(--control-height-lg);
   border: 1px solid var(--color-border);
   border-radius: var(--control-radius-md);
@@ -205,14 +218,17 @@
      box: hiding the bar would leave a real overflow unreachable, whereas this
      states the contract the wrapping already enforces. */
   overflow-x: hidden;
-  /* The field's OWN width, inside the flex row `.nocx-editor-field` became
-     (round 18, mockup pass): CM6's base theme already makes this element a
-     flex row of gutter + content, but as a CHILD of the taller field it
-     must also grow to fill it — `min-width: 0` is the flex sibling of
-     `overflow-x: hidden` above; without it a flex item's default auto
+  /* This element is ALSO the flex item `.nocx-editor-field`'s new
+     `justify-content: center` (above) centres vertically: `align-items`
+     there is left at its default `stretch`, which is what keeps this row
+     the field's full width without a `flex-grow` of its own — a `flex: 1 1
+     auto` here would grow it along the column's MAIN axis instead (height),
+     filling the whole field and leaving nothing for `justify-content` to
+     centre (round 18's own first attempt at this, caught by looking rather
+     than by a passing border-only test). `min-width: 0` is the flex sibling
+     of `overflow-x: hidden` above; without it a flex item's default auto
      minimum keeps it from shrinking to wrap, one more way the field could
      grow sideways instead of down. */
-  flex: 1 1 auto;
   min-width: 0;
 }
 

@@ -53,8 +53,18 @@
   color: var(--color-accent);
 }
 
+/* `margin-inline` is the only spacing in this whole component — every part
+   is a bare <span> with no whitespace text node between it and its sibling
+   (fill(), prompt-context.ts), so the elements read hard-adjacent without
+   it. Found by looking at a rendered screenshot rather than at
+   `textContent`: the e2e register spec's `.toContain('main')` still passes
+   on "~/repoonmain" because an SVG icon contributes nothing to
+   `textContent`, so a substring check cannot see the missing space either
+   side of it (round 18, mockup pass). `on` is the one part with a sibling
+   on both sides whenever a branch is known, so it carries both gaps. */
 .ui-prompt-context__part[data-part='on'] {
   color: var(--color-text-muted);
+  margin-inline: 0.35em;
 }
 
 .ui-prompt-context__part[data-part='branch'] {
@@ -67,4 +77,7 @@
   vertical-align: -2px;
   color: var(--color-text-muted);
   flex: 0 0 auto;
+  /* The gap before `branch` — `on`'s own right margin above is the gap
+     before this icon. */
+  margin-right: 0.3em;
 }

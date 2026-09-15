@@ -13,8 +13,14 @@
 //   <theme>-running.png   — the composer hidden, a live block with Stop
 //   <theme>-composer.png  — the composer back, focused, with a draft typed
 //
-// Modelled on terminal-screen-register-mockup-pass.spec.ts: promptReady, the
-// INPUT selector and the SETTLED/hasText wait-for-a-command idiom are its own.
+// Modelled on terminal-screen-register-mockup-pass.spec.ts: promptReady and
+// the INPUT selector are its own. Waiting is by SETTLED COUNT rather than by
+// a `# marker` comment in the typed command: round 1 embedded a marker in a
+// long printf one-liner, and the real terminal (not just CSS) wrapped that
+// long line mid-word — the wrapped tail then bled into the block's own
+// output in the screenshot ("d-diff-stat" as a stray first line). Counting
+// settled blocks keeps every typed command short and realistic, closer to
+// what the mockups themselves show.
 import { execFileSync } from 'node:child_process'
 
 import { clickIntoEditor, expect, openControlPlane, promptReady, test, type Page } from './harness'
@@ -52,23 +58,39 @@ async function setTheme(page: Page, id: string): Promise<void> {
   await page.waitForFunction((t) => document.documentElement.getAttribute('data-theme') === t, id)
 }
 
-async function runAndSettle(page: Page, command: string, marker: string): Promise<void> {
+/** Type one command and wait for it to settle — by the SETTLED count
+ *  growing by one, not by text, so the command itself can stay exactly what
+ *  a person would type (see the file header on why that matters here). */
+async function runAndSettle(page: Page, command: string): Promise<void> {
+  const before = await page.locator(SETTLED).count()
   await page.locator(INPUT).fill(command)
   await page.keyboard.press('Enter')
-  await expect(page.locator(SETTLED, { hasText: marker })).toHaveCount(1, { timeout: 15_000 })
+  await expect(page.locator(SETTLED)).toHaveCount(before + 1, { timeout: 15_000 })
   await promptReady(page)
 }
 
-/** Paint one theme's board: a `git diff --stat`-shaped block, a failed test
- *  block, a running block with Stop, then the composer back with a draft. */
+/** Paint one theme's board: a real `git diff --stat`, a failed test block, a
+ *  running block with Stop, then the composer back with a draft. */
 async function paintBoard(page: Page, prefix: string): Promise<void> {
   if (GIT_AVAILABLE) {
-    await runAndSettle(
-      page,
-      'mkdir -p ~/repo && cd ~/repo && git init -q -b main && ' +
-        'git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init # board-repo-init',
-      'board-repo-init',
-    )
+    // Four SHORT commands rather than one long chain: the terminal itself
+    // (not just CSS) wraps a line past its column width, and round 2's
+    // single 175-character setup line wrapped mid-word with the tail
+    // bleeding into the block's own output — "ame=t commit -q -m init" as a
+    // stray line. Every command below stays under 90 characters, comfortably
+    // inside even a narrow pane at this viewport.
+    // `rm -rf` first: both themes' tests run against the SAME backend home
+    // (tokyo-night then light), and without this the second run's `git
+    // init` hit an already-initialised ~/repo — "warning: re-init: ignored
+    // --initial-branch=main" and a commit with nothing to commit, since
+    // notes.txt already carried the first run's content. Found the same way
+    // as the wrapping bug above: by reading the light theme's screenshot,
+    // not by reasoning about the harness.
+    await runAndSettle(page, 'rm -rf ~/repo && mkdir -p ~/repo && cd ~/repo && git init -q -b main')
+    await runAndSettle(page, 'git config user.email t@t && git config user.name t')
+    // A tracked file with something to change, so the diff block below has
+    // real content — both a `+` and a `-` line, the mockup's own shape.
+    await runAndSettle(page, "printf 'a\\nb\\nc\\n' > n && git add n && git commit -qm i")
     const branchShown = await page
       .locator(COMPOSER_PROMPT)
       .filter({ hasText: 'main' })
@@ -84,31 +106,27 @@ async function paintBoard(page: Page, prefix: string): Promise<void> {
           'the branch source may still be landing (nocx-9bpeq.13/.16).',
       )
     }
-  } else {
-    console.log(`visual-board (${prefix}): git is not on PATH, skipping the branch block.`)
-  }
 
-  // A colourised `git diff --stat`-shaped block — the evidence image's own
-  // shape (01-command-states.png): a bold path, green/red counts.
-  await runAndSettle(
-    page,
-    "printf '\\033[1mfrontend/src/styles/tokens.css\\033[0m | " +
-      "\\033[32m6 ++++\\033[0m\\033[31m--\\033[0m\\n1 file changed, 4 insertions(+), 2 deletions(-)\\n' " +
-      '# board-diff-stat',
-    'board-diff-stat',
-  )
+    // The evidence image's own shape (01-command-states.png): a real
+    // coloured `git diff --stat`, not a synthesised one.
+    await runAndSettle(
+      page,
+      "printf 'a\\nB\\nc\\nd\\n' > n && git add -A && git -c color.ui=always diff --cached --stat",
+    )
+  } else {
+    console.log(`visual-board (${prefix}): git is not on PATH, skipping the git blocks.`)
+  }
 
   // A failed block: the register's own "Exit 1" shape.
   await runAndSettle(
     page,
-    'sh -c \'echo "--- FAIL: TestSessionReconnect (0.08s)"; echo FAIL; exit 1\' # board-fail',
-    'board-fail',
+    'sh -c \'echo "--- FAIL: TestSessionReconnect (0.08s)"; echo FAIL; exit 1\'',
   )
 
   // A running block: the mockup's `Running · Ns` plus a visible Stop.
-  await page.locator(INPUT).fill('sleep 30 # board-running')
+  await page.locator(INPUT).fill('sleep 30')
   await page.keyboard.press('Enter')
-  const running = page.locator(RUNNING, { hasText: 'board-running' })
+  const running = page.locator(RUNNING)
   await expect(running).toHaveCount(1, { timeout: 15_000 })
   await expect(running.getByRole('button', { name: 'Stop' })).toBeVisible()
   // The composer is hidden while a command owns input (spec §6's own rule) —

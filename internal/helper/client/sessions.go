@@ -854,18 +854,39 @@ func (a *AttachedSession) Write(p []byte) (int, error) {
 	if epoch == 0 {
 		return 0, errors.New("helper session attachment has no write lease")
 	}
-	frame := proto.EncodeSessionFrame(proto.SessionFrame{
-		Session: a.session, Subscriber: a.subscriber, Epoch: epoch, Payload: p,
-	})
+	// One write may be larger than one frame may carry (a big paste), and
+	// EncodeFrame panics above MaxFrameBytes rather than corrupting the wire.
+	// So the payload is cut into consecutive session frames, each leaving
+	// room for the session frame's own header inside the envelope; they are
+	// written under one writeMu hold, so no other writer's frame lands
+	// between them and the PTY receives the bytes in order.
+	overhead := len(proto.EncodeSessionFrame(proto.SessionFrame{
+		Session: a.session, Subscriber: a.subscriber, Epoch: epoch,
+	}))
+	chunk := proto.MaxFrameBytes - overhead
 	a.client.writeMu.Lock()
 	defer a.client.writeMu.Unlock()
-	// The inner session frame is the ENVELOPE'S payload, never the lane's:
-	// from the first write until this attachment is closed, every byte this
-	// method puts on the lane is inside exactly one TypeSessionData frame —
-	// the way attachedLifecycle.Write wraps its own in TypeLifecycleData, and
-	// the way every other producer on this wire wraps its own.
-	if _, err := a.client.conn.Stdin().Write(proto.EncodeFrame(proto.TypeSessionData, 0, 0, frame)); err != nil {
-		return 0, err
+	written := 0
+	for written < len(p) || (len(p) == 0 && written == 0) {
+		end := written + chunk
+		if end > len(p) {
+			end = len(p)
+		}
+		frame := proto.EncodeSessionFrame(proto.SessionFrame{
+			Session: a.session, Subscriber: a.subscriber, Epoch: epoch, Payload: p[written:end],
+		})
+		// The inner session frame is the ENVELOPE'S payload, never the lane's:
+		// from the first write until this attachment is closed, every byte this
+		// method puts on the lane is inside exactly one TypeSessionData frame —
+		// the way attachedLifecycle.Write wraps its own in TypeLifecycleData, and
+		// the way every other producer on this wire wraps its own.
+		if _, err := a.client.conn.Stdin().Write(proto.EncodeFrame(proto.TypeSessionData, 0, 0, frame)); err != nil {
+			return written, err
+		}
+		if len(p) == 0 {
+			break
+		}
+		written = end
 	}
 	return len(p), nil
 }

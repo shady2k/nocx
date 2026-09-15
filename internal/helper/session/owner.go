@@ -414,6 +414,14 @@ func (o *sessionOwner) run() {
 				drained = true
 			}
 		}
+		// What the drain queued must be offered to a free writer before this
+		// iteration blocks: the select below may otherwise wait on an event
+		// that never comes while the writer is idle and pending is not.
+		o.advance()
+		if o.closing && o.eofSeen && !o.writerBusy && o.inFlight == nil && len(o.pending) == 0 {
+			close(o.writeReq)
+			return
+		}
 
 		select {
 		case <-closingSignal:

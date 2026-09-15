@@ -532,7 +532,19 @@ func (rc *RealClient) borrowPooled(handle *poolHandle) (*PooledConn, error) {
 		fingerprint: client.HostKeyFingerprint(),
 		release:     func() { rc.dial.pool.Release(handle) },
 		taint:       func() { rc.dial.pool.Taint(handle) },
-		taintReason: handle.closeReason,
-		arm:         client.armKeepalive,
+		// The pool's own tainted reason (the detached-writer cap) wins when
+		// both could apply; either is a name for "this connection died for
+		// a reason a sibling's own Wait() cannot see", and there is exactly
+		// one at a time in practice (nocx-y6fh7 item 6, round 3).
+		taintReason: func() string {
+			if reason := handle.closeReason(); reason != "" {
+				return reason
+			}
+			if client.KeepaliveLost() {
+				return ReasonKeepaliveLost
+			}
+			return ""
+		},
+		arm: client.armKeepalive,
 	}, nil
 }

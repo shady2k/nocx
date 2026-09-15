@@ -933,6 +933,30 @@ type WindowSpan struct {
 	Written StreamOffset `json:"written"`
 }
 
+// SessionExitCause is WHY a session ended, in a closed set that is empty
+// (omitted) for the ordinary case: a process the far side actually ran to
+// completion or that closed with no cause this helper can name.
+//
+// It exists because "Code == -1, Signal == 0" is one shape with two
+// different meanings (nocx-y6fh7 item 6, round 3): the far side hanging up
+// mid-session with no status to report (TestAChannelLostMidSessionEndsThe
+// SessionWithAStatus, which stays exactly as it is), and THIS helper's own
+// keepalive prober giving up and closing the connection itself. Both leave
+// no process status to collect, so only the helper — the party running the
+// prober since ADR-0057 — can tell them apart, and it does so by naming the
+// cause rather than by the coordinator guessing from a code that is
+// identical either way.
+type SessionExitCause string
+
+const (
+	// ExitCauseKeepaliveLost is a connection this helper's OWN prober gave
+	// up on: it stopped believing the far end was there and closed the
+	// transport itself. This is CONNECTION LOSS, not a clean process exit —
+	// the coordinator's ExitOutcome maps it to Interrupted so the pane is
+	// offered the way back, the same offer any other channel loss gets.
+	ExitCauseKeepaliveLost SessionExitCause = "keepalive-lost"
+)
+
 // SessionExitStatus is how a session's process ended.
 type SessionExitStatus struct {
 	// Code is the exit status, or -1 when the process was killed by a signal
@@ -942,6 +966,10 @@ type SessionExitStatus struct {
 	Signal int `json:"signal,omitempty"`
 	// At is when the helper observed the end, RFC 3339 with nanoseconds.
 	At string `json:"at"`
+	// Cause names WHY this ended when Code/Signal alone cannot say — see
+	// SessionExitCause. Empty is the ordinary case: an authoritative exit,
+	// or a loss with no more specific cause to report.
+	Cause SessionExitCause `json:"cause,omitempty"`
 }
 
 // SessionExit is the EventSessionExit notification's params.

@@ -55,6 +55,11 @@ type pooledSSHConn struct {
 	// it — a caller that never asks (interval zero) never fires it at all,
 	// which is what lets the one that does win regardless of who dialed.
 	keepaliveArmOnce sync.Once
+	// keepaliveLost records that THIS connection's own prober is the party
+	// closing it, set BEFORE the close so a sibling reading it back through
+	// PooledConn.TaintReason (ReasonKeepaliveLost) never observes the close
+	// without the reason (nocx-y6fh7 item 6, round 3).
+	keepaliveLost atomic.Bool
 	// dead records that this connection has been closed, so the pool can
 	// refuse to hand it to anyone else. See isDead.
 	dead atomic.Bool
@@ -157,6 +162,18 @@ func (c *pooledSSHConn) armKeepalive(interval time.Duration, countMax int, obser
 		c.setKeepaliveStop(stop)
 	})
 }
+
+// markKeepaliveLost records that this connection's own prober is the one
+// closing it, before it does — the same "reason before close" order
+// CloseTainted keeps for its own cap. It is unexported because only the
+// prober started against this connection may set it: nothing else may claim
+// a connection died on that authority.
+func (c *pooledSSHConn) markKeepaliveLost() { c.keepaliveLost.Store(true) }
+
+// KeepaliveLost reports whether this connection's own keepalive prober is
+// the one that closed it (nocx-y6fh7 item 6, round 3), read back by
+// PooledConn.TaintReason.
+func (c *pooledSSHConn) KeepaliveLost() bool { return c.keepaliveLost.Load() }
 
 // setKeepaliveStop arms the prober's cancel after the connection exists. The
 // prober is started with this connection as the thing it closes when it gives
@@ -324,6 +341,16 @@ const maxDetachedWriters = 8
 // sshsvc.ShellChannel via *PooledConn) use, so there is exactly one spelling
 // of this cause (AGENTS.md, "Look for the existing answer").
 const ReasonDetachedWriterCap = "detached_writer_cap"
+
+// ReasonKeepaliveLost is why a sibling channel's session ends when this
+// connection's OWN keepalive prober gave up and closed it (nocx-y6fh7 item
+// 6, round 3) — a connection loss the prober itself declared, read back the
+// same way ReasonDetachedWriterCap is, through PooledConn.TaintReason, so
+// every session sharing the connection reports the SAME cause: the prober
+// watches the connection, not any one session's channel, and no single
+// channel's own Wait() could otherwise learn why the transport under it
+// went away.
+const ReasonKeepaliveLost = "keepalive_lost"
 
 // poolEntry holds a connection and its ref count.
 type poolEntry struct {

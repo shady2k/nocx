@@ -194,6 +194,11 @@
           "description": "When the helper observed the end, RFC 3339 with nanoseconds and an offset.",
           "type": "string",
           "minLength": 1
+        },
+        "cause": {
+          "description": "WHY this ended when code/signal alone cannot say (nocx-y6fh7 item 6, round 3): a closed set, empty for the ordinary case. `keepalive-lost` is a connection this helper's OWN keepalive prober gave up on and closed itself — connection loss, not a clean exit — which the coordinator's ExitOutcome maps to Interrupted so the pane is offered the way back, distinct from the far side hanging up with no status at all, which carries no cause and stays exactly as it was.",
+          "type": "string",
+          "enum": ["keepalive-lost"]
         }
       }
     },

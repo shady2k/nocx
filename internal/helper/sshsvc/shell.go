@@ -150,6 +150,35 @@ type ShellChannel struct {
 // failure.
 var ErrDetachedWriterCap = errors.New("sshsvc: detached_writer_cap")
 
+// keepaliveLostError names a channel's end as connection loss from this
+// connection's own keepalive prober giving up, rather than an anonymous
+// closed transport (nocx-y6fh7 item 6, round 3).
+//
+// It implements ExitCause() string rather than being checked with
+// errors.Is, because the reader that needs the cause —
+// internal/helper/session's exit-status mapping — is compiled into EVERY
+// helper build, including the untagged one that must never link this
+// package (internal/helper/deploy's dependency test). An optional-interface
+// probe is the same idiom that reader already uses for ExitCode() and
+// Signal(), and it costs no import at all.
+type keepaliveLostError struct{ err error }
+
+func (e *keepaliveLostError) Error() string {
+	if e.err == nil {
+		return "sshsvc: the connection's own keepalive prober gave up and closed it"
+	}
+	return fmt.Sprintf("sshsvc: the connection's own keepalive prober gave up and closed it: %v", e.err)
+}
+
+// Unwrap keeps the original wait error reachable — a caller that checks for
+// a specific exit shape (a *gossh.ExitError, say) still finds one if the
+// mux teardown happened to produce it, exactly as ErrDetachedWriterCap's
+// wrapping does.
+func (e *keepaliveLostError) Unwrap() error { return e.err }
+
+// ExitCause names this as the wire's keepalive-lost cause.
+func (e *keepaliveLostError) ExitCause() string { return string(proto.ExitCauseKeepaliveLost) }
+
 // ErrShellClosed is what a read or write on a channel that has ended returns.
 // It is not ErrChannelClosed (that is the proxied plane's own sentinel, and
 // the two are read by different callers); it is here so a session's failure
@@ -426,12 +455,22 @@ func (c *ShellChannel) WaitErr() (error, bool) {
 // sharing it can see.
 func (c *ShellChannel) wait() {
 	err := c.sess.Wait()
-	if c.pool.TaintReason() == ssh.ReasonDetachedWriterCap {
+	switch c.pool.TaintReason() {
+	case ssh.ReasonDetachedWriterCap:
 		if err != nil {
 			err = fmt.Errorf("%w: %w", ErrDetachedWriterCap, err)
 		} else {
 			err = fmt.Errorf("%w: the connection closed clean but under the cap", ErrDetachedWriterCap)
 		}
+	case ssh.ReasonKeepaliveLost:
+		// This connection's OWN prober gave up and closed it — connection
+		// loss, not a process exit (nocx-y6fh7 item 6, round 3). Wrapped
+		// rather than left as whatever the mux teardown produced, so
+		// internal/helper/session's exit mapping can name the cause on the
+		// wire through the SAME optional-interface probe it already uses
+		// for ExitCode()/Signal(), without importing this ssh-tagged
+		// package — which the untagged deployed helper must never link.
+		err = &keepaliveLostError{err: err}
 	}
 	c.exitMu.Lock()
 	c.exitErr = shellExit(err)

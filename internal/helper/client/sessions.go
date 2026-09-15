@@ -60,6 +60,11 @@ type ExitStatus struct {
 	Code   int    `json:"code"`
 	Signal int    `json:"signal,omitempty"`
 	At     string `json:"at"`
+	// Cause is proto.SessionExitCause's wire spelling, carried as a plain
+	// string for the reason every other field on this boundary is: nothing
+	// above internal/helper/client sees a proto type. Empty is the ordinary
+	// case (nocx-y6fh7 item 6, round 3).
+	Cause string `json:"cause,omitempty"`
 }
 
 // Error lets the existing session.ExitOutcome mapping consume the helper's
@@ -71,6 +76,12 @@ func (e *ExitStatus) Error() string {
 }
 
 func (e *ExitStatus) ExitCode() int { return e.Code }
+
+// ExitCause exposes Cause through the same optional-interface seam
+// session.ExitOutcome already probes ExitCode() through, so a keepalive-lost
+// connection reads as Interrupted rather than an anonymous Exited (nocx-y6fh7
+// item 6, round 3).
+func (e *ExitStatus) ExitCause() string { return e.Cause }
 
 // RemoteLaunch is the SSH branch of the wire's launch union
 // (proto.SSHLaunchRecord, nocx-50w7p.4): a session whose process is a shell
@@ -265,7 +276,7 @@ func mapSessionEntry(in proto.SessionEntry) SessionEntry {
 		}
 	}
 	if in.Exit != nil {
-		out.Exit = &ExitStatus{Code: in.Exit.Code, Signal: in.Exit.Signal, At: in.Exit.At}
+		out.Exit = &ExitStatus{Code: in.Exit.Code, Signal: in.Exit.Signal, At: in.Exit.At, Cause: string(in.Exit.Cause)}
 	}
 	return out
 }
@@ -742,7 +753,7 @@ func (a *AttachedSession) checkFullyDrained() {
 }
 
 func (a *AttachedSession) recordExit(status proto.SessionExitStatus) {
-	snapshot := &ExitStatus{Code: status.Code, Signal: status.Signal, At: status.At}
+	snapshot := &ExitStatus{Code: status.Code, Signal: status.Signal, At: status.At, Cause: string(status.Cause)}
 	a.exitMu.Lock()
 	if a.exit == nil {
 		a.exit = snapshot

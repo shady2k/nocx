@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -948,6 +949,9 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	if cfg.ConnectionName != "" {
 		opts = append(opts, ssh.WithConnectionName(cfg.ConnectionName))
 	}
+	if cfg.ProfileID != "" {
+		opts = append(opts, ssh.WithProfileID(cfg.ProfileID))
+	}
 	if cfg.PasswordRequester != nil {
 		opts = append(opts, ssh.WithPasswordRequester(cfg.PasswordRequester))
 	}
@@ -1379,6 +1383,17 @@ func (s *realSession) ExitOutcome() (ExitCause, int) {
 	// termination keeps the existing -1 status semantics.
 	var helperStatus interface{ ExitCode() int }
 	if errors.As(waitErr, &helperStatus) {
+		// A keepalive giving up is connection loss, not an authoritative
+		// exit (nocx-y6fh7 item 6, round 3): the helper names the cause on
+		// its ExitStatus DTO, read here through the SAME kind of optional
+		// interface probe as ExitCode itself, so this mapping stays free of
+		// any dependency on the helper's own wire types. Anything else —
+		// including the far side hanging up with no status at all, which
+		// carries no cause — is unchanged: an authoritative exit.
+		var causer interface{ ExitCause() string }
+		if errors.As(waitErr, &causer) && causer.ExitCause() == string(proto.ExitCauseKeepaliveLost) {
+			return ExitInterrupted, helperStatus.ExitCode()
+		}
 		return ExitExited, helperStatus.ExitCode()
 	}
 	return ExitInterrupted, 0

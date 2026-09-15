@@ -32,6 +32,10 @@ type helperExitConn struct {
 }
 
 func newHelperExitConn(code int) *helperExitConn {
+	return newHelperExitConnWithCause(code, "")
+}
+
+func newHelperExitConnWithCause(code int, cause proto.SessionExitCause) *helperExitConn {
 	toPeerR, toPeerW := io.Pipe()
 	fromPeerR, fromPeerW := io.Pipe()
 	c := &helperExitConn{
@@ -77,7 +81,7 @@ func newHelperExitConn(code int) *helperExitConn {
 						Service: proto.ServiceSession, Event: proto.EventSessionExit,
 						Params: proto.SessionExit{
 							Session: params.Session,
-							Status:  proto.SessionExitStatus{Code: code, At: "2026-09-02T12:00:00.000000000Z"},
+							Status:  proto.SessionExitStatus{Code: code, At: "2026-09-02T12:00:00.000000000Z", Cause: cause},
 						},
 					})
 					_, _ = fromPeerW.Write(proto.EncodeFrame(proto.TypeNotify, 0, 0, notification))
@@ -167,5 +171,53 @@ func TestHelperExitOutcomeCarriesStatusThroughTheProductSeam(t *testing.T) {
 	cause, status = adopted.ExitOutcome()
 	if cause != session.ExitExited || status != 7 {
 		t.Fatalf("after close: outcome = (%q, %d), want (%q, 7)", cause, status, session.ExitExited)
+	}
+}
+
+// TestHelperExitOutcomeWithKeepaliveLostCauseIsInterrupted is the same real
+// wire path — a real proto.SessionExit notification decoded by the real
+// client — but with the cause a keepalive give-up names (nocx-y6fh7 item 6,
+// round 3). It proves the field round-trips through the actual JSON decoder
+// and not merely through a value a test built in memory (contracts/README's
+// own distinction between an over-the-wire check and one that is not).
+func TestHelperExitOutcomeWithKeepaliveLostCauseIsInterrupted(t *testing.T) {
+	conn := newHelperExitConnWithCause(-1, proto.ExitCauseKeepaliveLost)
+	defer func() { _ = conn.Close() }()
+	attached, err := client.Dial(context.Background(), client.Config{
+		Exec: conn, Command: "/opt/nocx-helper", ExpectHash: "testhash",
+		SentinelTTL: time.Second, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = attached.Close() }()
+
+	channel, err := attached.Attach(context.Background(), proto.AttachParams{
+		Subscriber: helperExitSubscriber,
+		Session:    proto.HostSessionID{Generation: "generation-1", Session: helperExitSessionID},
+		Fresh:      true,
+	})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	defer func() { _ = channel.Close() }()
+
+	select {
+	case <-channel.Done():
+	case <-time.After(time.Second):
+		t.Fatal("helper exit notification did not close the attachment")
+	}
+
+	reg := session.New(log.NewSlogAdapter(nil), nil)
+	adopted, err := reg.Adopt(context.Background(), session.Config{Kind: session.KindRemote, Cwd: "/"}, session.ID(helperExitSessionID), channel)
+	if err != nil {
+		t.Fatalf("Adopt: %v", err)
+	}
+	cause, status := adopted.ExitOutcome()
+	if cause != session.ExitInterrupted {
+		t.Fatalf("outcome = (%q, %d), want cause %q: a keepalive give-up is connection loss, not a clean exit", cause, status, session.ExitInterrupted)
+	}
+	if status != -1 {
+		t.Fatalf("status = %d, want -1", status)
 	}
 }

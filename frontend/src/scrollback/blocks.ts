@@ -705,14 +705,16 @@ export function settleBlockOutcome(
     // `.ui-meta__sep` is the standalone separator this function places
     // between the word and the duration (spec 2026-09-15 §4) — a second
     // settle must clear it along with the Metas either side, or it doubles.
-    // `.ui-button[data-block-actions]` is the running Stop control
-    // (nocx-9bpeq.12): a settled block has no Stop, whatever kind or path
-    // settled it. The ordinary freeze path discards the whole running
-    // element rather than mutating it, so this never fires there in
-    // practice — it is here for whatever settles a block WITHOUT replacing
-    // it, present or future, rather than something only the common path
-    // is trusted to get right.
-    ':scope > .ui-meta, :scope > .ui-meta__sep, :scope > .ui-spinner, :scope > .cmd-header-waiting, :scope > .ui-button[data-block-actions]',
+    // `.ui-button[data-block-control]` is the running Stop control
+    // (nocx-9bpeq.12 round 6 — `data-block-actions` is the ⋮'s identity
+    // alone again, so Stop is found by the shared "leave selection and
+    // focus-bounce alone" attribute instead): a settled block has no Stop,
+    // whatever kind or path settled it. The ordinary freeze path discards
+    // the whole running element rather than mutating it, so this never
+    // fires there in practice — it is here for whatever settles a block
+    // WITHOUT replacing it, present or future, rather than something only
+    // the common path is trusted to get right.
+    ':scope > .ui-meta, :scope > .ui-meta__sep, :scope > .ui-spinner, :scope > .cmd-header-waiting, :scope > .ui-button[data-block-control]',
   )) {
     stale.remove()
   }
@@ -968,11 +970,14 @@ export function blockCommandText(blockEl: HTMLElement): string {
  *  the order by using this, instead of learning the button's position by
  *  luck. */
 function placeHeaderChip(right: Element, chip: Element): void {
-  // `.ui-icon-button` narrows this to the ⋮ specifically: a running block's
-  // Stop control (nocx-9bpeq.12) carries `data-block-actions` too — the same
-  // block-selection/focus-bounce escape hatch, reused rather than duplicated
-  // — so the bare attribute alone no longer picks out one element.
-  right.insertBefore(chip, right.querySelector('.ui-icon-button[data-block-actions]'))
+  // `data-block-actions` is the ⋮'s identity alone (nocx-9bpeq.12 round 6):
+  // Stop shares the "leave selection and focus-bounce alone" escape hatch
+  // through a SEPARATE attribute, `data-block-control` (wireBlockSelection's
+  // `mine()`, terminal-content.ts's focus-bounce check), rather than through
+  // this one — narrowing every consumer of "which one is the ⋮" to cope with
+  // a second element on this attribute was the second-owner defect
+  // (AGENTS.md); the identity stays singular instead.
+  right.insertBefore(chip, right.querySelector('[data-block-actions]'))
 }
 
 /** Fetch the DURABLE text of one answer entry, or null when it is not
@@ -1039,7 +1044,15 @@ function buildOverflowMenu(
     size: 'xs',
     ariaLabel: 'Block actions',
     icon: () => iconElement(MoreIcon),
-    attrs: { 'data-block-actions': '' },
+    // `data-block-actions` is the ⋮'s OWN identity — the one element every
+    // "find the block-actions button" caller (placeHeaderChip here, a dozen
+    // e2e specs, restored-block.test.ts, turn-children.test.ts) may assume
+    // it uniquely names. `data-block-control` is the SEPARATE, shared
+    // "leave selection and focus-bounce alone" attribute the Stop control
+    // also carries (nocx-9bpeq.12 round 6) — the ⋮ needs it too, since it is
+    // itself a control inside the header those two mechanisms must not
+    // touch.
+    attrs: { 'data-block-actions': '', 'data-block-control': '' },
     onClick: (e) => {
       e.stopPropagation()
       e.preventDefault()
@@ -1269,10 +1282,14 @@ function wireBlockSelection(
   let mouseMoved = false
 
   /** This block is the one the pointer is actually in — not an ancestor of
-   *  it, and not the ⋮ or its menu, which own their own clicks. */
+   *  it, and not a control the header carries (the ⋮, the running Stop
+   *  button) or its menu, which own their own clicks. `data-block-control`
+   *  is the shared attribute every such control carries (nocx-9bpeq.12
+   *  round 6) — never `data-block-actions`, which is the ⋮'s own identity
+   *  and, since round 4, no longer unique to it alone. */
   const mine = (e: Event): boolean => {
     const target = e.target as HTMLElement
-    if (target.closest('[data-block-actions], .ui-context-menu')) return false
+    if (target.closest('[data-block-control], .ui-context-menu')) return false
     return target.closest('.cmd-block') === blockEl
   }
 
@@ -1424,7 +1441,10 @@ export function createCommandBlock(
   // and there is no race to order. A single mousedown (detail 1) is not
   // intercepted: drag selection and click-to-select keep working.
   wrapper.addEventListener('mousedown', (e: MouseEvent) => {
-    if ((e.target as HTMLElement).closest('[data-block-actions], .ui-context-menu')) return
+    // `data-block-control` (nocx-9bpeq.12 round 6) — the shared attribute a
+    // header control carries, not `data-block-actions`, the ⋮'s own
+    // identity alone. See wireBlockSelection's `mine()` for the same guard.
+    if ((e.target as HTMLElement).closest('[data-block-control], .ui-context-menu')) return
     // The innermost block owns the gesture, for the reason selection does:
     // a turn contains the blocks it caused, so the same double-click reaches
     // every ancestor's listener (ADR-0040).
@@ -1509,10 +1529,17 @@ export function createRunningBlock(
   // the button DOES anything is still gated on `isActive` at CLICK time,
   // below, which is the fact that can legitimately change after the block
   // exists. Always visible (not opacity-hidden like ⋮), so it never asks a
-  // person to discover it by hovering. `data-block-actions` is the ⋮
-  // button's own escape hatch from block-selection and the pane's
-  // focus-bounce listener (`wireBlockSelection` below, terminal-content.ts);
-  // reusing it here is the SAME mechanism, not a second one.
+  // person to discover it by hovering. `data-block-control` (round 6) is
+  // the escape hatch from block-selection and the pane's focus-bounce
+  // listener (`wireBlockSelection` below, terminal-content.ts) that the ⋮
+  // button also carries — the SAME mechanism, not a second one. Never
+  // `data-block-actions`: that is the ⋮'s own identity, and giving Stop the
+  // same one made every "find the block-actions button" caller across the
+  // repo (placeHeaderChip here, a dozen e2e specs, restored-block.test.ts,
+  // turn-children.test.ts) find Stop first instead, since it is appended
+  // before the ⋮ (round 4's regression, fixed here rather than narrowed
+  // consumer by consumer, which would have made "which one is the ⋮" a
+  // second-owned fact — AGENTS.md).
   if (right && running) {
     const stop = createButton({
       label: 'Stop',
@@ -1539,7 +1566,7 @@ export function createRunningBlock(
     const label = document.createElement('span')
     label.textContent = 'Stop'
     stop.replaceChildren(icon, label)
-    stop.setAttribute('data-block-actions', '')
+    stop.setAttribute('data-block-control', '')
     right.appendChild(stop)
   }
 

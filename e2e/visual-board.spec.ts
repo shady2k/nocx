@@ -10,6 +10,8 @@
 // made by a person reading the PNGs this file writes to
 // test-results/visual-board/, one per theme and moment:
 //
+//   tokyo-night-empty.png — a fresh pane, nothing run: the composer alone
+//                           at `~`, exactly the owner's own screenshot
 //   <theme>-running.png   — the composer hidden, a live block with Stop
 //   <theme>-composer.png  — the composer back, focused, with a draft typed
 //
@@ -160,6 +162,9 @@ test.describe('visual board (nocx-9bpeq.18)', () => {
   test('tokyo-night', async ({ page }) => {
     await page.goto('/')
     await promptReady(page)
+    // The owner's own screenshot: a fresh pane, nothing run yet — the
+    // composer alone at `~`, before the board types anything into it.
+    await page.screenshot({ path: 'test-results/visual-board/tokyo-night-empty.png' })
     await paintBoard(page, 'tokyo-night')
   })
 

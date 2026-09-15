@@ -2,8 +2,9 @@
 // The vanilla Spinner is the Solid one's twin, and the pair is held together
 // by this test rather than by care (spec 2026-09-14 §6.2): a variance added to
 // one side only must fail here, not on the day a surface notices.
-import { describe, expect, it } from 'vitest'
+import { describe, it } from 'vitest'
 import { render } from 'solid-js/web'
+import { assertSameShape } from '../test-support/element-shape'
 import { Spinner, type SpinnerProps } from './spinner'
 import { createSpinner } from './spinner-element'
 
@@ -15,18 +16,6 @@ function fromSolid(props: SpinnerProps): Element {
   return el
 }
 
-function shape(el: Element) {
-  return {
-    tag: el.tagName,
-    classes: [...el.classList].sort(),
-    attrs: [...el.attributes]
-      .filter((a) => a.name !== 'class')
-      .map((a) => [a.name, a.value])
-      .sort(),
-    children: el.childElementCount,
-  }
-}
-
 describe('createSpinner is <Spinner>’s twin', () => {
   const cases: SpinnerProps[] = [
     { label: 'Running' },
@@ -35,7 +24,7 @@ describe('createSpinner is <Spinner>’s twin', () => {
   ]
   for (const props of cases) {
     it(`matches for ${JSON.stringify(props)}`, () => {
-      expect(shape(createSpinner(props))).toEqual(shape(fromSolid(props)))
+      assertSameShape(createSpinner(props), fromSolid(props))
     })
   }
 })

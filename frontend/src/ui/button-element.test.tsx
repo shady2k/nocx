@@ -1,25 +1,11 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { render, cleanup } from '@solidjs/testing-library'
+import { assertSameShape } from '../test-support/element-shape'
 import { Button } from './button'
 import { createButton, type CreateButtonOptions } from './button-element'
 
 afterEach(() => cleanup())
-
-/** Everything the kit's contract is made of, and nothing the engine adds. */
-function shape(el: Element): Record<string, unknown> {
-  const attrs = [...el.attributes]
-    .filter((a) => a.name !== 'class')
-    .map((a) => [a.name, a.value] as const)
-    .sort(([x], [y]) => x.localeCompare(y))
-  return {
-    tag: el.tagName,
-    classes: [...el.classList].sort(),
-    attrs,
-    text: el.textContent,
-    children: [...el.children].map(shape),
-  }
-}
 
 const CASES: ReadonlyArray<Omit<CreateButtonOptions, 'onClick'>> = [
   { label: 'Enable command editor', variant: 'ghost', size: 'sm' },
@@ -54,7 +40,7 @@ describe('createButton is the Button, emitted without Solid (spec §6.2)', () =>
       ))
       const solid = container.querySelector('button')!
       const vanilla = createButton({ ...c, onClick: vi.fn() })
-      expect(shape(vanilla)).toEqual(shape(solid))
+      assertSameShape(vanilla, solid)
     })
   }
 
@@ -72,7 +58,9 @@ describe('createButton is the Button, emitted without Solid (spec §6.2)', () =>
         x
       </Button>
     ))
-    expect(shape(vanilla)).not.toEqual(shape(container.querySelector('button')!))
+    expect(() => assertSameShape(vanilla, container.querySelector('button')!)).toThrow(
+      /emitters disagree/,
+    )
   })
 
   it('routes a click to onClick exactly once', () => {

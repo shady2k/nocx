@@ -912,6 +912,31 @@ func (a *AttachedSession) Close() error {
 		proto.DetachParams{Attachment: attachment}, nil)
 }
 
+// EndSession releases this attachment AND asks the helper to close the
+// session itself, which is what gives its reserved window budget back
+// (nocx-isjh4). It is a SEPARATE verb from Close and must stay one:
+// internal/session.realSession.Close calls it for a session the coordinator
+// is done with for good — the pane it was the pipe of has left the layout, a
+// shell exit has been persisted, or the user asked to close it directly —
+// while a caller that merely lost a re-adopt race (another coordinator holds
+// the write lease, or this coordinator's own adopt failed after a successful
+// attach) calls plain Close: the session stays live under whoever already
+// holds it, and ending it there would be the exact defect this method exists
+// to avoid causing anywhere else (see internal/app/session_readopt.go).
+//
+// The local bookkeeping Close performs is repeated here rather than
+// delegated to it, so this sends ONE round trip to the helper — closing a
+// session already implies detaching every attachment on it — instead of a
+// detach followed by a redundant close.
+func (a *AttachedSession) EndSession(ctx context.Context) error {
+	id := a.hostID()
+	a.client.mu.Lock()
+	delete(a.client.attachments, a.subscriber)
+	a.client.mu.Unlock()
+	a.finish()
+	return a.client.CloseSession(ctx, id)
+}
+
 // ── the signal seam (nocx-ie23r.3) ───────────────────────────────────────────
 //
 // THE WHOLE SEAM, OR NONE OF IT. internal/session reaches a channel's signal

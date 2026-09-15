@@ -178,11 +178,25 @@
    `.cm-scroller` keeps the full width it always had — the switch, the
    divider and the draft stay adjacent, just centred as one row inside the
    taller box. A draft that grows past the cap below still sizes the box to
-   its content, flex or not. */
+   its content, flex or not.
+
+   INLINE PADDING (round 2, mockup pass): the switch used to touch the
+   field's left border directly — the CM6 gutter carries no padding of its
+   OWN before the first character (`.cm-gutterElement` below only pads its
+   trailing edge, before the divider), and nothing else stood between it and
+   this box's border. The draft's inset on the right was `.cm-content`'s own
+   padding (below), which is a gap AFTER the content, not a matching gap
+   BEFORE the switch — so the two edges read differently even though the
+   field wraps both. Padding here, on the FIELD itself rather than on the
+   kit's ModeIndicator (which owns its own control padding, or lack of it,
+   for every other place it appears — the gutter, not the badge, is what
+   should not touch a border it does not know it is inside), gives both
+   edges the same inset from tokens. */
 .nocx-editor .nocx-editor-field {
   display: flex;
   justify-content: center;
   min-height: var(--control-height-lg);
+  padding-inline: var(--space-2);
   border: 1px solid var(--color-border);
   border-radius: var(--control-radius-md);
   background: var(--terminal-background);

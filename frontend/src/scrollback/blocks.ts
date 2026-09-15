@@ -1541,11 +1541,17 @@ export function createRunningBlock(
   // consumer by consumer, which would have made "which one is the ⋮" a
   // second-owned fact — AGENTS.md).
   if (right && running) {
+    // `size: 'sm'` (22px, --font-size-2xs) read tiny beside the row's own
+    // 14px mono status text — the owner's screenshot, round 2 of the
+    // mockup pass. `md` (the kit's other size, button.ts's own
+    // `ButtonSize` — there is no third to reach for) is the default
+    // height for `variant: 'default'` (--control-height-sm, 24px) at
+    // --font-size-sm, which reads at the command row's own register
+    // instead of the smallest one in the type scale.
     const stop = createButton({
       label: 'Stop',
       ariaLabel: 'Stop',
       variant: 'default',
-      size: 'sm',
       onClick: (e) => {
         e.stopPropagation()
         e.preventDefault()

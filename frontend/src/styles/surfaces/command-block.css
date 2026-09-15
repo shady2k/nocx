@@ -106,6 +106,23 @@
   margin-left: auto;
 }
 
+/* The status group reads as ONE tight phrase — "Exit 1 · 35ms", "Running ·
+   12s" — not as a word, a separator, and a duration floating loose in a
+   wide box (round 2, mockup pass: the owner's screenshot named the gap
+   after "·" directly). The kit's `data-column='duration'` width floor
+   (meta.css) is for a duration that stands ALONE — no preceding word, e.g.
+   a silent success — where several blocks' bare durations should still
+   line up as a column when scanned vertically; DURATION is then this
+   group's first real child (the settled and running builders both put the
+   word, when there is one, before it — scrollback/blocks.ts). Preceded by
+   anything, the floor is placement noise for this row specifically, so the
+   surface narrows it back to the duration's own width, tokens or not (there
+   are none to add — this only removes the floor). */
+.cmd-header-right > .ui-meta[data-column='duration']:not(:first-child) {
+  min-width: 0;
+  text-align: start;
+}
+
 .cmd-header-waiting {
   display: inline-flex;
   align-items: center;

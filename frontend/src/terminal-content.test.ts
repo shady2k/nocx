@@ -3085,24 +3085,27 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
     }
   })
 
-  it('asks with isLocal from the SESSION, not from the active domain (nocx-9bpeq.16 round 2)', async () => {
-    // Round 1 read `isLocal` off the domain-environment projection's view
-    // (view.isLocal), which answers "is the ACTIVE DOMAIN local" — a fact
-    // that walking into a hand-typed `ssh` flips to false for the CHILD
-    // domain that ssh opens (lifecycle/domain-environment.ts's
-    // `_seedFor`), even though the SESSION the git.open call actually
-    // names never stopped being local. `git.open`'s own consent gate
-    // (ws_git.go's `sess.Kind() != session.KindLocal`) is fixed at
-    // session-open and knows nothing about a domain the backend never
-    // sniffed the byte stream to find (AD-6) — the same reason
-    // `activeOrigin()` and `hostLabel()` already answer "is this pane
-    // local" from `this.sshOpts === undefined` rather than from the
-    // domain view. This pane is a LOCAL session throughout (`mountTerminal`
-    // is called with no `ssh` option); it walks into a hand-typed
-    // `ssh pi@192.168.0.93` (the exact fact shape
+  it('asks nothing for a hand-typed ssh child domain — the branch stays undefined in the composer (nocx-9bpeq.16 round 3)', async () => {
+    // Round 2 briefly read `isLocal` from `this.sshOpts === undefined` —
+    // the SESSION's own kind, fixed at session-open — reasoning that
+    // git.open's consent gate is a session-level fact the backend never
+    // revises from inside the shell (AD-6: no byte-stream sniffing). True,
+    // but the wrong fix for the wrong problem: after a hand-typed
+    // `ssh pi@192.168.0.93`, the verified cwd this pane reports is a path
+    // on THAT host, not on the local one `this.sshOpts === undefined`
+    // describes. Asking `git.open` about it would resolve `/home/pi`
+    // against the LOCAL filesystem — the branch of whatever unrelated
+    // local directory happens to share that path, or nothing, shown under
+    // a prompt that reads as remote. `view.isLocal` — "which machine will
+    // the next command actually run on" — is the fact this gate needs,
+    // and it is exactly what a destination-bearing child domain reports
+    // false (lifecycle/domain-environment.ts's `_seedFor`). This pane is a
+    // LOCAL session throughout (`mountTerminal` with no `ssh` option); it
+    // walks into a hand-typed `ssh pi@192.168.0.93` (the same fact shape
     // "a local tab whose pane walks onto a remote host" already uses,
-    // ~line 3200), and the branch source must still be asked with
-    // `isLocal: true` for a verified cwd reported on that nested domain.
+    // ~line 3200), and the branch source must be asked NOTHING for a
+    // verified cwd reported on that nested domain — the composer keeps
+    // showing no branch.
     const client = makeClient()
     const branchSource = makeFakeBranchSource()
     const { content, teardown } = await mountTerminal(
@@ -3112,7 +3115,6 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
     )
     const handler = lifecycleHandler(client)
     const renderer = rendererOf(content)
-    const sessionId = sessionOf(content).sessionId
     try {
       content.setVisible(true)
       // The local shell's own domain first.
@@ -3127,17 +3129,11 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
         epoch: 1,
         destination: { host: '192.168.0.93', user: 'pi' },
       })
-      // A verified cwd reported on the nested domain — the child domain's
-      // OWN view.isLocal is false (destination-bearing), but the SESSION
-      // is still the local one this pane opened.
+      // A verified cwd reported on the nested domain — a path on the far
+      // host, which this pane's own (local) session cannot answer for.
       renderer._fireCwd('192.168.0.93', '/home/pi')
-      expect(branchSource.requests).toHaveLength(1)
-      expect(branchSource.requests[0]).toMatchObject({
-        sessionId,
-        cwd: '/home/pi',
-        cwdVerified: true,
-        isLocal: true,
-      })
+      expect(branchSource.requests).toHaveLength(0)
+      expect(partText(editorOf(content).root, 'branch')).toBeUndefined()
     } finally {
       teardown()
     }

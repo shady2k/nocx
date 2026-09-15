@@ -995,6 +995,15 @@ export class TerminalContent extends BasePaneContent {
    *  §6, protocol §9). `_applyEnvironmentView` copies the projection's
    *  current view into these fields on every environment change. */
   private _cwdVerified = false
+  /** Mirrors the projection view's own `isLocal` (nocx-9bpeq.16): which
+   *  machine the ACTIVE DOMAIN's next command runs on, not whether this
+   *  pane's own session was opened over ssh — a hand-typed `ssh host`
+   *  flips this to false without touching `this.sshOpts`. The branch
+   *  source (`_requestBranchAfterSettle`) must never ask across a domain
+   *  it was told is remote (where/branch-source.ts's own remote-consent
+   *  refusal, and — round 3 — the plainer reason that a remote domain's
+   *  verified cwd is a path on a filesystem `git.open` cannot see). */
+  private _isLocal = true
   /** The last cwd reported to the layout chain. A shell prints its prompt
    *  many times in one directory and every one of them arrives here, so the
    *  report is on CHANGE — otherwise sitting still would cost a write per
@@ -1714,6 +1723,7 @@ export class TerminalContent extends BasePaneContent {
     const portsReasonBefore = this.portsUnavailableReason
     this._cwd = view.cwd
     this._cwdVerified = view.cwdVerified
+    this._isLocal = view.isLocal
     this._host = view.host
     this._user = view.user
     this.programTitle = view.programTitle
@@ -1761,7 +1771,7 @@ export class TerminalContent extends BasePaneContent {
     ) {
       this.hooks.onPortsTargetChange?.()
     }
-    this._syncWhereSources(view.cwd, view.cwdVerified)
+    this._syncWhereSources(view.cwd, view.cwdVerified, view.isLocal)
   }
 
   /** This session's home, read fresh rather than mirrored (nocx-9bpeq.16):
@@ -1795,34 +1805,19 @@ export class TerminalContent extends BasePaneContent {
    * in a test sees exactly zero calls rather than a call it must itself
    * recognise as a no-op.
    *
-   * `isLocal` is deliberately `this.sshOpts === undefined` — the SESSION's
-   * own kind, fixed at session-open — and never the environment
-   * projection's `view.isLocal`, which Round 1 read instead. Found while
-   * chasing a Round 2 report (nocx-9bpeq.16) of home resolving in a real
-   * e2e run while the branch never did: `view.isLocal` answers a DIFFERENT
-   * question from what this gate needs — is the ACTIVE DOMAIN (which can
-   * be a nested ssh/docker/su the user hand-typed) local — tracked through
-   * the domain-environment projection's own seed/reconcile machinery,
-   * whose `isLocal` and `host` fields move together (child-domain seeding
-   * in lifecycle/domain-environment.ts sets both from one
-   * `destination`-presence check). The reported run showed no host on the
-   * prompt line, which by that pairing means `view.isLocal` was already
-   * true there too — so this change is not proven to be the round-2
-   * defect by itself, only a genuine layering fix found on the way: it is
-   * still the wrong fact to gate on, on its own correctness merits.
-   * `git.open`'s consent gate (ws_git.go's `sess.Kind() !=
-   * session.KindLocal`) is a fact of the SESSION the git.open call names,
-   * set once at `session.Open` and never revised by anything that happens
-   * inside the shell (AD-6: the backend never sniffs the byte stream to
-   * notice a hand-typed `ssh`) — the same fact `activeOrigin()` and
-   * `hostLabel()` already read as `this.sshOpts === undefined` (AGENTS.md
-   * "look for the existing answer"). The two
-   * normally agree for the ROOT domain, but the branch source's gate
-   * exists to match the BACKEND's check, and the session-level fact is the
-   * direct answer to that — not a value laundered through a projection
-   * built for a different question (which domain is active), with its own
-   * seed timing this gate has no reason to depend on. */
-  private _syncWhereSources(cwd: string, cwdVerified: boolean): void {
+   * `isLocal` is the environment projection's `view.isLocal` — "which
+   * machine will the NEXT command actually run on" — never
+   * `this.sshOpts === undefined` (tried in round 2 and reverted in round
+   * 3): after a hand-typed `ssh host` inside a local tab, the verified cwd
+   * this method receives is a path on the FAR host, and `this.sshOpts`
+   * stays `undefined` for the life of the tab (it names how the SESSION
+   * was opened, never what the shell inside it is doing). Gating on it
+   * would ask `git.open` to resolve a remote path against the LOCAL
+   * filesystem — showing the branch of whatever local directory happens
+   * to share that path, or nothing, under a prompt that reads as remote.
+   * `view.isLocal` is exactly the fact this decision needs, because it is
+   * scoped to the ACTIVE DOMAIN rather than to the session. */
+  private _syncWhereSources(cwd: string, cwdVerified: boolean, isLocal: boolean): void {
     const sessionId = this.session?.sessionId
     if (sessionId && cwdVerified) {
       const homeSrc = this.hooks.sessionHome
@@ -1839,7 +1834,11 @@ export class TerminalContent extends BasePaneContent {
       }
     }
     if (this.branchSource) {
-      const isLocal = this.sshOpts === undefined
+      // The sessionId guard (added in round 2) stays even though home's
+      // gate above lacks one: an unset session would otherwise send
+      // git.open an empty sessionId, which the backend refuses outright
+      // rather than answering a result state — a guaranteed-wasted round
+      // trip this gate can skip for free.
       const usable = Boolean(sessionId) && cwdVerified && isLocal && cwd !== ''
       const key = usable ? `${sessionId}|${cwd}` : ''
       if (usable && key !== this._branchRequestKey) {
@@ -1858,12 +1857,13 @@ export class TerminalContent extends BasePaneContent {
    *  moves the branch, so `_syncWhereSources`'s dedup key would otherwise
    *  swallow exactly the event this exists for. Called from
    *  `_onBlockFrozen`, which fires at the end of every visual freeze.
-   *  `isLocal` reads `this.sshOpts` for the same reason `_syncWhereSources`
-   *  does — see its comment. */
+   *  `isLocal` reads `this._isLocal` for the same reason
+   *  `_syncWhereSources` reads `view.isLocal` — see its comment: the
+   *  ACTIVE DOMAIN's locality, never the session's own. */
   private _requestBranchAfterSettle(): void {
     if (!this.branchSource) return
     const sessionId = this.session?.sessionId
-    if (!sessionId || !this._cwdVerified || this._cwd === '' || this.sshOpts !== undefined) return
+    if (!sessionId || !this._cwdVerified || !this._isLocal || this._cwd === '') return
     const req: BranchRequest = {
       sessionId,
       cwd: this._cwd,

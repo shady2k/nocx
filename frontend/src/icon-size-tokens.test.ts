@@ -59,8 +59,10 @@ describe('icon and gutter tokens', () => {
 
   it('declares the pane gutter in the token layer and nowhere else', () => {
     // var(--space-4) since nocx-9bpeq.8, which moved xterm's column count to
-    // match: rows carry the gutter now, not the pane.
-    expect(valueOf('--pane-inline-padding')).toBe('var(--space-4)')
+    // match: rows carry the gutter now, not the pane. Raised to var(--space-6)
+    // (24px) by the terminal-screen mockup decision record's §3 shared
+    // contract (nocx-9bpeq.23) — still one token, still declared once.
+    expect(valueOf('--pane-inline-padding')).toBe('var(--space-6)')
     expect(
       declarations(read('styles/base.css')).some((d) => d.property === '--pane-inline-padding'),
     ).toBe(false)

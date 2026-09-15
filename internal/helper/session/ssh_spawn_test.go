@@ -599,3 +599,46 @@ func TestABuildWithoutAnSSHClientRefusesTheOp(t *testing.T) {
 func normaliseOD(s string) string {
 	return strings.Join(strings.Fields(s), "")
 }
+
+// TestAnUnrecordedHostKeyRefusesThenTheSamePaneRetriesClean is the RETRY half
+// of TestSpawnSSHRefusesByNameWithAPairedSuccess, spelled out on its own
+// because the production journey it stands in for
+// (connection-password.spec.ts:307, "an unknown key asks once, records
+// consent, and retries the failed open") exercises it under a DIFFERENT
+// verdict than the paired-success helper's other subtests cover
+// (HostKeyChanged, not HostKeyUnknown) and is the one a person answers by
+// clicking "Trust host key" rather than declining a machine-in-the-middle
+// warning. If this passes while the e2e spec still fails after the SAME key
+// is trusted, the defect is above this seam (internal/app's openSSH or the
+// renderer's retry), not in the helper's own verify-then-retry path.
+func TestAnUnrecordedHostKeyRefusesThenTheSamePaneRetriesClean(t *testing.T) {
+	f := newSSHFixture(t, "pw", "printf 'ALIVE\n'; cat")
+	coord := &sshCoordinator{
+		password: "pw", verdict: proto.HostKeyUnknown, fingerprint: f.fingerprint(),
+	}
+	stand := newSSHStand(t, f, coord)
+	p := stand.spawnParams(t, proto.SSHModeRaw)
+	// The pane-open request carries NO trust-on-sight, exactly as
+	// internal/app's openSSH sends it (helper_local.go never sets
+	// AcceptOnTrust on proto.SSHSpawnParams, so it is the wire's zero value):
+	// the accept flow belongs to the open, where a person is watching, and
+	// stand.spawnParams' own default of true is the PROBE's shape, not this
+	// one's.
+	p.AcceptOnTrust = false
+
+	_, err := stand.spawn(t, p)
+	if got := refusalCode(err); got != string(proto.ProbeHostKeyUnknown) {
+		t.Fatalf("first spawn answered %v (code %q), want %q", err, got, proto.ProbeHostKeyUnknown)
+	}
+
+	// The person clicked "Trust host key": the coordinator's own verdict for
+	// this destination is now HostKeyTrusted, exactly as it is once
+	// connections.trustHostKey has written the offered key to known_hosts.
+	coord.mu.Lock()
+	coord.verdict = proto.HostKeyTrusted
+	coord.mu.Unlock()
+
+	if _, err := stand.spawn(t, p); err != nil {
+		t.Fatalf("the retry after trust failed, so the same pane cannot recover from an unrecorded host key: %v", err)
+	}
+}

@@ -1058,7 +1058,14 @@ func validateSSHSpawn(p proto.SSHSpawnParams) error {
 		return fmt.Errorf("%w: port %d", ErrBadSSHParams, p.Destination.Port)
 	case p.Destination.User == "":
 		return fmt.Errorf("%w: no user", ErrBadSSHParams)
-	case p.Destination.Identity.CredentialOf().Ref == "":
+	// The interactive rung is the one auth kind whose identity carries no
+	// reference BY DESIGN (proto.SSHIdentity's own comment: "the interactive
+	// rung — a person — carries neither"): there is nothing stored to name
+	// before the far side has even asked a question. Refusing it here was
+	// this check reading every auth kind through the password/key rule,
+	// which turned the ordinary "the profile named nothing, ask a person"
+	// path into ErrBadSSHParams before the ask could happen.
+	case p.Destination.Identity.Auth != proto.SSHAuthInteractive && p.Destination.Identity.CredentialOf().Ref == "":
 		return fmt.Errorf("%w: no credential reference", ErrBadSSHParams)
 	}
 	if p.Cwd != "" {

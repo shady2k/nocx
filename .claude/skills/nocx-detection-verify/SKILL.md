@@ -56,3 +56,76 @@ Use after `claude --version` changes, or when a pane's reported state looks wron
    is red first.
 6. **Never** approve a tool call, work outside the run directory, or commit a capture from a directory that
    was not isolated.
+
+## Task 14 live checks: the session surface against a real Claude
+
+Runnable by the coordinator once epic `nocx-6q1uh` merges — never by a worker (the worker
+that wrote this section did not run it; `TestACoordinatorReadsAnswersAndMessagesItsWorker`
+in `internal/app/session_surface_happypath_test.go` is the CI-running acceptance check, over
+a fake agent, and it does not substitute for this). Two kinds of evidence, recorded in two
+different places:
+
+- A **fact about Claude's own screen** (a menu zone row span, an echo's exact bytes) is a
+  capture plus a `manifest.json` entry, exactly as steps 1-5 above already describe.
+- A **fact about whether nocx's own session.keys/session.message worked against a real
+  Claude** is not a capture at all — it is a live coordinator run, the same shape as
+  `internal/app/worker_happypath_test.go`'s `TestManualRealClaudeCoordinator` (a real
+  `claude --print --strict-mcp-config` process driving the shipped `cmd/nocx-helper mcp`
+  bridge against a real `newHappyStand`), and its outcome is a row appended to this design's
+  own §15, never `manifest.json`.
+
+1. **Menu zone and input-box displacement.** Already measured and shipped: `Document.
+   MenuDisplacesInputBox` (`internal/agentdriver/document.go`), recorded in commit
+   `e8d0dd84` (`nocx-6q1uh.10`'s own message names the nine corpus pairs it was measured
+   against). Nothing to re-run here unless a Claude update changes the finding — if it does,
+   re-derive it the way that commit did (replay every permission/modal pair against the
+   nearest preceding free_text/working moment with `agentdriver.Registry.Observe`) and file
+   a bead before touching `claude.rule.json`'s `menuDisplacesInputBox` field.
+
+2. **The echo form of a pasted multi-line message.** Record with
+   `internal/agentdriver/testdata/captures/scripts/session-message-paste-turn.script`
+   (new, this task) — it submits a short task, then a bracketed, multi-line paste
+   (`\x1b[200~...\n...\x1b[201~`) a few seconds into the turn. Place a mark on the input
+   box's own repaint (step 3 above) and read what it actually shows: nocx's own
+   `boxContainsEcho` (`internal/app/pane_messages.go`) accepts either the verbatim text or
+   Claude's own `[Pasted text #N +M lines]` placeholder, matched loosely on `"+M lines]"` —
+   confirm which one a real Claude draws for a 3-line paste (`M` should read `2`), and if it
+   is neither, that is a defect in `boxContainsEcho`'s own assumption, filed as a bead before
+   changing it. **The script's own paste encoding is unverified as of this writing** — check
+   by reading the replay (step 3) that the pane actually shows one pasted block and not three
+   typed lines; if `cmd/agent-capture`'s script parser does not forward `\x1b[200~`/`\x1b[201~`
+   as a literal byte sequence, adjust the script and note what worked here.
+
+3. **An option answered through session.keys.** Not a capture — a live coordinator run.
+   Stand up `newHappyStand` (or the shipped app) with a real `cmd/nocx-helper mcp` bridge per
+   `TestManualRealClaudeCoordinator`'s own `--mcp-config`, spawn a real `claude` worker, wait
+   for a real permission menu, call `session.read {target:"menu"}` then `session.keys
+   {option:<the drawn option text>}`, and confirm the menu closes and the pane proceeds.
+   `internal/agentdriver/testdata/captures/scripts/permission.script` names the same trigger
+   command (`touch marker.txt`) this run should provoke, so a disagreement between the two is
+   itself worth recording.
+
+4. **Messages during and after a turn.** Live coordinator run, same stand: `session.message
+   {when:"now"}` under a `target:"input"` (or `"working"`) minted while the worker is
+   mid-turn, and `session.message {when:"free"}` once it is back at its prompt — both against
+   the SAME worker, in that order, confirming each reaches `phase:"submitted"` via a
+   follow-up `session.read`'s `pendingMessages`. `session-message-paste-turn.script` above
+   records the SCREEN half of the "during a turn" case for the manifest; this step is the
+   TOOL half, and it is what actually exercises `internal/app/pane_messages.go`'s production
+   code against a real pane rather than this task's own fake helper.
+
+5. **Spec §8.2's one open measurement: does a Claude menu react to pasted text?** Record with
+   `internal/agentdriver/testdata/captures/scripts/session-message-paste-menu.script` (new,
+   this task): it provokes a permission menu, then attempts the same bracketed multi-line
+   paste WHILE the menu is still showing and unconfirmed, waits several seconds, and only
+   then confirms. Read the replay (step 3) across that wait: does the menu's own selection,
+   its option text, or its row span change; does the pasted text appear anywhere (the menu
+   zone, the box underneath it, nowhere); does the menu simply not react at all. **Write the
+   answer into this design's own `.internal/specs/2026-09-14-the-session-surface-design.md`,
+   §15, as a new "Live measurements" entry** (a row: what was tried, the capture name and
+   mark, what was observed, and what it settles about `PaneMessages.pasteReady`'s current
+   precondition that the box be identifiably empty before a paste — design §8.2 step 1).
+   This is the one item spec §13's "Live, outside CI" line names and this epic's plan (Task
+   14) leaves for the coordinator; do not guess the answer from `claude.rule.json` alone —
+   the whole point of this step is that nothing in the rule says what happens, only what the
+   screen looks like once it has.

@@ -1024,6 +1024,23 @@ func (c *sshCoordinator) registry() *client.ReverseRegistry {
 			Verdict: c.verdict, Fingerprint: c.fingerprint, Expected: c.expected,
 		}, nil
 	})
+	r.Register(proto.ServiceSSH, proto.OpPrompt, func(_ context.Context, raw json.RawMessage) (any, error) {
+		c.record(proto.OpPrompt)
+		var p proto.PromptParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		// The scripted coordinator's whole vocabulary for a live ask is the
+		// one secret it was built with (nocx-y6fh7 item 4): whatever the
+		// server's challenge asked — its own keyboard-interactive questions,
+		// or the synthesized single "Password:" question a bare `password`
+		// method carries — the answer is this fixture's password, in order.
+		answers := make([]string, len(p.Prompts))
+		for i := range answers {
+			answers[i] = c.password
+		}
+		return proto.PromptResult{Answers: answers}, nil
+	})
 	r.Register(proto.ServiceSSH, proto.OpTrustHostKey, func(_ context.Context, raw json.RawMessage) (any, error) {
 		c.record(proto.OpTrustHostKey)
 		var p proto.TrustHostKeyParams

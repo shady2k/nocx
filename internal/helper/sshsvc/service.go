@@ -655,36 +655,53 @@ func (s *Service) routeOf(ctx context.Context, conn *host.Host, d proto.SSHDesti
 // Shared by the probe and by every channel op, and by the forward op, because a
 // second builder would be a second answer to "how does this helper
 // authenticate" — and the two would first disagree about the arm that matters:
-// a config with more than one method is password spraying against somebody
-// else's host, and a config with no host-key callback is one that trusts
-// whatever answers.
+// a config offering more than one method for a STORED secret is password
+// spraying against somebody else's host, and a config with no host-key
+// callback is one that trusts whatever answers.
+//
+// A STORED secret (password or key) still offers exactly one method — that
+// half of the rule is unchanged. The interactive rung is the one exception,
+// and it is not spraying: nothing stored is repeated under a second name,
+// every method asks the SAME live person the SAME question, and the server
+// only ever sees an answer once a person has given one. Offering both is what
+// "ask a person, whichever method the server speaks" means when the server's
+// own supported set (`password`, `keyboard-interactive`) is unknown until the
+// handshake states it.
 func (s *Service) clientConfig(ctx context.Context, conn *host.Host, ep dialEndpoint, acceptOnTrust bool) (*gossh.ClientConfig, error) {
-	auth, err := s.authMethod(ctx, conn, ep)
+	auth, err := s.authMethods(ctx, conn, ep)
 	if err != nil {
 		return nil, err
 	}
 	return &gossh.ClientConfig{
-		User: ep.User,
-		// Exactly one method, as the coordinator's own probe path insists: a
-		// second attempt against one host is indistinguishable from password
-		// spraying, and MaxAuthTries is finite.
-		Auth:            []gossh.AuthMethod{auth},
+		User:            ep.User,
+		Auth:            auth,
 		HostKeyCallback: s.hostKeyCallback(ctx, conn, acceptOnTrust, ep.storageAddr()),
 		Timeout:         ProbeTimeout,
 	}, nil
 }
 
-// authMethod builds the ONE method this dial will send.
+// authMethods builds the method(s) this dial will send.
 //
-// The password and key arms are LAZY on purpose. A password is asked for at the
-// moment the server challenges for it rather than when the probe is built, so
-// it lives in this process for the duration of a callback and not for the
-// duration of a dial — the same discipline the coordinator's own chain keeps,
-// one hop out.
-func (s *Service) authMethod(ctx context.Context, conn *host.Host, ep dialEndpoint) (gossh.AuthMethod, error) {
+// Every arm but one answers with exactly one method — a STORED secret is
+// never repeated under a second name (clientConfig's own comment). The one
+// exception is SSHAuthInteractive: nothing is stored to spray, so it offers
+// BOTH `password` and `keyboard-interactive`, whichever the server actually
+// speaks, and each is the SAME live person answering the SAME question
+// through the SAME relay (askInteractive) — a password challenge is that
+// relay asked with one synthetic, non-echoed "Password:" question rather
+// than the server's own list, because a plain gossh.PasswordCallback carries
+// no question for a person to be asked and this rung has no stored secret to
+// hand it silently.
+//
+// The password and key arms are LAZY on purpose. A password is asked for at
+// the moment the server challenges for it rather than when the probe is
+// built, so it lives in this process for the duration of a callback and not
+// for the duration of a dial — the same discipline the coordinator's own
+// chain keeps, one hop out.
+func (s *Service) authMethods(ctx context.Context, conn *host.Host, ep dialEndpoint) ([]gossh.AuthMethod, error) {
 	switch ep.Identity.Auth {
 	case proto.SSHAuthPassword:
-		return gossh.PasswordCallback(func() (string, error) {
+		return []gossh.AuthMethod{gossh.PasswordCallback(func() (string, error) {
 			var out proto.SecretResult
 			err := conn.Ask(ctx, proto.ServiceSSH, proto.OpSecret, proto.SecretParams{
 				Credential: ep.Identity.CredentialOf(),
@@ -694,20 +711,33 @@ func (s *Service) authMethod(ctx context.Context, conn *host.Host, ep dialEndpoi
 				return "", askRefusal(err)
 			}
 			return string(out.Secret), nil
-		}), nil
+		})}, nil
 
 	case proto.SSHAuthInteractive:
-		// The rung a PERSON answers. The server's own questions travel to the
-		// coordinator, which raises them and returns the answers in order; this
-		// process never invents a question and never stores an answer.
-		//
-		// It is keyboard-interactive rather than a password callback because
-		// the question is the server's: a password callback carries none, and a
-		// person asked "Password:" and a person asked "Verification code:" are
-		// two different people's jobs to answer.
-		return gossh.KeyboardInteractive(func(_, _ string, questions []string, echos []bool) ([]string, error) {
-			return s.askInteractive(ctx, conn, ep, questions, echos)
-		}), nil
+		// The rung a PERSON answers, on whichever of the server's two
+		// password-shaped methods it actually offers. The server's own
+		// keyboard-interactive questions travel to the coordinator verbatim;
+		// this process never invents a question and never stores an answer.
+		return []gossh.AuthMethod{
+			gossh.KeyboardInteractive(func(_, _ string, questions []string, echos []bool) ([]string, error) {
+				return s.askInteractive(ctx, conn, ep, questions, echos)
+			}),
+			// `password` carries no question of its own — RFC 4252 §8's
+			// challenge is bare — so the ONE question a person is asked here
+			// is synthesized rather than read off the wire: "Password:",
+			// not echoed. It is still the same person answering the same
+			// relay, not a second credential.
+			gossh.PasswordCallback(func() (string, error) {
+				answers, err := s.askInteractive(ctx, conn, ep, []string{"Password:"}, []bool{false})
+				if err != nil {
+					return "", err
+				}
+				if len(answers) != 1 {
+					return "", internalRefusal("the coordinator answered %d questions for one password prompt", len(answers))
+				}
+				return answers[0], nil
+			}),
+		}, nil
 
 	case proto.SSHAuthKey:
 		// ONE method, every key in the queue: `gossh.PublicKeys` sends a
@@ -729,7 +759,7 @@ func (s *Service) authMethod(ctx context.Context, conn *host.Host, ep dialEndpoi
 			}
 			signers = append(signers, &reverseSigner{ctx: ctx, conn: conn, cred: offer.Credential, pub: pub})
 		}
-		return gossh.PublicKeys(signers...), nil
+		return []gossh.AuthMethod{gossh.PublicKeys(signers...)}, nil
 	}
 	// validateIdentity has already refused every other value; this arm exists
 	// so a kind added to the wire without a method here is a refusal and not a

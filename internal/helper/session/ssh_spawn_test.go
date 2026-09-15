@@ -116,6 +116,37 @@ func TestTheHelperOpensAShellOnTheFarHostAndTheSessionRuntimeAnswersIt(t *testin
 	}
 }
 
+// TestInteractiveAuthAnswersAPasswordOnlyServerThroughTheSynthesizedPrompt is
+// nocx-y6fh7 item 4's own proof: the interactive rung must reach a server
+// that speaks ONLY `password` (newSSHFixture registers no
+// KeyboardInteractiveCallback at all — the same shape as cmd/e2e-sshd and
+// most real sshd configurations), because that is what
+// connection-password.spec.ts:202 measured against a live helper before this
+// fix: "ssh: unable to authenticate, attempted methods [none], no supported
+// methods remain" — gossh never even asked its keyboard-interactive callback,
+// since the server's own supported-method list named only `password`.
+//
+// The profile names nothing (SSHAuthInteractive, no credential — exactly
+// resolveCredential's "ask a person" rung), and the person is the SAME
+// scripted coordinator every other spawn in this file uses, answering
+// through the ONE relay (OpPrompt) regardless of which ssh method the
+// server's challenge arrived on.
+func TestInteractiveAuthAnswersAPasswordOnlyServerThroughTheSynthesizedPrompt(t *testing.T) {
+	f := newSSHFixture(t, "pw", "printf 'ALIVE\n'; cat")
+	coord := &sshCoordinator{password: "pw", verdict: proto.HostKeyTrusted, fingerprint: f.fingerprint()}
+	stand := newSSHStand(t, f, coord)
+
+	p := stand.spawnParams(t, proto.SSHModeRaw)
+	p.Destination.Identity = proto.SSHIdentity{Auth: proto.SSHAuthInteractive}
+
+	if _, err := stand.spawn(t, p); err != nil {
+		t.Fatalf("spawn-ssh with the interactive rung against a password-only server: %v", err)
+	}
+	if asked := coord.asked(); !contains(asked, proto.OpPrompt) {
+		t.Fatalf("the helper never relayed a live ask to the coordinator; it asked %v", asked)
+	}
+}
+
 // contains reports whether a recorded op list names op.
 func contains(ops []string, op string) bool {
 	for _, seen := range ops {

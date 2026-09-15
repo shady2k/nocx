@@ -223,11 +223,20 @@ func (rc *RealClient) resolveDialEndpoint(
 // # The order, and why it is the profile's before the ladder's
 //
 // The coordinator's own auth chain tries several rungs in a fixed order, and
-// this wire carries ONE METHOD per dial — deliberately, because a second
-// METHOD against one host is indistinguishable from password spraying and
-// MaxAuthTries is finite. So the ladder has to be collapsed, and the rule for
-// collapsing it is: what the PROFILE declared wins, and the chain's own order
-// decides only among things nobody declared.
+// this wire carries ONE METHOD per dial for a STORED secret — deliberately,
+// because repeating one against one host is indistinguishable from password
+// spraying and MaxAuthTries is finite. So the ladder has to be collapsed, and
+// the rule for collapsing it is: what the PROFILE declared wins, and the
+// chain's own order decides only among things nobody declared.
+//
+// The interactive rung is the one exception, and it is not the same rule
+// relaxed: nothing stored is repeated under a second name there, because
+// nothing is stored. `DialAuthInteractive` offers the server BOTH
+// password-shaped methods (`password` and `keyboard-interactive`) precisely
+// because it carries no material of its own to pick one in advance — each is
+// the SAME live person answering the SAME question through the coordinator's
+// one ask (sshsvc.authMethods), so a server that speaks either is answered
+// once, not sprayed twice.
 //
 // That is what keeps a connection whose profile binds a stored password from
 // silently being dialed with an agent key that happens to be loaded on this

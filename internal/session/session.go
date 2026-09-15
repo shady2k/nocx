@@ -362,6 +362,10 @@ type Registry interface {
 	Open(ctx context.Context, cfg Config) (Session, error)
 	Get(id ID) (Session, error)
 	Close(id ID) error
+	// EndSession is Close's sibling for a caller that knows nobody will ever
+	// want this session again (nocx-isjh4) — see Reg.EndSession's own doc for
+	// the full rule of which callers use which verb.
+	EndSession(id ID) error
 	List() []Session
 	// InstanceID is the backend instance every session this registry opens is
 	// stamped with — see Reg.InstanceID for why a claim cannot be judged
@@ -752,6 +756,39 @@ func (r *Reg) Close(id ID) error {
 	// for. Close has no context of its own to bind, and does not need one.
 	s.log.Info("session closed", "id", string(id))
 	err := s.Close()
+	if r.usageTracker != nil && s.profileID != "" {
+		r.usageTracker.SessionClosed(s.profileID)
+	}
+	return err
+}
+
+// EndSession removes id from the registry exactly as Close does, but ends
+// the underlying session rather than merely detaching from it (nocx-isjh4):
+// a helper-hosted session gives back its reserved window budget and key
+// claim, because this caller KNOWS nobody will ever want it again.
+//
+// Use this from: the pane's own close (the layout chain, or the explicit
+// "close" RPC) and a shell exit once its result has been persisted. Use
+// Close, never this, from anything that must leave a helper-hosted session
+// alive for a later coordinator — shutdown foremost among them, since a
+// session outlives the coordinator that opened it by design (D1/D3/D10).
+// Calling the wrong one is the two-owners-of-one-input defect AGENTS.md
+// names: whichever verb reaches a session first decides its fate, and only
+// one of them may ever be the wrong answer for shutdown.
+func (r *Reg) EndSession(id ID) error {
+	r.mu.Lock()
+	s, ok := r.sessions[id]
+	if ok {
+		delete(r.sessions, id)
+	}
+	r.mu.Unlock()
+
+	if !ok {
+		return fmt.Errorf("session not found: %s", id)
+	}
+
+	s.log.Info("session ended", "id", string(id))
+	err := s.EndSession()
 	if r.usageTracker != nil && s.profileID != "" {
 		r.usageTracker.SessionClosed(s.profileID)
 	}
@@ -1181,6 +1218,26 @@ func (s *realSession) Resize(ctx context.Context, reported Size) error {
 	return nil
 }
 
+// channelEnder is the optional verb a helper-hosted CHANNEL answers to
+// (internal/helper/client.AttachedSession.EndSession, nocx-isjh4): release
+// the helper's reserved window budget and key claim along with the
+// attachment, rather than merely detaching. A channel with no helper session
+// behind it — a bare PTY, an ssh.Channel — has nothing to release beyond
+// itself and answers only the plain io.Closer.
+type channelEnder interface {
+	EndSession(ctx context.Context) error
+}
+
+// Close ends this coordinator's OWN hold on the session and nothing more: it
+// detaches from a helper-hosted channel without telling the helper the
+// session is over. This is deliberately the ONLY thing it does, because it
+// is also what a coordinator giving up its session for reasons that have
+// nothing to do with the session's own fate must call — process shutdown
+// (AD-1/D1: a session outlives the coordinator that opened it) and a
+// re-adopt that lost the write-lease race to another coordinator
+// (internal/app/session_readopt.go), where the session must stay alive on
+// the helper for whoever already holds it. EndSession below is the other
+// verb, for a caller that KNOWS nobody will ever need this session again.
 func (s *realSession) Close() error {
 	var err error
 	s.closeOnce.Do(func() {
@@ -1193,6 +1250,31 @@ func (s *realSession) Close() error {
 		// unblocks the in-flight write; the loop then sees writeDone.
 		close(s.writeDone)
 		err = s.ch.Close()
+	})
+	return err
+}
+
+// EndSession ends this session FOR GOOD (nocx-isjh4): closer 1 (a pane's
+// helper session, the moment the pane leaves the layout), closer 2 (a shell
+// that exited, once the coordinator has persisted its result) and the
+// explicit "close" RPC all call it rather than Close, because all three
+// KNOW nobody will ever attach to this session again. A helper-hosted
+// channel releases its reserved window budget and key claim through it; any
+// other channel has nothing more to give up than Close already releases.
+//
+// It shares Close's closeOnce: whichever of the two verbs reaches this
+// session FIRST decides its fate, and that ordering is exactly what keeps
+// the two from disagreeing about a session's own life — see Close's doc.
+func (s *realSession) EndSession() error {
+	var err error
+	s.closeOnce.Do(func() {
+		s.log.Debug("ending session")
+		close(s.writeDone)
+		if ender, ok := s.ch.(channelEnder); ok {
+			err = ender.EndSession(context.Background())
+		} else {
+			err = s.ch.Close()
+		}
 	})
 	return err
 }

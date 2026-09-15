@@ -457,6 +457,13 @@ func (f *fakeSessionRegistry) Close(id session.ID) error {
 	return nil
 }
 
+func (f *fakeSessionRegistry) EndSession(id session.ID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.sessions, id)
+	return nil
+}
+
 func (f *fakeSessionRegistry) List() []session.Session {
 	f.mu.Lock()
 	defer f.mu.Unlock()

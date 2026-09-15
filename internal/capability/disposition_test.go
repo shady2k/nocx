@@ -155,6 +155,8 @@ func (dispositionRegistry) Get(session.ID) (session.Session, error) {
 
 func (dispositionRegistry) Close(session.ID) error { return nil }
 
+func (dispositionRegistry) EndSession(session.ID) error { return nil }
+
 func (dispositionRegistry) List() []session.Session { return nil }
 
 // A registry stamps every session it opens with the instance it belongs to

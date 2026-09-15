@@ -18,6 +18,9 @@ type SessionService interface {
 	Get(id session.ID) (session.Session, error)
 	// Close tears down one session.
 	Close(id session.ID) error
+	// EndSession is Close's sibling for a caller that knows nobody will ever
+	// want this session again (nocx-isjh4) — see session.Reg.EndSession.
+	EndSession(id session.ID) error
 	// List returns every live session (sessions.status, attach addressing).
 	List() []session.Session
 	// LastUsedForProfiles answers persisted last-used timestamps
@@ -169,6 +172,13 @@ func (s *sessionService) Close(id session.ID) error {
 		return err
 	}
 	return s.registry.Close(id)
+}
+
+func (s *sessionService) EndSession(id session.ID) error {
+	if err := s.guard.check(); err != nil {
+		return err
+	}
+	return s.registry.EndSession(id)
 }
 
 func (s *sessionService) List() []session.Session {

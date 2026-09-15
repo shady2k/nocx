@@ -750,7 +750,13 @@ func New(opts ...Option) (*App, error) {
 	// party that launches a pane and learns its session id (nocx-50w7p.16), and
 	// it is built HERE so that the approval service below can be wired to the
 	// same one: two books would bind bearers nobody presented.
-	localOpener := &localHelperOpener{log: slogger, procs: procs, spawnTokens: &spawnTokens{}}
+	// SHARED WITH THE REVERSE HANDLERS BELOW (nocx-y6fh7 items 5, 6): the
+	// coordinator's own verifyHostKey answer is what this opener reads back
+	// after a spawn to give a helper-hosted session a fingerprint its wire
+	// does not carry. Built here, once, so both sides hold the SAME map
+	// rather than two that could drift.
+	hostKeys := newHostKeyObserver()
+	localOpener := &localHelperOpener{log: slogger, procs: procs, spawnTokens: &spawnTokens{}, hostKeys: hostKeys}
 	// THE REGISTRY HAS NO LOCAL PTY FACTORY, and that is the point of
 	// nocx-ie23r.3 rather than an omission. There is exactly one constructor
 	// of a local PTY in this repository and it lives in the daemon
@@ -1028,7 +1034,7 @@ func New(opts ...Option) (*App, error) {
 	// that raises the question is built: this root builds the transport late,
 	// so the holder is what lets one registry be complete either way.
 	helperPrompts := &helperPrompt{log: slogger}
-	localOpener.setReverseHandlers(helperReverseHandlers(sshClient, credResolver, helperPrompts, slogger))
+	localOpener.setReverseHandlers(helperReverseHandlers(sshClient, credResolver, helperPrompts, hostKeys, slogger))
 	// The destination half of the same client (nocx-50w7p.5): an ssh pane is
 	// hosted by THIS machine's helper, so the opener must resolve the address and
 	// the credential's authorization before the daemon is asked to dial — the

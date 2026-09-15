@@ -66,8 +66,8 @@ import (
 // helperReverseHandlers builds the registry a helper's questions are answered
 // through. It is constructed once, at the composition root, and handed to
 // every connection this coordinator opens to its helper.
-func helperReverseHandlers(client *ssh.RealClient, secrets credential.Resolver, prompts *helperPrompt, log *slog.Logger) *helperclient.ReverseRegistry {
-	h := &helperReverse{client: client, secrets: secrets, prompts: prompts, log: log}
+func helperReverseHandlers(client *ssh.RealClient, secrets credential.Resolver, prompts *helperPrompt, hostKeys *hostKeyObserver, log *slog.Logger) *helperclient.ReverseRegistry {
+	h := &helperReverse{client: client, secrets: secrets, prompts: prompts, hostKeys: hostKeys, log: log}
 	r := helperclient.NewReverseRegistry()
 	r.Register(proto.ServiceSSH, proto.OpSecret, h.secret)
 	r.Register(proto.ServiceSSH, proto.OpSign, h.sign)
@@ -130,6 +130,11 @@ type helperReverse struct {
 	secrets credential.Resolver
 	prompts *helperPrompt
 	log     *slog.Logger
+	// hostKeys is where a TRUSTED verdict's fingerprint is cached, keyed by
+	// the same storage identity the dial resolved (nocx-y6fh7 items 5 and
+	// 6). Nil is a legitimate wiring for a test double that exercises no
+	// consumer of it.
+	hostKeys *hostKeyObserver
 }
 
 // credentialRef reads a reference that crossed the wire back into the typed
@@ -382,9 +387,16 @@ func (h *helperReverse) verifyHostKey(_ context.Context, raw json.RawMessage) (a
 	)
 	switch {
 	case err == nil:
+		fp := gossh.FingerprintSHA256(key)
+		// Recorded on the way out, not before: the ONLY verdict a later
+		// consumer (a session's HostKeyFingerprint, the consent decision at
+		// connect) may act on is one this dial actually trusted — an
+		// unknown or changed key is judged, never cached, because the pane
+		// this ask belongs to may never open at all (nocx-y6fh7 items 5, 6).
+		h.hostKeys.record(storageAddr, fp)
 		return proto.VerifyHostKeyResult{
 			Verdict:     proto.HostKeyTrusted,
-			Fingerprint: gossh.FingerprintSHA256(key),
+			Fingerprint: fp,
 		}, nil
 	case errors.As(err, &unknown):
 		return proto.VerifyHostKeyResult{

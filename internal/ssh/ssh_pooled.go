@@ -174,6 +174,24 @@ type PooledConn struct {
 	// mechanism exists for.
 	taint       func()
 	taintReason func() string
+	// arm is armKeepalive on the pooledSSHConn this handle shares (nil for a
+	// connection dialed outside the pool, DialAuth): ANY holder may call
+	// ArmKeepalive, cache hit or miss, and the connection's own Once decides
+	// whose settings win (nocx-y6fh7 item 6).
+	arm func(interval time.Duration, countMax int, observe LivenessObserver)
+}
+
+// ArmKeepalive starts this connection's prober if nothing has already,
+// exactly as a fresh dial's own KeepaliveInterval would have — but callable
+// by ANY holder of a reference, at any time, not only the one that happened
+// to dial (see armKeepalive's own comment on why dial order is not caller
+// intent under AD-4 sharing). interval <= 0 is a no-op: a caller with
+// nothing configured must never claim the one arming slot a connection has.
+func (p *PooledConn) ArmKeepalive(interval time.Duration, countMax int, observe LivenessObserver) {
+	if p == nil || p.arm == nil {
+		return
+	}
+	p.arm(interval, countMax, observe)
 }
 
 // Taint marks this borrowed connection so the pool hands it to no new
@@ -292,8 +310,11 @@ func (rc *RealClient) AcquirePooled(ctx context.Context, spec PooledSpec) (*Pool
 			return nil, err
 		}
 		conn.fingerprint = fingerprint
-		stopKA, _ := startKeepalive(conn, spec.KeepaliveInterval, spec.KeepaliveCountMax, spec.Liveness)
-		conn.setKeepaliveStop(stopKA)
+		// NOT armed here (nocx-y6fh7 item 6): the dial closure only runs on a
+		// cache MISS, and the caller that happens to be first to dial a
+		// destination is not necessarily the caller that wants a prober —
+		// see armKeepalive's own comment. Arming happens below, for every
+		// caller, cache hit or miss alike.
 		return conn, nil
 	}
 
@@ -301,7 +322,17 @@ func (rc *RealClient) AcquirePooled(ctx context.Context, spec PooledSpec) (*Pool
 	if err != nil {
 		return nil, err
 	}
-	return rc.borrowPooled(handle)
+	pc, err := rc.borrowPooled(handle)
+	if err != nil {
+		return nil, err
+	}
+	// ARMED HERE, for every caller — cache hit or the miss that just dialed
+	// (nocx-y6fh7 item 6). A caller with nothing configured (KeepaliveInterval
+	// <= 0) is a no-op through ArmKeepalive's own guard, which is what lets a
+	// probe or a publish leasing this destination first leave the one arming
+	// slot open for whichever caller's interval is actually non-zero.
+	pc.ArmKeepalive(spec.KeepaliveInterval, spec.KeepaliveCountMax, spec.Liveness)
+	return pc, nil
 }
 
 // DialAuth dials a resolved spec ONCE and hands back the connection, without
@@ -502,5 +533,6 @@ func (rc *RealClient) borrowPooled(handle *poolHandle) (*PooledConn, error) {
 		release:     func() { rc.dial.pool.Release(handle) },
 		taint:       func() { rc.dial.pool.Taint(handle) },
 		taintReason: handle.closeReason,
+		arm:         client.armKeepalive,
 	}, nil
 }

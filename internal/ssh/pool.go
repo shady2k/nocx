@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/shady2k/nocx/internal/log"
 	gossh "golang.org/x/crypto/ssh"
@@ -41,6 +42,19 @@ type pooledSSHConn struct {
 	// away (proved in TestKeepaliveTickerStopsOnClose). Nil when keepalive is
 	// disabled or this is a test fake.
 	stopKeepalive func()
+	// keepaliveArmOnce guards armKeepalive (nocx-y6fh7 item 6): AD-4 shares
+	// one connection across every caller for the same destination+identity,
+	// and dial order among them is NOT the caller that wants a prober — a
+	// pane's own shell channel and an unrelated lease (a probe, an sftp
+	// publish) race for the same pool entry, and measurement found the
+	// publish consistently winning the race for an INTEGRATED pane (it runs
+	// before the spawn by design, nocx-50w7p.21), silently discarding
+	// keepalive settings that were only ever captured at dial time. Arming
+	// is therefore a SEPARATE act any holder may request, idempotent via
+	// this guard, so whichever caller actually wants a prober gets to start
+	// it — a caller that never asks (interval zero) never fires it at all,
+	// which is what lets the one that does win regardless of who dialed.
+	keepaliveArmOnce sync.Once
 	// dead records that this connection has been closed, so the pool can
 	// refuse to hand it to anyone else. See isDead.
 	dead atomic.Bool
@@ -125,6 +139,24 @@ func (c *pooledSSHConn) SendRequest(name string, wantReply bool, payload []byte)
 // global request answers a probe with. It reads as a failed probe, which for
 // a transport that cannot be probed is the honest answer.
 var errNoGlobalRequests = errors.New("ssh: transport carries no global requests")
+
+// armKeepalive starts this connection's prober at most once, with whichever
+// caller's (interval, countMax, observe) reaches here first — see
+// keepaliveArmOnce's own comment for why "first" is a caller that actually
+// asks, not a caller that happened to dial. Interval <= 0 is a caller that
+// wants no prober and must not consume the one slot a connection has: it is
+// checked BEFORE the Once fires, so a probe or a publish leasing the same
+// destination ahead of a pane's own shell channel leaves the slot open for
+// whichever caller's interval is the first non-zero one.
+func (c *pooledSSHConn) armKeepalive(interval time.Duration, countMax int, observe LivenessObserver) {
+	if interval <= 0 {
+		return
+	}
+	c.keepaliveArmOnce.Do(func() {
+		stop, _ := startKeepalive(c, interval, countMax, observe)
+		c.setKeepaliveStop(stop)
+	})
+}
 
 // setKeepaliveStop arms the prober's cancel after the connection exists. The
 // prober is started with this connection as the thing it closes when it gives

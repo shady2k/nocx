@@ -192,7 +192,7 @@ func startProbeStackWithStore(t *testing.T, srv *pwSSHServer, store credential.R
 	opener := &localHelperOpener{
 		log:     discardLogger(),
 		dir:     dir,
-		reverse: helperReverseHandlers(coordinatorClient, store, &helperPrompt{log: discardLogger()}, discardLogger()),
+		reverse: helperReverseHandlers(coordinatorClient, store, &helperPrompt{log: discardLogger()}, nil, discardLogger()),
 	}
 	opener.installedLocalGeneration(helperlocal.Installed{
 		// Never started: the endpoint above is already serving, so the binary is

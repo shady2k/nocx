@@ -338,6 +338,12 @@ type localHelperOpener struct {
 	// binds lane to session through laneRegistrar — and one closure doing
 	// both would put two owners on one statement.
 	noteChildDomainParent func(t lifecycle.TransportID, lane lifecycle.LaneID, sid string)
+	// hostKeys is the coordinator's own record of the fingerprint its
+	// verifyHostKey reverse handler judged for a destination, read back
+	// after a successful ssh spawn to give the session a fact its wire does
+	// not carry (nocx-y6fh7 items 5, 6). Nil is a legitimate wiring for a
+	// test that exercises no consumer of HostKeyFingerprint.
+	hostKeys *hostKeyObserver
 
 	mu sync.Mutex
 	// installed is what App.Start put on this machine, and dir is the
@@ -928,6 +934,21 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	// The launch carried the bearer; this is the only place that learns which
 	// session it was for.
 	o.spawnTokens.record(res.Session.ID(), params.AgentToolToken)
+	// THE FINGERPRINT THIS SPAWN'S OWN HANDSHAKE JUST VERIFIED, read back by
+	// the storage identity it was resolved under (nocx-y6fh7 items 5, 6): the
+	// coordinator's verifyHostKey reverse handler recorded it moments ago, on
+	// this same goroutine's own request. A miss is ordinary for a mode this
+	// generation never verifies a key for (there is none today, but a future
+	// caller with no host-key step must not be refused for lacking one) and
+	// is silently skipped rather than failing the open — the fingerprint is
+	// consumed by a consent decision and by nothing this pane's own use
+	// needs to exist.
+	if fp, ok := o.hostKeys.lookup(target.KnownHostsAddr); ok && o.registry != nil {
+		if rerr := o.registry.RecordHostKeyFingerprint(res.Session.ID(), fp); rerr != nil && o.log != nil {
+			o.log.Warn("ssh pane: the verified host key could not be recorded on its session",
+				"host", cfg.Host, "error", rerr)
+		}
+	}
 	return res, nil
 }
 

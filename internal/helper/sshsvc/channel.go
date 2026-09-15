@@ -296,12 +296,16 @@ func (s *Service) dialChannel(ctx context.Context, conn *host.Host, p proto.Open
 // shell channel is the caller that pins one, which is why this is a parameter
 // rather than a second acquisition function: one connection per destination is
 // AD-4's rule and two paths to it would be two answers.
-// keepalive and onLiveness are read ONLY on a cache MISS — AD-4's own rule,
-// stated for this fact rather than assumed: a second caller sharing an
-// already-pooled connection joins a prober that is already running (or
-// running with none), armed by whoever dialed first. A shell channel is the
-// one caller that ever passes a non-nil onLiveness (nocx-y6fh7 item 6);
-// every other caller passes zero and nil, which is unchanged behaviour.
+// keepalive and onLiveness are honoured regardless of whether THIS call
+// dials or joins an already-pooled connection: ssh.PooledConn.ArmKeepalive
+// is what decides, and it is safe to call on every acquisition because dial
+// order is not the same question as "which caller wants a prober"
+// (nocx-y6fh7 item 6 — measured against an integrated pane, where the
+// shell-integration bundle's own sftp publish reliably dials the same
+// destination first, which is what a cache-miss-only arm silently lost). A
+// shell channel is the one caller that ever passes a non-nil onLiveness;
+// every other caller passes zero and nil, which is a no-op through
+// ArmKeepalive's own guard and never claims the connection's one prober.
 func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SSHDestination, acceptOnTrust bool, fingerprint string, keepalive time.Duration, keepaliveCountMax int, onLiveness ssh.LivenessObserver) (*ssh.PooledConn, error) {
 	ep := endpointOf(d)
 	cfg, err := s.clientConfig(ctx, conn, ep, acceptOnTrust)

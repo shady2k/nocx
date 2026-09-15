@@ -719,6 +719,45 @@ func (r *Reg) RecordOwnedProcessPID(id ID, pid int) error {
 	return nil
 }
 
+// RecordHostKeyFingerprint records the fingerprint a helper-hosted ssh
+// session's own dial verified, once, right after the spawn that opened it
+// (nocx-y6fh7 items 5 and 6's shared foundation).
+//
+// It exists because HostKeyFingerprint()'s ordinary path — asking the
+// session's own Channel — answers "" for one: AttachedSession is a data-plane
+// attachment to a session the HELPER dialed (ADR-0057), and it has no
+// handshake of its own to have observed. The coordinator is not blind to the
+// fact, though — its own verifyHostKey reverse handler computes the SAME
+// fingerprint, synchronously, in-process, the moment the helper's dial asks
+// it what to make of the offered key. internal/app captures that answer
+// (keyed by the same storage identity the dial resolved) and calls this,
+// right after the spawn it belongs to, rather than inventing a wire field:
+// nothing here crosses a process boundary that was not already crossing it.
+//
+// Set-once, like ownedProcessPID: a session that reconnects keeps the
+// fingerprint of the FIRST successful handshake, and a caller naming a
+// different one for the same session is refused rather than silently
+// overwriting evidence a consent decision may already be keyed by.
+func (r *Reg) RecordHostKeyFingerprint(id ID, fingerprint string) error {
+	if fingerprint == "" {
+		return fmt.Errorf("host key fingerprint must not be empty")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	s, ok := r.sessions[id]
+	if !ok {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	s.hostKeyFingerprintMu.Lock()
+	defer s.hostKeyFingerprintMu.Unlock()
+	if s.hostKeyFingerprint != "" && s.hostKeyFingerprint != fingerprint {
+		return fmt.Errorf("host key fingerprint already recorded for session: %s", id)
+	}
+	s.hostKeyFingerprint = fingerprint
+	return nil
+}
+
 // OwnedProcessPID returns the process the backend opened for id. The second
 // result distinguishes an absent process from a valid PID, including for
 // sessions opened through SSH.
@@ -1005,6 +1044,14 @@ type realSession struct {
 	// the immutable launch fact without reaching into the registry lock.
 	ownedProcessMu  sync.RWMutex
 	ownedProcessPID int
+	// hostKeyFingerprintMu guards hostKeyFingerprint on the same terms
+	// ownedProcessMu guards its neighbour: a recorded fact set once, after
+	// the session already exists, read far more often than it is written.
+	// See RecordHostKeyFingerprint's own comment for why a helper-hosted
+	// session needs one at all — its channel (AttachedSession) cannot answer
+	// HostKeyFingerprint() the way a coordinator-dialed one can.
+	hostKeyFingerprintMu sync.RWMutex
+	hostKeyFingerprint   string
 
 	ch        Channel
 	log       log.Logger
@@ -1344,6 +1391,12 @@ func (s *realSession) ExitOutcome() (ExitCause, int) {
 // check: remote channels that captured the key carry it, everything else
 // answers "".
 func (s *realSession) HostKeyFingerprint() string {
+	s.hostKeyFingerprintMu.RLock()
+	recorded := s.hostKeyFingerprint
+	s.hostKeyFingerprintMu.RUnlock()
+	if recorded != "" {
+		return recorded
+	}
 	if rc, ok := s.ch.(interface{ HostKeyFingerprint() string }); ok {
 		return rc.HostKeyFingerprint()
 	}

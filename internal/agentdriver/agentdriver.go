@@ -44,6 +44,7 @@ package agentdriver
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"sync/atomic"
 
 	"github.com/shady2k/nocx/internal/paneview"
@@ -436,6 +437,52 @@ func (o Observation) Transcript() []string {
 		}
 	}
 	return out
+}
+
+// InputTextExtra is the name a rule document gives the extractor that reads
+// what is actually TYPED in the agent's own input box (nocx-6q1uh.18) — as
+// opposed to Document.InputBox, which is the box's whole chrome span, rule
+// rows included, and stays that wide on purpose (see claude.go's own note)
+// so a target minted from it still refuses the moment a menu displaces the
+// box. It is a constant here for the same reason SubagentsExtra,
+// TranscriptExtra and MenuExtra are: the document's vocabulary is this
+// package's contract, and a caller that misspells it silently reads a box
+// with no text ever typed into it, which is indistinguishable from a box
+// that is genuinely empty.
+const InputTextExtra = "inputText"
+
+// inputTextLine is the capture group an inputText extractor reads a
+// content row's own text into, once the prompt marker (or a continuation
+// row's own indent) has been stripped from the front of it.
+const inputTextLine = "line"
+
+// InputText projects the observation's inputText extractor into what is
+// actually typed in the agent's own input box, joined across the content
+// rows the rule read (top to bottom, in the order it read them) with the
+// prompt marker and any wrap indent already stripped.
+//
+// ok is false when this agent's rule carries no such extractor, or the
+// extractor's own anchor did not bind on this exact frame — which is every
+// frame a menu has displaced the box on, and every frame this build has no
+// rule for at all. It is deliberately NOT false merely because the box read
+// as empty: an idle prompt row still matches the rule's own grammar (a bare
+// "❯" with nothing captured after it), so ok=true, text="" is "the rule read
+// this box and it is empty", and a caller that only checked text=="" without
+// also checking ok could not tell that apart from "nothing was read here at
+// all" — the same "absent is not empty" contract Subagents and Transcript
+// already keep for their own extractors.
+func (o Observation) InputText() (text string, ok bool) {
+	for _, e := range o.Extras {
+		if e.Name != InputTextExtra {
+			continue
+		}
+		lines := make([]string, 0, len(e.Rows))
+		for _, row := range e.Rows {
+			lines = append(lines, row[inputTextLine])
+		}
+		return strings.Join(lines, "\n"), true
+	}
+	return "", false
 }
 
 // MenuExtra is the name a rule document gives the extractor that reads a

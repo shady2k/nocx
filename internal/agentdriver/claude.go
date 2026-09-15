@@ -219,6 +219,62 @@ package agentdriver
 // hint branch stays exactly as permissive as it always was. The
 // `subagent-finished` manifest mark could not move inside the lingering
 // window for the same reason; nocx-nru89.6's report has the full account.
+//
+// # What is TYPED is not what the target SPANS, and trimming the span read
+// the rule row as text (nocx-6q1uh.18)
+//
+// Document.InputBox is deliberately the box's WHOLE chrome, rule rows
+// included — session.message's precondition needs that width, because a menu
+// displacing the box must make the target it mints stop matching too (Task
+// 10's "TargetInput" design). But internal/app/pane_messages.go used to
+// answer "is the box empty" and "did the paste echo" by trimming
+// strings.TrimSpace over that SAME span joined whole, and the span's own two
+// edges are the topRule/bottomRule "─" rows — a full-width run of the rule
+// glyph is never whitespace, so the trimmed string was never empty and a
+// queued message could neither be pasted (refused "someone is typing") nor
+// have its own submission confirmed, on every real frame.
+//
+// The fix is a second, narrower reading of the same chrome: "inputText"
+// reads only the rows the box's own PROMPT marker introduces — anchored one
+// row above it (topRule, so the walk's own down-direction start lands
+// exactly on "prompt" without re-deriving the offset) and capped at two rows
+// down. Two, not one, because a typed line that visually wraps at the pane's
+// own width is real and already in the corpus:
+// claude-2.1.266-subagent-finished at 38s draws "❯ Use the Agent tool to
+// launch the Explore subagent ... in this" over "  folder. Do not wait for
+// it." as two rows of ONE message, and claude-permission-60 (the 60-column
+// geometry) does the same. The cap stops at two rather than reading further
+// because the box's OWN minimum height is three rows (topRule, one prompt
+// row, bottomRule) — so from topRule, two rows down reaches at most
+// bottomRule itself in the common one-row case, never the mode line past it.
+// Widening the cap without also protecting against that is not free: the
+// mode line's own hint text opens with the same two-space indent a wrapped
+// continuation line does ("  ⏸ manual mode on ...", "  esc to interrupt"),
+// so a cap sized to also cover a three-row box would need to tell that text
+// apart from something the box's own repaint had actually drawn, which nothing
+// in the corpus asks for yet.
+//
+// The pattern itself is what "excluding rule rows" means in practice: it
+// matches only "❯" optionally followed by ONE cell and content, or two
+// (ordinary) spaces followed by non-blank content, and a row of nothing but
+// "─" satisfies neither — so the rule's own bottom border is read and
+// silently excluded rather than trimmed after the fact. That one cell after
+// the marker is a NO-BREAK SPACE (U+00A0), not the ordinary space it looks
+// like printed — measured off every prompt row in the corpus, idle and
+// typed alike (claude-2.1.266-turn at 44s and 47s, claude-permission-60 at
+// 13s) — while a wrapped continuation row's own two-cell indent is ordinary
+// spaces. The two are visually identical in a terminal, so a pattern written
+// from how the row PRINTS rather than from its actual bytes would have
+// matched nothing on every real frame; \x{00A0} is spelled out in the
+// pattern rather than pasted as the raw byte for exactly that reason — a
+// byte that renders invisibly has no business being invisible in the
+// document that names it. An idle prompt row ("❯" plus that one cell, its
+// trailing ordinary spaces stripped by the same right-trim every region read
+// already applies) still matches the first alternative with nothing
+// captured, which is what lets Observation.InputText tell "the rule read
+// this box and it is empty" (ok=true, text="") apart from "this frame has no
+// box to read at all" (ok=false) — the same "absent is not empty" contract
+// Subagents and Transcript already keep.
 
 import (
 	_ "embed"

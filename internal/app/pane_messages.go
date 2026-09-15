@@ -25,6 +25,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/assistant"
+	"github.com/shady2k/nocx/internal/paneview"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/sessionruntime"
 	"github.com/shady2k/nocx/internal/workers"
@@ -673,6 +674,52 @@ func (m *paneMessages) deliveryTargetKind(sessionID string) sessionruntime.Targe
 	return sessionruntime.TargetInput
 }
 
+// agentFor answers which agent sessionID runs, through the SAME enrolment-
+// cache lookup deliveryTargetKind already keys MenuDisplacesInputBox on
+// (agentAwareReader.AgentFor) — never a second derivation of "what agent runs
+// here" (AGENTS.md, "look for the existing answer before you write a second
+// one"). Empty when this reader carries no such lookup (a test double, most
+// tests in this package) or the session names no enrolled agent.
+func (m *paneMessages) agentFor(sessionID string) string {
+	aware, ok := m.reader.(agentAwareReader)
+	if !ok {
+		return ""
+	}
+	return aware.AgentFor(sessionID)
+}
+
+// inputText re-evaluates f — the SAME frame a Read this call already made
+// just handed back — under sessionID's own agent rule, and answers what the
+// RULE says is actually typed in the input box (agentdriver.Observation.
+// InputText, nocx-6q1uh.18). This is a second, cheap, pure evaluation of a
+// frame this package already has in hand, never a second read of the pane:
+// Observe's own contract is a function of the frame alone, so calling it
+// again here is exactly as safe as the paneReader's own first call was.
+//
+// Before this, every caller below answered "is the box empty" and "did it
+// echo" by trimming strings.TrimSpace over regionText's raw cell-join of the
+// whole minted target span — which for an agent like claude is
+// Document.InputBox, rule rows included (deliberately: the target must stay
+// that wide so a menu displacing the box still makes it refuse). A row of
+// nothing but the rule's own full-width glyph is never whitespace, so that
+// trim was never empty and a queued message could neither be pasted nor have
+// its own submission confirmed (claude.go's own note on this has the full
+// account, and the corpus evidence). ok is false when this build has no rule
+// for the agent, or the rule's own extractor could not read the box on this
+// exact frame (a menu has displaced it, or nothing is enrolled here at all)
+// — the same fail-closed direction pasteReady's caller already takes for
+// "the box is not currently identifiable".
+func (m *paneMessages) inputText(sessionID string, f paneview.Frame) (string, bool) {
+	if m.rules == nil {
+		return "", false
+	}
+	agent := m.agentFor(sessionID)
+	if agent == "" {
+		return "", false
+	}
+	return m.rules.Observe(agent, f).InputText()
+}
+
 // pasteReady mints a fresh target of deliveryTargetKind's own answer and
 // reports whether the paste precondition holds (design §8.2 step 1: "the
 // input box empty"). False either because the box currently holds someone
@@ -681,14 +728,20 @@ func (m *paneMessages) deliveryTargetKind(sessionID string) sessionruntime.Targe
 // IS "a menu is up". Both reasons are treated identically by every caller
 // (when=="now" refuses either way; when=="free" retries either way), so
 // this reports only the one bool a caller acts on.
+//
+// The target mint is still spent for its own sake — it is what makes "a
+// menu is up" refuse (a target of a kind other than want, or none at all) —
+// and "empty" is answered by the RULE's own inputText reading of the same
+// frame (nocx-6q1uh.18), never by trimming the wider span the target itself
+// covers.
 func (m *paneMessages) pasteReady(ctx context.Context, da *DescendantPaneAccess, sessionID string) bool {
 	want := m.deliveryTargetKind(sessionID)
 	read, err := m.reader.Read(ctx, da, sessionID, &want, nil)
 	if err != nil || read.Target == nil || read.Target.Kind != want {
 		return false
 	}
-	box := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(regionText(read.Frame, read.Target.Rows.First, read.Target.Rows.Last)), "❯"))
-	return box == ""
+	text, ok := m.inputText(sessionID, read.Frame)
+	return ok && text == ""
 }
 
 // pasteResult carries what commitPasteOrEnter needs without exposing
@@ -741,10 +794,11 @@ func (m *paneMessages) waitForEcho(ctx context.Context, da *DescendantPaneAccess
 	for {
 		read, err := m.reader.Read(ctx, da, sessionID, &want, nil)
 		if err == nil && read.Target != nil && read.Target.Kind == want {
-			box := regionText(read.Frame, read.Target.Rows.First, read.Target.Rows.Last)
-			boxNow = box
-			if boxContainsEcho(box, text) {
-				return true, box
+			if box, ok := m.inputText(sessionID, read.Frame); ok {
+				boxNow = box
+				if boxContainsEcho(box, text) {
+					return true, box
+				}
 			}
 		}
 		if time.Now().After(deadline) {
@@ -785,13 +839,13 @@ func (m *paneMessages) confirmSubmission(ctx context.Context, da *DescendantPane
 			if read.Classification == agentdriver.StateWorking {
 				return true
 			}
-			want := m.deliveryTargetKind(sessionID)
-			boxRead, boxErr := m.reader.Read(ctx, da, sessionID, &want, nil)
-			if boxErr == nil && boxRead.Target != nil && boxRead.Target.Kind == want {
-				box := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(regionText(boxRead.Frame, boxRead.Target.Rows.First, boxRead.Target.Rows.Last)), "❯"))
-				if box == "" {
-					return true
-				}
+			// read.Frame is already this exact snapshot's own frame (Read
+			// fills it whether or not a target was asked for), so the box's
+			// own text is read straight off it — no second mint needed now
+			// that the check is the RULE's inputText rather than a trim over
+			// a minted target's span (nocx-6q1uh.18).
+			if text, ok := m.inputText(sessionID, read.Frame); ok && text == "" {
+				return true
 			}
 		}
 		if time.Now().After(deadline) {

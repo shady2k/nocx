@@ -458,7 +458,9 @@ test('a hand-typed ssh: frozen local block, remote blocks, integrated second con
     await expect(entered).toContainText('password:')
     await expect(entered).not.toHaveAttribute('data-outcome')
     await expect(
-      entered.locator(':scope > .cmd-header > .cmd-header-meta > .ui-meta > .ui-meta__part'),
+      entered.locator(
+        ':scope > .cmd-header > .cmd-header-meta > .ui-prompt-context > .ui-prompt-context__part',
+      ),
     ).toHaveCount(1)
     await expect(pane(page).locator('.cmd-block.cmd-block-running')).toHaveCount(0, {
       timeout: 10_000,
@@ -476,7 +478,9 @@ test('a hand-typed ssh: frozen local block, remote blocks, integrated second con
     // alias: `e2e@127.0.0.1`.
     await expect(
       remote1
-        .locator(':scope > .cmd-header > .cmd-header-meta > .ui-meta > .ui-meta__part')
+        .locator(
+          ':scope > .cmd-header > .cmd-header-meta > .ui-prompt-context > .ui-prompt-context__part',
+        )
         .first(),
     ).toHaveText('e2e@127.0.0.1', {
       timeout: 10_000,
@@ -504,7 +508,9 @@ test('a hand-typed ssh: frozen local block, remote blocks, integrated second con
     // guard that IS stable is the one below: whatever this block shows, it is
     // never this machine's directory.
     for (const chip of await remote1
-      .locator(':scope > .cmd-header > .cmd-header-meta > .ui-meta > .ui-meta__part:last-child')
+      .locator(
+        ':scope > .cmd-header > .cmd-header-meta > .ui-prompt-context > .ui-prompt-context__part:last-child',
+      )
       .allInnerTexts()) {
       expect(chip).not.toContain(path.basename(localHome()))
     }
@@ -537,7 +543,9 @@ test('a hand-typed ssh: frozen local block, remote blocks, integrated second con
     const local = pane(page).locator('.cmd-block', { hasText: 'local-after-exit' })
     await expect(local).toBeVisible({ timeout: 30_000 })
     await expect(
-      local.locator(':scope > .cmd-header > .cmd-header-meta > .ui-meta > .ui-meta__part'),
+      local.locator(
+        ':scope > .cmd-header > .cmd-header-meta > .ui-prompt-context > .ui-prompt-context__part',
+      ),
     ).toHaveCount(1)
 
     // The installed fact was recorded from the first run: the far shell
@@ -619,7 +627,7 @@ test('a hand-typed ssh: frozen local block, remote blocks, integrated second con
     await expect(failBlock).toHaveAttribute('data-outcome', 'failure', { timeout: 30_000 })
     await expect(
       failBlock.locator(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
-    ).toHaveText('exit 255', { timeout: 30_000 })
+    ).toHaveText('Exit 255', { timeout: 30_000 })
     await expect(failBlock).toContainText('Permission denied')
     // The fail run entered nothing: the entered-block set is unchanged. (The
     // count is 4 by now — the cut-short remote `exit` blocks also freeze

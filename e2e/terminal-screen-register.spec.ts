@@ -223,7 +223,7 @@ test('a successful command says nothing about its outcome', async ({ page }) => 
       .filter((el) => el.children.length === 0)
       .map((el) => el.textContent?.trim() ?? ''),
   )
-  expect(words.filter((w) => /^(ok|exit \d+|completed)$/.test(w))).toEqual([])
+  expect(words.filter((w) => /^(ok|Exit \d+|completed)$/.test(w))).toEqual([])
 })
 
 test('a failed command is marked, and its status is legible in every theme', async ({ page }) => {
@@ -234,7 +234,7 @@ test('a failed command is marked, and its status is legible in every theme', asy
   for (const theme of THEMES) {
     await setTheme(page, theme)
     const status = `${FAILED_ROW} ${STATUS}`
-    await expect(page.locator(status)).toHaveText(/exit 1/)
+    await expect(page.locator(status)).toHaveText(/Exit 1/)
     const ratio = await probe(page, 'textContrast', status)
     expect(ratio, `${theme}: status text contrast`).toBeGreaterThanOrEqual(4.5)
     const ground = await probe(page, 'ground', FAILED_ROW)

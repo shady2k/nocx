@@ -10,11 +10,36 @@
 // made by a person reading the PNGs this file writes to
 // test-results/visual-board/, one per theme and moment:
 //
-//   tokyo-night-empty.png — a fresh pane, nothing run: the composer alone
-//                           at `~`, exactly the owner's own screenshot
-//   <theme>-running.png   — the composer hidden, a live block with Stop
-//   <theme>-composer.png  — the composer back, focused, with a draft typed
+//   tokyo-night-empty.png          — a fresh pane, nothing run: the composer
+//                                    alone at `~`, exactly the owner's own
+//                                    screenshot
+//   <theme>-owner-scenario.png     — the owner's own two-command scenario
+//                                    (`ls`, then an unknown command) with the
+//                                    pane context strip above it (decision
+//                                    2026-09-15-terminal-screen-mockup-
+//                                    decision.md §1 items 1 and 3)
+//   <theme>-running.png            — the composer hidden, a live block with
+//                                    Stop
+//   <theme>-process-bar.png        — the SAME running moment, framed on the
+//                                    running-state footer (decision §1,
+//                                    "Running-state gap"): Send input,
+//                                    Interrupt, Stop
+//   <theme>-composer.png           — the composer back, focused, with a
+//                                    draft typed
 //
+// NOT extended with a two-pane split shot, despite the decision record's D
+// task asking for one: `.internal/specs/2026-09-15-terminal-screen-mockup-
+// decision.md` §1 item 3 and its completion criterion assume a side-by-side
+// split pane already exists to mount a PaneContext INSIDE. It does not —
+// `frontend/src/panes.ts`'s `Pane`/`PaneManager` stack panes one at a time
+// behind `.pane.active` (`styles/base.css`'s `.pane { position: absolute;
+// inset: 0; visibility: hidden }`), there is no layout code that renders two
+// `.pane` elements side by side in one tab, and `br search "split pane"` /
+// `"split view"` returns no bead for building one. Inventing a fake split
+// for one screenshot would be exactly the "invented activity" AGENTS.md
+// forbids. PaneContext's own API already supports the split identity
+// variant (`data-split`, `data-active` — `ui/pane-context.ts`) so mounting a
+// second one needs no further kit work once a real split layout exists.
 // Modelled on terminal-screen-register-mockup-pass.spec.ts: promptReady and
 // the INPUT selector are its own. Waiting is by SETTLED COUNT rather than by
 // a `# marker` comment in the typed command: round 1 embedded a marker in a
@@ -32,6 +57,8 @@ const INPUT = '.pane.active .nocx-editor-input'
 const SETTLED = '.pane.active .cmd-block:not(.cmd-block-running)'
 const RUNNING = '.pane.active .cmd-block.cmd-block-running'
 const COMPOSER_PROMPT = '.pane.active .nocx-editor-chrome .ui-prompt-context'
+const PANE_CONTEXT = '.pane.active .ui-pane-context'
+const PROCESS_BAR = '.pane.active .ui-process-bar'
 
 test.use({ viewport: { width: 1400, height: 900 } })
 
@@ -69,6 +96,22 @@ async function runAndSettle(page: Page, command: string): Promise<void> {
   await page.keyboard.press('Enter')
   await expect(page.locator(SETTLED)).toHaveCount(before + 1, { timeout: 15_000 })
   await promptReady(page)
+}
+
+/** The owner's own two-command scenario (decision record's §"Completion
+ *  criterion": "the owner's two-command scenario at the top under context
+ *  chrome") — `ls`, then a command nothing resolves, so the board shows
+ *  both a success and the unresolved-command underline in one short
+ *  transcript directly below the pane context strip (decision §1 items 1
+ *  and 3), with idle space below it rather than above the first prompt. */
+async function paintOwnerScenario(page: Page, prefix: string): Promise<void> {
+  await expect(page.locator(PANE_CONTEXT)).toBeVisible()
+  await runAndSettle(page, 'ls')
+  // Not a real command anywhere on this stand's PATH — the same unresolved
+  // shape the decision record's own evidence image shows (a normal-coloured,
+  // dotted-underlined command word), never a red "command not found" panel.
+  await runAndSettle(page, 'thiscommanddoesnotexist')
+  await page.screenshot({ path: `test-results/visual-board/${prefix}-owner-scenario.png` })
 }
 
 /** Paint one theme's board: a real `git diff --stat`, a failed test block, a
@@ -135,6 +178,19 @@ async function paintBoard(page: Page, prefix: string): Promise<void> {
   // this is the shot where it stays hidden.
   await page.screenshot({ path: `test-results/visual-board/${prefix}-running.png` })
 
+  // The running-state footer (decision §1, "Running-state gap"): shown for
+  // ordinary running on the normal buffer, replacing the composer rather
+  // than sitting beside it — never both surfaces visible at once. Stop here
+  // is the SAME stop owner as the block header's own Stop; Interrupt is the
+  // deliberately DIFFERENT `Ctrl+C` intent (`signalActiveCommand`
+  // ('interrupt')), never claimed as Stop's own shortcut.
+  const processBar = page.locator(PROCESS_BAR)
+  await expect(processBar).toBeVisible()
+  await expect(processBar.getByRole('button', { name: 'Send input' })).toBeVisible()
+  await expect(processBar.getByRole('button', { name: 'Interrupt' })).toBeVisible()
+  await expect(processBar.getByRole('button', { name: 'Stop' })).toBeVisible()
+  await page.screenshot({ path: `test-results/visual-board/${prefix}-process-bar.png` })
+
   // Stop it, bring the composer back and type a draft — the mockup's second
   // moment: "Run ▾ │ git checkout -b feat/fonts" in a focused field.
   await running.getByRole('button', { name: 'Stop' }).click()
@@ -165,6 +221,7 @@ test.describe('visual board (nocx-9bpeq.18)', () => {
     // The owner's own screenshot: a fresh pane, nothing run yet — the
     // composer alone at `~`, before the board types anything into it.
     await page.screenshot({ path: 'test-results/visual-board/tokyo-night-empty.png' })
+    await paintOwnerScenario(page, 'tokyo-night')
     await paintBoard(page, 'tokyo-night')
   })
 
@@ -172,6 +229,7 @@ test.describe('visual board (nocx-9bpeq.18)', () => {
     await page.goto('/')
     await promptReady(page)
     await setTheme(page, 'light')
+    await paintOwnerScenario(page, 'light')
     await paintBoard(page, 'light')
   })
 })

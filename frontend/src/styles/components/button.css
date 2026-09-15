@@ -41,7 +41,6 @@
 /* ── Default (neutral) — today's secondary, renamed (§3.6 vocabulary) ── */
 
 .ui-button[data-variant='default'] {
-  height: var(--control-height-sm);
   padding: 0 10px;
   background: var(--color-surface-raised);
   color: var(--color-text);
@@ -57,7 +56,6 @@
 /* ── Primary (accent-filled) ────────────────────────────────────────── */
 
 .ui-button[data-variant='primary'] {
-  height: 24px;
   padding: 0 12px;
   background: var(--color-accent);
   color: var(--color-canvas);
@@ -72,7 +70,6 @@
 /* ── Danger (danger outline) ─────────────────────────────────────────── */
 
 .ui-button[data-variant='danger'] {
-  height: 24px;
   padding: 0 8px;
   background: transparent;
   color: var(--color-danger);
@@ -81,6 +78,43 @@
 
 .ui-button[data-variant='danger']:hover {
   background: color-mix(in srgb, var(--color-danger), transparent 90%);
+}
+
+/* ── Height follows `data-size`, for every variant (nocx-9bpeq.21 round 2)
+   ──────────────────────────────────────────────────────────────────────
+   No attribute is `md` — `--control-height-md`, 32px — the SAME convention
+   `createButton`/`Button.tsx` already use to OMIT the attribute for the
+   common case (`local.size && local.size !== 'md'` is what earns it); an
+   explicit `sm` below is `--control-height-xs`, 22px, unchanged from today.
+
+   Ghost already followed this (`:not([data-size])`, further down); every
+   other sized variant instead carried its OWN literal or token —
+   `--control-height-sm` on default, a bare `24px` on primary and danger,
+   nothing at all on dashed — so `data-size` did nothing for any of them.
+   The running command block's Stop button (scrollback/blocks.ts, `variant:
+   'default'`, no size) rendered at 24px instead of the mockup pass's 32px
+   target (decision record 2026-09-15 §1.7), which is what surfaced this:
+   `data-size='sm'` had never actually been exercised on primary, danger or
+   dashed to notice they ignored it too.
+
+   `:not([data-size])` rather than folding `height` into each variant's own
+   rule above: `[data-size='sm']` below is then a SEPARATE, mutually
+   exclusive match — the two rules can never tie on specificity, and neither
+   depends on declaration order (the reason ghost's own comment gives).
+
+   `:not([data-secondary])` is the one exception TO that: `[data-secondary=
+   'true']` (bottom of file) is a taller, two-line auto-height mode a
+   consumer can combine with ANY of these variants (agent-approval-prompt.tsx
+   pairs it with default, primary AND danger, all sizeless) — and unguarded,
+   this rule's higher specificity (three attribute-level selectors against
+   secondary's two) would have overridden its `height: auto` and collapsed
+   the second line. Workspace (a full-height rail badge) has no sm/md
+   concept and keeps its own `height: 100%`. */
+.ui-button[data-variant='default']:not([data-size]):not([data-secondary]),
+.ui-button[data-variant='primary']:not([data-size]):not([data-secondary]),
+.ui-button[data-variant='danger']:not([data-size]):not([data-secondary]),
+.ui-button[data-variant='dashed']:not([data-size]):not([data-secondary]) {
+  height: var(--control-height-md);
 }
 
 /* ── Size sm (for inline/chrome uses like quick-connect) ─────────────── */

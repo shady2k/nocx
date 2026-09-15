@@ -257,3 +257,63 @@ describe('Button truncate (nocx-9bpeq.7)', () => {
     expect(rule).toMatch(/display:\s*inline-block/)
   })
 })
+
+// Height following `data-size` used to work for `ghost` alone: `default`
+// hard-coded `--control-height-sm` (24px, not any declared size), `primary`
+// and `danger` hard-coded a bare `24px`, and `dashed` set no height at all —
+// so `data-size` did nothing for any of the four, and the running command
+// block's Stop button (`variant: 'default'`, no size) rendered at 24px
+// instead of the mockup pass's 32px target (decision record 2026-09-15
+// §1.7, nocx-9bpeq.21 round 2). Asserted against the SHIPPED stylesheet,
+// like the ghost-selected tests above: jsdom cannot resolve var() in
+// computed style, so the deterministic check is the token relationship in
+// the real file.
+describe('Button — height follows data-size, for every variant (nocx-9bpeq.21 round 2)', () => {
+  const css = readFileSync(
+    resolve(import.meta.dirname ?? '.', '..', 'styles/components/button.css'),
+    'utf8',
+  )
+
+  it('gives every non-ghost, non-workspace variant the md height when unsized', () => {
+    // One rule, four variants: the same specificity trick ghost already
+    // used (`:not([data-size])`), so `[data-size='sm']` stays a SEPARATE,
+    // mutually exclusive match rather than a specificity tie this rule
+    // could lose or win depending on declaration order.
+    const rule =
+      /((?:\.ui-button\[data-variant='(?:default|primary|danger|dashed)'\]:not\(\[data-size\]\):not\(\[data-secondary\]\)),?\s*){4}\{([^}]*)\}/.exec(
+        css,
+      )
+    expect(rule, 'combined default/primary/danger/dashed height rule not found').not.toBeNull()
+    expect(rule![0]).toMatch(/height:\s*var\(--control-height-md\)/)
+  })
+
+  it('keeps the explicit sm height unchanged', () => {
+    const rule = /\.ui-button\[data-size='sm'\]\s*\{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(rule).toMatch(/height:\s*var\(--control-height-xs\)/)
+  })
+
+  it('never lets the md height override a two-line secondary button', () => {
+    // agent-approval-prompt.tsx pairs `secondary` with `default`, `primary`
+    // AND `danger`, all sizeless — the exact combination the md rule above
+    // must not match, or the second line collapses under a fixed 32px.
+    for (const variant of ['default', 'primary', 'danger', 'dashed']) {
+      const re = new RegExp(
+        `\\.ui-button\\[data-variant='${variant}'\\]:not\\(\\[data-size\\]\\):not\\(\\[data-secondary\\]\\)`,
+      )
+      expect(css, `${variant} height rule must exclude [data-secondary]`).toMatch(re)
+    }
+    const secondaryRule = /\.ui-button\[data-secondary='true'\]\s*\{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(secondaryRule).toMatch(/height:\s*auto/)
+    expect(secondaryRule).toMatch(/min-height:\s*var\(--control-height-sm\)/)
+  })
+
+  it('no longer hard-codes a height on the default/primary/danger variant rules themselves', () => {
+    for (const variant of ['default', 'primary', 'danger']) {
+      const block = new RegExp(`\\.ui-button\\[data-variant='${variant}'\\]\\s*\\{([^}]*)\\}`).exec(
+        css,
+      )?.[1]
+      expect(block, `${variant} rule not found`).toBeDefined()
+      expect(block).not.toMatch(/height\s*:/)
+    }
+  })
+})

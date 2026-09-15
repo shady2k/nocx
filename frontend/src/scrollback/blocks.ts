@@ -30,6 +30,7 @@ import { createBadge } from '../ui/badge-element'
 import { createMeta, createMetaSeparator, updateMeta, type MetaOptions } from '../ui/meta'
 import { createSpinner } from '../ui/spinner-element'
 import { createCommandBlockFrame, setHeaderInProgress } from '../ui/command-block-frame'
+import { markShellCommand } from '../ui/shell-command'
 import { createComponent } from 'solid-js'
 import { render } from 'solid-js/web'
 import { ContextMenu, type ContextMenuItem } from '../ui/context-menu'
@@ -720,28 +721,18 @@ function formatDurationTitle(ms: number): string {
 
 // ── The header's right-hand group and the block's outcome: one owner ───────
 
-/** `size: 'terminal'` is task A's addition to Meta (decision record
- *  2026-09-15 §3): the header's status group reads at the body size —
- *  `--font-size-terminal`, a 20px line box, tabular figures — rather than
- *  the 12.25px mono `sm` variant this replaces (§1.7). `MetaOptions` only
- *  types `'sm'` until A's `ui/meta.ts` lands; `createMeta`/`createMeta-
- *  Separator` already accept any string for `size` at runtime (`fill` in
- *  meta.ts writes it straight to a dataset), so this is a TYPE-LEVEL bridge
- *  only, never a second implementation of the variant — that stays owned by
- *  meta.css. Remove once A merges and `'terminal'` is a real member of
- *  `MetaOptions['size']`. */
-const META_SIZE_TERMINAL = 'terminal' as unknown as NonNullable<MetaOptions['size']>
-
 /** THE duration fact, for every kind and both states that show one. The TEXT
  *  is the caller's: a running command's ticks (formatRunningDuration) or a
  *  finished one's tenths (formatDuration, nocx-hoeq3, spec 2026-09-15 §1.7).
  *  `titleMs`, when given, is the precise figure the tenths display rounds
  *  away — a finished duration's own; a running duration re-derives its
  *  title from the live clock instead (BlockManager._startTicker) and passes
- *  none. The column variance keeps durations in a tabular column across
- *  blocks. */
+ *  none. `size: 'terminal'` (task A's Meta variant, §3 contract): the body
+ *  size, a 20px line box, tabular figures — replacing the 12.25px mono `sm`
+ *  the header used before §1.7. The column variance keeps durations in a
+ *  tabular column across blocks. */
 function durationMeta(text: string, titleMs?: number): HTMLSpanElement {
-  const opts: MetaOptions = { tone: 'muted', column: 'duration', size: META_SIZE_TERMINAL }
+  const opts: MetaOptions = { tone: 'muted', column: 'duration', size: 'terminal' }
   if (titleMs !== undefined) opts.title = formatDurationTitle(titleMs)
   return createMeta([text], opts)
 }
@@ -814,12 +805,12 @@ export function settleBlockOutcome(
     chips.push(
       createMeta([spec.text], {
         tone: spec.outcome === 'failure' ? 'danger' : 'dim',
-        size: META_SIZE_TERMINAL,
+        size: 'terminal',
       }),
     )
   }
   chips.forEach((chip, i) => {
-    if (i > 0) placeHeaderChip(right, createMetaSeparator({ size: META_SIZE_TERMINAL }))
+    if (i > 0) placeHeaderChip(right, createMetaSeparator({ size: 'terminal' }))
     placeHeaderChip(right, chip)
   })
 }
@@ -882,8 +873,8 @@ function createHeader(
     // ask kind's own in-progress word below (AD-8: one shape for "in
     // progress").
     right.appendChild(createSpinner({ label: 'Running', size: 'sm' }))
-    right.appendChild(createMeta(['Running'], { tone: 'accent', size: META_SIZE_TERMINAL }))
-    right.appendChild(createMetaSeparator({ size: META_SIZE_TERMINAL }))
+    right.appendChild(createMeta(['Running'], { tone: 'accent', size: 'terminal' }))
+    right.appendChild(createMetaSeparator({ size: 'terminal' }))
     right.appendChild(durationMeta(formatRunningDuration(0)))
   } else if (status === 'waiting' && rules.statusChips) {
     // The kind's own in-progress vocabulary: the ask block says it is
@@ -900,7 +891,7 @@ function createHeader(
     waiting.className = 'cmd-header-waiting'
     waiting.appendChild(createSpinner({ label: rules.statusChips.inProgress, size: 'sm' }))
     waiting.appendChild(
-      createMeta([rules.statusChips.inProgress], { tone: 'accent', size: META_SIZE_TERMINAL }),
+      createMeta([rules.statusChips.inProgress], { tone: 'accent', size: 'terminal' }),
     )
     right.appendChild(waiting)
   }
@@ -953,6 +944,16 @@ function createHeader(
       if (command) paintShellInto(cmdSpan, command, store)
       else cmdSpan.textContent = '(empty)'
     }
+    // The terminal-command presentation (spec 2026-09-15 §1.6, task A's
+    // ui/shell-command.ts): the shared tokenizer's `.tok-*` spans painted
+    // above are the SAME markup the live editor carries; this only scopes
+    // how THIS host paints them — `git` in accent, `diff --stat` in body
+    // text — rather than the generic `.tok-*` rainbow other consumers (an
+    // assistant code fence) keep. Applied once, here, for every command
+    // header regardless of which branch above filled it: a masked or
+    // reference-bearing command has no `.tok-*` descendants to match, so
+    // the identity is inert on that path rather than needing its own guard.
+    markShellCommand(cmdSpan)
   }
   // The sigil (spec 2026-09-15 §4): the mockup's `›`, as the kit's chevron
   // rather than a text glyph, for the command kind only — ask and tool rows
@@ -2395,7 +2396,7 @@ export class BlockManager {
       updateMeta(meta, [formatRunningDuration(this._now() - started)], {
         tone: 'muted',
         column: 'duration',
-        size: META_SIZE_TERMINAL,
+        size: 'terminal',
       })
     }
     // A hidden tab gains nothing from repainting ten times a second — this

@@ -32,20 +32,3 @@ type Nanos int64
 // mach_continuous_time domain, per-platform in monoclock_linux.go and
 // monoclock_darwin.go). It never calls time.Now() — see the package doc.
 func Now() Nanos { return nowRaw() }
-
-// Clock is the seam a caller that must not depend on wall-clock-shaped time
-// in a test uses instead of calling Now() directly: the owner's commit-point
-// deadline check (nocx-6q1uh.6) takes one so a test can inject a fake
-// reading instead of sleeping real nanoseconds to observe a real deadline
-// pass.
-type Clock interface {
-	Now() Nanos
-}
-
-// System is the zero-configuration Clock every production caller uses: it
-// reads the real machine clock through Now().
-func System() Clock { return systemClock{} }
-
-type systemClock struct{}
-
-func (systemClock) Now() Nanos { return Now() }

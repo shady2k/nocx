@@ -4,6 +4,13 @@
 - **Status:** decided by the owner in session, 2026-09-15 ("take all of it, follow the mockups")
 - **Amends:** `.internal/specs/2026-09-14-terminal-screen-visual-register-design.md` §3.1, §3.2, §5.1, §5.2, §8, §9.
   Everything not named here stands.
+- **Partially superseded 2026-09-15** by
+  [`2026-09-15-terminal-screen-mockup-decision.md`](2026-09-15-terminal-screen-mockup-decision.md), which wins
+  where the two conflict — see its §2 for the passage-by-passage table and the inline supersession notes
+  below. This document's own ASCII composer diagram (§6) and the base spec's block diagrams share the same
+  unstated bottom-alignment assumption the decision record's §2 names; see the base spec's own top-of-file
+  note for what changed (`style.css`, `scrollback/controller.ts`, decision record §1 item 1) — no single
+  passage in THIS file states the assumption in words either, so there is likewise no one line to strike here.
 - **Crosses:** ADR-0008 (keyboard-first ledger — Stop and the target menu stay reachable without a
   pointer), ADR-0004 §3 (the Run/Ask switch), ADR-0012 (imperative code gets the kit through vanilla
   emitters and render islands, §6 of the base spec), ADR-0013 (tokens only), AD-1 (no new data on the data
@@ -100,6 +107,17 @@ have one; out of scope here).
   `RunningBlockActions.stop()` — present only while `isActive(block)` holds, removed when the block
   settles, always visible (not hover-revealed) and in the tab order. The ⋮ menu keeps its Stop item: the
   button is the visible door, the menu the second door to the same handler.
+
+  > **Superseded 2026-09-15** by
+  > [`2026-09-15-terminal-screen-mockup-decision.md`](2026-09-15-terminal-screen-mockup-decision.md) §1 item
+  > 7: `--font-size-sm` (12.25px) reads small and grey next to the 14px command line it sits beside — a new
+  > `Meta` size, `terminal` (`--font-size-terminal`, 20px line-height, tabular figures), replaces it for the
+  > command block's status group; generic small `Meta` stays `sm` for every other consumer. The whole-second
+  > running ticker is a named divergence rather than the mockup's literal `12.4s`: the decision record accepts
+  > it as an EXPLICIT choice, or a 100ms tabular-figure ticker with one decimal below a minute — either is
+  > conforming, silence on the choice is not. Stop grows from `size="sm"` (24px) to `Button` `default` `size`
+  > `md` (32px).
+
 - The failed row keeps the base spec §3.3 treatment.
 
 ## 5. Rhythm (amends §8)
@@ -124,6 +142,15 @@ tokens; nothing literal.
   `--terminal-background` (base spec §7 stands — no raised surface in a row). When the editor is focused the
   border is `--color-accent`. The box is the `.nocx-editor` surface's own placement CSS in
   `styles/surfaces/composer.css`, since it paints no kit component. No send arrow.
+
+  > **Superseded 2026-09-15** by
+  > [`2026-09-15-terminal-screen-mockup-decision.md`](2026-09-15-terminal-screen-mockup-decision.md) §1 item
+  > 2: field paint moves OFF surface CSS and onto a kit frame — vanilla **ComposerFrame**
+  > (`ui/composer-frame.ts`, `styles/components/composer-frame.css`) that owns the outer card AND the inner
+  > field's border, with `CommandEditor`'s CM6 view placed in its editor slot. `styles/surfaces/composer.css`
+  > becomes placement-only. And there IS a send arrow now: a kit IconButton invoking the editor's existing
+  > `submit()`, at the field's trailing edge.
+
 - **`Run ▾`.** `ModeIndicator` gains a trailing `ChevronDownIcon` and a divider after it, and its click opens
   the kit `ContextMenu` (render island, §6.3 of the base spec) listing the registered targets by word, the
   active one checked, each item switching to that target. The ⌘/Ctrl+Enter chord is unchanged. The
@@ -134,6 +161,15 @@ tokens; nothing literal.
 
 A pane header row (every pane pays a row of chrome for facts the prompt line states), `Input: …`
 recipient labels, a status bar, a send arrow, a success mark, the attention model of v3–v5.
+
+> **Superseded 2026-09-15** by
+> [`2026-09-15-terminal-screen-mockup-decision.md`](2026-09-15-terminal-screen-mockup-decision.md) §2 and §1
+> item 3 / "Running-state gap": the pane header row and the status bar are back, with a truthful shape this
+> passage's own reasoning does not cover — **PaneContext**, chrome above the transcript, drawing facts already
+> known (home, branch, host) rather than a second where-derivation, and **ProcessBar**, a RUNNING-only footer
+> rather than a permanent status bar (omitted at idle and in alternate screen). `Input: …` recipient labels
+> and the attention model of v3–v5 stay rejected. A send arrow is also back — see this file's own §6 note
+> above. A success mark is not part of this pass either way.
 
 ## 8. Tasks
 

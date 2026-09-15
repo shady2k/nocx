@@ -2,6 +2,16 @@
 
 - **Bead:** nocx-9bpeq.1 (T1 of epic nocx-9bpeq)
 - **Status:** accepted by the owner in session, 2026-09-14; this document is its written form
+- **Partially superseded 2026-09-15** by
+  [`2026-09-15-terminal-screen-mockup-decision.md`](2026-09-15-terminal-screen-mockup-decision.md), which wins
+  where the two conflict — see its §2 for the passage-by-passage table and the inline supersession notes below.
+  One assumption threaded through this whole document's block/composer diagrams and never stated as its own
+  passage: `.scrollback-inner`'s history was bottom-anchored (`margin-top: auto`), so every ASCII diagram here
+  implicitly drew a short transcript flush with the composer rather than with the tab strip. That assumption
+  is gone (`style.css`, `scrollback/controller.ts` — decision record §1 item 1): the transcript is top-aligned,
+  and idle space sits BELOW the last block, not above it. No single passage below states the old assumption in
+  words, so there is no one line to strike; read every composer/block diagram in this file with that reversal
+  in mind.
 - **Crosses:** ADR-0008 (blocks are a keyboard-first ledger, not cards), ADR-0012 ("what is deliberately
   still imperative"), ADR-0013 (tokens; §3.1 colour derivation measured and failed), ADR-0014 (per-primitive
   kit), AD-6 (the terminal's cells and ANSI palette are not touched here)
@@ -40,6 +50,12 @@ Every block and the composer share one anatomy: a meta row saying where, and a c
 eye reads one column; the composer differs from the history only by carrying the caret. This is why the
 composer is neither the boxed card every mockup drew (a card is what ADR-0008 decided blocks are not) nor
 Warp's outlined chip (a second form for a fact the blocks already state as text).
+
+> **Superseded 2026-09-15** by
+> [`2026-09-15-terminal-screen-mockup-decision.md`](2026-09-15-terminal-screen-mockup-decision.md) §2: the
+> composer is a bounded input card — an inset outer frame around an inner field — not a row differing from
+> history only by its caret. ADR-0008's rejection of a card around every _finished command_ does not prohibit
+> a bounded input card; the completed transcript stays unboxed.
 
 ## 3. Block anatomy
 
@@ -106,12 +122,26 @@ component CSS: ADR-0013 §3.1 measured derived state colours and they failed.
 Only `failure` gets this. A cancelled command is something the person did; tinting it red would say the
 command failed.
 
+> **Superseded 2026-09-15** by
+> [`2026-09-15-terminal-screen-mockup-decision.md`](2026-09-15-terminal-screen-mockup-decision.md) §1 item 4
+> (retained by September 15 §4 and only now corrected): the failure background across the whole row is gone.
+> Only the OUTPUT rows carry a narrow rail — a 4px `--color-danger` pseudo-element spanning the output range
+> alone, in the existing side gutter — and the header/command band keeps normal ground. No rail at all for a
+> command with no output; the red `Exit N` label is sufficient there.
+
 ### 3.4 Between rows
 
 A hairline in `--color-divider` separates rows (today `--color-surface-hover`, which in tokyo-night is darker
 than the surface it is meant to stand out from). Hover and selection keep today's tints.
 
 ## 4. Rows are full width
+
+> **Superseded 2026-09-15** by
+> [`2026-09-15-terminal-screen-mockup-decision.md`](2026-09-15-terminal-screen-mockup-decision.md) §2: a
+> full-width row is not what makes a hover, a selection or the failure rail read correctly — those are the
+> frame's own inset decoration now (§1 items 4–5). Layout rows may remain full-width (the gutter move below
+> still stands), but the transcript's separators and the failure rail are INSET from the pane edge, not drawn
+> to it.
 
 The pane's inline gutter moves from `.pane { padding }` (`styles/base.css:464-465`) into the rows: each block,
 the live terminal region and the composer carry `padding-inline: var(--pane-inline-padding)`. Only a
@@ -138,6 +168,13 @@ stays flush with the pane's right edge (`style.css:790-815`).
 A full-width row on `--terminal-background` with the hairline above it. No accent bar, no border, no card, no
 submit arrow, no status line. `.nocx-editor`'s padding and row metrics become tokens; no `.nocx-editor*` rule
 remains in `style.css`.
+
+> **Superseded 2026-09-15** by
+> [`2026-09-15-terminal-screen-mockup-decision.md`](2026-09-15-terminal-screen-mockup-decision.md) §1 item 2
+> (also September 15 §6): the composer IS a bounded card (ComposerFrame) around an inner field, and its submit
+> control IS an accessible arrow button invoking the editor's existing `submit()`. "No card, no submit arrow"
+> is exactly the pair this pass reverses; the field wrapper owns the input border and the frame owns the outer
+> card boundary.
 
 ### 5.2 Meta row
 
@@ -280,6 +317,13 @@ Tab strip layout and its active indicator (nocx-mjyvr, nocx-jv3q), what the acti
 (nocx-708q.1), xterm cell rendering and the ANSI palette catalogue (nocx-tuhk, nocx-dvf6k), font family and
 size settings (nocx-ybki), block lifecycle ownership (nocx-2v80t), composer attachments beyond restyling the
 existing grant control (nocx-kflva).
+
+> **Superseded 2026-09-15** (the tab strip clause only) by
+> [`2026-09-15-terminal-screen-mockup-decision.md`](2026-09-15-terminal-screen-mockup-decision.md) §2: the
+> horizontal terminal-shell tab scale and its close-button focus states ARE in that pass — `--tab-height`
+> 44px, a 184px tab floor, and the activity rail at `--activity-bar-width` 56px. Tab strip layout beyond scale
+> (drag/reorder, workspace grouping) stays out of scope. The rest of this clause (activity bar contents, xterm
+> cell rendering, font settings, block lifecycle, composer attachments) is untouched.
 
 ## 11. How the children use this
 

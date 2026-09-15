@@ -250,3 +250,21 @@
   font-family: var(--font-family-mono);
   white-space: nowrap;
 }
+
+/* The palette has no title, so the dialog's close control would take a row of
+   its own above the filter and leave a band of empty panel there (owner review,
+   2026-09-15). It shares the filter's row instead: the panel is the positioning
+   context, the header sits at the panel's own padding, and the filter leaves
+   room for it. Placement only — the Dialog and its IconButton paint themselves. */
+.nocx-dialog__panel:has(.quick-connect) {
+  position: relative;
+}
+.nocx-dialog__panel:has(.quick-connect) > .nocx-dialog__header {
+  position: absolute;
+  top: var(--space-6);
+  right: var(--space-6);
+  margin: 0;
+}
+.quick-connect__search {
+  padding-right: calc(var(--control-height-md) + var(--space-2));
+}

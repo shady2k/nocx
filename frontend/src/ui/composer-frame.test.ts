@@ -17,11 +17,11 @@ describe('createComposerFrame', () => {
 
     expect(frame.root.classList.contains('ui-composer-frame')).toBe(true)
     expect([...frame.root.children].slice(0, 2)).toEqual([chrome, frame.field])
-    expect(frame.root.textContent).toContain('↵ run')
-    frame.setSubmitHint('↵ ask')
-    expect(frame.root.textContent).toContain('↵ ask')
-    frame.setSwitchHint('⌘↵ run')
-    expect(frame.root.querySelector('[data-hint="switch"]')?.textContent).toBe('⌘↵ run')
+    expect(frame.root.textContent).toContain('↵run')
+    frame.setSubmitHint('ask')
+    expect(frame.root.textContent).toContain('↵ask')
+    frame.setSwitchHint(['⌘', '↵'], 'run')
+    expect(frame.root.querySelector('[data-hint="switch"]')?.textContent).toBe('⌘↵run')
   })
 
   it('never repaints the caller’s chrome — it does not touch its class, attributes or children', () => {

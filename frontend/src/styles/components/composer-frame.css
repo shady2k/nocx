@@ -27,21 +27,41 @@
 }
 .ui-composer-frame__hint {
   display: flex;
+  align-items: center;
   gap: var(--space-4);
   margin-top: var(--space-2);
-  /* Key hints in the draft's own mono face, keys as their symbols, quieter
-     than the dim text ramp — Warp's register (owner, 2026-09-15): they are
-     there to be found, not read. */
-  font-family: var(--font-family-mono);
+  /* Warp's key-hint register (owner review, 2026-09-15): keycaps, then what
+     they do in the UI face — there to be found, not read. */
+  font-family: var(--font-family-ui);
   font-size: var(--font-size-sm);
   line-height: var(--terminal-ui-line-height);
   color: var(--color-text-dim);
-  opacity: 0.7;
 }
 
-/* One mono cell per key symbol (composer-frame.ts paintHint). */
+.ui-composer-frame__hint-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.ui-composer-frame__hint-item[hidden] {
+  display: none;
+}
+.ui-composer-frame__hint-label {
+  margin-left: var(--space-1);
+}
+/* A keycap: one key, boxed, so the symbol's own advance never matters. */
 .ui-composer-frame__key {
-  display: inline-block;
-  width: 1ch;
-  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: var(--control-height-xs);
+  height: var(--control-height-xs);
+  padding-inline: var(--space-1);
+  border-radius: var(--control-radius-sm);
+  background: var(--color-control-fill);
+  color: var(--color-text-muted);
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-xs);
+  line-height: 1;
 }

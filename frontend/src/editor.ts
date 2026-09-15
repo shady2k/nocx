@@ -617,12 +617,12 @@ export class CommandEditor {
     const label = toShell ? 'Run command' : 'Send question'
     this.submitButton.setAttribute('aria-label', label)
     this.submitButton.title = label
-    this.frame.setSubmitHint(toShell ? '↵ run' : '↵ ask')
+    this.frame.setSubmitHint(toShell ? 'run' : 'ask')
     // The ⌘/Ctrl+Enter chord flips where Enter goes (ADR-0004 §3); the hint
     // names what it does from here. The mark follows the host the person is
     // typing on: ⌘ on macOS, Ctrl elsewhere.
-    const chord = currentPlatform() === 'darwin' ? '⌘↵' : 'Ctrl↵'
-    this.frame.setSwitchHint(`${chord} ${toShell ? 'ask' : 'run'}`)
+    const mod = currentPlatform() === 'darwin' ? '⌘' : 'Ctrl'
+    this.frame.setSwitchHint([mod, '↵'], toShell ? 'ask' : 'run')
   }
 
   /** Install the extensions of the target Enter currently goes to. Called

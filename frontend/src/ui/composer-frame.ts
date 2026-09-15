@@ -19,10 +19,10 @@ export interface ComposerFrameHandle {
    *  read of CM6's own `cm-focused` class. */
   setFocused(focused: boolean): void
   /** Update the Enter hint when the input target changes. */
-  setSubmitHint(text: string): void
-  /** The target-switch chord's hint, e.g. `⌘↵ ask` — what the
-   *  ⌘/Ctrl+Enter chord does from the target currently active. */
-  setSwitchHint(text: string): void
+  setSubmitHint(label: string): void
+  /** The target-switch chord's hint: its keys, one keycap each, and what it
+   *  does from the target currently active — e.g. `['⌘', '↵'], 'ask'`. */
+  setSwitchHint(keys: readonly string[], label: string): void
   /** Remove the frame from its parent. CommandEditor's own `dispose()`
    *  still owns the CM6 view, the chrome row and every listener it
    *  installed; this is only the frame's own DOM teardown. */
@@ -51,11 +51,11 @@ export function createComposerFrame(chrome: HTMLElement): ComposerFrameHandle {
   const hint = document.createElement('div')
   hint.className = 'ui-composer-frame__hint'
   const submitHint = document.createElement('span')
-  paintHint(submitHint, '↵ run')
+  paintHint(submitHint, ['↵'], 'run')
   const switchHint = document.createElement('span')
   switchHint.dataset.hint = 'switch'
   const newlineHint = document.createElement('span')
-  paintHint(newlineHint, '⇧↵ newline')
+  paintHint(newlineHint, ['⇧', '↵'], 'newline')
   hint.append(submitHint, switchHint, newlineHint)
   root.append(chrome, field, hint)
 
@@ -67,12 +67,12 @@ export function createComposerFrame(chrome: HTMLElement): ComposerFrameHandle {
     setFocused(focused: boolean): void {
       field.dataset.focused = focused ? 'true' : 'false'
     },
-    setSubmitHint(text: string): void {
-      paintHint(submitHint, text)
+    setSubmitHint(label: string): void {
+      paintHint(submitHint, ['↵'], label)
     },
-    setSwitchHint(text: string): void {
-      paintHint(switchHint, text)
-      switchHint.hidden = text === ''
+    setSwitchHint(keys: readonly string[], label: string): void {
+      paintHint(switchHint, keys, label)
+      switchHint.hidden = keys.length === 0
     },
     dispose(): void {
       root.remove()
@@ -80,25 +80,21 @@ export function createComposerFrame(chrome: HTMLElement): ComposerFrameHandle {
   }
 }
 
-/** Write a hint, holding every key symbol to one mono cell. The mono face has
- *  no ↵ ⇧ ⌘ of its own, so the browser borrows them from a symbol font whose
- *  advances differ, and `↵ run` stops lining up with `Ctrl↵ ask`. A symbol
- *  therefore sits in its own `__key` box one `ch` wide; the text stays
- *  `textContent`, so a reader hears the same words. */
-function paintHint(host: HTMLElement, text: string): void {
+/** Write one hint the way Warp does: each key in its own keycap, then what
+ *  it does in plain words (owner review, 2026-09-15). The keycap boxes also
+ *  absorb the mono face's missing ↵ ⇧ ⌘ glyphs, whose borrowed advances no
+ *  longer have to line up with anything. */
+function paintHint(host: HTMLElement, keys: readonly string[], label: string): void {
   host.replaceChildren()
-  let run = ''
-  for (const ch of text) {
-    if (/[\u2190-\u23ff]/.test(ch)) {
-      if (run) host.append(run)
-      run = ''
-      const key = document.createElement('span')
-      key.className = 'ui-composer-frame__key'
-      key.textContent = ch
-      host.append(key)
-    } else {
-      run += ch
-    }
+  host.classList.add('ui-composer-frame__hint-item')
+  for (const k of keys) {
+    const cap = document.createElement('kbd')
+    cap.className = 'ui-composer-frame__key'
+    cap.textContent = k
+    host.append(cap)
   }
-  if (run) host.append(run)
+  const text = document.createElement('span')
+  text.className = 'ui-composer-frame__hint-label'
+  text.textContent = label
+  host.append(text)
 }

@@ -75,6 +75,7 @@ import { registerFileViewerSurface, openFileViewer } from './file-viewer'
 import { registerSkillSurface } from './skill-view'
 import { registerTerminalLinks } from './terminal-links'
 import type { LinkPathProbe } from './terminal-links/open'
+import { createSessionHomeSource } from './where/session-home'
 import type { FilesStatError } from './generated/files.stat.error'
 import { createUrlOpener } from './open-url'
 import { createFilesView, FILES_VIEW_ID } from './files/files-view'
@@ -906,9 +907,16 @@ function main(): void {
       return pathProbeFromError(error)
     }
   }
+  // The session-home source (nocx-9bpeq.13, where/session-home.ts): one
+  // files.open binding per session, shared by the link opener and — once
+  // nocx-9bpeq.16 wires it in — the prompt line, so the two never mint two
+  // bindings for one session.
+  const sessionHome = createSessionHomeSource({
+    openBinding: (sessionId, rootPath) => filesServicesTracked.open(sessionId, rootPath),
+    onBindingLiveness: onFilesBindingLiveness,
+  })
   registerTerminalLinks({
     openUrl: (url) => terminalLinkUrlOpener.open(url),
-    openBinding: (sessionId, rootPath) => filesServicesTracked.open(sessionId, rootPath),
     pathKind,
     openDirectory: async (path) => {
       const reveal = revealFilesPath
@@ -918,8 +926,8 @@ function main(): void {
       return reveal(path)
     },
     openViewer: (target) => openFileViewer(target),
-    onBindingLiveness: onFilesBindingLiveness,
     notify: (message) => showToast({ message, level: 'warning' }),
+    sessionHome,
   })
   const gitView = createGitView({
     services: gitServicesTracked,

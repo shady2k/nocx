@@ -1,0 +1,51 @@
+The owner's working day runs in nocx, and herdr is uninstalled  (nocx-xn63t)
+stages done: 0 of 6   tasks closed: 200 of 225   not decomposed: 5
+
+nocx-xn63t.1  [not started]  0 of 0 tasks closed
+  A worker is spawned into its own git worktree
+    not decomposed:
+      nocx-xn63t.1  A worker is spawned into its own git worktree
+
+nocx-xn63t.2  [in progress]  103 of 111 tasks closed
+  The working day moves between two laptops: nocx runs on the VM and the desktop app attaches to it
+    in progress:
+      nocx-eidfb  Two machines, one session, the same screen
+      nocx-ie23r  Every local pane is the helper's, and its program survives nocx
+      nocx-p2q1q  The coordinator outlives its window: quit nocx, reopen it, find the pane still running
+    not decomposed:
+      nocx-6ojko  A host becomes a nocx host: the server is deployed to it, and that is its own consent
+    blocked by, outside this stage:
+      nocx-22k1c  The backend keeps the output, and it outlives the window
+      nocx-pu4  [epic] Warpify: shell integration on any host, at any depth
+
+nocx-xn63t.3  [in progress]  31 of 33 tasks closed
+  A pane's indicator tells working, blocked and finished apart correctly for claude, codex and omp
+    in progress:
+      nocx-dhq4u  An agent nocx has never seen is described by the person who runs it, and a driver that broke is repaired without an update
+    not decomposed:
+      nocx-xn63t.3.1  nocx reads codex's and omp's state from their screens as it reads claude's, checked against labelled frames
+    blocked by, outside this stage:
+      nocx-luqz9  A coordinator learns its worker finished, is blocked or exited without calling anything
+
+nocx-xn63t.4  [in progress]  49 of 53 tasks closed
+  The coordinator hears from its workers, agents message each other, and closing a worker closes its tab
+    in progress:
+      nocx-dkawo  A wave of workers runs inside nocx: a coordinator starts them, waits on all of them, and reads what they did
+    not decomposed:
+      nocx-i8umd  An agent sees the agents in its workspace and can leave them a message
+      nocx-k2csf  A worker knows who started it and records checkpoints of its progress
+    blocked by, outside this stage:
+      nocx-6q1uh  A coordinator and nocx's assistant read, type into and message a pane through one session surface
+      nocx-ms7v.4  The attention queue: what actually needs you
+
+nocx-xn63t.5  [not started]  0 of 4 tasks closed
+  nocx restarts on the VM and the tabs come back with claude and codex conversations resumed
+    blocked by, outside this stage:
+      nocx-dhq4u  An agent nocx has never seen is described by the person who runs it, and a driver that broke is repaired without an update
+
+nocx-xn63t.6  [in progress]  17 of 24 tasks closed
+  The orchestration work is on main, and a full working day runs with herdr stopped
+    in progress:
+      nocx-6q1uh  A coordinator and nocx's assistant read, type into and message a pane through one session surface
+      nocx-k35e3  Every pane fails to start once the helper's window budget is gone, and the whole suite reads as one hidden prompt
+

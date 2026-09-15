@@ -1,0 +1,256 @@
+[
+  {
+    "stage": "nocx-xn63t.1",
+    "title": "A worker is spawned into its own git worktree",
+    "status": "open",
+    "epics": []
+  },
+  {
+    "stage": "nocx-xn63t.2",
+    "title": "The working day moves between two laptops: nocx runs on the VM and the desktop app attaches to it",
+    "status": "in_progress",
+    "epics": [
+      {
+        "id": "nocx-50w7p",
+        "title": "Every SSH connection is made by a helper, and the coordinator holds no SSH client",
+        "status": "closed",
+        "blocked_by": []
+      },
+      {
+        "id": "nocx-6ojko",
+        "title": "A host becomes a nocx host: the server is deployed to it, and that is its own consent",
+        "status": "open",
+        "blocked_by": [
+          {
+            "id": "nocx-wrugm",
+            "title": "An update on your machine does not interrupt a program on the server",
+            "status": "open"
+          }
+        ]
+      },
+      {
+        "id": "nocx-afgkj",
+        "title": "Connect to a nocx host from another machine and see the tabs that are open there",
+        "status": "open",
+        "blocked_by": [
+          {
+            "id": "nocx-6ojko",
+            "title": "A host becomes a nocx host: the server is deployed to it, and that is its own consent",
+            "status": "open"
+          },
+          {
+            "id": "nocx-eidfb",
+            "title": "Two machines, one session, the same screen",
+            "status": "in_progress"
+          }
+        ]
+      },
+      {
+        "id": "nocx-eidfb",
+        "title": "Two machines, one session, the same screen",
+        "status": "in_progress",
+        "blocked_by": []
+      },
+      {
+        "id": "nocx-ie23r",
+        "title": "Every local pane is the helper's, and its program survives nocx",
+        "status": "in_progress",
+        "blocked_by": []
+      },
+      {
+        "id": "nocx-if6",
+        "title": "[epic] External backends: multi-backend frontend seam, then the remote relay",
+        "status": "open",
+        "blocked_by": [
+          {
+            "id": "nocx-22k1c",
+            "title": "The backend keeps the output, and it outlives the window",
+            "status": "in_progress"
+          },
+          {
+            "id": "nocx-eidfb",
+            "title": "Two machines, one session, the same screen",
+            "status": "in_progress"
+          },
+          {
+            "id": "nocx-pu4",
+            "title": "[epic] Warpify: shell integration on any host, at any depth",
+            "status": "in_progress"
+          }
+        ]
+      },
+      {
+        "id": "nocx-isoph",
+        "title": "Your tabs group into workspaces, and the backend owns the whole chain",
+        "status": "closed",
+        "blocked_by": []
+      },
+      {
+        "id": "nocx-k6p18",
+        "title": "A remote session survives a dropped network, and shell integration stops travelling as a script",
+        "status": "closed",
+        "blocked_by": []
+      },
+      {
+        "id": "nocx-p2q1q",
+        "title": "The coordinator outlives its window: quit nocx, reopen it, find the pane still running",
+        "status": "in_progress",
+        "blocked_by": []
+      },
+      {
+        "id": "nocx-wrugm",
+        "title": "An update on your machine does not interrupt a program on the server",
+        "status": "open",
+        "blocked_by": []
+      },
+      {
+        "id": "nocx-ygxjv",
+        "title": "[epic] The session runtime owns the terminal, and it is proved with no client attached",
+        "status": "closed",
+        "blocked_by": []
+      }
+    ]
+  },
+  {
+    "stage": "nocx-xn63t.3",
+    "title": "A pane's indicator tells working, blocked and finished apart correctly for claude, codex and omp",
+    "status": "open",
+    "epics": [
+      {
+        "id": "nocx-7faow",
+        "title": "nocx takes a Claude pane's state from Claude's hooks, and from the screen when they are silent",
+        "status": "open",
+        "blocked_by": [
+          {
+            "id": "nocx-luqz9",
+            "title": "A coordinator learns its worker finished, is blocked or exited without calling anything",
+            "status": "open"
+          }
+        ]
+      },
+      {
+        "id": "nocx-dhq4u",
+        "title": "An agent nocx has never seen is described by the person who runs it, and a driver that broke is repaired without an update",
+        "status": "in_progress",
+        "blocked_by": []
+      },
+      {
+        "id": "nocx-nru89",
+        "title": "nocx reads Claude's screen correctly on the version you run today",
+        "status": "closed",
+        "blocked_by": []
+      },
+      {
+        "id": "nocx-szb40",
+        "title": "The pane says what it is doing, and three workers stop collapsing into one dot",
+        "status": "closed",
+        "blocked_by": []
+      },
+      {
+        "id": "nocx-xn63t.3.1",
+        "title": "nocx reads codex's and omp's state from their screens as it reads claude's, checked against labelled frames",
+        "status": "open",
+        "blocked_by": []
+      }
+    ]
+  },
+  {
+    "stage": "nocx-xn63t.4",
+    "title": "The coordinator hears from its workers, agents message each other, and closing a worker closes its tab",
+    "status": "open",
+    "epics": [
+      {
+        "id": "nocx-dkawo",
+        "title": "A wave of workers runs inside nocx: a coordinator starts them, waits on all of them, and reads what they did",
+        "status": "in_progress",
+        "blocked_by": []
+      },
+      {
+        "id": "nocx-f545a",
+        "title": "A worker stuck on a question says what it is asking, and its coordinator answers it",
+        "status": "closed",
+        "blocked_by": []
+      },
+      {
+        "id": "nocx-i8umd",
+        "title": "An agent sees the agents in its workspace and can leave them a message",
+        "status": "open",
+        "blocked_by": [
+          {
+            "id": "nocx-luqz9",
+            "title": "A coordinator learns its worker finished, is blocked or exited without calling anything",
+            "status": "open"
+          }
+        ]
+      },
+      {
+        "id": "nocx-k2csf",
+        "title": "A worker knows who started it and records checkpoints of its progress",
+        "status": "open",
+        "blocked_by": [
+          {
+            "id": "nocx-luqz9",
+            "title": "A coordinator learns its worker finished, is blocked or exited without calling anything",
+            "status": "open"
+          }
+        ]
+      },
+      {
+        "id": "nocx-luqz9",
+        "title": "A coordinator learns its worker finished, is blocked or exited without calling anything",
+        "status": "open",
+        "blocked_by": [
+          {
+            "id": "nocx-6q1uh",
+            "title": "A coordinator and nocx's assistant read, type into and message a pane through one session surface",
+            "status": "in_progress"
+          }
+        ]
+      },
+      {
+        "id": "nocx-rowqt",
+        "title": "claude typed in a nocx pane is the coordinator: the wave tools reach an external agent",
+        "status": "closed",
+        "blocked_by": []
+      },
+      {
+        "id": "nocx-ui8q6",
+        "title": "A worker participant's pane starts, says so, and runs its agent only once nocx can watch it",
+        "status": "closed",
+        "blocked_by": []
+      }
+    ]
+  },
+  {
+    "stage": "nocx-xn63t.5",
+    "title": "nocx restarts on the VM and the tabs come back with claude and codex conversations resumed",
+    "status": "open",
+    "epics": [
+      {
+        "id": "nocx-dz9vj",
+        "title": "An agent you run is described once: its command, its arguments and its environment, and nocx launches it that way",
+        "status": "open",
+        "blocked_by": [
+          {
+            "id": "nocx-dhq4u",
+            "title": "An agent nocx has never seen is described by the person who runs it, and a driver that broke is repaired without an update",
+            "status": "in_progress"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "stage": "nocx-xn63t.6",
+    "title": "The orchestration work is on main, and a full working day runs with herdr stopped",
+    "status": "in_progress",
+    "epics": [
+      {
+        "id": "nocx-6q1uh",
+        "title": "A coordinator and nocx's assistant read, type into and message a pane through one session surface",
+        "status": "in_progress",
+        "blocked_by": []
+      }
+    ]
+  }
+]

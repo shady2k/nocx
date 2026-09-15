@@ -31,11 +31,12 @@
   gap: var(--space-4);
   margin-top: var(--space-2);
   /* Warp's key-hint register (owner review, 2026-09-15): keycaps, then what
-     they do in the UI face — there to be found, not read. */
+     they do — in the same face, size and ink as the context row's controls
+     above the draft (Button sm, ghost). */
   font-family: var(--font-family-ui);
-  font-size: var(--font-size-sm);
+  font-size: var(--font-size-2xs);
   line-height: var(--terminal-ui-line-height);
-  color: var(--color-text-dim);
+  color: var(--color-text-muted);
 }
 
 .ui-composer-frame__hint-item {
@@ -62,6 +63,6 @@
   background: var(--color-control-fill);
   color: var(--color-text-muted);
   font-family: var(--font-family-ui);
-  font-size: var(--font-size-xs);
+  font-size: var(--font-size-2xs);
   line-height: 1;
 }

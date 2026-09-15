@@ -11,7 +11,7 @@
 // tests therefore assert through the DOM the render island actually
 // produces (role="menu", role="menuitem"), the same seam
 // scrollback/blocks.test.ts already asserts the block-actions menu through.
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { createModeIndicator } from './mode-indicator'
 
 const RUN_ASK_ITEMS = [
@@ -20,6 +20,19 @@ const RUN_ASK_ITEMS = [
 ]
 
 describe('createModeIndicator', () => {
+  // The menu is a Solid render island portalled into document.body and
+  // stays open until dismissed (scrollback/blocks.test.ts's block-actions
+  // menu carries the same rule, verbatim): a test that opens one and ends
+  // without picking a row or clicking again must still close it, or the
+  // NEXT test's querySelectorAll('[role="menuitem"]') finds THIS menu's
+  // rows first (they share one body-level query) and clicks an item wired
+  // to a dead test's onSelect. Escape closes it through the component
+  // itself — removing the portalled node by hand would leave its Solid
+  // root, and the document listeners it owns, alive.
+  afterEach(() => {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  })
+
   it('is the kit badge with a stable identity and the typed tone variance', () => {
     const el = createModeIndicator({
       word: 'Run',

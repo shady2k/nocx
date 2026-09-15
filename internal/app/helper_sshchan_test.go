@@ -119,6 +119,46 @@ func TestAnUnreachableHostKeepsItsOwnSentence(t *testing.T) {
 // decode must degrade to a plain error and never to a typed one carrying empty
 // fields — an accept sheet built from a zero-value error would offer to record
 // a key nobody saw.
+// TestAPaneOpensHostKeyRefusalSurvivesTheProcessBoundaryToo is
+// hostKeyErrorFromHelperRefusal's own coverage: the seam openSSH calls
+// directly, with no *sshOverHelper receiver and none of translate's "open a
+// channel" phrasing, because a pane's spawn-ssh refusal is not a channel
+// open. Before this function existed, openSSH returned the raw
+// *helperclient.RefusalError unrebuilt, so hostKeyInfoFromError
+// (ws_session_handlers.go) never recognised it and connection-password
+// .spec.ts:307's "Unknown host key" dialog never appeared at open time —
+// only the probe path (which already called translate) raised it.
+func TestAPaneOpensHostKeyRefusalSurvivesTheProcessBoundaryToo(t *testing.T) {
+	key := []byte("wire-format-public-key")
+	err := hostKeyErrorFromHelperRefusal(refusalWith(string(proto.ProbeHostKeyUnknown), proto.HostKeyEvidence{
+		Addr:           "host.example.com:22",
+		KnownHostsAddr: "host.example.com:22",
+		Algorithm:      "ssh-ed25519",
+		Key:            key,
+		Fingerprint:    "SHA256:offered",
+	}))
+
+	var unknown *ssh.ErrUnknownHostKey
+	if !errors.As(err, &unknown) {
+		t.Fatalf("hostKeyErrorFromHelperRefusal = %v (%T), want *ssh.ErrUnknownHostKey", err, err)
+	}
+	if unknown.Fingerprint != "SHA256:offered" {
+		t.Fatalf("evidence lost: fingerprint %q", unknown.Fingerprint)
+	}
+}
+
+// TestAPaneOpensOrdinaryRefusalIsUntouched is the control: a spawn-ssh
+// refusal that is NOT about a host key (ErrBadSSHParams's own "no credential
+// reference", for instance) must reach the caller exactly as it arrived —
+// hostKeyErrorFromHelperRefusal is a narrow rebuild, never a second
+// classifier for every refusal openSSH can meet.
+func TestAPaneOpensOrdinaryRefusalIsUntouched(t *testing.T) {
+	original := refusalWith(proto.ErrCodeBadParams, nil)
+	if got := hostKeyErrorFromHelperRefusal(original); got != original {
+		t.Fatalf("hostKeyErrorFromHelperRefusal rewrote a non-host-key refusal: got %v, want %v unchanged", got, original)
+	}
+}
+
 func TestAHostKeyRefusalWithNoEvidenceIsStillARefusal(t *testing.T) {
 	h := &sshOverHelper{}
 	err := h.translate("host.example.com", refusalWith(string(proto.ProbeHostKeyUnknown), nil))

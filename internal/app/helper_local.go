@@ -903,7 +903,16 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		return spawn.client.SpawnSSH(ctx, params)
 	})
 	if err != nil {
-		return res, err
+		// A pane open that hit an unrecorded or changed host key is the
+		// coordinator's own accept-on-first-use flow waiting to be asked, not
+		// a spawn failure: session.spawn-ssh's refusal carries the same
+		// evidence a probe's does (sshsvc.classifyChannelError feeds both),
+		// and without this rebuild it reaches handleOpen as an opaque
+		// "Terminal failed to start" with no evidence for
+		// hostKeyInfoFromError to find — the defect connection-password
+		// .spec.ts:307 measured: the "Unknown host key" dialog never
+		// appeared at open time.
+		return res, hostKeyErrorFromHelperRefusal(err)
 	}
 	// BOUND TO THE SESSION THE HELPER REPORTED, which is the id the interval
 	// will be created under when this pane's agent enrols and a person answers.

@@ -400,21 +400,26 @@ func (h *sshOverHelper) openChannel(ctx context.Context, kind proto.ChannelKind,
 	return stream, nil
 }
 
-// translate re-types a helper refusal into the error this coordinator's callers
-// already switches on.
+// hostKeyErrorFromHelperRefusal re-types the two host-key codes of a helper
+// refusal into the typed error this coordinator's accept-on-first-use flow
+// already switches on — ssh.ErrUnknownHostKey, ssh.ErrHostKeyMismatch — and
+// returns err UNCHANGED for every other refusal, including a non-refusal
+// error. It is the host-key half of translate, factored out so a caller that
+// does not share translate's "open a channel" phrasing can still raise the
+// same accept sheet: a pane's own spawn-ssh (helper_local.go's openSSH) is
+// one, because session.spawn-ssh's refusal carries the identical evidence
+// (sshsvc.classifyChannelError feeds both ops) and a pane open that hit an
+// unrecorded key must show the same dialog a probe would.
 //
-// It is the one place the migration has to be careful, and the reason is that
-// Go values do not cross a process boundary: the helper raises the SAME typed
-// errors this package's ssh client raises — ssh.ErrUnknownHostKey,
-// ssh.ErrHostKeyMismatch — and the classifier that reads them is one process
-// away (sshsvc.classifyChannelError). What arrives here is a code and the
-// evidence, so the typed error is REBUILT, field for field. Without this the
-// accept sheet, the mismatch warning and the transport's hostKeyInfoFromError
-// would all see an opaque helper failure where they used to see evidence.
-func (h *sshOverHelper) translate(host string, err error) error {
+// Go values do not cross a process boundary, so what arrives is a code and
+// the evidence, and the typed error is REBUILT, field for field, rather than
+// forwarded. Without this the accept sheet, the mismatch warning and the
+// transport's hostKeyInfoFromError all see an opaque helper failure where
+// they used to see evidence.
+func hostKeyErrorFromHelperRefusal(err error) error {
 	var refusal *helperclient.RefusalError
 	if !errors.As(err, &refusal) {
-		return fmt.Errorf("ssh: open a channel to %s: %w", host, err)
+		return err
 	}
 	switch refusal.Code {
 	case string(proto.ProbeHostKeyUnknown):
@@ -431,6 +436,30 @@ func (h *sshOverHelper) translate(host string, err error) error {
 				Fingerprint: ev.Fingerprint, Expected: ev.Expected, Key: ev.Key,
 			}
 		}
+	}
+	return err
+}
+
+// translate re-types a helper refusal into the error this coordinator's callers
+// already switches on.
+//
+// It is the one place the migration has to be careful, and the reason is that
+// Go values do not cross a process boundary: the helper raises the SAME typed
+// errors this package's ssh client raises — ssh.ErrUnknownHostKey,
+// ssh.ErrHostKeyMismatch — and the classifier that reads them is one process
+// away (sshsvc.classifyChannelError). What arrives here is a code and the
+// evidence, so the typed error is REBUILT, field for field. Without this the
+// accept sheet, the mismatch warning and the transport's hostKeyInfoFromError
+// would all see an opaque helper failure where they used to see evidence.
+func (h *sshOverHelper) translate(host string, err error) error {
+	if hk := hostKeyErrorFromHelperRefusal(err); hk != err {
+		return hk
+	}
+	var refusal *helperclient.RefusalError
+	if !errors.As(err, &refusal) {
+		return fmt.Errorf("ssh: open a channel to %s: %w", host, err)
+	}
+	switch refusal.Code {
 	case string(proto.ProbeRejected), string(proto.ProbeUnreachable):
 		// A credential the server refused, or a host that did not answer.
 		// Neither is a typed error here — the coordinator's own dial path

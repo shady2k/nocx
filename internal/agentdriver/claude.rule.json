@@ -284,6 +284,7 @@
       "up": true,
       "maxRows": 16,
       "fromCol": "cursor",
+      "states": ["permission_choice", "modal_choice"],
       "pattern": "^(?:(?:(?P<selected>❯)| ) (?:\\d+\\.\\s*)?(?P<option>\\S.*)|(?P<question>\\S.*))$"
     },
     {
@@ -291,6 +292,7 @@
       "anchor": "cursor",
       "maxRows": 8,
       "fromCol": "cursor",
+      "states": ["permission_choice", "modal_choice"],
       "pattern": "^(?:(?:(?P<selected>❯)| ) (?:\\d+\\.\\s*)?(?P<option>\\S.*)|(?P<question>\\S.*))$"
     }
   ],

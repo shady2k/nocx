@@ -122,6 +122,19 @@ type AnchorReading struct {
 	// screen. Row is meaningful only when it is true.
 	Bound bool
 	Row   int
+	// FromCursor is true for a "cursor" anchor itself and for one computed
+	// (through From, transitively) from a cursor anchor — "belowCursor" in
+	// claude.rule.json, for instance. It exists so a reader (and
+	// TestExplainMarksAnUnboundAnchorAbsent) can tell a cursor-rooted
+	// binding apart from a chrome one: a cursor anchor binds at
+	// Frame.CursorY on every real frame, by design (AnchorSpec.Kind's own
+	// doc comment), so it is never "absent" the way a searchUp or offset
+	// anchor rooted in screen chrome can be. Reporting it as Bound is the
+	// true answer, not a defect to hide — the cursor is a property of the
+	// terminal, not chrome this rule detected, and this field is what lets
+	// a caller ask "is this really chrome" without the explanation lying
+	// about whether the row bound.
+	FromCursor bool
 }
 
 // BranchReading is one branch's part in the walk.
@@ -232,15 +245,21 @@ func (d documentDriver) Explain(f paneview.Frame) Explanation {
 	ex.State = d.decide(f, anchors, tr)
 	ex.Branches = tr.branches
 	ex.Matched = tr.matched
-	ex.Extractors = d.readExtractors(f, anchors)
+	ex.Extractors = d.readExtractors(f, anchors, ex.State)
 	return ex
 }
 
 func (d documentDriver) readAnchors(anchors bound) []AnchorReading {
 	out := make([]AnchorReading, 0, len(d.doc.Anchors))
+	fromCursor := make(map[string]bool, len(d.doc.Anchors))
 	for _, a := range d.doc.Anchors {
+		derived := a.Kind == "cursor" || (a.From != "" && fromCursor[a.From])
+		fromCursor[a.Name] = derived
 		row, ok := anchors[a.Name]
-		out = append(out, AnchorReading{Name: a.Name, Kind: a.Kind, From: a.From, Bound: ok, Row: row})
+		out = append(out, AnchorReading{
+			Name: a.Name, Kind: a.Kind, From: a.From, Bound: ok, Row: row,
+			FromCursor: derived,
+		})
 	}
 	return out
 }
@@ -409,15 +428,24 @@ func predRegion(f paneview.Frame, anchors bound, p Pred) *ExplainRowSpan {
 // readExtractors reports each extractor twice over: the span it was permitted
 // to read, and what it read there.
 //
-// The yield comes from extract(), the same call Observe makes, so the view
+// The yield comes from extract(), the same call Observe makes (with the same
+// decided state, so a caller cannot be shown a menu extractor's rows on a
+// screen Observe itself would have refused to attribute them to), so the view
 // cannot show a person a reading the product did not take — the identity that
 // makes the branch walk trustworthy applied to the other half of the grammar.
-func (d documentDriver) readExtractors(f paneview.Frame, anchors bound) []ExtractorReading {
+//
+// Region is reported for every extractor whose anchor bound, even one whose
+// States excludes the decided state: the region is the engine's answer to
+// "where was this extractor PERMITTED to read", which does not depend on
+// whether this frame's state let it act on that permission, and hiding it
+// would leave a person repairing a states-gated extractor with no span to
+// compare a lack of Rows against.
+func (d documentDriver) readExtractors(f paneview.Frame, anchors bound, state State) []ExtractorReading {
 	if len(d.extractors) == 0 {
 		return nil
 	}
 	yield := make(map[string][]map[string]string, len(d.extractors))
-	for _, e := range d.extract(f, anchors) {
+	for _, e := range d.extract(f, anchors, state) {
 		yield[e.Name] = e.Rows
 	}
 	out := make([]ExtractorReading, 0, len(d.extractors))

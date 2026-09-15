@@ -211,7 +211,6 @@ test('the probes this spec stands on measure what they claim', async ({ page }) 
 })
 
 test('a successful command says nothing about its outcome', async ({ page }) => {
-  test.fail() // nocx-9bpeq.6 turns this green; that commit deletes this line.
   await twoBlocks(page)
   const header = page.locator(SETTLED, { hasText: OK }).locator('.cmd-header')
   await expect(header.locator('[data-tone="danger"], [data-tone="dim"]')).toHaveCount(0)
@@ -224,7 +223,6 @@ test('a successful command says nothing about its outcome', async ({ page }) => 
 })
 
 test('a failed command is marked, and its status is legible in every theme', async ({ page }) => {
-  test.fail() // nocx-9bpeq.3 (--color-danger-surface) and nocx-9bpeq.6 (the row); the later of the two deletes this line.
   test.setTimeout(120_000)
   await twoBlocks(page)
   const row = page.locator(SETTLED, { hasText: FAIL })
@@ -242,7 +240,6 @@ test('a failed command is marked, and its status is legible in every theme', asy
 })
 
 test('no emoji and no glyph stands in for an icon on the terminal screen', async ({ page }) => {
-  test.fail() // nocx-9bpeq.5, .6 and .7 each remove some; the last of them deletes this line.
   await twoBlocks(page)
   const offenders = await page.evaluate(
     ([headers, chrome]) => {
@@ -268,7 +265,6 @@ test('the composer shows no clock', async ({ page }) => {
 })
 
 test('every control in a block header and the composer is a kit component', async ({ page }) => {
-  test.fail() // nocx-9bpeq.4–.7; the last of them deletes this line.
   await twoBlocks(page)
   const identities = kitIdentities()
   const controls = await page.evaluate(

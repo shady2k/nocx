@@ -11,7 +11,7 @@
 // Identity `ui-prompt-context`; variance on data-tone and a part's
 // data-emphasis. A surface places it and never repaints it (ui/README).
 
-import { GitBranchIcon } from './icons'
+import { GitBranchIcon, iconElement } from './icons'
 
 export interface PromptContextFacts {
   /** Where the command ran or will run — undefined/empty for this machine.
@@ -60,7 +60,7 @@ function fill(el: HTMLSpanElement, facts: PromptContextFacts, opts: PromptContex
   children.push(part('path', facts.path, false))
   if (facts.branch) {
     children.push(part('on', 'on', false))
-    children.push(GitBranchIcon({}) as Element)
+    children.push(iconElement(GitBranchIcon))
     children.push(part('branch', facts.branch, false))
   }
   el.replaceChildren(...children)

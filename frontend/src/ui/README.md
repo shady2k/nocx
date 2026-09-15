@@ -412,6 +412,19 @@ A glyph whose SHAPE does not say what it MEANS gets a row here, so the next
 person choosing one does not have to guess from the file name — and so a
 meaning already spoken for is not spoken for twice.
 
+**`iconElement(Icon)` (`icon-element.ts`) is how imperative code (ADR-0012)
+turns an icon Component into a detached element — never `Icon({}) as
+Element`.** An icon called bare returns the wrong thing once that SAME icon
+has also been rendered through Solid's own pipeline anywhere in the same
+module's lifetime (a menu item's `icon: SomeIcon`, e.g.): `solid-refresh`'s
+dev-mode HMR proxy (active under vitest's `development` resolve condition
+and in the dev-web stand) marks the underlying function permanently the
+first time `createComponent` touches it, and a later bare call then returns
+its memo accessor — a function — instead of the rendered element
+(nocx-9bpeq.12 round 3; the mechanism is in `icon-element.ts`'s header).
+`iconElement` resolves that accessor if one comes back, and throws rather
+than hand back anything that is not a real `Element`.
+
 | Icon                   | Lucide             | What it means, and where                                                                                                                                                                                                                                    |
 | ---------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **ArrowRightLeftIcon** | `arrow-right-left` | An exchange: a request going out and a response coming back. The API testing surface's activity-bar entry (nocx-zccer). Deliberately **not** `ArrowRightIcon`, which means "go there" everywhere else in the product and made the entry read as navigation. |

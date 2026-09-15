@@ -29,7 +29,7 @@
 // see the colour still has to be able to tell the two apart (WCAG 1.4.1),
 // and telling them apart is the entire job.
 import type { BadgeTone } from './badge'
-import { AlertTriangleIcon, LockIcon } from './icons'
+import { AlertTriangleIcon, LockIcon, iconElement } from './icons'
 
 export type SecretChipVariant = 'resolved' | 'unresolved' | 'damaged'
 
@@ -58,9 +58,9 @@ export function createSecretChipDamaged(name: string, damage: string): HTMLEleme
  *  warning for the one state where the bytes are NOT what the name says, so
  *  the mark says it too rather than leaving it to the colour (WCAG 1.4.1). */
 const GLYPH: Record<SecretChipVariant, { name: 'lock' | 'warning'; icon: () => Element }> = {
-  resolved: { name: 'lock', icon: () => LockIcon({}) as Element },
-  unresolved: { name: 'lock', icon: () => LockIcon({}) as Element },
-  damaged: { name: 'warning', icon: () => AlertTriangleIcon({}) as Element },
+  resolved: { name: 'lock', icon: () => iconElement(LockIcon) },
+  unresolved: { name: 'lock', icon: () => iconElement(LockIcon) },
+  damaged: { name: 'warning', icon: () => iconElement(AlertTriangleIcon) },
 }
 
 /** The badge tone per variant. Three distinct tones, because the three

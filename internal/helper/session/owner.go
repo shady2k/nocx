@@ -387,6 +387,34 @@ func (o *sessionOwner) run() {
 			close(o.writeReq)
 			return
 		}
+
+		// Drain everything already sitting on o.incoming BEFORE looking at
+		// any other event, every iteration — in particular before o.writeRes,
+		// which a select giving both cases equal odds would otherwise let
+		// win the race on nothing but luck. A bump sent to o.incoming ahead
+		// of a write's completion is "already queued" the instant it is
+		// sent, by spec §7.2's own words ("ahead of everything already
+		// queued"), but Go's select carries no memory of WHICH channel's
+		// send happened first in wall-clock time between two DIFFERENT
+		// channels — only FIFO order within the SAME one. Without this,
+		// applyAccessBump's sweep (access.go) can run one iteration too
+		// late: a completeWrite that frees the writer in the same iteration
+		// as a not-yet-looked-at bump lets advance() dispatch an item the
+		// bump would have refused, handing it to the writer before the
+		// bump is ever read off the channel — the intent has then left
+		// o.pending for o.inFlight, and no sweep reaches it there. Draining
+		// o.incoming first, unconditionally, closes that gap: every item
+		// already sent is dispatched (and any bump's sweep already run)
+		// before this iteration ever asks whether the writer is free.
+		for drained := false; !drained; {
+			select {
+			case it := <-o.incoming:
+				o.dispatchIncoming(it)
+			default:
+				drained = true
+			}
+		}
+
 		select {
 		case <-closingSignal:
 			closingSignal = nil
@@ -394,24 +422,7 @@ func (o *sessionOwner) run() {
 				o.beginClosing()
 			}
 		case it := <-o.incoming:
-			switch {
-			case it.kind == itemAccessBump:
-				// Ahead of everything already queued, whether or not the
-				// owner is closing (spec §7.2: a bump always applies, and
-				// carries no refusal of its own) — see access.go's own doc
-				// for why this cannot wait for its turn in o.pending.
-				o.applyAccessBump(it)
-			case o.closing:
-				o.resolve(it, ownerResult{State: sessionruntime.IntentStateCancelled, Err: errOwnerClosing})
-			case it.kind == itemIntent && it.intent.Token.ID != (TokenID{}) && o.tokenGate(it, it.intent):
-				// tokenGate (tokens.go) resolved it directly: a replay of an
-				// already-recorded or in-flight token, or a refusal decided
-				// before this intent is ever admitted (forged, expired,
-				// token_spent, access_revoked, commit_deadline). Nothing
-				// left to queue.
-			default:
-				o.pending = append(o.pending, it)
-			}
+			o.dispatchIncoming(it)
 		case <-o.readableCh:
 			o.drainLocal()
 		case ev := <-readEvents:
@@ -422,6 +433,32 @@ func (o *sessionOwner) run() {
 			o.performDetach()
 		}
 		o.advance()
+	}
+}
+
+// dispatchIncoming is what run() does with one item off o.incoming, whether
+// reached through the priority drain above or the main select's own
+// o.incoming case: an access-bump is applied at once (access.go), a closing
+// owner cancels anything further outright, a token-bearing intent may be
+// resolved directly by tokenGate (tokens.go) without ever being queued, and
+// everything else joins o.pending for advance() to reach in its turn.
+func (o *sessionOwner) dispatchIncoming(it ownerItem) {
+	switch {
+	case it.kind == itemAccessBump:
+		// Ahead of everything already queued, whether or not the owner is
+		// closing (spec §7.2: a bump always applies, and carries no refusal
+		// of its own) — see access.go's own doc for why this cannot wait
+		// for its turn in o.pending.
+		o.applyAccessBump(it)
+	case o.closing:
+		o.resolve(it, ownerResult{State: sessionruntime.IntentStateCancelled, Err: errOwnerClosing})
+	case it.kind == itemIntent && it.intent.Token.ID != (TokenID{}) && o.tokenGate(it, it.intent):
+		// tokenGate (tokens.go) resolved it directly: a replay of an
+		// already-recorded or in-flight token, or a refusal decided before
+		// this intent is ever admitted (forged, expired, token_spent,
+		// access_revoked, commit_deadline). Nothing left to queue.
+	default:
+		o.pending = append(o.pending, it)
 	}
 }
 
@@ -632,14 +669,29 @@ func (o *sessionOwner) finishRead(err error) {
 	o.cancelReadAndWake()
 }
 
-// advance is where an idle writer picks up the next item, if there is one.
+// advance is where an idle writer picks up the next item, if there is one —
+// and, when the head resolves WITHOUT ever engaging the writer, the one
+// after it, in a loop rather than a single step. A resize (commitResize)
+// resolves synchronously and never touches o.writeReq; so does an intent
+// that encodes to no payload, or one commitIntent refuses outright before
+// Admit. Any of those leaves o.writerBusy exactly as it found it — false —
+// so a single dequeue-and-return here left whatever was queued BEHIND it
+// stuck until some unrelated event (a write completing, a new incoming
+// item) next drove run()'s own select, which a quiet session may never
+// produce again: TestResizeRacingARealTokenCommitIsIncomparable
+// (owner_adversarial_test.go, nocx-6q1uh.18) hung its full 20s watchdog on
+// exactly this — a token-bearing intent queued right behind a resize that
+// had already resolved, with nothing left to wake run() a second time.
+// Looping while the writer stays free is what commitIntent's admission
+// point already promises ("hands it the next item only after the previous
+// completed") for the write case; this is that same promise for the
+// no-write ones.
 func (o *sessionOwner) advance() {
-	if o.writerBusy || len(o.pending) == 0 {
-		return
+	for !o.writerBusy && len(o.pending) > 0 {
+		it := o.pending[0]
+		o.pending = o.pending[1:]
+		o.processHead(it)
 	}
-	it := o.pending[0]
-	o.pending = o.pending[1:]
-	o.processHead(it)
 }
 
 // processHead is the commit point (spec §5.3): an opportunistic extra drain

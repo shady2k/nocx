@@ -346,6 +346,20 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (OpenedSession,
 		return OpenedSession{}, err
 	}
 
+	// THE SAME STATEMENT session.Reg.Open's local-PTY path has always made on
+	// success, restored for the branch that bypasses it. A helper-hosted open
+	// — local or remote — never reaches Reg.Open (OpenHosted answers it
+	// before svc.Open is ever asked, per the kind check above), so before
+	// this line no ssh pane's open was observable in this process's own log
+	// at all: an operator, or a test, reading for "a session opened" saw
+	// nothing for the majority of sessions this coordinator serves. Logged
+	// here rather than inside recordHostedBinding so it fires whether or not
+	// a ledger is wired to bind against, matching Reg.Open's own
+	// unconditional line.
+	if hosted != nil {
+		o.log.Info("session opened", "id", string(sess.ID()), "kind", hostedKindName(cfg.Kind), "profile_id", cfg.ProfileID)
+	}
+
 	if hosted != nil && hosted.LifecycleLane != "" && o.laneRegistrar != nil {
 		o.laneRegistrar.RegisterLifecycleLane(hosted.LifecycleLane, sess.ID())
 	}
@@ -586,6 +600,23 @@ func (o *sessionOpener) claimSpawn(ctx context.Context, cfg session.Config, work
 		return "", fmt.Errorf("recording the pane's claim on this session: %w", err)
 	}
 	return key, nil
+}
+
+// hostedKindName spells cfg.Kind the way session.Reg.Open's own "session
+// opened" line always has (session.go's unexported kindName). Restated here
+// rather than exported from internal/session because the two log lines are
+// each a whole sentence their own package owns; what must not drift is the
+// two WORDS ("local", "ssh"), and a source-walking test pins that rather than
+// a shared function pretending the sentences are one.
+func hostedKindName(k session.Kind) string {
+	switch k {
+	case session.KindLocal:
+		return "local"
+	case session.KindRemote:
+		return "ssh"
+	default:
+		return "unknown"
+	}
 }
 
 // releaseClaim drops a claim that is over, either way. It is best-effort by

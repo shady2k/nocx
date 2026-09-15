@@ -441,15 +441,15 @@ describe('CommandEditor', () => {
       ed.show()
       const btn = submitButton(container)
       expect(btn.disabled).toBe(true)
-      expect(btn.dataset.variant).toBeUndefined()
+      expect(btn.dataset.appearance).toBeUndefined()
 
       ed.insertText('echo hi')
       expect(btn.disabled).toBe(false)
-      expect(btn.dataset.variant).toBe('primary')
+      expect(btn.dataset.appearance).toBe('primary')
 
       ed.clear()
       expect(btn.disabled).toBe(true)
-      expect(btn.dataset.variant).toBeUndefined()
+      expect(btn.dataset.appearance).toBeUndefined()
     })
 
     it('a whitespace-only draft leaves it disabled — matching the whitespace-only Enter rule', () => {

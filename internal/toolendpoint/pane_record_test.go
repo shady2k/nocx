@@ -16,6 +16,7 @@ package toolendpoint
 
 import (
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
@@ -296,13 +297,23 @@ func TestAnEndpointWithNoLaneRefusesToReadARecord(t *testing.T) {
 func TestTheLaneIsAskedAboutEveryConnection(t *testing.T) {
 	auth := &testAuthorizer{}
 	dispatch := &testDispatcher{out: `{"held":[]}`}
-	asked := 0
-	allow := false
+	// asked and allow are read inside cfg.Lane, which (*Endpoint).accept
+	// calls synchronously in its own persistent accept-loop goroutine
+	// (endpoint.go:399) — a goroutine this test never joins with a Go
+	// synchronization primitive. Reaching sendRequest's response does not
+	// establish a happens-before for the race detector: that ordering is
+	// enforced by the kernel socket, which Go's memory model does not
+	// credit as synchronization the way it does a mutex, atomic or channel.
+	// Plain int/bool here raced against the accept goroutine's read at
+	// L305 with the write below at L313 (nocx-6q1uh.18) — atomics fix the
+	// visibility without changing what the test asserts.
+	var asked atomic.Int64
+	var allow atomic.Bool
 	cfg := endpointConfig(t, auth, dispatch)
 	cfg.Lane = func(peer Peer) bool {
-		asked++
+		asked.Add(1)
 		// A lane that is not the peer it is asked about is not the lane.
-		return allow && peer.PID == 1234
+		return allow.Load() && peer.PID == 1234
 	}
 	ep := startEndpoint(t, cfg)
 
@@ -310,15 +321,15 @@ func TestTheLaneIsAskedAboutEveryConnection(t *testing.T) {
 	if response := sendRequest(t, ep, "", testPaneRequestA); response.Error != nil {
 		t.Fatalf("a connection with no lane was refused: %+v", response.Error)
 	}
-	allow = true
+	allow.Store(true)
 	if response := sendRequest(t, ep, testPaneSession, testPaneRequestA); response.Error != nil {
 		t.Fatalf("the lane's own connection was refused: %+v", response.Error)
 	}
 	if got := auth.seenPeer(t).Pane; got != testPaneSession {
 		t.Fatalf("after the lane was turned on, the authorizer saw pane %q", got)
 	}
-	if asked < 2 {
-		t.Fatalf("the lane predicate was asked %d time(s) for two connections", asked)
+	if got := asked.Load(); got < 2 {
+		t.Fatalf("the lane predicate was asked %d time(s) for two connections", got)
 	}
 }
 

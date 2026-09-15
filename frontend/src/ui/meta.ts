@@ -30,6 +30,25 @@ export interface MetaOptions {
 
 const SEPARATOR = ' · '
 
+/** The separator between two Metas that stand as SEPARATE elements — a
+ *  settled block's status word and its duration (spec 2026-09-15 §4), the
+ *  same shape a running block's word and duration share. Identical to the
+ *  one `fill` places between two parts of ONE Meta, so a surface reaching
+ *  for "the muted dot between two facts" never types a raw `·` of its own.
+ *
+ *  `size: 'sm'` is for exactly this standalone case: nested inside a Meta,
+ *  the separator already inherits that Meta's face through the cascade
+ *  (the reason `fill` below never sets it); standing alone between two
+ *  Metas, there is no such ancestor to inherit from. */
+export function createMetaSeparator(opts: { size?: 'sm' } = {}): HTMLSpanElement {
+  const sep = document.createElement('span')
+  sep.className = 'ui-meta__sep'
+  sep.setAttribute('aria-hidden', 'true')
+  sep.textContent = SEPARATOR
+  if (opts.size !== undefined) sep.dataset.size = opts.size
+  return sep
+}
+
 function fill(el: HTMLSpanElement, parts: readonly MetaPart[], opts: MetaOptions): void {
   el.dataset.tone = opts.tone ?? 'muted'
   if (opts.column === undefined) el.removeAttribute('data-column')
@@ -41,13 +60,7 @@ function fill(el: HTMLSpanElement, parts: readonly MetaPart[], opts: MetaOptions
 
   const children: HTMLSpanElement[] = []
   parts.forEach((part, i) => {
-    if (i > 0) {
-      const sep = document.createElement('span')
-      sep.className = 'ui-meta__sep'
-      sep.setAttribute('aria-hidden', 'true')
-      sep.textContent = SEPARATOR
-      children.push(sep)
-    }
+    if (i > 0) children.push(createMetaSeparator())
     const span = document.createElement('span')
     span.className = 'ui-meta__part'
     if (typeof part === 'string') {

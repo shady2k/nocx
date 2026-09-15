@@ -4,7 +4,13 @@
 // hidden the xterm has focus and keys flow to the PTY as usual.
 //
 // The input surface is a CodeMirror 6 EditorView mounted inside the
-// `.nocx-editor` card (ADR-0010 §1).
+// `.nocx-editor` card (ADR-0010 §1), which since the mockup pass
+// (.internal/specs/2026-09-15-terminal-screen-mockup-decision.md §4) wraps
+// the kit ComposerFrame: an outer inset card plus an inner bordered field
+// shared by the target switch, CM6 and the submit control (ui/composer-
+// frame.ts). `.nocx-editor` itself stays the thin placement wrapper it
+// already was (the overlay/summon-stack selectors and `ed.root` all key off
+// it); the frame owns every card/field appearance declaration.
 //
 // Key handling deliberately stays a native capture-phase listener on `root`,
 // NOT a CM6 keymap: the listener runs before CM6's own contentDOM handlers
@@ -27,6 +33,9 @@ import type { SubmitPlan } from './submit'
 import type { ModelChipState } from './agent-readiness'
 import { cwdLabel } from './cwd-label'
 import { createButton } from './ui/button-element'
+import { createIconButton } from './ui/icon-button-element'
+import { ArrowUpIcon, iconElement } from './ui/icons'
+import { createComposerFrame, type ComposerFrameHandle } from './ui/composer-frame'
 import {
   createPromptContext,
   updatePromptContext,
@@ -166,8 +175,20 @@ export interface EditorActions {
 
 export class CommandEditor {
   readonly root: HTMLElement
+  /** The kit card + field (ui/composer-frame.ts, spec 2026-09-15 §4): the
+   *  outer inset card and the one bordered box the target switch, CM6 and
+   *  the submit control share. `root` stays the thin `.nocx-editor`
+   *  placement wrapper around it — every external reference to `ed.root`
+   *  (terminal-content.ts, the e2e suite, `data-placement`) is unaffected. */
+  private frame: ComposerFrameHandle
   private chrome: HTMLElement
   private view: EditorView
+  /** The submit control (spec §4): an IconButton calling `submit()` and
+   *  nothing else — it never writes to the session directly. Enabled only
+   *  on a non-empty draft; the accessible name follows the active target
+   *  (`Run command` / `Send question`), refreshed from setTargetExtensions,
+   *  the same seam the host already calls on every switch. */
+  private submitButton: HTMLButtonElement
 
   /** The permanent grant chip in the chrome row. */
   private grantChip: HTMLButtonElement
@@ -299,6 +320,7 @@ export class CommandEditor {
   private readonly onViewUpdate = EditorView.updateListener.of((update) => {
     if (!update.docChanged) return
     const text = update.state.doc.toString()
+    this.updateSubmitEnabled(text)
     if (!this._programmatic) {
       try {
         this.actions.onInputChange?.(text)
@@ -336,7 +358,11 @@ export class CommandEditor {
     // ── Editor chrome: the meta row (spec 2026-09-14 §5.2) ──────────────
     // The same anatomy a block header has: where on the left, and here the
     // controls for the target Enter reaches on the right. Placement only —
-    // every element in it is the kit's (styles/surfaces/composer.css).
+    // every element in it is the kit's (styles/surfaces/composer.css). Built
+    // here, not inside ui/composer-frame.ts (below): it is unchanged surface
+    // content and the kit-identity scanner (lint-fixtures/scan-kit-
+    // identities.mjs) would otherwise read its existing appearance rules as
+    // a surface repainting kit markup — see composer-frame.ts's file header.
     this.chrome = document.createElement('div')
     this.chrome.className = 'nocx-editor-chrome'
 
@@ -404,7 +430,16 @@ export class CommandEditor {
 
     this.controls.append(this.recoveryChip, this.modelEndpointChip, this.modelChip, this.grantChip)
     this.chrome.append(this.context, this.controls)
-    this.root.appendChild(this.chrome)
+
+    // The kit card + field (ui/composer-frame.ts, spec §4): the outer inset
+    // card and the bordered box the target switch, CM6 and the submit
+    // control share. `this.root` stays the thin placement wrapper; the
+    // frame owns every appearance declaration for what is inside it. The
+    // already-built chrome row is placed inside the card, above the field
+    // (composer-frame.ts's file header says why it is a parameter here
+    // rather than something the frame builds itself).
+    this.frame = createComposerFrame(this.chrome)
+    this.root.appendChild(this.frame.root)
 
     // Focus dims the context (spec §5.3). focusin/focusout on the root rather
     // than CM6's focus tracking: a click on a control keeps the composer
@@ -489,22 +524,6 @@ export class CommandEditor {
             },
           }),
           CommandEditor.editorTheme,
-          // The visible input field's styling hook (spec §6). NOT
-          // `view.dom.classList.add(...)` after construction: CM6 owns
-          // `.cm-editor`'s class attribute and recomputes it on every
-          // update whose facet-derived string changed — in particular on
-          // the FIRST focus, which flips in `cm-focused` — via a blind
-          // `setAttribute('class', …)` (@codemirror/view's `updateAttrs`),
-          // wiping any class added by hand the moment the editor is
-          // focused. Measured: the border (which
-          // depends entirely on this class) was present unfocused and gone
-          // the instant the field gained focus in the real app, while a
-          // unit test that never dispatched a transaction after mount
-          // never observed the wipe. `editorAttributes` is a facet CM6
-          // itself reads on every recompute and its own `combineAttrs`
-          // CONCATENATES the `class` key (never replaces it), so the class
-          // survives every future update, focus included.
-          EditorView.editorAttributes.of({ class: 'nocx-editor-field' }),
           this.onViewUpdate,
           // The active target's layer sits where the shell's used to: the
           // caller's stable extensions (the target indicator) follow it,
@@ -513,16 +532,37 @@ export class CommandEditor {
           ...extensions,
         ],
       }),
-      parent: this.root,
+      // CM6 mounts into the FRAME's editor slot, not `this.root` directly
+      // (spec §4): the field's own border now lives on
+      // `.ui-composer-frame__field`, an ancestor of `.cm-editor` that CM6
+      // never touches, rather than on a class installed onto `.cm-editor`
+      // itself via `editorAttributes` — which used to be needed exactly
+      // because CM6 owns `.cm-editor`'s class attribute and rewrites it
+      // (via `combineAttrs`) on every update whose facet-derived string
+      // changed, in particular the FIRST focus (measured: a class added by
+      // hand there was present unfocused and gone the instant the field
+      // focused). Moving the bordered element one level up removes the
+      // need to fight that rewrite at all — see composer-frame.ts's file
+      // header for the fuller account, kept there because the border no
+      // longer lives in this file.
+      parent: this.frame.editor,
     })
     this.view.contentDOM.classList.add('nocx-editor-input')
     this.view.contentDOM.spellcheck = false
     this.view.contentDOM.setAttribute('autocapitalize', 'off')
-    // `.nocx-editor-field` is installed above as an `editorAttributes`
-    // extension, not here: the ModeIndicator lives in this view's own
-    // gutter, so `.cm-editor` ALREADY contains both it and the content —
-    // there is no second element to introduce, only a stable styling hook
-    // onto CM6's own root that survives CM6's own attribute updates.
+
+    // The submit control (spec §4): an IconButton calling `submit()` only —
+    // it never writes to the session directly, so the existing secret
+    // resolution, submission guards, multiline handling and target dispatch
+    // in submit()/commit() below are the ONLY path a click can reach.
+    this.submitButton = createIconButton({
+      ariaLabel: 'Run command',
+      icon: () => iconElement(ArrowUpIcon),
+      size: 'sm',
+      onClick: () => this.submit(),
+    })
+    this.frame.submit.appendChild(this.submitButton)
+    this.updateSubmitEnabled('')
 
     // Key handling: capture on the card, so our decisions run before CM6's
     // own contentDOM handlers no matter what keymap the caller installs
@@ -531,12 +571,39 @@ export class CommandEditor {
     this.root.addEventListener('keydown', this.onKeydown, true)
   }
 
+  /** Enabled only on a non-empty draft — a disabled empty pointer button
+   *  changes nothing about the existing keyboard behaviour for an empty
+   *  Enter (submit() below still runs its own empty-doc branch regardless
+   *  of this button's state; `disabled` governs pointer activation only).
+   *  The `primary` appearance (spec §4: filled blue, vs. the subdued
+   *  default arrow) is applied only while enabled, so an empty field never
+   *  wears an affordance it would refuse. */
+  private updateSubmitEnabled(text: string): void {
+    const hasDraft = text.trim() !== ''
+    this.submitButton.disabled = !hasDraft
+    if (hasDraft) this.submitButton.dataset.variant = 'primary'
+    else delete this.submitButton.dataset.variant
+  }
+
+  /** The submit control's accessible name follows the active target (spec
+   *  §4: "Run command" / "Send question") — read from the SAME
+   *  `handoffToShell` authority `commit()` already reads, at the SAME seam
+   *  the host already calls on every switch (setTargetExtensions below),
+   *  so no second "which target is active" channel is introduced. */
+  private updateSubmitLabel(): void {
+    const toShell = this.actions.handoffToShell?.() ?? true
+    const label = toShell ? 'Run command' : 'Send question'
+    this.submitButton.setAttribute('aria-label', label)
+    this.submitButton.title = label
+  }
+
   /** Install the extensions of the target Enter currently goes to. Called
    *  by the host on wire-up and on every switch — the editor never reads
    *  the registry itself (it stays passive) and never keeps a mode of its
    *  own: what is installed IS the mode. */
   setTargetExtensions(extensions: Extension[]): void {
     this.view.dispatch({ effects: this.targetCompartment.reconfigure(extensions) })
+    this.updateSubmitLabel()
   }
 
   mount(container: HTMLElement): void {
@@ -627,12 +694,17 @@ export class CommandEditor {
   private readonly onFocusIn = (): void => {
     this._focused = true
     this.renderContext()
+    // The field's border projection (spec §4) — a typed attribute driven
+    // from THIS existing notification, never from CM6's own `cm-focused`
+    // class (composer-frame.ts's file header says why).
+    this.frame.setFocused(true)
   }
 
   private readonly onFocusOut = (e: FocusEvent): void => {
     if (e.relatedTarget instanceof Node && this.root.contains(e.relatedTarget)) return
     this._focused = false
     this.renderContext()
+    this.frame.setFocused(false)
   }
 
   /** Update the directory the pending command will run in. */

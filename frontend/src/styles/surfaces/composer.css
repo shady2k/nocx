@@ -4,20 +4,17 @@
    must never repaint them, and surface-paints-kit only watches files outside the
    kit layer. */
 
+/* THE THIN PLACEMENT WRAPPER, not the card (spec 2026-09-15 §4). The old
+   pane-wide composer seam — a full-width top border, background and
+   padding painted directly here — is gone with the design it drew: an
+   inset CARD now owns the ground, the border and the padding
+   (ui/composer-frame.ts, styles/components/composer-frame.css), leaving
+   this element only the concerns a surface may still have — its flex slot
+   in the pane column, and the positioning context the overlay placement
+   below needs. */
 .nocx-editor {
   position: relative;
   flex: none;
-  /* The terminal screen's one ground (spec §7), not the canvas. */
-  background: var(--terminal-background);
-  /* The same seam as between two blocks (spec §3.4). No accent bar: it followed
-     neither focus nor mode, so it said nothing (spec §1). */
-  border-top: 1px solid var(--color-divider);
-  /* The pane no longer insets its children (nocx-9bpeq.8): the composer is a
-     row and carries the ledger's gutter itself. Tokens only (spec
-     2026-09-15 §6) — the old rule was two literal pixel values either side
-     of a token, which is how a surface starts drifting off the scale one
-     rule at a time. */
-  padding: var(--space-3) var(--pane-inline-padding);
 }
 
 .nocx-summon-stack > .nocx-editor[data-placement='overlay'] {
@@ -148,66 +145,21 @@
   box-sizing: border-box;
 }
 
-/* The visible input field (spec §6, amending base spec §5.1's "no border"):
-   the CM6 editor and the ModeIndicator gutter sit inside one box, because
-   the indicator IS a gutter of this very element — there is nothing else to
-   wrap. `.nocx-editor-field` (editor.ts) is a styling hook onto CM6's own
-   `.cm-editor`, kept separate from the rule above so the two concerns (the
-   growth cap, the visible box) stay independently readable. No raised
-   surface in a row (base spec §7) — the background is the terminal's own.
-
-   HEIGHT (round 18, mockup pass): the spec's own diagram drew a one-line
-   box with no floor under it, and the shipped field measured about 26px —
-   "a thin strip spanning the pane" in the owner's screenshot. The mockups
-   draw a taller field, so `--control-height-lg` (38px, the kit's own
-   tallest control) is the floor here rather than a new literal, and it
-   wins over the base spec's implied single-line height (spec §6 amended).
-
-   CENTRING IS `justify-content`, NOT `align-items` — CM6's own base theme
-   already puts `.cm-editor { display: flex !important; flex-direction:
-   column }` on this exact element (measured in
-   @codemirror/view/dist/index.js), so `flex-direction` can never be
-   anything but column here and `align-items` governs the CROSS axis, which
-   in a column is HORIZONTAL. Setting `align-items: center` (round 18's
-   first attempt) shrank the one child CM6 mounts (`.cm-scroller`) to its
-   content width and centred THAT — the mode switch stayed pinned to the
-   field's left edge while the draft, now the trailing end of a shrunk row,
-   landed near the right edge with the gap between them where the field's
-   spare width used to be. `justify-content: center` is the column's MAIN
-   axis, i.e. vertical, and leaves `align-items` at its default `stretch` so
-   `.cm-scroller` keeps the full width it always had — the switch, the
-   divider and the draft stay adjacent, just centred as one row inside the
-   taller box. A draft that grows past the cap below still sizes the box to
-   its content, flex or not.
-
-   INLINE PADDING (round 2, mockup pass): the switch used to touch the
-   field's left border directly — the CM6 gutter carries no padding of its
-   OWN before the first character (`.cm-gutterElement` below only pads its
-   trailing edge, before the divider), and nothing else stood between it and
-   this box's border. The draft's inset on the right was `.cm-content`'s own
-   padding (below), which is a gap AFTER the content, not a matching gap
-   BEFORE the switch — so the two edges read differently even though the
-   field wraps both. Padding here, on the FIELD itself rather than on the
-   kit's ModeIndicator (which owns its own control padding, or lack of it,
-   for every other place it appears — the gutter, not the badge, is what
-   should not touch a border it does not know it is inside), gives both
-   edges the same inset from tokens. */
-.nocx-editor .nocx-editor-field {
-  display: flex;
-  justify-content: center;
-  min-height: var(--control-height-lg);
-  padding-inline: var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--control-radius-md);
-  background: var(--terminal-background);
-}
-
-/* CM6 marks the focused editor with its own class — precise, and it needs
-   no second focus-tracking mechanism (spec §5.3: the caret and this border
-   are the only focus indicators). */
-.nocx-editor .nocx-editor-field.cm-focused {
-  border-color: var(--color-accent);
-}
+/* THE FIELD'S BORDER MOVED (spec 2026-09-15 §4): it used to be a styling
+   hook onto CM6's OWN `.cm-editor` (`.nocx-editor-field`, installed via
+   `EditorView.editorAttributes` because CM6 rewrites `.cm-editor`'s class
+   attribute on every focus change and a plain `classList.add` did not
+   survive it). The target switch now has its own leading grid column
+   BESIDE `.cm-editor` rather than a gutter inside it (ask-entry.ts), so the
+   box that needs one shared border is no longer `.cm-editor` at all — it is
+   `.ui-composer-frame__field`, an ancestor of both the switch and
+   `.cm-editor`, owned by the kit (styles/components/composer-frame.css).
+   This surface no longer needs an `.nocx-editor-field` hook, the
+   `justify-content` centring trick CM6's forced `display: flex !important;
+   flex-direction: column` on `.cm-editor` used to require, or a focus rule
+   here: `.ui-composer-frame__field[data-focused]` reads a typed attribute
+   CommandEditor projects from its own focusin/focusout listeners, never
+   from CM6's `cm-focused`. */
 
 .nocx-editor .cm-scroller {
   font-family: var(--font-family-mono);
@@ -232,17 +184,14 @@
      box: hiding the bar would leave a real overflow unreachable, whereas this
      states the contract the wrapping already enforces. */
   overflow-x: hidden;
-  /* This element is ALSO the flex item `.nocx-editor-field`'s new
-     `justify-content: center` (above) centres vertically: `align-items`
-     there is left at its default `stretch`, which is what keeps this row
-     the field's full width without a `flex-grow` of its own — a `flex: 1 1
-     auto` here would grow it along the column's MAIN axis instead (height),
-     filling the whole field and leaving nothing for `justify-content` to
-     centre (round 18's own first attempt at this, caught by looking rather
-     than by a passing border-only test). `min-width: 0` is the flex sibling
-     of `overflow-x: hidden` above; without it a flex item's default auto
-     minimum keeps it from shrinking to wrap, one more way the field could
-     grow sideways instead of down. */
+  /* The vertical centring within the field's row is now the outer grid's
+     job (`.ui-composer-frame__field { align-items: center }`,
+     composer-frame.css) rather than a flex trick on this element's own
+     ancestor — `.cm-editor` keeps CM6's forced `display: flex !important;
+     flex-direction: column` and this rule never has to negotiate with it.
+     `min-width: 0` is still needed on its own account: without it a flex
+     item's default auto minimum keeps this scroller from shrinking to
+     wrap, one more way the field could grow sideways instead of down. */
   min-width: 0;
 }
 
@@ -357,10 +306,13 @@
   display: none;
 }
 
-/* No hanging indent, and no measured token width: the token is a GUTTER
-   now (ask-entry.ts), so every line — a second document line, a wrapped
-   row — begins after the same reserved column by construction. The rules
-   that computed that alignment are gone with the widget that needed them. */
+/* No hanging indent, and no measured token width: the target switch is a
+   whole GRID COLUMN beside `.cm-editor` now (ask-entry.ts,
+   styles/components/composer-frame.css), so every line inside `.cm-editor`
+   — a second document line, a wrapped row — begins after the same column
+   boundary by construction, with nothing to reserve inside the document
+   itself. The rules that computed a hanging indent are gone with the
+   widget that needed them. */
 .nocx-editor .cm-line {
   padding: 0;
 }
@@ -368,28 +320,14 @@
 /* ── The ask entry gesture (nocx-4wtlh) ────────────────────────────────
    The target indicator — ADR-0004 §3's UI chip — is the prompt's sigil: it
    says where Enter goes and it is the person's one explicit switch (click,
-   or ⌘/Ctrl+Enter). It renders in a CM6 GUTTER, beside the content and
-   never inside it, so the textbox holds exactly what the person typed. The
-   reference chips a selection raises live in their own strip between the
-   chrome and the input: "if you ask, this comes with you". */
-
-/* The gutter the token lives in: a column beside the content, never inside
-   it. CM6's default gutter paints a panel and a divider — the chrome of a
-   line-number rail — and this one is a sigil in the prompt, so all of it is
-   cleared and only the trailing gap remains. The token itself is the kit's
-   ModeIndicator (ui/mode-indicator.ts, styles/components/mode-indicator.css)
-   — placed here, never repainted. */
-.nocx-editor .cm-gutters {
-  background: transparent;
-  border-right: none;
-  color: inherit;
-}
-
-.nocx-editor .nocx-editor-target-gutter .cm-gutterElement {
-  display: flex;
-  align-items: center;
-  padding: 0 6px 0 0;
-}
+   or ⌘/Ctrl+Enter). It used to render in a CM6 GUTTER, beside the content
+   and never inside it, so the textbox held exactly what the person typed.
+   Since the mockup pass (spec 2026-09-15 §4) it renders beside `.cm-editor`
+   entirely instead, in ComposerFrame's own leading grid column
+   (ask-entry.ts, styles/components/composer-frame.css) — a plain DOM
+   sibling, not a CM6 gutter, so there is no gutter CSS left to place here.
+   The reference chips a selection raises live in their own strip between
+   the chrome and the input: "if you ask, this comes with you". */
 
 /* ── The composition-time secret candidate mark (ADR-0021) ─────────────
 

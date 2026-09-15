@@ -489,6 +489,22 @@ export class CommandEditor {
             },
           }),
           CommandEditor.editorTheme,
+          // The visible input field's styling hook (spec §6). NOT
+          // `view.dom.classList.add(...)` after construction: CM6 owns
+          // `.cm-editor`'s class attribute and recomputes it on every
+          // update whose facet-derived string changed — in particular on
+          // the FIRST focus, which flips in `cm-focused` — via a blind
+          // `setAttribute('class', …)` (@codemirror/view's `updateAttrs`),
+          // wiping any class added by hand the moment the editor is
+          // focused. Measured: the border (which
+          // depends entirely on this class) was present unfocused and gone
+          // the instant the field gained focus in the real app, while a
+          // unit test that never dispatched a transaction after mount
+          // never observed the wipe. `editorAttributes` is a facet CM6
+          // itself reads on every recompute and its own `combineAttrs`
+          // CONCATENATES the `class` key (never replaces it), so the class
+          // survives every future update, focus included.
+          EditorView.editorAttributes.of({ class: 'nocx-editor-field' }),
           this.onViewUpdate,
           // The active target's layer sits where the shell's used to: the
           // caller's stable extensions (the target indicator) follow it,
@@ -502,12 +518,11 @@ export class CommandEditor {
     this.view.contentDOM.classList.add('nocx-editor-input')
     this.view.contentDOM.spellcheck = false
     this.view.contentDOM.setAttribute('autocapitalize', 'off')
-    // The visible input field (spec §6): the ModeIndicator lives in this
-    // view's own gutter, so `.cm-editor` ALREADY contains both it and the
-    // content — there is no second element to introduce. This class is
-    // only a stable styling hook onto that existing element, so
-    // composer.css never has to name a CodeMirror-owned class directly.
-    this.view.dom.classList.add('nocx-editor-field')
+    // `.nocx-editor-field` is installed above as an `editorAttributes`
+    // extension, not here: the ModeIndicator lives in this view's own
+    // gutter, so `.cm-editor` ALREADY contains both it and the content —
+    // there is no second element to introduce, only a stable styling hook
+    // onto CM6's own root that survives CM6's own attribute updates.
 
     // Key handling: capture on the card, so our decisions run before CM6's
     // own contentDOM handlers no matter what keymap the caller installs

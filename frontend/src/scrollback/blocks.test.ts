@@ -3591,6 +3591,70 @@ describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-
     expect(duration(el)?.textContent).toBe('0s')
     expect(el.dataset.outcome).toBeUndefined()
   })
+
+  // ── The group's DOM order: word, a muted separator, duration — never
+  // duration first (spec 2026-09-15 §4, nocx-9bpeq.12 round 5). Every test
+  // above checked the word's and the duration's OWN text and tone but never
+  // their order relative to each other, which is exactly how a block
+  // reading "1.2s Exit 1" shipped unnoticed.
+  const metaAndSepChildren = (right: HTMLElement): Element[] =>
+    [...right.children].filter(
+      (c) => c.classList.contains('ui-meta') || c.classList.contains('ui-meta__sep'),
+    )
+
+  it('a failed command reads Exit N, a separator, then the duration', () => {
+    const el = settledCommand(1200, 1)
+    const right = el.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')!
+    const kids = metaAndSepChildren(right)
+    expect(kids.map((c) => c.className)).toEqual(['ui-meta', 'ui-meta__sep', 'ui-meta'])
+    expect(kids[0].textContent).toBe('Exit 1')
+    expect((kids[0] as HTMLElement).dataset.tone).toBe('danger')
+    // Meta's own separator vocabulary — never a raw `·` typed into the
+    // surface — so it carries the same hidden-from-AT contract Meta's
+    // internal separator does.
+    expect(kids[1].getAttribute('aria-hidden')).toBe('true')
+    expect(kids[1].textContent?.trim()).toBe('·')
+    expect(kids[2].textContent).toBe('1.2s')
+    expect((kids[2] as HTMLElement).dataset.column).toBe('duration')
+  })
+
+  it('a cancelled turn reads its dim word, a separator, then the duration — the same shape a failure uses', () => {
+    const stopped = closedTurn(1500, 'cancelled')
+    const right = stopped.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')!
+    const kids = metaAndSepChildren(right)
+    expect(kids.map((c) => c.className)).toEqual(['ui-meta', 'ui-meta__sep', 'ui-meta'])
+    expect(kids[0].textContent).toBe('stopped')
+    expect((kids[0] as HTMLElement).dataset.tone).toBe('dim')
+    expect(kids[2].textContent).toBe('1.5s')
+  })
+
+  it('a successful command is silent: the duration stands alone, with no separator at all', () => {
+    const el = settledCommand(27, 0)
+    const right = el.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')!
+    expect(right.querySelector('.ui-meta__sep')).toBeNull()
+    const kids = metaAndSepChildren(right)
+    expect(kids).toHaveLength(1)
+    expect(kids[0].textContent).toBe('27ms')
+  })
+
+  it('a running block reads Running, a separator, then the elapsed time — the same shape a settled block uses', () => {
+    const el = createRunningBlock(
+      1,
+      'sleep 30',
+      '~',
+      '',
+      () => document.createElement('div'),
+      noopSelect,
+      freshStore(),
+    )
+    const right = el.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')!
+    const kids = metaAndSepChildren(right)
+    expect(kids.map((c) => c.className)).toEqual(['ui-meta', 'ui-meta__sep', 'ui-meta'])
+    expect(kids[0].textContent).toBe('Running')
+    expect((kids[0] as HTMLElement).dataset.tone).toBe('accent')
+    expect(kids[2].textContent).toBe('0s')
+    expect((kids[2] as HTMLElement).dataset.column).toBe('duration')
+  })
 })
 
 describe('the block grant menu action', () => {
@@ -4107,20 +4171,38 @@ describe('the running block header Stop control', () => {
     expect(btn?.classList.contains('ui-icon-button')).toBe(false)
   })
 
-  it('is absent when the actions do not consider this block active', () => {
+  it('is present even when isActive is false AT CONSTRUCTION — the real manager assigns runningBlock only after this call returns (round 4, nocx-9bpeq.12)', () => {
+    // terminal-content.ts's real `runningActions.isActive` reads
+    // `blockManager.runningBlock`, and `BlockManager.startBlock` assigns
+    // that only AFTER `createRunningBlock` returns (scrollback/blocks.ts).
+    // So the real app's isActive is UNCONDITIONALLY false for the very
+    // block being built, right up until construction finishes — an
+    // `isActive: () => true` fixture never exercises that, and a `sleep 30`
+    // in e2e showed the button never appearing because of exactly this: the
+    // button's presence must not be gated on isActive at construction.
     const container = document.createElement('div')
+    const stop = vi.fn()
+    let assigned = false
     const el = createRunningBlock(
       1,
-      'sleep 10',
+      'sleep 30',
       '~',
       '',
       () => container,
       noopSelect,
       freshStore(),
       'shell',
-      { stop: vi.fn(), isActive: () => false },
+      { stop, isActive: () => assigned },
     )
-    expect(el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-button')).toBeNull()
+    // The moment `startBlock` would assign `this._runningBlock = rec`.
+    assigned = true
+
+    const btn = el.querySelector<HTMLButtonElement>(
+      ':scope > .cmd-header .cmd-header-right > .ui-button',
+    )
+    expect(btn).not.toBeNull()
+    btn!.click()
+    expect(stop).toHaveBeenCalledTimes(1)
   })
 
   it('calls stop() only while the block is still active, and never selects the block', () => {
@@ -4157,6 +4239,26 @@ describe('the running block header Stop control', () => {
     btn.click()
     expect(stop).toHaveBeenCalledTimes(1)
     el.remove()
+  })
+
+  it('is removed once the block settles, whatever settles it (round 4, nocx-9bpeq.12)', () => {
+    const el = createRunningBlock(
+      1,
+      'sleep 30',
+      '~',
+      '',
+      () => document.createElement('div'),
+      noopSelect,
+      freshStore(),
+      'shell',
+      { stop: vi.fn(), isActive: () => true },
+    )
+    const right = el.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')!
+    expect(right.querySelector('.ui-button')).not.toBeNull()
+
+    settleBlockOutcome(el, 'command', 1200, { status: 'success', exitCode: 0 })
+
+    expect(right.querySelector('.ui-button')).toBeNull()
   })
 })
 

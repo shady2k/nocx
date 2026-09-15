@@ -2,7 +2,7 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { createMeta, updateMeta } from './meta'
+import { createMeta, createMetaSeparator, updateMeta } from './meta'
 
 const dirname =
   (import.meta as { dirname?: string }).dirname ?? resolve(new URL('.', import.meta.url).pathname)
@@ -100,6 +100,22 @@ describe('createMeta — the DOM contract', () => {
   })
 })
 
+describe('createMetaSeparator — the standalone dot between two Metas (spec 2026-09-15 §4)', () => {
+  it('is the same element and text a multi-part Meta joins its own parts with', () => {
+    const sep = createMetaSeparator()
+    expect(sep.tagName).toBe('SPAN')
+    expect(sep.className).toBe('ui-meta__sep')
+    expect(sep.getAttribute('aria-hidden')).toBe('true')
+    expect(sep.textContent).toBe(' · ')
+    expect(sep.hasAttribute('data-size')).toBe(false)
+  })
+
+  it('carries the sm size only when asked — the standalone case with no Meta ancestor to inherit from', () => {
+    const sm = createMetaSeparator({ size: 'sm' })
+    expect(sm.dataset.size).toBe('sm')
+  })
+})
+
 describe('updateMeta — the same element, restated', () => {
   it('replaces the parts and every option, removing ones no longer asked for', () => {
     const el = createMeta(['3s'], { tone: 'accent', column: 'duration', title: 'running' })
@@ -141,6 +157,16 @@ describe('meta.css — tokens only, and legible where the terminal screen puts i
 
   it('the sm size reads in the mono face at --font-size-sm (spec 2026-09-15 §4)', () => {
     const sm = ruleFor(css, ".ui-meta[data-size='sm']")
+    expect(sm).toContain('font-family: var(--font-family-mono)')
+    expect(sm).toContain('font-size: var(--font-size-sm)')
+  })
+
+  it('the standalone separator is always muted, whatever tone the word beside it takes', () => {
+    expect(ruleFor(css, '.ui-meta__sep')).toContain('color: var(--color-text-muted)')
+  })
+
+  it('the standalone separator carries the sm size in the mono face too, matching its siblings', () => {
+    const sm = ruleFor(css, ".ui-meta__sep[data-size='sm']")
     expect(sm).toContain('font-family: var(--font-family-mono)')
     expect(sm).toContain('font-size: var(--font-size-sm)')
   })

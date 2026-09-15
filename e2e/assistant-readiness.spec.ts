@@ -262,7 +262,10 @@ test.describe('the assistant says what it needs, one rung at a time (nocx-rikz5)
     await backToTerminal(page)
 
     const chrome = page.locator('.pane.active .nocx-editor-chrome')
-    const context = page.locator('.pane.active .nocx-editor-context .ui-meta')
+    // The composer's where-line: a kit Meta before nocx-9bpeq.15, now the
+    // same PromptContext primitive a block's header draws (spec
+    // 2026-09-15 §2, §6).
+    const context = page.locator('.pane.active .nocx-editor-context .ui-prompt-context')
     // Run: no chip at all, because no model answers anything here.
     await expect(page.locator(CHIPS)).toHaveCount(0)
     const before = (await chrome.boundingBox())?.height

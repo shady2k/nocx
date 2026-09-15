@@ -56,3 +56,17 @@
   font-family: var(--font-family-mono);
   font-size: var(--font-size-sm);
 }
+
+/* The separator between two Metas standing as separate elements
+ * (`createMetaSeparator`, spec 2026-09-15 §4's status word · duration) —
+ * always the quiet, connective register, whatever tone the word beside it
+ * takes. Nested inside one Meta's own parts it needs no rule of its own
+ * (inherits that Meta's colour and face); this is for the standalone case. */
+.ui-meta__sep {
+  color: var(--color-text-muted);
+}
+
+.ui-meta__sep[data-size='sm'] {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+}

@@ -44,6 +44,7 @@
 
 import type { GitOpenResult } from '../generated/git.open'
 import type { GitCloseResult } from '../generated/git.close'
+import { log } from '../log'
 
 /** The facts a pane knows when it asks for its branch. Mirrors the fields of
  *  `ActiveOrigin` this module actually consumes, without importing that
@@ -173,7 +174,28 @@ export function createBranchSource(
       (res) => {
         inFlight = false
         if (res.state === 'ok' && res.bindingId !== undefined) {
-          if (myEpoch === epoch) publish(branchFromStatus(res.status))
+          const branch = branchFromStatus(res.status)
+          if (myEpoch === epoch) publish(branch)
+          if (branch === undefined) {
+            // A silent no-branch outcome even on an OK open: no status came
+            // back at all (the inline read at git.open time failed — see
+            // ws_git.go's own comment on that being a non-fatal degrade),
+            // or the repo carries neither a branch name nor a detached
+            // head (an unborn HEAD, most likely). Logged rather than
+            // surfaced (spec §3: this feature raises no toast, no
+            // consent), because "the branch source asked and nothing came
+            // back" and "the branch source never asked" read identically
+            // from the UI, and nocx-9bpeq.16 round 2 spent real time
+            // telling them apart with no visibility into which one this
+            // was.
+            log.debug('nocx: branch source got no branch off an ok git.open', {
+              sessionId: req.sessionId,
+              cwd: req.cwd ?? '',
+              hasStatus: res.status !== undefined,
+              detached: res.status?.detached ?? null,
+              unborn: res.status?.unborn ?? null,
+            })
+          }
           // Always closed, whether or not the answer was stale: a
           // successful open has registered a live binding on the backend,
           // and this source never holds one (unlike GitStore's panel).
@@ -183,16 +205,27 @@ export function createBranchSource(
           // gitUnavailable, gitTooOld, and the remote-helper refusals) is
           // ambient decoration's silence: no branch, and — deliberately —
           // no notify, no toast, no consent call. There is nothing to
-          // close: none of these states carries a bindingId.
+          // close: none of these states carries a bindingId. Logged for
+          // the same reason as the ok-but-no-status case above.
+          log.debug('nocx: branch source git.open answered a non-ok state', {
+            sessionId: req.sessionId,
+            cwd: req.cwd ?? '',
+            state: res.state,
+          })
           publish(undefined)
         }
         runQueued()
       },
-      () => {
+      (err) => {
         // A rejected call publishes undefined (if still current) and
         // closes nothing — there is no binding to leak — and the next
         // request tries again: rejection is not remembered anywhere.
         inFlight = false
+        log.debug('nocx: branch source git.open rejected', {
+          sessionId: req.sessionId,
+          cwd: req.cwd ?? '',
+          error: err instanceof Error ? err.message : String(err),
+        })
         if (myEpoch === epoch) publish(undefined)
         runQueued()
       },

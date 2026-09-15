@@ -995,13 +995,6 @@ export class TerminalContent extends BasePaneContent {
    *  §6, protocol §9). `_applyEnvironmentView` copies the projection's
    *  current view into these fields on every environment change. */
   private _cwdVerified = false
-  /** Mirrors the projection view's own `isLocal` (nocx-9bpeq.16): the
-   *  branch source must never ask across a session it was told is remote
-   *  (where/branch-source.ts's own remote-consent refusal), and reading
-   *  this rather than `!this.sshOpts` follows the ACTIVE domain the same
-   *  way `_cwd`/`_cwdVerified` do — a hand-typed `ssh` from a local pane
-   *  walks onto a host this flag must then call remote. */
-  private _isLocal = true
   /** The last cwd reported to the layout chain. A shell prints its prompt
    *  many times in one directory and every one of them arrives here, so the
    *  report is on CHANGE — otherwise sitting still would cost a write per
@@ -1721,7 +1714,6 @@ export class TerminalContent extends BasePaneContent {
     const portsReasonBefore = this.portsUnavailableReason
     this._cwd = view.cwd
     this._cwdVerified = view.cwdVerified
-    this._isLocal = view.isLocal
     this._host = view.host
     this._user = view.user
     this.programTitle = view.programTitle
@@ -1769,7 +1761,7 @@ export class TerminalContent extends BasePaneContent {
     ) {
       this.hooks.onPortsTargetChange?.()
     }
-    this._syncWhereSources(view.cwd, view.cwdVerified, view.isLocal)
+    this._syncWhereSources(view.cwd, view.cwdVerified)
   }
 
   /** This session's home, read fresh rather than mirrored (nocx-9bpeq.16):
@@ -1802,8 +1794,35 @@ export class TerminalContent extends BasePaneContent {
    * method is the one place that decides whether to ask, so a fake source
    * in a test sees exactly zero calls rather than a call it must itself
    * recognise as a no-op.
-   */
-  private _syncWhereSources(cwd: string, cwdVerified: boolean, isLocal: boolean): void {
+   *
+   * `isLocal` is deliberately `this.sshOpts === undefined` — the SESSION's
+   * own kind, fixed at session-open — and never the environment
+   * projection's `view.isLocal`, which Round 1 read instead. Found while
+   * chasing a Round 2 report (nocx-9bpeq.16) of home resolving in a real
+   * e2e run while the branch never did: `view.isLocal` answers a DIFFERENT
+   * question from what this gate needs — is the ACTIVE DOMAIN (which can
+   * be a nested ssh/docker/su the user hand-typed) local — tracked through
+   * the domain-environment projection's own seed/reconcile machinery,
+   * whose `isLocal` and `host` fields move together (child-domain seeding
+   * in lifecycle/domain-environment.ts sets both from one
+   * `destination`-presence check). The reported run showed no host on the
+   * prompt line, which by that pairing means `view.isLocal` was already
+   * true there too — so this change is not proven to be the round-2
+   * defect by itself, only a genuine layering fix found on the way: it is
+   * still the wrong fact to gate on, on its own correctness merits.
+   * `git.open`'s consent gate (ws_git.go's `sess.Kind() !=
+   * session.KindLocal`) is a fact of the SESSION the git.open call names,
+   * set once at `session.Open` and never revised by anything that happens
+   * inside the shell (AD-6: the backend never sniffs the byte stream to
+   * notice a hand-typed `ssh`) — the same fact `activeOrigin()` and
+   * `hostLabel()` already read as `this.sshOpts === undefined` (AGENTS.md
+   * "look for the existing answer"). The two
+   * normally agree for the ROOT domain, but the branch source's gate
+   * exists to match the BACKEND's check, and the session-level fact is the
+   * direct answer to that — not a value laundered through a projection
+   * built for a different question (which domain is active), with its own
+   * seed timing this gate has no reason to depend on. */
+  private _syncWhereSources(cwd: string, cwdVerified: boolean): void {
     const sessionId = this.session?.sessionId
     if (sessionId && cwdVerified) {
       const homeSrc = this.hooks.sessionHome
@@ -1820,8 +1839,9 @@ export class TerminalContent extends BasePaneContent {
       }
     }
     if (this.branchSource) {
-      const usable = cwdVerified && isLocal && cwd !== ''
-      const key = usable ? `${sessionId ?? ''}|${cwd}` : ''
+      const isLocal = this.sshOpts === undefined
+      const usable = Boolean(sessionId) && cwdVerified && isLocal && cwd !== ''
+      const key = usable ? `${sessionId}|${cwd}` : ''
       if (usable && key !== this._branchRequestKey) {
         this._branchRequestKey = key
         const req: BranchRequest = { sessionId: sessionId ?? '', cwd, cwdVerified, isLocal }
@@ -1837,12 +1857,15 @@ export class TerminalContent extends BasePaneContent {
    *  unconditionally — the cwd string does not change when a checkout
    *  moves the branch, so `_syncWhereSources`'s dedup key would otherwise
    *  swallow exactly the event this exists for. Called from
-   *  `_onBlockFrozen`, which fires at the end of every visual freeze. */
+   *  `_onBlockFrozen`, which fires at the end of every visual freeze.
+   *  `isLocal` reads `this.sshOpts` for the same reason `_syncWhereSources`
+   *  does — see its comment. */
   private _requestBranchAfterSettle(): void {
     if (!this.branchSource) return
-    if (!this._cwdVerified || !this._isLocal || this._cwd === '') return
+    const sessionId = this.session?.sessionId
+    if (!sessionId || !this._cwdVerified || this._cwd === '' || this.sshOpts !== undefined) return
     const req: BranchRequest = {
-      sessionId: this.session?.sessionId ?? '',
+      sessionId,
       cwd: this._cwd,
       cwdVerified: true,
       isLocal: true,

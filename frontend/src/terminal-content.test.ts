@@ -3084,6 +3084,64 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
       teardown()
     }
   })
+
+  it('asks with isLocal from the SESSION, not from the active domain (nocx-9bpeq.16 round 2)', async () => {
+    // Round 1 read `isLocal` off the domain-environment projection's view
+    // (view.isLocal), which answers "is the ACTIVE DOMAIN local" — a fact
+    // that walking into a hand-typed `ssh` flips to false for the CHILD
+    // domain that ssh opens (lifecycle/domain-environment.ts's
+    // `_seedFor`), even though the SESSION the git.open call actually
+    // names never stopped being local. `git.open`'s own consent gate
+    // (ws_git.go's `sess.Kind() != session.KindLocal`) is fixed at
+    // session-open and knows nothing about a domain the backend never
+    // sniffed the byte stream to find (AD-6) — the same reason
+    // `activeOrigin()` and `hostLabel()` already answer "is this pane
+    // local" from `this.sshOpts === undefined` rather than from the
+    // domain view. This pane is a LOCAL session throughout (`mountTerminal`
+    // is called with no `ssh` option); it walks into a hand-typed
+    // `ssh pi@192.168.0.93` (the exact fact shape
+    // "a local tab whose pane walks onto a remote host" already uses,
+    // ~line 3200), and the branch source must still be asked with
+    // `isLocal: true` for a verified cwd reported on that nested domain.
+    const client = makeClient()
+    const branchSource = makeFakeBranchSource()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { createBranchSource: () => branchSource } },
+      client,
+    )
+    const handler = lifecycleHandler(client)
+    const renderer = rendererOf(content)
+    const sessionId = sessionOf(content).sessionId
+    try {
+      content.setVisible(true)
+      // The local shell's own domain first.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      // The parent suspends as the hand-typed ssh's child domain
+      // establishes (protocol §9).
+      handler({ lane: 'lane-1', lifecycle: 'native' })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd2',
+        epoch: 1,
+        destination: { host: '192.168.0.93', user: 'pi' },
+      })
+      // A verified cwd reported on the nested domain — the child domain's
+      // OWN view.isLocal is false (destination-bearing), but the SESSION
+      // is still the local one this pane opened.
+      renderer._fireCwd('192.168.0.93', '/home/pi')
+      expect(branchSource.requests).toHaveLength(1)
+      expect(branchSource.requests[0]).toMatchObject({
+        sessionId,
+        cwd: '/home/pi',
+        cwdVerified: true,
+        isLocal: true,
+      })
+    } finally {
+      teardown()
+    }
+  })
 })
 
 describe('an interrupted session is marked, never destroyed (nocx-ictcq)', () => {

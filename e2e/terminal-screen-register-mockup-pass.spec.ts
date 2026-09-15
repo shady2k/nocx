@@ -193,7 +193,9 @@ async function editorInputBoxBorder(page: Page): Promise<{ width: number; color:
 
 test("the composer's input box has a real border that changes with focus", async ({ page }) => {
   // nocx-9bpeq.15 moves the CM6 editor and the mode switch inside one
-  // bordered box (spec §6). Still landing — expect this red until it is in.
+  // bordered box (spec §6) — landed as ComposerFrame's field
+  // (composer-frame.css), the common ancestor `editorInputBoxBorder`
+  // computes structurally above.
 
   await page.locator(INPUT).fill('echo t14-field-probe')
   await page.keyboard.press('Enter')

@@ -117,6 +117,8 @@ describe('the notification area clears the activity bar', () => {
   })
 
   it('the rail width is a token, so the two rules cannot drift apart', () => {
-    expect(TOKENS_CSS).toMatch(/--activity-bar-width:\s*48px/)
+    // 56px since the mockup-decision-record pass (round 2, nocx-9bpeq.23):
+    // was 48px until the activity rail scaled up with the tab strip.
+    expect(TOKENS_CSS).toMatch(/--activity-bar-width:\s*56px/)
   })
 })

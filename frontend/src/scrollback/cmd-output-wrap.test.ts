@@ -54,20 +54,25 @@ function topLevelRules(css: string): Rule[] {
 const RULES: Rule[] = [
   ...topLevelRules(readFileSync(STYLE_ENTRY, 'utf8')),
   // The Ask token's own appearance moved into the kit with the indicator
-  // (nocx-4ff.7): the base identity lives in styles/components/. The
-  // gutter that PLACES it stays in the composer surface — both are read
-  // here, the same way the cascade would see them.
+  // (nocx-4ff.7): the base identity lives in styles/components/.
   ...topLevelRules(
     readFileSync(
       resolve(import.meta.dirname ?? '.', '..', 'styles/components/mode-indicator.css'),
       'utf8',
     ),
   ),
-  // The gutter's own rules moved out of style.css with the rest of the
-  // composer (nocx-9bpeq.7): `styles/surfaces/composer.css` is where the
-  // cascade now finds `.nocx-editor .cm-gutters` and its neighbours.
   ...topLevelRules(
     readFileSync(resolve(import.meta.dirname ?? '.', '..', 'styles/surfaces/composer.css'), 'utf8'),
+  ),
+  // The token's placement moved from a per-line CM6 gutter into
+  // ComposerFrame's field grid (task C, mockup decision record §1 item 2,
+  // round 2): `styles/components/composer-frame.css` is where the cascade
+  // now finds the field's own grid columns.
+  ...topLevelRules(
+    readFileSync(
+      resolve(import.meta.dirname ?? '.', '..', 'styles/components/composer-frame.css'),
+      'utf8',
+    ),
   ),
 ]
 
@@ -158,28 +163,40 @@ describe('the ask kind body wraps prose but keeps frozen output frozen (nocx-ex6
   })
 })
 
-describe('the Ask token is a gutter, not text in the input (nocx-ex636)', () => {
-  it('the gutter clears CM6 chrome: no panel, no divider — a sigil, not a line-number rail', () => {
+describe('the Ask token is a field-grid segment, not text in the input (nocx-ex636)', () => {
+  it('the segment sits beside CM6 as a grid column, never a CM6 gutter inside it (mockup decision §1 item 2, round 2)', () => {
     // The token moved out of `.cm-content` because a control inside the
-    // element carrying role="textbox" becomes part of the line's text. What
-    // it moved INTO is a gutter, and CM6's default gutter is dressed as a
-    // rail: a filled column with a divider down the side.
-    const gutters = RULES.find((r) => r.selectors.includes('.nocx-editor .cm-gutters'))
-    expect(gutters).toBeDefined()
-    expect(gutters!.body).toMatch(/background\s*:\s*transparent/)
-    expect(gutters!.body).toMatch(/border-right\s*:\s*none/)
+    // element carrying role="textbox" becomes part of the line's text —
+    // that invariant survives the round-2 rework. What it moved INTO
+    // changed: a per-line CM6 gutter (one cell per row, dressed as a rail)
+    // became ComposerFrame's field grid — one leading COLUMN the whole
+    // editor sits beside, never a gutter CM6 itself draws.
+    const field = RULES.find((r) => r.selectors.includes('.ui-composer-frame__field'))
+    expect(field).toBeDefined()
+    expect(field!.body).toMatch(/display\s*:\s*grid/)
+    expect(field!.body).toMatch(/grid-template-columns\s*:[^;]*--terminal-mode-segment-width/)
+    // The CM6 gutter this replaced is gone, not merely unused — no rule
+    // anywhere in the cascade still dresses one, which would be the old
+    // mechanism creeping back in beside the new one.
+    const gutters = RULES.find((r) => r.selectors.some((s) => s.includes('cm-gutters')))
+    expect(gutters).toBeUndefined()
   })
 
-  it('the chip declares no trailing margin of its own, so the gap has one owner', () => {
-    // The gap between the token and the text belongs to the gutter cell.
+  it('the segment owns its own padding on both sides, so the gap to the draft has one owner', () => {
+    // The gap between the token and the draft used to belong to a gutter
+    // cell's own right padding (`0 6px 0 0`); that cell is gone, and the
+    // FIELD variant's own inline padding is what separates the label from
+    // the field's edge on the left and from the editor's grid column on
+    // the right — one declaration, not a token-side rule plus a
+    // gutter-side rule agreeing by coincidence.
     const indicator = RULES.find((r) => r.selectors.includes('.ui-mode-indicator'))
     expect(indicator).toBeDefined()
     expect(indicator!.body).not.toMatch(/margin-right/)
-    const cell = RULES.find((r) =>
-      r.selectors.includes('.nocx-editor .nocx-editor-target-gutter .cm-gutterElement'),
+    const fieldVariant = RULES.find((r) =>
+      r.selectors.includes(".ui-mode-indicator[data-variant='field']"),
     )
-    expect(cell).toBeDefined()
-    expect(cell!.body).toMatch(/padding\s*:\s*0 6px 0 0/)
+    expect(fieldVariant).toBeDefined()
+    expect(fieldVariant!.body).toMatch(/padding-inline\s*:\s*var\(--space-3\)/)
   })
 
   it('no line carries a hanging indent any more: the gutter aligns every line by construction', () => {

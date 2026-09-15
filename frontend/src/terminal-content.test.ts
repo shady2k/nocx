@@ -5741,11 +5741,13 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     return registry.active().label
   }
 
-  /** The indicator as rendered in the editor's gutter — the editor's DOM,
-   *  deliberately NOT its contentDOM: the token is beside the document and
-   *  never in it (see the gutter test below for what that buys). */
+  /** The indicator as mounted in ComposerFrame's field — a SIBLING of CM6's
+   *  own root (`.ui-composer-frame__field`'s leading grid column, composer-
+   *  frame.css), not a CM6 gutter inside it any more (task C, round 2): the
+   *  token is beside the document and never in it, searched from `ed.root`
+   *  because it is no longer a descendant of `viewOf(ed).dom` at all. */
   function indicatorOf(ed: CommandEditor): HTMLElement | null {
-    return viewOf(ed).dom.querySelector<HTMLElement>('.ui-mode-indicator')
+    return ed.root.querySelector<HTMLElement>('.ui-mode-indicator')
   }
 
   /** Dispatch a submit key exactly where a person's keystroke lands. */
@@ -6596,9 +6598,13 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       // role="textbox", so a control inside it becomes part of the line's
       // text: a screen reader read the chip's word as content, and every
       // check that reads the prompt got `Run` glued to the command. The
-      // gutter is outside the document, so the text is the text.
+      // indicator sits in ComposerFrame's field as a SIBLING of CM6's own
+      // root (`view.dom`) now — not inside it at all — so it is outside
+      // the document twice over: outside `view.dom` and, inside that,
+      // outside `contentDOM`.
       const view = viewOf(ed)
-      expect(view.dom.querySelector('.ui-mode-indicator')).not.toBeNull()
+      expect(ed.root.querySelector('.ui-mode-indicator')).not.toBeNull()
+      expect(view.dom.querySelector('.ui-mode-indicator')).toBeNull()
       expect(view.contentDOM.querySelector('.ui-mode-indicator')).toBeNull()
       expect(view.contentDOM.textContent).toBe('')
 
@@ -6618,7 +6624,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     }
   })
 
-  it('the gutter reserves its column for EVERY line, so a second line starts where the first one does (nocx-ex636)', async () => {
+  it('the editor occupies its own grid column, so a second line starts where the first one does (nocx-ex636)', async () => {
     const { client } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
@@ -6626,22 +6632,28 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       _resetThemeState()
       ed.show()
 
-      // The widget this replaced sat on line one only, so line two began
-      // underneath the token and the command read as two ragged columns.
-      // A gutter has one element per line by construction: the marker on
-      // the first, an empty cell on the rest, both the same width.
+      // The per-line CM6 gutter this replaced (task C, round 2) kept the
+      // token off every line but the first with one blank cell per row —
+      // bookkeeping the mockup pass's ComposerFrame field grid
+      // (composer-frame.css) does not need: ONE indicator sits in the
+      // field's leading grid column and the WHOLE editor sits in the
+      // column after it, so every line the editor draws — wrapped or
+      // typed — starts at that column's left edge by construction, not by
+      // a marker repeated per row.
       ed.insertText('one\ntwo')
-      const view = viewOf(ed)
-      const cells = Array.from(
-        view.dom.querySelectorAll('.nocx-editor-target-gutter .cm-gutterElement'),
-      )
-      // The spacer element CM6 keeps for measurement is in this list too;
-      // what matters is that the lines have their cells and only the first
-      // carries the token.
-      expect(cells.length).toBeGreaterThanOrEqual(2)
-      const withToken = cells.filter((c) => c.querySelector('.ui-mode-indicator'))
-      expect(withToken.length).toBeGreaterThanOrEqual(1)
-      expect(view.contentDOM.textContent).toBe('onetwo')
+      const field = ed.root.querySelector<HTMLElement>('.ui-composer-frame__field')
+      expect(field).not.toBeNull()
+      const indicators = field!.querySelectorAll('.ui-mode-indicator')
+      expect(indicators.length).toBe(1)
+      const editorHost = field!.querySelector('.ui-composer-frame__editor')
+      expect(editorHost).not.toBeNull()
+      // DOM order IS the grid's column order (composer-frame.css places no
+      // explicit `grid-column` — the field relies on source order), so the
+      // indicator immediately preceding the editor host is what puts the
+      // whole multiline document in the SECOND column, never split across
+      // per-line cells the indicator could occupy one of.
+      expect(indicators[0].nextElementSibling).toBe(editorHost)
+      expect(viewOf(ed).contentDOM.textContent).toBe('onetwo')
     } finally {
       teardown()
     }
@@ -8669,7 +8681,7 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
    *  row is NOT the active one — the toggle these tests rely on, since Run
    *  and Ask are the only two registered targets. */
   const switchToAsk = (content: TerminalContent): void => {
-    const el = viewOf(editorOf(content)).dom.querySelector<HTMLButtonElement>('.ui-mode-indicator')
+    const el = editorOf(content).root.querySelector<HTMLButtonElement>('.ui-mode-indicator')
     if (!el) throw new Error('no mode indicator to switch with')
     el.click()
     const items = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
@@ -8953,7 +8965,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
    *  account of it, the mode indicator's data-target, wherever the editor
    *  is on screen to carry one. */
   function targetNamed(ed: CommandEditor): string | null {
-    const el = viewOf(ed).dom.querySelector<HTMLElement>('.ui-mode-indicator')
+    const el = ed.root.querySelector<HTMLElement>('.ui-mode-indicator')
     return el?.dataset.target ?? null
   }
 

@@ -78,6 +78,8 @@ import {
   type ConnectionFacts,
 } from './connection-condition'
 import type { SessionLiveness as SessionLivenessFact } from './generated/session.liveness'
+import type { SessionHomeSource } from './where/session-home'
+import type { BranchSource, BranchRequest } from './where/branch-source'
 
 /** What a pane reads when nothing supplied the recording seam: the fact is
  *  unknown and stays unknown, so the card says nothing about this session's
@@ -90,7 +92,12 @@ const RECORDING_UNKNOWN: OutputRecordingSource = {
 }
 import { BlockReceipt } from './ui/block-receipt'
 import type { HistoryRecord } from './generated/history.record'
-import { blockOutputText, renderRecordedCommand, toolCallExpansion } from './scrollback/blocks'
+import {
+  blockOutputText,
+  renderRecordedCommand,
+  toolCallExpansion,
+  setBlockWhere,
+} from './scrollback/blocks'
 import { KIND_LABELS } from './secret-kind'
 import { NATIVE_RESTORE } from './native-mode'
 import { isInteractiveTransition, extractDestination } from './ssh-transition'
@@ -465,6 +472,22 @@ export interface TerminalContentHooks {
    *  way a pane with nothing to reclaim always has. Whoever supplies the
    *  thunk owns saying so to the person — this side only falls back. */
   adoptSession?: () => Promise<SessionHandle>
+  /** This session's home directory (nocx-9bpeq.13/.16, spec §3): ONE
+   *  binding per session, shared with the terminal-link opener — the
+   *  composition root builds it once (main.tsx) and hands the same
+   *  instance to every pane that might open this session. Absent in an
+   *  embedding with no source (a bare-bones host, most tests), and then
+   *  no block or the composer ever learns a `~` path — cwdLabel's own
+   *  rule for "home unknown" (the absolute path) still applies. */
+  sessionHome?: SessionHomeSource
+  /** Build THIS pane's own branch source (nocx-9bpeq.13 §3: "per pane,
+   *  single-flight" — never shared, unlike sessionHome above). The
+   *  composition root supplies a factory bound to the git client's
+   *  open/close; TerminalContent calls it at most once, at construction,
+   *  and disposes what it built on its own dispose. Absent in an
+   *  embedding with no git client, and then no block or the composer
+   *  ever shows a branch. */
+  createBranchSource?: () => BranchSource
 }
 
 type SummonDecision =
@@ -972,6 +995,13 @@ export class TerminalContent extends BasePaneContent {
    *  §6, protocol §9). `_applyEnvironmentView` copies the projection's
    *  current view into these fields on every environment change. */
   private _cwdVerified = false
+  /** Mirrors the projection view's own `isLocal` (nocx-9bpeq.16): the
+   *  branch source must never ask across a session it was told is remote
+   *  (where/branch-source.ts's own remote-consent refusal), and reading
+   *  this rather than `!this.sshOpts` follows the ACTIVE domain the same
+   *  way `_cwd`/`_cwdVerified` do — a hand-typed `ssh` from a local pane
+   *  walks onto a host this flag must then call remote. */
+  private _isLocal = true
   /** The last cwd reported to the layout chain. A shell prints its prompt
    *  many times in one directory and every one of them arrives here, so the
    *  report is on CHANGE — otherwise sitting still would cost a write per
@@ -991,6 +1021,37 @@ export class TerminalContent extends BasePaneContent {
   /** The ssh user of `_host` ('' for local shells) — the location line's
    *  `user@host`, from the same projection view. */
   private _user = ''
+  /** This pane's own branch source (nocx-9bpeq.16, spec §3), built once
+   *  from `hooks.createBranchSource` — null in an embedding with none.
+   *  Disposed in `dispose()`. */
+  private readonly branchSource: BranchSource | null
+  /** Unsubscribe from the CURRENT session's home — torn down and
+   *  re-registered whenever `_homeWiredSession` changes underneath it. */
+  private _homeUnsub: (() => void) | null = null
+  /** The session `sessionHome.ensure`/`.subscribe` have already been
+   *  asked for (spec §3: "opened when the session first reports a
+   *  verified cwd", not on every environment view). Null until then;
+   *  reset to null on dispose only — a session change on one pane never
+   *  happens without a fresh TerminalContent, so there is no rebind case
+   *  to reset it for. */
+  private _homeWiredSession: string | null = null
+  /** A command block's branch, by `BlockRecord.id` — recorded once, at
+   *  the moment the block opens (spec §3: "a block records the branch
+   *  the pane knew when the command was submitted and never updates it
+   *  afterwards"). Keyed by id rather than a DOM attribute on `rec.el`
+   *  because the freeze that settles a block REPLACES that element with
+   *  a freshly built one (BlockManager._freezeVisual) that carries no
+   *  attribute of ours forward — `_onBlockFrozen` reads this map to
+   *  restate the branch on the new element. */
+  private readonly _blockBranch = new Map<number, string | undefined>()
+  /** The `sessionId|cwd` pair the branch source was last asked about, so
+   *  a re-render of the same verified cwd (a title change, an unrelated
+   *  OSC 7 replay) does not reset its debounce on every environment view
+   *  (spec §3: asked "when the verified cwd changes"). A settled block
+   *  asks again unconditionally (`_requestBranchAfterSettle`) — the cwd
+   *  string does not change when a `git checkout` moves the branch, so a
+   *  key match here would swallow exactly the event that exists for. */
+  private _branchRequestKey = ''
   /** The domain-scoped environment projection (bead nocx-u7uh.11): cwd,
    *  host, the tab title and the completion scope follow the ACTIVE domain.
    *  Created at session open (it needs the session facts to seed the lane
@@ -1288,6 +1349,12 @@ export class TerminalContent extends BasePaneContent {
     this._readyPromise = new Promise<boolean>((resolve) => {
       this._readyResolve = resolve
     })
+    // Built once, here, never re-created: "per pane" (spec §3) means for
+    // the life of this TerminalContent, not per session it happens to
+    // hold. The composer hears every change for as long as the pane
+    // exists; a block hears none of them (see `_onBranchChanged`).
+    this.branchSource = hooks.createBranchSource?.() ?? null
+    this.branchSource?.subscribe((branch) => this._onBranchChanged(branch))
   }
 
   /**
@@ -1654,6 +1721,7 @@ export class TerminalContent extends BasePaneContent {
     const portsReasonBefore = this.portsUnavailableReason
     this._cwd = view.cwd
     this._cwdVerified = view.cwdVerified
+    this._isLocal = view.isLocal
     this._host = view.host
     this._user = view.user
     this.programTitle = view.programTitle
@@ -1701,6 +1769,120 @@ export class TerminalContent extends BasePaneContent {
     ) {
       this.hooks.onPortsTargetChange?.()
     }
+    this._syncWhereSources(view.cwd, view.cwdVerified, view.isLocal)
+  }
+
+  /** This session's home, read fresh rather than mirrored (nocx-9bpeq.16):
+   *  a mirror can only be kept in step by remembering to update it
+   *  everywhere the session might change, and the source itself is the
+   *  one place that already knows both the session id and the answer. */
+  private currentHome(): string | undefined {
+    const sessionId = this.session?.sessionId
+    return sessionId ? this.hooks.sessionHome?.home(sessionId) : undefined
+  }
+
+  /**
+   * Ask the pane's where-sources for a fresh answer exactly when the spec
+   * says to (nocx-9bpeq.16, spec §3), and only then:
+   *
+   * - The session's home is opened (`ensure`) and subscribed to ONCE, the
+   *   first time this pane sees a VERIFIED cwd for the session — never on
+   *   the session-open cwd, which is a guess the provider would have to
+   *   answer with its own default root. `_homeWiredSession` guards the
+   *   once: every later call with the same session is a no-op here (the
+   *   subscription is already live and will hear the rest).
+   * - The branch source is asked again whenever the verified-cwd triple
+   *   actually changes (`_branchRequestKey`), so a program-title update or
+   *   a cwd replay does not reset its debounce for nothing. A settled
+   *   block asks again unconditionally — see `_requestBranchAfterSettle`,
+   *   called from `_onBlockFrozen` — because a `git checkout` moves the
+   *   branch without moving the cwd, which this key would otherwise miss.
+   *
+   * Neither call happens at all for a session with no verified cwd: this
+   * method is the one place that decides whether to ask, so a fake source
+   * in a test sees exactly zero calls rather than a call it must itself
+   * recognise as a no-op.
+   */
+  private _syncWhereSources(cwd: string, cwdVerified: boolean, isLocal: boolean): void {
+    const sessionId = this.session?.sessionId
+    if (sessionId && cwdVerified) {
+      const homeSrc = this.hooks.sessionHome
+      if (homeSrc && this._homeWiredSession !== sessionId) {
+        this._homeWiredSession = sessionId
+        this._homeUnsub?.()
+        void homeSrc.ensure(sessionId, cwd, cwdVerified)
+        this._homeUnsub = homeSrc.subscribe(sessionId, (home) => this._onHomeKnown(home))
+        // subscribe() does not replay a value already known (its own
+        // contract) — a link click, or another pane on the same session,
+        // may have resolved it before this pane ever asked.
+        const known = homeSrc.home(sessionId)
+        if (known !== undefined) this._onHomeKnown(known)
+      }
+    }
+    if (this.branchSource) {
+      const usable = cwdVerified && isLocal && cwd !== ''
+      const key = usable ? `${sessionId ?? ''}|${cwd}` : ''
+      if (usable && key !== this._branchRequestKey) {
+        this._branchRequestKey = key
+        const req: BranchRequest = { sessionId: sessionId ?? '', cwd, cwdVerified, isLocal }
+        this.branchSource.request(req)
+      } else if (!usable) {
+        this._branchRequestKey = ''
+      }
+    }
+  }
+
+  /** A settled command block asks the branch source again (spec §3: "and
+   *  when a command block settles (a `git checkout` changes it)"),
+   *  unconditionally — the cwd string does not change when a checkout
+   *  moves the branch, so `_syncWhereSources`'s dedup key would otherwise
+   *  swallow exactly the event this exists for. Called from
+   *  `_onBlockFrozen`, which fires at the end of every visual freeze. */
+  private _requestBranchAfterSettle(): void {
+    if (!this.branchSource) return
+    if (!this._cwdVerified || !this._isLocal || this._cwd === '') return
+    const req: BranchRequest = {
+      sessionId: this.session?.sessionId ?? '',
+      cwd: this._cwd,
+      cwdVerified: true,
+      isLocal: true,
+    }
+    this.branchSource.request(req)
+  }
+
+  /** The session's home became known, or changed (nocx-9bpeq.16, spec §3):
+   *  the composer restates its prompt line, and so does every command
+   *  block this pane already holds — its OWN recorded branch, read back
+   *  from `_blockBranch`, never the pane's current one (a block's branch
+   *  is history; only its path takes the new `~` form). Ask/tool/text
+   *  blocks are not command records and are out of this loop's reach —
+   *  `blockManager.blocks` names only what it can reach. */
+  private _onHomeKnown(home: string): void {
+    this.editor?.setWhereFacts({ home, branch: this.branchSource?.branch() })
+    for (const rec of this.scrollback?.blockManager.blocks ?? []) {
+      setBlockWhere(rec.el, { home, branch: this._blockBranch.get(rec.id) })
+    }
+  }
+
+  /** The pane's branch changed (nocx-9bpeq.16, spec §3): only the composer
+   *  hears about it. A block's prompt line is what the pane knew AT
+   *  SUBMIT — history, never revised — so this must never touch
+   *  `blockManager.blocks`; that is `_recordBlockWhere`'s moment alone. */
+  private _onBranchChanged(branch: string | undefined): void {
+    this.editor?.setWhereFacts({ home: this.currentHome(), branch })
+  }
+
+  /** Give a just-opened command block the where-facts known right now, and
+   *  remember the branch it recorded (spec §3: "a block records the
+   *  branch known at submit and never updates it afterwards"). Called
+   *  once per block, at the moment its running element exists — the
+   *  shell-originated open (`openBlock`) and the app-owned submit both
+   *  reach it through the same `BlockRecord` their `beginBlock` call
+   *  already returns via `blockManager.runningBlock`. */
+  private _recordBlockWhere(block: BlockRecord): void {
+    const branch = this.branchSource?.branch()
+    this._blockBranch.set(block.id, branch)
+    setBlockWhere(block.el, { home: this.currentHome(), branch })
   }
 
   // ── The ssh environment boundary (nocx-mlm7 P9) — SEVERED ────────────
@@ -2451,6 +2633,11 @@ export class TerminalContent extends BasePaneContent {
       // state a Run pane is in, and the one the row was built for.
       this.renderTargetChips()
       this.editor.mount(target)
+      // Whatever this pane's where-sources already know — a reconnect can
+      // land here with the session's home already resolved by another
+      // pane on the same session (nocx-9bpeq.16). `_syncWhereSources`
+      // (called from every environment view) covers the rest.
+      this.editor.setWhereFacts({ home: this.currentHome(), branch: this.branchSource?.branch() })
       this.completion.attach(this.editor, this.editor.root)
       this.promptVault = new PromptVaultController({
         editor: this.editor,
@@ -2786,6 +2973,11 @@ export class TerminalContent extends BasePaneContent {
               renderer.cursorLine(),
             )
             this.scrollback.blockManager.bindAttempt(attempt.id)
+            // The block just opened — give it the where-facts known right
+            // now and remember the branch it recorded (nocx-9bpeq.16,
+            // spec §3).
+            const opened = this.scrollback.blockManager.runningBlock
+            if (opened) this._recordBlockWhere(opened)
           },
           freezeBlock: (attempt) => {
             // ADR-0024 §7: the visual freeze is authorized only by the
@@ -6555,6 +6747,9 @@ export class TerminalContent extends BasePaneContent {
     this._disposed = true
     this._detachLinks?.()
     this._detachLinks = null
+    this._homeUnsub?.()
+    this._homeUnsub = null
+    this.branchSource?.dispose()
     this._pendingReadFrame = null
     this._readPinnedFrame = null
     this._mounted = false
@@ -6883,6 +7078,9 @@ export class TerminalContent extends BasePaneContent {
         this.scrollback.beginBlock(recordLine, submitCwd, startLine, startLine + 1, author)
       }
       block = this.scrollback.blockManager.runningBlock
+      // The block just opened — give it the where-facts known right now
+      // and remember the branch it recorded (nocx-9bpeq.16, spec §3).
+      if (block) this._recordBlockWhere(block)
     }
     const st = this.lifecycle.state
     if (st.kind !== 'prompt_ready') {
@@ -7034,6 +7232,13 @@ export class TerminalContent extends BasePaneContent {
    *  the block holds — never a silent truncation. */
   private _onBlockFrozen(rec: BlockRecord): void {
     this._lastFrozenBlock = rec
+    // The freeze REPLACED rec.el with a freshly built element that knows
+    // nothing about home or branch (createCommandBlock takes neither) —
+    // restate them from what this block recorded at submit (nocx-9bpeq.16,
+    // spec §3), then ask the branch source again: a settled command may
+    // have moved the branch (`git checkout`) without moving the cwd.
+    setBlockWhere(rec.el, { home: this.currentHome(), branch: this._blockBranch.get(rec.id) })
+    this._requestBranchAfterSettle()
     // The screen is handed back HERE and stays handed back until the prompt
     // that follows has finished painting; the marker handler closes the
     // interval by re-stamping this on B. Both ends move the generation

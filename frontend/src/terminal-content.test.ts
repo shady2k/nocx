@@ -84,6 +84,9 @@ import type { CapturedFrame } from './frame/types'
 import { createCapturedFrameView } from './frame/display'
 import { emptyAttrs } from './scrollback/serializer'
 import { BufferLine } from './scrollback/test-helpers'
+import type { SessionHomeSource } from './where/session-home'
+import type { BranchSource, BranchRequest } from './where/branch-source'
+import type { FilesOpenResult } from './generated/files.open'
 
 const capturedActionFacts = vi.hoisted(() => [] as ActionFacts[])
 vi.mock('./capability', async () => {
@@ -2851,6 +2854,232 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
       exitCb({ sessionId: session.sessionId, cause: 'exited' })
       expect(onActiveOriginChange).toHaveBeenCalledTimes(3)
       expect(content.activeOrigin()).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+})
+
+describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => {
+  /** A minimal fake session-home source: records every `ensure` call and
+   *  lets the test resolve a session's home on its own schedule, exactly
+   *  like the real source's async `files.open`. */
+  function makeFakeSessionHome(): SessionHomeSource & {
+    ensureCalls: Array<{ sessionId: string; cwd?: string | null; cwdVerified?: boolean }>
+    resolveHome: (sessionId: string, home: string) => void
+  } {
+    const homes = new Map<string, string>()
+    const subs = new Map<string, Set<(home: string) => void>>()
+    const ensureCalls: Array<{ sessionId: string; cwd?: string | null; cwdVerified?: boolean }> = []
+    return {
+      ensureCalls,
+      home: (sessionId) => homes.get(sessionId),
+      ensure: (sessionId, cwd, cwdVerified) => {
+        ensureCalls.push({ sessionId, cwd, cwdVerified })
+        return Promise.resolve({} as FilesOpenResult)
+      },
+      subscribe: (sessionId, cb) => {
+        let set = subs.get(sessionId)
+        if (!set) {
+          set = new Set()
+          subs.set(sessionId, set)
+        }
+        set.add(cb)
+        return () => set?.delete(cb)
+      },
+      resolveHome: (sessionId, home) => {
+        homes.set(sessionId, home)
+        for (const cb of [...(subs.get(sessionId) ?? [])]) cb(home)
+      },
+    }
+  }
+
+  /** A minimal fake branch source: records every `request` and lets the
+   *  test publish a branch on its own schedule. */
+  function makeFakeBranchSource(): BranchSource & {
+    requests: BranchRequest[]
+    publish: (branch: string | undefined) => void
+  } {
+    const subs = new Set<(branch: string | undefined) => void>()
+    const requests: BranchRequest[] = []
+    let current: string | undefined
+    return {
+      requests,
+      branch: () => current,
+      request: (req) => requests.push(req),
+      subscribe: (cb) => {
+        subs.add(cb)
+        return () => subs.delete(cb)
+      },
+      dispose: () => subs.clear(),
+      publish: (branch) => {
+        current = branch
+        for (const cb of [...subs]) cb(branch)
+      },
+    }
+  }
+
+  /** The composer's or a block's rendered prompt-line part, or undefined
+   *  when the part is not drawn at all (PromptContext only draws `branch`
+   *  when one is known). */
+  const partText = (root: ParentNode, part: string): string | null | undefined =>
+    root.querySelector(`[data-part="${part}"]`)?.textContent
+
+  it("gives the composer and every new block a '~' path once the session's home resolves", async () => {
+    const client = makeClient()
+    const sessionHome = makeFakeSessionHome()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { sessionHome } },
+      client,
+    )
+    const handler = lifecycleHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const sessionId = sessionOf(content).sessionId
+    try {
+      content.setVisible(true)
+      // A verified cwd asks the source to open, exactly once.
+      rendererOf(content)._fireCwd('', '/home/nocx/project')
+      expect(sessionHome.ensureCalls).toHaveLength(1)
+      expect(sessionHome.ensureCalls[0]).toMatchObject({
+        sessionId,
+        cwd: '/home/nocx/project',
+        cwdVerified: true,
+      })
+
+      // Before the source resolves, the absolute path stands — never a
+      // guessed `~` (spec §2: "Without a known home the absolute path is
+      // shown").
+      expect(partText(editorOf(content).root, 'path')).toBe('/home/nocx/project')
+
+      // The home resolves asynchronously, exactly as the real binding
+      // does — the composer restates its line.
+      sessionHome.resolveHome(sessionId, '/home/nocx')
+      expect(partText(editorOf(content).root, 'path')).toBe('~/project')
+
+      // A block opened AFTER the home is known takes the `~` form too.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('ls')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      const block = withScrollback.scrollback.blockManager.runningBlock
+      expect(block).not.toBeNull()
+      expect(partText(block!.el, 'path')).toBe('~/project')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a branch change after a command was submitted updates the composer and not the already-created block', async () => {
+    const client = makeClient()
+    const branchSource = makeFakeBranchSource()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { createBranchSource: () => branchSource } },
+      client,
+    )
+    const handler = lifecycleHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      rendererOf(content)._fireCwd('', '/repo')
+      branchSource.publish('main')
+
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('git status')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      const block = withScrollback.scrollback.blockManager.runningBlock
+      expect(block).not.toBeNull()
+      expect(partText(block!.el, 'branch')).toBe('main')
+
+      // The branch changes after the command was submitted (a `git
+      // checkout`, say) — the composer hears about it; the block's line
+      // is history and does not.
+      branchSource.publish('feature')
+      expect(partText(editorOf(content).root, 'branch')).toBe('feature')
+      expect(partText(block!.el, 'branch')).toBe('main')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the branch source hears about a verified cwd change and a settled block, and nothing for an unverified one', async () => {
+    const FENCE = 'e'.repeat(64)
+    const client = makeClient()
+    const branchSource = makeFakeBranchSource()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { createBranchSource: () => branchSource } },
+      client,
+    )
+    const handler = lifecycleHandler(client)
+    const renderer = rendererOf(content)
+    const sessionId = sessionOf(content).sessionId
+    try {
+      content.setVisible(true)
+      // The session-open cwd is not verified: nothing asks (spec §3).
+      expect(branchSource.requests).toHaveLength(0)
+
+      // A verified cwd triggers exactly one request.
+      renderer._fireCwd('', '/repo')
+      expect(branchSource.requests).toHaveLength(1)
+      expect(branchSource.requests[0]).toMatchObject({
+        sessionId,
+        cwd: '/repo',
+        cwdVerified: true,
+        isLocal: true,
+      })
+
+      // The SAME verified cwd reported again (an unrelated OSC 7 replay)
+      // does not reset the debounce for nothing.
+      renderer._fireCwd('', '/repo')
+      expect(branchSource.requests).toHaveLength(1)
+
+      // A settled command block asks again, unconditionally — a `git
+      // checkout` moves the branch without moving the cwd, which the
+      // dedup above would otherwise swallow.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('git checkout main')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-branch',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'git checkout main',
+        },
+      })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-branch',
+          state: 'completed',
+          exitCode: 0,
+          fence: FENCE,
+          completedAt: '2026-09-15T00:00:00Z',
+        },
+      })
+      renderer._fireRenderFence({ hex: FENCE, line: 3, buffer: 'normal' })
+      expect(branchSource.requests).toHaveLength(2)
+      expect(branchSource.requests[1]).toMatchObject({
+        sessionId,
+        cwd: '/repo',
+        cwdVerified: true,
+        isLocal: true,
+      })
     } finally {
       teardown()
     }
@@ -8355,11 +8584,22 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
    *  twin of ⌘Enter and the one these tests reach for, because what they
    *  are about is the CHIP. The chord's own owner is a pane-level capture
    *  listener that an off-screen, detached fixture cannot reach, and it has
-   *  its own specs (nocx-a7mw7.6). */
+   *  its own specs (nocx-a7mw7.6).
+   *
+   *  nocx-9bpeq.15 turned the click into a menu open (ui/mode-indicator.ts:
+   *  a kit ContextMenu, role="menu"/"menuitem", the active row wearing the
+   *  check icon — see its own test for the same shape). A bare mousedown no
+   *  longer toggles anything, so this opens the menu and picks whichever
+   *  row is NOT the active one — the toggle these tests rely on, since Run
+   *  and Ask are the only two registered targets. */
   const switchToAsk = (content: TerminalContent): void => {
-    const el = viewOf(editorOf(content)).dom.querySelector<HTMLElement>('.ui-mode-indicator')
+    const el = viewOf(editorOf(content)).dom.querySelector<HTMLButtonElement>('.ui-mode-indicator')
     if (!el) throw new Error('no mode indicator to switch with')
-    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+    el.click()
+    const items = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+    const inactive = items.find((i) => i.querySelector('.ui-context-menu__icon svg') === null)
+    if (!inactive) throw new Error('no inactive mode-indicator row to pick')
+    inactive.click()
   }
 
   it('shows no model chip while Enter goes to the shell', async () => {

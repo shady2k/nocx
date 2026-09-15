@@ -193,6 +193,43 @@ describe('PaneManager', () => {
     expect('onSetupVault' in hooks ? hooks.onSetupVault : undefined).toBe(onSetupVault)
   })
 
+  it('forwards the session-home source and the branch-source factory to every pane, local and ssh alike (nocx-9bpeq.16)', async () => {
+    const { manager } = await mountPaneManager()
+    const sessionHome = {
+      home: () => undefined,
+      ensure: () => Promise.resolve({}),
+      subscribe: () => () => {},
+    }
+    const createBranchSource = () => ({
+      branch: () => undefined,
+      request: () => {},
+      subscribe: () => () => {},
+      dispose: () => {},
+    })
+    manager.sessionHome = sessionHome as never
+    manager.createBranchSource = createBranchSource
+
+    const hooksOf = (content: unknown): Record<string, unknown> => {
+      if (!content || typeof content !== 'object' || !('hooks' in content)) {
+        throw new Error('TerminalContent has no hooks field')
+      }
+      const hooks = content.hooks
+      if (!hooks || typeof hooks !== 'object')
+        throw new Error('TerminalContent hooks are not an object')
+      return hooks as Record<string, unknown>
+    }
+
+    manager.newPane()
+    const localHooks = hooksOf(manager.activeTerminalContent())
+    expect(localHooks.sessionHome).toBe(sessionHome)
+    expect(localHooks.createBranchSource).toBe(createBranchSource)
+
+    manager.newSSHPane('ssh:test:2', 'host2.example.com')
+    const sshHooks = hooksOf(manager.activeTerminalContent())
+    expect(sshHooks.sessionHome).toBe(sessionHome)
+    expect(sshHooks.createBranchSource).toBe(createBranchSource)
+  })
+
   // ── closing detaches the session and activates a neighbour ──────────────
   it('detaches the session when the active tab is closed', async () => {
     const { client, manager } = await mountPaneManager()

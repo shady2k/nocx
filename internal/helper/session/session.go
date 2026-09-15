@@ -1000,6 +1000,10 @@ func (s *hostSession) resize(cols, rows uint16) error {
 // hostSession's own remaining job is exactly what it was: fail the runtime
 // and close the screen, in that order, once the owner has confirmed there is
 // nothing left for either of them to race.
+// stopGrace is how long a stopping session whose program was asked to end
+// waits for that program's tail before its PTY is closed under it.
+const stopGrace = 2 * time.Second
+
 func (s *hostSession) stop() {
 	s.mu.Lock()
 	if s.stopped {
@@ -1009,7 +1013,16 @@ func (s *hostSession) stop() {
 	s.stopped = true
 	s.mu.Unlock()
 	s.releaseConnection(nil)
-	if tailLost := s.owner.stop(true, time.Time{}); tailLost {
+	// Spec §5.7: a stop always has a deadline. A process that can be asked to
+	// end (a local PTY answers SIGHUP) gets stopGrace to deliver its tail; one
+	// that cannot be asked — an ssh channel, whose far side may never send EOF
+	// — is closed at once. A graceful stop with no deadline waited for an EOF
+	// that such a process never sends, and every session close hung on it.
+	deadline := time.Now()
+	if _, ok := s.proc.(ProcessGroupSignaller); ok {
+		deadline = deadline.Add(stopGrace)
+	}
+	if tailLost := s.owner.stop(false, deadline); tailLost {
 		s.log.Warn("session owner: the drain did not reach EOF before shutdown", "session", s.id.Session)
 	}
 	// A graceful stop with no deadline never itself forces the detach path

@@ -41,6 +41,7 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -716,4 +717,14 @@ func TestCommitByExactlyAtTheDeadlineIsNotRefused(t *testing.T) {
 	if res.State != sessionruntime.IntentStateExecuted {
 		t.Fatalf("commitBy exactly at the deadline: state=%v err=%v, want executed", res.State, res.Err)
 	}
+}
+
+// SignalProcessGroup stands in for the program answering the SIGHUP a
+// graceful stop sends (sessionOwner.requestTermination): a real program on a
+// PTY exits and its output reaches EOF, which is the one event a graceful stop
+// waits for. Without it this fixture never ends its read, so every test that
+// stops its owner gracefully in cleanup hangs there instead of finishing.
+func (p *rawReaderFakeProcess) SignalProcessGroup(_ int, _ syscall.Signal) error {
+	p.endRead(nil)
+	return nil
 }

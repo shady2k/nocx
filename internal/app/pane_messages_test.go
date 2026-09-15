@@ -23,15 +23,63 @@ import (
 	"github.com/shady2k/nocx/internal/workers"
 )
 
-// boxFrame is a one-row frame whose only row reads text — the shape
-// pasteReady/pasteStep/waitForEcho/confirmSubmission all read the input box
-// through (regionText over Rows{0,0}).
+// boxFrameCols is boxFrame's own frame width — wide enough for every text
+// this file pastes into it, and irrelevant to a reader that never asserts a
+// column count.
+const boxFrameCols = 80
+
+// boxFrame builds a REAL Claude input box around text, not a bare one-row
+// frame carrying it raw: pasteReady/waitForEcho/confirmSubmission now answer
+// "is the box empty" and "did it echo" through agentdriver.Observation.
+// InputText (nocx-6q1uh.18), which reads a rule's own chrome — the two
+// full-width "─" rules, the "❯" marker at column 0, a NO-BREAK SPACE after
+// it (claude.go's own note has the corpus evidence for why that one cell is
+// not the ordinary space it prints as) — rather than trimming a raw span. A
+// fake reader whose frame is not shaped like that box answers ok=false on
+// every read, since messagesTestRules wires the REAL claude.rule.json and
+// this rule cannot find its own chrome in a frame that never drew any.
+//
+// Two blank rows precede the box for the same reason a real Claude screen
+// always has room above it: claude.rule.json's "meter" anchor sits one row
+// above the box's own top rule, and an anchor computed from an out-of-frame
+// row never binds (agentdriver's own guard) — which would misroute this
+// synthetic frame into the "unknown" branch (anchorUnbound: meter) before
+// ever reaching free_text.
 func boxFrame(text string) paneview.Frame {
-	cells := make([]paneview.Cell, 0, len(text))
-	for _, r := range text {
-		cells = append(cells, paneview.Cell{Text: string(r), Width: 1})
+	rule := func() []paneview.Cell {
+		cells := make([]paneview.Cell, boxFrameCols)
+		for x := range cells {
+			cells[x] = paneview.Cell{Text: "─", Width: 1}
+		}
+		return cells
 	}
-	return paneview.Frame{Cols: 80, Rows: 1, Lines: [][]paneview.Cell{cells}}
+	blank := func() []paneview.Cell {
+		cells := make([]paneview.Cell, boxFrameCols)
+		for x := range cells {
+			cells[x] = paneview.Cell{Text: " ", Width: 1}
+		}
+		return cells
+	}
+	// "❯" then a NO-BREAK SPACE (U+00A0) — the exact two cells every real
+	// prompt row in the corpus opens with — then text, padded with ordinary
+	// spaces to the frame's own width.
+	promptRunes := []rune("❯\u00a0" + text)
+	promptRow := make([]paneview.Cell, boxFrameCols)
+	for x := range promptRow {
+		if x < len(promptRunes) {
+			promptRow[x] = paneview.Cell{Text: string(promptRunes[x]), Width: 1}
+			continue
+		}
+		promptRow[x] = paneview.Cell{Text: " ", Width: 1}
+	}
+	const promptY = 3
+	return paneview.Frame{
+		Cols:    boxFrameCols,
+		Rows:    5,
+		Lines:   [][]paneview.Cell{blank(), blank(), rule(), promptRow, rule()},
+		CursorX: len(promptRunes),
+		CursorY: promptY,
+	}
 }
 
 // fakeMsgReader is the paneKeysReader (session_keys.go) pane_messages.go's
@@ -347,6 +395,30 @@ func TestAMenuAppearingBeforeThePasteRefusesTooWhenNow(t *testing.T) {
 	}
 	if keys.callCount() != 0 {
 		t.Fatalf("PaneKeys.Send was reached with no identifiable input box: %d calls", keys.callCount())
+	}
+}
+
+// TestPasteReadyOnARealIdleFrame is this bead's own acceptance test at this
+// package's seam (nocx-6q1uh.18): pasteReady against a REAL captured idle
+// Claude frame — replayed through happyReplayCapture
+// (worker_happypath_test.go), the same corpus and replay path
+// internal/agentdriver's own tests use — rather than boxFrame's synthetic
+// chrome. Before the fix, pasteReady answered "is the box empty" by
+// trimming strings.TrimSpace over regionText's raw join of the whole minted
+// target span; that span's own closing "─" rule row is never whitespace, so
+// this exact replayed frame (claude-2.1.266-idle-60 at 38s, the corpus's own
+// free_text baseline at the narrow geometry) answered false on every real
+// idle box. It must answer true now, through
+// agentdriver.Observation.InputText.
+func TestPasteReadyOnARealIdleFrame(t *testing.T) {
+	hub, access, sessionID := newMessagesTestAccess(t, "real-idle")
+	reader := newFakeMsgReader("")
+	reader.frame = happyReplayCapture(t, "claude-2.1.266-idle-60", 38000)
+	keys := &fakeMsgKeys{}
+	pm := newTestPaneMessages(t, hub, reader, keys)
+
+	if !pm.pasteReady(context.Background(), access, sessionID) {
+		t.Fatal("pasteReady = false on a real idle Claude frame, want true")
 	}
 }
 

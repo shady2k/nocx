@@ -279,6 +279,13 @@
       "pattern": "^(?P<text>.*)$"
     },
     {
+      "name": "inputText",
+      "anchor": "topRule",
+      "maxRows": 2,
+      "states": ["free_text", "working"],
+      "pattern": "^(?:❯(?:\\x{00A0}(?P<line>.*))?|  (?P<line>\\S.*))$"
+    },
+    {
       "name": "menu",
       "anchor": "belowCursor",
       "up": true,

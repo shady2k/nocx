@@ -70,7 +70,15 @@ test('success is silent, failure is legible, in every theme', async ({ page }) =
         ':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])',
       )!
       const fg = lum(parse(getComputedStyle(status).color))
-      const bg = lum(parse(getComputedStyle(block).backgroundColor))
+      // The row paints no ground of its own now (the failure is the rail), so
+      // the status sits on the nearest ancestor that paints one.
+      let ground: Element | null = block
+      while (
+        ground &&
+        /rgba\(0, 0, 0, 0\)|transparent/.test(getComputedStyle(ground).backgroundColor)
+      )
+        ground = ground.parentElement
+      const bg = lum(parse(getComputedStyle(ground ?? document.body).backgroundColor))
       // The failure rail runs beside the OUTPUT only (reference pass, owner
       // review 2026-09-15), so it is the output's pseudo-element, not the row's.
       const output = block.querySelector(':scope > .cmd-output')!

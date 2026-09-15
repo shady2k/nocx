@@ -669,7 +669,12 @@ func (h sessionOpsHandlers) handleClose(ctx context.Context, state *connState, r
 		// out of the registry there, so no exit of ours is coming and the
 		// entry would have nothing to clear it.
 		h.machine.markCloseRequested(sid)
-		_ = svc.Close(sid)
+		// EndSession, not Close: a caller that asked this session to close by
+		// id knows nobody will ever attach to it again, so a helper-hosted
+		// session releases its reserved window budget here rather than only
+		// detaching (nocx-isjh4, closer 1's other door — the layout chain's
+		// own close runs through WSServer.closeSessionsForPanes).
+		_ = svc.EndSession(sid)
 		h.machine.closeSession(sid, sess)
 		state.remove(sid)
 

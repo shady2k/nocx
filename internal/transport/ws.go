@@ -3487,7 +3487,19 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	// goroutine; exactly one of us may delete the bindings, because deleting
 	// them is also the one chance to announce them.
 	owns := s.removeRx(sess.ID()) != nil
-	_ = s.registry.Close(sess.ID())
+	// EndSession, not Close (nocx-isjh4, closer 2): this call only ever does
+	// anything for a session whose shell exited with nobody else having
+	// touched the registry yet — Stop() and an explicit close both remove
+	// the registry row themselves, before their own Close/EndSession call
+	// can wake this goroutine, so this line is a no-op for either of them
+	// (Reg.Close/EndSession refuse an id already gone). For the case it DOES
+	// act on, the exit status and the session's recorded output are already
+	// this coordinator's own, in memory, before Done() ever fires — recorded
+	// via the notify path (internal/helper/client.Client.sessionExited) and
+	// the session-output ring this same goroutine already closed above — so
+	// nothing the "persist, then close" ordering requires depends on the
+	// helper session still existing past this line.
+	_ = s.registry.EndSession(sess.ID())
 
 	// The two responsibilities this path used to drop. closeSession has had
 	// both since it was written; monitorExit is the OTHER teardown owner and
@@ -3741,6 +3753,43 @@ func (s *WSServer) closeSession(sid session.ID, sess session.Session) {
 	s.unregisterLifecycleLanes(sid)
 	s.unregisterIntegration(sid)
 	s.discoverySessionClosed(sess)
+}
+
+// closeSessionsForPanes ends every session that is the pipe of one of
+// paneIDs — the layout domain's half of nocx-isjh4's closer 1. A pane that
+// has just left the layout for good can never be attached to again (its row
+// survives for entries.pane_id, but no open tab or workspace names it any
+// longer), so this is the moment its helper-hosted session, if it still has
+// one, must give its window budget back.
+//
+// It runs the SAME teardown the explicit "close" RPC runs (closeLane,
+// markCloseRequested, the registry close, then the transport teardown) so a
+// pane closed through the layout chain reads exactly like one closed by
+// hand — not a shell that "was interrupted" — and reuses that closer rather
+// than adding a second one (AGENTS.md, "look for the existing answer").
+//
+// A session with no pane (Config.PaneID empty, e.g. one opened for a
+// backend-internal purpose) is never matched and never touched.
+func (s *WSServer) closeSessionsForPanes(paneIDs map[string]struct{}) {
+	if len(paneIDs) == 0 {
+		return
+	}
+	for _, sess := range s.registry.List() {
+		pane := sess.PaneID()
+		if pane == "" {
+			continue
+		}
+		if _, ok := paneIDs[pane]; !ok {
+			continue
+		}
+		sid := sess.ID()
+		s.closeLane(sid)
+		s.markCloseRequested(sid)
+		if err := s.registry.EndSession(sid); err != nil {
+			s.log.Warn("closing a session whose pane left the layout", "session_id", string(sid), "error", err)
+		}
+		s.closeSession(sid, sess)
+	}
 }
 
 // --- profile/group control-plane handlers -------------------------------

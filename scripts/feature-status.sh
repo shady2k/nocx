@@ -16,9 +16,15 @@
 #
 # Deferred descendants are left out of the counts: deferring is how the owner
 # says "not part of this feature now".
+#
+# The argument is an id OR words from the feature's title: the owner names a
+# feature by what it is ("herdr"), and an id means nothing to a person. Words
+# match open root issues (no parent, at least one child) whose title contains
+# them, case-insensitively; more than one match lists the candidates instead of
+# guessing.
 set -euo pipefail
 
-root=${1:?usage: scripts/feature-status.sh <root-epic-id>}
+query=${1:?usage: scripts/feature-status.sh <feature id or words from its title>}
 
 command -v jq >/dev/null 2>&1 || {
 	echo "jq is required" >&2
@@ -31,6 +37,24 @@ JSONL="$BEADS_DIR_RESOLVED/issues.jsonl"
 # One export for the whole run, for br-queue.sh's reason: somebody working with
 # --no-auto-flush leaves the file behind the database.
 br sync --flush-only >/dev/null
+
+root=$(jq -rs --arg q "$query" '
+	map(select(.status != "tombstone")) as $all
+	| ($all | map(. as $i | ($i.dependencies // [])[] | select(.type == "parent-child")
+		| {child: $i.id, parent: .depends_on_id})) as $pc
+	| ($pc | map(.child) | unique) as $haveparent
+	| ($pc | map(.parent) | unique) as $haschildren
+	| if any($all[]; .id == $q) then $q
+	  else [$all[] | select(.status != "closed" and .status != "deferred"
+			and (.id as $x | ($haveparent | index($x)) == null)
+			and (.id as $x | ($haschildren | index($x)) != null)
+			and (.title | ascii_downcase | contains($q | ascii_downcase)))]
+		| if length == 1 then .[0].id
+		  elif length == 0 then "no feature matches: \($q)\n" | halt_error(1)
+		  else ("several features match \"\($q)\":\n"
+			+ (map("  \(.title)  (\(.id))") | join("\n")) + "\n") | halt_error(1)
+		  end
+	  end' "$JSONL")
 
 jq -rs --arg root "$root" '
 	map(select(.status != "tombstone")) as $all

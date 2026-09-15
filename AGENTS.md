@@ -724,7 +724,8 @@ far away it was, because the question had no object.
 - **A feature is one root epic whose DONE WHEN is what the owner can do**, and its direct
   children are stages, each an epic. The epics, bugs and chores that do the work hang under
   the stage they serve, with `parent-child`. Epics nest; `rollup` counts every descendant.
-- **Where it stands is a command, not a paragraph:** `scripts/feature-status.sh <root>`.
+- **Where it stands is a command, not a paragraph:** `scripts/feature-status.sh <root>`, or
+  words from its title (`scripts/feature-status.sh herdr`) — the owner names a feature, not an id.
   It is computed from the edges, so it is exactly as true as they are.
 - **Work found on a feature's path gets its parent in the same minute it is filed** — under
   the stage it blocks or serves. A bug on the path is a child of that stage, per "where a

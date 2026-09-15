@@ -58,7 +58,11 @@
   align-items: center;
   gap: var(--space-2);
   height: var(--control-height-xs);
-  margin-bottom: var(--space-1);
+  /* Prompt line to field (round 18, mockup pass): --space-1 read as no gap
+     at all once the prompt line grew to the command row's size — the two
+     rows nearly touched. --space-2 is the same air the mockup's chrome row
+     keeps above the boxed field. */
+  margin-bottom: var(--space-2);
   font-family: var(--font-family-ui);
   font-size: var(--font-size-2xs);
   -webkit-user-select: none;
@@ -150,8 +154,22 @@
    wrap. `.nocx-editor-field` (editor.ts) is a styling hook onto CM6's own
    `.cm-editor`, kept separate from the rule above so the two concerns (the
    growth cap, the visible box) stay independently readable. No raised
-   surface in a row (base spec §7) — the background is the terminal's own. */
+   surface in a row (base spec §7) — the background is the terminal's own.
+
+   HEIGHT (round 18, mockup pass): the spec's own diagram drew a one-line
+   box with no floor under it, and the shipped field measured about 26px —
+   "a thin strip spanning the pane" in the owner's screenshot. The mockups
+   draw a taller field, so `--control-height-lg` (38px, the kit's own
+   tallest control) is the floor here rather than a new literal, and it
+   wins over the base spec's implied single-line height (spec §6 amended).
+   `display: flex` + `align-items: center` centres the ONE child CM6 mounts
+   here (`.cm-scroller`, which is CM6's own flex row of gutter + content)
+   inside that taller box for a short draft; a draft that grows past the cap
+   below sizes the box to its content as before, flex or not. */
 .nocx-editor .nocx-editor-field {
+  display: flex;
+  align-items: center;
+  min-height: var(--control-height-lg);
   border: 1px solid var(--color-border);
   border-radius: var(--control-radius-md);
   background: var(--terminal-background);
@@ -187,6 +205,15 @@
      box: hiding the bar would leave a real overflow unreachable, whereas this
      states the contract the wrapping already enforces. */
   overflow-x: hidden;
+  /* The field's OWN width, inside the flex row `.nocx-editor-field` became
+     (round 18, mockup pass): CM6's base theme already makes this element a
+     flex row of gutter + content, but as a CHILD of the taller field it
+     must also grow to fill it — `min-width: 0` is the flex sibling of
+     `overflow-x: hidden` above; without it a flex item's default auto
+     minimum keeps it from shrinking to wrap, one more way the field could
+     grow sideways instead of down. */
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .nocx-editor .cm-content {

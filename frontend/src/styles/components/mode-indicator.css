@@ -1,23 +1,50 @@
-/* ModeIndicator (ui/README table) — the kit's badge wearing the operable
-   target-switch variance (ADR-0004 §3, nocx-4ff.7): what a submit reaches
-   and the person's one explicit switch. The badge shape and tone are
-   ui-badge's (data-tone: neutral for the shell, info for the assistant —
-   the same register the running block wears); this file owns only the
-   button affordances the badge lacks: the border that reads as a control,
-   the pointer, the hover, and — since nocx-9bpeq.15 — the trailing chevron
-   and the divider before it (spec 2026-09-15 §6: "Run ▾"). Colours are
-   tokens only — no literals (ADR-0013 §4). */
+/* ModeIndicator (ui/README table) — the terminal screen's target switch
+   (ADR-0004 §3, nocx-4ff.7): what a submit reaches and the person's one
+   explicit control for it. It is BUILT on the kit's badge (`ui-badge` stays
+   on the element for its identity and its ellipsis/no-wrap behaviour) but it
+   does not wear the badge's SHAPE: the mockups draw "Run ⌄" as plain text
+   beside the draft, not as a filled or bordered pill (round 18, mockup
+   pass — the owner's screenshot named the badge's `data-tone='neutral'`
+   background and its own border as "a filled pill badge"). Every
+   `.ui-badge[data-tone=...]` rule paints a background and a text colour;
+   the block below OUTRANKS all of them (element + class + attribute beats
+   class + attribute) and repaints every tone back to plain text, in the
+   text colour. Colours are tokens only — no literals (ADR-0013 §4). */
 .ui-mode-indicator {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
   cursor: pointer;
-  border: 1px solid var(--color-surface-raised);
-  padding: 1px 7px;
+  color: var(--color-text-muted);
 }
 
-.ui-mode-indicator:hover {
+/* Outranks every `.ui-badge[data-tone='...']` rule (badge.css): no pill,
+   whatever tone the switch carries — the tone is still read by the menu's
+   checked row and by anything else that keys off data-tone, it just never
+   paints a background here. `button.ui-mode-indicator[data-tone]` is
+   element + class + attribute-presence, which beats badge.css's
+   class + attribute-value pairing regardless of stylesheet order. */
+button.ui-mode-indicator[data-tone] {
+  background: transparent;
+  border: none;
+  padding: 0;
+  border-radius: 0;
+  color: inherit;
+}
+
+.ui-mode-indicator:hover,
+.ui-mode-indicator:focus-visible {
   color: var(--color-text);
+}
+
+/* Keyboard-reachable, per ADR-0008: the pill's border used to double as an
+   always-on focus ring; removing the pill must not remove the ring with
+   it. Shown on :focus-visible only — a mouse activation opens the menu and
+   need not also draw a ring around plain text. */
+.ui-mode-indicator:focus-visible {
+  outline: 1px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: var(--control-radius-sm);
 }
 
 /* The word itself carries no layout of its own — the flex row above

@@ -72,14 +72,6 @@ export function createModeIndicator(opts: ModeIndicatorOptions): HTMLButtonEleme
   label.textContent = opts.word
   btn.append(label)
 
-  // The divider between the word and the chevron (spec §6: "Run ▾"), the
-  // kit's own decoration — never a text glyph, so it never lands in
-  // textContent or in an accessible name built from it.
-  const divider = document.createElement('span')
-  divider.className = 'ui-mode-indicator__divider'
-  divider.setAttribute('aria-hidden', 'true')
-  btn.append(divider)
-
   // `iconElement` (ui/icons/icon-element.ts) resolves a detached icon
   // regardless of ambient Solid state — the same pattern PromptContext's
   // GitBranchIcon and the block header's ChevronRightIcon use, needed
@@ -88,6 +80,19 @@ export function createModeIndicator(opts: ModeIndicatorOptions): HTMLButtonEleme
   const chevron = iconElement(ChevronDownIcon)
   chevron.classList.add('ui-mode-indicator__chevron')
   btn.append(chevron)
+
+  // The divider AFTER the switch (round 18, mockup pass): the mockups read
+  // "Run ⌄ │ git diff" — one rule separating the whole switch (word +
+  // chevron) from the draft beside it, never a rule splitting the word from
+  // its own chevron. The earlier placement (between label and chevron) is
+  // what the owner's screenshot showed as "a divider inside the pill" — a
+  // seam nobody asked for, inside a control that reads as one unit. The
+  // kit's own decoration, never a text glyph, so it never lands in
+  // textContent or in an accessible name built from it.
+  const divider = document.createElement('span')
+  divider.className = 'ui-mode-indicator__divider'
+  divider.setAttribute('aria-hidden', 'true')
+  btn.append(divider)
 
   /** Disposes the open menu's Solid root, or null while closed — a render
    *  island, mounted on open and disposed on close (base spec §6.3). */

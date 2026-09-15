@@ -28,7 +28,10 @@ const srcDir = import.meta.dirname ?? resolve(new URL('.', import.meta.url).path
 const STYLE_ENTRY = resolve(srcDir, 'style.css')
 const BASE_STYLE_ENTRY = resolve(srcDir, 'styles/base.css')
 const FRAME_STYLE_ENTRY = resolve(srcDir, 'frame/display.css')
-const COMMAND_BLOCK_STYLE_ENTRY = resolve(srcDir, 'styles/surfaces/command-block.css')
+// CommandBlockFrame's own stylesheet (spec 2026-09-15 §1.7, task B): the
+// header's grid lives here now, not in styles/surfaces/command-block.css —
+// see the "SSH block header" describe block below.
+const COMMAND_BLOCK_FRAME_STYLE_ENTRY = resolve(srcDir, 'styles/components/command-block-frame.css')
 const COMPOSER_STYLE = resolve(srcDir, 'styles/surfaces/composer.css')
 
 import type { PaneIdentity } from './terminal-content'
@@ -2476,12 +2479,18 @@ const stripComments = (s: string): string => s.replace(/\/\*[\s\S]*?\*\//g, '')
 // `.cmd-header-chips`) separated its children with `justify-content:
 // space-between` — right for two children (a local block is [meta, right])
 // and wrong for three. Fixed in 30014e3 by pushing the right group out with
-// its own `margin-left: auto`, which behaves identically for any child count.
+// its own `margin-left: auto`, which behaved identically for any child
+// count. Superseded by the mockup pass's two-line header grid (spec
+// 2026-09-15 §1.7, task B): the right group is now the header's OWN third
+// grid child (ui/command-block-frame.ts), not nested inside the meta row —
+// that is what lets it span the command line while running, instead of only
+// ever widening row one. `margin-left: auto` inside a flex row cannot do
+// that, which is why the mechanism changed rather than only the numbers.
 // jsdom computes no layout, so these assertions pin what jsdom CAN see: the
 // DOM order that expresses the intent ("where left, duration and outcome
-// right"), and the stylesheet's structural contract that turns that order
-// into position without assuming a count.
-describe('the SSH block header keeps its where-meta left and the right group right (nocx-a44m)', () => {
+// right"), and the stylesheet's structural contract that places the header's
+// grid without assuming a child count.
+describe('the SSH block header keeps its where-meta left and the right group right (nocx-a44m, spec 2026-09-15 §1.7)', () => {
   const container = (): HTMLElement => document.createElement('div')
   const store = (): CommandSnapshotStore => new CommandSnapshotStore()
   const noop = (): void => {}
@@ -2502,15 +2511,17 @@ describe('the SSH block header keeps its where-meta left and the right group rig
       store(),
       'shell',
     )
+    const header = el.querySelector('.cmd-header')
     const metaRow = el.querySelector('.cmd-header-meta')
+    expect(header).not.toBeNull()
     expect(metaRow).not.toBeNull()
     const where = metaRow?.querySelector(':scope > .ui-prompt-context')
-    const right = metaRow?.querySelector(':scope > .cmd-header-right')
+    const right = header?.querySelector(':scope > .cmd-header-right')
     expect(where).not.toBeNull()
     expect(right).not.toBeNull()
 
-    const order = [...(metaRow as HTMLElement).children]
-    expect(order.indexOf(where as HTMLElement)).toBeLessThan(order.indexOf(right as HTMLElement))
+    const order = [...(header as HTMLElement).children]
+    expect(order.indexOf(metaRow as HTMLElement)).toBeLessThan(order.indexOf(right as HTMLElement))
 
     // Where reads host then directory, as one PromptContext (spec 2026-09-15
     // §2). No home is known at this seam, so the path is the absolute one.
@@ -2542,28 +2553,32 @@ describe('the SSH block header keeps its where-meta left and the right group rig
       store(),
       'shell',
     )
+    const header = el.querySelector('.cmd-header')
     const metaRow = el.querySelector('.cmd-header-meta')
     const where = metaRow?.querySelector(':scope > .ui-prompt-context')
-    const right = metaRow?.querySelector(':scope > .cmd-header-right')
+    const right = header?.querySelector(':scope > .cmd-header-right')
     expect(where).not.toBeNull()
     expect(right).not.toBeNull()
-    const order = [...(metaRow as HTMLElement).children]
-    expect(order.indexOf(where as HTMLElement)).toBeLessThan(order.indexOf(right as HTMLElement))
+    const order = [...(header as HTMLElement).children]
+    expect(order.indexOf(metaRow as HTMLElement)).toBeLessThan(order.indexOf(right as HTMLElement))
   })
 
-  it('the stylesheet pushes the right group with its own auto margin, not space-between', () => {
-    const css: string = readFileSync(COMMAND_BLOCK_STYLE_ENTRY, 'utf8')
+  it('the stylesheet places the header on its own explicit grid, not space-between', () => {
+    const css: string = readFileSync(COMMAND_BLOCK_FRAME_STYLE_ENTRY, 'utf8')
+    const header = stripComments(extractRuleBlock(css, 'cmd-header') ?? '')
     const metaRow = stripComments(extractRuleBlock(css, 'cmd-header-meta') ?? '')
     const right = stripComments(extractRuleBlock(css, 'cmd-header-right') ?? '')
+    expect(header).not.toBe('')
     expect(metaRow).not.toBe('')
     expect(right).not.toBe('')
 
-    // space-between assumes exactly two children; a located block's where
-    // meta can grow a second part. The container must not distribute, and
-    // the right group must carry its own auto margin — the mechanism that
-    // behaves identically for any child count (nocx-a44m).
+    // Explicit grid placement, not a flex row a count-sensitive rule could
+    // mis-space (nocx-a44m's own defect: `justify-content: space-between`
+    // assumed exactly two children). Column 2 is where the right group
+    // lands regardless of how many parts the meta row grows.
+    expect(header).toMatch(/display\s*:\s*grid/)
     expect(metaRow).not.toMatch(/justify-content\s*:\s*(space-between|space-around|space-evenly)/)
-    expect(right).toMatch(/margin-left\s*:\s*auto/)
+    expect(right).toMatch(/grid-column\s*:\s*2/)
   })
 })
 
@@ -8083,11 +8098,13 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
       ).toBeNull()
       // And the other fact still says itself out loud, so the absence above
       // reads as "unknown" and never as "the chip was dropped".
+      // Tenths of a second, not milliseconds (spec 2026-09-15 §1.7): the
+      // precise figure the tenths display rounds away is the Meta's title.
       expect(
         instant.querySelector(
           ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]',
         )?.textContent,
-      ).toBe('0ms')
+      ).toBe('0.0s')
     } finally {
       teardown()
     }

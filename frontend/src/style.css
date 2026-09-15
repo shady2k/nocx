@@ -102,6 +102,7 @@
 @import './styles/components/folder-picker.css';
 @import './styles/components/mark-affordance.css';
 @import './styles/components/toggle-matrix.css';
+@import './styles/components/command-block-frame.css';
 @import './styles/surfaces/banner.css';
 @import './styles/surfaces/integration-notice.css';
 @import './styles/surfaces/recovery-notice.css';

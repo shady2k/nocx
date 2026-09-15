@@ -22,6 +22,21 @@
      safe convergence to make deliberately later.) */
   --color-chrome: #0e0f15;
   --color-chrome-rail: #111219;
+  /* The terminal screen's OWN chrome band — the pane context strip and the
+     running process footer (mockup decision 2026-09-15 §1.9, §3) — is a
+     third role, deliberately not --color-chrome above. The mockups' context
+     and footer bands read LIGHTER than the terminal ground beneath them;
+     --color-chrome here is darker than --color-canvas (the shell's own
+     chrome-behind-content direction, unrelated and correct for what it
+     paints — the tab bar, the rail). Reusing it for the terminal band would
+     have painted context/footer chrome darker than the terminal ground,
+     the wrong direction the mockups draw. This is exactly this theme's
+     --color-surface value (#1f2335, already lighter than --terminal-
+     background/--color-canvas #1a1b26) — the nearest existing hue with the
+     right relationship, not a new colour invented for this pass. Every
+     theme sets this explicitly (12 files); a component never falls back to
+     a literal near it (ADR-0013 §4). */
+  --color-terminal-chrome: #1f2335;
   --color-surface-sunken: #24283b;
   --color-tab-active: #1f2235;
   --color-surface: #1f2335;

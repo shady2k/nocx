@@ -23,6 +23,14 @@
      canvas — the tab bar, the vertical strip and the settings rail. */
   --color-chrome: #eee8d5;
   --color-chrome-rail: #f3ecda;
+  /* The terminal screen's own chrome band (pane context strip, running
+     process footer — mockup decision 2026-09-15 §1.9, §3), same
+     role as tokyo-night.css's terminal-chrome comment explains in full.
+     This theme's --terminal-background is its --color-canvas hue, not
+     white, so --color-surface (white, already distinct from the ground)
+     is the fit — unlike light.css, where surface and ground coincide.
+     Every theme sets this explicitly (ADR-0013 §4). */
+  --color-terminal-chrome: #ffffff;
   --color-surface-sunken: #f5efdc;
   --color-tab-active: #ffffff;
   --color-surface: #ffffff;

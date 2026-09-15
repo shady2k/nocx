@@ -173,6 +173,10 @@ const BACKGROUND_TOKENS = [
   '--color-surface-raised',
   '--color-tab-active',
   '--color-surface-hover',
+  // The terminal screen's own chrome band (PaneContext, ProcessBar — mockup
+  // decision 2026-09-15 §1.9, §3): real text lands on it, so it is gated the
+  // same way every other background role is.
+  '--color-terminal-chrome',
 ]
 
 const AA_TEXT = 4.5
@@ -234,6 +238,20 @@ describe('theme catalogue', () => {
     const d = deltaL(t.get('--color-chrome')!, t.get(GROUND)!)
     expect(Number.isNaN(d), `${id}: chrome or ground is not an opaque hex`).toBe(false)
     expect(d, `${id}: ΔL* chrome vs ${GROUND}`).toBeGreaterThanOrEqual(MIN_CHROME_DL)
+  })
+
+  it.each(themeIds)('%s sets terminal-chrome apart from the terminal ground', (id) => {
+    // The new role the mockup decision (2026-09-15 §1.9, §3) adds: PaneContext
+    // and ProcessBar paint this, deliberately distinct from --color-chrome
+    // above — that token is darker than canvas by design (the shell's own
+    // chrome-behind-content direction, tab bar/rail), where the mockups draw
+    // the terminal screen's OWN context/footer band reading apart from the
+    // terminal ground it sits over, whichever direction that theme's palette
+    // makes legible.
+    const t = tokensById.get(id)!
+    const d = deltaL(t.get('--color-terminal-chrome')!, t.get(GROUND)!)
+    expect(Number.isNaN(d), `${id}: terminal-chrome or ground is not an opaque hex`).toBe(false)
+    expect(d, `${id}: ΔL* terminal-chrome vs ${GROUND}`).toBeGreaterThanOrEqual(MIN_CHROME_DL)
   })
 
   it.each(themeIds)('%s lifts a floating surface off the terminal ground', (id) => {

@@ -2,8 +2,16 @@
    2026-09-15 §2): `~/repos/nocx on ⎇ main`. Mono face, one line, ellipsis at
    its own edge — the same register the command row below it reads in.
    Colours are tokens only (ADR-0013 §4); there is deliberately no
-   background, border or padding here — this is text, like Meta. */
+   background, border or padding here — this is text, like Meta.
 
+   FONT SIZE (round 18, mockup pass): the mockups draw the prompt line at the
+   SAME size as the command text below it — `~/repos/nocx on main` and
+   `git diff --stat` read as one register, not a caption over a headline. The
+   base spec's `--font-size-sm` read small and grey against the terminal's
+   own 14px, which is what the owner's screenshot called "a tiny accent ~".
+   `--font-size-terminal` is the token `.cmd-header-text` already uses for
+   the command row, so this is the same size, not a new one — the mockup
+   wins over the base spec's literal token name here (spec §2 amended). */
 .ui-prompt-context {
   display: inline-block;
   min-width: 0;
@@ -13,7 +21,7 @@
   white-space: nowrap;
   vertical-align: bottom;
   font-family: var(--font-family-mono);
-  font-size: var(--font-size-sm);
+  font-size: var(--font-size-terminal);
   -webkit-user-select: none;
   user-select: none;
 }
@@ -45,8 +53,18 @@
   color: var(--color-accent);
 }
 
+/* `margin-inline` is the only spacing in this whole component — every part
+   is a bare <span> with no whitespace text node between it and its sibling
+   (fill(), prompt-context.ts), so the elements read hard-adjacent without
+   it. Found by looking at a rendered screenshot rather than at
+   `textContent`: the e2e register spec's `.toContain('main')` still passes
+   on "~/repoonmain" because an SVG icon contributes nothing to
+   `textContent`, so a substring check cannot see the missing space either
+   side of it (round 18, mockup pass). `on` is the one part with a sibling
+   on both sides whenever a branch is known, so it carries both gaps. */
 .ui-prompt-context__part[data-part='on'] {
   color: var(--color-text-muted);
+  margin-inline: 0.35em;
 }
 
 .ui-prompt-context__part[data-part='branch'] {
@@ -59,4 +77,7 @@
   vertical-align: -2px;
   color: var(--color-text-muted);
   flex: 0 0 auto;
+  /* The gap before `branch` — `on`'s own right margin above is the gap
+     before this icon. */
+  margin-right: 0.3em;
 }

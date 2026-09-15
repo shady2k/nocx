@@ -75,7 +75,7 @@ describe('createModeIndicator', () => {
     expect(el.getAttribute('aria-expanded')).toBe('false')
   })
 
-  it('renders a trailing chevron and a divider before it (spec §6: "Run ▾")', () => {
+  it('renders a trailing chevron, then a divider after the whole switch (round 18: "Run ⌄ │")', () => {
     const el = createModeIndicator({
       word: 'Run',
       tone: 'neutral',
@@ -88,6 +88,18 @@ describe('createModeIndicator', () => {
     expect(divider).not.toBeNull()
     expect(divider?.getAttribute('aria-hidden')).toBe('true')
     expect(divider?.textContent).toBe('')
+    // The divider separates the SWITCH (word + chevron) from whatever sits
+    // beside it (the composer's draft) — never the word from its own
+    // chevron, which is what the earlier placement drew as a seam inside
+    // the control (the owner's "divider inside the pill").
+    const children = [...el.children]
+    const dividerIndex = children.findIndex((c) =>
+      c.classList.contains('ui-mode-indicator__divider'),
+    )
+    const chevronIndex = children.findIndex((c) =>
+      c.classList.contains('ui-mode-indicator__chevron'),
+    )
+    expect(dividerIndex).toBeGreaterThan(chevronIndex)
   })
 
   it('a mousedown never moves the caret or steals the editor’s focus', () => {

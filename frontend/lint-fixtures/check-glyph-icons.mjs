@@ -40,11 +40,15 @@ function glyphIn(text) {
   return m ? m[0] : null
 }
 
+// `tokens` and `comments` are metadata arrays the parser hangs off the
+// Program node, not tree structure — and a JSXText TOKEN carries the exact
+// same `type: 'JSXText'` as the real JSXText AST node for the same source
+// range, so walking into `tokens` visited (and reported) it a second time.
 function walk(node, visit, parent = null) {
   if (!node || typeof node !== 'object') return
   visit(node, parent)
   for (const key of Object.keys(node)) {
-    if (key === 'parent') continue
+    if (key === 'parent' || key === 'tokens' || key === 'comments') continue
     const child = node[key]
     if (Array.isArray(child)) {
       for (const c of child) if (c && typeof c.type === 'string') walk(c, visit, node)

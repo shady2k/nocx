@@ -605,6 +605,58 @@ describe('the editor never copies on selection (nocx-w7h.17)', () => {
   })
 })
 
+// The focus bounce (P0-4, ~terminal-content.ts:2895) returns focus to the
+// editor whenever something inside the pane takes it, with named exceptions —
+// the editor itself, the live terminal, the receipt's review mode. A block's
+// own ⋮ (nocx-9bpeq.1) is the newest one: it lives inside the pane like any
+// other scrollback content, so an unconditional bounce took the caret back
+// the instant the button took focus and the keyboard path to it (ADR-0008)
+// could never land. No existing describe block in this file names this
+// listener, so both directions are asserted here: the exception, and that it
+// is still exactly as narrow as the receipt's.
+describe('the focus bounce yields to a block’s own actions control (nocx-9bpeq.1)', () => {
+  it('focusing [data-block-actions] with the editor visible keeps focus there', async () => {
+    const { ed, content, tab, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    try {
+      content.setVisible(true)
+      ed.show()
+      expect(ed.isVisible).toBe(true)
+
+      const actions = document.createElement('button')
+      actions.setAttribute('data-block-actions', '')
+      tab.pane.appendChild(actions)
+
+      actions.focus()
+
+      expect(document.activeElement).toBe(actions)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('anything else inside the pane still bounces back to the editor', async () => {
+    const { ed, content, tab, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    try {
+      content.setVisible(true)
+      ed.show()
+      expect(ed.isVisible).toBe(true)
+
+      const other = document.createElement('button')
+      tab.pane.appendChild(other)
+
+      other.focus()
+
+      expect(ed.rootContains(document.activeElement)).toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+})
+
 it('a focused interactive control keeps its keys — the typing rescue stands down (nocx-nak2)', async () => {
   const { view, ed, content, teardown } = await mountTerminal(makeClipboard(), {
     attachToDocument: true,

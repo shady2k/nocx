@@ -2899,11 +2899,23 @@ export class TerminalContent extends BasePaneContent {
         // focus leaves the editor: ⇧⌘S parks it in the name fields. The
         // bounce must yield to it, or the caret snaps straight back and the
         // receipt cannot be edited at all.
+        //
+        // A block's own ⋮ is the other: it lives inside the pane like any
+        // other scrollback content, so an unconditional bounce took the
+        // caret back the instant the button took focus and the keyboard
+        // path to it (ADR-0008) could never land. `[data-block-actions]` is
+        // the one identity blocks.ts already stamps it with. The menu it
+        // opens needs no exception of its own — ContextMenu renders into
+        // document.body through a Portal, outside this listener's `target`,
+        // so a menu item taking focus never fires this handler at all; when
+        // the menu closes it returns focus to the ⋮ (ContextMenu's own
+        // releaseFocus), which lands here and is covered by the same guard.
         if (
           active &&
           (this.editor.rootContains(active) ||
             this.scrollback?.xtermLiveContainer.contains(active) ||
-            this.receipt?.root.contains(active))
+            this.receipt?.root.contains(active) ||
+            active.closest('[data-block-actions]'))
         )
           return
         this.editor.focus()

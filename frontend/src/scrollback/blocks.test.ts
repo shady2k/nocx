@@ -17,6 +17,8 @@ import {
   blockCommandText,
   blockKindRules,
   FENCE_DEFER_MS,
+  settleBlockOutcome,
+  setBlockWhere,
   type BlockKind,
 } from './blocks'
 import { clampMenuPosition } from '../ui/menu-geometry'
@@ -28,6 +30,7 @@ import { setCurrentTheme, _resetThemeState } from '../renderers/theme-adapter'
 import { CommandSnapshotStore } from '../command-snapshot'
 import { mintDomain, type IntegrationDomain } from '../lifecycle/domains'
 import type { ExecutionAttempt } from '../lifecycle/state'
+import type { AppVisibility } from '../app-visible'
 
 /** Helper: returns a container supplier that references the given element. */
 function makeContainer(el: HTMLElement): () => HTMLElement {
@@ -38,6 +41,14 @@ const noopSelect = (): void => {}
 
 /** A fresh, empty store — verdicts default to "no snapshot" per test. */
 const freshStore = (): CommandSnapshotStore => new CommandSnapshotStore()
+
+/** Re-settle a built command block through the one outcome owner. */
+function completeRestoredLike(el: HTMLElement, exitCode: number, durationMs: number): void {
+  settleBlockOutcome(el, 'command', durationMs, {
+    status: exitCode === 0 ? 'success' : 'failure',
+    exitCode,
+  })
+}
 
 describe('createRunningBlock', () => {
   it('creates a div with classes cmd-block and cmd-block-running', () => {
@@ -57,7 +68,7 @@ describe('createRunningBlock', () => {
     expect(text?.textContent).toBe('ls -la')
   })
 
-  it('includes cwd chip in the header (standard .nocx-chip component)', () => {
+  it('includes cwd in the header, as the prompt line’s own text (spec 2026-09-15 §2)', () => {
     const container = document.createElement('div')
     const el = createRunningBlock(
       1,
@@ -68,15 +79,18 @@ describe('createRunningBlock', () => {
       noopSelect,
       freshStore(),
     )
-    const cwd = el.querySelector('.cmd-header-cwd')
-    expect(cwd?.textContent).toBe('\u{1F4C1} dev/projects')
-    expect(cwd?.classList.contains('nocx-chip')).toBe(true)
+    const where = el.querySelector<HTMLElement>(
+      ':scope > .cmd-header > .cmd-header-meta > .ui-prompt-context',
+    )
+    // No home is known yet at this seam (nocx-9bpeq.13 wires one in), so the
+    // path is shown in full rather than guessed short.
+    expect(where?.textContent).toBe('/home/dev/projects')
   })
 
   it('shows a spinner for running state', () => {
     const container = document.createElement('div')
     const el = createRunningBlock(1, 'sleep 10', '~', '', () => container, noopSelect, freshStore())
-    const spinner = el.querySelector('.cmd-header-spinner')
+    const spinner = el.querySelector('.ui-spinner')
     expect(spinner).not.toBeNull()
   })
 
@@ -90,7 +104,7 @@ describe('createRunningBlock', () => {
   it('includes overflow menu button (P2-9)', () => {
     const container = document.createElement('div')
     const el = createRunningBlock(1, 'cmd', '~', '', () => container, noopSelect, freshStore())
-    const btn = el.querySelector('.cmd-overflow-btn')
+    const btn = el.querySelector('[data-block-actions]')
     expect(btn).not.toBeNull()
   })
 
@@ -144,12 +158,13 @@ describe('createCommandBlock', () => {
       'shell',
     )
     expect(el.classList.contains('cmd-block-unreconciled')).toBe(true)
-    expect(el.querySelector('.cmd-header-exit')).toBeNull()
-    expect(el.querySelector('.cmd-header-exit-ok')).toBeNull()
-    expect(el.querySelector('.cmd-header-exit-fail')).toBeNull()
+    expect(el.dataset.outcome).toBeUndefined()
+    expect(
+      el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
+    ).toBeNull()
     // Not running either: its rows are fixed, so there is no spinner. Neither
     // running nor finished is the whole of what it says.
-    expect(el.querySelector('.cmd-header-spinner')).toBeNull()
+    expect(el.querySelector('.ui-spinner')).toBeNull()
   })
 
   it('creates a frozen block with success status', () => {
@@ -169,8 +184,10 @@ describe('createCommandBlock', () => {
       'shell',
     )
     expect(el.classList.contains('cmd-block')).toBe(true)
-    const exit = el.querySelector('.cmd-header-exit-ok')
-    expect(exit?.textContent).toBe('ok')
+    expect(el.dataset.outcome).toBe('success')
+    expect(
+      el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
+    ).toBeNull()
   })
 
   it('creates a frozen block with failure status', () => {
@@ -189,8 +206,11 @@ describe('createCommandBlock', () => {
       freshStore(),
       'shell',
     )
-    const exit = el.querySelector('.cmd-header-exit-fail')
-    expect(exit?.textContent).toBe('exit 1')
+    expect(el.dataset.outcome).toBe('failure')
+    const exit = el.querySelector(
+      ':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])',
+    )
+    expect(exit?.textContent).toBe('Exit 1')
   })
 
   it('includes serialized output', () => {
@@ -323,11 +343,13 @@ describe('createCommandBlock', () => {
       freshStore(),
       'shell',
     )
-    const dur = el.querySelector('.cmd-header-duration')
+    const dur = el.querySelector(
+      ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]',
+    )
     expect(dur?.textContent).toBe('1.2s')
   })
 
-  it('omits exit badge when exitCode is null', () => {
+  it('omits the outcome when exitCode is null', () => {
     const el = createCommandBlock(
       'command',
       1,
@@ -343,7 +365,10 @@ describe('createCommandBlock', () => {
       freshStore(),
       'shell',
     )
-    expect(el.querySelector('.cmd-header-exit')).toBeNull()
+    expect(el.dataset.outcome).toBeUndefined()
+    expect(
+      el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
+    ).toBeNull()
   })
 
   it('omits .cmd-output when outputHtml is empty (P0-3)', () => {
@@ -400,7 +425,7 @@ describe('createCommandBlock', () => {
       freshStore(),
       'shell',
     )
-    const btn = el.querySelector('.cmd-overflow-btn')
+    const btn = el.querySelector('[data-block-actions]')
     expect(btn).not.toBeNull()
   })
 
@@ -420,8 +445,11 @@ describe('createCommandBlock', () => {
       freshStore(),
       'shell',
     )
-    const cwdEl = el.querySelector('.cmd-header-cwd')
-    expect(cwdEl?.textContent).toBe('\u{1F4C1} user/repos')
+    const where = el.querySelector<HTMLElement>(
+      ':scope > .cmd-header > .cmd-header-meta > .ui-prompt-context',
+    )
+    expect(where?.textContent).toBe('/home/user/repos')
+    expect(where?.textContent).not.toMatch(/\p{Extended_Pictographic}/u)
   })
 })
 
@@ -457,7 +485,7 @@ describe('freezeBlock', () => {
     expect(parent.children.length).toBe(1)
     expect(parent.children[0]).toBe(frozen)
     expect(frozen.classList.contains('cmd-block')).toBe(true)
-    expect(frozen.querySelector('.cmd-header-exit-ok')).not.toBeNull()
+    expect(frozen.dataset.outcome).toBe('success')
     expect(frozen.querySelector('.cmd-output')?.innerHTML).toContain('done')
   })
 
@@ -480,7 +508,7 @@ describe('freezeBlock', () => {
       freshStore(),
       'success',
     )
-    expect(frozen.querySelector('.cmd-overflow-btn')).not.toBeNull()
+    expect(frozen.querySelector('[data-block-actions]')).not.toBeNull()
   })
 })
 
@@ -717,16 +745,75 @@ describe('BlockManager', () => {
     vi.useFakeTimers()
     try {
       const rec = manager.startBlock('find /', '~', 10)
-      const duration = rec.el.querySelector<HTMLElement>('.cmd-header-duration')
-      expect(duration?.textContent).toBe('0s')
+      const durationSelector =
+        ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]'
+      // The ticker paints immediately on start, at the current elapsed
+      // time (zero) — below one tenth of a second the duration figure
+      // does not exist yet at all, only the bare "Running" word (spec
+      // 2026-09-15 §1.7 round 3).
+      expect(rec.el.querySelector(durationSelector)).toBeNull()
 
       fixedNow = 66_250
       vi.advanceTimersByTime(1000)
 
+      const duration = rec.el.querySelector<HTMLElement>(durationSelector)
       expect(duration?.textContent).toBe('1m 5s')
       expect(rec.el).toBe(inner.children[0])
       expect(inner.children).toHaveLength(2)
     } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // `document.hidden` has one owner, app-visible.ts (grant.test.ts's "keeps
+  // direct document visibility reads in the app visibility module"), so the
+  // ticker's pause/resume reads it through an injected `AppVisibility`
+  // rather than the real `document` — which is what makes this behaviour
+  // testable at all without redefining a read-only property on jsdom's
+  // `document`.
+  it('pauses the ticker while hidden and repaints once, immediately, on return', () => {
+    vi.useFakeTimers()
+    let localInner: HTMLElement | undefined
+    let localManager: BlockManager | undefined
+    try {
+      let hidden = false
+      const appVisibility: AppVisibility = {
+        visible: () => !hidden,
+        destroy: () => {},
+      }
+      localInner = document.createElement('div')
+      const localXterm = document.createElement('div')
+      localInner.appendChild(localXterm)
+      document.body.appendChild(localInner)
+      localManager = new BlockManager(localInner, localXterm, {
+        now: () => fixedNow,
+        snapshotStore: freshStore(),
+        appVisibility,
+      })
+      const rec = localManager.startBlock('find /', '~', 10)
+      const durationSelector =
+        ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]'
+
+      hidden = true
+      document.dispatchEvent(new Event('visibilitychange'))
+      fixedNow = 5_000
+      vi.advanceTimersByTime(5000)
+      // A hidden tab gains nothing from repainting: the interval itself is
+      // paused, not merely the paint inside it, so this never wrote a
+      // duration a person would never have seen anyway.
+      expect(rec.el.querySelector(durationSelector)).toBeNull()
+
+      hidden = false
+      fixedNow = 13_300 // started at 1000 (beforeEach) — 12.3s elapsed
+      document.dispatchEvent(new Event('visibilitychange'))
+      // Repaints immediately on return — before the next scheduled tick,
+      // and at the CURRENT elapsed time, not a stale one from before the
+      // tab was hidden.
+      const duration = rec.el.querySelector<HTMLElement>(durationSelector)
+      expect(duration?.textContent).toBe('12.3s')
+    } finally {
+      localManager?.dispose()
+      localInner?.remove()
       vi.useRealTimers()
     }
   })
@@ -838,17 +925,28 @@ describe('BlockManager', () => {
     manager.restorePast([restored])
     manager.startBlock('live', '~', 0)
 
+    const status = (el: HTMLElement) =>
+      el.querySelector<HTMLElement>(
+        ':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])',
+      )
+    const duration = (el: HTMLElement) =>
+      el.querySelector<HTMLElement>(
+        ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]',
+      )
+
     expect(manager.completeRestoredBlock('missing', 7, 9_999)).toBe(false)
     expect(restored.classList.contains('cmd-block-unreconciled')).toBe(true)
-    expect(restored.querySelector('.cmd-header-exit')).toBeNull()
+    expect(restored.dataset.outcome).toBeUndefined()
+    expect(status(restored)).toBeNull()
 
     expect(manager.completeRestoredBlock('entry-restored', 7, 1_234)).toBe(true)
     expect(restored.classList.contains('cmd-block-unreconciled')).toBe(false)
     expect(restored.dataset.restoredStatus).toBe('failure')
-    expect(restored.querySelector('.cmd-header-exit-fail')?.textContent).toBe('exit 7')
-    expect(restored.querySelector('.cmd-header-duration')?.textContent).toBe('1.2s')
+    expect(restored.dataset.outcome).toBe('failure')
+    expect(status(restored)?.textContent).toBe('Exit 7')
+    expect(duration(restored)?.textContent).toBe('1.2s')
     expect(manager.completeRestoredBlock('entry-restored', 0, 0)).toBe(false)
-    expect(restored.querySelector('.cmd-header-exit-fail')?.textContent).toBe('exit 7')
+    expect(status(restored)?.textContent).toBe('Exit 7')
 
     expect(manager.completeRestoredBlock('1', 0, 0)).toBe(false)
     expect(manager.blocks.find((block) => block.command === 'live')?.status).toBe('running')
@@ -886,7 +984,10 @@ describe('BlockManager', () => {
 
     expect(manager.completeRestoredBlock('entry-nested', 0, 2_000)).toBe(true)
     expect(nested.classList.contains('cmd-block-unreconciled')).toBe(false)
-    expect(nested.querySelector('.cmd-header-exit-ok')?.textContent).toBe('ok')
+    expect(nested.dataset.outcome).toBe('success')
+    expect(
+      nested.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
+    ).toBeNull()
   })
 
   it('clearAll removes all blocks and resets state', () => {
@@ -1047,14 +1148,14 @@ describe('overflow menu (P1-6)', () => {
     )
     container.appendChild(el)
 
-    const btn = el.querySelector('.cmd-overflow-btn') as HTMLElement
+    const btn = el.querySelector('[data-block-actions]') as HTMLElement
     expect(btn).not.toBeNull()
 
     // Click the ⋮ button
     btn.click()
 
     // Menu should now exist in document.body
-    const menu = document.body.querySelector('.cmd-overflow-menu')
+    const menu = document.body.querySelector('[data-testid="block-actions-menu"]')
     expect(menu).not.toBeNull()
 
     // Clean up
@@ -1062,7 +1163,7 @@ describe('overflow menu (P1-6)', () => {
     document.body.removeChild(container)
   })
 
-  it('closes menu on outside click', async () => {
+  it('closes menu on outside click', () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
     const el = createCommandBlock(
@@ -1082,20 +1183,17 @@ describe('overflow menu (P1-6)', () => {
     )
     container.appendChild(el)
 
-    const btn = el.querySelector('.cmd-overflow-btn') as HTMLElement
+    const btn = el.querySelector('[data-block-actions]') as HTMLElement
     btn.click()
 
     // Menu should exist
-    expect(document.body.querySelector('.cmd-overflow-menu')).not.toBeNull()
+    expect(document.body.querySelector('[data-testid="block-actions-menu"]')).not.toBeNull()
 
-    // Wait for the setTimeout(0) that registers the close listener
-    await new Promise((r) => setTimeout(r, 10))
-
-    // Click outside
-    document.body.click()
+    // Pointerdown outside (the kit closes on pointerdown, not click)
+    document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
 
     // Menu should be removed
-    expect(document.body.querySelector('.cmd-overflow-menu')).toBeNull()
+    expect(document.body.querySelector('[data-testid="block-actions-menu"]')).toBeNull()
 
     document.body.removeChild(container)
   })
@@ -1120,15 +1218,15 @@ describe('overflow menu (P1-6)', () => {
     )
     container.appendChild(el)
 
-    const btn = el.querySelector('.cmd-overflow-btn') as HTMLElement
+    const btn = el.querySelector('[data-block-actions]') as HTMLElement
     btn.click()
 
-    expect(document.body.querySelector('.cmd-overflow-menu')).not.toBeNull()
+    expect(document.body.querySelector('[data-testid="block-actions-menu"]')).not.toBeNull()
 
     // Press Escape
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
 
-    expect(document.body.querySelector('.cmd-overflow-menu')).toBeNull()
+    expect(document.body.querySelector('[data-testid="block-actions-menu"]')).toBeNull()
 
     document.body.removeChild(container)
   })
@@ -1153,15 +1251,15 @@ describe('overflow menu (P1-6)', () => {
     )
     container.appendChild(el)
 
-    const btn = el.querySelector('.cmd-overflow-btn') as HTMLElement
+    const btn = el.querySelector('[data-block-actions]') as HTMLElement
 
     // First click opens
     btn.click()
-    expect(document.body.querySelector('.cmd-overflow-menu')).not.toBeNull()
+    expect(document.body.querySelector('[data-testid="block-actions-menu"]')).not.toBeNull()
 
     // Second click closes
     btn.click()
-    expect(document.body.querySelector('.cmd-overflow-menu')).toBeNull()
+    expect(document.body.querySelector('[data-testid="block-actions-menu"]')).toBeNull()
 
     document.body.removeChild(container)
   })
@@ -1198,16 +1296,18 @@ describe('overflow menu (P1-6)', () => {
     el.dataset.turnState = 'success'
     container.appendChild(el)
 
-    ;(el.querySelector('.cmd-overflow-btn') as HTMLElement).click()
+    ;(el.querySelector('[data-block-actions]') as HTMLElement).click()
     const item = Array.from(
-      document.querySelectorAll<HTMLButtonElement>('.cmd-overflow-menu-item'),
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="block-actions-menu"] .ui-context-menu__item',
+      ),
     ).find((button) => button.textContent === 'Show dump')
     expect(item).toBeDefined()
     item!.click()
     await new Promise<void>((resolve) => queueMicrotask(resolve))
 
     expect(seen).toEqual(['turn-entry-1'])
-    document.querySelector('.cmd-overflow-menu')?.remove()
+    document.querySelector('[data-testid="block-actions-menu"]')?.remove()
     document.querySelector('.nocx-dialog')?.remove()
     document.body.removeChild(container)
   })
@@ -1472,10 +1572,11 @@ describe('freezeBlock entered presentation (N6, nocx-y5v5)', () => {
       freshStore(),
       'entered',
     )
-    expect(frozen.querySelector('.cmd-header-exit')).toBeNull() // no exit code at all
-    expect(frozen.querySelector('.cmd-header-exit-ok')).toBeNull()
-    expect(frozen.querySelector('.cmd-header-exit-fail')).toBeNull()
-    expect(frozen.querySelector('.cmd-header-spinner')).toBeNull() // frozen, not running
+    expect(frozen.dataset.outcome).toBeUndefined() // no exit code at all
+    expect(
+      frozen.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
+    ).toBeNull()
+    expect(frozen.querySelector('.ui-spinner')).toBeNull() // frozen, not running
     expect(frozen.classList.contains('cmd-block-entered')).toBe(true)
     expect(frozen.querySelector('.cmd-output')?.innerHTML).toContain('host key prompt')
   })
@@ -1507,7 +1608,7 @@ describe('freezeBlock entered presentation (N6, nocx-y5v5)', () => {
       freshStore(),
       'entered',
     )
-    expect(frozen.querySelector('.cmd-header-exit')).toBeNull()
+    expect(frozen.dataset.outcome).toBeUndefined()
     expect(frozen.classList.contains('cmd-block-entered')).toBe(true)
   })
 })
@@ -1539,8 +1640,8 @@ describe('BlockManager entered freeze (N6, nocx-y5v5)', () => {
     expect(manager.runningBlock).toBeNull()
     expect(manager.cmdStartTime).toBeNull()
     // The frozen block paints neither success nor failure.
-    expect(entered!.el.querySelector('.cmd-header-exit')).toBeNull()
-    expect(entered!.el.querySelector('.cmd-header-spinner')).toBeNull()
+    expect(entered!.el.dataset.outcome).toBeUndefined()
+    expect(entered!.el.querySelector('.ui-spinner')).toBeNull()
     expect(entered!.el.classList.contains('cmd-block-entered')).toBe(true)
     // The running block element was replaced in the DOM.
     expect(inner.querySelectorAll('.cmd-block-running').length).toBe(0)
@@ -1573,7 +1674,7 @@ describe('BlockManager entered freeze (N6, nocx-y5v5)', () => {
     const done = manager.freezeBlock(() => undefined, 8, 0)
     expect(done!.status).toBe('success')
     expect(done!.exitCode).toBe(0)
-    expect(done!.el.querySelector('.cmd-header-exit-ok')).not.toBeNull()
+    expect(done!.el.dataset.outcome).toBe('success')
     expect(manager.blocks[0].status).toBe('entered') // still untouched
   })
 })
@@ -1639,6 +1740,56 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     expect(frozen!.el.dataset.blockId).toBeUndefined()
   })
 
+  it('a stop request turns a nonzero exit into cancelled, never failure (nocx-9bpeq.19)', () => {
+    // The backend's own completion fact states only exitCode (contracts/
+    // lifecycle.changed.schema.json's `attempt`), never a cause — SIGINT's
+    // 130 reads exactly like a program's own failure otherwise.
+    // `stopRequested` is set by terminal-content.ts's `signalActiveCommand`
+    // at the moment of the gesture; this test sets it directly to isolate
+    // freezeFromAttempt's OWN derivation from that wiring.
+    const rec = manager.startBlock('sleep 30', '~', 0)
+    manager.bindAttempt('att-1')
+    rec.stopRequested = true
+    manager.sightFence(FENCE, 8)
+    const frozen = manager.freezeFromAttempt(
+      attempt({ exitCode: 130 }),
+      () => undefined,
+      8,
+      () => 9,
+    )
+    expect(frozen).not.toBeNull()
+    expect(frozen!.status).toBe('cancelled')
+    expect(frozen!.exitCode).toBe(130)
+    expect(frozen!.el.dataset.outcome).not.toBe('failure')
+    expect(frozen!.el.dataset.outcome).toBe('cancelled')
+    expect(
+      frozen!.el.querySelector(
+        ':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])',
+      )?.textContent,
+    ).toBe('Stopped')
+  })
+
+  it('the SAME nonzero exit reads as failure when no stop was requested — the pairing case (nocx-9bpeq.19)', () => {
+    const rec = manager.startBlock('sleep 30', '~', 0)
+    manager.bindAttempt('att-1')
+    expect(rec.stopRequested).toBe(false)
+    manager.sightFence(FENCE, 8)
+    const frozen = manager.freezeFromAttempt(
+      attempt({ exitCode: 130 }),
+      () => undefined,
+      8,
+      () => 9,
+    )
+    expect(frozen).not.toBeNull()
+    expect(frozen!.status).toBe('failure')
+    expect(frozen!.el.dataset.outcome).toBe('failure')
+    expect(
+      frozen!.el.querySelector(
+        ':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])',
+      )?.textContent,
+    ).toBe('Exit 130')
+  })
+
   it('freezeFromAttempt refuses a non-completed attempt — an open attempt cannot freeze a block', () => {
     manager.startBlock('make', '~', 0)
     manager.bindAttempt('att-1')
@@ -1674,7 +1825,7 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     expect(frozen).not.toBeNull()
     expect(frozen!.status).toBe('unknown')
     expect(frozen!.exitCode).toBeNull()
-    expect(frozen!.el.querySelector('.cmd-header-exit')).toBeNull()
+    expect(frozen!.el.dataset.outcome).toBeUndefined()
     expect(manager.runningBlock).toBeNull()
     expect(rec.attemptId).toBe('att-1')
   })
@@ -2003,17 +2154,22 @@ function captureClipboard(): string[] {
   return copied
 }
 
-/** Open one block's ⋮ menu and return it. */
+/** Open one block's ⋮ menu and return it.
+ *
+ *  `[data-block-actions]` is the ⋮'s identity alone (nocx-9bpeq.12 round 6):
+ *  the running Stop control carries a SEPARATE, shared attribute
+ *  (`data-block-control`) for the block-selection/focus-bounce escape hatch
+ *  instead, so this plain attribute selector is unique again. */
 function openBlockMenu(blockEl: HTMLElement): HTMLElement {
   blockEl
-    .querySelector<HTMLElement>('.cmd-overflow-btn')!
+    .querySelector<HTMLElement>('[data-block-actions]')!
     .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-  return document.body.querySelector<HTMLElement>('.cmd-overflow-menu')!
+  return document.body.querySelector<HTMLElement>('[data-testid="block-actions-menu"]')!
 }
 
 /** Open the menu and click the item with this label. */
 function clickMenuItem(blockEl: HTMLElement, label: string): void {
-  Array.from(openBlockMenu(blockEl).querySelectorAll<HTMLElement>('.cmd-overflow-menu-item'))
+  Array.from(openBlockMenu(blockEl).querySelectorAll<HTMLElement>('.ui-context-menu__item'))
     .find((b) => b.textContent === label)!
     .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
 }
@@ -2309,7 +2465,10 @@ describe('BlockManager.addAnswerBlock', () => {
     const rows = Array.from(h.el.querySelectorAll('.term-line')).map((r) => r.textContent)
     expect(rows).toEqual(['partial'])
     expect(h.el.querySelector('.cmd-answer-error')?.textContent).toBe('the model returned no text')
-    const chip = h.el.querySelector('.cmd-header-exit')
+    expect(h.el.dataset.outcome).toBe('failure')
+    const chip = h.el.querySelector(
+      ':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])',
+    )
     expect(chip?.textContent).toBe('failed')
   })
 
@@ -2336,14 +2495,14 @@ describe('BlockManager.addAnswerBlock', () => {
       'shell',
     )
     const cmdRight = cmd.querySelector('.cmd-header-right')!
-    expect(cmdRight.lastElementChild?.classList.contains('cmd-overflow-btn')).toBe(true)
+    expect(cmdRight.lastElementChild?.hasAttribute('data-block-actions')).toBe(true)
 
     const h = manager.addAnswerBlock('q', '/')
     h.append('the answer')
     h.close('failure', 'the model returned no text')
     const askRight = h.el.querySelector('.cmd-header-right')!
-    expect(askRight.querySelector('.cmd-header-exit')?.textContent).toBe('failed')
-    expect(askRight.lastElementChild?.classList.contains('cmd-overflow-btn')).toBe(true)
+    expect(askRight.querySelector('.ui-meta:not([data-column])')?.textContent).toBe('failed')
+    expect(askRight.lastElementChild?.hasAttribute('data-block-actions')).toBe(true)
   })
 
   // nocx-e6kn2 acceptance: the person must be able to tell which model
@@ -2380,15 +2539,19 @@ describe('BlockManager.addAnswerBlock', () => {
     const h = manager.addAnswerBlock('q', '/', actions)
 
     const menu = openBlockMenu(h.el)
-    expect(menu.querySelector<HTMLElement>('[data-action="stop"]')?.textContent).toBe('Stop')
-    menu.querySelector<HTMLElement>('[data-action="stop"]')!.click()
+    expect(menu.querySelector<HTMLElement>('[data-item-id="stop"]')?.textContent).toBe('Stop')
+    menu.querySelector<HTMLElement>('[data-item-id="stop"]')!.click()
     expect(stop).toHaveBeenCalledTimes(1)
 
     const secondMenu = openBlockMenu(h.el)
     h.close('cancelled')
     expect(secondMenu.isConnected).toBe(false)
-    expect(h.el.querySelector('.cmd-header-exit')?.textContent).toBe('stopped')
-    expect(h.el.querySelector('.cmd-answer-waiting')).toBeNull()
+    expect(h.el.dataset.outcome).toBe('cancelled')
+    expect(
+      h.el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])')
+        ?.textContent,
+    ).toBe('stopped')
+    expect(h.el.querySelector('.cmd-header-waiting')).toBeNull()
     expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
   })
 })
@@ -2572,12 +2735,15 @@ describe('the working stand-in (nocx-vnirv.1)', () => {
 // A running block sits at the bottom of the scrollback by construction, so
 // an unclamped menu opened past the window's bottom edge and the two
 describe('the block overflow menu stays in the viewport', () => {
-  // The imperative menu appends itself to document.body and stays until
-  // dismissed; a test that opens one and ends must take it down, or the
-  // NEXT describe's openBlockMenu finds THIS menu first (they share the
-  // same body-level query) and clicks an item that belongs to a dead test.
+  // The menu is a Solid render island portalled into document.body and
+  // stays open until dismissed; a test that opens one and ends must close
+  // it, or the NEXT describe's openBlockMenu finds THIS menu first (they
+  // share the same body-level query) and clicks an item that belongs to a
+  // dead test. Escape closes it through the component itself — removing
+  // the portalled node by hand would leave its Solid root, and the
+  // document listeners it owns, alive.
   afterEach(() => {
-    document.querySelectorAll('.cmd-overflow-menu').forEach((m) => m.remove())
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
   })
 
   function openMenu(nearBottom: boolean): { menu: HTMLElement; buttonRect: DOMRect } {
@@ -2585,13 +2751,13 @@ describe('the block overflow menu stays in the viewport', () => {
     document.body.appendChild(container)
     const el = createRunningBlock(1, 'make', '~', '', () => container, noopSelect, freshStore())
     container.appendChild(el)
-    const btn = el.querySelector<HTMLElement>('.cmd-overflow-btn')!
+    const btn = el.querySelector<HTMLElement>('[data-block-actions]')!
     const rect = nearBottom
       ? { top: 743, bottom: 765, left: 950, right: 972, width: 22, height: 22 }
       : { top: 700, bottom: 722, left: 1000, right: 1022, width: 22, height: 22 }
     btn.getBoundingClientRect = () => rect as DOMRect
     btn.click()
-    const menu = document.querySelector<HTMLElement>('.cmd-overflow-menu')!
+    const menu = document.querySelector<HTMLElement>('[data-testid="block-actions-menu"]')!
     return { menu, buttonRect: rect as DOMRect }
   }
 
@@ -2615,55 +2781,6 @@ describe('the block overflow menu stays in the viewport', () => {
     expect({ left, top }).toEqual(expected)
   })
 
-  it('measures the menu OUT OF FLOW — measured in flow it reports the window\u2019s width and lands nowhere near its ⋮', () => {
-    // jsdom has no box model, so the two tests above cannot tell an in-flow
-    // menu from a fixed one: every rect is zeros and the arithmetic agrees
-    // with itself. This one supplies the difference the browser makes, and
-    // it is the difference the defect was made of (owner, 2026-08-24): a
-    // plain div appended to `body` is an in-flow block box as wide as the
-    // body, so measuring it there reports the WINDOW width as the menu's,
-    // `btnRect.right - width` goes negative, and the clamp does exactly as
-    // asked — pins the menu to the left edge of the screen.
-    const CONTENT_WIDTH = 160
-    // Through the descriptor rather than the bare method: a prototype method
-    // captured by reference is what the unbound-method lint exists for, and
-    // the stub still needs the original's dynamic `this` to delegate.
-    const originalDesc = Object.getOwnPropertyDescriptor(
-      Element.prototype,
-      'getBoundingClientRect',
-    )!
-    const delegate = originalDesc.value as (this: Element) => DOMRect
-    Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
-      if (this instanceof HTMLElement && this.classList.contains('cmd-overflow-menu')) {
-        const width = this.style.position === 'fixed' ? CONTENT_WIDTH : window.innerWidth
-        return {
-          x: 0,
-          y: 0,
-          top: 0,
-          left: 0,
-          right: width,
-          bottom: 120,
-          width,
-          height: 120,
-        } as DOMRect
-      }
-      return delegate.call(this)
-    }
-    try {
-      // The ⋮ that is NOT against the right edge, so the clamp has nothing
-      // to correct and the assertion is about the measurement alone.
-      const { menu, buttonRect } = openMenu(true)
-      const left = Number.parseFloat(menu.style.left)
-      // Beside the ⋮ that opened it, right-aligned to the button — and
-      // therefore NOT against the left edge, which is where the in-flow
-      // measurement put it.
-      expect(left).toBe(buttonRect.right - CONTENT_WIDTH)
-      expect(left).toBeGreaterThan(8)
-    } finally {
-      Object.defineProperty(Element.prototype, 'getBoundingClientRect', originalDesc)
-    }
-  })
-
   it('clamps the menu back inside when the ⋮ hugs the right edge', () => {
     const { menu, buttonRect } = openMenu(false)
     const menuRect = menu.getBoundingClientRect()
@@ -2685,26 +2802,17 @@ describe('the block overflow menu stays in the viewport', () => {
     const el = createRunningBlock(1, 'make', '~', '', () => container, noopSelect, freshStore())
     container.appendChild(el)
     const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
-    el.querySelector<HTMLElement>('.cmd-overflow-btn')!.click()
-    const menu = document.querySelector<HTMLElement>('.cmd-overflow-menu')!
-    // Fixed at body level: out of flow, so the block underneath never moves
-    // to make room, and nothing in the open path scrolls the page.
-    expect(menu.parentElement).toBe(document.body)
-    expect(menu.style.position).toBe('fixed')
+    el.querySelector<HTMLElement>('[data-block-actions]')!.click()
+    const menu = document.querySelector<HTMLElement>('[data-testid="block-actions-menu"]')!
+    // Portalled at body level: out of flow, so the block underneath never
+    // moves to make room, and nothing in the open path scrolls the page.
+    // The kit sets no inline position — context-menu.css fixes the shell —
+    // so the assertion is about WHERE it mounted, not its inline style.
+    expect(menu.closest('body')).toBe(document.body)
+    expect(menu.parentElement).not.toBe(el)
     expect(scrollTo).not.toHaveBeenCalled()
     scrollTo.mockRestore()
     container.remove()
-  })
-
-  it('a menu taller than the viewport scrolls WITHIN the shell — the CSS contract', () => {
-    // jsdom lays nothing out, so the reachability half of the clamp is
-    // asserted on the shipped stylesheet: the shell caps its height and
-    // scrolls its own items, instead of running past the window's edge.
-    const css = readFileSync(resolve(import.meta.dirname ?? '.', '..', 'style.css'), 'utf8')
-    const rule = css.match(/\.cmd-overflow-menu\s*\{([^}]*)\}/)
-    expect(rule).not.toBeNull()
-    expect(rule![1]).toContain('max-height')
-    expect(rule![1]).toContain('overflow-y: auto')
   })
 })
 
@@ -2744,8 +2852,8 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     expect(frozen!.el.dataset.blockKind).toBe('command')
     // The visible difference in the flow: the ask block's header names its
     // in-progress state; a command block's never does.
-    expect(answer.el.querySelector('.cmd-answer-waiting')).not.toBeNull()
-    expect(frozen!.el.querySelector('.cmd-answer-waiting')).toBeNull()
+    expect(answer.el.querySelector('.cmd-header-waiting')).not.toBeNull()
+    expect(frozen!.el.querySelector('.cmd-header-waiting')).toBeNull()
   })
 
   it('the kind rules are read from one table; a kind that declares nothing fails loudly', () => {
@@ -2813,19 +2921,23 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
   it('says it is thinking between submit and the first delta, and stops on the first delta', () => {
     const { manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
-    const waiting = h.el.querySelector('.cmd-answer-waiting')
+    const waiting = h.el.querySelector('.cmd-header-waiting')
     expect(waiting?.textContent).toBe('thinking')
     h.append('first')
-    expect(h.el.querySelector('.cmd-answer-waiting')).toBeNull()
+    expect(h.el.querySelector('.cmd-header-waiting')).toBeNull()
   })
 
   it('a run that fails before any delta stops waiting and says failed', () => {
     const { manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
-    expect(h.el.querySelector('.cmd-answer-waiting')).not.toBeNull()
+    expect(h.el.querySelector('.cmd-header-waiting')).not.toBeNull()
     h.close('failure', 'the model did not answer in time')
-    expect(h.el.querySelector('.cmd-answer-waiting')).toBeNull()
-    expect(h.el.querySelector('.cmd-header-exit')?.textContent).toBe('failed')
+    expect(h.el.querySelector('.cmd-header-waiting')).toBeNull()
+    expect(h.el.dataset.outcome).toBe('failure')
+    expect(
+      h.el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])')
+        ?.textContent,
+    ).toBe('failed')
     expect(h.el.querySelector('.cmd-answer-error')?.textContent).toBe(
       'the model did not answer in time',
     )
@@ -3048,7 +3160,7 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
 
     const menu = openBlockMenu(h.el)
     const item = Array.from(
-      menu.querySelectorAll<HTMLButtonElement>('.cmd-overflow-menu-item'),
+      menu.querySelectorAll<HTMLButtonElement>('.ui-context-menu__item'),
     ).find((b) => b.textContent === 'Copy output')!
     item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
     // The item reports the work rather than sitting there looking clicked.
@@ -3057,7 +3169,9 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     expect(item.textContent).not.toBe('Copy output')
 
     release('stored')
-    await vi.waitFor(() => expect(document.body.querySelector('.cmd-overflow-menu')).toBeNull())
+    await vi.waitFor(() =>
+      expect(document.body.querySelector('[data-testid="block-actions-menu"]')).toBeNull(),
+    )
   })
 
   it('a COMMAND block still copies what the terminal drew — unchanged', () => {
@@ -3085,12 +3199,12 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
 
     const openMenu = () => {
       h.el
-        .querySelector<HTMLElement>('.cmd-overflow-btn')!
+        .querySelector<HTMLElement>('[data-block-actions]')!
         .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-      return document.body.querySelector<HTMLElement>('.cmd-overflow-menu')!
+      return document.body.querySelector<HTMLElement>('[data-testid="block-actions-menu"]')!
     }
     const item = (menu: HTMLElement, label: string) =>
-      Array.from(menu.querySelectorAll<HTMLElement>('.cmd-overflow-menu-item')).find(
+      Array.from(menu.querySelectorAll<HTMLElement>('.ui-context-menu__item')).find(
         (b) => b.textContent === label,
       )
 
@@ -3169,16 +3283,16 @@ it('closes every body-level overflow menu when its pane is hidden', () => {
     manager.startBlock('ls', '~', 0)
     const frozen = manager.freezeBlock((y) => (y === 0 ? new BufferLine('out') : undefined), 0, 0)
     expect(frozen).not.toBeNull()
-    const button = frozen!.el.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!
+    const button = frozen!.el.querySelector<HTMLButtonElement>('[data-block-actions]')!
 
     button.click()
-    expect(document.querySelector('.cmd-overflow-menu')).not.toBeNull()
+    expect(document.querySelector('[data-testid="block-actions-menu"]')).not.toBeNull()
 
     manager.closeOverflowMenus()
 
-    expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
+    expect(document.querySelector('[data-testid="block-actions-menu"]')).toBeNull()
     button.click()
-    expect(document.querySelector('.cmd-overflow-menu')).not.toBeNull()
+    expect(document.querySelector('[data-testid="block-actions-menu"]')).not.toBeNull()
   } finally {
     manager.closeOverflowMenus()
     inner.remove()
@@ -3367,16 +3481,16 @@ describe.each(['shell', 'agent'] as const)('a %s-authored block', (author) => {
     document.body.appendChild(parent)
     const el = build(parent)
     parent.appendChild(el)
-    const btn = el.querySelector('.cmd-overflow-btn') as HTMLElement
+    const btn = el.querySelector('[data-block-actions]') as HTMLElement
     expect(btn).not.toBeNull()
     btn.click()
     const items = Array.from(
-      document.body.querySelectorAll('.cmd-overflow-menu .cmd-overflow-menu-item'),
+      document.body.querySelectorAll('[data-testid="block-actions-menu"] .ui-context-menu__item'),
     ).map((i) => i.textContent)
     expect(items).toContain('Copy command')
     expect(items).toContain('Copy output')
     expect(items).toContain('Copy all')
-    document.body.querySelector('.cmd-overflow-menu')?.remove()
+    document.body.querySelector('[data-testid="block-actions-menu"]')?.remove()
     parent.remove()
   })
 
@@ -3410,7 +3524,7 @@ describe.each(['shell', 'agent'] as const)('a %s-authored block', (author) => {
 // header is supposed to be per-kind except the WORDS (nocx-ex636).
 //
 // Two constructions were standing. The command's exit chip was built in
-// createHeader and carried `cmd-header-exit-ok`/`-fail`; the turn's was built
+// createHeader and carried its own ok/fail modifier classes; the turn's was built
 // again in the answer flow's close and carried neither. And a turn was handed
 // `durationMs = null` at build and never given one afterwards, so its group
 // held one chip where a command's holds two.
@@ -3419,7 +3533,7 @@ describe.each(['shell', 'agent'] as const)('a %s-authored block', (author) => {
 // snapshots of either: a second construction cannot agree with the first by
 // accident, and a chip that only one kind emits shows up as a difference in
 // the group.
-describe('the header’s right-hand group has one owner (nocx-hoeq3)', () => {
+describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-hoeq3)', () => {
   beforeAll(async () => {
     await shellHighlightReady
   })
@@ -3458,7 +3572,7 @@ describe('the header’s right-hand group has one owner (nocx-hoeq3)', () => {
   }
 
   /** A turn driven to its close, on a clock that makes it take `ms`. */
-  function closedTurn(ms: number, status: 'success' | 'failure' = 'success') {
+  function closedTurn(ms: number, status: 'success' | 'failure' | 'cancelled' = 'success') {
     let t = 0
     const { manager } = newManager(() => t)
     const turn = manager.addAnswerBlock('how much disk is free?', '/home/dev')
@@ -3468,121 +3582,250 @@ describe('the header’s right-hand group has one owner (nocx-hoeq3)', () => {
     return turn.el
   }
 
-  /** The right-hand group's contents, as the class list of each child in DOM
-   *  order. The class list is the whole identity — the tone, the shared chip
-   *  appearance and the identity class an e2e spec reads are all in it — so
-   *  two kinds whose groups read the same here are carrying the same chips,
-   *  built by the same code, in the same order. */
-  function rightGroup(el: HTMLElement): string[] {
-    const right = el.querySelector('.cmd-header-right')!
-    return Array.from(right.children).map((c) => c.className)
-  }
-
-  it('the class list of a command’s terminal chip and a turn’s is the same list', () => {
-    // Criterion 1. Not "both contain cmd-header-exit": the ASSERTION is
-    // equality, so a second construction anywhere — one modifier missing, one
-    // class added — fails here rather than the day somebody styles
-    // `.cmd-header-exit-ok` and only one kind moves.
-    const okCmd = settledCommand(27, 0).querySelector('.cmd-header-exit')!
-    const okTurn = closedTurn(1200, 'success').querySelector('.cmd-header-exit')!
-    expect(okTurn.className).toBe(okCmd.className)
-    expect(okCmd.className).toBe('nocx-chip nocx-chip-ok cmd-header-exit cmd-header-exit-ok')
-
-    const failCmd = settledCommand(27, 2).querySelector('.cmd-header-exit')!
-    const failTurn = closedTurn(1200, 'failure').querySelector('.cmd-header-exit')!
-    expect(failTurn.className).toBe(failCmd.className)
-    expect(failCmd.className).toBe('nocx-chip nocx-chip-fail cmd-header-exit cmd-header-exit-fail')
-  })
-
-  it('the WORDS stay the kind’s own — a turn is completed, a command is ok', () => {
-    // The other half of criterion 1, and the line nocx-ex636 drew: one chip,
-    // two vocabularies. An answer is not a command's output and must not
-    // borrow its words, so sharing the construction must not share the text.
-    expect(settledCommand(27, 0).querySelector('.cmd-header-exit')?.textContent).toBe('ok')
-    expect(settledCommand(27, 2).querySelector('.cmd-header-exit')?.textContent).toBe('exit 2')
-    expect(closedTurn(1200, 'success').querySelector('.cmd-header-exit')?.textContent).toBe(
-      'completed',
+  const status = (el: HTMLElement) =>
+    el.querySelector<HTMLElement>(
+      ':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])',
     )
-    expect(closedTurn(1200, 'failure').querySelector('.cmd-header-exit')?.textContent).toBe(
-      'failed',
+  const duration = (el: HTMLElement) =>
+    el.querySelector<HTMLElement>(
+      ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]',
     )
+
+  it('a command that succeeded shows a check and its measured duration', () => {
+    const el = settledCommand(27, 0)
+    expect(el.dataset.outcome).toBe('success')
+    expect(status(el)).toBeNull()
+    expect(el.querySelector('[aria-label="Succeeded"]')).not.toBeNull()
+    // Below a tenth of a second the figure reads `<0.1s` (spec 2026-09-15
+    // §1.7 round 3) — `0.0s` read as "took no time" or "the timer is
+    // broken" to a person watching it. The precise millisecond figure
+    // this rounds away is the Meta's `title` instead.
+    expect(duration(el)?.textContent).toBe('27ms')
+    expect(duration(el)?.title).toBe('27ms')
   })
 
-  it('each kind declares what its right group holds, in the rules table', () => {
-    // Criterion 2: the decision is beside the other per-kind rules, so a
-    // third kind declares its group or fails loudly — it never inherits the
-    // command's group by being built through the same builder.
-    expect(blockKindRules('command').headerRight.chips).toEqual(['duration', 'terminal'])
-    expect(blockKindRules('ask').headerRight.chips).toEqual(['duration', 'terminal'])
+  it('a command that failed says so in the danger tone, and the row is marked failed', () => {
+    const el = settledCommand(5, 1)
+    expect(el.dataset.outcome).toBe('failure')
+    expect(status(el)?.textContent).toBe('Exit 1')
+    expect(status(el)?.dataset.tone).toBe('danger')
   })
 
-  it('a finished turn says how long it took, in the same chip a command uses', () => {
-    // Criterion 3. A turn HAS a duration — the model took time, and that is
-    // as worth knowing as `df` taking 27ms. Same chip, same formatter.
+  it('a command the person stopped reads cancelled, dim, with no danger tint (nocx-9bpeq.19)', () => {
+    // Built with status 'cancelled' directly — BlockManager.freezeFromAttempt
+    // is what derives it from `stopRequested` (see its own tests); this
+    // isolates BLOCK_KIND_RULES.command's own reading of that status, spec
+    // 2026-09-14 §3.1/§3.3: a cancelled command is something the person did,
+    // never the danger tint a program's own failure gets.
+    const el = createCommandBlock(
+      'command',
+      1,
+      'sleep 30',
+      '~',
+      '',
+      '',
+      1200,
+      130,
+      'cancelled',
+      () => document.createElement('div'),
+      noopSelect,
+      freshStore(),
+      'shell',
+    )
+    expect(el.dataset.outcome).not.toBe('failure')
+    expect(el.dataset.outcome).toBe('cancelled')
+    expect(status(el)?.textContent).toBe('Stopped')
+    expect(status(el)?.dataset.tone).toBe('dim')
+  })
+
+  it('a turn uses its own words through the same function', () => {
+    const ok = closedTurn(1200, 'success')
+    expect(ok.dataset.outcome).toBe('success')
+    expect(status(ok)).toBeNull()
+    expect(duration(ok)?.textContent).toBe('1.2s')
+
+    const failed = closedTurn(10, 'failure')
+    expect(failed.dataset.outcome).toBe('failure')
+    expect(status(failed)?.textContent).toBe('failed')
+    expect(status(failed)?.dataset.tone).toBe('danger')
+
+    const stopped = closedTurn(10, 'cancelled')
+    expect(stopped.dataset.outcome).toBe('cancelled')
+    expect(status(stopped)?.textContent).toBe('stopped')
+    expect(status(stopped)?.dataset.tone).toBe('dim')
+  })
+
+  it('a block with no outcome of its own states none, and carries no data-outcome', () => {
+    for (const s of ['entered', 'unreconciled'] as const) {
+      const el = createCommandBlock(
+        'command',
+        1,
+        'ssh box',
+        '~',
+        '',
+        '',
+        null,
+        null,
+        s,
+        () => document.createElement('div'),
+        noopSelect,
+        freshStore(),
+        'shell',
+      )
+      expect(el.dataset.outcome).toBeUndefined()
+      expect(status(el)).toBeNull()
+      expect(el.querySelector('.ui-spinner')).toBeNull()
+    }
+  })
+
+  it('settling twice restates the group rather than growing a second copy', () => {
+    const el = settledCommand(27, 0)
+    completeRestoredLike(el, 2, 40)
+    expect(el.dataset.outcome).toBe('failure')
+    expect(el.querySelectorAll(':scope > .cmd-header .cmd-header-right > .ui-meta').length).toBe(2)
+    expect(status(el)?.textContent).toBe('Exit 2')
+  })
+
+  it('the ⋮ stays last in the group whatever settles after it', () => {
     const turn = closedTurn(1234)
-    const dur = turn.querySelector('.cmd-header-duration')!
-    expect(dur.textContent).toBe('1.2s')
-    expect(dur.className).toBe(
-      settledCommand(27, 0).querySelector('.cmd-header-duration')!.className,
+    const right = turn.querySelector(':scope > .cmd-header .cmd-header-right')!
+    expect(right.lastElementChild?.classList.contains('ui-icon-button')).toBe(true)
+  })
+
+  it('the prompt line names host and path as one element, and never an emoji (spec 2026-09-15 §2)', () => {
+    const el = createCommandBlock(
+      'command',
+      1,
+      'ls',
+      '/srv/app/current',
+      'dev@staging',
+      '',
+      3,
+      0,
+      'success',
+      () => document.createElement('div'),
+      noopSelect,
+      freshStore(),
+      'shell',
     )
-    // The same formatter, asserted at a second magnitude so an agreement at
-    // one number is not mistaken for an agreement about formatting.
-    expect(closedTurn(27).querySelector('.cmd-header-duration')?.textContent).toBe('27ms')
+    const where = el.querySelector<HTMLElement>(
+      ':scope > .cmd-header > .cmd-header-meta > .ui-prompt-context',
+    )!
+    expect(
+      [...where.querySelectorAll('.ui-prompt-context__part')].map((p) => p.textContent),
+    ).toEqual(['dev@staging', '/srv/app/current'])
+    expect(where.textContent).not.toMatch(/\p{Extended_Pictographic}/u)
   })
 
-  it('the two headers agree on their right group: same chips, same order, same ⋮ last', () => {
-    // Criterion 4, off the DOM. The right edge and the gap to the ⋮ are one
-    // CSS rule (.cmd-header-right: margin-left auto, gap 8px) applied to one
-    // element class, so what geometry actually turns on is WHAT IS IN THE
-    // GROUP — which is what this reads.
-    const cmd = settledCommand(27, 0)
-    const turn = closedTurn(1234)
-    expect(rightGroup(turn)).toEqual(rightGroup(cmd))
-    expect(rightGroup(cmd)).toEqual([
-      'nocx-chip nocx-chip-muted cmd-header-duration',
-      'nocx-chip nocx-chip-ok cmd-header-exit cmd-header-exit-ok',
-      'cmd-overflow-btn',
-    ])
-    // …and neither group is trivially equal by being empty or by hanging off
-    // a different container.
-    expect(turn.querySelector('.cmd-header-right')).not.toBeNull()
+  it('a running block shows the kit spinner and no duration figure yet', () => {
+    const el = createRunningBlock(
+      1,
+      'sleep 10',
+      '~',
+      '',
+      () => document.createElement('div'),
+      noopSelect,
+      freshStore(),
+    )
+    const spinner = el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-spinner')
+    expect(spinner?.getAttribute('data-size')).toBe('sm')
+    // Built with no ticker attached, so elapsed time never advances past
+    // the one-tenth-of-a-second floor (BlockManager._startTicker is what
+    // adds the duration once it does) — a figure that can only ever read
+    // `0.0s` would say "this took no time" rather than "not yet measured"
+    // (spec 2026-09-15 §1.7 round 3).
+    expect(duration(el)).toBeNull()
+    expect(el.dataset.outcome).toBeUndefined()
   })
 
-  it('the turn states its outcome once, on its own header, however much it did', () => {
-    // Criterion 5, as ADR-0040 leaves it. The outcome used to be a question
-    // of WHICH FRAGMENT states it — the turn was several blocks and only the
-    // last one had ended. There is one block now, so how long the turn took
-    // and how it ended land on the header that carries the question, and no
-    // child of it says anything about an outcome it does not have.
-    let t = 0
-    const { manager } = newManager(() => t)
-    const turn = manager.addAnswerBlock('how much disk is free?', '/repo')
-    turn.toolCall({ callId: 'c1', tool: 'run', effect: 'mutate-destructive', opensBlock: true })
-    manager.startBlock('df -h', '/repo', 0, 0, 'agent')
-    turn.append('41G free')
-    t = 900
-    turn.close('success')
+  // ── The group's DOM order: word, a muted separator, duration — never
+  // duration first (spec 2026-09-15 §4, nocx-9bpeq.12 round 5). Every test
+  // above checked the word's and the duration's OWN text and tone but never
+  // their order relative to each other, which is exactly how a block
+  // reading "1.2s Exit 1" shipped unnoticed.
+  const metaAndSepChildren = (right: HTMLElement): Element[] =>
+    [...right.children].filter(
+      (c) => c.classList.contains('ui-meta') || c.classList.contains('ui-meta__sep'),
+    )
 
-    const own = turn.el.querySelector(':scope > .cmd-header')!
-    expect(own.querySelector('.cmd-header-duration')?.textContent).toBe('900ms')
-    expect(own.querySelector('.cmd-header-exit')?.textContent).toBe('completed')
-    // Exactly one of each in the whole turn: the command's block is still
-    // running, so nothing else states a duration or an outcome yet.
-    expect(turn.el.querySelectorAll('.cmd-header-exit')).toHaveLength(1)
-    // And a run of prose has no header to state anything with.
-    const prose = turn.el.querySelector('.cmd-block[data-block-kind="text"]')!
-    expect(prose.querySelector('.cmd-header')).toBeNull()
+  it('a failed command reads Exit N, a separator, then the duration', () => {
+    const el = settledCommand(1200, 1)
+    const right = el.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')!
+    const kids = metaAndSepChildren(right)
+    expect(kids.map((c) => c.className)).toEqual(['ui-meta', 'ui-meta__sep', 'ui-meta'])
+    expect(kids[0].textContent).toBe('Exit 1')
+    expect((kids[0] as HTMLElement).dataset.tone).toBe('danger')
+    // Meta's own separator vocabulary — never a raw `·` typed into the
+    // surface — so it carries the same hidden-from-AT contract Meta's
+    // internal separator does.
+    expect(kids[1].getAttribute('aria-hidden')).toBe('true')
+    expect(kids[1].textContent?.trim()).toBe('·')
+    expect(kids[2].textContent).toBe('1.2s')
+    expect((kids[2] as HTMLElement).dataset.column).toBe('duration')
+  })
+
+  it('a cancelled turn reads its dim word, a separator, then the duration — the same shape a failure uses', () => {
+    const stopped = closedTurn(1500, 'cancelled')
+    const right = stopped.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')!
+    const kids = metaAndSepChildren(right)
+    expect(kids.map((c) => c.className)).toEqual(['ui-meta', 'ui-meta__sep', 'ui-meta'])
+    expect(kids[0].textContent).toBe('stopped')
+    expect((kids[0] as HTMLElement).dataset.tone).toBe('dim')
+    expect(kids[2].textContent).toBe('1.5s')
+  })
+
+  it('a successful command pairs a check with duration, without a separator', () => {
+    const el = settledCommand(27, 0)
+    const right = el.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')!
+    expect(right.querySelector('.ui-meta__sep')).toBeNull()
+    const kids = metaAndSepChildren(right)
+    expect(kids).toHaveLength(1)
+    // Below a tenth of a second: `<0.1s`, not `0.0s` (spec 2026-09-15 §1.7
+    // round 3).
+    expect(kids[0].textContent).toBe('27ms')
+  })
+
+  it('a running block reads bare "Running" until the first tenth of a second elapses', () => {
+    // Built with no ticker attached (BlockManager._startTicker owns the
+    // elapsed clock), so this is exactly the "not yet reached 0.1s" state
+    // (spec 2026-09-15 §1.7 round 3): the word alone, no separator and no
+    // figure that could only ever read `0.0s`.
+    const el = createRunningBlock(
+      1,
+      'sleep 30',
+      '~',
+      '',
+      () => document.createElement('div'),
+      noopSelect,
+      freshStore(),
+    )
+    const right = el.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')!
+    const kids = metaAndSepChildren(right)
+    expect(kids.map((c) => c.className)).toEqual(['ui-meta'])
+    expect(kids[0].textContent).toBe('Running')
+    expect((kids[0] as HTMLElement).dataset.tone).toBe('accent')
   })
 })
 
 describe('the block grant menu action', () => {
+  // `[data-block-actions]` is the ⋮'s identity alone (nocx-9bpeq.12 round
+  // 6): the running Stop control carries a separate, shared attribute
+  // (`data-block-control`) for the block-selection/focus-bounce escape
+  // hatch instead, so this plain selector is unique again.
   const menuItems = (el: HTMLElement): HTMLElement[] => {
-    el.querySelector<HTMLElement>('.cmd-overflow-btn')!.click()
-    return Array.from(document.querySelectorAll<HTMLElement>('.cmd-overflow-menu-item'))
+    el.querySelector<HTMLElement>('[data-block-actions]')!.click()
+    return Array.from(
+      document.querySelectorAll<HTMLElement>(
+        '[data-testid="block-actions-menu"] .ui-context-menu__item',
+      ),
+    )
   }
 
   afterEach(() => {
-    document.querySelectorAll('.cmd-overflow-menu').forEach((menu) => menu.remove())
+    // Escape closes the kit menu through the component itself; removing the
+    // portalled node by hand would leave its Solid root, and the document
+    // listeners it owns, alive.
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
   })
 
   it('marks running and finished blocks through one liveness-free action', () => {
@@ -3619,14 +3862,14 @@ describe('the block grant menu action', () => {
     )
     document.body.append(running, finished)
     try {
-      const runningGrant = menuItems(running).find((item) => item.dataset.action === 'grant')
+      const runningGrant = menuItems(running).find((item) => item.dataset.itemId === 'grant')
       expect(runningGrant?.textContent).toBe('Ask about this block')
       isActive.mockClear()
       runningGrant?.click()
       expect(toggleGrant).toHaveBeenCalledWith(running)
       expect(isActive).not.toHaveBeenCalled()
 
-      const finishedGrant = menuItems(finished).find((item) => item.dataset.action === 'grant')
+      const finishedGrant = menuItems(finished).find((item) => item.dataset.itemId === 'grant')
       expect(finishedGrant?.textContent).toBe('Ask about this block')
       isActive.mockClear()
       finishedGrant?.click()
@@ -3664,7 +3907,7 @@ describe('the block grant menu action', () => {
     )
     document.body.append(el)
     try {
-      const grant = menuItems(el).find((item) => item.dataset.action === 'grant')
+      const grant = menuItems(el).find((item) => item.dataset.itemId === 'grant')
       expect(grant?.textContent).toBe('Unmark')
     } finally {
       el.remove()
@@ -3701,14 +3944,14 @@ describe('the block grant menu action', () => {
     document.body.append(el)
     try {
       const unavailableItems = menuItems(el)
-      expect(unavailableItems.find((item) => item.dataset.action === 'grant')).toBeUndefined()
+      expect(unavailableItems.find((item) => item.dataset.itemId === 'grant')).toBeUndefined()
       expect(unavailableItems.map((item) => item.textContent)).toContain('Copy command')
       expect(grantsAvailable).toHaveBeenLastCalledWith()
 
-      el.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      el.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       available = true
       const availableItems = menuItems(el)
-      expect(availableItems.find((item) => item.dataset.action === 'grant')?.textContent).toBe(
+      expect(availableItems.find((item) => item.dataset.itemId === 'grant')?.textContent).toBe(
         'Unmark',
       )
     } finally {
@@ -3732,11 +3975,11 @@ describe('the block grant menu action', () => {
     )
     document.body.append(el)
     try {
-      const stopItem = menuItems(el).find((item) => item.dataset.action === 'stop')
+      const stopItem = menuItems(el).find((item) => item.dataset.itemId === 'stop')
       expect(stopItem?.textContent).toBe('Stop')
       stopItem!.click()
       expect(stop).toHaveBeenCalledTimes(1)
-      expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
+      expect(document.querySelector('[data-testid="block-actions-menu"]')).toBeNull()
     } finally {
       el.remove()
     }
@@ -3759,11 +4002,11 @@ describe('the block grant menu action', () => {
     )
     document.body.append(el)
     try {
-      const stopItem = menuItems(el).find((item) => item.dataset.action === 'stop')
+      const stopItem = menuItems(el).find((item) => item.dataset.itemId === 'stop')
       active = false
       stopItem!.click()
       expect(stop).not.toHaveBeenCalled()
-      expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
+      expect(document.querySelector('[data-testid="block-actions-menu"]')).toBeNull()
     } finally {
       el.remove()
     }
@@ -3786,7 +4029,7 @@ describe('the block grant menu action', () => {
     document.body.append(el)
     try {
       const items = menuItems(el)
-      expect(items.find((item) => item.dataset.action === 'stop')).toBeUndefined()
+      expect(items.find((item) => item.dataset.itemId === 'stop')).toBeUndefined()
       expect(isActive).toHaveBeenCalledWith(el)
     } finally {
       el.remove()
@@ -3812,7 +4055,7 @@ describe('the block grant menu action', () => {
     )
     document.body.append(el)
     try {
-      expect(menuItems(el).find((item) => item.dataset.action === 'stop')).toBeUndefined()
+      expect(menuItems(el).find((item) => item.dataset.itemId === 'stop')).toBeUndefined()
     } finally {
       el.remove()
     }
@@ -3852,7 +4095,7 @@ describe('the block grant menu action', () => {
     document.body.append(first, second)
     try {
       const menu = menuItems(first)
-      const stopItem = menu.find((item) => item.dataset.action === 'stop')
+      const stopItem = menu.find((item) => item.dataset.itemId === 'stop')
       expect(stopItem?.textContent).toBe('Stop')
       expect(actions.isActive).toHaveBeenCalledWith(first)
 
@@ -3891,8 +4134,8 @@ describe('the block grant menu action', () => {
       expect(labels).toEqual(
         expect.arrayContaining(['Copy command', 'Copy output', 'Copy all', 'Wrap lines']),
       )
-      expect(items.find((item) => item.dataset.action === 'grant')).toBeUndefined()
-      expect(items.find((item) => item.dataset.action === 'stop')).toBeUndefined()
+      expect(items.find((item) => item.dataset.itemId === 'grant')).toBeUndefined()
+      expect(items.find((item) => item.dataset.itemId === 'stop')).toBeUndefined()
     } finally {
       el.remove()
     }
@@ -3980,5 +4223,314 @@ describe('a tool call expands to what was sent and what came back (nocx-hp8p2.13
     const h = manager.addAnswerBlock('q', '/')
     h.toolCall(call())
     expect(disclosureOf(h)).toBeNull()
+  })
+})
+
+// ── The command row's sigil (spec 2026-09-15 §4, nocx-9bpeq.12) ───────────
+describe('the command row sigil', () => {
+  const c = (): HTMLElement => document.createElement('div')
+
+  it('a command block draws the sigil before the command text, as a decorative glyph', () => {
+    const el = createCommandBlock(
+      'command',
+      1,
+      'go test ./internal/session',
+      '~',
+      '',
+      '',
+      10,
+      0,
+      'success',
+      c,
+      noopSelect,
+      freshStore(),
+      'shell',
+    )
+    const row = el.querySelector<HTMLElement>(':scope > .cmd-header > .cmd-header-command')
+    expect(row).not.toBeNull()
+    const children = [...row!.children]
+    const sigil = row!.querySelector('svg')
+    const text = row!.querySelector('.cmd-header-text')
+    expect(sigil).not.toBeNull()
+    expect(sigil?.getAttribute('aria-hidden')).toBe('true')
+    expect(children.indexOf(sigil!)).toBeLessThan(children.indexOf(text!))
+  })
+
+  it('ask and tool kinds keep their row as it was — no sigil, no wrapper', () => {
+    const inner = document.createElement('div')
+    document.body.appendChild(inner)
+    const manager = new BlockManager(inner, document.createElement('div'), {
+      snapshotStore: freshStore(),
+    })
+    const h = manager.addAnswerBlock('q', '/')
+    expect(h.el.querySelector('.cmd-header-command')).toBeNull()
+    expect(h.el.querySelector('.cmd-header-sigil')).toBeNull()
+  })
+
+  it('the sigil never changes what blockCommandText reads', () => {
+    const el = createCommandBlock(
+      'command',
+      1,
+      'echo hello',
+      '~',
+      '',
+      '',
+      10,
+      0,
+      'success',
+      c,
+      noopSelect,
+      freshStore(),
+      'shell',
+    )
+    expect(blockCommandText(el)).toBe('echo hello')
+    expect(el.querySelector('.cmd-header-text')?.textContent).toBe('echo hello')
+  })
+})
+
+// ── The running block's Stop control (spec 2026-09-15 §4, nocx-9bpeq.12) ──
+describe('the running block header Stop control', () => {
+  it('is absent when no running actions were injected', () => {
+    const container = document.createElement('div')
+    const el = createRunningBlock(1, 'sleep 10', '~', '', () => container, noopSelect, freshStore())
+    expect(el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-button')).toBeNull()
+  })
+
+  it('is present, with the square icon and the word Stop, while the block is active', () => {
+    const container = document.createElement('div')
+    const stop = vi.fn()
+    const el = createRunningBlock(
+      1,
+      'sleep 10',
+      '~',
+      '',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+      { stop, isActive: () => true },
+    )
+    const right = el.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')!
+    const btn = right.querySelector<HTMLButtonElement>(':scope > .ui-button')
+    expect(btn).not.toBeNull()
+    expect(btn?.querySelector('svg')).not.toBeNull()
+    expect(btn?.textContent).toBe('Stop')
+    // A kit Button, not an IconButton: command-block-frame.css's hover/
+    // selection-only opacity rule keys on `.ui-icon-button` (the ⋮'s own
+    // identity), so this control never inherits that treatment and stays
+    // always visible.
+    expect(btn?.classList.contains('ui-icon-button')).toBe(false)
+  })
+
+  it('is present even when isActive is false AT CONSTRUCTION — the real manager assigns runningBlock only after this call returns (round 4, nocx-9bpeq.12)', () => {
+    // terminal-content.ts's real `runningActions.isActive` reads
+    // `blockManager.runningBlock`, and `BlockManager.startBlock` assigns
+    // that only AFTER `createRunningBlock` returns (scrollback/blocks.ts).
+    // So the real app's isActive is UNCONDITIONALLY false for the very
+    // block being built, right up until construction finishes — an
+    // `isActive: () => true` fixture never exercises that, and a `sleep 30`
+    // in e2e showed the button never appearing because of exactly this: the
+    // button's presence must not be gated on isActive at construction.
+    const container = document.createElement('div')
+    const stop = vi.fn()
+    let assigned = false
+    const el = createRunningBlock(
+      1,
+      'sleep 30',
+      '~',
+      '',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+      { stop, isActive: () => assigned },
+    )
+    // The moment `startBlock` would assign `this._runningBlock = rec`.
+    assigned = true
+
+    const btn = el.querySelector<HTMLButtonElement>(
+      ':scope > .cmd-header .cmd-header-right > .ui-button',
+    )
+    expect(btn).not.toBeNull()
+    btn!.click()
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('calls stop() only while the block is still active, and never selects the block', () => {
+    const container = document.createElement('div')
+    const stop = vi.fn()
+    let active = true
+    const el = createRunningBlock(
+      1,
+      'sleep 10',
+      '~',
+      '',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+      { stop, isActive: () => active },
+    )
+    document.body.appendChild(el)
+    const btn = el.querySelector<HTMLButtonElement>(
+      ':scope > .cmd-header .cmd-header-right > .ui-button',
+    )!
+
+    // The same escape hatch the ⋮ button uses (blocks.ts wireBlockSelection,
+    // terminal-content.ts's focus-bounce exception) — reused, not
+    // duplicated — through the shared `data-block-control` attribute, never
+    // `data-block-actions`, which is the ⋮'s own identity alone
+    // (nocx-9bpeq.12 round 6).
+    expect(btn.getAttribute('data-block-control')).toBe('')
+    expect(btn.hasAttribute('data-block-actions')).toBe(false)
+    btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+    expect(el.classList.contains('cmd-block-selected')).toBe(false)
+
+    btn.click()
+    expect(stop).toHaveBeenCalledTimes(1)
+
+    active = false
+    btn.click()
+    expect(stop).toHaveBeenCalledTimes(1)
+    el.remove()
+  })
+
+  it('is removed once the block settles, whatever settles it (round 4, nocx-9bpeq.12)', () => {
+    const el = createRunningBlock(
+      1,
+      'sleep 30',
+      '~',
+      '',
+      () => document.createElement('div'),
+      noopSelect,
+      freshStore(),
+      'shell',
+      { stop: vi.fn(), isActive: () => true },
+    )
+    const right = el.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')!
+    expect(right.querySelector('.ui-button')).not.toBeNull()
+
+    settleBlockOutcome(el, 'command', 1200, { status: 'success', exitCode: 0 })
+
+    expect(right.querySelector('.ui-button')).toBeNull()
+  })
+
+  it('is the ONLY element carrying data-block-control besides the ⋮, and never carries data-block-actions (round 6, nocx-9bpeq.12)', () => {
+    // Round 4 gave Stop the ⋮'s OWN identity (`data-block-actions`), which
+    // made a bare `querySelector('[data-block-actions]')` — how the rest of
+    // the repo (a dozen e2e specs, restored-block.test.ts,
+    // turn-children.test.ts, terminal-content.ts's focus-bounce check) names
+    // "the block's ⋮" — return Stop instead, since it is appended first.
+    // Fixed at the source: `data-block-actions` names the ⋮ alone again;
+    // Stop and the ⋮ share a SEPARATE attribute, `data-block-control`, for
+    // the one thing they actually have in common (leave selection and
+    // focus-bounce alone).
+    const el = createRunningBlock(
+      1,
+      'sleep 30',
+      '~',
+      '',
+      () => document.createElement('div'),
+      noopSelect,
+      freshStore(),
+      'shell',
+      { stop: vi.fn(), isActive: () => true },
+    )
+    document.body.appendChild(el)
+
+    const withActions = el.querySelectorAll('[data-block-actions]')
+    expect(withActions).toHaveLength(1)
+    expect((withActions[0] as HTMLElement).classList.contains('ui-icon-button')).toBe(true)
+    expect((withActions[0] as HTMLElement).getAttribute('aria-label')).toBe('Block actions')
+
+    const withControl = el.querySelectorAll('[data-block-control]')
+    expect(withControl).toHaveLength(2)
+    expect(
+      [...withControl].every(
+        (c) =>
+          (c as HTMLElement).classList.contains('ui-icon-button') ||
+          (c as HTMLElement).classList.contains('ui-button'),
+      ),
+    ).toBe(true)
+
+    // Clicking Stop stays inert to selection (blocks.ts's own mechanism,
+    // `wireBlockSelection`'s `mine()`) — and carries the exact attribute the
+    // pane's focus-bounce listener (terminal-content.ts) keys on, which is
+    // as far as this file can assert that mechanism without terminal-
+    // content.ts's own owner.
+    const stopBtn = el.querySelector<HTMLButtonElement>(
+      ':scope > .cmd-header .cmd-header-right > .ui-button',
+    )!
+    expect(stopBtn.getAttribute('data-block-control')).toBe('')
+    stopBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    stopBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+    expect(el.classList.contains('cmd-block-selected')).toBe(false)
+
+    el.remove()
+  })
+})
+
+// ── setBlockWhere — the prompt line restated in place (spec 2026-09-15 §3
+// seam, nocx-9bpeq.12) ─────────────────────────────────────────────────────
+describe('setBlockWhere', () => {
+  const c = (): HTMLElement => document.createElement('div')
+
+  it('re-renders the prompt line with a home and a branch, on the SAME element', () => {
+    const el = createCommandBlock(
+      'command',
+      1,
+      'git status',
+      '/home/dev/repos/nocx',
+      '',
+      '',
+      10,
+      0,
+      'success',
+      c,
+      noopSelect,
+      freshStore(),
+      'shell',
+    )
+    const before = el.querySelector('.ui-prompt-context')
+    expect(before?.textContent).toBe('/home/dev/repos/nocx')
+
+    setBlockWhere(el, { home: '/home/dev', branch: 'main' })
+
+    const after = el.querySelector('.ui-prompt-context')
+    expect(after).toBe(before) // restated in place, not replaced
+    expect(after?.textContent).toBe('~/repos/nocx')
+    expect(after?.querySelector('[data-part="path"]')?.textContent).toBe('~/repos/nocx')
+    // A finished block keeps its branch in the prompt line's title, not
+    // inline: the history reads path-only, as the reference screen does.
+    expect(after?.getAttribute('title')).toBe('~/repos/nocx · main')
+  })
+
+  it('keeps the location it was built with when restating for a home', () => {
+    const el = createCommandBlock(
+      'command',
+      1,
+      'deploy',
+      '/srv/www',
+      'user@server',
+      '',
+      10,
+      0,
+      'success',
+      c,
+      noopSelect,
+      freshStore(),
+      'shell',
+    )
+    setBlockWhere(el, { branch: 'release' })
+    const where = el.querySelector('.ui-prompt-context')!
+    expect(where.querySelector('[data-part="host"]')?.textContent).toBe('user@server')
+    expect(where.querySelector('[data-part="branch"]')).toBeNull()
+  })
+
+  it('does nothing to a block with no prompt line to restate', () => {
+    const el = document.createElement('div')
+    el.className = 'cmd-block'
+    expect(() => setBlockWhere(el, { branch: 'main' })).not.toThrow()
   })
 })

@@ -177,7 +177,9 @@ async function askFromPrompt(page: Page, question: string): Promise<void> {
  */
 async function answerFinished(page: Page, question: string): Promise<void> {
   const block = page.locator('.cmd-block').filter({ hasText: question })
-  await expect(block.locator('.cmd-header-exit')).toHaveText('completed', { timeout: 30_000 })
+  // Success is silent (spec 2026-09-14 §3.1): the outcome attribute is the
+  // observable, the word `completed` never reaches the DOM.
+  await expect(block).toHaveAttribute('data-outcome', 'success', { timeout: 30_000 })
 }
 
 /**

@@ -81,7 +81,10 @@ export function formatRelativeTime(at: number, now: number): string {
   return `${Math.round(age / DAY)} d ago`
 }
 
-/** The exact moment, in the reader's own locale.
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+const two = (n: number): string => String(n).padStart(2, '0')
+
+/** The exact moment, in English, on a 24-hour clock, in the reader's time zone.
  *
  *  Two callers, and they want it for opposite reasons. An operation row wants
  *  the hover detail behind a relative label — there, this is never the label
@@ -92,8 +95,15 @@ export function formatRelativeTime(at: number, now: number): string {
  *
  *  So the rule is not "absolute is for hovers" but "relative for what just
  *  happened, absolute for what is on file", and this function is the one
- *  owner of the absolute form either way. */
+ *  owner of the absolute form either way.
+ *
+ *  Built by hand, not through Intl: the UI is English, and the engine's
+ *  default locale is the WebView's — which is how "пн, 14 сент. 21:04:04"
+ *  reached an English screen (spec 2026-09-14 §5.4). Even with an explicit
+ *  'en-GB', ICU versions disagree on the month ("Sep" vs "Sept"), and the two
+ *  engines this ships on carry different ICUs. */
 export function formatTimestamp(at: number): string {
   if (!Number.isFinite(at)) return ''
-  return new Date(at).toLocaleString()
+  const d = new Date(at)
+  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}, ${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`
 }

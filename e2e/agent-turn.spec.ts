@@ -262,11 +262,10 @@ function turnBlock(page: Page, question: string) {
 }
 
 async function completed(page: Page, question: string): Promise<void> {
-  // The turn's OWN chip — `:scope > .cmd-header`, never the run child's
-  // `ok` chip nested inside the turn (both are `.cmd-header-exit`).
-  await expect(
-    turnBlock(page, question).locator(':scope > .cmd-header .cmd-header-exit'),
-  ).toHaveText('completed', {
+  // The turn's OWN outcome attribute, on the turn's own `.cmd-block` — never
+  // the run child's, which is a descendant and carries its own. Success is
+  // silent (spec 2026-09-14 §3.1), so this is the observable left to wait on.
+  await expect(turnBlock(page, question)).toHaveAttribute('data-outcome', 'success', {
     timeout: 30_000,
   })
 }
@@ -377,14 +376,14 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
     expect(liveRows[4]).toBe(`text:${PROSE_AFTER}`)
 
     // ── 2. The `run` child is a REAL command block: its own header, its
-    //       real output, its exit status (echo exits 0 → ‘ok’), its agent
-    //       badge.
+    //       real output, its exit status (echo exits 0 → silent success),
+    //       its agent badge.
     const children = turnBlock(page, QUESTION).locator(':scope > .cmd-children > .cmd-block')
     const runBlock = children.nth(1)
     await expect(runBlock).toHaveAttribute('data-block-kind', 'command')
     await expect(runBlock.locator('.cmd-header-text')).toContainText(RUN_CMD)
     await expect(runBlock.locator('.cmd-output')).toContainText(RUN_MARKER)
-    await expect(runBlock.locator('.cmd-header-exit')).toHaveText('ok')
+    await expect(runBlock).toHaveAttribute('data-outcome', 'success')
     await expect(runBlock.locator('.ui-badge[data-author="agent"]')).toBeVisible()
 
     // ── 3. The two tool calls read differently — the run's block says what

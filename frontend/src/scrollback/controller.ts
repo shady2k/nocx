@@ -421,6 +421,19 @@ export class ScrollbackController {
     return (Number.isFinite(top) ? top : 0) + (Number.isFinite(bottom) ? bottom : 0)
   }
 
+  /** The inline inset the live region wears as a ROW of the ledger
+   *  (nocx-9bpeq.8): the pane gutter moved from `.pane` into every row so a
+   *  row can paint to the edge. The grid is drawn inside that inset, so the fit
+   *  must not count it — read off the element, like `_bodyPaddingPx`, so the
+   *  stylesheet stays the one place the number lives. Zero wherever there is no
+   *  layout to read (jsdom without inline styles). */
+  get liveInlineInsetPx(): number {
+    const cs = getComputedStyle(this.xtermLiveContainer)
+    const left = parseFloat(cs.paddingLeft)
+    const right = parseFloat(cs.paddingRight)
+    return (Number.isFinite(left) ? left : 0) + (Number.isFinite(right) ? right : 0)
+  }
+
   /**
    * The vertical offset, in CSS pixels, that moves the live region's first
    * SHOWN row to the running block's outputStart (nocx-w1n4).
@@ -590,10 +603,12 @@ export class ScrollbackController {
    *  pane while it is up, a markerless session enters `unstructured`
    *  underneath it, and dismissing it gave the pixels back to the SCROLLER and
    *  to the grid fitted against it, but not to the box between them.
-   *  `.scrollback-inner` hangs from the scroller's bottom edge, so the
-   *  difference showed up as a blank strip above the prompt, and the rows past
-   *  the box were clipped by its overflow — `top` drawing 34 of the 40 rows it
-   *  had been given. A window resize is the same defect with no card in it. */
+   *  `.scrollback-inner` was bottom-aligned then (`margin-top: auto`,
+   *  superseded by decision 2026-09-15-terminal-screen-mockup-decision.md
+   *  §1 item 1 — it is top-aligned now), so the difference showed up as a
+   *  blank strip above the prompt, and the rows past the box were clipped
+   *  by its overflow — `top` drawing 34 of the 40 rows it had been given.
+   *  A window resize is the same defect with no card in it. */
   private _fillPane(): void {
     const max = this.scrollbackArea.clientHeight
     if (max > 0) this.xtermLiveContainer.style.height = `${max}px`
@@ -732,10 +747,14 @@ export class ScrollbackController {
       const last = target
       if (!last || !this.scrollbackInner.contains(last)) return
       // ONLY FOR A BLOCK THAT DOES NOT FIT. A block that fits is already
-      // whole on screen — the stack hangs from the bottom edge and we are
-      // following it — so there is nothing to bring into view, and asking
-      // anyway would put a second owner on the scroll position beside the
-      // settle that was still unwinding (nocx-i4h04.2:
+      // whole on screen whenever we are following: `scrollToBottom` has put
+      // the scroller at its live end, and a block no taller than the
+      // viewport is entirely inside that window whether the stack above it
+      // is short (top-aligned, decision §1 item 1 — nothing above it moves
+      // the scroll at all) or long enough to have pushed scrollTop down to
+      // reach here. Either way there is nothing to bring into view, and
+      // asking anyway would put a second owner on the scroll position
+      // beside the settle that was still unwinding (nocx-i4h04.2:
       // `scrollIntoView` reads the transformed box, and in the container it
       // scrolled a row it then had to give back).
       if (last.getBoundingClientRect().height <= this.scrollbackArea.clientHeight) return
@@ -799,11 +818,20 @@ export class ScrollbackController {
    * MOVE THE PANE, DO NOT JUMP IT.
    *
    * Every structural change to a command's block — it opens, it freezes —
-   * changes the pane's height, and the stack of blocks hangs from the bottom
-   * edge of the scroller (`.scrollback-inner` has `margin-top: auto`), so all
-   * of it moves at once. Two of those in thirty milliseconds is what the
-   * owner reported as the pane "not settling": the eye reads a sequence of
-   * instant displacements as a twitch, whatever their direction.
+   * changes the stack's total content height, and while the person is
+   * FOLLOWING the live end the scroller's `scrollTop` moves to match
+   * (`_scrollToBottom`), so the whole stack's position in the viewport
+   * shifts at once. Two of those in thirty milliseconds is what the owner
+   * reported as the pane "not settling": the eye reads a sequence of instant
+   * displacements as a twitch, whatever their direction. `.scrollback-inner`
+   * is top-aligned now (decision 2026-09-15-terminal-screen-mockup-decision.
+   * md §1 item 1 — it carried `margin-top: auto` before, and the whole stack
+   * hung from the scroller's bottom edge), which removes exactly the case
+   * this glide otherwise has nothing to compensate: a transcript that still
+   * FITS the scroller never changes `scrollTop` at all, so `dy` below comes
+   * out at (or under) zero and no settle plays — the FLIP mechanism itself
+   * is unchanged and still owns the case that does move: a transcript long
+   * enough that opening or freezing a block moves the live end's scrollTop.
    *
    * This is FLIP, and the F and the I are why it is not the animation that
    * was tried and removed. The DOM change is applied WHOLE and at once; then
@@ -839,8 +867,14 @@ export class ScrollbackController {
    * The editor's box is the case that opened it: the composer leaves the
    * layout at submit — it has to, because the keyboard goes to the program
    * and nocx may not sniff the stream to find out whether the program wants
-   * it (ADR-0004) — and the scrollback hangs from the scroller's bottom edge,
-   * so its 77px leaves as a jump. Reserving the box instead was the older
+   * it (ADR-0004) — and `.scrollback-area` grows by the composer's 77px in
+   * response (it is the flex sibling that absorbs the freed space). A short
+   * transcript that still fits notices nothing: `.scrollback-inner` is
+   * top-aligned (decision §1 item 1) and its own position never depended on
+   * where the composer's box ended. A transcript that OVERFLOWS does move —
+   * the taller scroller needs less `scrollTop` to reach the same live end —
+   * and that is the 77px this glide still exists to play back rather than
+   * let land as a jump. Reserving the composer's box instead was the older
    * answer and cost an inline TUI four rows of pane (nocx-i4h04). The
    * displacement is not the defect; an UNGLIDED displacement is.
    */

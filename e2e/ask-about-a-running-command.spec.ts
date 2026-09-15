@@ -256,7 +256,9 @@ function answerBlock(page: Page, question: string) {
 }
 
 async function answerFinished(page: Page, question: string): Promise<void> {
-  await expect(answerBlock(page, question).locator('.cmd-header-exit')).toHaveText('completed', {
+  // Success is silent (spec 2026-09-14 §3.1): the outcome attribute is the
+  // observable, the word `completed` never reaches the DOM.
+  await expect(answerBlock(page, question)).toHaveAttribute('data-outcome', 'success', {
     timeout: 30_000,
   })
 }
@@ -441,7 +443,7 @@ test.describe('asking about a command that is still running (nocx-92gfl)', () =>
     //    ordinary session.signal intent; the answer remains streaming and no
     //    agent.cancel frame exists. Focused grid delivery is already the
     //    xterm/raw path and is covered separately.
-    await turn.locator(':scope > .cmd-header .cmd-overflow-btn').focus()
+    await turn.locator(':scope > .cmd-header [data-block-actions]').focus()
     await page.keyboard.press('Control+C')
     await expect
       .poll(async () => (await recorded(page)).signals)
@@ -456,11 +458,13 @@ test.describe('asking about a command that is still running (nocx-92gfl)', () =>
     //    command is still running.
     await page.keyboard.press('Escape')
     await expect.poll(async () => (await recorded(page)).cancels.length).toBe(1)
-    await expect(turn.locator(':scope > .cmd-header .cmd-header-exit')).toHaveText('stopped', {
+    await expect(
+      turn.locator(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
+    ).toHaveText('stopped', {
       timeout: 30_000,
     })
     await expect(body).toContainText(MARKER)
-    await expect(turn.locator(':scope > .cmd-header .cmd-header-exit')).not.toHaveText('failed')
+    await expect(turn).not.toHaveAttribute('data-outcome', 'failure')
     await expect(page.locator(INPUT)).toBeHidden({ timeout: 10_000 })
     await expect(page.locator('.pane.active .nocx-freeze-frame')).toHaveCount(0)
     await expect(page.locator(RUNNING_BLOCK)).toHaveCount(1)

@@ -61,8 +61,12 @@ describe('createSecretChipDamaged (the emitter)', () => {
     expect(damaged.dataset.tone).not.toBe(intact.dataset.tone)
     // …and so does the glyph and the text, because colour alone is not a
     // difference a person who cannot see it can read (WCAG 1.4.1).
-    const glyph = (el: HTMLElement) => el.querySelector('.ui-secret-chip__lock')?.textContent
+    const glyph = (el: HTMLElement) =>
+      el.querySelector<HTMLElement>('.ui-secret-chip__lock')?.dataset.glyph
+    expect(glyph(intact)).toBe('lock')
+    expect(glyph(damaged)).toBe('warning')
     expect(glyph(damaged)).not.toBe(glyph(intact))
+    expect(damaged.querySelector('.ui-secret-chip__lock svg')).not.toBeNull()
     expect(damaged.textContent).not.toBe(intact.textContent)
     expect(damaged.querySelector('.ui-secret-chip__damage')).not.toBeNull()
     expect(intact.querySelector('.ui-secret-chip__damage')).toBeNull()

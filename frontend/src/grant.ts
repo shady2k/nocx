@@ -1,5 +1,8 @@
 import { grantRows, type GrantBlock } from './ask-entry'
 import { FloatingPanel, type FloatingPanelRow } from './ui/floating-panel'
+import { createIconButton } from './ui/icon-button-element'
+import { createButton } from './ui/button-element'
+import { CloseIcon, iconElement } from './ui/icons'
 
 export type { GrantBlock }
 
@@ -32,12 +35,16 @@ export class GrantController {
   constructor(options: GrantControllerOptions = {}) {
     this.onChange = options.onChange
     this.ownsChip = options.chip === undefined
-    this.chip = options.chip ?? document.createElement('button')
-    if (this.ownsChip) {
-      this.chip.type = 'button'
-      this.chip.className = 'nocx-chip nocx-editor-grant'
-      this.chip.addEventListener('click', () => this.toggle())
-    }
+    this.chip =
+      options.chip ??
+      createButton({
+        label: '',
+        variant: 'ghost',
+        size: 'sm',
+        truncate: true,
+        onClick: () => this.toggle(),
+      })
+    if (this.ownsChip) this.chip.dataset.control = 'grant'
     this.panel = new FloatingPanel({
       variant: 'grant',
       role: 'listbox',
@@ -136,9 +143,9 @@ export class GrantController {
     const automatic = this.automaticBlock === null ? '' : ' + screen'
     const spoken = this.automaticBlock === null ? '' : ' · frozen screen attached automatically'
     this.chip.textContent = `marked for the question · ${count}${automatic}`
-    // The chip ellipsises when the pane is narrow (style.css), so the title
-    // carries the whole line rather than a label about it — nothing may live
-    // only in the ellipsis.
+    // The chip ellipsises within its bounded width (Button's `data-truncate`,
+    // composer.css), so the title carries the whole line rather than a label
+    // about it — nothing may live only in the ellipsis.
     this.chip.title =
       count === 0 && this.automaticBlock === null
         ? 'Mark blocks to include them in a question'
@@ -157,41 +164,43 @@ export class GrantController {
     }))
     const footer = document.createElement('div')
     footer.className = 'ui-floating-panel__footer'
-    const dismissAll = document.createElement('button')
-    dismissAll.type = 'button'
-    dismissAll.className = 'ui-context-menu__item'
-    dismissAll.dataset.action = 'dismiss-all-grants'
-    dismissAll.textContent = 'Dismiss all'
-    dismissAll.addEventListener('click', (event) => {
-      event.stopPropagation()
-      this.blocks = []
-      this.repaintBlocks()
-      this.updateChip()
-      this.onChange?.(this.blocks)
-      this.panel.hide()
+    const dismissAll = createButton({
+      label: 'Dismiss all',
+      variant: 'ghost',
+      size: 'sm',
+      onClick: (event) => {
+        event.stopPropagation()
+        this.blocks = []
+        this.repaintBlocks()
+        this.updateChip()
+        this.onChange?.(this.blocks)
+        this.panel.hide()
+      },
     })
+    dismissAll.dataset.action = 'dismiss-all-grants'
     footer.appendChild(dismissAll)
     this.panel.show({ rows, selectedIndex: -1, after: [footer] })
   }
 
   private dismissButton(itemId: string): HTMLButtonElement {
-    const button = document.createElement('button')
-    button.type = 'button'
-    button.className = 'ui-context-menu__item'
-    button.dataset.action = 'dismiss-grant'
-    button.dataset.itemId = itemId
-    button.setAttribute('aria-label', 'Dismiss this mark')
-    button.textContent = '×'
-    button.addEventListener('mousedown', (event) => event.stopPropagation())
-    button.addEventListener('click', (event) => {
-      event.stopPropagation()
-      this.blocks = this.blocks.filter((grant) => grant.itemId !== itemId)
-      this.repaintBlocks()
-      this.updateChip()
-      this.onChange?.(this.blocks)
-      if (this.blocks.length === 0 && this.automaticBlock === null) this.panel.hide()
-      else this.renderPanel()
+    // The kit's icon button, not a context-menu row class borrowed for a lone ×:
+    // the row's identity belongs to ContextMenu, and a glyph is not an icon.
+    const button = createIconButton({
+      size: 'xs',
+      ariaLabel: 'Dismiss this mark',
+      icon: () => iconElement(CloseIcon),
+      attrs: { 'data-action': 'dismiss-grant', 'data-item-id': itemId },
+      onClick: (event) => {
+        event.stopPropagation()
+        this.blocks = this.blocks.filter((grant) => grant.itemId !== itemId)
+        this.repaintBlocks()
+        this.updateChip()
+        this.onChange?.(this.blocks)
+        if (this.blocks.length === 0 && this.automaticBlock === null) this.panel.hide()
+        else this.renderPanel()
+      },
     })
+    button.addEventListener('mousedown', (event) => event.stopPropagation())
     return button
   }
 

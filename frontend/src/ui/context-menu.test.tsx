@@ -201,4 +201,105 @@ describe('ContextMenu', () => {
     fireEvent.keyDown(document.body, { key: 'Escape' })
     expect(close).not.toHaveBeenCalled()
   })
+
+  it('stamps each item with its id, so a caller can address a row by what it does', () => {
+    render(() => <ContextMenu open x={10} y={20} items={ITEMS} onClose={() => undefined} />)
+    expect(menuItems().map((i) => i.dataset.itemId)).toEqual(['copy', 'reveal'])
+  })
+
+  it("align='end' hangs the menu from x as its RIGHT edge, through the shared clamp", () => {
+    const rects = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
+      () =>
+        ({
+          x: 0,
+          y: 0,
+          top: 0,
+          left: 0,
+          right: 160,
+          bottom: 80,
+          width: 160,
+          height: 80,
+        }) as DOMRect,
+    )
+    try {
+      render(() => (
+        <ContextMenu open align="end" x={600} y={100} items={ITEMS} onClose={() => undefined} />
+      ))
+      const el = menu()!
+      const expected = clampMenuPosition(
+        { x: 600 - 160, y: 100 },
+        { width: 160, height: 80 },
+        { width: window.innerWidth, height: window.innerHeight },
+      )
+      expect({
+        left: Number.parseFloat(el.style.left),
+        top: Number.parseFloat(el.style.top),
+      }).toEqual(expected)
+    } finally {
+      rects.mockRestore()
+    }
+  })
+
+  it('a pointerdown on the anchor is not outside — the opener toggles, it does not reopen', () => {
+    const close = vi.fn()
+    const anchor = document.createElement('button')
+    document.body.append(anchor)
+    render(() => <ContextMenu open anchor={anchor} x={10} y={20} items={ITEMS} onClose={close} />)
+    fireEvent.pointerDown(anchor)
+    expect(close).not.toHaveBeenCalled()
+    fireEvent.pointerDown(document.body)
+    expect(close).toHaveBeenCalledTimes(1)
+    anchor.remove()
+  })
+
+  it('an item with busyLabel reports the work in place and closes when it settles', async () => {
+    const close = vi.fn()
+    let release: () => void = () => {}
+    const work = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const onSelect = vi.fn(() => work)
+    render(() => (
+      <ContextMenu
+        open
+        x={10}
+        y={20}
+        items={items({ copy: { id: 'copy', label: 'Copy path', busyLabel: 'Copying…', onSelect } })}
+        onClose={close}
+      />
+    ))
+    fireEvent.click(menuItems()[0])
+    expect(onSelect).toHaveBeenCalledTimes(1)
+    const busy = menuItems()[0]
+    expect(busy.disabled).toBe(true)
+    expect(busy.dataset.busy).toBe('')
+    expect(busy.textContent).toBe('Copying…')
+    expect(close).not.toHaveBeenCalled()
+
+    release()
+    await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(1))
+  })
+
+  it('an item without busyLabel keeps the order the focus fix needs: close first, then act', () => {
+    const order: string[] = []
+    render(() => (
+      <ContextMenu
+        open
+        x={10}
+        y={20}
+        items={items({
+          copy: {
+            id: 'copy',
+            label: 'Copy path',
+            onSelect: () => {
+              order.push('select')
+            },
+          },
+        })}
+        onClose={() => order.push('close')}
+      />
+    ))
+    fireEvent.click(menuItems()[0])
+    expect(order).toEqual(['close', 'select'])
+  })
 })

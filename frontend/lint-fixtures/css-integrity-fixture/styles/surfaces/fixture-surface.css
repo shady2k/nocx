@@ -85,3 +85,10 @@
 .fixture-font-inherit {
   font: inherit;
 }
+
+/* TIER A for a VANILLA component — reported. `fixture-vanilla` is stamped by
+   ui/fixture-vanilla.ts with `className =`, so it is a kit identity by the same
+   derivation, and colour is appearance (nocx-9bpeq.4). */
+.fixture-host > .fixture-vanilla {
+  color: red;
+}

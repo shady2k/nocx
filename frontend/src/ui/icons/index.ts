@@ -42,3 +42,8 @@ export { default as PinIcon } from './PinIcon'
 export { default as LayersIcon } from './LayersIcon'
 export { default as BellIcon } from './BellIcon'
 export { default as StickyNoteIcon } from './StickyNoteIcon'
+export { default as ChevronRightIcon } from './ChevronRightIcon'
+export { default as GitBranchIcon } from './GitBranchIcon'
+export { iconElement } from './icon-element'
+
+export { default as CheckIcon } from './CheckIcon'

@@ -70,7 +70,7 @@
   font: inherit;
   text-align: left;
   cursor: pointer;
-  border-radius: var(--border-radius-sm, 4px);
+  border-radius: var(--control-radius-sm);
 }
 
 .ui-record-row__open:focus-visible {

@@ -46,11 +46,11 @@ test('a pet arrives and stands on a finished command block', async ({ page }) =>
     .not.toContain('fall')
 
   // Its feet are on something the terminal drew, not floating in the middle
-  // of the pane. Every ledge is the top edge of a block or of a chip the
+  // of the pane. Every ledge is the top edge of a block or of the meta a
   // block wears.
   const feet = await page.locator(SPRITE).evaluate((el) => el.getBoundingClientRect().bottom)
   const edges = await page
-    .locator(`${BLOCK}, .pane.active .nocx-chip, .pane.active .scrollback-area`)
+    .locator(`${BLOCK}, .pane.active .cmd-block .ui-meta, .pane.active .scrollback-area`)
     .evaluateAll((els) => els.map((e) => e.getBoundingClientRect()).map((r) => [r.top, r.bottom]))
   const standsOnSomething = edges.some(
     ([top, bottom]) => Math.abs(feet - top) < 2 || Math.abs(feet - bottom) < 2,

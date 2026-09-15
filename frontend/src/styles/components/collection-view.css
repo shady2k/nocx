@@ -47,7 +47,7 @@
   gap: var(--space-3);
   padding: var(--space-2) var(--space-6);
   cursor: default;
-  border-radius: var(--border-radius-sm, 4px);
+  border-radius: var(--control-radius-sm);
 }
 
 /* An activatable row advertises that clicking its body does something. Hover

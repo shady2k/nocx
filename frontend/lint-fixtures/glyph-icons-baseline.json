@@ -1,0 +1,9 @@
+{
+  "//": [
+    "DO NOT EDIT MANUALLY except to write a reason. Regenerate with `npm run baseline:glyph-icons-update`.",
+    "",
+    "Every entry is a character standing in for an icon as element text (nocx-9bpeq.5).",
+    "The baseline may only shrink. Its normal state is empty."
+  ],
+  "violations": []
+}

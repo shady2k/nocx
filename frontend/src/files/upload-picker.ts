@@ -37,6 +37,7 @@ export interface PickDeps {
  *  person cancelled. */
 function pickInBrowser(doc: Document): Promise<UploadSource[]> {
   return new Promise((resolve) => {
+    // eslint-disable-next-line nocx/no-raw-controls -- not a control on screen: the hidden file input is the only way a browser raises its native picker, and it is removed when the picker settles.
     const input = doc.createElement('input')
     input.type = 'file'
     input.multiple = true

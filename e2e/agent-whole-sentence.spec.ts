@@ -46,15 +46,16 @@
  *                   command blocks that preceded it, and it still holds its
  *                   five children in seat order.
  *   6  SAYS       — the ask kind's cancelled word ("stopped") on the turn's OWN
- *      STOPPED      header chip. The turn contains a shell command block with
- *                   its own `.cmd-header-exit` reading "ok", so the `:scope >`
- *                   scoping is load-bearing and is asserted to be: reading the
- *                   chip unscoped inside this turn is ambiguous by
- *                   construction. (assistant-intake once shipped three cases
- *                   waiting on `.cmd-header-exit` where the block had none, so
- *                   all three passed whether or not the feature worked —
- *                   44b0dfc9. A chip assertion that cannot tell you WHICH chip
- *                   it read is the same defect wearing a different hat.)
+ *      STOPPED      status word. The turn contains a shell command block that
+ *                   settled successfully, which states no word of its own
+ *                   (spec 2026-09-14 §3.1), so the `:scope >` scoping is
+ *                   asserted rather than assumed even though today it finds
+ *                   the only word there is. (assistant-intake once shipped
+ *                   three cases waiting on a status chip where the block
+ *                   had none, so all three passed whether or not the feature
+ *                   worked — 44b0dfc9. A read that cannot tell you WHICH
+ *                   element it found is the same defect wearing a different
+ *                   hat.)
  *
  * THE TURN THIS DRIVES — three model rounds, the interleave agent-turn.spec.ts
  * proved (the run continues only while a response ends in a tool proposal, so a
@@ -447,9 +448,13 @@ test.describe('one person, one run, the whole assistant sentence (nocx-hp8p2.2)'
       'PROMISE 3 (a tool is announced and run): the command block does not say the assistant ran it',
     ).toBeVisible()
     await expect(
-      runChild.locator('.cmd-header-exit'),
+      runChild,
       'PROMISE 3 (a tool is announced and run): the command block has no exit status of its own',
-    ).toHaveText('ok', { timeout: 30_000 })
+    ).toHaveAttribute('data-outcome', 'success', { timeout: 30_000 })
+    await expect(
+      runChild.locator(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
+      'PROMISE 3 (a tool is announced and run): a successful command should say nothing about how it went',
+    ).toHaveCount(0)
 
     // Nothing above needed a person's approval, and that absence is asserted
     // only now — after the calls have demonstrably executed — so it is a fact
@@ -485,7 +490,7 @@ test.describe('one person, one run, the whole assistant sentence (nocx-hp8p2.2)'
     // ══ PROMISE 4 — the person stops it ═══════════════════════════════════
     // Through the real gesture: the TURN's own ⋮ (`:scope > .cmd-header`, never
     // the command child's, which carries an identical button), then Stop.
-    const overflow = turn.locator(':scope > .cmd-header .cmd-overflow-btn')
+    const overflow = turn.locator(':scope > .cmd-header [data-block-actions]')
     await expect(
       overflow,
       'PROMISE 4 (the person stops it): the turn has no ⋮ of its own to stop it from',
@@ -493,7 +498,7 @@ test.describe('one person, one run, the whole assistant sentence (nocx-hp8p2.2)'
     await overflow.click()
     // The menu renders at document.body level so it floats above every scroll
     // container — it is deliberately NOT a descendant of the block.
-    const stop = page.locator('.cmd-overflow-menu-item[data-action="stop"]')
+    const stop = page.locator('.ui-context-menu__item[data-item-id="stop"]')
     await expect(
       stop,
       'PROMISE 4 (the person stops it): a live turn offers no Stop in its menu',
@@ -505,25 +510,30 @@ test.describe('one person, one run, the whole assistant sentence (nocx-hp8p2.2)'
     await stop.click()
 
     // ══ PROMISE 6 — the header says stopped ═══════════════════════════════
-    // The ask kind's cancelled vocabulary, on the TURN's own chip.
+    // The ask kind's cancelled vocabulary, on the TURN's own status word.
     await expect(
-      turn.locator(':scope > .cmd-header .cmd-header-exit'),
+      turn.locator(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
       'PROMISE 6 (the header says stopped): the turn did not settle on the stopped word',
     ).toHaveText('stopped', { timeout: 60_000 })
-    // And the chip that was read is the turn's, not a nested one. The turn
-    // CONTAINS a shell command block whose header carries its own
-    // `.cmd-header-exit`, so an unscoped read inside this turn is ambiguous by
-    // construction — which is what makes the scoping above an assertion rather
-    // than a style. (assistant-intake shipped three cases waiting on a chip the
-    // block did not have; all three passed whether or not the feature worked.)
     await expect(
-      turn.locator('.cmd-header-exit'),
-      'PROMISE 6 (the header says stopped): the turn no longer contains both its own chip and the command block’s, so the scoped read above proves nothing',
-    ).toHaveCount(2)
+      turn,
+      'PROMISE 6 (the header says stopped): the turn did not settle to the cancelled outcome',
+    ).toHaveAttribute('data-outcome', 'cancelled', { timeout: 60_000 })
+    // The word that was read is the turn's own. The turn CONTAINS a shell
+    // command block that settled too, but successfully — success states no
+    // word of its own (spec 2026-09-14 §3.1) — so an unscoped read inside
+    // this turn finds exactly the one word above, and the scoping is
+    // asserted rather than assumed. (assistant-intake shipped three cases
+    // waiting on a chip the block did not have; all three passed whether or
+    // not the feature worked.)
     await expect(
-      runChild.locator('.cmd-header-exit'),
-      'PROMISE 6 (the header says stopped): the shell command block’s chip was overwritten with the turn’s outcome',
-    ).toHaveText('ok')
+      turn.locator('.cmd-header-right > .ui-meta:not([data-column])'),
+      'PROMISE 6 (the header says stopped): a second status word appeared where the successful child should have stayed silent',
+    ).toHaveCount(1)
+    await expect(
+      runChild,
+      'PROMISE 6 (the header says stopped): the shell command block’s own outcome was overwritten with the turn’s',
+    ).toHaveAttribute('data-outcome', 'success')
     await expect(
       turn,
       'PROMISE 6 (the header says stopped): the stopped block is not the assistant turn',

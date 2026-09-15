@@ -1,0 +1,135 @@
+/* ── Graphite theme — nocx's default: neutral near-black surfaces, the terminal
+   screen's reference palette (owner review 2026-09-15), with Tokyo Night's
+   ANSI accents. ADR-0013 §2. All colour literals live here and only here. */
+
+/* Graphite is the default theme, so it is the one file allowed a bare
+   `:root` block — what applies before `data-theme` is set, and if bootstrap
+   ever fails to set it. The attribute selector is written `:root[data-theme=…]`
+   (specificity 0,2,0) rather than `[data-theme=…]` (0,1,0) so that every
+   attribute-scoped theme outranks this default whatever order the files are
+   imported in. Import order deciding which theme wins is how a missing
+   @import passed for a working theme switch (nocx-u7wq.2). */
+:root,
+:root[data-theme='graphite'] {
+  /* ── UI colour tokens (§2.1) ─────────────────────────────────────── */
+  --color-canvas: #111316;
+
+  --color-chrome: #17191d;
+  --color-chrome-rail: #1b1e23;
+
+  --color-terminal-chrome: #1a1d22;
+  /* A filled control resting ON the terminal-chrome card — the composer's
+     Run segment and submit button: one step from the card toward the text,
+     so it reads as a control in every theme, dark or light. */
+  --color-control-fill: #23272e;
+  --color-surface-sunken: #181b20;
+  --color-tab-active: #252a35;
+  --color-surface: #1a1d22;
+  --color-surface-hover: #23272e;
+  --color-surface-raised: #30353e;
+  --color-text: #d8dce5;
+  --color-text-muted: #aeb5c1;
+  --color-text-dim: #9ba4b3;
+  --color-border: #626d82;
+  /* Hairline between regions — rail, tab bar, panel edges. Split from
+     --color-border because the two answer different questions: a control
+     outline has to be findable (WCAG 1.4.11, 3:1 against the canvas), a
+     divider only has to be a seam. Raising border to meet 3:1 dragged every
+     divider up with it and the shell looked wireframed. */
+  --color-divider: #292f39;
+  --color-accent: #7aa2f7;
+
+  /* ── Additional semantic colours (§2.2) ──────────────────────────── */
+  --color-success: #9ece6a;
+  --color-warning: #e0af68;
+  --color-danger: #f7768e;
+  /* The failed row's ground (spec 2026-09-14 §3.3). A solid per-theme value,
+     never a color-mix of danger into the ground — ADR-0013 §3.1 measured those.
+     Chosen as the smallest step from --terminal-background that a person can see
+     (ΔL* ≥ 2) while text and the danger status word keep 4.5:1 on it; the test
+     in theme-catalogue.test.ts holds every theme to the same numbers. */
+  --color-danger-surface: #231f2a;
+  --color-accent-secondary: #9d7cd8;
+  --color-error: #ff6b6b;
+
+  /* ── Font families (§2.4) — ADR §2.4 mandates these per theme file ──
+     These are the values that were declared as --nocx-mono / --nocx-ui until
+     cc92306 renamed every usage and dropped the declarations, which put the
+     whole app in the UA serif fallback (nocx-u7wq.1). */
+  --font-family-ui: ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  --font-family-mono:
+    ui-monospace, 'SF Mono', Menlo, Monaco, 'Apple Color Emoji', 'Apple Symbols', monospace;
+
+  /* ── Interaction states — assigned, not derived ──────────────────────
+     ADR-0013 §3 proposed deriving these centrally with color-mix(). The
+     palette does not cooperate: measured during nocx-xrrl.2, not one of the
+     six matches its derivation. surface-hover is DARKER than surface, so no
+     percentage of white reaches it; success-hover is off by 17 in red; and
+     danger-hover and warning-hover are translucent overlays, not solid
+     colours, which is a different rendering model rather than a different
+     shade. See ADR-0013 §3.1. */
+  --color-accent-hover: #89b4fa;
+  --color-accent-active: #89b4fa;
+  --color-accent-disabled: rgba(122, 162, 247, 0.6);
+  --color-surface-hover: #23272e;
+  --color-surface-active: #292f39;
+  --color-surface-disabled: rgba(31, 35, 53, 0.7);
+  --color-success-hover: #b9d870;
+  --color-danger-hover: rgba(247, 118, 142, 0.1);
+  --color-warning-hover: rgba(224, 175, 104, 0.1);
+  --color-focus-ring: rgba(122, 162, 247, 0.6);
+  --color-scrim: rgba(0, 0, 0, 0.5);
+  --color-selection: rgba(122, 162, 247, 0.3);
+
+  /* ── Terminal palette (§2.3) ─────────────────────────────────────────
+     Lifted verbatim from the literal object that lived in
+     renderers/xterm.ts, which was the only definition of these colours
+     until now. The adapter in nocx-xrrl.5 reads them from here, so this
+     file is the single source of terminal colour as well as UI colour —
+     which is the point of the token layer.
+
+     ANSI 0-15 are theme colours. Indices 16-255 and truecolor stay
+     algorithmic in the terminal itself: those are content, not theme. */
+  --terminal-background: #111316;
+  --terminal-foreground: #d8dce5;
+  --terminal-cursor: #d8dce5;
+  --terminal-cursor-accent: #111316;
+  --terminal-selection: #364a82;
+
+  --terminal-ansi-0: #111316;
+  --terminal-ansi-1: #f7768e;
+  --terminal-ansi-2: #9ece6a;
+  --terminal-ansi-3: #e0af68;
+  --terminal-ansi-4: #7aa2f7;
+  --terminal-ansi-5: #bb9af7;
+  --terminal-ansi-6: #7dcfff;
+  --terminal-ansi-7: #979fac;
+  --terminal-ansi-8: #414868;
+  --terminal-ansi-9: #f7768e;
+  --terminal-ansi-10: #9ece6a;
+  --terminal-ansi-11: #e0af68;
+  --terminal-ansi-12: #7aa2f7;
+  --terminal-ansi-13: #bb9af7;
+  --terminal-ansi-14: #7dcfff;
+  --terminal-ansi-15: #d8dce5;
+
+  /* ── The workspace palette (nocx-2mipw) ────────────────────────────────
+     Nine hues a user picks from to identify a workspace. They are repeated
+     IDENTICALLY in every theme on purpose, and that is the opposite of what
+     an accent does: a tab's colour follows the theme, because a tab decorated
+     under one theme must still read under another; a workspace's colour is
+     the identity of a container the person made, and an identity that changed
+     when you switched theme would not be one — no more than its name would
+     change. A theme whose ground makes one of these unreadable is free to
+     override that one here, which is exactly why they live per-theme rather
+     than in a single shared file. */
+  --ws-grey: #8b949e;
+  --ws-blue: #4c8dff;
+  --ws-cyan: #39c5cf;
+  --ws-green: #3fb950;
+  --ws-yellow: #d29922;
+  --ws-orange: #f0883e;
+  --ws-red: #f85149;
+  --ws-pink: #f778ba;
+  --ws-purple: #a371f7;
+}

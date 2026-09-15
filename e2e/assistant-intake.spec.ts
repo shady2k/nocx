@@ -133,10 +133,15 @@ async function waitForChatRequests(count: number): Promise<FakeRequest[]> {
 }
 
 async function expectCompletedAnswer(page: Page, inputText: string, answer: string): Promise<void> {
+  // Scoped to the ask turn itself, not '.cmd-block' generally: a turn nests a
+  // 'text' block that also carries [data-answer-body] and the same text, so
+  // the unscoped selector was a strict-mode violation (both matched).
   const turn = page
-    .locator('.pane.active .cmd-block')
+    .locator('.pane.active .cmd-block[data-block-kind="ask"]')
     .filter({ hasText: inputText, has: page.locator('[data-answer-body]') })
-  await expect(turn.locator(':scope > .cmd-header .cmd-header-exit')).toHaveText('completed', {
+  // Success is silent (spec 2026-09-14 §3.1): the outcome attribute is the
+  // observable, on the turn's own root.
+  await expect(turn).toHaveAttribute('data-outcome', 'success', {
     timeout: 30_000,
   })
   await expect(turn.locator('[data-answer-body]')).toContainText(answer, { timeout: 15_000 })

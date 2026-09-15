@@ -54,6 +54,8 @@ checkFound('ui-fixture-plain', 'plain-literal.tsx', 'plain literal class')
 checkFound('ui-fixture-tmpl', 'template-passthrough.tsx', 'template literal with passthrough')
 checkFound('ui-fixture-rp', 'root-and-part.tsx', 'root identity')
 checkPart('root-and-part.tsx', 'ui-fixture-rp__element', 'ui-fixture-rp')
+checkFound('ui-fixture-vanilla', 'vanilla-emitter.ts', 'className = on a vanilla-emitted component')
+checkPart('vanilla-emitter.ts', 'ui-fixture-vanilla__part', 'ui-fixture-vanilla')
 
 // ── Required absent identities (must NOT be found) ──────────────────────────
 function checkAbsent(className, label) {
@@ -65,6 +67,7 @@ function checkAbsent(className, label) {
 
 checkAbsent('ui-fixture-comment', 'appears only in a JSDoc comment')
 checkAbsent('ui-fixture-qs', 'appears only as a querySelector argument')
+checkAbsent('ui-fixture-vanilla-qs', 'appears only as a querySelector argument in a .ts file')
 
 // ── Undetermined expressions must be reported ──────────────────────────────
 const undetFiles = new Set(undetermined.map((u) => u.file))

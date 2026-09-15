@@ -1,0 +1,47 @@
+/* ProcessBar (ui/README table) — the running-state footer (decision
+   2026-09-15-terminal-screen-mockup-decision.md §1, "Running-state gap"):
+   a 56px non-growing sibling below `.scrollback-layout`, replacing the
+   composer for the row-cost the owner accepted rather than reserving both. */
+
+.ui-process-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--terminal-process-bar-height);
+  padding-inline: var(--pane-inline-padding);
+  background: var(--color-terminal-chrome);
+  border-top: 1px solid var(--color-divider);
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-sm);
+}
+
+.ui-process-bar__info {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-muted);
+}
+
+.ui-process-bar__icon {
+  width: var(--icon-size-md);
+  height: var(--icon-size-md);
+  flex: none;
+}
+
+.ui-process-bar__controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/* The hint sits beside Interrupt, never inside Stop — the decision
+   record's semantic-mismatch fix: "Stop Ctrl+C" is not an accurate
+   statement of this branch's Stop/Interrupt semantics, so the shortcut
+   reads next to the action it actually belongs to. `aria-hidden`: the
+   button's own `title="Ctrl+C"` already carries it for assistive tech. */
+.ui-process-bar__hint {
+  margin-left: calc(-1 * var(--space-2));
+  color: var(--color-text-dim);
+  font-size: var(--font-size-xs);
+}

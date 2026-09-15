@@ -1,0 +1,85 @@
+/* PaneContext (ui/README table) — the strip naming a pane before its
+   transcript starts (decision 2026-09-15-terminal-screen-mockup-decision.md
+   §1 item 3): `folder ~/repos/nocx on ⎇ main`. Chrome, not a transcript
+   row — it sits above `.scrollback-layout` and never scrolls with it.
+
+   The where-line itself (path/host/branch) is PromptContext's own
+   `chrome` presentation (prompt-context.css's
+   `[data-presentation='chrome']` rule) — this file owns placement and the
+   leading icon/trailing slots only, never a second path/branch paint. */
+
+.ui-pane-context {
+  flex: none;
+  display: flex;
+  align-items: center;
+  height: var(--terminal-context-height);
+  padding-inline: var(--pane-inline-padding);
+  gap: var(--space-2);
+  background: var(--color-terminal-chrome);
+  border-bottom: 1px solid var(--color-divider);
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-sm);
+  -webkit-user-select: none;
+  user-select: none;
+  overflow: hidden;
+}
+
+/* Split identity presentation (spec: "44 px for split identity
+   presentation") — a touch taller, for the pane header anatomy `03` draws
+   per column rather than the single shared strip `01` draws once. */
+.ui-pane-context[data-split='true'] {
+  height: var(--terminal-split-context-height);
+}
+
+/* Active-PANE indication, deliberately distinct from the active-TAB accent
+   line (tab.css): a split's own left rule, never a repaint of the tab
+   strip's vocabulary (spec §3: "Keep active-pane indication distinct from
+   active-tab indication"). No-op outside a split — `data-active` is set
+   only where `data-split` is, by TerminalContent's own facts. */
+.ui-pane-context[data-active='true'] {
+  box-shadow: inset 2px 0 0 var(--color-accent);
+}
+
+.ui-pane-context__icon {
+  width: var(--icon-size-md);
+  height: var(--icon-size-md);
+  flex: none;
+  color: var(--color-text-muted);
+}
+
+/* The program name — `program` kind's own leading label; PromptContext
+   (whereLine) draws everything about path/host/branch, so this is the one
+   text part PaneContext still paints itself. */
+.ui-pane-context__program {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-weight: 500;
+}
+
+/* PromptContext ellipsizes at its OWN edge (prompt-context.css) but has no
+   opinion on how much of the row it may claim — that is a layout question
+   for whichever surface places it. `min-width: 0` lets it shrink inside
+   this row's flex layout instead of forcing the strip wider. */
+.ui-pane-context > .ui-prompt-context {
+  min-width: 0;
+}
+
+.ui-pane-context__trailing {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+  flex: none;
+}
+
+.ui-pane-context__keyboard {
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.ui-pane-context[hidden] {
+  display: none;
+}

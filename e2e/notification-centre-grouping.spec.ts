@@ -459,7 +459,7 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
     // The connection is up and the editor is taking input — a `script`-mode
     // connection to a bash host arrives already integrated (nocx-mlm7), so the
     // healthy state is the recovery chrome offering nothing.
-    await expect(page.locator('.pane.active .nocx-editor-recovery')).not.toBeVisible({
+    await expect(page.locator('.pane.active [data-control="recovery"]')).not.toBeVisible({
       timeout: 20_000,
     })
     const remoteEditor = page.locator(INPUT)

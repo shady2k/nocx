@@ -183,7 +183,7 @@ test('a command that finished is waiting in the notification centre, and a failu
   await run(page, OK)
   const okBlock = finishedBlock(page, OK)
   await expect(okBlock).toHaveCount(1, { timeout: 30_000 })
-  await expect(okBlock.locator('.cmd-header-exit')).toHaveText('ok')
+  await expect(okBlock).toHaveAttribute('data-outcome', 'success')
 
   // ── 2. the centre holds a row naming it ─────────────────────────────────
   // The row is the observable, and it is the whole claim. An explicit budget
@@ -220,7 +220,10 @@ test('a command that finished is waiting in the notification centre, and a failu
   await run(page, BAD)
   const badBlock = finishedBlock(page, BAD)
   await expect(badBlock).toHaveCount(1, { timeout: 30_000 })
-  await expect(badBlock.locator('.cmd-header-exit-fail')).toHaveText('exit 1')
+  await expect(badBlock).toHaveAttribute('data-outcome', 'failure')
+  await expect(
+    badBlock.locator(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
+  ).toHaveText('Exit 1')
 
   const badRow = page.locator(UNREAD_ROW).filter({ hasText: `${BAD} failed` })
   await expect(badRow).toHaveCount(1, { timeout: 30_000 })

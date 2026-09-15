@@ -34,9 +34,14 @@
    already; the rules for what sits inside it belong with it rather than in the
    shell stylesheet. Placement only — how big a rail button's hit area is, is the
    rail's business; how big its icon is, is IconButton's `lg` size. */
+/* Height matches the rail's own width token rather than a second literal
+   (decision 2026-09-15-terminal-screen-mockup-decision.md §1 item 10): the
+   button is square with the rail, so widening `--activity-bar-width` (see
+   style.css's temporary override note on the same token) widens the hit
+   area with it instead of leaving a 48px button adrift in a 56px rail. */
 .activity-bar .ui-icon-button {
   width: 100%;
-  height: 48px;
+  height: var(--activity-bar-width);
 }
 
 /* ── What a view's icon says about work behind it (nocx-hbdw4.1) ──────────

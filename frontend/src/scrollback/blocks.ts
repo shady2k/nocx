@@ -15,7 +15,6 @@ import { createDisclosure, type Disclosure } from '../ui/disclosure'
 import type { Drive } from '../generated/agent.dump'
 import { reasoningStartsExpanded } from '../reasoning-expanded'
 import { showToast } from '../ui/toast'
-import { clampMenuPosition } from '../ui/menu-geometry'
 import { findReferences } from '../secret-reference'
 import { commandFragment } from '../command-text'
 import { KIND_LABELS, type SecretKind } from '../secret-kind'
@@ -26,6 +25,37 @@ import { toolCallTitle } from './tool-call-title'
 import { paintShellInto } from './shell-paint'
 import { mountDumpPanel } from '../ui/dump-panel'
 import { decorateLinks } from '../terminal-links/decorate'
+import { cwdLabel } from '../cwd-label'
+import { createBadge } from '../ui/badge-element'
+import { createMeta, createMetaSeparator, updateMeta, type MetaOptions } from '../ui/meta'
+import { createSpinner } from '../ui/spinner-element'
+import {
+  createCommandBlockFrame,
+  createCommandSuccess,
+  setHeaderInProgress,
+} from '../ui/command-block-frame'
+import { markShellCommand } from '../ui/shell-command'
+import { createAppVisibility, type AppVisibility } from '../app-visible'
+import { createComponent } from 'solid-js'
+import { render } from 'solid-js/web'
+import { ContextMenu, type ContextMenuItem } from '../ui/context-menu'
+import { createIconButton } from '../ui/icon-button-element'
+import { createButton } from '../ui/button-element'
+import {
+  ArrowDownUpIcon,
+  ChevronRightIcon,
+  CopyIcon,
+  FileIcon,
+  iconElement,
+  MoreIcon,
+  PinIcon,
+  SquareIcon,
+} from '../ui/icons'
+import {
+  createPromptContext,
+  updatePromptContext,
+  type PromptContextFacts,
+} from '../ui/prompt-context'
 // ── Clipboard helper ────────────────────────────────────────────────────────
 
 async function copyToClipboardImpl(text: string): Promise<void> {
@@ -38,6 +68,7 @@ async function copyToClipboardImpl(text: string): Promise<void> {
     }
   }
 
+  // eslint-disable-next-line nocx/no-raw-controls -- not a control: an off-screen buffer for the legacy execCommand('copy') path when navigator.clipboard refuses. A second clipboard implementation beside ClipboardAccess; nocx-6cdiq.
   const ta = document.createElement('textarea')
   ta.value = text
   ta.style.position = 'fixed'
@@ -91,8 +122,11 @@ type FenceTimer = ReturnType<typeof setTimeout>
 /** A block status that has left `running` — the terminal set the DOM
  *  freeze and the block record share. The LOGICAL freeze produces it and
  *  hands it to the VISUAL freeze, so serialization is typed to follow a
- *  terminalized record. */
-export type FrozenStatus = 'success' | 'failure' | 'entered' | 'unknown'
+ *  terminalized record. `cancelled` (nocx-9bpeq.19) is the live path's own
+ *  outcome for a stopped command — unlike `unreconciled`, which the LIVE
+ *  path can never produce, this one now can: `freezeFromAttempt` derives it
+ *  from `BlockRecord.stopRequested`, never from the exit code alone. */
+export type FrozenStatus = 'success' | 'failure' | 'cancelled' | 'entered' | 'unknown'
 
 /** Where a block is, as its HEADER reports it (nocx-hoeq3).
  *
@@ -226,7 +260,7 @@ interface HeaderRightRules {
    *  the run's terminal status and its words are its own — an answer is not
    *  a command's output and does not borrow "ok". The CHIP the two produce
    *  is one chip, built once, below. */
-  readonly terminal: (outcome: BlockOutcome) => TerminalChipSpec | null
+  readonly terminal: (outcome: BlockOutcome) => TerminalOutcomeSpec | null
 }
 
 /** One slot in the header's right-hand group. */
@@ -242,10 +276,11 @@ interface BlockOutcome {
   readonly exitCode: number | null
 }
 
-/** What a terminal chip says: its tone and its word. The tone is the
- *  block's outcome; the word is the kind's vocabulary. */
-interface TerminalChipSpec {
-  readonly ok: boolean
+/** How a settled block ended, as its kind SAYS it (nocx-hoeq3, nocx-9bpeq.6).
+ *  The outcome goes on the block (`data-outcome`) whatever it is; the WORD is
+ *  rendered only when it is news — success is silent (spec 2026-09-14 §3.1). */
+interface TerminalOutcomeSpec {
+  readonly outcome: 'success' | 'failure' | 'cancelled'
   readonly text: string
 }
 
@@ -273,7 +308,10 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
       ),
     statusChips: null,
     headerRight: {
-      chips: ['duration', 'terminal'],
+      // Word before duration (spec 2026-09-15 §4: "Exit 1 · 1.2s", not
+      // "1.2s Exit 1") — the array IS the DOM order settleBlockOutcome
+      // renders in, so this is the one place that decides it.
+      chips: ['terminal', 'duration'],
       terminal: ({ status, exitCode }) => {
         // An 'entered' block froze on environment entry (N6): it carries no
         // exit code and must never paint success or failure, whatever code
@@ -285,7 +323,21 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
         // the rule is about the STATUS and a later exit code arriving must
         // not silently start painting one.
         if (status === 'entered' || status === 'unreconciled' || exitCode === null) return null
-        return exitCode === 0 ? { ok: true, text: 'ok' } : { ok: false, text: `exit ${exitCode}` }
+        // A command the person stopped is cancelled, never failed
+        // (nocx-9bpeq.19, spec 2026-09-14 §3.1/§3.3): the danger tint and
+        // the bar are for a program's OWN failure, and SIGINT's 130 (or the
+        // escalation ladder's own 143/137) is not that just because it is
+        // nonzero. `status` already carries the answer here — the block was
+        // built or frozen as 'cancelled' by the one place that knows
+        // (BlockManager.freezeFromAttempt) — so this checks it before ever
+        // looking at the code.
+        if (status === 'cancelled') return { outcome: 'cancelled', text: 'Stopped' }
+        // Capital E (spec 2026-09-15 §4): the status group now reads in the
+        // mono face beside the command line, where a lowercase word read as
+        // a stray shell token rather than as the header's own word.
+        return exitCode === 0
+          ? { outcome: 'success', text: 'ok' }
+          : { outcome: 'failure', text: `Exit ${exitCode}` }
       },
     },
   },
@@ -300,16 +352,18 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
       ),
     statusChips: ASK_STATUS_CHIPS,
     headerRight: {
-      chips: ['duration', 'terminal'],
+      // Word before duration — see the command kind's own chips above.
+      chips: ['terminal', 'duration'],
       // From the STATUS, never from the exit code. A turn's outcome is the
       // run's, and the store sends no exit code for one; deriving the chip
       // from the code left a restored turn saying nothing at all about
       // whether it finished, while the live one said `completed` from a
       // second construction (nocx-hoeq3).
       terminal: ({ status }) => {
-        if (status === 'success') return { ok: true, text: ASK_STATUS_CHIPS.done }
-        if (status === 'failure') return { ok: false, text: ASK_STATUS_CHIPS.failed }
-        if (status === 'cancelled') return { ok: false, text: ASK_STATUS_CHIPS.cancelled }
+        if (status === 'success') return { outcome: 'success', text: ASK_STATUS_CHIPS.done }
+        if (status === 'failure') return { outcome: 'failure', text: ASK_STATUS_CHIPS.failed }
+        if (status === 'cancelled')
+          return { outcome: 'cancelled', text: ASK_STATUS_CHIPS.cancelled }
         return null
       },
     },
@@ -539,8 +593,26 @@ export interface BlockRecord {
    *  neither success nor failure, no exit code — the block the ssh command
    *  froze into when the remote session began. 'unknown' = the bound
    *  attempt was abandoned (ADR-0024 §5): frozen, never successful, no
-   *  reported exit code. */
-  status: 'running' | 'success' | 'failure' | 'entered' | 'unknown'
+   *  reported exit code. 'cancelled' = the person stopped it (nocx-9bpeq.19)
+   *  — SIGINT's 130 and the escalation ladder's own 143/137 are otherwise
+   *  indistinguishable from the program's own failure, since the backend's
+   *  completion fact (contracts/lifecycle.changed.schema.json's `attempt`)
+   *  states only `exitCode`, never a cause. */
+  status: 'running' | 'success' | 'failure' | 'cancelled' | 'entered' | 'unknown'
+  /** Whether THIS block's running command was sent a stop request through
+   *  nocx (nocx-9bpeq.19) — the Stop button or the ⋮ menu's Stop item,
+   *  never Ctrl+C's plain interrupt. Recorded by terminal-content.ts's
+   *  `signalActiveCommand` at the moment the gesture fires, before the
+   *  round trip: the backend states no "stopped by request" fact on a
+   *  completed attempt, and the completion notification can reach the
+   *  renderer before the signal call's own response does over the same
+   *  connection, so waiting for a confirmed `delivered` would still race a
+   *  freeze that got there first. Reverted to false if the outcome turns
+   *  out not to be `delivered` (nothing was actually done to the process),
+   *  so a stop that never happened cannot mislabel this block's real,
+   *  possibly much later, completion. Read once, by `freezeFromAttempt`,
+   *  to turn a nonzero exit into `cancelled` instead of `failure`. */
+  stopRequested: boolean
   /** Run once, after the VISUAL freeze has replaced `el`.
    *
    *  The two freezes are separate moments (u7uh.8): the logical one lands on
@@ -616,130 +688,170 @@ function div(className: string, ...children: (string | HTMLElement)[]): HTMLElem
 // ── Duration formatters ────────────────────────────────────────────────────
 
 /**
- * The elapsed time of a command that is still running.
+ * The elapsed time of a command that is still running (spec 2026-09-15
+ * §1.7): one decimal below a minute — `Running · 12.4s`, ticking at
+ * `--ticker: 100ms` (BlockManager._startTicker) rather than the whole-second
+ * cadence the mockup's number could not otherwise show. A minute or more
+ * keeps the coarser `Nm Ns` shape: a decimal digit on a multi-minute figure
+ * would read as false precision for a wait that long.
  *
- * Whole seconds, unlike the finished-command format. The ticker fires once a
- * second, so a tenths digit could only ever read `.0` — a decimal place that
- * never varies is not precision, it is noise that makes the number wider and
- * harder to read at a glance.
+ * Never called below `DURATION_FLOOR_MS`: `_startTicker` shows bare
+ * "Running" instead until then (round 3) — this function has no `<0.1s`
+ * branch of its own because that state is the ABSENCE of a duration meta
+ * (and its separator) entirely, not a string this formatter could return.
  */
 function formatRunningDuration(ms: number): string {
-  if (ms < 60000) return `${Math.floor(ms / 1000)}s`
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
   const min = Math.floor(ms / 60000)
   const sec = Math.floor((ms % 60000) / 1000)
   return `${min}m ${sec}s`
 }
 
+/** Below this, `Running · 0.0s` and a finished `0.0s` both read as "took no
+ *  time" or "the timer is broken" rather than as an honest measurement
+ *  (spec 2026-09-15 §1.7 round 3) — the mockup pass's own tenths precision
+ *  cannot represent anything smaller. Shared by `formatDuration`'s `<0.1s`
+ *  branch below and `BlockManager._startTicker`'s running-header threshold,
+ *  so the two readings of "not enough time has passed to say a number"
+ *  cannot drift to different figures. */
+const DURATION_FLOOR_MS = 100
+
+/** Finished durations use milliseconds below a second, then tenths of seconds.
+ * The exact millisecond value remains available in the title. */
 function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms.toFixed(0)}ms`
+  if (ms < 1000) return `${Math.round(ms)}ms`
   if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
   const min = Math.floor(ms / 60000)
   const sec = ((ms % 60000) / 1000).toFixed(0)
   return `${min}m ${sec}s`
 }
 
-// ── The header's right-hand group: one owner (nocx-hoeq3) ──────────────────
-
-/** THE construction of a header's duration chip, for every kind and for both
- *  of the states that show one.
- *
- *  A turn takes time and that is as worth knowing as `df` taking 27ms, so it
- *  is drawn with the same chip and the same identity class a command's is —
- *  which is also what makes the two headers line up, since the width floor
- *  lives on `.cmd-header-duration`.
- *
- *  The TEXT is the caller's, because the two formatters are deliberately
- *  different: a running command shows whole seconds (the ticker fires once a
- *  second, so a tenths digit could only read `.0`) and a finished one shows
- *  the precise figure. Two formatters, one chip. */
-function durationChip(text: string): HTMLElement {
-  const el = document.createElement('span')
-  el.className = 'nocx-chip nocx-chip-muted cmd-header-duration'
-  el.textContent = text
-  return el
+/** The exact figure `formatDuration`'s tenths rounds away — a hover/title
+ *  value only, never the header's own text (spec 2026-09-15 §1.7). */
+function formatDurationTitle(ms: number): string {
+  return `${ms.toFixed(0)}ms`
 }
 
-/** THE construction of a header's TERMINAL chip, for every kind.
- *
- *  There were two. The command's carried `cmd-header-exit-ok`/`-fail` and the
- *  turn's did not, which was invisible only because no stylesheet paints
- *  those modifiers — the two would have disagreed the day one did. The WORD
- *  still comes from the kind (nocx-ex636); the element does not. */
-function terminalChip(spec: TerminalChipSpec): HTMLElement {
-  const el = document.createElement('span')
-  el.className = spec.ok
-    ? 'nocx-chip nocx-chip-ok cmd-header-exit cmd-header-exit-ok'
-    : 'nocx-chip nocx-chip-fail cmd-header-exit cmd-header-exit-fail'
-  el.textContent = spec.text
-  return el
+// ── The header's right-hand group and the block's outcome: one owner ───────
+
+/** THE duration fact, for every kind and both states that show one. The TEXT
+ *  is the caller's: a running command's ticks (formatRunningDuration) or a
+ *  finished one's tenths (formatDuration, nocx-hoeq3, spec 2026-09-15 §1.7).
+ *  `titleMs`, when given, is the precise figure the tenths display rounds
+ *  away — a finished duration's own; a running duration re-derives its
+ *  title from the live clock instead (BlockManager._startTicker) and passes
+ *  none. `size: 'terminal'` (task A's Meta variant, §3 contract): the body
+ *  size, a 20px line box, tabular figures — replacing the 12.25px mono `sm`
+ *  the header used before §1.7. The column variance keeps durations in a
+ *  tabular column across blocks. */
+function durationMeta(text: string, titleMs?: number): HTMLSpanElement {
+  const opts: MetaOptions = { tone: 'muted', column: 'duration', size: 'terminal' }
+  if (titleMs !== undefined) opts.title = formatDurationTitle(titleMs)
+  return createMeta([text], opts)
 }
 
 /**
- * Fill a header's right-hand group with what a SETTLED block of this kind
- * shows, in the order the kind declared (nocx-hoeq3).
+ * Settle a block: its right-hand group and its `data-outcome`, from the
+ * kind's rules, in one place (nocx-hoeq3, nocx-9bpeq.6).
  *
- * Called from the two moments a block settles, so there is one answer for
- * both: at BUILD, for a block whose outcome was already known (a frozen
- * command, a restored anything), and at CLOSE, for a turn that was built
- * while it was still being written. Before this the close built its own chip
- * and never a duration, so a turn's header held one chip where a command's
- * held two — the difference in number and placement the owner reported.
- *
- * IDEMPOTENT: the settled chips are cleared first, so settling a header twice
- * re-states the group rather than growing a second copy of it. The ⋮ is not
+ * Called with the BLOCK, after its header is attached — at build for a block
+ * whose outcome was already known, at close for a turn, at replay for a
+ * restored command. IDEMPOTENT: the settled facts are cleared first, so a
+ * second settle restates the group instead of growing it. The ⋮ is not
  * ours — placeHeaderChip keeps it last, whether or not it exists yet.
  */
-function settleHeaderRight(
-  right: Element,
+export function settleBlockOutcome(
+  block: HTMLElement,
   kind: BlockKind,
   durationMs: number | null,
   outcome: BlockOutcome,
 ): void {
-  for (const stale of right.querySelectorAll('.cmd-header-duration, .cmd-header-exit')) {
+  const header = block.querySelector<HTMLElement>(':scope > .cmd-header')
+  const right = header?.querySelector<HTMLElement>(':scope > .cmd-header-right')
+  if (!header || !right) return
+  // The status region no longer spans both text lines once the block has
+  // an outcome of its own — settled always aligns with the path line
+  // alone (spec 2026-09-15 §1.7). Idempotent, like the rest of this
+  // function: a second settle restates `false` rather than needing to
+  // check whether it was already set.
+  setHeaderInProgress(header, false)
+  for (const stale of right.querySelectorAll(
+    // `.ui-meta__sep` is the standalone separator this function places
+    // between the word and the duration (spec 2026-09-15 §4) — a second
+    // settle must clear it along with the Metas either side, or it doubles.
+    // `.ui-button[data-block-control]` is the running Stop control
+    // (nocx-9bpeq.12 round 6 — `data-block-actions` is the ⋮'s identity
+    // alone again, so Stop is found by the shared "leave selection and
+    // focus-bounce alone" attribute instead): a settled block has no Stop,
+    // whatever kind or path settled it. The ordinary freeze path discards
+    // the whole running element rather than mutating it, so this never
+    // fires there in practice — it is here for whatever settles a block
+    // WITHOUT replacing it, present or future, rather than something only
+    // the common path is trusted to get right.
+    ':scope > .ui-command-block-frame__success, :scope > .ui-meta, :scope > .ui-meta__sep, :scope > .ui-spinner, :scope > .cmd-header-waiting, :scope > .ui-button[data-block-control]',
+  )) {
     stale.remove()
   }
+  delete block.dataset.outcome
   const rules = blockKindRules(kind).headerRight
+
+  // Each slot the kind declares (in ITS OWN DOM order — `chips` above)
+  // becomes an element or nothing at all: a slot that renders nothing must
+  // not still cost a separator, which is why the group is built as a list
+  // first and joined after, rather than a separator written beside each
+  // slot as it is decided. Word before duration (spec 2026-09-15 §4: status
+  // word, a muted separator, duration) falls out of `chips`' own order —
+  // nothing here hardcodes which slot comes first.
+  const chips: Element[] = []
   for (const slot of rules.chips) {
     if (slot === 'duration') {
-      if (durationMs !== null) placeHeaderChip(right, durationChip(formatDuration(durationMs)))
+      if (durationMs !== null) chips.push(durationMeta(formatDuration(durationMs), durationMs))
       continue
     }
     const spec = rules.terminal(outcome)
-    if (spec) placeHeaderChip(right, terminalChip(spec))
+    if (!spec) continue
+    block.dataset.outcome = spec.outcome
+    // The target shows a check beside a successful command duration.
+    // Other block kinds retain their own outcome vocabulary.
+    if (spec.outcome === 'success') {
+      if (kind === 'command') chips.push(createCommandSuccess())
+      continue
+    }
+    chips.push(
+      createMeta([spec.text], {
+        tone: spec.outcome === 'failure' ? 'danger' : 'dim',
+        size: 'terminal',
+      }),
+    )
   }
-}
-
-// ── CWD display ────────────────────────────────────────────────────────────
-
-function cwdLabel(cwd: string): string {
-  const path = cwd.trim().replace(/\/+$/, '') || '~'
-  const parts = path.split('/').filter(Boolean)
-  if (path === '~' || parts.length === 0) return path
-  return parts.slice(-2).join('/')
+  chips.forEach((chip, i) => {
+    if (i > 0 && block.dataset.outcome !== 'success')
+      placeHeaderChip(right, createMetaSeparator({ size: 'terminal' }))
+    placeHeaderChip(right, chip)
+  })
 }
 
 /**
- * Create the header row for a block — flat, warp-style (P0-1).
- * No card background, no pill/chip styling. Plain muted small text.
- * The grammar (highlighting, the status vocabulary) is the kind's
- * (nocx-ex636).
+ * Create the header row for a block (spec 2026-09-14 §3, geometry amended
+ * 2026-09-15 §1.7): a two-line grid — a meta row (where), then the
+ * command/question line — with the status region beside the command band
+ * for a settled block and spanning both lines, centered, while work is in
+ * progress (CommandBlockFrame; `setHeaderInProgress` below decides which).
+ * Metadata is text, not chips. A settled block's outcome is NOT decided
+ * here: the builder calls settleBlockOutcome once the header is attached,
+ * so there is one owner.
  */
 function createHeader(
   kind: BlockKind,
   command: string,
   cwd: string,
   location: string,
-  durationMs: number | null,
-  exitCode: number | null,
   status: HeaderStatus,
   store: CommandSnapshotStore,
   author: CommandAuthor = 'shell',
 ): HTMLElement {
-  const header = div('cmd-header')
+  const { header, metaRow, status: right } = createCommandBlockFrame()
   const rules = blockKindRules(kind)
-
-  // ── Chips row (above command text): cwd left, duration+exit right ──
-  const chipsRow = div('cmd-header-chips')
 
   // Who ran it, when it was not the human (design §3.1, nocx-iadtt): the
   // kit's badge in its info tone — the same "informational provenance"
@@ -747,81 +859,81 @@ function createHeader(
   // all; only a non-human author is worth saying out loud. Never a
   // hand-rolled chip: this is the kit's badge, placed like any other chip.
   if (author !== 'shell') {
-    const mark = document.createElement('span')
-    mark.className = 'ui-badge'
-    mark.dataset.tone = 'info'
+    const mark = createBadge({ text: author, tone: 'info' })
     mark.dataset.author = author
-    mark.textContent = author
-    chipsRow.appendChild(mark)
+    metaRow.appendChild(mark)
   }
 
-  // Where the command ran, when it is somewhere other than this machine. Warp
-  // puts `user@host` at the head of every block header and it is the attribute
-  // ours was missing: a scrollback full of blocks with no host in them reads
-  // the same whether you were on your laptop or three hops away (nocx-6w4z).
-  if (location) {
-    const loc = document.createElement('span')
-    loc.className = 'nocx-chip nocx-chip-muted cmd-header-location'
-    loc.textContent = location
-    chipsRow.appendChild(loc)
-  }
-
-  // CWD — standard chip component
-  if (cwd) {
-    const cwdEl = document.createElement('span')
-    cwdEl.className = 'nocx-chip cmd-header-cwd'
-    cwdEl.textContent = `📁 ${cwdLabel(cwd)}`
-    chipsRow.appendChild(cwdEl)
-  }
-
-  // Right: duration + exit status (or spinner while running)
-  const right = div('cmd-header-right')
+  // WHERE: the prompt line (spec 2026-09-15 §2) — host (when not this
+  // machine, nocx-6w4z), the short path, and the branch once a source
+  // reports one (nocx-9bpeq.13 wires that in; `setBlockWhere` below is the
+  // seam). The block records what it was BUILT with — cwd and location — so
+  // a later `setBlockWhere` can re-render the line in place without asking
+  // the caller to keep them around a second time.
+  header.dataset.cwd = cwd
+  header.dataset.location = location
+  const promptFacts: PromptContextFacts = { path: cwdLabel(cwd) }
+  if (location) promptFacts.host = location
+  metaRow.appendChild(createPromptContext(promptFacts, { presentation: 'history' }))
 
   if (status === 'running') {
-    // The elapsed time, ticking. It used to appear only once the command had
-    // finished, which is the one moment you no longer need it — the question
-    // "how long has this been going" is asked WHILE it is going. Warp shows it
-    // live and so does this (nocx-6w4z).
-    const spinner = document.createElement('span')
-    spinner.className = 'cmd-header-spinner'
-    right.appendChild(spinner)
-    right.appendChild(durationChip(formatRunningDuration(0)))
-  } else if (status === 'waiting') {
+    // The elapsed time, ticking, beside the kit spinner. It used to appear
+    // only once the command had finished, which is the one moment you no
+    // longer need it — the question "how long has this been going" is asked
+    // WHILE it is going. Warp shows it live and so does this (nocx-6w4z).
+    //
+    // Word, muted separator, duration (spec 2026-09-15 §4) — the same shape
+    // a settled block's status word and duration share (settleBlockOutcome
+    // below), so the group reads one way whether the block is still going
+    // or has already finished. `Running` in the accent tone, matching the
+    // ask kind's own in-progress word below (AD-8: one shape for "in
+    // progress").
+    //
+    // NO separator or duration here (spec 2026-09-15 §1.7 round 3): at
+    // build time elapsed is always zero, below `DURATION_FLOOR_MS`, and a
+    // figure that can only ever read `0.0s` says "took no time" rather than
+    // "not yet measured". `BlockManager._startTicker` inserts both, right
+    // before Stop/the ⋮, the moment elapsed actually crosses the floor —
+    // this header starts, and a block built with no ticker attached stays,
+    // bare "Running".
+    right.appendChild(createSpinner({ label: 'Running', size: 'sm' }))
+    right.appendChild(createMeta(['Running'], { tone: 'accent', size: 'terminal' }))
+  } else if (status === 'waiting' && rules.statusChips) {
     // The kind's own in-progress vocabulary: the ask block says it is
-    // thinking until the first delta lands, and the answer
-    // lifecycle removes it at exactly that moment (nocx-ex636). The
-    // command kind has no in-progress WORD — its running state is the
-    // spinner above — so a command handed this status shows nothing.
-    if (rules.statusChips) {
-      // The SAME pulse a running command's header carries, in the SAME
-      // place: a bare dot in the chip row, left of the chip (AD-8 — one
-      // owner for "this block is in progress", and one shape for it). A
-      // static word is a label; a word beside a live pulse is a report
-      // that something is happening right now. It sat INSIDE the chip for
-      // one round and read as a different control from the command's,
-      // which is two vocabularies for one concept.
-      const pulse = document.createElement('span')
-      // Its own identity class beside the shared appearance: the pulse is a
-      // SIBLING of the chip now, so whoever ends the wait has to be able to
-      // find it. Removing only the chip left a dot pulsing next to
-      // `completed` — the report half that nobody owned.
-      pulse.className = 'cmd-header-spinner cmd-answer-waiting-pulse'
-      right.appendChild(pulse)
-      const wait = document.createElement('span')
-      wait.className = 'nocx-chip nocx-chip-muted cmd-answer-waiting'
-      wait.textContent = rules.statusChips.inProgress
-      right.appendChild(wait)
-    }
-  } else {
-    // Settled: the group is the kind's, from its one owner. A block whose
-    // outcome arrives LATER — a turn, which is written before it ends —
-    // settles the same group through the same function at its close.
-    settleHeaderRight(right, kind, durationMs, { status, exitCode })
+    // thinking until the first delta lands, and the answer lifecycle removes
+    // it at exactly that moment (nocx-ex636). The command kind has no
+    // in-progress WORD — its running state is the spinner above — so a
+    // command handed this status shows nothing.
+    //
+    // The SAME spinner a running command's header carries, beside the SAME
+    // kind of word (AD-8 — one owner for "this block is in progress", and
+    // one shape for it), both inside one placement span so whoever ends the
+    // wait removes one thing.
+    const waiting = document.createElement('span')
+    waiting.className = 'cmd-header-waiting'
+    waiting.appendChild(createSpinner({ label: rules.statusChips.inProgress, size: 'sm' }))
+    waiting.appendChild(
+      createMeta([rules.statusChips.inProgress], { tone: 'accent', size: 'terminal' }),
+    )
+    right.appendChild(waiting)
   }
+  // A settled block's outcome is filled in later, by settleBlockOutcome,
+  // once this header is attached to its block — there is no branch here for
+  // it, on purpose: there is exactly one place that writes it.
 
-  chipsRow.appendChild(right)
-  header.appendChild(chipsRow)
-  // ── Header text (below chips) ──────────────────────────────────────
+  // The status region spans both text lines, centered, exactly while there
+  // is a WORD in progress to show beside the spinner (running, or the ask
+  // kind's own waiting vocabulary) — never derived from whether `right`
+  // happens to be empty, so an ask block with no statusChips (none exists
+  // today, but BLOCK_KIND_RULES allows it) reads as settled from the start
+  // rather than centering on an empty box.
+  setHeaderInProgress(
+    header,
+    status === 'running' || (status === 'waiting' && rules.statusChips !== null),
+  )
+
+  header.appendChild(metaRow)
+  // ── Header text (beside the meta row) ───────────────────────────────
   // The grammar is the kind's (nocx-ex636): a command header carries the
   // same syntactic highlight pass as the live editor (same lexer, same
   // classes — see shell-highlight.ts); a question is prose and renders
@@ -854,10 +966,61 @@ function createHeader(
       if (command) paintShellInto(cmdSpan, command, store)
       else cmdSpan.textContent = '(empty)'
     }
+    // The terminal-command presentation (spec 2026-09-15 §1.6, task A's
+    // ui/shell-command.ts): the shared tokenizer's `.tok-*` spans painted
+    // above are the SAME markup the live editor carries; this only scopes
+    // how THIS host paints them — `git` in accent, `diff --stat` in body
+    // text — rather than the generic `.tok-*` rainbow other consumers (an
+    // assistant code fence) keep. Applied once, here, for every command
+    // header regardless of which branch above filled it: a masked or
+    // reference-bearing command has no `.tok-*` descendants to match, so
+    // the identity is inert on that path rather than needing its own guard.
+    markShellCommand(cmdSpan)
   }
-  header.appendChild(cmdSpan)
+  // The sigil (spec 2026-09-15 §4): the mockup's `›`, as the kit's chevron
+  // rather than a text glyph, for the command kind only — ask and tool rows
+  // keep the anatomy they already have. It sits BESIDE `.cmd-header-text` in
+  // its own row wrapper, never inside it, so the command's own text —
+  // copy, selection, `blockCommandText` — reads exactly what it read before.
+  if (kind === 'command') {
+    const commandRow = div('cmd-header-command')
+    const sigil = iconElement(ChevronRightIcon)
+    sigil.classList.add('cmd-header-sigil')
+    commandRow.appendChild(sigil)
+    commandRow.appendChild(cmdSpan)
+    header.appendChild(commandRow)
+  } else {
+    header.appendChild(cmdSpan)
+  }
+
+  // The status region is the header's own THIRD grid child, appended last:
+  // command-block-frame.css places it by grid-column/row, not by DOM order,
+  // so this only has to keep it reachable — never before the command line,
+  // since neither it nor the meta row hold anything the button focus order
+  // would need to precede (nocx-hoeq3).
+  header.appendChild(right)
 
   return header
+}
+
+/**
+ * Restate a block's prompt line in place (spec 2026-09-15 §3 seam): once a
+ * home or branch source reports one, without asking the caller to keep the
+ * block's cwd and location around a second time — the header already carries
+ * them, from the moment it was built.
+ */
+export function setBlockWhere(block: HTMLElement, facts: { home?: string; branch?: string }): void {
+  const header = block.querySelector<HTMLElement>(':scope > .cmd-header')
+  const promptEl = header?.querySelector<HTMLSpanElement>(
+    ':scope > .cmd-header-meta > .ui-prompt-context',
+  )
+  if (!header || !promptEl) return
+  const cwd = header.dataset.cwd ?? ''
+  const location = header.dataset.location ?? ''
+  const promptFacts: PromptContextFacts = { path: cwdLabel(cwd, facts.home) }
+  if (location) promptFacts.host = location
+  if (facts.branch) promptFacts.branch = facts.branch
+  updatePromptContext(promptEl, promptFacts, { presentation: 'history' })
 }
 
 /**
@@ -923,16 +1086,16 @@ export function blockCommandText(blockEl: HTMLElement): string {
  *  the order by using this, instead of learning the button's position by
  *  luck. */
 function placeHeaderChip(right: Element, chip: Element): void {
-  right.insertBefore(chip, right.querySelector('.cmd-overflow-btn'))
+  // `data-block-actions` is the ⋮'s identity alone (nocx-9bpeq.12 round 6):
+  // Stop shares the "leave selection and focus-bounce alone" escape hatch
+  // through a SEPARATE attribute, `data-block-control` (wireBlockSelection's
+  // `mine()`, terminal-content.ts's focus-bounce check), rather than through
+  // this one — narrowing every consumer of "which one is the ⋮" to cope with
+  // a second element on this attribute was the second-owner defect
+  // (AGENTS.md); the identity stays singular instead.
+  right.insertBefore(chip, right.querySelector('[data-block-actions]'))
 }
 
-/**
- * Build the "⋮" overflow menu button + dropdown (P2-9, P1-6 fix).
- * The menu is rendered as a child of document.body with position:fixed
- * so it floats above ALL blocks and scroll containers. Position is
- * calculated from the button's bounding rect. Closes on outside click
- * and Escape key.
- */
 /** Fetch the DURABLE text of one answer entry, or null when it is not
  *  stored any more. Injected, never constructed here: this module has no
  *  socket, and the one that does is wired at the composition root. */
@@ -966,6 +1129,16 @@ export interface RunningBlockActions {
 
 const overflowMenuClosers = new WeakMap<HTMLElement, () => void>()
 
+/**
+ * Build the block's "⋮" (nocx-9bpeq.5): a kit IconButton whose click mounts
+ * the kit ContextMenu as a render island — created on open, disposed on
+ * close — rather than the hand-rolled position:fixed dropdown this once was.
+ * The menu itself positions and dismisses itself (ContextMenu's own anchor,
+ * clamp and outside-click/Escape handling); this function only decides which
+ * items apply to this block (copy, wrap, grant, stop, show dump) and reopens
+ * them fresh on every open, since a running block's actions change block to
+ * block.
+ */
 function buildOverflowMenu(
   blockEl: HTMLElement,
   command: string,
@@ -973,29 +1146,40 @@ function buildOverflowMenu(
   dump?: DumpSource,
   running?: RunningBlockActions,
 ): HTMLElement {
-  const btn = document.createElement('button')
-  btn.className = 'cmd-overflow-btn'
-  btn.textContent = '\u22EE' // ⋮ vertical ellipsis
-  btn.setAttribute('aria-label', 'Block actions')
+  /** Disposes the open menu's Solid root, or null while closed. The menu is a
+   *  render island: mounted on open, disposed on close (spec 2026-09-14 §6.3). */
+  let dispose: (() => void) | null = null
 
-  let menu: HTMLElement | null = null
-  let closeOnEscape: ((e: KeyboardEvent) => void) | null = null
-  let closeOnClick: ((ev: MouseEvent) => void) | null = null
-
-  const closeMenu = () => {
-    if (menu) {
-      menu.remove()
-      menu = null
-    }
-    if (closeOnEscape) {
-      document.removeEventListener('keydown', closeOnEscape)
-      closeOnEscape = null
-    }
-    if (closeOnClick) {
-      document.removeEventListener('click', closeOnClick)
-      closeOnClick = null
-    }
+  const closeMenu = (): void => {
+    const d = dispose
+    dispose = null
+    d?.()
   }
+
+  const btn = createIconButton({
+    size: 'xs',
+    ariaLabel: 'Block actions',
+    icon: () => iconElement(MoreIcon),
+    // `data-block-actions` is the ⋮'s OWN identity — the one element every
+    // "find the block-actions button" caller (placeHeaderChip here, a dozen
+    // e2e specs, restored-block.test.ts, turn-children.test.ts) may assume
+    // it uniquely names. `data-block-control` is the SEPARATE, shared
+    // "leave selection and focus-bounce alone" attribute the Stop control
+    // also carries (nocx-9bpeq.12 round 6) — the ⋮ needs it too, since it is
+    // itself a control inside the header those two mechanisms must not
+    // touch.
+    attrs: { 'data-block-actions': '', 'data-block-control': '' },
+    onClick: (e) => {
+      e.stopPropagation()
+      e.preventDefault()
+      if (dispose !== null) {
+        closeMenu()
+        return
+      }
+      openMenu()
+    },
+  })
+
   overflowMenuClosers.set(blockEl, closeMenu)
   const onBlockSettled = (): void => {
     closeMenu()
@@ -1003,151 +1187,60 @@ function buildOverflowMenu(
   }
   blockEl.addEventListener('nocx:block-settled', onBlockSettled)
 
-  btn.addEventListener('click', (e) => {
-    e.stopPropagation()
-    e.preventDefault()
+  // WHERE A BLOCK'S OUTPUT COMES FROM, AND WHY THE TWO KINDS DIFFER (nocx-v13pd).
+  // A COMMAND block copies what the terminal DREW: the rows in the DOM are the
+  // artefact. An ANSWER block copies what was RECORDED: the DOM is a rendering of
+  // the markdown, so a copy scraped from it would quietly differ from what the
+  // model said. Copying an answer is therefore async — the item reports the work
+  // (busyLabel) — and a fetch that comes back empty REFUSES rather than falling
+  // back to the painted text.
+  const isAnswer = (): boolean => blockEl.dataset.blockKind === 'ask'
 
-    // If menu is already open, close it.
-    if (menu) {
-      closeMenu()
-      return
-    }
+  const storedAnswer = async (): Promise<string | null> => {
+    const entryId = blockEl.dataset.entryId
+    if (!entryId || !answerText) return null
+    return answerText(entryId)
+  }
 
-    // Build the dropdown.
-    menu = document.createElement('div')
-    menu.className = 'cmd-overflow-menu'
-    const copyCmd = document.createElement('button')
-    copyCmd.className = 'cmd-overflow-menu-item'
-    copyCmd.textContent = 'Copy command'
-    copyCmd.addEventListener('click', (ev) => {
-      ev.stopPropagation()
-      // Once history.record acks, the block shows — and therefore copies —
-      // the MASKED command: what you see is what went to the store, and the
-      // renderer no longer holds the plaintext for that block (ADR-0021,
-      // the receipt round's named trade). The full masked text lives in
-      // data-recorded-command; the chips in the header are labels.
-      const recorded = btn.closest('.cmd-block')?.getAttribute('data-recorded-command')
-      clipboardFallback(recorded ?? command)
-      closeMenu()
+  const refuseCopy = (): void => {
+    showToast({
+      level: 'warning',
+      message: 'The stored answer is not available, so nothing was copied.',
     })
+  }
 
-    // WHERE A BLOCK'S OUTPUT COMES FROM, AND WHY THE TWO KINDS DIFFER
-    // (nocx-v13pd).
-    //
-    // A COMMAND block copies what the terminal DREW. The rows in the DOM are
-    // the artefact — the serializer put them there from the grid — so
-    // scraping them is not a shortcut, it is reading the thing itself.
-    //
-    // An ANSWER block copies what was RECORDED. Since nocx-swoje the answer
-    // flow RENDERS the model's markdown: `# ` becomes a heading and the
-    // marker is consumed, `**bold**` becomes weight and the asterisks are
-    // gone. The DOM is therefore a rendering of the answer and no longer the
-    // answer, and a copy scraped from it would quietly differ from what the
-    // model said. The durable text is right there — SubmitAgentAsk writes a
-    // text/plain artifact for every answer — and the block already knows its
-    // entry id, because the deltas were routed by it.
-    //
-    // Which makes copying an answer ASYNC, and that has two consequences the
-    // menu has to honour: the item says it is working (a control that looks
-    // clicked and does nothing reads as broken), and a fetch that comes back
-    // empty REFUSES rather than falling back to the painted text. A copy
-    // that quietly differs from the record is worse than one that did not
-    // happen.
-    const isAnswer = () => blockEl.dataset.blockKind === 'ask'
+  /** The command as the block shows it: once history.record acks, the MASKED
+   *  command in data-recorded-command (ADR-0021). */
+  const intent = (): string => blockEl.getAttribute('data-recorded-command') ?? command
 
-    /** The answer's stored text, or null — retention took it, the store is
-     *  unreachable, or this window has no source wired. All three are the
-     *  same fact to a person: it is not here. */
-    const storedAnswer = async (): Promise<string | null> => {
-      const entryId = blockEl.dataset.entryId
-      if (!entryId || !answerText) return null
-      return answerText(entryId)
-    }
+  // The label names the EFFECTIVE wrap state: the attribute answers when it is
+  // there, and the rendered style answers when the setting decided (see the
+  // history of this item in git for the full argument).
+  const wrapOn = (): boolean => {
+    const attr = blockEl.getAttribute('data-wrap')
+    if (attr === 'on') return true
+    if (attr === 'off') return false
+    const out = blockEl.querySelector<HTMLElement>('.cmd-output')
+    return out ? getComputedStyle(out).whiteSpace.startsWith('pre-wrap') : false
+  }
 
-    const refuseCopy = (): void => {
-      showToast({
-        level: 'warning',
-        message: 'The stored answer is not available, so nothing was copied.',
-      })
-    }
-
-    /** Run an async menu action with the item reporting the work, and close
-     *  the menu when it settles either way. */
-    const whileFetching = async (
-      item: HTMLButtonElement,
-      work: () => Promise<void>,
-      busyLabel = 'Copying…',
-    ) => {
-      item.disabled = true
-      item.dataset.busy = ''
-      item.textContent = busyLabel
-      try {
-        await work()
-      } finally {
-        closeMenu()
-      }
-    }
-
-    const copyOut = document.createElement('button')
-    copyOut.className = 'cmd-overflow-menu-item'
-    copyOut.textContent = 'Copy output'
-    copyOut.addEventListener('click', (ev) => {
-      ev.stopPropagation()
-      if (!isAnswer()) {
-        // The copyable text is asked of the BLOCK at read time (nocx-ex636):
-        // an answer block's body is appended after the frame, so the
-        // builder-time output reference is null — the block knows where its
-        // output lives.
-        clipboardFallback(blockOutputText(blockEl))
-        closeMenu()
-        return
-      }
-      void whileFetching(copyOut, async () => {
-        const stored = await storedAnswer()
-        if (stored === null) refuseCopy()
-        else clipboardFallback(stored)
-      })
-    })
-    const copyAll = document.createElement('button')
-    copyAll.className = 'cmd-overflow-menu-item'
-    copyAll.textContent = 'Copy all'
-    copyAll.addEventListener('click', (ev) => {
-      ev.stopPropagation()
-      const intent = () =>
-        btn.closest('.cmd-block')?.getAttribute('data-recorded-command') ?? command
-      if (!isAnswer()) {
-        clipboardFallback(`${intent()}\n${blockOutputText(blockEl)}`)
-        closeMenu()
-        return
-      }
-      // The same source as Copy output, deliberately: two items on one block
-      // reading one thing from two places is how they start to disagree.
-      void whileFetching(copyAll, async () => {
-        const stored = await storedAnswer()
-        if (stored === null) refuseCopy()
-        else clipboardFallback(`${intent()}\n${stored}`)
-      })
-    })
-
-    const dumpItem = document.createElement('button')
-    dumpItem.className = 'cmd-overflow-menu-item'
-    dumpItem.textContent = 'Show dump'
-    dumpItem.addEventListener('click', (ev) => {
-      ev.stopPropagation()
-      const entryId = blockEl.dataset.entryId
-      if (
-        !dump ||
-        !entryId ||
-        !isAnswer() ||
-        !blockEl.dataset.turnState ||
-        blockEl.dataset.turnState === 'waiting'
-      ) {
-        closeMenu()
-        return
-      }
-      void whileFetching(
-        dumpItem,
-        async () => {
+  function items(): ContextMenuItem[] {
+    const list: ContextMenuItem[] = []
+    const answerSettled =
+      dump !== undefined &&
+      isAnswer() &&
+      blockEl.dataset.turnState !== undefined &&
+      blockEl.dataset.turnState !== '' &&
+      blockEl.dataset.turnState !== 'waiting'
+    if (answerSettled) {
+      list.push({
+        id: 'dump',
+        label: 'Show dump',
+        icon: FileIcon,
+        busyLabel: 'Loading…',
+        onSelect: async () => {
+          const entryId = blockEl.dataset.entryId
+          if (!dump || !entryId) return
           try {
             const result = await dump(entryId)
             const host = document.createElement('div')
@@ -1157,137 +1250,105 @@ function buildOverflowMenu(
             showToast({ level: 'danger', message: 'Could not load the model dump' })
           }
         },
-        'Loading…',
-      )
-    })
-    if (
-      dump &&
-      isAnswer() &&
-      blockEl.dataset.turnState &&
-      blockEl.dataset.turnState !== 'waiting'
-    ) {
-      menu.appendChild(dumpItem)
+      })
     }
-
-    const isActive = running?.isActive(blockEl) ?? false
     if (running?.toggleGrant && (running.grantsAvailable?.() ?? true)) {
-      const grant = document.createElement('button')
-      grant.className = 'cmd-overflow-menu-item'
-      grant.dataset.action = 'grant'
-      grant.textContent = running.isGranted?.(blockEl) ? 'Unmark' : 'Ask about this block'
-      grant.addEventListener('click', (ev) => {
-        ev.stopPropagation()
-        running.toggleGrant?.(blockEl)
-        closeMenu()
+      list.push({
+        id: 'grant',
+        label: running.isGranted?.(blockEl) ? 'Unmark' : 'Ask about this block',
+        icon: PinIcon,
+        onSelect: () => running.toggleGrant?.(blockEl),
       })
-      menu.appendChild(grant)
     }
-    // Wrap is a per-block override of the kind's default, and it lives here
-    // rather than as a control on the block because it is rare: the kind is
-    // right nearly always (a command's grid must not re-wrap — nocx-juau —
-    // and an answer's prose must). What it is for is the exception the kind
-    // cannot know about: one wide table in otherwise ordinary output, or one
-    // answer a person wants to read as it came. The override is the DOM
-    // state `data-wrap` on the block, so the CSS reads one attribute and the
-    // kind's own rule stays the default underneath it.
-    //
-    // The label names the EFFECTIVE state, not the attribute: with the
-    // `terminal.wrapOutput` setting deciding untouched blocks, a block that
-    // is already wrapping carries no attribute at all, and a menu offering
-    // to "Wrap lines" on a wrapped block is a control you have to try in
-    // order to understand. So the attribute answers when it is there, and
-    // the rendered style answers when it is not — one question, asked of
-    // whoever actually decided it.
-    const wrapOn = (): boolean => {
-      const attr = blockEl.getAttribute('data-wrap')
-      if (attr === 'on') return true
-      if (attr === 'off') return false
-      const out = blockEl.querySelector<HTMLElement>('.cmd-output')
-      return out ? getComputedStyle(out).whiteSpace.startsWith('pre-wrap') : false
-    }
-    const wrapItem = document.createElement('button')
-    wrapItem.className = 'cmd-overflow-menu-item'
-    wrapItem.textContent = wrapOn() ? 'Do not wrap' : 'Wrap lines'
-    wrapItem.addEventListener('click', (ev) => {
-      ev.stopPropagation()
-      blockEl.setAttribute('data-wrap', wrapOn() ? 'off' : 'on')
-      closeMenu()
-    })
-
-    // Stopping remains time-limited; granting the whole block does not.
     // Stopping is the only liveness-bound action; granting is not.
-    if (running && isActive) {
-      const stop = document.createElement('button')
-      stop.className = 'cmd-overflow-menu-item'
-      stop.dataset.action = 'stop'
-      stop.textContent = 'Stop'
-      stop.addEventListener('click', (ev) => {
-        ev.stopPropagation()
-        if (!running.isActive(blockEl)) {
-          closeMenu()
-          return
-        }
-        closeMenu()
-        running.stop()
+    if (running && running.isActive(blockEl)) {
+      list.push({
+        id: 'stop',
+        label: 'Stop',
+        icon: SquareIcon,
+        onSelect: () => {
+          if (running.isActive(blockEl)) running.stop()
+        },
       })
-      menu.append(stop)
     }
-    menu.append(copyCmd, copyOut, copyAll, wrapItem)
-    // Render at body level so it floats above all scroll containers (P1-6).
-    document.body.appendChild(menu)
+    list.push({
+      id: 'copy-command',
+      label: 'Copy command',
+      icon: CopyIcon,
+      onSelect: () => clipboardFallback(intent()),
+    })
+    if (isAnswer()) {
+      list.push(
+        {
+          id: 'copy-output',
+          label: 'Copy output',
+          icon: CopyIcon,
+          busyLabel: 'Copying…',
+          onSelect: async () => {
+            const stored = await storedAnswer()
+            if (stored === null) refuseCopy()
+            else clipboardFallback(stored)
+          },
+        },
+        {
+          id: 'copy-all',
+          label: 'Copy all',
+          icon: CopyIcon,
+          busyLabel: 'Copying…',
+          // The same source as Copy output, deliberately: two items on one block
+          // reading one thing from two places is how they start to disagree.
+          onSelect: async () => {
+            const stored = await storedAnswer()
+            if (stored === null) refuseCopy()
+            else clipboardFallback(`${intent()}\n${stored}`)
+          },
+        },
+      )
+    } else {
+      list.push(
+        {
+          id: 'copy-output',
+          label: 'Copy output',
+          icon: CopyIcon,
+          onSelect: () => clipboardFallback(blockOutputText(blockEl)),
+        },
+        {
+          id: 'copy-all',
+          label: 'Copy all',
+          icon: CopyIcon,
+          onSelect: () => clipboardFallback(`${intent()}\n${blockOutputText(blockEl)}`),
+        },
+      )
+    }
+    list.push({
+      id: 'wrap',
+      label: wrapOn() ? 'Do not wrap' : 'Wrap lines',
+      icon: ArrowDownUpIcon,
+      onSelect: () => blockEl.setAttribute('data-wrap', wrapOn() ? 'off' : 'on'),
+    })
+    return list
+  }
 
-    // Position relative to the button using fixed coordinates — clamped by
-    // the SAME geometry the kit's ContextMenu clamps through
-    // (ui/menu-geometry.ts, nocx-vnirv.2). This is not a second clamp: a
-    // running block sits at the bottom of the scrollback by construction, so
-    // an unclamped menu opens past the window's bottom edge and "Ask about
-    // this command" and "Stop" — the two items that exist ONLY while it runs
-    // — are off-screen. Measured AFTER the menu is in the DOM, because the
-    // clamp needs the laid-out size to keep the whole shell inside the
-    // viewport. A menu taller than the viewport still fits: the shell's
-    // `max-height` + `overflow-y` (style.css) scrolls within the menu.
-    // TAKEN OUT OF FLOW BEFORE IT IS MEASURED, which is the whole of this
-    // ordering and is not a tidy-up. A plain div appended to `body` is an
-    // in-flow block box: it is as wide as the body, so measuring it there
-    // reports the WINDOW's width as the menu's. `btnRect.right - width` then
-    // goes negative and the clamp does exactly what it is asked to — pins
-    // the menu against the left edge of the screen, nowhere near the ⋮ that
-    // opened it (owner, 2026-08-24). Fixed positioning with no `left`/`top`
-    // yet shrinks the box to its content, which is the size the clamp needs.
-    menu.style.position = 'fixed'
-    const btnRect = btn.getBoundingClientRect()
-    const menuRect = menu.getBoundingClientRect()
-    // Freeze the measured shell dimensions before assigning its final
-    // coordinates. This keeps the clamp calculation stable in browsers whose
-    // fixed-position box reports a different static rect after placement.
-    menu.style.width = `${menuRect.width}px`
-    menu.style.height = `${menuRect.height}px`
-    // Right-aligned to the button, exactly where the fixed `right` it
-    // replaces put it.
-    const { left, top } = clampMenuPosition(
-      { x: btnRect.right - menuRect.width, y: btnRect.bottom + 2 },
-      { width: menuRect.width, height: menuRect.height },
-      { width: window.innerWidth, height: window.innerHeight },
+  function openMenu(): void {
+    // Right-aligned to the button, below it: the kit turns `align: 'end'` into
+    // `x - width` and clamps through menu-geometry.ts (nocx-vnirv.2).
+    const rect = btn.getBoundingClientRect()
+    const host = document.createElement('div')
+    dispose = render(
+      () =>
+        createComponent(ContextMenu, {
+          open: true,
+          align: 'end',
+          anchor: btn,
+          x: rect.right,
+          y: rect.bottom + 2,
+          items: items(),
+          onClose: closeMenu,
+          'data-testid': 'block-actions-menu',
+        }),
+      host,
     )
-    menu.style.left = `${left}px`
-    menu.style.top = `${top}px`
-
-    // Close on outside click (after this event finishes).
-    closeOnClick = (ev: MouseEvent) => {
-      if (!menu?.contains(ev.target as Node) && ev.target !== btn) {
-        closeMenu()
-      }
-    }
-    setTimeout(() => document.addEventListener('click', closeOnClick!), 0)
-
-    // Close on Escape.
-    closeOnEscape = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape') {
-        closeMenu()
-      }
-    }
-    document.addEventListener('keydown', closeOnEscape)
-  })
+  }
 
   return btn
 }
@@ -1337,10 +1398,14 @@ function wireBlockSelection(
   let mouseMoved = false
 
   /** This block is the one the pointer is actually in — not an ancestor of
-   *  it, and not the ⋮ or its menu, which own their own clicks. */
+   *  it, and not a control the header carries (the ⋮, the running Stop
+   *  button) or its menu, which own their own clicks. `data-block-control`
+   *  is the shared attribute every such control carries (nocx-9bpeq.12
+   *  round 6) — never `data-block-actions`, which is the ⋮'s own identity
+   *  and, since round 4, no longer unique to it alone. */
   const mine = (e: Event): boolean => {
     const target = e.target as HTMLElement
-    if (target.closest('.cmd-overflow-btn, .cmd-overflow-menu')) return false
+    if (target.closest('[data-block-control], .ui-context-menu')) return false
     return target.closest('.cmd-block') === blockEl
   }
 
@@ -1458,17 +1523,7 @@ export function createCommandBlock(
   // header — and a run of prose is the one that does not (ADR-0040): there
   // is nothing to name it, because the intent was the question.
   if (rules.header) {
-    const header = createHeader(
-      kind,
-      command,
-      cwd,
-      location,
-      durationMs,
-      exitCode,
-      status,
-      store,
-      author,
-    )
+    const header = createHeader(kind, command, cwd, location, status, store, author)
     // Overflow menu (P2-9) — always the LAST element of the header-right
     // group (owner directive: ⋮ never shifts position). It reads the block's
     // copyable text from the BLOCK, at click time (nocx-ex636).
@@ -1476,6 +1531,13 @@ export function createCommandBlock(
     const right = header.querySelector('.cmd-header-right')
     if (right) right.appendChild(overflow)
     wrapper.appendChild(header)
+    // Settle the block's outcome now that its header is attached — there is
+    // one owner for this (nocx-hoeq3, nocx-9bpeq.6). A block still WAITING
+    // has no outcome to settle yet; its header already drew the in-progress
+    // state above, and settling here would strip it right back off.
+    if (status !== 'waiting') {
+      settleBlockOutcome(wrapper, kind, durationMs, { status, exitCode })
+    }
   }
   if (outputEl) wrapper.appendChild(outputEl)
 
@@ -1495,7 +1557,10 @@ export function createCommandBlock(
   // and there is no race to order. A single mousedown (detail 1) is not
   // intercepted: drag selection and click-to-select keep working.
   wrapper.addEventListener('mousedown', (e: MouseEvent) => {
-    if ((e.target as HTMLElement).closest('.cmd-overflow-btn, .cmd-overflow-menu')) return
+    // `data-block-control` (nocx-9bpeq.12 round 6) — the shared attribute a
+    // header control carries, not `data-block-actions`, the ⋮'s own
+    // identity alone. See wireBlockSelection's `mine()` for the same guard.
+    if ((e.target as HTMLElement).closest('[data-block-control], .ui-context-menu')) return
     // The innermost block owns the gesture, for the reason selection does:
     // a turn contains the blocks it caused, so the same double-click reaches
     // every ancestor's listener (ADR-0040).
@@ -1563,23 +1628,74 @@ export function createRunningBlock(
   wrapper.dataset.blockKind = 'command'
   if (command && findReferences(command).length > 0) wrapper.dataset.recordedCommand = command
 
-  const header = createHeader(
-    'command',
-    command,
-    cwd,
-    location,
-    null,
-    null,
-    'running',
-    store,
-    author,
-  )
+  const header = createHeader('command', command, cwd, location, 'running', store, author)
+  const right = header.querySelector('.cmd-header-right')
+
+  // Stop, the visible door (spec 2026-09-15 §4): the ⋮ menu keeps its own
+  // Stop item as the second door to the same handler, below. Built whenever
+  // running actions are injected at all (round 4, nocx-9bpeq.12) — NOT
+  // gated on `running.isActive(wrapper)` here, because in the real app
+  // (terminal-content.ts's `runningActions.isActive`) that reads
+  // `blockManager.runningBlock`, which this very call is IN THE MIDDLE OF
+  // setting (`startBlock` assigns it only after `createRunningBlock`
+  // returns) — so at construction it is always false and the button was
+  // never built at all, on every real running command; a unit test that
+  // injected `isActive: () => true` unconditionally missed this because it
+  // never asked what the real manager answers DURING construction. Whether
+  // the button DOES anything is still gated on `isActive` at CLICK time,
+  // below, which is the fact that can legitimately change after the block
+  // exists. Always visible (not opacity-hidden like ⋮), so it never asks a
+  // person to discover it by hovering. `data-block-control` (round 6) is
+  // the escape hatch from block-selection and the pane's focus-bounce
+  // listener (`wireBlockSelection` below, terminal-content.ts) that the ⋮
+  // button also carries — the SAME mechanism, not a second one. Never
+  // `data-block-actions`: that is the ⋮'s own identity, and giving Stop the
+  // same one made every "find the block-actions button" caller across the
+  // repo (placeHeaderChip here, a dozen e2e specs, restored-block.test.ts,
+  // turn-children.test.ts) find Stop first instead, since it is appended
+  // before the ⋮ (round 4's regression, fixed here rather than narrowed
+  // consumer by consumer, which would have made "which one is the ⋮" a
+  // second-owned fact — AGENTS.md).
+  if (right && running) {
+    // `size: 'sm'` (22px, --font-size-2xs) read tiny beside the row's own
+    // 14px mono status text — the owner's screenshot, round 2 of the
+    // mockup pass. `md` (the kit's other size, button.ts's own
+    // `ButtonSize` — there is no third to reach for) is the default
+    // height for `variant: 'default'` (--control-height-sm, 24px) at
+    // --font-size-sm, which reads at the command row's own register
+    // instead of the smallest one in the type scale.
+    const stop = createButton({
+      label: 'Stop',
+      ariaLabel: 'Stop',
+      variant: 'default',
+      onClick: (e) => {
+        e.stopPropagation()
+        e.preventDefault()
+        if (running.isActive(wrapper)) running.stop()
+      },
+    })
+    // Rebuilt explicitly rather than `.prepend()`-ing onto the text node
+    // `createButton` already gave it (round 2, nocx-9bpeq.12): the icon and
+    // the label are two separate elements, replacing the button's content
+    // outright. `iconElement` (round 3) is what actually resolves the icon:
+    // SquareIcon is ALSO passed uncalled as `icon: SquareIcon` to the ⋮
+    // menu's Stop item below, and the first time Solid renders it there
+    // permanently marks the underlying function so a later bare call
+    // returns an HMR-proxy accessor instead of an element (see
+    // ui/icons/icon-element.ts's header) — order-dependent on which test
+    // opened that menu first.
+    const icon = iconElement(SquareIcon)
+    const label = document.createElement('span')
+    label.textContent = 'Stop'
+    stop.replaceChildren(icon, label)
+    stop.setAttribute('data-block-control', '')
+    right.appendChild(stop)
+  }
 
   // Overflow menu — copying the command, plus what can be done ABOUT the
   // command while it is still running (nocx-92gfl, nocx-23rph).
   // Always the LAST element of header-right (owner directive).
   const overflow = buildOverflowMenu(wrapper, command, undefined, undefined, running)
-  const right = header.querySelector('.cmd-header-right')
   if (right) right.appendChild(overflow)
 
   wrapper.appendChild(header)
@@ -1591,11 +1707,14 @@ export function createRunningBlock(
 /**
  * Freeze a running block: replace it with a frozen version.
  *
- * `status` is the presentation, never derived from the exit code: 'entered'
- * (N6) freezes on environment entry — neither success nor failure, no exit
- * code — and the old exitCode === null → 'failure' mapping is exactly the
- * bug this must not inherit. The D path passes 'success'/'failure' from the
- * real code; entry passes 'entered' with a null code.
+ * `status` is the presentation, never derived from the exit code alone:
+ * 'entered' (N6) freezes on environment entry — neither success nor
+ * failure, no exit code — and the old exitCode === null → 'failure' mapping
+ * is exactly the bug this must not inherit. 'cancelled' (nocx-9bpeq.19) is
+ * the other exception: a nonzero exit the caller already knows was caused
+ * by a stop request through nocx, never derived here either. The D path
+ * passes 'success'/'failure'/'cancelled' from `freezeFromAttempt`'s own
+ * derivation; entry passes 'entered' with a null code.
  */
 export function freezeBlock(
   el: HTMLElement,
@@ -1609,7 +1728,7 @@ export function freezeBlock(
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
-  status: 'success' | 'failure' | 'entered' | 'unknown',
+  status: 'success' | 'failure' | 'cancelled' | 'entered' | 'unknown',
   author: CommandAuthor = 'shell',
   menuActions?: RunningBlockActions,
   entryId?: string,
@@ -1737,6 +1856,17 @@ export interface BlockManagerOpts {
    *  manager opens; this manager neither summons nor signals anything.
    *  Absent in a bare-bones embedding, and then the menu is what it was. */
   runningActions?: RunningBlockActions
+  /** The document's visibility, for the running duration ticker
+   *  (`_startTicker`): the app has ONE owner for `document.hidden`
+   *  (app-visible.ts — "panels must not read document.hidden themselves or
+   *  each invent a subtly different gate"; enforced by grant.test.ts's
+   *  "keeps direct document visibility reads in the app visibility
+   *  module"), so this manager reads it through that module too rather
+   *  than a second raw read. Defaults to a fresh `createAppVisibility()`
+   *  when absent; a caller that already holds the application's one
+   *  instance (sidebar.tsx) may pass it instead. Injectable mainly so a
+   *  test can supply a fake without touching the real `document`. */
+  appVisibility?: AppVisibility
 }
 
 export class BlockManager {
@@ -1783,6 +1913,11 @@ export class BlockManager {
   /** Reads back what a tool call returned — see BlockManagerOpts. */
   private _toolResult?: ToolResultSource
   private _runningActions?: RunningBlockActions
+  /** The one owner of `document.hidden` (app-visible.ts) — see
+   *  BlockManagerOpts.appVisibility. Owned by this manager when the caller
+   *  did not supply one, so `dispose()` destroys it exactly then. */
+  private _appVisibility: AppVisibility
+  private _ownsAppVisibility: boolean
   /** The attempt id the running block is bound to (ADR-0024 §7 projection).
    *  Set when the published running fact binds the block; cleared when the
    *  block freezes or the scrollback is cleared. */
@@ -1849,6 +1984,8 @@ export class BlockManager {
     this._dump = opts.dump
     this._toolResult = opts.toolResult
     this._runningActions = opts.runningActions
+    this._ownsAppVisibility = opts.appVisibility === undefined
+    this._appVisibility = opts.appVisibility ?? createAppVisibility()
   }
 
   /** THE ONE DOOR into `.scrollback-inner`. Everything this manager shows
@@ -1859,6 +1996,29 @@ export class BlockManager {
   private _own(el: HTMLElement, before: ChildNode | null): void {
     this._scrollbackInner.insertBefore(el, before)
     this._owned.add(el)
+    this._refreshFirstEntry()
+  }
+
+  /** Keep exactly one top-level entry marked as the transcript's FIRST
+   *  (spec 2026-09-15 §1.5): assigned structurally, here, whenever the
+   *  stack's own membership changes — never recomputed from scroll offset
+   *  or viewport visibility, and never left to `:first-child`, which is not
+   *  a general test for "first visible command" (a restore boundary, a
+   *  reconnect line and a command block are three different element types
+   *  sharing one leading position). `.cmd-block` and `.scrollback-restore-
+   *  boundary` are the only "entries" for this purpose — the live region is
+   *  a sibling that never carries the leading rule, and a block nested
+   *  inside a turn is not a TOP-LEVEL entry at all. */
+  private _refreshFirstEntry(): void {
+    const first = this._scrollbackInner.querySelector<HTMLElement>(
+      ':scope > .cmd-block, :scope > .scrollback-restore-boundary',
+    )
+    for (const marked of this._scrollbackInner.querySelectorAll<HTMLElement>(
+      ':scope > [data-first-entry]',
+    )) {
+      if (marked !== first) delete marked.dataset.firstEntry
+    }
+    if (first) first.dataset.firstEntry = 'true'
   }
 
   /** WHERE THE LIVE REGION BELONGS (nocx-hp8p2.8).
@@ -1934,6 +2094,12 @@ export class BlockManager {
   private _reown(oldEl: HTMLElement, newEl: HTMLElement): void {
     this._owned.delete(oldEl)
     this._owned.add(newEl)
+    // The running element carried `data-first-entry` when it was the
+    // transcript's leading entry; `freezeBlock` built `newEl` from scratch
+    // and does not know that, so the mark must be recomputed here rather
+    // than copied — a copy would go stale the day two elements can freeze
+    // at once.
+    this._refreshFirstEntry()
   }
   /** The "working, nothing written yet" stand-in for the RUNNING command,
    *  inside the live region, where the first output line will be written
@@ -2017,12 +2183,10 @@ export class BlockManager {
       if (block) break
     }
     if (!block) return false
-    const right = block.querySelector('.cmd-header-right')
-    if (!right) return false
     const status = exitCode === 0 ? 'success' : 'failure'
     block.classList.remove('cmd-block-unreconciled')
     block.dataset.restoredStatus = status
-    settleHeaderRight(right, 'command', durationMs, { status, exitCode })
+    settleBlockOutcome(block, 'command', durationMs, { status, exitCode })
     return true
   }
 
@@ -2234,6 +2398,7 @@ export class BlockManager {
       outputStart,
       endLine: startLine,
       cReceived: false,
+      stopRequested: false,
       el,
     }
     this._blocks.push(rec)
@@ -2244,28 +2409,105 @@ export class BlockManager {
   }
 
   /**
-   * Tick the running block's duration chip once a second.
+   * Tick the running block's duration chip at the tenth-second cadence its
+   * display needs (spec 2026-09-15 §1.7: `Running · 12.4s`) — 100ms, not
+   * the old once-a-second interval a decimal digit could never have shown.
    *
-   * One timer for the one running block, cleared the moment it stops running —
-   * there is never more than one, so this cannot accumulate the way a per-block
-   * timer would.
+   * One timer for the one running block, cleared the moment it stops running
+   * — there is never more than one, so this cannot accumulate the way a
+   * per-block timer would.
    */
   private _ticker: ReturnType<typeof setInterval> | null = null
+  /** The tab-visibility listener the running ticker installs — a fresh one
+   *  per command, so the timer's own lifetime (`_startTicker`/`_stopTicker`)
+   *  is what owns it, rather than a listener that outlives every command
+   *  this manager will ever run. */
+  private _tickerVisibility: (() => void) | null = null
+  /** The document the visibility listener went onto — the block's own, so
+   *  removing it never reaches for a global `document` that may be gone. */
+  private _tickerDocument: Document | null = null
 
   private _startTicker(el: HTMLElement): void {
     this._stopTicker()
-    const chip = el.querySelector('.cmd-header-duration')
+    const right = el.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')
     const started = this._cmdStartTime
-    if (!chip || started === null) return
-    this._ticker = setInterval(() => {
-      chip.textContent = formatRunningDuration(this._now() - started)
-    }, 1000)
+    if (!right || started === null) return
+
+    // Built LAZILY, the moment elapsed first crosses `DURATION_FLOOR_MS` —
+    // never at header-build time, when it is always zero (round 3: bare
+    // "Running" until there is a figure worth showing). Inserted right
+    // before Stop/the ⋮ (whichever comes first in DOM — Stop always
+    // precedes the ⋮ when both exist), the one place "Running · 12.4s
+    // [Stop] [⋮]" puts it; a plain `right.appendChild` would instead land
+    // it AFTER both, since they are appended by the caller once this
+    // header already exists (createRunningBlock).
+    let meta: HTMLSpanElement | null = null
+
+    const paint = (): void => {
+      // The block left the document — its pane was torn down without this
+      // manager being told, or (in a test) the whole window closed under a
+      // still-running block. Nothing is left to paint; stop the timer rather
+      // than write into a DOM that is gone.
+      if (!el.isConnected || el.ownerDocument.defaultView === null) {
+        this._stopTicker()
+        return
+      }
+      const elapsed = this._now() - started
+      if (elapsed < DURATION_FLOOR_MS) return
+      if (meta) {
+        updateMeta(meta, [formatRunningDuration(elapsed)], {
+          tone: 'muted',
+          column: 'duration',
+          size: 'terminal',
+        })
+        return
+      }
+      const before = right.querySelector('[data-block-control], [data-block-actions]')
+      right.insertBefore(createMetaSeparator({ size: 'terminal' }), before)
+      meta = durationMeta(formatRunningDuration(elapsed))
+      right.insertBefore(meta, before)
+    }
+    // A hidden tab gains nothing from repainting ten times a second — this
+    // PAUSES the timer itself rather than merely skipping the paint inside
+    // it, and `visibilitychange` repaints once, immediately, on return.
+    // The BOOLEAN comes from `this._appVisibility` (app-visible.ts), the
+    // app's one owner of `document.hidden` — never a second raw read here
+    // (grant.test.ts's "keeps direct document visibility reads in the app
+    // visibility module"). Listening to `visibilitychange` directly is
+    // still fine (dispatcher.ts, wake-report.ts and terminal-links/
+    // armed.ts each do too, for their own different lifecycle questions,
+    // per app-visible.ts's own header comment) — only the VALUE has one
+    // owner, not the event.
+    const resume = (): void => {
+      if (this._ticker !== null) return
+      paint()
+      this._ticker = setInterval(paint, 100)
+    }
+    const pause = (): void => {
+      if (this._ticker === null) return
+      clearInterval(this._ticker)
+      this._ticker = null
+    }
+    this._tickerVisibility = () => {
+      if (this._appVisibility.visible()) resume()
+      else pause()
+    }
+    this._tickerDocument = el.ownerDocument
+    this._tickerDocument.addEventListener('visibilitychange', this._tickerVisibility)
+    if (this._appVisibility.visible()) resume()
+    else paint()
   }
 
   private _stopTicker(): void {
-    if (this._ticker === null) return
-    clearInterval(this._ticker)
-    this._ticker = null
+    if (this._ticker !== null) {
+      clearInterval(this._ticker)
+      this._ticker = null
+    }
+    if (this._tickerVisibility !== null) {
+      this._tickerDocument?.removeEventListener('visibilitychange', this._tickerVisibility)
+      this._tickerVisibility = null
+      this._tickerDocument = null
+    }
   }
   freezeBlock(getLine: GetLineFn, endLine: number, exitCode: number | null): BlockRecord | null {
     const rec = this._runningBlock
@@ -2405,11 +2647,17 @@ export class BlockManager {
     if (attempt.state !== 'completed') return null
     if (this._attemptId !== attempt.id) return null
     const code = attempt.exitCode ?? null
-    const status = code === 0 ? 'success' : 'failure'
     const fence = attempt.fence
     const sighted = fence !== undefined ? this._fences.get(fence) : undefined
     const rec = this._runningBlock
     if (!rec) return null
+    // A nonzero exit is a failure UNLESS this block was sent a stop request
+    // through nocx (nocx-9bpeq.19): the backend's own completion fact never
+    // says why the process died — SIGINT's 130 and the escalation ladder's
+    // own 143/137 read exactly like a program's own failure otherwise —
+    // so `stopRequested` (set by terminal-content.ts's `signalActiveCommand`
+    // at the moment of the gesture) is the one fact that tells them apart.
+    const status = code === 0 ? 'success' : rec.stopRequested ? 'cancelled' : 'failure'
 
     if (this._pendingFence !== null) {
       // Another completion wants the slot while one is pending. The pty
@@ -2672,8 +2920,7 @@ export class BlockManager {
       children.querySelector(':scope > .cmd-answer-typing')?.remove()
     }
     const stopWaiting = (): void => {
-      el.querySelector('.cmd-header-right .cmd-answer-waiting')?.remove()
-      el.querySelector('.cmd-header-right .cmd-answer-waiting-pulse')?.remove()
+      el.querySelector(':scope > .cmd-header .cmd-header-right > .cmd-header-waiting')?.remove()
       // The corner stops reporting work when the first answer delta lands.
       // The child marker has a different lifetime: it belongs to the whole
       // run and is removed only by close.
@@ -2858,12 +3105,11 @@ export class BlockManager {
         // A `run` that was announced and never reached a command must not
         // adopt somebody else's block later: the claim dies with the turn.
         if (claimedBy() === children) claim(null)
-        // The header's right-hand group, from its ONE owner (nocx-hoeq3):
-        // how long the turn took and how it ended, as the ask kind's rules
-        // say them. One header now, so the outcome lands where the question
-        // is and nowhere else.
-        const right = el.querySelector('.cmd-header-right')
-        if (right) settleHeaderRight(right, 'ask', now() - startedAt, { status, exitCode: null })
+        // The header's right-hand group and the block's outcome, from its
+        // ONE owner (nocx-hoeq3, nocx-9bpeq.6): how long the turn took and
+        // how it ended, as the ask kind's rules say them. One header now, so
+        // the outcome lands where the question is and nowhere else.
+        settleBlockOutcome(el, 'ask', now() - startedAt, { status, exitCode: null })
         // The model that answered, on the answer itself (nocx-e6kn2): the
         // person must be able to tell which model answered without going to
         // look it up. The value is the ask result's pinned model — this run's
@@ -2926,5 +3172,10 @@ export class BlockManager {
 
   dispose(): void {
     this.clearAll()
+    // Only when THIS manager created its own instance (BlockManagerOpts.
+    // appVisibility absent): a caller-supplied one — the application's
+    // shared instance (sidebar.tsx) — outlives any one manager and is not
+    // this manager's to tear down.
+    if (this._ownsAppVisibility) this._appVisibility.destroy()
   }
 }

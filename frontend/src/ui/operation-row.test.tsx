@@ -4,6 +4,7 @@ import { createSignal } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { OperationRow } from './operation-row'
 import type { OperationPhase } from './operation'
+import { formatTimestamp } from './format-time'
 
 afterEach(cleanup)
 
@@ -290,7 +291,7 @@ describe('OperationRow once the work is over', () => {
   it('puts the exact moment on hover, because the label ages and the clock does not', () => {
     const { container } = render(() => <OperationRow {...FINISHED} />)
     expect(container.querySelector('.ui-operation-row__summary')?.getAttribute('title')).toBe(
-      new Date(ENDED).toLocaleString(),
+      formatTimestamp(ENDED),
     )
   })
 

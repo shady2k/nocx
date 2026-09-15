@@ -36,6 +36,7 @@ import { IconButton } from './ui/icon-button'
 import { StatusCard } from './ui/status-card'
 import { formatBytes } from './ui/format-bytes'
 import { UNRECORDED, type SessionRecovery } from './ipc'
+import { CloseIcon } from './ui/icons'
 
 /** The retention bound's word, minted by the store (internal/content's
  *  TruncCap) and repeated on the wire by session.output's gap reason. Named
@@ -148,7 +149,7 @@ function RecoveryNotice(props: { account: RecoveryAccount; onDismiss: () => void
       description={description(props.account)}
       action={
         <IconButton ariaLabel="Dismiss" size="sm" onClick={() => props.onDismiss()}>
-          {'×'}
+          <CloseIcon />
         </IconButton>
       }
     />

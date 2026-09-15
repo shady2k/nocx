@@ -13,7 +13,9 @@
  *                 ".kit-scope" — well-formed, and matches nothing that can
  *                 exist in HTML. 21 kit rules were dead this way.
  *   undefined-var `font-family: var(--font-family-mono)` where no rule
- *                 declares that property. The declaration is invalid at
+ *                 declares that property — or `var(--radius-sm, 4px)` where no
+ *                 rule declares it and no source sets it, so the fallback is
+ *                 all that ever renders. The declaration is invalid at
  *                 computed-value time and the element silently inherits.
  *   theme-scope   A theme file selecting bare `:root` applies unconditionally,
  *                 so a second theme cannot override it except by import order.
@@ -59,7 +61,7 @@ const css = createRequire(import.meta.url)('css-tree')
  * order the files are imported in. Relying on import order is what makes a
  * missing @import look like a working theme switch.
  */
-const DEFAULT_THEME_FILE = 'tokyo-night.css'
+const DEFAULT_THEME_FILE = 'graphite.css'
 
 /**
  * Custom properties written by code rather than by a stylesheet, or read by
@@ -143,7 +145,9 @@ function findEscapedDotSelectors(ast) {
   return found
 }
 
-/** Custom properties declared (`--x: …`) and referenced (`var(--x)`) in a file. */
+/** Custom properties declared (`--x: …`) and referenced (`var(--x)`) in a file.
+ *  A reference records whether it carries a fallback; the rule decides what a
+ *  fallback excuses, not the collector. */
 function collectCustomProperties(ast) {
   const declared = new Set()
   const referenced = []
@@ -155,15 +159,43 @@ function collectCustomProperties(ast) {
     if (node.type === 'Function' && node.name === 'var') {
       const first = node.children && node.children.first
       if (!first || first.type !== 'Identifier' || !first.name.startsWith('--')) return
-      // A fallback (`var(--x, monospace)`) makes the reference safe even when
-      // --x is undefined, so only bare references are candidates.
-      const hasFallback = node.children.size > 1
-      if (hasFallback) return
-      referenced.push({ name: first.name, line: node.loc ? node.loc.start.line : 0 })
+      referenced.push({
+        name: first.name,
+        hasFallback: node.children.size > 1,
+        line: node.loc ? node.loc.start.line : 0,
+      })
     }
   })
 
   return { declared, referenced }
+}
+
+/**
+ * Custom properties a source file sets from script — every `'--name'`, `"--name"`
+ * or `` `--name `` string literal in a non-test .ts/.tsx under `rootAbs`.
+ *
+ * This is what a fallback legitimately stands in for: `--sidebar-width` has no
+ * declaration because sidebar-width.ts writes it inline. A name set with a
+ * computed string (`--${x}`) is deliberately not found — spell it literally.
+ */
+function collectRuntimeProperties(rootAbs) {
+  const names = new Set()
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === 'node_modules') continue
+      const abs = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        walk(abs)
+        continue
+      }
+      if (!/\.(ts|tsx)$/.test(entry.name) || /\.test\.(ts|tsx)$/.test(entry.name)) continue
+      for (const m of readFileSync(abs, 'utf8').matchAll(/['"`](--[a-zA-Z][a-zA-Z0-9-]*)/g)) {
+        names.add(m[1])
+      }
+    }
+  }
+  if (existsSync(rootAbs)) walk(rootAbs)
+  return names
 }
 
 /**
@@ -798,13 +830,20 @@ export function checkCSSIntegrity({ entry, stylesDir, uiDir }) {
   }
 
   // ── undefined-var (needs every file's declarations first) ───────────────
+  // A bare reference must be declared. A reference with a fallback may also be
+  // set from script instead; one that is neither renders its fallback forever,
+  // which is how six `--radius-*` references stood for months (nocx-9bpeq.2).
+  const runtimeProperties = collectRuntimeProperties(resolve(stylesAbs, '..'))
   for (const ref of referencedEverywhere) {
     if (declaredEverywhere.has(ref.name)) continue
+    if (ref.hasFallback && runtimeProperties.has(ref.name)) continue
     violations.push({
       rule: 'undefined-var',
       file: rel(ref.file),
       line: ref.line,
-      detail: `var(${ref.name}) has no declaration in the loaded cascade and no fallback`,
+      detail: ref.hasFallback
+        ? `var(${ref.name}, …) names a property no stylesheet declares and no source sets — its fallback is the only value that can ever render`
+        : `var(${ref.name}) has no declaration in the loaded cascade and no fallback`,
     })
   }
 

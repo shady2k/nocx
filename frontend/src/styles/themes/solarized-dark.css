@@ -22,6 +22,19 @@
      canvas — the tab bar, the vertical strip and the settings rail. */
   --color-chrome: #00212b;
   --color-chrome-rail: #002731;
+  /* The terminal screen's own chrome band (pane context strip, running
+     process footer — mockup decision 2026-09-15 §1.9, §3): reads
+     LIGHTER than --terminal-background, unlike --color-chrome above,
+     which is darker than --color-canvas for the shell's own chrome-
+     behind-content role. This theme's existing --color-surface value —
+     already lighter than the terminal ground and distinct from it — is
+     the nearest fit; see tokyo-night.css for the full rationale. Every
+     theme sets this explicitly (ADR-0013 §4). */
+  --color-terminal-chrome: #073642;
+  /* A filled control resting ON the terminal-chrome card — the composer's
+     Run segment and submit button: one step from the card toward the text,
+     so it reads as a control in every theme, dark or light. */
+  --color-control-fill: #1c464f;
   --color-surface-sunken: #012730;
   --color-tab-active: #073642;
   --color-surface: #073642;
@@ -41,7 +54,8 @@
   /* ── Additional semantic colours (§2.2) ──────────────────────────── */
   --color-success: #859900;
   --color-warning: #b58900;
-  --color-danger: #dc322f;
+  --color-danger: #e27067;
+  --color-danger-surface: #0e2f39;
   --color-accent-secondary: #6c71c4;
   --color-error: #cb4b16;
 
@@ -64,7 +78,7 @@
   --color-surface-active: #0d4553;
   --color-surface-disabled: rgba(7, 54, 66, 0.7);
   --color-success-hover: #94a51f;
-  --color-danger-hover: rgba(220, 50, 47, 0.1);
+  --color-danger-hover: rgba(226, 112, 103, 0.1);
   --color-warning-hover: rgba(181, 137, 0, 0.1);
   --color-focus-ring: rgba(42, 161, 152, 0.6);
   --color-scrim: rgba(0, 0, 0, 0.5);

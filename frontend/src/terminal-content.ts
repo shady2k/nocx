@@ -78,6 +78,8 @@ import {
   type ConnectionFacts,
 } from './connection-condition'
 import type { SessionLiveness as SessionLivenessFact } from './generated/session.liveness'
+import type { SessionHomeSource } from './where/session-home'
+import type { BranchSource, BranchRequest } from './where/branch-source'
 
 /** What a pane reads when nothing supplied the recording seam: the fact is
  *  unknown and stays unknown, so the card says nothing about this session's
@@ -90,7 +92,12 @@ const RECORDING_UNKNOWN: OutputRecordingSource = {
 }
 import { BlockReceipt } from './ui/block-receipt'
 import type { HistoryRecord } from './generated/history.record'
-import { blockOutputText, renderRecordedCommand, toolCallExpansion } from './scrollback/blocks'
+import {
+  blockOutputText,
+  renderRecordedCommand,
+  toolCallExpansion,
+  setBlockWhere,
+} from './scrollback/blocks'
 import { KIND_LABELS } from './secret-kind'
 import { NATIVE_RESTORE } from './native-mode'
 import { isInteractiveTransition, extractDestination } from './ssh-transition'
@@ -151,6 +158,9 @@ import { createSignal, type Setter } from 'solid-js'
 import { ResizeHandle } from './ui/resize-handle'
 import { IconButton } from './ui/icon-button'
 import { CloseIcon } from './ui/icons'
+import { createPaneContext, updatePaneContext, type PaneContextFacts } from './ui/pane-context'
+import { createProcessBar, updateProcessBar } from './ui/process-bar'
+import { cwdLabel } from './cwd-label'
 import { secretReference } from './secret-reference'
 import { hasSecretReference } from './snippets/resolve'
 import { LOCAL_TARGET_ID } from './ports-client'
@@ -465,6 +475,22 @@ export interface TerminalContentHooks {
    *  way a pane with nothing to reclaim always has. Whoever supplies the
    *  thunk owns saying so to the person — this side only falls back. */
   adoptSession?: () => Promise<SessionHandle>
+  /** This session's home directory (nocx-9bpeq.13/.16, spec §3): ONE
+   *  binding per session, shared with the terminal-link opener — the
+   *  composition root builds it once (main.tsx) and hands the same
+   *  instance to every pane that might open this session. Absent in an
+   *  embedding with no source (a bare-bones host, most tests), and then
+   *  no block or the composer ever learns a `~` path — cwdLabel's own
+   *  rule for "home unknown" (the absolute path) still applies. */
+  sessionHome?: SessionHomeSource
+  /** Build THIS pane's own branch source (nocx-9bpeq.13 §3: "per pane,
+   *  single-flight" — never shared, unlike sessionHome above). The
+   *  composition root supplies a factory bound to the git client's
+   *  open/close; TerminalContent calls it at most once, at construction,
+   *  and disposes what it built on its own dispose. Absent in an
+   *  embedding with no git client, and then no block or the composer
+   *  ever shows a branch. */
+  createBranchSource?: () => BranchSource
 }
 
 type SummonDecision =
@@ -692,6 +718,15 @@ export class TerminalContent extends BasePaneContent {
   private _setSummonAnswersHeight: Setter<number> | null = null
   private _summonEditorHome: { parent: Node; nextSibling: ChildNode | null } | null = null
   private scrollback: ScrollbackController | null = null
+  /** The pane context strip, above `.scrollback-layout` (decision §1 item
+   *  3). Facts pushed from the same seam that already feeds the composer's
+   *  PromptContext (`_applyEnvironmentView`, `_onHomeKnown`,
+   *  `_onBranchChanged`) — see `_syncPaneContext`. */
+  private paneContext: HTMLElement | null = null
+  /** The running-state footer (decision §1, "Running-state gap"), mounted
+   *  once beside the composer and shown/hidden by `_syncLifecycleOwnership`
+   *  — never both surfaces visible at once. */
+  private processBar: HTMLElement | null = null
   private dumpSource: DumpSource | null = null
   private ledger: CommandLedger | null = null
   /** The vault RPC client, built over this tab's WS client (the shared
@@ -972,6 +1007,15 @@ export class TerminalContent extends BasePaneContent {
    *  §6, protocol §9). `_applyEnvironmentView` copies the projection's
    *  current view into these fields on every environment change. */
   private _cwdVerified = false
+  /** Mirrors the projection view's own `isLocal` (nocx-9bpeq.16): which
+   *  machine the ACTIVE DOMAIN's next command runs on, not whether this
+   *  pane's own session was opened over ssh — a hand-typed `ssh host`
+   *  flips this to false without touching `this.sshOpts`. The branch
+   *  source (`_requestBranchAfterSettle`) must never ask across a domain
+   *  it was told is remote (where/branch-source.ts's own remote-consent
+   *  refusal, and — round 3 — the plainer reason that a remote domain's
+   *  verified cwd is a path on a filesystem `git.open` cannot see). */
+  private _isLocal = true
   /** The last cwd reported to the layout chain. A shell prints its prompt
    *  many times in one directory and every one of them arrives here, so the
    *  report is on CHANGE — otherwise sitting still would cost a write per
@@ -991,6 +1035,37 @@ export class TerminalContent extends BasePaneContent {
   /** The ssh user of `_host` ('' for local shells) — the location line's
    *  `user@host`, from the same projection view. */
   private _user = ''
+  /** This pane's own branch source (nocx-9bpeq.16, spec §3), built once
+   *  from `hooks.createBranchSource` — null in an embedding with none.
+   *  Disposed in `dispose()`. */
+  private readonly branchSource: BranchSource | null
+  /** Unsubscribe from the CURRENT session's home — torn down and
+   *  re-registered whenever `_homeWiredSession` changes underneath it. */
+  private _homeUnsub: (() => void) | null = null
+  /** The session `sessionHome.ensure`/`.subscribe` have already been
+   *  asked for (spec §3: "opened when the session first reports a
+   *  verified cwd", not on every environment view). Null until then;
+   *  reset to null on dispose only — a session change on one pane never
+   *  happens without a fresh TerminalContent, so there is no rebind case
+   *  to reset it for. */
+  private _homeWiredSession: string | null = null
+  /** A command block's branch, by `BlockRecord.id` — recorded once, at
+   *  the moment the block opens (spec §3: "a block records the branch
+   *  the pane knew when the command was submitted and never updates it
+   *  afterwards"). Keyed by id rather than a DOM attribute on `rec.el`
+   *  because the freeze that settles a block REPLACES that element with
+   *  a freshly built one (BlockManager._freezeVisual) that carries no
+   *  attribute of ours forward — `_onBlockFrozen` reads this map to
+   *  restate the branch on the new element. */
+  private readonly _blockBranch = new Map<number, string | undefined>()
+  /** The `sessionId|cwd` pair the branch source was last asked about, so
+   *  a re-render of the same verified cwd (a title change, an unrelated
+   *  OSC 7 replay) does not reset its debounce on every environment view
+   *  (spec §3: asked "when the verified cwd changes"). A settled block
+   *  asks again unconditionally (`_requestBranchAfterSettle`) — the cwd
+   *  string does not change when a `git checkout` moves the branch, so a
+   *  key match here would swallow exactly the event that exists for. */
+  private _branchRequestKey = ''
   /** The domain-scoped environment projection (bead nocx-u7uh.11): cwd,
    *  host, the tab title and the completion scope follow the ACTIVE domain.
    *  Created at session open (it needs the session facts to seed the lane
@@ -1288,6 +1363,12 @@ export class TerminalContent extends BasePaneContent {
     this._readyPromise = new Promise<boolean>((resolve) => {
       this._readyResolve = resolve
     })
+    // Built once, here, never re-created: "per pane" (spec §3) means for
+    // the life of this TerminalContent, not per session it happens to
+    // hold. The composer hears every change for as long as the pane
+    // exists; a block hears none of them (see `_onBranchChanged`).
+    this.branchSource = hooks.createBranchSource?.() ?? null
+    this.branchSource?.subscribe((branch) => this._onBranchChanged(branch))
   }
 
   /**
@@ -1654,6 +1735,7 @@ export class TerminalContent extends BasePaneContent {
     const portsReasonBefore = this.portsUnavailableReason
     this._cwd = view.cwd
     this._cwdVerified = view.cwdVerified
+    this._isLocal = view.isLocal
     this._host = view.host
     this._user = view.user
     this.programTitle = view.programTitle
@@ -1701,6 +1783,186 @@ export class TerminalContent extends BasePaneContent {
     ) {
       this.hooks.onPortsTargetChange?.()
     }
+    this._syncWhereSources(view.cwd, view.cwdVerified, view.isLocal)
+    this._syncPaneContext()
+  }
+
+  /** This session's home, read fresh rather than mirrored (nocx-9bpeq.16):
+   *  a mirror can only be kept in step by remembering to update it
+   *  everywhere the session might change, and the source itself is the
+   *  one place that already knows both the session id and the answer. */
+  private currentHome(): string | undefined {
+    const sessionId = this.session?.sessionId
+    return sessionId ? this.hooks.sessionHome?.home(sessionId) : undefined
+  }
+
+  /**
+   * Ask the pane's where-sources for a fresh answer exactly when the spec
+   * says to (nocx-9bpeq.16, spec §3), and only then:
+   *
+   * - The session's home is opened (`ensure`) and subscribed to ONCE, the
+   *   first time this pane sees a VERIFIED cwd for the session — never on
+   *   the session-open cwd, which is a guess the provider would have to
+   *   answer with its own default root. `_homeWiredSession` guards the
+   *   once: every later call with the same session is a no-op here (the
+   *   subscription is already live and will hear the rest).
+   * - The branch source is asked again whenever the verified-cwd triple
+   *   actually changes (`_branchRequestKey`), so a program-title update or
+   *   a cwd replay does not reset its debounce for nothing. A settled
+   *   block asks again unconditionally — see `_requestBranchAfterSettle`,
+   *   called from `_onBlockFrozen` — because a `git checkout` moves the
+   *   branch without moving the cwd, which this key would otherwise miss.
+   *
+   * Neither call happens at all for a session with no verified cwd: this
+   * method is the one place that decides whether to ask, so a fake source
+   * in a test sees exactly zero calls rather than a call it must itself
+   * recognise as a no-op.
+   *
+   * `isLocal` is the environment projection's `view.isLocal` — "which
+   * machine will the NEXT command actually run on" — never
+   * `this.sshOpts === undefined` (tried in round 2 and reverted in round
+   * 3): after a hand-typed `ssh host` inside a local tab, the verified cwd
+   * this method receives is a path on the FAR host, and `this.sshOpts`
+   * stays `undefined` for the life of the tab (it names how the SESSION
+   * was opened, never what the shell inside it is doing). Gating on it
+   * would ask `git.open` to resolve a remote path against the LOCAL
+   * filesystem — showing the branch of whatever local directory happens
+   * to share that path, or nothing, under a prompt that reads as remote.
+   * `view.isLocal` is exactly the fact this decision needs, because it is
+   * scoped to the ACTIVE DOMAIN rather than to the session. */
+  private _syncWhereSources(cwd: string, cwdVerified: boolean, isLocal: boolean): void {
+    const sessionId = this.session?.sessionId
+    if (sessionId && cwdVerified) {
+      const homeSrc = this.hooks.sessionHome
+      if (homeSrc && this._homeWiredSession !== sessionId) {
+        this._homeWiredSession = sessionId
+        this._homeUnsub?.()
+        void homeSrc.ensure(sessionId, cwd, cwdVerified)
+        this._homeUnsub = homeSrc.subscribe(sessionId, (home) => this._onHomeKnown(home))
+        // subscribe() does not replay a value already known (its own
+        // contract) — a link click, or another pane on the same session,
+        // may have resolved it before this pane ever asked.
+        const known = homeSrc.home(sessionId)
+        if (known !== undefined) this._onHomeKnown(known)
+      }
+    }
+    if (this.branchSource) {
+      // The sessionId guard (added in round 2) stays even though home's
+      // gate above lacks one: an unset session would otherwise send
+      // git.open an empty sessionId, which the backend refuses outright
+      // rather than answering a result state — a guaranteed-wasted round
+      // trip this gate can skip for free.
+      const usable = Boolean(sessionId) && cwdVerified && isLocal && cwd !== ''
+      const key = usable ? `${sessionId}|${cwd}` : ''
+      if (usable && key !== this._branchRequestKey) {
+        this._branchRequestKey = key
+        const req: BranchRequest = { sessionId: sessionId ?? '', cwd, cwdVerified, isLocal }
+        this.branchSource.request(req)
+      } else if (!usable) {
+        this._branchRequestKey = ''
+      }
+    }
+  }
+
+  /** A settled command block asks the branch source again (spec §3: "and
+   *  when a command block settles (a `git checkout` changes it)"),
+   *  unconditionally — the cwd string does not change when a checkout
+   *  moves the branch, so `_syncWhereSources`'s dedup key would otherwise
+   *  swallow exactly the event this exists for. Called from
+   *  `_onBlockFrozen`, which fires at the end of every visual freeze.
+   *  `isLocal` reads `this._isLocal` for the same reason
+   *  `_syncWhereSources` reads `view.isLocal` — see its comment: the
+   *  ACTIVE DOMAIN's locality, never the session's own. */
+  private _requestBranchAfterSettle(): void {
+    if (!this.branchSource) return
+    const sessionId = this.session?.sessionId
+    if (!sessionId || !this._cwdVerified || !this._isLocal || this._cwd === '') return
+    const req: BranchRequest = {
+      sessionId,
+      cwd: this._cwd,
+      cwdVerified: true,
+      isLocal: true,
+    }
+    this.branchSource.request(req)
+  }
+
+  /** The session's home became known, or changed (nocx-9bpeq.16, spec §3):
+   *  the composer restates its prompt line, and so does every command
+   *  block this pane already holds — its OWN recorded branch, read back
+   *  from `_blockBranch`, never the pane's current one (a block's branch
+   *  is history; only its path takes the new `~` form). Ask/tool/text
+   *  blocks are not command records and are out of this loop's reach —
+   *  `blockManager.blocks` names only what it can reach. */
+  private _onHomeKnown(home: string): void {
+    this.editor?.setWhereFacts({ home, branch: this.branchSource?.branch() })
+    for (const rec of this.scrollback?.blockManager.blocks ?? []) {
+      setBlockWhere(rec.el, { home, branch: this._blockBranch.get(rec.id) })
+    }
+    this._syncPaneContext()
+  }
+
+  /** The pane's branch changed (nocx-9bpeq.16, spec §3): only the composer
+   *  hears about it. A block's prompt line is what the pane knew AT
+   *  SUBMIT — history, never revised — so this must never touch
+   *  `blockManager.blocks`; that is `_recordBlockWhere`'s moment alone. The
+   *  pane context strip is chrome, not history, so it hears every change
+   *  the same way the composer does (decision §1 item 3). */
+  private _onBranchChanged(branch: string | undefined): void {
+    this.editor?.setWhereFacts({ home: this.currentHome(), branch })
+    this._syncPaneContext()
+  }
+
+  /** Push the pane's current identity into its PaneContext strip (decision
+   *  2026-09-15-terminal-screen-mockup-decision.md §1 item 3) — the exact
+   *  facts already pushed to the composer's PromptContext
+   *  (`_applyEnvironmentView`, `_onHomeKnown`, `_onBranchChanged`), read
+   *  fresh rather than cached a second time. `program` is chosen from the
+   *  renderer's own buffer report (`this.scrollback.mode`), never a
+   *  heuristic over the byte stream (AD-6): an alt-screen program takes
+   *  the pane and this strip switches with it, in both directions, from
+   *  the same `renderer.onBufferChange` callback that drives
+   *  `enterFullscreen`/`exitFullscreen`.
+   *
+   *  Session actions (the mockup's `02` trailing control) is deliberately
+   *  NOT wired here yet: the decision record asks this strip to "expose
+   *  clearly" the existing native-input escape, and no such menu exists
+   *  in this tree to point it at — inventing one would be exactly the
+   *  "invented activity" AGENTS.md forbids. `createPaneContext`'s
+   *  `onSessionActions` slot is ready for whichever pane-management
+   *  surface owns that escape once it exists. */
+  private _syncPaneContext(): void {
+    const el = this.paneContext
+    if (!el) return
+    el.hidden = this.scrollback?.mode !== 'fullscreen'
+    if (this.scrollback?.mode === 'fullscreen') {
+      const target = this.inputOwner() === 'pty' ? this.programTitle || undefined : undefined
+      const facts: PaneContextFacts = {
+        kind: 'program',
+        program: this.programTitle || this.cwdTitle,
+        path: cwdLabel(this._cwd, this.currentHome()),
+        keyboardTarget: target,
+      }
+      updatePaneContext(el, facts)
+      return
+    }
+    const path = cwdLabel(this._cwd, this.currentHome())
+    const facts: PaneContextFacts = this._host
+      ? { kind: 'remote', host: this.hostLabel(), path }
+      : { kind: 'local', path, branch: this.branchSource?.branch() }
+    updatePaneContext(el, facts)
+  }
+
+  /** Give a just-opened command block the where-facts known right now, and
+   *  remember the branch it recorded (spec §3: "a block records the
+   *  branch known at submit and never updates it afterwards"). Called
+   *  once per block, at the moment its running element exists — the
+   *  shell-originated open (`openBlock`) and the app-owned submit both
+   *  reach it through the same `BlockRecord` their `beginBlock` call
+   *  already returns via `blockManager.runningBlock`. */
+  private _recordBlockWhere(block: BlockRecord): void {
+    const branch = this.branchSource?.branch()
+    this._blockBranch.set(block.id, branch)
+    setBlockWhere(block.el, { home: this.currentHome(), branch })
   }
 
   // ── The ssh environment boundary (nocx-mlm7 P9) — SEVERED ────────────
@@ -1889,12 +2151,25 @@ export class TerminalContent extends BasePaneContent {
         runningActions: this.runningActions,
       })
 
+      // ── Pane context strip (decision 2026-09-15-terminal-screen-mockup-
+      // decision.md §1 item 3) — chrome above the transcript, never a row
+      // inside it. Inserted BEFORE scrollbackLayout rather than at
+      // `target.firstChild`: the controller's own constructor already
+      // claimed that slot (`opts.pane.insertBefore(this.scrollbackLayout,
+      // opts.pane.firstChild)`), so this is the one ordering that puts the
+      // strip ABOVE the layout without racing it.
+      this.paneContext = createPaneContext({ kind: 'local', path: '~' })
+      this.paneContext.hidden = true
+      target.insertBefore(this.paneContext, this.scrollback.scrollbackLayout)
+
       log.info('nocx: mounting renderer')
       await renderer.mount(this.scrollback.mountTarget)
 
       if (signal.aborted) {
         renderer.dispose()
         this.scrollback.dispose()
+        this.paneContext?.remove()
+        this.paneContext = null
         this._readyResolve(false)
         return
       }
@@ -2451,6 +2726,25 @@ export class TerminalContent extends BasePaneContent {
       // state a Run pane is in, and the one the row was built for.
       this.renderTargetChips()
       this.editor.mount(target)
+      // The running-state footer (decision §1, "Running-state gap"):
+      // mounted once, right after the composer it replaces, and hidden
+      // until `_syncLifecycleOwnership` decides an ordinary running
+      // command owns the pane. `onStop` is the SAME stop owner the
+      // running block's own Stop uses; `onInterrupt` is the deliberately
+      // DIFFERENT intent the decision record's semantic-mismatch note
+      // requires.
+      this.processBar = createProcessBar({
+        onSendInput: () => this.takeKeyboardToGrid(),
+        onStop: () => this.runningActions.stop(),
+        onInterrupt: () => this.signalActiveCommand('interrupt'),
+      })
+      this.processBar.hidden = true
+      target.appendChild(this.processBar)
+      // Whatever this pane's where-sources already know — a reconnect can
+      // land here with the session's home already resolved by another
+      // pane on the same session (nocx-9bpeq.16). `_syncWhereSources`
+      // (called from every environment view) covers the rest.
+      this.editor.setWhereFacts({ home: this.currentHome(), branch: this.branchSource?.branch() })
       this.completion.attach(this.editor, this.editor.root)
       this.promptVault = new PromptVaultController({
         editor: this.editor,
@@ -2575,6 +2869,10 @@ export class TerminalContent extends BasePaneContent {
         this.editor.dispose()
         renderer.dispose()
         this.scrollback.dispose()
+        this.paneContext?.remove()
+        this.paneContext = null
+        this.processBar?.remove()
+        this.processBar = null
         this._readyResolve(false)
         return
       }
@@ -2683,6 +2981,11 @@ export class TerminalContent extends BasePaneContent {
             this.scrollback?.setRunning()
           }
         }
+        // AFTER the transition, not before: `_syncPaneContext` reads
+        // `this.scrollback.mode`, which `enterFullscreen`/`exitFullscreen`
+        // above just set — reading it earlier would show the strip the
+        // buffer it is LEAVING, one event late.
+        this._syncPaneContext()
       })
 
       // Match the shell's one-shot recovery fence in the render stream — an
@@ -2786,6 +3089,11 @@ export class TerminalContent extends BasePaneContent {
               renderer.cursorLine(),
             )
             this.scrollback.blockManager.bindAttempt(attempt.id)
+            // The block just opened — give it the where-facts known right
+            // now and remember the branch it recorded (nocx-9bpeq.16,
+            // spec §3).
+            const opened = this.scrollback.blockManager.runningBlock
+            if (opened) this._recordBlockWhere(opened)
           },
           freezeBlock: (attempt) => {
             // ADR-0024 §7: the visual freeze is authorized only by the
@@ -2899,11 +3207,28 @@ export class TerminalContent extends BasePaneContent {
         // focus leaves the editor: ⇧⌘S parks it in the name fields. The
         // bounce must yield to it, or the caret snaps straight back and the
         // receipt cannot be edited at all.
+        //
+        // A block's own ⋮ is the other, and so — since nocx-9bpeq.12 round
+        // 4 — is a running block's Stop button: both live inside the pane
+        // like any other scrollback content, so an unconditional bounce
+        // took the caret back the instant either took focus and the
+        // keyboard path to them (ADR-0008) could never land.
+        // `[data-block-control]` is the identity blocks.ts stamps on BOTH
+        // (round 6 — `data-block-actions` names the ⋮ alone, uniquely,
+        // and is not this guard's business; keying this check on it too
+        // is what let Stop and the ⋮ collide under a single-match query
+        // in a dozen other consumers). The ⋮'s menu needs no exception of
+        // its own — ContextMenu renders into document.body through a
+        // Portal, outside this listener's `target`, so a menu item taking
+        // focus never fires this handler at all; when the menu closes it
+        // returns focus to the ⋮ (ContextMenu's own releaseFocus), which
+        // lands here and is covered by the same guard.
         if (
           active &&
           (this.editor.rootContains(active) ||
             this.scrollback?.xtermLiveContainer.contains(active) ||
-            this.receipt?.root.contains(active))
+            this.receipt?.root.contains(active) ||
+            active.closest('[data-block-control]'))
         )
           return
         this.editor.focus()
@@ -3046,7 +3371,7 @@ export class TerminalContent extends BasePaneContent {
           const active = document.activeElement
           if (isTextEntry(active, this.scrollback?.xtermLiveContainer)) return
           if (hasOpenOverlays()) return
-          if (document.querySelector('.cmd-overflow-menu')) return
+          if (document.querySelector('.ui-context-menu')) return
           if (this.stopCurrentSummonedAnswerAndDismiss()) e.preventDefault()
           return
         }
@@ -3062,7 +3387,7 @@ export class TerminalContent extends BasePaneContent {
           const active = document.activeElement
           if (isTextEntry(active, this.scrollback?.xtermLiveContainer)) return
           if (hasOpenOverlays()) return
-          if (document.querySelector('.cmd-overflow-menu')) return
+          if (document.querySelector('.ui-context-menu')) return
           if (this.stopLiveAnswer()) {
             e.preventDefault()
             return
@@ -3093,7 +3418,7 @@ export class TerminalContent extends BasePaneContent {
           // before).
           if (isTextEntry(active, this.scrollback?.xtermLiveContainer)) return
           if (hasOpenOverlays()) return
-          if (document.querySelector('.cmd-overflow-menu')) return
+          if (document.querySelector('.ui-context-menu')) return
           if (this.editor.handleExternalEscape(e)) e.preventDefault()
           return
         }
@@ -3456,12 +3781,13 @@ export class TerminalContent extends BasePaneContent {
       document.addEventListener('keydown', this._targetChordKeydown, true)
 
       this.grantController = new GrantController({
-        chip: this.editor.root.querySelector<HTMLButtonElement>('.nocx-editor-grant') ?? undefined,
+        chip:
+          this.editor.root.querySelector<HTMLButtonElement>('[data-control="grant"]') ?? undefined,
         onChange: (blocks) => {
           this.grantedBlocks = [...blocks]
         },
       })
-      const chipRow = this.editor.root.querySelector<HTMLElement>('.nocx-editor-chrome-left')
+      const chipRow = this.editor.root.querySelector<HTMLElement>('.nocx-editor-controls')
       if (chipRow) this.grantController.mount(chipRow)
       this.editor.onGrantChipClick(() => this.grantController?.toggle())
       this.grantController.setBlocks(this.grantedBlocks)
@@ -4260,11 +4586,12 @@ export class TerminalContent extends BasePaneContent {
    *
    * The guard covers WIDTH too since nocx-cwnz0, and that half needs its own
    * argument, because a width the fit can move is a width that can alternate.
-   * It cannot: `usableViewport` reads `.scrollback-area`'s clientWidth, and
-   * that box is `flex: 1 1 auto` inside the pane — its width comes from the
-   * pane, never from the grid drawn in it, and `overflow-x: hidden` keeps a
-   * wide grid from widening it. The one thing that could move it is the
-   * vertical scrollbar appearing as rows change, and neither engine lets it:
+   * It cannot: `usableViewport` reads `.scrollback-area`'s clientWidth minus
+   * the live row's inline inset, and that box is `flex: 1 1 auto` inside the
+   * pane — its width comes from the pane, never from the grid drawn in it, and
+   * `overflow-x: hidden` keeps a wide grid from widening it. The one thing
+   * that could move it is the vertical scrollbar appearing as rows change,
+   * and neither engine lets it:
    * Chromium reserves the gutter (`scrollbar-gutter: stable`, style.css) and
    * WebKit draws an overlay bar that occupies no width at all. Which is also
    * why the two engines disagreed by 10px in nocx-vydj and why clientWidth,
@@ -4315,7 +4642,13 @@ export class TerminalContent extends BasePaneContent {
     // `running` the cap is null and the delivered/scroller height applies.
     const cap = this.scrollback?.runningLiveCap
     const height = cap ?? (area && area.clientHeight > 0 ? area.clientHeight : viewport.height)
-    const width = area && area.clientWidth > 0 ? area.clientWidth : viewport.width
+    // THE GRID'S BOX IS THE LIVE ROW'S CONTENT BOX (nocx-9bpeq.8). Rows carry
+    // the pane gutter, the live region included, so the scroller's clientWidth
+    // is the grid width PLUS that inset — fitting to clientWidth would put the
+    // last columns under `.xterm-inner`'s overflow, which is nocx-vydj again.
+    // Subtracted on the fallback path too: the delivered box is the pane's.
+    const outer = area && area.clientWidth > 0 ? area.clientWidth : viewport.width
+    const width = Math.max(0, outer - (this.scrollback?.liveInlineInsetPx ?? 0))
     return { ...viewport, width, height }
   }
 
@@ -5410,7 +5743,7 @@ export class TerminalContent extends BasePaneContent {
       // silent DOM invariant, not a refusal a person can reach.
       return { kind: 'invariant', reason: 'missing-live-container' }
     }
-    const markerHost = editor.root.querySelector<HTMLElement>('.nocx-editor-chrome-left')
+    const markerHost = editor.root.querySelector<HTMLElement>('.nocx-editor-controls')
     if (markerHost === null) {
       // The mounted editor always has its chrome row; this is a silent DOM
       // invariant, not a refusal a person can reach.
@@ -5554,7 +5887,7 @@ export class TerminalContent extends BasePaneContent {
         return false
       }
 
-      const markerHost = editor.root.querySelector<HTMLElement>('.nocx-editor-chrome-left')
+      const markerHost = editor.root.querySelector<HTMLElement>('.nocx-editor-controls')
       const frameHost = this.scrollback?.xtermLiveContainer
       if (markerHost === null || frameHost === undefined) return false
       if (!this._placeEditorInSummonStack(editor)) return false
@@ -6105,6 +6438,22 @@ export class TerminalContent extends BasePaneContent {
     const session = this.session
     if (session === null || !this.hasRunningCommand()) return
     const targetBlock = this.scrollback?.blockManager.runningBlock ?? null
+    // Recorded EAGERLY, before the round trip (nocx-9bpeq.19): the backend
+    // states no "stopped by request" fact on a completed attempt —
+    // contracts/lifecycle.changed.schema.json's `attempt` carries only
+    // `exitCode`, `completedAt` and `fence`, never a cause — so this is the
+    // renderer's own evidence, and the completion notification for this
+    // exact attempt can reach the renderer before session.signal's own
+    // response does, over the same connection. Waiting for a confirmed
+    // `delivered` would still lose that race to a freeze that got there
+    // first; marking at the gesture itself cannot, since nothing async has
+    // happened yet. Reverted below if the outcome turns out not to be
+    // `delivered` — a stop that never reached anything must not mislabel
+    // whatever this block eventually, possibly much later, completes with.
+    if (signal === 'stop' && targetBlock) targetBlock.stopRequested = true
+    const revertStopRequested = (): void => {
+      if (signal === 'stop' && targetBlock) targetBlock.stopRequested = false
+    }
     void session.signal(signal).then(
       (result) => {
         // A SWITCH, AND EXHAUSTIVE ON PURPOSE. The outcome set is closed by
@@ -6123,6 +6472,7 @@ export class TerminalContent extends BasePaneContent {
             }
             return
           case 'unsupported':
+            revertStopRequested()
             message =
               'This command is running on the remote host, which nocx cannot signal from here.'
             break
@@ -6131,14 +6481,17 @@ export class TerminalContent extends BasePaneContent {
             // not kill, Ctrl+C is precisely what the backend just sent, and
             // recommending the gesture that has already failed reads as the
             // app not knowing what it did.
+            revertStopRequested()
             message =
               'The command is still recorded as running and nocx could not stop it — the program shares the shell it was started from, so stopping it by force would take the shell too. Use the program’s own way out.'
             break
           case 'nothing-running':
+            revertStopRequested()
             message = 'Nothing is running in this pane any more, so there was nothing to stop.'
             break
           default: {
             const unreachable: never = result.outcome
+            revertStopRequested()
             log.warn('nocx: session.signal returned an outcome this build does not know', {
               outcome: String(unreachable),
             })
@@ -6148,6 +6501,7 @@ export class TerminalContent extends BasePaneContent {
         showToast({ level: 'warning', message })
       },
       (err: unknown) => {
+        revertStopRequested()
         log.warn('nocx: session.signal failed', {
           message: err instanceof Error ? err.message : String(err),
         })
@@ -6457,6 +6811,31 @@ export class TerminalContent extends BasePaneContent {
     // projection has shown or hidden the editor so recovery actions cannot
     // describe the state from before this reconciliation.
     this._updateCapability()
+    this._syncProcessBar(summoned)
+  }
+
+  /** ProcessBar's own visibility policy (decision §1, "Running-state gap"):
+   *  shown for ORDINARY running — `hasRunningCommand()`, never a heuristic
+   *  over recognized output text — and omitted whenever the composer would
+   *  instead be an overlay (`summoned`), the buffer is alternate (an
+   *  alt-screen program takes the pane, and `02` carries no such footer),
+   *  or the person's own native-input latch is on. Never both the
+   *  composer and this bar visible at once: `show` above and this policy
+   *  are complementary by construction — a summoned/native/alt-screen
+   *  pane that is NOT showing the editor still does not get the bar,
+   *  because none of those are "ordinary running". */
+  private _syncProcessBar(summoned: boolean): void {
+    const bar = this.processBar
+    if (!bar) return
+    const visible =
+      this.hasRunningCommand() &&
+      !summoned &&
+      !this.nativeMode &&
+      this.lifecycle.buffer === 'normal'
+    bar.hidden = !visible
+    if (visible) {
+      updateProcessBar(bar, { inputAvailable: this.session !== null })
+    }
   }
 
   /** A selection is a quote and a grant whose window follows the selected
@@ -6535,6 +6914,9 @@ export class TerminalContent extends BasePaneContent {
     this._disposed = true
     this._detachLinks?.()
     this._detachLinks = null
+    this._homeUnsub?.()
+    this._homeUnsub = null
+    this.branchSource?.dispose()
     this._pendingReadFrame = null
     this._readPinnedFrame = null
     this._mounted = false
@@ -6588,6 +6970,10 @@ export class TerminalContent extends BasePaneContent {
     this.recall?.destroy()
     this.recall = null
     this.scrollback?.dispose()
+    this.paneContext?.remove()
+    this.paneContext = null
+    this.processBar?.remove()
+    this.processBar = null
     this.destroyReceipt()
     this.clearGrants()
     this.grantController?.destroy()
@@ -6863,6 +7249,9 @@ export class TerminalContent extends BasePaneContent {
         this.scrollback.beginBlock(recordLine, submitCwd, startLine, startLine + 1, author)
       }
       block = this.scrollback.blockManager.runningBlock
+      // The block just opened — give it the where-facts known right now
+      // and remember the branch it recorded (nocx-9bpeq.16, spec §3).
+      if (block) this._recordBlockWhere(block)
     }
     const st = this.lifecycle.state
     if (st.kind !== 'prompt_ready') {
@@ -7014,6 +7403,13 @@ export class TerminalContent extends BasePaneContent {
    *  the block holds — never a silent truncation. */
   private _onBlockFrozen(rec: BlockRecord): void {
     this._lastFrozenBlock = rec
+    // The freeze REPLACED rec.el with a freshly built element that knows
+    // nothing about home or branch (createCommandBlock takes neither) —
+    // restate them from what this block recorded at submit (nocx-9bpeq.16,
+    // spec §3), then ask the branch source again: a settled command may
+    // have moved the branch (`git checkout`) without moving the cwd.
+    setBlockWhere(rec.el, { home: this.currentHome(), branch: this._blockBranch.get(rec.id) })
+    this._requestBranchAfterSettle()
     // The screen is handed back HERE and stays handed back until the prompt
     // that follows has finished painting; the marker handler closes the
     // interval by re-stamping this on B. Both ends move the generation
@@ -7036,14 +7432,29 @@ export class TerminalContent extends BasePaneContent {
     }
     const body = {
       exitCode: rec.exitCode,
-      status: rec.status === 'running' ? ('unknown' as const) : rec.status,
+      // `AgentRunCompletion.status` deliberately has no 'cancelled' of its
+      // own (run-command.ts): "the stopped fact is explicit renderer
+      // evidence and is never inferred from the exit code" is the SAME
+      // separation nocx-9bpeq.19 draws for the block header, the other
+      // direction — the model reads the raw exit-code truth (nonzero, so
+      // 'failure') plus `stopped` below, rather than one word standing in
+      // for both facts the way the header's `data-outcome` does.
+      status:
+        rec.status === 'running'
+          ? ('unknown' as const)
+          : rec.status === 'cancelled'
+            ? ('failure' as const)
+            : rec.status,
       stopped: waiter.stopped,
       total: lines.length,
       start: 0,
       end,
       text: lines.slice(0, end).join('\n'),
     }
-    if (rec.status !== 'success' && rec.status !== 'failure') {
+    // A cancelled block completed exactly like any other — history.record
+    // already ran for it — so it waits for the stored entry the same way
+    // success/failure do; only 'entered'/'unknown' never got one.
+    if (rec.status !== 'success' && rec.status !== 'failure' && rec.status !== 'cancelled') {
       this.runEntryIds.delete(waiter.ledgerId)
       waiter.resolve({ entryId: '', ...body })
       return

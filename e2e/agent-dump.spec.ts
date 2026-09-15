@@ -113,11 +113,15 @@ base.describe('a finished turn can show its raw model dump (nocx-0mvpy.4)', () =
       await askFromPrompt(page, question)
 
       const block = page.locator('.pane.active .cmd-block').filter({ hasText: question })
-      await expect(block.locator(':scope > .cmd-header .cmd-header-exit')).toHaveText('completed', {
+      // Success is silent (spec 2026-09-14 §3.1): the outcome attribute is
+      // the observable, on the block's own root — never a nested child's.
+      await expect(block).toHaveAttribute('data-outcome', 'success', {
         timeout: 30_000,
       })
-      await block.locator('.cmd-overflow-btn').click()
-      await page.getByRole('button', { name: 'Show dump' }).click()
+      await block.locator('[data-block-actions]').click()
+      // The block menu is the kit ContextMenu (nocx-9bpeq.5): its rows carry
+      // role="menuitem", not role="button".
+      await page.getByRole('menuitem', { name: 'Show dump' }).click()
 
       const dialog = page.getByRole('dialog', { name: 'Model dump' })
       await expect(dialog).toBeVisible()

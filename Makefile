@@ -551,8 +551,8 @@ OS_PKG_DIRS := cmd/e2e-sshd internal/apicoll internal/app internal/contentkey \
                internal/loginshell internal/nativeports internal/procwatch \
                internal/pty internal/reveal internal/ssh/mux \
                internal/storage internal/update internal/vault/system \
-               internal/peerpin
-OS_PKG_RE := (cmd/e2e-sshd|internal/apicoll|internal/app|internal/contentkey|internal/coordinator|internal/helper/endpoint|internal/helper/session|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/reveal|internal/ssh/mux|internal/storage|internal/update|internal/vault/system|internal/peerpin)
+               internal/peerpin internal/monoclock
+OS_PKG_RE := (cmd/e2e-sshd|internal/apicoll|internal/app|internal/contentkey|internal/coordinator|internal/helper/endpoint|internal/helper/session|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/reveal|internal/ssh/mux|internal/storage|internal/update|internal/vault/system|internal/peerpin|internal/monoclock)
 
 # internal/claudeconformance cannot run in CI: no runner can carry an
 # authenticated vendor CLI, and a `t.Fatal` is the honest result when it is
@@ -761,6 +761,13 @@ ci-os-split:
 	@derived=$$(grep -rlE '^//go:build.*$(GOOS_RE)' --include='*.go' \
 	  --exclude-dir=node_modules --exclude-dir=worktrees . \
 	  | grep -v '_test\.go$$' | xargs -n1 dirname | sed 's|^\./||' | sort -u \
+	  | while read -r d; do \
+	      p=$$d; nested=""; \
+	      while [ "$$p" != "." ] && [ -n "$$p" ]; do \
+	        if [ -f "$$p/go.mod" ]; then nested=1; break; fi; p=$$(dirname "$$p"); \
+	      done; \
+	      [ -z "$$nested" ] && echo "$$d"; \
+	    done \
 	  | tr '\n' ' '); \
 	missing=""; \
 	for d in $$derived; do \

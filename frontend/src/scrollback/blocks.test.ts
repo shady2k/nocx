@@ -2048,13 +2048,13 @@ function captureClipboard(): string[] {
 
 /** Open one block's ⋮ menu and return it.
  *
- *  `.ui-icon-button[data-block-actions]` rather than the bare attribute: a
- *  running block's Stop control (nocx-9bpeq.12) carries the same attribute
- *  — the block-selection/focus-bounce escape hatch, reused rather than
- *  duplicated — so the plain attribute selector no longer names one element. */
+ *  `[data-block-actions]` is the ⋮'s identity alone (nocx-9bpeq.12 round 6):
+ *  the running Stop control carries a SEPARATE, shared attribute
+ *  (`data-block-control`) for the block-selection/focus-bounce escape hatch
+ *  instead, so this plain attribute selector is unique again. */
 function openBlockMenu(blockEl: HTMLElement): HTMLElement {
   blockEl
-    .querySelector<HTMLElement>('.ui-icon-button[data-block-actions]')!
+    .querySelector<HTMLElement>('[data-block-actions]')!
     .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
   return document.body.querySelector<HTMLElement>('[data-testid="block-actions-menu"]')!
 }
@@ -2694,7 +2694,7 @@ describe('the block overflow menu stays in the viewport', () => {
     const el = createRunningBlock(1, 'make', '~', '', () => container, noopSelect, freshStore())
     container.appendChild(el)
     const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
-    el.querySelector<HTMLElement>('.ui-icon-button[data-block-actions]')!.click()
+    el.querySelector<HTMLElement>('[data-block-actions]')!.click()
     const menu = document.querySelector<HTMLElement>('[data-testid="block-actions-menu"]')!
     // Portalled at body level: out of flow, so the block underneath never
     // moves to make room, and nothing in the open path scrolls the page.
@@ -3658,12 +3658,12 @@ describe('the header states an outcome only when it is news (nocx-9bpeq.6, nocx-
 })
 
 describe('the block grant menu action', () => {
-  // `.ui-icon-button[data-block-actions]`, not the bare attribute: a running
-  // block's Stop control shares the attribute (the same block-selection/
-  // focus-bounce escape hatch), so the plain selector no longer names one
-  // element once both are present.
+  // `[data-block-actions]` is the ⋮'s identity alone (nocx-9bpeq.12 round
+  // 6): the running Stop control carries a separate, shared attribute
+  // (`data-block-control`) for the block-selection/focus-bounce escape
+  // hatch instead, so this plain selector is unique again.
   const menuItems = (el: HTMLElement): HTMLElement[] => {
-    el.querySelector<HTMLElement>('.ui-icon-button[data-block-actions]')!.click()
+    el.querySelector<HTMLElement>('[data-block-actions]')!.click()
     return Array.from(
       document.querySelectorAll<HTMLElement>(
         '[data-testid="block-actions-menu"] .ui-context-menu__item',
@@ -4226,8 +4226,12 @@ describe('the running block header Stop control', () => {
     )!
 
     // The same escape hatch the ⋮ button uses (blocks.ts wireBlockSelection,
-    // terminal-content.ts's focus-bounce exception) — reused, not duplicated.
-    expect(btn.getAttribute('data-block-actions')).toBe('')
+    // terminal-content.ts's focus-bounce exception) — reused, not
+    // duplicated — through the shared `data-block-control` attribute, never
+    // `data-block-actions`, which is the ⋮'s own identity alone
+    // (nocx-9bpeq.12 round 6).
+    expect(btn.getAttribute('data-block-control')).toBe('')
+    expect(btn.hasAttribute('data-block-actions')).toBe(false)
     btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
     btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
     expect(el.classList.contains('cmd-block-selected')).toBe(false)
@@ -4259,6 +4263,60 @@ describe('the running block header Stop control', () => {
     settleBlockOutcome(el, 'command', 1200, { status: 'success', exitCode: 0 })
 
     expect(right.querySelector('.ui-button')).toBeNull()
+  })
+
+  it('is the ONLY element carrying data-block-control besides the ⋮, and never carries data-block-actions (round 6, nocx-9bpeq.12)', () => {
+    // Round 4 gave Stop the ⋮'s OWN identity (`data-block-actions`), which
+    // made a bare `querySelector('[data-block-actions]')` — how the rest of
+    // the repo (a dozen e2e specs, restored-block.test.ts,
+    // turn-children.test.ts, terminal-content.ts's focus-bounce check) names
+    // "the block's ⋮" — return Stop instead, since it is appended first.
+    // Fixed at the source: `data-block-actions` names the ⋮ alone again;
+    // Stop and the ⋮ share a SEPARATE attribute, `data-block-control`, for
+    // the one thing they actually have in common (leave selection and
+    // focus-bounce alone).
+    const el = createRunningBlock(
+      1,
+      'sleep 30',
+      '~',
+      '',
+      () => document.createElement('div'),
+      noopSelect,
+      freshStore(),
+      'shell',
+      { stop: vi.fn(), isActive: () => true },
+    )
+    document.body.appendChild(el)
+
+    const withActions = el.querySelectorAll('[data-block-actions]')
+    expect(withActions).toHaveLength(1)
+    expect((withActions[0] as HTMLElement).classList.contains('ui-icon-button')).toBe(true)
+    expect((withActions[0] as HTMLElement).getAttribute('aria-label')).toBe('Block actions')
+
+    const withControl = el.querySelectorAll('[data-block-control]')
+    expect(withControl).toHaveLength(2)
+    expect(
+      [...withControl].every(
+        (c) =>
+          (c as HTMLElement).classList.contains('ui-icon-button') ||
+          (c as HTMLElement).classList.contains('ui-button'),
+      ),
+    ).toBe(true)
+
+    // Clicking Stop stays inert to selection (blocks.ts's own mechanism,
+    // `wireBlockSelection`'s `mine()`) — and carries the exact attribute the
+    // pane's focus-bounce listener (terminal-content.ts) keys on, which is
+    // as far as this file can assert that mechanism without terminal-
+    // content.ts's own owner.
+    const stopBtn = el.querySelector<HTMLButtonElement>(
+      ':scope > .cmd-header .cmd-header-right > .ui-button',
+    )!
+    expect(stopBtn.getAttribute('data-block-control')).toBe('')
+    stopBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    stopBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+    expect(el.classList.contains('cmd-block-selected')).toBe(false)
+
+    el.remove()
   })
 })
 

@@ -3115,22 +3115,27 @@ export class TerminalContent extends BasePaneContent {
         // bounce must yield to it, or the caret snaps straight back and the
         // receipt cannot be edited at all.
         //
-        // A block's own ⋮ is the other: it lives inside the pane like any
-        // other scrollback content, so an unconditional bounce took the
-        // caret back the instant the button took focus and the keyboard
-        // path to it (ADR-0008) could never land. `[data-block-actions]` is
-        // the one identity blocks.ts already stamps it with. The menu it
-        // opens needs no exception of its own — ContextMenu renders into
-        // document.body through a Portal, outside this listener's `target`,
-        // so a menu item taking focus never fires this handler at all; when
-        // the menu closes it returns focus to the ⋮ (ContextMenu's own
-        // releaseFocus), which lands here and is covered by the same guard.
+        // A block's own ⋮ is the other, and so — since nocx-9bpeq.12 round
+        // 4 — is a running block's Stop button: both live inside the pane
+        // like any other scrollback content, so an unconditional bounce
+        // took the caret back the instant either took focus and the
+        // keyboard path to them (ADR-0008) could never land.
+        // `[data-block-control]` is the identity blocks.ts stamps on BOTH
+        // (round 6 — `data-block-actions` names the ⋮ alone, uniquely,
+        // and is not this guard's business; keying this check on it too
+        // is what let Stop and the ⋮ collide under a single-match query
+        // in a dozen other consumers). The ⋮'s menu needs no exception of
+        // its own — ContextMenu renders into document.body through a
+        // Portal, outside this listener's `target`, so a menu item taking
+        // focus never fires this handler at all; when the menu closes it
+        // returns focus to the ⋮ (ContextMenu's own releaseFocus), which
+        // lands here and is covered by the same guard.
         if (
           active &&
           (this.editor.rootContains(active) ||
             this.scrollback?.xtermLiveContainer.contains(active) ||
             this.receipt?.root.contains(active) ||
-            active.closest('[data-block-actions]'))
+            active.closest('[data-block-control]'))
         )
           return
         this.editor.focus()

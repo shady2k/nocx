@@ -3,31 +3,39 @@ import { describe, expect, it, vi } from 'vitest'
 import { createPaneContext, updatePaneContext } from './pane-context'
 
 describe('createPaneContext — the DOM contract', () => {
-  it('local: folder icon, muted path, no branch when none is known', () => {
+  it("local: folder icon, then PromptContext's chrome presentation carrying the path, no branch when none is known", () => {
     const el = createPaneContext({ kind: 'local', path: '~/repos/nocx' })
     expect(el.className).toBe('ui-pane-context')
     expect(el.dataset.kind).toBe('local')
     expect(el.hasAttribute('data-split')).toBe(false)
     expect(el.hasAttribute('data-active')).toBe(false)
+    // The leading identity icon — PaneContext's own, not PromptContext's.
     expect(el.querySelector('svg')).not.toBeNull()
-    const path = el.querySelector<HTMLElement>('.ui-pane-context__path')
+    // The where-line itself is PromptContext, in its `chrome` presentation
+    // (round 2, nocx-9bpeq.23): PaneContext no longer paints path/branch
+    // text of its own — see pane-context.ts's file header.
+    const prompt = el.querySelector<HTMLElement>('.ui-prompt-context')
+    expect(prompt).not.toBeNull()
+    expect(prompt?.dataset.presentation).toBe('chrome')
+    const path = prompt?.querySelector<HTMLElement>('[data-part="path"]')
     expect(path?.textContent).toBe('~/repos/nocx')
-    expect(el.querySelector('.ui-pane-context__divider')).toBeNull()
-    expect(el.querySelector('.ui-pane-context__branch')).toBeNull()
-    // Chrome muted, not PromptContext's accent — see pane-context.ts's own
-    // file-header note on why this is a local renderer rather than
-    // PromptContext's chrome presentation.
-    expect(path?.className).toBe('ui-pane-context__path')
+    expect(prompt?.querySelector('[data-part="host"]')).toBeNull()
+    expect(prompt?.querySelector('[data-part="branch"]')).toBeNull()
   })
 
-  it('local: a known branch adds a divider and the branch text', () => {
+  it('local: a known branch renders through PromptContext\'s own "on" connector and branch icon', () => {
     const el = createPaneContext({ kind: 'local', path: '~/repos/nocx', branch: 'main' })
-    expect(el.querySelector('.ui-pane-context__divider')).not.toBeNull()
-    const branch = el.querySelector<HTMLElement>('.ui-pane-context__branch')
+    const prompt = el.querySelector<HTMLElement>('.ui-prompt-context')
+    expect(prompt?.querySelector('[data-part="on"]')).not.toBeNull()
+    // Scoped to the where-line, not the whole strip: PaneContext's own
+    // leading identity icon is a separate `<svg>` sibling, and PromptContext
+    // draws a second one (GitBranchIcon) for the branch part.
+    expect(prompt?.querySelector('svg')).not.toBeNull()
+    const branch = prompt?.querySelector<HTMLElement>('[data-part="branch"]')
     expect(branch?.textContent).toBe('main')
   })
 
-  it('remote: server icon, host label, path — never a branch (spec §3: remote is not walked for one)', () => {
+  it("remote: server icon, then PromptContext's host:path — never a branch (spec §3: remote is not walked for one)", () => {
     const el = createPaneContext({
       kind: 'remote',
       host: 'dev@staging',
@@ -35,11 +43,13 @@ describe('createPaneContext — the DOM contract', () => {
       branch: 'should-not-render',
     })
     expect(el.dataset.kind).toBe('remote')
-    const host = el.querySelector<HTMLElement>('.ui-pane-context__host')
+    expect(el.querySelector('svg')).not.toBeNull()
+    const prompt = el.querySelector<HTMLElement>('.ui-prompt-context')
+    const host = prompt?.querySelector<HTMLElement>('[data-part="host"]')
     expect(host?.textContent).toBe('dev@staging')
-    const path = el.querySelector<HTMLElement>('.ui-pane-context__path')
+    const path = prompt?.querySelector<HTMLElement>('[data-part="path"]')
     expect(path?.textContent).toBe('/srv/nocx')
-    expect(el.querySelector('.ui-pane-context__branch')).toBeNull()
+    expect(prompt?.querySelector('[data-part="branch"]')).toBeNull()
   })
 
   it('program: the foreground program name, "Keyboard → target", and no Session actions control absent a callback', () => {
@@ -80,7 +90,10 @@ describe('createPaneContext — the DOM contract', () => {
     const el = createPaneContext({ kind: 'local', path: '~/repos/nocx', branch: 'main' })
     updatePaneContext(el, { kind: 'remote', host: 'dev@staging', path: '/srv/nocx' })
     expect(el.dataset.kind).toBe('remote')
-    expect(el.querySelector('.ui-pane-context__branch')).toBeNull()
-    expect(el.querySelector<HTMLElement>('.ui-pane-context__host')?.textContent).toBe('dev@staging')
+    const prompt = el.querySelector<HTMLElement>('.ui-prompt-context')
+    expect(prompt?.querySelector('[data-part="branch"]')).toBeNull()
+    expect(prompt?.querySelector<HTMLElement>('[data-part="host"]')?.textContent).toBe(
+      'dev@staging',
+    )
   })
 })

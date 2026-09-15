@@ -45,6 +45,9 @@ const STYLE_ENTRY = resolve(HERE, '..', 'style.css')
 const BASE_ENTRY = resolve(HERE, '..', 'styles/base.css')
 const TOKENS_ENTRY = resolve(HERE, '..', 'styles/tokens.css')
 const COMPOSER_ENTRY = resolve(HERE, '..', 'styles/surfaces/composer.css')
+// The composer's card margin — its own gutter now (nocx-9bpeq.23 round 2) —
+// lives in ComposerFrame's own stylesheet, not the surface that places it.
+const COMPOSER_FRAME_ENTRY = resolve(HERE, '..', 'styles/components/composer-frame.css')
 
 /** Top-level rules only, comments stripped. An at-rule block is skipped
  *  whole. Lifted from cmd-output-wrap.test.ts. */
@@ -85,6 +88,9 @@ const RULES: Rule[] = [
   // The composer's own rules moved out of style.css (nocx-9bpeq.7); the
   // gutter this suite is about moved with them.
   ...topLevelRules(readFileSync(COMPOSER_ENTRY, 'utf8')),
+  // The composer's gutter moved again in round 2 (nocx-9bpeq.23): off
+  // `.nocx-editor`'s own padding and onto ComposerFrame's card margin.
+  ...topLevelRules(readFileSync(COMPOSER_FRAME_ENTRY, 'utf8')),
 ]
 
 /** Every declaration the shipped cascade gives `selector` exactly, later
@@ -111,7 +117,10 @@ const INLINE = [
 
 describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () => {
   it('the gutter is one token on the spacing scale', () => {
-    expect(shipped(':root', '--pane-inline-padding')).toBe('var(--space-4)')
+    // var(--space-4) (16px) until the terminal-screen mockup decision
+    // record's §3 shared contract raised it to var(--space-6) (24px,
+    // nocx-9bpeq.23) — still one token, still declared once.
+    expect(shipped(':root', '--pane-inline-padding')).toBe('var(--space-6)')
   })
 
   it('the pane insets nothing, so the scroller and its scrollbar reach the pane edge', () => {
@@ -156,10 +165,18 @@ describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () 
   it('the running region states only its block padding, never resetting the inset', () => {
     // A `padding` shorthand here (0,2,0) would override the row inset (0,1,0)
     // with 0 and put the running grid on a different edge from the block it
-    // freezes into.
+    // freezes into. `padding-block` only ever touches top/bottom, whatever
+    // its own value — the inline inset stays whatever `.scrollback-inner > *`
+    // (fact 3 above) already gave it.
     expect(shipped('.xterm-live-container.live-running', 'padding')).toBeNull()
+    // The bottom half grew by --terminal-block-trailing-space (nocx-9bpeq.23,
+    // round 2): a frozen block pays that space OUTSIDE `.cmd-output`, on
+    // `.cmd-block` itself; the running region has no such outer box — it IS
+    // the body — so its own bottom padding is where the same total is paid,
+    // or the freeze reads as a 16px shrink. Only the bottom changed: the top
+    // pad is untouched, so the first output row's baseline does not move.
     expect(shipped('.xterm-live-container.live-running', 'padding-block')).toBe(
-      'var(--cmd-output-pad-top) var(--cmd-output-pad-bottom)',
+      'var(--cmd-output-pad-top)\n    calc(var(--cmd-output-pad-bottom) + var(--terminal-block-trailing-space))',
     )
   })
 
@@ -170,12 +187,17 @@ describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () 
     expect(shipped('.nocx-summon-answers > *', 'box-sizing')).toBe('border-box')
   })
 
-  it('the composer carries the gutter itself', () => {
-    // Tokenised in nocx-9bpeq.15 (spec 2026-09-15 §6): the two literal
-    // pixel values either side of the token were how this rule started
-    // drifting off the scale. The fact this guards is unchanged — the
-    // composer states its OWN `--pane-inline-padding`, same as every other
-    // row (fact 3 above).
-    expect(shipped('.nocx-editor', 'padding')).toBe('var(--space-3) var(--pane-inline-padding)')
+  it('the composer is a card with its OWN inset, not a row wearing the ledger gutter', () => {
+    // Superseded by the mockup decision record's ComposerFrame (§4,
+    // nocx-9bpeq.23 round 2): the composer stopped being a full-width row
+    // carrying `--pane-inline-padding` like a block or the live region —
+    // `.nocx-editor` itself states no padding at all now (composer.css).
+    // It is an inset CARD instead, and the card's own margin —
+    // `--terminal-card-margin` (spec §3, equal to the existing --space-3,
+    // so no new token was spent on it) — is where its gutter lives now,
+    // deliberately narrower than the ledger's 24px row inset (the mockup's
+    // own "10-12 px external gutter" for the card, not the row's).
+    expect(shipped('.nocx-editor', 'padding')).toBeNull()
+    expect(shipped('.ui-composer-frame', 'margin')).toBe('0 var(--space-3) var(--space-3)')
   })
 })

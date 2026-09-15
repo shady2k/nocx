@@ -227,79 +227,31 @@ type Closer interface {
 	Close(ctx context.Context, p Participant) error
 }
 
-// PaneScreen is what a participant's pane is showing, as its coordinator may
-// read it (nocx-f545a.6, ADR-0064 §2).
+// TaskQueue enqueues a participant's task for delivery once its pane is free
+// (design §9, Task 11). It replaces the owed-task debt and the dedicated
+// menu-answer path (Screener/Answerer/PaneScreen/PaneAnswer/TaskOutcome,
+// deleted with this bead): a spawn that meets a question no longer marks a
+// debt for a LATER answer call to pay — it enqueues a "when=free" message,
+// namespace "nocx", id "task", and the SAME queue every session.message
+// caller's own free message goes through delivers it whenever the pane frees
+// up, whether that is a coordinator's session.keys answer or a person
+// pressing Enter themselves.
 //
-// Rows are text, top to bottom, one per screen row, rendered by the grid's
-// own row renderer — the same one a rule's predicates read — so a coordinator
-// is shown the rows nocx itself reasons about rather than a second rendering
-// of them. Nothing here is stored: it is answered to the caller that asked.
-type PaneScreen struct {
-	// Readable is false when nocx holds no reading of the pane — the session
-	// ended, or its observation closed. That is an answer, not a failure,
-	// for the reason agent.emitting answers the same race with no reading.
-	Readable bool
-	// State is what nocx reads the pane as, when it has classified it; empty
-	// when it has not yet.
-	State string
-	// Rows is the screen. Empty whenever Readable is false.
-	Rows []string
-}
-
-// Screener reads a participant's pane. It is a seam for Closer's reason: a
-// pane's grid belongs to the composition root, and this package knows only
-// that a participant has one.
-type Screener interface {
-	ReadScreen(ctx context.Context, p Participant) (PaneScreen, error)
-}
-
-// PaneAnswer is what became of an answer to a participant's menu
-// (nocx-f545a.4, ADR-0064 §1).
-type PaneAnswer struct {
-	// Outcome is the typing gate's closed set: "submitted" — the option was
-	// chosen and confirmed; "typed" — the selection moved and nothing was
-	// confirmed; "refused" — nothing was written.
-	Outcome string
-	// State is the pane state that decided.
-	State string
-	// Reason is why, in the words a caller reads; empty when the answer was
-	// confirmed.
-	Reason string
-	// Task is what became of a task this participant's spawn left owed —
-	// present only when this answer's own confirmation was ALSO the moment
-	// the debt was paid (nocx-f545a.7). Nil means no task was owed: either
-	// this spawn typed its task already, or the answer was not confirmed
-	// (Outcome != "submitted"), which pays no debt.
-	Task *TaskOutcome
-}
-
-// TaskOutcome is what nocx did with a task it owed a participant, once a
-// confirmed menu answer gave it the chance to act (ADR-0064 §4: a menu
-// answer writes nothing into the record, so this travels with the answer
-// that produced it and is kept nowhere, the same discipline TaskDelivery
-// above already uses for the identical fact at spawn time).
-type TaskOutcome struct {
-	// Delivery is the closed set: "typed" — the task reached the pane and
-	// started a turn; "waiting" — the pane is asking something else, and the
-	// task is still owed; "refused" — nocx's typing gate turned the
-	// submission away, or the debt could not be paid for another reason (the
-	// participant's agent exited). Never empty when Task is non-nil.
-	Delivery string
-	// State is the pane state Delivery was decided against, when there is
-	// one to name (empty for a gate refusal that carries no state of its
-	// own, or when the agent exited before the pane was ever read).
-	State string
-	// Reason is why, in the words a caller reads; empty when Delivery is
-	// "typed" and when Delivery is "waiting" on a plain question with
-	// nothing more to say about it.
-	Reason string
-}
-
-// Answerer answers a participant's menu by naming an option. It is a seam for
-// Closer's reason: the pane, its screen and its input queue are the
-// composition root's.
-type Answerer interface {
-	Answer(ctx context.Context, p Participant, option string) (PaneAnswer, error)
+// It is a seam for Closer's reason: the message queue, its authority checks
+// and the pane it writes into are all the composition root's
+// (internal/app.paneMessages), and this package knows only that a
+// registration may have a task to hand it.
+//
+// Register calls this AFTER the delegation is committed and the participant
+// is marked live (step 5/6 below) — never from within Spawner.Spawn (step
+// 3), because EnqueueTask resolves the participant from its OWN session id
+// (ParticipantBySession), and that mapping does not exist until MarkLive
+// writes the participant's Liveness. A queue nobody wired in (nil) is the
+// same absence case every other optional seam in this package's composition
+// treats: nothing is enqueued, which only matters to a caller that never
+// wired one in — production always does.
+type TaskQueue interface {
+	EnqueueTask(ctx context.Context, coordinatorSession string, participant Participant, task string) error
 }
 
 // Supervisor is the watch that outlives the coordinator's turn. It is attached

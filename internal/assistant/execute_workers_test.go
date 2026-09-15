@@ -22,31 +22,20 @@ const testWorkerEnv = "env-local"
 // fakeWorkerRecord records what it was asked and answers what it is told to.
 type fakeWorkerRecord struct {
 	// delivery is what Register reports became of the task (nocx-f545a.3).
-	delivery workers.TaskDelivery
-	// screen and screenErr are what Screen answers (nocx-f545a.6), and
-	// screenedFor records every participant a screen was asked for, so a
-	// test can assert the executor named the one the model named.
-	screen      workers.PaneScreen
-	screenErr   error
-	screenedFor []workers.ParticipantID
-	// answer and answerErr are what Answer answers (nocx-f545a.4), and
-	// answeredWith records the option each answer named.
-	answer       workers.PaneAnswer
-	answerErr    error
-	answeredWith []string
-	registered   []workers.RegisterRequest
-	held         []workers.Participant
-	registerFn   func(workers.RegisterRequest) (workers.Participant, error)
-	heldErr      error
-	heldFor      []string
-	owed         []workers.Fact
-	mail         map[workers.ReaderID][]workers.Message
-	sent         []workers.Message
-	unread       []workers.Message
-	fetchedBy    []workers.ReaderID
-	acked        []int64
-	closed       []workers.ParticipantID
-	closeErr     error
+	delivery   workers.TaskDelivery
+	registered []workers.RegisterRequest
+	held       []workers.Participant
+	registerFn func(workers.RegisterRequest) (workers.Participant, error)
+	heldErr    error
+	heldFor    []string
+	owed       []workers.Fact
+	mail       map[workers.ReaderID][]workers.Message
+	sent       []workers.Message
+	unread     []workers.Message
+	fetchedBy  []workers.ReaderID
+	acked      []int64
+	closed     []workers.ParticipantID
+	closeErr   error
 	// waitedFor records the worker a wait was opened on, and waitHeld is what
 	// it answers with — a double that returned HeldBy's rows would hide a
 	// carrier that never waited at all.
@@ -56,16 +45,6 @@ type fakeWorkerRecord struct {
 	// order is the whole correctness of the answer: the fetch is what clears
 	// the set, so asking after it always answers nothing.
 	readOrder []string
-}
-
-func (f *fakeWorkerRecord) Screen(_ context.Context, _ string, id workers.ParticipantID) (workers.PaneScreen, error) {
-	f.screenedFor = append(f.screenedFor, id)
-	return f.screen, f.screenErr
-}
-
-func (f *fakeWorkerRecord) Answer(_ context.Context, _ string, _ workers.ParticipantID, option string) (workers.PaneAnswer, error) {
-	f.answeredWith = append(f.answeredWith, option)
-	return f.answer, f.answerErr
 }
 
 func (f *fakeWorkerRecord) Register(_ context.Context, req workers.RegisterRequest) (workers.Registration, error) {

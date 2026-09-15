@@ -29,6 +29,8 @@ export interface AgentApprovalRequested {
     | 'fetch.url'
     | 'session.list'
     | 'session.read'
+    | 'session.keys'
+    | 'session.message'
     | 'session.run'
     | 'session.wait'
     | 'files.edit'
@@ -55,8 +57,6 @@ export interface AgentApprovalRequested {
     | 'workers.wait'
     | 'workers.inbox'
     | 'workers.close'
-    | 'workers.screen'
-    | 'workers.answer'
   /**
    * The model's call id for the proposed call — part of the binding.
    */

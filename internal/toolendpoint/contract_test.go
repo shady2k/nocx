@@ -95,24 +95,6 @@ func (contractWorkerRecord) Close(context.Context, string, workers.ParticipantID
 
 func (contractWorkerRecord) Undispatched() []workers.Fact { return nil }
 
-func (contractWorkerRecord) Screen(context.Context, string, workers.ParticipantID) (workers.PaneScreen, error) {
-	return workers.PaneScreen{
-		Readable: true,
-		State:    "permission_choice",
-		Rows:     []string{"Quick safety check: Is this a project you created or one you trust?", "", "❯ No, exit", "  Yes, I trust this folder"},
-	}, nil
-}
-
-func (contractWorkerRecord) Answer(context.Context, string, workers.ParticipantID, string) (workers.PaneAnswer, error) {
-	// A task object (nocx-f545a.7), carried by the over-the-wire case below
-	// so the schema's $defs.result.properties.task is exercised off a real
-	// result and not only off the DTO built directly from the Go struct.
-	return workers.PaneAnswer{
-		Outcome: "submitted", State: "permission_choice",
-		Task: &workers.TaskOutcome{Delivery: "typed"},
-	}, nil
-}
-
 func contractWorkerParticipants() []workers.Participant {
 	return []workers.Participant{{
 		ID:    "worker-1",
@@ -232,8 +214,6 @@ func TestGroupEndpoint_OverTheWireConformsToContract(t *testing.T) {
 		{method: "workers.say", params: `{"worker":"worker-1","message":"the wire is a party"}`, result: "workers.say"},
 		{method: "workers.wait", params: `{}`, result: "workers.wait"},
 		{method: "workers.close", params: `{"worker":"worker-1"}`, result: "workers.close"},
-		{method: "workers.screen", params: `{"worker":"worker-1"}`, result: "workers.screen"},
-		{method: "workers.answer", params: `{"worker":"worker-1","option":"Yes, I trust this folder"}`, result: "workers.answer"},
 		// A descendant's pane, read through the helper-backed path this
 		// task adds (nocx-6q1uh.8): sessionId differs from the admitted
 		// session, so this exercises PaneReader over the real endpoint,
@@ -254,22 +234,6 @@ func TestGroupEndpoint_OverTheWireConformsToContract(t *testing.T) {
 				t.Fatalf("response error = %+v", response.Error)
 			}
 			validateGroupResult(t, workerResultSchema(t, tc.result), response.Result, tc.method)
-			if tc.method == "workers.answer" {
-				// The double above hands back a task outcome (nocx-f545a.7);
-				// this confirms the REAL result off the real wire carries it,
-				// which is what the schema validation just above cannot tell
-				// on its own — task is optional in the schema, so a result
-				// that omitted it would validate too.
-				var decoded struct {
-					Task map[string]any `json:"task"`
-				}
-				if err := json.Unmarshal(response.Result, &decoded); err != nil {
-					t.Fatalf("decode workers.answer result: %v", err)
-				}
-				if decoded.Task == nil || decoded.Task["delivery"] != "typed" {
-					t.Fatalf("workers.answer result = %s, want a task object with delivery typed", response.Result)
-				}
-			}
 		})
 	}
 }

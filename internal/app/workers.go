@@ -19,7 +19,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -182,11 +181,6 @@ type workerSpawner struct {
 	// come. Production always wires the real watcher; only a test double built
 	// to exercise the axis gate or the tab bookkeeping alone leaves it nil.
 	readiness paneReadiness
-	// typist is what actually puts the task into the pane, once readiness
-	// says it may. The SAME Typist agent.type and the coordinator's own wake
-	// reach (workerWaker below) — a second one would be a second answer to
-	// "may nocx write into this pane", decided against a second grid.
-	typist paneTypist
 	// workspace is where a participant's tab is minted. The worker's own
 	// workspace, resolved by the caller, never guessed here.
 	workspace string
@@ -194,13 +188,7 @@ type workerSpawner struct {
 	// committed to succeeding (nocx-ui8q6.3). Nil is the absence case
 	// tabAnnouncer's own doc names.
 	announce tabAnnouncer
-	// owed is marked when deliverTask ends on a question rather than typing
-	// the task (nocx-f545a.7): the debt workerAnswerer pays once the
-	// coordinator's own answer to that question is confirmed. A nil owed set
-	// is the same absence case as every other optional seam here — nothing
-	// is tracked, which only matters to a caller that never wires one in.
-	owed *owedTasks
-	log  log.Logger
+	log      log.Logger
 }
 
 // paneReadiness is the spawner's narrow view of the pane-observation watcher
@@ -286,32 +274,18 @@ func (w *paneWaitState) note(o paneobserve.Observation) {
 // structured fields rather than prose, because the two readers are not
 // looking for the same thing.
 //
-// label names the CALLER in that log line — "worker spawn" or "worker
-// answer" — because this same wait now runs from two places (nocx-f545a.7):
-// a spawn typing a task for the first time, and an answerer paying a task it
-// owes once a menu is confirmed. A hardcoded "worker spawn:" in the answer's
-// own log line would describe a call that never happened.
+// label names the CALLER in that log line — deliverTask's own "worker
+// spawn" today, the only caller left after Task 11 deleted the answer path
+// this wait used to also serve (nocx-f545a.7's workerAnswerer, which read
+// the watcher's cache immediately after a menu confirm and had to adapt a
+// LIVE classification in to stay fresh — see git history for the account).
+// Kept as a parameter rather than inlined so a caller naming itself in the
+// log is still the wait's own contract, not an accident of there being one.
 //
-// r MUST ALREADY BE A LIVE READING for a caller that has just written into
-// the pane. A question is trusted the moment this function sees it — the
-// FIRST check included, exactly as before nocx-f545a.7 — which is correct
-// for a fresh classification (a spawn's first observation has nothing to be
-// stale relative to) and would be wrong for the watcher's own cache read
-// immediately after a menu confirm: Touch fires only on the session's own
-// READ side, nothing about WRITING into a pane touches it, so that cache is,
-// with certainty, still the reading of the menu that was just confirmed. An
-// earlier version of this function tried to paper over that by distrusting
-// the very first check and delaying one deliveryPoll — which only narrowed
-// the race by one tick rather than closing it, and AGENTS.md's own rule is
-// that a test may not depend on timing to be right eventually. The actual
-// fix lives one layer up, in workerAnswerer.typeOwedTask: it does not call
-// this with the watcher's cache at all. It waits, on the GRID, for the
-// confirmed menu to leave the screen first (awaitMenuLeftScreen), and only
-// then classifies the CURRENT frame (paneobserve.Watcher.Classify, adapted
-// by classifyingReadiness) and hands THAT live reading here. So by the time
-// r.Snapshot is ever asked, the answer to "is this pane still showing what I
-// just confirmed" is already known to be no — freshness is established by
-// two facts, not by waiting a little and hoping.
+// r is deliverTask's OWN watcher-cache reading, which is always fresh here:
+// a spawn's first observation has nothing preceding it to be stale relative
+// to, unlike the now-deleted answer path's read immediately after a menu
+// confirm.
 func awaitFreeText(ctx context.Context, r paneReadiness, paneID string, lg log.Logger, label string) (agentdriver.State, error) {
 	var last paneWaitState
 	// check answers the state that ENDS the wait, and "" while nothing has.
@@ -376,11 +350,10 @@ func awaitFreeText(ctx context.Context, r paneReadiness, paneID string, lg log.L
 // sentence from a value rather than from this prose.
 //
 // label is the same word awaitFreeText was given, and it names the caller in
-// both the log line and the error's own Detail — no longer hardcoded to
-// "spawn" — which is what makes both readings true of a call that came from
-// workerAnswerer's paid debt as much as from a spawn (see awaitFreeText's
-// doc). Neither existing caller's test asserts on this prose, only on the
-// structured fields beside it and on the state named inside it.
+// both the log line and the error's own Detail (see awaitFreeText's own doc
+// for why it is still a parameter). No existing caller's test asserts on
+// this prose, only on the structured fields beside it and on the state named
+// inside it.
 func refusePaneNeverTypable(lg log.Logger, paneID string, last paneWaitState, label string) error {
 	if !last.observed {
 		lg.Warn(label+": the pane's budget expired with no observation ever recorded for it",
@@ -399,94 +372,6 @@ func refusePaneNeverTypable(lg log.Logger, paneID string, last paneWaitState, la
 	return &workers.PaneNeverTypable{State: string(last.state), Detail: fmt.Sprintf(
 		"the pane held state %q for %s without becoming typable",
 		last.state, held.Round(time.Millisecond))}
-}
-
-// owedTasks is the in-memory set of participants whose spawn left a task
-// untyped because the pane asked a question first (nocx-f545a.3, nocx-f545a.7).
-//
-// THE INTERVAL. A session id is owed from the moment deliverTask's own wait
-// ends on a question — WaitingOn != "" — until one of: (a) the task is
-// actually submitted (workerAnswerer's own take, below, is the check-and-clear
-// that makes this happen at most once even under two concurrent answers); (b)
-// the participant's session ends, dropped from workerSupervisor.report AND
-// from spawnedParticipant.Kill — Kill's own doc already establishes why a
-// registration that fails after Spawn compensates through it before any
-// supervisor is ever attached, and this debt must not outlive either path; or
-// (c) this backend restarts, which needs no code at all: the set lives only in
-// this process's memory, and the restart sweep that finds such a participant
-// abandoned is exactly the interruption ADR-0064 already treats a human
-// takeover as orthogonal to — see the omission note below.
-//
-// A HUMAN TAKEOVER DOES NOT CLOSE IT. Suspending EffectSendInput stops a
-// coordinator's own answer from reaching the pane (Registrar.Answer refuses
-// before workerAnswerer.Answer is ever called), but it does not un-owe the
-// task: the person is not nocx, and nothing here reads a screen to decide
-// whether they typed it themselves. The debt closes only through (a), (b) or
-// (c) above.
-//
-// It is deliberately NOT part of the workers.Store record: ADR-0064 §4 says a
-// screen reading assigns no status to a participant and a menu answer moves no
-// record, and "this participant's task is still owed" is exactly such a
-// status — derived from what nocx did at spawn, not from anything the
-// participant declared. So it lives here, at the composition root, beside the
-// other two maps (workerEnrolments) this layer already owns for the same
-// reason.
-type owedTasks struct {
-	mu   sync.Mutex
-	sids map[session.ID]struct{}
-}
-
-func newOwedTasks() *owedTasks {
-	return &owedTasks{sids: make(map[session.ID]struct{})}
-}
-
-// mark records sid as owed. A nil *owedTasks is a spawner nobody wired one
-// into, treated exactly like every other optional seam in this file: the
-// spawn proceeds and nothing is tracked, rather than panicking on a debt
-// nobody asked it to keep.
-func (o *owedTasks) mark(sid session.ID) {
-	if o == nil {
-		return
-	}
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	o.sids[sid] = struct{}{}
-}
-
-// take is the check-and-clear: it reports whether sid was owed, and if so
-// clears the debt in the same locked section. This is what makes two
-// concurrent Answer calls on one owed participant type the task at most
-// once — the second call's take finds nothing and does nothing, rather than
-// both racing to submit.
-func (o *owedTasks) take(sid session.ID) bool {
-	if o == nil {
-		return false
-	}
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if _, ok := o.sids[sid]; !ok {
-		return false
-	}
-	delete(o.sids, sid)
-	return true
-}
-
-// restore re-marks sid as owed, for an answer that took the debt but could
-// not pay it — the pane asked a different question, or the gate refused the
-// submission. A later answer takes it again.
-func (o *owedTasks) restore(sid session.ID) {
-	o.mark(sid)
-}
-
-// drop ends the debt without paying it, for a participant whose session is
-// gone — see the interval doc above for both callers.
-func (o *owedTasks) drop(sid session.ID) {
-	if o == nil {
-		return
-	}
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	delete(o.sids, sid)
 }
 
 // spawnedParticipant is a launcher that has been started. It is not yet a
@@ -513,11 +398,6 @@ type spawnedParticipant struct {
 	// delivery is what became of the task (nocx-f545a.3), set by Spawn and
 	// read once by the registration through workers.TaskDeliverer.
 	delivery workers.TaskDelivery
-	// owed is dropped for this participant's session in Kill, below, so a
-	// spawn that never becomes a supervised participant — compensated before
-	// workerSupervisor.Attach ever runs — does not leave a debt nothing will
-	// ever clear (nocx-f545a.7, owedTasks' own doc).
-	owed *owedTasks
 }
 
 // TaskDelivery is how the registration that started this participant learns
@@ -578,13 +458,6 @@ func (s spawnedParticipant) Liveness() workers.Liveness {
 func (s spawnedParticipant) Kill(ctx context.Context) error {
 	ctx, cancel := killContext(ctx)
 	defer cancel()
-	if s.sess != nil {
-		// Dropped unconditionally and first: a session that is about to be
-		// killed owes nothing more, whether or not this call's own session
-		// close succeeds below — a debt left standing over a session already
-		// gone would never be cleared by anything else.
-		s.owed.drop(s.sess.ID())
-	}
 	var errs []error
 	if s.sess != nil {
 		if _, getErr := s.sessions.Get(s.sess.ID()); getErr == nil {
@@ -759,7 +632,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	lg.Debug("worker spawn: the participant's session is open",
 		"cols", participantCols, "rows", participantRows)
 	spawned := spawnedParticipant{
-		tabID: tabID.String(), sess: opened.Session, sessions: s.sessions, layout: s.layout, owed: s.owed,
+		tabID: tabID.String(), sess: opened.Session, sessions: s.sessions, layout: s.layout,
 	}
 
 	// Told BEFORE the command is written, or an enrolment that arrives
@@ -911,16 +784,26 @@ func (s *workerSpawner) coordinatorCwd(ctx context.Context, coordinator string, 
 	return cwd
 }
 
-// deliverTask waits for paneID to become typable and submits task into it.
+// deliverTask waits for paneID to become typable and reports what it found —
+// it no longer TYPES the task itself (design §9, Task 11). A spawn that met
+// a question used to mark it owed for a LATER answer call to pay; now the
+// actual delivery is a "when=free" session.message the queue delivers on
+// its own once the pane is free, whichever way that happens
+// (Registrar.Register enqueues it, once this participant is live — see
+// workers.TaskQueue's own doc for why that cannot happen from in here). What
+// stays here is the one thing this wait was ALWAYS also for: a pane that
+// never becomes typable at all — neither free_text nor a question — fails
+// the whole spawn, because a shell nocx can never watch is not a participant
+// (ADR-0064, nocx-ty5ks).
 //
-// Nil readiness or nil typist is the ABSENCE case, exactly like
-// integrationAwaiterSeam's above: a spawner nobody wired an observation or a
-// typist into cannot ask whether a pane is ready any more than it could ask
-// whether a domain accepted, so the spawn proceeds rather than hanging or
-// refusing a question it was never asked. Production always wires both.
+// Nil readiness is the ABSENCE case, exactly like integrationAwaiterSeam's
+// above: a spawner nobody wired an observation into cannot ask whether a
+// pane is ready any more than it could ask whether a domain accepted, so the
+// spawn proceeds rather than hanging or refusing a question it was never
+// asked. Production always wires one.
 func (s *workerSpawner) deliverTask(ctx context.Context, paneID, task string) (workers.TaskDelivery, error) {
-	if s.readiness == nil || s.typist == nil {
-		s.log.Debug("worker spawn: no pane-typing seam is wired; the task will not be typed at spawn",
+	if s.readiness == nil {
+		s.log.Debug("worker spawn: no pane-observation seam is wired; the task's readiness cannot be confirmed at spawn",
 			"pane_id", paneID)
 		return workers.TaskDelivery{}, nil
 	}
@@ -933,29 +816,16 @@ func (s *workerSpawner) deliverTask(ctx context.Context, paneID, task string) (w
 		return workers.TaskDelivery{}, fmt.Errorf("%w: %s", workers.ErrPaneNeverTypable, waitErr)
 	}
 	if state != agentdriver.StateFreeText {
-		// The pane is asking something. Nothing is typed into a question —
-		// the gate would refuse it anyway, and answering it is the caller's
-		// choice under ADR-0064, never nocx's. The debt is owed from here
-		// until workerAnswerer pays it, the session ends, or the backend
-		// restarts (owedTasks' own doc).
-		s.log.Info("worker spawn: the participant's pane is asking a question, so its task was not typed",
+		// The pane is asking something. Nothing is typed into a question at
+		// spawn time — the gate would refuse it anyway, and answering it is
+		// the caller's choice under ADR-0064, never nocx's. The task is still
+		// enqueued (Registrar.Register, once this participant is live); this
+		// is purely informational for a caller reading the spawn result.
+		s.log.Info("worker spawn: the participant's pane is asking a question; its task will be delivered once the pane is free",
 			"pane_id", paneID, "state", string(state))
-		s.owed.mark(session.ID(paneID))
 		return workers.TaskDelivery{WaitingOn: string(state)}, nil
 	}
-	res := s.typist.Submit(ctx, paneID, task)
-	if res.Outcome == agenttyping.OutcomeSubmitted {
-		return workers.TaskDelivery{Typed: true}, nil
-	}
-	// OutcomeTyped is a refusal here too, not a delivery: the text reached
-	// the input region and the submit key did not, so no turn started and the
-	// coordinator's task never reached the agent — exactly the distinction
-	// workerWaker's own doc draws for the identical outcome on a wake.
-	reason := res.Reason
-	if reason == "" {
-		reason = fmt.Sprintf("nocx refused to submit the task (%s)", res.Outcome)
-	}
-	return workers.TaskDelivery{}, fmt.Errorf("%w: %s", workers.ErrTaskSubmitRefused, reason)
+	return workers.TaskDelivery{}, nil
 }
 
 // compensateSpawn undoes what Spawn built so far, for a failure Spawn catches
@@ -977,7 +847,7 @@ func (s *workerSpawner) deliverTask(ctx context.Context, paneID, task string) (w
 // two errors instead: that caller has no Spawn error of its own to prefer,
 // this one does.
 func (s *workerSpawner) compensateSpawn(ctx context.Context, tabID string, sess session.Session) {
-	sp := spawnedParticipant{tabID: tabID, sess: sess, sessions: s.sessions, layout: s.layout, owed: s.owed}
+	sp := spawnedParticipant{tabID: tabID, sess: sess, sessions: s.sessions, layout: s.layout}
 	if err := sp.Kill(ctx); err != nil {
 		s.log.Warn("worker spawn: could not fully compensate a failed spawn",
 			"tab_id", tabID, "error", err)
@@ -1124,12 +994,7 @@ type workerSupervisor struct {
 	// registrar to report to. Two-phase wiring at the composition root, which
 	// is the ordinary shape for a cycle between two things the root owns.
 	exited func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, e workers.Exit)
-	// owed is dropped in report, below, for the participant whose exit is
-	// being reported (nocx-f545a.7): a process that is gone owes nobody a
-	// task, and this is the closing event for a debt that survives even a
-	// human takeover — see owedTasks' own doc for the whole interval.
-	owed *owedTasks
-	log  log.Logger
+	log    log.Logger
 }
 
 // Attach begins watching a participant that is already recorded live.
@@ -1165,10 +1030,6 @@ func (s *workerSupervisor) Attach(ctx context.Context, p workers.Participant) er
 }
 
 func (s *workerSupervisor) report(ctx context.Context, p workers.Participant, e workers.Exit) {
-	// Dropped first and unconditionally: the process this participant was is
-	// gone whether or not anything downstream is wired to hear about it, and
-	// a debt over a gone process is a debt nothing will ever pay.
-	s.owed.drop(session.ID(p.Liveness.SessionID))
 	if s.exited == nil {
 		// Unwired supervision is a worker nothing watches, which is the one
 		// state this whole record exists to make impossible. Say so loudly
@@ -1270,456 +1131,6 @@ func (c *workerCloser) Close(_ context.Context, p workers.Participant) error {
 	}
 	c.log.Info("worker participant closed", "participant", string(p.ID), "session_id", string(sid))
 	return nil
-}
-
-// workerScreener is the composition root's half of workers.screen
-// (nocx-f545a.6): the grid a participant's pane is kept in, and the watcher
-// that says what nocx reads it as.
-//
-// The rows are paneview.Frame.Text, right-trimmed — the one row renderer the
-// grid already offers and the one a rule's predicates read rows through — so
-// a coordinator is shown the rows nocx itself reasons about, not a second
-// rendering of them (ADR-0064 §2).
-type workerScreener struct {
-	screens paneScreens
-	watch   paneReadiness
-}
-
-func (s *workerScreener) ReadScreen(_ context.Context, p workers.Participant) (workers.PaneScreen, error) {
-	sid := p.Liveness.SessionID
-	if sid == "" || s.screens == nil {
-		return workers.PaneScreen{}, nil
-	}
-	f, err := s.screens.Frame(sid)
-	if err != nil {
-		// The observation closed, or never opened: no reading, and an answer
-		// that says so rather than an error, exactly as agent.emitting
-		// answers the same race.
-		return workers.PaneScreen{}, nil //nolint:nilerr // an absent grid is an answer, not a failure
-	}
-	rows := make([]string, 0, len(f.Lines))
-	for y := range f.Lines {
-		rows = append(rows, strings.TrimRight(f.Text(y), " "))
-	}
-	out := workers.PaneScreen{Readable: true, Rows: rows}
-	if s.watch != nil {
-		if o, ok := s.watch.Snapshot(sid); ok {
-			out.State = string(o.State)
-		}
-	}
-	return out, nil
-}
-
-// paneChooser is the app's narrow view of the menu half of the typing gate
-// (nocx-f545a.4). It is a second one-method interface beside paneTypist rather
-// than a second method on it, so every double that only ever submitted text
-// goes on satisfying what it satisfied.
-type paneChooser interface {
-	Choose(ctx context.Context, paneID, option string) agenttyping.Result
-}
-
-// workerAnswerer is the composition root's half of workers.answer
-// (nocx-f545a.4, ADR-0064 §1): the typing gate that decides every key, and the
-// grid it waits on between a movement and its confirm.
-//
-// THE WAIT IS HERE AND NOT IN THE GATE. A TUI repaints after it reads its
-// input, so the frame read straight after a movement key can still show the
-// old selection. agenttyping.Choose therefore moves OR confirms, never both on
-// one belief; this waits for the screen to show the selection on the named
-// option — asked through agenttyping.ReadMenu, the same reading Choose
-// confirms against — and only then chooses again, which confirms from that
-// frame. Choosing again on a stale frame would move a second time and overshoot.
-//
-// A SECOND WAIT, BEFORE ANY OF THAT, GATES THE FIRST KEY (nocx-f545a.8):
-// menuSettle's own doc has the measurement, but the shape of it here is that
-// Answer no longer writes into a menu the instant it is asked to — it first
-// confirms, on the live grid and the live classification, that the menu has
-// been standing still for menuSettle. See awaitMenuSettled.
-type workerAnswerer struct {
-	screens paneScreens
-	typist  paneChooser
-	// owed and typing are what pays a task this participant's spawn left
-	// owed, once THIS answer is the one that confirms the question it was
-	// waiting on (nocx-f545a.7). classify is the third: nil on all of them
-	// is the ordinary absence case every optional seam in this file already
-	// uses — nothing is paid, and Answer behaves exactly as it did before
-	// this bead.
-	owed *owedTasks
-	// classify is a LIVE reading, never the watcher's cache — see
-	// paneClassifier's own doc for why typeOwedTask cannot use the same
-	// paneReadiness deliverTask reads at spawn. awaitMenuSettled reads it for
-	// the identical reason: the menu it is timing must be the one on screen
-	// right now, never a cached belief about an earlier frame.
-	classify paneClassifier
-	// typing is the same *agenttyping.Typist as typist above, reached
-	// through Submit rather than Choose: the one gate, never a second door
-	// onto this pane's input queue, exactly as workerWaker and deliverTask
-	// already share it.
-	typing paneTypist
-	// now is the clock awaitMenuSettled measures menuSettle against. Nil
-	// means time.Now — production wires nothing here, exactly like
-	// killTimeout's sibling seams elsewhere in this file are package vars
-	// rather than constructor arguments every caller must supply. A test
-	// injects a fake clock so it can prove the gate applies, and does not
-	// apply too early, without ever sleeping out menuSettle's own real
-	// interval (menuSettle's own doc says why shrinking it globally instead
-	// would hide the gate from every other test in this file).
-	now func() time.Time
-	// pollHook, when set, is called once per awaitMenuSettled poll, after
-	// that poll's fresh reading is taken. It exists for tests only: with now
-	// injected, a test observes a poll having happened before it advances the
-	// fake clock, rather than sleeping out deliveryPoll's own real interval
-	// and hoping it landed after this loop's next tick.
-	pollHook func()
-	log      log.Logger
-}
-
-func (a *workerAnswerer) Answer(ctx context.Context, p workers.Participant, option string) (workers.PaneAnswer, error) {
-	sid := p.Liveness.SessionID
-	if sid == "" || a.screens == nil || a.typist == nil {
-		return workers.PaneAnswer{}, errors.New("worker answer: this participant has no pane nocx can answer")
-	}
-	if err := a.awaitMenuSettled(ctx, sid, option); err != nil {
-		return workers.PaneAnswer{}, fmt.Errorf(
-			"worker answer: waiting for the menu to settle before its first key: %w", err)
-	}
-	res := a.typist.Choose(ctx, sid, option)
-	if res.Outcome != agenttyping.OutcomeTyped {
-		return a.withOwedTask(ctx, p, option, res), nil
-	}
-	if err := awaitSelectionOn(ctx, a.screens, sid, option); err != nil {
-		res.Reason = "the selection was moved and the menu never showed it on that option, so nothing was confirmed (" + err.Error() + ")"
-		return paneAnswerOf(res), nil
-	}
-	return a.withOwedTask(ctx, p, option, a.typist.Choose(ctx, sid, option)), nil
-}
-
-// menuSettle is the minimum time a menu must have been shown, continuously
-// and unchanged, before workerAnswerer.Answer writes its FIRST key into it.
-//
-// MEASURED, not guessed (nocx-f545a.8, 2026-09-11, against the installed
-// Claude Code 2.1.266). Reproduced outside nocx in a bare pty (python
-// pty.fork) on the real CLI's own folder-trust dialog, in a directory it had
-// never seen: a down key written within ~100 ms of the dialog's FIRST paint
-// is repainted CORRECTLY on screen — the marker and the cursor move to the
-// intended row — but Claude's own internal selection stays on the original
-// default ("No, exit") PERMANENTLY. An Enter written 5 ms, 300 ms or even 1 s
-// later still confirms "No, exit"; a later up/down pair 0.5 s or 1 s
-// afterwards does not resync it either. Sequential trials: 0.10 s failed
-// twice in a row (and failed again under CPU contention); 0.15 s, 0.30 s and
-// 0.50 s each succeeded twice in a row. A down key written >=150 ms after
-// first paint works even with an Enter written 5 ms after IT.
-//
-// THE DESYNC IS INVISIBLE ON SCREEN — the repaint after a "bad" down key is
-// indistinguishable from the repaint after a "good" one — so, unlike every
-// other wait in this file, no observable state can gate this one: there is
-// no frame, no classification and no submit outcome that differs between the
-// two cases. A DURATION is the only honest signal left, which is also why
-// this is not a business number nocx picked for its own convenience: it is
-// what the measurement above required.
-//
-// 1 second is roughly 6x the measured ~150 ms threshold, deliberately loose
-// rather than tight against it, because even 100 ms already failed once on
-// an unloaded machine and failed again under load — a margin that thin is
-// not a margin. It costs the interval once per Answer call, which is well
-// inside workers.answer's own 30 s Deadline alongside answerTaskBudget (see
-// that var's own doc); no change to answerTaskBudget was needed for it.
-var menuSettle = 1 * time.Second
-
-// awaitMenuSettled blocks, before workerAnswerer's FIRST Choose call for this
-// Answer, until sid's pane has shown a menu (permission_choice or
-// modal_choice) offering option CONTINUOUSLY for menuSettle. See menuSettle's
-// own doc for the measurement that makes a duration the only honest gate
-// here.
-//
-// THE AGE IS COUNTED FROM WHEN THIS CALL FIRST SAW THE MENU, never from any
-// history kept across calls or across answers. That is strictly SAFE, unlike
-// the delay an earlier version of a sibling wait tried and had to retract
-// (awaitFreeText's own doc, nocx-f545a.7, on why counting from a cache
-// narrows a race instead of closing it): a menu this wait has only just
-// started watching cannot have desynced before this wait began watching it,
-// so "settled since I started looking" can only UNDERcount a menu that was
-// already on screen for a while before Answer was called, never overcount
-// one that just appeared. It needs no state beyond this one call's own
-// locals, which is what makes it safe to keep this simple.
-//
-// A menu whose OPTIONS change mid-wait — a different set of rows than the one
-// this wait started timing — is a DIFFERENT menu and restarts the clock: it
-// has not been sitting still for menuSettle just because something that
-// classifies the same (permission_choice, say) was on screen before it. A
-// pane that stops being a menu offering option AT ALL ends the wait early
-// with no error: Choose itself decides the refusal for that case, with its
-// own reason, never a second sentence invented here.
-//
-// A nil classify or grid is the same ABSENCE case every optional seam in
-// this file already treats: a caller that wired no observation in was never
-// asking this question, so Answer proceeds exactly as it did before this
-// bead rather than hanging on one.
-func (a *workerAnswerer) awaitMenuSettled(ctx context.Context, sid, option string) error {
-	if a.classify == nil || a.screens == nil {
-		return nil
-	}
-	now := a.now
-	if now == nil {
-		now = time.Now
-	}
-	var since time.Time
-	var sinceOptions string
-	// tick takes one fresh reading and reports whether the wait is over —
-	// settled because the menu has now stood still for menuSettle, or
-	// stopped because it no longer offers option at all and there is
-	// nothing left to time.
-	tick := func() (settled, stopped bool) {
-		offers, options := a.menuOffersOption(sid, option)
-		if a.pollHook != nil {
-			a.pollHook()
-		}
-		if !offers {
-			return false, true
-		}
-		if since.IsZero() || options != sinceOptions {
-			since, sinceOptions = now(), options
-			return false, false
-		}
-		return now().Sub(since) >= menuSettle, false
-	}
-	if settled, stopped := tick(); settled || stopped {
-		return nil
-	}
-	ticker := time.NewTicker(deliveryPoll)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			if settled, stopped := tick(); settled || stopped {
-				return nil
-			}
-		}
-	}
-}
-
-// menuOffersOption is one fresh, live reading of whether sid's pane is
-// CURRENTLY a menu (permission_choice or modal_choice) offering option — the
-// same two facts Choose's own menuPermit.menu asks, off the same
-// agenttyping.ReadMenu, so "does this menu offer that option" is decided once
-// rather than twice by two readings that could disagree. options is the
-// menu's own option list, joined by a separator no option text can contain,
-// so a caller can tell "the same menu, read again" from "a different menu
-// that happens to classify the same".
-func (a *workerAnswerer) menuOffersOption(sid, option string) (offers bool, options string) {
-	o, ok := a.classify.Classify(sid)
-	if !ok || (o.State != agentdriver.StatePermissionChoice && o.State != agentdriver.StateModalChoice) {
-		return false, ""
-	}
-	f, err := a.screens.Frame(sid)
-	if err != nil {
-		return false, ""
-	}
-	m := agenttyping.ReadMenu(f)
-	if m.Index(option) < 0 {
-		return false, ""
-	}
-	return true, strings.Join(m.Options, "\x00")
-}
-
-// withOwedTask turns the gate's own result into the answer, and — only when
-// that result just CONFIRMED a selection — pays a task this participant's
-// pane was left owing, if one still is (nocx-f545a.7).
-//
-// ADR-0064 §4 is why this decides it here rather than reading it off the
-// record: a screen reading assigns no status to a participant and a menu
-// answer moves no record, so "this task is still owed" was never something
-// workers.Store could be asked — it lives in owed, this call's own in-memory
-// debt, and take is what makes paying it happen at most once even under two
-// concurrent Answer calls racing the same participant.
-func (a *workerAnswerer) withOwedTask(ctx context.Context, p workers.Participant, option string, res agenttyping.Result) workers.PaneAnswer {
-	ans := paneAnswerOf(res)
-	if res.Outcome != agenttyping.OutcomeSubmitted || a.classify == nil || a.typing == nil {
-		// No seam to pay a debt with is the same absence case as everywhere
-		// else in this file — never a reason to dereference one.
-		return ans
-	}
-	sid := session.ID(p.Liveness.SessionID)
-	if !a.owed.take(sid) {
-		return ans
-	}
-	ans.Task = a.typeOwedTask(ctx, sid, option, p.Task)
-	return ans
-}
-
-// answerTaskBudget bounds how long typeOwedTask waits — both for the
-// confirmed menu to leave the screen and, once it has, for the pane to reach
-// free_text — after THIS answer confirmed, once the confirmation itself is
-// already committed (nocx-f545a.7).
-//
-// It must stay under workers.answer's own declared Deadline
-// (internal/agenttools/registry.go, 30s) so a pane that never becomes
-// typable inside it is answered as itself — "waiting", with the state the
-// wait ended on — rather than the whole tool call timing out and reporting a
-// failure for an answer nocx actually confirmed. A package var and not a
-// const, exactly like killTimeout above, so a test can shorten it and prove
-// the bound applies without waiting out the production value — the test
-// still asserts on the STATE the answer reports, never on how long it took.
-var answerTaskBudget = 20 * time.Second
-
-// typeOwedTask pays sid's debt, under answerTaskBudget, and submits task
-// through the SAME gate a spawn's own delivery and a wake both reach.
-//
-// FRESHNESS IS TWO FACTS, NOT A DELAY (nocx-f545a.7, a review of an earlier
-// version of this bead that tried the delay and left the race open — see
-// awaitFreeText's own doc for the full account). First: the menu THIS answer
-// just confirmed has actually left the screen — awaitMenuLeftScreen polls
-// the grid for the SAME reading Choose's own confirm decided against, so
-// "the menu is still showing" is asked once, the mirror of
-// awaitSelectionOn's own wait rather than a second answer to it. Second:
-// once it has, the pane's state is read LIVE (paneClassifier.Classify),
-// never from the watcher's cache — Snapshot's own cache is exactly what the
-// first fact already proved cannot be trusted here. Only past both does
-// awaitFreeText run, over classifyingReadiness's adapter onto that live
-// reading.
-//
-// Every branch below either pays the debt (Delivery: "typed") or restores it
-// for a later answer to try again — except the one case where restoring
-// would be wrong: the participant's agent has exited, and there will be no
-// later answer to pay it with.
-func (a *workerAnswerer) typeOwedTask(ctx context.Context, sid session.ID, option, task string) *workers.TaskOutcome {
-	subCtx, cancel := context.WithTimeout(ctx, answerTaskBudget)
-	defer cancel()
-
-	if err := awaitMenuLeftScreen(subCtx, a.screens, string(sid), option); err != nil {
-		// The sub-budget ran out with the confirmed menu still on screen —
-		// a slow repaint, or a screen nocx cannot read at all. Either way
-		// this is an answer, not a failure: whatever Classify says right now
-		// is what a coordinator would see by looking, so that is what is
-		// reported, and the debt is restored for a later answer to try again.
-		a.owed.restore(sid)
-		o, _ := a.classify.Classify(string(sid))
-		return &workers.TaskOutcome{Delivery: "waiting", State: string(o.State)}
-	}
-
-	state, waitErr := awaitFreeText(subCtx, classifyingReadiness{classify: a.classify}, string(sid), a.log, "worker answer")
-	if waitErr != nil {
-		var never *workers.PaneNeverTypable
-		if errors.As(waitErr, &never) {
-			a.owed.restore(sid)
-			return &workers.TaskOutcome{Delivery: "waiting", State: never.State, Reason: never.Detail}
-		}
-		// The agent exited: the session is ending, so the debt is not
-		// restored (owedTasks' own doc, closing event (b)) — nothing will
-		// ever answer for this participant again.
-		return &workers.TaskOutcome{Delivery: "refused", Reason: waitErr.Error()}
-	}
-	if state != agentdriver.StateFreeText {
-		// The pane is asking something ELSE now. Answering THAT question is
-		// what pays this debt next — see workers.answer's own description.
-		a.owed.restore(sid)
-		return &workers.TaskOutcome{Delivery: "waiting", State: string(state)}
-	}
-	res := a.typing.Submit(ctx, string(sid), task)
-	if res.Outcome == agenttyping.OutcomeSubmitted {
-		return &workers.TaskOutcome{Delivery: "typed"}
-	}
-	a.owed.restore(sid)
-	reason := res.Reason
-	if reason == "" {
-		reason = fmt.Sprintf("nocx refused to submit the task (%s)", res.Outcome)
-	}
-	return &workers.TaskOutcome{Delivery: "refused", State: string(res.State), Reason: reason}
-}
-
-// menuSelectedOn reads paneID's CURRENT frame and reports whether it shows a
-// menu with its selection on option — live, off the grid, never the
-// watcher's cache: a TUI repaints after it reads input, so what decides a
-// movement, a confirm, or (nocx-f545a.7) whether a just-confirmed menu is
-// still showing must be what the screen shows right now. Shared by
-// awaitSelectionOn and awaitMenuLeftScreen so "is the menu on this option"
-// is decided once rather than twice.
-func menuSelectedOn(screens paneScreens, paneID, option string) bool {
-	f, err := screens.Frame(paneID)
-	if err != nil {
-		return false
-	}
-	m := agenttyping.ReadMenu(f)
-	i := m.Index(option)
-	return i >= 0 && m.Selected == i
-}
-
-// awaitSelectionOn blocks until paneID's screen shows a menu whose selection is
-// on option, or until ctx ends.
-func awaitSelectionOn(ctx context.Context, screens paneScreens, paneID, option string) error {
-	if menuSelectedOn(screens, paneID, option) {
-		return nil
-	}
-	ticker := time.NewTicker(deliveryPoll)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			if menuSelectedOn(screens, paneID, option) {
-				return nil
-			}
-		}
-	}
-}
-
-// awaitMenuLeftScreen blocks until paneID's screen NO LONGER shows a menu
-// with its selection on option, or until ctx ends. It is the mirror of
-// awaitSelectionOn, over the identical predicate: that one waits for a
-// reading to become true, this one waits for the SAME reading to become
-// false, which is the first of the two facts typeOwedTask establishes
-// freshness from (nocx-f545a.7) — the confirmed menu has actually left the
-// screen, rather than the wait merely having let some time pass.
-func awaitMenuLeftScreen(ctx context.Context, screens paneScreens, paneID, option string) error {
-	if !menuSelectedOn(screens, paneID, option) {
-		return nil
-	}
-	ticker := time.NewTicker(deliveryPoll)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			if !menuSelectedOn(screens, paneID, option) {
-				return nil
-			}
-		}
-	}
-}
-
-func paneAnswerOf(r agenttyping.Result) workers.PaneAnswer {
-	return workers.PaneAnswer{Outcome: string(r.Outcome), State: string(r.State), Reason: r.Reason}
-}
-
-// paneClassifier is the answerer's narrow view of a LIVE classification
-// (nocx-f545a.7, a review of 1ffd3a56): read paneID's CURRENT frame and
-// classify it now, never from a cache. It is satisfied by
-// *paneobserve.Watcher's Classify method, whose own doc has the full
-// argument; the short version is that paneReadiness.Snapshot (deliverTask's
-// own seam, above) answers from the watcher's cache, which only changes on
-// a Sweep, and nothing about writing a confirm key into a pane marks it
-// dirty — so the instant after workerAnswerer confirms a menu, Snapshot is
-// guaranteed to still describe the menu that was just confirmed. Only the
-// answer path needs this: deliverTask's first observation at spawn is never
-// stale, because nothing preceded it.
-type paneClassifier interface {
-	Classify(paneID string) (paneobserve.Observation, bool)
-}
-
-// classifyingReadiness adapts a paneClassifier into the paneReadiness seam
-// awaitFreeText already takes, so the answer path reuses that ONE wait
-// rather than writing a second one — only the reading it is handed differs
-// from deliverTask's.
-type classifyingReadiness struct {
-	classify paneClassifier
-}
-
-func (c classifyingReadiness) Snapshot(paneID string) (paneobserve.Observation, bool) {
-	return c.classify.Classify(paneID)
 }
 
 // ── the two routes out of the undispatched set (nocx-dkawo.3) ─────────────

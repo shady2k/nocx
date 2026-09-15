@@ -415,16 +415,26 @@ func (m *paneMessages) Send(ctx context.Context, access any, sessionID, text, wh
 // Resolve's own contract refuses controller==sessionID (they can never be
 // the same session), so a real DescendantPaneAccess for delivering to
 // participant's pane needs the ACTUAL controller above it, exactly as the
-// registrar methods this replaces (Screen, Answer) already require it as a
-// parameter. Reported explicitly in this task's own hand-off: Task 11's
-// wiring already holds this value at its own call site (the spawn/enrolment
-// path in workers.go), the same value workerScreener/workerAnswerer
-// resolved it from before.
+// registrar methods this replaced (Screen, Answer) already required it as a
+// parameter.
+//
+// sessionID is participant.Liveness.SessionID, never string(participant.ID):
+// ParticipantID is a backend-minted opaque name (internal/workers/ids.go's
+// newParticipantID, random hex) and Resolve's own ParticipantBySession
+// lookup keys on the pane's SESSION id (a session.ID, e.g. a UUID) — the two
+// only coincide in a test double whose fake Spawner happens to default one
+// from the other (worker_two_callers_test.go's workerTwoCallersSpawner).
+// Task 11's own caller (workers.go's Registrar.Register, via TaskQueue) is
+// what surfaced this: every real EnqueueTask call was resolving a session id
+// that names no participant at all.
 func (m *paneMessages) EnqueueTask(ctx context.Context, coordinatorSession string, participant workers.Participant, task string) error {
 	if m.hub == nil || m.hub.registrar == nil {
 		return errNoPaneRuntime
 	}
-	sessionID := string(participant.ID)
+	sessionID := participant.Liveness.SessionID
+	if sessionID == "" {
+		return workers.ErrNotReachable
+	}
 	da := m.hub.Bind(coordinatorSession, session.Identity{}, KernelAuthority{RunID: "internal:owed-task"})
 	reach, err := da.Resolve(ctx, sessionID, workers.EffectSendInput)
 	if err != nil {

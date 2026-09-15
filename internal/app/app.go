@@ -2182,16 +2182,7 @@ func New(opts ...Option) (*App, error) {
 	// registrar exists. Two-phase wiring at the composition root, which is
 	// the ordinary shape for a cycle between two things the root owns — the
 	// same shape as the emitter and the liveness observer above.
-	// workerOwed is the one in-memory set of tasks left owed by a spawn whose
-	// pane asked a question first (nocx-f545a.7): marked in workerSpawner,
-	// paid in workerAnswerer once the coordinator's own answer to that
-	// question confirms, and dropped in workerSupervisor (below) and in
-	// spawnedParticipant.Kill (workers.go) when the participant's session
-	// ends. One instance shared by all three, for the reason workerEnrol
-	// above is shared: they are three views of one debt, and two instances
-	// would be two answers to "is this participant still owed its task".
-	workerOwed := newOwedTasks()
-	workerSup := &workerSupervisor{sessions: sess, owed: workerOwed, log: logger}
+	workerSup := &workerSupervisor{sessions: sess, log: logger}
 	// The undispatched fact set and its two routes out (nocx-dkawo.3): the
 	// coordinator by a wake through the SAME typist agent.type reaches, the
 	// human by a deadline through the notification pipeline built above. The
@@ -2212,15 +2203,16 @@ func New(opts ...Option) (*App, error) {
 			// is what a spawn asks whether it ever answered (nocx-ui8q6.4).
 			integration: tp,
 			enrolments:  workerEnrol,
-			// readiness and typist are what deliverTask uses to give a
-			// participant its task at spawn (nocx-66gd0): paneWatch is the
-			// SAME watcher the enrolment act opens an observation on, and
-			// paneTyping is the SAME Typist agent.type and the coordinator's
-			// own wake reach - one gate, never a second door onto a pane's
-			// input queue.
+			// readiness is what deliverTask uses to know a participant's pane
+			// became typable at spawn (nocx-66gd0): paneWatch is the SAME
+			// watcher the enrolment act opens an observation on. The task
+			// itself is no longer typed from here (design §9, Task 11) — it
+			// is enqueued through descendantPaneMessages once this
+			// participant is live (workerRecord.SetTaskQueue below), which is
+			// the SAME PaneKeys/PaneMessages step path session.keys and
+			// session.message already spend targets through — never a second
+			// door onto a pane's input queue.
 			readiness: paneWatch,
-			typist:    paneTyping,
-			owed:      workerOwed,
 			// Participants are minted in the default workspace until a
 			// coordinator names its own. It is the workspace the ledger
 			// already records every session nobody named one for, so this
@@ -2241,26 +2233,6 @@ func New(opts ...Option) (*App, error) {
 		// which is the right answer: reporting a worker ended that is still
 		// running is the one thing a close must never do.
 		workers.WithCloser(&workerCloser{sessions: sess, log: logger}),
-		// The seam a coordinator's workers.screen reaches (nocx-f545a.6):
-		// paneGrid and paneWatch are the SAME grid and watcher the enrolment
-		// act opens and the typing gate reads, so what a coordinator is shown
-		// is the screen every other decision about that pane is made from.
-		workers.WithScreener(&workerScreener{screens: paneViews, watch: paneWatch}),
-		// And the seam workers.answer reaches (nocx-f545a.4): paneTyping is the
-		// SAME Typist agent.type, a wake and a spawn's task delivery go through,
-		// so an answer is one more act through the one gate onto a pane's input.
-		// owed and paneTyping (again, as typing) are what lets a confirmed
-		// answer also pay a task it left owed (nocx-f545a.7): the SAME gate
-		// deliverTask itself uses. paneWatch is handed as classify rather than
-		// readiness — workerAnswerer reads it LIVE (paneWatch.Classify), never
-		// from its cache, which is what closes the race a review of 1ffd3a56
-		// found: nothing marks a pane dirty as a side effect of typing a
-		// confirm into it, so the cache is guaranteed stale the instant after
-		// one.
-		workers.WithAnswerer(&workerAnswerer{
-			screens: paneViews, typist: paneTyping,
-			owed: workerOwed, classify: paneWatch, typing: paneTyping, log: logger,
-		}),
 		workers.WithBound(workerParticipantBound),
 		workers.WithEnrolmentDeadline(workerEnrolmentDeadline),
 	)
@@ -2313,6 +2285,16 @@ func New(opts ...Option) (*App, error) {
 	descendantPaneMessages := newPaneMessages(descendantPaneKeys, descendantPaneReader, accessHub, paneDrivers, time.Now())
 	descendantPaneReader.SetMessages(descendantPaneMessages)
 	toolAuthorizer.BindSessionMessages(descendantPaneMessages)
+	// The owed task, re-homed (design §9, Task 11): a spawn that meets a
+	// question no longer marks a debt for a later answer call to pay — it
+	// enqueues a "when=free" message through this SAME queue, namespace
+	// "nocx", id "task", and any answer that frees the prompt (a
+	// coordinator's session.keys, or a person pressing Enter) lets the queue
+	// deliver it.
+	// Two-phase, for the cycle workerRecord.SetTaskQueue's own doc names:
+	// descendantPaneMessages needs accessHub, and accessHub needs
+	// workerRecord's own address to resolve a chain through.
+	workerRecord.SetTaskQueue(descendantPaneMessages)
 	// The kernel's own side of the same binding (design §7.3): a
 	// coordinator run's session.read naming a worker IT spawned reaches
 	// this for its own runID, bound fresh per run as KernelAuthority —

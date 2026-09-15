@@ -51,12 +51,6 @@ type WorkerRecord interface {
 	// Close ends a participant. It writes no state: the exit it causes
 	// reaches the record by the ordinary path.
 	Close(ctx context.Context, coordinatorSession string, id workers.ParticipantID) error
-	// Screen reads what a participant's pane is showing, for the session
-	// that holds it (nocx-f545a.6). It writes nothing and keeps nothing.
-	Screen(ctx context.Context, coordinatorSession string, id workers.ParticipantID) (workers.PaneScreen, error)
-	// Answer answers a participant's menu by naming one of its options
-	// (nocx-f545a.4). It writes nothing into the record.
-	Answer(ctx context.Context, coordinatorSession string, id workers.ParticipantID, option string) (workers.PaneAnswer, error)
 	// Undispatched is what the record still owes judgement on. It is read
 	// BEFORE HeldBy, because HeldBy is the fetch that clears it (D8): asking
 	// afterwards would always answer nothing, which is a truthful answer to
@@ -137,56 +131,6 @@ const defaultWorkerWait = 120 * time.Second
 
 type workerCloseParams struct {
 	Worker string `json:"worker"`
-}
-
-type workerScreenParams struct {
-	Worker string `json:"worker"`
-}
-
-// workerScreenResult is a held worker's pane, as rows of text (ADR-0064 §2).
-// Rows is always present, and empty when the pane cannot be read, so a
-// coordinator never has to tell an absent field from an empty screen.
-type workerScreenResult struct {
-	Worker   string   `json:"worker"`
-	Readable bool     `json:"readable"`
-	State    string   `json:"state,omitempty"`
-	Rows     []string `json:"rows"`
-}
-
-type workerAnswerParams struct {
-	Worker string `json:"worker"`
-	Option string `json:"option"`
-}
-
-// workerAnswerResult is what became of an answer. A refusal at the typing
-// gate is a RESULT — outcome refused, with its reason — for the reason
-// agent.type answers one: a refusal is an answer a caller acts on, not a fault.
-type workerAnswerResult struct {
-	Worker  string `json:"worker"`
-	Outcome string `json:"outcome"`
-	State   string `json:"state,omitempty"`
-	Reason  string `json:"reason,omitempty"`
-	// Task is what became of a task this worker's spawn left owed, present
-	// only when THIS answer's own confirmation was the moment nocx paid it
-	// (nocx-f545a.7). Nil for every other answer — a refused one, one that
-	// only moved a selection, or one that confirmed a participant that
-	// owed nothing — so a coordinator never has to tell "nothing was owed"
-	// from "the field was simply omitted".
-	Task *workerAnswerTaskResult `json:"task,omitempty"`
-}
-
-// workerAnswerTaskResult restates workers.TaskOutcome in the wire's own
-// vocabulary, exactly as workerAnswerResult restates workers.PaneAnswer: one
-// owner of the words, this package never inventing a second set.
-type workerAnswerTaskResult struct {
-	// Delivery is the closed set: "typed" — the task reached the pane and
-	// started the worker's turn. "waiting" — the pane is asking something
-	// else now; look at it with workers.screen and answer it, and the task
-	// follows. "refused" — nocx's typing gate turned the submission away, or
-	// the worker's agent exited before it could be paid; look at reason.
-	Delivery string `json:"delivery"`
-	State    string `json:"state,omitempty"`
-	Reason   string `json:"reason,omitempty"`
 }
 
 type workerCloseResult struct {
@@ -486,87 +430,6 @@ func executeWorkerClose(ctx context.Context, cap agenttools.Capability, args jso
 	raw, err := json.Marshal(workerCloseResult{ID: p.Worker, Ended: true})
 	if err != nil {
 		return "", fmt.Errorf("workers.close: result: %w", err)
-	}
-	return string(raw), nil
-}
-
-// executeWorkerScreen shows a coordinator one of its workers' panes
-// (nocx-f545a.6).
-//
-// It exists because what nocx CONCLUDED about a pane is exactly the thing that
-// can be wrong: a coordinator told its worker is waiting on a question has no
-// way to notice nocx misread the screen, and a pane nocx reads as `unknown` is
-// the one it cannot describe at all. The screen is the evidence behind the
-// verdict. Authority is the record's — the same ownership and delegation
-// questions workers.close asks — and nothing read here is kept.
-func executeWorkerScreen(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
-	coordinator, err := workerCoordinatorFrom(cap, "workers.screen")
-	if err != nil {
-		return "", err
-	}
-	if seams.workerStore == nil {
-		return "", errors.New("workers.screen: this backend keeps no worker record")
-	}
-	var p workerScreenParams
-	if argErr := json.Unmarshal(args, &p); argErr != nil {
-		return "", fmt.Errorf("workers.screen: %w", argErr)
-	}
-	if p.Worker == "" {
-		return "", errors.New("workers.screen: name the worker whose pane to read")
-	}
-	screen, err := seams.workerStore.Screen(ctx, coordinator.Session(), workers.ParticipantID(p.Worker))
-	if err != nil {
-		return "", fmt.Errorf("workers.screen: %w", err)
-	}
-	rows := screen.Rows
-	if rows == nil {
-		rows = []string{}
-	}
-	raw, err := json.Marshal(workerScreenResult{
-		Worker: p.Worker, Readable: screen.Readable, State: screen.State, Rows: rows,
-	})
-	if err != nil {
-		return "", fmt.Errorf("workers.screen: result: %w", err)
-	}
-	return string(raw), nil
-}
-
-// executeWorkerAnswer answers one of a coordinator's workers' menus by naming
-// an option as the screen drew it (nocx-f545a.4, ADR-0064 §1).
-//
-// Authority is the record's — ownership, and a delegation that still permits
-// send-input — and what may be written is the typing gate's: the keys that
-// menu offers, decided from a frame read at the moment of each key.
-func executeWorkerAnswer(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
-	coordinator, err := workerCoordinatorFrom(cap, "workers.answer")
-	if err != nil {
-		return "", err
-	}
-	if seams.workerStore == nil {
-		return "", errors.New("workers.answer: this backend keeps no worker record")
-	}
-	var p workerAnswerParams
-	if argErr := json.Unmarshal(args, &p); argErr != nil {
-		return "", fmt.Errorf("workers.answer: %w", argErr)
-	}
-	if p.Worker == "" || p.Option == "" {
-		return "", errors.New("workers.answer: name the worker, and the option to choose exactly as its screen shows it")
-	}
-	answer, err := seams.workerStore.Answer(ctx, coordinator.Session(), workers.ParticipantID(p.Worker), p.Option)
-	if err != nil {
-		return "", fmt.Errorf("workers.answer: %w", err)
-	}
-	result := workerAnswerResult{
-		Worker: p.Worker, Outcome: answer.Outcome, State: answer.State, Reason: answer.Reason,
-	}
-	if answer.Task != nil {
-		result.Task = &workerAnswerTaskResult{
-			Delivery: answer.Task.Delivery, State: answer.Task.State, Reason: answer.Task.Reason,
-		}
-	}
-	raw, err := json.Marshal(result)
-	if err != nil {
-		return "", fmt.Errorf("workers.answer: result: %w", err)
 	}
 	return string(raw), nil
 }

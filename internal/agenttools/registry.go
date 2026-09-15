@@ -448,13 +448,11 @@ var declarations = []Declaration{
 	{
 		Name:        "session.keys",
 		Description: "Write one step under a target session.read minted for a worker you spawned (or one of its own workers): a single key, one text atom pasted (never submitted — a newline is refused unless the program has bracketed paste on), or a named menu option (chosen step by step until it is selected, then confirmed). A sequence is not one call: send Down, read again, then send the next key. tokenId comes from that session.read's target, and it is spent at most once.",
-		// MUTATE-DESTRUCTIVE for the same reason workers.answer already is:
-		// an option this call sends can approve a tool call inside the
-		// worker or trust a directory on the person's behalf, and neither
-		// comes back. It is the worst case this one row covers — a plain
-		// key such as Down is far more often reversible — but the
-		// declaration has one effect class for the whole row, exactly as
-		// workers.answer's own row already does for the same reason.
+		// MUTATE-DESTRUCTIVE: an option this call confirms can approve a
+		// tool call inside the worker or trust a directory on the person's
+		// behalf, and neither comes back. It is the worst case this one row
+		// covers — a plain key such as Down is far more often reversible —
+		// but the declaration has one effect class for the whole row.
 		//
 		// The DELEGATION effect this write ALSO requires — a session with
 		// no send-input on its chain refuses reachability entirely — is
@@ -1031,46 +1029,6 @@ var declarations = []Declaration{
 		ResolveResources: resourceSession,
 		Executes:         InGo,
 		Params:           "workers.close.schema.json",
-		Narrow:           narrowWorkers,
-	},
-	{
-		Name:        "workers.screen",
-		Description: "Look at what one of your workers' panes is showing right now, as rows of text, and what nocx reads it as. Reach for it when a worker is not doing what you expect — when workers.spawn says its task was not typed because the pane is waiting on a question, or when it has gone quiet — so you can read the question in its own words instead of guessing at it. What you are shown is what is on that screen, and it becomes part of your conversation. You can only look at workers your own session started.",
-		// OBSERVE. Reading a pane is the delegation's EffectObserve, which a
-		// human takeover leaves in place: a person helping a worker past a
-		// prompt does not blind its coordinator to the prompt. ADR-0064 §2
-		// admits this read for a participant the caller holds and for no
-		// other pane, and records its cost — a screen handed to a model
-		// leaves the machine on its next request.
-		Effect:           []content.Effect{content.EffectObserve},
-		OutputTrust:      OutputTrustUntrusted,
-		ResultBound:      ResultBound{MaxBytes: 16 << 10, Truncation: TruncationDropTail},
-		Deadline:         10 * time.Second,
-		Cancellation:     CancellationReturnError,
-		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
-		ResolveResources: resourceSession,
-		Executes:         InGo,
-		Params:           "workers.screen.schema.json",
-		Narrow:           narrowWorkers,
-	},
-	{
-		Name:        "workers.answer",
-		Description: "Answer a question one of your workers' panes is asking — a menu such as whether to trust the folder it was started in, or whether to approve a tool — by naming the option exactly as its screen shows it. Look at the screen with workers.screen first: nocx refuses an option that is not on it, and never picks one for you. The option you choose is the worker's answer, so choose it as the person would. If workers.spawn told you a task was waiting on this same question, answering it here is enough: nocx types the task itself once the pane is ready, and the result's task field says what became of it — call workers.holdings or workers.wait to learn what happens next, never resend the task yourself. You can only answer workers your own session started, and not while a person is at that worker's keyboard.",
-		// MUTATE-DESTRUCTIVE, for workers.close's reason and one more: the
-		// option named can approve a tool call inside the worker, or trust a
-		// directory on the person's behalf, and neither comes back. ADR-0064
-		// admits the write — the keys a positively identified menu offers,
-		// through the typing gate — and a person who wants to be asked before
-		// an agent answers for them has a policy row to say so in.
-		Effect:           []content.Effect{content.EffectMutateDestructive},
-		OutputTrust:      OutputTrustUntrusted,
-		ResultBound:      ResultBound{MaxBytes: 2 << 10, Truncation: TruncationDropTail},
-		Deadline:         30 * time.Second,
-		Cancellation:     CancellationReturnError,
-		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
-		ResolveResources: resourceSession,
-		Executes:         InGo,
-		Params:           "workers.answer.schema.json",
 		Narrow:           narrowWorkers,
 	},
 }

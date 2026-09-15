@@ -27,7 +27,7 @@ import { mountDumpPanel } from '../ui/dump-panel'
 import { decorateLinks } from '../terminal-links/decorate'
 import { cwdLabel } from '../cwd-label'
 import { createBadge } from '../ui/badge-element'
-import { createMeta, updateMeta } from '../ui/meta'
+import { createMeta, createMetaSeparator, updateMeta } from '../ui/meta'
 import { createSpinner } from '../ui/spinner-element'
 import { createComponent } from 'solid-js'
 import { render } from 'solid-js/web'
@@ -298,7 +298,10 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
       ),
     statusChips: null,
     headerRight: {
-      chips: ['duration', 'terminal'],
+      // Word before duration (spec 2026-09-15 §4: "Exit 1 · 1.2s", not
+      // "1.2s Exit 1") — the array IS the DOM order settleBlockOutcome
+      // renders in, so this is the one place that decides it.
+      chips: ['terminal', 'duration'],
       terminal: ({ status, exitCode }) => {
         // An 'entered' block froze on environment entry (N6): it carries no
         // exit code and must never paint success or failure, whatever code
@@ -330,7 +333,8 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
       ),
     statusChips: ASK_STATUS_CHIPS,
     headerRight: {
-      chips: ['duration', 'terminal'],
+      // Word before duration — see the command kind's own chips above.
+      chips: ['terminal', 'duration'],
       // From the STATUS, never from the exit code. A turn's outcome is the
       // run's, and the store sends no exit code for one; deriving the chip
       // from the code left a restored turn saying nothing at all about
@@ -698,6 +702,9 @@ export function settleBlockOutcome(
   const right = block.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')
   if (!right) return
   for (const stale of right.querySelectorAll(
+    // `.ui-meta__sep` is the standalone separator this function places
+    // between the word and the duration (spec 2026-09-15 §4) — a second
+    // settle must clear it along with the Metas either side, or it doubles.
     // `.ui-button[data-block-actions]` is the running Stop control
     // (nocx-9bpeq.12): a settled block has no Stop, whatever kind or path
     // settled it. The ordinary freeze path discards the whole running
@@ -705,31 +712,41 @@ export function settleBlockOutcome(
     // practice — it is here for whatever settles a block WITHOUT replacing
     // it, present or future, rather than something only the common path
     // is trusted to get right.
-    ':scope > .ui-meta, :scope > .ui-spinner, :scope > .cmd-header-waiting, :scope > .ui-button[data-block-actions]',
+    ':scope > .ui-meta, :scope > .ui-meta__sep, :scope > .ui-spinner, :scope > .cmd-header-waiting, :scope > .ui-button[data-block-actions]',
   )) {
     stale.remove()
   }
   delete block.dataset.outcome
   const rules = blockKindRules(kind).headerRight
+
+  // Each slot the kind declares (in ITS OWN DOM order — `chips` above)
+  // becomes an element or nothing at all: a slot that renders nothing must
+  // not still cost a separator, which is why the group is built as a list
+  // first and joined after, rather than a separator written beside each
+  // slot as it is decided. Word before duration (spec 2026-09-15 §4: status
+  // word, a muted separator, duration) falls out of `chips`' own order —
+  // nothing here hardcodes which slot comes first.
+  const chips: Element[] = []
   for (const slot of rules.chips) {
     if (slot === 'duration') {
-      if (durationMs !== null) placeHeaderChip(right, durationMeta(formatDuration(durationMs)))
+      if (durationMs !== null) chips.push(durationMeta(formatDuration(durationMs)))
       continue
     }
     const spec = rules.terminal(outcome)
     if (!spec) continue
     block.dataset.outcome = spec.outcome
-    // Success is silent (spec 2026-09-14 §3.1): the word left the DOM, and
-    // `data-outcome` is what an e2e spec waits on instead.
+    // Success is silent (spec 2026-09-14 §3.1): no element and no
+    // separator either — `data-outcome` is what an e2e spec waits on
+    // instead.
     if (spec.outcome === 'success') continue
-    placeHeaderChip(
-      right,
-      createMeta([spec.text], {
-        tone: spec.outcome === 'failure' ? 'danger' : 'dim',
-        size: 'sm',
-      }),
+    chips.push(
+      createMeta([spec.text], { tone: spec.outcome === 'failure' ? 'danger' : 'dim', size: 'sm' }),
     )
   }
+  chips.forEach((chip, i) => {
+    if (i > 0) placeHeaderChip(right, createMetaSeparator({ size: 'sm' }))
+    placeHeaderChip(right, chip)
+  })
 }
 
 /**
@@ -781,7 +798,16 @@ function createHeader(
     // only once the command had finished, which is the one moment you no
     // longer need it — the question "how long has this been going" is asked
     // WHILE it is going. Warp shows it live and so does this (nocx-6w4z).
+    //
+    // Word, muted separator, duration (spec 2026-09-15 §4) — the same shape
+    // a settled block's status word and duration share (settleBlockOutcome
+    // below), so the group reads one way whether the block is still going
+    // or has already finished. `Running` in the accent tone, matching the
+    // ask kind's own in-progress word below (AD-8: one shape for "in
+    // progress").
     right.appendChild(createSpinner({ label: 'Running', size: 'sm' }))
+    right.appendChild(createMeta(['Running'], { tone: 'accent', size: 'sm' }))
+    right.appendChild(createMetaSeparator({ size: 'sm' }))
     right.appendChild(durationMeta(formatRunningDuration(0)))
   } else if (status === 'waiting' && rules.statusChips) {
     // The kind's own in-progress vocabulary: the ask block says it is

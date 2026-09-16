@@ -406,13 +406,18 @@ func TestARefusedFirstLineNowDeletesTheOrphanTab(t *testing.T) {
 func TestASessionOpenFailureDeletesTheOrphanTab(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	tabs := &fakeAxisTabs{}
+	// enrolments IS reached on this path since nocx-7venl/nocx-ve3pm: armFor
+	// now arms the rendezvous by pane BEFORE OpenSession runs (closing the
+	// window between a session becoming observable and its waiter existing),
+	// so a spawner under test needs a real one even though OpenSession is
+	// about to fail — sessions is nil because that field is only read once an
+	// enrolment actually arrives, which this path never reaches.
 	spawner := &workerSpawner{
-		layout: tabs,
-		opener: failingAxisOpener{err: errors.New("boom: the helper is unreachable")},
-		// enrolments and sessions are never reached on this path: OpenSession
-		// fails before either is touched.
-		workspace: "ws-test",
-		log:       logger,
+		layout:     tabs,
+		opener:     failingAxisOpener{err: errors.New("boom: the helper is unreachable")},
+		enrolments: newWorkerEnrolments(logger, nil),
+		workspace:  "ws-test",
+		log:        logger,
 	}
 
 	_, err := spawner.Spawn(context.Background(), workers.SpawnRequest{
@@ -424,5 +429,80 @@ func TestASessionOpenFailureDeletesTheOrphanTab(t *testing.T) {
 	created, deleted := tabs.snapshot()
 	if len(created) != 1 || len(deleted) != 1 || created[0] != deleted[0] {
 		t.Fatalf("an OpenSession failure left an orphan tab: created=%v deleted=%v", created, deleted)
+	}
+}
+
+// enrolOnOpenAxisOpener opens a real session, exactly like fakeAxisOpener,
+// and then enrols it SYNCHRONOUSLY, before OpenSession returns to Spawn's
+// own caller. That is the tightest possible version of the race nocx-7venl
+// and nocx-ve3pm found: a launcher — a real one, or a test standing in for
+// one — scheduled the instant a session exists, before Spawn's goroutine has
+// run even its next statement. Nothing here depends on scheduling or timing,
+// which is the point: the race that showed up once in eight runs on a real
+// machine is this ordering exactly, made to happen on every run instead of
+// being waited out.
+type enrolOnOpenAxisOpener struct {
+	reg   *session.Reg
+	enrol *workerEnrolments
+	lane  string
+}
+
+func (f *enrolOnOpenAxisOpener) OpenSession(ctx context.Context, spec transport.OpenSpec) (transport.OpenedSession, error) {
+	sess, err := f.reg.Open(ctx, session.Config{
+		Kind: session.KindLocal, Cols: spec.Cols, Rows: spec.Rows, PaneID: spec.PaneID, Cwd: spec.Cwd,
+	})
+	if err != nil {
+		return transport.OpenedSession{}, err
+	}
+	f.enrol.enrolled(sess.ID(), f.lane)
+	return transport.OpenedSession{Session: sess}, nil
+}
+
+// THE DETERMINISTIC REPRODUCTION of nocx-7venl / nocx-ve3pm: an enrolment
+// that arrives in the same breath the session is created is not dropped.
+//
+// Before the fix (workerEnrolments.expect keyed by the SESSION id, called
+// only after OpenSession returned) this failed on every run, not one in
+// eight — enrolOnOpenAxisOpener's enrolled() call happens strictly before
+// Spawn's own next statement, so there was never a waiter for it to find.
+// The fix arms the rendezvous by PANE id, minted and armed before CreateTab
+// or OpenSession run at all, so there is no ordering left for even this
+// synchronous, zero-scheduling reproduction to land inside.
+func TestAnEnrolmentArrivingTheInstantTheSessionExistsIsNotDropped(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	ptys := &workerTestPTYFactory{log: logger}
+	reg := session.New(logger, ptys)
+	t.Cleanup(func() {
+		for _, s := range reg.List() {
+			_ = reg.Close(s.ID())
+		}
+	})
+	tabs := &fakeAxisTabs{}
+	enrol := newWorkerEnrolments(logger, reg)
+	opener := &enrolOnOpenAxisOpener{reg: reg, enrol: enrol, lane: "lane-instant"}
+	awaiter := &fakeAxisAwaiter{outcome: transport.IntegrationOutcome{
+		Registered: true, Status: transport.IntegrationIntegrated,
+	}}
+	spawner := &workerSpawner{
+		layout: tabs, opener: opener, sessions: reg,
+		integration: awaiter, enrolments: enrol,
+		workspace: "ws-test", log: logger,
+	}
+
+	const participant = workers.ParticipantID("p-instant")
+	if _, err := spawner.Spawn(context.Background(), workers.SpawnRequest{
+		Participant: participant, Group: "worker-1", Task: "t", Command: "run-agent",
+	}); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	awaitCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	live, err := enrol.Await(awaitCtx, participant)
+	if err != nil {
+		t.Fatalf("the enrolment that arrived the instant the session existed was dropped: %v", err)
+	}
+	if live.Lane != "lane-instant" {
+		t.Fatalf("liveness lane = %q, want %q", live.Lane, "lane-instant")
 	}
 }

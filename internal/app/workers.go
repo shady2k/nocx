@@ -626,6 +626,16 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	lg.Debug("worker spawn: the participant's tab exists",
 		"tab_id", tabID.String(), "pane_id", paneID.String(), "workspace", s.workspace)
 
+	// ARMED BY PANE, BEFORE THE SESSION EXISTS (nocx-7venl, nocx-ve3pm). The
+	// pane id above is the earliest thing about this participant anything
+	// could observe, so this is the earliest point the rendezvous can be
+	// armed at — before OpenSession, which is what used to arm it (keyed by
+	// the session id OpenSession hands back) and so could only arm it at the
+	// same instant the session became visible to a launcher, real or
+	// standing in for one. See workerEnrolments' own doc for why that is a
+	// window and this is not.
+	s.enrolments.armFor(req.Participant, paneID.String())
+
 	opened, err := s.opener.OpenSession(ctx, transport.OpenSpec{
 		PaneID: paneID.String(),
 		Cols:   participantCols,
@@ -633,7 +643,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		Cwd:    cwd,
 	})
 	if err != nil {
-		s.compensateSpawn(ctx, tabID.String(), nil)
+		s.compensateSpawn(ctx, req.Participant, tabID.String(), nil)
 		return nil, fmt.Errorf("worker spawn: opening the participant's session: %w", err)
 	}
 	lg = lg.With("session_id", string(opened.Session.ID()), "pane_id", paneID.String())
@@ -642,10 +652,6 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	spawned := spawnedParticipant{
 		tabID: tabID.String(), sess: opened.Session, sessions: s.sessions, layout: s.layout,
 	}
-
-	// Told BEFORE the command is written, or an enrolment that arrives
-	// promptly would find nobody waiting for it.
-	s.enrolments.expect(req.Participant, opened.Session.ID())
 
 	// THE GATE. Nothing is written into the session's queue — and so the
 	// agent never execs and never races its own enrolment — until the axis
@@ -667,7 +673,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		// from answering `conventional`, because the two need different
 		// fixes: this one is worth retrying (a slow machine, a loaded
 		// helper), the other is not (the shell itself will never integrate).
-		s.compensateSpawn(ctx, tabID.String(), opened.Session)
+		s.compensateSpawn(ctx, req.Participant, tabID.String(), opened.Session)
 		return nil, fmt.Errorf(
 			"worker spawn: the participant's shell never answered its integration handshake within the deadline; retrying may succeed if this was transient: %w",
 			awaitErr)
@@ -691,7 +697,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		// AGENTS.md's testing rules name as the failure to refuse rather than
 		// ship. Do not retry the same command unmodified: the shell itself is
 		// what did not integrate.
-		s.compensateSpawn(ctx, tabID.String(), opened.Session)
+		s.compensateSpawn(ctx, req.Participant, tabID.String(), opened.Session)
 		return nil, fmt.Errorf(
 			"worker spawn: the participant's shell answered %q (%s): this pane cannot be watched, so it cannot be a participant; do not retry the same command until the shell-integration failure is fixed",
 			outcome.Status, outcome.Reason)
@@ -702,7 +708,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		// Compensate here rather than letting the enrolment deadline do it:
 		// the failure is known now, and waiting would spend the deadline
 		// learning what we already know.
-		s.compensateSpawn(ctx, tabID.String(), opened.Session)
+		s.compensateSpawn(ctx, req.Participant, tabID.String(), opened.Session)
 		return nil, errors.New("worker spawn: the participant's session refused its first line")
 	}
 	// THE WRITE IS AN ATTEMPT AND NOT A START. What follows it is the
@@ -722,7 +728,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	if req.Task != "" {
 		delivery, deliverErr := s.deliverTask(ctx, string(opened.Session.ID()), req.Task)
 		if deliverErr != nil {
-			s.compensateSpawn(ctx, tabID.String(), opened.Session)
+			s.compensateSpawn(ctx, req.Participant, tabID.String(), opened.Session)
 			return nil, fmt.Errorf("worker spawn: %w", deliverErr)
 		}
 		// A pane that asked a question keeps its tab, its session and its
@@ -854,7 +860,25 @@ func (s *workerSpawner) deliverTask(ctx context.Context, paneID, task string) (w
 // other caller (Registrar.compensate) resolves differently, by joining the
 // two errors instead: that caller has no Spawn error of its own to prefer,
 // this one does.
-func (s *workerSpawner) compensateSpawn(ctx context.Context, tabID string, sess session.Session) {
+//
+// IT ALSO WITHDRAWS THE ENROLMENT (nocx-7venl, nocx-ve3pm). armFor now arms
+// the rendezvous before OpenSession runs, which means every failure this
+// helper compensates — including OpenSession's own — has already armed one.
+// Registrar.compensate (the OTHER caller of Kill, reached once Spawn has
+// returned successfully) withdraws separately, keyed on whether the
+// enrolment had already arrived by the time a LATER step failed; nothing
+// upstream of Spawn returning ever reaches that call, so this is the only
+// place a failure caught here would otherwise leave an armed waiter — and a
+// participant id that failed to spawn will never be asked about again, so an
+// un-withdrawn one would sit forever. Withdraw is idempotent (never errors on
+// an absent participant), so calling it here even for the one existing
+// caller that had nothing armed yet (the mint-a-tab-id / mint-a-pane-id
+// failures return before this is ever reached) costs nothing.
+func (s *workerSpawner) compensateSpawn(ctx context.Context, participant workers.ParticipantID, tabID string, sess session.Session) {
+	if err := s.enrolments.Withdraw(ctx, participant); err != nil {
+		s.log.Warn("worker spawn: could not withdraw a failed spawn's enrolment",
+			"participant", string(participant), "error", err)
+	}
 	sp := spawnedParticipant{tabID: tabID, sess: sess, sessions: s.sessions, layout: s.layout}
 	if err := sp.Kill(ctx); err != nil {
 		s.log.Warn("worker spawn: could not fully compensate a failed spawn",
@@ -870,9 +894,32 @@ func (s *workerSpawner) compensateSpawn(ctx context.Context, tabID string, sess 
 // across when it answers agent_enrol. Nothing here reads a screen, and nothing
 // times anything — the deadline belongs to the caller's context, so the bound
 // is stated once, by whoever owns the interval.
+//
+// THE WINDOW THIS CLOSES (nocx-7venl, nocx-ve3pm). A session's id does not
+// exist until OpenSession returns it, and OpenSession's return is also the
+// instant the session becomes visible to anything watching the registry — a
+// real enrolment can only ever follow much later (nothing runs in the pane
+// until the command line is written, well after this file's Spawn is past
+// this point), but a test standing in for a launcher has no such floor, and
+// once observed one that fast. Keying the rendezvous by the SESSION id, as
+// this used to, meant the earliest possible moment to arm it was also
+// OpenSession's return — so a caller scheduled in the gap between that
+// return and the next statement could enrol into a waiter nobody had made
+// yet, and the enrolment was silently dropped (Await then timed out).
+//
+// The pane id has no such floor: workers.go's Spawn mints it before CreateTab
+// or OpenSession run, so arming BY PANE (armFor) happens before the session
+// that would carry an enrolment exists at all. bySess is kept for the
+// established case and for participantFor/Withdraw, which read it; byPane is
+// what a session with no bySess entry yet is resolved through, self-healing
+// bySess the first time its enrolment is seen.
 type workerEnrolments struct {
-	mu       sync.Mutex
-	bySess   map[session.ID]workers.ParticipantID
+	mu     sync.Mutex
+	bySess map[session.ID]workers.ParticipantID
+	// byPane arms the rendezvous by pane id, before a session (and its id)
+	// exist. An entry is consumed (deleted) the first time enrolled resolves
+	// through it, exactly once, because a pane is opened for one participant.
+	byPane   map[string]workers.ParticipantID
 	waiters  map[workers.ParticipantID]chan workers.Liveness
 	arrived  map[workers.ParticipantID]workers.Liveness
 	sessions sessionCloser
@@ -882,6 +929,7 @@ type workerEnrolments struct {
 func newWorkerEnrolments(lg log.Logger, sessions sessionCloser) *workerEnrolments {
 	return &workerEnrolments{
 		bySess:   make(map[session.ID]workers.ParticipantID),
+		byPane:   make(map[string]workers.ParticipantID),
 		waiters:  make(map[workers.ParticipantID]chan workers.Liveness),
 		arrived:  make(map[workers.ParticipantID]workers.Liveness),
 		sessions: sessions,
@@ -889,11 +937,15 @@ func newWorkerEnrolments(lg log.Logger, sessions sessionCloser) *workerEnrolment
 	}
 }
 
-// expect records which participant a session's enrolment will speak for.
-func (e *workerEnrolments) expect(p workers.ParticipantID, sid session.ID) {
+// armFor arms the rendezvous for a participant's PANE, before the session
+// that pane will open even exists (workers.go's Spawn calls this right after
+// CreateTab, strictly before OpenSession) — see the type doc for why keying
+// on the pane rather than the session is what removes the window instead of
+// narrowing it.
+func (e *workerEnrolments) armFor(p workers.ParticipantID, paneID string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.bySess[sid] = p
+	e.byPane[paneID] = p
 	e.waiters[p] = make(chan workers.Liveness, 1)
 }
 
@@ -904,6 +956,21 @@ func (e *workerEnrolments) expect(p workers.ParticipantID, sid session.ID) {
 func (e *workerEnrolments) enrolled(sid session.ID, lane string) {
 	e.mu.Lock()
 	p, ok := e.bySess[sid]
+	if !ok {
+		// Not yet linked by session id — ask whether this session's PANE was
+		// armed. armFor ran before this session existed, so if the pane is
+		// armed, it was armed before this call could possibly have arrived;
+		// there is no ordering left to lose the race on.
+		if sess, sessErr := e.sessions.Get(sid); sessErr == nil {
+			if pane := sess.PaneID(); pane != "" {
+				if pp, armed := e.byPane[pane]; armed {
+					p, ok = pp, true
+					e.bySess[sid] = p
+					delete(e.byPane, pane)
+				}
+			}
+		}
+	}
 	if !ok {
 		e.mu.Unlock()
 		return
@@ -973,15 +1040,22 @@ func (e *workerEnrolments) Await(ctx context.Context, p workers.ParticipantID) (
 	}
 }
 
-// Withdraw forgets the participant. It undoes what expect recorded, so a
-// compensated registration leaves no rendezvous behind for a later enrolment
-// to satisfy.
+// Withdraw forgets the participant. It undoes what armFor and enrolled
+// recorded, so a compensated registration leaves no rendezvous behind for a
+// later enrolment to satisfy — including one only ever armed by pane,
+// because a spawn can fail before a session (and its id) ever existed to
+// link byPane into bySess.
 func (e *workerEnrolments) Withdraw(_ context.Context, p workers.ParticipantID) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for sid, have := range e.bySess {
 		if have == p {
 			delete(e.bySess, sid)
+		}
+	}
+	for pane, have := range e.byPane {
+		if have == p {
+			delete(e.byPane, pane)
 		}
 	}
 	delete(e.waiters, p)

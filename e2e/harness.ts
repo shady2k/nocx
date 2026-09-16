@@ -343,6 +343,57 @@ async function resetStand(): Promise<void> {
   }
 }
 
+/** The wire shape of one control answer: `error` is present exactly when the
+ *  call was refused. */
+interface ControlAnswer {
+  id?: number
+  result?: unknown
+  error?: { code?: number; message?: string; data?: { retryAfterMs?: number } }
+}
+
+/**
+ * The JSON-RPC code of a refused control request — "Control plane busy"
+ * (internal/transport/ws_saturation.go, contracts/control.saturated.schema.json).
+ *
+ * NOT an error this harness may treat as a fatal answer. The server's bounded
+ * executor REFUSES control work when a submission is saturated instead of
+ * queueing it unboundedly, and every client of the stand shares those queues
+ * with the renderer: during a reconnect the renderer's own burst is exactly
+ * what saturates the session submission, and a probe's `session.output` lands
+ * behind it. Measured on the v0.4.0 release run (35138263215, ci-e2e webkit),
+ * where `e2e: session.output refused: Control plane busy` failed
+ * connection-overlay.spec.ts:271 — a spec whose subject is scrollback, not
+ * backpressure, and which passed on the same commit under chromium.
+ *
+ * Retrying is the honest reading, and the bound is what keeps it honest: a
+ * stand that NEVER drains is still a failure, reported after the attempts are
+ * spent.
+ */
+const CONTROL_SATURATED_CODE = -32004
+const SATURATION_ATTEMPTS = 6
+const SATURATION_BACKOFF_MS = 50
+
+/** One frame, one answer, on the socket this closure owns. Retrying is the
+ *  caller's business. */
+function sendOnce(
+  ws: WebSocket,
+  id: number,
+  method: string,
+  params: unknown,
+): Promise<ControlAnswer> {
+  const answer = Promise.withResolvers<ControlAnswer>()
+  const onMessage = (ev: MessageEvent): void => {
+    if (typeof ev.data !== 'string') return
+    const msg = JSON.parse(ev.data) as ControlAnswer
+    if (msg.id !== id) return
+    ws.removeEventListener('message', onMessage)
+    answer.resolve(msg)
+  }
+  ws.addEventListener('message', onMessage)
+  ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
+  return answer.promise
+}
+
 /** One JSON-RPC call at a time over a socket opened for this purpose. The
  *  data plane is not touched: every frame here is text. */
 export async function openControlPlane(
@@ -357,24 +408,30 @@ export async function openControlPlane(
     ws.addEventListener('close', failed, { once: true })
   })
   let nextId = 0
-  const call = (method: string, params: unknown): Promise<unknown> =>
-    new Promise((resolve, reject) => {
-      const id = ++nextId
-      const onMessage = (ev: MessageEvent): void => {
-        if (typeof ev.data !== 'string') return
-        const msg = JSON.parse(ev.data) as {
-          id?: number
-          result?: unknown
-          error?: { message?: string }
-        }
-        if (msg.id !== id) return
-        ws.removeEventListener('message', onMessage)
-        if (msg.error) reject(new Error(`e2e: ${method} refused: ${msg.error.message ?? ''}`))
-        else resolve(msg.result)
+  /** A refused call is retried only for the saturation code, and only within
+   *  the bound; anything else is the answer, and it is reported as one. */
+  const call = async (method: string, params: unknown): Promise<unknown> => {
+    for (let attempt = 1; ; attempt += 1) {
+      const answer = await sendOnce(ws, ++nextId, method, params)
+      const error = answer.error
+      if (error === undefined) return answer.result
+      const retryAfterMs = error.data?.retryAfterMs
+      if (error.code === CONTROL_SATURATED_CODE && attempt < SATURATION_ATTEMPTS) {
+        const backoff = Promise.withResolvers<void>()
+        setTimeout(
+          backoff.resolve,
+          typeof retryAfterMs === 'number' && retryAfterMs > 0
+            ? retryAfterMs
+            : SATURATION_BACKOFF_MS * attempt,
+        )
+        await backoff.promise
+        continue
       }
-      ws.addEventListener('message', onMessage)
-      ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
-    })
+      const spent =
+        error.code === CONTROL_SATURATED_CODE ? ` after ${String(attempt)} attempts` : ''
+      throw new Error(`e2e: ${method} refused${spent}: ${error.message ?? ''}`)
+    }
+  }
   return { call, close: () => ws.close() }
 }
 

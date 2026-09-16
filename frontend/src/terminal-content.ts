@@ -797,8 +797,23 @@ export class TerminalContent extends BasePaneContent {
   /** A selection offers a grant; only the body-level control confirms it. */
   private markAffordance: MarkAffordance | null = null
   private readonly runningActions: RunningBlockActions = {
-    isActive: (blockEl) =>
-      this.hasRunningCommand() && this.scrollback?.blockManager.runningBlock?.el === blockEl,
+    // ONE OWNER, and it is the block manager: it is what draws the running
+    // chrome this control lives in — the `cmd-block-running` class, the Stop
+    // button itself, `runningBlock` — so it is also what answers "does this
+    // control still belong to this block". The lifecycle kernel answers a
+    // DIFFERENT question (is the pane's execution open) and it learns the
+    // answer LATER than the manager does: the submit is answered before the
+    // running fact lands, so ANDing it in here dropped the click in that
+    // window, silently. Measured on webkit 2026-09-16, running
+    // e2e/terminal-screen-register-mockup-pass.spec.ts's Stop test repeatedly
+    // in the container: 4 failures in 30 and 1 in 30, each with the keydown,
+    // keypress and click all reaching the button (defaultPrevented false on
+    // every one) and the block still `cmd-block-running` with no toast
+    // anywhere — and in the run probed for it, a second press 1.5s later
+    // cancelled the command, which is what a dropped gesture looks like and
+    // what a broken button does not. The same gate guards the ⋮ menu's Stop
+    // item below, which is the other door to this handler.
+    isActive: (blockEl) => this.scrollback?.blockManager.runningBlock?.el === blockEl,
     isGranted: (blockEl) => this.grantedBlocks.some((grant) => grant.blockEl === blockEl),
     grantsAvailable: () => this.grantsAvailable(),
     toggleGrant: (blockEl) => this.toggleGrant(blockEl),
@@ -6436,8 +6451,18 @@ export class TerminalContent extends BasePaneContent {
    *  a Stop that quietly did nothing is worse than one that failed. */
   private signalActiveCommand(signal: SessionSignal['signal']): void {
     const session = this.session
-    if (session === null || !this.hasRunningCommand()) return
+    // A command is running if EITHER owner says so, and the union is the
+    // point: the block manager draws the running block, the lifecycle kernel
+    // learns of the open attempt a beat later, and requiring both (as this
+    // did) silently refused the gesture in that window — the same defect the
+    // block's own Stop carried, and this function's own rule is that a Stop
+    // that quietly did nothing is worse than one that failed.
+    //
+    // The backend is the authority on what is running, and its closed outcome
+    // set is spoken below; so the honest answer is the round trip's, never a
+    // local guess that drops the gesture.
     const targetBlock = this.scrollback?.blockManager.runningBlock ?? null
+    if (session === null || (targetBlock === null && !this.hasRunningCommand())) return
     // Recorded EAGERLY, before the round trip (nocx-9bpeq.19): the backend
     // states no "stopped by request" fact on a completed attempt —
     // contracts/lifecycle.changed.schema.json's `attempt` carries only

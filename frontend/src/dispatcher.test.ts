@@ -197,6 +197,42 @@ describe('dispatcher endpoint state machine', () => {
     expect(socket().url).toBe('ws://second-host:1002/session')
   })
 
+  // nocx-n14oo.11: a failing e2e test reads its own connection's backend
+  // lines by trace_id, which only works if the socket that test's page opens
+  // actually carries the id the harness minted. This is the one seam that
+  // proves it does, without a real backend: the endpoint the provider
+  // resolves is the harness's shim (frontend/src/endpoint.ts:traceparent),
+  // and the URL constructed from it is what the wire actually receives.
+  it('carries traceparent on the connection URL when the endpoint supplies one', async () => {
+    const provider = new TestEndpointProvider()
+    provider.enqueue({
+      ok: true,
+      endpoint: {
+        host: 'h',
+        port: 1,
+        token: 't',
+        traceparent: '00-0123456789abcdef0123456789abcdef-0123456789abcdef-01',
+      },
+    })
+    const d = new Dispatcher(provider)
+
+    await connected(d)
+
+    expect(socket().url).toBe(
+      'ws://h:1/session?traceparent=00-0123456789abcdef0123456789abcdef-0123456789abcdef-01',
+    )
+  })
+
+  it('omits the traceparent query parameter entirely when the endpoint has none', async () => {
+    const provider = new TestEndpointProvider()
+    provider.enqueue({ ok: true, endpoint: { host: 'h', port: 1, token: 't' } })
+    const d = new Dispatcher(provider)
+
+    await connected(d)
+
+    expect(socket().url).toBe('ws://h:1/session')
+  })
+
   it('publishes each state transition exactly once, including timer-fired connecting', async () => {
     const provider = new TestEndpointProvider()
     const d = new Dispatcher(provider)

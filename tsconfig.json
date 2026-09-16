@@ -24,7 +24,22 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "verbatimModuleSyntax": true
+    "verbatimModuleSyntax": true,
+    // Lets harness.ts and failure-context.ts import trace-context.mts and
+    // redact-frame.mts BY their real .mts extension. Safe only because this
+    // config is noEmit — the specifier is never rewritten for a build step,
+    // so writing it as it will actually be resolved at run time (by Node's
+    // native test runner, and by Playwright's own loader) is exactly right
+    // rather than a workaround.
+    "allowImportingTsExtensions": true
   },
-  "include": ["e2e/**/*.ts", "playwright.config.ts"]
+  // *.mts alongside *.ts: e2e/trace-context.mts and e2e/redact-frame.mts are
+  // the two files node --test itself runs (e2e/*.test.mts), and Node treats
+  // .mts as ES module unconditionally, independent of any package.json —
+  // which is what let them be unit-tested at all without changing how
+  // Playwright loads the rest of this directory (nocx-n14oo.11: an
+  // e2e/package.json declaring "type": "module" was tried first and broke
+  // Playwright's own resolution of every other file here, extensionless
+  // imports included — reverted rather than carried).
+  "include": ["e2e/**/*.ts", "e2e/**/*.mts", "playwright.config.ts"]
 }

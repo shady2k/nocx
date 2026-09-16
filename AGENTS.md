@@ -367,6 +367,14 @@ WebKit at a container-default viewport; the shipped app is macOS WKWebView. Layo
 specs fail there and pass in CI. Use it to iterate, confirm in CI, and never "fix" a test
 that is only red in the container without working out which one is lying.
 
+**A failing e2e test prints its own context, at the moment it fails** (nocx-n14oo.11): the
+backend log lines its own connection caused (matched by a `trace_id` the harness mints per
+test and the renderer sends as `traceparent`), the browser console, the control-plane's
+JSON-RPC frames, and the accessibility snapshot — all in the reporter output, with no
+artifact download needed. Read that block before forming a hypothesis; it is usually the
+whole answer, and guessing from the DOM or re-running locally to reproduce what the block
+already said is the failure mode this exists to end.
+
 ## How we work
 
 1. Take the next task from `br ready` — see [What to work on next](#what-to-work-on-next).

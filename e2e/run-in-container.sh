@@ -10,6 +10,10 @@
 #   PW_PROJECTS=chromium e2e/run-in-container.sh  # one browser
 #   NOCX_E2E_CPUS=0 e2e/run-in-container.sh       # uncapped, while iterating
 #   NOCX_LOG_LEVEL=debug e2e/run-in-container.sh  # the backend says more
+#   NOCX_PROVE_FAILURE_CONTEXT=1 e2e/run-in-container.sh e2e/failure-context-proof.spec.ts
+#                                                  # runs the one spec that deliberately
+#                                                  # fails, to see the failure-context block
+#                                                  # (nocx-n14oo.11); skipped otherwise
 #
 # The backend's log is inside the disposable home, at
 # .e2e/home/.local/share/nocx-dev/nocx.log. Read it BEFORE the Playwright
@@ -180,6 +184,7 @@ exec docker run --rm -i ${tty_flag[@]+"${tty_flag[@]}"} \
   -e PW_PROJECTS="${PW_PROJECTS:-}" \
   -e PW_WORKERS="${PW_WORKERS:-}" \
   -e NOCX_LOG_LEVEL="${NOCX_LOG_LEVEL:-}" \
+  -e NOCX_PROVE_FAILURE_CONTEXT="${NOCX_PROVE_FAILURE_CONTEXT:-}" \
   -e NOCX_E2E_HOST_UID="$(id -u)" \
   -e NOCX_E2E_HOST_GID="$(id -g)" \
   -w /work \

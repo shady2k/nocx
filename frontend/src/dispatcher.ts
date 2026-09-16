@@ -327,7 +327,17 @@ export class Dispatcher {
   private _openSocket(endpoint: Endpoint): Promise<void> {
     return new Promise((resolve, reject) => {
       const subprotocol = `nocx.token.${endpoint.token}`
-      const ws = new WebSocket(`ws://${endpoint.host}:${endpoint.port}/session`, subprotocol)
+      // traceparent is opt-in and absent in production (see Endpoint): the
+      // desktop app has never had an exchange to continue before its first
+      // socket. The e2e harness is the one caller that ever sets it, so a
+      // failing Playwright test's backend lines carry the same trace id the
+      // test itself is named by, over a query parameter the backend already
+      // parses at the connection's entry (internal/transport/ws.go,
+      // log.ContinueTrace).
+      const url = endpoint.traceparent
+        ? `ws://${endpoint.host}:${endpoint.port}/session?traceparent=${encodeURIComponent(endpoint.traceparent)}`
+        : `ws://${endpoint.host}:${endpoint.port}/session`
+      const ws = new WebSocket(url, subprotocol)
       ws.binaryType = 'arraybuffer'
       let settled = false
       const onMessage = (event: MessageEvent) => this._onSocketMessage(event, ws)

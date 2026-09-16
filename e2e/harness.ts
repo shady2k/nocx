@@ -1,8 +1,10 @@
 import { test as base, expect as baseExpect, type Locator, type Page } from '@playwright/test'
 
 import { BASE_URL } from './base-url'
+import { attachFailureDiagnostics, registerBackendForTest } from './failure-context'
 import { reportStandingModals } from './modal-report'
 import { readStand } from './stand'
+import { traceIdForTest, traceparentForTest } from './trace-context.mts'
 
 export { expect } from '@playwright/test'
 export type { Page } from '@playwright/test'
@@ -149,10 +151,17 @@ export async function clickIntoEditor(
 //
 // A spec that needs its OWN backend overrides this afterwards with
 // bindEndpoint(); its accessor wins whether the page shim runs before or after it.
-async function injectWailsShim(page: Page): Promise<void> {
+//
+// traceparent is optional and, when given, rides along on the SAME
+// ResolveBackend object the renderer already reads at startup — no second
+// binding, no second round trip. Dispatcher (frontend/src/dispatcher.ts)
+// reads endpoint.traceparent and appends it to the WebSocket URL; the
+// backend continues it at the connection's entry (internal/transport/ws.go,
+// log.ContinueTrace). See e2e/trace-context.ts for where it is minted.
+async function injectWailsShim(page: Page, traceparent?: string): Promise<void> {
   const stand = readStand()
   await page.addInitScript(
-    (opts: { p: number; t: string }) => {
+    (opts: { p: number; t: string; tp: string }) => {
       ;(window as unknown as { go: unknown }).go = {
         main: {
           WailsApp: {
@@ -165,6 +174,7 @@ async function injectWailsShim(page: Page): Promise<void> {
                 kind: '',
                 message: '',
                 remedy: '',
+                ...(opts.tp ? { traceparent: opts.tp } : {}),
               }),
             CheckForUpdate: () => Promise.resolve(null),
             ReportHealthy: () => Promise.resolve(),
@@ -173,7 +183,7 @@ async function injectWailsShim(page: Page): Promise<void> {
         },
       }
     },
-    { p: stand.port, t: stand.token },
+    { p: stand.port, t: stand.token, tp: traceparent ?? '' },
   )
 }
 
@@ -246,18 +256,27 @@ export const test = base.extend<object, { appReady: void }>({
   ],
 
   page: async ({ page }, use, info) => {
+    // Attached before anything else touches the page, so a failure's printed
+    // block (nocx-n14oo.11) misses nothing this test's page ever did — the
+    // listeners are cheap and a passing test never prints what they collect.
+    const diagnostics = attachFailureDiagnostics(page)
+    // One trace per Playwright test, derived from its own id — stable across
+    // a retry, distinct from every other test's — so its own connection's
+    // backend lines are findable by trace_id alone (e2e/trace-context.ts).
+    const traceparent = traceparentForTest(info.testId)
     // BEFORE the test, not after it. A teardown answers for the test that has
     // just run and is skipped when that test dies badly; a setup answers for
     // the test that is about to run, which is the one whose result depends on
     // it. Whatever the last spec left — including a page that crashed with
     // eight tabs open — this is what the next one starts from.
     await resetStand()
-    await injectWailsShim(page)
+    await injectWailsShim(page, traceparent)
     await use(page)
     // …and one thing is READ afterwards, on the way out of a test that
     // failed: whichever modal was standing over the page, by name. See
     // modal-report.ts for why that is a report and not an assertion.
     await reportStandingModals(page, info)
+    await diagnostics.report(info, traceIdForTest(info.testId))
   },
 })
 
@@ -282,8 +301,10 @@ export const test = base.extend<object, { appReady: void }>({
  */
 export const standalone = base.extend<object>({
   page: async ({ page }, use, info) => {
+    const diagnostics = attachFailureDiagnostics(page)
     await use(page)
     await reportStandingModals(page, info)
+    await diagnostics.report(info, traceIdForTest(info.testId))
   },
 })
 
@@ -687,10 +708,30 @@ export function collectionsDir(isolatedHome: string, name: string): string {
  * mid-test — vault surviving a restart is the thing under test — and `wails
  * dev` owns exactly one backend whose lifecycle Playwright cannot touch. The
  * requirement was never "override the bindings"; it was "run headless".
+ *
+ * traceparent defaults from the currently running test's own id
+ * (traceparentForTest, e2e/trace-context.ts) when the caller does not supply
+ * one — which is every one of the forty-some specs that call this today.
+ * None of them has to change for its backend's lines to carry a trace: the
+ * default is silent unless base.info() throws (no test running), in which
+ * case the connection simply opens with none, exactly as before this
+ * existed.
  */
-export async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promise<void> {
+export async function bindEndpoint(
+  page: Page,
+  endpoint: BackendEndpoint,
+  traceparent?: string,
+): Promise<void> {
+  let tp = traceparent
+  if (tp === undefined) {
+    try {
+      tp = traceparentForTest(base.info().testId)
+    } catch {
+      tp = ''
+    }
+  }
   await page.context().addInitScript(
-    (opts: { p: number; t: string }) => {
+    (opts: { p: number; t: string; tp: string }) => {
       const workbenchGo = {
         main: {
           WailsApp: {
@@ -703,6 +744,7 @@ export async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promi
                 kind: '',
                 message: '',
                 remedy: '',
+                ...(opts.tp ? { traceparent: opts.tp } : {}),
               }),
             CheckForUpdate: () => Promise.resolve(null),
             ReportHealthy: () => Promise.resolve(),
@@ -720,7 +762,7 @@ export async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promi
         set: () => undefined,
       })
     },
-    { p: endpoint.port, t: endpoint.token },
+    { p: endpoint.port, t: endpoint.token, tp },
   )
 }
 type ResolvableBackendResolution =
@@ -1017,6 +1059,19 @@ export class VaultBackend {
       what: this.binary,
       timeoutMs: 30_000,
     })
+
+    // Attribute this backend to whichever test is running RIGHT NOW, so a
+    // failure's printed context (failure-context.ts) can find it without any
+    // spec having to register it by hand — the whole reason it lives here
+    // rather than being left to each spec's own bookkeeping. base.info()
+    // throws outside a running test (a script, a REPL); that is not this
+    // suite, so the failure is simply not tracked rather than raised.
+    try {
+      registerBackendForTest(base.info().testId, this)
+    } catch {
+      /* not running inside a Playwright test; nothing to attribute this to */
+    }
+
     return { port, token }
   }
 
@@ -1029,13 +1084,32 @@ export class VaultBackend {
    * Every diagnosis then had to be guessed from the DOM. test-results/ is
    * already uploaded on failure (ci.yml), so that is where it goes.
    *
+   * UNDER THIS TEST'S OWN outputDir, not a name shared by every spec that
+   * starts a backend (nocx-ky68q). Every one of them wrote `nocx-server.log`
+   * to the same `test-results/nocx-server/` directory, so each stop()
+   * overwrote the last, and the CI artifact for a failing spec held whichever
+   * OTHER spec's backend happened to stop most recently — confirmed in run
+   * 35119868922, where the artifact's copy was 40 lines from an unrelated
+   * spec while the failing test's own log was already gone. testInfo's own
+   * outputDir is unique per test (and per retry), so two specs can no longer
+   * share the destination file no matter what order their backends stop in.
+   *
+   * Falls back to the old shared path only when there is no running test to
+   * ask (a script invoking VaultBackend directly) — a location is still
+   * better than nothing, and this is not the path any spec runs through.
+   *
    * Best-effort by construction: a harness that throws while trying to explain
    * a failure replaces the failure with its own.
    */
   private preserveLog(): void {
     if (!this.logPath) return
     try {
-      const dir = resolve(process.cwd(), 'test-results', 'nocx-server')
+      let dir: string
+      try {
+        dir = base.info().outputDir
+      } catch {
+        dir = resolve(process.cwd(), 'test-results', 'nocx-server')
+      }
       mkdirSync(dir, { recursive: true })
       copyFileSync(this.logPath, resolve(dir, basename(this.logPath)))
     } catch {

@@ -2859,7 +2859,18 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	// ringToConn goroutines blocked in waitForData receive ctx.Done()
 	// and exit. r.Context() is NOT reliably cancelled for hijacked
 	// WebSocket connections.
-	ctx, cancel := context.WithCancel(r.Context())
+	//
+	// A caller that already has a trace for this exchange says so in the
+	// query string (nocx-n14oo.11): the desktop app never sends one, but the
+	// e2e harness mints one per Playwright test and passes it here as the
+	// same W3C header the wire already understands elsewhere, so every
+	// control frame this connection sends opens a child span of it — a
+	// failing test can then grep the backend's own log for its own trace_id
+	// instead of a backend log some other test happened to leave behind.
+	// An absent or malformed value leaves ContinueTrace a no-op: every
+	// request still opens its own trace, exactly as before this existed.
+	ctx := log.ContinueTrace(r.Context(), r.URL.Query().Get("traceparent"))
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	wconn := newWSConn(s, conn, s.nextConnID.Add(1))
 
@@ -3054,6 +3065,12 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	// that drives a RUN opens its own trace over this, because a run outlives
 	// the frame that started it.
 	ctx, _ = log.StartSpan(ctx)
+	// One line every dispatched frame produces (nocx-n14oo.11): most control
+	// handlers never log at all when they succeed, so without this a
+	// connection's trace could go unrepresented in the backend log entirely
+	// even though every frame on it opened a span. This is what a failing
+	// e2e test's printed block actually finds by trace_id.
+	log.From(ctx).Debug("jsonrpc dispatch", "method", req.Method)
 	requestCtx := ctx
 	cancelRequest := func() {}
 	var cancelEntry *requestCancel

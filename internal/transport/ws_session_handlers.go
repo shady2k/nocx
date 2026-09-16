@@ -276,6 +276,16 @@ func (h openHandlers) answerOpenFailure(r Responder, req jsonrpcRequest, err err
 		_ = respond(r, resp)
 		return
 	}
+	// The connect-time helper ask (ADR-0068): the open path itself, one
+	// layer below in internal/app, decided that a person must answer for
+	// this destination's helper before the connect may proceed. Answered
+	// here rather than folded into the openRefusal branch above because it
+	// is built from an exported type app can construct across the package
+	// boundary (session_open_helper_consent.go) — openRefusal's carrier is
+	// unexported on purpose (session_open.go).
+	if answerHelperConsentNeeded(r, req, err) {
+		return
+	}
 	// A gate refusal: another operation holds the config or session
 	// domain — the request is refused, never queued.
 	if capability.IsRefused(err) {

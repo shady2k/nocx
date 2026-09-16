@@ -2148,6 +2148,55 @@
       "x-nocx-noResultSchema": true
     },
     {
+      "name": "connections.helperConsent",
+      "params": [
+        {
+          "name": "params",
+          "required": false,
+          "schema": {
+            "$ref": "https://nocx.local/contracts/connections.helperConsent.params.schema.json"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "code": -32601,
+          "message": "Method not found",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32603,
+          "message": "Internal error",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32004,
+          "message": "Control plane busy",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        }
+      ],
+      "x-nocx-agent-disposition": "operation-owned",
+      "result": {
+        "name": "connections.helperConsentResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/connections.helperConsent.schema.json"
+        }
+      }
+    },
+    {
       "name": "connections.passwordResolved",
       "params": [
         {
@@ -10866,6 +10915,9 @@
       "$ref": "https://nocx.local/contracts/backup.saveToFile.schema.json"
     },
     {
+      "$ref": "https://nocx.local/contracts/connections.helperConsent.schema.json"
+    },
+    {
       "$ref": "https://nocx.local/contracts/connections.passwordRequest.schema.json"
     },
     {
@@ -11104,6 +11156,9 @@
     },
     {
       "$ref": "https://nocx.local/contracts/notify.toast.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/open.helperConsent.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/open.schema.json"

@@ -1433,6 +1433,179 @@ func TestConnectionsTrustHostKey_OverTheWireConformsToContract(t *testing.T) {
 	}
 }
 
+func TestConnectionsHelperConsent_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "connections.helperConsent.schema.json")
+	for _, tc := range []connectionsHelperConsentResult{
+		{Fingerprint: "SHA256:abc", Answer: "granted"},
+		{Fingerprint: "SHA256:abc", Answer: "denied"},
+	} {
+		raw, err := json.Marshal(tc)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		validateJSON(t, schema, raw, "connections.helperConsent result ("+tc.Answer+")")
+	}
+}
+
+func TestConnectionsHelperConsent_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "connections.helperConsent.schema.json")
+	writer := &fakeHelperConsentWriter{}
+	srv := startHelperConsentServer(t, writer)
+	conn := connectWS(t, srv)
+	defer conn.Close() //nolint:errcheck
+
+	resp := jsonrpcCall(t, conn, "connections.helperConsent", map[string]any{
+		"fingerprint": "SHA256:abc",
+		"granted":     true,
+	})
+	var envelope struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct{}       `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("unexpected RPC error: %s", resp)
+	}
+	validateJSON(t, schema, envelope.Result, "connections.helperConsent result over the wire")
+}
+
+// ── the connect-time helper ask (ADR-0068) ──────────────────────────────
+
+// consentAskHelperOpener answers a remote destination with a scripted
+// ErrHelperConsentNeeded, standing in for internal/app's real connect-time
+// decision (helper_git.go's openHoldingLease — that decision has its own
+// unit tests in that package, against the resolver and the consent store
+// directly). What THIS proves is the wire half only: what answerOpenFailure
+// builds from that error is what the schema promises and what the real
+// socket actually sends — never a payload a test constructed itself.
+type consentAskHelperOpener struct {
+	err error
+}
+
+func (o *consentAskHelperOpener) OpenHosted(_ context.Context, cfg session.Config, _ string) (HostedSessionOpen, bool, error) {
+	if cfg.Kind != session.KindRemote {
+		return HostedSessionOpen{}, false, nil
+	}
+	return HostedSessionOpen{}, true, o.err
+}
+
+// TestOpenHelperConsentAsk_HelperOnly_OverTheWireConformsToContract: the key
+// is already trusted (Cause is nil) — the wire carries the helper question
+// alone, with no hostKey field at all.
+func TestOpenHelperConsentAsk_HelperOnly_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "open.helperConsent.schema.json")
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	ws := NewWSServer(logger, reg,
+		WithHelperSessionOpener(&consentAskHelperOpener{
+			err: NewHelperConsentNeeded("host.example.com:22", "SHA256:trusted", nil),
+		}),
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(string) (string, *ssh.ConnectConfig, error) {
+				return "host.example.com", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	resp := jsonrpcCall(t, conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "kind": "ssh", "profileId": "ssh:test:1",
+	})
+	var envelope struct {
+		Error *struct {
+			Code    int             `json:"code"`
+			Message string          `json:"message"`
+			Data    json.RawMessage `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, resp)
+	}
+	if envelope.Error == nil {
+		t.Fatalf("expected an open failure carrying the helper ask, got %s", resp)
+	}
+	if envelope.Error.Code != -32603 {
+		t.Errorf("code = %d, want -32603", envelope.Error.Code)
+	}
+	validateJSON(t, schema, envelope.Error.Data, "open error data (helper-only ask)")
+	var data helperConsentData
+	if err := json.Unmarshal(envelope.Error.Data, &data); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !data.HelperAsk || data.Fingerprint != "SHA256:trusted" || data.HostKey != nil {
+		t.Errorf("data = %+v, want helperAsk with the trusted fingerprint and no hostKey", data)
+	}
+}
+
+// TestOpenHelperConsentAsk_WithHostKey_OverTheWireConformsToContract: the
+// key is ALSO unknown, so the SAME refusal carries the host-key evidence
+// beside the helper question — one dialog, never two in sequence (owner's
+// decision, 2026-09-16).
+func TestOpenHelperConsentAsk_WithHostKey_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "open.helperConsent.schema.json")
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	cause := &ssh.ErrUnknownHostKey{
+		Addr:           "host.example.com:22",
+		KnownHostsAddr: "nocx-v1-route:22",
+		KeyAlgo:        "ssh-ed25519",
+		Fingerprint:    "SHA256:offered",
+		Key:            []byte("offered-key-blob"),
+	}
+	ws := NewWSServer(logger, reg,
+		WithHelperSessionOpener(&consentAskHelperOpener{
+			err: NewHelperConsentNeeded("host.example.com:22", "SHA256:offered", cause),
+		}),
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(string) (string, *ssh.ConnectConfig, error) {
+				return "host.example.com", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	resp := jsonrpcCall(t, conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "kind": "ssh", "profileId": "ssh:test:1",
+	})
+	var envelope struct {
+		Error *struct {
+			Code int             `json:"code"`
+			Data json.RawMessage `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, resp)
+	}
+	if envelope.Error == nil {
+		t.Fatalf("expected an open failure carrying the combined ask, got %s", resp)
+	}
+	validateJSON(t, schema, envelope.Error.Data, "open error data (combined ask)")
+	var data helperConsentData
+	if err := json.Unmarshal(envelope.Error.Data, &data); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !data.HelperAsk || data.HostKey == nil {
+		t.Fatalf("data = %+v, want helperAsk with nested hostKey evidence", data)
+	}
+	if data.HostKey.Fingerprint != "SHA256:offered" || data.HostKey.Changed {
+		t.Errorf("hostKey = %+v, want the offered, unchanged evidence", data.HostKey)
+	}
+}
+
 // ── history.query ─────────────────────────────────────────────────────────
 
 // The DTO's own conformance: field tags, omitempty behaviour, null-vs-omitted

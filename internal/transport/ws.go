@@ -456,6 +456,10 @@ type WSServer struct {
 	// (connections.trustHostKey — accept-on-first-use). When nil, the
 	// handler returns a JSON-RPC error.
 	hostKeyTruster HostKeyTruster
+	// helperConsentWriter records the person's answer to the connect-time
+	// helper ask (connections.helperConsent — ADR-0068). When nil, the
+	// handler returns a JSON-RPC error.
+	helperConsentWriter HelperConsentWriter
 	// probeResultStore records probe outcomes as operational evidence.
 	// When nil, probe results are not stored (the probe still runs and
 	// returns its outcome to the caller).

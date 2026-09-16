@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/connections.helperConsent.params.schema.json",
+  "title": "ConnectionsHelperConsentParams",
+  "description": "Params for connections.helperConsent: the person's answer to the connect-time helper ask (ADR-0068). fingerprint is echoed verbatim from the open failure's helperConsentData (open.helperConsent.schema.json) and is the whole identity the answer is keyed by (ADR-0034) — never the hostname, the profile or the route.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["fingerprint", "granted"],
+  "properties": {
+    "fingerprint": {
+      "description": "SHA256 fingerprint of the destination's host key, echoed from the open failure that raised the ask.",
+      "type": "string",
+      "minLength": 1
+    },
+    "host": {
+      "description": "The destination, for the backend's log line only. The write is keyed by fingerprint alone.",
+      "type": "string"
+    },
+    "granted": {
+      "description": "true records Granted (the helper may be installed and served for this machine); false records Denied (never asked again, never silently upgraded).",
+      "type": "boolean"
+    }
+  }
+}

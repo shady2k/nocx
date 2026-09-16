@@ -131,6 +131,10 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"connections.trustHostKey": {
 			[]byte(`{"host":"host.example.com:22","key":"b2ZmZXJlZC1rZXktYmxvYg=="}`),
 		},
+		"connections.helperConsent": {
+			[]byte(`{"fingerprint":"SHA256:abc","granted":true}`),
+			[]byte(`{"fingerprint":"SHA256:abc","host":"host.example.com:22","granted":false}`),
+		},
 		"dialog.openDirectory": {
 			[]byte(`{}`),
 		},

@@ -83,11 +83,23 @@ const SWEEP_INTERVAL_MS = 100
 /** The contact shadow appears only shortly before a ledge landing. */
 const SHADOW_WINDOW = 0.2
 
-const DEFAULT_LEDGES: readonly LedgeSource[] = [
+export const DEFAULT_LEDGES: readonly LedgeSource[] = [
   { selector: '.tabbar', edge: 'bottom' },
   { selector: '.pane.active .cmd-block', edge: 'top' },
-  { selector: '.pane.active .nocx-chip', edge: 'top' },
+  // The meta a block wears (spec 2026-09-14 §5.5): the header's right-hand
+  // status group stayed a Meta, so this ledge stays. The composer is not a
+  // ledge either way: the animal does not stand where the caret is.
+  { selector: '.pane.active .cmd-block .ui-meta', edge: 'top' },
+  // The where-line moved from Meta to PromptContext (spec 2026-09-15 §2),
+  // and its ledge follows it — the prompt line is still terrain the same
+  // way the old where-meta was.
+  { selector: '.pane.active .cmd-block .ui-prompt-context', edge: 'top' },
 ]
+
+/** The active pane's composer, if one is on screen — read only to keep the
+ *  synthetic floor below (`_measure`) OUT of it, never added to a ledge
+ *  list itself. Spec 2026-09-15 §6/§7: the composer is never a ledge. */
+const COMPOSER_SELECTOR = '.pane.active .nocx-editor'
 
 export function timingFrom(pack: PetPack, loaded: LoadedPack | null = null): PetTiming {
   const clipTiming = (name: string) => {
@@ -490,11 +502,31 @@ export class PetOverlay {
       viewport,
     })
     const halfBody = this._width / 2
+    // The window floor, capped at the composer's own top edge when one is
+    // visible in the active pane (round 18: "the pet stands on the field").
+    // `host.height` alone is the bottom of the whole application shell, and
+    // the composer sits flush with it — the shell has nothing below the
+    // composer, so that fallback put the pet's feet INSIDE the field
+    // (measured against the shipped layout: the sprite's feet landed at
+    // roughly the field's own top border, exactly where the owner's
+    // screenshot showed it standing). The composer is never a ledge (spec
+    // §6/§7), so the synthetic floor must sit above it, not inside it or on
+    // its own edge — `DEFAULT_TERRAIN.inset` is the same clearance a real
+    // ledge already keeps from its ends, used here as the gap from the
+    // composer's hairline.
+    const composer = this._blocks.querySelector<HTMLElement>(COMPOSER_SELECTOR)
+    let floorY = host.height
+    if (composer) {
+      const r = composer.getBoundingClientRect()
+      if (r.width > 0 && r.height > 0) {
+        floorY = Math.min(floorY, r.top - host.top - DEFAULT_TERRAIN.inset)
+      }
+    }
     this._floor = {
       id: 'floor',
       x0: 8 + halfBody,
       x1: Math.max(8 + halfBody, host.width - 8 - halfBody),
-      y: host.height,
+      y: Math.max(0, floorY),
     }
     this._stale = false
   }

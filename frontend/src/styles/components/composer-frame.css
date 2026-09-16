@@ -1,0 +1,89 @@
+/* The composer is one inset card with an open input row. */
+.ui-composer-frame {
+  display: flex;
+  flex-direction: column;
+  /* The field below reshapes by the card's own width, not the viewport's: a
+     pane beside an open sidebar can be narrower than any viewport query. */
+  container-type: inline-size;
+  margin: 0 var(--terminal-card-margin) var(--terminal-card-margin);
+  padding: var(--terminal-card-padding);
+  border: 1px solid var(--color-divider);
+  border-radius: var(--control-radius-lg);
+  background: var(--color-terminal-chrome);
+}
+.ui-composer-frame__field {
+  position: relative;
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: minmax(var(--terminal-mode-segment-width), max-content) minmax(0, 1fr) auto;
+  gap: var(--space-3);
+  align-items: start;
+  min-height: var(--terminal-composer-control-size);
+}
+.ui-composer-frame__editor {
+  min-width: 0;
+  align-self: center;
+}
+.ui-composer-frame__submit {
+  display: flex;
+  align-self: start;
+}
+.ui-composer-frame__hint {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin-top: var(--space-2);
+  /* Warp's key-hint register (owner review, 2026-09-15): keycaps, then what
+     they do, in the draft's own mono face at sm, dim. */
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+  line-height: var(--terminal-ui-line-height);
+  color: var(--color-text-dim);
+}
+
+.ui-composer-frame__hint-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.ui-composer-frame__hint-item[hidden] {
+  display: none;
+}
+.ui-composer-frame__hint-label {
+  margin-left: var(--space-1);
+}
+/* A keycap: one key, boxed, so the symbol's own advance never matters. */
+.ui-composer-frame__key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: var(--control-height-xs);
+  height: var(--control-height-xs);
+  padding-inline: var(--space-1);
+  border-radius: var(--control-radius-sm);
+  background: var(--color-control-fill);
+  color: var(--color-text-muted);
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-xs);
+  line-height: 1;
+}
+
+/* A very narrow pane (a sidebar open in a small window): the Run segment gives
+   up its reserved width and the submit button steps aside — Enter still sends
+   — so the draft keeps a column it can be typed and clicked in. Measured: at a
+   124px pane the three columns and their gaps left the editor zero pixels and
+   pushed the submit button outside the card. */
+@container (max-width: 240px) {
+  .ui-composer-frame__field {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: var(--space-1);
+  }
+  .ui-composer-frame__submit {
+    display: none;
+  }
+  .ui-composer-frame__field > .ui-mode-indicator[data-variant='field'] {
+    min-width: 0;
+    padding-inline: var(--space-1);
+  }
+}

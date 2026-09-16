@@ -23,7 +23,7 @@
  *    a surface somebody else owns.
  */
 import type { QuickConnectItem, QuickConnectProvider } from '../quick-connect'
-import { CopyIcon } from '../ui/icons'
+import { CopyIcon, iconElement } from '../ui/icons'
 import { needsForm } from './resolve'
 import type {
   SnippetDestination,
@@ -223,7 +223,7 @@ export class SnippetsQuickConnectProvider implements QuickConnectProvider {
       // person who wants the phrase somewhere else asks for it before
       // anything has gone wrong, and never learns it exists by being told no.
       action: {
-        icon: () => CopyIcon({}),
+        icon: () => iconElement(CopyIcon),
         ariaLabel: `Copy "${snippet.title}" to the clipboard`,
         run: () => void this.copy(snippet),
       },

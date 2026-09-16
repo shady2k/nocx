@@ -13,6 +13,7 @@
 // instead.
 import { describe, expect, it, vi, type Mock } from 'vitest'
 import { mountPaneManager } from '../test-support/panes-fixtures'
+import { formatTimestamp } from '../ui/format-time'
 import { SurfaceRegistry, SURFACE_ID_SKILL } from '../surface-registry'
 import { SkillsStore, type SkillsClientLike } from '../skills-store'
 import type { SkillsList } from '../generated/skills.list'
@@ -325,7 +326,7 @@ describe('openSkill — the tab a skill is read in', () => {
     expect(facts['Installed from']).toBe('https://example.com/weather/SKILL.md')
     // The moment, in the reader's own locale — a record is read months
     // later, where "312 d ago" is the form that makes them do arithmetic.
-    expect(facts['Taken on']).toBe(new Date('2026-09-03T12:00:00Z').toLocaleString())
+    expect(facts['Taken on']).toBe(formatTimestamp(Date.parse('2026-09-03T12:00:00Z')))
     // The digest, with its qualification ON its row: a hash of bytes a
     // stranger served is change detection and never a vouch for them.
     expect(facts['What that address served']).toContain(
@@ -365,7 +366,7 @@ describe('openSkill — the tab a skill is read in', () => {
     const facts = recordFactsIn(paneEl)
 
     expect(facts['Installed from']).toBe('https://example.com/weather/SKILL.md')
-    expect(facts['Taken on']).toBe(new Date('2026-09-03T12:00:00Z').toLocaleString())
+    expect(facts['Taken on']).toBe(formatTimestamp(Date.parse('2026-09-03T12:00:00Z')))
     expect('What that address served' in facts).toBe(false)
   })
 

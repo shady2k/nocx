@@ -236,7 +236,7 @@ test('an SSH connection comes up integrated and its commands become blocks', asy
 
     // And now the healthy state means something: the prompt is up and its
     // chrome offers no recovery.
-    const recovery = page.locator('.pane.active .nocx-editor-recovery')
+    const recovery = page.locator('.pane.active [data-control="recovery"]')
     await expect(recovery).not.toBeVisible()
 
     // The user then runs a command through the nocx editor, and it becomes

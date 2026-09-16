@@ -2,6 +2,7 @@
    file nothing imports, because a stylesheet that is merely never loaded looks
    exactly like one that is loaded and overridden (nocx-u7wq.4). */
 @import './styles/tokens.css';
+@import './styles/themes/graphite.css';
 @import './styles/themes/tokyo-night.css';
 @import './styles/themes/light.css';
 /* The ported catalogue. Order within the block carries no meaning — every one of
@@ -44,6 +45,9 @@
 @import './styles/components/section.css';
 @import './styles/components/swatch-picker.css';
 @import './styles/components/badge.css';
+@import './styles/components/meta.css';
+@import './styles/components/prompt-context.css';
+@import './styles/components/shell-command.css';
 @import './styles/components/watch-badge.css';
 @import './styles/components/secret-chip.css';
 @import './styles/components/terminal-link.css';
@@ -51,6 +55,7 @@
 @import './styles/components/answer-markdown.css';
 @import './styles/components/document-surface.css';
 @import './styles/components/mode-indicator.css';
+@import './styles/components/composer-frame.css';
 @import './styles/components/secret-value-field.css';
 @import './styles/components/block-notice.css';
 @import './styles/components/block-receipt.css';
@@ -102,6 +107,9 @@
 @import './styles/components/folder-picker.css';
 @import './styles/components/mark-affordance.css';
 @import './styles/components/toggle-matrix.css';
+@import './styles/components/command-block-frame.css';
+@import './styles/components/pane-context.css';
+@import './styles/components/process-bar.css';
 @import './styles/surfaces/banner.css';
 @import './styles/surfaces/integration-notice.css';
 @import './styles/surfaces/integration-waiting.css';
@@ -123,6 +131,8 @@
 @import './styles/surfaces/agent-rules.css';
 @import './styles/surfaces/git.css';
 @import './styles/surfaces/skill-view.css';
+@import './styles/surfaces/command-block.css';
+@import './styles/surfaces/composer.css';
 
 /* ── App body row: strip | panes | sidebar | activity bar ─────────────── */
 
@@ -183,29 +193,21 @@
   display: none;
 }
 
-/* ── Command editor (DOM textarea) ──────────────────────────────────── */
-
-.nocx-editor {
-  position: relative;
-  flex: none;
-  background: var(--color-canvas);
-  border-top: 1px solid var(--color-surface-raised);
-  border-left: 3px solid var(--color-accent);
-  padding: 10px 14px 12px;
-}
-
 /* One absolute presentation stack keeps the running program's pane geometry
    untouched. Answer nodes stay ordered in the scrollable upper child and the
    one existing composer takes the final flex seat when no answer is streaming. */
 .nocx-summon-stack {
   position: absolute;
-  left: var(--pane-inline-padding);
-  right: var(--pane-inline-padding);
+  left: 0;
+  right: 0;
   bottom: 0;
   z-index: 10;
   /* The stack owns the rows it occupies. Its opaque ground stops the frozen
-     frame underneath from painting through the answer. */
-  background: var(--color-canvas);
+     frame underneath from painting through the answer — and it sits over the
+     terminal screen, so that ground is --terminal-background (spec §7), not
+     the canvas; .nocx-summon-answers below paints nothing of its own and
+     inherits it. */
+  background: var(--terminal-background);
   /* THE VISIBLE SEAM. The kit's separator is transparent at rest by design —
      "the pane border beside it is the visible seam" — so a surface that
      places one owes it that border, or the person is handed a six-pixel
@@ -253,14 +255,12 @@
   overflow-x: hidden;
 }
 
-.nocx-summon-stack > .nocx-editor[data-placement='overlay'] {
-  position: relative;
-  left: auto;
-  right: auto;
-  bottom: auto;
-  z-index: auto;
-  flex: none;
+/* An answer in the stack is a row of the ledger before it is seated into
+   one, so it wears the row inset now rather than inheriting a pane padding
+   that no longer exists (nocx-9bpeq.8). */
+.nocx-summon-answers > * {
   box-sizing: border-box;
+  padding-inline: var(--pane-inline-padding);
 }
 
 /* A summoned answer is a flex item, not a second bottom-pinned overlay. It is
@@ -269,199 +269,6 @@
 .nocx-answer-overlay {
   position: relative;
   flex: none;
-}
-
-/* Every presentation that is not a prompt REMOVES this card and its box: the
-   composer's `hide()` sets `display:none`, and the height goes back to the
-   scroller. It kept its box for a while, so a submit could not move a
-   scrollback that hangs from the scroller's bottom edge — traded away once
-   the settle glide could play that displacement back instead, because the
-   reservation was costing an inline TUI on the normal buffer four rows of
-   pane. The history is in editor.ts on `hide()` (nocx-g6hnk, nocx-i4h04). */
-
-.nocx-editor-chrome {
-  display: flex;
-  align-items: center;
-  margin-bottom: 8px;
-  /* One chip row, always. The chips in this strip come and go with the
-     lifecycle — the recovery chip appears when a command starts, the location
-     chip only on ssh — and a strip that collapsed when the last one left
-     would take its height out of the scrollback at exactly the moment a
-     command is submitted. The chips themselves are all one height; this is
-     the row's floor when none of them is showing (nocx-i4h04). */
-  min-height: 23px;
-  font-family: var(--font-family-ui);
-  font-size: var(--font-size-2xs);
-  -webkit-user-select: none;
-  user-select: none;
-}
-
-/* Left chip group: the location + cwd chips sit together; the clock pins
-   the right edge of the chrome row with its own auto margin (below). The row
-   itself does NOT distribute (nocx-a44m): space-between is only correct for
-   exactly two children, and this row must not break if a third joins it.
-   Placement only — the chips carry their own appearance (ui/README: a
-   surface may place a kit component, never repaint it). */
-.nocx-editor-chrome-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-/* The clock is the chrome row's right-edge element: margin-left: auto pushes
-   it to the far right for any child count, the same mechanism as
-   .cmd-header-right. Margin is placement, not appearance. */
-.nocx-editor-time {
-  margin-left: auto;
-}
-
-/* ── Chip ────────────────────────────────────────────────────────────── */
-
-.nocx-chip {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  background: var(--color-surface-raised);
-  border-radius: 5px;
-  padding: 3px 9px;
-  font-family: var(--font-family-ui);
-  font-size: var(--font-size-xs);
-  /* Digits get equal advance widths. The UI font is proportional, so `1` is
-     narrower than `0` and the clock chip changed width every time a digit
-     rolled — visible as a twitch once a second, and worse on the minute where
-     several digits change at once. Tabular figures are the fix rather than a
-     monospace family: this is UI chrome and should read as the rest of the app,
-     it just must not resize itself.
-
-     On `.nocx-chip` rather than on the clock alone. Every chip that carries a
-     number has the same problem — exit codes and durations in the scrollback
-     block headers sit in a column where unequal digits show up as ragged
-     alignment rather than as movement (nocx-6w4z). */
-  font-variant-numeric: tabular-nums;
-  color: var(--color-accent);
-  cursor: default;
-  -webkit-user-select: none;
-  user-select: none;
-  flex: none;
-  /* A CHIP IS ONE BOX WHATEVER ELEMENT CARRIES IT. The recovery chip is a
-     <button> — it is pressable — and a button's UA border and metrics made it
-     25px tall against every other chip's 21. That chip appears exactly when a
-     command starts, so the composer's chrome grew 2px at every Enter and the
-     scrollback, which hangs from its bottom edge, moved with it (nocx-i4h04).
-     Reset here rather than on the one chip: the next pressable chip would
-     arrive with the same 4px. */
-  border: 0;
-  font: inherit;
-  font-family: var(--font-family-ui);
-  font-size: var(--font-size-xs);
-}
-
-.nocx-chip-muted {
-  color: var(--color-text-muted);
-}
-
-.nocx-chip-ok {
-  color: var(--color-success);
-}
-
-.nocx-chip-fail {
-  color: var(--color-danger);
-}
-
-.nocx-freeze-dismiss {
-  /* Placement only: the kit's IconButton carries its own size, shape and
-     hover (ui/icon-button.css). This cell keeps it on the chrome row's
-     baseline beside the freeze badge it belongs to. */
-  display: inline-flex;
-  align-items: center;
-}
-
-/* The permanent grant chip (nocx-wcswn). One chip, two typed states: the
-   count is the only changing content and the list lives in its popover.
-
-   THE WIDTH IS A FLOOR, NOT A SIZE (nocx-hp8p2.5). It was `width: 13rem`,
-   which held the count steady as it changed — the same twitch-avoidance the
-   tabular figures above are for — but a fixed width is only a size for
-   content that never grows. The automatic attachment appends a sentence to
-   this chip, and an over-long line in a fixed box with no `overflow` is
-   painted straight over its neighbours: the model chip and the freeze badge
-   ended up underneath the text, all three legible as one smear.
-
-   So: `min-width` keeps the count from twitching, `max-width` bounds the
-   longest sentence, and the chip may SHRINK (`flex: 0 1 auto` against
-   .nocx-chip's `flex: none`) with the ellipsis rather than escaping its box
-   when the pane is narrow. Nothing lives only in the ellipsis — the full
-   text is the title and the accessible name, and the attachment has its own
-   row in the popover. Same mechanism, same reasons, as .nocx-editor-model
-   below. */
-.nocx-editor-grant {
-  flex: 0 1 auto;
-  min-width: 13rem;
-  max-width: 18rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: inline-block;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.nocx-editor-grant[data-state='default'] {
-  color: var(--color-text-muted);
-}
-
-.nocx-editor-grant[data-state='chosen'] {
-  color: var(--color-accent);
-}
-/* The model chip pair (nocx-rikz5): the endpoint and model that will answer
-   a question, or the one rung of the ladder that has to be climbed first.
-   A control, so it takes the pointer its neighbours do not — .nocx-chip
-   sets `cursor: default` for the chips that are only labels.
-
-   The truncation is the point of the rest. A model id is long
-   ("deepseek/deepseek-v4-flash-0731-preview") and a chip that wraps pushes
-   the chrome row to a second line, which moves the composer and the
-   scrollback hanging from it (the same 2px lesson .nocx-chip's border reset
-   records). One line, ellipsised; the whole value lives in the title and
-   the accessible name, so nothing is only in the ellipsis. */
-.nocx-editor-model {
-  cursor: pointer;
-  max-width: 16rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  /* One deviation from the rest of the row, and the reason is mechanical:
-     .nocx-chip is `inline-flex`, and `text-overflow` applies to a block
-     container's own inline content — inside a flex container the text is an
-     anonymous ITEM, so the id would hard-clip mid-glyph instead of
-     ellipsising. Safe here because the parent .nocx-editor-chrome-left is
-     itself `display: flex; align-items: center`: these chips are flex items,
-     so their display value is blockified either way and nothing about the
-     row's alignment or its single height turns on the difference. */
-  display: inline-block;
-}
-
-/* A rung no page repairs ('unavailable') is not a control: it must not
-   offer the pointer a click would answer with nothing. */
-.nocx-editor-model:disabled {
-  cursor: default;
-}
-
-.nocx-editor-input {
-  width: 100%;
-  background: transparent;
-  color: var(--color-text);
-  border: none;
-  outline: none;
-  font-family: var(--font-family-mono);
-  font-size: var(--font-size-terminal);
-  line-height: 1.2;
-  resize: none;
-  padding: 2px 8px 4px;
-  white-space: pre-wrap;
-  overflow-wrap: break-word;
-  word-break: break-word;
 }
 
 /* ── Shell syntax highlighting (shell-highlight.ts) ────────────────────
@@ -536,207 +343,6 @@
   color: var(--color-text);
 }
 
-/* CodeMirror 6 surface (ADR-0010). Auto-grow is layout, not arithmetic: the
-   box grows with its content and scrolls past the cap (spec §Decision 3).
-
-   The cap is 30 lines — 30 × line-height 1.2 × font-size (the em in the calc
-   resolves against .cm-editor's font-size) plus the 6px vertical padding,
-   border-box — and never more than half the pane. Ten lines was the original
-   cap and it is too tight for the thing people actually paste: a curl with a
-   JSON body is twenty lines, and it arrived as a small scrolling window onto
-   a command the user could not see. Half the pane is the other side of that:
-   the prompt may take the room it needs, but never so much that the block it
-   belongs to disappears. MAX_ROWS in editor.ts is the same cap — the row
-   count is what fires `resized`, so a CSS box that keeps growing past it
-   stops telling the scrollback to follow. */
-.nocx-editor .cm-editor {
-  font-size: var(--font-size-terminal);
-  max-height: min(50vh, calc(36em + 6px));
-}
-
-.nocx-editor .cm-scroller {
-  font-family: var(--font-family-mono);
-  line-height: 1.2;
-  overflow-y: auto;
-  /* THE COMPOSER WRAPS, SO IT NEVER SCROLLS SIDEWAYS — and saying so is what
-     keeps it one height. CM6 ships `.cm-scroller { overflow-x: auto }` for the
-     editors that do scroll horizontally; this one runs `EditorView.lineWrapping`
-     with `word-break: break-word`, so a horizontal scrollbar here is a bar that
-     can never appear.
-
-     It still cost 10px. base.css styles `::-webkit-scrollbar` at 10px, which
-     makes every scrollbar in this app a CLASSIC one: it takes layout space
-     instead of floating over the content. WebKit reserved that gutter for the
-     EMPTY document and did not revisit the decision until the document changed,
-     so the card stood 10px taller until the first keystroke and then snapped
-     down — chip row, Run token and the scrollback hanging above it with it
-     (nocx-6c546). Chromium never reserved it, which is why this only ever
-     showed on macOS, where the app is WKWebView.
-
-     `overflow-x: hidden` rather than a `::-webkit-scrollbar` override on this
-     box: hiding the bar would leave a real overflow unreachable, whereas this
-     states the contract the wrapping already enforces. */
-  overflow-x: hidden;
-}
-
-.nocx-editor .cm-content {
-  padding: 2px 8px 4px;
-}
-
-/* THE GHOST MAY NOT CHANGE THE HEIGHT OF THE LINE IT SITS ON.
-
-   CM6 draws an `<img class="cm-widgetBuffer">` beside every inline widget —
-   its own workaround for browser caret bugs next to uneditable content — and
-   styles it `height: 1em; vertical-align: text-top`. `text-top` puts that box
-   at the top of the line's CONTENT AREA, so whether it fits is a question
-   about the font's ascent and descent, not about the line height: with a font
-   whose content area is shorter than 1em the box hangs below it and the line
-   box grows to cover it.
-
-   The completion ghost is the only inline widget this editor draws, so the
-   growth arrives exactly when a suggestion appears — a card that twitches by
-   a pixel under the caret, taking the Run token and the whole scrollback
-   above it along. Measured across seven mono fonts at 11–18px, in WebKit and
-   Chromium: every stack is 0.000 except one, and the one is whatever
-   `ui-monospace` resolves to inside WKWebView (+0.34px there; Monaco is the
-   nearest reproducible stand-in and gives +0.344 in WebKit, +1.000 in
-   Chromium). Which is why it showed in the shipped macOS app and in no
-   browser the dev stand runs — the same shape as the scrollbar gutter above.
-
-   `top` rather than `text-top` — the box is aligned to the top of the LINE
-   BOX instead, and the buffer's box is its line-height, which is this line's
-   line-height, so it can never be the taller of the two and can never grow
-   it. That is a fact about the box model rather than about the font, and it
-   is what makes the rule font-independent: the same seven fonts all measure
-   0.000 with it, on both engines. The buffer stays in the DOM — deleting it
-   would take CM6's caret workaround with it. */
-.nocx-editor .cm-widgetBuffer {
-  vertical-align: top;
-}
-
-/* ── The cursor: the terminal's block, in the prompt ───────────────────
-   block-cursor.ts says why it is a block and why it is decorations. These
-   are the two shapes it takes, plus the bar it replaces.
-
-   The character the cursor stands on. `color` must beat the syntax token's
-   own colour and the mark span is nested inside it, so the two-class
-   selector is what wins — an `!important` here would be a rule whose
-   correctness nothing states. */
-.nocx-editor .nocx-block-cursor {
-  background: var(--terminal-cursor);
-  color: var(--terminal-cursor-accent);
-}
-
-/* …and it blinks, on the period CM6's cursor layer is blinking the other half
-   on. `--nocx-cursor-blink` is set by the editor's own theme from the single
-   declaration in block-cursor.ts. The fallback is that number written twice,
-   which is what the CSS-integrity gate requires of a property that arrives
-   from outside the cascade (the same shape as `--sidebar-width`), so the
-   duplicate is CHECKED rather than trusted: block-cursor.test.ts reads this
-   fallback and asserts it equals CURSOR_BLINK_MS. Change one and the other
-   fails.
-
-   The off phase restores the ordinary line — transparent behind, the syntax
-   token's own colour on top — because that is what a terminal shows between
-   blinks: the character, not a gap. `steps(1)` and two stops rather than a
-   fade, for the same reason.
-
-   Guarded by the motion query like every other animation in this file. CM6's
-   half cannot be guarded here — its animation is inline — so the rate handed
-   to drawSelection carries the same answer (block-cursor.ts). */
-@media (prefers-reduced-motion: no-preference) {
-  .nocx-editor .nocx-block-cursor {
-    animation: nocx-block-cursor-blink var(--nocx-cursor-blink, 1200ms) steps(1) infinite;
-  }
-}
-
-@keyframes nocx-block-cursor-blink {
-  0% {
-    background: var(--terminal-cursor);
-    color: var(--terminal-cursor-accent);
-  }
-
-  50% {
-    background: transparent;
-    color: inherit;
-  }
-}
-
-/* The end of the line, where there is no character to mark: CM6's own cursor
-   element, widened from a bar into the same block. It is the right mechanism
-   for exactly the two reasons the alternatives are the wrong ones — it lives
-   in an absolutely positioned layer, so no line box can grow around it, and
-   CM places it AT THE CARET rather than at the end of the line's content, so
-   a completion ghost stays behind it (`unam█e`, not `unam[e]█`).
-
-   `1ch` is one cell of the composer's monospace font, which is what makes it
-   the terminal's block rather than a wide bar. Nothing sets its height: CM
-   writes the line's height on the element itself.
-
-   The blink comes from CM6's base theme at the period editor.ts hands to
-   drawSelection — the same period the mark above animates on. It is not
-   controlled from this file, and cannot be: the layer writes an inline
-   `animation-name` on itself, which no rule here could ever outrank. */
-.nocx-editor .cm-cursorLayer .cm-cursor {
-  width: 1ch;
-  border-left: none;
-  background: var(--terminal-cursor);
-}
-
-/* …and it steps aside for the mark, which is the block whenever the caret has
-   a character to stand on. Two cursors on screen is the defect this whole
-   surface has already had once (nocx-dvdfx). */
-.nocx-editor .cm-editor:has(.nocx-block-cursor) .cm-cursorLayer .cm-cursor {
-  display: none;
-}
-
-/* No hanging indent, and no measured token width: the token is a GUTTER
-   now (ask-entry.ts), so every line — a second document line, a wrapped
-   row — begins after the same reserved column by construction. The rules
-   that computed that alignment are gone with the widget that needed them. */
-.nocx-editor .cm-line {
-  padding: 0;
-}
-
-/* ── The ask entry gesture (nocx-4wtlh) ────────────────────────────────
-   The target indicator — ADR-0004 §3's UI chip — is the prompt's sigil: it
-   says where Enter goes and it is the person's one explicit switch (click,
-   or ⌘/Ctrl+Enter). It renders in a CM6 GUTTER, beside the content and
-   never inside it, so the textbox holds exactly what the person typed. The
-   reference chips a selection raises live in their own strip between the
-   chrome and the input: "if you ask, this comes with you". */
-
-/* The gutter the token lives in: a column beside the content, never inside
-   it. CM6's default gutter paints a panel and a divider — the chrome of a
-   line-number rail — and this one is a sigil in the prompt, so all of it is
-   cleared and only the trailing gap remains. The token itself is the kit's
-   ModeIndicator (ui/mode-indicator.ts, styles/components/mode-indicator.css)
-   — placed here, never repainted. */
-.nocx-editor .cm-gutters {
-  background: transparent;
-  border-right: none;
-  color: inherit;
-}
-
-.nocx-editor .nocx-editor-target-gutter .cm-gutterElement {
-  display: flex;
-  align-items: center;
-  padding: 0 6px 0 0;
-}
-
-/* ── The composition-time secret candidate mark (ADR-0021) ─────────────
-
-   A detected credential while the user is still typing: a quiet dotted
-   underline, nothing more — no panel, no focus change, no selection. The
-   mark says "⌘S will store this span", and it is the only thing it says.
-   The tier that decides which findings earn it lives in secret-kind.ts. */
-.nocx-editor .cm-secret-candidate {
-  text-decoration: underline;
-  text-decoration-style: dotted;
-  text-decoration-color: var(--color-warning);
-  text-underline-offset: 3px;
-}
-
 /* ── Command-ledger gutter glyphs (ADR-0008) ────────────────────────── */
 
 .nocx-gutter-glyph {
@@ -793,32 +399,24 @@
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
-  /* THE SCROLLBAR IS THE PANE'S TRAILING EDGE, NOT AN OBJECT NEAR IT.
-
-     `.pane` insets its children by `--pane-inline-padding` on both sides —
-     breathing room around terminal text — so the scroller, and with it the
-     stable gutter the thumb is drawn in, used to stop 10px short of the
-     pane's border edge. With the activity bar on the window's trailing edge
-     that left canvas on BOTH sides of the thumb: text, gutter, thumb, 10px of
-     canvas, the rail's divider. A bar with a margin either side reads as a
-     free-standing stripe and the eye keeps catching on it; a bar flush
-     against the surface it borders reads as that surface's edge and goes
-     quiet (nocx-mvbne).
-
-     Cancelling on the LAYOUT rather than on `.scrollback-area` is the whole
-     of it. `usableViewport` fits the grid to the scroller's `clientWidth`
-     (terminal-content.ts), and padding counts in `clientWidth` — so pushing
-     the box out and paying for it with `padding-right` on the scroller would
-     fit a grid 10px wider than the box it is drawn in, which is the overhang
-     nocx-vydj closed. The layout's margin moves the box and nothing else: the
-     content edge and the measured width stay one number, and the text column
-     simply gains the 10px the gap was holding.
-
-     The leading inset stays. Nothing about a trailing scrollbar asks for the
-     first column to sit on the pane's edge. The composer is unaffected — it
-     is absolutely positioned against the pane and states both insets itself
-     (`.nocx-summon-stack`). */
-  margin-right: calc(-1 * var(--pane-inline-padding));
+  /* The terminal screen's one ground (spec §7), not the canvas: history rows
+     and the live region paint `transparent` (command-block.css, the xterm
+     live container) and composite to whatever sits behind them, which was
+     `.pane`'s --color-canvas — the one theme where that differs from
+     --terminal-background is `light`, which is exactly where the block rows
+     read grey instead of white. This box spans the whole history + live
+     region, including the empty space above bottom-anchored blocks
+     (`.scrollback-inner`'s `margin-top: auto`), so painting it here covers
+     that too. `.pane` itself stays on --color-canvas: Settings, the API
+     workbench and the skill view are `.pane-manager`, not this class. */
+  background: var(--terminal-background);
+  /* THE SCROLLBAR IS THE PANE'S TRAILING EDGE, NOT AN OBJECT NEAR IT. The
+     pane used to inset its children and this layout cancelled the trailing
+     half so the stable gutter the thumb is drawn in stopped flush against
+     the pane's border edge rather than short of it (nocx-mvbne). The pane
+     no longer pads at all — the gutter moved into the rows themselves
+     (`.scrollback-inner > *`, nocx-9bpeq.8) — so there is nothing left here
+     to cancel. */
 }
 
 .scrollback-area {
@@ -837,12 +435,17 @@
   flex-direction: column;
 }
 
-/* While the pane is settling into a new shape, the stack is displaced
-   downward by the amount the glide is hiding (scrollback/controller.ts
-   `_glide`), and the stack hangs from this box's bottom edge — so those
-   pixels are past it and the scroller reports itself scrollable. The bar
-   flashed on every command. `hidden` keeps the scroll offset and keeps this a
-   scroll container, and the stable gutter above means no width moves. */
+/* While the pane is settling into a new shape, the stack is displaced by the
+   amount the glide is hiding (scrollback/controller.ts `_glide`) — downward
+   while the transcript overflows the scroller and the settle plays back a
+   scrollTop change the person was following (decision §1 item 1: a short
+   transcript that still fits the pane has nothing to compensate, since its
+   top-aligned position does not move when a block opens or freezes). Either
+   way the displaced pixels can land past this box's bottom edge for the
+   ~140ms the glide runs, and the scroller reports itself scrollable for
+   them. The bar flashed on every command. `hidden` keeps the scroll offset
+   and keeps this a scroll container, and the stable gutter above means no
+   width moves. */
 .scrollback-area.is-settling {
   overflow-y: hidden;
 }
@@ -873,10 +476,30 @@
   overflow: visible;
 }
 
+/* BOTTOM-ANCHORED: a short transcript hangs from the scroller's bottom edge,
+   right above the composer, the way output leaves a terminal. The owner tried
+   the top-aligned transcript of the 2026-09-15 mockup pass on the running app
+   and asked for this back (2026-09-15). */
 .scrollback-inner {
   display: flex;
   flex-direction: column;
   margin-top: auto;
+}
+
+/* EVERY ROW WEARS THE GUTTER, AND THE STACK DOES NOT (nocx-9bpeq.8).
+
+   The pane's side gutter moved from `.pane` into the rows so a row can paint
+   its own ground edge to edge — a failed block's tint, a selection — and put a
+   mark at its left edge without moving its text. One rule for every child of
+   the stack, the live region included, so the frozen column and the live
+   column are one content box by construction. A block nested in a turn is not
+   a child of the stack and is not inset again.
+
+   The grid is fitted INSIDE this inset: `usableViewport` subtracts the live
+   row's computed inline padding from the scroller's clientWidth. */
+.scrollback-inner > :not(.cell-metric-probe) {
+  box-sizing: border-box;
+  padding-inline: var(--pane-inline-padding);
 }
 
 .scrollback-separator {
@@ -918,10 +541,24 @@
      (.cmd-output above, one source for both). Without it the region was 8px
      shorter than the body that replaces it, and the scrollback — which hangs
      from its bottom edge — moved by that much at every freeze. The controller
-     never hard-codes the 8: it reads the padding off this element and sizes
-     the box to content + padding, so this rule stays the only place the
-     number lives. */
-  padding: var(--cmd-output-pad-top) 0 var(--cmd-output-pad-bottom);
+     never hard-codes the numbers: `_bodyPaddingPx()` reads the padding off
+     this element and sizes the box to content + padding, so this rule stays
+     the only place they live. `padding-block`, never the shorthand: the
+     shorthand's `0` would reset the row inset.
+
+     THE BOTTOM ALSO CARRIES `--terminal-block-trailing-space` (spec
+     2026-09-15-terminal-screen-mockup-decision.md §1 item 5's running/frozen
+     seam — command-block.css's own comment on `.cmd-block.cmd-block-running`
+     names this rule as where its half of the accounting belongs). A frozen
+     block pays that space OUTSIDE `.cmd-output`, on `.cmd-block` itself
+     (command-block.css); this region has no such outer box while running —
+     it IS the body, full stop — so its own bottom padding is where the same
+     total has to be paid, or a running block's trailing air is 16px short of
+     the frozen block it becomes and the freeze reads as a shrink. Only the
+     BOTTOM grows: the top pad is unchanged, so the first output row's
+     baseline is identical live and frozen. */
+  padding-block: var(--cmd-output-pad-top)
+    calc(var(--cmd-output-pad-bottom) + var(--terminal-block-trailing-space));
   /* The containing block for the running command's "working, nothing
      written yet" stand-in (nocx-vnirv.1) — see the rule below. */
   position: relative;
@@ -937,11 +574,13 @@
    byte lands and the stand-in is removed, the box does not shrink, and the
    frozen body that replaces the region is the same box. `prefers-reduced-
    motion` opts out of the dots' animation the same way it does in the turn
-   (the rule below), and the dots themselves stay — the report survives. */
+   (the rule below), and the dots themselves stay — the report survives. The
+   stand-in stands at the first column, which is inside the inset now
+   (nocx-9bpeq.8). */
 .xterm-live-container.live-running > .cmd-answer-typing {
   position: absolute;
   top: var(--cmd-output-pad-top);
-  left: 0;
+  left: var(--pane-inline-padding);
   pointer-events: none;
 }
 
@@ -1023,145 +662,6 @@
    descendants with it (P0-2). */
 .scrollback-inner.inner-fullscreen-mode > *:not(.xterm-live-container) {
   display: none;
-}
-
-/* ── Command blocks ─────────────────────────────────────────────────── */
-
-.cmd-block {
-  margin: 0;
-  border: 0;
-  border-top: 1px solid var(--color-surface-hover);
-  border-radius: 0;
-  background: transparent;
-  /* `content-visibility: auto` with an intrinsic-size guess is gone. Off-screen
-     blocks reported the GUESS — 48px — from `getBoundingClientRect()`, so the
-     scroll target computed for "put this block at the top" was built on a
-     number that was wrong by an order of magnitude: measured, a 635px block
-     answering 48. Skipping layout for off-screen content is a real
-     optimisation, but not while exact offsets decide where the view lands. */
-  overflow: visible;
-  /* The arrow, not the hand. A block is selectable, but what fills it is command
-     output you read and select text in — and a pointer cursor over a wall of
-     text says "this is a link" while making it harder to see where the caret
-     will land. The controls that really are clickable (the ⋮ button, the menu
-     items) keep their own `cursor: pointer` (nocx-6w4z). */
-  position: relative;
-}
-
-.cmd-block:first-child {
-  border-top: 0;
-}
-
-.cmd-block:hover {
-  background: color-mix(in srgb, var(--color-text), transparent 97%);
-}
-
-.cmd-block.cmd-block-selected {
-  background: color-mix(in srgb, var(--color-accent), transparent 94%);
-}
-
-.cmd-block.cmd-block-selected:hover {
-  background: color-mix(in srgb, var(--color-accent), transparent 91%);
-}
-
-.cmd-header {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  /* The bottom half of this padding is the gap between the command and what it
-     printed. It belongs to the header rather than to `.cmd-output`, because a
-     RUNNING block has no `.cmd-output` at all — the live xterm follows the
-     header directly — and a rule on the output would have left exactly the case
-     you are looking at while a command runs without any gap. */
-  padding: 3px 0 var(--space-3);
-  background: transparent;
-  border: 0;
-  font-family: var(--font-family-ui);
-  font-size: var(--font-size-xs);
-  pointer-events: auto;
-  -webkit-user-select: none;
-  user-select: none;
-  color: var(--color-text-dim);
-}
-
-/* Left-to-right: the chips that say WHERE (location, cwd) group at the start,
-   and the right-hand group is pushed out by its own auto margin.
-
-   This used to be `justify-content: space-between`, which is right for two
-   children and wrong for three. A local block has no location chip, so the row
-   was [cwd, right] and space-between put them at the two ends, exactly as
-   intended. An SSH block adds the location chip, and the same rule then spaced
-   three children evenly — parking the cwd chip in the dead centre of the
-   header. Nobody saw it until shell integration started producing blocks over
-   SSH at all. */
-.cmd-header-chips {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.cmd-header-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: none;
-  margin-left: auto;
-}
-
-.cmd-header-text {
-  font-family: var(--font-family-mono);
-  font-size: var(--font-size-terminal);
-  color: var(--color-text);
-  white-space: pre-wrap;
-  overflow-wrap: break-word;
-  -webkit-user-select: text;
-  user-select: text;
-}
-
-.cmd-header-cwd {
-  flex: none;
-}
-
-.cmd-header-duration {
-  font-variant-numeric: tabular-nums;
-  min-width: 52px;
-}
-
-.cmd-header-spinner {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--color-accent);
-  opacity: 0.6;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .cmd-header-spinner {
-    animation: cmd-spin-pulse 1.2s ease-in-out infinite;
-  }
-}
-
-@keyframes cmd-spin-pulse {
-  0%,
-  100% {
-    opacity: 0.4;
-  }
-  50% {
-    opacity: 1;
-  }
-}
-
-.cmd-header-exit {
-  min-width: 44px;
-}
-
-/* The ask kind's in-progress chip. The pulse is its NEIGHBOUR, not its
-   content — the same arrangement a running command's header has, where the
-   dot is bare in the chip row and the chip beside it carries the text. The
-   chip never wraps or clips its own word. */
-.cmd-answer-waiting {
-  white-space: nowrap;
 }
 
 /* The ONE "work is happening here, nothing has been written yet" stand-in
@@ -1268,35 +768,6 @@
   border-top: 0;
 }
 
-/* ONE TOOL CALL: a header and nothing else (ADR-0040). The header's bottom
-   padding is the gap between a command and what it printed, and a call
-   prints nothing here — its result belongs to the ledger's attempt, and the
-   command a `run` call opened is a block of its own beside this. */
-.cmd-block[data-block-kind='tool'] .cmd-header {
-  padding-bottom: 2px;
-}
-
-/* It reads as a MARGIN NOTE, not as content: the answer is what the person
-   came for, and a call that shouted would compete with it. Dim and one size
-   below the body — and monospace, which it inherits, because the tool name
-   and its arguments are identifiers a person compares against the same words
-   in the terminal above. */
-.cmd-block[data-block-kind='tool'] .cmd-header-text {
-  font-size: var(--font-size-sm);
-  color: var(--color-text-muted);
-}
-
-/* A call that CHANGES something must not read like a call that looked at
-   something. The variance is the BACKEND's effect class, typed on the block
-   — never derived here from the tool's name (ADR-0028 decision 4). Only the
-   two ends are painted: a reader needs "this only looked" and "this could
-   not be undone" distinguishable at a glance, and giving all seven classes a
-   colour of their own would turn the turn into a legend. */
-.cmd-block[data-block-kind='tool'][data-effect='mutate-destructive'] .cmd-header-text,
-.cmd-block[data-block-kind='tool'][data-effect='privilege-change'] .cmd-header-text {
-  color: var(--color-warning);
-}
-
 .cmd-output {
   /* The block body's own padding, named because the LIVE region wears the
      same box while the command runs (see .xterm-live-container.live-running):
@@ -1339,10 +810,11 @@
      scrollback/cell-metric.ts; `1.2em` was here before it and was a guess at
      a number only the renderer can measure. The vertical miss is felt rather
      than seen: the frozen block replaces the live region at the end of every
-     command, so a pitch that disagrees with the grid's changes the pane's
-     height at that moment and the scrollback — which hangs from its bottom
-     edge — moves. The fallback keeps the old guess for a session whose
-     renderer has not measured yet. */
+     command, so a pitch that disagrees with the grid changes the stack's
+     total height at that moment, and the settle glide
+     (scrollback/controller.ts `_glide`) has something to play back that a
+     correct pitch would not have given it. The fallback keeps the old guess
+     for a session whose renderer has not measured yet. */
   min-height: var(--term-cell-height, 1.2em);
   line-height: var(--term-cell-height, 1.2em);
   /* N frozen columns must occupy exactly N × the terminal's cell width
@@ -1468,7 +940,12 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-2) 0;
+  /* `padding-block`, never the shorthand (nocx-9bpeq.8): this is a direct
+     child of `.scrollback-inner`, at the same specificity as its
+     `padding-inline: var(--pane-inline-padding)` row rule and later in the
+     cascade — a `padding` shorthand here would win and reset that inset to
+     0, pulling this boundary's text back to the pane's edge. */
+  padding-block: var(--space-2);
   color: var(--color-text-muted);
   font-size: var(--font-size-xs);
   text-transform: uppercase;
@@ -1572,67 +1049,4 @@
   font-family: var(--font-family-mono);
   font-size: var(--font-size-terminal);
   line-height: 1.2;
-}
-
-/* ── Block overflow menu (P2-9) ─────────────────────────────────────── */
-
-.cmd-overflow-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border: 0;
-  border-radius: 3px;
-  background: transparent;
-  color: var(--color-text-dim);
-  font-family: var(--font-family-ui);
-  font-size: var(--font-size-sm);
-  line-height: 1;
-  cursor: pointer;
-  flex: none;
-  -webkit-user-select: none;
-  user-select: none;
-}
-
-.cmd-overflow-btn:hover {
-  background: var(--color-surface-raised);
-  color: var(--color-text-muted);
-}
-
-.cmd-overflow-menu {
-  z-index: 200;
-  background: var(--color-canvas);
-  border: 1px solid var(--color-surface-raised);
-  border-radius: 6px;
-  padding: 4px 0;
-  min-width: 160px;
-  box-shadow: 0 4px 16px color-mix(in srgb, black, transparent 50%);
-  /* A menu taller than the viewport must still be fully reachable
-     (nocx-vnirv.2): the geometry clamps the shell's top-left corner, and
-     this cap + scroll is the other half of the same contract — the items
-     scroll WITHIN the menu instead of running past the window's bottom
-     edge. EDGE_MARGIN_PX is 8 (ui/menu-geometry.ts), so the cap leaves the
-     same clearance the clamp enforces. */
-  max-height: calc(100vh - 16px);
-  overflow-y: auto;
-}
-
-.cmd-overflow-menu-item {
-  display: block;
-  width: 100%;
-  padding: 6px 12px;
-  border: 0;
-  background: transparent;
-  color: var(--color-text);
-  font-family: var(--font-family-ui);
-  font-size: var(--font-size-xs);
-  text-align: left;
-  cursor: pointer;
-  -webkit-user-select: none;
-  user-select: none;
-}
-
-.cmd-overflow-menu-item:hover {
-  background: var(--color-surface-raised);
 }

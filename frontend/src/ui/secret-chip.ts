@@ -29,6 +29,7 @@
 // see the colour still has to be able to tell the two apart (WCAG 1.4.1),
 // and telling them apart is the entire job.
 import type { BadgeTone } from './badge'
+import { AlertTriangleIcon, LockIcon, iconElement } from './icons'
 
 export type SecretChipVariant = 'resolved' | 'unresolved' | 'damaged'
 
@@ -53,13 +54,13 @@ export function createSecretChipDamaged(name: string, damage: string): HTMLEleme
   return buildChip('damaged', name, damage)
 }
 
-const GLYPH: Record<SecretChipVariant, string> = {
-  // lock — the same register the cwd chip uses
-  resolved: '\u{1F512}',
-  unresolved: '\u{1F512}',
-  // warning sign: the one state where the bytes are NOT what the name says,
-  // so the glyph has to say it too rather than leaving it to the colour.
-  damaged: '\u26A0',
+/** The mark per variant, as a kit icon. A lock for a reference to a secret; a
+ *  warning for the one state where the bytes are NOT what the name says, so
+ *  the mark says it too rather than leaving it to the colour (WCAG 1.4.1). */
+const GLYPH: Record<SecretChipVariant, { name: 'lock' | 'warning'; icon: () => Element }> = {
+  resolved: { name: 'lock', icon: () => iconElement(LockIcon) },
+  unresolved: { name: 'lock', icon: () => iconElement(LockIcon) },
+  damaged: { name: 'warning', icon: () => iconElement(AlertTriangleIcon) },
 }
 
 /** The badge tone per variant. Three distinct tones, because the three
@@ -94,7 +95,8 @@ function buildChip(variant: SecretChipVariant, label: string, damage = ''): HTML
   const lock = document.createElement('span')
   lock.className = 'ui-secret-chip__lock'
   lock.setAttribute('aria-hidden', 'true')
-  lock.textContent = GLYPH[variant]
+  lock.dataset.glyph = GLYPH[variant].name
+  lock.append(GLYPH[variant].icon())
 
   const labelEl = document.createElement('span')
   labelEl.className = 'ui-secret-chip__name'

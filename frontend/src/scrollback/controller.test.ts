@@ -873,6 +873,26 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     controller.blockManager.clearAll()
     pane.remove()
   })
+
+  it('reports the inline inset the grid must not be fitted into (nocx-9bpeq.8)', () => {
+    // Rows carry the pane gutter now, the live region included, so the grid's
+    // box is the scroller MINUS that inset. Read off the element, like the body
+    // padding above: the stylesheet stays the one place the number lives.
+    const { renderer } = rendererWithGeometry()
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    document.body.appendChild(pane)
+    expect(controller.liveInlineInsetPx).toBe(0)
+    controller.xtermLiveContainer.style.paddingLeft = '16px'
+    controller.xtermLiveContainer.style.paddingRight = '16px'
+    expect(controller.liveInlineInsetPx).toBe(32)
+    controller.blockManager.clearAll()
+    pane.remove()
+  })
 })
 
 describe('the pane moves rather than jumping (nocx-i4h04.2)', () => {

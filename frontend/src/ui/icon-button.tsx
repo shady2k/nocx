@@ -20,6 +20,13 @@ export interface IconButtonProps {
   class?: never
   className?: never
   selected?: boolean
+  /** `primary` is the accent-filled register — a control that SUBMITS rather
+   *  than merely acts (spec 2026-09-15 §1.2's composer submit arrow). The
+   *  default is the existing transparent affordance; unset and `'default'`
+   *  render identically. `icon-button.css` owns the fill, its hover and its
+   *  disabled treatment; the focus ring is the global `button:focus-visible`
+   *  rule in base.css, unchanged by either appearance. */
+  appearance?: 'default' | 'primary' | 'submit'
   size?: IconButtonSize
   tabIndex?: number
   onClick?: (e: MouseEvent) => void
@@ -50,6 +57,7 @@ export function IconButton(props: IconButtonAttrs) {
     'className',
     'selected',
     'square',
+    'appearance',
     'size',
     'tabIndex',
     'onClick',
@@ -65,6 +73,7 @@ export function IconButton(props: IconButtonAttrs) {
     <button
       class="ui-icon-button"
       data-size={local.size ?? 'md'}
+      data-appearance={local.appearance !== 'default' ? local.appearance : undefined}
       aria-selected={local.selected === true ? 'true' : undefined}
       data-square={local.square === true ? 'true' : undefined}
       data-rail-indicator={local.railIndicator === true ? 'true' : undefined}

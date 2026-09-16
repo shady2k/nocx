@@ -1,0 +1,77 @@
+/* A block of the ledger: its row, its header, its outcome (spec 2026-09-14 §3,
+   geometry amended 2026-09-15 §1.4/§1.5/§1.7). A SURFACE stylesheet on
+   purpose: the block places kit components — Meta, Badge, IconButton,
+   Spinner, CommandBlockFrame — and styles/components/ is exempt from the
+   gate that keeps a surface from repainting them. Rows are full width and
+   carry the pane gutter (style.css `.scrollback-inner > *`, nocx-9bpeq.8);
+   nothing here gives a block an inline padding of its own.
+
+   The header's own grid, its status region and the output-only failure rail
+   are CommandBlockFrame's appearance and live in command-block-frame.css
+   (spec 2026-09-15 §1.5's "Kit ownership" — the visual command-shell
+   renderer, not this file, owns them now); this file keeps the block's own
+   outer box: margin, the leading/trailing rhythm, hover/selection tint,
+   and the running/frozen trailing-space seam below. */
+
+.cmd-block {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  /* `content-visibility: auto` with an intrinsic-size guess is gone. Off-screen
+     blocks reported the GUESS — 48px — from `getBoundingClientRect()`, so the
+     scroll target computed for "put this block at the top" was built on a
+     number that was wrong by an order of magnitude: measured, a 635px block
+     answering 48. Skipping layout for off-screen content is a real
+     optimisation, but not while exact offsets decide where the view lands. */
+  overflow: visible;
+  /* The arrow, not the hand. A block is selectable, but what fills it is command
+     output you read and select text in — and a pointer cursor over a wall of
+     text says "this is a link" while making it harder to see where the caret
+     will land. The controls that really are clickable (the ⋮ button, the menu
+     items) keep their own `cursor: pointer` (nocx-6w4z). */
+  position: relative;
+  /* A container for its own header's narrow-split reflow (command-block-
+     frame.css's `@container cmd-block` — spec 2026-09-15 §1.7's "at narrow
+     widths, dedicate a full row to status"), named here because `.cmd-block`
+     is the one box every presentation of a command shares, live or frozen. */
+  container-type: inline-size;
+  container-name: cmd-block;
+  /* Bottom of the block, before the next one's separator (spec 2026-09-15
+     §1.5). Block-direction only — the inline gutter stays on
+     `.scrollback-inner > *` (T8, nocx-9bpeq.8) and is never duplicated here. */
+  padding-bottom: var(--terminal-block-trailing-space);
+}
+
+/* Running/frozen trailing-space seam (spec 2026-09-15 §1.5): a running
+   block has only a header — its output is the live region, a SIBLING the
+   controller inserts after this element (scrollback/blocks.ts
+   `_liveFollows`), never a child of it — so the trailing space above must
+   not sit here while running, or it lands BEFORE the live region instead of
+   after it, which is the gap the mockup pass measured. D's live-running
+   container (style.css `.xterm-live-container.live-running`) must carry
+   the SAME amount at its own trailing edge instead; see this task's report
+   for the exact requirement. This rule only stops the space being paid
+   twice — once here, once there — while the block is still running. */
+.cmd-block.cmd-block-running {
+  padding-bottom: 0;
+}
+
+/* A tool call reads as a margin note (ADR-0040, ADR-0028 decision 4), and
+   the general block's bottom air would undo that tightness — it keeps its
+   own, matching the header's own tight bottom (command-block-frame.css). */
+.cmd-block[data-block-kind='tool'] {
+  padding-bottom: 2px;
+}
+
+.cmd-block:hover {
+  background: color-mix(in srgb, var(--color-text), transparent 97%);
+}
+
+.cmd-block.cmd-block-selected {
+  background: color-mix(in srgb, var(--color-accent), transparent 94%);
+}
+
+.cmd-block.cmd-block-selected:hover {
+  background: color-mix(in srgb, var(--color-accent), transparent 91%);
+}

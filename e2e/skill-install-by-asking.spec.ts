@@ -564,7 +564,9 @@ test.describe('a person installs a skill by asking for it (nocx-ojfuc.5)', () =>
     // did (`enabled` is `const: false` in the tool's contract).
     const turn = page.locator('.pane.active .cmd-block').filter({ hasText: question }).first()
     await expect(turn).toBeVisible({ timeout: 30_000 })
-    await expect(turn.locator(':scope > .cmd-header .cmd-header-exit')).toHaveText('completed', {
+    // Success is silent (spec 2026-09-14 §3.1): the outcome attribute is
+    // the observable, on the turn's own root.
+    await expect(turn).toHaveAttribute('data-outcome', 'success', {
       timeout: 60_000,
     })
     await expect(turn.locator('[data-answer-body]')).toContainText(

@@ -152,9 +152,16 @@ if [ "$(echo "$integrity_check" | grep -c '"rule":"bare-type-selector"')" -ne 1 
   exit 1
 fi
 
-# A var() with a fallback is legitimate; reporting it would make the rule noise.
-if echo "$integrity_check" | grep -q 'fixture-also-never-declared'; then
-  echo "CSS INTEGRITY GATE FAILED — var() with a fallback was reported as undefined"
+# A fallback no longer exempts a property nothing declares and no source sets
+# (nocx-9bpeq.2): --fixture-also-never-declared must fire, --fixture-runtime-width
+# (a fallback to a property runtime-property.ts sets via setProperty) must not.
+if ! echo "$integrity_check" | grep -q 'fixture-also-never-declared'; then
+  echo "CSS INTEGRITY GATE FAILED — var() with a fallback to a property nothing declares or sets was not reported"
+  exit 1
+fi
+
+if echo "$integrity_check" | grep -q 'fixture-runtime-width'; then
+  echo "CSS INTEGRITY GATE FAILED — var() with a fallback to a property a source file sets was reported as undefined"
   exit 1
 fi
 
@@ -164,8 +171,15 @@ fi
 # surface's own class — must stay silent, because placement is the one thing a parent
 # has no other way to express and a rule that reported it would be turned off.
 integrity_kit_hits=$(echo "$integrity_check" | grep -c '"rule":"surface-paints-kit"' || true)
-if [ "$integrity_kit_hits" -ne 2 ]; then
-  echo "CSS INTEGRITY GATE FAILED — expected exactly 2 surface-paints-kit hits (tier A + tier B), got ${integrity_kit_hits}"
+if [ "$integrity_kit_hits" -ne 3 ]; then
+  echo "CSS INTEGRITY GATE FAILED — expected exactly 3 surface-paints-kit hits (tier A + tier B + a vanilla-emitted identity), got ${integrity_kit_hits}"
+  exit 1
+fi
+
+# The vanilla hit specifically: a scanner that stopped reading .ts modules would
+# still produce the other two.
+if ! echo "$integrity_check" | grep -q 'fixture-vanilla'; then
+  echo "CSS INTEGRITY GATE FAILED — rule 3 did not report a surface repainting a vanilla-emitted identity"
   exit 1
 fi
 
@@ -238,6 +252,31 @@ if [ "$integrity_theme_hits" -ne 1 ]; then
   exit 1
 fi
 
+# ── Glyph-icons fixture check (nocx-9bpeq.5) ─────────────────────────────
+# A character written as an element's text where an icon belongs. The fixture's
+# three intentional uses must fire; a multiplication sign in a title and a glyph
+# constant compared against a screen must stay silent, because a rule that
+# reported those would be turned off. No path is exempt — the block header's ⋮
+# lived in a file the raw-control lint exempts.
+glyph_check=$(node "${fixture_dir}/check-glyph-icons.mjs" \
+  "${fixture_dir}/glyph-icons-fixture/glyphs.tsx" 2>&1 || true)
+
+glyph_hits=$(echo "$glyph_check" | grep -c '^lint-fixtures/glyph-icons-fixture' || true)
+if [ "$glyph_hits" -ne 3 ]; then
+  echo "GLYPH-ICONS GATE FAILED — expected exactly 3 glyph icons in the fixture, got ${glyph_hits}"
+  exit 1
+fi
+
+if echo "$glyph_check" | grep -q 'PARSE ERROR'; then
+  echo "GLYPH-ICONS GATE FAILED — the fixture did not parse"
+  exit 1
+fi
+
+if ! node "${fixture_dir}/check-glyph-icons.mjs" >/dev/null 2>&1; then
+  echo "GLYPH-ICONS GATE FAILED — the rule reports un-baselined glyphs on the real tree"
+  exit 1
+fi
+
 # ── Kit identity fixture check ──────────────────────────────────────────────
 # The AST scanner must find the expected classes and not pick up comment-only
 # or querySelector patterns. See check-kit-identities.mjs.
@@ -289,6 +328,36 @@ trap - EXIT INT TERM
 
 if ! echo "$import_check" | grep -q 'no-restricted-imports'; then
   echo "IMPORT DIRECTION GATE FAILED — ui/ importing from outside itself was not reported"
+  exit 1
+fi
+
+# ── Raw controls inside the terminal-owned tree (nocx-9bpeq.10) ─────────────
+# The rule is path-scoped, so only a file inside src/scrollback/ can prove the
+# narrowed exemption: a createElement('button') there MUST fire, and innerHTML
+# there must NOT — the frozen block is serialised HTML by design (ADR-0012).
+raw_fixture="src/scrollback/__gate_raw_controls.ts"
+cleanup_raw_fixture() { rm -f "$raw_fixture"; }
+trap cleanup_raw_fixture EXIT INT TERM
+cat > "$raw_fixture" <<'FIXTURE'
+// Temporary fixture written by lint-fixtures/gate.sh. If you are reading this in
+// a working tree, the gate crashed between writing and removing it; delete it.
+export function gateRawControl(): HTMLElement {
+  const host = document.createElement('div')
+  host.innerHTML = '<span class="term-line"></span>'
+  host.append(document.createElement('button'))
+  return host
+}
+FIXTURE
+raw_check=$(npx eslint --no-ignore "$raw_fixture" 2>&1 || true)
+cleanup_raw_fixture
+trap - EXIT INT TERM
+
+if ! echo "$raw_check" | grep -q "createElement('button')\|nocx/no-raw-controls"; then
+  echo "RAW CONTROLS GATE FAILED — createElement('button') inside scrollback/ was not reported"
+  exit 1
+fi
+if echo "$raw_check" | grep -q 'innerHTML assignment'; then
+  echo "RAW CONTROLS GATE FAILED — innerHTML inside scrollback/ was reported; the frozen block's HTML is by design"
   exit 1
 fi
 
@@ -355,5 +424,5 @@ if [ -z "$ts_reactivity" ]; then
   exit 1
 fi
 
-echo "OK — all 10 lint rules fired; kit identities verified; CSS colour + integrity + row-grammar + error-vocabulary + menu-icons verified (11 integrity rules)"
+echo "OK — all 10 lint rules fired; kit identities verified; CSS colour + integrity + row-grammar + error-vocabulary + menu-icons + glyph-icons verified (11 integrity rules)"
 exit 0

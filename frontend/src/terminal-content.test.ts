@@ -28,6 +28,11 @@ const srcDir = import.meta.dirname ?? resolve(new URL('.', import.meta.url).path
 const STYLE_ENTRY = resolve(srcDir, 'style.css')
 const BASE_STYLE_ENTRY = resolve(srcDir, 'styles/base.css')
 const FRAME_STYLE_ENTRY = resolve(srcDir, 'frame/display.css')
+// CommandBlockFrame's own stylesheet (spec 2026-09-15 §1.7, task B): the
+// header's grid lives here now, not in styles/surfaces/command-block.css —
+// see the "SSH block header" describe block below.
+const COMMAND_BLOCK_FRAME_STYLE_ENTRY = resolve(srcDir, 'styles/components/command-block-frame.css')
+const COMPOSER_STYLE = resolve(srcDir, 'styles/surfaces/composer.css')
 
 import type { PaneIdentity } from './terminal-content'
 import { grantBlockFromElement, type GrantBlock } from './ask-entry'
@@ -82,6 +87,9 @@ import type { CapturedFrame } from './frame/types'
 import { createCapturedFrameView } from './frame/display'
 import { emptyAttrs } from './scrollback/serializer'
 import { BufferLine } from './scrollback/test-helpers'
+import type { SessionHomeSource } from './where/session-home'
+import type { BranchSource, BranchRequest } from './where/branch-source'
+import type { FilesOpenResult } from './generated/files.open'
 
 const capturedActionFacts = vi.hoisted(() => [] as ActionFacts[])
 vi.mock('./capability', async () => {
@@ -325,6 +333,43 @@ describe('TerminalContent geometry handoff and PTY resize policy (nocx-cwnz0)', 
       renderer._fireWriteParsed()
       renderer._fireWriteParsed()
       expect(renderer.fitViewport).toHaveBeenCalledTimes(1)
+      /* eslint-enable @typescript-eslint/unbound-method */
+    } finally {
+      globalThis.requestAnimationFrame = raf
+      teardown()
+    }
+  })
+
+  it('fits the grid to the live content box, not to the scroller (nocx-9bpeq.8)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const renderer = rendererOf(content)
+    const raf = globalThis.requestAnimationFrame
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      cb(0)
+      return 0
+    }
+    try {
+      const live = withScrollback.scrollback.xtermLiveContainer
+      live.style.paddingLeft = '16px'
+      live.style.paddingRight = '16px'
+      /* eslint-disable @typescript-eslint/unbound-method */
+      // Fallback path: jsdom reports clientWidth 0, so the delivered viewport
+      // is the guess — and the rows' inset is still not the grid's.
+      content.viewportChanged({ width: 1000, height: 400 })
+      expect(renderer.fitViewport).toHaveBeenLastCalledWith(
+        expect.objectContaining({ width: 968, height: 400 }),
+      )
+      // Measured path: the scroller's content width minus the same inset.
+      Object.defineProperty(withScrollback.scrollback.scrollbackArea, 'clientWidth', {
+        value: 800,
+        configurable: true,
+      })
+      content.viewportChanged({ width: 1000, height: 400 })
+      expect(renderer.fitViewport).toHaveBeenLastCalledWith(
+        expect.objectContaining({ width: 768, height: 400 }),
+      )
       /* eslint-enable @typescript-eslint/unbound-method */
     } finally {
       globalThis.requestAnimationFrame = raf
@@ -751,6 +796,63 @@ describe('the editor never copies on selection (nocx-w7h.17)', () => {
       view.dispatch({ selection: { anchor: 5, head: 10 } }) // "hello"
       mouseupOn(view)
       expect(clipboard.writeText).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// The focus bounce (P0-4, ~terminal-content.ts:2895) returns focus to the
+// editor whenever something inside the pane takes it, with named exceptions —
+// the editor itself, the live terminal, the receipt's review mode. A block's
+// own ⋮ (nocx-9bpeq.1) is the newest one: it lives inside the pane like any
+// other scrollback content, so an unconditional bounce took the caret back
+// the instant the button took focus and the keyboard path to it (ADR-0008)
+// could never land. No existing describe block in this file names this
+// listener, so both directions are asserted here: the exception, and that it
+// is still exactly as narrow as the receipt's.
+//
+// The check keys on `data-block-control` (nocx-9bpeq.12 round 6), not
+// `data-block-actions` — the latter is the ⋮'s own identity alone, and a
+// running block's Stop control shares only the former, the attribute this
+// guard and block-selection actually care about.
+describe('the focus bounce yields to a block’s own actions control (nocx-9bpeq.1)', () => {
+  it('focusing [data-block-control] with the editor visible keeps focus there', async () => {
+    const { ed, content, tab, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    try {
+      content.setVisible(true)
+      ed.show()
+      expect(ed.isVisible).toBe(true)
+
+      const actions = document.createElement('button')
+      actions.setAttribute('data-block-control', '')
+      tab.pane.appendChild(actions)
+
+      actions.focus()
+
+      expect(document.activeElement).toBe(actions)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('anything else inside the pane still bounces back to the editor', async () => {
+    const { ed, content, tab, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    try {
+      content.setVisible(true)
+      ed.show()
+      expect(ed.isVisible).toBe(true)
+
+      const other = document.createElement('button')
+      tab.pane.appendChild(other)
+
+      other.focus()
+
+      expect(ed.rootContains(document.activeElement)).toBe(true)
     } finally {
       teardown()
     }
@@ -1958,34 +2060,29 @@ describe('the live prompt says where Enter will land (nocx-3779)', () => {
   /** jsdom lacks scrollTo/scrollIntoView; the scrollback controller calls
    *  both when blocks are created and the layout changes. */
 
-  it('an SSH prompt shows the location chip the block header would carry', async () => {
+  it('an SSH prompt shows the location the block header would carry, strong in the context (spec §5.2)', async () => {
     const { content, tab, teardown } = await mountSshTerminal()
     try {
       content.setVisible(true)
-      // The chip is fed at session open from ONE derivation
+      // The context is fed at session open from ONE derivation
       // (this.locationLine()); no stream marker may change it (ADR-0024 §1).
-      const chip = tab.pane.querySelector<HTMLElement>('.nocx-editor-location')
-      expect(chip).not.toBeNull()
-      expect(chip!.style.display).not.toBe('none')
-      expect(chip!.textContent).toBe('root@192.168.0.57')
+      const strong = tab.pane.querySelector('.nocx-editor-context [data-emphasis="strong"]')
+      expect(strong?.textContent).toBe('root@192.168.0.57')
       // The block header never appears in the severed product: blocks are
       // a completion projection with no stream (or app) trigger.
-      expect(tab.pane.querySelector('.cmd-header-location')).toBeNull()
+      expect(tab.pane.querySelector('.cmd-header-meta')).toBeNull()
     } finally {
       teardown()
     }
   })
 
-  it('a local session grows no location chip', async () => {
+  it('a local session names no host at all', async () => {
     const { content, tab, teardown } = await mountTerminal(makeClipboard(), {
       attachToDocument: true,
     })
     try {
       content.setVisible(true)
-      const chip = tab.pane.querySelector<HTMLElement>('.nocx-editor-location')
-      expect(chip).not.toBeNull()
-      expect(chip!.style.display).toBe('none')
-      expect(chip!.textContent).toBe('')
+      expect(tab.pane.querySelector('.nocx-editor-context [data-emphasis="strong"]')).toBeNull()
     } finally {
       teardown()
     }
@@ -2011,7 +2108,7 @@ describe('the recovery action chip in editor chrome (nocx-atyf.2)', () => {
 
   const recoveryLabel = (content: TerminalContent): string | null => {
     const withEditor = content as unknown as { editor: { root: HTMLElement } }
-    const el = withEditor.editor.root.querySelector<HTMLElement>('.nocx-editor-recovery')
+    const el = withEditor.editor.root.querySelector<HTMLElement>('[data-control="recovery"]')
     if (!el || el.style.display === 'none') return null
     return el.textContent
   }
@@ -2622,8 +2719,9 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
       pending[0]?.resolve({ accepted: true })
       await Promise.resolve()
       await Promise.resolve()
-      const recoveryChip =
-        editorOf(content).root.querySelector<HTMLElement>('.nocx-editor-recovery')
+      const recoveryChip = editorOf(content).root.querySelector<HTMLElement>(
+        '[data-control="recovery"]',
+      )
       expect(recoveryChip?.style.display).toBe('none')
 
       // The current acknowledgement refuses. A genuinely fresh episode must
@@ -2678,28 +2776,34 @@ function extractRuleBlock(css: string, className: string): string | null {
 
 const stripComments = (s: string): string => s.replace(/\/\*[\s\S]*?\*\//g, '')
 
-// The SSH block header regression (nocx-a44m): the cwd chip used to park in
-// the dead centre of the header because `.cmd-header-chips` separated its
-// children with `justify-content: space-between` — right for two children
-// (a local block is [cwd, right]) and wrong for three (an SSH block adds the
-// location chip, and three children space evenly). Fixed in 30014e3 by
-// pushing the right group out with its own `margin-left: auto`, which behaves
-// identically for any child count. jsdom computes no layout, so these
-// assertions pin what jsdom CAN see: the DOM order that expresses the intent
-// ("cwd left, duration and exit right"), and the stylesheet's structural
-// contract that turns that order into position without assuming a count.
-describe('the SSH block header keeps cwd left and duration/exit right (nocx-a44m)', () => {
+// The SSH block header regression (nocx-a44m): the cwd meta used to park in
+// the dead centre of the header because `.cmd-header-meta` (then
+// `.cmd-header-chips`) separated its children with `justify-content:
+// space-between` — right for two children (a local block is [meta, right])
+// and wrong for three. Fixed in 30014e3 by pushing the right group out with
+// its own `margin-left: auto`, which behaved identically for any child
+// count. Superseded by the mockup pass's two-line header grid (spec
+// 2026-09-15 §1.7, task B): the right group is now the header's OWN third
+// grid child (ui/command-block-frame.ts), not nested inside the meta row —
+// that is what lets it span the command line while running, instead of only
+// ever widening row one. `margin-left: auto` inside a flex row cannot do
+// that, which is why the mechanism changed rather than only the numbers.
+// jsdom computes no layout, so these assertions pin what jsdom CAN see: the
+// DOM order that expresses the intent ("where left, duration and outcome
+// right"), and the stylesheet's structural contract that places the header's
+// grid without assuming a child count.
+describe('the SSH block header keeps its where-meta left and the right group right (nocx-a44m, spec 2026-09-15 §1.7)', () => {
   const container = (): HTMLElement => document.createElement('div')
   const store = (): CommandSnapshotStore => new CommandSnapshotStore()
   const noop = (): void => {}
 
-  it('orders an SSH block header location, cwd, then the right group', () => {
+  it('orders the where meta before the right group, on an SSH block', () => {
     const el = createCommandBlock(
       'command',
       1,
       'deploy',
       '/srv/www',
-      'user@server', // location — the chip that made the header three children
+      'user@server', // location — the fact that made the where meta two parts
       '<span class="term-line">done</span>',
       1200,
       0,
@@ -2709,25 +2813,33 @@ describe('the SSH block header keeps cwd left and duration/exit right (nocx-a44m
       store(),
       'shell',
     )
-    const chips = el.querySelector('.cmd-header-chips')
-    expect(chips).not.toBeNull()
-    const loc = chips?.querySelector('.cmd-header-location')
-    const cwd = chips?.querySelector('.cmd-header-cwd')
-    const right = chips?.querySelector('.cmd-header-right')
-    expect(loc).not.toBeNull()
-    expect(cwd).not.toBeNull()
+    const header = el.querySelector('.cmd-header')
+    const metaRow = el.querySelector('.cmd-header-meta')
+    expect(header).not.toBeNull()
+    expect(metaRow).not.toBeNull()
+    const where = metaRow?.querySelector(':scope > .ui-prompt-context')
+    const right = header?.querySelector(':scope > .cmd-header-right')
+    expect(where).not.toBeNull()
     expect(right).not.toBeNull()
 
-    const order = [...(chips as HTMLElement).children]
-    expect(order.indexOf(loc as HTMLElement)).toBeLessThan(order.indexOf(cwd as HTMLElement))
-    expect(order.indexOf(cwd as HTMLElement)).toBeLessThan(order.indexOf(right as HTMLElement))
+    const order = [...(header as HTMLElement).children]
+    expect(order.indexOf(metaRow as HTMLElement)).toBeLessThan(order.indexOf(right as HTMLElement))
 
-    // The right group holds what belongs on the right: duration and exit.
-    expect(right?.querySelector('.cmd-header-duration')).not.toBeNull()
-    expect(right?.querySelector('.cmd-header-exit-ok')).not.toBeNull()
+    // Where reads host then directory, as one PromptContext (spec 2026-09-15
+    // §2). No home is known at this seam, so the path is the absolute one.
+    const parts = [...(where as HTMLElement).querySelectorAll('.ui-prompt-context__part')].map(
+      (p) => p.textContent,
+    )
+    expect(parts).toEqual(['user@server', '/srv/www'])
+
+    // The right group holds what belongs on the right: the duration, and —
+    // success being silent (spec 2026-09-14 §3.1) — no status word.
+    expect(right?.querySelector('.ui-meta[data-column="duration"]')).not.toBeNull()
+    expect(el.dataset.outcome).toBe('success')
+    expect(right?.querySelector('.ui-meta:not([data-column])')).toBeNull()
   })
 
-  it('keeps cwd before the right group on a local block too', () => {
+  it('keeps the where meta before the right group on a local block too', () => {
     const el = createCommandBlock(
       'command',
       1,
@@ -2743,47 +2855,42 @@ describe('the SSH block header keeps cwd left and duration/exit right (nocx-a44m
       store(),
       'shell',
     )
-    const chips = el.querySelector('.cmd-header-chips')
-    const cwd = chips?.querySelector('.cmd-header-cwd')
-    const right = chips?.querySelector('.cmd-header-right')
-    expect(cwd).not.toBeNull()
+    const header = el.querySelector('.cmd-header')
+    const metaRow = el.querySelector('.cmd-header-meta')
+    const where = metaRow?.querySelector(':scope > .ui-prompt-context')
+    const right = header?.querySelector(':scope > .cmd-header-right')
+    expect(where).not.toBeNull()
     expect(right).not.toBeNull()
-    const order = [...(chips as HTMLElement).children]
-    expect(order.indexOf(cwd as HTMLElement)).toBeLessThan(order.indexOf(right as HTMLElement))
+    const order = [...(header as HTMLElement).children]
+    expect(order.indexOf(metaRow as HTMLElement)).toBeLessThan(order.indexOf(right as HTMLElement))
   })
 
-  it('the stylesheet pushes the right group with its own auto margin, not space-between', () => {
-    const css: string = readFileSync(STYLE_ENTRY, 'utf8')
-    const chips = stripComments(extractRuleBlock(css, 'cmd-header-chips') ?? '')
+  it('the stylesheet places the header on its own explicit grid, not space-between', () => {
+    const css: string = readFileSync(COMMAND_BLOCK_FRAME_STYLE_ENTRY, 'utf8')
+    const header = stripComments(extractRuleBlock(css, 'cmd-header') ?? '')
+    const metaRow = stripComments(extractRuleBlock(css, 'cmd-header-meta') ?? '')
     const right = stripComments(extractRuleBlock(css, 'cmd-header-right') ?? '')
-    expect(chips).not.toBe('')
+    expect(header).not.toBe('')
+    expect(metaRow).not.toBe('')
     expect(right).not.toBe('')
 
-    // space-between assumes exactly two children; the location chip made the
-    // SSH header three. The container must not distribute, and the right
-    // group must carry its own auto margin — the mechanism that behaves
-    // identically for any child count (nocx-a44m).
-    expect(chips).not.toMatch(/justify-content\s*:\s*(space-between|space-around|space-evenly)/)
-    expect(right).toMatch(/margin-left\s*:\s*auto/)
+    // Explicit grid placement, not a flex row a count-sensitive rule could
+    // mis-space (nocx-a44m's own defect: `justify-content: space-between`
+    // assumed exactly two children). Column 2 is where the right group
+    // lands regardless of how many parts the meta row grows.
+    expect(header).toMatch(/display\s*:\s*grid/)
+    expect(metaRow).not.toMatch(/justify-content\s*:\s*(space-between|space-around|space-evenly)/)
+    expect(right).toMatch(/grid-column\s*:\s*2/)
   })
 })
 
-// The command editor's chrome row has the same latent class as the SSH
-// header above: `justify-content: space-between` is only correct for exactly
-// two children (left group + clock), and the row must not break if a third
-// joins it. Same fix, same contract assertion: the row does not distribute,
-// and the clock — the right-edge element — carries its own auto margin
-// (nocx-a44m).
-describe('the command editor chrome pins the clock to the right edge without distributing (nocx-a44m)', () => {
-  it('the stylesheet gives the clock its own auto margin, not space-between on the row', () => {
-    const css: string = readFileSync(STYLE_ENTRY, 'utf8')
+describe('the composer chrome keeps its row height whatever it holds (nocx-i4h04, spec §5.2)', () => {
+  it('declares a fixed height, never a floor, and never distributes its children', () => {
+    const css = stripComments(readFileSync(COMPOSER_STYLE, 'utf8'))
     const chrome = stripComments(extractRuleBlock(css, 'nocx-editor-chrome') ?? '')
-    const time = stripComments(extractRuleBlock(css, 'nocx-editor-time') ?? '')
-    expect(chrome).not.toBe('')
-    expect(time).not.toBe('')
-
+    expect(chrome).toMatch(/(^|;|\s)height\s*:\s*var\(--control-height-xs\)/)
+    expect(chrome).not.toMatch(/min-height/)
     expect(chrome).not.toMatch(/justify-content\s*:\s*(space-between|space-around|space-evenly)/)
-    expect(time).toMatch(/margin-left\s*:\s*auto/)
   })
 })
 
@@ -2794,7 +2901,7 @@ describe('summoned editor overlay stylesheet contract (nocx-92gfl)', () => {
     const stack = stripComments(extractRuleBlock(css, 'nocx-summon-stack') ?? '')
     const answers = stripComments(extractRuleBlock(css, 'nocx-summon-answers') ?? '')
     const editor =
-      css.match(
+      stripComments(readFileSync(COMPOSER_STYLE, 'utf8')).match(
         /\.nocx-summon-stack\s*>\s*\.nocx-editor\[data-placement=['"]overlay['"]\]\s*\{([^}]*)\}/,
       )?.[1] ?? ''
     const pane = baseCss.match(/\.pane\s*\{([^}]*)\}/)
@@ -2802,10 +2909,12 @@ describe('summoned editor overlay stylesheet contract (nocx-92gfl)', () => {
     expect(answers).not.toBe('')
     expect(editor).not.toBe('')
     expect(pane).not.toBeNull()
-    expect(pane?.[1] ?? '').toMatch(/--pane-inline-padding\s*:\s*10px/)
+    // The pane insets nothing; the stack is full width and its rows carry the
+    // gutter (nocx-9bpeq.8, asserted in scrollback/trailing-edge.test.ts).
+    expect(pane?.[1] ?? '').not.toMatch(/(^|;)\s*padding\s*:/)
     expect(stack).toMatch(/position\s*:\s*absolute/)
-    expect(stack).toMatch(/left\s*:\s*var\(--pane-inline-padding\)/)
-    expect(stack).toMatch(/right\s*:\s*var\(--pane-inline-padding\)/)
+    expect(stack).toMatch(/left\s*:\s*0/)
+    expect(stack).toMatch(/right\s*:\s*0/)
     expect(stack).toMatch(/bottom\s*:\s*0/)
     expect(stack).toMatch(/display\s*:\s*flex/)
     expect(stack).toMatch(/flex-direction\s*:\s*column/)
@@ -2827,8 +2936,9 @@ describe('summoned editor overlay stylesheet contract (nocx-92gfl)', () => {
     expect(stack).not.toBe('')
     expect(frame).not.toBe('')
     // The stack owns every row it occupies. Its ground makes the frozen
-    // capture behind it no longer a second painter of those rows.
-    expect(stack).toMatch(/background\s*:\s*var\(--color-canvas\)/)
+    // capture behind it no longer a second painter of those rows, and it is
+    // the terminal screen's one ground (spec 2026-09-14 §7), not the canvas.
+    expect(stack).toMatch(/background\s*:\s*var\(--terminal-background\)/)
     expect(stack).toMatch(/z-index\s*:\s*10/)
     expect(frame).toMatch(/z-index\s*:\s*1/)
   })
@@ -3066,6 +3176,288 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
       exitCb({ sessionId: session.sessionId, cause: 'exited' })
       expect(onActiveOriginChange).toHaveBeenCalledTimes(3)
       expect(content.activeOrigin()).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+})
+
+describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => {
+  /** A minimal fake session-home source: records every `ensure` call and
+   *  lets the test resolve a session's home on its own schedule, exactly
+   *  like the real source's async `files.open`. */
+  function makeFakeSessionHome(): SessionHomeSource & {
+    ensureCalls: Array<{ sessionId: string; cwd?: string | null; cwdVerified?: boolean }>
+    resolveHome: (sessionId: string, home: string) => void
+  } {
+    const homes = new Map<string, string>()
+    const subs = new Map<string, Set<(home: string) => void>>()
+    const ensureCalls: Array<{ sessionId: string; cwd?: string | null; cwdVerified?: boolean }> = []
+    return {
+      ensureCalls,
+      home: (sessionId) => homes.get(sessionId),
+      ensure: (sessionId, cwd, cwdVerified) => {
+        ensureCalls.push({ sessionId, cwd, cwdVerified })
+        return Promise.resolve({} as FilesOpenResult)
+      },
+      subscribe: (sessionId, cb) => {
+        let set = subs.get(sessionId)
+        if (!set) {
+          set = new Set()
+          subs.set(sessionId, set)
+        }
+        set.add(cb)
+        return () => set?.delete(cb)
+      },
+      resolveHome: (sessionId, home) => {
+        homes.set(sessionId, home)
+        for (const cb of [...(subs.get(sessionId) ?? [])]) cb(home)
+      },
+    }
+  }
+
+  /** A minimal fake branch source: records every `request` and lets the
+   *  test publish a branch on its own schedule. */
+  function makeFakeBranchSource(): BranchSource & {
+    requests: BranchRequest[]
+    publish: (branch: string | undefined) => void
+  } {
+    const subs = new Set<(branch: string | undefined) => void>()
+    const requests: BranchRequest[] = []
+    let current: string | undefined
+    return {
+      requests,
+      branch: () => current,
+      request: (req) => requests.push(req),
+      subscribe: (cb) => {
+        subs.add(cb)
+        return () => subs.delete(cb)
+      },
+      dispose: () => subs.clear(),
+      publish: (branch) => {
+        current = branch
+        for (const cb of [...subs]) cb(branch)
+      },
+    }
+  }
+
+  /** The composer's or a block's rendered prompt-line part, or undefined
+   *  when the part is not drawn at all (PromptContext only draws `branch`
+   *  when one is known). */
+  const partText = (root: ParentNode, part: string): string | null | undefined =>
+    root.querySelector(`[data-part="${part}"]`)?.textContent
+
+  it("gives the composer and every new block a '~' path once the session's home resolves", async () => {
+    const client = makeClient()
+    const sessionHome = makeFakeSessionHome()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { sessionHome } },
+      client,
+    )
+    const handler = lifecycleHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const sessionId = sessionOf(content).sessionId
+    try {
+      content.setVisible(true)
+      // A verified cwd asks the source to open, exactly once.
+      rendererOf(content)._fireCwd('', '/home/nocx/project')
+      expect(sessionHome.ensureCalls).toHaveLength(1)
+      expect(sessionHome.ensureCalls[0]).toMatchObject({
+        sessionId,
+        cwd: '/home/nocx/project',
+        cwdVerified: true,
+      })
+
+      // Before the source resolves, the absolute path stands — never a
+      // guessed `~` (spec §2: "Without a known home the absolute path is
+      // shown").
+      expect(partText(editorOf(content).root, 'path')).toBe('/home/nocx/project')
+
+      // The home resolves asynchronously, exactly as the real binding
+      // does — the composer restates its line.
+      sessionHome.resolveHome(sessionId, '/home/nocx')
+      expect(partText(editorOf(content).root, 'path')).toBe('~/project')
+
+      // A block opened AFTER the home is known takes the `~` form too.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('ls')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      const block = withScrollback.scrollback.blockManager.runningBlock
+      expect(block).not.toBeNull()
+      expect(partText(block!.el, 'path')).toBe('~/project')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a branch change after a command was submitted updates the composer and not the already-created block', async () => {
+    const client = makeClient()
+    const branchSource = makeFakeBranchSource()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { createBranchSource: () => branchSource } },
+      client,
+    )
+    const handler = lifecycleHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      rendererOf(content)._fireCwd('', '/repo')
+      branchSource.publish('main')
+
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('git status')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      const block = withScrollback.scrollback.blockManager.runningBlock
+      expect(block).not.toBeNull()
+      const blockTitle = () => block!.el.querySelector('.ui-prompt-context')?.getAttribute('title')
+      expect(blockTitle()).toContain('main')
+
+      // The branch changes after the command was submitted (a `git
+      // checkout`, say) — the composer hears about it; the block's line
+      // is history and does not.
+      branchSource.publish('feature')
+      expect(partText(editorOf(content).root, 'branch')).toBe('feature')
+      expect(blockTitle()).toContain('main')
+      expect(blockTitle()).not.toContain('feature')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the branch source hears about a verified cwd change and a settled block, and nothing for an unverified one', async () => {
+    const FENCE = 'e'.repeat(64)
+    const client = makeClient()
+    const branchSource = makeFakeBranchSource()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { createBranchSource: () => branchSource } },
+      client,
+    )
+    const handler = lifecycleHandler(client)
+    const renderer = rendererOf(content)
+    const sessionId = sessionOf(content).sessionId
+    try {
+      content.setVisible(true)
+      // The session-open cwd is not verified: nothing asks (spec §3).
+      expect(branchSource.requests).toHaveLength(0)
+
+      // A verified cwd triggers exactly one request.
+      renderer._fireCwd('', '/repo')
+      expect(branchSource.requests).toHaveLength(1)
+      expect(branchSource.requests[0]).toMatchObject({
+        sessionId,
+        cwd: '/repo',
+        cwdVerified: true,
+        isLocal: true,
+      })
+
+      // The SAME verified cwd reported again (an unrelated OSC 7 replay)
+      // does not reset the debounce for nothing.
+      renderer._fireCwd('', '/repo')
+      expect(branchSource.requests).toHaveLength(1)
+
+      // A settled command block asks again, unconditionally — a `git
+      // checkout` moves the branch without moving the cwd, which the
+      // dedup above would otherwise swallow.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('git checkout main')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-branch',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'git checkout main',
+        },
+      })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-branch',
+          state: 'completed',
+          exitCode: 0,
+          fence: FENCE,
+          completedAt: '2026-09-15T00:00:00Z',
+        },
+      })
+      renderer._fireRenderFence({ hex: FENCE, line: 3, buffer: 'normal' })
+      expect(branchSource.requests).toHaveLength(2)
+      expect(branchSource.requests[1]).toMatchObject({
+        sessionId,
+        cwd: '/repo',
+        cwdVerified: true,
+        isLocal: true,
+      })
+    } finally {
+      teardown()
+    }
+  })
+
+  it('asks nothing for a hand-typed ssh child domain — the branch stays undefined in the composer (nocx-9bpeq.16 round 3)', async () => {
+    // Round 2 briefly read `isLocal` from `this.sshOpts === undefined` —
+    // the SESSION's own kind, fixed at session-open — reasoning that
+    // git.open's consent gate is a session-level fact the backend never
+    // revises from inside the shell (AD-6: no byte-stream sniffing). True,
+    // but the wrong fix for the wrong problem: after a hand-typed
+    // `ssh pi@192.168.0.93`, the verified cwd this pane reports is a path
+    // on THAT host, not on the local one `this.sshOpts === undefined`
+    // describes. Asking `git.open` about it would resolve `/home/pi`
+    // against the LOCAL filesystem — the branch of whatever unrelated
+    // local directory happens to share that path, or nothing, shown under
+    // a prompt that reads as remote. `view.isLocal` — "which machine will
+    // the next command actually run on" — is the fact this gate needs,
+    // and it is exactly what a destination-bearing child domain reports
+    // false (lifecycle/domain-environment.ts's `_seedFor`). This pane is a
+    // LOCAL session throughout (`mountTerminal` with no `ssh` option); it
+    // walks into a hand-typed `ssh pi@192.168.0.93` (the same fact shape
+    // "a local tab whose pane walks onto a remote host" already uses,
+    // ~line 3200), and the branch source must be asked NOTHING for a
+    // verified cwd reported on that nested domain — the composer keeps
+    // showing no branch.
+    const client = makeClient()
+    const branchSource = makeFakeBranchSource()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { createBranchSource: () => branchSource } },
+      client,
+    )
+    const handler = lifecycleHandler(client)
+    const renderer = rendererOf(content)
+    try {
+      content.setVisible(true)
+      // The local shell's own domain first.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      // The parent suspends as the hand-typed ssh's child domain
+      // establishes (protocol §9).
+      handler({ lane: 'lane-1', lifecycle: 'native' })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd2',
+        epoch: 1,
+        destination: { host: '192.168.0.93', user: 'pi' },
+      })
+      // A verified cwd reported on the nested domain — a path on the far
+      // host, which this pane's own (local) session cannot answer for.
+      renderer._fireCwd('192.168.0.93', '/home/pi')
+      expect(branchSource.requests).toHaveLength(0)
+      expect(partText(editorOf(content).root, 'branch')).toBeUndefined()
     } finally {
       teardown()
     }
@@ -3438,21 +3830,23 @@ describe('the projections consume the kernel through the composition root (ADR-0
       ;(
         content as unknown as { inputTargets: { setActive(id: string): void } }
       ).inputTargets.setActive('agent')
-      const menuButton = rec.el.querySelector<HTMLElement>('.cmd-overflow-btn')
+      const menuButton = rec.el.querySelector<HTMLElement>('[data-block-actions]')
       expect(menuButton).not.toBeNull()
       menuButton!.click()
       const menuItems = Array.from(
-        document.querySelectorAll<HTMLElement>('.cmd-overflow-menu-item'),
+        document.querySelectorAll<HTMLElement>(
+          '[data-testid="block-actions-menu"] .ui-context-menu__item',
+        ),
       )
-      const grant = menuItems.find((item) => item.dataset.action === 'grant')
-      const stop = menuItems.find((item) => item.dataset.action === 'stop')
+      const grant = menuItems.find((item) => item.dataset.itemId === 'grant')
+      const stop = menuItems.find((item) => item.dataset.itemId === 'stop')
       expect(grant).toBeDefined()
       expect(grant?.textContent).toBe('Ask about this block')
       grant!.click()
       const grantsBeforeAck = (content as unknown as { grantedBlocks: GrantBlock[] }).grantedBlocks
       expect(grantsBeforeAck[0]?.command).toBe('echo sk-proj-abcdef')
       expect(stop).toBeUndefined()
-      document.querySelector('.cmd-overflow-menu')?.remove()
+      document.querySelector('[data-testid="block-actions-menu"]')?.remove()
 
       // The ack lands here. It used to be refused for the class alone and
       // dropped for good — no retry, nothing shown, nothing logged.
@@ -5471,11 +5865,16 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
 
   const cardIn = (tab: { pane: HTMLElement }) => tab.pane.querySelector('.nocx-integration-notice')
 
+  // A button's label is its visible text, or — for an icon-only control like
+  // the dismiss cross — its accessible name (aria-label). A glyph is not text
+  // (nocx-9bpeq.5): the cross renders a CloseIcon now, so textContent alone
+  // would read as empty rather than as the button it is.
+  const buttonLabel = (b: HTMLButtonElement): string =>
+    (b.textContent ?? '').trim() || (b.getAttribute('aria-label') ?? '')
+
   /** Press one of the card's own actions, by the label the user reads. */
   const press = (tab: { pane: HTMLElement }, label: string): void => {
-    const found = [...cardIn(tab)!.querySelectorAll('button')].find(
-      (b) => (b.textContent ?? '').trim() === label,
-    )
+    const found = [...cardIn(tab)!.querySelectorAll('button')].find((b) => buttonLabel(b) === label)
     if (!found) throw new Error(`no card action labelled ${label}`)
     found.click()
   }
@@ -5537,7 +5936,7 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
       expect(first.tab.pane.querySelector('.ui-status-card__title')!.textContent).toBe(
         'Not integrated',
       )
-      press(first.tab, '×')
+      press(first.tab, 'Dismiss')
     } finally {
       first.teardown()
     }
@@ -5590,7 +5989,7 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
     )
     try {
       publish(client)
-      press(tab, '×')
+      press(tab, 'Dismiss')
       expect(cardIn(tab)).toBeNull()
       publish(client)
       expect(cardIn(tab)).toBeNull()
@@ -5610,7 +6009,7 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
     )
     try {
       publish(client)
-      press(tab, '×')
+      press(tab, 'Dismiss')
       publish(client, { status: 'lost', reason: 'channel-lost' })
       expect(cardIn(tab)).not.toBeNull()
     } finally {
@@ -5705,7 +6104,7 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
     )
     try {
       publish(client)
-      press(tab, '×')
+      press(tab, 'Dismiss')
       expect(cardIn(tab)).toBeNull()
       // The mark is the state of the session, not a notification: dismissing
       // the card says nothing about whether the session is integrated.
@@ -5745,7 +6144,7 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
     const first = await mountTerminal(makeClipboard(), { attachToDocument: true }, clientA)
     try {
       publish(clientA)
-      press(first.tab, '×')
+      press(first.tab, 'Dismiss')
     } finally {
       first.teardown()
     }
@@ -5878,11 +6277,13 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     return registry.active().label
   }
 
-  /** The indicator as rendered in the editor's gutter — the editor's DOM,
-   *  deliberately NOT its contentDOM: the token is beside the document and
-   *  never in it (see the gutter test below for what that buys). */
+  /** The indicator as mounted in ComposerFrame's field — a SIBLING of CM6's
+   *  own root (`.ui-composer-frame__field`'s leading grid column, composer-
+   *  frame.css), not a CM6 gutter inside it any more (task C, round 2): the
+   *  token is beside the document and never in it, searched from `ed.root`
+   *  because it is no longer a descendant of `viewOf(ed).dom` at all. */
   function indicatorOf(ed: CommandEditor): HTMLElement | null {
-    return viewOf(ed).dom.querySelector<HTMLElement>('.ui-mode-indicator')
+    return ed.root.querySelector<HTMLElement>('.ui-mode-indicator')
   }
 
   /** Dispatch a submit key exactly where a person's keystroke lands. */
@@ -6204,15 +6605,17 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(markShortcut.defaultPrevented).toBe(false)
       expect((content as unknown as { grantedBlocks: GrantBlock[] }).grantedBlocks).toEqual([])
 
-      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       const items = Array.from(
-        document.querySelectorAll<HTMLButtonElement>('.cmd-overflow-menu-item'),
+        document.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="block-actions-menu"] .ui-context-menu__item',
+        ),
       )
-      expect(items.find((item) => item.dataset.action === 'grant')).toBeUndefined()
+      expect(items.find((item) => item.dataset.itemId === 'grant')).toBeUndefined()
       expect(items.map((item) => item.textContent)).toContain('Copy command')
-      expect(ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')?.style.display).toBe(
-        'none',
-      )
+      expect(
+        ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')?.style.display,
+      ).toBe('none')
       expect((content as unknown as { grantedBlocks: GrantBlock[] }).grantedBlocks).toEqual([])
       expect(dispatcherCalls.some((call) => call.method === 'agent.ask')).toBe(false)
     } finally {
@@ -6243,9 +6646,9 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       const grantState = content as unknown as { grantedBlocks: GrantBlock[] }
       expect(grantState.grantedBlocks).toHaveLength(1)
 
-      whole.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      whole.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       const menuGrant = document.querySelector<HTMLButtonElement>(
-        '.cmd-overflow-menu-item[data-action="grant"]',
+        '.ui-context-menu__item[data-item-id="grant"]',
       )
       expect(menuGrant).not.toBeNull()
       menuGrant!.click()
@@ -6254,7 +6657,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(before).toHaveLength(2)
       expect(before[0]).toMatchObject({ blockEl: rows, start: 1, count: 1 })
       expect(before[1]).toMatchObject({ blockEl: whole })
-      const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
+      const chip = ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')!
       chip.click()
       expect(document.querySelector('.ui-floating-panel[data-open="true"]')).not.toBeNull()
       expect(whole.dataset.granted).toBe('true')
@@ -6262,12 +6665,12 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
       // Hiding the pane removes every body-level and inline grant surface,
       // including a menu that otherwise lives outside the pane subtree.
-      whole.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
-      expect(document.querySelector('.cmd-overflow-menu')).not.toBeNull()
+      whole.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
+      expect(document.querySelector('[data-testid="block-actions-menu"]')).not.toBeNull()
       content.setVisible(false)
       expect(chip.style.display).toBe('none')
       expect(document.querySelector('.ui-floating-panel[data-open="true"]')).toBeNull()
-      expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
+      expect(document.querySelector('[data-testid="block-actions-menu"]')).toBeNull()
       expect(whole.dataset.granted).toBeUndefined()
       expect(rows.querySelector('.term-line[data-granted]')).toBeNull()
       // A target change while the tab is in the background cannot repaint
@@ -6293,8 +6696,8 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(grantState.grantedBlocks[0]).toBe(before[0])
       expect(grantState.grantedBlocks[1]).toBe(before[1])
 
-      whole.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
-      expect(document.querySelector('.cmd-overflow-menu-item[data-action="grant"]')).toBeNull()
+      whole.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
+      expect(document.querySelector('.ui-context-menu__item[data-item-id="grant"]')).toBeNull()
 
       submitKey(ed, { metaKey: true })
 
@@ -6355,15 +6758,15 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       registry.setActive('agent')
       const block = frozenBlockOf(content, 'git status', ['clean'])
 
-      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
-      expect(document.querySelector('.cmd-overflow-menu-item[data-action="grant"]')).not.toBeNull()
+      block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
+      expect(document.querySelector('.ui-context-menu__item[data-item-id="grant"]')).not.toBeNull()
 
       // Programmatic, because that is the case the pane-hide sweep cannot
       // reach: ask entry and restore both call setActive without anybody
       // clicking. A menu left open goes on offering Mark in Run.
       registry.setActive('shell')
 
-      expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
+      expect(document.querySelector('[data-testid="block-actions-menu"]')).toBeNull()
     } finally {
       teardown()
     }
@@ -6444,7 +6847,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       ed.show()
       const block = frozenBlockOf(content, 'ls', ['one', 'two', 'three'])
       submitKey(ed, { metaKey: true })
-      const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
+      const chip = ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')!
 
       selectRows(block, 0, 1)
       document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')!.click()
@@ -6475,7 +6878,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       ed.show()
       const block = frozenBlockOf(content, 'ls', ['one', 'two', 'three'])
       submitKey(ed, { metaKey: true })
-      const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
+      const chip = ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')!
       selectRows(block, 0, 1)
       document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')!.click()
       selectRows(block, 2, 3)
@@ -6485,9 +6888,9 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       // The menu speaks about the BLOCK, so with any of it marked its action
       // is Unmark — and it takes the row marks with it rather than leaving
       // half of them behind under a label that says nothing is marked.
-      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       const action = document.querySelector<HTMLButtonElement>(
-        '.cmd-overflow-menu-item[data-action="grant"]',
+        '.ui-context-menu__item[data-item-id="grant"]',
       )!
       expect(action.textContent).toBe('Unmark')
       action.click()
@@ -6513,7 +6916,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
       submitKey(ed, { metaKey: true })
       selectRows(block, 0, 1)
-      const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
+      const chip = ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')!
       expect(chip.dataset.state).toBe('default')
       expect(chip.textContent).toContain('0')
       expect(block.dataset.granted).toBeUndefined()
@@ -6528,9 +6931,9 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(block.querySelector<HTMLElement>('.term-line')?.dataset.granted).toBe('true')
       expect(block.querySelectorAll<HTMLElement>('.term-line[data-granted]')).toHaveLength(1)
 
-      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       const unmark = document.querySelector<HTMLButtonElement>(
-        '.cmd-overflow-menu-item[data-action="grant"]',
+        '.ui-context-menu__item[data-item-id="grant"]',
       )
       expect(unmark?.textContent).toBe('Unmark')
       unmark?.click()
@@ -6554,9 +6957,9 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       ed.show()
       const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
       submitKey(ed, { metaKey: true })
-      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       document
-        .querySelector<HTMLButtonElement>('.cmd-overflow-menu-item[data-action="grant"]')!
+        .querySelector<HTMLButtonElement>('.ui-context-menu__item[data-item-id="grant"]')!
         .click()
       expect(block.dataset.granted).toBe('true')
       expect(block.querySelector('.term-line[data-granted]')).toBeNull()
@@ -6692,11 +7095,11 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
       const marked = frozenBlockOf(content, 'git status', ['clean'])
       submitKey(ed, { metaKey: true })
-      marked.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      marked.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       document
-        .querySelector<HTMLButtonElement>('.cmd-overflow-menu-item[data-action="grant"]')!
+        .querySelector<HTMLButtonElement>('.ui-context-menu__item[data-item-id="grant"]')!
         .click()
-      const grantChip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
+      const grantChip = ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')!
       expect(grantChip.dataset.state).toBe('chosen')
 
       typeAndAsk(ed, content, 'why did it fail?')
@@ -6731,9 +7134,13 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       // role="textbox", so a control inside it becomes part of the line's
       // text: a screen reader read the chip's word as content, and every
       // check that reads the prompt got `Run` glued to the command. The
-      // gutter is outside the document, so the text is the text.
+      // indicator sits in ComposerFrame's field as a SIBLING of CM6's own
+      // root (`view.dom`) now — not inside it at all — so it is outside
+      // the document twice over: outside `view.dom` and, inside that,
+      // outside `contentDOM`.
       const view = viewOf(ed)
-      expect(view.dom.querySelector('.ui-mode-indicator')).not.toBeNull()
+      expect(ed.root.querySelector('.ui-mode-indicator')).not.toBeNull()
+      expect(view.dom.querySelector('.ui-mode-indicator')).toBeNull()
       expect(view.contentDOM.querySelector('.ui-mode-indicator')).toBeNull()
       expect(view.contentDOM.textContent).toBe('')
 
@@ -6753,7 +7160,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     }
   })
 
-  it('the gutter reserves its column for EVERY line, so a second line starts where the first one does (nocx-ex636)', async () => {
+  it('the editor occupies its own grid column, so a second line starts where the first one does (nocx-ex636)', async () => {
     const { client } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
@@ -6761,22 +7168,28 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       _resetThemeState()
       ed.show()
 
-      // The widget this replaced sat on line one only, so line two began
-      // underneath the token and the command read as two ragged columns.
-      // A gutter has one element per line by construction: the marker on
-      // the first, an empty cell on the rest, both the same width.
+      // The per-line CM6 gutter this replaced (task C, round 2) kept the
+      // token off every line but the first with one blank cell per row —
+      // bookkeeping the mockup pass's ComposerFrame field grid
+      // (composer-frame.css) does not need: ONE indicator sits in the
+      // field's leading grid column and the WHOLE editor sits in the
+      // column after it, so every line the editor draws — wrapped or
+      // typed — starts at that column's left edge by construction, not by
+      // a marker repeated per row.
       ed.insertText('one\ntwo')
-      const view = viewOf(ed)
-      const cells = Array.from(
-        view.dom.querySelectorAll('.nocx-editor-target-gutter .cm-gutterElement'),
-      )
-      // The spacer element CM6 keeps for measurement is in this list too;
-      // what matters is that the lines have their cells and only the first
-      // carries the token.
-      expect(cells.length).toBeGreaterThanOrEqual(2)
-      const withToken = cells.filter((c) => c.querySelector('.ui-mode-indicator'))
-      expect(withToken.length).toBeGreaterThanOrEqual(1)
-      expect(view.contentDOM.textContent).toBe('onetwo')
+      const field = ed.root.querySelector<HTMLElement>('.ui-composer-frame__field')
+      expect(field).not.toBeNull()
+      const indicators = field!.querySelectorAll('.ui-mode-indicator')
+      expect(indicators.length).toBe(1)
+      const editorHost = field!.querySelector('.ui-composer-frame__editor')
+      expect(editorHost).not.toBeNull()
+      // DOM order IS the grid's column order (composer-frame.css places no
+      // explicit `grid-column` — the field relies on source order), so the
+      // indicator immediately preceding the editor host is what puts the
+      // whole multiline document in the SECOND column, never split across
+      // per-line cells the indicator could occupy one of.
+      expect(indicators[0].nextElementSibling).toBe(editorHost)
+      expect(viewOf(ed).contentDOM.textContent).toBe('onetwo')
     } finally {
       teardown()
     }
@@ -7867,9 +8280,9 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
       const block = inner.querySelector<HTMLElement>('[data-restored="true"]')!
       expect(block.dataset.entryId).toBe('e-1')
 
-      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       const mark = document.querySelector<HTMLButtonElement>(
-        '.cmd-overflow-menu-item[data-action="grant"]',
+        '.ui-context-menu__item[data-item-id="grant"]',
       )
       expect(mark?.textContent).toBe('Ask about this block')
       mark?.click()
@@ -7877,13 +8290,13 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
       const grantState = content as unknown as { grantedBlocks: GrantBlock[] }
       const viaMenu = grantState.grantedBlocks[0]
       expect(viaMenu?.itemId).toBe('e-1')
-      expect(ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')?.textContent).toContain(
-        '1',
-      )
+      expect(
+        ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')?.textContent,
+      ).toContain('1')
 
-      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       const unmark = document.querySelector<HTMLButtonElement>(
-        '.cmd-overflow-menu-item[data-action="grant"]',
+        '.ui-context-menu__item[data-item-id="grant"]',
       )
       expect(unmark?.textContent).toBe('Unmark')
       unmark?.click()
@@ -8133,27 +8546,27 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
       const block = inner.querySelector<HTMLElement>('[data-restored="true"]')!
       expect(block.dataset.entryId).toBe('e-1')
 
-      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       const mark = document.querySelector<HTMLButtonElement>(
-        '.cmd-overflow-menu-item[data-action="grant"]',
+        '.ui-context-menu__item[data-item-id="grant"]',
       )
       expect(mark?.textContent).toBe('Ask about this block')
       mark?.click()
 
       const grantState = content as unknown as { grantedBlocks: GrantBlock[] }
       expect(grantState.grantedBlocks[0]?.itemId).toBe('e-1')
-      expect(ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')?.textContent).toContain(
-        '1',
-      )
-      const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
+      expect(
+        ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')?.textContent,
+      ).toContain('1')
+      const chip = ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')!
       chip.click()
       expect(
         ed.root.querySelector<HTMLElement>('.ui-floating-panel[data-variant="grant"]')?.textContent,
       ).toContain('make test')
 
-      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
       const unmark = document.querySelector<HTMLButtonElement>(
-        '.cmd-overflow-menu-item[data-action="grant"]',
+        '.ui-context-menu__item[data-item-id="grant"]',
       )
       expect(unmark?.textContent).toBe('Unmark')
       unmark?.click()
@@ -8226,10 +8639,21 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
       const restored = [...inner.querySelectorAll('[data-restored="true"]')] as HTMLElement[]
       const [untimed, instant] = restored
       expect(untimed.querySelector('.cmd-header-text')?.textContent).toBe('make test')
-      expect(untimed.querySelector('.cmd-header-duration')).toBeNull()
+      expect(
+        untimed.querySelector(
+          ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]',
+        ),
+      ).toBeNull()
       // And the other fact still says itself out loud, so the absence above
       // reads as "unknown" and never as "the chip was dropped".
-      expect(instant.querySelector('.cmd-header-duration')?.textContent).toBe('0ms')
+      // Below a tenth of a second: `<0.1s`, not `0.0s` (spec 2026-09-15
+      // §1.7 round 3) — the precise figure the tenths display rounds away
+      // is the Meta's title instead.
+      expect(
+        instant.querySelector(
+          ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]',
+        )?.textContent,
+      ).toBe('0ms')
     } finally {
       teardown()
     }
@@ -8533,9 +8957,11 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
       // The turn draws NO body of its own — the wiretap is not an answer.
       expect(turnBlock!.querySelector(':scope > [data-answer-body]')).toBeNull()
 
-      turnBlock!.querySelector<HTMLElement>('.cmd-overflow-btn')!.click()
+      turnBlock!.querySelector<HTMLElement>('[data-block-actions]')!.click()
       const copyOut = Array.from(
-        document.querySelectorAll<HTMLElement>('.cmd-overflow-menu-item'),
+        document.querySelectorAll<HTMLElement>(
+          '[data-testid="block-actions-menu"] .ui-context-menu__item',
+        ),
       ).find((el) => el.textContent === 'Copy output')
       expect(copyOut).toBeDefined()
       copyOut!.click()
@@ -8766,9 +9192,9 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
   }
 
   const chipEls = (content: TerminalContent): HTMLElement[] =>
-    Array.from(editorOf(content).root.querySelectorAll<HTMLElement>('.nocx-editor-model')).filter(
-      (el) => el.style.display !== 'none',
-    )
+    Array.from(
+      editorOf(content).root.querySelectorAll<HTMLElement>('[data-control^="model"]'),
+    ).filter((el) => el.style.display !== 'none')
 
   const chipsOf = (content: TerminalContent): string[] =>
     chipEls(content).map((el) => el.textContent ?? '')
@@ -8783,11 +9209,22 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
    *  twin of ⌘Enter and the one these tests reach for, because what they
    *  are about is the CHIP. The chord's own owner is a pane-level capture
    *  listener that an off-screen, detached fixture cannot reach, and it has
-   *  its own specs (nocx-a7mw7.6). */
+   *  its own specs (nocx-a7mw7.6).
+   *
+   *  nocx-9bpeq.15 turned the click into a menu open (ui/mode-indicator.ts:
+   *  a kit ContextMenu, role="menu"/"menuitem", the active row wearing the
+   *  check icon — see its own test for the same shape). A bare mousedown no
+   *  longer toggles anything, so this opens the menu and picks whichever
+   *  row is NOT the active one — the toggle these tests rely on, since Run
+   *  and Ask are the only two registered targets. */
   const switchToAsk = (content: TerminalContent): void => {
-    const el = viewOf(editorOf(content)).dom.querySelector<HTMLElement>('.ui-mode-indicator')
+    const el = editorOf(content).root.querySelector<HTMLButtonElement>('.ui-mode-indicator')
     if (!el) throw new Error('no mode indicator to switch with')
-    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+    el.click()
+    const items = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+    const inactive = items.find((i) => i.querySelector('.ui-context-menu__icon svg') === null)
+    if (!inactive) throw new Error('no inactive mode-indicator row to pick')
+    inactive.click()
   }
 
   it('shows no model chip while Enter goes to the shell', async () => {
@@ -8828,7 +9265,7 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
       content.setVisible(true)
-      const grant = editorOf(content).root.querySelector<HTMLElement>('.nocx-editor-grant')!
+      const grant = editorOf(content).root.querySelector<HTMLElement>('[data-control="grant"]')!
       expect(grant.style.display).toBe('none')
 
       switchToAsk(content)
@@ -8848,15 +9285,15 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
     try {
       switchToAsk(content)
       await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
-      const left = editorOf(content).root.querySelector<HTMLElement>('.nocx-editor-chrome-left')!
+      const left = editorOf(content).root.querySelector<HTMLElement>('.nocx-editor-controls')!
       const children = [...left.children]
-      const grant = left.querySelector<HTMLElement>('.nocx-editor-grant')!
+      const grant = left.querySelector<HTMLElement>('[data-control="grant"]')!
       const visibleModels = chipEls(content)
       expect(visibleModels).toHaveLength(2)
       expect(visibleModels.every((chip) => children.indexOf(chip) < children.indexOf(grant))).toBe(
         true,
       )
-      const chips = children.filter((child) => child.classList.contains('nocx-chip'))
+      const chips = children.filter((child) => child.hasAttribute('data-control'))
       expect(chips[chips.length - 1]).toBe(grant)
     } finally {
       teardown()
@@ -9065,7 +9502,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
    *  account of it, the mode indicator's data-target, wherever the editor
    *  is on screen to carry one. */
   function targetNamed(ed: CommandEditor): string | null {
-    const el = viewOf(ed).dom.querySelector<HTMLElement>('.ui-mode-indicator')
+    const el = ed.root.querySelector<HTMLElement>('.ui-mode-indicator')
     return el?.dataset.target ?? null
   }
 
@@ -9187,7 +9624,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
 
       const summonedFacts = capturedActionFacts[capturedActionFacts.length - 1]
       expect(summonedFacts).toEqual(expect.objectContaining({ presentation: 'editor' }))
-      const recovery = ed.root.querySelector<HTMLElement>('.nocx-editor-recovery')
+      const recovery = ed.root.querySelector<HTMLElement>('[data-control="recovery"]')
       expect(recovery?.style.display).toBe('none')
 
       expect(ed.isVisible).toBe(true)
@@ -9197,7 +9634,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       // and says so on the badge below. An ordinary running command is no
       // exception — a summon that pins a photograph and then sends nothing
       // is where the owner's zero-count report came from (nocx-hp8p2.4).
-      expect(ed.root.querySelector('.nocx-editor-grant')?.getAttribute('aria-label')).toContain(
+      expect(ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label')).toContain(
         'frozen screen attached automatically',
       )
       // Ask, not the shell: the summoned editor's only target. Read off the
@@ -9243,7 +9680,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
 
       await summonChord(content)
 
-      expect(ed.root.querySelector('.nocx-editor-grant')?.getAttribute('aria-label')).toContain(
+      expect(ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label')).toContain(
         'frozen screen attached automatically',
       )
     } finally {
@@ -9275,7 +9712,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       // The program is still painting its screen — it has never frozen, so the
       // attachment owner is the running block itself. Without this the
       // assistant is asked about a screen nothing handed it.
-      expect(ed.root.querySelector('.nocx-editor-grant')?.getAttribute('aria-label')).toContain(
+      expect(ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label')).toContain(
         'frozen screen attached automatically',
       )
     } finally {
@@ -9306,7 +9743,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       // screen, and it is the program the owner reported this against. The
       // gesture, not the buffer kind, is what says which screen the question
       // carries.
-      expect(ed.root.querySelector('.nocx-editor-grant')?.getAttribute('aria-label')).toContain(
+      expect(ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label')).toContain(
         'frozen screen attached automatically',
       )
     } finally {
@@ -9857,9 +10294,9 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         chordOn(viewOf(ed).contentDOM)
 
         await vi.waitFor(() =>
-          expect(ed.root.querySelector('.nocx-editor-grant')?.getAttribute('aria-label')).toContain(
-            'frozen screen attached automatically',
-          ),
+          expect(
+            ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label'),
+          ).toContain('frozen screen attached automatically'),
         )
         expect(captureLiveFrame).toHaveBeenCalledTimes(1)
       } finally {
@@ -9883,7 +10320,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         await settleAttachment()
 
         expect(
-          ed.root.querySelector('.nocx-editor-grant')?.getAttribute('aria-label'),
+          ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label'),
         ).not.toContain('frozen screen attached automatically')
         expect(captureLiveFrame).not.toHaveBeenCalled()
       } finally {
@@ -9922,7 +10359,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
 
         expect(targetNamed(ed)).toBe('agent')
         expect(
-          ed.root.querySelector('.nocx-editor-grant')?.getAttribute('aria-label'),
+          ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label'),
         ).not.toContain('frozen screen attached automatically')
         expect(captureLiveFrame).not.toHaveBeenCalled()
       } finally {
@@ -10062,8 +10499,8 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         content.setVisible(true)
         ed.show()
         const block = frozenBlock(content, 'git status', ['clean'])
-        block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
-        expect(document.querySelector('.cmd-overflow-menu')).not.toBeNull()
+        block.querySelector<HTMLButtonElement>('[data-block-actions]')!.click()
+        expect(document.querySelector('[data-testid="block-actions-menu"]')).not.toBeNull()
 
         chordOn(document.body)
 
@@ -10190,7 +10627,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     const frozen = document.createElement('div')
     frozen.className = 'cmd-block'
     const frozenButton = document.createElement('button')
-    frozenButton.className = 'cmd-overflow-btn'
+    frozenButton.setAttribute('data-block-actions', '')
     const selectedText = document.createTextNode('selected output')
     frozen.append(selectedText, frozenButton)
     scrollbackInner!.append(frozen)
@@ -10208,9 +10645,10 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     targets.push({ name: 'scrollback background', element: scrollbackBackground! })
 
     const menu = document.createElement('div')
-    menu.className = 'cmd-overflow-menu'
+    menu.className = 'ui-context-menu'
+    menu.dataset.testid = 'block-actions-menu'
     const menuItem = document.createElement('button')
-    menuItem.className = 'cmd-overflow-menu-item'
+    menuItem.className = 'ui-context-menu__item'
     menu.append(menuItem)
     document.body.append(menu)
     targets.push({ name: 'block action menu', element: menuItem })
@@ -10524,14 +10962,20 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
 
   /** Open the running block's overflow menu and return its items. */
   function runningBlockMenu(content: TerminalContent): HTMLElement[] {
-    const btn = paneOf(content).querySelector<HTMLElement>('.cmd-block-running .cmd-overflow-btn')
+    const btn = paneOf(content).querySelector<HTMLElement>(
+      '.cmd-block-running [data-block-actions]',
+    )
     expect(btn, 'the running block has no ⋮ button').not.toBeNull()
     btn!.click()
-    return Array.from(document.querySelectorAll<HTMLElement>('.cmd-overflow-menu-item'))
+    return Array.from(
+      document.querySelectorAll<HTMLElement>(
+        '[data-testid="block-actions-menu"] .ui-context-menu__item',
+      ),
+    )
   }
 
   function itemNamed(items: HTMLElement[], action: string): HTMLElement | undefined {
-    return items.find((el) => el.dataset.action === action)
+    return items.find((el) => el.dataset.itemId === action)
   }
 
   it('the running block grant action exists only after the target switches to Ask', async () => {
@@ -10569,7 +11013,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       const runItems = runningBlockMenu(content)
       expect(itemNamed(runItems, 'grant')).toBeUndefined()
       expect(itemNamed(runItems, 'stop')?.textContent).toBe('Stop')
-      paneOf(content).querySelector<HTMLElement>('.cmd-block-running .cmd-overflow-btn')!.click()
+      paneOf(content).querySelector<HTMLElement>('.cmd-block-running [data-block-actions]')!.click()
 
       await summonChord(content)
       await vi.waitFor(() => expect(ed.isVisible).toBe(true))
@@ -10580,16 +11024,16 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
 
       const block = paneOf(content).querySelector<HTMLElement>('.cmd-block-running')
       expect(block?.dataset.granted).toBe('true')
-      expect(ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')?.dataset.state).toBe(
-        'chosen',
-      )
+      expect(
+        ed.root.querySelector<HTMLButtonElement>('[data-control="grant"]')?.dataset.state,
+      ).toBe('chosen')
 
       escapeOn(view.contentDOM)
       expect(ed.isVisible).toBe(false)
       expect(targetNamed(ed)).toBe('shell')
       expect(block?.dataset.granted).toBeUndefined()
       expect(itemNamed(runningBlockMenu(content), 'grant')).toBeUndefined()
-      paneOf(content).querySelector<HTMLElement>('.cmd-block-running .cmd-overflow-btn')!.click()
+      paneOf(content).querySelector<HTMLElement>('.cmd-block-running [data-block-actions]')!.click()
 
       await summonChord(content)
       const unmark = itemNamed(runningBlockMenu(content), 'grant')
@@ -10599,7 +11043,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     } finally {
       restore()
       teardown()
-      document.querySelectorAll('.cmd-overflow-menu').forEach((m) => m.remove())
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     }
   })
 
@@ -10622,7 +11066,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     } finally {
       restore()
       teardown()
-      document.querySelectorAll('.cmd-overflow-menu').forEach((m) => m.remove())
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     }
   })
 
@@ -10666,7 +11110,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     } finally {
       restore()
       teardown()
-      document.querySelectorAll('.cmd-overflow-menu').forEach((m) => m.remove())
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     }
   })
 
@@ -10712,7 +11156,161 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     } finally {
       restore()
       teardown()
-      document.querySelectorAll('.cmd-overflow-menu').forEach((el) => el.remove())
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    }
+  })
+
+  // ── a stopped command is cancelled, never failed (nocx-9bpeq.19) ─────────
+  //
+  // The backend's own completion fact (contracts/lifecycle.changed.
+  // schema.json's `attempt`) states only exitCode, completedAt and fence —
+  // never a cause — so SIGINT's 130 and a program's own exit 130 are
+  // otherwise indistinguishable. These two tests are the pairing the bead
+  // asks for: the SAME exit code, through the SAME completion path, reading
+  // two different ways depending on whether nocx actually sent the signal.
+
+  it('a command stopped through the pane settles as cancelled, never failed', async () => {
+    const client = makeClient()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      const handler = lifecycleHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('sleep 30')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-stop-19',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'sleep 30',
+        },
+      })
+      const rec = scrollbackFor(content).blockManager.runningBlock!
+      expect(rec).not.toBeNull()
+
+      // The REAL stop path: the Stop menu item, signalActiveCommand, the
+      // pane's session.signal — not a status flipped by hand.
+      itemNamed(runningBlockMenu(content), 'stop')!.click()
+      expect(signalsSent(content)).toEqual(['stop'])
+
+      // The escalation ladder's SIGINT rung. `fence` is REQUIRED here, not
+      // decorative: lifecycle/state.ts's own `freezeBlock` — the gate
+      // terminal-content.ts's `freezeBlock` callback calls before it will
+      // even reach `scrollback.freezeFromAttempt` at all — refuses an
+      // attempt with `fence === undefined` outright (ADR-0024 §7), so
+      // omitting it here left `freezeFromAttempt` never called and
+      // `rec.status` stuck at 'running'. A real authenticated completion
+      // always carries one (contracts/lifecycle.changed.schema.json:
+      // "Present exactly when state is completed"); this is unsighted here
+      // on purpose, so the deferral window (FENCE_DEFER_MS) is what settles
+      // the visual freeze, exactly as a fence still in flight over the pty
+      // would — `rec.status` does not wait for it either way.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-stop-19',
+          state: 'completed',
+          exitCode: 130,
+          completedAt: '2026-09-15T00:00:00Z',
+          fence: '9'.repeat(64),
+        },
+      })
+      expect(rec.status).toBe('cancelled')
+
+      await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
+      expect(rec.el.dataset.outcome).not.toBe('failure')
+      expect(rec.el.dataset.outcome).toBe('cancelled')
+      expect(rec.el.classList.contains('cmd-block')).toBe(true)
+      expect(
+        rec.el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])')
+          ?.textContent,
+      ).toBe('Stopped')
+    } finally {
+      restore()
+      teardown()
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    }
+  })
+
+  it('a program that exits 130 on its own, with no stop request, still reads as failure', async () => {
+    const client = makeClient()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      const handler = lifecycleHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('sh -c "exit 130"')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-self-19',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'sh -c "exit 130"',
+        },
+      })
+      const rec = scrollbackFor(content).blockManager.runningBlock!
+      expect(rec).not.toBeNull()
+
+      // No Stop, no ⋮ item, no session.signal at all — the SAME exit code
+      // the test above delivers, but nothing in nocx asked for it.
+      expect(signalsSent(content)).toEqual([])
+      // `fence` required — see the sibling test's comment: without it,
+      // lifecycle/state.ts's `freezeBlock` refuses the completion before
+      // `freezeFromAttempt` is ever called, and `rec.status` never leaves
+      // 'running'.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-self-19',
+          state: 'completed',
+          exitCode: 130,
+          completedAt: '2026-09-15T00:00:00Z',
+          fence: '1'.repeat(64),
+        },
+      })
+      expect(rec.status).toBe('failure')
+
+      await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
+      expect(rec.el.dataset.outcome).toBe('failure')
+      expect(
+        rec.el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])')
+          ?.textContent,
+      ).toBe('Exit 130')
+    } finally {
+      restore()
+      teardown()
     }
   })
 })
@@ -12441,7 +13039,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       affordance!.click()
 
       // Counted as a person mark, and the rows are painted as granted.
-      const chip = document.querySelector<HTMLElement>('.nocx-editor-grant')
+      const chip = document.querySelector<HTMLElement>('[data-control="grant"]')
       expect(chip?.textContent).toContain('· 1')
       expect(rows[1].dataset.granted).toBe('true')
       expect(rows[2].dataset.granted).toBe('true')
@@ -12533,30 +13131,30 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       expect(editorOf(content).isVisible).toBe(false)
 
       await vi.waitFor(() =>
-        expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).toBe(
-          'stopped',
-        ),
+        expect(
+          answer.querySelector(
+            ':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])',
+          )?.textContent,
+        ).toBe('stopped'),
       )
       expect(answer.dataset.turnState).toBe('cancelled')
-      expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).not.toBe(
-        'failed',
-      )
+      expect(answer.dataset.outcome).toBe('cancelled')
       expect(answer.querySelector('[data-answer-body]')?.textContent).toContain(
         'partial prose survives',
       )
 
       // The notification is allowed to arrive after the reserved cancellation
-      // response; it must be idempotent and cannot replace the stopped chip.
+      // response; it must be idempotent and cannot replace the stopped word.
       const state = client.dispatcher.subscribe.mock.calls.find(
         ([method]) => method === 'agent.runState',
       )?.[1] as ((params: unknown) => void) | undefined
       state!({ runId: 42, entryId: 'entry-42', state: 'cancelled', droppedDeltas: 0 })
-      expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).not.toBe(
-        'failed',
-      )
-      expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).toBe(
-        'stopped',
-      )
+      expect(answer.dataset.outcome).not.toBe('failure')
+      expect(answer.dataset.outcome).toBe('cancelled')
+      expect(
+        answer.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])')
+          ?.textContent,
+      ).toBe('stopped')
     } finally {
       teardown()
     }
@@ -12712,7 +13310,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     )
     const input = document.createElement('input')
     const menu = document.createElement('div')
-    menu.className = 'cmd-overflow-menu'
+    menu.className = 'ui-context-menu'
     let overlayClosed = false
     let overlay: ReturnType<typeof pushOverlay> | null = null
     try {
@@ -13362,9 +13960,11 @@ describe('replayed completion restores a durable block outcome (nocx-gm21o)', ()
         '[data-entry-id="entry-replayed-command"]',
       )
       expect(
-        restored?.querySelector('.cmd-header-exit')?.textContent,
+        restored?.querySelector(
+          ':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])',
+        )?.textContent,
         'the restored block still reads unknown after its completion replayed',
-      ).toBe('exit 7')
+      ).toBe('Exit 7')
     } finally {
       teardown()
     }

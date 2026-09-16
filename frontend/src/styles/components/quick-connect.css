@@ -250,3 +250,13 @@
   font-family: var(--font-family-mono);
   white-space: nowrap;
 }
+
+/* The palette has no title, so the dialog's close control has a row to itself
+   above the filter. That row sits close to the panel's top edge and close to
+   the filter (owner review, 2026-09-15): the header's margins pull it up into
+   the panel's padding and tighten the gap below it. Placement only — the
+   Dialog and its IconButton paint themselves. */
+.nocx-dialog__panel:has(.quick-connect) > .nocx-dialog__header {
+  margin-top: calc(-1 * var(--space-3));
+  margin-bottom: var(--space-2);
+}

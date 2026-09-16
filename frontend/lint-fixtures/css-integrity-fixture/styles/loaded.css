@@ -10,9 +10,16 @@
   font-family: var(--fixture-never-declared);
 }
 
-/* A var() WITH a fallback is legitimate and must not be reported. */
+/* A var() WITH a fallback is reported when nothing declares the name and no
+   source sets it — the fallback is then the only value that can ever render. */
 .fixture-uses-fallback {
   font-family: var(--fixture-also-never-declared, monospace);
+}
+
+/* A fallback for a property a source file sets (runtime-property.ts) is the
+   value before the first write, and must not be reported. */
+.fixture-uses-runtime-property {
+  width: var(--fixture-runtime-width, 240px);
 }
 
 /* Rule 11 fixture — control CSS in a surface stylesheet.

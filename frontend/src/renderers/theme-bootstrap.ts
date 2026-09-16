@@ -29,7 +29,7 @@ import { resolveValidatedITheme, setCurrentTheme, DEFAULT_TERMINAL_THEME } from 
 
 // ── Constants ───────────────────────────────────────────────────────────
 
-export const DEFAULT_THEME_ID = 'tokyo-night'
+export const DEFAULT_THEME_ID = 'graphite'
 
 /** Versioned localStorage key for the bootstrap cache. Cache format v1. */
 export const STORAGE_KEY = 'nocx:bootstrap:theme:v1'
@@ -46,6 +46,7 @@ export const STORAGE_KEY = 'nocx:bootstrap:theme:v1'
  * options in internal/settings/settings.go.
  */
 export const KNOWN_THEME_IDS: ReadonlySet<string> = new Set([
+  'graphite',
   'tokyo-night',
   'light',
   'ayu-dark',

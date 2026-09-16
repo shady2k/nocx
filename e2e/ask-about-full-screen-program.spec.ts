@@ -406,7 +406,9 @@ function answerBlock(page: Page, question: string) {
 }
 
 async function answerFinished(page: Page, question: string): Promise<void> {
-  await expect(answerBlock(page, question).locator('.cmd-header-exit')).toHaveText('completed', {
+  // Success is silent (spec 2026-09-14 §3.1): the outcome attribute is the
+  // observable, the word `completed` never reaches the DOM.
+  await expect(answerBlock(page, question)).toHaveAttribute('data-outcome', 'success', {
     timeout: 30_000,
   })
 }
@@ -863,8 +865,8 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
       gridFullscreen: false,
     })
 
-    await running.locator('.cmd-overflow-btn').click()
-    await page.locator('.cmd-overflow-menu-item[data-action="stop"]').click()
+    await running.locator('[data-block-actions]').click()
+    await page.locator('.ui-context-menu__item[data-item-id="stop"]').click()
     await expect.poll(async () => (await recorded(page)).signalResults.length).toBeGreaterThan(0)
     const signal = (await recorded(page)).signalResults.at(-1)
     const fourFacts = { lifecycle, beforeStop, signal }

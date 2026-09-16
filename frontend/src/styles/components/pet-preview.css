@@ -18,7 +18,7 @@
      would show one ledge instead of two. */
   height: 210px;
   border: 1px solid var(--color-divider);
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--control-radius-md);
   background: var(--color-canvas);
 }
 
@@ -42,7 +42,7 @@
 
 .pet-preview__chip {
   padding: 1px var(--space-2);
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--control-radius-sm);
   background: var(--color-chrome);
   color: var(--color-text-dim);
   font-size: var(--font-size-xs);

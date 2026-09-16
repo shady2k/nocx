@@ -51,8 +51,8 @@
 }
 
 .ui-icon-button[data-size='xs'] > svg {
-  width: 13px;
-  height: 13px;
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
 }
 
 .ui-icon-button[data-size='sm'] {
@@ -61,8 +61,8 @@
 }
 
 .ui-icon-button[data-size='sm'] > svg {
-  width: 16px;
-  height: 16px;
+  width: var(--icon-size-md);
+  height: var(--icon-size-md);
 }
 
 .ui-icon-button[data-size='md'] {
@@ -73,29 +73,24 @@
 }
 
 /* ── The icon ────────────────────────────────────────────────────────────
-   An icon-only button owns how big its icon is. This was
-   `.activity-bar .ui-icon-button svg` in style.css — a surface reaching past the
-   component into markup the component renders (T20, nocx-zhjx) — and it could not
-   simply be deleted: the kit's icons carry a viewBox and no intrinsic size, so with
-   no rule at all an SVG child renders at the default 300x150.
-
-   `1em` ties the icon to the button's own font-size, so an icon and a text glyph at
-   the same `data-size` come out the same size. A size that needs a different box
-   says so, which is what `lg` is: the activity bar's 48px rail buttons carry a 24px
-   glyph, and 24px is not a step on the type scale. */
+   An icon-only button owns how big its icon is, and says it with an icon-size
+   token (spec §8). The kit's icons carry a viewBox and no intrinsic size, so
+   with no rule at all an SVG child renders at the default 300x150. This used to
+   be `1em`, tying the glyph to the button's font-size; the md button's 16.8px
+   was never a size anybody chose, and a glyph box is not type. */
 
 .ui-icon-button > svg {
-  width: 1em;
-  height: 1em;
+  width: var(--icon-size-md);
+  height: var(--icon-size-md);
 }
 
 /* `lg` sizes the GLYPH and deliberately not the button. Where a rail button's hit
    area comes from is the rail's business — it is placement, and `.activity-bar`
-   still declares it. A component that assumed a 48px column would be wrong the
-   first time one of these appeared anywhere else. */
+   still declares it. Its only consumer is the activity rail (sidebar.tsx), whose
+   glyphs go from 24px to 20px here (spec §8). */
 .ui-icon-button[data-size='lg'] > svg {
-  width: 24px;
-  height: 24px;
+  width: var(--icon-size-lg);
+  height: var(--icon-size-lg);
 }
 
 .ui-icon-button:hover {
@@ -127,4 +122,41 @@
    the component's shape, which is the one thing rule 3 does not allow it to do. */
 .ui-icon-button[data-square='true'] {
   border-radius: 0;
+}
+
+/* ── Primary — accent-filled (spec 2026-09-15 §1.2, §3) ─────────────────
+   The one appearance variant besides the default transparent affordance: a
+   control that SUBMITS rather than merely acts, first needed by the
+   composer's submit arrow (ComposerFrame, a different task's file — this
+   identity only supplies the appearance it places). Composes with any
+   `data-size`; the frame places width/height, this owns fill and ink. */
+.ui-icon-button[data-appearance='primary'] {
+  background: var(--color-accent);
+  color: var(--color-canvas);
+}
+
+.ui-icon-button[data-appearance='primary']:hover {
+  background: var(--color-accent-hover);
+  color: var(--color-canvas);
+}
+
+/* The generic `:disabled` rule above already dims this by opacity — the
+   accent fill dims with it rather than disappearing under a neutral one,
+   which would read as "not filled" instead of "filled but inert". */
+.ui-icon-button[data-appearance='primary']:disabled {
+  background: var(--color-accent);
+  color: var(--color-canvas);
+}
+
+.ui-icon-button[data-appearance='submit'] {
+  width: var(--terminal-composer-control-size);
+  height: var(--terminal-composer-control-size);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--control-radius-md);
+  color: var(--color-text);
+  background: var(--color-control-fill);
+}
+.ui-icon-button[data-appearance='submit'] > svg {
+  width: var(--icon-size-md);
+  height: var(--icon-size-md);
 }

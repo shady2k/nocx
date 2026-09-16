@@ -7,9 +7,10 @@
 // computes no layout, so the rectangles are stated — the arithmetic they feed
 // is what is under test, and the pixels are confirmed in the browser.
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { PetOverlay, timingFrom } from './overlay'
+import { PetOverlay, timingFrom, DEFAULT_LEDGES } from './overlay'
 import { loadPack, type ImageSource, type PetPack } from './pack'
 import { DEFAULT_TUNING, type PetTuning } from './pet'
+import { CommandEditor } from '../editor'
 
 const CELL = 10
 
@@ -797,5 +798,24 @@ describe('ledges keep their names', () => {
     await new Promise((r) => setTimeout(r, 0))
     s.pump(0.3)
     expect(s.blocks.querySelector<HTMLElement>('.cmd-block')!.dataset.petLedge).toBe(first)
+  })
+})
+
+describe('the composer is not ground (spec §5.5)', () => {
+  it('no default ledge selector matches anything inside the composer', () => {
+    const pane = document.createElement('div')
+    pane.className = 'pane active'
+    document.body.append(pane)
+    const ed = new CommandEditor({ submit: vi.fn(), cancel: vi.fn() })
+    ed.mount(pane)
+    ed.show()
+    ed.setLocation('root@host')
+    ed.setModelChip({ kind: 'ready', endpoint: 'openrouter', model: 'm-a' })
+    for (const { selector } of DEFAULT_LEDGES) {
+      const inside = [...document.querySelectorAll(selector)].filter((el) => ed.root.contains(el))
+      expect(inside, selector).toEqual([])
+    }
+    ed.dispose()
+    pane.remove()
   })
 })

@@ -1,14 +1,6 @@
 /* ── Tokyo Night theme — the current palette, extracted from 27 hex values
    ADR-0013 §2. All colour literals live here and only here. */
 
-/* Tokyo Night is the default theme, so it is the one file allowed a bare
-   `:root` block — what applies before `data-theme` is set, and if bootstrap
-   ever fails to set it. The attribute selector is written `:root[data-theme=…]`
-   (specificity 0,2,0) rather than `[data-theme=…]` (0,1,0) so that every
-   attribute-scoped theme outranks this default whatever order the files are
-   imported in. Import order deciding which theme wins is how a missing
-   @import passed for a working theme switch (nocx-u7wq.2). */
-:root,
 :root[data-theme='tokyo-night'] {
   /* ── UI colour tokens (§2.1) ─────────────────────────────────────── */
   --color-canvas: #1a1b26;
@@ -22,6 +14,25 @@
      safe convergence to make deliberately later.) */
   --color-chrome: #0e0f15;
   --color-chrome-rail: #111219;
+  /* The terminal screen's OWN chrome band — the pane context strip and the
+     running process footer (mockup decision 2026-09-15 §1.9, §3) — is a
+     third role, deliberately not --color-chrome above. The mockups' context
+     and footer bands read LIGHTER than the terminal ground beneath them;
+     --color-chrome here is darker than --color-canvas (the shell's own
+     chrome-behind-content direction, unrelated and correct for what it
+     paints — the tab bar, the rail). Reusing it for the terminal band would
+     have painted context/footer chrome darker than the terminal ground,
+     the wrong direction the mockups draw. This is exactly this theme's
+     --color-surface value (#1f2335, already lighter than --terminal-
+     background/--color-canvas #1a1b26) — the nearest existing hue with the
+     right relationship, not a new colour invented for this pass. Every
+     theme sets this explicitly (12 files); a component never falls back to
+     a literal near it (ADR-0013 §4). */
+  --color-terminal-chrome: #1f2335;
+  /* A filled control resting ON the terminal-chrome card — the composer's
+     Run segment and submit button: one step from the card toward the text,
+     so it reads as a control in every theme, dark or light. */
+  --color-control-fill: #2d3246;
   --color-surface-sunken: #24283b;
   --color-tab-active: #1f2235;
   --color-surface: #1f2335;
@@ -43,6 +54,12 @@
   --color-success: #9ece6a;
   --color-warning: #e0af68;
   --color-danger: #f7768e;
+  /* The failed row's ground (spec 2026-09-14 §3.3). A solid per-theme value,
+     never a color-mix of danger into the ground — ADR-0013 §3.1 measured those.
+     Chosen as the smallest step from --terminal-background that a person can see
+     (ΔL* ≥ 2) while text and the danger status word keep 4.5:1 on it; the test
+     in theme-catalogue.test.ts holds every theme to the same numbers. */
+  --color-danger-surface: #231f2a;
   --color-accent-secondary: #9d7cd8;
   --color-error: #ff6b6b;
 

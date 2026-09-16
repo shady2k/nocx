@@ -1,0 +1,54 @@
+/* ui-shell-command (ui/README table) — the terminal-command token
+   presentation (spec 2026-09-15 §1.6): a small pale chevron; the executable
+   in accent; ordinary arguments and flags in body text. Output colours
+   (a green `ok`, a diff's `+`/`-`) represent actual output and are NOT this
+   identity's concern — they never repeat the input highlighter's palette,
+   which is exactly the thing this identity exists to stop the COMMAND row
+   from doing.
+
+   Scoped under `.ui-shell-command` so it never becomes a global recolour of
+   every `.tok-*` consumer (style.css owns that generic vocabulary — an
+   assistant code fence keeps its full syntax palette). Every rule here pairs
+   a `.tok-*` class with this identity and nothing else, and every selector
+   below is two classes deep (or three for the unresolved override) so it
+   wins on specificity over the generic single-class rules regardless of
+   stylesheet import order (ADR-0013 §1's "one file per component" makes no
+   promise about import order between files that do not address the same
+   element — this file and the generic `.tok-*` block in style.css do). */
+
+.ui-shell-command .tok-command {
+  font-weight: 600;
+  color: var(--color-accent);
+}
+
+.ui-shell-command .tok-path,
+.ui-shell-command .tok-flag,
+.ui-shell-command .tok-atom,
+.ui-shell-command .tok-string,
+.ui-shell-command .tok-heredoc {
+  color: var(--color-text);
+}
+
+.ui-shell-command .tok-operator {
+  color: var(--color-text-muted);
+}
+
+.ui-shell-command .tok-comment {
+  color: var(--color-text-dim);
+}
+
+.ui-shell-command .tok-variable,
+.ui-shell-command .tok-keyword {
+  color: var(--color-accent-secondary);
+}
+
+/* A command word the session's snapshot says does not exist keeps the
+   ordinary text colour under this identity too — the warning is the dotted
+   underline `.tok-unresolved` already paints globally (style.css), which
+   this identity does not touch. Three classes deep: `.tok-command` above is
+   already two, and `.tok-command.tok-unresolved` in style.css is also two,
+   so without the third class here, source order between the two files would
+   decide the winner instead of this rule. */
+.ui-shell-command .tok-command.tok-unresolved {
+  color: var(--color-text);
+}

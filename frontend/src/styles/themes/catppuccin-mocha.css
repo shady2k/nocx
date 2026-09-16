@@ -21,6 +21,19 @@
      canvas — the tab bar, the vertical strip and the settings rail. */
   --color-chrome: #11111b;
   --color-chrome-rail: #181825;
+  /* The terminal screen's own chrome band (pane context strip, running
+     process footer — mockup decision 2026-09-15 §1.9, §3): reads
+     LIGHTER than --terminal-background, unlike --color-chrome above,
+     which is darker than --color-canvas for the shell's own chrome-
+     behind-content role. This theme's existing --color-surface value —
+     already lighter than the terminal ground and distinct from it — is
+     the nearest fit; see tokyo-night.css for the full rationale. Every
+     theme sets this explicitly (ADR-0013 §4). */
+  --color-terminal-chrome: #26273a;
+  /* A filled control resting ON the terminal-chrome card — the composer's
+     Run segment and submit button: one step from the card toward the text,
+     so it reads as a control in every theme, dark or light. */
+  --color-control-fill: #35374b;
   --color-surface-sunken: #181825;
   --color-tab-active: #313244;
   --color-surface: #26273a;
@@ -41,6 +54,7 @@
   --color-success: #a6e3a1;
   --color-warning: #fab387;
   --color-danger: #f38ba8;
+  --color-danger-surface: #272233;
   --color-accent-secondary: #cba6f7;
   --color-error: #eba0ac;
 

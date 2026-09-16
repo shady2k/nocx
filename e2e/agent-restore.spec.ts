@@ -257,14 +257,12 @@ function blockFor(page: Page, text: string) {
 }
 
 async function finished(page: Page, text: string): Promise<void> {
-  // The turn's OWN chip — `:scope > .cmd-header`, never a child command's
-  // nested `ok` chip (both are `.cmd-header-exit`).
-  await expect(blockFor(page, text).locator(':scope > .cmd-header .cmd-header-exit')).toHaveText(
-    'completed',
-    {
-      timeout: 30_000,
-    },
-  )
+  // The turn's OWN outcome attribute, on its own `.cmd-block` — never a
+  // child command's, which is a descendant. Success is silent (spec
+  // 2026-09-14 §3.1), so the attribute is what there is to wait on.
+  await expect(blockFor(page, text)).toHaveAttribute('data-outcome', 'success', {
+    timeout: 30_000,
+  })
 }
 
 test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {

@@ -62,5 +62,11 @@ function InnerHTMLAssignment() {
   return el
 }
 
+// Rule: nocx/no-raw-controls — a raw control built imperatively (nocx-9bpeq.10).
+// The rule used to see JSX only, so every imperative surface could build one.
+function ImperativeRawSelect() {
+  return document.createElement('select')
+}
+
 // Export so TypeScript treats this as a module
 export const _unused: Component<Record<string, never>> = () => null

@@ -76,7 +76,7 @@ const INPUT = '.pane.active .nocx-editor-input'
  *  state and strict mode would fail the wait rather than the assertion.
  *  Filtering to what is on screen also makes the COUNT meaningful: one chip
  *  is a rung of the ladder, two is the ready pair. */
-const CHIPS = `.pane.active .nocx-editor-model:visible`
+const CHIPS = `.pane.active [data-control^="model"]:visible`
 
 const test = base
 
@@ -86,9 +86,9 @@ const nonce = Date.now().toString(36)
 
 const ENDPOINT_NAME = `Readiness Fake ${nonce}`
 const MODEL = 'e2e-model'
-/** Forty characters, asserted below rather than counted by eye: the chip's
- *  truncation (style.css .nocx-editor-model) exists for ids this long, and
- *  the claim under test is that one of them does not wrap the row. */
+/** Forty characters, asserted below rather than counted by eye: the model
+ *  control's truncation (Button's `data-truncate`) exists for ids this long,
+ *  and the claim under test is that one of them does not wrap the row. */
 const LONG_MODEL = 'openrouter/qwen3-235b-a22b-thinking-2507'
 
 let backend: VaultBackend
@@ -263,7 +263,10 @@ test.describe('the assistant says what it needs, one rung at a time (nocx-rikz5)
     await backToTerminal(page)
 
     const chrome = page.locator('.pane.active .nocx-editor-chrome')
-    const cwd = page.locator('.pane.active .nocx-editor-cwd')
+    // The composer's where-line: a kit Meta before nocx-9bpeq.15, now the
+    // same PromptContext primitive a block's header draws (spec
+    // 2026-09-15 §2, §6).
+    const context = page.locator('.pane.active .nocx-editor-context .ui-prompt-context')
     // Run: no chip at all, because no model answers anything here.
     await expect(page.locator(CHIPS)).toHaveCount(0)
     const before = (await chrome.boundingBox())?.height
@@ -272,13 +275,14 @@ test.describe('the assistant says what it needs, one rung at a time (nocx-rikz5)
     const chips = page.locator(CHIPS)
     await expect(chips).toHaveText([ENDPOINT_NAME, LONG_MODEL])
 
-    // The row is one chip row, always (style.css .nocx-editor-chrome): two
+    // The row is one chip row, always (composer.css .nocx-editor-chrome): two
     // chips appearing must not move the composer, because the scrollback
     // hangs from it.
     expect((await chrome.boundingBox())?.height).toBe(before)
-    // One line, ellipsised — the chip is exactly as tall as the chip that
-    // was already in the row. A wrapped id would be taller and the height
-    // above would have moved with it.
-    expect((await chips.last().boundingBox())?.height).toBe((await cwd.boundingBox())?.height)
+    // One line, ellipsised: a control fits inside the row's fixed height. A
+    // wrapped id would be taller than the row and the height above would move.
+    const row = (await chrome.boundingBox())!.height
+    expect((await chips.last().boundingBox())!.height).toBeLessThanOrEqual(row)
+    await expect(context).toBeVisible()
   })
 })

@@ -133,7 +133,9 @@ function answerBlock(page: Page, question: string) {
 async function answerFinished(page: Page, question: string): Promise<void> {
   const turn = answerBlock(page, question)
   await expect(turn).toBeVisible({ timeout: 30_000 })
-  await expect(turn.locator(':scope > .cmd-header .cmd-header-exit')).toHaveText('completed', {
+  // Success is silent (spec 2026-09-14 §3.1): the outcome attribute is the
+  // observable, on the turn's own root.
+  await expect(turn).toHaveAttribute('data-outcome', 'success', {
     timeout: 30_000,
   })
 }

@@ -33,8 +33,9 @@
  *   orchestration runs for a question).
  * - The answer renders as an ANSWER BLOCK in the flow: a `.cmd-block` whose
  *   header is the QUESTION, whose `.cmd-output[data-answer-body]` streams
- *   the deltas, and whose header gains a `completed` chip
- *   (`.nocx-chip.cmd-header-exit`) when the run terminalizes.
+ *   the deltas, and which carries `data-outcome="success"` — silently, the
+ *   way a successful block always does (spec 2026-09-14 §3.1) — when the
+ *   run terminalizes.
  * - The model receives the marked block as metadata naming its `session.read`
  *   id; only the tool result carries the block's output, and no unmarked
  *   block's output can reach the answer (bead acceptance 2).
@@ -134,7 +135,7 @@ const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
  *  So "the chip names the block it came from" is asserted as "the block the
  *  selection came from is the one that is marked", which is the same claim
  *  and does not restate a list the surface refuses to keep twice. */
-const GRANT_CHIP = '.pane.active .nocx-editor-grant'
+const GRANT_CHIP = '.pane.active [data-control="grant"]'
 const GRANTED = '.pane.active .cmd-block[data-granted="true"]'
 
 /** The blocks a question would carry, by their own header text — read off
@@ -304,12 +305,14 @@ async function pointAtFromRun(block: Locator): Promise<void> {
   const indicator = page.locator('.pane.active .ui-mode-indicator:visible')
   await expect(indicator).toHaveAttribute('data-target', 'shell')
 
-  await block.locator('.cmd-overflow-btn').click()
-  await expect(page.locator('.cmd-overflow-menu-item[data-action="grant"]')).toHaveCount(0)
-  const copyCommand = page.locator('.cmd-overflow-menu-item').filter({ hasText: 'Copy command' })
+  await block.locator('[data-block-actions]').click()
+  await expect(page.locator('.ui-context-menu__item[data-item-id="grant"]')).toHaveCount(0)
+  const copyCommand = page
+    .locator('[data-testid="block-actions-menu"] .ui-context-menu__item')
+    .filter({ hasText: 'Copy command' })
   await expect(copyCommand).toBeVisible()
   await copyCommand.click()
-  await expect(page.locator('.cmd-overflow-menu')).toHaveCount(0)
+  await expect(page.locator('[data-testid="block-actions-menu"]')).toHaveCount(0)
 
   await page.locator(INPUT).click()
   await selectWholeOutput(block)
@@ -638,19 +641,19 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
       .toBe('streaming')
 
     // Release the held stream: the rest arrives, the run terminalizes, and
-    // the block's header gains the completion chip — the surface's own word
-    // for "the answer finished".
+    // the block settles to the success outcome — silently, the surface's own
+    // way of saying "the answer finished" (spec 2026-09-14 §3.1).
     fake.release(requestAfterRead.id)
     const answer = `The first block output contains ${markerA}.`
     await expect(answerBody).toContainText(answer, { timeout: 15_000 })
     await expect
       .poll(() => fake.requests().find((request) => request.id === requestAfterRead.id)?.state)
       .toBe('done')
-    await expect(answerBlock.locator('.cmd-header-exit')).toHaveText('completed', {
+    await expect(answerBlock).toHaveAttribute('data-outcome', 'success', {
       timeout: 15_000,
     })
     // Answer-block identity: the question's block is the agent's answer
-    // block (header = question, [data-answer-body] output, completed chip),
+    // block (header = question, [data-answer-body] output, success outcome),
     // not a shell command block — its body carries no shell error. The
     // stronger "nothing shell ran" half (zero pty bytes, no lifecycle
     // attempt, no running block) is proven by the unit suite's ask-seam
@@ -807,8 +810,8 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await expect(body2).toContainText(answerB, { timeout: 15_000 })
     await expect(body1).not.toContainText(answerB)
     await expect(body2).not.toContainText(answerA)
-    await expect(blockQ1.locator('.cmd-header-exit')).toHaveText('completed')
-    await expect(blockQ2.locator('.cmd-header-exit')).toHaveText('completed')
+    await expect(blockQ1).toHaveAttribute('data-outcome', 'success')
+    await expect(blockQ2).toHaveAttribute('data-outcome', 'success')
   })
 
   test('the Test button on a saved endpoint probes with the STORED credential, and a typed key wins (nocx-reu5)', async ({
@@ -1008,7 +1011,7 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
       'answered after unlock',
       { timeout: 15_000 },
     )
-    await expect(answer.locator('.cmd-header-exit')).toHaveText('completed', {
+    await expect(answer).toHaveAttribute('data-outcome', 'success', {
       timeout: 15_000,
     })
   })
@@ -1031,9 +1034,12 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await expect(unlock).not.toBeVisible({ timeout: 10_000 })
 
     const answer = answerBlockOf(page, question)
-    await expect(answer.locator('.cmd-header-exit')).toHaveText('stopped', {
+    await expect(
+      answer.locator(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
+    ).toHaveText('stopped', {
       timeout: 15_000,
     })
+    await expect(answer).toHaveAttribute('data-outcome', 'cancelled', { timeout: 15_000 })
     expect(fake.requests()).toHaveLength(base)
     await expect(answer).not.toContainText('failed')
   })

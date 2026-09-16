@@ -59,6 +59,24 @@ describe('IconButton', () => {
     expect(btn.hasAttribute('aria-selected')).toBe(false)
   })
 
+  it('omits data-appearance by default — the transparent affordance (round 20)', () => {
+    subject()
+    const btn = screen.getByRole('button')
+    expect(btn.hasAttribute('data-appearance')).toBe(false)
+  })
+
+  it('omits data-appearance when appearance is explicitly default (round 20)', () => {
+    subject({ appearance: 'default' })
+    const btn = screen.getByRole('button')
+    expect(btn.hasAttribute('data-appearance')).toBe(false)
+  })
+
+  it('sets data-appearance to primary — the accent-filled submit register (round 20)', () => {
+    subject({ appearance: 'primary' })
+    const btn = screen.getByRole('button')
+    expect(btn.getAttribute('data-appearance')).toBe('primary')
+  })
+
   it('sets data-rail-indicator when railIndicator is true', () => {
     subject({ railIndicator: true, selected: true })
     const btn = screen.getByRole('button')

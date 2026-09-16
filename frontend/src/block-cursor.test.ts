@@ -95,7 +95,10 @@ describe('the composer draws the terminal block cursor', () => {
     //
     // Read from the stylesheet because jsdom loads no CSS and computes no
     // animation: the file is the only place this fact exists.
-    const css = readFileSync(resolve(import.meta.dirname ?? '.', 'style.css'), 'utf8')
+    const css = readFileSync(
+      resolve(import.meta.dirname ?? '.', 'styles/surfaces/composer.css'),
+      'utf8',
+    )
     const rule = /\.nocx-editor \.nocx-block-cursor \{[^}]*animation:([^;]*);/.exec(css)
     expect(rule).not.toBeNull()
     // The period comes from the property, and the fallback beside it — which

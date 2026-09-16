@@ -1,0 +1,328 @@
+/* The composer — the next block of the ledger, the one that has not run yet
+   (spec .internal/specs/2026-09-14-terminal-screen-visual-register-design.md §5).
+   A SURFACE, deliberately not styles/components/: it places kit components and
+   must never repaint them, and surface-paints-kit only watches files outside the
+   kit layer. */
+
+/* THE THIN PLACEMENT WRAPPER, not the card (spec 2026-09-15 §4). The old
+   pane-wide composer seam — a full-width top border, background and
+   padding painted directly here — is gone with the design it drew: an
+   inset CARD now owns the ground, the border and the padding
+   (ui/composer-frame.ts, styles/components/composer-frame.css), leaving
+   this element only the concerns a surface may still have — its flex slot
+   in the pane column, and the positioning context the overlay placement
+   below needs. */
+.nocx-editor {
+  position: relative;
+  flex: none;
+}
+
+.nocx-summon-stack > .nocx-editor[data-placement='overlay'] {
+  position: relative;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  z-index: auto;
+  flex: none;
+  box-sizing: border-box;
+}
+
+.nocx-freeze-dismiss {
+  /* Placement only: the kit's IconButton carries its own size, shape and
+     hover (ui/icon-button.css). This cell keeps it on the chrome row's
+     baseline beside the freeze badge it belongs to. */
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Every presentation that is not a prompt REMOVES this card and its box: the
+   composer's `hide()` sets `display:none`, and the height goes back to the
+   scroller. It kept its box for a while, so a submit could not move a
+   scrollback that hangs from the scroller's bottom edge — traded away once
+   the settle glide could play that displacement back instead, because the
+   reservation was costing an inline TUI on the normal buffer four rows of
+   pane. The history is in editor.ts on `hide()` (nocx-g6hnk, nocx-i4h04). */
+
+/* The meta row. A FIXED height, never a floor: the scrollback hangs from the
+   composer's bottom edge, so a row that grew when a control appeared would
+   move it at the moment of submit (nocx-i4h04, nocx-6c546). The kit Button at
+   size sm is exactly this tall, and Meta is shorter — the row's own height is
+   what holds the line, not either child's. It does not distribute its
+   children either (nocx-a44m): `margin-left: auto` on the controls group is
+   what keeps them at the right edge for any child count. */
+.nocx-editor-chrome {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--control-height-xs);
+  /* Prompt line to field (round 18, mockup pass): --space-1 read as no gap
+     at all once the prompt line grew to the command row's size — the two
+     rows nearly touched. --space-2 is the same air the mockup's chrome row
+     keeps above the boxed field. */
+  margin-bottom: var(--space-2);
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-2xs);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Where the pending command will run (spec §5.2): one kit Meta, host strong
+   when the session is remote. Placement only — Meta carries its own
+   appearance (ui/README: a surface may place a kit component, never repaint
+   it). */
+.nocx-editor-context {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* The controls for the target Enter reaches: recovery, the model endpoint and
+   model, and the grant — all kit ghost Buttons. `margin-left: auto` is what
+   pins the group to the row's right edge for any child count; the row itself
+   must not distribute (nocx-a44m). */
+.nocx-editor-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: auto;
+}
+
+/* Widths are placement. The floor keeps the grant count from twitching as it
+   changes; the ceilings bound the longest id (nocx-hp8p2.5, nocx-rikz5). The
+   ellipsis itself is Button's (data-truncate). */
+.nocx-editor-controls > [data-control='grant'] {
+  flex: 0 1 auto;
+  min-width: 13rem;
+  max-width: 18rem;
+}
+
+.nocx-editor-controls > [data-control='model-endpoint'],
+.nocx-editor-controls > [data-control='model'] {
+  max-width: 16rem;
+}
+
+.nocx-editor-input {
+  width: 100%;
+  background: transparent;
+  color: var(--color-text);
+  border: none;
+  outline: none;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-terminal);
+  line-height: var(--terminal-ui-line-height);
+  resize: none;
+  padding: 2px 8px 4px;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* CodeMirror 6 surface (ADR-0010). Auto-grow is layout, not arithmetic: the
+   box grows with its content and scrolls past the cap (spec §Decision 3).
+
+   The cap is 30 lines at the shared terminal UI line height plus the 6px vertical padding,
+   border-box — and never more than half the pane. Ten lines was the original
+   cap and it is too tight for the thing people actually paste: a curl with a
+   JSON body is twenty lines, and it arrived as a small scrolling window onto
+   a command the user could not see. Half the pane is the other side of that:
+   the prompt may take the room it needs, but never so much that the block it
+   belongs to disappears. MAX_ROWS in editor.ts is the same cap — the row
+   count is what fires `resized`, so a CSS box that keeps growing past it
+   stops telling the scrollback to follow.
+
+   BORDER-BOX, on purpose: the visible field (spec §6) adds a 1px border to
+   this same element (below), and the 30-row cap above was measured against
+   the padding alone. Border-box keeps the border inside that budget instead
+   of adding 2px on top of it, so MAX_ROWS in editor.ts and this calc still
+   agree at the cap. */
+.nocx-editor .cm-editor {
+  font-size: var(--font-size-terminal);
+  max-height: min(50vh, calc(30 * var(--terminal-ui-line-height) + 6px));
+  box-sizing: border-box;
+}
+
+/* The kit card owns the only border. CM6 and the mode switch occupy
+   separate columns in the card's open input row. */
+.nocx-editor .cm-scroller {
+  font-family: var(--font-family-mono);
+  line-height: var(--terminal-ui-line-height);
+  overflow-y: auto;
+  /* THE COMPOSER WRAPS, SO IT NEVER SCROLLS SIDEWAYS — and saying so is what
+     keeps it one height. CM6 ships `.cm-scroller { overflow-x: auto }` for the
+     editors that do scroll horizontally; this one runs `EditorView.lineWrapping`
+     with `word-break: break-word`, so a horizontal scrollbar here is a bar that
+     can never appear.
+
+     It still cost 10px. base.css styles `::-webkit-scrollbar` at 10px, which
+     makes every scrollbar in this app a CLASSIC one: it takes layout space
+     instead of floating over the content. WebKit reserved that gutter for the
+     EMPTY document and did not revisit the decision until the document changed,
+     so the card stood 10px taller until the first keystroke and then snapped
+     down — chip row, Run token and the scrollback hanging above it with it
+     (nocx-6c546). Chromium never reserved it, which is why this only ever
+     showed on macOS, where the app is WKWebView.
+
+     `overflow-x: hidden` rather than a `::-webkit-scrollbar` override on this
+     box: hiding the bar would leave a real overflow unreachable, whereas this
+     states the contract the wrapping already enforces. */
+  overflow-x: hidden;
+  /* The vertical centring within the field's row is now the outer grid's
+     job (`.ui-composer-frame__field { align-items: center }`,
+     composer-frame.css) rather than a flex trick on this element's own
+     ancestor — `.cm-editor` keeps CM6's forced `display: flex !important;
+     flex-direction: column` and this rule never has to negotiate with it.
+     `min-width: 0` is still needed on its own account: without it a flex
+     item's default auto minimum keeps this scroller from shrinking to
+     wrap, one more way the field could grow sideways instead of down. */
+  min-width: 0;
+}
+
+.nocx-editor .cm-content {
+  padding: 2px 8px 4px;
+}
+
+/* THE GHOST MAY NOT CHANGE THE HEIGHT OF THE LINE IT SITS ON.
+
+   CM6 draws an `<img class="cm-widgetBuffer">` beside every inline widget —
+   its own workaround for browser caret bugs next to uneditable content — and
+   styles it `height: 1em; vertical-align: text-top`. `text-top` puts that box
+   at the top of the line's CONTENT AREA, so whether it fits is a question
+   about the font's ascent and descent, not about the line height: with a font
+   whose content area is shorter than 1em the box hangs below it and the line
+   box grows to cover it.
+
+   The completion ghost is the only inline widget this editor draws, so the
+   growth arrives exactly when a suggestion appears — a card that twitches by
+   a pixel under the caret, taking the Run token and the whole scrollback
+   above it along. Measured across seven mono fonts at 11–18px, in WebKit and
+   Chromium: every stack is 0.000 except one, and the one is whatever
+   `ui-monospace` resolves to inside WKWebView (+0.34px there; Monaco is the
+   nearest reproducible stand-in and gives +0.344 in WebKit, +1.000 in
+   Chromium). Which is why it showed in the shipped macOS app and in no
+   browser the dev stand runs — the same shape as the scrollbar gutter above.
+
+   `top` rather than `text-top` — the box is aligned to the top of the LINE
+   BOX instead, and the buffer's box is its line-height, which is this line's
+   line-height, so it can never be the taller of the two and can never grow
+   it. That is a fact about the box model rather than about the font, and it
+   is what makes the rule font-independent: the same seven fonts all measure
+   0.000 with it, on both engines. The buffer stays in the DOM — deleting it
+   would take CM6's caret workaround with it. */
+.nocx-editor .cm-widgetBuffer {
+  vertical-align: top;
+}
+
+/* ── The cursor: the terminal's block, in the prompt ───────────────────
+   block-cursor.ts says why it is a block and why it is decorations. These
+   are the two shapes it takes, plus the bar it replaces.
+
+   The character the cursor stands on. `color` must beat the syntax token's
+   own colour and the mark span is nested inside it, so the two-class
+   selector is what wins — an `!important` here would be a rule whose
+   correctness nothing states. */
+.nocx-editor .nocx-block-cursor {
+  background: var(--terminal-cursor);
+  color: var(--terminal-cursor-accent);
+}
+
+/* …and it blinks, on the period CM6's cursor layer is blinking the other half
+   on. `--nocx-cursor-blink` is set by the editor's own theme from the single
+   declaration in block-cursor.ts. The fallback is that number written twice,
+   which is what the CSS-integrity gate requires of a property that arrives
+   from outside the cascade (the same shape as `--sidebar-width`), so the
+   duplicate is CHECKED rather than trusted: block-cursor.test.ts reads this
+   fallback and asserts it equals CURSOR_BLINK_MS. Change one and the other
+   fails.
+
+   The off phase restores the ordinary line — transparent behind, the syntax
+   token's own colour on top — because that is what a terminal shows between
+   blinks: the character, not a gap. `steps(1)` and two stops rather than a
+   fade, for the same reason.
+
+   Guarded by the motion query like every other animation in this file. CM6's
+   half cannot be guarded here — its animation is inline — so the rate handed
+   to drawSelection carries the same answer (block-cursor.ts). */
+@media (prefers-reduced-motion: no-preference) {
+  .nocx-editor .nocx-block-cursor {
+    animation: nocx-block-cursor-blink var(--nocx-cursor-blink, 1200ms) steps(1) infinite;
+  }
+}
+
+@keyframes nocx-block-cursor-blink {
+  0% {
+    background: var(--terminal-cursor);
+    color: var(--terminal-cursor-accent);
+  }
+
+  50% {
+    background: transparent;
+    color: inherit;
+  }
+}
+
+/* The end of the line, where there is no character to mark: CM6's own cursor
+   element, widened from a bar into the same block. It is the right mechanism
+   for exactly the two reasons the alternatives are the wrong ones — it lives
+   in an absolutely positioned layer, so no line box can grow around it, and
+   CM places it AT THE CARET rather than at the end of the line's content, so
+   a completion ghost stays behind it (`unam█e`, not `unam[e]█`).
+
+   `1ch` is one cell of the composer's monospace font, which is what makes it
+   the terminal's block rather than a wide bar. Nothing sets its height: CM
+   writes the line's height on the element itself.
+
+   The blink comes from CM6's base theme at the period editor.ts hands to
+   drawSelection — the same period the mark above animates on. It is not
+   controlled from this file, and cannot be: the layer writes an inline
+   `animation-name` on itself, which no rule here could ever outrank. */
+.nocx-editor .cm-cursorLayer .cm-cursor {
+  width: 1ch;
+  border-left: none;
+  background: var(--terminal-cursor);
+}
+
+/* …and it steps aside for the mark, which is the block whenever the caret has
+   a character to stand on. Two cursors on screen is the defect this whole
+   surface has already had once (nocx-dvdfx). */
+.nocx-editor .cm-editor:has(.nocx-block-cursor) .cm-cursorLayer .cm-cursor {
+  display: none;
+}
+
+/* No hanging indent, and no measured token width: the target switch is a
+   whole GRID COLUMN beside `.cm-editor` now (ask-entry.ts,
+   styles/components/composer-frame.css), so every line inside `.cm-editor`
+   — a second document line, a wrapped row — begins after the same column
+   boundary by construction, with nothing to reserve inside the document
+   itself. The rules that computed a hanging indent are gone with the
+   widget that needed them. */
+.nocx-editor .cm-line {
+  padding: 0;
+}
+
+/* ── The ask entry gesture (nocx-4wtlh) ────────────────────────────────
+   The target indicator — ADR-0004 §3's UI chip — is the prompt's sigil: it
+   says where Enter goes and it is the person's one explicit switch (click,
+   or ⌘/Ctrl+Enter). It used to render in a CM6 GUTTER, beside the content
+   and never inside it, so the textbox held exactly what the person typed.
+   Since the mockup pass (spec 2026-09-15 §4) it renders beside `.cm-editor`
+   entirely instead, in ComposerFrame's own leading grid column
+   (ask-entry.ts, styles/components/composer-frame.css) — a plain DOM
+   sibling, not a CM6 gutter, so there is no gutter CSS left to place here.
+   The reference chips a selection raises live in their own strip between
+   the chrome and the input: "if you ask, this comes with you". */
+
+/* ── The composition-time secret candidate mark (ADR-0021) ─────────────
+
+   A detected credential while the user is still typing: a quiet dotted
+   underline, nothing more — no panel, no focus change, no selection. The
+   mark says "⌘S will store this span", and it is the only thing it says.
+   The tier that decides which findings earn it lives in secret-kind.ts. */
+.nocx-editor .cm-secret-candidate {
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-decoration-color: var(--color-warning);
+  text-underline-offset: 3px;
+}

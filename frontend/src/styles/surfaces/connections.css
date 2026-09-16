@@ -36,7 +36,7 @@
 .cm-credential-card {
   padding: 8px;
   background: var(--color-surface-raised);
-  border-radius: var(--border-radius-md, 6px);
+  border-radius: var(--control-radius-md);
 }
 
 .cm-credential-card strong {

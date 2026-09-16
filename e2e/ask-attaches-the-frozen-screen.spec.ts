@@ -36,7 +36,7 @@ const serverBin = () => readStand().server
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
 const GRID = '.pane.active .xterm-live-container'
-const GRANT_CHIP = '.pane.active .nocx-editor-grant'
+const GRANT_CHIP = '.pane.active [data-control="grant"]'
 const FREEZE = '.pane.active .nocx-editor [role="status"]'
 const RUNNING_BLOCK = '.pane.active .cmd-block.cmd-block-running'
 const APPROVAL_TITLE = 'This action needs your approval'
@@ -277,7 +277,7 @@ test.describe('the assistant is told the frozen screen came with the question (n
       // content's width, so this is red both for the old paint-over-the-row
       // and for a label that only fits by being ellipsised away.
       const chipBox = await page.evaluate(() => {
-        const chip = document.querySelector('.pane.active .nocx-editor-grant')
+        const chip = document.querySelector('.pane.active [data-control="grant"]')
         if (!chip) return null
         return {
           content: chip.scrollWidth,

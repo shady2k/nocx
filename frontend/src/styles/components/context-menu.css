@@ -19,6 +19,13 @@
   border-radius: var(--control-radius-md);
   box-shadow: 0 12px 40px color-mix(in srgb, black, transparent 22%);
   --wails-draggable: no-drag;
+  /* A menu taller than the viewport must still be fully reachable (nocx-vnirv.2):
+     the component clamps the shell's corner through menu-geometry.ts, and this cap
+     is the other half — the rows scroll within the menu instead of running past the
+     window's edge. EDGE_MARGIN_PX is 8, so the cap leaves the clearance the clamp
+     enforces. Owned by the kit for every menu; it lived on the block menu alone. */
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
 }
 
 /* One action per row. A native button: natively focusable and operable
@@ -83,6 +90,13 @@
 .ui-context-menu__item:focus-visible {
   background: var(--color-surface-hover);
   outline: none;
+}
+
+/* An item doing the work it was picked for (ContextMenuItem.busyLabel): it says so
+   in its label, and it cannot be picked twice. */
+.ui-context-menu__item:disabled {
+  cursor: default;
+  color: var(--color-text-muted);
 }
 
 /* The header: what the menu is ABOUT, when it was opened at a thing rather

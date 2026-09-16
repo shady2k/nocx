@@ -186,7 +186,9 @@ function answerBlock(page: Page, question: string): Locator {
 async function answerFinished(page: Page, question: string): Promise<void> {
   const turn = answerBlock(page, question)
   await expect(turn).toBeVisible({ timeout: 30_000 })
-  await expect(turn.locator(':scope > .cmd-header .cmd-header-exit')).toHaveText('completed', {
+  // Success is silent (spec 2026-09-14 §3.1): the outcome attribute is the
+  // observable, on the turn's own `.cmd-block`.
+  await expect(turn).toHaveAttribute('data-outcome', 'success', {
     timeout: 30_000,
   })
 }
@@ -254,9 +256,12 @@ test.describe('a skill ages and nocx records the machine decision (nocx-dzy7l)',
     const pinnedRequests = await fake.waitForRequests(pinnedBase + 1)
     expect(pinnedRequests[pinnedBase].body).toContain('skills.update')
     const pinnedTurn = answerBlock(page, pinnedQuestion)
-    await expect(pinnedTurn.locator(':scope > .cmd-header .cmd-header-exit')).toHaveText('failed', {
+    await expect(
+      pinnedTurn.locator(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
+    ).toHaveText('failed', {
       timeout: 30_000,
     })
+    await expect(pinnedTurn).toHaveAttribute('data-outcome', 'failure')
     await expect(pinnedTurn).toContainText('pinned unchanged')
 
     const ordinaryQuestion = `Update the ordinary skill ${nonce}.`

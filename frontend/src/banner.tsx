@@ -23,6 +23,7 @@
 import { render } from 'solid-js/web'
 import { IconButton } from './ui/icon-button'
 import { Button } from './ui/button'
+import { CloseIcon } from './ui/icons'
 
 /** The three banner outcomes the caller acts on. */
 export type BannerChoice = 'allow' | 'suppress' | 'dismiss'
@@ -64,7 +65,7 @@ function ClipboardBannerComponent(props: { onChoice: (choice: BannerChoice) => v
           Don't show again
         </Button>
         <IconButton ariaLabel="Dismiss" size="sm" onClick={() => props.onChoice('dismiss')}>
-          ✕
+          <CloseIcon />
         </IconButton>
       </div>
     </div>

@@ -66,6 +66,27 @@ resolves that without deleting anything. If your database and a pulled JSONL bot
 `br sync --merge` does the three-way; `--force-db`, `--force-jsonl` and `--force` are the
 explicit policies.
 
+**`br sync --merge` DELETES every issue your database holds that the JSONL does not**, and
+the ordinary shape of a session here is exactly that. It reads their absence as a deletion
+upstream and writes a tombstone over each one, `delete_reason: "merge deletion"` — but you
+created those beads minutes ago, and the JSONL has never seen them. Measured 2026-09-11: a
+fast-forward of 139 commits followed by `br sync --merge` tombstoned 70 records — 51 closed
+that day, 18 open, 1 in progress — and the flush after it published them dead, so anybody
+pulling would have retired a day's backlog including beads named by commits already on
+`main`. **Merge is for a database and a JSONL that both changed the SAME records. For a
+database that is merely AHEAD, `--reconcile-additive` is the one that adds without
+deleting.**
+
+**A tombstone is not undone by the tracker's ordinary commands**, so know the repair before
+you need it. `br update <id> --status open` answers `cannot update tombstone issue`;
+`br sync --import-only` over a corrected JSONL answers `Tombstone protected: N issues` and
+skips them. What survives is the record — only `status` is overwritten, and the title, body,
+labels and edges are all still on the line — so: rebuild the JSONL with each tombstoned line
+replaced by its last live version out of `git show`, `br delete --hard` those ids to prune
+the tombstone rows and free the ids, then `br sync --import-only`, which recreates each
+issue with its own id, labels and dependency edges. Verify with `br ready` rather than with
+the exporter: an id that reads `open` in `br show` is not yet proof its edges came back.
+
 **Publish every backlog write immediately** — a create, an edit, an edge, a close — not at
 session close. An unpushed bead does not exist for anybody else, and the afternoon it costs
 is somebody else's. Batch your writes if you like (`br update` and `br close` take several
@@ -516,6 +537,18 @@ or the wrong behaviour exactly, say where it lives (`git diff origin/main...HEAD
 settles "did I bring this"), and then fix it. If a bead already owns it, work that bead —
 another "occurrence" note is worth less than one line of fix.
 
+**"A bead already tracks it" is not a reason to leave it either — and neither is "another
+epic owns it".** A bead is where the fix is recorded, not a licence to walk past the red.
+**The rule binds a coordinator exactly as hard as a worker:** a brief or a review never
+tells a worker to leave a failing test alone. If the worker found it, the worker fixes it or
+reports why it cannot; if it lands in a package someone else is mid-flight in, the
+coordinator dispatches the fix in the same minute and names who has it.
+
+> 2026-09-15 (`nocx-gantk`). A worker reported a real-helper test in `internal/app` red on
+> the unmodified baseline. The coordinator's review answered "tracked under
+> `nocx-6q1uh.14`, leave it alone" — and that bead named a different test. The failure was
+> filed nowhere, and the answer would have carried it into the merged tree.
+
 This is about BREAKAGE YOU HAVE ENCOUNTERED, and it does not license widening the task you
 were given. New work still comes off the queue, and a brief still means what it says. The
 distinction: nobody asked you to build the adjacent feature, and everybody expects you to
@@ -783,6 +816,34 @@ stop that loop.
 6. **Label it** `mvp`, `phase-2`, `phase-3` or `infra`; no `mvp` epic behind a deferred one.
 
 Prefer more, smaller epics — "handed over whole" and "large area" cannot both hold.
+
+### A feature is a root epic, and its stages are its children
+
+The owner thinks in features — "replace herdr" — and a feature is larger than an epic. By
+2026-09-15 that one was about twenty epics with no common parent (2 of 229 epics in the
+tracker had one), joined by `discovered-from`, which sums nothing. Nobody could say how
+far away it was, because the question had no object.
+
+- **A feature is one root epic whose DONE WHEN is what the owner can do**, and its direct
+  children are stages, each an epic. The epics, bugs and chores that do the work hang under
+  the stage they serve, with `parent-child`. Epics nest; `rollup` counts every descendant.
+- **Where it stands is a command, not a paragraph:** `scripts/feature-status.sh <root>`, or
+  words from its title (`scripts/feature-status.sh herdr`) — the owner names a feature, not an id.
+  It is computed from the edges, so it is exactly as true as they are.
+- **Work found on a feature's path gets its parent in the same minute it is filed** — under
+  the stage it blocks or serves. A bug on the path is a child of that stage, per "where a
+  bug goes" above. An existing bead the status lists as "blocked by, outside this stage" is
+  on the path too: give it the parent, or remove an edge that no longer holds.
+- **One parent.** An epic two features need stays under one and is `related` to the other.
+- **"Not decomposed" means the size is unknown, not small.** The status lists open epics
+  with no children separately for that reason. On a feature's path, break those down before
+  building further; until then nobody can say how much is left.
+- **Never put a `blocks` edge on a root or a stage.** A blocked parent hides every child
+  from `br ready` — measured 2026-09-15: `nocx-afgkj.1` has no edge of its own, and it is
+  absent from `br ready` because `nocx-afgkj` is blocked. Put the edge on the leaf.
+- **A change of scope says what it does to the root's DONE WHEN.** A spec or brainstorm that
+  adds epics to a feature either changes that criterion, with the owner, or files them under
+  an existing stage or deferred (`br defer`) — never beside the feature.
 
 ## Git authority
 

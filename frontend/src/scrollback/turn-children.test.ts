@@ -17,9 +17,17 @@
 // Every assertion here reads DOCUMENT ORDER and the text a person actually
 // reads, because that is the claim the product is making.
 
-import { describe, it, expect } from 'vitest'
+import { afterEach, describe, it, expect } from 'vitest'
 import { BlockManager } from './blocks'
 import { CommandSnapshotStore } from '../command-snapshot'
+
+// Every manager a test built is disposed after it: a block still running when
+// the test ends keeps its 100ms duration ticker alive, and that timer would
+// otherwise fire into a torn-down jsdom (`document is not defined`).
+const managers: BlockManager[] = []
+afterEach(() => {
+  for (const m of managers.splice(0)) m.dispose()
+})
 
 function newManager(sessionName?: (id: string) => string | null) {
   const inner = document.createElement('div')
@@ -30,6 +38,7 @@ function newManager(sessionName?: (id: string) => string | null) {
     snapshotStore: new CommandSnapshotStore(),
     sessionName,
   })
+  managers.push(manager)
   return { inner, manager }
 }
 
@@ -166,13 +175,17 @@ describe('a turn draws the blocks it caused, in order', () => {
     // Who ran it: the assistant, said out loud.
     expect(rec.el.querySelector('.ui-badge[data-author="agent"]')?.textContent).toBe('agent')
     // Its own ⋮.
-    expect(rec.el.querySelector(':scope > .cmd-header .cmd-overflow-btn')).not.toBeNull()
+    expect(rec.el.querySelector(':scope > .cmd-header [data-block-actions]')).not.toBeNull()
 
     // And it freezes with its own exit status, in place.
     const frozen = manager.freezeBlock(() => undefined, 0, 3)
     expect(frozen).not.toBeNull()
     const cmd = box.querySelector<HTMLElement>('.cmd-block[data-block-kind="command"]')!
-    expect(cmd.querySelector('.cmd-header-exit')?.textContent).toBe('exit 3')
+    expect(cmd.dataset.outcome).toBe('failure')
+    expect(
+      cmd.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])')
+        ?.textContent,
+    ).toBe('Exit 3')
     // Selecting it selects IT, not the turn that contains it.
     cmd.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
     expect(inner.querySelectorAll('.cmd-block-selected')).toHaveLength(1)
@@ -249,9 +262,9 @@ describe('a turn draws the blocks it caused, in order', () => {
 
     expect(topLevel(inner)).toEqual(['ask:who are you?'])
     expect(childrenOf(turn.el)).toEqual(['text:an assistant', 'cmd-answer-provenance'])
-    expect(turn.el.querySelector('.cmd-header-exit')?.textContent).toBe('completed')
+    expect(turn.el.dataset.outcome).toBe('success')
     expect(inner.querySelector('.cmd-answer-typing')).toBeNull()
-    expect(inner.querySelector('.cmd-answer-waiting')).toBeNull()
+    expect(inner.querySelector('.cmd-header-waiting')).toBeNull()
   })
 
   // ── acceptance 6 ────────────────────────────────────────────────────────
@@ -386,7 +399,7 @@ describe('a turn draws the blocks it caused, in order', () => {
     // closes the turn while its run call's block is live) carries its own
     // stand-in in the live region, which also lives under `inner`.
     expect(turn.el.querySelector('.cmd-answer-typing')).toBeNull()
-    expect(inner.querySelector('.cmd-answer-waiting')).toBeNull()
+    expect(inner.querySelector('.cmd-header-waiting')).toBeNull()
   })
 
   it('a run that never reached a command does not adopt the next block a person opens', () => {

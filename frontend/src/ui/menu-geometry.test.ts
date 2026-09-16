@@ -45,8 +45,8 @@ describe('clampMenuPosition', () => {
   it('keeps a menu TALLER than the viewport reachable: it starts at the margin', () => {
     // The clamp positions, it does not size. A menu taller than the window
     // still starts at the margin; the shell's max-height + overflow-y
-    // (style.css, .cmd-overflow-menu) is what keeps every item reachable —
-    // this pins the position half of that contract.
+    // (context-menu.css, .ui-context-menu) is what keeps every item
+    // reachable — this pins the position half of that contract.
     const { top } = clampMenuPosition({ x: 40, y: 400 }, { width: 160, height: 900 }, VIEWPORT)
     expect(top).toBe(EDGE_MARGIN_PX)
     expect(top).toBeGreaterThanOrEqual(EDGE_MARGIN_PX)

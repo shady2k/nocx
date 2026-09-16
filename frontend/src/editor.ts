@@ -4,7 +4,13 @@
 // hidden the xterm has focus and keys flow to the PTY as usual.
 //
 // The input surface is a CodeMirror 6 EditorView mounted inside the
-// `.nocx-editor` card (ADR-0010 §1).
+// `.nocx-editor` card (ADR-0010 §1), which since the mockup pass
+// (.internal/specs/2026-09-15-terminal-screen-mockup-decision.md §4) wraps
+// the kit ComposerFrame: an outer inset card plus an inner bordered field
+// shared by the target switch, CM6 and the submit control (ui/composer-
+// frame.ts). `.nocx-editor` itself stays the thin placement wrapper it
+// already was (the overlay/summon-stack selectors and `ed.root` all key off
+// it); the frame owns every card/field appearance declaration.
 //
 // Key handling deliberately stays a native capture-phase listener on `root`,
 // NOT a CM6 keymap: the listener runs before CM6's own contentDOM handlers
@@ -12,6 +18,7 @@
 // decide exactly as they did on the textarea. Binding these keys as a CM6
 // keymap at Prec.highest is W2's job; W1 only preserves today's behaviour.
 
+import { currentPlatform } from './platform'
 import { Compartment, EditorState, Extension } from '@codemirror/state'
 import { drawSelection, EditorView, keymap } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
@@ -25,6 +32,17 @@ import {
 } from './unresolved-redactions'
 import type { SubmitPlan } from './submit'
 import type { ModelChipState } from './agent-readiness'
+import { cwdLabel } from './cwd-label'
+import { createButton } from './ui/button-element'
+import { createIconButton } from './ui/icon-button-element'
+import { ArrowRightIcon, iconElement } from './ui/icons'
+import { createComposerFrame, type ComposerFrameHandle } from './ui/composer-frame'
+import { markShellCommand } from './ui/shell-command'
+import {
+  createPromptContext,
+  updatePromptContext,
+  type PromptContextFacts,
+} from './ui/prompt-context'
 
 /**
  * The indent a pasted command arrives with, when it arrives at the very
@@ -56,9 +74,9 @@ export function stripPastedIndent(text: string, atLineStart: boolean): string {
 }
 
 /** The row count at which `resized` stops firing — it must match the CSS cap
- *  in style.css (`.nocx-editor .cm-editor`, 30 lines), because past the cap
- *  the box no longer grows and the scrollback has nothing to follow. Raise
- *  both or neither. */
+ *  in styles/surfaces/composer.css (`.nocx-editor .cm-editor`, 30 lines),
+ *  because past the cap the box no longer grows and the scrollback has
+ *  nothing to follow. Raise both or neither. */
 const MAX_ROWS = 30
 
 export interface EditorActions {
@@ -159,18 +177,45 @@ export interface EditorActions {
 
 export class CommandEditor {
   readonly root: HTMLElement
+  /** The kit card + field (ui/composer-frame.ts, spec 2026-09-15 §4): the
+   *  outer inset card and the one bordered box the target switch, CM6 and
+   *  the submit control share. `root` stays the thin `.nocx-editor`
+   *  placement wrapper around it — every external reference to `ed.root`
+   *  (terminal-content.ts, the e2e suite, `data-placement`) is unaffected. */
+  private frame: ComposerFrameHandle
   private chrome: HTMLElement
   private view: EditorView
+  /** The submit control (spec §4): an IconButton calling `submit()` and
+   *  nothing else — it never writes to the session directly. Enabled only
+   *  on a non-empty draft; the accessible name follows the active target
+   *  (`Run command` / `Send question`), refreshed from setTargetExtensions,
+   *  the same seam the host already calls on every switch. */
+  private submitButton: HTMLButtonElement
 
   /** The permanent grant chip in the chrome row. */
   private grantChip: HTMLButtonElement
   private _onGrantChipClick: (() => void) | null = null
-  /** Left chip group: the location + cwd chips sit together, the clock
-   *  keeps the right edge of the chrome row. */
-  private chromeLeft: HTMLElement
-  private locationChip: HTMLElement
-  private cwdChip: HTMLElement
-  private timeChip: HTMLElement
+  /** The row's two groups (spec §5.2): where the pending command runs, and
+   *  the controls for the target Enter reaches. */
+  private context: HTMLElement
+  private controls: HTMLElement
+  /** The one prompt-line primitive (spec 2026-09-15 §2, §6): host (strong,
+   *  remote only) · path · branch, dimmed while unfocused. The SAME
+   *  primitive a block's header draws (scrollback/blocks.ts), so the
+   *  composer and a finished block cannot start naming "where" two ways
+   *  (AD-8). */
+  private contextEl: HTMLSpanElement
+  private _cwd = '~'
+  /** This session's home, once nocx-9bpeq.16 wires a source in — undefined
+   *  until then, which cwdLabel already reads as "show the absolute path"
+   *  (never a guessed `~`). Set only via setWhereFacts. */
+  private _home?: string
+  /** The pane's branch when the pending command was queried against it —
+   *  undefined with no source, no repository, or consent required (spec
+   *  §3): ambient decoration, never a derivation of its own. Set only via
+   *  setWhereFacts. */
+  private _branch?: string
+  private _focused = false
   /** Recovery action chip — hidden in the healthy state, shows one action
    *  label in an exception state. The chip IS the action: one click, no
    *  popover (nocx-atyf.2). */
@@ -181,8 +226,8 @@ export class CommandEditor {
    *  resolve — one chip carrying the rung of the ladder the person is on.
    *  Buttons, because they are controls: a chip that navigates must be
    *  reachable by keyboard, and `recoveryChip` above is the precedent.
-   *  Hidden until setModelChip is called with a state, exactly as
-   *  locationChip is, so the row's height never moves (nocx-6c546). */
+   *  Hidden until setModelChip is called with a state, so the row's height
+   *  never moves (nocx-6c546). */
   private modelEndpointChip: HTMLButtonElement
   private modelChip: HTMLButtonElement
   /** Where each chip goes when clicked. STORED rather than captured in a
@@ -233,22 +278,7 @@ export class CommandEditor {
   }
 
   /**
-   * The clock ticks only while the editor is on screen.
-   *
-   * It used to be stamped once, by the input-state transition that revealed the
-   * editor, and then left alone — so the chip showed the second the prompt
-   * appeared and stayed there. Sit at a prompt for ten minutes and it is ten
-   * minutes wrong, which is worse than showing nothing: a wrong clock is still
-   * read as a clock.
-   *
-   * A block in the scrollback is the opposite case and keeps its frozen stamp:
-   * it records when that command ran. This chip is not a record, it is the
-   * present, and the editor is where the present is (nocx-6w4z).
-   */
-  private clock: ReturnType<typeof setInterval> | null = null
-
-  /**
-   * The editor's own surface styling. Kept as a CM6 theme (not style.css)
+   * The editor's own surface styling. Kept as a CM6 theme (not a stylesheet)
    * because a theme extension deterministically overrides the base theme,
    * which is what these rules must do: kill the base theme's dotted focus
    * outline (the textarea had `outline: none`) and paint the caret and the
@@ -263,8 +293,8 @@ export class CommandEditor {
   private static readonly editorTheme = EditorView.theme({
     // The blink period the mark half animates on, handed to the stylesheet
     // from the one place it is declared (block-cursor.ts). Reduced motion is
-    // NOT handled here — style.css guards its own animation with the media
-    // query, the way the rest of this app's animations are guarded.
+    // NOT handled here — composer.css guards its own animation with the
+    // media query, the way the rest of this app's animations are guarded.
     '&': { '--nocx-cursor-blink': `${CURSOR_BLINK_MS}ms` },
     '&.cm-focused': { outline: 'none' },
     '.cm-content': { caretColor: 'var(--color-text)' },
@@ -292,6 +322,7 @@ export class CommandEditor {
   private readonly onViewUpdate = EditorView.updateListener.of((update) => {
     if (!update.docChanged) return
     const text = update.state.doc.toString()
+    this.updateSubmitEnabled(text)
     if (!this._programmatic) {
       try {
         this.actions.onInputChange?.(text)
@@ -326,72 +357,101 @@ export class CommandEditor {
     this.root.className = 'nocx-editor'
     this.root.style.display = 'none'
 
-    // ── Editor chrome (header row) ──────────────────────────────────────
+    // ── Editor chrome: the meta row (spec 2026-09-14 §5.2) ──────────────
+    // The same anatomy a block header has: where on the left, and here the
+    // controls for the target Enter reaches on the right. Placement only —
+    // every element in it is the kit's (styles/surfaces/composer.css). Built
+    // here, not inside ui/composer-frame.ts (below): it is unchanged surface
+    // content and the kit-identity scanner (lint-fixtures/scan-kit-
+    // identities.mjs) would otherwise read its existing appearance rules as
+    // a surface repainting kit markup — see composer-frame.ts's file header.
     this.chrome = document.createElement('div')
     this.chrome.className = 'nocx-editor-chrome'
 
-    // Left group: location + cwd together, the clock keeps the right edge.
-    // Placement only — the chips carry their own appearance (ui/README).
-    this.chromeLeft = document.createElement('div')
-    this.chromeLeft.className = 'nocx-editor-chrome-left'
+    this.context = document.createElement('div')
+    this.context.className = 'nocx-editor-context'
+    this.contextEl = createPromptContext({ path: '~' }, { tone: 'dim', presentation: 'composer' })
+    this.contextEl.title = '~'
+    this.context.append(this.contextEl)
 
-    // Where the pending command would land: the same chip the block header
-    // shows (`nocx-chip nocx-chip-muted`), fed the same string. Hidden until
-    // setLocation receives a value — a local session grows NO chip.
-    this.locationChip = document.createElement('span')
-    this.locationChip.className = 'nocx-chip nocx-chip-muted nocx-editor-location'
-    this.locationChip.style.display = 'none'
+    this.controls = document.createElement('div')
+    this.controls.className = 'nocx-editor-controls'
 
-    this.cwdChip = document.createElement('span')
-    this.cwdChip.className = 'nocx-chip nocx-editor-cwd'
-    this.cwdChip.textContent = '📁 ~'
-
-    this.grantChip = document.createElement('button')
-    this.grantChip.type = 'button'
-    this.grantChip.className = 'nocx-chip nocx-editor-grant'
-    this.grantChip.style.display = 'none'
-    this.grantChip.addEventListener('click', () => this._onGrantChipClick?.())
-    this.timeChip = document.createElement('span')
-    this.timeChip.className = 'nocx-chip nocx-editor-time'
-
-    this.recoveryChip = document.createElement('button')
-    this.recoveryChip.type = 'button'
-    this.recoveryChip.className = 'nocx-chip nocx-editor-recovery'
+    // Recovery: hidden in the healthy state; one label in an exception state.
+    // The control IS the action — one click, no popover (nocx-atyf.2).
+    this.recoveryChip = createButton({
+      label: '',
+      variant: 'ghost',
+      size: 'sm',
+      mono: true,
+      onClick: () => this._recoveryOnClick?.(),
+    })
+    this.recoveryChip.dataset.control = 'recovery'
     this.recoveryChip.style.display = 'none'
-    this.recoveryChip.addEventListener('click', () => this._recoveryOnClick?.())
 
     // The model that will answer, and the way to change it (nocx-rikz5).
-    // The same .nocx-chip family as every other chip in this row: the row
-    // has no ui-badge in it and must not grow one — two visual grammars in
-    // one row is worse than one old grammar.
-    this.modelEndpointChip = document.createElement('button')
-    this.modelEndpointChip.type = 'button'
-    this.modelEndpointChip.className = 'nocx-chip nocx-editor-model'
+    // Hidden until setModelChip is called with a state, so the row never
+    // grows on its own; the row's height is fixed regardless (nocx-6c546,
+    // nocx-i4h04).
+    this.modelEndpointChip = createButton({
+      label: '',
+      variant: 'ghost',
+      size: 'sm',
+      truncate: true,
+      mono: true,
+      onClick: () => {
+        const page = this._modelChipTargets.endpoint
+        if (page) this._onModelChipClick?.(page)
+      },
+    })
+    this.modelEndpointChip.dataset.control = 'model-endpoint'
     this.modelEndpointChip.style.display = 'none'
-    this.modelEndpointChip.addEventListener('click', () => {
-      const page = this._modelChipTargets.endpoint
-      if (page) this._onModelChipClick?.(page)
-    })
 
-    this.modelChip = document.createElement('button')
-    this.modelChip.type = 'button'
-    this.modelChip.className = 'nocx-chip nocx-editor-model'
+    this.modelChip = createButton({
+      label: '',
+      variant: 'ghost',
+      size: 'sm',
+      truncate: true,
+      mono: true,
+      onClick: () => {
+        const page = this._modelChipTargets.model
+        if (page) this._onModelChipClick?.(page)
+      },
+    })
+    this.modelChip.dataset.control = 'model'
     this.modelChip.style.display = 'none'
-    this.modelChip.addEventListener('click', () => {
-      const page = this._modelChipTargets.model
-      if (page) this._onModelChipClick?.(page)
-    })
 
-    this.chromeLeft.append(
-      this.recoveryChip,
-      this.locationChip,
-      this.cwdChip,
-      this.modelEndpointChip,
-      this.modelChip,
-      this.grantChip,
-    )
-    this.chrome.append(this.chromeLeft, this.timeChip)
-    this.root.appendChild(this.chrome)
+    // The grant control: the editor owns the element and its place;
+    // GrantController owns everything it says (nocx-5u3oz.13).
+    this.grantChip = createButton({
+      label: '',
+      variant: 'ghost',
+      size: 'sm',
+      truncate: true,
+      mono: true,
+      onClick: () => this._onGrantChipClick?.(),
+    })
+    this.grantChip.dataset.control = 'grant'
+    this.grantChip.style.display = 'none'
+
+    this.controls.append(this.recoveryChip, this.modelEndpointChip, this.modelChip, this.grantChip)
+    this.chrome.append(this.context, this.controls)
+
+    // The kit card + field (ui/composer-frame.ts, spec §4): the outer inset
+    // card and the bordered box the target switch, CM6 and the submit
+    // control share. `this.root` stays the thin placement wrapper; the
+    // frame owns every appearance declaration for what is inside it. The
+    // already-built chrome row is placed inside the card, above the field
+    // (composer-frame.ts's file header says why it is a parameter here
+    // rather than something the frame builds itself).
+    this.frame = createComposerFrame(this.chrome)
+    this.root.appendChild(this.frame.root)
+
+    // Focus dims the context (spec §5.3). focusin/focusout on the root rather
+    // than CM6's focus tracking: a click on a control keeps the composer
+    // "focused", and a move to another pane does not.
+    this.root.addEventListener('focusin', this.onFocusIn)
+    this.root.addEventListener('focusout', this.onFocusOut)
 
     // ── CodeMirror 6 surface (ADR-0010) ────────────────────────────────
     // The extension list is a constructor parameter: the editor must not
@@ -478,11 +538,59 @@ export class CommandEditor {
           ...extensions,
         ],
       }),
-      parent: this.root,
+      // CM6 mounts into the FRAME's editor slot, not `this.root` directly
+      // (spec §4): the field's own border now lives on
+      // `.ui-composer-frame__field`, an ancestor of `.cm-editor` that CM6
+      // never touches, rather than on a class installed onto `.cm-editor`
+      // itself via `editorAttributes` — which used to be needed exactly
+      // because CM6 owns `.cm-editor`'s class attribute and rewrites it
+      // (via `combineAttrs`) on every update whose facet-derived string
+      // changed, in particular the FIRST focus (measured: a class added by
+      // hand there was present unfocused and gone the instant the field
+      // focused). Moving the bordered element one level up removes the
+      // need to fight that rewrite at all — see composer-frame.ts's file
+      // header for the fuller account, kept there because the border no
+      // longer lives in this file.
+      parent: this.frame.editor,
     })
     this.view.contentDOM.classList.add('nocx-editor-input')
     this.view.contentDOM.spellcheck = false
     this.view.contentDOM.setAttribute('autocapitalize', 'off')
+    // The terminal-command presentation (spec §1.6): the same `.tok-*`
+    // tokens a block's header paints (blocks.ts's own `markShellCommand`
+    // call), scoped here to the editor's owning host — `contentDOM` IS
+    // `.cm-content`, the ancestor the shell tokenizer already decorates —
+    // so a draft's `git checkout -b feat/fonts` reads with the same accent
+    // executable / body-text arguments a settled block does, never the
+    // generic `.tok-*` rainbow. Applied once, unconditionally: with Ask
+    // active there are no `.tok-*` spans inside this host to repaint, so
+    // marking it costs nothing and needs no per-target toggle.
+    markShellCommand(this.view.contentDOM)
+
+    // The submit control (spec §4): an IconButton calling `submit()` only —
+    // it never writes to the session directly, so the existing secret
+    // resolution, submission guards, multiline handling and target dispatch
+    // in submit()/commit() below are the ONLY path a click can reach.
+    this.submitButton = createIconButton({
+      ariaLabel: 'Run command',
+      icon: () => iconElement(ArrowRightIcon),
+      size: 'sm',
+      onClick: () => this.submit(),
+    })
+    this.frame.submit.appendChild(this.submitButton)
+    this.updateSubmitEnabled('')
+    // Establish the correct initial label from `actions` directly, rather
+    // than leaving the button's construction-time default ('Run command')
+    // to stand until the host's first setTargetExtensions() call. Every
+    // current caller happens to call setTargetExtensions immediately after
+    // constructing the editor (terminal-content.ts), so this was never
+    // visibly wrong in the shipped app — but it made the button's
+    // correctness an implicit ordering contract with the caller instead of
+    // a fact this class establishes about itself. A host constructed with a
+    // non-default active target (or a future caller that defers the first
+    // setTargetExtensions) would otherwise show "Run command" while Enter
+    // actually asks a question, until the next switch repainted it.
+    this.updateSubmitLabel()
 
     // Key handling: capture on the card, so our decisions run before CM6's
     // own contentDOM handlers no matter what keymap the caller installs
@@ -491,39 +599,43 @@ export class CommandEditor {
     this.root.addEventListener('keydown', this.onKeydown, true)
   }
 
+  /** Enabled only on a non-empty draft — a disabled empty pointer button
+   *  changes nothing about the existing keyboard behaviour for an empty
+   *  Enter (submit() below still runs its own empty-doc branch regardless
+   *  of this button's state; `disabled` governs pointer activation only).
+   *  The outlined submit control keeps its shape in both states; disabled
+   *  opacity communicates that an empty draft cannot be clicked. */
+  private updateSubmitEnabled(text: string): void {
+    const hasDraft = text.trim() !== ''
+    this.submitButton.disabled = !hasDraft
+    this.submitButton.dataset.appearance = 'submit'
+  }
+
+  /** The submit control's accessible name follows the active target (spec
+   *  §4: "Run command" / "Send question") — read from the SAME
+   *  `handoffToShell` authority `commit()` already reads, at the SAME seam
+   *  the host already calls on every switch (setTargetExtensions below),
+   *  so no second "which target is active" channel is introduced. */
+  private updateSubmitLabel(): void {
+    const toShell = this.actions.handoffToShell?.() ?? true
+    const label = toShell ? 'Run command' : 'Send question'
+    this.submitButton.setAttribute('aria-label', label)
+    this.submitButton.title = label
+    this.frame.setSubmitHint(toShell ? 'run' : 'ask')
+    // The ⌘/Ctrl+Enter chord flips where Enter goes (ADR-0004 §3); the hint
+    // names what it does from here. The mark follows the host the person is
+    // typing on: ⌘ on macOS, Ctrl elsewhere.
+    const mod = currentPlatform() === 'darwin' ? '⌘' : 'Ctrl'
+    this.frame.setSwitchHint([mod, '↵'], toShell ? 'ask' : 'run')
+  }
+
   /** Install the extensions of the target Enter currently goes to. Called
    *  by the host on wire-up and on every switch — the editor never reads
    *  the registry itself (it stays passive) and never keeps a mode of its
    *  own: what is installed IS the mode. */
   setTargetExtensions(extensions: Extension[]): void {
     this.view.dispatch({ effects: this.targetCompartment.reconfigure(extensions) })
-  }
-
-  private startClock(): void {
-    this.setTime(new Date())
-    if (this.clock !== null) return
-    this.clock = setInterval(() => this.setTime(new Date()), 1000)
-  }
-
-  private stopClock(): void {
-    if (this.clock === null) return
-    clearInterval(this.clock)
-    this.clock = null
-  }
-
-  /** Update the time chip with date, weekday and time. */
-  setTime(ts: Date): void {
-    const datePart = ts.toLocaleDateString([], {
-      weekday: 'short',
-      month: 'short',
-      day: 'numeric',
-    })
-    const timePart = ts.toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    })
-    this.timeChip.textContent = `${datePart} ${timePart}`
+    this.updateSubmitLabel()
   }
 
   mount(container: HTMLElement): void {
@@ -611,38 +723,71 @@ export class CommandEditor {
     )
   }
 
-  /** Update the cwd chip text. Uses the same short directoryLabel shape. */
+  private readonly onFocusIn = (): void => {
+    this._focused = true
+    this.renderContext()
+    // The field's border projection (spec §4) — a typed attribute driven
+    // from THIS existing notification, never from CM6's own `cm-focused`
+    // class (composer-frame.ts's file header says why).
+    this.frame.setFocused(true)
+  }
+
+  private readonly onFocusOut = (e: FocusEvent): void => {
+    if (e.relatedTarget instanceof Node && this.root.contains(e.relatedTarget)) return
+    this._focused = false
+    this.renderContext()
+    this.frame.setFocused(false)
+  }
+
+  /** Update the directory the pending command will run in. */
   setCwd(cwd: string): void {
-    const path = cwd.trim().replace(/\/+$/, '') || '~'
-    const parts = path.split('/').filter(Boolean)
-    const label = path === '~' || parts.length === 0 ? path : parts.slice(-2).join('/')
-    this.cwdChip.textContent = `📁 ${label}`
+    this._cwd = cwd.trim() || '~'
+    this.renderContext()
   }
 
   /**
    * Where the pending command would land — the same string the block header
    * shows, routed from the one locationLine derivation rather than computed
    * a second way (two derivations of "which host" are how they start
-   * disagreeing). Empty for a local session: no chip, and the absence is
+   * disagreeing). Empty for a local session: no host, and the absence is
    * the information.
    */
   setLocation(location: string): void {
     this._location = location
-    this.renderLocation()
+    this.renderContext()
   }
 
-  /** The chip is where the next Enter would land: hidden for a local
-   *  session, the host string otherwise. The trust-gated display is deleted
-   *  with the `trusted` boolean (ADR-0024 §6) — no stream sequence may
-   *  promote or revoke the chip. */
-  private renderLocation(): void {
-    if (!this._location) {
-      this.locationChip.style.display = 'none'
-      this.locationChip.textContent = ''
-      return
+  /** The home and branch nocx-9bpeq.16 feeds in once a source reports one
+   *  (spec 2026-09-15 §3's composer seam — scrollback/blocks.ts's
+   *  `setBlockWhere` is the block's half of the same seam). Stored so the
+   *  cwd/location setters above keep re-rendering through the same facts
+   *  without the caller having to repeat them on every cwd change. Nothing
+   *  calls this yet; nocx-9bpeq.16 wires the sources in. */
+  setWhereFacts(facts: { home?: string; branch?: string }): void {
+    this._home = facts.home
+    this._branch = facts.branch
+    this.renderContext()
+  }
+
+  /** The context's one writer: host (strong — it answers "where does Enter
+   *  go", spec §5.2) · path · branch, dimmed when the composer is not
+   *  focused (spec §6: `tone: 'dim'` unfocused, `'normal'` focused — CM6's
+   *  own focus state, not a second mechanism). The host is routed from the
+   *  one locationLine derivation; empty for a local session, where its
+   *  absence is the information. ADR-0024 §6: no stream sequence promotes
+   *  or revokes it. */
+  private renderContext(): void {
+    const facts: PromptContextFacts = { path: cwdLabel(this._cwd, this._home) }
+    if (this._location) {
+      facts.host = this._location
+      facts.hostStrong = true
     }
-    this.locationChip.style.display = ''
-    this.locationChip.textContent = this._location
+    if (this._branch) facts.branch = this._branch
+    updatePromptContext(this.contextEl, facts, {
+      tone: this._focused ? 'normal' : 'dim',
+      presentation: 'composer',
+    })
+    this.contextEl.title = this._cwd
   }
 
   // ── keyboard ──────────────────────────────────────────────────────────
@@ -1001,7 +1146,6 @@ export class CommandEditor {
     // empty one above. Clearing the property lets the pane decide, which is
     // where that decision belongs.
     this.root.style.visibility = ''
-    this.startClock()
     // A view that was display:none can cache zero or stale geometry; ask CM6
     // to re-measure before it is painted and focused (spec W1 check 5).
     this.view.requestMeasure()
@@ -1143,10 +1287,6 @@ export class CommandEditor {
    */
   hide(): void {
     this._inputActive = false
-    // Stopped, not left running. Every tab owns an editor, so a timer that
-    // outlives visibility is one wakeup per second per tab for a chip nobody
-    // can see — and they accumulate for the life of the window.
-    this.stopClock()
     this.view.contentDOM.blur()
     this.root.removeAttribute('inert')
     this.root.style.display = 'none'
@@ -1161,7 +1301,7 @@ export class CommandEditor {
   }
 
   /** Whether the editor's root element contains `el`. Used to scope the
-   *  focus-bounce so clicks on the editor surface / cwd chip
+   *  focus-bounce so clicks on the editor surface / composer context
    *  are not swallowed. CM6's contentDOM lives inside root, so the contract
    *  the focus-bounce tests against holds unchanged. */
   rootContains(el: Node | null): boolean {
@@ -1174,15 +1314,13 @@ export class CommandEditor {
   }
 
   dispose(): void {
-    // A tab can be closed while its editor is on screen, which is the common
-    // case rather than the edge one — hide() would never run and the interval
-    // would outlive everything it refers to.
-    this.stopClock()
     // The arbiter outlives the overlay it points at otherwise; a closed tab
     // must not keep consuming keys through a dead closure.
     this.keyArbiter = null
     this._onGrantChipClick = null
     this.root.removeEventListener('keydown', this.onKeydown, true)
+    this.root.removeEventListener('focusin', this.onFocusIn)
+    this.root.removeEventListener('focusout', this.onFocusOut)
     this.view.destroy()
     this.root.remove()
   }

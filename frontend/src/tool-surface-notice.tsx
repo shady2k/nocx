@@ -11,6 +11,7 @@
 import { render } from 'solid-js/web'
 import type { SessionToolSurfaceChanged } from './generated/session.toolSurfaceChanged'
 import { IconButton } from './ui/icon-button'
+import { CloseIcon } from './ui/icons'
 import { StatusCard } from './ui/status-card'
 
 export interface ToolSurfaceNoticeProps {
@@ -33,7 +34,7 @@ export function mountToolSurfaceNotice(
         description={`The nocx worker tool surface is unavailable: ${props.fact.reason ?? 'the endpoint did not answer'}.`}
         action={
           <IconButton ariaLabel="Dismiss" size="sm" onClick={props.onDismiss}>
-            {'×'}
+            <CloseIcon />
           </IconButton>
         }
       />

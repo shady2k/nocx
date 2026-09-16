@@ -92,16 +92,21 @@ const surface = (): ParentNode => {
   return open[open.length - 1] ?? pane!.querySelector('.ui-status-card') ?? pane!
 }
 
+// A button's label is its visible text, or — for an icon-only control like
+// the dismiss cross — its accessible name (aria-label). A glyph is not text
+// (nocx-9bpeq.5): the cross renders a CloseIcon now, so textContent alone
+// would read as empty rather than as the button it is.
+const buttonLabel = (b: HTMLButtonElement): string =>
+  (b.textContent ?? '').trim() || (b.getAttribute('aria-label') ?? '')
+
 const button = (label: string): HTMLButtonElement => {
-  const found = [...surface().querySelectorAll('button')].find(
-    (b) => (b.textContent ?? '').trim() === label,
-  )
+  const found = [...surface().querySelectorAll('button')].find((b) => buttonLabel(b) === label)
   if (!found) throw new Error(`no button labelled ${label} on the visible surface`)
   return found
 }
 
 const buttonLabels = (): string[] =>
-  [...surface().querySelectorAll('button')].map((b) => (b.textContent ?? '').trim())
+  [...surface().querySelectorAll('button')].map((b) => buttonLabel(b))
 
 const visibleText = (): string => surface().textContent ?? ''
 
@@ -139,7 +144,7 @@ describe('the degraded-session card', () => {
   // it was a second surface holding what belongs behind the remedy.
   it('offers three actions and Details is not one of them', () => {
     mount()
-    expect(buttonLabels()).toEqual(['How to fix', "Don't show again for this shell", '×'])
+    expect(buttonLabels()).toEqual(['How to fix', "Don't show again for this shell", 'Dismiss'])
   })
 })
 
@@ -217,7 +222,7 @@ describe("what the card says about this session's output", () => {
 describe('what each action on the card does', () => {
   it('the cross takes this card away and promises nothing further', () => {
     const { props } = mount()
-    button('×').click()
+    button('Dismiss').click()
     expect(props.onDismiss).toHaveBeenCalledOnce()
     expect(props.onSuppressShell).not.toHaveBeenCalled()
   })

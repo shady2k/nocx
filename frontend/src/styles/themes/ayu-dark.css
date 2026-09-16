@@ -20,8 +20,21 @@
 
   /* Chrome sits *behind* content and is deliberately darker than the
      canvas — the tab bar, the vertical strip and the settings rail. */
-  --color-chrome: #05080d;
+  --color-chrome: #04070b;
   --color-chrome-rail: #080b11;
+  /* The terminal screen's own chrome band (pane context strip, running
+     process footer — mockup decision 2026-09-15 §1.9, §3): reads
+     LIGHTER than --terminal-background, unlike --color-chrome above,
+     which is darker than --color-canvas for the shell's own chrome-
+     behind-content role. This theme's existing --color-surface value —
+     already lighter than the terminal ground and distinct from it — is
+     the nearest fit; see tokyo-night.css for the full rationale. Every
+     theme sets this explicitly (ADR-0013 §4). */
+  --color-terminal-chrome: #11151c;
+  /* A filled control resting ON the terminal-chrome card — the composer's
+     Run segment and submit button: one step from the card toward the text,
+     so it reads as a control in every theme, dark or light. */
+  --color-control-fill: #21242a;
   --color-surface-sunken: #0d1017;
   --color-tab-active: #12161f;
   --color-surface: #11151c;
@@ -42,6 +55,7 @@
   --color-success: #aad94c;
   --color-warning: #ffb454;
   --color-danger: #f07178;
+  --color-danger-surface: #161319;
   --color-accent-secondary: #59c2ff;
   --color-error: #d95757;
 

@@ -461,24 +461,12 @@ select:focus-visible {
   pointer-events: none;
   display: flex;
   flex-direction: column;
-  --pane-inline-padding: 10px;
-  padding: 0 var(--pane-inline-padding);
   --default-contextmenu: hide;
 }
 
 .pane.active {
   visibility: visible;
   pointer-events: auto;
-}
-
-/* A pane hosting a surface goes edge to edge.
-   The 10px on `.pane` is breathing room around terminal text — it must not
-   apply to a surface, where it shows up as a 10px strip of canvas between the
-   activity bar and the surface's own chrome, reading as a gap in the layout.
-   Keyed off the surface host that SolidPaneContent creates rather than off a
-   flag the pane would have to be told, so nothing can forget to set it. */
-.pane:has(> .surface-host) {
-  padding: 0;
 }
 
 /* Manager panes host the connection UI, not a terminal — no padding,

@@ -52,16 +52,19 @@
      THE FLOOR IS WHERE THE LABEL STOPS BEING A LABEL, and 96px was below it:
      with eleven tabs open every one of them shrank to the floor and read
      `ho…`, which is a strip that has kept its geometry and thrown away its
-     content. 150px is the narrowest a tab can be and still show enough of a
-     path or a command to tell it from its neighbour. Past that the row
-     SCROLLS (tab-strip.css) rather than shrinking further — an unreadable tab
-     on screen is worth less than a readable one a wheel-click away. */
+     content. 184px (`--terminal-tab-min-width`, tokens.css) is the
+     narrowest a tab can be and still show enough of a path or a command to
+     tell it from its neighbour — raised from a literal 150px by decision
+     2026-09-15-terminal-screen-mockup-decision.md §1 item 10, which keeps
+     the existing 220px ceiling. Past the floor the row SCROLLS
+     (tab-strip.css) rather than shrinking further — an unreadable tab on
+     screen is worth less than a readable one a wheel-click away. */
   flex: 0 1 auto;
-  min-width: 150px;
+  min-width: var(--terminal-tab-min-width);
   max-width: 220px;
   padding: 0 10px;
   cursor: pointer;
-  background: var(--color-surface-sunken);
+  background: var(--color-chrome);
   border: 0;
   border-right: 1px solid var(--color-divider);
   color: var(--color-text-muted);
@@ -110,7 +113,14 @@
 
    The absolute position stays: the digit must not shift the label, or every
    title in the strip would move when a tab was added past the ninth and the
-   numbering stopped. */
+   numbering stopped.
+
+   SIZE (decision 2026-09-15-terminal-screen-mockup-decision.md §1 item 10):
+   `--font-size-2xs` (0.75rem, ~10.5px at the 14px root) read as the strip's
+   own scale grew around it; `--font-size-sm` (0.875rem, ~12.25px) is the
+   nearest existing token to the mockup's "approximately 12px" and the one
+   Meta's own `size="sm"` already uses for the same register elsewhere in
+   this pass. */
 .nocx-tab-index {
   position: absolute;
   left: 8px;
@@ -118,7 +128,7 @@
   transform: translateY(-50%);
   flex: none;
   font-weight: 500;
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-sm);
   width: 12px;
   line-height: 1;
   text-align: center;
@@ -269,8 +279,29 @@
   transition: opacity 0.15s;
 }
 
-.nocx-tab:hover > .ui-icon-button {
+/* Visible on hover, on the ACTIVE tab, and on approach by keyboard
+   (decision 2026-09-15-terminal-screen-mockup-decision.md §1 item 10: "Keep
+   the close button's slot visible for the active tab, hover and
+   :focus-within"). Before this the slot was hover-only, so the one tab a
+   person is actually looking at could hide its own close control, and
+   Tabbing to it with no mouse in play never revealed it at all —
+   `:focus-visible` on the button never got the chance to draw because the
+   ancestor's `opacity: 0` never lifted for keyboard approach. The ACTIVE-tab
+   reveal is the horizontal strip's only: a vertical row's label runs to the
+   row edge and the mark stays hover-revealed there (nocx-lfsw4). */
+.nocx-tab:hover > .ui-icon-button,
+.tabbar .nocx-tab[aria-selected='true'] > .ui-icon-button,
+.nocx-tab:focus-within > .ui-icon-button {
   opacity: 1;
+}
+
+/* The close mark's OWN keyboard focus, distinct from the tab row's
+   selection ring: a visible outline here is what makes Tabbing INTO the
+   button (rather than merely near it) legible once `:focus-within` above
+   has already lifted its opacity. */
+.nocx-tab > .ui-icon-button:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
 }
 
 /* ── What the pane is doing ───────────────────────────────────────────────

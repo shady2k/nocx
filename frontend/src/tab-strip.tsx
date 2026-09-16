@@ -810,7 +810,7 @@ abstract class TabStripBase implements TabStrip {
                   this.onCloseWorkspace?.(item.key)
                 }}
               >
-                {'\u00d7'}
+                <CloseIcon />
               </IconButton>
             </div>
           )

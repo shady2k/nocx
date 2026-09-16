@@ -89,6 +89,8 @@ import {
   type PaneIdentity,
 } from './terminal-content'
 import type { IntegrationMethod } from './host-key-dialog'
+import type { SessionHomeSource } from './where/session-home'
+import type { BranchSource } from './where/branch-source'
 import type { OutputRecordingSource } from './integration/status'
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -910,6 +912,18 @@ export class PaneManager {
    *  recordingSource() rather than handed to a pane directly, so a pane
    *  built before the root has wired it still sees the answer afterwards. */
   outputRecording?: OutputRecordingSource
+  /** This window's one session-home source (nocx-9bpeq.13/.16) — set once
+   *  by the composition root to the SAME instance the terminal-link
+   *  opener uses, and handed to every pane's TerminalContent as it is
+   *  built, so a session's home is opened through one binding no matter
+   *  which of the two consumers asks first. */
+  sessionHome?: SessionHomeSource
+  /** Build a pane's own branch source (nocx-9bpeq.13 §3: "per pane" —
+   *  never shared, unlike sessionHome above). Set once by the composition
+   *  root to a factory bound to the git client's open/close; each pane
+   *  calls it at most once, at construction, and owns disposing what it
+   *  built. */
+  createBranchSource?: () => BranchSource
 
   constructor(
     bar: HTMLElement,
@@ -1515,6 +1529,8 @@ export class PaneManager {
         adoptSession,
         onWarningChange: (warning, label) => paneRef.current?.setWarningState(warning, label),
         outputRecording: this.recordingSource(),
+        sessionHome: this.sessionHome,
+        createBranchSource: this.createBranchSource,
         onPortsTargetChange: () => this.onActivePaneChange?.(),
         onActiveOriginChange: () => this.onActivePaneChange?.(),
         onSetupVault: this.onSetupVault,
@@ -1618,6 +1634,8 @@ export class PaneManager {
         },
         onWarningChange: (warning, label) => paneRef.current?.setWarningState(warning, label),
         outputRecording: this.recordingSource(),
+        sessionHome: this.sessionHome,
+        createBranchSource: this.createBranchSource,
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
         onPaneObservationChange: (state, children) =>
           paneRef.current?.updatePaneObservation(state, children),

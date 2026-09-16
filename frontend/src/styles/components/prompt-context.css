@@ -1,0 +1,85 @@
+/* One context vocabulary: muted history paths, folder/path/branch composer context and program chrome. */
+.ui-prompt-context {
+  display: inline-block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-terminal);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.ui-prompt-context[data-tone='dim'] {
+  opacity: 0.75;
+}
+
+.ui-prompt-context__part[data-part='host'] {
+  color: var(--color-text-muted);
+}
+
+.ui-prompt-context__part[data-part='host'][data-emphasis='strong'] {
+  color: var(--color-text);
+}
+
+.ui-prompt-context__colon {
+  color: var(--color-text-muted);
+}
+
+.ui-prompt-context__part[data-part='path'] {
+  color: var(--color-text-muted);
+}
+
+.ui-prompt-context__part[data-part='on'] {
+  color: var(--color-text-muted);
+  margin-inline: 0.35em;
+}
+
+.ui-prompt-context__part[data-part='branch'] {
+  color: var(--color-text-muted);
+}
+
+.ui-prompt-context[data-presentation='chrome'] .ui-prompt-context__part[data-part='path'],
+.ui-prompt-context[data-presentation='chrome'] .ui-prompt-context__part[data-part='branch'] {
+  color: var(--color-text-muted);
+}
+
+.ui-prompt-context svg {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+  vertical-align: -2px;
+  color: var(--color-text-muted);
+  flex: 0 0 auto;
+
+  margin-right: 0.3em;
+}
+
+.ui-prompt-context[data-presentation='composer'] {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  /* The key hints' register (composer-frame.css): mono, sm, dim. */
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-dim);
+  line-height: var(--terminal-ui-line-height);
+}
+.ui-prompt-context[data-presentation='composer'] svg {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+  margin-right: 0;
+}
+.ui-prompt-context[data-presentation='composer'] .ui-prompt-context__part[data-part='on'] {
+  height: var(--icon-size-sm);
+  border-left: 1px solid var(--color-divider);
+  margin-inline: var(--space-2);
+}
+
+/* Every part and icon of the composer's line in the same dim ink. */
+.ui-prompt-context[data-presentation='composer'] .ui-prompt-context__part,
+.ui-prompt-context[data-presentation='composer'] svg {
+  color: var(--color-text-dim);
+}

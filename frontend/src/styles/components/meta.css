@@ -1,0 +1,92 @@
+/* Meta (ui/README table) — the kit's inline fact on the terminal screen: muted
+   text, one line, tabular figures (spec 2026-09-14 §6.1). It replaces the
+   old boxed chip family; there is deliberately no background, border or
+   padding here — metadata is text. Colours are tokens only (ADR-0013 §4). */
+
+.ui-meta {
+  display: inline-block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-2xs);
+  /* Equal advance widths: a duration that ticks or a column of exit codes must
+     not change width digit by digit (the reason the old chip carried the
+     same declaration, nocx-6w4z). */
+  font-variant-numeric: tabular-nums;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.ui-meta[data-tone='muted'] {
+  color: var(--color-text-muted);
+}
+
+.ui-meta[data-tone='dim'] {
+  color: var(--color-text-dim);
+}
+
+.ui-meta[data-tone='danger'] {
+  color: var(--color-danger);
+}
+
+.ui-meta[data-tone='accent'] {
+  color: var(--color-accent);
+}
+
+/* Where the fact is a safety question — the remote host the pending command
+   will run on (spec §5.2) — the part reads at normal text colour. */
+.ui-meta__part[data-emphasis='strong'] {
+  color: var(--color-text);
+}
+
+/* The width floor a column of durations aligns on: the same floor
+   `.cmd-header-duration` gave the chip (style.css), carried by the kit now. */
+.ui-meta[data-column='duration'] {
+  min-width: 3.25rem;
+  text-align: end;
+}
+
+/* Mono, and readable beside a mono command line rather than the UI font's
+   smallest size — one step below the terminal-sized `terminal` variant
+   below, for a consumer that wants that face without matching the command
+   line's own size. */
+.ui-meta[data-size='sm'] {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+}
+
+/* The command block's status group, at its FINAL size (spec 2026-09-15
+   §1.7, §1.8, §3, superseding the smaller mono Meta the September 15 base
+   spec had it at — see §2's replacement table): the terminal body's own
+   size, not a step toward it, with an explicit 20px line box so
+   `Exit 1 · 1.2s` sits on the command's own baseline instead of a caption
+   above it. Tabular figures are already the base rule's. */
+.ui-meta[data-size='terminal'] {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-terminal);
+  line-height: var(--terminal-ui-line-height);
+}
+
+/* The separator between two Metas standing as separate elements
+ * (`createMetaSeparator`, spec 2026-09-15 §4's status word · duration) —
+ * always the quiet, connective register, whatever tone the word beside it
+ * takes. Nested inside one Meta's own parts it needs no rule of its own
+ * (inherits that Meta's colour and face); this is for the standalone case. */
+.ui-meta__sep {
+  color: var(--color-text-muted);
+}
+
+.ui-meta__sep[data-size='sm'] {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+}
+
+.ui-meta__sep[data-size='terminal'] {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-terminal);
+  line-height: var(--terminal-ui-line-height);
+}

@@ -3463,12 +3463,40 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	<-sess.Done()
 
-	// The pane's observation closes here, first, because everything below this
-	// line tears down the things a frame could still be about. A session that
-	// is done can produce no further frame, which is what the AD-6 amendment
-	// means by the interval's second end — and this is the end that covers an
-	// enrolment whose own withdrawal never came, because the shell holding it
-	// was killed rather than returning (nocx-szb40.5).
+	// EndSession, not Close (nocx-isjh4, closer 2), and FIRST — moved ahead
+	// of unwatchPane by nocx-xn63t.6.4. This call only ever does anything
+	// for a session whose shell exited with nobody else having touched the
+	// registry yet — Stop() and an explicit close both remove the registry
+	// row themselves, before their own Close/EndSession call can wake this
+	// goroutine, so this line is a no-op for either of them (Reg.Close/
+	// EndSession refuse an id already gone). For the case it DOES act on,
+	// the exit status and the session's recorded output are already this
+	// coordinator's own, in memory, before Done() ever fires — recorded via
+	// the notify path (internal/helper/client.Client.sessionExited) and the
+	// session-output ring this goroutine closes below — so nothing the
+	// "persist, then close" ordering ITSELF requires depends on running
+	// this before unwatchPane.
+	//
+	// What DOES require it: EndSession's own round trip (internal/helper/
+	// client's AttachedSession.EndSession) is this coordinator's only
+	// chance to tell the far helper the session is over, and unwatchPane
+	// ends in helperRegistry.SessionEnded, which — since nocx-xn63t.6.3 —
+	// legitimately closes that same shared client once no git binding
+	// holds it open. Called after unwatchPane, EndSession's CloseSession
+	// could find that client already gone: the far helper never hears it,
+	// and keeps listing a session this coordinator has already given up on
+	// until its own unclaimed-session TTL sweeps it — measured against
+	// e2e/remote-coordinator-reclaim.spec.ts's 60s bound. So the message
+	// that tells the far helper goes out while the connection to send it on
+	// is still guaranteed open.
+	_ = s.registry.EndSession(sess.ID())
+
+	// The pane's observation closes here, because everything below this line
+	// tears down the things a frame could still be about. A session that is
+	// done can produce no further frame, which is what the AD-6 amendment
+	// means by the interval's second end — and this is the end that covers
+	// an enrolment whose own withdrawal never came, because the shell
+	// holding it was killed rather than returning (nocx-szb40.5).
 	s.unwatchPane(sess.ID())
 
 	// The session died on its own: the close gate is terminal here too, so
@@ -3487,19 +3515,6 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	// goroutine; exactly one of us may delete the bindings, because deleting
 	// them is also the one chance to announce them.
 	owns := s.removeRx(sess.ID()) != nil
-	// EndSession, not Close (nocx-isjh4, closer 2): this call only ever does
-	// anything for a session whose shell exited with nobody else having
-	// touched the registry yet — Stop() and an explicit close both remove
-	// the registry row themselves, before their own Close/EndSession call
-	// can wake this goroutine, so this line is a no-op for either of them
-	// (Reg.Close/EndSession refuse an id already gone). For the case it DOES
-	// act on, the exit status and the session's recorded output are already
-	// this coordinator's own, in memory, before Done() ever fires — recorded
-	// via the notify path (internal/helper/client.Client.sessionExited) and
-	// the session-output ring this same goroutine already closed above — so
-	// nothing the "persist, then close" ordering requires depends on the
-	// helper session still existing past this line.
-	_ = s.registry.EndSession(sess.ID())
 
 	// The two responsibilities this path used to drop. closeSession has had
 	// both since it was written; monitorExit is the OTHER teardown owner and

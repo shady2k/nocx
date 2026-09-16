@@ -660,10 +660,28 @@ func (r *helperRegistry) completeFarToolSocket(sid session.ID, id proto.ForwardI
 //
 // It is idempotent: the entry is taken out of the map before anything is done,
 // so a second end for one session finds nothing and does nothing.
+//
+// IT IS ALSO THE CLOSING EDGE OF A SECOND INTERVAL openFarHelper OPENS
+// (nocx-xn63t.6.3): the hostHelper it registered into r.hosts is
+// SESSION-HELD from that same open until here, which is what stops a git
+// binding's own ref count — opened and closed, or refused, on a session that
+// has never had one — from closing the shared client (and with it the
+// session's still-live PTY and lifecycle channel) out from under a pane
+// that is nowhere near ending. hostHelper.sessionEnded is the release; it
+// closes the client itself only if no git binding is holding it open
+// either. Looked up and released whether or not this session ever opened a
+// far tool socket — the two intervals are independent, and a far-helper
+// -hosted session with no git.open call at all still has a hostHelper entry
+// to release, because openFarHelper inserts it at OPEN, before any git.open
+// exists to insert one lazily the way a plain SSH-tab session would.
 func (r *helperRegistry) SessionEnded(sid session.ID) {
 	r.mu.Lock()
 	_, ok := r.farTools[sid]
+	h, hostedOK := r.hosts[sid]
 	r.mu.Unlock()
+	if hostedOK {
+		h.sessionEnded()
+	}
 	if !ok {
 		return
 	}
@@ -1019,6 +1037,16 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 				"host", cfg.Host, "error", rerr)
 		}
 	}
+	// THE HOLD THAT NAMES THE INVARIANT THIS BEAD FIXES (nocx-xn63t.6.3): from
+	// here — before this session is even visible to a caller — until
+	// SessionEnded below runs for it, this hostHelper's shared client is
+	// SESSION-HELD, and closeLocked (git-refs reaching zero, git.open's own
+	// refusing-outcome branch) must not close it on that account alone. Set
+	// under h.mu because helper(f) may already be finding this same entry from
+	// a concurrent git.open the instant OpenHosted returns.
+	h.mu.Lock()
+	h.hostedSession = true
+	h.mu.Unlock()
 	r.mu.Lock()
 	r.hosts[sid] = h
 	r.mu.Unlock()
@@ -1440,6 +1468,16 @@ type hostHelper struct {
 	refs    int
 	dead    bool // the shared client is closed; the next open must redial
 	closing bool // uninstall has frozen this helper against new opens
+	// hostedSession is true from openFarHelper's own open until this
+	// session's SessionEnded, the SAME interval a helper-hosted pane's PTY
+	// and lifecycle channel live on this client (nocx-xn63t.6.3). refs
+	// counts only GIT BINDINGS, and it starts at zero for a session that has
+	// never had one — which used to mean the FIRST git.open, opened and
+	// closed (or refused, e.g. notARepository), closed the shared client on
+	// "nothing references it any more" while a live PTY plainly still did.
+	// Both closing sites below (released, and open's refusing-outcome
+	// branch) check this before deciding refs==0 means "nothing left".
+	hostedSession bool
 }
 
 // connectLocked returns the existing carrier or establishes a new bridge to
@@ -1585,8 +1623,12 @@ func (h *hostHelper) open(ctx context.Context, cwd string) (git.Repo, git.OpenOu
 		// A refusing open carries no repo, so the helper factory never
 		// counts it — if nothing else references the helper, close it
 		// rather than leaving a process with no owner running on the far
-		// host.
-		if h.refs == 0 {
+		// host. "Nothing else" excludes a session hosted on this same
+		// client (nocx-xn63t.6.3): a notARepository answer — the ordinary
+		// outcome for a cwd that is not a repo — must not tear down the
+		// pane's own PTY and lifecycle channel just because this was the
+		// first (and refused) git.open the session ever made.
+		if h.refs == 0 && !h.hostedSession {
 			h.closeLocked()
 		}
 		return repo, outcome, nil
@@ -1627,17 +1669,40 @@ func dialFailure(err error, host string) (git.OpenOutcome, bool) {
 	return outcome, true
 }
 
-// released is called by the wrapping repo when a binding closes. The
-// wrapped helper repo's own Close has already run the factory's release,
-// which closes the shared client at zero; this half forgets the entry so
-// the next open brings one helper up fresh instead of reusing a dead
-// client.
+// released is called by the wrapping repo when a binding closes. It is now
+// the ONLY place a git binding's closing can close the shared client (the
+// wrapped helper repo's own Close no longer does — internal/git/helper's
+// NewFactory says why): refs reaching zero means no GIT binding references
+// this helper any more, and closeLocked runs UNLESS a session is still
+// hosted on the same client (nocx-xn63t.6.3) — that reference is not a git
+// binding and released never counted it, so refs alone must not be read as
+// "nothing left".
 func (h *hostHelper) released() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.refs--
 	if h.refs <= 0 {
 		h.refs = 0
+		if !h.hostedSession {
+			h.closeLocked()
+		}
+	}
+}
+
+// sessionEnded is the closing half of the hold openFarHelper opens on this
+// hostHelper (nocx-xn63t.6.3, hostedSession's own comment): called once, when
+// helperRegistry.SessionEnded reaches this session's entry, it releases the
+// hold and — since the session was the reason this helper stayed hosted
+// while it had no git binding of its own — closes the shared client here if
+// no git binding is holding it open either. A git binding still open at this
+// point (a git panel whose repo binding outlives its pane, however that
+// happens) keeps the client until ITS OWN released() runs, exactly as
+// before this fix.
+func (h *hostHelper) sessionEnded() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.hostedSession = false
+	if h.refs == 0 {
 		h.closeLocked()
 	}
 }

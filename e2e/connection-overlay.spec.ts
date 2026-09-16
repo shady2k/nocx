@@ -288,7 +288,22 @@ test.describe('connection overlay survives backend loss', () => {
     await expect(page.locator('dialog[open]')).toHaveCount(0)
   })
 
-  test('preserves scrollback across a live-daemon connection cut', async ({ browser }) => {
+  test('preserves scrollback across a live-daemon connection cut', async ({
+    browser,
+    browserName,
+  }) => {
+    // QUARANTINED on webkit, tracked by nocx-61k0g (P1), which is blocked by
+    // nocx-n14oo.11. About one run in five the overlay's Retry button resolves
+    // and stays not-visible until the test times out. Two hypotheses were
+    // measured and ruled out on 2026-09-16: a missing deadline on a connecting
+    // attempt (fixed in b2a44bfd, :324 is green) and the dispatcher's backoff
+    // timer winning the click (still 4 of 5 with page.clock installed). The
+    // Playwright call log cannot say which state the overlay is in or why, so
+    // the next step is the per-test context a failure prints, not another guess.
+    test.fixme(
+      browserName === 'webkit',
+      'nocx-61k0g: Retry stays not-visible about one run in five',
+    )
     const current = await backend.start()
     const proxy = await startFaultProxy('127.0.0.1', current.port)
     proxies.push(proxy)

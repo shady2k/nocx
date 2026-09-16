@@ -1728,9 +1728,10 @@ func (h *hostHelper) closeLocked() {
 }
 
 // refRepo wraps a helper-backed repo so the composition root can count the
-// bindings referencing its shared helper. The wrapped repo's Close releases
-// the helper factory's reference (which closes the shared client at zero);
-// the wrapper then tells the hostHelper, which forgets the entry.
+// bindings referencing its shared helper. The wrapped repo's Close owns
+// nothing (internal/git/helper's NewFactory says why); the wrapper tells the
+// hostHelper, whose released is the only place a binding's close can close
+// the shared client — and not while a session is still hosted on it.
 type refRepo struct {
 	git.Repo
 	released func()

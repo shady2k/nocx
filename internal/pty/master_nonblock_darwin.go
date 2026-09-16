@@ -82,7 +82,7 @@ func openMaster() (master *os.File, slaveName string, err error) {
 // an unexported one this package cannot reach.
 func ptyGrantedName(fd int) (string, error) {
 	var buf [ptyNameLen]byte
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), uintptr(unix.TIOCPTYGNAME), uintptr(unsafe.Pointer(&buf[0])))
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), uintptr(unix.TIOCPTYGNAME), uintptr(unsafe.Pointer(&buf[0]))) //nolint:gosec,staticcheck // gosec: buf is a stack array sized to exactly what TIOCPTYGNAME's own encoded parameter length (ptyNameLen) says the ioctl writes, and it is alive for the whole syscall — the pointer never outlives the call or is reused afterward. staticcheck (SA1019): unix.SYS_IOCTL is deprecated in favour of libSystem wrappers, but x/sys/unix exposes none for a fixed-byte-buffer OUT ioctl on darwin — IoctlGetInt/Winsize/Termios cover only their own fixed types, and the package's ioctlPtr that backs them is unexported, so this is the only path this package can reach
 	if errno != 0 {
 		return "", fmt.Errorf("pty: TIOCPTYGNAME: %w", errno)
 	}

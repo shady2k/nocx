@@ -20,3 +20,19 @@ func TestADisposableHomeLeavesRoomForTheHelperEndpointSocket(t *testing.T) {
 		t.Fatalf("the helper endpoint socket does not fit in the disposable home %q: %v", home, err)
 	}
 }
+
+// A test that binds a socket directly in [storagetest.SocketDir] — not
+// nested under a home's .nocx/run — must have the same room. The generation
+// is the longest shape the endpoint accepts (a full 64-hex id), and its
+// derived socket name (proto.Version + 16 hex chars + ".sock") is the
+// longest fixed socket-file name the product ever binds, longer than
+// internal/coordinator's "srv.sock" and internal/toolendpoint's
+// "tool.sock" — so a directory that fits this fits every socket-binding
+// test in the tree.
+func TestSocketDirLeavesRoomForTheHelperEndpointSocket(t *testing.T) {
+	dir := storagetest.SocketDir(t)
+	gen := proto.GenerationID("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	if _, err := endpoint.Path(dir, gen); err != nil {
+		t.Fatalf("the helper endpoint socket does not fit in %q: %v", dir, err)
+	}
+}

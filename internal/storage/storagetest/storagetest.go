@@ -89,6 +89,34 @@ func IsolateWithHome(t *testing.T) string {
 	return home
 }
 
+// SocketDir is a short directory under the same disposable root as
+// [IsolateWithHome], for a test that binds a unix socket directly — a
+// coordinator discovery socket, a worker tool endpoint, a bare helper
+// endpoint dialled by generation — and has no profile layout of its own to
+// isolate.
+//
+// t.TempDir() embeds the test's own name, and on macOS a TMPDIR of
+// /var/folders/<two random components>/T/ sits ahead of that (49 bytes
+// before the test's own name), so this had already grown three near-copies
+// of "make the directory short" before this one: internal/coordinator's
+// shortTempDir and shortDir, and internal/app's shortWorkerSocketDir. Each
+// shortened only the directory's own prefix — os.MkdirTemp("", "nocxbind"),
+// its siblings — which still resolves under TMPDIR and so still loses
+// whatever TMPDIR grows to next; it happened to leave enough room on this
+// runner and is exactly the fragility disposableRoot was chosen over for
+// IsolateWithHome. This is the one answer, sharing that already-fixed root
+// instead of shortening a second, independent prefix under the same
+// vulnerable parent.
+func SocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(disposableRoot(), "nocx-sock-")
+	if err != nil {
+		t.Fatalf("create a short socket directory: %v", err)
+	}
+	t.Cleanup(func() { removeUnderTempDir(t, dir) })
+	return dir
+}
+
 // disposableRoot is where a disposable home is made, and the only root
 // removeUnderTempDir will delete under.
 //

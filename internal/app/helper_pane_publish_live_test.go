@@ -60,6 +60,12 @@ type paneJourney struct {
 	srv     *pwSSHServer
 	carrier *remoteInstallerAdapter
 	opener  *localHelperOpener
+	// prompts is the person-ask seam this journey's helper answers a reverse
+	// ssh.password-prompt through (helperReverseHandlers' third argument).
+	// Exposed so a test that opens an INTERACTIVE destination — nothing
+	// stored, only a person to ask — can wire a counting requester onto it
+	// before opening; see openSSHInteractive.
+	prompts *helperPrompt
 }
 
 // startPaneJourney assembles the stack: the fixture, the real daemon (ssh
@@ -122,12 +128,17 @@ func startPaneJourney(t *testing.T, srv *pwSSHServer) *paneJourney {
 		}
 	})
 
+	// prompts is the person-ask seam: unwired (no asker set) by default, which
+	// is exactly what openSSH's own SecretID-bound destination never needs —
+	// openSSHInteractive is what calls .set() on it, for the destination that
+	// does.
+	prompts := &helperPrompt{log: logger}
 	peer, err := helperclient.Dial(ctx, helperclient.Config{
 		Exec:        helperclient.NewSocketConn(coordEnd),
 		ExpectHash:  filesFixtureGenera,
 		SentinelTTL: 5 * time.Second,
 		Reverse: helperReverseHandlers(
-			rc, &askRecorder{value: openPasswordFixturePassword}, &helperPrompt{log: logger}, nil, logger),
+			rc, &askRecorder{value: openPasswordFixturePassword}, prompts, nil, logger),
 		Log: logger,
 	})
 	if err != nil {
@@ -155,7 +166,8 @@ func startPaneJourney(t *testing.T, srv *pwSSHServer) *paneJourney {
 				probes: probes, channels: over, publish: impl, log: logger,
 			},
 		},
-		opener: opener,
+		opener:  opener,
+		prompts: prompts,
 	}
 }
 
@@ -174,6 +186,43 @@ func (j *paneJourney) openSSH(t *testing.T, mode string) error {
 			AuthMode: "password",
 			Secrets:  &askRecorder{value: openPasswordFixturePassword},
 			SecretID: filesFixtureSecret,
+			// The credential may only be spent on the endpoint its profile
+			// names, and this process is the party that checks it.
+			AuthorizedEndpoint: j.srv.addr,
+			ConnectionName:     "pane publish journey",
+			DesiredMode:        mode,
+			Shell:              "bash",
+			RemoteInstaller:    j.carrier,
+		},
+	}, "")
+	if err == nil {
+		_ = opened.Session.Close()
+	}
+	if !selected {
+		t.Fatalf("this machine's opener declined an ssh pane (selected=false)")
+	}
+	return err
+}
+
+// openSSHInteractive opens one ssh pane exactly as openSSH does, except the
+// destination carries NO stored credential at all — no Secrets, no SecretID
+// — only a person to ask (requester). That is the shape the auth ladder
+// resolves to the interactive rung for (AuthMode "password", nothing bound:
+// internal/ssh's resolveCredential falls through SecretID's case and lands
+// on "passwordCapable && cfg.PasswordRequester != nil"), and it is the exact
+// shape e2e/connection-password.spec.ts's first-open case is: a profile with
+// nothing stored yet, remembered only after the person answers once.
+func (j *paneJourney) openSSHInteractive(t *testing.T, mode string, requester ssh.ConnectionPasswordRequester) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	opened, selected, err := j.opener.OpenHosted(ctx, session.Config{
+		Kind: session.KindRemote,
+		Host: j.srv.addr,
+		Remote: &ssh.ConnectConfig{
+			User:              filesFixtureUser,
+			AuthMode:          "password",
+			PasswordRequester: requester,
 			// The credential may only be spent on the endpoint its profile
 			// names, and this process is the party that checks it.
 			AuthorizedEndpoint: j.srv.addr,
@@ -278,6 +327,48 @@ func TestAPaneStillOpensWhenItsBundleCouldNotBePublished(t *testing.T) {
 	}
 	t.Logf("MEASURED a pane whose publish could not name a home: opened, nothing written, the host saw %v",
 		srv.eventLog())
+}
+
+// TestASSHPaneWithNothingStoredAsksThePersonOnceFromThePublishUntilTheSpawnHoldsItsOwnReference
+// is nocx-xn63t.6.6's own criterion, named as the interval it is: FROM the
+// moment the script-mode publish takes its lease on the destination UNTIL
+// the interactive spawn that follows has taken a reference of its own, the
+// underlying connection must not be dropped — so a person with nothing
+// stored for this destination is asked for the password EXACTLY ONCE, and
+// the far host authenticates EXACTLY ONCE, even though the publish
+// (helper_publish.go's PublishBundle) and the spawn (sshsvc.Service.
+// OpenShell) are two operations that each dial independently when nothing
+// bridges the gap between them.
+//
+// Before holdConnection (openSSH, internal/app/helper_local.go) this was
+// RED: the publish's own lease released before the spawn acquired one, the
+// pool's refcount touched zero between them, and the spawn re-dialed —
+// asking a person a SECOND time for a password they had already given, with
+// nobody left to answer it. That is exactly the standing "Password for
+// {profile}" prompt e2e/connection-password.spec.ts's first-open case
+// measured, 20 seconds after the person's one Connect click.
+func TestASSHPaneWithNothingStoredAsksThePersonOnceFromThePublishUntilTheSpawnHoldsItsOwnReference(t *testing.T) {
+	srv, _, _ := newBundleFixture(t)
+	srv.acceptLaunchExec = true
+	journey := startPaneJourney(t, srv)
+
+	asker := &countingPasswordRequester{answer: openPasswordFixturePassword}
+	journey.prompts.set(asker)
+
+	if err := journey.openSSHInteractive(t, "script", asker); err != nil {
+		t.Fatalf("opening an ssh pane with nothing stored for it: %v", err)
+	}
+
+	if got := asker.count(); got != 1 {
+		t.Fatalf("the person was asked for the connection password %d times, want exactly 1 — a second ask "+
+			"is a prompt nobody is left to answer, standing behind the one they already answered", got)
+	}
+	if got := srv.connCount(); got != 1 {
+		t.Fatalf("the far host authenticated %d connection(s) for one pane, want exactly 1 — the publish's "+
+			"lease and the spawn's own channel must land on the SAME pooled connection (AD-4), not one each", got)
+	}
+	t.Logf("MEASURED %d ask(s) and %d authentication(s) for one script-mode pane with nothing stored",
+		asker.count(), srv.connCount())
 }
 
 // fileExistsIn answers whether a path is a regular file.

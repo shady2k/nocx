@@ -263,3 +263,37 @@ func TestAPaneOpensEvenWhenItsPublishFailed(t *testing.T) {
 	}
 	t.Logf("MEASURED the fail-open publish: pane opened, and the record names the cause")
 }
+
+// TestASSHPaneStillOpensWhenTheKeepAliveLeaseCannotBeAcquired is the paired
+// degrade for holdConnection (nocx-xn63t.6.6): this file's daemon
+// (fakeLocalEndpoint, built by startFakeLocalEndpoint) registers only the
+// git and session services, never an ssh one, so the extra probe lease
+// openSSH now holds across the publish and the spawn can never be acquired
+// here — the coordinator dials the daemon fine and is refused the op by
+// name. The pane must still open, the same ADR-0004 rule
+// TestAPaneOpensEvenWhenItsPublishFailed already holds openSSH to for the
+// publish itself, and the log must say why, in the same shape that failure's
+// own record takes.
+func TestASSHPaneStillOpensWhenTheKeepAliveLeaseCannotBeAcquired(t *testing.T) {
+	stand := startPaneStand(t)
+	installer := &paneInstaller{daemon: stand.daemon}
+
+	if err := stand.openSSH(t, "script", installer); err != nil {
+		t.Fatalf("a keep-alive lease that could not be acquired refused the pane: %v — ADR-0004 promises an "+
+			"ordinary usable terminal instead", err)
+	}
+	if got := stand.daemon.spawned(); got != 1 {
+		t.Fatalf("the daemon was asked to spawn %d sessions, want 1: the pane must still open", got)
+	}
+	if hosts, _ := installer.calls(); len(hosts) != 1 {
+		t.Fatalf("the installer was asked to publish for %v, want exactly one call: a lease that could not "+
+			"be held must not have stopped the publish from being attempted", hosts)
+	}
+
+	// The failure is NAMED, not swallowed: the log carries why the connection
+	// could not be held, the same way a failed publish's own log does.
+	if logged := stand.logs.String(); !strings.Contains(logged, "could not hold the connection") {
+		t.Fatalf("the failed keep-alive lease left no record of why; the log was %q", logged)
+	}
+	t.Logf("MEASURED a pane whose keep-alive lease could not be acquired: opened, and the record names why")
+}

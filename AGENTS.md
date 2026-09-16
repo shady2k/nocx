@@ -735,6 +735,18 @@ stop that loop.
   really a date, have been deleted. `mvp` and `phase-1/2/3` stay: they are roadmap, they are
   orthogonal to area, and the rules above already govern them.
 
+- **Triage labels are the third axis**, added 2026-09-16 for the `/triage` skill:
+  `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. Like `mvp`
+  and `phase-1/2/3` they are orthogonal to area, so the one-area-label rule is unchanged —
+  a triaged bead carries its area label _and_ a triage label. These five, the area list and
+  the roadmap list are the whole permitted vocabulary; anything else is still refused.
+  `wontfix` is a label **and** a close (`br close <id> --reason "wontfix: <why>"`), because
+  a label alone leaves the bead open in everybody's listing. And `ready-for-agent` /
+  `ready-for-human` are for work arriving from OUTSIDE the queue: for a bead already inside
+  an epic, `br ready` is the authority on whether it is takeable, since it computes blockers
+  and holds that a hand-applied label cannot. Mapping in
+  [`docs/agents/triage-labels.md`](docs/agents/triage-labels.md).
+
 - **`in_progress` means a worker is holding it now** — not "started once", not "nearly
   done". Stopping means setting it back to `open` in the same minute, because an unheld bead
   sitting in `in_progress` is invisible to `br ready` and to every colleague looking for
@@ -946,6 +958,20 @@ changed.
 - **Desktop shell:** Wails v3 (macOS first).
 - **Transport:** one WebSocket — raw **binary** data plane + **JSON-RPC 2.0** control plane
   (AD-1).
+
+## Agent skills
+
+The `mattpocock/skills` engineering skills read their per-repo configuration from
+`docs/agents/`. Three files, and they are the skills' view of rules this file owns:
+
+| File                                                           | What it tells a skill                                                                                |
+| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| [`docs/agents/issue-tracker.md`](docs/agents/issue-tracker.md) | Issues live in **`br`**, not GitHub Issues and not markdown — the verbs, and the wayfinder mapping.  |
+| [`docs/agents/triage-labels.md`](docs/agents/triage-labels.md) | The five triage roles as `br` labels, orthogonal to the one mandatory area label.                    |
+| [`docs/agents/domain.md`](docs/agents/domain.md)               | Single-context: this file is the `CONTEXT.md`, and ADRs are in `docs/decisions/`, never `docs/adr/`. |
+
+They restate; they do not decide. Where one disagrees with this file, this file wins and
+the `docs/agents/` copy is the bug.
 
 ## This file wins over a skill
 

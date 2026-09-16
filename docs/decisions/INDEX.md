@@ -125,7 +125,8 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0065 | [The emulator a program talks to is not the emulator that watches it](0065-the-emulator-a-program-talks-to.md)                                                | Accepted (2026-09-13; supersedes ADR-0041's choice)                       |
 | 0066 | [One emulator, and it is the backend's](0066-one-emulator-and-it-is-the-backends.md)                                                                          | Accepted (2026-09-12; supersedes parts of AD-1/6/9/10 and ADR-0001/2/8/9) |
 | 0067 | [A write into a descendant's pane is one step under a helper-minted target](0067-a-write-into-a-descendants-pane-is-one-step-under-a-helper-minted-target.md) | Accepted (2026-09-14; supersedes ADR-0064 §1 and ADR-0029)                |
-| 0068 | [The helper is decided by the connection, never by a feature](0068-the-helper-is-decided-by-the-connection-never-by-a-feature.md)                             | Accepted (2026-09-15; supersedes remote-helper D8)                        |
+| 0068 | [The helper is decided by the connection, never by a feature](0068-the-helper-is-decided-by-the-connection-never-by-a-feature.md)                             | Accepted (connect-time answer superseded by ADR-0069)                     |
+| 0069 | [The connect-time ask chooses a method, and the connection keeps it](0069-the-connect-time-ask-chooses-a-method-and-the-connection-keeps-it.md)               | Accepted (2026-09-16; supersedes ADR-0068's connect-time answer)          |
 
 ## Adding one
 

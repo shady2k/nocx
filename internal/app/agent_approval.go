@@ -62,8 +62,9 @@ type agentApprovalService struct {
 	workspace string
 
 	// resolveExecutable is the seam Approve resolves an agent name through.
-	// Defaulted in newAgentApprovalService to the real resolver; overridden
-	// only by a test (SetExecutableResolver).
+	// Defaulted in newAgentApprovalService to the real resolver. A test in
+	// this package assigns the field directly; there is deliberately no
+	// setter, because nothing in production chooses another resolver.
 	resolveExecutable executableResolver
 
 	// What was approved for a live enrolment, so the admit-time check reads
@@ -151,16 +152,6 @@ func newAgentApprovalService(sessions workerAuthSessions, store *agentapproval.S
 
 func (s *agentApprovalService) SetRequester(requester hostApprovalRequester) {
 	s.requester = requester
-}
-
-// SetExecutableResolver overrides how Approve resolves an agent name to an
-// executable identity. Nil is ignored: a test that has not set one keeps the
-// real resolver newAgentApprovalService installed.
-func (s *agentApprovalService) SetExecutableResolver(resolve executableResolver) {
-	if resolve == nil {
-		return
-	}
-	s.resolveExecutable = resolve
 }
 
 // Interval answers for the AGENT this session enrolled, which is the identity

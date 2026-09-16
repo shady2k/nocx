@@ -180,7 +180,7 @@ func newFarStand(t *testing.T, sessions ...session.Session) *farStand {
 
 	store := agentapproval.NewStore(log.NewSlogAdapter(nil), &approvalDocStore{}, "agent-approvals.json")
 	approval := newAgentApprovalService(seam, store, workerTestWorkspace)
-	approval.SetExecutableResolver(testExecutableResolver(t))
+	approval.resolveExecutable = testExecutableResolver(t)
 	approval.SetRequester(&recordingRequester{answer: true})
 
 	auth := mustToolAuthorizer(t, &workerAuthPinner{}, seam, watched, emptyWorkerRecord(), workerTestWorkspace, approval)

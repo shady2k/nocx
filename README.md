@@ -351,7 +351,7 @@ The executable backlog lives in beads, not markdown, and in `.beads/issues.jsonl
 which is a tracked file — so a clone has it:
 
 ```bash
-scripts/br-queue.sh          # what to work on next: taken epics' fronts, plus standalone bugs
+br ready                     # what to work on next (--epic/--parent/-t/-l to narrow)
 br show <id>                 # view an issue
 br update <id> --claim       # claim work
 br close <id> --reason "..." # complete work, with evidence a stranger can check

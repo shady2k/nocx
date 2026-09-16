@@ -203,7 +203,8 @@ called before that", the fix is an assertion or a test.
 ## Code search
 
 **`grep`, `glob` and reading the file** is the answer for _does this exist, and who calls
-it_.
+it_ — measured against `repowise` rather than assumed
+([ADR-0056](docs/decisions/0056-repowise-is-kept-for-history-not-for-search.md)).
 
 **`repowise` is installed, and it is not a second `grep`.** That ordering is measured, not
 asserted: `nocx-14sbw` put both against five questions we actually ask. With a live
@@ -347,7 +348,7 @@ that is only red in the container without working out which one is lying.
 
 ## How we work
 
-1. Take the next task with the queue command in [What to work on next](#what-to-work-on-next).
+1. Take the next task from `br ready` — see [What to work on next](#what-to-work-on-next).
 2. Read the relevant `AD`(s) before touching a boundary.
 3. **TDD**: red → green → refactor. The failing test comes first.
 4. Keep it green, and let the gate cost what it is worth. `pre-commit` is static and takes
@@ -359,6 +360,34 @@ that is only red in the container without working out which one is lying.
    push ran everything, on every worktree. The suites are one command away by hand
    (`.githooks/containerized-tests.sh`); what catches a break is CI and the merged-tree gate.
 5. Update the bead; record any non-obvious decision as an ADR in `docs/decisions/`.
+
+## Session completion
+
+Subordinate to whatever the user actually asked for. `br` will not do any of the git
+steps for you.
+
+1. **File beads for remaining work** — anything that needs follow-up, before you forget it.
+2. **Run the quality gates** if code changed. Which ones, and whose job they are, is under
+   [Git authority](#git-authority): a worker runs the unit tests for what it touched, the
+   coordinator runs `make ci-full` on the merged tree.
+3. **Update issue status** — close what is finished, and set anything you stopped holding
+   back to `open` in the same minute. An unheld bead in `in_progress` is invisible to
+   `br ready` and to every colleague looking for work.
+4. **Send the backlog out with the code:**
+
+   ```bash
+   br sync --flush-only
+   git add .beads/issues.jsonl
+   git commit          # same commit as the code it describes, or one right beside it
+   git push
+   ```
+
+5. **Write down anything that was bought.** If something in this session cost a
+   measurement or a wrong turn and is not derivable from the repository, it goes in this
+   file, which has the three tests. Nothing does this for you: the transcript `deja`
+   indexes is a record of what you did, not a rule anybody will review.
+6. **Hand off** — changed files, what you validated, bead status, and anything you left
+   blocked, in those words.
 
 ## Testing: five rules, each bought by a green suite over a broken product
 
@@ -634,28 +663,32 @@ ancestor that did it.
 Asked to "keep going" with no further instruction, this is the whole answer:
 
 ```bash
-scripts/br-queue.sh
+br ready
 ```
-
-It prints two lists: tasks inside epics somebody has actually taken, and standalone bugs,
-which legitimately have no epic. It is a script rather than two piped commands because
-`br ready` can filter on neither parent nor issue type, so both filters are computed. Read
-the script before working around it; the reasoning is in its header.
 
 **If it returns nothing, that is an answer, not a bug** — every open epic's front is
 occupied. Finish something in flight or take a free epic; never widen the query.
 
+**The rules below are yours to apply, and no wrapper's to enforce.** Narrow with the
+binary's own flags — `--parent`, `--epic` (sugar for `--parent <id> --recursive`), a
+repeatable `-t/--type`, `-r/--recursive`, `-l/--label` — and never with a script around
+them. Custom machinery wrapped around a tracker is a second answer to the tracker's own
+question, and it goes stale the quarter the tracker catches up.
+
 - **You may not take a task out of an epic nobody has taken.** If the epic is free, take
   the epic (`br update <epic> --assignee "$(git config user.email)" --status in_progress`),
-  then come back for its children.
+  then come back for its children with `br ready --epic <epic>`.
 - **Never take work out of a blocked epic** — it is blocked because the same files are
-  moving. The queue script enforces this; going around it via `br list`, `br search` or an
-  id in a document is the failure mode. If a bead is not in `br ready`, do not start it.
+  moving. Nothing computes this for you: read the epic before you take its child. Going
+  around the queue via `br list`, `br search` or an id in a document is the failure mode.
+  If a bead is not in `br ready`, do not start it.
 - **An epic is assigned, its children are claimed.** Owning an epic means seeing it to its
   DONE WHEN. Never `--claim` an epic bead as though it were a task.
 - **`br ready -t epic --unassigned`** lists epics nobody owns and nothing blocks — what you
   can hand to a colleague. Do not flip an epic to `in_progress` to hide it from a task
-  listing; the queue script already excludes epics.
+  listing; `br ready -t task -t bug` is how you leave epics out of one.
+- **A standalone bug legitimately has no epic.** `br ready -t bug` is where those surface,
+  and taking one needs no epic to be taken first.
 
 ### Backlog invariants
 
@@ -920,9 +953,9 @@ The `beads-superpowers` plugin is installed for its process skills — brainstor
 writing-plans, test-driven-development, systematic-debugging — and they are worth having.
 Its tracker half is not: those skills were written for an older tracker under a different
 binary name, and by the plugin's own rule repository instructions win over skills.
-**Translate every tracker command in a skill to `br`.** Three do not survive a rename:
-"what next" is `scripts/br-queue.sh`, recall is `deja` and not the tracker at all, and
-export is `br sync --flush-only` to `.beads/issues.jsonl`.
+**Translate every tracker command in a skill to `br`.** Two do not survive a rename:
+recall is `deja` and not the tracker at all, and export is `br sync --flush-only` to
+`.beads/issues.jsonl`.
 
 The official `br` skill is installed too and carries the same kind of leftovers — config
 keys that do not exist in `br config schema`, and an id prefix that was never ours. Believe

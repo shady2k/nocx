@@ -696,7 +696,7 @@ async function rpc<T>(
   )
 }
 
-test('on an SSH tab whose machine has declined the helper, the panel says what it cannot do and offers NO install action anywhere', async ({
+test('on an SSH tab whose connection was set to Script at the connect-time ask, the panel says what it cannot do and offers NO install action anywhere', async ({
   page,
 }) => {
   test.setTimeout(120_000)
@@ -736,8 +736,8 @@ test('on an SSH tab whose machine has declined the helper, the panel says what i
         // (ADR-0033), which wraps and installs the launcher automatically
         // — landing the OSC 7 that makes the cwd verified and lets the
         // git store reach git.open — and is also what raises the
-        // connect-time helper ask below (ADR-0068). An explicit Script or
-        // Helper mode would skip past the ask this spec needs.
+        // connect-time ask below (ADR-0069). An explicit Script or Helper
+        // mode would skip past the ask this spec needs.
       },
     })
     createdProfileId = created?.id ?? null
@@ -754,20 +754,20 @@ test('on an SSH tab whose machine has declined the helper, the panel says what i
     await expect(option).toBeVisible({ timeout: 10_000 })
     await page.keyboard.press('Enter')
 
-    // ADR-0068: the ask is at the connection, not the feature. The host
+    // ADR-0069: the ask is at the connection, not the feature. The host
     // key is already trusted (trustHostKey, above), so this connect's
-    // probe succeeds and the one unanswered question is the helper alone
+    // probe succeeds and the one unanswered question is the method alone
     // — raised on the same one-dialog surface the host-key ask uses
-    // (HostKeyDialog), titled for the helper-only case. "Not now" is a
-    // RECORDED decline (host-key-dialog.tsx: "approved=false is a recorded
-    // decline, not a cancel"), so the retried open proceeds without the
-    // helper rather than failing outright — the connection stays usable,
-    // which is the whole point of the decline being an answer.
-    const helperDialog = page
-      .getByRole('dialog')
-      .filter({ hasText: 'Use the helper for this connection?' })
+    // (HostKeyDialog), titled for the method-only case. Choosing Script is
+    // a RECORDED answer (written to the connection's desiredMode, ADR-0069)
+    // rather than the old yes/no "Not now": the retried open proceeds
+    // without the helper, script-tier, and the connection stays usable —
+    // the same outcome the removed decline button gave, reached the way a
+    // person now reaches it.
+    const helperDialog = page.getByRole('dialog').filter({ hasText: 'Choose how nocx connects' })
     await expect(helperDialog).toBeVisible({ timeout: 30_000 })
-    await helperDialog.getByRole('button', { name: 'Not now' }).click()
+    await helperDialog.getByRole('radio', { name: 'Script' }).click()
+    await helperDialog.getByRole('button', { name: 'Continue' }).click()
     await expect(helperDialog).not.toBeVisible()
 
     // The SSH tab opens and becomes active (opening a tab activates it),
@@ -776,14 +776,18 @@ test('on an SSH tab whose machine has declined the helper, the panel says what i
     await page.locator(VIEW_GIT).click()
 
     // The git panel never asks (ADR-0068): git.open answers the SAME
-    // not-available error a raw or denied machine gets, rendered as the
-    // ordinary failed-open card — naming the setting that would change
-    // it (reconnect, or Delivery mode Helper) rather than offering to ask
-    // again itself.
+    // not-available error a raw or Script connection gets, rendered as the
+    // ordinary failed-open card — naming the setting that would change it
+    // (Delivery mode Helper, or Auto to be offered the ask again) rather
+    // than offering to ask again itself. Script is an ANSWER under
+    // ADR-0069 (internal/app/helper_git.go's refusedHelperReason), not a
+    // decline recorded against the machine — there is no more "declined"
+    // to read back here; the connect-time ask no longer writes one.
     await expect(page.locator(PANEL)).toBeVisible({ timeout: 30_000 })
     const errorCard = page.locator('[data-testid="git-error"]')
     await expect(errorCard).toBeVisible({ timeout: 30_000 })
-    await expect(errorCard).toContainText('declined')
+    await expect(errorCard).toContainText('Script')
+    await expect(errorCard).toContainText('nocx helper')
 
     // No install/accept action anywhere in the panel: neither the removed
     // consent testids nor any button whose label reads as one — only the

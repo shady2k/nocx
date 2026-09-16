@@ -57,7 +57,10 @@ function createDisposableRoot(): string {
 }
 
 /** Seed the profile store with ONE password-mode profile and no binding —
- *  the state "saving a host" leaves behind. The directory comes from the
+ *  the state "saving a host" leaves behind. This spec's subject is the
+ *  connection-password ask, not the connect-time ask (ADR-0069) —
+ *  desiredMode is declared explicitly as script so an auto connection's
+ *  helper ask never rides the same open. The directory comes from the
  *  harness rather than from a literal: it is not the same on every platform,
  *  and writing the Linux one on a Mac put the profile where nothing read it. */
 function seedProfile(isolatedHome: string, fixtureAddr: number): string {
@@ -77,6 +80,7 @@ function seedProfile(isolatedHome: string, fixtureAddr: number): string {
             port: fixtureAddr,
             user: 'e2euser',
             auth: 'password',
+            desiredMode: 'script',
           },
         },
       ],
@@ -87,7 +91,10 @@ function seedProfile(isolatedHome: string, fixtureAddr: number): string {
 }
 
 /** Seed a key-auth profile, so a spec can reach the host-key gate without
- *  a password prompt standing in front of it. */
+ *  a password prompt standing in front of it. This spec's subject is the
+ *  host-key trust action (issue (b), ADR-0069), not the method choice —
+ *  desiredMode is declared explicitly as script so the unknown key raises
+ *  the plain host-key-only ask rather than the combined one. */
 function seedPublicKeyProfile(isolatedHome: string, fixtureAddr: number, keyPath: string): void {
   // documentDir, not a hand-spelled path: the store is under
   // Library/Application Support on darwin and .config elsewhere, and the two
@@ -108,6 +115,7 @@ function seedPublicKeyProfile(isolatedHome: string, fixtureAddr: number, keyPath
             user: 'e2euser',
             auth: 'publicKey',
             keyPath,
+            desiredMode: 'script',
           },
         },
       ],

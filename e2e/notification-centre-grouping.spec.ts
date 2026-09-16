@@ -429,12 +429,21 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
     await backToTheTerminal(page)
     const ws = await resolveBackend(page)
     // Unique per run: the stand's profile store persists across runs in this
-    // home, and a stale profile would dial a fixture that is long dead.
+    // home, and a stale profile would dial a fixture that is long dead. This
+    // spec's subject is notification grouping, not the connect-time ask
+    // (ADR-0069) — desiredMode is declared explicitly as script so the
+    // connection is never asked.
     const profileName = `e2e-grouping-${Date.now()}`
     const created = await rpc<{ id: string }>(page, ws.port, ws.token, 'profiles.create', {
       type: 'ssh',
       name: profileName,
-      options: { host: remoteHost, port: remotePort, user: 'e2e', keyPath: fixture.userKey },
+      options: {
+        host: remoteHost,
+        port: remotePort,
+        user: 'e2e',
+        keyPath: fixture.userKey,
+        desiredMode: 'script',
+      },
     })
     profileId = created.id
 

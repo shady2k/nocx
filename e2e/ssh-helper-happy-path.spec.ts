@@ -350,6 +350,13 @@ async function seedPasswordConnection(ep: BackendEndpoint, fixture: SshdFixture)
   // The renderer's vocabulary is the row HANDLE (ADR-0011 §2): the backend
   // resolves it to the stored reference, and a reference never crosses the
   // wire.
+  //
+  // desiredMode is declared explicitly as helper: this spec's subject IS the
+  // helper tier (one connection sharing a pane and Files), not the
+  // connect-time ask (ADR-0069) that decides it for an unanswered auto
+  // connection. An explicit helper choice is its own consent for the binary
+  // (ADR-0034 §4.3, internal/app/consent.go's Resolve) — no separate
+  // machine grant needs seeding.
   await ask(ep, 'profiles.create', {
     type: 'ssh',
     name: PROFILE_NAME,
@@ -359,6 +366,7 @@ async function seedPasswordConnection(ep: BackendEndpoint, fixture: SshdFixture)
       user: 'e2e',
       auth: 'password',
       passwordSecret: minted.row,
+      desiredMode: 'helper',
     },
   })
 }

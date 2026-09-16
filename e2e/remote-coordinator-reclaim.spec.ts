@@ -395,11 +395,11 @@ async function createProfileAndOpen(
 }
 
 /** The shipped install gesture: opening this AUTO connection for the first
- *  time raises the connect-time helper ask (ADR-0068) — the host key is
- *  already trusted (seedKnownHost, above), so the ask is helper-only, on
- *  the same one-dialog surface the host-key ask uses — and granting it
- *  puts the helper on the host. The open itself does not resolve, and the
- *  tab does not appear, until the ask is answered.
+ *  time raises the connect-time ask (ADR-0069) — the host key is already
+ *  trusted (seedKnownHost, above), so the ask is method-only, on the same
+ *  one-dialog surface the host-key ask uses — and choosing Helper puts the
+ *  helper on the host. The open itself does not resolve, and the tab does
+ *  not appear, until the ask is answered.
  *
  *  The shell that comes up is NOT inside the seeded repository. Since
  *  ADR-0057 every pane is helper-hosted: the far nocx-helper spawns it
@@ -420,11 +420,10 @@ async function installHelperThroughProduct(
   repoPath: string,
 ): Promise<string> {
   const profileName = await createProfileAndOpen(page, endpoint, fixture)
-  const helperDialog = page
-    .getByRole('dialog')
-    .filter({ hasText: 'Use the helper for this connection?' })
+  const helperDialog = page.getByRole('dialog').filter({ hasText: 'Choose how nocx connects' })
   await expect(helperDialog).toBeVisible({ timeout: 30_000 })
-  await helperDialog.getByRole('button', { name: 'Use the helper' }).click()
+  await helperDialog.getByRole('radio', { name: 'Helper' }).click()
+  await helperDialog.getByRole('button', { name: 'Continue' }).click()
   await expect(helperDialog).not.toBeVisible()
   await expect(page.locator(TAB)).toHaveCount(2, { timeout: 30_000 })
   await promptReady(page)

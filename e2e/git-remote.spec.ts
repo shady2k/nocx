@@ -284,9 +284,9 @@ test('a commit from the panel, on a remote host, through its own pre-commit hook
         keyPath: fixture.userKey,
         // No desiredMode option: the cascade's hardcoded default is Auto
         // (ADR-0033), which is what makes this connect raise the
-        // connect-time helper ask (ADR-0068) below — an explicit Script or
-        // Helper would skip straight past it. Auto also wraps and installs
-        // the launcher automatically, which is what makes the remote shell
+        // connect-time ask (ADR-0069) below — an explicit Script or Helper
+        // would skip straight past it. Auto also wraps and installs the
+        // launcher automatically, which is what makes the remote shell
         // emit OSC 7 so the cwd — and with it the tab title and git.open's
         // origin — lands.
       },
@@ -304,18 +304,18 @@ test('a commit from the panel, on a remote host, through its own pre-commit hook
     await page.keyboard.press('Enter')
 
     // The ask comes first, at the connection rather than the feature
-    // (ADR-0068): the host key is already trusted (trustHostKey, above),
+    // (ADR-0069): the host key is already trusted (trustHostKey, above),
     // so this connect's probe succeeds and the ONLY unanswered question is
-    // the helper — the same one-dialog surface the host-key ask uses
-    // (HostKeyDialog), titled for the helper-only case. The open itself
+    // the method — the same one-dialog surface the host-key ask uses
+    // (HostKeyDialog), titled for the method-only case. The open itself
     // does not resolve — and the tab does not appear — until this is
     // answered: openSessionWithHostKeyRecovery retries the open only after
-    // the dialog settles.
-    const helperDialog = page
-      .getByRole('dialog')
-      .filter({ hasText: 'Use the helper for this connection?' })
+    // the dialog settles. Helper is chosen from the SegmentedControl and
+    // confirmed with Continue — there is no more one-click "Use the helper".
+    const helperDialog = page.getByRole('dialog').filter({ hasText: 'Choose how nocx connects' })
     await expect(helperDialog).toBeVisible({ timeout: 30_000 })
-    await helperDialog.getByRole('button', { name: 'Use the helper' }).click()
+    await helperDialog.getByRole('radio', { name: 'Helper' }).click()
+    await helperDialog.getByRole('button', { name: 'Continue' }).click()
     await expect(helperDialog).not.toBeVisible()
 
     // The SSH tab opens and becomes active. Since ADR-0057 every pane is

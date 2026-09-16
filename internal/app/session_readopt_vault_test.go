@@ -35,6 +35,7 @@ package app
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -347,10 +348,19 @@ func TestReconcileSessions_ASessionLeftPendingIsTakenBackOnceAttachedAndUnsealed
 // predecessor.
 type unsealsThenBlocksRequester struct {
 	v *vault.Vault
+	// unsealed is closed the instant Unseal has returned, below — the
+	// observable event a caller waits on instead of a duration. once guards
+	// the close: EnsureUnsealed's fast path (StateUnsealed: return nil,
+	// before touching a requester) should keep this called exactly once in
+	// practice, but a second raise finding the state changed underneath it
+	// must not panic the test on a double close.
+	unsealed chan struct{}
+	once     sync.Once
 }
 
-func (r unsealsThenBlocksRequester) RequestUnlock(ctx context.Context, reason string) error {
+func (r *unsealsThenBlocksRequester) RequestUnlock(ctx context.Context, reason string) error {
 	_ = r.v.Unseal(context.Background(), vault.UnsealRequest{Passphrase: "hunter2"})
+	r.once.Do(func() { close(r.unsealed) })
 	<-ctx.Done()
 	return ctx.Err()
 }
@@ -363,6 +373,21 @@ func (r unsealsThenBlocksRequester) RequestUnlock(ctx context.Context, reason st
 // exactly as measured, and the second, a FRESH EnsureUnsealed call, finds
 // the vault already unsealed (State is checked before any requester is
 // touched) and needs nobody's answer at all.
+//
+// WHY TWO FIXED ATTEMPTS, NOT A LOOP OF SEVERAL SHORT ONES. An earlier
+// version ran up to five 100ms attempts, betting that the leader goroutine
+// EnsureUnsealed spawns (unlock.go's `go func(){ ... req.RequestUnlock ...
+// }()`) would get scheduled and call Unseal within that wall-clock budget.
+// On a loaded runner it sometimes was not: nothing here bounds how long the
+// Go scheduler takes to run a freshly spawned goroutine, so counting
+// attempts measured scheduler latency and mistook it for the retry
+// mechanism failing to catch the unseal (mac4.log, ci-mac: "verdict after 5
+// short attempts = unknown, want live"; nocx-8m3av). The fix is the same rule
+// AGENTS.md's testing section states for every timing-shaped test: wait on
+// an observable state change, never a duration. requester.unsealed is that
+// event — closed the instant the leader's Unseal call returns — so the
+// second attempt runs only once we KNOW the raw unseal already happened,
+// not once we hope five 100ms windows were enough.
 func TestReconcileSessions_APollOfShortAttemptsCatchesARawUnsealASuspendedOneMissed(t *testing.T) {
 	svc := sharedHelperService(t)
 	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
@@ -374,7 +399,8 @@ func TestReconcileSessions_APollOfShortAttemptsCatchesARawUnsealASuspendedOneMis
 	first.quit()
 
 	v.Seal()
-	v.SetUnlockRequester(unsealsThenBlocksRequester{v: v})
+	requester := &unsealsThenBlocksRequester{v: v, unsealed: make(chan struct{})}
+	v.SetUnlockRequester(requester)
 	v.ClientsAttached(1) // a client IS attached, matching Transport.Start having already returned
 
 	second := newCoordinator(t, provider)
@@ -383,20 +409,28 @@ func TestReconcileSessions_APollOfShortAttemptsCatchesARawUnsealASuspendedOneMis
 	pass.timeout = 100 * time.Millisecond // vaultSealedRetryAttempt's own shape: short, so this is a poll
 	pending := []content.PendingSession{binding}
 
-	const maxAttempts = 5 // comfortably more than the two this needs
-	var last content.SessionVerdict
-	for i := range maxAttempts {
-		rec := &recordingReconciler{pending: pending}
-		reconcileSessions(context.Background(), rec, second.reg.inventories(), pass, time.Hour, quietLogger(t))
-		if len(rec.applied) != 1 {
-			t.Fatalf("attempt %d: judgements = %+v, want exactly one", i, rec.applied)
-		}
-		last = rec.applied[0].Verdict
-		if last == content.VerdictLive {
-			break
-		}
+	// ATTEMPT ONE raises the ask; unsealsThenBlocksRequester answers nobody
+	// within this attempt's own short timeout, so it is lost exactly as
+	// App.retryVaultSealedSessions's own comment measures — but it is what
+	// starts the leader goroutine that will call Unseal.
+	firstAttempt := &recordingReconciler{pending: pending}
+	reconcileSessions(context.Background(), firstAttempt, second.reg.inventories(), pass, time.Hour, quietLogger(t))
+	if len(firstAttempt.applied) != 1 {
+		t.Fatalf("attempt one: judgements = %+v, want exactly one", firstAttempt.applied)
 	}
-	if last != content.VerdictLive {
-		t.Fatalf("verdict after %d short attempts = %q, want live — the poll never caught the raw unseal", maxAttempts, last)
+
+	select {
+	case <-requester.unsealed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the requester never reported its raw unseal")
+	}
+
+	// ATTEMPT TWO is a fresh EnsureUnsealed call, made only once the raw
+	// unseal is a known fact rather than a hoped-for race winner: State is
+	// checked before any requester is touched, so this needs nobody's answer.
+	secondAttempt := &recordingReconciler{pending: pending}
+	reconcileSessions(context.Background(), secondAttempt, second.reg.inventories(), pass, time.Hour, quietLogger(t))
+	if len(secondAttempt.applied) != 1 || secondAttempt.applied[0].Verdict != content.VerdictLive {
+		t.Fatalf("attempt two = %+v, want exactly one live verdict — the poll never caught the raw unseal", secondAttempt.applied)
 	}
 }

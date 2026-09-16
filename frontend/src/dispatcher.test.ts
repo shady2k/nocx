@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { EndpointProvider, EndpointResult } from './endpoint'
 import {
+  CONNECT_ATTEMPT_TIMEOUT_MS,
   Dispatcher,
   HEARTBEAT_IDLE_WINDOW_MS,
   SATURATION_TOAST_WINDOW_MS,
@@ -341,6 +342,87 @@ describe('dispatcher endpoint state machine', () => {
     await flush()
     expect(d.connectionState).toEqual({ kind: 'online' })
     expect(provider.calls).toBe(1)
+  })
+
+  /**
+   * The overlay's own `canRetry` only draws Retry for `waiting` and
+   * `blocked` — never `connecting` — so a `connecting` attempt that never
+   * settles (a stalled coordinator discovery, or a WebSocket that never
+   * fires open/error/close) is a `connecting` with no way out: no Retry to
+   * click, and nothing else moves the state. This is the losing order
+   * behind connection-overlay.spec.ts:237 and :324 (nocx-oez54, nocx-61k0g):
+   * an automatic background reconnect can win the race against a person's
+   * deliberate Retry and leave a hung attempt behind it, and there was no
+   * deadline to recover from that. A give-up deadline is the fix, matching
+   * the same shape of problem already solved for the heartbeat and for the
+   * ssh keepalive (nocx-y6fh7).
+   */
+  it('gives up a connecting attempt that never settles, so Retry can act again', async () => {
+    const provider = new TestEndpointProvider()
+    let hungResolve!: (result: EndpointResult) => void
+    provider.resolveImpl = () =>
+      new Promise<EndpointResult>((resolve) => {
+        hungResolve = resolve
+      })
+    const d = new Dispatcher(provider)
+    const states: string[] = []
+    d.onConnectionStateChange((state) => states.push(state.kind))
+
+    d.start()
+    await flush()
+    expect(d.connectionState).toEqual({ kind: 'connecting' })
+    expect(provider.calls).toBe(1)
+
+    // Short of the deadline: still connecting, still no way out.
+    vi.advanceTimersByTime(CONNECT_ATTEMPT_TIMEOUT_MS - 1)
+    await flush()
+    expect(d.connectionState).toEqual({ kind: 'connecting' })
+
+    vi.advanceTimersByTime(1)
+    await flush()
+    expect(d.connectionState.kind).toBe('waiting')
+    expect(d.reconnectPending).toBe(true)
+
+    // The abandoned call resolving late must not resurrect the attempt it
+    // belonged to — the same guarantee `_openSocket` already gives a
+    // superseded socket's late `open`.
+    hungResolve(SUCCESS)
+    await flush()
+    expect(d.connectionState.kind).toBe('waiting')
+    expect(MockWebSocket.all).toHaveLength(0)
+
+    // And Retry — which was hidden the whole time — now actually retries
+    // instead of being swallowed as "already connecting".
+    provider.resolveImpl = null
+    provider.enqueue(SUCCESS)
+    d.retryNow()
+    await flush()
+    expect(d.connectionState).toEqual({ kind: 'connecting' })
+    socket().serverAccepts()
+    await flush()
+    expect(d.connectionState).toEqual({ kind: 'online' })
+  })
+
+  it('gives up a socket that never fires open, error or close, and closes it', async () => {
+    const provider = new TestEndpointProvider()
+    const d = new Dispatcher(provider)
+
+    d.start()
+    await flush()
+    expect(MockWebSocket.all).toHaveLength(1)
+    const hungSocket = socket()
+    expect(hungSocket.closeCalled).toBe(false)
+
+    vi.advanceTimersByTime(CONNECT_ATTEMPT_TIMEOUT_MS)
+    await flush()
+    expect(d.connectionState.kind).toBe('waiting')
+    expect(hungSocket.closeCalled).toBe(true)
+
+    // A stale open firing on the abandoned socket must not flip the state
+    // back to online.
+    hungSocket.serverAccepts()
+    await flush()
+    expect(d.connectionState.kind).toBe('waiting')
   })
 })
 

@@ -117,6 +117,20 @@ const MAX_BACKOFF_MS = 5000
 export const HEARTBEAT_IDLE_WINDOW_MS = 15_000
 const HEARTBEAT_RESPONSE_TIMEOUT_MS = 5_000
 
+/**
+ * `connecting` has no face of its own — the overlay's `canRetry` draws Retry
+ * only for `waiting` and `blocked` — because an attempt already in flight
+ * has a person's own click to wait for. That is only true while something is
+ * actually moving it: a coordinator-discovery call that never settles, or a
+ * WebSocket that never fires `open`, `error` or `close`, left `connecting`
+ * with no exit at all, Retry hidden by design and nothing else to move it.
+ * The deadline is what the heartbeat and the ssh keepalive already do for
+ * the same shape of problem — name the hang a loss instead of waiting on it
+ * forever (nocx-y6fh7) — applied to the one place in this state machine that
+ * still waited without one (nocx-oez54, nocx-61k0g).
+ */
+export const CONNECT_ATTEMPT_TIMEOUT_MS = 10_000
+
 type TimerHandle = ReturnType<typeof setTimeout>
 
 interface PendingCall {
@@ -167,6 +181,10 @@ export class Dispatcher {
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private _started = false
   private _attemptInFlight = false
+  /** Bumped on every new attempt and on every give-up. A callback from an
+   *  earlier attempt compares its captured value against this one to tell
+   *  whether it still owns the state it is about to touch. */
+  private _attemptEpoch = 0
 
   private _heartbeatIdleTimer: TimerHandle | null = null
   private _heartbeatResponseTimer: TimerHandle | null = null
@@ -247,15 +265,21 @@ export class Dispatcher {
   private async _attemptConnection(): Promise<void> {
     if (this._attemptInFlight || this._closingDeliberately) return
     this._attemptInFlight = true
+    const epoch = ++this._attemptEpoch
     this.setConnectionState({ kind: 'connecting' })
+    const giveUpTimer = setTimeout(() => this._giveUpAttempt(epoch), CONNECT_ATTEMPT_TIMEOUT_MS)
     try {
       let result: EndpointResult
       try {
         result = await this.provider.resolve()
       } catch {
+        if (epoch !== this._attemptEpoch) return
         this._scheduleReconnect()
         return
       }
+      // The give-up may already have run while this call was in flight —
+      // its resolution belongs to an attempt this dispatcher no longer owns.
+      if (epoch !== this._attemptEpoch) return
       if (!result.ok) {
         this.setConnectionState({ kind: 'blocked', failure: result.failure })
         return
@@ -264,11 +288,40 @@ export class Dispatcher {
         await this._openSocket(result.endpoint)
         this._backoffMs = MIN_BACKOFF_MS
       } catch {
+        if (epoch !== this._attemptEpoch) return
         if (!this._closingDeliberately) this._scheduleReconnect()
       }
     } finally {
-      this._attemptInFlight = false
+      clearTimeout(giveUpTimer)
+      // Only clear the flag if this is still the current attempt — a give-up
+      // followed by a fresh attempt already owns it.
+      if (epoch === this._attemptEpoch) this._attemptInFlight = false
     }
+  }
+
+  /**
+   * Abandon an attempt that has not settled within the deadline. Its promise
+   * chain may still be out there and may still resolve; bumping the epoch is
+   * what makes that resolution inert, the same way a superseded socket's
+   * late `open` already is (`_openSocket`, `this.ws !== ws`). A hung socket
+   * is force-closed here for the same reason: a live one left open would
+   * still fire `open` — spuriously reporting `online` after the state
+   * machine has already given up on it and returned Retry to the person who
+   * needs it.
+   */
+  private _giveUpAttempt(epoch: number): void {
+    if (epoch !== this._attemptEpoch) return
+    this._attemptEpoch++
+    this._attemptInFlight = false
+    const ws = this.ws
+    if (ws !== null) {
+      this.ws = null
+      ws.onopen = null
+      ws.onerror = null
+      ws.close()
+    }
+    if (this._closingDeliberately) return
+    this._scheduleReconnect()
   }
 
   private _openSocket(endpoint: Endpoint): Promise<void> {

@@ -695,8 +695,12 @@ func (o *sessionOwner) finishRead(err error) {
 // and, when the head resolves WITHOUT ever engaging the writer, the one
 // after it, in a loop rather than a single step. A resize (commitResize)
 // resolves synchronously and never touches o.writeReq; so does an intent
-// that encodes to no payload, or one commitIntent refuses outright before
-// Admit. Any of those leaves o.writerBusy exactly as it found it — false —
+// that encodes to no payload, one commitIntent refuses outright before
+// Admit, or one whose payload would have gone to a writer already detached
+// (writeStart's own check, finishNeverOffered — nocx-q502e: this owner's
+// writer, once gone, is gone for every item from then on, not just the one
+// in flight when it went). Any of those leaves o.writerBusy exactly as it
+// found it — false —
 // so a single dequeue-and-return here left whatever was queued BEHIND it
 // stuck until some unrelated event (a write completing, a new incoming
 // item) next drove run()'s own select, which a quiet session may never
@@ -815,18 +819,30 @@ func (o *sessionOwner) commitResize(it ownerItem) {
 // the writer goroutine. An empty payload (an intent that encoded to nothing)
 // still gets a fence and resolves at once: fences order EVERY input item,
 // not only the ones that reach the kernel.
+//
+// A payload never reaches o.writeReq once this owner's writer has been
+// detached (o.writerDetached, owner_ssh.go): that writer is gone for good,
+// not momentarily busy, and o.writeReq is unbuffered — sending on it to a
+// writer nobody will ever again receive from would block run()'s own
+// goroutine forever, for this item and every one behind it (nocx-q502e).
+// finishNeverOffered resolves it the way spec §5.7's own shutdown pass
+// resolves anything "not handed to the writer": cancelled, definitely, never
+// left waiting on an answer that cannot come.
 func (o *sessionOwner) writeStart(it ownerItem, payload []byte) {
 	o.nextFence++
 	fence := o.nextFence
 	it.payload = payload
-	if len(payload) == 0 {
+	switch {
+	case len(payload) == 0:
 		o.finishItem(it, fence, writeOutcome{})
-		return
+	case o.writerDetached():
+		o.finishNeverOffered(it, fence)
+	default:
+		o.writerBusy = true
+		o.inFlight = &inFlightItem{item: it, fence: fence}
+		o.inFlightFlag.Store(true)
+		o.writeReq <- payload
 	}
-	o.writerBusy = true
-	o.inFlight = &inFlightItem{item: it, fence: fence}
-	o.inFlightFlag.Store(true)
-	o.writeReq <- payload
 }
 
 // runWriter performs exactly one item's Write at a time, on the same
@@ -842,11 +858,23 @@ func (o *sessionOwner) runWriter() {
 }
 
 // completeWrite is the writer reporting back. It is the ONLY place
-// writerBusy clears, which is what lets advance hand the writer its next
-// item.
+// writerBusy clears for an ORDINARY write, which is what lets advance hand
+// the writer its next item.
+//
+// fi can be nil here without that being this write's own outcome at all: a
+// detached writer's abandoned goroutine is never stopped (performDetach,
+// owner_ssh.go), only forgotten, and its eventual send on o.writeRes can
+// still land in run's own select while run() keeps looping. That send
+// belongs to no in-flight item — performDetach already resolved and cleared
+// the one it had — so it is ignored rather than attributed to whatever
+// o.inFlight holds next, which used to be exactly this line dereferencing a
+// nil pointer (nocx-q502e).
 func (o *sessionOwner) completeWrite(res writeOutcome) {
-	o.writerBusy = false
 	fi := o.inFlight
+	if fi == nil {
+		return
+	}
+	o.writerBusy = false
 	o.inFlight = nil
 	o.inFlightFlag.Store(false)
 	o.finishItem(fi.item, fi.fence, res)
@@ -888,6 +916,39 @@ func (o *sessionOwner) finishItem(it ownerItem, fence sessionruntime.Fence, res 
 		// session.intent.status poll) sees the SAME answer this write just
 		// produced, rather than re-attempting or reporting in_progress
 		// forever.
+		o.recordTokenOutcome(it.intent, result)
+	}
+	o.resolve(it, result)
+}
+
+// finishNeverOffered resolves an item that will never reach any writer — the
+// counterpart to finishItem for the one case finishItem cannot represent:
+// this owner's writer is permanently gone (o.detached, set by performDetach,
+// owner_ssh.go), so there is no writeOutcome to report and never will be.
+// Spec §5.7 draws this exact line for shutdown's own resolution pass ("not
+// handed to the writer -> cancelled"); a detached writer being gone for good
+// puts every item that reaches writeStart afterward on that same side of it,
+// whether it was already queued at the moment of detach or arrives later.
+//
+// It still publishes the fence — nothing else will, and a caller stamping a
+// frame against inputFence must not stall behind one this item was assigned
+// but never completed — and it still reports the outcome to the runtime for
+// a token-bearing intent, exactly as finishItem does: o.rt.Admit already
+// registered it there the moment commitIntent ran, before writeStart ever
+// saw it, so the runtime's own record needs closing out the same way.
+func (o *sessionOwner) finishNeverOffered(it ownerItem, fence sessionruntime.Fence) {
+	o.completedFence.Store(uint64(fence))
+
+	if it.kind == itemReply {
+		o.replyBytes -= len(it.payload)
+		if o.replyBytes < 0 {
+			o.replyBytes = 0
+		}
+	}
+
+	result := ownerResult{State: sessionruntime.IntentStateCancelled, FenceAfter: fence, Err: errWriterGone}
+	if it.kind == itemIntent {
+		o.rt.ReportOutcome(it.intent.admittedID, errWriterGone)
 		o.recordTokenOutcome(it.intent, result)
 	}
 	o.resolve(it, result)

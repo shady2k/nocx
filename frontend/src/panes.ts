@@ -88,6 +88,7 @@ import {
   type HelperConsentAskEvidence,
   type PaneIdentity,
 } from './terminal-content'
+import type { IntegrationMethod } from './host-key-dialog'
 import type { OutputRecordingSource } from './integration/status'
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -845,11 +846,15 @@ export class PaneManager {
    *  or changed. Resolves true only after explicit trust; the content then
    *  retries the same open. */
   onHostKeyError?: (evidence: HostKeyErrorEvidence, signal: AbortSignal) => Promise<boolean>
-  /** Called when an SSH connection needs a person's answer about this
-   *  destination's helper before it may proceed (ADR-0068's connect-time
-   *  ask). Resolves true once an answer was recorded; the content then
-   *  retries the same open. */
-  onHelperConsentAsk?: (ask: HelperConsentAskEvidence, signal: AbortSignal) => Promise<boolean>
+  /** Called when an SSH connection needs a person's choice of integration
+   *  method for this destination before it may proceed (ADR-0069's
+   *  connect-time ask). Resolves with the chosen method once it was
+   *  written; the content then retries the same open. null means declined
+   *  or cancelled. */
+  onHelperConsentAsk?: (
+    ask: HelperConsentAskEvidence,
+    signal: AbortSignal,
+  ) => Promise<IntegrationMethod | null>
   /** The strip's "show all workspaces" button was pressed. Wired by main.tsx
    *  to the overview controller's `open` — the surface's lifetime belongs to
    *  the composition root, and a PaneManager that owned an overlay would be

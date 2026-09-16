@@ -117,7 +117,7 @@ import {
   HelperConsentAskQueue,
   type HelperConsentAskRequest,
 } from './host-key-controller'
-import { HostKeyDialog, AgentApprovalDialog } from './host-key-dialog'
+import { HostKeyDialog, AgentApprovalDialog, type IntegrationMethod } from './host-key-dialog'
 import { SnippetsClient } from './snippets/snippets-client'
 import { SnippetsStore, type Snippet } from './snippets/snippets-store'
 import { SkillsClient } from './skills-client'
@@ -437,7 +437,7 @@ function main(): void {
     setOpenHostKeyBusy(true)
     try {
       await profileClient.trustHostKey(request.evidence.knownHostsHost, request.evidence.key)
-      openHostKeys.settleMatchingQueued(request)
+      openHostKeys.settleMatchingQueued(request, true)
       openHostKeys.settle(request, true)
     } catch (err) {
       showToast({
@@ -450,31 +450,56 @@ function main(): void {
     }
   }
 
-  // decideHelperConsentAsk answers the connect-time helper ask: when the
-  // SAME refusal also carried host-key evidence, the key is trusted FIRST —
-  // it is a precondition of either helper answer, never a separate click
-  // (host-key-dialog.tsx's own comment) — and only once that succeeds is
-  // the helper decision written. Both writes use the SAME fingerprint the
-  // ask named, so the resolver's next Lookup finds exactly the answer this
-  // recorded (ADR-0034).
-  const decideHelperConsentAsk = async (request: HelperConsentAskRequest, approved: boolean) => {
+  // acceptHelperAskHostKey trusts the key half of a combined connect-time
+  // ask (ADR-0069, issue (b)): its own action, independent of the method
+  // choice below. Trusting does not answer the method — the request settles
+  // null, the same as Cancel — because the owner reversed the earlier
+  // "trust is a shared precondition" reading: the key is trusted, and the
+  // open still fails this once (no method was chosen), but the NEXT connect
+  // probes successfully and raises the method question alone.
+  const acceptHelperAskHostKey = async (request: HelperConsentAskRequest) => {
+    const hostKey = request.evidence.hostKey
+    if (!hostKey) return
     setHelperConsentAskBusy(true)
     try {
-      const hostKey = request.evidence.hostKey
-      if (hostKey) {
-        await profileClient.trustHostKey(hostKey.knownHostsHost, hostKey.key)
-      }
-      await profileClient.helperConsent(
-        request.evidence.fingerprint,
-        approved,
-        request.evidence.host,
-      )
-      helperConsentAsks.settleMatchingQueued(request)
-      helperConsentAsks.settle(request, true)
+      await profileClient.trustHostKey(hostKey.knownHostsHost, hostKey.key)
+      helperConsentAsks.settle(request, null)
     } catch (err) {
       showToast({
         level: 'danger',
-        message: `Could not record the answer for ${request.evidence.host}: ${
+        message: `Could not trust the host key: ${err instanceof Error ? err.message : String(err)}`,
+        duration: 0,
+      })
+    } finally {
+      setHelperConsentAskBusy(false)
+    }
+  }
+
+  // decideIntegrationMethod answers the connect-time ask with a chosen
+  // method (ADR-0069): written through the SAME RPC the editor's Delivery
+  // mode field ultimately reaches (connections.setIntegrationMethod ->
+  // profiles.patch's desiredMode), plus the machine's helper grant when the
+  // method is helper. The chosen method rides the settled promise so
+  // terminal-content.ts can carry it on the retried open for a hand-typed
+  // connection, which has nothing else to persist it to.
+  const decideIntegrationMethod = async (
+    request: HelperConsentAskRequest,
+    method: IntegrationMethod,
+  ) => {
+    setHelperConsentAskBusy(true)
+    try {
+      await profileClient.setIntegrationMethod(
+        request.evidence.fingerprint,
+        method,
+        request.evidence.host,
+        request.evidence.profileId,
+      )
+      helperConsentAsks.settleMatchingQueued(request, method)
+      helperConsentAsks.settle(request, method)
+    } catch (err) {
+      showToast({
+        level: 'danger',
+        message: `Could not save the connection method for ${request.evidence.host}: ${
           err instanceof Error ? err.message : String(err)
         }`,
         duration: 0,
@@ -1878,7 +1903,7 @@ function main(): void {
               helperAsk={null}
               busy={openHostKeyBusy()}
               onAcceptHostKey={() => void acceptOpenHostKey(request)}
-              onDecideHelper={() => {}}
+              onChooseMethod={() => {}}
               onClose={() => openHostKeys.settle(request, false)}
             />
           )}
@@ -1889,9 +1914,9 @@ function main(): void {
               evidence={request.evidence.hostKey}
               helperAsk={{ fingerprint: request.evidence.fingerprint }}
               busy={helperConsentAskBusy()}
-              onAcceptHostKey={() => {}}
-              onDecideHelper={(approved) => void decideHelperConsentAsk(request, approved)}
-              onClose={() => helperConsentAsks.settle(request, false)}
+              onAcceptHostKey={() => void acceptHelperAskHostKey(request)}
+              onChooseMethod={(method) => void decideIntegrationMethod(request, method)}
+              onClose={() => helperConsentAsks.settle(request, null)}
             />
           )}
         </Show>

@@ -952,12 +952,18 @@ export class WSClient {
 
   // openSSHSessionByHost opens a direct SSH session by hostname/alias,
   // resolved through ~/.ssh/config on the backend. No saved profile needed.
+  //
+  // desiredMode is the connect-time ask's one-shot answer for THIS session
+  // (ADR-0069): a hand-typed connection has no saved profile to write the
+  // choice onto, so a retry after the ask carries it here instead. Absent on
+  // an ordinary open.
   openSSHSessionByHost(
     cols: number,
     rows: number,
     host: string,
     user?: string,
     anchor: OpenAnchor = {},
+    desiredMode?: string,
   ): Promise<SessionHandle> {
     return this.dispatcher
       .call<OpenResult>('open', {
@@ -968,6 +974,7 @@ export class WSClient {
         kind: 'ssh',
         host,
         user,
+        ...(desiredMode ? { desiredMode } : {}),
         ...paneParam(anchor),
       })
       .then((result) => this._registerHandle(result, { cols, rows }))

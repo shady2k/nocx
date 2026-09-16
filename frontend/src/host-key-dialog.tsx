@@ -1,8 +1,9 @@
-import { Show } from 'solid-js'
+import { createSignal, Show } from 'solid-js'
 import { machineLabel, type MachineFacts } from './agent-machine'
 import { Button } from './ui/button'
 import { Dialog } from './ui/dialog'
 import { FactList } from './ui/fact-list'
+import { SegmentedControl } from './ui/segmented-control'
 import { Stack } from './ui/stack'
 
 interface HostKeyDecisionEvidence {
@@ -12,44 +13,75 @@ interface HostKeyDecisionEvidence {
   storedFingerprint?: string
 }
 
-/** The connect-time helper ask (ADR-0068): a machine with no consent record
- *  for its host-key fingerprint. Only the identity travels here — what a
- *  yes and a no each mean is fixed copy in the dialog below, the same way
- *  AgentApprovalDialog states its own grant rather than taking it as a prop. */
+/** The connect-time ask (ADR-0069): a machine whose connection has not
+ *  answered how nocx integrates with it. Only the identity travels here —
+ *  the methods offered and what each means is fixed copy in the dialog
+ *  below, the same way AgentApprovalDialog states its own grant rather than
+ *  taking it as a prop. */
 interface HelperConsentAskEvidence {
   fingerprint: string
 }
 
+/** The methods the connect-time ask offers — built from the modes the
+ *  product can actually carry (ADR-0069): never 'auto', which is not an
+ *  answer, and never a disabled "coming soon" entry. A mode added later
+ *  (the server tier, nocx-xn63t.2.1) adds one entry here. */
+export type IntegrationMethod = 'raw' | 'script' | 'helper'
+
+const METHOD_OPTIONS: { value: IntegrationMethod; label: string; title: string }[] = [
+  {
+    value: 'raw',
+    label: 'Raw',
+    title: 'No integration — a plain terminal, nothing written to the host.',
+  },
+  {
+    value: 'script',
+    label: 'Script',
+    title: 'The shell scripts nocx ships — command blocks, completions, no compiled binary.',
+  },
+  {
+    value: 'helper',
+    label: 'Helper',
+    title: 'Deploy the nocx helper — the Git panel and everything that needs more than a shell.',
+  },
+]
+
 interface HostKeyDialogProps {
-  /** null when this ask is about the helper alone — the key is already
+  /** null when this ask is about the method alone — the key is already
    *  trusted, so there is nothing here to show or accept about it. */
   evidence: HostKeyDecisionEvidence | null
   /** null when this ask is about the host key alone (the ordinary
    *  probe-time and open-time case, unchanged). Present together with
    *  evidence exactly when the SAME dial discovered both: one dialog then
-   *  carries both questions, each with its own action, rather than raising
-   *  a second dialog once the key is trusted (owner's decision, 2026-09-16). */
+   *  carries both questions, each with its own action. */
   helperAsk: HelperConsentAskEvidence | null
   busy: boolean
-  /** Meaningful only when evidence is non-null. */
+  /** Meaningful only when evidence is non-null. Its own action, independent
+   *  of the method choice (owner's decision, 2026-09-16, ADR-0069): trusting
+   *  the key answers nothing about the method, and answering the method
+   *  needs no trust decision made first. */
   onAcceptHostKey: () => void
-  /** Meaningful only when helperAsk is non-null. approved=false is a
-   *  recorded decline, not a cancel: the connection stays usable without
-   *  the helper and this fingerprint is not asked again. */
-  onDecideHelper: (approved: boolean) => void
+  /** Meaningful only when helperAsk is non-null. Fires once the person has
+   *  picked one of the three methods and pressed Continue. */
+  onChooseMethod: (method: IntegrationMethod) => void
   onClose: () => void
 }
 
 /** One consent surface for probe-time and open-time host-key decisions, and
- *  the connect-time helper ask (ADR-0068) — which rides the SAME surface
- *  because the two questions can arrive on the very same connect: a host
- *  whose key is already trusted raises no host-key dialog at all, so
- *  hanging the helper ask off that dialog alone would leave it unasked
- *  forever on an already-trusted host (owner's decision, 2026-09-16). */
+ *  the connect-time integration-method ask (ADR-0069) — which rides the SAME
+ *  surface because the two questions can arrive on the very same connect: a
+ *  host whose key is already trusted raises no host-key dialog at all, so
+ *  hanging the method ask off that dialog alone would leave it unasked
+ *  forever on an already-trusted host. */
 export function HostKeyDialog(props: HostKeyDialogProps) {
+  // No pre-selected method (ADR-0069's own rationale): a choice names what
+  // the person is choosing between, and a default picked for them is the
+  // answer nobody gave. Continue stays disabled until one is picked.
+  const [method, setMethod] = createSignal<IntegrationMethod | ''>('')
+
   const title = () => {
     if (props.evidence) return props.evidence.changed ? 'Host key changed' : 'Unknown host key'
-    return 'Use the helper for this connection?'
+    return 'Choose how nocx connects'
   }
   return (
     <Dialog
@@ -58,22 +90,20 @@ export function HostKeyDialog(props: HostKeyDialogProps) {
       title={title()}
       footer={
         <>
-          {/* The standalone host-key action is offered only when the helper
-              is not also being asked about: when both are present, trusting
-              the key is a SHARED precondition of either helper answer, so
-              "Use the helper" and "Not now" each trust it as part of doing
-              one thing — a third, partial-completion button would leave the
-              dialog needing yet another click to finish either question. */}
-          <Show when={!props.helperAsk && props.evidence}>
+          {/* Its own action, always offered when there is a key to trust —
+              independent of the method choice below (issue (b), ADR-0069):
+              the owner reversed the earlier combined dialog's withholding of
+              this button whenever a method question rode the same refusal. */}
+          <Show when={props.evidence} keyed>
             {(evidence) => (
               <Button
-                variant={evidence().changed ? 'danger' : 'primary'}
+                variant={evidence.changed ? 'danger' : 'primary'}
                 disabled={props.busy}
                 onClick={props.onAcceptHostKey}
               >
                 {props.busy
                   ? 'Trusting…'
-                  : evidence().changed
+                  : evidence.changed
                     ? 'Trust the new key'
                     : 'Trust host key'}
               </Button>
@@ -82,17 +112,13 @@ export function HostKeyDialog(props: HostKeyDialogProps) {
           <Show when={props.helperAsk}>
             <Button
               variant="primary"
-              disabled={props.busy}
-              onClick={() => props.onDecideHelper(true)}
+              disabled={props.busy || method() === ''}
+              onClick={() => {
+                const m = method()
+                if (m !== '') props.onChooseMethod(m)
+              }}
             >
-              {props.busy ? 'Saving…' : 'Use the helper'}
-            </Button>
-            <Button
-              variant="default"
-              disabled={props.busy}
-              onClick={() => props.onDecideHelper(false)}
-            >
-              Not now
+              {props.busy ? 'Saving…' : 'Continue'}
             </Button>
           </Show>
           <Button variant="default" disabled={props.busy} onClick={props.onClose} autofocus>
@@ -137,15 +163,19 @@ export function HostKeyDialog(props: HostKeyDialogProps) {
           {(ask) => (
             <>
               <p>
-                This connection is set to decide automatically. Nocx has not been told whether it
-                may install its helper on this machine — a small program that powers the Git panel
-                and other features that need more than a plain shell.
+                This connection is set to decide automatically. Choose how nocx integrates with this
+                machine — the answer is saved on the connection, so it is asked only once.
               </p>
+              <SegmentedControl
+                ariaLabel="Integration method"
+                options={METHOD_OPTIONS}
+                value={method()}
+                onChange={(v) => setMethod(v as IntegrationMethod)}
+                disabled={props.busy}
+              />
               <p>
-                If you allow it, nocx installs and runs the helper on this machine the next time it
-                is needed. If you decline, the connection still works as a plain terminal, and you
-                are not asked again for this machine — change your mind later from the
-                connection&rsquo;s settings.
+                Choosing Helper also allows nocx to deploy its helper binary on this machine; Raw
+                and Script never do. Change your mind later from the connection&rsquo;s settings.
               </p>
               <p>
                 Fingerprint: <code>{ask.fingerprint}</code>

@@ -42,7 +42,7 @@ describe('OpenHostKeyRequestQueue', () => {
     void duplicate.then(duplicateSettled)
     void different.then(differentSettled)
 
-    queue.settleMatchingQueued(accepted)
+    queue.settleMatchingQueued(accepted, true)
     await expect(duplicate).resolves.toBe(true)
     expect(differentSettled).not.toHaveBeenCalled()
 
@@ -70,13 +70,14 @@ function helperAskEvidence(fingerprint: string): HelperConsentAskEvidence {
   return { host: 'db.example.com:22', fingerprint, hostKey: null }
 }
 
-// The connect-time helper ask (ADR-0068) reuses the exact queueing
-// mechanism the host-key ask above uses (AD-8) — this pins that the
-// generalisation kept its own identity: two asks are "the same question"
-// when they share a fingerprint (ADR-0034's own identity), not a
-// knownHostsHost/key pair, which a helper-only ask does not even carry.
+// The connect-time ask (ADR-0069) reuses the exact queueing mechanism the
+// host-key ask above uses (AD-8) — this pins that the generalisation kept
+// its own identity: two asks are "the same question" when they share a
+// fingerprint (ADR-0034's own identity), not a knownHostsHost/key pair,
+// which a helper-only ask does not even carry — and that a decline resolves
+// null, never false, since the answer is a method or nothing.
 describe('HelperConsentAskQueue', () => {
-  it('one recorded answer resolves every queued request for the same fingerprint', async () => {
+  it('one chosen method resolves every queued request for the same fingerprint', async () => {
     const active: Array<HelperConsentAskRequest | null> = []
     const queue = new HelperConsentAskQueue((request) => active.push(request))
 
@@ -89,12 +90,12 @@ describe('HelperConsentAskQueue', () => {
     const differentSettled = vi.fn()
     void different.then(differentSettled)
 
-    queue.settleMatchingQueued(accepted)
-    await expect(duplicate).resolves.toBe(true)
+    queue.settleMatchingQueued(accepted, 'script')
+    await expect(duplicate).resolves.toBe('script')
     expect(differentSettled).not.toHaveBeenCalled()
 
-    queue.settle(accepted, true)
-    await expect(first).resolves.toBe(true)
+    queue.settle(accepted, 'script')
+    await expect(first).resolves.toBe('script')
     expect(active[active.length - 1]?.evidence.fingerprint).toBe('SHA256:other')
   })
 
@@ -109,7 +110,7 @@ describe('HelperConsentAskQueue', () => {
     void other.then(otherSettled)
 
     controller.abort()
-    await expect(aborted).resolves.toBe(false)
+    await expect(aborted).resolves.toBeNull()
     expect(otherSettled).not.toHaveBeenCalled()
   })
 })

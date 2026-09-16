@@ -175,11 +175,12 @@ describe('AgentApprovalDialog', () => {
 
 /**
  * HostKeyDialog tests — the one consent surface for probe-time and open-time
- * host-key decisions AND the connect-time helper ask (ADR-0068).
+ * host-key decisions AND the connect-time integration-method ask
+ * (ADR-0069).
  *
  * What a user can do, in each of the three shapes the wire can send: an
  * ordinary host-key ask (evidence only — unchanged by this bead), a
- * helper-only ask (a machine whose key is already trusted), and the
+ * method-only ask (a machine whose key is already trusted), and the
  * combined ask a single unknown-or-changed-key auto connect raises. Each
  * button is asserted from the state the button starts enabled in: present,
  * enabled, and its click reaching the callback the caller acts on.
@@ -202,7 +203,7 @@ function openHostKeyDialog(props: {
   busy?: boolean
 }) {
   const onAcceptHostKey = vi.fn()
-  const onDecideHelper = vi.fn()
+  const onChooseMethod = vi.fn()
   const onClose = vi.fn()
   const view = render(() => (
     <HostKeyDialog
@@ -210,24 +211,24 @@ function openHostKeyDialog(props: {
       helperAsk={props.helperAsk ?? null}
       busy={props.busy ?? false}
       onAcceptHostKey={onAcceptHostKey}
-      onDecideHelper={onDecideHelper}
+      onChooseMethod={onChooseMethod}
       onClose={onClose}
     />
   ))
-  return { view, onAcceptHostKey, onDecideHelper, onClose }
+  return { view, onAcceptHostKey, onChooseMethod, onClose }
 }
 
-describe('HostKeyDialog — host-key-only ask (unchanged by ADR-0068)', () => {
+describe('HostKeyDialog — host-key-only ask (unchanged by ADR-0069)', () => {
   afterEach(cleanup)
 
-  it('offers Trust host key and reaches onAcceptHostKey, not the helper callback', () => {
-    const { view, onAcceptHostKey, onDecideHelper } = openHostKeyDialog({
+  it('offers Trust host key and reaches onAcceptHostKey, not the method callback', () => {
+    const { view, onAcceptHostKey, onChooseMethod } = openHostKeyDialog({
       evidence: HOST_KEY_UNKNOWN,
     })
-    expect(view.queryByText('Use the helper')).toBeNull()
+    expect(view.queryByText('Continue')).toBeNull()
     fireEvent.click(view.getByText('Trust host key'))
     expect(onAcceptHostKey).toHaveBeenCalledTimes(1)
-    expect(onDecideHelper).not.toHaveBeenCalled()
+    expect(onChooseMethod).not.toHaveBeenCalled()
   })
 
   it('names a changed key as danger, distinctly from an unknown one', () => {
@@ -245,56 +246,72 @@ describe('HostKeyDialog — host-key-only ask (unchanged by ADR-0068)', () => {
   })
 })
 
-describe('HostKeyDialog — connect-time helper ask (ADR-0068)', () => {
+describe('HostKeyDialog — connect-time integration-method ask (ADR-0069)', () => {
   afterEach(cleanup)
 
-  it('on an already-trusted machine asks about the helper alone, with no host-key action', () => {
-    const { view, onDecideHelper } = openHostKeyDialog({
+  it('on an already-trusted machine asks about the method alone, with no host-key action', () => {
+    const { view, onChooseMethod } = openHostKeyDialog({
       helperAsk: { fingerprint: 'SHA256:trusted' },
     })
     expect(view.queryByText('Trust host key')).toBeNull()
     expect(view.queryByText('Trust the new key')).toBeNull()
-    expect(view.getByText('Use the helper')).toBeTruthy()
-    expect(view.getByText('Not now')).toBeTruthy()
+    expect(view.getByText('Raw')).toBeTruthy()
+    expect(view.getByText('Script')).toBeTruthy()
+    expect(view.getByText('Helper')).toBeTruthy()
     expect(view.container.textContent).toContain('SHA256:trusted')
 
-    fireEvent.click(view.getByText('Use the helper'))
-    expect(onDecideHelper).toHaveBeenCalledWith(true)
+    // Continue starts disabled — no default is picked for the person
+    // (ADR-0069's own rationale) — until a method is chosen.
+    expect((view.getByText('Continue').closest('button') as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(view.getByText('Script'))
+    expect((view.getByText('Continue').closest('button') as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(view.getByText('Continue'))
+    expect(onChooseMethod).toHaveBeenCalledWith('script')
   })
 
-  it('declining reaches onDecideHelper(false) — a recorded answer, not a cancel', () => {
-    const { view, onDecideHelper, onClose } = openHostKeyDialog({
+  it('cancelling without choosing a method reaches onClose, not the method callback', () => {
+    const { view, onChooseMethod, onClose } = openHostKeyDialog({
       helperAsk: { fingerprint: 'SHA256:trusted' },
     })
-    fireEvent.click(view.getByText('Not now'))
-    expect(onDecideHelper).toHaveBeenCalledWith(false)
-    expect(onClose).not.toHaveBeenCalled()
+    fireEvent.click(view.getByText('Cancel'))
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onChooseMethod).not.toHaveBeenCalled()
   })
 
-  it('when the key is ALSO unknown, one dialog shows both the host-key evidence and the helper question, with no standalone host-key action', () => {
-    const { view, onAcceptHostKey, onDecideHelper } = openHostKeyDialog({
+  it('choosing helper reaches onChooseMethod with "helper"', () => {
+    const { view, onChooseMethod } = openHostKeyDialog({
+      helperAsk: { fingerprint: 'SHA256:trusted' },
+    })
+    fireEvent.click(view.getByText('Helper'))
+    fireEvent.click(view.getByText('Continue'))
+    expect(onChooseMethod).toHaveBeenCalledWith('helper')
+  })
+
+  it('when the key is ALSO unknown, one dialog shows both the host-key evidence and the method question, with its OWN Trust host key action (issue (b))', () => {
+    const { view, onAcceptHostKey, onChooseMethod } = openHostKeyDialog({
       evidence: HOST_KEY_UNKNOWN,
       helperAsk: { fingerprint: HOST_KEY_UNKNOWN.fingerprint },
     })
     // The host-key evidence is shown (so the person can judge it)...
     expect(view.container.textContent).toContain(HOST_KEY_UNKNOWN.fingerprint)
-    // ...but its own accept button is not offered: trusting the key is a
-    // precondition of either helper answer below, never a third click.
-    expect(view.queryByText('Trust host key')).toBeNull()
-    expect(onAcceptHostKey).not.toHaveBeenCalled()
+    // ...and its own action is offered independently of the method choice —
+    // the owner's reversal of the earlier "shared precondition" reading.
+    fireEvent.click(view.getByText('Trust host key'))
+    expect(onAcceptHostKey).toHaveBeenCalledTimes(1)
+    expect(onChooseMethod).not.toHaveBeenCalled()
 
-    fireEvent.click(view.getByText('Use the helper'))
-    expect(onDecideHelper).toHaveBeenCalledWith(true)
+    fireEvent.click(view.getByText('Raw'))
+    fireEvent.click(view.getByText('Continue'))
+    expect(onChooseMethod).toHaveBeenCalledWith('raw')
   })
 
-  it('busy disables every action, including the helper buttons', () => {
-    const { view, onDecideHelper } = openHostKeyDialog({
+  it('busy disables every action, including the method choice and Continue', () => {
+    const { view, onChooseMethod } = openHostKeyDialog({
       helperAsk: { fingerprint: 'SHA256:trusted' },
       busy: true,
     })
     fireEvent.click(view.getByText('Saving…'))
-    expect(onDecideHelper).not.toHaveBeenCalled()
-    fireEvent.click(view.getByText('Not now'))
-    expect(onDecideHelper).not.toHaveBeenCalled()
+    expect(onChooseMethod).not.toHaveBeenCalled()
+    expect((view.getByText('Script').closest('button') as HTMLButtonElement).disabled).toBe(true)
   })
 })

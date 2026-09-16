@@ -3184,7 +3184,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             helperAsk={null}
             busy={hostKeyBusy()}
             onAcceptHostKey={() => void acceptPendingHostKey()}
-            onDecideHelper={() => {}}
+            onChooseMethod={() => {}}
             onClose={() => setPendingHostKey(null)}
           />
         )}

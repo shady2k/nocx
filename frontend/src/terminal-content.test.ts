@@ -211,7 +211,10 @@ interface MountOpts {
    *  handler bails on a disconnected target, so tests that exercise it need
    *  the pane in the tree. Default false — the copy-on-select tests do not. */
   attachToDocument?: boolean
-  /** Mount an SSH tab (the capability rail is SSH-only, nocx-4t37.2). */
+  /** Mount an SSH tab (the capability rail is SSH-only, nocx-4t37.2).
+   *  profileId '' is a hand-typed connection with no saved profile
+   *  (ADR-0069's own case for the connect-time ask's session-only answer) —
+   *  the same convention buildSSHPane uses, never undefined. */
   ssh?: { profileId: string; host: string }
   /** Host callbacks handed to the TerminalContent (TerminalContentHooks). */
   hooks?: Partial<TerminalContentHooks>
@@ -530,8 +533,8 @@ describe('SSH open host-key recovery', () => {
   })
 })
 
-describe('SSH open helper-consent recovery (ADR-0068)', () => {
-  it('on an already-trusted machine, asks about the helper alone and retries once answered', async () => {
+describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
+  it('on an already-trusted machine, asks about the method alone and retries once answered', async () => {
     const openSSHSession = vi
       .fn()
       .mockRejectedValueOnce(
@@ -546,7 +549,7 @@ describe('SSH open helper-consent recovery (ADR-0068)', () => {
         ),
       )
       .mockResolvedValueOnce(makeSession())
-    const onHelperConsentAsk = vi.fn().mockResolvedValue(true)
+    const onHelperConsentAsk = vi.fn().mockResolvedValue('script')
     const onHostKeyError = vi.fn()
     const client = makeClient({ openSSHSession })
 
@@ -601,7 +604,7 @@ describe('SSH open helper-consent recovery (ADR-0068)', () => {
         ),
       )
       .mockResolvedValueOnce(makeSession())
-    const onHelperConsentAsk = vi.fn().mockResolvedValue(true)
+    const onHelperConsentAsk = vi.fn().mockResolvedValue('helper')
     const onHostKeyError = vi.fn()
     const client = makeClient({ openSSHSession })
 
@@ -654,7 +657,7 @@ describe('SSH open helper-consent recovery (ADR-0068)', () => {
         },
       ),
     )
-    const onHelperConsentAsk = vi.fn().mockResolvedValue(false)
+    const onHelperConsentAsk = vi.fn().mockResolvedValue(null)
     const client = makeClient({ openSSHSession })
 
     const { tab, teardown } = await mountTerminal(
@@ -671,6 +674,47 @@ describe('SSH open helper-consent recovery (ADR-0068)', () => {
       expect(tab.pane.textContent).toContain(
         'The connection to db.example.com:22 needs an answer before it can continue',
       )
+    } finally {
+      teardown()
+    }
+  })
+
+  // A hand-typed ssh with no saved connection has nowhere to keep the
+  // answer — connections.setIntegrationMethod writes nothing for it to
+  // persist — so the retry itself must carry the chosen method, for this
+  // session alone (ADR-0069's own words).
+  it('a hand-typed connection with no saved profile carries the chosen method on the retried open', async () => {
+    const openSSHSessionByHost = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new RpcError(
+          'nocx has not been told whether it may use its helper on db.example.com:22',
+          -32603,
+          {
+            host: 'db.example.com:22',
+            fingerprint: 'SHA256:trusted',
+            helperAsk: true,
+          },
+        ),
+      )
+      .mockResolvedValueOnce(makeSession())
+    const onHelperConsentAsk = vi.fn().mockResolvedValue('script')
+    const client = makeClient({ openSSHSessionByHost })
+
+    const { teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        ssh: { profileId: '', host: 'db.example.com' },
+        hooks: { onHelperConsentAsk },
+      },
+      client,
+    )
+    try {
+      expect(openSSHSessionByHost).toHaveBeenCalledTimes(2)
+      // First attempt: no override, since nothing has been answered yet.
+      expect(openSSHSessionByHost.mock.calls[0][5]).toBeUndefined()
+      // Retry: the method just chosen rides this open alone.
+      expect(openSSHSessionByHost.mock.calls[1][5]).toBe('script')
     } finally {
       teardown()
     }

@@ -2,7 +2,7 @@ import { Dispatcher } from './dispatcher'
 import type { ConnectionTestResult } from './generated/connections.probe'
 import type { SettingsSet } from './generated/settings.set'
 import type { TrustHostKeyResult } from './generated/connections.trustHostKey'
-import type { ConnectionsHelperConsentResult } from './generated/connections.helperConsent'
+import type { ConnectionsSetIntegrationMethodResult } from './generated/connections.setIntegrationMethod'
 import type { SaveKeyMaterialMintResult } from './generated/secrets.saveKeyMaterial'
 import type { BackupCreateResult } from './generated/backup.create'
 import type { BackupRestorePreview as RestorePreview } from './generated/backup.preview'
@@ -486,17 +486,23 @@ export class ProfileClient {
   }
 
   /**
-   * connections.helperConsent — record the person's answer to the
-   * connect-time helper ask (ADR-0068). fingerprint is echoed verbatim from
-   * the open failure's helperConsentData; the write is keyed by it alone
-   * (ADR-0034), and host travels for the backend's log line only.
+   * connections.setIntegrationMethod — record the person's answer to the
+   * connect-time ask (ADR-0069): a choice of integration method, not a
+   * yes/no about the helper. fingerprint is echoed verbatim from the open
+   * failure's helperConsentData; host travels for the backend's log line
+   * only. profileId names the saved connection the method is written to
+   * (through the SAME write path the connection editor uses) — absent for a
+   * hand-typed connection, which has nowhere to keep the answer. Choosing
+   * helper also grants the machine's consent by fingerprint (ADR-0034); raw
+   * and script write nothing to that store.
    */
-  helperConsent(
+  setIntegrationMethod(
     fingerprint: string,
-    granted: boolean,
+    method: 'raw' | 'script' | 'helper',
     host?: string,
-  ): Promise<ConnectionsHelperConsentResult> {
-    return this.call('connections.helperConsent', { fingerprint, granted, host })
+    profileId?: string,
+  ): Promise<ConnectionsSetIntegrationMethodResult> {
+    return this.call('connections.setIntegrationMethod', { fingerprint, method, host, profileId })
   }
 
   /**

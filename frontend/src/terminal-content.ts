@@ -3,6 +3,7 @@
 // Extracted from Tab so the chrome layer never touches a session or renderer.
 // ═══════════════════════════════════════════════════════════════════════════
 
+import type { IntegrationMethod } from './host-key-dialog'
 import { XtermRenderer } from './renderers/xterm'
 import type { MarkerAdapter, TerminalRenderer } from './renderers/types'
 import { LifecycleClient } from './lifecycle/client'
@@ -488,15 +489,20 @@ export interface TerminalContentHooks {
    *  backend-issued known_hosts identity; mount then retries the same open.
    *  Abort closes a pending decision when the tab is closed. */
   onHostKeyError?: (evidence: HostKeyErrorEvidence, signal: AbortSignal) => Promise<boolean>
-  /** An SSH connection needs a person's answer about this destination's
-   *  helper before it may proceed (ADR-0068's connect-time ask) — with the
-   *  host-key evidence carried alongside when the same dial also needs a
-   *  trust decision. The promise resolves true once an answer (accept OR
-   *  decline) was recorded and any needed host-key trust was written; mount
-   *  then retries the same open, which now finds an answered machine. False
-   *  means the person closed the dialog without deciding — the open fails.
-   *  Abort closes a pending decision when the tab is closed. */
-  onHelperConsentAsk?: (ask: HelperConsentAskEvidence, signal: AbortSignal) => Promise<boolean>
+  /** An SSH connection needs a person's choice of integration method for
+   *  this destination before it may proceed (ADR-0069's connect-time ask) —
+   *  with the host-key evidence carried alongside when the same dial also
+   *  needs a trust decision. The promise resolves with the chosen method
+   *  once it was written (to the saved connection's desiredMode, or —
+   *  absent a profileId — nowhere, since a hand-typed connection carries the
+   *  choice on the retried open instead); mount then retries. null means the
+   *  person closed the dialog, or trusted only the host key, without
+   *  choosing a method — the open fails. Abort closes a pending decision
+   *  when the tab is closed. */
+  onHelperConsentAsk?: (
+    ask: HelperConsentAskEvidence,
+    signal: AbortSignal,
+  ) => Promise<IntegrationMethod | null>
   /** The reference picker's setup offer needs the setup dialog (no OS key):
    *  the vault layer owns it — wired by main.tsx to
    *  vaultController.openSetup. */
@@ -1859,8 +1865,16 @@ export class TerminalContent extends BasePaneContent {
       this.sshOpts.host,
       this.sshOpts.user,
       anchor,
+      this._sessionDesiredModeOverride,
     )
   }
+
+  /** A one-shot integration-method override for a hand-typed connection with
+   *  no saved profile, set once the connect-time ask (ADR-0069) is answered
+   *  for THIS session — there is nowhere else to keep the choice. Read by
+   *  openRequestedSession's retry; a profile-backed connection never sets
+   *  this, since its answer was written to the connection itself. */
+  private _sessionDesiredModeOverride: IntegrationMethod | undefined
 
   /**
    * Take back the session the coordinator is already running for this pane,
@@ -1898,20 +1912,28 @@ export class TerminalContent extends BasePaneContent {
       try {
         return await this.openRequestedSession()
       } catch (err) {
-        // The connect-time helper ask (ADR-0068) is checked FIRST: its
-        // shape is a superset of the plain host-key failure — it carries
-        // the same evidence, nested, when the key also needs a trust
-        // decision — so checking host-key-only second is what keeps a
-        // combined refusal from ever raising two dialogs in sequence
-        // (owner's decision, 2026-09-16).
+        // The connect-time ask (ADR-0069) is checked FIRST: its shape is a
+        // superset of the plain host-key failure — it carries the same
+        // evidence, nested, when the key also needs a trust decision — so
+        // checking host-key-only second is what keeps a combined refusal
+        // from ever raising two dialogs in sequence.
         const ask = helperConsentAskFromOpenError(err, this.sshOpts?.profileId)
         if (ask && this.hooks.onHelperConsentAsk) {
-          const answered = await this.hooks.onHelperConsentAsk(ask, signal)
-          if (!answered) {
+          const method = await this.hooks.onHelperConsentAsk(ask, signal)
+          if (!method) {
             throw new Error(`The connection to ${ask.host} needs an answer before it can continue`)
           }
           if (signal.aborted) {
             throw new Error('SSH open cancelled')
+          }
+          // A hand-typed connection (no saved profile) has nowhere to keep
+          // the answer — connections.setIntegrationMethod wrote nothing for
+          // it to persist — so the retry itself carries the chosen method,
+          // for this session alone (ADR-0069). A saved connection needs no
+          // override: the write already updated its desiredMode, and the
+          // resolver reads that fresh on every open.
+          if (!this.sshOpts?.profileId) {
+            this._sessionDesiredModeOverride = method
           }
           continue
         }

@@ -18,7 +18,7 @@ export interface OpenHelperConsentData {
    */
   host: string
   /**
-   * The identity the helper answer is keyed by (ADR-0034): the already-trusted fingerprint when hostKey is absent, or the OFFERED fingerprint — deterministic from the key bytes alone — when hostKey is present and the key itself is not yet trusted. Echoed back verbatim to connections.helperConsent.
+   * The identity the helper answer is keyed by (ADR-0034): the already-trusted fingerprint when hostKey is absent, or the OFFERED fingerprint — deterministic from the key bytes alone — when hostKey is present and the key itself is not yet trusted. Echoed back verbatim to connections.setIntegrationMethod.
    */
   fingerprint: string
   /**

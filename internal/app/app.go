@@ -2753,6 +2753,26 @@ func (a *App) Start(ctx context.Context) error {
 		a.installLocalHelper(ctx, home)
 	}
 
+	// nocx-xn63t.6.10: the vault must be told presence is tracked, and
+	// currently zero, BEFORE reconciliation can ask it for anything. Without
+	// this, a restored session whose re-attach needs a credential from a
+	// sealed vault (Vault.EnsureUnsealed, reached through
+	// readoptPass.Readopt's helper dial) finds internal/vault's
+	// clientsKnown still at its zero value — indistinguishable, from the
+	// vault's own state, from a vault nobody will ever report presence to —
+	// and answers "no client connected to show unlock prompt" at once
+	// instead of suspending for the client Transport.Start below is about
+	// to accept. Measured against ssh-helper-happy-path.spec.ts: the
+	// replacing coordinator's re-adoption of a password-authenticated SSH
+	// session lost this race on a slower runner and never lost it on an
+	// idle one, which is exactly the signature of a vault answer that
+	// depends on whether anything has told it a count yet. See
+	// transport.WSServer.PrimePresence's own comment for why Start's
+	// trailing notePresence call cannot be the one that does this: it fires
+	// after the listener is up, which is after this whole pass has already
+	// run.
+	a.Transport.PrimePresence()
+
 	// nocx-73aln: reconciliation runs from here now, once installLocalHelper
 	// above has had its chance to put this machine's own generation on disk
 	// (see the App.sessionReconciler/sessionRoutes fields for why it moved).

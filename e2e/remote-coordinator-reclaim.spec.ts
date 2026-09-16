@@ -119,8 +119,6 @@ const test = base
 const TAB = '.nocx-tab'
 const VIEW_GIT = 'button[data-view="git"]'
 const GIT_PANEL = '[data-testid="git-panel"]'
-const GIT_CONSENT = '[data-testid="git-consent-required"]'
-const GIT_ACCEPT = '[data-testid="git-consent-accept"]'
 
 /** The bell's rail button and the panel's rows, in the panel's own vocabulary
  *  — the same two notification-centre.spec.ts uses, and for the same reason:
@@ -396,20 +394,29 @@ async function createProfileAndOpen(
   return profileName
 }
 
-/** The shipped install gesture: the Git panel on a connected remote tab asks
- *  for consent, and accepting it puts the helper on the host. The branch line
- *  appearing is the panel's own statement that the helper answered. */
+/** The shipped install gesture: opening this AUTO connection for the first
+ *  time raises the connect-time helper ask (ADR-0068) — the host key is
+ *  already trusted (seedKnownHost, above), so the ask is helper-only, on
+ *  the same one-dialog surface the host-key ask uses — and granting it
+ *  puts the helper on the host. The open itself does not resolve, and the
+ *  tab does not appear, until the ask is answered. The branch line
+ *  appearing afterwards is the panel's own statement that the helper
+ *  answered; the git panel itself never asks (ADR-0068). */
 async function installHelperThroughProduct(
   page: Page,
   endpoint: BackendEndpoint,
   fixture: SshdFixture,
 ): Promise<string> {
   const profileName = await createProfileAndOpen(page, endpoint, fixture)
+  const helperDialog = page
+    .getByRole('dialog')
+    .filter({ hasText: 'Use the helper for this connection?' })
+  await expect(helperDialog).toBeVisible({ timeout: 30_000 })
+  await helperDialog.getByRole('button', { name: 'Use the helper' }).click()
+  await expect(helperDialog).not.toBeVisible()
   await expect(page.locator(TAB)).toHaveCount(2, { timeout: 30_000 })
   await page.locator(VIEW_GIT).click()
   await expect(page.locator(GIT_PANEL)).toBeVisible({ timeout: 30_000 })
-  await expect(page.locator(GIT_CONSENT)).toBeVisible({ timeout: 30_000 })
-  await page.locator(GIT_ACCEPT).click()
   await expect(page.locator('[data-testid="git-branch"]')).toBeVisible({ timeout: 60_000 })
   return profileName
 }

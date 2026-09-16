@@ -64,8 +64,6 @@ const UNSTAGED = '[data-testid="git-unstaged-list"]'
 const COMMIT = '[data-testid="git-commit"]'
 const SUBJECT = '#git-commit-subject'
 const BODY = '#git-commit-body'
-const CONSENT = '[data-testid="git-consent-required"]'
-const ACCEPT = '[data-testid="git-consent-accept"]'
 const ROW = '.ui-collection-row'
 const TAB = '.nocx-tab'
 
@@ -284,11 +282,13 @@ test('a commit from the panel, on a remote host, through its own pre-commit hook
         port: Number(fixture.addr.split(':')[1]),
         user: 'e2e',
         keyPath: fixture.userKey,
-        // No shellIntegration option: the default destination mode (script)
-        // wraps and installs the launcher automatically, which is what
-        // makes the remote shell emit OSC 7 so the cwd — and with it the
-        // tab title and git.open's origin — lands. 'ask' would leave the
-        // session conventional and the panel would never see a cwd.
+        // No desiredMode option: the cascade's hardcoded default is Auto
+        // (ADR-0033), which is what makes this connect raise the
+        // connect-time helper ask (ADR-0068) below — an explicit Script or
+        // Helper would skip straight past it. Auto also wraps and installs
+        // the launcher automatically, which is what makes the remote shell
+        // emit OSC 7 so the cwd — and with it the tab title and git.open's
+        // origin — lands.
       },
     })
     createdProfileId = created?.id ?? null
@@ -303,6 +303,21 @@ test('a commit from the panel, on a remote host, through its own pre-commit hook
     await expect(option).toBeVisible({ timeout: 10_000 })
     await page.keyboard.press('Enter')
 
+    // The ask comes first, at the connection rather than the feature
+    // (ADR-0068): the host key is already trusted (trustHostKey, above),
+    // so this connect's probe succeeds and the ONLY unanswered question is
+    // the helper — the same one-dialog surface the host-key ask uses
+    // (HostKeyDialog), titled for the helper-only case. The open itself
+    // does not resolve — and the tab does not appear — until this is
+    // answered: openSessionWithHostKeyRecovery retries the open only after
+    // the dialog settles.
+    const helperDialog = page
+      .getByRole('dialog')
+      .filter({ hasText: 'Use the helper for this connection?' })
+    await expect(helperDialog).toBeVisible({ timeout: 30_000 })
+    await helperDialog.getByRole('button', { name: 'Use the helper' }).click()
+    await expect(helperDialog).not.toBeVisible()
+
     // The SSH tab opens and becomes active. The remote shell starts INSIDE
     // the seeded repository (the fixture chdirs there) and the launcher
     // rcfile dials the lifecycle channel, so the first prompt's OSC 7
@@ -313,19 +328,16 @@ test('a commit from the panel, on a remote host, through its own pre-commit hook
     // names the destination"), and pushTitle prefers programTitle over the
     // cwd label. The panel is the right surface: the git store's rescope
     // refuses to ask git.open for a session whose cwd is not verified, so
-    // the consent card appearing below is itself the proof the cwd landed.
+    // the branch badge appearing below is itself the proof the cwd landed.
     await expect(page.locator(TAB)).toHaveCount(2, { timeout: 30_000 })
 
-    // The git panel answers for THAT tab. The ask comes first: consent at
-    // the feature (D8) — a fresh home has no grant for this host.
+    // The git panel answers for THAT tab. Consent was already granted at
+    // connect (ADR-0068: the git panel never asks) — the helper installed
+    // over the fixture's sftp subsystem the moment the retried open found
+    // the answer, the dial answers, and git.open returns ok. The branch
+    // badge is the store's own word for it.
     await page.locator(VIEW_GIT).click()
     await expect(page.locator(PANEL)).toBeVisible({ timeout: 30_000 })
-    await expect(page.locator(CONSENT)).toBeVisible({ timeout: 30_000 })
-    await page.locator(ACCEPT).click()
-
-    // Accept raises the machine to the helper tier: the helper installs over
-    // the fixture's sftp subsystem, the dial answers, and git.open returns
-    // ok. The branch badge is the store's own word for it.
     await expect(page.locator(BRANCH)).toBeVisible({ timeout: 60_000 })
     await expect(page.locator(BRANCH)).toHaveText('main')
 

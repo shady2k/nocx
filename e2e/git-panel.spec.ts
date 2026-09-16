@@ -42,8 +42,6 @@ const SUBJECT = '#git-commit-subject'
 const BODY = '#git-commit-body'
 const COMMIT_OUTPUT = '[data-testid="git-commit-output"]'
 const CONFLICT_REFUSAL = '[data-testid="git-conflict-refusal"]'
-const CONSENT = '[data-testid="git-consent-required"]'
-const ACCEPT = '[data-testid="git-consent-accept"]'
 const LOG_ROW = '[data-testid="git-log-row"]'
 const ROW = '.ui-collection-row'
 const TAB = '.nocx-tab'
@@ -698,7 +696,7 @@ async function rpc<T>(
   )
 }
 
-test('on an SSH tab with no consent the consent offer is present and the mutation controls are absent', async ({
+test('on an SSH tab whose machine has declined the helper, the panel says what it cannot do and offers NO install action anywhere', async ({
   page,
 }) => {
   test.setTimeout(120_000)
@@ -734,13 +732,12 @@ test('on an SSH tab with no consent the consent offer is present and the mutatio
         port: Number(fixture.addr.split(':')[1]),
         user: 'e2e',
         keyPath: fixture.userKey,
-        // No desiredMode option: the default (script — N3) wraps and
-        // installs the launcher automatically, which is what lands the
-        // OSC 7 that makes the cwd verified and lets the git store reach
-        // git.open — and with it the consent ask. The shellIntegration:
-        // 'ask' this spec used to pass is dead vocabulary from the
-        // pre-helper model, and a conventional session would strand the
-        // panel on noCwd (the same recipe git-remote.spec.ts uses).
+        // No desiredMode option: the cascade's hardcoded default is Auto
+        // (ADR-0033), which wraps and installs the launcher automatically
+        // — landing the OSC 7 that makes the cwd verified and lets the
+        // git store reach git.open — and is also what raises the
+        // connect-time helper ask below (ADR-0068). An explicit Script or
+        // Helper mode would skip past the ask this spec needs.
       },
     })
     createdProfileId = created?.id ?? null
@@ -756,26 +753,51 @@ test('on an SSH tab with no consent the consent offer is present and the mutatio
     const option = page.locator('.quick-connect__item', { hasText: profileName })
     await expect(option).toBeVisible({ timeout: 10_000 })
     await page.keyboard.press('Enter')
-    // The SSH tab opens and becomes active (opening a tab activates it).
-    // The git panel must answer for THAT tab, not the local one — the
-    // consent card only renders for an ssh origin whose cwd landed
-    // verified, so asserting it is also the proof of which tab is active.
+
+    // ADR-0068: the ask is at the connection, not the feature. The host
+    // key is already trusted (trustHostKey, above), so this connect's
+    // probe succeeds and the one unanswered question is the helper alone
+    // — raised on the same one-dialog surface the host-key ask uses
+    // (HostKeyDialog), titled for the helper-only case. "Not now" is a
+    // RECORDED decline (host-key-dialog.tsx: "approved=false is a recorded
+    // decline, not a cancel"), so the retried open proceeds without the
+    // helper rather than failing outright — the connection stays usable,
+    // which is the whole point of the decline being an answer.
+    const helperDialog = page
+      .getByRole('dialog')
+      .filter({ hasText: 'Use the helper for this connection?' })
+    await expect(helperDialog).toBeVisible({ timeout: 30_000 })
+    await helperDialog.getByRole('button', { name: 'Not now' }).click()
+    await expect(helperDialog).not.toBeVisible()
+
+    // The SSH tab opens and becomes active (opening a tab activates it),
+    // without the helper.
     await expect(page.locator(TAB)).toHaveCount(2, { timeout: 30_000 })
     await page.locator(VIEW_GIT).click()
 
-    // A fresh fixture spawn mints fresh host keys, so this machine has no
-    // consent on record: git.open answers consentRequired and the panel
-    // OFFERS the flow (remote-helper design D8). The accept is the positive
-    // path e2e/git-remote.spec.ts already owns, so this spec stops at the
-    // offer and asserts it is really there.
+    // The git panel never asks (ADR-0068): git.open answers the SAME
+    // not-available error a raw or denied machine gets, rendered as the
+    // ordinary failed-open card — naming the setting that would change
+    // it (reconnect, or Delivery mode Helper) rather than offering to ask
+    // again itself.
     await expect(page.locator(PANEL)).toBeVisible({ timeout: 30_000 })
-    await expect(page.locator(CONSENT)).toBeVisible({ timeout: 30_000 })
-    await expect(page.locator(ACCEPT)).toBeVisible()
+    const errorCard = page.locator('[data-testid="git-error"]')
+    await expect(errorCard).toBeVisible({ timeout: 30_000 })
+    await expect(errorCard).toContainText('declined')
 
-    // D14: what the panel cannot do it does not draw — with no consent the
-    // mutation controls are ABSENT, not disabled. Each asserted to count
-    // zero in the DOM, beside the offer that is present.
+    // No install/accept action anywhere in the panel: neither the removed
+    // consent testids nor any button whose label reads as one — only the
+    // ordinary Retry, which re-runs git.open and asks nobody anything.
+    await expect(page.locator('[data-testid="git-consent-required"]')).toHaveCount(0)
+    await expect(page.locator('[data-testid="git-consent-accept"]')).toHaveCount(0)
+    const buttons = await page.locator(`${PANEL} button`).allTextContents()
+    for (const label of buttons) {
+      expect(label).not.toMatch(/accept|allow|install|use the helper/i)
+    }
+    await expect(page.locator('[data-testid="git-retry-open"]')).toBeVisible()
 
+    // D14: what the panel cannot do it does not draw — with no helper the
+    // mutation controls are ABSENT, not disabled.
     const mutationControls = [
       STAGE_ALL,
       UNSTAGE_ALL,

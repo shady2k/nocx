@@ -73,7 +73,7 @@ type bundleStand struct {
 // handlers, and the product carrier between them.
 func startBundleStand(t *testing.T, srv *pwSSHServer, secrets *askRecorder) *bundleStand {
 	t.Helper()
-	logger := discardLogger()
+	logger := discardLogger(t)
 	sshLog := log.NewSlogAdapter(logger)
 
 	// The coordinator's client: it RESOLVES, it answers host-key questions,

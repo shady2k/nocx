@@ -60,10 +60,10 @@ func (neverAnsweringGitFactory) Open(ctx context.Context, _ string) (git.Repo, g
 // a factory that never answers — helperPeerWithoutSession and realHelperPeer
 // both wire localgit.NewFactory() instead, which is exactly the "and it
 // answers" case those tests already cover.
-func neverAnsweringHelperPeer() func(in io.Reader, out io.Writer) int {
+func neverAnsweringHelperPeer(t testing.TB) func(in io.Reader, out io.Writer) int {
 	contentHash := syntheticArtifactHash
 	return func(in io.Reader, out io.Writer) int {
-		h := host.New(in, out, contentHash, "instance-1", discardLogger())
+		h := host.New(in, out, contentHash, "instance-1", discardLogger(t))
 		h.Register(hostsvc.New(neverAnsweringGitFactory{}))
 		h.Register(helpersession.New(helpersession.Options{
 			Generation: proto.GenerationID(contentHash),
@@ -93,10 +93,10 @@ func TestGitOpenNeverAnsweredIsBoundedRatherThanHungForever(t *testing.T) {
 	gitOpenTimeout = 200 * time.Millisecond
 	t.Cleanup(func() { gitOpenTimeout = old })
 
-	provider := &fakeLaneProvider{peer: neverAnsweringHelperPeer()}
+	provider := &fakeLaneProvider{peer: neverAnsweringHelperPeer(t)}
 	source := stubArtifacts(t)
 	store, installs := testConsentStores(t)
-	factory, _ := helperGitFactory(provider, source, store, installs, discardLogger())
+	factory, _ := helperGitFactory(provider, source, store, installs, discardLogger(t))
 
 	sel := factory(&fakeRemoteSession{id: "s1", host: "host.example"})
 	if sel.Factory == nil {

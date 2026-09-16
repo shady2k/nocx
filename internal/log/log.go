@@ -73,6 +73,13 @@ func (a *SlogAdapter) With(args ...any) Logger {
 	return &SlogAdapter{log: a.log.With(args...)}
 }
 
+// Handler exposes the underlying slog.Handler. It exists for test support
+// that needs to reach the sink underneath every With/WithContext derivation
+// — internal/log/logtest asserts back to its own handler type to read what
+// a test's logger recorded — and is not meant for an ordinary caller, which
+// wants Logger, not what is behind it.
+func (a *SlogAdapter) Handler() slog.Handler { return a.log.Handler() }
+
 // WithContext binds the ids the context is carrying — the W3C span that names
 // this frame of the exchange, the trace the exchange belongs to, the frame that
 // asked for it, and the wire request being served — onto every record this

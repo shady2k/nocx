@@ -73,7 +73,7 @@ type paneJourney struct {
 // and resolver, and the product carrier between them.
 func startPaneJourney(t *testing.T, srv *pwSSHServer) *paneJourney {
 	t.Helper()
-	logger := discardLogger()
+	logger := discardLogger(t)
 	sshLog := log.NewSlogAdapter(logger)
 
 	khPath := filepath.Join(t.TempDir(), "known_hosts")
@@ -147,7 +147,7 @@ func startPaneJourney(t *testing.T, srv *pwSSHServer) *paneJourney {
 	t.Cleanup(func() { _ = peer.Close() })
 
 	opener := &localHelperOpener{
-		log:        discardLogger(),
+		log:        discardLogger(t),
 		registry:   session.New(sshLog, &reachPTYFactory{stub: pty.NewStub(sshLog)}),
 		client:     peer,
 		sshTargets: rc,

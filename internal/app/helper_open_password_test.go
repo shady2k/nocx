@@ -658,7 +658,7 @@ func TestOpenPath_ProbeStillRunsOnARememberedPassword(t *testing.T) {
 // whose selection runs before it. The only double is the artifact source.
 func openPasswordStack(t *testing.T, srv *pwSSHServer, probes probeHelperSource) (*session.Reg, *helperRegistry) {
 	t.Helper()
-	logger := log.NewSlogAdapter(discardLogger())
+	logger := log.NewSlogAdapter(discardLogger(t))
 
 	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
 	writeKnownHostsFor(t, knownHosts, srv)
@@ -690,7 +690,7 @@ func openPasswordStack(t *testing.T, srv *pwSSHServer, probes probeHelperSource)
 		// drives the pane's auth ladder passes the failing default.
 		probes: &helperProbes{local: probes, resolve: client},
 	}
-	_, helperReg := helperGitFactory(lanes, refusingArtifactSource{}, consentStore, installStore, discardLogger())
+	_, helperReg := helperGitFactory(lanes, refusingArtifactSource{}, consentStore, installStore, discardLogger(t))
 	helperReg.registry = reg
 	return reg, helperReg
 }

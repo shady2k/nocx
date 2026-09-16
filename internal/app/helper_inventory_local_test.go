@@ -27,11 +27,11 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"log/slog"
 	"net"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/log/logtest"
 
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/endpoint"
@@ -59,7 +59,7 @@ import (
 func farHelperStand(t *testing.T, a *App, sid session.ID, hostName, account, generation string) string {
 	t.Helper()
 	ctx := context.Background()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := logtest.Slog(t)
 	svc := helper.New(helper.Options{
 		Generation: helperproto.GenerationID(generation),
 		Spawner:    helper.NewLocalSpawner(logger, helper.Shell{Path: "/bin/sh", Args: []string{"-i"}}, ""),

@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/log/logtest"
+
 	"github.com/shady2k/nocx/internal/agentcalib"
 	"github.com/shady2k/nocx/internal/agentcapture"
 	"github.com/shady2k/nocx/internal/agentcapture/replaylocal"
@@ -517,11 +519,11 @@ type happyStandConfig struct {
 // the reason a test can assert about a whole exchange from a single buffer.
 func (c happyStandConfig) logger() log.Logger { return log.NewSlogAdapter(c.slogger) }
 
-func (c happyStandConfig) endpointSlog() *slog.Logger {
+func (c happyStandConfig) endpointSlog(t testing.TB) *slog.Logger {
 	if c.slogger != nil {
 		return c.slogger
 	}
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+	return logtest.Slog(t)
 }
 
 // withHappyStandLogger makes the stand's log READABLE, which is what a test
@@ -804,7 +806,7 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 		Peers:    coordsock.SystemPeerCredentials{},
 		SelfUID:  uint32(os.Getuid()), //nolint:gosec // uid is not a signed quantity
 		Owner:    happyEndpointOwner{},
-		Logger:   cfg.endpointSlog(),
+		Logger:   cfg.endpointSlog(t),
 		Auth:     auth,
 		Dispatch: dispatcher,
 	})

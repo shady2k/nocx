@@ -110,7 +110,7 @@ func startFakeLocalEndpoint(t *testing.T, dir, generation string) *fakeLocalEndp
 		// built here can open an ssh pane for this machine's daemon to hold —
 		// which is the shape the pane-screen owner must answer for.
 		SSHSpawner: spawner,
-		Log:        discardLogger(),
+		Log:        discardLogger(t),
 	})
 	ep := &fakeLocalEndpoint{generation: generation, dir: dir, ln: ln, svc: svc, spawner: spawner}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -134,7 +134,7 @@ func startFakeLocalEndpoint(t *testing.T, dir, generation string) *fakeLocalEndp
 				ep.live--
 				ep.mu.Unlock()
 			}()
-			h := host.New(conn, conn, generation, "instance-1", discardLogger())
+			h := host.New(conn, conn, generation, "instance-1", discardLogger(t))
 			h.Register(hostsvc.New(localgit.NewFactory()))
 			h.Register(svc)
 			release := svc.Bind(h)
@@ -304,8 +304,8 @@ func TestALocalSessionIsUnknownWhenItsEndpointCannotBeAskedAndAbsentWhenItDenies
 		dir := endpoint.Dir(storagetest.IsolateWithHome(t))
 
 		reconcileSessions(ctx, store.Reconcile(), nil,
-			&readoptPass{local: &localHelperOpener{dir: dir, log: discardLogger()}},
-			time.Hour, quietLogger())
+			&readoptPass{local: &localHelperOpener{dir: dir, log: discardLogger(t)}},
+			time.Hour, quietLogger(t))
 
 		pending, err := store.Reconcile().Pending(ctx)
 		if err != nil {
@@ -374,8 +374,8 @@ func TestALocalSessionIsUnknownWhenItsEndpointCannotBeAskedAndAbsentWhenItDenies
 		ep := startFakeLocalEndpoint(t, endpoint.Dir(storagetest.IsolateWithHome(t)), localReconGeneration)
 
 		reconcileSessions(ctx, store.Reconcile(), nil,
-			&readoptPass{local: &localHelperOpener{dir: ep.dir, log: discardLogger()}},
-			time.Hour, quietLogger())
+			&readoptPass{local: &localHelperOpener{dir: ep.dir, log: discardLogger(t)}},
+			time.Hour, quietLogger(t))
 
 		if ep.asked() == 0 {
 			t.Fatal("this machine's daemon was never reached, so nothing could have judged the session")
@@ -423,7 +423,7 @@ func TestALocalSessionIsUnknownWhenItsEndpointCannotBeAskedAndAbsentWhenItDenies
 		store := aStoreThatCarriedALocalSessionOver(t, path)
 		defer func() { _ = store.Close() }()
 
-		reconcileSessions(ctx, store.Reconcile(), nil, &readoptPass{}, time.Hour, quietLogger())
+		reconcileSessions(ctx, store.Reconcile(), nil, &readoptPass{}, time.Hour, quietLogger(t))
 
 		pending, err := store.Reconcile().Pending(ctx)
 		if err != nil {
@@ -444,7 +444,7 @@ func TestALocalSessionIsUnknownWhenItsEndpointCannotBeAskedAndAbsentWhenItDenies
 		local := &countingLocalRoute{}
 
 		reconcileSessions(ctx, store.Reconcile(), nil,
-			&readoptPass{local: local}, time.Hour, quietLogger())
+			&readoptPass{local: local}, time.Hour, quietLogger(t))
 
 		if len(local.generations) != 0 {
 			t.Fatalf("the local route was asked about %v, want nothing — a host's session is not this "+
@@ -460,7 +460,7 @@ func TestALocalSessionIsUnknownWhenItsEndpointCannotBeAskedAndAbsentWhenItDenies
 // is still this machine's helper not answering.
 func TestTheLocalRouteMarksBothHalvesOfItsAsk(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "run")
-	route := &localHelperOpener{dir: dir, log: discardLogger()}
+	route := &localHelperOpener{dir: dir, log: discardLogger(t)}
 
 	// NOTHING IS SERVING: the dial fails.
 	_, err := route.LocalSessions(context.Background(), localReconGeneration)
@@ -502,7 +502,7 @@ func TestTheLocalRouteMarksBothHalvesOfItsAsk(t *testing.T) {
 		// the helper is up, it is the right generation, and it does not serve
 		// sessions. The ask therefore fails after the handshake.
 		_ = endpoint.Serve(serveCtx, ln, func(conn net.Conn) {
-			h := host.New(conn, conn, localReconGeneration, "instance-1", discardLogger())
+			h := host.New(conn, conn, localReconGeneration, "instance-1", discardLogger(t))
 			_ = h.Serve(serveCtx)
 		})
 	}()

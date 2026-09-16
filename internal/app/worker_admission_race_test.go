@@ -3,14 +3,14 @@ package app
 import (
 	"context"
 	"errors"
-	"io"
-	"log/slog"
 	"net"
 	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/log/logtest"
 
 	"github.com/shady2k/nocx/internal/agentapproval"
 	"github.com/shady2k/nocx/internal/agenttools"
@@ -138,7 +138,7 @@ func newRaceStand(t *testing.T, participants workerAuthParticipants) *raceStand 
 		SelfUID:  1000,
 		Auth:     auth,
 		Dispatch: dispatch,
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:   logtest.Slog(t),
 	})
 	if err != nil {
 		t.Fatalf("new tool endpoint: %v", err)

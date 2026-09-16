@@ -56,12 +56,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/log/logtest"
 
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/assistant"
@@ -407,7 +408,7 @@ type s14Stand struct {
 func newS14Stand(t *testing.T) *s14Stand {
 	t.Helper()
 	ctx := context.Background()
-	logger := log.NewSlogAdapter(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	logger := log.NewSlogAdapter(logtest.Slog(t))
 
 	dir := t.TempDir()
 	key := make([]byte, 32)
@@ -534,7 +535,7 @@ func newS14Stand(t *testing.T) *s14Stand {
 		Peers:    coordsock.SystemPeerCredentials{},
 		SelfUID:  uint32(os.Getuid()), //nolint:gosec // uid is not a signed quantity
 		Owner:    happyEndpointOwner{},
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:   logtest.Slog(t),
 		Auth:     auth,
 		Dispatch: dispatcher,
 	})

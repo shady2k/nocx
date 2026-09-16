@@ -141,7 +141,7 @@ func startProbeStack(t *testing.T, srv *pwSSHServer) *probeStack {
 // change the STORE and not the profile.
 func startProbeStackWithStore(t *testing.T, srv *pwSSHServer, store credential.Resolver) *probeStack {
 	t.Helper()
-	logger := log.NewSlogAdapter(discardLogger())
+	logger := log.NewSlogAdapter(discardLogger(t))
 
 	home := storagetest.IsolateWithHome(t)
 
@@ -172,7 +172,7 @@ func startProbeStackWithStore(t *testing.T, srv *pwSSHServer, store credential.R
 		t.Fatalf("serving this machine's endpoint: %v", err)
 	}
 
-	svc := sshsvc.New(helperClient, discardLogger())
+	svc := sshsvc.New(helperClient, discardLogger(t))
 	wire := &wireLog{}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -183,16 +183,16 @@ func startProbeStackWithStore(t *testing.T, srv *pwSSHServer, store credential.R
 			// first.
 			tee := &wireTee{Conn: conn}
 			wire.add(tee)
-			h := host.New(tee, tee, string(generation), "instance-1", discardLogger())
+			h := host.New(tee, tee, string(generation), "instance-1", discardLogger(t))
 			h.Register(svc)
 			_ = h.Serve(ctx)
 		})
 	}()
 
 	opener := &localHelperOpener{
-		log:     discardLogger(),
+		log:     discardLogger(t),
 		dir:     dir,
-		reverse: helperReverseHandlers(coordinatorClient, store, &helperPrompt{log: discardLogger()}, nil, discardLogger()),
+		reverse: helperReverseHandlers(coordinatorClient, store, &helperPrompt{log: discardLogger(t)}, nil, discardLogger(t)),
 	}
 	opener.installedLocalGeneration(helperlocal.Installed{
 		// Never started: the endpoint above is already serving, so the binary is
@@ -206,7 +206,7 @@ func startProbeStackWithStore(t *testing.T, srv *pwSSHServer, store credential.R
 		cancel()
 	})
 	return &probeStack{
-		helper: &sshOverHelper{local: opener, resolve: coordinatorClient, log: discardLogger()},
+		helper: &sshOverHelper{local: opener, resolve: coordinatorClient, log: discardLogger(t)},
 		khPath: khPath,
 		client: coordinatorClient,
 		wire:   wire,
@@ -219,16 +219,16 @@ func startProbeStackWithStore(t *testing.T, srv *pwSSHServer, store credential.R
 func noHelperStack(t *testing.T) *probeStack {
 	t.Helper()
 	home := storagetest.IsolateWithHome(t)
-	logger := log.NewSlogAdapter(discardLogger())
+	logger := log.NewSlogAdapter(discardLogger(t))
 	khPath := filepath.Join(t.TempDir(), "known_hosts")
 	client, err := ssh.NewReal(logger, ssh.WithKnownHostsFile(khPath))
 	if err != nil {
 		t.Fatalf("coordinator ssh client: %v", err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
-	opener := &localHelperOpener{log: discardLogger(), dir: endpoint.Dir(home)}
+	opener := &localHelperOpener{log: discardLogger(t), dir: endpoint.Dir(home)}
 	return &probeStack{
-		helper: &sshOverHelper{local: opener, resolve: client, log: discardLogger()},
+		helper: &sshOverHelper{local: opener, resolve: client, log: discardLogger(t)},
 		khPath: khPath,
 	}
 }

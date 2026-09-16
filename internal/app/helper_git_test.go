@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/log/logtest"
 
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/hostsvc"
@@ -532,10 +533,10 @@ func (fi fakeInstallInfo) Sys() any           { return nil }
 // stands in for the installed binary, and the stub artifact source is what
 // the selection installed — the client's D21 verification is the real one,
 // and it must not depend on the embedded binaries existing.
-func realHelperPeer() func(in io.Reader, out io.Writer) int {
+func realHelperPeer(t testing.TB) func(in io.Reader, out io.Writer) int {
 	contentHash := syntheticArtifactHash
 	return func(in io.Reader, out io.Writer) int {
-		h := host.New(in, out, contentHash, "instance-1", discardLogger())
+		h := host.New(in, out, contentHash, "instance-1", discardLogger(t))
 		h.Register(hostsvc.New(localgit.NewFactory()))
 		h.Register(helpersession.New(helpersession.Options{
 			Generation: proto.GenerationID(contentHash),
@@ -551,10 +552,10 @@ func realHelperPeer() func(in io.Reader, out io.Writer) int {
 // service. Uninstall must refuse when this daemon cannot enumerate its live
 // sessions; treating the unknown service as an empty inventory would remove a
 // live helper executable without first closing its process.
-func helperPeerWithoutSession() func(in io.Reader, out io.Writer) int {
+func helperPeerWithoutSession(t testing.TB) func(in io.Reader, out io.Writer) int {
 	contentHash := syntheticArtifactHash
 	return func(in io.Reader, out io.Writer) int {
-		h := host.New(in, out, contentHash, "instance-1", discardLogger())
+		h := host.New(in, out, contentHash, "instance-1", discardLogger(t))
 		h.Register(hostsvc.New(localgit.NewFactory()))
 		if err := h.Serve(context.Background()); err != nil {
 			return 1
@@ -646,8 +647,13 @@ func (s *fakeRemoteSession) SSHOptions() []ssh.ConnectOption {
 	return []ssh.ConnectOption{ssh.WithDesiredMode(string(s.mode))}
 }
 
-func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+// discardLogger used to be a bare io.Discard sink shared by every caller, so
+// a failure showed only the assertion that tripped and none of the debug
+// lines that led to it (nocx-n14oo.10). It is now logtest.Slog(t): a buffer
+// private to the test that asked for it, dumped by t.Cleanup only when that
+// test fails.
+func discardLogger(t testing.TB) *slog.Logger {
+	return logtest.Slog(t)
 }
 
 // syntheticPayload is the stand-in for the embedded helper: real gzip
@@ -711,7 +717,7 @@ func stubArtifacts(t *testing.T) deploy.ArtifactSource {
 // persists — this bead owns no writer for it.
 func testConsentStores(t *testing.T) (*consent.Store, *consent.InstallStore) {
 	t.Helper()
-	logger := log.NewSlogAdapter(discardLogger())
+	logger := log.NewSlogAdapter(discardLogger(t))
 	store := seedGrantedDocument(t, t.TempDir(), "SHA256:test-host")
 	installs := consent.NewInstallStore(logger, storage.NewDocumentStore(t.TempDir()), "installs.json")
 	return store, installs
@@ -721,7 +727,7 @@ func configuredSelector(t *testing.T, provider *fakeLaneProvider) transport.GitF
 	t.Helper()
 	source := stubArtifacts(t)
 	store, installs := testConsentStores(t)
-	factory, _ := helperGitFactory(provider, source, store, installs, discardLogger())
+	factory, _ := helperGitFactory(provider, source, store, installs, discardLogger(t))
 	return factory
 }
 
@@ -731,7 +737,7 @@ func configuredSelector(t *testing.T, provider *fakeLaneProvider) transport.GitF
 // complete install afterwards — and a second consultation of the same host
 // uploads nothing (an already-complete directory is not reinstalled).
 func TestHelperSelectorInstallsTheArtifact(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	sel := configuredSelector(t, provider)
 	sess := &fakeRemoteSession{id: "s1", host: "host.example"}
 
@@ -791,7 +797,7 @@ func TestHelperSelectorFallsBackWhenArtifactsNotBuilt(t *testing.T) {
 // (D20), and the refusal stands rather than an install attempt.
 func TestHelperSelectorFallsBackOnUnsupportedPlatform(t *testing.T) {
 	provider := &fakeLaneProvider{uname: "Darwin x86_64"}
-	sel, _ := helperGitFactory(provider, helperartifacts.DefaultSource, nil, nil, discardLogger())
+	sel, _ := helperGitFactory(provider, helperartifacts.DefaultSource, nil, nil, discardLogger(t))
 	if got := sel(&fakeRemoteSession{host: "host.example"}); got.Factory != nil {
 		t.Fatalf("selection on an unsupported platform = %+v, want the empty refusal", got)
 	}
@@ -802,7 +808,7 @@ func TestHelperSelectorFallsBackOnUnsupportedPlatform(t *testing.T) {
 // the process dies when the last binding closes and is redialed on the
 // next open.
 func TestHelperSharesOneProcessAcrossOpens(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	sel := configuredSelector(t, provider)
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
 	if selection.Factory == nil {
@@ -866,7 +872,7 @@ func TestHelperSharesOneProcessAcrossOpens(t *testing.T) {
 // share one connection is not exposed, and sharing across principals would
 // be an authorization error.
 func TestHelperSessionsDoNotShareAProcess(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	sel := configuredSelector(t, provider)
 	dir := fixtureRepo(t)
 
@@ -898,17 +904,17 @@ func TestHelperSessionsDoNotShareAProcess(t *testing.T) {
 // not touch any other machine's helpers — the backend knows its own
 // channels by the host-key fingerprint that keys consent.
 func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	source := stubArtifacts(t)
-	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	if err := store.Grant("SHA256:machine-a"); err != nil {
 		t.Fatalf("grant a: %v", err)
 	}
 	if err := store.Grant("SHA256:machine-b"); err != nil {
 		t.Fatalf("grant b: %v", err)
 	}
-	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	factory, reg := helperGitFactory(provider, source, store, installs, discardLogger())
+	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
+	factory, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
 	dir := fixtureRepo(t)
 
 	selA := factory(&fakeRemoteSession{id: "s1", host: "host.example", fingerprint: "SHA256:machine-a"})
@@ -966,10 +972,10 @@ func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
 // the operation can be retried after the daemon is repaired.
 func TestHelperCloseHelpersForRefusesWhenSessionsCannotBeEnumerated(t *testing.T) {
 	const fingerprint = "SHA256:test-host"
-	provider := &fakeLaneProvider{peer: helperPeerWithoutSession()}
+	provider := &fakeLaneProvider{peer: helperPeerWithoutSession(t)}
 	source := stubArtifacts(t)
 	store, installs := testConsentStores(t)
-	factory, reg := helperGitFactory(provider, source, store, installs, discardLogger())
+	factory, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
 	dir := fixtureRepo(t)
 
 	selectionA := factory(&fakeRemoteSession{id: "s1", host: "host.example"})
@@ -1018,7 +1024,7 @@ func TestHelperCloseHelpersForRefusesWhenSessionsCannotBeEnumerated(t *testing.T
 // process — the factory must close the client (and so the lane) rather
 // than leaking it on the far host.
 func TestHelperDialFactory_RefusingOpenClosesTheLane(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	sel := configuredSelector(t, provider)
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
 	if selection.Factory == nil {
@@ -1075,11 +1081,11 @@ func TestHelperDialFactory_ExecForbiddenClosesTheLane(t *testing.T) {
 // even needed to decide that. The refusal names what would change it: the
 // connect-time ask ADR-0068 puts elsewhere.
 func TestHelperSelectionNoAnswerYetIsRefusedNeverAsked(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	source := stubArtifacts(t)
-	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
-	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger())
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
+	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger(t))
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", fingerprint: "SHA256:never-answered"})
 	if selection.Factory != nil {
@@ -1108,11 +1114,11 @@ func TestHelperSelectionNoAnswerYetIsRefusedNeverAsked(t *testing.T) {
 // answers the resolver's Refused as a reason with no earned state, and
 // git.open's not-available error carries it.
 func TestHelperSelectionExplicitRawWritesNothing(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	source := stubArtifacts(t)
-	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
-	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger())
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
+	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger(t))
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredRaw})
 	if selection.Factory != nil {
@@ -1130,11 +1136,11 @@ func TestHelperSelectionExplicitRawWritesNothing(t *testing.T) {
 // data is written only when the install actually succeeded — after a grant,
 // the selection installs and the observation store lists the machine.
 func TestHelperSelectionRecordsTheFootprintObservation(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	source := stubArtifacts(t)
 	store := seedGrantedDocument(t, t.TempDir(), "SHA256:test-host")
-	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger())
+	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
+	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger(t))
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
 	if selection.Factory == nil {
@@ -1160,11 +1166,11 @@ func TestHelperSelectionRecordsTheFootprintObservation(t *testing.T) {
 // been otherwise: while silence also resolved to script, refusing here would
 // have refused every user who never opened a connection's settings.
 func TestHelperSelectionExplicitScriptIsNotOfferedTheBinary(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	source := stubArtifacts(t)
-	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
-	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger())
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
+	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger(t))
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredScript})
 	if selection.Factory != nil {
@@ -1201,7 +1207,7 @@ func TestHelperSelectionExplicitScriptIsNotOfferedTheBinary(t *testing.T) {
 // directory is compared against deploy's own layout rather than a literal,
 // because that layout is the one expression that says where an install is.
 func TestTheLaneNamesTheInstallAndTheGenerationTheCoordinatorInstalled(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	sel := configuredSelector(t, provider)
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
 	if selection.Factory == nil {
@@ -1260,7 +1266,7 @@ func TestTheLaneNamesTheInstallAndTheGenerationTheCoordinatorInstalled(t *testin
 // available when the SSH carrier dies but the helper daemon still exists.
 // The binding keeps the hostHelper registered; only its client is lost.
 func TestHelperSessionsRedialsAfterCarrierLoss(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := logtest.Slog(t)
 	daemon := helpersession.New(helpersession.Options{
 		Generation: proto.GenerationID(syntheticArtifactHash),
 		Spawner:    helpersession.NewLocalSpawner(logger, helpersession.Shell{Path: "/bin/sh"}, ""),
@@ -1268,7 +1274,7 @@ func TestHelperSessionsRedialsAfterCarrierLoss(t *testing.T) {
 	})
 	t.Cleanup(daemon.Close)
 	peer := func(in io.Reader, out io.Writer) int {
-		h := host.New(in, out, syntheticArtifactHash, "instance-1", discardLogger())
+		h := host.New(in, out, syntheticArtifactHash, "instance-1", discardLogger(t))
 		h.Register(hostsvc.New(localgit.NewFactory()))
 		h.Register(daemon)
 		release := daemon.Bind(h)

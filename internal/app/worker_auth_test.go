@@ -6,12 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log/slog"
 	"net"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/log/logtest"
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
@@ -383,7 +384,7 @@ func TestWorkerToolCallAfterLifecycleLossIsRefusedWithoutParticipant(t *testing.
 		SelfUID:  1000,
 		Auth:     auth,
 		Dispatch: dispatcher,
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:   logtest.Slog(t),
 	})
 	if err != nil {
 		t.Fatalf("new tool endpoint: %v", err)

@@ -949,7 +949,11 @@ Checked by eye at review. If that rots, file a `commit-msg` hook rather than dro
   ad-hoc `fmt.Println`. Get the logger with `log.From(ctx)` (`internal/log`), never a stored
   field: it carries module, request id, trace and span from whatever the context holds, with
   no call site passing any of the four by hand, and a pre-commit ratchet refuses a new call
-  that does not go through it (`.githooks/check-log-context.mjs`).
+  that does not go through it (`.githooks/check-log-context.mjs`). In a test, get the logger
+  from `internal/log/logtest.New(t)` instead of a discard sink: it is private to that test and
+  prints itself, grouped by trace, only when the test fails — never hand production code a
+  bare `io.Discard`-backed logger again. `go test -tags gtk3 -failfast -run '<Name>' ./<pkg>`
+  is the local command that shows a failing test's own debug log this way.
 - **Clean-only:** no backward-compatibility shims (greenfield — break and refactor freely),
   no dead code, no quick-win hacks. YAGNI.
 - **Respect the spine.** Never wrap PTY bytes in JSON-RPC (AD-1); the backend never sniffs

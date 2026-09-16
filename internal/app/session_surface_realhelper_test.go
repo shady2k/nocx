@@ -76,12 +76,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/log/logtest"
 
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/assistant"
@@ -220,7 +221,7 @@ type s14RealStand struct {
 func newS14RealStand(t *testing.T, mockDir, stateDir string) *s14RealStand {
 	t.Helper()
 	ctx := context.Background()
-	slogger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	slogger := logtest.Slog(t)
 	logger := log.NewSlogAdapter(slogger)
 
 	// The helper binary is built BEFORE $HOME moves, for the same GOPATH
@@ -419,7 +420,7 @@ func newS14RealStand(t *testing.T, mockDir, stateDir string) *s14RealStand {
 		Peers:    coordsock.SystemPeerCredentials{},
 		SelfUID:  uint32(os.Getuid()), //nolint:gosec // uid is not a signed quantity
 		Owner:    happyEndpointOwner{},
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:   logtest.Slog(t),
 		Auth:     auth,
 		Dispatch: dispatcher,
 	})

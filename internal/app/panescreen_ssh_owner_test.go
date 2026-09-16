@@ -58,8 +58,8 @@ func TestAnSSHPaneOpenedByThisMachinesHelperAnswersItsScreen(t *testing.T) {
 	// `spawn-ssh` too, which is what lets an ssh pane be held here at all.
 	_ = startFakeLocalEndpoint(t, endpoint.Dir(home), gen)
 
-	logger := log.NewSlogAdapter(discardLogger())
-	lg := discardLogger()
+	logger := log.NewSlogAdapter(discardLogger(t))
+	lg := discardLogger(t)
 	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
 	rc, err := ssh.NewReal(logger, ssh.WithKnownHostsFile(home+"/known_hosts"))
 	if err != nil {
@@ -132,8 +132,8 @@ func TestAnSSHPaneOpenedByThisMachinesHelperAnswersItsScreen(t *testing.T) {
 // that stopped naming what failed is the failure mode this whole epic's
 // ADR-0057 work exists to prevent.
 func TestAPaneNoHelperHoldsIsStillTheNamedLoss(t *testing.T) {
-	logger := log.NewSlogAdapter(discardLogger())
-	lg := discardLogger()
+	logger := log.NewSlogAdapter(discardLogger(t))
+	lg := discardLogger(t)
 	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
 
 	// A LOCAL session, opened into the registry directly — so this machine's
@@ -164,7 +164,7 @@ func TestAPaneNoHelperHoldsIsStillTheNamedLoss(t *testing.T) {
 // nobody recorded, which is the inference nocx-k6p18.15 exists to forbid. A
 // profile edited between two runs is the ordinary way it happens.
 func TestReAdoptingARemoteOnLocalBindingRefusesWhenTheProfileMoved(t *testing.T) {
-	logger := log.NewSlogAdapter(discardLogger())
+	logger := log.NewSlogAdapter(discardLogger(t))
 	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
 	route := &countingLocalRoute{entries: []helperclient.SessionEntry{{
 		HostSessionID: helperclient.HostSessionID{Generation: "gen-1", Session: "sess-1"},
@@ -208,8 +208,8 @@ func TestReAdoptingAnSSHPaneKeepsItsDestinationAndAnswersItsScreen(t *testing.T)
 	gen := src.hash()
 	_ = startFakeLocalEndpoint(t, endpoint.Dir(home), gen)
 
-	logger := log.NewSlogAdapter(discardLogger())
-	lg := discardLogger()
+	logger := log.NewSlogAdapter(discardLogger(t))
+	lg := discardLogger(t)
 	newOpener := func(reg *session.Reg) *localHelperOpener {
 		rc, err := ssh.NewReal(logger, ssh.WithKnownHostsFile(home+"/known_hosts"))
 		if err != nil {
@@ -316,8 +316,8 @@ func TestReAdoptingABindingTheDaemonNoLongerHoldsIsALossNotAnOwnership(t *testin
 	// opposed to the different one where nobody could be asked at all.
 	_ = startFakeLocalEndpoint(t, endpoint.Dir(home), gen)
 
-	logger := log.NewSlogAdapter(discardLogger())
-	lg := discardLogger()
+	logger := log.NewSlogAdapter(discardLogger(t))
+	lg := discardLogger(t)
 	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
 	rc, rerr := ssh.NewReal(logger, ssh.WithKnownHostsFile(home+"/known_hosts"))
 	if rerr != nil {
@@ -373,8 +373,8 @@ func TestASessionThatEndsLeavesTheOpenersSet(t *testing.T) {
 	gen := src.hash()
 	_ = startFakeLocalEndpoint(t, endpoint.Dir(home), gen)
 
-	logger := log.NewSlogAdapter(discardLogger())
-	lg := discardLogger()
+	logger := log.NewSlogAdapter(discardLogger(t))
+	lg := discardLogger(t)
 	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
 	rc, rerr := ssh.NewReal(logger, ssh.WithKnownHostsFile(home+"/known_hosts"))
 	if rerr != nil {

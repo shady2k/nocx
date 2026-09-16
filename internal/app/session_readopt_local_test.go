@@ -172,12 +172,12 @@ func TestALocalSessionAnotherCoordinatorIsHoldingIsLeftToIt(t *testing.T) {
 	adopter := &stubAdopter{}
 	pass := &readoptPass{
 		registry: other.reg, adopter: adopter,
-		local: &localHelperOpener{dir: ep.dir, log: discardLogger()},
+		local: &localHelperOpener{dir: ep.dir, log: discardLogger(t)},
 	}
 	rec := &recordingReconciler{pending: []content.PendingSession{{
 		SessionID: string(sid), Generation: src.hash(), PaneID: "pane-local",
 	}}}
-	reconcileSessions(ctx, rec, nil, pass, time.Hour, quietLogger())
+	reconcileSessions(ctx, rec, nil, pass, time.Hour, quietLogger(t))
 
 	if len(rec.applied) != 1 || rec.applied[0].Verdict != content.VerdictLive {
 		t.Fatalf("verdict = %+v, want exactly one live: the daemon holds the session, so nothing about "+
@@ -220,7 +220,7 @@ func TestAReattachedPanesScreenIsReadFromTheDaemonThatHoldsIt(t *testing.T) {
 	opener := &localHelperOpener{
 		dir:       t.TempDir(),
 		installed: helperlocal.Installed{Binary: "/nonexistent/nocx-helper", Generation: installed},
-		log:       discardLogger(),
+		log:       discardLogger(t),
 	}
 	// The connection a re-attached pane's attachment rides, as the re-adoption
 	// leaves it: keyed by the session, carrying the generation its endpoint is

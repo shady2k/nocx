@@ -3,12 +3,13 @@ package app
 import (
 	"context"
 	"io"
-	"log/slog"
 	"net"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/log/logtest"
 
 	"github.com/shady2k/nocx/internal/agentapproval"
 	"github.com/shady2k/nocx/internal/agenttools"
@@ -122,7 +123,7 @@ func newSessionEndStand(t *testing.T, dispatch assistant.ToolDispatcher) *sessio
 		SelfUID:  1000,
 		Auth:     auth,
 		Dispatch: dispatch,
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:   logtest.Slog(t),
 	})
 	if err != nil {
 		t.Fatalf("new tool endpoint: %v", err)

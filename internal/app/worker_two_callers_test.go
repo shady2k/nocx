@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -16,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/log/logtest"
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
@@ -287,7 +288,7 @@ func publishGroupEndpoint(t *testing.T, reg *session.Reg, grid workerAuthEnrolme
 		SelfUID:  uint32(os.Getuid()), //nolint:gosec // a uid is not a signed quantity
 		Auth:     mustToolAuthorizer(t, peerpin.SystemPinner{}, reg, grid, record, workerTestWorkspace, allowWorkerApproval{}),
 		Dispatch: dispatch,
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:   logtest.Slog(t),
 	})
 	if err != nil {
 		t.Fatalf("new worker endpoint: %v", err)

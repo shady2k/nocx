@@ -73,7 +73,7 @@ func sealedVaultForReadopt(t *testing.T) *vault.Vault {
 	if err != nil {
 		t.Fatalf("vault.NewRegistry: %v", err)
 	}
-	v, err := vault.New(store, reg, discardLogger())
+	v, err := vault.New(store, reg, discardLogger(t))
 	if err != nil {
 		t.Fatalf("vault.New: %v", err)
 	}
@@ -102,7 +102,7 @@ func freshlySetUpVaultForReadopt(t *testing.T) *vault.Vault {
 	if err != nil {
 		t.Fatalf("vault.NewRegistry: %v", err)
 	}
-	v, err := vault.New(store, reg, discardLogger())
+	v, err := vault.New(store, reg, discardLogger(t))
 	if err != nil {
 		t.Fatalf("vault.New: %v", err)
 	}
@@ -183,8 +183,8 @@ func passwordPendingSessions(n int) []content.PendingSession {
 // cost about what one does, not three times as much.
 func TestReconcileSessions_PreListenPassRefusesPromptlyEvenWithNPendingSessions(t *testing.T) {
 	const n = 3
-	svc := sharedHelperService()
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	coord := newCoordinator(t, provider)
 
 	v := sealedVaultForReadopt(t)
@@ -199,7 +199,7 @@ func TestReconcileSessions_PreListenPassRefusesPromptlyEvenWithNPendingSessions(
 
 	rec := &recordingReconciler{pending: pending}
 	start := time.Now()
-	reconcileSessions(context.Background(), rec, coord.reg.inventories(), pass, time.Hour, quietLogger())
+	reconcileSessions(context.Background(), rec, coord.reg.inventories(), pass, time.Hour, quietLogger(t))
 	elapsed := time.Since(start)
 
 	if len(rec.applied) != n {
@@ -231,8 +231,8 @@ func TestReconcileSessions_PreListenPassRefusesPromptlyEvenWithNPendingSessions(
 // slower.
 func TestReconcileSessions_IfPresenceIsPrimedTooEarlyEachSessionCostsItsBound(t *testing.T) {
 	const n = 3
-	svc := sharedHelperService()
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	coord := newCoordinator(t, provider)
 
 	v := sealedVaultForReadopt(t)
@@ -246,7 +246,7 @@ func TestReconcileSessions_IfPresenceIsPrimedTooEarlyEachSessionCostsItsBound(t 
 
 	rec := &recordingReconciler{pending: pending}
 	start := time.Now()
-	reconcileSessions(context.Background(), rec, coord.reg.inventories(), pass, time.Hour, quietLogger())
+	reconcileSessions(context.Background(), rec, coord.reg.inventories(), pass, time.Hour, quietLogger(t))
 	elapsed := time.Since(start)
 
 	// (n-1)*bound rather than n*bound: the vault coalesces one prompt per
@@ -272,8 +272,8 @@ func TestReconcileSessions_IfPresenceIsPrimedTooEarlyEachSessionCostsItsBound(t 
 // a real client attach for this one fact would test the WebSocket rather
 // than the retry.
 func TestReconcileSessions_ASessionLeftPendingIsTakenBackOnceAttachedAndUnsealed(t *testing.T) {
-	svc := sharedHelperService()
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 
 	// A REAL session, opened while the vault is unsealed (a person is
 	// present, exactly as they were when they first connected this saved
@@ -303,7 +303,7 @@ func TestReconcileSessions_ASessionLeftPendingIsTakenBackOnceAttachedAndUnsealed
 	// promptly, exactly like the test above, and left pending rather than
 	// deleted (VerdictUnknown never sweeps the row).
 	firstPass := &recordingReconciler{pending: pending}
-	reconcileSessions(context.Background(), firstPass, second.reg.inventories(), pass, time.Hour, quietLogger())
+	reconcileSessions(context.Background(), firstPass, second.reg.inventories(), pass, time.Hour, quietLogger(t))
 	if len(firstPass.applied) != 1 || firstPass.applied[0].Verdict != content.VerdictUnknown {
 		t.Fatalf("first pass = %+v, want exactly one unknown verdict", firstPass.applied)
 	}
@@ -323,7 +323,7 @@ func TestReconcileSessions_ASessionLeftPendingIsTakenBackOnceAttachedAndUnsealed
 	// time EnsureUnsealed's first branch answers before ever reaching a
 	// requester: the vault is simply unsealed now.
 	secondPass := &recordingReconciler{pending: pending}
-	reconcileSessions(context.Background(), secondPass, second.reg.inventories(), pass, time.Hour, quietLogger())
+	reconcileSessions(context.Background(), secondPass, second.reg.inventories(), pass, time.Hour, quietLogger(t))
 
 	if len(secondPass.applied) != 1 || secondPass.applied[0].Verdict != content.VerdictLive {
 		t.Fatalf("retry pass = %+v, want exactly one live verdict", secondPass.applied)
@@ -364,8 +364,8 @@ func (r unsealsThenBlocksRequester) RequestUnlock(ctx context.Context, reason st
 // the vault already unsealed (State is checked before any requester is
 // touched) and needs nobody's answer at all.
 func TestReconcileSessions_APollOfShortAttemptsCatchesARawUnsealASuspendedOneMissed(t *testing.T) {
-	svc := sharedHelperService()
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 
 	v := freshlySetUpVaultForReadopt(t)
 	first := newCoordinator(t, provider)
@@ -387,7 +387,7 @@ func TestReconcileSessions_APollOfShortAttemptsCatchesARawUnsealASuspendedOneMis
 	var last content.SessionVerdict
 	for i := range maxAttempts {
 		rec := &recordingReconciler{pending: pending}
-		reconcileSessions(context.Background(), rec, second.reg.inventories(), pass, time.Hour, quietLogger())
+		reconcileSessions(context.Background(), rec, second.reg.inventories(), pass, time.Hour, quietLogger(t))
 		if len(rec.applied) != 1 {
 			t.Fatalf("attempt %d: judgements = %+v, want exactly one", i, rec.applied)
 		}

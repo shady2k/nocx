@@ -205,12 +205,12 @@ func startFarPaneStand(t *testing.T) *farPaneStand {
 		Generation: proto.GenerationID(syntheticArtifactHash),
 		Spawner:    spawner,
 		SSHSpawner: spawner,
-		Log:        discardLogger(),
+		Log:        discardLogger(t),
 	})
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc), home: t.TempDir()}
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc), home: t.TempDir()}
 	store, installs := testConsentStores(t)
-	_, reg := helperGitFactory(provider, stubArtifacts(t), store, installs, discardLogger())
-	reg.registry = session.New(log.NewSlogAdapter(discardLogger()), &reachPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(discardLogger()))})
+	_, reg := helperGitFactory(provider, stubArtifacts(t), store, installs, discardLogger(t))
+	reg.registry = session.New(log.NewSlogAdapter(discardLogger(t)), &reachPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(discardLogger(t)))})
 	tools := &fakeFarTools{}
 	reg.tools = tools
 	return &farPaneStand{reg: reg, tools: tools, spawner: spawner}

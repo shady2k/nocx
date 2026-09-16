@@ -139,7 +139,7 @@ func (a *askRecorder) asked() []string {
 // the helper must ask its coordinator about rather than one it can trust.
 func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver, extra ...*pwSSHServer) *filesStand {
 	t.Helper()
-	logger := discardLogger()
+	logger := discardLogger(t)
 	// The ssh client takes the harness's own logging seam (internal/log), the
 	// same adapter app.go builds beside it.
 	sshLog := log.NewSlogAdapter(logger)

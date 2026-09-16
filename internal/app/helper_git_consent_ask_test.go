@@ -40,9 +40,9 @@ import (
 // session on the far helper too, which realHelperPeer's bare
 // helpersession.New (no Spawner) panics on. TestHelperSessionsRedialsAfterCarrierLoss
 // is the existing precedent for wiring one.
-func realHelperPeerWithSpawner() func(in io.Reader, out io.Writer) int {
+func realHelperPeerWithSpawner(t testing.TB) func(in io.Reader, out io.Writer) int {
 	contentHash := syntheticArtifactHash
-	logger := discardLogger()
+	logger := discardLogger(t)
 	daemon := helpersession.New(helpersession.Options{
 		Generation: proto.GenerationID(contentHash),
 		Spawner:    helpersession.NewLocalSpawner(logger, helpersession.Shell{Path: "/bin/sh"}, ""),
@@ -81,9 +81,9 @@ func newTestRegistry(t *testing.T, provider *fakeLaneProvider, store *consent.St
 		lanes:    provider,
 		install:  provider,
 		source:   stubArtifacts(t),
-		log:      discardLogger(),
+		log:      discardLogger(t),
 		consent:  store,
-		registry: session.New(log.NewSlogAdapter(discardLogger()), &reachPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(discardLogger()))}),
+		registry: session.New(log.NewSlogAdapter(discardLogger(t)), &reachPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(discardLogger(t)))}),
 		hosts:    make(map[session.ID]*hostHelper),
 		closing:  make(map[string]struct{}),
 	}
@@ -95,8 +95,8 @@ func newTestRegistry(t *testing.T, provider *fakeLaneProvider, store *consent.St
 // fell through to a silent script-tier open, so an auto connection whose
 // host key was already trusted was never asked, on any connect, ever.
 func TestOpenHoldingLease_AutoUnansweredAsksInsteadOfFallingThrough(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
-	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	r := newTestRegistry(t, provider, store)
 
 	opened, hold, selected, err := r.openHoldingLease(context.Background(), remoteConfigFor(profile.DesiredAuto), "claim-1")
@@ -128,7 +128,7 @@ func TestOpenHoldingLease_AutoUnansweredAsksInsteadOfFallingThrough(t *testing.T
 // the fingerprint the probe reports, the SAME connection resolves silently
 // to the helper — the second half of "asked exactly once per fingerprint".
 func TestOpenHoldingLease_GrantedResolvesWithoutAsking(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner()}
+	provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner(t)}
 	// fakeProbeConn.HostKeyFingerprint is the fixed "SHA256:fake" (helper_git_test.go).
 	store := seedGrantedDocument(t, t.TempDir(), "SHA256:fake")
 	r := newTestRegistry(t, provider, store)
@@ -157,13 +157,13 @@ func TestOpenHoldingLease_GrantedResolvesWithoutAsking(t *testing.T) {
 // "this connection has not yet been asked" refusal
 // e2e/git-remote.spec.ts hit after granting the helper at connect.
 func TestOpenHoldingLease_GrantedMachineIsFoundAgainByGitOpen(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner()}
+	provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner(t)}
 	source := stubArtifacts(t)
 	// fakeProbeConn.HostKeyFingerprint is the fixed "SHA256:fake" (helper_git_test.go).
 	store := seedGrantedDocument(t, t.TempDir(), "SHA256:fake")
-	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	factoryFor, reg := helperGitFactory(provider, source, store, installs, discardLogger())
-	reg.registry = session.New(log.NewSlogAdapter(discardLogger()), &reachPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(discardLogger()))})
+	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
+	factoryFor, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	reg.registry = session.New(log.NewSlogAdapter(discardLogger(t)), &reachPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(discardLogger(t)))})
 
 	opened, hold, selected, err := reg.openHoldingLease(context.Background(), remoteConfigFor(profile.DesiredAuto), "claim-1")
 	defer hold.release()
@@ -193,8 +193,8 @@ func TestOpenHoldingLease_GrantedMachineIsFoundAgainByGitOpen(t *testing.T) {
 // never reaches the ask, whatever the store holds — mode is checked before
 // any consent lookup (D8, unchanged by this bead).
 func TestOpenHoldingLease_ExplicitRawNeverAsks(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
-	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	r := newTestRegistry(t, provider, store)
 
 	_, hold, selected, err := r.openHoldingLease(context.Background(), remoteConfigFor(profile.DesiredRaw), "claim-1")
@@ -213,7 +213,7 @@ func TestOpenHoldingLease_ExplicitRawNeverAsks(t *testing.T) {
 // connection's first contact with an unknown host key gets ONE refusal
 // carrying both questions.
 func TestHelperConsentAskForProbeFailure_UnknownKeyAsksOnce(t *testing.T) {
-	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	probeErr := &ssh.ErrUnknownHostKey{Addr: "h:22", Fingerprint: "SHA256:offered", KeyAlgo: "ssh-ed25519"}
 
 	err := helperConsentAskForProbeFailure("h:22", profile.DesiredAuto, probeErr, store)
@@ -234,7 +234,7 @@ func TestHelperConsentAskForProbeFailure_UnknownKeyAsksOnce(t *testing.T) {
 // just as deterministic as an unknown one's, and the ask must not require
 // the key to already be unchanged to be raised.
 func TestHelperConsentAskForProbeFailure_ChangedKeyAsksToo(t *testing.T) {
-	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	probeErr := &ssh.ErrHostKeyMismatch{Addr: "h:22", Fingerprint: "SHA256:new", Expected: "SHA256:old"}
 
 	err := helperConsentAskForProbeFailure("h:22", profile.DesiredAuto, probeErr, store)
@@ -252,7 +252,7 @@ func TestHelperConsentAskForProbeFailure_ChangedKeyAsksToo(t *testing.T) {
 // connection must never raise the connect-time ask, even for a host-key
 // failure.
 func TestHelperConsentAskForProbeFailure_ExplicitModeNeverAsks(t *testing.T) {
-	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	probeErr := &ssh.ErrUnknownHostKey{Addr: "h:22", Fingerprint: "SHA256:offered"}
 
 	for _, mode := range []profile.DesiredMode{profile.DesiredRaw, profile.DesiredScript, profile.DesiredHelper} {
@@ -267,7 +267,7 @@ func TestHelperConsentAskForProbeFailure_ExplicitModeNeverAsks(t *testing.T) {
 // not raise the ask — the existing local-opener fallback answers those on
 // its own, as it always has.
 func TestHelperConsentAskForProbeFailure_NonHostKeyFailureNeverAsks(t *testing.T) {
-	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	if err := helperConsentAskForProbeFailure("h:22", profile.DesiredAuto, errors.New("dial tcp: connection refused"), store); err != nil {
 		t.Errorf("err = %v, want nil for a non-host-key probe failure", err)
 	}

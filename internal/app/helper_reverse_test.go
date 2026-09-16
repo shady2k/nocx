@@ -19,11 +19,11 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
-	"io"
-	"log/slog"
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/log/logtest"
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/helper/proto"
@@ -85,7 +85,7 @@ func newReverseFixture(t *testing.T, material map[credential.SecretID][]byte) *r
 
 	secrets := &fakeSecrets{material: material}
 	return &reverseFixture{
-		handlers: &helperReverse{client: client, secrets: secrets, log: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		handlers: &helperReverse{client: client, secrets: secrets, log: logtest.Slog(t)},
 		secrets:  secrets,
 		client:   client,
 		host:     "example.test:22",
@@ -533,7 +533,7 @@ func (p *promptAsker) questions() []ssh.PasswordRequest {
 func TestThePromptHandlerAsksThePersonTheServersOwnQuestion(t *testing.T) {
 	f := newReverseFixture(t, nil)
 	asker := &promptAsker{answer: "hunter2"}
-	f.handlers.prompts = &helperPrompt{asker: asker, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	f.handlers.prompts = &helperPrompt{asker: asker, log: logtest.Slog(t)}
 
 	raw, err := f.handlers.prompt(context.Background(), params(t, proto.PromptParams{
 		Host: "prod.example.com", Port: 22, User: "deploy",
@@ -571,7 +571,7 @@ func TestThePromptHandlerAsksThePersonTheServersOwnQuestion(t *testing.T) {
 func TestThePromptHandlerAsksOncePerQuestion(t *testing.T) {
 	f := newReverseFixture(t, nil)
 	asker := &promptAsker{answer: "answer"}
-	f.handlers.prompts = &helperPrompt{asker: asker, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	f.handlers.prompts = &helperPrompt{asker: asker, log: logtest.Slog(t)}
 
 	raw, err := f.handlers.prompt(context.Background(), params(t, proto.PromptParams{
 		Host: "prod.example.com", Port: 22, User: "deploy",
@@ -606,7 +606,7 @@ func TestThePromptHandlerRefusesWhatItCannotAnswerItself(t *testing.T) {
 		f := newReverseFixture(t, nil)
 		f.handlers.prompts = &helperPrompt{
 			asker: &promptAsker{err: transport.ErrPasswordPromptCancelled},
-			log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+			log:   logtest.Slog(t),
 		}
 		_, err := f.handlers.prompt(context.Background(), params(t, promptRequest()))
 		if got := reverseRefusalCode(t, err); got != proto.ErrCodePromptCancelled {
@@ -618,7 +618,7 @@ func TestThePromptHandlerRefusesWhatItCannotAnswerItself(t *testing.T) {
 		f := newReverseFixture(t, nil)
 		f.handlers.prompts = &helperPrompt{
 			asker: &promptAsker{err: transport.ErrPasswordNoClientConnected},
-			log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+			log:   logtest.Slog(t),
 		}
 		_, err := f.handlers.prompt(context.Background(), params(t, promptRequest()))
 		if got := reverseRefusalCode(t, err); got != proto.ErrCodeNoAuthChannel {
@@ -628,7 +628,7 @@ func TestThePromptHandlerRefusesWhatItCannotAnswerItself(t *testing.T) {
 
 	t.Run("this coordinator has no prompt seam wired", func(t *testing.T) {
 		f := newReverseFixture(t, nil)
-		f.handlers.prompts = &helperPrompt{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+		f.handlers.prompts = &helperPrompt{log: logtest.Slog(t)}
 		_, err := f.handlers.prompt(context.Background(), params(t, promptRequest()))
 		if got := reverseRefusalCode(t, err); got != proto.ErrCodeNoAuthChannel {
 			t.Fatalf("code = %q, want %q", got, proto.ErrCodeNoAuthChannel)
@@ -637,7 +637,7 @@ func TestThePromptHandlerRefusesWhatItCannotAnswerItself(t *testing.T) {
 
 	t.Run("a challenge with no questions", func(t *testing.T) {
 		f := newReverseFixture(t, nil)
-		f.handlers.prompts = &helperPrompt{asker: &promptAsker{answer: "x"}, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+		f.handlers.prompts = &helperPrompt{asker: &promptAsker{answer: "x"}, log: logtest.Slog(t)}
 		_, err := f.handlers.prompt(context.Background(), params(t, proto.PromptParams{
 			Host: "prod.example.com", Port: 22, User: "deploy",
 		}))
@@ -663,7 +663,7 @@ func TestThePromptHandlerRefusesWhatItCannotAnswerItself(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newReverseFixture(t, nil)
 			asker := &promptAsker{answer: "x"}
-			f.handlers.prompts = &helperPrompt{asker: asker, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			f.handlers.prompts = &helperPrompt{asker: asker, log: logtest.Slog(t)}
 
 			_, err := f.handlers.prompt(context.Background(), params(t, tc.p))
 			if got := reverseRefusalCode(t, err); got != proto.ErrCodeBadParams {

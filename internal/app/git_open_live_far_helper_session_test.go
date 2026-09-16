@@ -58,13 +58,13 @@ import (
 // directly: it must never fire while git.open traffic runs.
 func TestGitOpenOnALiveFarHelperConnectionLeavesTheSessionAndLifecycleChannelOpen(t *testing.T) {
 	spawner := &lifecycleSpawner{}
-	svc := helperWithIntegratedShells(spawner)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := helperWithIntegratedShells(t, spawner)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 
 	source := stubArtifacts(t)
 	store, installs := testConsentStores(t)
-	gitFor, reg := helperGitFactory(provider, source, store, installs, discardLogger())
-	sessReg := session.New(log.NewSlogAdapter(discardLogger()), nil)
+	gitFor, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	sessReg := session.New(log.NewSlogAdapter(discardLogger(t)), nil)
 	reg.registry = sessReg
 	pub := lifecyclepub.New(lifecycle.New(lifecycle.Options{}))
 	emitter := &recordingEmitter{}
@@ -234,13 +234,13 @@ func TestGitOpenOnALiveFarHelperConnectionLeavesTheSessionAndLifecycleChannelOpe
 // most common possible git.open answer.
 func TestGitOpenRefusingNotARepositoryOnALiveFarHelperConnectionLeavesTheSession(t *testing.T) {
 	spawner := &lifecycleSpawner{}
-	svc := helperWithIntegratedShells(spawner)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := helperWithIntegratedShells(t, spawner)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 
 	source := stubArtifacts(t)
 	store, installs := testConsentStores(t)
-	gitFor, reg := helperGitFactory(provider, source, store, installs, discardLogger())
-	sessReg := session.New(log.NewSlogAdapter(discardLogger()), nil)
+	gitFor, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	sessReg := session.New(log.NewSlogAdapter(discardLogger(t)), nil)
 	reg.registry = sessReg
 	pub := lifecyclepub.New(lifecycle.New(lifecycle.Options{}))
 	emitter := &recordingEmitter{}

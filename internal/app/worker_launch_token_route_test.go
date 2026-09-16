@@ -73,8 +73,8 @@ func sshTokenRoute(t *testing.T) (*localHelperOpener, *spawnTokens, *fakeLocalEn
 	// the scripted one that keeps what a spawn asked for.
 	ep := startFakeLocalEndpoint(t, endpoint.Dir(home), gen)
 
-	logger := log.NewSlogAdapter(discardLogger())
-	lg := discardLogger()
+	logger := log.NewSlogAdapter(discardLogger(t))
+	lg := discardLogger(t)
 	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
 	rc, err := ssh.NewReal(logger, ssh.WithKnownHostsFile(home+"/known_hosts"))
 	if err != nil {

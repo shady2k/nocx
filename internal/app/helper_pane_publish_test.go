@@ -101,7 +101,7 @@ func startPaneStand(t *testing.T) *paneStand {
 	gen := fakeArtifacts{payload: syntheticPayload}.hash()
 	daemon := startFakeLocalEndpoint(t, endpoint.Dir(home), gen)
 
-	slogger := log.NewSlogAdapter(discardLogger())
+	slogger := log.NewSlogAdapter(discardLogger(t))
 	reg := session.New(slogger, &reachPTYFactory{stub: pty.NewStub(slogger)})
 	rc, err := ssh.NewReal(slogger, ssh.WithKnownHostsFile(home+"/known_hosts"))
 	if err != nil {

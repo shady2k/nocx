@@ -95,7 +95,7 @@ func openFaultPassStore(t *testing.T, path string) content.ContentDB {
 		Path:   path,
 		Key:    faultPassKey(),
 		Budget: content.Budget{RetentionBytes: 1 << 30, DiskCeilingBytes: 2 << 30, CompactionFloor: 0.8},
-		Logger: log.NewSlogAdapter(discardLogger()),
+		Logger: log.NewSlogAdapter(discardLogger(t)),
 	})
 	if err != nil {
 		t.Fatalf("content.Open(%s): %v", path, err)
@@ -229,7 +229,7 @@ func theFaultFreePass(t *testing.T) (asks []string, converged map[string]uint64)
 	path := filepath.Join(t.TempDir(), "content.db")
 	store := aStoreThatCarriedSessionsOver(t, path)
 	readopt := &faultingReadopter{held: heldByTheHost()}
-	reconcileSessions(context.Background(), store.Reconcile(), nil, readopt, time.Hour, quietLogger())
+	reconcileSessions(context.Background(), store.Reconcile(), nil, readopt, time.Hour, quietLogger(t))
 	if err := store.Close(); err != nil {
 		t.Fatalf("close after the fault-free pass: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestAnAskThatFailsPartWayThroughLeavesTheRestUnjudgedAndTheNextPassComplete
 			path := filepath.Join(t.TempDir(), "content.db")
 			store := aStoreThatCarriedSessionsOver(t, path)
 			readopt := &faultingReadopter{held: heldByTheHost(), failFrom: n}
-			reconcileSessions(ctx, store.Reconcile(), nil, readopt, time.Hour, quietLogger())
+			reconcileSessions(ctx, store.Reconcile(), nil, readopt, time.Hour, quietLogger(t))
 
 			// Why each session is where it is, in THIS incarnation's words.
 			// Read before the close because a cause describes the attempts of
@@ -343,7 +343,7 @@ func TestAnAskThatFailsPartWayThroughLeavesTheRestUnjudgedAndTheNextPassComplete
 			remainder := sortedIDs(afterFault)
 			next := openFaultPassStore(t, path)
 			healed := &faultingReadopter{held: heldByTheHost()}
-			reconcileSessions(ctx, next.Reconcile(), nil, healed, time.Hour, quietLogger())
+			reconcileSessions(ctx, next.Reconcile(), nil, healed, time.Hour, quietLogger(t))
 			if err = next.Close(); err != nil {
 				t.Fatalf("close after the completing pass: %v", err)
 			}

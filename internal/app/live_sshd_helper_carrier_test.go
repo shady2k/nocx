@@ -117,7 +117,7 @@ func (r liveFixtureKeyResolver) Resolve(_ context.Context, _ credential.SecretID
 // key as the credential the helper must present.
 func startLiveHelperStand(t *testing.T, fx *liveSshd) (*remoteInstallerAdapter, liveFixtureKeyResolver) {
 	t.Helper()
-	logger := discardLogger()
+	logger := discardLogger(t)
 	sshLog := log.NewSlogAdapter(logger)
 
 	block, err := gossh.MarshalPrivateKey(fx.clientRaw, "")

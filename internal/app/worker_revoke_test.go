@@ -5,13 +5,14 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log/slog"
 	"net"
 	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/log/logtest"
 
 	"github.com/shady2k/nocx/internal/agentapproval"
 	"github.com/shady2k/nocx/internal/peerpin"
@@ -83,7 +84,7 @@ func admittedWorkerEndpoint(t *testing.T) (*agentApprovalService, *toolendpoint.
 		SelfUID:  1000,
 		Auth:     auth,
 		Dispatch: newSharedToolDispatcher(t, record),
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:   logtest.Slog(t),
 	})
 	if err != nil {
 		t.Fatalf("new tool endpoint: %v", err)
@@ -292,7 +293,7 @@ func TestRevokingOneAgentLeavesAnotherAgentsSessionAdmitted(t *testing.T) {
 		SelfUID:  1000,
 		Auth:     auth,
 		Dispatch: newSharedToolDispatcher(t, emptyWorkerRecord()),
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:   logtest.Slog(t),
 	})
 	if err != nil {
 		t.Fatalf("new tool endpoint: %v", err)

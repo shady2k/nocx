@@ -33,7 +33,7 @@ import (
 
 func TestClosingAHelperHostedSessionReleasesItsHelperWindowBudget(t *testing.T) {
 	ctx := context.Background()
-	logger := discardLogger()
+	logger := discardLogger(t)
 	sessionLog := log.NewSlogAdapter(logger)
 	const generation = "1111111111111111aaaaaaaaaaaaaaaa"
 

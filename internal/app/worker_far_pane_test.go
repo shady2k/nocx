@@ -19,8 +19,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
-	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -28,6 +26,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/log/logtest"
 
 	"github.com/shady2k/nocx/internal/agentapproval"
 	"github.com/shady2k/nocx/internal/agenttools"
@@ -192,7 +192,7 @@ func newFarStand(t *testing.T, sessions ...session.Session) *farStand {
 		SelfUID:  1000,
 		Auth:     auth,
 		Dispatch: dispatch,
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:   logtest.Slog(t),
 		// The helper's lane. A test dials this socket itself, so this test
 		// process IS the helper for the purpose of the record — which is the
 		// point: what the endpoint trusts is the lane, and here the lane is

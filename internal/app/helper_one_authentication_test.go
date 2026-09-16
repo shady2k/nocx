@@ -76,7 +76,7 @@ type openSeam struct {
 func openSeamOver(t *testing.T, stand *filesStand) openSeam {
 	t.Helper()
 	consentStore, installStore := testConsentStores(t)
-	_, remote := helperGitFactory(stand.routes, refusingArtifactSource{}, consentStore, installStore, discardLogger())
+	_, remote := helperGitFactory(stand.routes, refusingArtifactSource{}, consentStore, installStore, discardLogger(t))
 	remote.registry = stand.registry
 	return openSeam{
 		hosted: &hostedOpeners{local: stand.opener, remote: remote},

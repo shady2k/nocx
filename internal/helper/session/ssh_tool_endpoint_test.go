@@ -39,10 +39,8 @@ package session_test
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"errors"
-	"log/slog"
 	"net"
 	"path/filepath"
 	"strings"
@@ -53,6 +51,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/log/logtest"
 )
 
 // addCoordinator dials a SECOND coordinator connection to the SAME helper
@@ -327,8 +326,14 @@ func consumeAnswer(t *testing.T, agent net.Conn) {
 // race, which is the outcome this test wants, not a failure. Asserting that
 // write would make the test about which goroutine reached the socket first.
 func TestAPaneWhoseCoordinatorHasGoneIsRefusedAndNotReRouted(t *testing.T) {
-	var logs bytes.Buffer
-	standLogger = slog.New(slog.NewTextHandler(&logs, nil))
+	// logtest.Slog, not a bare bytes.Buffer (nocx-n14oo.10): the refusal this
+	// test reads for is logged by toolSocket.forward on ITS OWN goroutine
+	// (internal/helper/sshsvc/toolsocket.go), racing this test's read of the
+	// same buffer under -race — CI's own finding. logtest's store is
+	// mutex-guarded and WaitForSlog is a condition wait on it, so the read
+	// below is ordered after the write rather than merely usually after it.
+	standLog := logtest.Slog(t)
+	standLogger = standLog
 	t.Cleanup(func() { standLogger = nil })
 
 	f := newSSHFixture(t, "pw", "printf 'ALIVE\n'; cat")
@@ -407,10 +412,19 @@ func TestAPaneWhoseCoordinatorHasGoneIsRefusedAndNotReRouted(t *testing.T) {
 	}
 
 	alive.nothingSeen(t, "a coordinator that did not open this pane")
-	if !strings.Contains(logs.String(), "refusing a far-side tool connection") {
-		t.Fatalf("the helper did not refuse by name:\n%s", logs.String())
+
+	// A CONDITION WAIT, not a read: the far agent's connection ending (above)
+	// proves the helper has decided to refuse, not that it has finished
+	// LOGGING the refusal — toolSocket.forward writes that line after
+	// closing the connection, on its own goroutine. Waiting for the record
+	// is what makes the text.Contains checks below deterministic instead of
+	// racing that write, which is what -race caught.
+	if !logtest.WaitForSlog(standLog, paneWait, func(r logtest.Record) bool {
+		return strings.Contains(r.Message, "refusing a far-side tool connection")
+	}) {
+		t.Fatalf("the helper did not refuse by name:\n%s", logtest.TextSlog(standLog))
 	}
-	if !strings.Contains(logs.String(), gonePath) {
-		t.Fatalf("the refusal does not name the endpoint that is gone (%s):\n%s", gonePath, logs.String())
+	if text := logtest.TextSlog(standLog); !strings.Contains(text, gonePath) {
+		t.Fatalf("the refusal does not name the endpoint that is gone (%s):\n%s", gonePath, text)
 	}
 }

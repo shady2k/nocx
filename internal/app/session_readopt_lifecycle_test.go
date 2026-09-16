@@ -202,11 +202,11 @@ func newIntegratedCoordinator(t *testing.T, provider *fakeLaneProvider) *integra
 
 // helperWithIntegratedShells builds the shared daemon whose one shell holds a
 // lifecycle channel.
-func helperWithIntegratedShells(spawner *lifecycleSpawner) *helpersession.Service {
+func helperWithIntegratedShells(t testing.TB, spawner *lifecycleSpawner) *helpersession.Service {
 	return helpersession.New(helpersession.Options{
 		Generation: proto.GenerationID(syntheticArtifactHash),
 		Spawner:    spawner,
-		Log:        discardLogger(),
+		Log:        discardLogger(t),
 	})
 }
 
@@ -214,8 +214,8 @@ func helperWithIntegratedShells(spawner *lifecycleSpawner) *helpersession.Servic
 
 func TestACommandRunAfterTheReturnProducesABlock(t *testing.T) {
 	spawner := &lifecycleSpawner{}
-	svc := helperWithIntegratedShells(spawner)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := helperWithIntegratedShells(t, spawner)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 
 	first := newIntegratedCoordinator(t, provider)
 	binding := openHostedFixture(t, first.coordinator, "pane-1")
@@ -234,7 +234,7 @@ func TestACommandRunAfterTheReturnProducesABlock(t *testing.T) {
 	adopter := &stubAdopter{}
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger())
+		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger(t))
 
 	if adopted := adopter.adoptedIDs(); len(adopted) != 1 {
 		t.Fatalf("the session was not taken back at all (%v); there is nothing to run a command in", adopter.failure())
@@ -307,8 +307,8 @@ func TestACommandRunAfterTheReturnProducesABlock(t *testing.T) {
 // session, with no client ever asking for anything on it.
 func TestAGitOpenAgainstAReadoptedSessionLeavesItsLifecycleChannelOpen(t *testing.T) {
 	spawner := &lifecycleSpawner{}
-	svc := helperWithIntegratedShells(spawner)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := helperWithIntegratedShells(t, spawner)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 
 	first := newIntegratedCoordinator(t, provider)
 	binding := openHostedFixture(t, first.coordinator, "pane-1")
@@ -338,7 +338,7 @@ func TestAGitOpenAgainstAReadoptedSessionLeavesItsLifecycleChannelOpen(t *testin
 	adopter := &stubAdopter{}
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger())
+		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger(t))
 	if adopted := adopter.adoptedIDs(); len(adopted) != 1 {
 		t.Fatalf("the session was not taken back at all (%v); there is nothing to protect", adopter.failure())
 	}
@@ -408,8 +408,8 @@ func TestAGitOpenAgainstAReadoptedSessionLeavesItsLifecycleChannelOpen(t *testin
 // nothing would be the same silence in the other direction.
 func TestATakenBackPaneReportsItsIntegrationAndItsLane(t *testing.T) {
 	spawner := &lifecycleSpawner{}
-	svc := helperWithIntegratedShells(spawner)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := helperWithIntegratedShells(t, spawner)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 
 	first := newIntegratedCoordinator(t, provider)
 	binding := openHostedFixture(t, first.coordinator, "pane-1")
@@ -423,7 +423,7 @@ func TestATakenBackPaneReportsItsIntegrationAndItsLane(t *testing.T) {
 	adopter := &stubAdopter{}
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger())
+		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger(t))
 
 	open := adopter.lastOpen()
 	if open.LifecycleLane != lifecycle.LaneID(launch.Lane) {
@@ -446,8 +446,8 @@ func TestATakenBackPaneReportsItsIntegrationAndItsLane(t *testing.T) {
 // silent, which is the whole of what this bead refuses to ship.
 func TestAGenerationThatCannotHandBackTheChannelSaysSoInTheProduct(t *testing.T) {
 	spawner := &lifecycleSpawner{}
-	svc := helperWithIntegratedShells(spawner)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := helperWithIntegratedShells(t, spawner)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 
 	first := newIntegratedCoordinator(t, provider)
 	binding := openHostedFixture(t, first.coordinator, "pane-1")
@@ -459,12 +459,12 @@ func TestAGenerationThatCannotHandBackTheChannelSaysSoInTheProduct(t *testing.T)
 
 	// The generation that answers now is one from before adopt-lifecycle
 	// existed: it serves the frozen ABI and refuses everything newer.
-	provider.peer = olderGenerationPeer(svc)
+	provider.peer = olderGenerationPeer(t, svc)
 	second := newIntegratedCoordinator(t, provider)
 	adopter := &stubAdopter{}
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger())
+		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger(t))
 
 	if len(rec.applied) != 1 || rec.applied[0].Verdict != content.VerdictLive {
 		t.Fatalf("verdict = %+v, want live — a channel that cannot be re-established is not a session that is gone", rec.applied)
@@ -490,8 +490,8 @@ func TestAGenerationThatCannotHandBackTheChannelSaysSoInTheProduct(t *testing.T)
 // "conventional by design" is expressed, and a pane that never offered blocks
 // has nothing to have lost.
 func TestAConventionalSessionTakenBackSaysNothingAboutIntegration(t *testing.T) {
-	svc := sharedHelperService()
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 
 	first := newIntegratedCoordinator(t, provider)
 	binding := openHostedFixture(t, first.coordinator, "pane-1")
@@ -501,7 +501,7 @@ func TestAConventionalSessionTakenBackSaysNothingAboutIntegration(t *testing.T) 
 	adopter := &stubAdopter{}
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger())
+		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger(t))
 
 	open := adopter.lastOpen()
 	if open.IntegrationStatus != "" {
@@ -521,8 +521,8 @@ func TestAConventionalSessionTakenBackSaysNothingAboutIntegration(t *testing.T) 
 // what says so.
 func TestTheAdoptedChannelDoesNotReplayCommandsThatAlreadyRan(t *testing.T) {
 	spawner := &lifecycleSpawner{}
-	svc := helperWithIntegratedShells(spawner)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := helperWithIntegratedShells(t, spawner)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 
 	first := newIntegratedCoordinator(t, provider)
 	binding := openHostedFixture(t, first.coordinator, "pane-1")
@@ -549,7 +549,7 @@ func TestTheAdoptedChannelDoesNotReplayCommandsThatAlreadyRan(t *testing.T) {
 	adopter := &stubAdopter{}
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger())
+		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger(t))
 	if adopted := adopter.adoptedIDs(); len(adopted) != 1 {
 		t.Fatalf("the session was not taken back: %v", adopter.failure())
 	}
@@ -581,10 +581,10 @@ func TestTheAdoptedChannelDoesNotReplayCommandsThatAlreadyRan(t *testing.T) {
 // holding its sessions predates the op, which is a state the design
 // guarantees: two generations are resident at once, and one lingers for as
 // long as it holds a session.
-func olderGenerationPeer(svc *helpersession.Service) func(in io.Reader, out io.Writer) int {
+func olderGenerationPeer(t testing.TB, svc *helpersession.Service) func(in io.Reader, out io.Writer) int {
 	contentHash := syntheticArtifactHash
 	return func(in io.Reader, out io.Writer) int {
-		h := host.New(in, out, contentHash, "instance-1", discardLogger())
+		h := host.New(in, out, contentHash, "instance-1", discardLogger(t))
 		h.Register(hostsvc.New(localgit.NewFactory()))
 		h.Register(&generationWithoutAdoptLifecycle{Service: svc})
 		release := svc.Bind(h)

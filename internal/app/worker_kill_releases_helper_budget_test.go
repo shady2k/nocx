@@ -26,7 +26,7 @@ import (
 
 func TestKillingAWorkerReleasesItsHelperSessionsWindowBudget(t *testing.T) {
 	ctx := context.Background()
-	logger := log.NewSlogAdapter(discardLogger())
+	logger := log.NewSlogAdapter(discardLogger(t))
 	dir := t.TempDir()
 	const gen = "2222222222222222bbbbbbbbbbbbbbbb"
 
@@ -38,7 +38,7 @@ func TestKillingAWorkerReleasesItsHelperSessionsWindowBudget(t *testing.T) {
 
 	reg := session.New(logger, nil) // no local ptf: every open reaches the helper
 	opener := &localHelperOpener{
-		log:      discardLogger(),
+		log:      discardLogger(t),
 		registry: reg,
 		dir:      dir,
 		installed: helperlocal.Installed{

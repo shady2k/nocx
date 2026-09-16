@@ -337,16 +337,22 @@ type coordinator struct {
 	reg     *helperRegistry
 	sess    *session.Reg
 	consent *consent.Store
+	// gitFor is the SAME selection closure ws_git.go's handleOpen would call
+	// (transport.GitFactoryFor), captured from the one helperGitFactory call
+	// that also built reg — a second call would build a second, unrelated
+	// registry, and a test driving git.open against reg's own hostHelpers
+	// needs the closure that actually looks them up in this reg.
+	gitFor transport.GitFactoryFor
 }
 
 func newCoordinator(t *testing.T, provider *fakeLaneProvider) *coordinator {
 	t.Helper()
 	source := stubArtifacts(t)
 	store, installs := testConsentStores(t)
-	_, reg := helperGitFactory(provider, source, store, installs, discardLogger())
+	gitFor, reg := helperGitFactory(provider, source, store, installs, discardLogger())
 	sess := session.New(log.NewSlogAdapter(discardLogger()), nil)
 	reg.registry = sess
-	return &coordinator{reg: reg, sess: sess, consent: store}
+	return &coordinator{reg: reg, sess: sess, consent: store, gitFor: gitFor}
 }
 
 // helperConnection is a saved connection whose destination mode is an explicit

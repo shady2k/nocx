@@ -29,12 +29,14 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/hostsvc"
 	localgit "github.com/shady2k/nocx/internal/git/local"
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	helpersession "github.com/shady2k/nocx/internal/helper/session"
 	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclecodec"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/session"
@@ -267,6 +269,137 @@ func TestACommandRunAfterTheReturnProducesABlock(t *testing.T) {
 	}
 	if last.Lane != binding.SessionID && last.Domain == "" {
 		t.Fatalf("the block was published on no domain: %+v", last)
+	}
+}
+
+// TestAGitOpenAgainstAReadoptedSessionLeavesItsLifecycleChannelOpen
+// (nocx-xn63t.6.5): the second half of the regression
+// TestAReadoptedSessionAnswersItsOwnHostKeyFingerprint found but did not
+// close. That fix made a `helper` connection's git.open reach hostHelper.open
+// exactly as an `auto`+granted one always could (both now resolve
+// DesiredHelper the same way); this test is the proof that reaching it is
+// safe for a session a coordinator restart re-adopted.
+//
+// THE INVARIANT, BOTH ENDS NAMED (mirrors openFarHelper's own, nocx-xn63t.6.3,
+// git_open_live_far_helper_session_test.go's own doc comment): the hostHelper
+// a session's shared client lives in is SESSION-HELD from the moment it is
+// registered into helperRegistry.hosts — before the session is even visible
+// to a caller — until helperRegistry.SessionEnded reaches that entry. A git
+// binding opened and refused (refs==0) must never read "nothing references
+// the helper" and close the shared client while that hold stands, because the
+// SAME client also carries the session's live PTY and lifecycle channel.
+//
+// openFarHelper (a fresh open) sets hostHelper.hostedSession = true at
+// exactly that point (helper_git.go). session_readopt.go's readopt() builds
+// its own hostHelper for the SAME r.hosts map (a second constructor call,
+// `&hostHelper{f: f, ...}`) but never sets the field, so a re-adopted
+// session's hostHelper starts, and stays, with hostedSession false. The FIRST
+// git.open against it — the ordinary notARepository refusal any SSH tab gets
+// for a cwd that is not a repo, which frontend/src/git/git-store.ts's
+// rescope() raises automatically for every verified cwd and not only when
+// the git panel is visible — finds refs==0 and !hostedSession and closes the
+// shared client, tearing the session's lifecycle channel (and PTY) down with
+// it. Measured against e2e/remote-coordinator-reclaim.spec.ts in the
+// container: a `git.open` request is immediately followed, in the same
+// backend log, by `session closed` / `ending session` / a `close-session`
+// sent to the far helper, and then the lifecycle bridge reporting its own
+// end-of-stream loss — right after a coordinator restart reconciled the
+// session, with no client ever asking for anything on it.
+func TestAGitOpenAgainstAReadoptedSessionLeavesItsLifecycleChannelOpen(t *testing.T) {
+	spawner := &lifecycleSpawner{}
+	svc := helperWithIntegratedShells(spawner)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+
+	first := newIntegratedCoordinator(t, provider)
+	binding := openHostedFixture(t, first.coordinator, "pane-1")
+	shell, _ := spawner.theShell(t)
+	shell.drain()
+
+	shell.send(t, lifecycle.Event{Kind: lifecycle.KindHello, Hello: &lifecycle.Hello{Shell: "bash"}})
+	waittest.WaitFor(t, "the shell integrated with the coordinator that started it", func() bool {
+		return len(first.emitter.any()) > 0
+	})
+
+	first.quit()
+	second := newIntegratedCoordinator(t, provider)
+
+	// Observed directly, the same signal the bead's own log line names ("the
+	// lifecycle channel reports end-of-stream") and the same seam
+	// git_open_live_far_helper_session_test.go asserts against for a fresh
+	// open: it must never fire from a refusing git.open alone.
+	var lossMu sync.Mutex
+	var losses []lifecyclechannel.LossCause
+	second.reg.lifecycleLoss = func(_ lifecycle.LaneID, cause lifecyclechannel.LossCause) {
+		lossMu.Lock()
+		losses = append(losses, cause)
+		lossMu.Unlock()
+	}
+
+	adopter := &stubAdopter{}
+	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
+	reconcileSessions(context.Background(), rec, second.reg.inventories(),
+		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger())
+	if adopted := adopter.adoptedIDs(); len(adopted) != 1 {
+		t.Fatalf("the session was not taken back at all (%v); there is nothing to protect", adopter.failure())
+	}
+
+	sess, err := second.sess.Get(session.ID(binding.SessionID))
+	if err != nil {
+		t.Fatalf("the replacement coordinator does not hold the session it took back: %v", err)
+	}
+
+	// THE TRAFFIC UNDER TEST: git.open, exactly as the frontend's git-store
+	// raises it automatically for any SSH tab with a verified cwd (rescope) —
+	// a plain temp directory refuses as notARepository, the ordinary answer
+	// for a tab that never cd'd into a repository.
+	sel := second.gitFor(sess)
+	if sel.Factory == nil {
+		t.Fatalf("git.open selection carried no factory: refusal=%+v", sel.Refusal)
+	}
+	repo, outcome, err := sel.Factory.Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("git.open: %v", err)
+	}
+	if repo != nil {
+		_ = repo.Close()
+	}
+	if outcome.State == git.OpenOK {
+		t.Fatalf("git.open resolved OK against a plain directory; the fixture no longer proves a refusing outcome")
+	}
+
+	select {
+	case <-sess.Done():
+		t.Fatal("the re-adopted session ended when the refusing git.open closed its shared client")
+	default:
+	}
+
+	// THE COMMAND A USER TYPES RIGHT AFTER, exactly as
+	// TestACommandRunAfterTheReturnProducesABlock proves for the case with no
+	// git.open in between: if the shared client (and with it the lifecycle
+	// bridge) died silently under the refusing git.open above, nothing would
+	// ever publish this block, and this poll would time out rather than
+	// pass.
+	attempt := lifecycle.AttemptID("after-git-open")
+	shell.send(t, lifecycle.Event{
+		Kind: lifecycle.KindStart, Start: &lifecycle.Start{AttemptID: &attempt, Command: "make"},
+	})
+	code := 0
+	shell.send(t, lifecycle.Event{
+		Kind: lifecycle.KindComplete,
+		Complete: &lifecycle.Complete{
+			ExitCode: &code,
+			Fence:    lifecycle.FenceNonce{9, 9, 9},
+		},
+	})
+	waittest.WaitFor(t, "a command run after the refusing git.open still produced a completed block", func() bool {
+		return len(second.emitter.completed()) > 0
+	})
+
+	lossMu.Lock()
+	got := append([]lifecyclechannel.LossCause(nil), losses...)
+	lossMu.Unlock()
+	if len(got) != 0 {
+		t.Fatalf("the lifecycle channel reported loss from the refusing git.open alone: %v", got)
 	}
 }
 

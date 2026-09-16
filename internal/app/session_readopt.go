@@ -722,6 +722,30 @@ func (rp *readoptPass) readopt(
 		// entry to write and says so by passing no helper: its channel is this
 		// attachment, and there is nothing else it could be reached through.
 		if h != nil {
+			// THE SAME HOLD openFarHelper TAKES (nocx-xn63t.6.3), taken here
+			// too (nocx-xn63t.6.5): from this point — before this session is
+			// even visible to a caller — until helperRegistry.SessionEnded
+			// reaches this entry, h's shared client is SESSION-HELD, and
+			// hostHelper.open's own refusing-outcome branch (refs==0) must
+			// not read that as "nothing references the helper" and close it
+			// out from under the PTY and lifecycle channel this same client
+			// carries. Without this, a re-adopted session's hostHelper kept
+			// hostedSession at its zero value forever — set-once like the
+			// fingerprint next to it — and the FIRST git.open against it (an
+			// ordinary notARepository refusal; frontend/src/git/git-store.ts's
+			// rescope() raises git.open for any SSH tab with a verified cwd,
+			// not only when the git panel is visible) closed the shared
+			// client and tore the session down with it. Measured against
+			// e2e/remote-coordinator-reclaim.spec.ts: a coordinator restart
+			// reconciled the session, and it went live-but-not-reclaimable
+			// the instant the returned pane's own cwd verification raised
+			// git.open — with no client ever asking for anything on it.
+			// Set under h.mu for the same reason openFarHelper does: helper(f)
+			// may already be finding this same entry from a concurrent
+			// git.open the instant this function returns.
+			h.mu.Lock()
+			h.hostedSession = true
+			h.mu.Unlock()
 			rp.registry.mu.Lock()
 			rp.registry.hosts[sid] = h
 			rp.registry.mu.Unlock()

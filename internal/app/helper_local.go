@@ -849,6 +849,38 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	// with its own cause rather than reported as this open's error, because
 	// ADR-0004 makes an ordinary usable terminal the one thing no failure path
 	// may suppress.
+	//
+	// KEEP THE CONNECTION ALIVE ACROSS THE PUBLISH AND THE SPAWN
+	// (nocx-xn63t.6.6). publishForPane's own reference is acquired and
+	// released entirely inside EnsureInstalledRemote (helper_publish.go's
+	// PublishBundle: "the lease is acquired first and released last" is a
+	// promise about ITS OWN two ops, not about what comes after it), and the
+	// spawn below acquires ITS OWN, separate reference a moment later
+	// (sshsvc.Service.OpenShell's acquirePooled). Nothing bridged the two, so
+	// the publish's last reference dropped the pool's refcount to zero and
+	// the helper closed the connection (probeLease.end) before the spawn ever
+	// asked for one: a destination resolving no stored credential
+	// authenticates TWICE for what is one person's one "Connect" click, and
+	// the SECOND ask has nobody left to answer it — measured as
+	// e2e/connection-password.spec.ts's first-open case leaving a "Password
+	// for {profile}" prompt standing forever after the first one is
+	// answered. Held here, before either side acquires its own, and released
+	// only once the spawn has had the chance to acquire its own (or failed
+	// to), so the publish's lease and the spawn's channel land on the SAME
+	// connection — which is what this file's own header and
+	// helper_publish.go's already claim happens ("one authentication for one
+	// machine") and what the shared pool key (AD-4) exists for.
+	if remote := cfg.Remote; remote != nil && remote.RemoteInstaller != nil &&
+		profile.DesiredMode(remote.DesiredMode).DeliversScripts() {
+		if hold, herr := o.holdConnection(ctx, target); herr != nil {
+			if o.log != nil {
+				o.log.Warn("ssh pane: could not hold the connection across the publish; the spawn may re-authenticate",
+					"host", cfg.Host, "error", herr)
+			}
+		} else {
+			defer func() { _ = hold.Close() }()
+		}
+	}
 	if perr := o.publishForPane(ctx, cfg); perr != nil {
 		// THE LOGGER IS OPTIONAL and the failure is not: a test that wires an
 		// opener without one must still get the fail-open behaviour below
@@ -982,6 +1014,15 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 // installer publishes nothing, which is not a refusal: a build wiring no
 // installer is a build that integrates nothing, and the open proceeds to the
 // same plain shell either way.
+//
+// The destination is named the way the pane names it — the host and the
+// options this open is about to resolve with — so the publish's lease and
+// the pane's channel are ELIGIBLE to land on one pooled connection (AD-4's
+// key is the resolved destination). Eligible is not automatic: this call by
+// itself acquires and fully releases its own reference before returning
+// (helper_publish.go's PublishBundle), so whether it actually shares a
+// connection with the spawn that follows depends on the CALLER keeping the
+// pool's refcount above zero across the gap — see openSSH's holdConnection.
 func (o *localHelperOpener) publishForPane(ctx context.Context, cfg session.Config) error {
 	remote := cfg.Remote
 	if remote == nil || remote.RemoteInstaller == nil {
@@ -990,15 +1031,37 @@ func (o *localHelperOpener) publishForPane(ctx context.Context, cfg session.Conf
 	if !profile.DesiredMode(remote.DesiredMode).DeliversScripts() {
 		return nil
 	}
-	// The destination is named the way the pane names it — the host and the
-	// options this open is about to resolve with — so the publish's lease and
-	// the pane's channel land on ONE pooled connection rather than costing two
-	// authentications for one machine.
 	if err := remote.RemoteInstaller.EnsureInstalledRemote(
 		ctx, cfg.Host, session.SSHOptionsFromConfig(remote)...); err != nil {
 		return fmt.Errorf("publish the shell integration bundle on %s: %w", cfg.Host, err)
 	}
 	return nil
+}
+
+// holdConnection acquires a probe lease on the already-resolved destination
+// for no reason but to keep the helper's pooled connection referenced
+// (refcount above zero) across two operations that otherwise dial it
+// independently: the script-mode publish (publishForPane) and the
+// interactive spawn that follows it in openSSH. Neither of those knows about
+// the other's reference, so without a third one bridging them the first to
+// finish drops the pool to zero and the helper closes the connection —
+// nocx-xn63t.6.6, see openSSH's own comment for the measurement.
+//
+// The lease is a probeCommands and never asked a probe: acquiring it is the
+// whole of what it is for, and the caller releases it once the spawn has had
+// its chance to acquire its own.
+func (o *localHelperOpener) holdConnection(ctx context.Context, target ssh.DialTarget) (probeCommands, error) {
+	helper, err := o.probeHelper(ctx)
+	if err != nil {
+		return nil, err
+	}
+	lease, err := helper.AcquireProbeLease(ctx, proto.LeaseParams{
+		Destination: ssh.WireDestination(target),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return lease, nil
 }
 
 // localIntegrationStatus is what this open already knows about the pane's

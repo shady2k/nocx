@@ -1025,13 +1025,29 @@ func (a *AttachedSession) Close() error {
 // delegated to it, so this sends ONE round trip to the helper — closing a
 // session already implies detaching every attachment on it — instead of a
 // detach followed by a redundant close.
+//
+// THE ORDER IS THE POINT (nocx-xn63t.6.4). The round trip runs FIRST, and
+// the local bookkeeping — including a.finish(), which is what closes Done()
+// — runs only once it returns. Before this, finish() ran first: Done()
+// closed, and only the next line sent CloseSession. A caller reacting to
+// Done() by tearing down the shared client — helperRegistry.SessionEnded
+// legitimately does exactly that once no git binding holds the client open,
+// internal/app/helper_git.go, nocx-xn63t.6.3 — could then close the
+// transport before the close-session request had even reached the wire.
+// The far helper never heard it, and kept the session in its own inventory
+// until its unclaimed-session TTL swept it, minutes past any caller's
+// remaining patience (e2e/remote-coordinator-reclaim.spec.ts measured it
+// against a 60s bound). CloseSession's own failure — a dead transport,
+// ErrLost — must still run the local half so this attachment does not hang
+// forever, which is why the error is captured rather than returned early.
 func (a *AttachedSession) EndSession(ctx context.Context) error {
 	id := a.hostID()
+	err := a.client.CloseSession(ctx, id)
 	a.client.mu.Lock()
 	delete(a.client.attachments, a.subscriber)
 	a.client.mu.Unlock()
 	a.finish()
-	return a.client.CloseSession(ctx, id)
+	return err
 }
 
 // ── the signal seam (nocx-ie23r.3) ───────────────────────────────────────────

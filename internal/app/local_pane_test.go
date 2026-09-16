@@ -437,6 +437,26 @@ func TestALocalPaneNeverExportsItsCapability(t *testing.T) {
 // RESIZE reaches the daemon's PTY. The session's Resize goes over the helper
 // protocol now instead of into an ioctl in this process, and the assertion is
 // the one a user makes: the program running in the pane sees the new width.
+//
+// Read with `stty size`, not `tput cols` — deliberately, and not the same
+// thing. `stty size` asks the kernel directly, on the fd it is given, which
+// inside this `$(...)` is still fd 0: the substitution only redirects the
+// command's STDOUT to the pipe it captures, so stdin stays the pane's own
+// tty. `tput cols` is not that: ncurses only checks stdin as a LAST resort
+// after its own stdout and stderr, both of which this line already sends
+// elsewhere ($() takes stdout, and a `2>/dev/null` used to sit here to quiet
+// an unrelated warning) — so whether "tput cols" reports the real size
+// depends on which fds a given ncurses build is willing to fall back to, not
+// on whether the resize reached the pty. Confirmed by driving a real pty on
+// this machine (a Python `pty.fork` harness, kept only as a scratch
+// reproduction, not checked in): with fd 0 the lone tty among 0/1/2, GNU
+// ncurses' `tput cols` still found it and read the live size, but the same
+// setup with fd 0 ALSO taken away fell back to the terminfo entry's static
+// default — 80 for xterm-256color, printed with a clean exit status, not an
+// error the `||` could ever have caught. Every sibling in this repository
+// that asks a shell its width already reads `stty size` alone
+// (internal/session/size_test.go, internal/sessionruntime/realpty_test.go,
+// internal/transport/ws_test.go); this was the one test asking a second way.
 func TestALocalPaneResizes(t *testing.T) {
 	a := newLocalPaneApp(t)
 	p := openLocalPane(t, a)
@@ -447,7 +467,7 @@ func TestALocalPaneResizes(t *testing.T) {
 	if err := p.sess.Resize(context.Background(), session.Size{Cols: 132, Rows: 40}); err != nil {
 		t.Fatalf("resizing the pane: %v", err)
 	}
-	if got := p.run(t, say("NOCXCOLS", "=[$(tput cols 2>/dev/null || stty size | cut -d' ' -f2)]"), columnAnswer)[1]; got != "132" {
+	if got := p.run(t, say("NOCXCOLS", "=[$(stty size | cut -d' ' -f2)]"), columnAnswer)[1]; got != "132" {
 		t.Fatalf("the shell reports %s columns after a resize to 132", got)
 	}
 }

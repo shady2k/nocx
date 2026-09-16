@@ -756,8 +756,22 @@ func (r *helperRegistry) openHoldingLease(ctx context.Context, cfg session.Confi
 		return transport.HostedSessionOpen{}, nil, false, nil
 	}
 	opts := session.SSHOptionsFromConfig(cfg.Remote)
+	mode := profile.DesiredMode(cfg.Remote.DesiredMode)
 	hold, fingerprint, platform, available, err := probeHelperPlatformHeld(ctx, cfg.Host, opts, r.install, r.source)
-	if err != nil && !available {
+	if err != nil {
+		// The connect-time helper ask (ADR-0068, owner's decision
+		// 2026-09-16). An unknown or changed host key is the ONE probe
+		// failure that also carries a fingerprint (deterministic from the
+		// offered key bytes, independent of trust — ssh.ErrUnknownHostKey /
+		// ErrHostKeyMismatch), so it is the one case that can need this ask
+		// before the key itself is even trusted. Every other probe failure
+		// (unreachable, no auth material, uname exec failed after the dial
+		// succeeded) is answered exactly as before: swallowed here, so the
+		// local opener's own dial a moment later produces the real,
+		// definitive refusal.
+		if ask := helperConsentAskForProbeFailure(cfg.Host, mode, err, r.consent); ask != nil {
+			return transport.HostedSessionOpen{}, hold, true, ask
+		}
 		return transport.HostedSessionOpen{}, hold, false, nil
 	}
 	resolver := newResolver(
@@ -765,11 +779,76 @@ func (r *helperRegistry) openHoldingLease(ctx context.Context, cfg session.Confi
 		withHelperArtifactAvailable(available),
 		withHelperRequested(true),
 	)
-	if resolver.Resolve(Machine{Fingerprint: fingerprint, Mode: profile.DesiredMode(cfg.Remote.DesiredMode)}) != DesiredHelper {
+	switch resolver.Resolve(Machine{Fingerprint: fingerprint, Mode: mode}) {
+	case DesiredHelper:
+		opened, selected, oerr := r.openFarHelper(ctx, cfg, claim, opts, platform, fingerprint)
+		return opened, hold, selected, oerr
+	case ConsentRequired:
+		// The key is ALREADY trusted (the probe above just dialed it
+		// successfully) — nothing about the host key rides this refusal,
+		// and the one dialog the renderer raises asks about the helper
+		// alone. Answered here, `selected: true`, rather than swallowed
+		// like an ordinary Refused: swallowing this outcome is exactly the
+		// bug ADR-0068 fixes — an auto connection whose fingerprint has
+		// never been answered fell through to a silent script-tier open
+		// and was never asked, on every connect, forever.
+		return transport.HostedSessionOpen{}, hold, true, transport.NewHelperConsentNeeded(cfg.Host, fingerprint, nil)
+	default:
+		// Refused: raw, script, an explicit helper that failed elsewhere,
+		// or auto with a recorded decline. Falls through to the local
+		// opener exactly as before — declining leaves the connection
+		// usable without the helper.
 		return transport.HostedSessionOpen{}, hold, false, nil
 	}
-	opened, selected, err := r.openFarHelper(ctx, cfg, claim, opts, platform, fingerprint)
-	return opened, hold, selected, err
+}
+
+// helperConsentAskForProbeFailure decides whether a failed platform probe
+// is the moment to raise the connect-time helper ask (ADR-0068), when the
+// failure is a host-key trust decision the SAME dialog can carry it beside
+// (owner's decision 2026-09-16: never two dialogs in sequence).
+//
+// Returns nil for every case that must NOT ask here: an explicit mode
+// (script is an answer, not a gap — D8; raw and helper never reach this
+// function's caller at all since only auto falls through to a probe
+// failure this deep — see below), a probe failure that is not a host-key
+// one, or a fingerprint ADR-0034 has already answered through some OTHER
+// route to the same machine ("one machine, one answer" —
+// TestOneMachineOneAnswerAcrossConnections). In every nil case the existing
+// mechanism answers on its own: the local opener's own dial produces the
+// ordinary host-key-only refusal a moment later (or, for an already-
+// answered fingerprint, the key gets trusted and the very next probe
+// resolves the machine's already-recorded answer without asking again).
+func helperConsentAskForProbeFailure(host string, mode profile.DesiredMode, probeErr error, store *consent.Store) error {
+	if mode == "" {
+		mode = profile.DesiredAuto
+	}
+	if mode != profile.DesiredAuto {
+		return nil
+	}
+	fingerprint := offeredHostKeyFingerprint(probeErr)
+	if fingerprint == "" || store == nil {
+		return nil
+	}
+	if _, answered := store.Lookup(fingerprint); answered {
+		return nil
+	}
+	return transport.NewHelperConsentNeeded(host, fingerprint, probeErr)
+}
+
+// offeredHostKeyFingerprint reads the fingerprint an unknown-or-changed
+// host-key error carries, deterministic from the offered key bytes alone —
+// the one probe failure that names a machine before the dial has trusted
+// anything. Empty for every other error, including a nil one.
+func offeredHostKeyFingerprint(err error) string {
+	var unknown *ssh.ErrUnknownHostKey
+	if errors.As(err, &unknown) {
+		return unknown.Fingerprint
+	}
+	var changed *ssh.ErrHostKeyMismatch
+	if errors.As(err, &changed) {
+		return changed.Fingerprint
+	}
+	return ""
 }
 
 // openFarHelper is the SELECTED arm of the remote route: the far host's own

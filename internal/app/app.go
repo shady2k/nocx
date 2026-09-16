@@ -1387,6 +1387,11 @@ func New(opts ...Option) (*App, error) {
 		// dependency.
 		transport.WithBuildInfo(version.Info()),
 		transport.WithHostKeyTruster(&proberAdapter{client: sshClient}),
+		// connections.helperConsent — the write half of the connect-time
+		// helper ask (ADR-0068): the same consent store the connect-time
+		// decision (openHoldingLease) and the git-lane selection both read,
+		// so an answer this writes is the answer either reads back.
+		transport.WithHelperConsentWriter(helperConsent),
 		// The remote shell launcher (nocx-xs1d), adapted across the two
 		// identically-named declarations and wired into every ConnectConfig
 		// the transport builds. Before this line the launcher was reachable

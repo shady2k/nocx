@@ -97,7 +97,7 @@
 import { expect, type Browser, type Page } from '@playwright/test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 
 import { BASE_URL } from './base-url'
 import {
@@ -399,13 +399,25 @@ async function createProfileAndOpen(
  *  already trusted (seedKnownHost, above), so the ask is helper-only, on
  *  the same one-dialog surface the host-key ask uses — and granting it
  *  puts the helper on the host. The open itself does not resolve, and the
- *  tab does not appear, until the ask is answered. The branch line
- *  appearing afterwards is the panel's own statement that the helper
- *  answered; the git panel itself never asks (ADR-0068). */
+ *  tab does not appear, until the ask is answered.
+ *
+ *  The shell that comes up is NOT inside the seeded repository. Since
+ *  ADR-0057 every pane is helper-hosted: the far nocx-helper spawns it
+ *  through internal/pty (NewLocal), whose resolveCwd falls back to the
+ *  login user's home when no cwd is given — the same place a REAL sshd
+ *  starts a login shell. e2e-sshd's own `-repo` seeding only chdirs a shell
+ *  IT serves directly, so it never reaches this one. This function moves
+ *  into the repository the way a person would, with a typed `cd`, and waits
+ *  on the prompt editor's own cwd chip before asking the panel to open — the
+ *  same observable signal git-remote.spec.ts and local-drop.spec.ts wait on.
+ *  The branch line appearing afterwards is then the panel's own statement
+ *  that the helper answered for that repository; the git panel itself never
+ *  asks (ADR-0068). */
 async function installHelperThroughProduct(
   page: Page,
   endpoint: BackendEndpoint,
   fixture: SshdFixture,
+  repoPath: string,
 ): Promise<string> {
   const profileName = await createProfileAndOpen(page, endpoint, fixture)
   const helperDialog = page
@@ -415,6 +427,12 @@ async function installHelperThroughProduct(
   await helperDialog.getByRole('button', { name: 'Use the helper' }).click()
   await expect(helperDialog).not.toBeVisible()
   await expect(page.locator(TAB)).toHaveCount(2, { timeout: 30_000 })
+  await promptReady(page)
+  await page.keyboard.type(`cd '${repoPath}'`)
+  await page.keyboard.press('Enter')
+  await expect(page.locator('.pane.active .nocx-editor-cwd')).toContainText(basename(repoPath), {
+    timeout: 30_000,
+  })
   await page.locator(VIEW_GIT).click()
   await expect(page.locator(GIT_PANEL)).toBeVisible({ timeout: 30_000 })
   await expect(page.locator('[data-testid="git-branch"]')).toBeVisible({ timeout: 60_000 })
@@ -465,7 +483,7 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
     // this test opens is a host a person could have set up.
     first = await freshClient(browser, endpoint)
     await promptReady(first)
-    const profileName = await installHelperThroughProduct(first, endpoint, fixture)
+    const profileName = await installHelperThroughProduct(first, endpoint, fixture, remoteCwd)
 
     // ── the build's tab, and it really is helper-hosted ───────────────────
     //

@@ -97,7 +97,7 @@ func main() {
 func run() error {
 	banner := flag.String("banner", "", "sshd banner sent before authentication")
 	password := flag.String("password", "", "require password auth; accepts exactly this password and refuses every key")
-	repo := flag.String("repo", "", "seed a git repository at this path for the git acceptance spec: an initial commit, an untracked file whose name has a space, a quote, a leading dash and a newline, and a pre-commit hook that writes a marker outside the repository and prints more than one packet of output; the fixture chdirs into it so every served shell starts inside the repository")
+	repo := flag.String("repo", "", "seed a git repository at this path for the git acceptance spec: an initial commit, an untracked file whose name has a space, a quote, a leading dash and a newline, and a pre-commit hook that writes a marker outside the repository and prints more than one packet of output; the fixture chdirs into it, so a shell this process serves directly starts inside the repository — a helper-hosted shell does not: the far nocx-helper spawns it and starts it in the login user's home, like any real sshd's login shell")
 	flag.Parse()
 
 	if *repo != "" {
@@ -1056,9 +1056,13 @@ func accountHome() string {
 }
 
 // seedRepo creates the acceptance repository at dir and chdirs the fixture
-// into it, so every served shell (and the git panel's cwd) starts inside
-// the repository. The repository carries its own git identity — a commit's
-// success never depends on the environment the fixture inherits.
+// into it, so a shell this process serves DIRECTLY starts inside the
+// repository. That covers the fixture's own PTY and exec paths; it does not
+// cover a helper-hosted session, where the far nocx-helper spawns the shell
+// through internal/pty (NewLocal), whose resolveCwd falls back to the
+// login user's home when no cwd is given — the same place a real sshd
+// starts a login shell. The repository carries its own git identity — a
+// commit's success never depends on the environment the fixture inherits.
 //
 // The contents are the acceptance test's three load-bearing pieces:
 //

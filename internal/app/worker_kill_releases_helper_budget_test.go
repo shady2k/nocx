@@ -19,6 +19,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/workers"
 	"github.com/shady2k/nocx/internal/workspace"
@@ -27,7 +28,10 @@ import (
 func TestKillingAWorkerReleasesItsHelperSessionsWindowBudget(t *testing.T) {
 	ctx := context.Background()
 	logger := log.NewSlogAdapter(discardLogger(t))
-	dir := t.TempDir()
+	// storagetest.SocketDir, not t.TempDir(): startFakeLocalEndpoint below
+	// binds a real unix socket in dir, and t.TempDir()'s embedded test name
+	// produced a 143-byte socket path against sun_path's 103 (nocx-zmeu1).
+	dir := storagetest.SocketDir(t)
 	const gen = "2222222222222222bbbbbbbbbbbbbbbb"
 
 	// The real, in-process daemon this worker's pane will be spawned on —

@@ -121,7 +121,6 @@ function fakeServices(over: Partial<GitPanelServices> = {}): GitPanelServices {
     commit: vi.fn().mockResolvedValue({ state: 'ok', outputTruncated: false }),
     headMessage: vi.fn().mockResolvedValue({ state: 'ok', message: 'head' }),
     remote: vi.fn().mockResolvedValue({ state: 'none' }),
-    grantConsent: vi.fn().mockResolvedValue({ state: 'granted' }),
     // (D14), which is the DOM every pre-existing test expects. Tests that
     // exercise the links override with an ok remote.
     openUrl: vi.fn().mockResolvedValue({}),
@@ -248,16 +247,35 @@ describe('the panel renders what the store says', () => {
     const { panel } = mountApp(fakeServices())
     expect(panel.textContent).toContain('No repository to show')
   })
-  it('ssh: an SSH tab that has not consented shows the offer and NO mutation controls (D14)', async () => {
+  // ADR-0068: no feature surface may initiate, offer or request installing
+  // the helper. A session without it says what it cannot do and names the
+  // connection setting that would change it — it carries no Accept, and
+  // (the DOM-wide half of the proof) no install action renders ANYWHERE
+  // in the panel, not just under the removed consent testid.
+  it('ssh: a session with no helper-tier answer says what it cannot do and offers NO install action', async () => {
     const { panel, setActiveOrigin } = mountApp(
-      fakeServices({ open: vi.fn().mockResolvedValue({ state: 'consentRequired' }) }),
+      fakeServices({
+        open: vi
+          .fn()
+          .mockRejectedValue(
+            new Error(
+              'git.open: this connection has not yet been asked about the nocx helper — reconnect to be asked, or set its Delivery mode to Helper to allow it outright',
+            ),
+          ),
+      }),
     )
     setActiveOrigin(SSH_ORIGIN)
     await settle()
-    // The consent offer renders with its Accept — the panel offers the
-    // flow, and what the panel cannot do it does not draw (D14).
-    expect(panel.textContent).toContain('Allow the nocx helper')
-    expect(panel.querySelector('[data-testid="git-consent-accept"]')).not.toBeNull()
+    expect(panel.querySelector('[data-testid="git-error"]')).not.toBeNull()
+    expect(panel.textContent).toContain('reconnect')
+    // No install/accept action anywhere: neither the removed consent
+    // testid nor any button whose label reads as one.
+    expect(panel.querySelector('[data-testid="git-consent-required"]')).toBeNull()
+    expect(panel.querySelector('[data-testid="git-consent-accept"]')).toBeNull()
+    const buttonLabels = Array.from(panel.querySelectorAll('button')).map((b) => b.textContent)
+    for (const label of buttonLabels) {
+      expect(label).not.toMatch(/accept|allow|install|use the helper/i)
+    }
     expect(panel.querySelector('[data-testid="git-stage-all"]')).toBeNull()
     expect(panel.querySelector('[data-testid="git-unstage-all"]')).toBeNull()
     expect(panel.querySelector('[data-testid="git-commit"]')).toBeNull()

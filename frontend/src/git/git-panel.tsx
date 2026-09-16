@@ -26,10 +26,12 @@
 // 3. WHAT THE PANEL CANNOT DO, IT DOES NOT DRAW (D14). On an SSH tab the
 //    mutation controls are present exactly when the helper serves the
 //    repository — the wire's ok answer — and absent from the DOM, not
-//    disabled, on every refusal state (consentRequired, unsupported
-//    platform, failed deploy, refused exec, version mismatch), each of
-//    which renders its own message naming what to do (remote-helper
-//    design §6). While a conflict is unresolved the whole-index controls
+//    disabled, on every refusal state (unsupported platform, failed
+//    deploy, refused exec, version mismatch, or no helper-tier answer at
+//    all), each of which renders its own message naming what to do
+//    (remote-helper design §6; ADR-0068: this surface carries no Accept,
+//    and no RPC it calls may raise a machine's tier). While a conflict is
+//    unresolved the whole-index controls
 //    refuse, VISIBLY and with the reason (D19): measured, git add -A
 //    resolves the conflict using the marker-laden file and bare git reset
 //    aborts the merge.
@@ -597,38 +599,6 @@ export function GitPanel(props: GitPanelProps) {
             title="No repository to show"
             description="Focus a terminal tab to see the repository your shell is standing in."
           />
-        </Match>
-        <Match when={props.store.state() === 'consentRequired'}>
-          <div class="git-consent" data-testid="git-consent-required">
-            {/* The consent flow (remote-helper design D8): the ask is a
-                state, and accepting raises this machine to the helper tier.
-                The copy states the helper serves other remote features,
-                not only git — the panel is where the user meets the
-                trade. */}
-            <StatusCard
-              tone="neutral"
-              title="Allow the nocx helper on this host?"
-              description="The nocx helper hasn't been allowed on this machine yet. Accepting lets nocx run it here, so the git panel can open this repository — the helper serves git and other remote features."
-              action={
-                <Button
-                  size="sm"
-                  data-testid="git-consent-accept"
-                  onClick={() => props.store.grantConsent()}
-                >
-                  Accept
-                </Button>
-              }
-            />
-            <Show when={props.store.consentError() !== null}>
-              {/* The kit's card, not a class of this surface's own: a
-                  refusal shown in place is exactly what StatusCard is for,
-                  and it is inline rather than a toast because a toast
-                  evaporates while the offer it refuses is still on screen. */}
-              <div data-testid="git-consent-error">
-                <StatusCard tone="danger" title={props.store.consentError()!} />
-              </div>
-            </Show>
-          </div>
         </Match>
         <Match when={props.store.state() === 'unsupportedPlatform'}>
           <StatusCard

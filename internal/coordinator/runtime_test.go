@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/coordinator"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 )
 
 func TestPrepareRuntimeDirRefusesForeignOwner(t *testing.T) {
@@ -20,7 +21,10 @@ func TestPrepareRuntimeDirRefusesForeignOwner(t *testing.T) {
 }
 
 func TestBindSocketRefusesSymlinkPath(t *testing.T) {
-	dir := t.TempDir()
+	// storagetest.SocketDir, not t.TempDir(): the socket this test binds is
+	// bounded by sun_path, and t.TempDir()'s embedded test name pushed this
+	// one past it under macOS's TMPDIR (nocx-zmeu1).
+	dir := storagetest.SocketDir(t)
 	if err := coordinator.PrepareRuntimeDir(dir, coordinator.SystemPathOwner{}, coordinator.SelfUID()); err != nil {
 		t.Fatalf("PrepareRuntimeDir: %v", err)
 	}
@@ -39,7 +43,7 @@ func TestBindSocketRefusesSymlinkPath(t *testing.T) {
 }
 
 func TestBindSocketRefusesNonSocketOccupant(t *testing.T) {
-	dir := t.TempDir()
+	dir := storagetest.SocketDir(t)
 	if err := coordinator.PrepareRuntimeDir(dir, coordinator.SystemPathOwner{}, coordinator.SelfUID()); err != nil {
 		t.Fatalf("PrepareRuntimeDir: %v", err)
 	}
@@ -61,7 +65,7 @@ func TestBindSocketRefusesOverlongPath(t *testing.T) {
 }
 
 func TestSystemPeerCredentialsReportsOwnPID(t *testing.T) {
-	dir := shortDir(t)
+	dir := storagetest.SocketDir(t)
 	if prepareErr := coordinator.PrepareRuntimeDir(dir, coordinator.SystemPathOwner{}, coordinator.SelfUID()); prepareErr != nil {
 		t.Fatalf("PrepareRuntimeDir: %v", prepareErr)
 	}

@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 )
 
 // The two external calls inside bind — ListenUnix and Rename — are not
@@ -15,24 +17,13 @@ import (
 // are exercised here, against the unexported function, rather than through
 // a production hook that would exist only for a test.
 
-// shortTempDir is a temporary directory whose NAME is short.
-//
-// t.TempDir() embeds the test's own name, and macOS puts the whole thing
-// under /var/folders/<two random components>/T/ — so a test called
-// TestBindPublishesTheSocketOnAnOrdinaryDirectory produced a 126-byte socket
-// path against a 104-byte sun_path, and bind refused it with ErrPathTooLong
-// on the runner while passing on Linux, whose limit is 108 and whose /tmp is
-// short (nocx-lvdj3). The name of the test may not decide whether the socket
-// can be bound, so the directory does not carry it.
-func shortTempDir(t *testing.T) string {
-	t.Helper()
-	dir, err := os.MkdirTemp("", "nocxbind")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
-}
+// A socket-binding test in this file used to make its own short directory
+// (shortTempDir, nocx-lvdj3) rather than t.TempDir(), whose embedded test
+// name plus macOS's TMPDIR (/var/folders/<two random components>/T/) put a
+// bind past sun_path's 104 bytes. shortTempDir only shortened its own
+// prefix and still resolved under that same TMPDIR, so it stayed exactly as
+// exposed to TMPDIR growing as the bug it was fixing; storagetest.SocketDir
+// shares IsolateWithHome's root instead (nocx-zmeu1).
 
 func newBindServer(t *testing.T, dir string) *Server {
 	t.Helper()
@@ -58,7 +49,7 @@ func (stubBackend) WSToken() string   { return "unused" }
 
 func TestBindReportsAListenFailure(t *testing.T) {
 	// A runtime directory that does not exist: ListenUnix answers ENOENT.
-	dir := filepath.Join(shortTempDir(t), "absent")
+	dir := filepath.Join(storagetest.SocketDir(t), "absent")
 	s := newBindServer(t, dir)
 
 	if _, err := s.bind(); err == nil {
@@ -67,7 +58,7 @@ func TestBindReportsAListenFailure(t *testing.T) {
 }
 
 func TestBindReportsARenameFailureAndLeavesNothingBehind(t *testing.T) {
-	dir := shortTempDir(t)
+	dir := storagetest.SocketDir(t)
 	s := newBindServer(t, dir)
 	// A non-empty directory at the socket path: rename(2) refuses to
 	// replace it (ENOTEMPTY / EISDIR).
@@ -95,7 +86,7 @@ func TestBindReportsARenameFailureAndLeavesNothingBehind(t *testing.T) {
 // And the same function on an ordinary directory succeeds, with the socket
 // published at its final name and nothing else in the directory.
 func TestBindPublishesTheSocketOnAnOrdinaryDirectory(t *testing.T) {
-	dir := shortTempDir(t)
+	dir := storagetest.SocketDir(t)
 	s := newBindServer(t, dir)
 
 	l, err := s.bind()
@@ -133,7 +124,7 @@ func TestBindPublishesTheSocketOnAnOrdinaryDirectory(t *testing.T) {
 // going from zero to one underneath a waiter is the misuse the detector was
 // reporting.
 func TestTrackConnRefusesOnceTheServerIsClosing(t *testing.T) {
-	s := newBindServer(t, shortTempDir(t))
+	s := newBindServer(t, storagetest.SocketDir(t))
 
 	if !s.trackConn() {
 		t.Fatal("trackConn refused on an open server")

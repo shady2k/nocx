@@ -31,6 +31,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 )
 
 // testToolSocket is one tool socket with no listener behind it: these tests
@@ -96,7 +98,7 @@ func TestClosingAToolSocketEndsTheForwardsItIsCarrying(t *testing.T) {
 // being still in flight, and that is an absence — the one shape a duration may
 // bound, because nothing has to ARRIVE for it to be true.
 func TestClosingAToolSocketEndsAForwardParkedOnTheEndpoint(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "endpoint.sock")
+	path := filepath.Join(storagetest.SocketDir(t), "endpoint.sock")
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatalf("listen: %v", err)

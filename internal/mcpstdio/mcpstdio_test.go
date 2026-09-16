@@ -17,6 +17,7 @@ import (
 	"time"
 
 	nocxlog "github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 )
 
 func TestServeInitializesAbsorbsNotificationAndLists(t *testing.T) {
@@ -130,7 +131,7 @@ func TestServeForwardsCallAndWrapsDomainRefusal(t *testing.T) {
 }
 
 func TestServeNamesEndpointFailureAndDoesNotReturnEmptyTools(t *testing.T) {
-	dir := t.TempDir()
+	dir := storagetest.SocketDir(t)
 	socket := filepath.Join(dir, "missing.sock")
 	input := strings.Join([]string{
 		`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}`,
@@ -239,7 +240,7 @@ func startEndpoint(t *testing.T, handler func(net.Conn, rpcEnvelope)) string {
 
 func listenEndpoint(t *testing.T) *net.UnixListener {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "endpoint.sock")
+	path := filepath.Join(storagetest.SocketDir(t), "endpoint.sock")
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)

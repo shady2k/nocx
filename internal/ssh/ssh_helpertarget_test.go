@@ -27,6 +27,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
@@ -244,7 +245,7 @@ func agentSocket(t *testing.T) gossh.PublicKey {
 		t.Fatalf("add key to the agent: %v", addErr)
 	}
 
-	dir := t.TempDir()
+	dir := storagetest.SocketDir(t)
 	sock := filepath.Join(dir, "agent.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
@@ -586,7 +587,7 @@ func keyringAgent(t *testing.T, keys ...any) []gossh.PublicKey {
 		}
 		public = append(public, signer.PublicKey())
 	}
-	sock := filepath.Join(t.TempDir(), "agent.sock")
+	sock := filepath.Join(storagetest.SocketDir(t), "agent.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatalf("listen: %v", err)

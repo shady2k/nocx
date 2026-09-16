@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 )
 
 func testService() *Service {
@@ -81,7 +82,7 @@ func TestTheToolSocketOpRefusesAnIncompleteRequest(t *testing.T) {
 // already accepted (that half is pane_close_test.go's).
 func TestUnforwardEndsAToolSocketAndForgetsIt(t *testing.T) {
 	svc := testService()
-	path := filepath.Join(t.TempDir(), "far.sock")
+	path := filepath.Join(storagetest.SocketDir(t), "far.sock")
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -91,7 +92,7 @@ func TestUnforwardEndsAToolSocketAndForgetsIt(t *testing.T) {
 		t.Fatalf("mint: %v", err)
 	}
 	svc.toolSockets = map[proto.ForwardID]*toolSocket{
-		id: newToolSocket(svc.log, ln, nil, path, filepath.Join(t.TempDir(), "local.sock"), "0f9b4d7159d38afee9648a843654516f"),
+		id: newToolSocket(svc.log, ln, nil, path, filepath.Join(storagetest.SocketDir(t), "local.sock"), "0f9b4d7159d38afee9648a843654516f"),
 	}
 
 	if _, err := svc.unforward(id); err != nil {

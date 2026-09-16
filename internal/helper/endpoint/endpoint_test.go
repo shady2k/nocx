@@ -21,6 +21,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/helper/endpoint"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 )
 
 const gen = proto.GenerationID("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
@@ -28,15 +29,13 @@ const gen = proto.GenerationID("0123456789abcdef0123456789abcdef0123456789abcdef
 // runDir is a short temp directory: a Unix socket path is bounded by sun_path
 // (104 bytes on darwin), and a t.TempDir() under a long TMPDIR eats most of
 // it. The bound is the platform's, so the test honours it rather than
-// pretending it does not exist.
+// pretending it does not exist. storagetest.SocketDir, not a package-local
+// os.MkdirTemp("", ...): that only shortens this file's own prefix and still
+// resolves under TMPDIR, the root IsolateWithHome moved off of on darwin
+// (nocx-zmeu1) — the one answer every socket-binding test now shares.
 func runDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "nocxep")
-	if err != nil {
-		t.Fatalf("temp dir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return filepath.Join(dir, "run")
+	return filepath.Join(storagetest.SocketDir(t), "run")
 }
 
 func TestListenCreatesAPrivateSocketInAPrivateDirectory(t *testing.T) {

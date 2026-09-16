@@ -18,6 +18,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 )
 
 // THE DEFECT THIS FILE EXISTS FOR (nocx-tlaft). With a long poll outstanding,
@@ -183,7 +185,7 @@ func withEndObserver(observe func(net.Conn)) startScriptedEndpointOption {
 
 func startScriptedEndpoint(t *testing.T, answer func(net.Conn, rpcEnvelope), options ...startScriptedEndpointOption) *scriptedEndpoint {
 	t.Helper()
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(t.TempDir(), "endpoint.sock"), Net: "unix"})
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(storagetest.SocketDir(t), "endpoint.sock"), Net: "unix"})
 	if err != nil {
 		t.Fatalf("listen on endpoint socket: %v", err)
 	}
@@ -459,7 +461,7 @@ func TestTheNextCallRedialsWhenTheEndpointClosedTheIdleConnection(t *testing.T) 
 // A DIAL THAT GENUINELY FAILS IS NAMED, and it is the same answer the wire has
 // always carried for it.
 func TestADialThatFailsIsNamedEndpointUnavailable(t *testing.T) {
-	link := newEndpointLink(filepath.Join(t.TempDir(), "missing.sock"), &net.Dialer{}, "", discardLogger)
+	link := newEndpointLink(filepath.Join(storagetest.SocketDir(t), "missing.sock"), &net.Dialer{}, "", discardLogger)
 	_, _, err := link.call(context.Background(), "alpha.first", json.RawMessage(`{}`))
 	if !errors.Is(err, ErrEndpointUnavailable) {
 		t.Fatalf("call error = %v, want %v", err, ErrEndpointUnavailable)

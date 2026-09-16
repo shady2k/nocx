@@ -25,6 +25,7 @@ import (
 	"github.com/shady2k/nocx/internal/mcpstdio"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 	"github.com/shady2k/nocx/internal/toolendpoint"
 	"github.com/shady2k/nocx/internal/transport"
 )
@@ -171,7 +172,7 @@ func TestClaudeEndpointFailurePublishesUnavailableFact(t *testing.T) {
 	claude := requireClaude(t)
 	failureMarker := filepath.Join(t.TempDir(), "bridge-failure")
 	h := startSurfaceHarness(t)
-	missingSocket := filepath.Join(t.TempDir(), "missing-tool.sock")
+	missingSocket := filepath.Join(storagetest.SocketDir(t), "missing-tool.sock")
 	config := writeMCPConfig(t, missingSocket, failureMarker)
 
 	parentEnv := h.parentEnv
@@ -303,7 +304,7 @@ type catalogueEndpoint struct {
 
 func startCatalogueEndpoint(t *testing.T) *catalogueEndpoint {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "tool.sock")
+	path := filepath.Join(storagetest.SocketDir(t), "tool.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatalf("listen endpoint: %v", err)

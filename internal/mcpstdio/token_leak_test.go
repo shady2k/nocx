@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/shellintegration"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
 )
 
@@ -162,7 +163,7 @@ func TestTheBridgesLogsNeverCarryTheBearer(t *testing.T) {
 func TestTheBridgesLogsNeverCarryTheBearerWhenTheEndpointIsGone(t *testing.T) {
 	logs := &lockedLogs{}
 	link := newEndpointLink(
-		filepath.Join(t.TempDir(), "no-endpoint-here.sock"), &net.Dialer{}, testBearer,
+		filepath.Join(storagetest.SocketDir(t), "no-endpoint-here.sock"), &net.Dialer{}, testBearer,
 		slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

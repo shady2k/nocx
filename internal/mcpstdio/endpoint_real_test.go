@@ -13,6 +13,7 @@ import (
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 	"github.com/shady2k/nocx/internal/toolendpoint"
 )
 
@@ -121,7 +122,7 @@ func (d *heldDispatcher) Catalogue(content.Grant) []agenttools.Tool {
 func startRealEndpoint(t *testing.T, auth toolendpoint.Authorizer, dispatch assistant.ToolDispatcher) *toolendpoint.Endpoint {
 	t.Helper()
 	endpoint, err := toolendpoint.New(toolendpoint.Config{
-		Dir:      t.TempDir(),
+		Dir:      storagetest.SocketDir(t),
 		Peers:    testUIDPeers{},
 		Owner:    testUIDOwner{},
 		SelfUID:  testUID,

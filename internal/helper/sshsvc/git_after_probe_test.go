@@ -65,11 +65,11 @@ func TestGitOpenIsAnsweredAfterAProbeLeaseSharesTheConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquire probe lease: %v", err)
 	}
-	if _, err := lease.Uname(ctx); err != nil {
-		t.Fatalf("uname: %v", err)
+	if _, uerr := lease.Uname(ctx); uerr != nil {
+		t.Fatalf("uname: %v", uerr)
 	}
-	if err := lease.Close(); err != nil {
-		t.Fatalf("unlease: %v", err)
+	if cerr := lease.Close(); cerr != nil {
+		t.Fatalf("unlease: %v", cerr)
 	}
 
 	// The install's own channel: an sftp-kind ssh.open, immediately
@@ -80,8 +80,8 @@ func TestGitOpenIsAnsweredAfterAProbeLeaseSharesTheConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open the install channel: %v", err)
 	}
-	if err := install.Close(); err != nil {
-		t.Fatalf("close the install channel: %v", err)
+	if cerr := install.Close(); cerr != nil {
+		t.Fatalf("close the install channel: %v", cerr)
 	}
 
 	// The far helper's own lane, over the same destination — the unlease

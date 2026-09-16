@@ -59,10 +59,6 @@ func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admissi
 			h := trustHostKeyHandlers{truster: s.hostKeyTruster, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleConnectionsTrustHostKey(ctx, req) }
 		}),
-		regResponder(s.lane, "connections.helperConsent", params(validateHelperConsentRaw), func(r Responder) handlerFunc {
-			h := helperConsentHandlers{writer: s.helperConsentWriter, r: r}
-			return func(ctx context.Context, req jsonrpcRequest) { h.handleConnectionsHelperConsent(ctx, req) }
-		}),
 		// The dialog methods run under a bounded queue submission wrapped
 		// in the inflight set; the native-picker capability itself is
 		// dialogAdmit, a capacity-one WAITING gate the handler acquires on

@@ -1433,30 +1433,31 @@ func TestConnectionsTrustHostKey_OverTheWireConformsToContract(t *testing.T) {
 	}
 }
 
-func TestConnectionsHelperConsent_DTOConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "connections.helperConsent.schema.json")
-	for _, tc := range []connectionsHelperConsentResult{
-		{Fingerprint: "SHA256:abc", Answer: "granted"},
-		{Fingerprint: "SHA256:abc", Answer: "denied"},
+func TestConnectionsSetIntegrationMethod_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "connections.setIntegrationMethod.schema.json")
+	for _, tc := range []integrationMethodResult{
+		{Fingerprint: "SHA256:abc", Method: "raw"},
+		{Fingerprint: "SHA256:abc", Method: "script", ProfileID: "ssh-1"},
+		{Fingerprint: "SHA256:abc", Method: "helper", ProfileID: "ssh-1"},
 	} {
 		raw, err := json.Marshal(tc)
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
 		}
-		validateJSON(t, schema, raw, "connections.helperConsent result ("+tc.Answer+")")
+		validateJSON(t, schema, raw, "connections.setIntegrationMethod result ("+tc.Method+")")
 	}
 }
 
-func TestConnectionsHelperConsent_OverTheWireConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "connections.helperConsent.schema.json")
-	writer := &fakeHelperConsentWriter{}
-	srv := startHelperConsentServer(t, writer)
+func TestConnectionsSetIntegrationMethod_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "connections.setIntegrationMethod.schema.json")
+	granter := &fakeHelperConsentGranter{}
+	srv := startIntegrationMethodServer(t, granter, nil)
 	conn := connectWS(t, srv)
 	defer conn.Close() //nolint:errcheck
 
-	resp := jsonrpcCall(t, conn, "connections.helperConsent", map[string]any{
+	resp := jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
 		"fingerprint": "SHA256:abc",
-		"granted":     true,
+		"method":      "helper",
 	})
 	var envelope struct {
 		Result json.RawMessage `json:"result"`
@@ -1468,7 +1469,7 @@ func TestConnectionsHelperConsent_OverTheWireConformsToContract(t *testing.T) {
 	if envelope.Error != nil {
 		t.Fatalf("unexpected RPC error: %s", resp)
 	}
-	validateJSON(t, schema, envelope.Result, "connections.helperConsent result over the wire")
+	validateJSON(t, schema, envelope.Result, "connections.setIntegrationMethod result over the wire")
 }
 
 // ── the connect-time helper ask (ADR-0068) ──────────────────────────────

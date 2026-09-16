@@ -455,10 +455,11 @@ type WSServer struct {
 	// (connections.trustHostKey — accept-on-first-use). When nil, the
 	// handler returns a JSON-RPC error.
 	hostKeyTruster HostKeyTruster
-	// helperConsentWriter records the person's answer to the connect-time
-	// helper ask (connections.helperConsent — ADR-0068). When nil, the
-	// handler returns a JSON-RPC error.
-	helperConsentWriter HelperConsentWriter
+	// helperConsentWriter grants the machine's helper consent when the
+	// connect-time ask is answered "helper" (connections.setIntegrationMethod
+	// — ADR-0069). When nil, choosing helper fails; choosing raw or script
+	// needs no granter at all.
+	helperConsentWriter HelperConsentGranter
 	// probeResultStore records probe outcomes as operational evidence.
 	// When nil, probe results are not stored (the probe still runs and
 	// returns its outcome to the caller).
@@ -2441,6 +2442,10 @@ type openParams struct {
 	// overrides the resolved user.
 	Host string `json:"host,omitempty"`
 	User string `json:"user,omitempty"`
+	// DesiredMode is a one-shot integration-method override for a direct-host
+	// ssh open with no saved profile (ADR-0069) — see OpenSpec.DesiredMode.
+	// Empty is the ordinary case.
+	DesiredMode string `json:"desiredMode,omitempty"`
 	// Shell pins the far shell the launcher must target (nocx-pu4.1): a
 	// user who knows their host runs zsh can say so, and where detection
 	// is wrong they have an override. Empty means detect — the launcher

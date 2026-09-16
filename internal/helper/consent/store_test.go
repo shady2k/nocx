@@ -168,71 +168,42 @@ func TestRevokeForgetsTheMachineAnswer(t *testing.T) {
 	}
 }
 
-// TestDenyPersistsAcrossReopen is Deny's own durability proof, mirroring
-// TestGrantPersistsAcrossReopen: a decline written by the connect-time ask
-// must survive a store reconstructed over the same directory, or a restart
-// would re-ask a person who already said no.
-func TestDenyPersistsAcrossReopen(t *testing.T) {
+// TestDeniedSurvivesReopen: nothing writes Denied any more (ADR-0069 removed
+// Deny with its last caller), but a document an earlier build wrote, or one
+// this package's own tests seed directly, must still read back as denied —
+// Resolve's Refused branch depends on Lookup reporting it accurately.
+func TestDeniedSurvivesReopen(t *testing.T) {
 	dir := t.TempDir()
 	s := NewStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(dir), "consent.json")
-	if err := s.Deny("SHA256:abc"); err != nil {
-		t.Fatalf("Deny: %v", err)
+	if err := s.setAnswer("SHA256:abc", Denied); err != nil {
+		t.Fatalf("setAnswer: %v", err)
 	}
 	ans, ok := s.Lookup("SHA256:abc")
 	if !ok || ans != Denied {
-		t.Fatalf("Lookup after Deny = %q/%v, want denied", ans, ok)
+		t.Fatalf("Lookup = %q/%v, want denied", ans, ok)
 	}
 	again := NewStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(dir), "consent.json")
 	ans, ok = again.Lookup("SHA256:abc")
 	if !ok || ans != Denied {
-		t.Fatalf("Lookup after reopen = %q/%v, want denied — the decline must survive", ans, ok)
+		t.Fatalf("Lookup after reopen = %q/%v, want denied — it must survive a reconstruction", ans, ok)
 	}
 }
 
-// TestDenyEmptyFingerprintRefused mirrors TestGrantEmptyFingerprintRefused:
-// a decline under "" would make every un-fingerprinted machine share one
-// answer, the same defect an empty grant would be.
-func TestDenyEmptyFingerprintRefused(t *testing.T) {
-	dir := t.TempDir()
-	s := NewStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(dir), "consent.json")
-	if err := s.Deny(""); err == nil {
-		t.Fatal("Deny(\"\") = nil, want a refusal")
-	}
-	if ans, ok := s.Lookup(""); ok {
-		t.Fatalf("an empty fingerprint must never read as denied, got %q", ans)
-	}
-}
-
-// TestDenyWriteFailureDoesNotDeny mirrors TestGrantWriteFailureDoesNotGrant:
-// when the document cannot be persisted, the in-memory answer is rolled
-// back — a process that could not write the decline must not behave as
-// answered, or the next connect would silently proceed without ever having
-// recorded that anyone was asked.
-func TestDenyWriteFailureDoesNotDeny(t *testing.T) {
-	s := NewStore(log.NewSlogAdapter(nil), failingDocStore{storage.NewDocumentStore(t.TempDir())}, "consent.json")
-	if err := s.Deny("SHA256:abc"); err == nil {
-		t.Fatal("Deny with an unwritable store = nil, want the write error")
-	}
-	if _, ok := s.Lookup("SHA256:abc"); ok {
-		t.Fatal("a failed deny must not answer at all")
-	}
-}
-
-// TestDenyThenGrantOverwrites: a person who declined and later reopens the
-// connection form to opt in gets ONE current answer, not the first one
-// forever — setAnswer is a plain overwrite, and this pins that both
-// directions work, not just Grant-then-Grant (already covered by the
+// TestDeniedThenGrantOverwrites: a machine denied by an earlier build (or a
+// seeded document) that is later granted gets ONE current answer, not the
+// first one forever — setAnswer is a plain overwrite, and this pins that
+// both directions work, not just Grant-then-Grant (already covered by the
 // persistence tests above).
-func TestDenyThenGrantOverwrites(t *testing.T) {
+func TestDeniedThenGrantOverwrites(t *testing.T) {
 	dir := t.TempDir()
 	s := NewStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(dir), "consent.json")
-	if err := s.Deny("SHA256:abc"); err != nil {
-		t.Fatalf("Deny: %v", err)
+	if err := s.setAnswer("SHA256:abc", Denied); err != nil {
+		t.Fatalf("setAnswer: %v", err)
 	}
 	if err := s.Grant("SHA256:abc"); err != nil {
 		t.Fatalf("Grant: %v", err)
 	}
 	if ans, ok := s.Lookup("SHA256:abc"); !ok || ans != Granted {
-		t.Fatalf("Lookup after Deny then Grant = %q/%v, want granted", ans, ok)
+		t.Fatalf("Lookup after Denied then Grant = %q/%v, want granted", ans, ok)
 	}
 }

@@ -2348,6 +2348,16 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			h := profileHandlers{op: configOp, wired: profilesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
+		// connections.setIntegrationMethod (ADR-0069) writes the connect-time
+		// ask's answer through the SAME configOp profiles.patch uses — never a
+		// second owner of desiredMode — and grants the helper's machine
+		// consent when the chosen method is helper. Registered here, under
+		// the config domain gate, rather than in seamSpecs: unlike
+		// connections.trustHostKey it can write the profile store.
+		regResponder(configSub, "connections.setIntegrationMethod", params(validateIntegrationMethodRaw), func(r Responder) handlerFunc {
+			h := integrationMethodHandlers{op: configOp, wired: profilesWired, granter: s.helperConsentWriter, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
+		}),
 		regResponder(configSub, "endpoints.list", noParams(), func(r Responder) handlerFunc {
 			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }

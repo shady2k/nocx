@@ -16,6 +16,11 @@
     "host": { "type": "string", "maxLength": 253 },
     "user": { "type": "string", "maxLength": 256 },
     "shell": { "type": "string", "maxLength": 32 },
+    "desiredMode": {
+      "type": "string",
+      "enum": ["raw", "script", "helper"],
+      "description": "A one-shot integration-method override for THIS open alone (ADR-0069). Set only by a retry after the connect-time ask was answered for a hand-typed ssh session with no saved connection — there is nowhere else to keep the choice, so it rides the very open it answers. Ignored (the resolved connection's own desiredMode governs) once a profileId or a matched saved connection is in play, since the answer for those was written to the connection itself."
+    },
     "paneId": {
       "type": "string",
       "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"

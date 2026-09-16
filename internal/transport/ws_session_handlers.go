@@ -357,10 +357,11 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		XPixel: params.XPixel,
 		YPixel: params.YPixel,
 
-		ProfileID: params.ProfileID,
-		Host:      params.Host,
-		User:      params.User,
-		Shell:     params.Shell,
+		ProfileID:   params.ProfileID,
+		Host:        params.Host,
+		User:        params.User,
+		DesiredMode: params.DesiredMode,
+		Shell:       params.Shell,
 	}
 	if params.Parent != nil {
 		spec.Parent = &session.Ref{
@@ -1164,6 +1165,14 @@ func validateOpenRaw(raw json.RawMessage) string {
 	}
 	if utf8.RuneCountInString(p.Shell) > maxShellPinRunes {
 		return fmt.Sprintf("shell exceeds %d characters", maxShellPinRunes)
+	}
+	// desiredMode is the connect-time ask's one-shot answer for a hand-typed
+	// connection (ADR-0069, OpenSpec.DesiredMode) — never "auto", which is
+	// not an answer, and never absent-vs-empty here: empty means no override.
+	switch p.DesiredMode {
+	case "", "raw", "script", "helper":
+	default:
+		return `desiredMode must be "raw", "script", "helper", or absent`
 	}
 	// The parent edge (nocx-9hu9d) is optional — a root session carries none —
 	// but a present one must be COMPLETE and well-shaped. Half an identity is

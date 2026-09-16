@@ -109,27 +109,14 @@ func (s *Store) Grant(fingerprint string) error {
 	return s.setAnswer(fingerprint, Granted)
 }
 
-// Deny records that the machine identified by the remote host's public-key
-// fingerprint declined the helper (D8, the connect-time ask — ADR-0068,
-// owner's decision 2026-09-16). The resolver already honours Denied: a
-// denied machine is Refused, never asked again and never silently upgraded
-// (consent.go's Resolve). What was missing was a writer — the store modelled
-// the answer and the resolver read it, but nothing on any surface ever wrote
-// it (nocx-j49sp: "Denied is currently unreachable from any surface"). The
-// connect-time ask is that writer.
-//
-// Same persistence discipline as Grant: the in-memory answer is committed
-// only when the document write succeeded, so a decline this process could
-// not persist is not believed here and re-asked on the next start rather
-// than silently forgotten as answered.
-func (s *Store) Deny(fingerprint string) error {
-	return s.setAnswer(fingerprint, Denied)
-}
-
-// setAnswer is Grant and Deny's shared write: one machine, one answer,
-// whichever value it is. Splitting the two would risk the two ever writing
-// through different paths — the exact "two owners of one decision" AD-8
-// forbids — for a difference that is one value wide.
+// setAnswer is Grant's write. It once also served Deny (nocx-k32ql), which
+// wrote Denied from the connect-time ask's yes/no shape; ADR-0069 replaced
+// that ask with a choice of integration method, under which choosing raw or
+// script writes nothing to this store at all — a fingerprint record answers
+// "may a binary be deployed here", never "which method" — so nothing calls
+// Deny any more and it is gone with its last caller. Denied itself stays a
+// valid Answer: Resolve still switches on it, and Lookup can still report it
+// for a fingerprint Revoke has not cleared.
 func (s *Store) setAnswer(fingerprint string, answer Answer) error {
 	if fingerprint == "" {
 		return ErrEmptyFingerprint

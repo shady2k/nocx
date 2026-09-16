@@ -131,9 +131,9 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"connections.trustHostKey": {
 			[]byte(`{"host":"host.example.com:22","key":"b2ZmZXJlZC1rZXktYmxvYg=="}`),
 		},
-		"connections.helperConsent": {
-			[]byte(`{"fingerprint":"SHA256:abc","granted":true}`),
-			[]byte(`{"fingerprint":"SHA256:abc","host":"host.example.com:22","granted":false}`),
+		"connections.setIntegrationMethod": {
+			[]byte(`{"fingerprint":"SHA256:abc","method":"raw"}`),
+			[]byte(`{"fingerprint":"SHA256:abc","host":"host.example.com:22","profileId":"ssh-1","method":"helper"}`),
 		},
 		"dialog.openDirectory": {
 			[]byte(`{}`),

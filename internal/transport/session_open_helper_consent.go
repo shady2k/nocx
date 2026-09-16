@@ -54,7 +54,7 @@ type ErrHelperConsentNeeded struct {
 	// TRUSTED fingerprint when Cause is nil, and the OFFERED fingerprint —
 	// deterministic from the key bytes alone, independent of trust — when
 	// Cause carries an unknown or changed key. The same value is what
-	// connections.helperConsent is asked to write the answer under.
+	// connections.setIntegrationMethod is asked to write the answer under.
 	Fingerprint string
 	Cause       error
 }

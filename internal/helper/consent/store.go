@@ -30,9 +30,10 @@ const (
 	// machine may run the helper, and the next git.open installs it.
 	Granted Answer = "granted"
 	// Denied — the user declined. The machine is never asked again and is
-	// never silently upgraded. This bead has no writer for it (the ask
-	// surface is nocx-1xxa's); the resolver honours the value so a later
-	// writer changes behaviour without touching the decision.
+	// never silently upgraded. Written by Deny, from the connect-time ask
+	// (ADR-0068); the resolver has honoured the value since before that
+	// writer existed, so this changed behaviour without touching the
+	// decision (nocx-j49sp).
 	Denied Answer = "denied"
 )
 
@@ -105,6 +106,31 @@ var ErrEmptyFingerprint = errors.New("helper consent: refusing a grant under an 
 // here and forgotten on the next start — an unwritable store never
 // authorizes a remote write it cannot show (consent design §6).
 func (s *Store) Grant(fingerprint string) error {
+	return s.setAnswer(fingerprint, Granted)
+}
+
+// Deny records that the machine identified by the remote host's public-key
+// fingerprint declined the helper (D8, the connect-time ask — ADR-0068,
+// owner's decision 2026-09-16). The resolver already honours Denied: a
+// denied machine is Refused, never asked again and never silently upgraded
+// (consent.go's Resolve). What was missing was a writer — the store modelled
+// the answer and the resolver read it, but nothing on any surface ever wrote
+// it (nocx-j49sp: "Denied is currently unreachable from any surface"). The
+// connect-time ask is that writer.
+//
+// Same persistence discipline as Grant: the in-memory answer is committed
+// only when the document write succeeded, so a decline this process could
+// not persist is not believed here and re-asked on the next start rather
+// than silently forgotten as answered.
+func (s *Store) Deny(fingerprint string) error {
+	return s.setAnswer(fingerprint, Denied)
+}
+
+// setAnswer is Grant and Deny's shared write: one machine, one answer,
+// whichever value it is. Splitting the two would risk the two ever writing
+// through different paths — the exact "two owners of one decision" AD-8
+// forbids — for a difference that is one value wide.
+func (s *Store) setAnswer(fingerprint string, answer Answer) error {
 	if fingerprint == "" {
 		return ErrEmptyFingerprint
 	}
@@ -112,10 +138,10 @@ func (s *Store) Grant(fingerprint string) error {
 	defer s.mu.Unlock()
 	s.loadLocked()
 	prev, existed := s.answers[fingerprint]
-	s.answers[fingerprint] = Granted
+	s.answers[fingerprint] = answer
 	if err := s.writeDocLocked(); err != nil {
-		// Roll the in-memory answer back: a failed persist is not a
-		// grant. The map must never report what the document does not.
+		// Roll the in-memory answer back: a failed persist is not an
+		// answer. The map must never report what the document does not.
 		if existed {
 			s.answers[fingerprint] = prev
 		} else {

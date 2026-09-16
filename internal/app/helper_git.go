@@ -595,6 +595,28 @@ type farToolSocket struct {
 // own teardown behind them.
 const farToolTeardownTimeout = 10 * time.Second
 
+// gitOpenTimeout bounds one git.open's wait on the far helper (nocx-xn63t.6.4).
+// client.Client.Call has no timeout of its own — it waits on the caller's
+// context and nothing else (client.go's own comment: "the wait is bounded by
+// the context and by nothing else, deliberately") — and the context a git.open
+// request carries is the WS request's, which lives as long as the browser's
+// promise: neither ends on its own when the far side stops answering. Without
+// this bound, an unanswered git.open holds h.mu (open's own lock, taken above)
+// for the rest of the connection's life, wedging every later request against
+// this session's shared helper behind it — not only the Git panel that asked,
+// which never saw an answer either way.
+//
+// It is scoped to THIS call and not to client.Call generally: a mutation
+// already strips the caller's cancellation on purpose (mutationCtx, D11 — a
+// half-applied commit is worse than a slow one), and a deadline imposed here
+// would silently reintroduce exactly the abandon-and-retry race D12's
+// indeterminate exists to rule out. git.open is a read with nothing to
+// half-apply, so bounding it costs nothing D11 protects.
+//
+// A var, not a const: TestGitOpenNeverAnsweredIsBoundedRatherThanHungForever
+// shrinks it for the run rather than waiting out the production budget.
+var gitOpenTimeout = 20 * time.Second
+
 // beginFarToolSocket registers one far pane's socket against its session BEFORE
 // the listener exists, and answers false when the session is ALREADY over.
 //
@@ -1615,7 +1637,13 @@ func (h *hostHelper) open(ctx context.Context, cwd string) (git.Repo, git.OpenOu
 		h.dead = false
 		h.factory = helpergit.NewFactory(c)
 	}
-	repo, outcome, err := h.factory.Open(ctx, cwd)
+	// Bounded: a far side that never answers must still let this session's
+	// shared helper go on serving the request after it — never wait for the
+	// caller's own context, which does not end on its own (gitOpenTimeout's
+	// own comment).
+	openCtx, cancel := context.WithTimeout(ctx, gitOpenTimeout)
+	repo, outcome, err := h.factory.Open(openCtx, cwd)
+	cancel()
 	if err != nil {
 		return nil, git.OpenOutcome{}, err
 	}

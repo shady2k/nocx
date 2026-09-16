@@ -34,15 +34,36 @@ func newRawPTYPair(t *testing.T) (lp *LocalPty, slave *os.File) {
 }
 
 // TestOneDrainConsumesEverythingReadable is the owner's drain step made
-// concrete (spec §5.3.1): 4 KiB written to the slave before the call, one
-// RawReadUntilAgain delivers all of it and returns without blocking, and a
-// second call on the now-idle fd delivers nothing and returns at once — both
-// assertions with no sleep, because the write to the slave and the master's
-// read of it are one kernel-level path with nothing in between to wait on.
+// concrete (spec §5.3.1): a batch of bytes written to the slave before the
+// call, one RawReadUntilAgain delivers all of it and returns without
+// blocking, and a second call on the now-idle fd delivers nothing and
+// returns at once — both assertions with no sleep, because the write to the
+// slave and the master's read of it are one kernel-level path with nothing
+// in between to wait on.
+//
+// THE PAYLOAD IS DELIBERATELY SMALL, not the 4 KiB spec §5.3.1 first named.
+// A synchronous write with nobody draining the master concurrently can only
+// stay off-CPU-free the way this test wants when the whole payload fits
+// under the pty's OWN output queue high-water mark, and that mark is not
+// the same number on every platform this ships to: Linux's line discipline
+// buffers a full N_TTY_BUF_SIZE (4096 bytes) before a writer blocks, but
+// xnu's tty driver (bsd/sys/tty.h) caps a pty's output queue at
+// TTMAXHIWAT = roundup(2048, CBSIZE) and can configure it as low as
+// TTMINHIWAT = roundup(100, CBSIZE) depending on the line's nominal speed —
+// so a write of exactly 4096 bytes can legitimately block on darwin with no
+// reader running to make room, which is what ci-mac measured directly: this
+// test hung the full 10-minute panic bound with its only running goroutine
+// parked in os.(*File).Write → internal/poll's IO-wait, never in the read
+// that follows it (mac4.log, run 35150838522, nocx-4c1rd). 64 bytes is
+// comfortably under TTMINHIWAT — the LOWEST that mark can be configured to,
+// regardless of the pty's nominal speed — so the write completes on its own
+// on every platform, and the behaviour under test (one drain call empties
+// whatever is already sitting in the kernel buffer) is unchanged by the
+// smaller number.
 func TestOneDrainConsumesEverythingReadable(t *testing.T) {
 	lp, slave := newRawPTYPair(t)
 
-	payload := bytes.Repeat([]byte("x"), 4096)
+	payload := bytes.Repeat([]byte("x"), 64)
 	if _, err := slave.Write(payload); err != nil {
 		t.Fatalf("write %d bytes to the slave: %v", len(payload), err)
 	}

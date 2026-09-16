@@ -1067,11 +1067,14 @@ func TestHelperDialFactory_ExecForbiddenClosesTheLane(t *testing.T) {
 	}
 }
 
-// TestHelperSelectionConsentRequiredWritesNothing is D8's zero-write
-// invariant at the selection: a machine with no helper-tier answer gets the
-// ask — and not a byte is written to the host. No install lease is
-// acquired, no platform probe is even needed to decide that.
-func TestHelperSelectionConsentRequiredWritesNothing(t *testing.T) {
+// TestHelperSelectionNoAnswerYetIsRefusedNeverAsked is ADR-0068 at the
+// git.open selection: a machine with no helper-tier answer at all gets the
+// SAME Refused the panel renders for raw or a denied answer — never the
+// ask, because git.open may not raise a machine's tier — and not a byte is
+// written to the host. No install lease is acquired, no platform probe is
+// even needed to decide that. The refusal names what would change it: the
+// connect-time ask ADR-0068 puts elsewhere.
+func TestHelperSelectionNoAnswerYetIsRefusedNeverAsked(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeer()}
 	source := stubArtifacts(t)
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
@@ -1079,17 +1082,24 @@ func TestHelperSelectionConsentRequiredWritesNothing(t *testing.T) {
 	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger())
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", fingerprint: "SHA256:never-answered"})
-	if !selection.ConsentRequired {
-		t.Fatalf("selection = %+v, want consentRequired for a machine with no answer", selection)
+	if selection.Factory != nil {
+		t.Fatalf("selection = %+v, want no factory for a machine with no answer", selection)
+	}
+	if selection.Refusal == nil || selection.Refusal.State != "" || selection.Refusal.Message == "" {
+		t.Fatalf("selection = %+v, want the Refused reason naming what would change it", selection)
+	}
+	if !strings.Contains(selection.Refusal.Message, "reconnect") {
+		t.Errorf("refusal = %q, want it to name reconnecting as what would change it — "+
+			"git.open must say what it cannot do, never offer to ask", selection.Refusal.Message)
 	}
 	if provider.install != nil && provider.install.uploadCount() != 0 {
-		t.Fatalf("consentRequired wrote %d uploads, want 0 — the ask must not leave a footprint", provider.install.uploadCount())
+		t.Fatalf("no-answer-yet wrote %d uploads, want 0 — a refusal must not leave a footprint", provider.install.uploadCount())
 	}
 	if got := provider.laneCount(); got != 0 {
-		t.Fatalf("consentRequired brought up %d helper lanes, want 0", got)
+		t.Fatalf("no-answer-yet brought up %d helper lanes, want 0", got)
 	}
 	if got := installs.All(); len(got) != 0 {
-		t.Fatalf("consentRequired recorded %d installs, want 0", len(got))
+		t.Fatalf("no-answer-yet recorded %d installs, want 0", len(got))
 	}
 }
 
@@ -1105,8 +1115,8 @@ func TestHelperSelectionExplicitRawWritesNothing(t *testing.T) {
 	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger())
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredRaw})
-	if selection.Factory != nil || selection.ConsentRequired {
-		t.Fatalf("selection = %+v, want no factory and no ask for explicit raw", selection)
+	if selection.Factory != nil {
+		t.Fatalf("selection = %+v, want no factory for explicit raw", selection)
 	}
 	if selection.Refusal == nil || selection.Refusal.State != "" || selection.Refusal.Message == "" {
 		t.Fatalf("selection = %+v, want the Refused reason naming what to do", selection)
@@ -1157,9 +1167,6 @@ func TestHelperSelectionExplicitScriptIsNotOfferedTheBinary(t *testing.T) {
 	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger())
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredScript})
-	if selection.ConsentRequired {
-		t.Fatalf("selection = %+v, want no ask for an explicit script — it is an answer", selection)
-	}
 	if selection.Factory != nil {
 		t.Fatalf("selection = %+v, want no factory for an explicit script — it was never upgraded", selection)
 	}

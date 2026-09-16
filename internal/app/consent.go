@@ -1,14 +1,27 @@
 package app
 
-// The consent decision for the remote helper (remote-helper design D8):
-// what git.open may do for one machine. The 2026-08-10 footprint-consent
-// design's auto ladder resolved helper from "a suitable binary exists for
-// that platform" alone — forward structure written before any helper
-// existed. The day one ships, that arm becomes true everywhere, and every
-// user would be asked, on every new machine, about a feature they never
-// reached for. D8 adds the second condition: auto resolves to helper only
-// when a surface on that connection has asked for the helper. The ask moves
-// to the moment the user opens the git panel.
+// The consent resolver: what the helper selection may do for one machine at
+// one consultation (ADR-0034: the answer is keyed by the destination's
+// host-key fingerprint, in internal/helper/consent; ADR-0068: the helper is
+// decided by the connection, never by a feature).
+//
+// Two callers consult it, and only one may act on ConsentRequired.
+// openHoldingLease, at connect, is where ADR-0068 puts the ask — beside the
+// host-key verification, once per machine — so it is the only caller
+// allowed to turn ConsentRequired into an actual prompt. helperGitFactory,
+// at git.open, treats ConsentRequired exactly like Refused: a feature
+// surface consumes whatever the connection already decided and may never
+// raise the tier itself.
+//
+// This superseded D8, which put the ask at the git panel instead and needed
+// a second condition — "a surface on this connection has asked for the
+// helper" — to keep a shipped binary from opting every machine in silently
+// (the 2026-08-10 footprint-consent design's auto ladder resolved helper
+// from "a suitable binary exists for that platform" alone, which becomes
+// true everywhere the day one ships). ADR-0068 answers that worry a
+// different way: the connect-time ask runs once per machine, automatically,
+// so the second condition — and the option that carried it — is gone with
+// it.
 
 import (
 	"github.com/shady2k/nocx/internal/helper/consent"
@@ -22,13 +35,18 @@ const (
 	// DesiredHelper — the machine resolves to the helper tier: install the
 	// helper (if not complete) and serve it.
 	DesiredHelper Outcome = "helper"
-	// ConsentRequired — the machine has no helper-tier answer; git.open
-	// answers consentRequired and the surface offers the consent flow.
+	// ConsentRequired — the machine has no helper-tier answer. Only the
+	// connect-time caller (openHoldingLease, ADR-0068) may raise the ask
+	// on this outcome; every other caller — git.open included — treats it
+	// exactly like Refused, because no feature surface may raise a
+	// machine's tier.
 	ConsentRequired Outcome = "consentRequired"
-	// Refused — nothing is written and nothing is asked: raw, a denied
-	// answer, no surface asked, or no artifact to offer. The selection
-	// answers the §6 refusal states (unsupportedPlatform, execForbidden)
-	// or, for a machine with no earned state, the not-available error.
+	// Refused — nothing is written and nothing is asked: raw, script, a
+	// denied answer, no artifact to offer, or — outside the connect-time
+	// caller — a machine with no answer yet. The selection answers the §6
+	// refusal states (unsupportedPlatform, execForbidden) or, for a
+	// machine with no earned state, the not-available error naming the
+	// connection setting that would change it.
 	Refused Outcome = "refused"
 )
 
@@ -62,22 +80,15 @@ func withHelperArtifactAvailable(b bool) option {
 	return func(r *resolver) { r.artifactAvailable = b }
 }
 
-// withHelperRequested sets whether a surface on this connection has asked
-// for the helper — D8's second condition. Fail-closed default: false.
-func withHelperRequested(b bool) option {
-	return func(r *resolver) { r.requested = b }
-}
-
 type resolver struct {
 	store             *consent.Store
 	artifactAvailable bool
-	requested         bool
 }
 
 // Resolve decides what the selection may do for m's machine: install and
-// serve (DesiredHelper), raise the ask (ConsentRequired), or nothing
-// (Refused). The fail-closed default is Refused — a resolver that has not
-// been told the helper exists or that a surface asked for it installs
+// serve (DesiredHelper), raise the ask (ConsentRequired — the connect-time
+// caller's alone to act on), or nothing (Refused). The fail-closed default
+// is Refused — a resolver that has not been told the helper exists installs
 // nothing and asks nothing (consent design §4.2: a failure to decide never
 // swallows a command, and degrade is toward the plain terminal, never
 // toward the larger privilege).
@@ -95,7 +106,7 @@ func (r *resolver) Resolve(m Machine) Outcome {
 		return DesiredHelper
 	case profile.DesiredScript:
 		// An explicit script is an ANSWER: "the shell tiers, and do not
-		// offer me the binary". D8 — script is an answer, not a gap.
+		// offer me the binary" — script is an answer, not a gap.
 		//
 		// This arm is what ADR-0033 bought. Until auto existed as its own
 		// value, script also carried every user who had never opened the
@@ -110,14 +121,7 @@ func (r *resolver) Resolve(m Machine) Outcome {
 		// that do offer the helper, and both are one Select away.
 		return Refused
 	}
-	// auto falls through: the helper arm of the ladder needs more than a
-	// binary (D8).
-	if !r.requested {
-		// No surface on this connection asked for the helper: nothing
-		// happens — not even the ask. This is the second condition, and it
-		// is what keeps shipping a binary from opting every machine in.
-		return Refused
-	}
+	// auto falls through: the machine's own answer, or the ask.
 	if r.store != nil {
 		if ans, ok := r.store.Lookup(m.Fingerprint); ok {
 			switch ans {
@@ -135,7 +139,8 @@ func (r *resolver) Resolve(m Machine) Outcome {
 		// offer, so no ask.
 		return Refused
 	}
-	// No helper-tier answer, on a machine that has not answered: the ask is
-	// raised at the feature (D8), before anything is written (§4 step 4).
+	// No helper-tier answer, on a machine that has not answered: the
+	// connect-time caller raises the ask (ADR-0068), before anything is
+	// written (§4 step 4); every other caller treats this as Refused.
 	return ConsentRequired
 }

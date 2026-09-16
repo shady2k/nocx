@@ -395,11 +395,10 @@ type WSServer struct {
 	// empty helpers list — nothing is claimed installed that cannot be
 	// shown.
 	helperInstalls *consent.InstallStore
-	// helperConsent is the per-machine helper-tier answer store
-	// (remote-helper design D8): the write half shell.footprint.consent
-	// persists grants through. Wired through WithHelperConsentStore; when
-	// nil, the method refuses — the consent prompt is never offered by a
-	// server that cannot record the answer.
+	// helperConsent is the per-machine helper-tier answer store (ADR-0034,
+	// ADR-0068). Wired through WithHelperConsentStore; when nil,
+	// shell.footprint.helperUninstall skips revocation rather than
+	// claiming it.
 	helperConsent *consent.Store
 	// installedFactSeen bounds the write to once per domain: a lane
 	// publishes a fact at every prompt, and the installation it reports does
@@ -661,10 +660,9 @@ type WSServer struct {
 	git        *registry.Registry
 	gitFactory git.RepoFactory
 	// gitHelperFor resolves the helper-backed repo factory selection
-	// git.open uses for an SSH session (the remote-helper design). When
-	// nil, or when the selection answers none of Factory, ConsentRequired
-	// and Refusal, git.open answers the not-available error for that
-	// session.
+	// git.open uses for an SSH session (ADR-0068). When nil, or when the
+	// selection answers neither Factory nor Refusal, git.open answers the
+	// not-available error for that session.
 	gitHelperFor GitFactoryFor
 	// helperSessionOpener selects the execution-host-owned PTY for remote
 	// opens when the existing helper resolver permits it.
@@ -1375,29 +1373,27 @@ type GitOpenRefusal struct {
 }
 
 // GitOpenSelection is the composition root's selection for one SSH session
-// (remote-helper design D8): a factory to open through, consentRequired to
-// answer, or a refusal naming the §6 state and what to do about it.
-// ConsentRequired, Refusal and Factory are mutually exclusive — the ask and
-// the refusal are the alternatives to opening, never a factory that
-// answers them.
+// (ADR-0068): a factory to open through, or a refusal naming the §6 state
+// and what to do about it. git.open never asks — the helper's tier is
+// decided at the connection, or at connect (ADR-0068) — so a machine with
+// no helper-tier answer is a Refusal here, exactly like raw or a denied
+// answer. Refusal and Factory are mutually exclusive.
 type GitOpenSelection struct {
 	Factory git.RepoFactory
-	// ConsentRequired — the session's machine has no helper-tier answer;
-	// git.open must answer the consentRequired state and the panel offers
-	// the consent flow. Set means Factory is nil.
-	ConsentRequired bool
 	// Refusal — the honest refusal when the machine cannot be served:
 	// unsupportedPlatform, deployFailed or execForbidden with the message
 	// naming what to do, or State "" with the reason for the resolver's
-	// Refused (raw, a denied answer). Set means Factory is nil.
+	// Refused (raw, a denied answer, or no helper-tier answer yet — each
+	// naming the connection setting that would change it). Set means
+	// Factory is nil.
 	Refusal *GitOpenRefusal
 }
 
 // GitFactoryFor resolves the helper-backed factory selection git.open uses
 // for an SSH session — the composition root's answer to "is a helper
-// available for this host, and may it be used" (the remote-helper design).
-// ConsentRequired and Refusal answer their states instead of opening; a
-// selection with none of the three answers the not-available error.
+// available for this host, and may it be used" (ADR-0068). Refusal answers
+// its state instead of opening; a selection with neither answers the
+// not-available error.
 
 // HostedSessionOpen is the synchronous result of selecting a helper-owned
 // session. Host, Account and Generation are facts used by later projections;

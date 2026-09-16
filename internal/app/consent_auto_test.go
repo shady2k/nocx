@@ -46,7 +46,7 @@ func TestAbsentModeResolvesToOneValue(t *testing.T) {
 	// The resolver's own reading of "nothing was set" must be the same value.
 	// A machine with an empty Mode is a connection the cascade never spoke
 	// for — a direct host or an ad-hoc destination.
-	r := newResolver(withHelperArtifactAvailable(true), withHelperRequested(true))
+	r := newResolver(withHelperArtifactAvailable(true))
 	absent := r.Resolve(Machine{Fingerprint: "SHA256:absent"})
 	declared := r.Resolve(Machine{Fingerprint: "SHA256:declared", Mode: cascadeDefault})
 
@@ -56,15 +56,15 @@ func TestAbsentModeResolvesToOneValue(t *testing.T) {
 	}
 }
 
-// TestExplicitScriptIsNeverRaisedToTheAsk is D8's rule, which only became
-// assertable once silence stopped resolving to script. A user who chose
-// script has answered; the ask is for those who have not.
+// TestExplicitScriptIsNeverRaisedToTheAsk, which only became assertable
+// once silence stopped resolving to script. A user who chose script has
+// answered; the ask is for those who have not.
 func TestExplicitScriptIsNeverRaisedToTheAsk(t *testing.T) {
-	r := newResolver(withHelperArtifactAvailable(true), withHelperRequested(true))
+	r := newResolver(withHelperArtifactAvailable(true))
 
 	if got := r.Resolve(explicitScript); got == ConsentRequired {
 		t.Error("an explicit script was raised to the consent ask — " +
-			"D8: script is an answer, not a gap")
+			"script is an answer, not a gap")
 	}
 	if got := r.Resolve(machineWithNoStoredAnswer); got != ConsentRequired {
 		t.Errorf("an unanswered machine resolved to %q, want %q — "+
@@ -79,7 +79,7 @@ func TestExplicitScriptIsNeverRaisedToTheAsk(t *testing.T) {
 // raw gets a mode the resolver does not recognise, and fails closed into
 // Refused.
 func TestExplicitAutoIsAskableLikeSilence(t *testing.T) {
-	r := newResolver(withHelperArtifactAvailable(true), withHelperRequested(true))
+	r := newResolver(withHelperArtifactAvailable(true))
 
 	explicitAuto := Machine{Fingerprint: "SHA256:auto", Mode: profile.DesiredAuto}
 	if got := r.Resolve(explicitAuto); got != ConsentRequired {
@@ -105,7 +105,7 @@ func TestExplicitAutoIsAskableLikeSilence(t *testing.T) {
 func TestHelperIsAdditiveNotAlternative(t *testing.T) {
 	// The helper half: an explicit helper is the consent, with no surface
 	// having to ask (§4.3).
-	r := newResolver(withHelperArtifactAvailable(true), withHelperRequested(false))
+	r := newResolver(withHelperArtifactAvailable(true))
 	if got := r.Resolve(explicitHelper); got != DesiredHelper {
 		t.Errorf("helper resolved to %q, want %q — the explicit choice is the consent", got, DesiredHelper)
 	}

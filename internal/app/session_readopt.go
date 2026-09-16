@@ -240,18 +240,18 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 			account, host, p.Account, p.Host)
 	}
 	// CONSENT IS RE-ASKED, never assumed to have survived. Opening a helper
-	// channel to a machine is the act consent governs (D8), and a person who
-	// withdrew it between two runs must not have one opened silently.
+	// channel to a machine is the act consent governs (ADR-0034, ADR-0068),
+	// and a person who withdrew it between two runs must not have one
+	// opened silently.
 	if rp.registry.consent != nil && p.Fingerprint != "" {
 		resolver := newResolver(
 			withStore(rp.registry.consent),
 			// The artifact is not consulted and nothing is installed: this
 			// path connects to a helper the machine is ALREADY running. What
-			// is being asked is the machine's own decision, so the two inputs
-			// that decide it are supplied as satisfied and the answer comes
+			// is being asked is the machine's own decision, so the input
+			// that decides it is supplied as satisfied and the answer comes
 			// from the store.
 			withHelperArtifactAvailable(true),
-			withHelperRequested(true),
 		)
 		if resolver.Resolve(Machine{
 			Fingerprint: p.Fingerprint,

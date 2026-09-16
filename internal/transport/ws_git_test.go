@@ -470,9 +470,10 @@ func TestGitOpen_RemoteSessionResolvesThroughTheHelperFactory(t *testing.T) {
 }
 
 // TestGitOpen_RemoteSessionRefusedByTheSelectionAnswersTheError: a
-// selection that answers none of Factory, ConsentRequired and Refusal —
-// the resolver's Refused (raw, a denied answer) — gets the not-available
-// error carrying the reason, and the local factory is never consulted.
+// selection that answers neither Factory nor a factory-carrying state —
+// the resolver's Refused (raw, a denied answer, or no helper-tier answer
+// yet — ADR-0068) — gets the not-available error carrying the reason, and
+// the local factory is never consulted.
 func TestGitOpen_RemoteSessionRefusedByTheSelectionAnswersTheError(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
@@ -700,74 +701,6 @@ func TestGitOpen_HelperVersionMismatchIsAStateFromTheFactory(t *testing.T) {
 	}
 	if got.Result.BindingID != "" {
 		t.Errorf("bindingId = %q, want empty for a refused open", got.Result.BindingID)
-	}
-}
-
-// TestGitOpen_ConsentRequiredIsAResultState is D8 on the wire: an SSH
-// session whose machine has no helper-tier answer gets the consentRequired
-// RESULT state — the panel's offer — and nothing is opened and nothing is
-// written.
-func TestGitOpen_ConsentRequiredIsAResultState(t *testing.T) {
-	logger := log.NewSlogAdapter(nil)
-	reg := newRegWithStub(logger)
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			return ssh.NewStubChannel(logger), nil
-		},
-	})
-	factory := newStubGitFactory()
-	ws := NewWSServer(logger, reg,
-		// The ssh pane this test opens is this machine's helper's
-		// (nocx-50w7p.5). This stand's subject is git.open — which the pane
-		// opening precedes — so the pane is given the route it has in
-		// production rather than measuring the named refusal.
-		sshHelperOpt(reg),
-		WithGitRegistry(registry.New()),
-		WithGitRepoFactory(factory),
-		// The machine has no helper-tier answer: the selection answers
-		// consentRequired, never a factory.
-		WithGitHelperFactory(func(session.Session) GitOpenSelection {
-			return GitOpenSelection{ConsentRequired: true}
-		}),
-		WithProfileResolver(&fakeResolver{
-			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
-				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
-			},
-		}),
-	)
-	ctx := context.Background()
-	if err := ws.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	t.Cleanup(func() { _ = ws.Stop(ctx) })
-	conn := connectWS(t, ws)
-	t.Cleanup(func() { _ = conn.Close() })
-	sid := openSSHSession(t, conn, 1)
-
-	resp := jsonrpcCallWithID(t, conn, "git.open", map[string]any{
-		"sessionId": sid,
-		"cwd":       "/some/cwd",
-	}, 2)
-	var got struct {
-		Result struct {
-			State string `json:"state"`
-		} `json:"result"`
-		Error *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(resp, &got); err != nil {
-		t.Fatalf("git.open: unmarshal: %v\nraw: %s", err, resp)
-	}
-	if got.Error != nil {
-		t.Fatalf("git.open: %+v", got.Error)
-	}
-	if got.Result.State != string(git.OpenConsentRequired) {
-		t.Errorf("state = %q, want %q — the ask is a RESULT state, not a refusal", got.Result.State, git.OpenConsentRequired)
-	}
-	factory.mu.Lock()
-	opens := factory.opens
-	factory.mu.Unlock()
-	if opens != 0 {
-		t.Errorf("factory consulted %d times for a consentRequired open, want 0 — the ask must not spawn anything", opens)
 	}
 }
 

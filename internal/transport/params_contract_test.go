@@ -377,9 +377,6 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"shell.complete": {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","cwd":"/tmp","line":"echo","pos":4}`),
 		},
-		"shell.footprint.consent": {
-			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef"}`),
-		},
 		"shell.footprint.helperUninstall": {
 			[]byte(`{"profileId":"profile-1","fingerprint":"SHA256:abc","path":"~/.nocx/helper"}`),
 		},

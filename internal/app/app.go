@@ -930,13 +930,13 @@ func New(opts ...Option) (*App, error) {
 	// produces no passport. The delivery planner reads it to choose the
 	// compact installed line; without it every host bootstraps.
 	installedFacts := ssh.NewInstalledFactStore(logger, docStore, "installed-facts.json")
-	// The helper consent (remote-helper design D8; the 2026-08-10 consent
+	// The helper consent (ADR-0034, ADR-0068; the 2026-08-10 consent
 	// design): the per-machine helper-tier answer, keyed by the remote
 	// host's public-key fingerprint, and the observed helper installs the
 	// footprint surface lists. Both are backend-owned and persisted; the
-	// consent decision at git.open and the footprint listing read them, so
-	// without these lines the consent path is reachable from its own tests
-	// and nowhere else (AGENTS.md check 5).
+	// consent decision at connect and at git.open, and the footprint
+	// listing, read them, so without these lines the consent path is
+	// reachable from its own tests and nowhere else (AGENTS.md check 5).
 	helperConsent := consent.NewStore(logger, docStore, "helper-consent.json")
 	helperInstalls := consent.NewInstallStore(logger, docStore, "helper-installs.json")
 	// The helper-backed git factory and the registry that owns its live
@@ -1496,11 +1496,12 @@ func New(opts ...Option) (*App, error) {
 		// The factory resolves the shell environment in the background
 		// from construction (nocx-6pz0) and is stopped at shutdown.
 		transport.WithGitRepoFactory(gitFactory),
-		// The helper-backed factory selection (remote-helper design D8):
-		// SSH sessions get a repository served over the helper when the
-		// machine's consent resolves to helper, and the refusal (or the
-		// consentRequired ask) stands otherwise. The helper client, the
-		// git factory over it and the consent path are reachable from
+		// The helper-backed factory selection (ADR-0068): SSH sessions get
+		// a repository served over the helper when the machine's consent —
+		// decided at the connection, or at connect — resolves to helper,
+		// and the refusal stands otherwise; this surface never raises the
+		// ask itself. The helper client, the git factory over it and the
+		// consent path are reachable from
 		// main() only through this line (AGENTS.md check 5). The second
 		// return is the registry that OWNS the live helper channels; the
 		// uninstall surface needs it to close them before removing an

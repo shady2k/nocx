@@ -541,11 +541,11 @@ func (s *WSServer) forgetBinding(bid string) {
 type gitOpenHandlers struct {
 	op capability.GitOpenOperation
 	// helperFor resolves the helper-backed factory for an SSH session
-	// (the remote-helper design). nil — or a selection answering none of
-	// Factory, ConsentRequired and Refusal — is the not-available answer:
-	// an error carrying the reason, the one exception to the outcome
-	// table's "every outcome is a RESULT state" rule (the machine has no
-	// earned state — raw, a denied answer).
+	// (ADR-0068). nil — or a selection answering neither Factory nor
+	// Refusal — is the not-available answer: an error carrying the
+	// reason, the one exception to the outcome table's "every outcome is
+	// a RESULT state" rule (the machine has no earned state — raw, a
+	// denied answer, or no helper-tier answer yet).
 	helperFor GitFactoryFor
 	r         Responder
 	bindings  gitBindingsSeam
@@ -592,21 +592,19 @@ func (h gitOpenHandlers) handleOpen(ctx context.Context, state *connState, req j
 			return nil
 		}
 		if sess.Kind() != session.KindLocal {
-			// D3 as amended 2026-08-13: the remote case is the helper's.
-			// The selection answers one of a factory, consentRequired, a
-			// §6 refusal (unsupportedPlatform, deployFailed,
-			// execForbidden) or — for a machine with no earned state
-			// (raw, denied) — nothing, and the not-available error is
-			// the answer (remote-helper design §6).
+			// D3 as amended 2026-08-13, superseded by ADR-0068: the
+			// remote case is the helper's, and git.open never asks — the
+			// selection answers a factory, a §6 refusal
+			// (unsupportedPlatform, deployFailed, execForbidden), or —
+			// for a machine with no earned state (raw, denied, or no
+			// helper-tier answer yet) — nothing, and the not-available
+			// error is the answer, naming the connection setting that
+			// would change it.
 			if h.helperFor == nil {
 				_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "git.open not available for SSH sessions (no helper factory wired)"})
 				return nil
 			}
 			sel := h.helperFor(sess)
-			if sel.ConsentRequired {
-				_ = h.r.TryResult(req.ID, mustMarshal(gitOpenResult{State: string(git.OpenConsentRequired)}))
-				return nil
-			}
 			if sel.Factory == nil {
 				if sel.Refusal != nil && sel.Refusal.State != "" {
 					_ = h.r.TryResult(req.ID, mustMarshal(gitOpenResult{
@@ -1284,10 +1282,10 @@ func (s *WSServer) gitSpecs(lane control.Admission, sessionGate, gitGate control
 				if s.gitHelperFor == nil {
 					return nil
 				}
-				// The refusal decision has already answered
-				// consentRequired and the refusal states; this second
-				// consultation is the open itself, and only a selection
-				// carrying a factory may proceed (D8).
+				// The refusal decision has already answered the refusal
+				// states; this second consultation is the open itself,
+				// and only a selection carrying a factory may proceed
+				// (ADR-0068).
 				return s.gitHelperFor(sess).Factory
 			}
 			return s.gitFactory

@@ -111,10 +111,14 @@ type RepoFactory interface {
 // OpenState is the outcome table of git.open (spec §5.1, remote-helper
 // design §6). noCwd is produced by the composition layer from the caller's
 // origin before the factory is invoked; the §6 refusal states
-// (consentRequired, unsupportedPlatform, deployFailed, execForbidden,
-// helperVersionMismatch) are produced by the helper selection and the
-// helper dial — the composition layer again, never the factory; the
-// factory itself answers ok, notARepository, gitUnavailable or gitTooOld.
+// (unsupportedPlatform, deployFailed, execForbidden, helperVersionMismatch)
+// are produced by the helper selection and the helper dial — the
+// composition layer again, never the factory; the factory itself answers
+// ok, notARepository, gitUnavailable or gitTooOld. A machine with no
+// helper-tier answer is not a state here at all (ADR-0068): the composition
+// layer answers the not-available error, naming the connection setting
+// that would change it, because no feature surface — this one included —
+// may raise a machine's tier.
 type OpenState string
 
 const (
@@ -128,14 +132,6 @@ const (
 	OpenGitUnavailable OpenState = "gitUnavailable"
 	// OpenGitTooOld — below the version floor; the result carries what it found.
 	OpenGitTooOld OpenState = "gitTooOld"
-	// OpenConsentRequired — the session is an SSH session whose machine has
-	// no helper-tier answer (remote-helper design D8): the user has not yet
-	// accepted the helper for this host. The panel offers the consent flow;
-	// accepting raises the machine to the helper tier and the next git.open
-	// proceeds. Produced by the composition layer from the consent
-	// decision, before the factory is invoked — the producer of a state
-	// owns declaring it, so the state lives here with its siblings.
-	OpenConsentRequired OpenState = "consentRequired"
 	// OpenUnsupportedPlatform — the session's host runs an OS/arch we build
 	// no helper for (D20), or the helper artifact was not built (`make
 	// helpers` has not run). Message names which, and what to do about it.

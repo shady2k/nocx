@@ -94,18 +94,22 @@ func accountFromOptions(opts []ssh.ConnectOption) string {
 // helperGitFactory is the composition root's answer to
 
 // transport.GitFactoryFor: for an SSH session it decides whether the
-// helper may be used for that machine at all (D8) — the consent decision
-// comes before any remote write — and when it may, installs the helper
-// artifact on the session's host (D7) and returns a factory that serves
-// git over one helper process on that session's pooled connection. The
-// selection answers one of a factory, consentRequired, a §6 refusal
+// helper may be used for that machine at all (ADR-0068: the answer was
+// already decided on the connection, or at connect — this consultation
+// only CONSUMES it, and never raises the tier) — and when it may, installs
+// the helper artifact on the session's host (D7) and returns a factory
+// that serves git over one helper process on that session's pooled
+// connection. The selection answers one of a factory, a §6 refusal
 // (unsupportedPlatform, deployFailed, execForbidden — each with the
-// message naming what to do), or the resolver's Refused (raw, a denied
-// answer) as a reason with no earned state. git.open consults the
-// selection twice (the refusal decision, then the open); each consultation
-// installs idempotently, and an already-complete directory uploads nothing
-// (D7), so both consultations converge on the same install. The dial
-// happens inside the returned factory's Open, never here.
+// message naming what to do), or the resolver's Refused (raw, script, a
+// denied answer, or no answer yet) as a reason with no earned state — the
+// last of these is ConsentRequired at the resolver, which this surface
+// treats exactly like Refused because it may never raise the ask itself.
+// git.open consults the selection twice (the refusal decision, then the
+// open); each consultation installs idempotently, and an already-complete
+// directory uploads nothing (D7), so both consultations converge on the
+// same install. The dial happens inside the returned factory's Open, never
+// here.
 
 func helperGitFactory(lanes helperInstallProvider, source deploy.ArtifactSource, store *consent.Store, installs *consent.InstallStore, log *slog.Logger) (transport.GitFactoryFor, *helperRegistry) {
 	reg := &helperRegistry{
@@ -120,14 +124,13 @@ func helperGitFactory(lanes helperInstallProvider, source deploy.ArtifactSource,
 		// The platform probe is the one bounded remote exec the decision
 		// runs before the user has accepted anything — it writes nothing.
 		// The install, the prune and the footprint observation are reached
-		// only when the machine resolves to helper (D8: consent is asked
-		// when the user reaches for the feature, not when a connection is
-		// made; nothing is written before the ask is answered).
+		// only when the machine resolves to helper (ADR-0068: the ask
+		// lives at the connection, or at connect — never here; nothing is
+		// written before the connect-time ask was answered).
 		platform, available, perr := probeHelperPlatform(sess, lanes, source)
 		r := newResolver(
 			withStore(store),
 			withHelperArtifactAvailable(available),
-			withHelperRequested(true), // git.open is the surface reaching for the helper
 		)
 		switch r.Resolve(Machine{Fingerprint: sess.HostKeyFingerprint(), Mode: effectiveModeFor(sess)}) {
 		case DesiredHelper:
@@ -182,15 +185,14 @@ func helperGitFactory(lanes helperInstallProvider, source deploy.ArtifactSource,
 				opts:    sess.SSHOptions(),
 				install: installed,
 			}}
-		case ConsentRequired:
-			// The ask is a RESULT state, never an install: nothing was
-			// written to the host.
-			return transport.GitOpenSelection{ConsentRequired: true}
 		default:
-			// Refused — raw, a denied answer, or nothing to offer. The
-			// probe failure and the missing artifact are facts with
-			// states; a machine that refused has no earned state and the
-			// transport answers the not-available error with the reason.
+			// Refused — raw, script, a denied answer, no answer yet
+			// (ConsentRequired: this surface never raises the ask — that
+			// is the connect-time caller's alone, ADR-0068), or nothing to
+			// offer. The probe failure and the missing artifact are facts
+			// with states; a machine that refused has no earned state and
+			// the transport answers the not-available error with the
+			// reason.
 			if !available && perr != nil {
 				log.Info("helper unavailable: the platform probe failed",
 					"host", sess.Host(), "error", perr)
@@ -264,8 +266,16 @@ func refusedHelperReason(sess session.Session, store *consent.Store) string {
 		return "this connection is set to Script, which installs the shell integration but not the nocx helper — change its Delivery mode to Auto to be offered the helper, or to Helper to allow it outright"
 	}
 	if store != nil {
-		if ans, ok := store.Lookup(sess.HostKeyFingerprint()); ok && ans == consent.Denied {
-			return "this machine has declined to run the nocx helper — set the connection's Delivery mode to Helper, or change the answer in the footprint screen, to allow it"
+		if ans, ok := store.Lookup(sess.HostKeyFingerprint()); ok {
+			if ans == consent.Denied {
+				return "this machine has declined to run the nocx helper — set the connection's Delivery mode to Helper, or change the answer in the footprint screen, to allow it"
+			}
+		} else {
+			// No answer at all (ConsentRequired at the resolver): ADR-0068
+			// puts the ask at the connection, beside the host-key
+			// verification — never here. This surface only says what it
+			// cannot do and names what would change it.
+			return "this connection has not yet been asked about the nocx helper — reconnect to be asked, or set its Delivery mode to Helper to allow it outright"
 		}
 	}
 	return "no helper available for this SSH session"
@@ -777,7 +787,6 @@ func (r *helperRegistry) openHoldingLease(ctx context.Context, cfg session.Confi
 	resolver := newResolver(
 		withStore(r.consent),
 		withHelperArtifactAvailable(available),
-		withHelperRequested(true),
 	)
 	switch resolver.Resolve(Machine{Fingerprint: fingerprint, Mode: mode}) {
 	case DesiredHelper:
@@ -990,6 +999,25 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		_ = c.CloseSession(ctx, entry.HostSessionID)
 		_ = c.Close()
 		return transport.HostedSessionOpen{}, true, err
+	}
+	// THE FINGERPRINT THIS SELECTION ALREADY RESOLVED (ADR-0068), recorded
+	// onto the session Adopt just created (session.Reg.RecordHostKeyFingerprint's
+	// own comment): the adopted session is a data-plane attachment to a
+	// dial the FAR HELPER made, so its ordinary HostKeyFingerprint() path —
+	// asking the channel — answers "" forever, the same gap
+	// hostedOpeners.OpenHosted closes for a locally-dialed pane
+	// (helper_local.go). Without this, a later consultation of the SAME
+	// session — git.open's own resolver call, sess.HostKeyFingerprint() in
+	// helperGitFactory — cannot find the Granted answer this open just
+	// acted on, and reads the machine as never having been asked at all.
+	// Best-effort: a missing fingerprint here is the ordinary answer for a
+	// mode this generation never verifies one for, and must not fail an
+	// open that has already spawned and attached.
+	if fingerprint != "" {
+		if rerr := r.registry.RecordHostKeyFingerprint(sid, fingerprint); rerr != nil {
+			r.log.Warn("far helper pane: the verified host key could not be recorded on its session",
+				"host", cfg.Host, "error", rerr)
+		}
 	}
 	r.mu.Lock()
 	r.hosts[sid] = h

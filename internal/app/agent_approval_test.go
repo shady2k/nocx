@@ -236,6 +236,32 @@ func TestApprovingOneAgentDoesNotAdmitAnother(t *testing.T) {
 	}
 }
 
+// TestAnAgentResolvableOnPATHIsAdmittedThroughTheRealResolver is the paired
+// success for nocx-xn63t.6.8: elsewhere a test gives Approve's seam a resolver
+// that never touches PATH, because a test about bearers must not depend on
+// which agent binaries the machine running it happens to have. This proves
+// the seam's DEFAULT — the one newAgentApprovalService installs and every
+// production caller gets — still resolves a real command through exec.LookPath
+// and admits it. approvalServiceForTest never overrides the resolver, so
+// Approve here runs agentapproval.IdentityForExecutable itself, unmocked.
+func TestAnAgentResolvableOnPATHIsAdmittedThroughTheRealResolver(t *testing.T) {
+	dir := t.TempDir()
+	const agent = "nocx-test-agent-6-8"
+	path := filepath.Join(dir, agent)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil { //nolint:gosec // an executable fixture is the point: exec.LookPath must find it
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	svc := approvalServiceForTest(t, &recordingRequester{answer: true})
+
+	admit(t, svc, "pane-a", agent)
+
+	if !svc.answered(agent) {
+		t.Fatal("an agent resolvable on PATH through the real resolver was not recorded as answered")
+	}
+}
+
 // The question names what the person typed. A path they cannot recognise is
 // the same as no path at all: D13 asks for a human who SEES the executable.
 func TestTheQuestionNamesTheAgentAndNotTheShell(t *testing.T) {

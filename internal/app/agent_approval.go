@@ -21,6 +21,14 @@ type hostApprovalRequester interface {
 	RequestHost(context.Context, transport.HostAsk) (transport.HostAnswer, error)
 }
 
+// executableResolver turns the agent name a person typed into the identity
+// Approve keys its answer on. It is a seam and not a bare call to
+// agentapproval.IdentityForExecutable so that a test asserting about BEARERS
+// can answer without depending on which agent binaries the machine running it
+// happens to have on PATH (nocx-xn63t.6.8) — the composition root leaves it at
+// its default, the real filesystem/PATH resolution.
+type executableResolver func(agent string) (agentapproval.Executable, error)
+
 // agentApprovalService joins durable human intent to the live process pin.
 // The store answers whether this exact executable digest and scope was already
 // decided; the requester is used only for an unanswered identity. A path-only
@@ -52,6 +60,11 @@ type agentApprovalService struct {
 	requester hostApprovalRequester
 	scope     string
 	workspace string
+
+	// resolveExecutable is the seam Approve resolves an agent name through.
+	// Defaulted in newAgentApprovalService to the real resolver; overridden
+	// only by a test (SetExecutableResolver).
+	resolveExecutable executableResolver
 
 	// What was approved for a live enrolment, so the admit-time check reads
 	// the same identity the person answered about. The ANSWER is still read
@@ -128,15 +141,26 @@ type enrolledAgent struct {
 func newAgentApprovalService(sessions workerAuthSessions, store *agentapproval.Store, scope string) *agentApprovalService {
 	return &agentApprovalService{
 		sessions: sessions, store: store,
-		scope:     agentToolEndpointScopePrefix + scope,
-		workspace: scope,
-		enrolled:  map[session.ID]enrolledAgent{},
-		asking:    map[askingKey][]chan string{},
+		scope:             agentToolEndpointScopePrefix + scope,
+		workspace:         scope,
+		enrolled:          map[session.ID]enrolledAgent{},
+		asking:            map[askingKey][]chan string{},
+		resolveExecutable: agentapproval.IdentityForExecutable,
 	}
 }
 
 func (s *agentApprovalService) SetRequester(requester hostApprovalRequester) {
 	s.requester = requester
+}
+
+// SetExecutableResolver overrides how Approve resolves an agent name to an
+// executable identity. Nil is ignored: a test that has not set one keeps the
+// real resolver newAgentApprovalService installed.
+func (s *agentApprovalService) SetExecutableResolver(resolve executableResolver) {
+	if resolve == nil {
+		return
+	}
+	s.resolveExecutable = resolve
 }
 
 // Interval answers for the AGENT this session enrolled, which is the identity
@@ -368,7 +392,7 @@ func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agen
 	if err != nil {
 		return err
 	}
-	executable, err := agentapproval.IdentityForExecutable(agent)
+	executable, err := s.resolveExecutable(agent)
 	if err != nil {
 		return err
 	}

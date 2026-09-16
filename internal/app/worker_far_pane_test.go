@@ -15,12 +15,15 @@ package app
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -177,6 +180,7 @@ func newFarStand(t *testing.T, sessions ...session.Session) *farStand {
 
 	store := agentapproval.NewStore(log.NewSlogAdapter(nil), &approvalDocStore{}, "agent-approvals.json")
 	approval := newAgentApprovalService(seam, store, workerTestWorkspace)
+	approval.SetExecutableResolver(testExecutableResolver(t))
 	approval.SetRequester(&recordingRequester{answer: true})
 
 	auth := mustToolAuthorizer(t, &workerAuthPinner{}, seam, watched, emptyWorkerRecord(), workerTestWorkspace, approval)
@@ -204,6 +208,33 @@ func newFarStand(t *testing.T, sessions ...session.Session) *farStand {
 	t.Cleanup(func() { _ = endpoint.Close() })
 
 	return &farStand{approval: approval, sessions: seam, watched: watched, endpoint: endpoint, dispatch: dispatch}
+}
+
+// testExecutableResolver answers a bare agent name (e.g. "claude") with a
+// stable, valid identity — same name, same identity, every call, for the
+// lifetime of one test — without ever touching PATH (nocx-xn63t.6.8): a test
+// asserting about BEARERS must not depend on which agent binaries the machine
+// running it happens to have. An already-absolute command (fakeAgent's
+// output) is left to the real resolver, which reads and digests the file the
+// test itself wrote — that half of resolution is not the seam under test.
+//
+// Memoizing by name matters as much as avoiding PATH: farStand.enrol can
+// Approve the SAME agent name twice inside one wait/re-approve cycle, and the
+// second call's lookup must land on the identity the first call's answer was
+// recorded under, or it finds nothing and asks the question again.
+func testExecutableResolver(t *testing.T) executableResolver {
+	t.Helper()
+	dir := t.TempDir()
+	return func(agent string) (agentapproval.Executable, error) {
+		if filepath.IsAbs(agent) {
+			return agentapproval.IdentityForPath(agent)
+		}
+		digest := sha256.Sum256([]byte("test-executable-identity:" + agent))
+		return agentapproval.Executable{
+			Path:   filepath.Join(dir, agent),
+			SHA256: hex.EncodeToString(digest[:]),
+		}, nil
+	}
 }
 
 // enrol answers the person's question about this agent for this pane, all the

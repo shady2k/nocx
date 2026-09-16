@@ -19,7 +19,7 @@ func validManifest() *Manifest {
 			Version:    "1.3.2-dev",
 			License:    "MIT",
 		},
-		Toolchain: Toolchain{Zig: "0.16.0"},
+		Toolchain: Toolchain{Zig: "0.16.0", Llvm: "21.1.8"},
 		Build: Build{
 			Command:       "zig build {flags} -Dtarget={zigTarget}",
 			Flags:         []string{"-Demit-lib-vt=true"},
@@ -68,6 +68,7 @@ func TestValidateRejectsIncompleteManifests(t *testing.T) {
 		{"wrong schema", func(m *Manifest) { m.Schema = 99 }},
 		{"short commit", func(m *Manifest) { m.Upstream.Commit = "e2e53f8" }},
 		{"no zig", func(m *Manifest) { m.Toolchain.Zig = "" }},
+		{"no llvm", func(m *Manifest) { m.Toolchain.Llvm = "" }},
 		{"no flags", func(m *Manifest) { m.Build.Flags = nil }},
 		{"url without placeholder", func(m *Manifest) { m.Release.AssetURLTemplate = "https://example.invalid/" + "x" }},
 		{"unsourced headers", func(m *Manifest) { m.Targets[0].Headers = Asset{} }},
@@ -303,9 +304,17 @@ func TestCommittedManifestIsComplete(t *testing.T) {
 	if got, want := m.Release.Tag, "libghostty-vt-"+m.ShortCommit(); got != want {
 		t.Fatalf("release tag %q, want %q: the tag is derived from the commit the archives came from", got, want)
 	}
-	if m.Upstream.Commit == m.Upstream.BaseCommit || m.Upstream.Patch == "" {
-		t.Fatalf("the pin is unpatched (commit %s, base %s) and this repository's pin is expected to carry the "+
-			"DECRQM patch; if upstream fixed it, the pin needs a new base and no patch", m.Upstream.Commit, m.Upstream.BaseCommit)
+	// The pin carried one patch (the DECRQM ANSI-form fix, nocx-ygxjv.8) until
+	// upstream merged the same one-line fix itself — ghostty-org/ghostty#14236,
+	// merge commit 1f225ebb5894, verified byte-for-byte against the fork's
+	// patch during nocx-q3ya5. So the pin is unpatched again: commit and
+	// baseCommit name the same upstream commit, and Patch is empty — Validate
+	// refuses any other combination (a patched commit with no Patch text, or an
+	// unpatched one that still claims a Patch).
+	if m.Upstream.Commit != m.Upstream.BaseCommit || m.Upstream.Patch != "" {
+		t.Fatalf("the pin is patched (commit %s, base %s, patch %q); if that patch is no longer needed "+
+			"(upstream merged it), the pin should be unpatched: commit == baseCommit and no patch text",
+			m.Upstream.Commit, m.Upstream.BaseCommit, m.Upstream.Patch)
 	}
 	if !strings.Contains(m.Release.AssetURLTemplate, m.Release.Tag) {
 		t.Fatalf("asset URL template %q does not name the release tag %q", m.Release.AssetURLTemplate, m.Release.Tag)

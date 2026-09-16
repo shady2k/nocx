@@ -17,6 +17,7 @@
 //	vtfetch licenses --source DIR --dist DIR --out FILE
 //	vtfetch cc       --target GOOS/GOARCH [--zig BIN] [--stubs DIR]
 //	vtfetch zig      [--bin BIN]
+//	vtfetch llvm     --tool ar|objcopy|ranlib [--bin BIN]
 //	vtfetch inspect  [--require-static] [--symbol NAME] FILE...
 package main
 
@@ -27,6 +28,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/shady2k/nocx/internal/vtpin"
@@ -73,6 +75,8 @@ func main() {
 		err = cmdCC(args)
 	case "zig":
 		err = cmdZig(args)
+	case "llvm":
+		err = cmdLlvm(args)
 	case "inspect":
 		err = cmdInspect(args)
 	case "-h", "--help", "help":
@@ -100,6 +104,7 @@ func usage() {
   licenses      generate THIRD_PARTY_LICENSES from the pin and the built archives
   cc            print the C compiler for one helper target
   zig           resolve the pinned Zig and refuse a different version
+  llvm          resolve one pinned LLVM tool (ar, objcopy, ranlib) and refuse a different version
   inspect       report linkage (and symbols) of built files
 
 Run "vtfetch <command> -h" for the flags of one command.
@@ -417,6 +422,73 @@ func cmdZig(args []string) error {
 	got := strings.TrimSpace(string(out))
 	if got != m.Toolchain.Zig {
 		return fmt.Errorf("zig %s at %s, but the manifest pins %s — archives built with another Zig are not the pinned bytes", got, abs, m.Toolchain.Zig)
+	}
+	fmt.Println(abs)
+	return nil
+}
+
+// llvmVersionRE pulls the version out of "llvm-<tool> --version", which for
+// every LLVM tool prints a line shaped "LLVM version X.Y.Z" regardless of
+// which tool it is (ar, objcopy, ranlib, nm all agree — measured against
+// nixpkgs' llvm 21.1.8).
+var llvmVersionRE = regexp.MustCompile(`LLVM version (\S+)`)
+
+// llvmToolNames is the set cmdLlvm knows how to resolve. Only ar, objcopy and
+// ranlib are ever invoked by the recipe's darwin localisation step; nm is
+// listed too because it is what a reader verifies the RESULT with (this
+// bead's own evidence), and pinning it the same way means a verifier is
+// checking with the same tool version the recipe built with.
+var llvmToolNames = map[string]string{
+	"ar":      "llvm-ar",
+	"objcopy": "llvm-objcopy",
+	"ranlib":  "llvm-ranlib",
+	"nm":      "llvm-nm",
+}
+
+// cmdLlvm resolves one pinned LLVM tool and refuses anything else, the same
+// shape as cmdZig and for the same reason: nocx-q3ya5 found that the darwin
+// archives' duplicate _memset survived undetected because the mechanism that
+// would have caught it (upstream's own LibsystemOverrideStep) is silently a
+// no-op off a Darwin build host. A recipe step that replicates it on Linux
+// must not repeat that shape — a missing or wrong LLVM has to fail loudly,
+// not skip quietly and ship the archive that was never localised.
+func cmdLlvm(args []string) error {
+	fs := flags("llvm")
+	manifest := fs.String("manifest", DefaultManifest, "the pin document")
+	tool := fs.String("tool", "", "which LLVM tool to resolve: ar, objcopy, ranlib or nm")
+	bin := fs.String("bin", "", "the tool's binary (default: llvm-<tool> from PATH)")
+	_ = fs.Parse(args)
+
+	name, ok := llvmToolNames[*tool]
+	if !ok {
+		return fmt.Errorf("llvm: --tool must be one of ar, objcopy, ranlib, nm (got %q)", *tool)
+	}
+	m, err := loadManifest(fs, manifest)
+	if err != nil {
+		return err
+	}
+	toolBin := *bin
+	if toolBin == "" {
+		toolBin = name
+	}
+	abs, err := exec.LookPath(toolBin)
+	if err != nil {
+		return fmt.Errorf("llvm: %s: %w (the manifest pins LLVM %s; install it — e.g. `nix shell nixpkgs#llvm` — "+
+			"or see third_party/libghostty-vt/README.md)", name, err, m.Toolchain.Llvm)
+	}
+	//nolint:gosec // the binary was resolved above and the version it must report is the pinned one
+	out, err := exec.Command(abs, "--version").Output()
+	if err != nil {
+		return fmt.Errorf("llvm: %s --version: %w", abs, err)
+	}
+	match := llvmVersionRE.FindSubmatch(out)
+	if match == nil {
+		return fmt.Errorf("llvm: %s --version did not print a recognisable LLVM version line", abs)
+	}
+	got := string(match[1])
+	if got != m.Toolchain.Llvm {
+		return fmt.Errorf("%s is LLVM %s at %s, but the manifest pins %s — a different LLVM localises the "+
+			"darwin archive's symbols differently, or not at all", name, got, abs, m.Toolchain.Llvm)
 	}
 	fmt.Println(abs)
 	return nil

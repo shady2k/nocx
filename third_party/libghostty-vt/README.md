@@ -99,6 +99,23 @@ helper this repository has always shipped already carries `LC_LOAD_DYLIB` for
 `libSystem` and `libresolv`, because Go's own darwin runtime links them
 (measured, `nocx-cm1ac`).
 
+**The recipe also localises a handful of libc/libm symbols in the two darwin
+archives, and this is a Linux-side stand-in for an upstream step that never
+ran here.** Ghostty's own fork already fixes the archive linking twice into
+one symbol (`compiler_rt.o`'s bundled generic `memset`/`memcpy`/… and, on this
+pin, a second copy the zcu object also strongly defines) with
+`LibsystemOverrideStep` (`src/build/libsystem_override.sh`), which localises
+those names so ld64 binds them to Apple's own `libSystem` instead — but that
+step's own guard is the BUILD host, not the target, and it is a no-op unless
+the build runs on Darwin. This pin's `canonicalHost` is `linux/amd64`, so
+every darwin archive built here had silently skipped it, and ld64 refused the
+resulting duplicate `_memset` (`nocx-q3ya5`). `recipe.sh` now replicates the
+same localisation with LLVM's `ar`/`objcopy`/`ranlib` (pinned in
+`toolchain.llvm`, resolved and version-checked by `vtfetch llvm` the way `zig`
+is), reading the symbol list out of the pinned source's own
+`libsystem_override.sh` rather than copying it, so a future change to
+upstream's list is picked up with the next re-pin.
+
 ## Where a build finds them
 
 `vtfetch fetch` materialises exactly the layout the CGo link files name:

@@ -167,19 +167,131 @@ info "archives"
 plan="$(vtfetch plan --manifest "$manifest")"
 echo "$plan" | awk -F'\t' 'NR>1 && $1=="target" {printf "  %-18s %s\n", $2, $6}'
 
+# 2b. The darwin-only localisation step, resolved and prepared ONCE, only if a
+#     darwin target is actually in the (possibly --only-filtered) plan.
+#
+#     WHY THIS EXISTS (nocx-q3ya5): every darwin archive this pin has ever
+#     produced links a duplicate STRONG `_memset` — one copy in
+#     libghostty-vt-static_zcu.o (Zig's own quirks_memset), one in
+#     compiler_rt.o — which Apple's ld64 refuses ("duplicate symbol"). Upstream
+#     already has the fix, LibsystemOverrideStep
+#     (src/build/libsystem_override.sh): it localises (hides) the small set of
+#     libc/libm symbols libSystem already provides, in compiler_rt.o, so ld64
+#     binds them to libSystem instead of the bundled generic implementations.
+#     But that step's own guard is `builtin.os.tag.isDarwin()` — the BUILD
+#     HOST, not the target — and this recipe's canonicalHost is linux/amd64.
+#     So the fix has been silently skipped on every archive built here.
+#
+#     This block replicates it on Linux with LLVM's own ar/objcopy/ranlib
+#     (pinned in toolchain.llvm, resolved and version-checked exactly like
+#     Zig above — a missing or wrong LLVM must fail the build, not skip the
+#     one step that exists because a HOST check silently skipped it before).
+#     It also covers libghostty-vt-static_zcu.o, which upstream's own script
+#     does not touch: this pin's build additionally strong-defines a subset of
+#     the same symbol names there, which is the second half of the duplicate
+#     (evidenced with llvm-nm; see third_party/libghostty-vt/README.md).
+needs_darwin_tools=0
+while IFS=$'\t' read -r kind name _goos _goarch _libc _zig_target _archive_asset _headers_asset; do
+  [ "$kind" = "target" ] || continue
+  if [ -n "$only" ]; then
+    case ",$only," in *",$name,"*) ;; *) continue ;; esac
+  fi
+  [ "$_goos" = "darwin" ] && needs_darwin_tools=1
+done <<< "$plan"
+
+if [ "$needs_darwin_tools" = 1 ]; then
+  info "darwin libSystem-override tools"
+  llvm_ar="$(vtfetch llvm --tool ar --manifest "$manifest")"
+  llvm_objcopy="$(vtfetch llvm --tool objcopy --manifest "$manifest")"
+  llvm_ranlib="$(vtfetch llvm --tool ranlib --manifest "$manifest")"
+  llvm_nm="$(vtfetch llvm --tool nm --manifest "$manifest")"
+  echo "llvm-ar:      $llvm_ar"
+  echo "llvm-objcopy: $llvm_objcopy"
+  echo "llvm-ranlib:  $llvm_ranlib"
+  echo "llvm-nm:      $llvm_nm"
+
+  # The symbol list is READ FROM THE PINNED SOURCE, not copied, so a change to
+  # upstream's own list (adding a symbol libSystem now provides, or dropping
+  # one it no longer does) is picked up the next time the pin moves rather
+  # than silently going stale here. libsystem_override.sh holds it as one
+  # `cat >"$tmp/localize.txt" <<'EOF' ... EOF` heredoc; extracting the same
+  # heredoc's body is exactly what that script itself does to build its own
+  # keep-list, so this reads it the way its own author reads it.
+  override_script="$src/src/build/libsystem_override.sh"
+  [ -f "$override_script" ] || {
+    echo "FATAL: $override_script not found — upstream may have moved or renamed its" >&2
+    echo "  libSystem-override script; the darwin localisation step has no list to copy" >&2
+    echo "  and must not silently skip it (that is the defect nocx-q3ya5 found)." >&2
+    exit 1
+  }
+  darwin_symbols="$cache/darwin-libsystem-symbols.txt"
+  awk '/^cat >"\$tmp\/localize\.txt" <<.EOF.$/{p=1; next} p && /^EOF$/{exit} p' \
+    "$override_script" >"$darwin_symbols"
+  [ -s "$darwin_symbols" ] || {
+    echo "FATAL: could not extract the symbol list from $override_script" >&2
+    echo "  (its heredoc shape changed); the darwin localisation step has nothing to" >&2
+    echo "  localise and must not silently skip it." >&2
+    exit 1
+  }
+  echo "symbols read from $override_script: $(wc -l < "$darwin_symbols") names"
+fi
+
+# localize_darwin_archive replicates libsystem_override.sh's effect for one
+# built archive, using LLVM's tools instead of Apple's xcrun/nmedit (which
+# this Linux builder does not have). Unlike the upstream script, it processes
+# EVERY member that strongly defines one of the listed symbols, not only
+# compiler_rt.o — see the block comment above for why libghostty-vt-static_zcu.o
+# needs it too on this pin.
+localize_darwin_archive() {
+  # Resolved to an absolute path BEFORE anything below `cd`s into the
+  # extraction tmpdir — a caller may pass $out/$archive_asset with $out
+  # relative to the caller's cwd (make's vt-recipe-pin passes VT_DIST
+  # unresolved), and a relative path stops meaning the same file the moment
+  # the cwd changes.
+  archive="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+  ltmp="$(mktemp -d)"
+  trap 'rm -rf "$ltmp"' RETURN
+  ( cd "$ltmp" && "$llvm_ar" x "$archive" )
+  changed=""
+  for member in "$ltmp"/*.o; do
+    [ -f "$member" ] || continue
+    defined="$("$llvm_nm" --defined-only "$member" 2>/dev/null | awk '{print $NF}')"
+    hit=0
+    while IFS= read -r sym; do
+      [ -n "$sym" ] || continue
+      case "$defined" in *"$sym"*) grep -qx "$sym" <<<"$defined" && hit=1 ;; esac
+    done < "$darwin_symbols"
+    if [ "$hit" = 1 ]; then
+      "$llvm_objcopy" $(sed 's/^/-L /' "$darwin_symbols") "$member"
+      changed="$changed $(basename "$member")"
+    fi
+  done
+  [ -n "$changed" ] || {
+    echo "FATAL: $archive: no member strongly defined any symbol in $darwin_symbols" >&2
+    echo "  (expected at least compiler_rt.o); the localisation step did nothing," >&2
+    echo "  which is worse than not running it because it looks like it worked." >&2
+    exit 1
+  }
+  ( cd "$ltmp" && "$llvm_ar" r "$archive" ./*.o && "$llvm_ranlib" "$archive" )
+  echo "  localised (libSystem override):$changed"
+}
+
 while IFS=$'\t' read -r kind name _goos _goarch _libc zig_target archive_asset headers_asset; do
   [ "$kind" = "target" ] || continue
   if [ -n "$only" ]; then
     case ",$only," in *",$name,"*) ;; *) continue ;; esac
   fi
   start=$(date +%s)
-  (cd "$src" && "$zig_path" build -Demit-lib-vt=true -Demit-xcframework=false \
+  (cd "$src" && "$zig_path" build -j"${VT_JOBS:-4}" -Demit-lib-vt=true -Demit-xcframework=false \
     -Doptimize=ReleaseFast -Dtarget="$zig_target") >"$cache/build-$name.log" 2>&1 || {
       echo "FATAL: zig build failed for $name; first error:" >&2
       grep -m1 'error:' "$cache/build-$name.log" >&2 || tail -5 "$cache/build-$name.log" >&2
       exit 1
     }
   cp "$src/zig-out/lib/libghostty-vt.a" "$out/$archive_asset"
+  if [ "$_goos" = "darwin" ]; then
+    localize_darwin_archive "$out/$archive_asset"
+  fi
   vtfetch pack-headers --dir "$src/zig-out/include/ghostty" --out "$out/$headers_asset"
   secs=$(( $(date +%s) - start ))
   printf '%-18s %-20s %10d B  %3d s  %s\n' "$name" "$zig_target" \

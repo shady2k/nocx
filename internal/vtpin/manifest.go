@@ -90,8 +90,22 @@ type Upstream struct {
 // Toolchain is the compiler that produced the archives. It is pinned because
 // ghostty pins it: build.zig.zon declares minimum_zig_version, and a different
 // Zig is different bytes.
+//
+// Llvm is pinned for the same reason, and it is not merely a preference:
+// nocx-q3ya5 found the darwin archives ld64 refuses to link because Zig's
+// own compiler-rt and the archive's own zcu object both strongly define the
+// same libc/libm symbols (memset among them) — upstream's own fix for this
+// (LibsystemOverrideStep, src/build/libsystem_override.sh) runs only on a
+// Darwin BUILD HOST, and the pin's canonicalHost is linux/amd64, so it was
+// silently skipped on every archive this pin has ever produced. The recipe
+// now replicates that step on Linux with llvm-objcopy/-ar/-ranlib
+// (third_party/libghostty-vt/README.md, "Six archives" and "Bumping the
+// pin"), and a wrong or missing LLVM would silently skip the darwin
+// localisation exactly the way the missing Darwin host did — which is the
+// defect this pins against, not a preference for reproducibility.
 type Toolchain struct {
-	Zig string `json:"zig"`
+	Zig  string `json:"zig"`
+	Llvm string `json:"llvm"`
 }
 
 // Build is the recipe's input: the flags, and where the build leaves the two
@@ -253,6 +267,11 @@ func (m *Manifest) Validate() error {
 	}
 	if m.Toolchain.Zig == "" {
 		return fmt.Errorf("toolchain.zig is empty")
+	}
+	if m.Toolchain.Llvm == "" {
+		return fmt.Errorf("toolchain.llvm is empty: the darwin archives need it for the libSystem-override " +
+			"localisation (nocx-q3ya5), and a manifest that does not pin it cannot refuse a missing or " +
+			"wrong-version tool the way vtfetch llvm does")
 	}
 	if len(m.Build.Flags) == 0 || m.Build.Archive == "" || m.Build.Headers == "" {
 		return fmt.Errorf("build is incomplete: flags, archive and headers are all required")

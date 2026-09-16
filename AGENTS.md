@@ -946,7 +946,10 @@ Checked by eye at review. If that rots, file a `commit-msg` hook rather than dro
 - **Quality gates from every commit** — format, lint, test. Go and TypeScript held to the
   same bar.
 - **Observability:** structured logging via `log/slog` behind the logging interface — no
-  ad-hoc `fmt.Println`.
+  ad-hoc `fmt.Println`. Get the logger with `log.From(ctx)` (`internal/log`), never a stored
+  field: it carries module, request id, trace and span from whatever the context holds, with
+  no call site passing any of the four by hand, and a pre-commit ratchet refuses a new call
+  that does not go through it (`.githooks/check-log-context.mjs`).
 - **Clean-only:** no backward-compatibility shims (greenfield — break and refactor freely),
   no dead code, no quick-win hacks. YAGNI.
 - **Respect the spine.** Never wrap PTY bytes in JSON-RPC (AD-1); the backend never sniffs

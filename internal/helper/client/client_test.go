@@ -22,6 +22,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	nocxlog "github.com/shady2k/nocx/internal/log"
 )
 
 // fakeConn is a HelperConn backed by io.Pipe with a scripted peer. The peer
@@ -315,8 +316,14 @@ func TestEveryCallLogsTheSameCorrOnBothSides(t *testing.T) {
 	}
 	defer func() { _ = c.Close() }()
 
+	// Call reads its logger from ctx (log.From, nocx-n14oo.9), not from
+	// Config.Log — Config.Log only seeds the client's own background pumps
+	// (client.go's own doc). A caller that wants its D26 correlation line on
+	// a particular sink carries that logger in the ctx it calls with, the
+	// same way a production caller's ctx carries the composition root's.
+	ctx := nocxlog.WithLogger(context.Background(), nocxlog.NewSlogAdapter(clientLogger))
 	var got string
-	if err := c.Call(context.Background(), "stub", "ping", pingParams{Msg: "hi"}, &got); err != nil {
+	if err := c.Call(ctx, "stub", "ping", pingParams{Msg: "hi"}, &got); err != nil {
 		t.Fatalf("Call: %v", err)
 	}
 	clientCorr := logCorr(t, clientLog.String())

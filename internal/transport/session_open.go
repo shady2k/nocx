@@ -185,7 +185,6 @@ type sessionOpener struct {
 	// It is a seam and not the whole machine because what this needs is one
 	// statement: this lane belongs to this session.
 	laneRegistrar lifecycleLaneRegistrar
-	log           log.Logger
 }
 
 // lifecycleLaneRegistrar is the narrow view of "remember which session this
@@ -366,7 +365,7 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (OpenedSession,
 	// a ledger is wired to bind against, matching Reg.Open's own
 	// unconditional line.
 	if hosted != nil {
-		o.log.Info("session opened", "id", string(sess.ID()), "kind", hostedKindName(cfg.Kind), "profile_id", cfg.ProfileID)
+		log.From(ctx).Info("session opened", "id", string(sess.ID()), "kind", hostedKindName(cfg.Kind), "profile_id", cfg.ProfileID)
 	}
 
 	if hosted != nil && hosted.LifecycleLane != "" && o.laneRegistrar != nil {
@@ -402,7 +401,7 @@ func (o *sessionOpener) resolveRemote(ctx context.Context, svc capability.OpenSe
 		}
 		host, resolved, err := svc.Resolve(spec.ProfileID)
 		if err != nil {
-			o.log.Error("profile resolve failed", "profileId", spec.ProfileID, "error", err)
+			log.From(ctx).Error("profile resolve failed", "profileId", spec.ProfileID, "error", err)
 			// Resolving reads the stored password, so a sealed vault
 			// surfaces here — the caller needs the reason to offer an
 			// unlock.
@@ -417,7 +416,7 @@ func (o *sessionOpener) resolveRemote(ctx context.Context, svc capability.OpenSe
 		remote.RemoteLauncher = o.launcher
 		remote.RemoteLifecycle = o.lifecycle
 
-		o.log.Info("SSH open via profile", "profileId", spec.ProfileID, "host", host, "user", remote.User)
+		log.From(ctx).Info("SSH open via profile", "profileId", spec.ProfileID, "host", host, "user", remote.User)
 
 		cfg.Kind = session.KindRemote
 		cfg.Host = host
@@ -439,7 +438,7 @@ func (o *sessionOpener) resolveRemote(ctx context.Context, svc capability.OpenSe
 		}
 		resolved, err := o.sshCfg.ResolveConfig(ctx, spec.Host)
 		if err != nil {
-			o.log.Warn("SSH config resolution degraded for direct host", "host", spec.Host, "error", err)
+			log.From(ctx).Warn("SSH config resolution degraded for direct host", "host", spec.Host, "error", err)
 		}
 
 		user := spec.User
@@ -480,7 +479,7 @@ func (o *sessionOpener) resolveRemote(ctx context.Context, svc capability.OpenSe
 			DesiredMode: spec.DesiredMode,
 		}
 
-		o.log.Info("SSH open via direct host", "host", spec.Host, "resolvedHost", remoteHost, "user", user)
+		log.From(ctx).Info("SSH open via direct host", "host", spec.Host, "resolvedHost", remoteHost, "user", user)
 
 		cfg.Kind = session.KindRemote
 		cfg.Host = remoteHost
@@ -510,7 +509,7 @@ func (o *sessionOpener) resolveRemote(ctx context.Context, svc capability.OpenSe
 		case ssh.ShellBash, ssh.ShellZsh, ssh.ShellUnknown, ssh.ShellAuto:
 			remote.Shell = ssh.ShellKind(spec.Shell)
 		default:
-			o.log.Warn("ignoring unknown shell pin", "profileId", spec.ProfileID, "shell", spec.Shell)
+			log.From(ctx).Warn("ignoring unknown shell pin", "profileId", spec.ProfileID, "shell", spec.Shell)
 		}
 	}
 	return nil
@@ -643,7 +642,7 @@ func (o *sessionOpener) releaseClaim(ctx context.Context, claim string) {
 		return
 	}
 	if err := o.ledger.DeleteSession(ctx, claim); err != nil {
-		o.log.Warn("the pane's spawn claim outlived its spawn", "claim", claim, "error", err)
+		log.From(ctx).Warn("the pane's spawn claim outlived its spawn", "claim", claim, "error", err)
 	}
 }
 
@@ -720,7 +719,7 @@ func (s *WSServer) OpenSession(ctx context.Context, spec OpenSpec) (OpenedSessio
 	// pane that was pumped and heard nothing back: the call left no trace at
 	// all. The line names the lane, which is what joins it to the adapter's
 	// own "established" and "lost".
-	lg := s.log.WithContext(ctx)
+	lg := log.From(ctx)
 	switch {
 	case opened.Hosted == nil:
 		lg.Debug("backend open: the pane is not hosted, so it has no lifecycle leg",

@@ -206,8 +206,12 @@ func (c *Client) Call(ctx context.Context, service, op string, params, out any) 
 	}
 	// D26: the correlation id the helper logs for this request is the
 	// SAME value the backend logs here — one trace across the two hops.
-	nocxlog.NewSlogAdapter(c.log).WithContext(ctx).
-		Debug("helper request", "service", service, "op", op, "corr", req.Corr)
+	//
+	// log.From(ctx), not a wrap of c.log (nocx-n14oo.9): the caller's own
+	// context is what carries the trace this request belongs to, and From
+	// also names the module without being told. c.log stays the client's
+	// fallback for the background pumps below, which own no request ctx.
+	nocxlog.From(ctx).Debug("helper request", "service", service, "op", op, "corr", req.Corr)
 	payload, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("helper: request: %w", err)

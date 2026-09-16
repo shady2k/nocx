@@ -45,6 +45,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/notices"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/session"
+	nocxlog "github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/mcpstdio"
 )
 
@@ -115,12 +116,20 @@ func main() {
 		// The DAEMON gets a file; the bridge keeps stderr alone, which is
 		// where D22 puts it and where somebody is actually reading (servelog.go).
 		serveLog, logFile := openServeLog(home, string(generation))
+		// This composition root's own wiring (nocx-n14oo.9): everything
+		// serve() calls with ctx from here on answers log.From(ctx) with
+		// serveLog, the same sink openServeLog just built (stderr, plus the
+		// generation's log file when one opened).
+		ctx = nocxlog.WithLogger(ctx, nocxlog.NewSlogAdapter(serveLog))
+		nocxlog.SetRoot(nocxlog.NewSlogAdapter(serveLog))
 		code := serve(ctx, serveLog, dir, generation, contentHash, exe)
 		if logFile != nil {
 			_ = logFile.Close()
 		}
 		os.Exit(code)
 	case len(args) == 2 && args[0] == endpoint.BridgeCommand:
+		ctx = nocxlog.WithLogger(ctx, nocxlog.NewSlogAdapter(log))
+		nocxlog.SetRoot(nocxlog.NewSlogAdapter(log))
 		os.Exit(bridge(ctx, log, dir, proto.GenerationID(args[1]), generation, exe))
 	default:
 		fmt.Fprintf(os.Stderr, "usage: nocx-helper %s | nocx-helper %s <generation> | nocx-helper mcp --socket <path> | nocx-helper --licenses\n",

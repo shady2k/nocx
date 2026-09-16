@@ -26,6 +26,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/app"
 	"github.com/shady2k/nocx/internal/coordinator"
+	nocxlog "github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/toolendpoint"
 	"github.com/shady2k/nocx/internal/version"
@@ -103,6 +104,11 @@ func run(logger *slog.Logger) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// This composition root's own copy of the wiring App.Start does
+	// internally (nocx-n14oo.9): a.Shutdown below and anything else this
+	// file calls with ctx directly — not through App — answer log.From(ctx)
+	// with the same logger, rather than the package default.
+	ctx = nocxlog.WithLogger(ctx, nocxlog.NewSlogAdapter(logger))
 	if startErr := a.Start(ctx); startErr != nil {
 		return startErr
 	}

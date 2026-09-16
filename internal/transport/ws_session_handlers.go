@@ -1019,7 +1019,7 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 		launcher: s.remoteLauncher, installer: s.remoteInstaller,
 		lifecycle: s.remoteLifecycle, panes: s.layoutReader(),
 		ledger: sessionLedger, helper: s.helperSessionOpener,
-		laneRegistrar: laneRegistrar, log: s.log,
+		laneRegistrar: laneRegistrar,
 	}
 	sessionOps := capability.NewSessionOperations(sessionGate, lane, s.registry, s.profileUsage)
 	// The whole-domain operation sessions.live reads the registry under, beside

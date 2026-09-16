@@ -2741,6 +2741,15 @@ func appendRouteHops(cfg *ssh.ConnectConfig, hops *[]endpointHop) {
 }
 
 func (a *App) Start(ctx context.Context) error {
+	// THE COMPOSITION ROOT PUTS ITS LOGGER IN THE CONTEXT (nocx-n14oo.9): from
+	// here on, anything this call passes ctx to answers log.From(ctx) with
+	// a.Logger — module, request id, trace and span attached automatically,
+	// with no call site threading them by hand. SetRoot is the net under
+	// that: a path that reaches log.From with a context nobody wired (a
+	// background goroutine, a context.Background() a few calls down) still
+	// gets a.Logger rather than the package's bare default.
+	ctx = log.WithLogger(ctx, a.Logger)
+	log.SetRoot(a.Logger)
 	a.Logger.Info("starting application services")
 
 	home, err := os.UserHomeDir()

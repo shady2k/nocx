@@ -2753,26 +2753,6 @@ func (a *App) Start(ctx context.Context) error {
 		a.installLocalHelper(ctx, home)
 	}
 
-	// nocx-xn63t.6.10: the vault must be told presence is tracked, and
-	// currently zero, BEFORE reconciliation can ask it for anything. Without
-	// this, a restored session whose re-attach needs a credential from a
-	// sealed vault (Vault.EnsureUnsealed, reached through
-	// readoptPass.Readopt's helper dial) finds internal/vault's
-	// clientsKnown still at its zero value — indistinguishable, from the
-	// vault's own state, from a vault nobody will ever report presence to —
-	// and answers "no client connected to show unlock prompt" at once
-	// instead of suspending for the client Transport.Start below is about
-	// to accept. Measured against ssh-helper-happy-path.spec.ts: the
-	// replacing coordinator's re-adoption of a password-authenticated SSH
-	// session lost this race on a slower runner and never lost it on an
-	// idle one, which is exactly the signature of a vault answer that
-	// depends on whether anything has told it a count yet. See
-	// transport.WSServer.PrimePresence's own comment for why Start's
-	// trailing notePresence call cannot be the one that does this: it fires
-	// after the listener is up, which is after this whole pass has already
-	// run.
-	a.Transport.PrimePresence()
-
 	// nocx-73aln: reconciliation runs from here now, once installLocalHelper
 	// above has had its chance to put this machine's own generation on disk
 	// (see the App.sessionReconciler/sessionRoutes fields for why it moved).
@@ -2781,6 +2761,26 @@ func (a *App) Start(ctx context.Context) error {
 	// installLocalHelper already warned above — never a reason to skip
 	// judging every OTHER carried-over session too, and the pass still
 	// finishes before Transport.Start below lets a client ask.
+	//
+	// THIS PASS MUST NEVER SUSPEND ON A PERSON (nocx-xn63t.6.10, round 2). A
+	// re-adoption whose credential lives in a sealed vault reaches
+	// Vault.EnsureUnsealed, which CAN wait for a client to attach and answer
+	// an unlock prompt — but no client can attach until THIS call returns,
+	// since Transport.Start is the next line. Round 1 of this bead primed
+	// the vault's presence tracking before this line (WSServer.PrimePresence,
+	// since removed) so EnsureUnsealed would suspend instead of refusing at
+	// once; the CI failure it fixed went green, but nothing had measured
+	// what a suspend here actually costs. reconcileSessions runs every
+	// pending session's Readopt call SEQUENTIALLY, each bounded by
+	// readoptAttemptTimeout, so N password-authenticated sessions pending
+	// across a restart would each cost that bound in full before Start
+	// could finish — TestReconcileSessions_IfPresenceIsPrimedTooEarly...
+	// (session_readopt_vault_test.go) pins the shape so priming presence
+	// here is never reintroduced. Left unprimed, as it is now,
+	// EnsureUnsealed answers from the "nobody will ever report presence to
+	// this vault" branch instead — exactly the branch a headless package's
+	// own vault is always in — and refuses at once
+	// (TestReconcileSessions_PreListenPassRefusesPromptlyEvenWithN...).
 	reconcileSessions(ctx, a.sessionReconciler, a.helperRegistry.inventories(),
 		&readoptPass{
 			registry: a.helperRegistry, routes: a.sessionRoutes, adopter: a.Transport,
@@ -2788,7 +2788,100 @@ func (a *App) Start(ctx context.Context) error {
 		},
 		content.DefaultUnreconciledRetention, a.slogger)
 
-	return a.Transport.Start(ctx)
+	if err := a.Transport.Start(ctx); err != nil {
+		return err
+	}
+
+	// THE RETRY: a session left pending with CauseVaultSealed — "the one
+	// cause on this list that a person clears in one gesture"
+	// (content/reconcile.go) — gets exactly that gesture a chance to answer.
+	// The id set is captured HERE, once, right after this pass returns —
+	// see retryReconciler's own comment for why it must be fixed rather than
+	// re-filtered by cause on every later poll. Every OTHER cause (an
+	// unreachable host, a timeout) is unchanged by a client attaching, so it
+	// is left for the pass above. See retryVaultSealedSessions for why the
+	// retry itself is a poll and not one suspended attempt.
+	if ids := vaultSealedSessionIDs(ctx, a.sessionReconciler, a.slogger); len(ids) > 0 {
+		go a.retryVaultSealedSessions(ctx, ids)
+	}
+
+	return nil
+}
+
+// vaultSealedRetryAttempt bounds ONE poll of retryVaultSealedSessions. Short
+// on purpose — see that function's own comment for why a suspend is the
+// wrong shape for this loop and a short, repeated ask is the right one.
+const vaultSealedRetryAttempt = time.Second
+
+// vaultSealedRetryBudget is how long the poll keeps trying before it leaves a
+// session `unknown` for good this run. Generous on purpose: unlike
+// readoptAttemptTimeout (bounding a HOST that may simply be off),
+// this bounds a PERSON reaching for their passphrase, which the coordinator
+// cannot hurry.
+const vaultSealedRetryBudget = 2 * time.Minute
+
+// retryVaultSealedSessions is App.Start's second pass, run once Transport.Start
+// has returned so a client CAN attach and answer — the first pass
+// (reconcileSessions above) must never suspend on that, because nothing can
+// attach until it returns (nocx-xn63t.6.10, round 2's whole finding).
+//
+// IT POLLS RATHER THAN SUSPENDING ONCE, and that is not a stylistic choice:
+// Vault.EnsureUnsealed's suspend is answered by `vault.unlockResolved`, the
+// RPC a renderer sends after the person's passphrase has ALREADY unsealed the
+// vault — it is the resolution of a SPECIFIC outstanding ask, not a general
+// "the vault changed" event. A caller that unseals the vault another way —
+// `vault.unseal` on its own, which is what a script (and this bead's own
+// e2e/ssh-helper-happy-path.spec.ts) does, or a person unlocking from
+// Settings while unrelated to any raised prompt — wakes nobody who is
+// suspended inside a DIFFERENT EnsureUnsealed call, because Unseal itself
+// resolves no pending ask (internal/vault/vault.go's Unseal, read end to
+// end: it sets rootKey and calls wakeAutoSeal, and touches nothing in
+// unlock.go). Measured directly: a single long-suspended retry attempt
+// timed out at its own bound with "context deadline exceeded" 15s after the
+// container's own log showed `vault unsealed`, never having noticed.
+//
+// A short, REPEATED attempt sidesteps the whole handshake: each one is a
+// fresh EnsureUnsealed call, and a fresh call checks State first
+// (StateUnsealed: return nil, before ever touching a requester or a
+// suspension) — so the poll needs nothing to resolve anything, only for one
+// attempt to start after the vault is actually unsealed. Bounded so a vault
+// that is never unsealed this run costs vaultSealedRetryBudget once, in the
+// background, and not a goroutine leaked for the rest of the process.
+//
+// ids IS FIXED FOR THE WHOLE POLL (retryReconciler's own comment has the
+// reason: an attempt's own timeout can itself read back as a different,
+// non-retried cause). What DOES shrink here is which of ids the loop still
+// bothers asking about: an id an inventory now owns has been taken back —
+// reconcileSessions will keep confirming it cheaply through that inventory
+// for as long as it stays in retryReconciler's set, so removing it once
+// owned is what lets the loop stop before vaultSealedRetryBudget elapses
+// rather than spending the whole budget after everything already succeeded.
+func (a *App) retryVaultSealedSessions(ctx context.Context, ids map[string]struct{}) {
+	remaining := make(map[string]struct{}, len(ids))
+	for id := range ids {
+		remaining[id] = struct{}{}
+	}
+	deadline := time.Now().Add(vaultSealedRetryBudget)
+	for len(remaining) > 0 && time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		reconcileSessions(ctx, retryReconciler{a.sessionReconciler, remaining}, a.helperRegistry.inventories(),
+			&readoptPass{
+				registry: a.helperRegistry, routes: a.sessionRoutes, adopter: a.Transport,
+				local: a.localHelper, timeout: vaultSealedRetryAttempt,
+			},
+			content.DefaultUnreconciledRetention, a.slogger)
+		for _, inv := range a.helperRegistry.inventories() {
+			for id := range remaining {
+				if inv.Owns(id) {
+					delete(remaining, id)
+				}
+			}
+		}
+	}
 }
 
 // localHelperArtifacts is the artifact source Start installs the local

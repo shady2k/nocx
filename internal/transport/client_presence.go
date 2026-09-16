@@ -71,31 +71,3 @@ func (s *WSServer) notePresence() {
 	// that would make every future broadcast wait on a keyring.
 	s.presence.ClientsAttached(n)
 }
-
-// PrimePresence tells the observer presence is tracked, and currently zero,
-// before this server has listened for a single connection.
-//
-// WHY THIS CANNOT WAIT FOR Start (nocx-xn63t.6.10). Start's own trailing
-// notePresence call reports the same "zero, and known" fact, but only once
-// the listener is up — and a composition root that must reconcile restored
-// sessions before Start lets a client ask (session_readopt.go's own
-// invariant: nobody may see an incomplete `sessions.live` mid-pass) runs
-// that reconciliation BEFORE Start, not after. A session whose credential
-// lives in a vault that is sealed right after a start needs
-// Vault.EnsureUnsealed to SUSPEND for the client Start is about to accept —
-// and the vault can only tell "nobody has attached YET" from "nobody will
-// EVER report presence to this vault" (clientsKnown, internal/vault/
-// presence.go) once something has told it a count. Reconciliation used to
-// run in the window where nothing ever had, so every restored session whose
-// re-attach needed a secret from a sealed vault answered "no client
-// connected to show unlock prompt" immediately — a real client was always
-// about to attach, the moment Start let one, and nothing here had said so.
-//
-// Call this once, right after the presence observer is wired
-// (WithClientPresence) and before anything that might resolve a
-// vault-backed secret — reconcileSessions in particular. A server with no
-// observer wired has nobody to tell and does nothing, exactly like
-// notePresence.
-func (s *WSServer) PrimePresence() {
-	s.notePresence()
-}

@@ -97,6 +97,17 @@ func TestNoFailureModeEverProducesAbsent(t *testing.T) {
 		{"a deadline that passed", context.DeadlineExceeded, content.CauseTimedOut},
 		{"a sealed vault", vault.ErrVaultSealed, content.CauseVaultSealed},
 		{"a vault nobody is there to unlock", vault.ErrNoUnlockClient, content.CauseVaultSealed},
+		// The SAME cause, reconstructed from a REMOTE session's own reverse
+		// ask (nocx-xn63t.6.10, round 2): a lane's credential fetch crosses
+		// this machine's local helper daemon and back, and nothing on that
+		// round trip is a Go error by the time it reaches causeFor — only
+		// its message, verbatim from session_readopt.go's own wrap
+		// ("connect the helper holding this session: %w") around what the
+		// lane's client reconstructed from the reverse handler's refusal.
+		// errors.Is never matches this; the string-match branch must.
+		{"the same, with no Go sentinel left to match (a remote lane's own reverse ask)", errors.New(
+			"helper lane for 127.0.0.1: ssh: open a channel to 127.0.0.1: " +
+				"helper: internal: no client connected to show unlock prompt"), content.CauseVaultSealed},
 		{"an unreachable host", errors.New("ssh: no route to host"), content.CauseHostUnreachable},
 		{"something this build cannot classify", errors.New("¯\\_(ツ)_/¯"), content.CauseHostUnreachable},
 	}
@@ -333,5 +344,46 @@ func TestAVerdictThatCannotBeWrittenLeavesThePassRunning(t *testing.T) {
 	reconcileSessions(context.Background(), rec, nil, nil, time.Hour, quietLogger())
 	if len(rec.sweptWith) != 1 {
 		t.Fatalf("the age bound did not run after a failed verdict: %v", rec.sweptWith)
+	}
+}
+
+// retryReconciler filters by a FIXED id set, decided once, never by
+// re-reading a session's CURRENT cause (nocx-xn63t.6.10, round 2). A session
+// this run's retry is polling keeps being offered even after ONE of its own
+// attempts times out and gets reclassified to something other than
+// vaultSealed — causeFor's own last-resort string match cannot always tell a
+// retry attempt's timeout waiting on the vault from a genuinely unreachable
+// host, and re-filtering by cause on every poll would drop the session the
+// first time that happened. Measured directly against the real container:
+// exactly this, one retry attempt short of working.
+func TestRetryReconciler_KeepsAnIDRegardlessOfALaterCause(t *testing.T) {
+	rec := &recordingReconciler{pending: []content.PendingSession{
+		// As if an earlier poll already reclassified "a"'s own row away from
+		// vaultSealed — retryReconciler must not read that and drop it.
+		{SessionID: "a", Cause: content.CauseHostUnreachable},
+		{SessionID: "c", Cause: content.CauseVaultSealed}, // not in the id set: must not appear
+	}}
+	retry := retryReconciler{rec, map[string]struct{}{"a": {}}}
+
+	got, err := retry.Pending(context.Background())
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if len(got) != 1 || got[0].SessionID != "a" {
+		t.Fatalf("Pending = %+v, want exactly session %q regardless of its current cause", got, "a")
+	}
+}
+
+// vaultSealedSessionIDs is the ONE read that decides the retry's fixed set —
+// exactly the sessions CauseVaultSealed, nothing an unreachable host or a
+// timeout left pending.
+func TestVaultSealedSessionIDs_OnlyTheVaultSealedCause(t *testing.T) {
+	rec := &recordingReconciler{pending: []content.PendingSession{
+		{SessionID: "a", Cause: content.CauseVaultSealed},
+		{SessionID: "b", Cause: content.CauseHostUnreachable},
+	}}
+	ids := vaultSealedSessionIDs(context.Background(), rec, quietLogger())
+	if _, ok := ids["a"]; !ok || len(ids) != 1 {
+		t.Fatalf("ids = %v, want exactly {a}", ids)
 	}
 }

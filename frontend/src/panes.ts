@@ -82,7 +82,12 @@ import type {
 } from './pane-content'
 import { SURFACE_TERMINAL } from './pane-content'
 import type { SnippetProviderDeps } from './snippets/snippet-provider'
-import { TerminalContent, type HostKeyErrorEvidence, type PaneIdentity } from './terminal-content'
+import {
+  TerminalContent,
+  type HostKeyErrorEvidence,
+  type HelperConsentAskEvidence,
+  type PaneIdentity,
+} from './terminal-content'
 import type { OutputRecordingSource } from './integration/status'
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -840,6 +845,11 @@ export class PaneManager {
    *  or changed. Resolves true only after explicit trust; the content then
    *  retries the same open. */
   onHostKeyError?: (evidence: HostKeyErrorEvidence, signal: AbortSignal) => Promise<boolean>
+  /** Called when an SSH connection needs a person's answer about this
+   *  destination's helper before it may proceed (ADR-0068's connect-time
+   *  ask). Resolves true once an answer was recorded; the content then
+   *  retries the same open. */
+  onHelperConsentAsk?: (ask: HelperConsentAskEvidence, signal: AbortSignal) => Promise<boolean>
   /** The strip's "show all workspaces" button was pressed. Wired by main.tsx
    *  to the overview controller's `open` — the surface's lifetime belongs to
    *  the composition root, and a PaneManager that owned an overlay would be
@@ -1612,6 +1622,7 @@ export class PaneManager {
         onPortsTargetChange: () => this.onActivePaneChange?.(),
         onVaultSealed: this.onVaultSealed,
         onHostKeyError: this.onHostKeyError,
+        onHelperConsentAsk: this.onHelperConsentAsk,
         onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
         onSnippetChord: this.onSnippetChord,

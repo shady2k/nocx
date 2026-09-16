@@ -111,7 +111,12 @@ import { applySSHReconnect, SSH_RECONNECT_KEY } from './reconnect-setting'
 import { applyPetsSettings, PETS_ENABLED_KEY, PETS_PACK_KEY, PETS_SIZE_KEY } from './pets/setting'
 import { mountWindowPet } from './pets/window-pet'
 import type { TunnelOpenResult } from './generated/tunnel.open'
-import { OpenHostKeyRequestQueue, type OpenHostKeyRequest } from './host-key-controller'
+import {
+  OpenHostKeyRequestQueue,
+  type OpenHostKeyRequest,
+  HelperConsentAskQueue,
+  type HelperConsentAskRequest,
+} from './host-key-controller'
 import { HostKeyDialog, AgentApprovalDialog } from './host-key-dialog'
 import { SnippetsClient } from './snippets/snippets-client'
 import { SnippetsStore, type Snippet } from './snippets/snippets-store'
@@ -390,6 +395,19 @@ function main(): void {
   const [openHostKeyBusy, setOpenHostKeyBusy] = createSignal(false)
   const openHostKeys = new OpenHostKeyRequestQueue((request) => setPendingOpenHostKey(request))
 
+  // The connect-time helper ask (ADR-0068): raised on the first connect of
+  // an auto connection whose fingerprint has no consent record, on the SAME
+  // one-dialog surface as the host-key ask above (HostKeyDialog). A
+  // separate queue because it is a separate question — a tab can hit a
+  // plain host-key refusal while another hits the combined ask — but it is
+  // rendered through the same component below.
+  const [pendingHelperConsentAsk, setPendingHelperConsentAsk] =
+    createSignal<HelperConsentAskRequest | null>(null)
+  const [helperConsentAskBusy, setHelperConsentAskBusy] = createSignal(false)
+  const helperConsentAsks = new HelperConsentAskQueue((request) =>
+    setPendingHelperConsentAsk(request),
+  )
+
   type AgentHostApproval = ApprovalFacts & {
     resolve: (approved: boolean) => void
   }
@@ -429,6 +447,40 @@ function main(): void {
       })
     } finally {
       setOpenHostKeyBusy(false)
+    }
+  }
+
+  // decideHelperConsentAsk answers the connect-time helper ask: when the
+  // SAME refusal also carried host-key evidence, the key is trusted FIRST —
+  // it is a precondition of either helper answer, never a separate click
+  // (host-key-dialog.tsx's own comment) — and only once that succeeds is
+  // the helper decision written. Both writes use the SAME fingerprint the
+  // ask named, so the resolver's next Lookup finds exactly the answer this
+  // recorded (ADR-0034).
+  const decideHelperConsentAsk = async (request: HelperConsentAskRequest, approved: boolean) => {
+    setHelperConsentAskBusy(true)
+    try {
+      const hostKey = request.evidence.hostKey
+      if (hostKey) {
+        await profileClient.trustHostKey(hostKey.knownHostsHost, hostKey.key)
+      }
+      await profileClient.helperConsent(
+        request.evidence.fingerprint,
+        approved,
+        request.evidence.host,
+      )
+      helperConsentAsks.settleMatchingQueued(request)
+      helperConsentAsks.settle(request, true)
+    } catch (err) {
+      showToast({
+        level: 'danger',
+        message: `Could not record the answer for ${request.evidence.host}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+        duration: 0,
+      })
+    } finally {
+      setHelperConsentAskBusy(false)
     }
   }
 
@@ -532,6 +584,7 @@ function main(): void {
   tm.outputRecording = historyStatusStore
   tm.onVaultSealed = () => vaultController.openUnlock('open this connection')
   tm.onHostKeyError = (evidence, signal) => openHostKeys.request(evidence, signal)
+  tm.onHelperConsentAsk = (ask, signal) => helperConsentAsks.request(ask, signal)
   tm.onSetupVault = () => vaultController.openSetup()
   tm.onCreateSecret = (name) => openSettingsPane().startNewSecret(name)
   // -- The client host (nocx-uo1k6, design D3) -------------------------
@@ -1822,9 +1875,23 @@ function main(): void {
           {(request) => (
             <HostKeyDialog
               evidence={request.evidence}
+              helperAsk={null}
               busy={openHostKeyBusy()}
-              onAccept={() => void acceptOpenHostKey(request)}
+              onAcceptHostKey={() => void acceptOpenHostKey(request)}
+              onDecideHelper={() => {}}
               onClose={() => openHostKeys.settle(request, false)}
+            />
+          )}
+        </Show>
+        <Show when={pendingHelperConsentAsk()} keyed>
+          {(request) => (
+            <HostKeyDialog
+              evidence={request.evidence.hostKey}
+              helperAsk={{ fingerprint: request.evidence.fingerprint }}
+              busy={helperConsentAskBusy()}
+              onAcceptHostKey={() => {}}
+              onDecideHelper={(approved) => void decideHelperConsentAsk(request, approved)}
+              onClose={() => helperConsentAsks.settle(request, false)}
             />
           )}
         </Show>
@@ -1848,6 +1915,11 @@ function main(): void {
     }
     setPendingOpenHostKey(null)
     setOpenHostKeyBusy(false)
+    while (pendingHelperConsentAsk()) {
+      pendingHelperConsentAsk()!.abort()
+    }
+    setPendingHelperConsentAsk(null)
+    setHelperConsentAskBusy(false)
   }
 
   dispatcher.onConnectionStateChange((state) => {

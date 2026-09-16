@@ -290,6 +290,79 @@ function hostKeyEvidenceFromOpenError(
   }
 }
 
+/** The connect-time helper ask (ADR-0068, owner's decision 2026-09-16):
+ *  an auto connection whose destination has no consent record is asked
+ *  before the open proceeds. hostKey is present only when the SAME dial
+ *  also discovered the key is unknown or changed — one dialog carries both
+ *  questions rather than raising two in sequence. Mirrors the backend's
+ *  open.helperConsent.schema.json exactly. */
+export interface HelperConsentAskEvidence {
+  host: string
+  fingerprint: string
+  hostKey: HostKeyErrorEvidence | null
+  profileId?: string
+}
+
+function helperConsentAskFromOpenError(
+  err: unknown,
+  profileId?: string,
+): HelperConsentAskEvidence | null {
+  if (!(err instanceof RpcError)) return null
+  const data: unknown = err.data
+  if (
+    !data ||
+    typeof data !== 'object' ||
+    !('helperAsk' in data) ||
+    data.helperAsk !== true ||
+    !('host' in data) ||
+    typeof data.host !== 'string' ||
+    !('fingerprint' in data) ||
+    typeof data.fingerprint !== 'string'
+  ) {
+    return null
+  }
+  let hostKey: HostKeyErrorEvidence | null = null
+  if ('hostKey' in data && data.hostKey && typeof data.hostKey === 'object') {
+    const hk: unknown = data.hostKey
+    if (
+      typeof hk === 'object' &&
+      hk !== null &&
+      'host' in hk &&
+      typeof hk.host === 'string' &&
+      'knownHostsHost' in hk &&
+      typeof hk.knownHostsHost === 'string' &&
+      'changed' in hk &&
+      typeof hk.changed === 'boolean' &&
+      'algorithm' in hk &&
+      typeof hk.algorithm === 'string' &&
+      'fingerprint' in hk &&
+      typeof hk.fingerprint === 'string' &&
+      'key' in hk &&
+      typeof hk.key === 'string'
+    ) {
+      hostKey = {
+        host: hk.host,
+        knownHostsHost: hk.knownHostsHost,
+        changed: hk.changed,
+        algorithm: hk.algorithm,
+        fingerprint: hk.fingerprint,
+        storedFingerprint:
+          'storedFingerprint' in hk && typeof hk.storedFingerprint === 'string'
+            ? hk.storedFingerprint
+            : undefined,
+        key: hk.key,
+        profileId,
+      }
+    }
+  }
+  return {
+    host: data.host,
+    fingerprint: data.fingerprint,
+    hostKey,
+    profileId,
+  }
+}
+
 /**
  * Whether `el` is somewhere the user types on purpose.
  *
@@ -415,6 +488,15 @@ export interface TerminalContentHooks {
    *  backend-issued known_hosts identity; mount then retries the same open.
    *  Abort closes a pending decision when the tab is closed. */
   onHostKeyError?: (evidence: HostKeyErrorEvidence, signal: AbortSignal) => Promise<boolean>
+  /** An SSH connection needs a person's answer about this destination's
+   *  helper before it may proceed (ADR-0068's connect-time ask) — with the
+   *  host-key evidence carried alongside when the same dial also needs a
+   *  trust decision. The promise resolves true once an answer (accept OR
+   *  decline) was recorded and any needed host-key trust was written; mount
+   *  then retries the same open, which now finds an answered machine. False
+   *  means the person closed the dialog without deciding — the open fails.
+   *  Abort closes a pending decision when the tab is closed. */
+  onHelperConsentAsk?: (ask: HelperConsentAskEvidence, signal: AbortSignal) => Promise<boolean>
   /** The reference picker's setup offer needs the setup dialog (no OS key):
    *  the vault layer owns it — wired by main.tsx to
    *  vaultController.openSetup. */
@@ -1816,6 +1898,23 @@ export class TerminalContent extends BasePaneContent {
       try {
         return await this.openRequestedSession()
       } catch (err) {
+        // The connect-time helper ask (ADR-0068) is checked FIRST: its
+        // shape is a superset of the plain host-key failure — it carries
+        // the same evidence, nested, when the key also needs a trust
+        // decision — so checking host-key-only second is what keeps a
+        // combined refusal from ever raising two dialogs in sequence
+        // (owner's decision, 2026-09-16).
+        const ask = helperConsentAskFromOpenError(err, this.sshOpts?.profileId)
+        if (ask && this.hooks.onHelperConsentAsk) {
+          const answered = await this.hooks.onHelperConsentAsk(ask, signal)
+          if (!answered) {
+            throw new Error(`The connection to ${ask.host} needs an answer before it can continue`)
+          }
+          if (signal.aborted) {
+            throw new Error('SSH open cancelled')
+          }
+          continue
+        }
         const evidence = hostKeyEvidenceFromOpenError(err, this.sshOpts?.profileId)
         if (!evidence || !this.hooks.onHostKeyError) {
           throw err

@@ -530,6 +530,153 @@ describe('SSH open host-key recovery', () => {
   })
 })
 
+describe('SSH open helper-consent recovery (ADR-0068)', () => {
+  it('on an already-trusted machine, asks about the helper alone and retries once answered', async () => {
+    const openSSHSession = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new RpcError(
+          'nocx has not been told whether it may use its helper on db.example.com:22',
+          -32603,
+          {
+            host: 'db.example.com:22',
+            fingerprint: 'SHA256:trusted',
+            helperAsk: true,
+          },
+        ),
+      )
+      .mockResolvedValueOnce(makeSession())
+    const onHelperConsentAsk = vi.fn().mockResolvedValue(true)
+    const onHostKeyError = vi.fn()
+    const client = makeClient({ openSSHSession })
+
+    const { teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        ssh: { profileId: 'ssh:test:1', host: 'db.example.com' },
+        hooks: { onHelperConsentAsk, onHostKeyError },
+      },
+      client,
+    )
+    try {
+      expect(onHelperConsentAsk).toHaveBeenCalledWith(
+        {
+          host: 'db.example.com:22',
+          fingerprint: 'SHA256:trusted',
+          hostKey: null,
+          profileId: 'ssh:test:1',
+        },
+        expect.any(AbortSignal),
+      )
+      // The already-trusted case never raises the plain host-key dialog —
+      // there is nothing about the key for it to show.
+      expect(onHostKeyError).not.toHaveBeenCalled()
+      expect(openSSHSession).toHaveBeenCalledTimes(2)
+      expect(openSSHSession.mock.calls[0]).toEqual(openSSHSession.mock.calls[1])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('when the key is ALSO unknown, the combined evidence carries the nested host-key data and only one hook fires', async () => {
+    const openSSHSession = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new RpcError(
+          'a person must decide before nocx may use its helper on db.example.com:22',
+          -32603,
+          {
+            host: 'db.example.com:22',
+            fingerprint: 'SHA256:offered',
+            helperAsk: true,
+            hostKey: {
+              host: 'db.example.com:22',
+              knownHostsHost: 'nocx-v1-route:22',
+              algorithm: 'ssh-ed25519',
+              fingerprint: 'SHA256:offered',
+              key: 'a2V5',
+              changed: false,
+            },
+          },
+        ),
+      )
+      .mockResolvedValueOnce(makeSession())
+    const onHelperConsentAsk = vi.fn().mockResolvedValue(true)
+    const onHostKeyError = vi.fn()
+    const client = makeClient({ openSSHSession })
+
+    const { teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        ssh: { profileId: 'ssh:test:1', host: 'db.example.com' },
+        hooks: { onHelperConsentAsk, onHostKeyError },
+      },
+      client,
+    )
+    try {
+      expect(onHelperConsentAsk).toHaveBeenCalledWith(
+        {
+          host: 'db.example.com:22',
+          fingerprint: 'SHA256:offered',
+          hostKey: {
+            host: 'db.example.com:22',
+            knownHostsHost: 'nocx-v1-route:22',
+            algorithm: 'ssh-ed25519',
+            fingerprint: 'SHA256:offered',
+            storedFingerprint: undefined,
+            key: 'a2V5',
+            changed: false,
+            profileId: 'ssh:test:1',
+          },
+          profileId: 'ssh:test:1',
+        },
+        expect.any(AbortSignal),
+      )
+      // ONE dialog answers both: the plain host-key hook never fires for a
+      // refusal the combined ask already claimed (owner's decision,
+      // 2026-09-16 — never two dialogs in sequence).
+      expect(onHostKeyError).not.toHaveBeenCalled()
+      expect(openSSHSession).toHaveBeenCalledTimes(2)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('closing the ask without an answer fails the open rather than retrying', async () => {
+    const openSSHSession = vi.fn().mockRejectedValue(
+      new RpcError(
+        'nocx has not been told whether it may use its helper on db.example.com:22',
+        -32603,
+        {
+          host: 'db.example.com:22',
+          fingerprint: 'SHA256:trusted',
+          helperAsk: true,
+        },
+      ),
+    )
+    const onHelperConsentAsk = vi.fn().mockResolvedValue(false)
+    const client = makeClient({ openSSHSession })
+
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        ssh: { profileId: 'ssh:test:1', host: 'db.example.com' },
+        hooks: { onHelperConsentAsk },
+        expectedReady: false,
+      },
+      client,
+    )
+    try {
+      expect(openSSHSession).toHaveBeenCalledTimes(1)
+      expect(tab.pane.textContent).toContain(
+        'The connection to db.example.com:22 needs an answer before it can continue',
+      )
+    } finally {
+      teardown()
+    }
+  })
+})
+
 /** Flip the active input target through the real composer chord. */
 const switchInputTarget = (ed: CommandEditor): void => {
   viewOf(ed).contentDOM.dispatchEvent(

@@ -3181,8 +3181,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         {(pending) => (
           <HostKeyDialog
             evidence={pending.evidence}
+            helperAsk={null}
             busy={hostKeyBusy()}
-            onAccept={() => void acceptPendingHostKey()}
+            onAcceptHostKey={() => void acceptPendingHostKey()}
+            onDecideHelper={() => {}}
             onClose={() => setPendingHostKey(null)}
           />
         )}

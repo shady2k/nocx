@@ -15,7 +15,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { cleanup, render, fireEvent } from '@solidjs/testing-library'
 import type { MachineFacts } from './agent-machine'
-import { AgentApprovalDialog } from './host-key-dialog'
+import { AgentApprovalDialog, HostKeyDialog } from './host-key-dialog'
 
 // The shape the backend actually sends: agent_approval.go composes the path
 // and the digest into one string, so the value the dialog receives is long,
@@ -170,5 +170,131 @@ describe('AgentApprovalDialog', () => {
     fireEvent.click(view.getByText('Saving…'))
     fireEvent.click(view.getByText('Deny'))
     expect(onDecide).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * HostKeyDialog tests — the one consent surface for probe-time and open-time
+ * host-key decisions AND the connect-time helper ask (ADR-0068).
+ *
+ * What a user can do, in each of the three shapes the wire can send: an
+ * ordinary host-key ask (evidence only — unchanged by this bead), a
+ * helper-only ask (a machine whose key is already trusted), and the
+ * combined ask a single unknown-or-changed-key auto connect raises. Each
+ * button is asserted from the state the button starts enabled in: present,
+ * enabled, and its click reaching the callback the caller acts on.
+ */
+const HOST_KEY_UNKNOWN = {
+  host: 'db.example.com:22',
+  changed: false,
+  fingerprint: 'SHA256:offered',
+}
+const HOST_KEY_CHANGED = {
+  host: 'db.example.com:22',
+  changed: true,
+  fingerprint: 'SHA256:new',
+  storedFingerprint: 'SHA256:old',
+}
+
+function openHostKeyDialog(props: {
+  evidence?: typeof HOST_KEY_UNKNOWN | null
+  helperAsk?: { fingerprint: string } | null
+  busy?: boolean
+}) {
+  const onAcceptHostKey = vi.fn()
+  const onDecideHelper = vi.fn()
+  const onClose = vi.fn()
+  const view = render(() => (
+    <HostKeyDialog
+      evidence={props.evidence ?? null}
+      helperAsk={props.helperAsk ?? null}
+      busy={props.busy ?? false}
+      onAcceptHostKey={onAcceptHostKey}
+      onDecideHelper={onDecideHelper}
+      onClose={onClose}
+    />
+  ))
+  return { view, onAcceptHostKey, onDecideHelper, onClose }
+}
+
+describe('HostKeyDialog — host-key-only ask (unchanged by ADR-0068)', () => {
+  afterEach(cleanup)
+
+  it('offers Trust host key and reaches onAcceptHostKey, not the helper callback', () => {
+    const { view, onAcceptHostKey, onDecideHelper } = openHostKeyDialog({
+      evidence: HOST_KEY_UNKNOWN,
+    })
+    expect(view.queryByText('Use the helper')).toBeNull()
+    fireEvent.click(view.getByText('Trust host key'))
+    expect(onAcceptHostKey).toHaveBeenCalledTimes(1)
+    expect(onDecideHelper).not.toHaveBeenCalled()
+  })
+
+  it('names a changed key as danger, distinctly from an unknown one', () => {
+    const { view } = openHostKeyDialog({ evidence: HOST_KEY_CHANGED })
+    expect(view.getByText('Trust the new key')).toBeTruthy()
+    expect(view.container.textContent).toContain('SHA256:old')
+    expect(view.container.textContent).toContain('SHA256:new')
+  })
+
+  it('cancelling reaches onClose without recording anything', () => {
+    const { view, onAcceptHostKey, onClose } = openHostKeyDialog({ evidence: HOST_KEY_UNKNOWN })
+    fireEvent.click(view.getByText('Cancel'))
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onAcceptHostKey).not.toHaveBeenCalled()
+  })
+})
+
+describe('HostKeyDialog — connect-time helper ask (ADR-0068)', () => {
+  afterEach(cleanup)
+
+  it('on an already-trusted machine asks about the helper alone, with no host-key action', () => {
+    const { view, onDecideHelper } = openHostKeyDialog({
+      helperAsk: { fingerprint: 'SHA256:trusted' },
+    })
+    expect(view.queryByText('Trust host key')).toBeNull()
+    expect(view.queryByText('Trust the new key')).toBeNull()
+    expect(view.getByText('Use the helper')).toBeTruthy()
+    expect(view.getByText('Not now')).toBeTruthy()
+    expect(view.container.textContent).toContain('SHA256:trusted')
+
+    fireEvent.click(view.getByText('Use the helper'))
+    expect(onDecideHelper).toHaveBeenCalledWith(true)
+  })
+
+  it('declining reaches onDecideHelper(false) — a recorded answer, not a cancel', () => {
+    const { view, onDecideHelper, onClose } = openHostKeyDialog({
+      helperAsk: { fingerprint: 'SHA256:trusted' },
+    })
+    fireEvent.click(view.getByText('Not now'))
+    expect(onDecideHelper).toHaveBeenCalledWith(false)
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('when the key is ALSO unknown, one dialog shows both the host-key evidence and the helper question, with no standalone host-key action', () => {
+    const { view, onAcceptHostKey, onDecideHelper } = openHostKeyDialog({
+      evidence: HOST_KEY_UNKNOWN,
+      helperAsk: { fingerprint: HOST_KEY_UNKNOWN.fingerprint },
+    })
+    // The host-key evidence is shown (so the person can judge it)...
+    expect(view.container.textContent).toContain(HOST_KEY_UNKNOWN.fingerprint)
+    // ...but its own accept button is not offered: trusting the key is a
+    // precondition of either helper answer below, never a third click.
+    expect(view.queryByText('Trust host key')).toBeNull()
+    expect(onAcceptHostKey).not.toHaveBeenCalled()
+
+    fireEvent.click(view.getByText('Use the helper'))
+    expect(onDecideHelper).toHaveBeenCalledWith(true)
+  })
+
+  it('busy disables every action, including the helper buttons', () => {
+    const { view, onDecideHelper } = openHostKeyDialog({
+      helperAsk: { fingerprint: 'SHA256:trusted' },
+      busy: true,
+    })
+    fireEvent.click(view.getByText('Saving…'))
+    expect(onDecideHelper).not.toHaveBeenCalled()
+    fireEvent.click(view.getByText('Not now'))
+    expect(onDecideHelper).not.toHaveBeenCalled()
   })
 })

@@ -2,6 +2,7 @@ import { Dispatcher } from './dispatcher'
 import type { ConnectionTestResult } from './generated/connections.probe'
 import type { SettingsSet } from './generated/settings.set'
 import type { TrustHostKeyResult } from './generated/connections.trustHostKey'
+import type { ConnectionsHelperConsentResult } from './generated/connections.helperConsent'
 import type { SaveKeyMaterialMintResult } from './generated/secrets.saveKeyMaterial'
 import type { BackupCreateResult } from './generated/backup.create'
 import type { BackupRestorePreview as RestorePreview } from './generated/backup.preview'
@@ -482,6 +483,20 @@ export class ProfileClient {
    */
   trustHostKey(knownHostsHost: string, key: string): Promise<TrustHostKeyResult> {
     return this.call('connections.trustHostKey', { host: knownHostsHost, key })
+  }
+
+  /**
+   * connections.helperConsent — record the person's answer to the
+   * connect-time helper ask (ADR-0068). fingerprint is echoed verbatim from
+   * the open failure's helperConsentData; the write is keyed by it alone
+   * (ADR-0034), and host travels for the backend's log line only.
+   */
+  helperConsent(
+    fingerprint: string,
+    granted: boolean,
+    host?: string,
+  ): Promise<ConnectionsHelperConsentResult> {
+    return this.call('connections.helperConsent', { fingerprint, granted, host })
   }
 
   /**

@@ -429,9 +429,12 @@ async function installHelperThroughProduct(
   await promptReady(page)
   await page.keyboard.type(`cd '${repoPath}'`)
   await page.keyboard.press('Enter')
-  await expect(page.locator('.pane.active .nocx-editor-cwd')).toContainText(basename(repoPath), {
-    timeout: 30_000,
-  })
+  await expect(page.locator('.pane.active .nocx-editor-context .ui-prompt-context')).toContainText(
+    basename(repoPath),
+    {
+      timeout: 30_000,
+    },
+  )
   await page.locator(VIEW_GIT).click()
   await expect(page.locator(GIT_PANEL)).toBeVisible({ timeout: 30_000 })
   await expect(page.locator('[data-testid="git-branch"]')).toBeVisible({ timeout: 60_000 })

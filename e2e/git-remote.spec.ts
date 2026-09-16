@@ -339,10 +339,9 @@ test('a commit from the panel, on a remote host, through its own pre-commit hook
     // seed sets programTitle to the ssh host (domain-environment.ts:235 —
     // "the tab names the destination"), and pushTitle prefers programTitle
     // over the cwd label, so the title would never move.
-    await expect(page.locator('.pane.active .nocx-editor-cwd')).toContainText(
-      path.basename(fixture.repo),
-      { timeout: 30_000 },
-    )
+    await expect(
+      page.locator('.pane.active .nocx-editor-context .ui-prompt-context'),
+    ).toContainText(path.basename(fixture.repo), { timeout: 30_000 })
 
     // The git panel answers for THAT tab. Consent was already granted at
     // connect (ADR-0068: the git panel never asks) — the helper installed

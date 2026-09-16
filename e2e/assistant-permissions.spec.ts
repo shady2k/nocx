@@ -266,10 +266,9 @@ function turn(page: Page, question: string): Locator {
  * This is the synchronisation point every "and was not asked" below stands on.
  */
 async function answerFinished(page: Page, question: string): Promise<void> {
-  await expect(turn(page, question).locator(':scope > .cmd-header .cmd-header-exit')).toHaveText(
-    'completed',
-    { timeout: 60_000 },
-  )
+  await expect(turn(page, question)).toHaveAttribute('data-outcome', 'success', {
+    timeout: 60_000,
+  })
 }
 
 /** The approval prompt, by the title a policy question carries. */
@@ -400,7 +399,7 @@ async function expectCommandRan(page: Page, question: string, command: string): 
   await expect(block).toHaveCount(1, { timeout: 60_000 })
   await expect(block.locator('.cmd-header-text')).toContainText(command)
   await expect(block.locator('.ui-badge[data-author="agent"]')).toBeVisible()
-  await expect(block.locator('.cmd-header-exit')).toHaveText('ok', { timeout: 30_000 })
+  await expect(block).toHaveAttribute('data-outcome', 'success', { timeout: 30_000 })
 }
 
 /** The answer a person reads, which is derived from what the tool returned. */

@@ -691,6 +691,30 @@ func (rp *readoptPass) readopt(
 			adoption.abort()
 			return transport.HostedSessionOpen{}, fmt.Errorf("adopt the re-attached session: %w", err)
 		}
+		// THE FINGERPRINT IS RECORDED HERE TOO, exactly as a fresh open
+		// records it (helper_git.go's openFarHelper, helper_local.go's
+		// OpenHosted) — and it must be, because a re-adopted session's own
+		// channel is AttachedSession, which HostKeyFingerprint()'s own doc
+		// says "has no handshake of its own to have observed". Skipping this
+		// call left every re-adopted session answering "" forever (set-once,
+		// never set): a caller that consults the fingerprint to decide
+		// something — git.open's resolver, for the auto+consent-store branch
+		// — silently fails that lookup and refuses gracefully. A caller
+		// whose mode is an explicit answer (DesiredHelper) never reaches that
+		// lookup at all and finds nothing to warn it the session it is about
+		// to re-probe is one this coordinator cannot yet name by fingerprint
+		// (nocx-xn63t.6.5: measured driving git.open against a reconciled
+		// session immediately after a restart). p.Fingerprint is the same
+		// value recordHostedBinding already wrote to this session's durable
+		// row at open time, so this is not a new fact — only the first time
+		// it reaches the re-adopted, in-memory session object a live caller
+		// can actually read.
+		if p.Fingerprint != "" {
+			if rerr := rp.registry.registry.RecordHostKeyFingerprint(sid, p.Fingerprint); rerr != nil {
+				rp.registry.log.Warn("re-adopted session: its durable fingerprint could not be recorded",
+					"session_id", p.SessionID, "error", rerr)
+			}
+		}
 		// The registry entry is what makes `sessions.inventory` answer for
 		// this generation on a cold start, and it is written only now — after
 		// the attach and the adopt, so nothing claims a helper for a session

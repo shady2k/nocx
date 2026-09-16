@@ -489,6 +489,49 @@ func TestAFreshCoordinatorTakesBackTheSessionStillRunningOnItsHost(t *testing.T)
 	}
 }
 
+// TestAReadoptedSessionAnswersItsOwnHostKeyFingerprint (nocx-xn63t.6.5): a
+// re-adopted session's channel is AttachedSession, which HostKeyFingerprint's
+// own doc says has no handshake of its own to observe — so unless the
+// re-adopt records the durable fingerprint the way a fresh open does, the
+// session answers "" forever (set-once, never set). Found by driving
+// remote-coordinator-reclaim.spec.ts and ssh-helper-happy-path.spec.ts in the
+// container: git.open, called against a just-reconciled session, resolves by
+// mode alone for an explicit `helper` connection (skipping the fingerprint
+// entirely) and reaches its probe-and-install branch even though the session
+// it is about is one this coordinator cannot yet name by fingerprint —
+// destabilising the live session mid-probe. An `auto`+granted connection
+// happened to survive the same call only because ITS resolve branch needs the
+// fingerprint for the consent-store lookup and, finding none, refused
+// gracefully — an accident of a different code path, not a guarantee.
+func TestAReadoptedSessionAnswersItsOwnHostKeyFingerprint(t *testing.T) {
+	svc := sharedHelperService()
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+
+	first := newCoordinator(t, provider)
+	binding := openHostedFixture(t, first, "pane-1")
+	if binding.Fingerprint == "" {
+		t.Fatal("the fixture's own open recorded no fingerprint; nothing here would be proof of anything")
+	}
+
+	first.quit()
+	second := newCoordinator(t, provider)
+
+	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
+	adopter := &stubAdopter{}
+	reconcileSessions(context.Background(), rec, second.reg.inventories(),
+		readoptFixture(t, second, routesFor(binding), adopter), time.Hour, quietLogger())
+
+	sess, err := second.sess.Get(session.ID(binding.SessionID))
+	if err != nil {
+		t.Fatalf("the replacement coordinator does not hold the session it took back: %v", err)
+	}
+	if got := sess.HostKeyFingerprint(); got != binding.Fingerprint {
+		t.Fatalf("HostKeyFingerprint() = %q, want %q (the durable binding's own) — "+
+			"a caller that keys a decision on it, like git.open's consent-store lookup, "+
+			"cannot tell this machine apart from one it has never met", got, binding.Fingerprint)
+	}
+}
+
 // helperSessionsOnHost asks the daemon directly what it holds — the count that
 // says whether a second shell was spawned. Straight at the service rather than
 // over a lane, deliberately: this is the test's own instrument and must not be

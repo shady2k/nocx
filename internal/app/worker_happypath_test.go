@@ -2,6 +2,7 @@ package app
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -276,6 +277,53 @@ type happyRealPTYFactory struct {
 	// product, so the stand tees the PTY itself rather than deriving a screen
 	// from a stream the coordinator no longer reads.
 	views *paneviewtest.Views
+	// transcript holds the raw bytes every pane this factory opened actually
+	// printed — nocx.bash's own stderr included, which is where "nocx: tool
+	// surface unavailable" or a shell's own error about a failed redirect
+	// would land. Nothing before nocx-xn63t.6.1 kept this: a failure inside
+	// the worker's pane (as opposed to the external coordinator process,
+	// whose own stdout/stderr runHappyExternalCoordinator already prints on
+	// failure) left no trace at all — the CI dump for the mac run that
+	// motivated this had nothing between "agent enrolled" and "agent
+	// withdrawn" to say why no agent_report ever followed. Read on test
+	// failure only (happyPaneTranscripts), so a passing run pays nothing.
+	transcript *happyPaneTranscripts
+}
+
+// happyPaneTranscripts records every byte each pane produced, keyed by pane
+// id, so a failing test can print exactly what a person watching that pane
+// would have seen — including whatever the shell wrote to its own stderr
+// before nocx ever gets a structured fact about it.
+type happyPaneTranscripts struct {
+	mu   sync.Mutex
+	byID map[string]*bytes.Buffer
+}
+
+func newHappyPaneTranscripts() *happyPaneTranscripts {
+	return &happyPaneTranscripts{byID: make(map[string]*bytes.Buffer)}
+}
+
+func (h *happyPaneTranscripts) feed(paneID string, b []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	buf, ok := h.byID[paneID]
+	if !ok {
+		buf = &bytes.Buffer{}
+		h.byID[paneID] = buf
+	}
+	buf.Write(b)
+}
+
+// dump renders every pane's transcript so far, for a t.Cleanup that only
+// calls it once the test has already failed.
+func (h *happyPaneTranscripts) dump() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out strings.Builder
+	for paneID, buf := range h.byID {
+		fmt.Fprintf(&out, "--- pane %s ---\n%s\n", paneID, buf.String())
+	}
+	return out.String()
 }
 
 // teePTY hands every byte a pane produced to the stand's pane source as well as
@@ -388,12 +436,21 @@ func (f *happyRealPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty
 		<-lp.Done()
 		_ = os.Remove(rcPath)
 	}()
+	paneID := cfg.SessionID
+	transcript := f.transcript
 	if f.views == nil {
-		return lp, nil
+		if transcript == nil {
+			return lp, nil
+		}
+		return teePTY{Pty: lp, feed: func(b []byte) { transcript.feed(paneID, b) }}, nil
 	}
 	views := f.views
-	paneID := cfg.SessionID
-	return teePTY{Pty: lp, feed: func(b []byte) { views.Feed(paneID, b) }}, nil
+	return teePTY{Pty: lp, feed: func(b []byte) {
+		views.Feed(paneID, b)
+		if transcript != nil {
+			transcript.feed(paneID, b)
+		}
+	}}, nil
 }
 
 func (f *happyRealPTYFactory) closeAdapters() {
@@ -672,7 +729,10 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 	var watch *happyPaneWatch
 	var paneWatcherSeam paneWatcher
 	grid := paneviewtest.NewViews(logger)
-	factory := &happyRealPTYFactory{log: logger, lanes: lanes, lanesBySession: make(map[string]lifecycle.LaneID), views: grid}
+	factory := &happyRealPTYFactory{
+		log: logger, lanes: lanes, lanesBySession: make(map[string]lifecycle.LaneID),
+		views: grid, transcript: newHappyPaneTranscripts(),
+	}
 	reg := session.New(logger, factory)
 	enrol := newWorkerEnrolments(logger, reg)
 
@@ -928,6 +988,18 @@ func TestExternalClaudeDrivesAWorkerEndToEnd(t *testing.T) {
 		t.Logf("using external worker command %q", command)
 	}
 	stand := newHappyStand(t)
+	// Nothing before nocx-xn63t.6.1 printed what the worker's OWN pane saw —
+	// runHappyExternalCoordinator already surfaces the external coordinator
+	// process's stdout/stderr on failure, but a report that never arrived
+	// could be the shell's fault (an nocx.bash refusal, a fake claude that
+	// never ran, a write that failed) with nothing to say so. t.Cleanup, not
+	// a defer near the assertions, so it also catches a t.Fatalf raised by a
+	// helper this test calls.
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("worker pane transcript(s):\n%s", stand.factory.transcript.dump())
+		}
+	})
 	cycle := runHappyExternalCoordinator(t, stand.endpoint.SocketPath())
 
 	var spawned struct {

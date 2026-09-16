@@ -43,6 +43,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/shellintegration"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 )
 
 // TestAFarSideAgentReachesTheCoordinatorsToolSocketThroughThePaneForward is the
@@ -69,7 +70,7 @@ func TestAFarSideAgentReachesTheCoordinatorsToolSocketThroughThePaneForward(t *t
 	// The far host's path, named by the coordinator. It does not exist yet: the
 	// far side's sshd creates it, and a fixture-owned directory stands in for
 	// the account's own run directory there.
-	farPath := filepath.Join(t.TempDir(), "nocx-tool.sock")
+	farPath := filepath.Join(storagetest.SocketDir(t), "nocx-tool.sock")
 
 	// THE PANE FIRST, because the socket belongs to it: the session id the far
 	// daemon mints is what every connection through the socket announces.

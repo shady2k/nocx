@@ -52,6 +52,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/log/logtest"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 )
 
 // addCoordinator dials a SECOND coordinator connection to the SAME helper
@@ -99,7 +100,7 @@ func TestEachCoordinatorsPaneForwardsToItsOwnToolEndpoint(t *testing.T) {
 	first := stand.client
 	second := stand.addCoordinator(t)
 
-	dir := t.TempDir()
+	dir := storagetest.SocketDir(t)
 	farA, farB := filepath.Join(dir, "far-a.sock"), filepath.Join(dir, "far-b.sock")
 	coordA, coordB := filepath.Join(dir, "coord-a.sock"), filepath.Join(dir, "coord-b.sock")
 	endpointA := serveToolEndpoint(t, coordA, true)
@@ -208,7 +209,7 @@ func TestAFarToolConnectionEndsWithTheSessionThatJustifiesIt(t *testing.T) {
 	stand := newSSHStand(t, f, &sshCoordinator{
 		password: "pw", verdict: proto.HostKeyTrusted, fingerprint: f.fingerprint(),
 	})
-	dir := t.TempDir()
+	dir := storagetest.SocketDir(t)
 	farA, farB := filepath.Join(dir, "far-a.sock"), filepath.Join(dir, "far-b.sock")
 	endpoint := serveToolEndpoint(t, stand.toolSocket, true)
 
@@ -344,7 +345,7 @@ func TestAPaneWhoseCoordinatorHasGoneIsRefusedAndNotReRouted(t *testing.T) {
 	// The coordinator that started this daemon, still running.
 	alive := serveToolEndpoint(t, stand.toolSocket, true)
 
-	dir := t.TempDir()
+	dir := storagetest.SocketDir(t)
 	farPath := filepath.Join(dir, "far.sock")
 	gonePath := filepath.Join(dir, "coord-gone.sock")
 	gone, err := net.Listen("unix", gonePath)

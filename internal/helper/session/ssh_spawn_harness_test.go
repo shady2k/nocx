@@ -50,6 +50,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 )
 
 const sshTestHash = "ssh-test-hash"
@@ -1323,7 +1324,7 @@ func newSSHStandWith(t *testing.T, f *sshFixture, coord *sshCoordinator, withSSH
 	// there, and a test that does not leaves the path dead — which is exactly
 	// the difference between a pane whose agent can reach the tool surface and
 	// one whose agent cannot.
-	return newSSHStandFull(t, f, coord, withSSHSpawner, filepath.Join(t.TempDir(), "tool.sock"))
+	return newSSHStandFull(t, f, coord, withSSHSpawner, filepath.Join(storagetest.SocketDir(t), "tool.sock"))
 }
 
 func newSSHStandFull(t *testing.T, f *sshFixture, coord *sshCoordinator, withSSHSpawner bool, toolSocket string) *sshStand {

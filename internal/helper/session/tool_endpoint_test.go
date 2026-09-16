@@ -52,6 +52,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
 )
 
@@ -261,7 +262,10 @@ func TestEachCoordinatorsLocalPaneIsToldItsOwnToolEndpoint(t *testing.T) {
 	first := addCoordinatorTo(t, svc, coordinatorHash, log, nil, nil)
 	second := addCoordinatorTo(t, svc, coordinatorHash, log, nil, nil)
 
-	dir := t.TempDir()
+	// storagetest.SocketDir, not t.TempDir(): the two sockets below are
+	// bounded by sun_path, and t.TempDir()'s embedded test name pushed this
+	// one past it under macOS's TMPDIR (nocx-zmeu1).
+	dir := storagetest.SocketDir(t)
 	coordA, coordB := filepath.Join(dir, "coord-a.sock"), filepath.Join(dir, "coord-b.sock")
 	endpointA := serveToolEndpoint(t, coordA, false)
 	endpointB := serveToolEndpoint(t, coordB, false)

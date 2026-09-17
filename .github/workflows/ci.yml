@@ -625,10 +625,32 @@ jobs:
           node-version: '24'
 
       - name: The backlog is still a queue
+        env:
+          # Through the environment rather than into the script: an expression
+          # interpolated into a shell line is a shell line somebody else can
+          # write.
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
         run: |
           set -eu
           gate=.githooks/backlog-gate
-          base=$(git merge-base "origin/${{ github.base_ref || 'main' }}" HEAD)
+          # What was already wrong before this change. On a pull request that is
+          # the merge base with the branch being merged into; on a push it is the
+          # commit the branch was at before the push, because a merge base
+          # against the branch\'s own upstream is the branch itself — the
+          # baseline would be the backlog under test and nothing could ever be
+          # new. A first push or a shallow surprise leaves neither, and then the
+          # previous commit is the honest answer.
+          base=""
+          if [ -n "${BASE_REF:-}" ]; then
+            base=$(git merge-base "origin/$BASE_REF" HEAD)
+          elif [ -n "${BEFORE:-}" ]; then
+            base="$BEFORE"
+          fi
+          if [ -z "$base" ] || ! git rev-parse -q --verify "$base^{commit}" >/dev/null ||
+            [ "$(git rev-parse "$base^{commit}")" = "$(git rev-parse HEAD)" ]; then
+            base=$(git rev-parse HEAD^)
+          fi
           echo "baseline: $base"
           node "$gate/adapter.mjs" --at "$base" > "$RUNNER_TEMP/backlog-baseline.json"
           node "$gate/adapter.mjs" |

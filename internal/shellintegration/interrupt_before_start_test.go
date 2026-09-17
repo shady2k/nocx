@@ -114,7 +114,7 @@ const interruptIterations = 20
 // readline wedged with the line unrun, so what is established is that an idle
 // machine does not reach the window, not that descheduling is the only thing
 // that opens it. So the reproduction is recorded with its numbers here and in
-// the commit that landed this, and not as a test: a test that silently stops
+// this task's commit messages, and not as a test: a test that silently stops
 // reproducing is worse than none. What is deterministic, and what earns its
 // place in the suite, is TestInterruptOracleClassifiesWhatBashExecuted, which
 // drives this oracle with that CI run's verbatim evidence.
@@ -389,16 +389,19 @@ func iterationStart(evs []kernelEvent, startsBefore int) (string, bool) {
 }
 
 // truncationShape names how the executed text relates to the submitted line,
-// so a failure says which defect it saw: the recorded upstream one drops a
-// prefix, while any other shape would be a different — possibly ours — defect.
+// in the same vocabulary classifyInterrupt decides in: a PROPER SUFFIX is the
+// recorded upstream defect (bash drops a prefix, and the hook may cut the
+// remainder further), and anything else is a shape that defect does not
+// produce — so a failure never describes an interior fragment or a prefix as
+// a front-truncated remainder.
 func truncationShape(submitted, executed string) string {
 	switch {
 	case executed == "":
 		return "an empty command text"
-	case strings.Contains(submitted, executed):
+	case executed != submitted && strings.HasSuffix(submitted, executed):
 		return "a front-truncated remainder of the submitted line"
 	default:
-		return "NOT any part of the submitted line"
+		return "NOT a proper suffix of the submitted line"
 	}
 }
 

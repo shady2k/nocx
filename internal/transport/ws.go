@@ -785,6 +785,27 @@ type WSServer struct {
 	lifecyclePub   *lifecyclepub.Publisher
 	lifecycleMu    sync.Mutex
 	lifecycleLanes map[lifecycle.LaneID]session.ID
+	// heldMu guards heldStops, and the lock ORDER is heldMu → lifecycleMu →
+	// the kernel's own lock, because the one read that both arms a hold and
+	// answers what it is for (sessionProtectedForeground.StopTarget) runs
+	// inside heldMu. Nothing takes those two in the other order, and no
+	// helper below calls an emitter, a session or the wire while either is
+	// held.
+	heldMu sync.Mutex
+	// heldStops is one accepted Stop per attempt, waiting for that attempt's
+	// authenticated start (nocx-zas0d, ws_signal.go). Keyed by attempt
+	// because the obligation is about one execution: the same Stop arriving
+	// twice is one obligation, and an attempt that never starts takes its
+	// hold with it when the publisher reports it closed.
+	heldStops map[lifecycle.AttemptID]session.ID
+	// signalSub and signalOps are the execution lane session.signal runs on
+	// (buildControlPlane), shared with the one other thing that is a signal:
+	// a held Stop being delivered when its attempt starts. One lane, so the
+	// bound that keeps a person's Stop off the socket read loop also bounds
+	// the delivery, and neither may wait on the other's permit while holding
+	// the shell channel's reader.
+	signalSub control.Submission
+	signalOps *capability.SessionOperations
 	// integrations is the per-session integration axis published as
 	// session.integrationChanged (nocx-dvql, ws_integration.go). Separate
 	// from lifecycleLanes because it answers a different question: that map
@@ -1665,6 +1686,13 @@ func (s *WSServer) buildControlPlane() {
 	// The per-operation queue submissions bound in-flight tasks per operation.
 	gates := s.domainGates()
 	immediate := control.ImmediateSubmission{}
+	// The signal lane, built here rather than inside signalSpecs because it
+	// has TWO users and must be one lane: the method a person's Stop calls,
+	// and the delivery of a Stop that was held for an attempt's start
+	// (nocx-zas0d, ws_signal.go). Both are the same act on the same session,
+	// so they share the bound and the serialisation.
+	s.signalOps = capability.NewSessionOperations(gates.session, lane, s.registry, s.profileUsage)
+	s.signalSub = s.operationQueue("signal")
 	// The request broker is constructed here, once the server's connection
 	// set exists: its delivery seams are this server's own snapshot and
 	// per-connection enqueue, and its resolution methods register on the
@@ -1684,7 +1712,7 @@ func (s *WSServer) buildControlPlane() {
 		s.hostSessionInventorySpecs(inventorySub)[0],
 		func() bool { return s.hostSessionInventory != nil },
 		"method not found: helper session inventory not wired"))
-	specs = append(specs, s.signalSpecs(lane, gates.session)...)
+	specs = append(specs, s.signalSpecs()...)
 	specs = append(specs, s.askResolverSpecs(immediate)...)
 	specs = append(specs, s.laneInteractivitySpec(immediate))
 	specs = append(specs, s.brokerSpecs(immediate)...)
@@ -3788,6 +3816,11 @@ func (s *WSServer) closeSession(sid session.ID, sess session.Session) {
 	// (ws_sessionpolicy.go).
 	s.sessionPolicy.Drop(sid)
 	s.unregisterLifecycleLanes(sid)
+	// A held Stop belongs to an attempt, and an attempt belongs to a session:
+	// when the session ends there is nothing left for the obligation to be
+	// about, and it must not outlive the registry entry that named it
+	// (nocx-zas0d, ws_signal.go's heldStops).
+	s.dropHeldStopsFor(sid)
 	s.unregisterIntegration(sid)
 	s.discoverySessionClosed(sess)
 }

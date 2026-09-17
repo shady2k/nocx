@@ -1870,6 +1870,23 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     expect(rec.attemptId).toBe('att-1')
   })
 
+  it('abandonAttempt leaves an armed Stop unread — a command that never started cannot be labelled', () => {
+    // nocx-zas0d: a Stop accepted before the shell began the line keeps
+    // `stopRequested`, because the backend took the request and the completion
+    // it causes is SIGINT's 130 (terminal-content.test.ts's held case). This
+    // is the other end of that decision. When the attempt closes WITHOUT ever
+    // starting, the block freezes as `unknown`, draws no terminal chip at all
+    // and never reads the flag — so an armed Stop cannot turn a command that
+    // never ran into a "Stopped".
+    const rec = manager.startBlock('sleep 100', '~', 0)
+    manager.bindAttempt('att-1')
+    rec.stopRequested = true
+    const frozen = manager.abandonAttempt(attempt({ state: 'unknown' }), () => undefined, 6)
+    expect(frozen).not.toBeNull()
+    expect(frozen!.status).toBe('unknown')
+    expect(frozen!.el.dataset.outcome).toBeUndefined()
+  })
+
   it('abandonAttempt refuses a completed attempt and a foreign binding', () => {
     manager.startBlock('make', '~', 0)
     manager.bindAttempt('att-1')

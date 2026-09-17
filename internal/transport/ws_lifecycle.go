@@ -170,6 +170,13 @@ func (s *WSServer) PublishLifecycleProjection(f lifecyclepub.Fact) {
 	s.syncLifecycleLedger(f)
 }
 
+// THE TWO TRANSITIONS THE FACT STREAM CANNOT CARRY are delivered through the
+// publisher's optional emitter, type-asserted there — so a drifting signature
+// on either method unwires them in silence. Pinned as a compile-time assertion
+// for that reason: the held Stop's delivery is the only consumer today, and a
+// test that reads the obligation itself would be the only thing that noticed.
+var _ lifecyclepub.AttemptTransitionEmitter = (*WSServer)(nil)
+
 // PublishLifecycle routes one published fact to the lane's session's current
 // subscriber and writes the notification. This is the Emitter half of
 // internal/lifecyclepub.Emitter: the composition root binds the server as the

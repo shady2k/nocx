@@ -411,6 +411,40 @@ type ProjectionEmitter interface {
 	PublishLifecycleProjection(f Fact)
 }
 
+// AttemptTransitionEmitter receives the two transitions of one attempt that
+// the published Fact cannot carry, and cannot be extended to carry without
+// claiming something else:
+//
+//   - the shell AUTHENTICATED ITS START. Fact.Attempt.StartedAt is the SUBMIT
+//     time (the attempt exists from submit, before its bytes reach the pty —
+//     decision 5), so a lane's projection is byte-identical before and after
+//     the start attaches and the change-dedupe suppresses the notification.
+//     publishLaneProjection exists for the ledger's half of this transition;
+//     this is the transport's.
+//   - the attempt LEFT OPEN WITHOUT ONE. applyPromptReady clears the lane's
+//     attempt reference as soon as it PRIMES it (kernel.go: an open attempt
+//     the shell reached a prompt over may still be the start's target), so the
+//     prompt_ready that later closes that attempt derives a fact identical to
+//     the one already emitted — the closer is invisible in the fact stream and
+//     in the lane's own projection, which by then names no attempt at all.
+//
+// The two are one interface because they are two answers about one attempt,
+// both read the same way: the open attempts of a lane, before and after a
+// mutation that succeeded (transitionsBelow). An emitter that does not
+// implement this interface is not told, which is every emitter that has no
+// state resting on either transition.
+type AttemptTransitionEmitter interface {
+	// PublishAttemptStarted reports that this already-open attempt is now
+	// started — the shell has authenticated the line it belongs to, which is
+	// the first moment an interrupt may be written for it without landing in
+	// bash's parser (nocx-zas0d).
+	PublishAttemptStarted(attempt lifecycle.AttemptID)
+	// PublishAttemptClosed reports that this attempt has left `open`, with no
+	// start ever having been authenticated for it. An obligation held against
+	// that start can never be discharged and must be dropped.
+	PublishAttemptClosed(attempt lifecycle.AttemptID)
+}
+
 // Publisher wraps the kernel, forwards every mutation, and projects the
 // affected lane into a Fact on each change. It is safe for concurrent use:
 // per-lane serialization comes from the kernel (and from the single adapter
@@ -700,7 +734,73 @@ func (p *Publisher) shouldPublishStartedAttempt(env lifecycle.Envelope) bool {
 	return ok && !attempt.Started
 }
 
+// openAttemptsOf reads the lane's open attempts with the one bit the published
+// Fact cannot carry — whether each has been STARTED — and it is the read both
+// transition reports are defined against (AttemptTransitionEmitter). It must be
+// taken BEFORE the mutation whose transitions it is asked about, and it returns
+// nil when the lane holds nothing open, which is the ordinary state between
+// commands.
+func (p *Publisher) openAttemptsOf(lane lifecycle.LaneID) map[lifecycle.AttemptID]bool {
+	if lane == "" {
+		return nil
+	}
+	snap, err := p.kernel.State(lane)
+	if err != nil {
+		return nil
+	}
+	return p.openAttemptsIn(snap)
+}
+
+// openAttemptsIn is openAttemptsOf over a snapshot the caller already read.
+func (p *Publisher) openAttemptsIn(snap lifecycle.LaneSnapshot) map[lifecycle.AttemptID]bool {
+	if len(snap.OpenAttempts) == 0 {
+		return nil
+	}
+	open := make(map[lifecycle.AttemptID]bool, len(snap.OpenAttempts))
+	for _, id := range snap.OpenAttempts {
+		att, ok := p.kernel.Attempt(id)
+		if !ok {
+			continue
+		}
+		open[id] = att.Started
+	}
+	return open
+}
+
+// transitionsBelow reports to the emitter every transition of the attempts in
+// `before` that the published Fact cannot carry, and it is the ONLY place
+// either one is reported from, whatever mutation caused it. It runs after that
+// mutation succeeded, outside every lock, and reads nothing further when the
+// emitter has not asked for these transitions.
+func (p *Publisher) transitionsBelow(before map[lifecycle.AttemptID]bool) {
+	if len(before) == 0 {
+		return
+	}
+	p.mu.Lock()
+	e := p.emitter
+	p.mu.Unlock()
+	te, ok := e.(AttemptTransitionEmitter)
+	if !ok {
+		return
+	}
+	for attempt, wasStarted := range before {
+		current, ok := p.kernel.Attempt(attempt)
+		switch {
+		case !ok || current.State != lifecycle.AttemptOpen:
+			te.PublishAttemptClosed(attempt)
+		case !wasStarted && current.Started:
+			te.PublishAttemptStarted(attempt)
+		}
+	}
+}
+
 func (p *Publisher) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) error {
+	// The lane's open attempts are read BEFORE the mutation — the only moment
+	// they can be — because a prompt_ready that closes one also clears the
+	// lane's own reference to it, leaving nothing afterwards to compare
+	// against. The ledger's own forced projection keeps the narrower condition
+	// it was written with (shouldPublishStartedAttempt above).
+	before := p.openAttemptsOf(env.Lane)
 	forceStartedProjection := p.shouldPublishStartedAttempt(env)
 	outs, err := p.kernel.Ingest(t, env)
 	if err != nil {
@@ -732,6 +832,7 @@ func (p *Publisher) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) erro
 			p.answerAgentEnrolment(env, out)
 		}
 	}
+	p.transitionsBelow(before)
 	if forceStartedProjection {
 		p.publishLaneProjection(env.Lane)
 	}
@@ -803,10 +904,16 @@ func (p *Publisher) OpenAttempt(domain lifecycle.DomainID) (lifecycle.ExecutionA
 // only prolongs the desynchronization).
 func (p *Publisher) NotifyGap(t lifecycle.TransportID, d lifecycle.DomainID, garbageBytes, garbageFrames int) error {
 	lane := ""
+	var before map[lifecycle.AttemptID]bool
 	if dom, ok := p.kernel.Domain(d); ok {
 		lane = string(dom.Lane)
+		// Framing corruption can REVOKE a lane outright (the desync budgets),
+		// and a revoke closes every attempt it holds open — the same closure as
+		// any other, read the same way, before the mutation.
+		before = p.openAttemptsOf(dom.Lane)
 	}
 	outs, err := p.kernel.NotifyGap(t, d, garbageBytes, garbageFrames)
+	p.transitionsBelow(before)
 	if lane != "" {
 		p.publishLane(lifecycle.LaneID(lane))
 	}
@@ -828,20 +935,29 @@ func (p *Publisher) TransportLost(t lifecycle.TransportID) error {
 	}
 	p.mu.Unlock()
 	attempts := make(map[lifecycle.LaneID]lifecycle.AttemptID)
+	// Loss CLOSES every attempt the affected lanes held open (the kernel marks
+	// them unknown), and that closure is reported like any other — read from
+	// the same snapshot the attempt below is read from, before the mutation.
+	openBefore := make(map[lifecycle.LaneID]map[lifecycle.AttemptID]bool)
 	for _, l := range lanes {
 		st, err := p.kernel.State(l)
-		if err != nil || st.Attempt == "" || st.Domain == "" {
+		if err != nil || st.Domain == "" {
 			continue
 		}
 		d, exists := p.kernel.Domain(st.Domain)
-		if exists && d.Transport == t {
+		if !exists || d.Transport != t {
+			continue
+		}
+		if st.Attempt != "" {
 			attempts[l] = st.Attempt
 		}
+		openBefore[l] = p.openAttemptsIn(st)
 	}
 	if err := p.kernel.TransportLost(t); err != nil {
 		return err
 	}
 	for _, l := range lanes {
+		p.transitionsBelow(openBefore[l])
 		if attemptID, ok := attempts[l]; ok {
 			p.publishLostLane(l, attemptID)
 			continue
@@ -869,10 +985,19 @@ func (p *Publisher) RecoverLane(lane lifecycle.LaneID) error {
 // editor submit, before the pty bytes) and publishes the lane's move to
 // running.
 func (p *Publisher) SubmitAttempt(domain lifecycle.DomainID, command, cwd, host, submitID string) (lifecycle.ExecutionAttempt, error) {
+	// A submit can CLOSE an attempt: one the shell reached a prompt over and no
+	// start ever attached to is closed by the next submit (kernel.go's
+	// SubmitAttempt), and that closure is invisible in the fact stream for the
+	// same reason the prompt_ready one is — it is read before the mutation.
+	var before map[lifecycle.AttemptID]bool
+	if d, ok := p.kernel.Domain(domain); ok {
+		before = p.openAttemptsOf(d.Lane)
+	}
 	att, err := p.kernel.SubmitAttempt(domain, command, cwd, host, submitID)
 	if err != nil {
 		return att, err
 	}
+	p.transitionsBelow(before)
 	p.publishLane(att.Lane)
 	return att, nil
 }
@@ -881,10 +1006,15 @@ func (p *Publisher) SubmitAttempt(domain lifecycle.DomainID, command, cwd, host,
 // publishes the attempt's lane: the attempt's state becomes unknown, which is
 // a projection change even though the lane stays running.
 func (p *Publisher) AbandonAttempt(id lifecycle.AttemptID) error {
+	var before map[lifecycle.AttemptID]bool
+	if att, ok := p.kernel.Attempt(id); ok {
+		before = p.openAttemptsOf(att.Lane)
+	}
 	err := p.kernel.AbandonAttempt(id)
 	if err != nil {
 		return err
 	}
+	p.transitionsBelow(before)
 	if att, ok := p.kernel.Attempt(id); ok {
 		p.publishLane(att.Lane)
 	}

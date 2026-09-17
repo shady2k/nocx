@@ -626,11 +626,15 @@ export interface BlockRecord {
    *  completed attempt, and the completion notification can reach the
    *  renderer before the signal call's own response does over the same
    *  connection, so waiting for a confirmed `delivered` would still race a
-   *  freeze that got there first. Reverted to false if the outcome turns
-   *  out not to be `delivered` (nothing was actually done to the process),
-   *  so a stop that never happened cannot mislabel this block's real,
-   *  possibly much later, completion. Read once, by `freezeFromAttempt`,
-   *  to turn a nonzero exit into `cancelled` instead of `failure`. */
+   *  freeze that got there first. Reverted to false when the backend did
+   *  NOT take the request — `unsupported`, `unreconciled`, `nothing-running`
+   *  — so a stop that never happened cannot mislabel this block's real,
+   *  possibly much later, completion. It is KEPT for `held` (nocx-zas0d),
+   *  which is the backend saying it accepted the Stop and is holding the
+   *  byte until the shell has begun the command: the completion that stop
+   *  causes is SIGINT's 130, and reverting here would paint it as the
+   *  program's own failure. Read once, by `freezeFromAttempt`, to turn a
+   *  nonzero exit into `cancelled` instead of `failure`. */
   stopRequested: boolean
   /** Run once, after the VISUAL freeze has replaced `el`.
    *

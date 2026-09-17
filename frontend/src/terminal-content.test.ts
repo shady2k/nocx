@@ -11464,6 +11464,85 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     }
   })
 
+  it('a Stop accepted before the command started is armed, and its 130 still reads as stopped', async () => {
+    const client = makeClient()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      const handler = lifecycleHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('sleep 30')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-held-19',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'sleep 30',
+        },
+      })
+      const rec = scrollbackFor(content).blockManager.runningBlock!
+      // The app attempt is open and the shell has not begun the line: the
+      // backend ACCEPTS the gesture and holds the byte for the authenticated
+      // start (nocx-zas0d, internal/transport/ws_signal.go).
+      sessionOf(content).signal.mockResolvedValue({ signal: 'stop', outcome: 'held' })
+      vi.mocked(showToast).mockClear()
+
+      itemNamed(runningBlockMenu(content), 'stop')!.click()
+      expect(signalsSent(content)).toEqual(['stop'])
+
+      await vi.waitFor(() => expect(showToast).toHaveBeenCalled())
+      const calls = vi.mocked(showToast).mock.calls
+      const toast = calls[calls.length - 1]?.[0]
+      // Said out loud, and said as what it is: the stop is armed, not done.
+      expect(toast).toMatchObject({ level: 'info' })
+      expect(toast?.message).toContain('had not started yet')
+      expect(toast?.message).not.toContain('Nothing is running')
+      // The acceptance is kept, because the byte IS coming: reverting it
+      // would make the completion below — SIGINT's 130 — read as the
+      // program's own failure.
+      expect(rec.stopRequested).toBe(true)
+
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-held-19',
+          state: 'completed',
+          exitCode: 130,
+          completedAt: '2026-09-15T00:00:00Z',
+          fence: '7'.repeat(64),
+        },
+      })
+      expect(rec.status).toBe('cancelled')
+
+      await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
+      expect(rec.el.dataset.outcome).toBe('cancelled')
+      expect(
+        rec.el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])')
+          ?.textContent,
+      ).toBe('Stopped')
+    } finally {
+      restore()
+      teardown()
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    }
+  })
+
   it('a program that exits 130 on its own, with no stop request, still reads as failure', async () => {
     const client = makeClient()
     const { view, ed, content, teardown } = await mountTerminal(

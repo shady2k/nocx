@@ -93,6 +93,15 @@ const (
 	// the shell-group guard prevented direct signalling and the safe terminal
 	// interrupt could not prove that exact attempt ended.
 	foregroundUnreconciled foregroundOutcome = "unreconciled"
+	// foregroundHeld means the Stop was ACCEPTED and not yet delivered: the
+	// attempt it addresses is open and the shell has not authenticated its
+	// start, so the interrupt is held for that attempt and goes in the moment
+	// the start arrives (nocx-zas0d). It is deliberately not delivered — a
+	// byte written now lands while bash is still consuming the line, which is
+	// the window bash resumes a line's SUFFIX in (nocx-xn63t.6.11). Nothing
+	// has been signalled when this is the outcome, and nothing ever will be if
+	// that attempt closes without starting.
+	foregroundHeld foregroundOutcome = "held"
 )
 
 // protectedForeground is what this package cannot answer for itself over a
@@ -113,6 +122,18 @@ type protectedForeground interface {
 	// the bytes that could cause it are written (lifecycle-protocol §7), so
 	// a merely-submitted attempt is not evidence that anything is running.
 	Attempt() (lifecycle.AttemptID, bool)
+	// StopTarget names what a Stop over a protected group must address, in ONE
+	// read: the started attempt if the session has one, and otherwise the
+	// attempt that is open and NOT started — the command the shell has not
+	// begun yet.
+	//
+	// IN THAT SECOND CASE THE READ ARMS THE HOLD, and that is why the question
+	// is one call rather than two (nocx-zas0d): a read that merely reported
+	// "not started" would leave the window between itself and the record open,
+	// and a start landing there is a Stop nobody would ever deliver. The caller
+	// that holds no obligation to leave — the run lease — passes no answer for
+	// it and gets the started attempt or nothing, exactly as before.
+	StopTarget() (foregroundTarget, bool)
 	// Interrupt writes the terminal's own interrupt byte through the
 	// session's ordinary input path. False means the write was refused —
 	// the queue is full, closed, or quarantined — and nothing was sent.
@@ -121,6 +142,16 @@ type protectedForeground interface {
 	// most the cooperative bound. It observes the backend's own lifecycle
 	// read model; it never reads the terminal.
 	Ended(attempt lifecycle.AttemptID, grace time.Duration) bool
+}
+
+// foregroundTarget is which attempt a protected-group interrupt reaches, as
+// one read of the backend's projection decided it.
+type foregroundTarget struct {
+	Attempt lifecycle.AttemptID
+	// Started is false for the attempt the shell has not begun: the app opened
+	// it at submit, its bytes may still be on their way to the pty, and the
+	// only safe moment to interrupt it is the authenticated start.
+	Started bool
 }
 
 // foregroundReach is what one SignalForeground call actually established,
@@ -216,10 +247,20 @@ func stopForeground(lg log.Logger, sid session.ID, sess runLeaseSession, grace t
 	switch classifyForeground(err) {
 	case reachDelivered:
 		return stopProcessGroup(lg, sid, sess, pgid, grace)
-	case reachProtected:
-		return stopProtected(lg, sid, fb, grace)
-	case reachGone:
-		return foregroundNothingRunning
+	case reachProtected, reachGone:
+		// NOTHING MAY BE SIGNALLED DIRECTLY, and the two kernel answers that
+		// say so are the same answer here. reachProtected: the foreground group
+		// is the launcher shell's own (job control off, or `exec`), and every
+		// rung of a ladder would reach the shell. reachGone: there is no
+		// foreground group at all — TIOCGPGRP has no job to name because none
+		// has ever been made the foreground one — which is EXACTLY what a Stop
+		// arrives to when it is pressed before the shell has begun the line
+		// (nocx-zas0d; measured 2026-09-17: pgid 0 at a prompt, the shell's own
+		// group once a job runs). Reading that as "nothing is running" would
+		// make the fix depend on which side of an unrelated kernel state the
+		// pane happened to be in, so both go where the authenticated attempt
+		// — not the kernel's group — decides what may be done.
+		return stopByTerminalInterrupt(lg, sid, fb, grace)
 	default:
 		// The call itself failed. Something may well be there and nocx
 		// cannot prove it stopped — never nothing-running, which is a
@@ -230,22 +271,48 @@ func stopForeground(lg log.Logger, sid session.ID, sess runLeaseSession, grace t
 	}
 }
 
-// stopProtected is Stop over a group that may never be killed. The byte goes
-// in, and then the ONLY proof available is the authenticated attempt closing
-// — the foreground group cannot supply it, because over a protected group
-// the shell's group is the foreground group whether the program lives or
-// dies (which is what made the incident's contradiction possible).
-func stopProtected(lg log.Logger, sid session.ID, fb protectedForeground, grace time.Duration) foregroundOutcome {
-	attempt, ok := protectedAttempt(lg, sid, fb)
+// stopByTerminalInterrupt is Stop over a session whose foreground group may not
+// — or cannot — be signalled directly: the launcher shell's own group (every
+// rung of a ladder would reach the shell), or no group at all (see
+// stopForeground). What is left is the terminal's own interrupt byte, and the
+// ONLY thing that may justify writing it is the authenticated lifecycle: the
+// kernel cannot say what is in there, and over a group that is the shell's the
+// shell's group is the foreground group whether the program lives or dies
+// (which is what made the incident's contradiction possible).
+//
+// AND WHEN THE SHELL HAS NOT BEGUN THE LINE YET, NOTHING GOES IN (nocx-zas0d).
+// An attempt that is open and unstarted is a command on its way to the pty,
+// and a byte written into that window is a byte bash's parser eats: upstream
+// bash 5.2 resumes an accepted line at the index readline had reached, so
+// SIGINT arriving while it consumes the line makes it execute the line's
+// SUFFIX (measured, nocx-xn63t.6.11/.6.12). So the Stop is accepted and held
+// for that attempt (the read in StopTarget armed it), and the transport
+// delivers it when the shell authenticates its start — by then the line is
+// parsed and the program is the one in front.
+func stopByTerminalInterrupt(lg log.Logger, sid session.ID, conv protectedForeground, grace time.Duration) foregroundOutcome {
+	if conv == nil {
+		// A caller holding no lifecycle projection at all (the run lease whose
+		// session carries none). Nothing can say what is in the group, and the
+		// honest answer there is the prompt's — the same refusal
+		// protectedAttempt gives the interrupt path.
+		return foregroundNothingRunning
+	}
+	target, ok := conv.StopTarget()
 	if !ok {
 		return foregroundNothingRunning
 	}
-	if !fb.Interrupt(attempt) {
+	if !target.Started {
+		lg.Info("foreground signal: stop held for an attempt that has not started yet",
+			"session_id", string(sid), "attempt", string(target.Attempt))
+		return foregroundHeld
+	}
+	attempt := target.Attempt
+	if !conv.Interrupt(attempt) {
 		lg.Warn("foreground signal: the session refused the terminal interrupt",
 			"session_id", string(sid), "attempt", string(attempt))
 		return foregroundUnreconciled
 	}
-	if fb.Ended(attempt, grace) {
+	if conv.Ended(attempt, grace) {
 		return foregroundDelivered
 	}
 	lg.Warn("foreground signal: the attempt stayed open after the terminal interrupt",

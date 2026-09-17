@@ -51,7 +51,7 @@ import { secretCandidateExtension } from './secret-candidate'
 import { unresolvedRedactionField } from './unresolved-redactions'
 import { PromptVaultController } from './prompt-vault'
 import { VaultClient } from './vault-client'
-import { showToast } from './ui/toast'
+import { showToast, type ToastLevel } from './ui/toast'
 import type { SessionIntegrationChanged } from './generated/session.integrationChanged'
 import type { SessionToolSurfaceChanged } from './generated/session.toolSurfaceChanged'
 import type { DriverState, PaneChild } from './pane-observation'
@@ -6769,6 +6769,7 @@ export class TerminalContent extends BasePaneContent {
         // that must never be shown by accident: it is exactly the lie the
         // incident was reported as (nocx-7l4ex.12).
         let message: string
+        let level: ToastLevel = 'warning'
         switch (result.outcome) {
           case 'delivered':
             if (signal === 'stop') {
@@ -6776,6 +6777,34 @@ export class TerminalContent extends BasePaneContent {
               if (waiter) waiter.stopped = true
             }
             return
+          case 'held':
+            // ACCEPTED, NOT YET DELIVERED — and deliberately NOT reverted. The
+            // hold exists because an app attempt is open from submit, a round
+            // trip before its bytes reach the pty (ADR-0024 §5), and a byte
+            // written into that window is eaten by bash's own parser (upstream
+            // bash 5.2 resumes an accepted line at the index readline had
+            // reached: nocx-xn63t.6.11/.6.12). So the backend keeps the
+            // gesture and writes it the moment the shell authenticates the
+            // start.
+            //
+            // `stopRequested` is the renderer's evidence that a person asked
+            // for this command to stop and the backend took the request
+            // (nocx-9bpeq.19); a held Stop is that request, and dropping it
+            // here would make the very completion this causes — SIGINT's 130 —
+            // read as the program's own failure. The never-started case cannot
+            // be mislabelled by keeping it: an attempt that closes before its
+            // start freezes the block through blocks.ts's `abandonAttempt`,
+            // whose status is `unknown`, which draws no terminal chip and
+            // never consults this flag. A command that finishes with exit 0 is
+            // `success` whatever the flag says.
+            if (signal === 'stop') {
+              const waiter = targetBlock === null ? undefined : this.agentRuns.get(targetBlock)
+              if (waiter) waiter.stopped = true
+            }
+            level = 'info'
+            message =
+              'The command had not started yet, so the stop is armed: it will land the moment the command starts.'
+            break
           case 'unsupported':
             revertStopRequested()
             message =
@@ -6803,7 +6832,7 @@ export class TerminalContent extends BasePaneContent {
             message = 'nocx could not tell whether the command stopped.'
           }
         }
-        showToast({ level: 'warning', message })
+        showToast({ level, message })
       },
       (err: unknown) => {
         revertStopRequested()

@@ -4615,6 +4615,171 @@ describe('the projections consume the kernel through the composition root (ADR-0
       teardown()
     }
   })
+
+  it('a Ctrl-C while the command is still in flight cancels the submit (nocx-xn63t.6.12)', async () => {
+    const client = makeClient()
+    const submitAttempt = client.dispatcher.call
+    // Promise.withResolvers needs ES2024 and this project targets ES2021, so
+    // the resolver is captured via the executor form (the codebase pattern).
+    let resolveAttempt!: (v: unknown) => void
+    const attemptPromise = new Promise<unknown>((done) => {
+      resolveAttempt = done
+    })
+    submitAttempt.mockImplementation(() => attemptPromise)
+    const { content, ed, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    try {
+      const renderer = rendererOf(content)
+      const session = sessionOf(content)
+      const withScrollback = content as unknown as { scrollback: ScrollbackController }
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      session.send.mockClear()
+
+      ed.insertText('echo RACE')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // The round trip is in flight: the attempt was opened with the
+      // app-owned text, the block opened at submit is the running one, and
+      // not one byte has reached the pty.
+      expect(submitAttempt).toHaveBeenCalledWith(
+        'lifecycle.submitAttempt',
+        expect.objectContaining({ command: 'echo RACE' }),
+      )
+      expect(withScrollback.scrollback.blockManager.runningBlock).not.toBeNull()
+      expect(session.send).not.toHaveBeenCalled()
+
+      // Ctrl-C inside that window, which is the one path that turns bash
+      // 5.2's parse-resume race into a certainty: the held keys are flushed
+      // immediately behind the submitted line, so the pty would receive
+      // `echo RACE\r\x03` back to back and the shell can notice QUIT while
+      // its parser is consuming the accepted line — running what is left of
+      // it, which is not the command that was typed. The person's own
+      // gesture says the line is not to run, so it never goes out.
+      renderer._fireData('\x03')
+
+      resolveAttempt({
+        id: 'att-cancelled',
+        domain: 'd1',
+        state: 'open',
+        command: 'echo RACE',
+        cwd: FIXTURE_CWD,
+        host: '',
+        origin: 'app',
+        submitId: submitToken(client),
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+
+      // Waited on through the withdrawal's own observable, never on a
+      // duration: the running slot is free and the block it held is closed
+      // as abandoned — never successful. That is exactly what a submission
+      // withdrawn before its bytes leaves behind in the agent lane.
+      await vi.waitFor(() => expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull())
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('unknown')
+      // Neither the command nor the 0x03. The cancel is served by the
+      // withdrawal itself: nothing is running at the shell to interrupt, and
+      // a byte written here would be an interrupt the person never asked
+      // for — the second-owner defect the grid's own Ctrl+C already refuses.
+      expect(session.send).not.toHaveBeenCalled()
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      teardown()
+    }
+  })
+
+  it('the Ctrl-C discards the line it cancelled, and not the bytes after it (nocx-xn63t.6.12)', async () => {
+    const client = makeClient()
+    let resolveAttempt!: (v: unknown) => void
+    const attemptPromise = new Promise<unknown>((done) => {
+      resolveAttempt = done
+    })
+    client.dispatcher.call.mockImplementation(() => attemptPromise)
+    const { content, ed, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    try {
+      const renderer = rendererOf(content)
+      const session = sessionOf(content)
+      const withScrollback = content as unknown as { scrollback: ScrollbackController }
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      session.send.mockClear()
+
+      ed.insertText('echo RACE')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // Keys typed while the command was in flight are part of the pending
+      // line, and ^C discards that line — a terminal with ISIG set flushes
+      // the input queue it has not read yet, which is what every shell does
+      // with the half-typed command somebody interrupts.
+      renderer._fireData('ab')
+      expect(session.send).not.toHaveBeenCalled()
+
+      // What followed the ^C is not part of the line it discarded: after the
+      // flush the shell is at a fresh prompt, and these bytes belong to it,
+      // so they are delivered (the old behaviour for everything that is not
+      // the pending line) rather than swallowed with it.
+      renderer._fireData('\x03cd')
+      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['cd'])
+
+      resolveAttempt({
+        id: 'att-cancelled',
+        domain: 'd1',
+        state: 'open',
+        command: 'echo RACE',
+        cwd: FIXTURE_CWD,
+        host: '',
+        origin: 'app',
+        submitId: submitToken(client),
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      await vi.waitFor(() => expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull())
+      // The command never ran, and 'cd' is the only byte the pty ever saw.
+      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['cd'])
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      teardown()
+    }
+  })
+
+  it('a Ctrl-C after the command has gone out is delivered as it always was (nocx-xn63t.6.12)', async () => {
+    const client = makeClient()
+    const { content, ed, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    try {
+      const renderer = rendererOf(content)
+      const session = sessionOf(content)
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      session.send.mockClear()
+
+      ed.insertText('read x')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // This fake's attempt answers on its own, so the window closes with the
+      // write: the command and its CR are at the pty, and there is no pending
+      // line left for a ^C to cancel.
+      await vi.waitFor(() => expect(session.send.mock.calls.length).toBe(2))
+      renderer._fireData('\x03')
+
+      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['read x', '\r', '\x03'])
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      teardown()
+    }
+  })
 })
 
 describe('two attempts and the live region stay separate while running (nocx-m87n, nocx-zn4d, nocx-mu8s)', () => {

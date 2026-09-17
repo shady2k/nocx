@@ -236,6 +236,18 @@ const RESIZE_ECHO_MS = 400
 const SETTLE_BACKSTOP_MS = 3000
 
 /**
+ * A Ctrl-C on the data plane: ETX, which the line discipline turns into
+ * SIGINT for the foreground group while ISIG is set, and which the shell's
+ * own line editor reads as "discard the line I am on".
+ *
+ * One byte, one spelling. It is named here because the renderer now decides
+ * about it — whether a submission still in flight is cancelled by it
+ * (nocx-xn63t.6.12) — and a literal '\x03' at that decision point would be
+ * the second spelling of the same key.
+ */
+const INTERRUPT = '\x03'
+
+/**
  * Whether a settle call failed because the backend no longer holds the
  * capture — it was destroyed by the tab closing, the vault sealing, the
  * transport dropping, or the record that carried it failing.
@@ -423,6 +435,22 @@ interface HeldRange {
   readonly startOffset: number
   readonly endNode: Node
   readonly endOffset: number
+}
+
+/** The window between a person's submit and the command's own bytes reaching
+ *  the pty, as the grid's keystrokes see it: the keys typed into it, and
+ *  whether a Ctrl-C cancelled the submission they were waiting for.
+ *
+ *  Two facts, one object, because they are one state: a cancelled window
+ *  holds no keys — the interrupt discards the line it interrupted, and every
+ *  key in here belongs to that line. Read as one take (takeHeldWindow) for
+ *  the same reason. */
+interface HeldWindow {
+  /** The keys, in the order they were typed. A cancelled window holds none. */
+  keys: string[]
+  /** True once a Ctrl-C arrived in the window: the submission is not to be
+   *  written, and nothing held for it is delivered. */
+  cancelled: boolean
 }
 
 /** The host callbacks a tab may hand a TerminalContent. Named rather than
@@ -4470,12 +4498,43 @@ export class TerminalContent extends BasePaneContent {
     // owner rejected queueing it for later delivery on 2026-09-10 ("хранить
     // там какие-то клавиши, а потом их куда-то отправлять — это странная
     // идея"). So it is read, and then it is gone.
+    //
+    // AND A Ctrl-C IN THE WINDOW CANCELS THE SUBMISSION (nocx-xn63t.6.12):
+    // the command is never written, so nothing reaches bash behind it. The
+    // defect this closes is a byte-order one — upstream bash 5.2 checks QUIT
+    // while its parser consumes an accepted line and resumes from the index
+    // its readline buffer had reached, so `command\r\x03` delivered back to
+    // back ran the command's SUFFIX (CI run 35190081902 ran `cho RACE...` for
+    // a typed `echo RACE...`). Holding the interrupt and flushing it
+    // immediately behind the command is precisely that ordering, so the
+    // interrupt is not held and not flushed: it is the person's own "this
+    // line is not to run".
     renderer.onData((data: string) => {
       if (isAwaitingIntegration(this._integration, this._awaitsIntegration)) return
-      if (this._heldRaw !== null) {
-        this._heldRaw.push(data)
+      const held = this._heldRaw
+      if (held !== null && !held.cancelled) {
+        const at = data.indexOf(INTERRUPT)
+        if (at < 0) {
+          held.keys.push(data)
+          return
+        }
+        // The interrupt discards the line it interrupts, which is every key
+        // held in this window: they are the pending line, and a terminal
+        // with ISIG set flushes the input it has not read yet.
+        held.keys = []
+        held.cancelled = true
+        // What followed the interrupt in the same read does NOT belong to
+        // the line it discarded — it was typed at the fresh prompt that
+        // discard leaves — so it is delivered rather than swallowed with
+        // what came before it.
+        const after = data.slice(at + 1)
+        if (after !== '') this.session?.send(after)
         return
       }
+      // No window, or one already cancelled: an ordinary keystroke, and the
+      // ordinary route. A second Ctrl-C lands here too, which is right — by
+      // now there is no pending line to discard, so it is the shell's own
+      // interrupt exactly as it is outside the window.
       this.session?.send(data)
     })
     // The pane's classification, for an enrolled agent pane. Registered
@@ -6929,28 +6988,44 @@ export class TerminalContent extends BasePaneContent {
    *  been sent, and bytes crossing it would arrive at the pty AHEAD of the
    *  command. Measured: `hello\r` reaching the shell before `read x; …\r`,
    *  which runs `hello` as a command and leaves `read` waiting for a line
-   *  nobody typed. */
-  private _heldRaw: string[] | null = null
+   *  nobody typed.
+   *
+   *  Since nocx-xn63t.6.12 it also carries whether a Ctrl-C arrived in the
+   *  window, which cancels the submission rather than flushing the interrupt
+   *  behind it (see HeldWindow, and the onData handler that arms this). */
+  private _heldRaw: HeldWindow | null = null
 
-  /** Start holding: from here until releaseHeldRaw, the grid's bytes queue.
-   *  A second submit inside the window keeps the existing queue — the order
-   *  is the invariant, and re-arming would publish the earlier one twice. */
-  private holdRawUntilSubmitted(): void {
-    this._heldRaw ??= []
+  /** Start holding, and hand back the window being held in: from here until
+   *  takeHeldWindow, the grid's bytes queue.
+   *
+   *  A second submit inside the window JOINS the existing one — the order is
+   *  the invariant, and re-arming would publish the earlier queue twice — so
+   *  the window belongs to the pane, not to a submission, and every submit
+   *  waiting on it shares one cancellation. The caller keeps the object it is
+   *  handed rather than re-reading the field later: another submission can
+   *  take the queue in between, and what it took must not answer for this
+   *  one. */
+  private holdRawUntilSubmitted(): HeldWindow {
+    this._heldRaw ??= { keys: [], cancelled: false }
+    return this._heldRaw
   }
 
   /** Stop holding and hand back what was held, for the caller to send after
    *  the command. Detaching and flushing are two steps on purpose — the
    *  command's own bytes travel between them (see `write`).
    *
+   *  ONE take, with the keys and the cancellation in it together: they are
+   *  facts about the same window, and two reads could let a Ctrl-C land
+   *  between them and be missed by the write it was meant to stop.
+   *
    *  Nothing bounds this window with a timer, and nothing should: the write
-   *  is attempted on BOTH settlements of the attempt RPC (`.then(write,
-   *  write)`), and the dispatcher rejects every pending call when the socket
-   *  closes. The only way to stay held is a live socket whose backend never
-   *  answers — where the queued bytes had nowhere to go either, and which
-   *  the session's own input-stalled warning is what reports. */
-  private takeHeldRaw(): string[] {
-    const held = this._heldRaw ?? []
+   *  is attempted on BOTH settlements of the attempt RPC (`.then(() =>
+   *  write(block), …)`), and the dispatcher rejects every pending call when
+   *  the socket closes. The only way to stay held is a live socket whose
+   *  backend never answers — where the queued bytes had nowhere to go either,
+   *  and which the session's own input-stalled warning is what reports. */
+  private takeHeldWindow(): HeldWindow | null {
+    const held = this._heldRaw
     this._heldRaw = null
     return held
   }
@@ -7403,9 +7478,13 @@ export class TerminalContent extends BasePaneContent {
     beforeWrite?: () => boolean
   }): { block: BlockRecord | null; ledgerId: number | null } {
     const { doc, recordLine, author, takeKeys, callerOwnsGlide, sendLine, beforeWrite } = opts
+    // The window this submission ARMS — null for the agent lane, whose bytes
+    // never hold the grid's queue (takeKeys). Held by reference, not
+    // re-read from the field later: see holdRawUntilSubmitted.
+    let heldWindow: HeldWindow | null = null
     if (takeKeys) {
       this.takeKeyboardToGrid()
-      this.holdRawUntilSubmitted()
+      heldWindow = this.holdRawUntilSubmitted()
     }
     // Where the command RUNS, captured before anything below can change it.
     // Entering an environment blanks `_cwd` (we know the host, not the
@@ -7418,7 +7497,7 @@ export class TerminalContent extends BasePaneContent {
     // record (CommandLedger.open refuses empty commands) and no block. The
     // shell still gets its newline — a conventional terminal stays
     // conventional.
-    const write = (): void => {
+    const write = (block: BlockRecord | null): void => {
       // This is deliberately after lifecycle.submitAttempt resolved: the
       // broker can withdraw the request during that round trip, and a
       // check at submit entry would miss the only unsafe window.
@@ -7431,8 +7510,24 @@ export class TerminalContent extends BasePaneContent {
       // BEHIND the keys that were waiting for it, which is the same
       // reordering with the operands swapped (measured: a bare `\r`
       // reaching the pty ahead of its own command line).
-      const held = this.takeHeldRaw()
+      const taken = this.takeHeldWindow()
       try {
+        // A Ctrl-C that arrived while this submission was in flight
+        // (nocx-xn63t.6.12): the line is not to run. Nor is it "run and then
+        // interrupt" — the interrupt came first, and writing the command
+        // would put it at the pty with the shell's line editor already told
+        // to discard the line. So the command is not written AT ALL, and
+        // there is nothing at the pty for an 0x03 to mean: no interrupt is
+        // written for it either.
+        //
+        // Read from the window THIS submission armed. Taking the queue tells
+        // us what the pane last held, which after another submission has
+        // taken it is not this window — and reading the cancellation from
+        // there would resurrect exactly the line the person withdrew.
+        if (heldWindow?.cancelled === true) {
+          this.withdrawSubmit(block)
+          return
+        }
         submitCommand(doc, {
           focusGrid: () => this.takeKeyboardToGrid(),
           sendDoc: sendLine,
@@ -7442,11 +7537,15 @@ export class TerminalContent extends BasePaneContent {
         // and holding the keys anyway would swallow them for the rest of
         // the session. Late at a prompt is a line the user can see and
         // erase; silently gone is not.
-        for (const data of held) this.session?.send(data)
+        //
+        // A cancelled window holds no keys — the interrupt discarded them —
+        // so this is empty on the withdrawal path by construction, never by
+        // a second rule about which keys a cancelled submission may carry.
+        for (const data of taken?.keys ?? []) this.session?.send(data)
       }
     }
     if (recordLine === '') {
-      write()
+      write(null)
       return { block: null, ledgerId: null }
     }
     // SEVERED (ADR-0024): the ssh attempt binding (expected passport id,
@@ -7521,7 +7620,7 @@ export class TerminalContent extends BasePaneContent {
       // the attempt that eventually arrives may belong to a different
       // command entirely, and binding it here would store one command's exit
       // status under another's text — the defect nocx-td6d4.10 removed.
-      write()
+      write(block)
       return { block, ledgerId }
     }
     // ADR-0024 decision 5: the app-owned attempt opens BEFORE the bytes
@@ -7543,22 +7642,53 @@ export class TerminalContent extends BasePaneContent {
         ...(submitId ? { submitId } : {}),
         ...(opts.requestId ? { requestId: opts.requestId } : {}),
       })
-      .then(write, (err: unknown) => {
-        // STILL fail-open — the bytes go out either way, and swallowing a
-        // command because the control plane was busy is the worse failure.
-        // What changes is that it stops being invisible: this rejection and
-        // a success took the same silent path, so a refused submit and a
-        // healthy one were indistinguishable from every surface, while the
-        // record left behind could never be bound by token.
-        if (ledgerId !== null) this.ledger?.orphan(ledgerId)
-        log.warn('nocx: the lifecycle attempt was refused; the command runs unattributed', {
-          pane: this.pane.paneId,
-          ledgerId,
-          error: err instanceof Error ? err.message : String(err),
-        })
-        write()
-      })
+      .then(
+        () => write(block),
+        (err: unknown) => {
+          // STILL fail-open — the bytes go out either way, and swallowing a
+          // command because the control plane was busy is the worse failure.
+          // What changes is that it stops being invisible: this rejection and
+          // a success took the same silent path, so a refused submit and a
+          // healthy one were indistinguishable from every surface, while the
+          // record left behind could never be bound by token.
+          if (ledgerId !== null) this.ledger?.orphan(ledgerId)
+          log.warn('nocx: the lifecycle attempt was refused; the command runs unattributed', {
+            pane: this.pane.paneId,
+            ledgerId,
+            error: err instanceof Error ? err.message : String(err),
+          })
+          write(block)
+        },
+      )
     return { block, ledgerId }
+  }
+
+  /** Withdraw a submission whose bytes will never be written: the app-owned
+   *  block opened at its submit has no attempt that can complete it, so it is
+   *  frozen as abandoned — unknown, never successful — and the running slot
+   *  is freed.
+   *
+   *  ONE owner, reached by two triggers: the broker withdrawing its request
+   *  mid-round-trip (submitAgentCommand's AbortSignal) and a Ctrl-C arriving
+   *  while the command is still on its way to the pty (nocx-xn63t.6.12).
+   *  The second trigger is why this is a method rather than a line in the
+   *  agent path: two copies of "freeze it as abandoned" would agree
+   *  everywhere anyone looked and disagree in the one case nobody looked.
+   *
+   *  Nothing goes on the wire, deliberately. docs/lifecycle-protocol.md §14's
+   *  AbandonAttempt is the kernel's own call, with no outbound envelope of
+   *  its own, and the app-owned attempt the submitAttempt RPC already opened
+   *  is left exactly as the agent lane's withdrawal leaves one — the
+   *  withdrawal is the renderer declining to write, and the ledger record
+   *  stays unbound and running like that path's (it persists nothing: only a
+   *  completed record does, and its marker's disposal reclaims it). */
+  private withdrawSubmit(block: BlockRecord | null): void {
+    if (block === null) return
+    // Only while this submission still owns the running slot. A later
+    // command's block is not this submission's to abandon, and freezing it
+    // here would show a cancelled line as the one that ran.
+    if (this.scrollback?.blockManager.runningBlock !== block) return
+    this.scrollback.abandonUnbound(this.renderer?.cursorLine() ?? 0)
   }
 
   /** The run tool's renderer half (nocx-tjppv): submit a command through
@@ -7614,15 +7744,11 @@ export class TerminalContent extends BasePaneContent {
     let writeStarted = false
     let cancellationHandled = false
     const cleanupCancelled = (): void => {
-      if (openedBlock !== null) {
-        this.agentRuns.delete(openedBlock)
-        // The app-owned block has no attempt to complete it after a
-        // pre-execution withdrawal. Reuse the existing abandonment owner only
-        // while this submission still owns the running slot.
-        if (this.scrollback?.blockManager.runningBlock === openedBlock) {
-          this.scrollback.abandonUnbound(this.renderer?.cursorLine() ?? 0)
-        }
-      }
+      if (openedBlock !== null) this.agentRuns.delete(openedBlock)
+      // The app-owned block has no attempt to complete it after a
+      // pre-execution withdrawal — the ONE owner of that withdrawal, shared
+      // with the Ctrl-C that cancels a person's submission (nocx-xn63t.6.12).
+      this.withdrawSubmit(openedBlock)
       if (openedLedgerId !== null) this.runEntryIds.delete(openedLedgerId)
     }
     const cancel = (): void => {

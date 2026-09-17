@@ -86,6 +86,9 @@ type hostRequestWire struct {
 	Body       string `json:"body"`
 	SessionID  string `json:"sessionId"`
 	Count      *int   `json:"count"`
+	Executable string `json:"executable"`
+	Digest     string `json:"digest"`
+	Workspace  string `json:"workspace"`
 }
 
 // askAsync issues one RequestHost on a goroutine and hands back its outcome.
@@ -188,6 +191,21 @@ var hostCapabilityCases = []struct {
 		noHost: ErrNoWindowHost,
 		answer: map[string]any{"outcome": "ok"},
 	},
+	{
+		name: "agent approval",
+		ask: HostAsk{
+			Capability: HostCapAgentApproval,
+			Executable: "/usr/local/bin/agent",
+			Digest:     "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12",
+			Workspace:  "default",
+			// The machine is part of every approval ask (nocx-50w7p.16): the
+			// answer is kept for one machine, so an ask without one is refused
+			// rather than sent with an empty kind.
+			Machine: MachineFacts{Kind: "local"},
+		},
+		noHost: ErrNoApprovalHost,
+		answer: map[string]any{"outcome": "ok", "approved": true},
+	},
 }
 
 // TestClientHost_EachCapabilityReachesAnAttachedClient — the happy path, once
@@ -207,6 +225,13 @@ func TestClientHost_EachCapabilityReachesAnAttachedClient(t *testing.T) {
 			}
 			if req.URL != tc.wantURL {
 				t.Errorf("url = %q, want %q", req.URL, tc.wantURL)
+			}
+			if tc.ask.Capability == HostCapAgentApproval &&
+				(req.Executable != tc.ask.Executable || req.Digest != tc.ask.Digest ||
+					req.Workspace != tc.ask.Workspace) {
+				t.Fatalf("approval args = (%q,%q,%q), want (%q,%q,%q)",
+					req.Executable, req.Digest, req.Workspace,
+					tc.ask.Executable, tc.ask.Digest, tc.ask.Workspace)
 			}
 			if tc.ask.Capability == HostCapBanner {
 				if req.Title != "done" || req.Body != "the build finished" || req.SessionID != "s-1" {
@@ -584,6 +609,129 @@ func TestClientHost_NoCapabilityIsRefused(t *testing.T) {
 	ws := newHostServer(t)
 	if _, err := ws.RequestHost(t.Context(), HostAsk{}); err == nil {
 		t.Fatal("an ask with no capability was accepted")
+	}
+}
+
+// The ask NAMES the machine (nocx-50w7p.16). A dialog that cannot say where
+// the agent would run is collecting a decision about a place nobody named, and
+// the answer it collects is kept for one machine — so this is asserted on the
+// payload, off the socket, for an ssh machine and for the local one.
+func TestHostRequest_AgentApprovalCarriesTheMachine(t *testing.T) {
+	for _, machine := range []MachineFacts{
+		{Kind: "local"},
+		{Kind: "ssh", Host: "build.example.com", Account: "deploy", HostKey: "SHA256:key-a"},
+	} {
+		t.Run(machine.Kind, func(t *testing.T) {
+			ws := newHostServer(t)
+			conn := attachClient(t, ws)
+			defer conn.Close() //nolint:errcheck
+
+			out := askAsync(ws, t.Context(), HostAsk{
+				Capability: HostCapAgentApproval,
+				Executable: "/usr/local/bin/agent",
+				Digest:     "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12",
+				Workspace:  "default",
+				Machine:    machine,
+			})
+			raw := readNotification(t, conn, "host.request", 5*time.Second)
+
+			var req struct {
+				RequestID string       `json:"requestId"`
+				Machine   MachineFacts `json:"machine"`
+			}
+			if err := json.Unmarshal(raw, &req); err != nil {
+				t.Fatalf("decode host.request: %v", err)
+			}
+			if req.Machine != machine {
+				t.Fatalf("the ask carried machine %+v, want %+v", req.Machine, machine)
+			}
+
+			resolveHost(t, conn, map[string]any{
+				"requestId": req.RequestID, "outcome": "ok", "approved": false,
+			})
+			if o := settled(t, out); o.err != nil {
+				t.Fatalf("RequestHost: %v", o.err)
+			}
+		})
+	}
+}
+
+// An approval ask must name the machine it is about (nocx-50w7p.16). The
+// answer is kept FOR one machine, so asking a person to admit an agent
+// somewhere nobody named is a question they cannot answer — and the refusal
+// happens here, before the payload reaches a client.
+//
+// A CLIENT IS ATTACHED, which is what makes this test discriminating: with
+// nobody to ask, every case below would fail with the capability's own
+// "no surface" answer and the test would pass without the machine check
+// existing at all. The assertion is therefore not "an error" but "this error
+// and not that one".
+func TestClientHost_AgentApprovalWithoutAMachineIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		machine MachineFacts
+	}{
+		{"no machine at all", MachineFacts{}},
+		{"a kind nobody derives", MachineFacts{Kind: "container"}},
+		{"an ssh machine with no host", MachineFacts{Kind: "ssh", Account: "deploy", HostKey: "SHA256:k"}},
+		{"an ssh machine with no account", MachineFacts{Kind: "ssh", Host: "build.example.com", HostKey: "SHA256:k"}},
+		{"an ssh machine with no host key", MachineFacts{Kind: "ssh", Host: "build.example.com", Account: "deploy"}},
+		{"a local machine carrying a host", MachineFacts{Kind: "local", Host: "build.example.com"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := newHostServer(t)
+			conn := attachClient(t, ws)
+			defer conn.Close() //nolint:errcheck
+
+			// BOUNDED, so a regression that stopped refusing fails in seconds
+			// instead of parking on the ask: with the check removed the
+			// payload reaches the client, nobody answers it, and the mutation
+			// probe would otherwise spend the whole host-ask budget proving
+			// the same thing.
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			_, err := ws.RequestHost(ctx, HostAsk{
+				Capability: HostCapAgentApproval,
+				Executable: "/usr/local/bin/agent",
+				Digest:     "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12",
+				Workspace:  "default",
+				Machine:    tc.machine,
+			})
+			if err == nil {
+				t.Fatalf("an approval ask with a %s machine was accepted", tc.name)
+			}
+			if errors.Is(err, ErrNoApprovalHost) {
+				t.Fatalf("the ask was refused as 'no surface to ask' rather than for its machine: %v", err)
+			}
+			if !strings.Contains(err.Error(), "machine") {
+				t.Fatalf("the refusal does not name the machine: %v", err)
+			}
+		})
+	}
+
+	// The pairing: a COMPLETE machine is asked. The notification reaches the
+	// attached client, so the cases above are about the machine and not about
+	// approvals being refused wholesale.
+	ws := newHostServer(t)
+	conn := attachClient(t, ws)
+	defer conn.Close() //nolint:errcheck
+	out := askAsync(ws, t.Context(), HostAsk{
+		Capability: HostCapAgentApproval,
+		Executable: "/usr/local/bin/agent",
+		Digest:     "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12",
+		Workspace:  "default",
+		Machine:    MachineFacts{Kind: "ssh", Host: "build.example.com", Account: "deploy", HostKey: "SHA256:k"},
+	})
+	raw := readNotification(t, conn, "host.request", 5*time.Second)
+	var req struct {
+		RequestID string `json:"requestId"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		t.Fatalf("decode host.request: %v", err)
+	}
+	resolveHost(t, conn, map[string]any{"requestId": req.RequestID, "outcome": "ok", "approved": false})
+	if o := settled(t, out); o.err != nil {
+		t.Fatalf("a complete machine did not reach the person: %v", o.err)
 	}
 }
 

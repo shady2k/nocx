@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"os"
@@ -40,6 +41,25 @@ type LocalSpawner struct {
 	// be told what to start over an API would be a second answer to the
 	// question the doc comment above says only the composition root may ask.
 	openPTY func(log.Logger, pty.Config) (localPTY, error)
+	// agentHelperPath is the executable a pane's shell should exec to reach
+	// this generation's MCP adapter, and it is DAEMON-scoped on purpose: it is
+	// a property of this binary rather than of any caller, and there is
+	// exactly one such binary per daemon. The pane's tool ENDPOINT is the
+	// opposite case and is therefore not here — see
+	// SpawnRequest.AgentToolEndpoint.
+	//
+	// It is a path and never a bare name: the wrapper's own fallback is
+	// `${NOCX_AGENT_HELPER_PATH:-nocx-helper}`, and nothing in this product
+	// puts a `nocx-helper` on PATH — `make helpers` writes gzipped
+	// per-platform artifacts for deployment to a remote host. Unset, that
+	// fallback stands and an agent's MCP server fails to start with every
+	// other fact about it correct (nocx-o36tr).
+	//
+	// The path is the DAEMON'S OWN executable, so the pane execs the
+	// generation that owns it: nothing else in this process knows a better
+	// answer, and a path handed down from the coordinator could name a
+	// different generation than the one that forked the shell.
+	agentHelperPath string
 }
 
 // localPTY is everything Spawn and localProcess need from internal/pty, named
@@ -55,6 +75,18 @@ type localPTY interface {
 	Process
 	Dir() string
 	SignalProcessGroup(pgid int, sig syscall.Signal) error
+	// InterruptWrite, WaitReadable and RawReadUntilAgain are the session I/O
+	// owner's local-PTY read/write seam (nocx-6q1uh.3, internal/pty's
+	// master_nonblock_{linux,darwin}.go and RawReadUntilAgain). Stated here
+	// for the same reason Dir and SignalProcessGroup already are: localPTY
+	// embeds Process, an INTERFACE, so a method the concrete *pty.LocalPty
+	// has but this interface does not name is never promoted to
+	// localProcess below — a blind type assertion in owner.go would fail
+	// silently and fall back to the reader-goroutine path for every local
+	// session, never only for the ones that lack the seam.
+	InterruptWrite() error
+	WaitReadable(ctx context.Context) error
+	RawReadUntilAgain(buf []byte, deliver func([]byte)) (eof bool, err error)
 }
 
 // Shell pins what a LocalSpawner starts. Its ZERO VALUE means "ask
@@ -73,11 +105,17 @@ type Shell struct {
 	Args []string
 }
 
-// NewLocalSpawner builds the spawner. Production passes a zero Shell.
-func NewLocalSpawner(logger *slog.Logger, shell Shell) *LocalSpawner {
+// NewLocalSpawner builds the spawner. Production passes a zero Shell and this
+// daemon's own executable as agentHelperPath — the two facts that ARE the
+// daemon's. It deliberately takes no tool endpoint: that is a fact about the
+// coordinator that asked for a pane, so it arrives on each SpawnRequest
+// (nocx-50w7p.18), where a constructor argument would have frozen it to
+// whichever coordinator started this process.
+func NewLocalSpawner(logger *slog.Logger, shell Shell, agentHelperPath string) *LocalSpawner {
 	return &LocalSpawner{
-		log:   log.NewSlogAdapter(logger),
-		shell: shell,
+		log:             log.NewSlogAdapter(logger),
+		shell:           shell,
+		agentHelperPath: agentHelperPath,
 		openPTY: func(l log.Logger, cfg pty.Config) (localPTY, error) {
 			// Returned through the named nil rather than as one expression:
 			// a (*pty.LocalPty)(nil) handed back as an interface is not nil,
@@ -144,8 +182,36 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 		}
 	}
 
+	// THE LAUNCH DECISION, SAID BEFORE IT IS ACTED ON (nocx-n14oo.2).
+	//
+	// Everything about whether a pane can ever integrate is decided in the
+	// next few lines, and none of it was written down. A pane that takes the
+	// plain arm gets no capability and no lifecycle, so a caller that asked
+	// for one waits out its whole hello budget and learns only that the
+	// channel was lost — in another process, ten seconds later, with nothing
+	// naming the shell or the tier that made it inevitable.
+	//
+	// Note what the enhanced arm requires: a session id, no explicit shell
+	// args, and a shell LocalShellKind recognises as bash or zsh. Anything
+	// else takes the plain arm DELIBERATELY — the POSIX tier has no local
+	// launch semantics yet and ShellUnknown means "start it, integrate
+	// nothing, and say so" rather than "substitute bash" (nocx-k28e,
+	// shellintegration.LocalShellKind). The saying-so is this line: it was the
+	// half that did not exist.
+	launchKind := shellintegration.LocalShellKind(shellPath)
+	enhanced := req.SessionID != "" && len(shellArgs) == 0 &&
+		(launchKind == shellintegration.ShellBash || launchKind == shellintegration.ShellZsh)
+	s.log.Info("pane launch decided",
+		"session", req.SessionID,
+		"shell", shellPath,
+		"shell_kind", string(launchKind),
+		"enhanced", enhanced,
+		"explicit_shell_args", len(shellArgs),
+		"tool_endpoint", req.AgentToolEndpoint,
+		"lifecycle_requested", req.Lifecycle != nil)
+
 	if req.SessionID != "" && len(shellArgs) == 0 {
-		kind := shellintegration.LocalShellKind(shellPath)
+		kind := launchKind
 		if kind == shellintegration.ShellBash || kind == shellintegration.ShellZsh {
 			if req.Lifecycle != nil {
 				lifecycleParent, lifecycleChild, err = lifecyclechannel.NewSocketPair()
@@ -154,7 +220,22 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 					return nil, err
 				}
 			}
-			opts := shellintegration.LaunchOptions{SessionID: req.SessionID, Enhanced: true}
+			opts := shellintegration.LaunchOptions{
+				SessionID: req.SessionID,
+				Enhanced:  true,
+				// The REQUEST's endpoint, and nothing else's: this is the
+				// coordinator that opened this pane, which is the only party
+				// that knows which endpoint the pane's tools belong to
+				// (nocx-50w7p.18). Empty renders no NOCX_TOOL_SOCKET at all,
+				// which is the soft degrade for a caller that runs none.
+				AgentToolSocketPath: req.AgentToolEndpoint,
+				AgentHelperPath:     s.agentHelperPath,
+				// The pane's bearer, on the road every bearer takes
+				// (launcher.go says why it is not in the env block):
+				// nocx-e2bws, and the same value the ssh route carries for a
+				// far pane this machine's helper dials.
+				AgentToolToken: req.AgentToolToken,
+			}
 			if req.Lifecycle != nil {
 				opts.Lane = req.Lifecycle.Lane
 				opts.Domain = req.Lifecycle.Domain
@@ -165,9 +246,18 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 			}
 			launch, err = shellintegration.LocalEnhancedLaunchInMemory(shellPath, kind, opts)
 			if err != nil {
+				s.log.Error("pane launch: the enhanced tier could not be built",
+					"session", req.SessionID, "shell", shellPath, "shell_kind", string(kind), "error", err)
 				release()
 				return nil, err
 			}
+			// The argv SHAPE and not its contents: the capability rides in
+			// the script text these arguments point at, and printing it would
+			// put a bearer token in a log file.
+			s.log.Info("pane launch: the enhanced tier is built",
+				"session", req.SessionID, "shell", launch.Command, "argv", len(launch.Args),
+				"extra_files", len(launch.ExtraFiles), "bootstrap_bytes", len(launch.Bootstrap),
+				"lifecycle_fd", opts.LifecycleFD, "lane", opts.Lane, "epoch", opts.Epoch)
 			if lifecycleChild != nil {
 				launch.ExtraFiles = append(launch.ExtraFiles, lifecycleChild)
 				previousCleanup := launch.Cleanup
@@ -184,15 +274,24 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 	}
 	lp, err := s.openPTY(s.log, cfg)
 	if err != nil {
+		s.log.Error("pane launch: the pty could not be opened",
+			"session", req.SessionID, "shell", cfg.Command, "error", err)
 		release()
 		return nil, err
 	}
 	if len(launch.Bootstrap) > 0 {
+		// The bootstrap is a LINE INTO THE TERMINAL — `. /dev/fd/3` for the
+		// tiers that cannot take a descriptor as an rcfile — so it is the one
+		// thing here that shares a channel with the user's own input.
 		if _, err := lp.Write(launch.Bootstrap); err != nil {
+			s.log.Error("pane launch: the bootstrap line could not be written",
+				"session", req.SessionID, "bytes", len(launch.Bootstrap), "error", err)
 			_ = lp.Close()
 			release()
 			return nil, err
 		}
+		s.log.Debug("pane launch: the bootstrap line is written",
+			"session", req.SessionID, "bytes", len(launch.Bootstrap))
 	}
 	if launch.Cleanup != nil {
 		launch.Cleanup()

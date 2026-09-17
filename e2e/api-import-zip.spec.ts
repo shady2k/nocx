@@ -16,13 +16,13 @@
  * No wait below is a duration. The preview, destination, dialog, directory,
  * and toast are all observable state transitions.
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { existsSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
 import { join, sep } from 'node:path'
 import { openWorkbench } from './api-workbench'
-import { openImportDestination, VaultBackend } from './harness'
+import { standalone as base, openImportDestination, VaultBackend } from './harness'
 import { readStand } from './stand'
 
 const test = base

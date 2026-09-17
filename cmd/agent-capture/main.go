@@ -5,7 +5,8 @@
 // on a real PTY, together with the moments at which those bytes arrived. This tool
 // makes that evidence reproducible. Capture pins terminal size and locale, drives
 // the child from a small timed-keystroke script, and stores bytes only. Replay feeds
-// those bytes through charmbracelet/x/vt and prints the screen at requested moments.
+// those bytes back through the replay in internal/agentcapture and prints the screen
+// at the requested moments.
 //
 // The two operations are subcommands of one binary because they share one capture
 // format and one workflow: take evidence, then inspect the exact moments a driver
@@ -13,8 +14,7 @@
 package main
 
 import (
-	"bufio"
-	"encoding/json"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -28,29 +28,33 @@ import (
 	"time"
 	"unicode"
 
-	xvt "github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
+
+	"github.com/shady2k/nocx/internal/agentcapture"
+	"github.com/shady2k/nocx/internal/agentcapture/replaylocal"
+	"github.com/shady2k/nocx/internal/paneview"
 )
-
-type captureHeader struct {
-	Agent   string   `json:"agent"`
-	Argv    []string `json:"argv"`
-	Cols    int      `json:"cols"`
-	Rows    int      `json:"rows"`
-	Started string   `json:"started"`
-	Script  []string `json:"script"`
-}
-
-type captureChunk struct {
-	AtMs   int64  `json:"atMs"`
-	Offset int    `json:"offset"`
-	Data   string `json:"data"`
-}
 
 type scriptStep struct {
 	delay time.Duration
 	send  []byte
 	label string
+}
+
+// captureOptions is one capture. Env nil inherits the caller's environment, as
+// capture always has; a non-nil Env replaces it and turns on the Claude
+// configuration refusals.
+type captureOptions struct {
+	OutPath        string
+	Argv           []string
+	Cols, Rows     int
+	Timeout        time.Duration
+	Steps          []scriptStep
+	ScriptProvided bool
+	Env            []string
+	Dir            string
+	MetaPath       string
+	VersionArg     string
 }
 
 type usageError struct {
@@ -116,7 +120,7 @@ func runCaptureCommand(args []string, stderr io.Writer) error {
 	fs := flag.NewFlagSet("capture", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
-		if _, err := fmt.Fprintln(stderr, "usage: agent-capture capture -out FILE [-script FILE] [-cols N] [-rows N] [-timeout DURATION] -- PROGRAM [ARGS...]"); err != nil {
+		if _, err := fmt.Fprintln(stderr, "usage: agent-capture capture -out FILE [-script FILE] [-cols N] [-rows N] [-timeout DURATION] [-env-file FILE] [-dir DIR] [-meta FILE] [-version-arg ARG] -- PROGRAM [ARGS...]"); err != nil {
 			return
 		}
 		fs.PrintDefaults()
@@ -126,6 +130,10 @@ func runCaptureCommand(args []string, stderr io.Writer) error {
 	cols := fs.Int("cols", 120, "PTY columns")
 	rows := fs.Int("rows", 40, "PTY rows")
 	timeout := fs.Duration("timeout", 90*time.Second, "hard stop after this duration")
+	envFile := fs.String("env-file", "", "replace the inherited environment with this file's KEY=VALUE lines, and refuse to start if Claude Code would read configuration outside the run")
+	dir := fs.String("dir", "", "working directory for the program (default: the current directory)")
+	metaPath := fs.String("meta", "", "with -env-file, write what ran and the variable names here")
+	versionArg := fs.String("version-arg", "", "with -meta, also run the resolved program once with this argument under the same environment and record its output as the program version")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -157,7 +165,18 @@ func runCaptureCommand(args []string, stderr io.Writer) error {
 			return fmt.Errorf("capture: script %q: %w", *scriptPath, err)
 		}
 	}
-	return captureProgram(*outPath, argv, *cols, *rows, *timeout, steps, *scriptPath != "", stderr)
+	opts := captureOptions{
+		OutPath: *outPath, Argv: argv, Cols: *cols, Rows: *rows, Timeout: *timeout,
+		Steps: steps, ScriptProvided: *scriptPath != "", Dir: *dir, MetaPath: *metaPath, VersionArg: *versionArg,
+	}
+	if *envFile != "" {
+		env, err := readEnvFile(*envFile)
+		if err != nil {
+			return fmt.Errorf("capture: %w", err)
+		}
+		opts.Env = env
+	}
+	return captureProgram(opts, stderr)
 }
 
 func runReplayCommand(args []string, stdout, stderr io.Writer) error {
@@ -309,10 +328,48 @@ func parseMarks(text string) ([]int64, error) {
 	return marks, nil
 }
 
-func captureProgram(outPath string, argv []string, cols, rows int, timeout time.Duration, steps []scriptStep, scriptProvided bool, stderr io.Writer) error {
+func captureProgram(opts captureOptions, stderr io.Writer) error {
+	outPath, argv, cols, rows, timeout, steps, scriptProvided := opts.OutPath, opts.Argv, opts.Cols, opts.Rows, opts.Timeout, opts.Steps, opts.ScriptProvided
+	base := os.Environ()
+	program := argv[0]
+	if opts.Env != nil {
+		base = opts.Env
+		if err := refuseEnvOutsideClaudeConfig(opts.Env); err != nil {
+			return err
+		}
+		root := opts.Dir
+		if root == "" {
+			wd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("refusing to start: cannot resolve the working directory: %w", err)
+			}
+			root = wd
+		}
+		if err := refuseOutsideClaudeConfig(root); err != nil {
+			return err
+		}
+		resolved, err := resolveProgram(argv[0], opts.Env)
+		if err != nil {
+			return fmt.Errorf("refusing to start: %w", err)
+		}
+		if opts.MetaPath != "" {
+			version := ""
+			if opts.VersionArg != "" {
+				version, err = probeVersion(resolved, opts.VersionArg, opts.Env, root)
+				if err != nil {
+					return fmt.Errorf("record program version: %w", err)
+				}
+			}
+			if err := writeRunMeta(opts.MetaPath, argv[0], resolved, opts.Env, version); err != nil {
+				return err
+			}
+		}
+		program = resolved
+	}
 	//nolint:gosec // the operator explicitly supplies the program and arguments
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Env = pinnedEnvironment(cols, rows)
+	cmd := exec.Command(program, argv[1:]...)
+	cmd.Dir = opts.Dir
+	cmd.Env = pinnedEnvironment(base, cols, rows)
 	//nolint:gosec // cols and rows are validated against uint16 bounds before this call
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 	if err != nil {
@@ -378,7 +435,7 @@ func captureProgram(outPath string, argv []string, cols, rows int, timeout time.
 		runErr = fmt.Errorf("program %q exited without producing PTY output; check the command and arguments", argv[0])
 	}
 
-	header := captureHeader{
+	header := agentcapture.Header{
 		Agent:   argv[0],
 		Argv:    append([]string(nil), argv...),
 		Cols:    cols,
@@ -386,7 +443,7 @@ func captureProgram(outPath string, argv []string, cols, rows int, timeout time.
 		Started: started.Format(time.RFC3339Nano),
 		Script:  scriptLabels(steps),
 	}
-	if writeErr := writeCapture(outPath, header, result.chunks); writeErr != nil {
+	if writeErr := agentcapture.Write(outPath, header, result.chunks); writeErr != nil {
 		if runErr == nil {
 			runErr = writeErr
 		} else {
@@ -408,7 +465,7 @@ func captureProgram(outPath string, argv []string, cols, rows int, timeout time.
 }
 
 type readResult struct {
-	chunks []captureChunk
+	chunks []agentcapture.Chunk
 	bytes  int
 	err    error
 }
@@ -420,7 +477,7 @@ func readPTY(ptmx io.Reader, started time.Time, done chan<- readResult) {
 		n, err := ptmx.Read(buf)
 		if n > 0 {
 			data := string(buf[:n])
-			result.chunks = append(result.chunks, captureChunk{
+			result.chunks = append(result.chunks, agentcapture.Chunk{
 				AtMs:   time.Since(started).Milliseconds(),
 				Offset: result.bytes,
 				Data:   data,
@@ -467,12 +524,19 @@ func killProcess(cmd *exec.Cmd) error {
 	return nil
 }
 
-func pinnedEnvironment(cols, rows int) []string {
-	keys := map[string]struct{}{
-		"TERM": {}, "LANG": {}, "LC_ALL": {}, "COLUMNS": {}, "LINES": {},
+// pinnedEnvironmentKeys are the variables captureProgram pins regardless of
+// what -env-file supplies, so the capture's terminal size and locale never
+// depend on the caller. TestAnEnvFileIsTheWholeEnvironment asserts the exact
+// resulting environment against this list.
+var pinnedEnvironmentKeys = []string{"TERM", "LANG", "LC_ALL", "COLUMNS", "LINES"}
+
+func pinnedEnvironment(base []string, cols, rows int) []string {
+	keys := make(map[string]struct{}, len(pinnedEnvironmentKeys))
+	for _, k := range pinnedEnvironmentKeys {
+		keys[k] = struct{}{}
 	}
-	env := make([]string, 0, len(os.Environ())+5)
-	for _, entry := range os.Environ() {
+	env := make([]string, 0, len(base)+5)
+	for _, entry := range base {
 		key, _, ok := strings.Cut(entry, "=")
 		if !ok {
 			continue
@@ -499,164 +563,62 @@ func scriptLabels(steps []scriptStep) []string {
 	return labels
 }
 
-func writeCapture(path string, header captureHeader, chunks []captureChunk) error {
-	file, err := os.Create(path) //nolint:gosec // the operator explicitly supplies the capture path
-	if err != nil {
-		return fmt.Errorf("cannot create capture %q: %w", path, err)
-	}
-	encoder := json.NewEncoder(file)
-	if err := encoder.Encode(header); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("write capture header: %w", err)
-	}
-	for _, chunk := range chunks {
-		if err := encoder.Encode(chunk); err != nil {
-			_ = file.Close()
-			return fmt.Errorf("write capture chunk: %w", err)
-		}
-	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("close capture %q: %w", path, err)
-	}
-	return nil
-}
-
-func replayCapture(path string, marks []int64, stdout io.Writer) (err error) {
-	header, chunks, err := readCapture(path)
+// replayCapture prints the screen at each mark. The FORMAT belongs to
+// internal/agentcapture, which is also what a calibration set is read with: one
+// format, one arithmetic, one owner.
+//
+// The emulator is this tool's OWN process — replaylocal — and that is a
+// deliberate difference from the product, not a second implementation of one
+// thing. In the product the emulator is the helper's (proto.OpReplay) because
+// cmd/nocx-server is built CGO_ENABLED=0; this tool is a person's command over
+// a file, it may link the emulator, and it uses the SAME one
+// (internal/emulator/ghostty through paneview.Replay), so the frames it prints
+// are the frames the product produces.
+func replayCapture(path string, marks []int64, stdout io.Writer) error {
+	header, chunks, err := agentcapture.Read(path)
 	if err != nil {
 		return err
 	}
-	term := xvt.NewEmulator(header.Cols, header.Rows)
-	drainDone := make(chan struct{})
-	go drainEmulator(term, drainDone)
-	defer func() {
-		if closeErr := term.Close(); closeErr != nil && err == nil {
-			err = fmt.Errorf("close emulator: %w", closeErr)
-		}
-		<-drainDone
-	}()
-
-	consumed := 0
-	for _, mark := range marks {
-		previous := consumed
-		consumed = chunksThroughMark(chunks, mark, consumed)
-		if err := feedChunks(term, chunks[previous:consumed]); err != nil {
-			return fmt.Errorf("feed capture at %dms: %w", mark, err)
-		}
-		if err := printFrame(stdout, term, header, mark, consumed, previousOffset(chunks, consumed)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func readCapture(path string) (captureHeader, []captureChunk, error) {
-	file, err := os.Open(path) //nolint:gosec // the operator explicitly supplies the capture path
+	moments, err := agentcapture.Frames(context.Background(), replaylocal.Replayer{}, header, chunks, marks)
 	if err != nil {
-		return captureHeader{}, nil, fmt.Errorf("cannot open capture %q: %w", path, err)
+		return err
 	}
-	defer func() { _ = file.Close() }()
-
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 1<<20), 1<<24)
-	if !scanner.Scan() {
-		if err := scanner.Err(); err != nil {
-			return captureHeader{}, nil, fmt.Errorf("read capture header: %w", err)
-		}
-		return captureHeader{}, nil, errors.New("capture is empty; expected a JSONL header")
-	}
-	var header captureHeader
-	if err := json.Unmarshal(scanner.Bytes(), &header); err != nil {
-		return captureHeader{}, nil, fmt.Errorf("decode capture header: %w", err)
-	}
-	if header.Agent == "" || len(header.Argv) == 0 {
-		return captureHeader{}, nil, errors.New("capture header has no agent or argv")
-	}
-	if header.Cols <= 0 || header.Rows <= 0 {
-		return captureHeader{}, nil, fmt.Errorf("capture header has invalid geometry %dx%d", header.Cols, header.Rows)
-	}
-
-	chunks := make([]captureChunk, 0)
-	expectedOffset := 0
-	var previousAt int64
-	for lineNumber := 2; scanner.Scan(); lineNumber++ {
-		var chunk captureChunk
-		if err := json.Unmarshal(scanner.Bytes(), &chunk); err != nil {
-			return captureHeader{}, nil, fmt.Errorf("decode capture chunk on line %d: %w", lineNumber, err)
-		}
-		if chunk.AtMs < 0 || chunk.AtMs < previousAt {
-			return captureHeader{}, nil, fmt.Errorf("capture chunk on line %d has out-of-order atMs %d", lineNumber, chunk.AtMs)
-		}
-		if chunk.Offset != expectedOffset {
-			return captureHeader{}, nil, fmt.Errorf("capture chunk on line %d starts at offset %d, expected %d", lineNumber, chunk.Offset, expectedOffset)
-		}
-		chunks = append(chunks, chunk)
-		expectedOffset += len([]byte(chunk.Data))
-		previousAt = chunk.AtMs
-	}
-	if err := scanner.Err(); err != nil {
-		return captureHeader{}, nil, fmt.Errorf("read capture: %w", err)
-	}
-	return header, chunks, nil
-}
-
-func chunksThroughMark(chunks []captureChunk, mark int64, already int) int {
-	for already < len(chunks) && chunks[already].AtMs <= mark {
-		already++
-	}
-	return already
-}
-
-func previousOffset(chunks []captureChunk, consumed int) int {
-	if consumed == 0 {
-		return 0
-	}
-	return chunks[consumed-1].Offset + len([]byte(chunks[consumed-1].Data))
-}
-
-func feedChunks(term *xvt.Emulator, chunks []captureChunk) error {
-	for _, chunk := range chunks {
-		if _, err := term.Write([]byte(chunk.Data)); err != nil {
+	for _, m := range moments {
+		if err := printFrame(stdout, m); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func drainEmulator(term *xvt.Emulator, done chan<- struct{}) {
-	defer close(done)
-	buf := make([]byte, 4096)
-	for {
-		if _, err := term.Read(buf); err != nil {
-			return
-		}
-	}
-}
-
-func printFrame(w io.Writer, term *xvt.Emulator, header captureHeader, mark int64, consumed, offset int) error {
-	position := term.CursorPosition()
-	if _, err := fmt.Fprintf(w, "=== at %dms (through chunk %d, offset %d) cursor %d,%d alt=%v ===\n", mark, consumed, offset, position.X, position.Y, term.IsAltScreen()); err != nil {
+func printFrame(w io.Writer, m agentcapture.Moment) error {
+	f := m.Frame
+	if _, err := fmt.Fprintf(w, "=== at %dms (through chunk %d, offset %d) cursor %d,%d alt=%v ===\n",
+		m.AtMs, m.Chunks, m.Offset, f.CursorX, f.CursorY, f.AltScreen); err != nil {
 		return fmt.Errorf("write frame header: %w", err)
 	}
-	for y := 0; y < header.Rows; y++ {
-		var line strings.Builder
-		for x := 0; x < header.Cols; x++ {
-			cell := term.CellAt(x, y)
-			if cell == nil || cell.Width == 0 {
-				if cell == nil {
-					line.WriteByte(' ')
-				}
-				continue
-			}
-			if cell.Content == "" {
-				line.WriteByte(' ')
-				continue
-			}
-			line.WriteString(cell.Content)
-		}
-		if _, err := fmt.Fprintf(w, "%3d|%s\n", y, strings.TrimRight(line.String(), " ")); err != nil {
+	for y := 0; y < f.Rows; y++ {
+		if _, err := fmt.Fprintf(w, "%3d|%s\n", y, strings.TrimRight(rowText(f, y), " ")); err != nil {
 			return fmt.Errorf("write frame row %d: %w", y, err)
 		}
 	}
 	return nil
+}
+
+// rowText renders one row the way the frame reports it: a continuation cell
+// contributes nothing, because the double-width grapheme before it already
+// stands for both of its columns.
+func rowText(f paneview.Frame, y int) string {
+	var line strings.Builder
+	for _, c := range f.Lines[y] {
+		if c.Width == 0 {
+			continue
+		}
+		if c.Text == "" {
+			line.WriteByte(' ')
+			continue
+		}
+		line.WriteString(c.Text)
+	}
+	return line.String()
 }

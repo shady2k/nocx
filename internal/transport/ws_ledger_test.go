@@ -1120,6 +1120,9 @@ func TestLedgerEntry_SaysWhichHostItRanOn(t *testing.T) {
 		},
 	})
 	ws := NewWSServer(logger, reg,
+		// Same reason as the host-rung test: the ssh pane is a helper's, and
+		// this test measures which host a ledger entry reports.
+		sshHelperOpt(reg),
 		WithContentDB(db),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(string) (string, *ssh.ConnectConfig, error) {

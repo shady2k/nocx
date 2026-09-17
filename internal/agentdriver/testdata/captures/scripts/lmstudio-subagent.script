@@ -1,0 +1,7 @@
+14000 \r
+6000 \r
+7000 \x1b[B
+1500 \r
+9000 Use the Agent tool to launch the Explore subagent with run_in_background true, asking it to list the files in this folder. Do not wait for it.
+800 \r
+120000

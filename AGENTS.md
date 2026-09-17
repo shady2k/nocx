@@ -224,7 +224,8 @@ called before that", the fix is an assertion or a test.
 ## Code search
 
 **`grep`, `glob` and reading the file** is the answer for _does this exist, and who calls
-it_.
+it_ — measured against `repowise` rather than assumed
+([ADR-0056](docs/decisions/0056-repowise-is-kept-for-history-not-for-search.md)).
 
 **`repowise` is installed, and it is not a second `grep`.** That ordering is measured, not
 asserted: `nocx-14sbw` put both against five questions we actually ask. With a live
@@ -319,6 +320,18 @@ that is correct: before it, an e2e run wrote the developer's real settings and r
 theme on every pass. If you want your real SSH profiles in the dev stand, copy them across
 by hand — nothing migrates them for you, and nothing should.
 
+**A dev build logs everything, and that includes what you typed.** The default level is
+the BUILD's (`internal/log`'s `DefaultLevel`, split on the `release` tag), so a dev stand
+writes debug from its first line without being asked — the owner's decision of 2026-09-10,
+because a debug line nobody can reach without a restart is a debug line nobody writes.
+The data plane's arrival log (`internal/transport/ws.go`) is one of those lines, and that
+plane carries exactly what the person at the keyboard pressed: every password typed into a
+running `ssh` for a host nocx holds no credentials for. `log.Sensitive` still redacts it in
+a shipped build, chosen by the build tag and not by the level, so nothing a user runs is
+affected. What is affected is `~/.local/share/nocx-dev/nocx.log` on YOUR machine:
+**it is not a file to paste into an issue, a bead or a pull request.** Quote the lines you
+need.
+
 **The e2e suite gets a disposable `$HOME`.** There is one stand and Playwright owns it
 (`e2e/stand.ts`), so the boundary is applied to every backend the suite starts — the shared
 one and the ones individual specs raise — by `e2e/home-isolation.ts`, which RAISES rather
@@ -354,9 +367,17 @@ WebKit at a container-default viewport; the shipped app is macOS WKWebView. Layo
 specs fail there and pass in CI. Use it to iterate, confirm in CI, and never "fix" a test
 that is only red in the container without working out which one is lying.
 
+**A failing e2e test prints its own context, at the moment it fails** (nocx-n14oo.11): the
+backend log lines its own connection caused (matched by a `trace_id` the harness mints per
+test and the renderer sends as `traceparent`), the browser console, the control-plane's
+JSON-RPC frames, and the accessibility snapshot — all in the reporter output, with no
+artifact download needed. Read that block before forming a hypothesis; it is usually the
+whole answer, and guessing from the DOM or re-running locally to reproduce what the block
+already said is the failure mode this exists to end.
+
 ## How we work
 
-1. Take the next task with the queue command in [What to work on next](#what-to-work-on-next).
+1. Take the next task from `br ready` — see [What to work on next](#what-to-work-on-next).
 2. Read the relevant `AD`(s) before touching a boundary.
 3. **TDD**: red → green → refactor. The failing test comes first.
 4. Keep it green, and let the gate cost what it is worth. `pre-commit` is static and takes
@@ -368,6 +389,34 @@ that is only red in the container without working out which one is lying.
    push ran everything, on every worktree. The suites are one command away by hand
    (`.githooks/containerized-tests.sh`); what catches a break is CI and the merged-tree gate.
 5. Update the bead; record any non-obvious decision as an ADR in `docs/decisions/`.
+
+## Session completion
+
+Subordinate to whatever the user actually asked for. `br` will not do any of the git
+steps for you.
+
+1. **File beads for remaining work** — anything that needs follow-up, before you forget it.
+2. **Run the quality gates** if code changed. Which ones, and whose job they are, is under
+   [Git authority](#git-authority): a worker runs the unit tests for what it touched, the
+   coordinator runs `make ci-full` on the merged tree.
+3. **Update issue status** — close what is finished, and set anything you stopped holding
+   back to `open` in the same minute. An unheld bead in `in_progress` is invisible to
+   `br ready` and to every colleague looking for work.
+4. **Send the backlog out with the code:**
+
+   ```bash
+   br sync --flush-only
+   git add .beads/issues.jsonl
+   git commit          # same commit as the code it describes, or one right beside it
+   git push
+   ```
+
+5. **Write down anything that was bought.** If something in this session cost a
+   measurement or a wrong turn and is not derivable from the repository, it goes in this
+   file, which has the three tests. Nothing does this for you: the transcript `deja`
+   indexes is a record of what you did, not a rule anybody will review.
+6. **Hand off** — changed files, what you validated, bead status, and anything you left
+   blocked, in those words.
 
 ## Testing: five rules, each bought by a green suite over a broken product
 
@@ -555,6 +604,19 @@ how two agents ship two answers to one question.
 4. **Decided in an ADR?** `ls docs/decisions/`. Re-deciding a settled question inside a
    bugfix is how it stops being settled.
 
+   **An accepted ADR is never edited. A change is a NEW record that supersedes it.**
+   The owner's rule, 2026-09-10. An ADR is evidence of what was decided and why, at a
+   date — edit it and the evidence is gone, while every citation written against it now
+   points at a decision nobody took. The index already carries the spelling
+   (`Superseded by ADR-NNNN`, and `Accepted (§7 superseded by ADR-0027)` where only a
+   section moved), so this costs one row. The new record names what it supersedes and
+   why the old answer stopped holding; citations elsewhere — `contracts/`, code
+   comments, protocol docs — move to the new number in the same commit.
+
+   This overrules the practice visible in the tree: ADR-0024 carries two `## Amendment`
+   sections written into the record itself. Do not copy them. They are what the rule
+   was made against.
+
 5. **Is the code reachable?** A file on `main` is not a feature in the product.
 
    ```bash
@@ -616,33 +678,58 @@ git diff origin/main...HEAD -- <path> | grep '^-'
 > timing out on a visible button. Hours of geometry reasoning; the removed-lines diff found
 > it in a minute.
 
+**And when a gate fails only for you, suspect how you launched it before you suspect the
+code.** A long run wants detaching, and the reflex is `nohup` — which sets SIGHUP to
+`SIG_IGN`. That disposition survives `exec`, and Go deliberately preserves signals ignored
+at program entry, so it reaches the test binary, the shell an `internal/pty` test spawns
+and everything that shell runs. `LocalPty.Close` then cannot hang its program up; the
+program keeps the slave open; the master's `Read` never returns; Go defers the real
+`close(2)` behind that in-flight read, so the kernel's own last-close hangup never fires
+either — and the package deadlocks to its ten-minute panic. **Detach with `setsid` alone.**
+It does not touch signal dispositions.
+
+`grep SigIgn /proc/<pid>/status` settles it in one line: bit 0 set means SIGHUP is ignored
+in that process, and the mask is inherited, so reading it on a leaked child names the
+ancestor that did it.
+
+> 2026-09-06 (`nocx-pibr3`). Three `make ci` runs red on `internal/pty`, 600 s each, on
+> `origin/main` and on a branch alike — while the package was green run by hand every
+> time. Two causes were written down and committed before the third was measured: five
+> leaked `tail -f` from five runs all carried `SigIgn 0x1`, survived an explicit
+> `kill -HUP` and died instantly on `kill -TERM`. Removing `nohup` and changing nothing
+> else: `ok internal/pty 1.510s`. A worker had already been dispatched to fix the pty.
+
 ## What to work on next
 
 Asked to "keep going" with no further instruction, this is the whole answer:
 
 ```bash
-scripts/br-queue.sh
+br ready
 ```
-
-It prints two lists: tasks inside epics somebody has actually taken, and standalone bugs,
-which legitimately have no epic. It is a script rather than two piped commands because
-`br ready` can filter on neither parent nor issue type, so both filters are computed. Read
-the script before working around it; the reasoning is in its header.
 
 **If it returns nothing, that is an answer, not a bug** — every open epic's front is
 occupied. Finish something in flight or take a free epic; never widen the query.
 
+**The rules below are yours to apply, and no wrapper's to enforce.** Narrow with the
+binary's own flags — `--parent`, `--epic` (sugar for `--parent <id> --recursive`), a
+repeatable `-t/--type`, `-r/--recursive`, `-l/--label` — and never with a script around
+them. Custom machinery wrapped around a tracker is a second answer to the tracker's own
+question, and it goes stale the quarter the tracker catches up.
+
 - **You may not take a task out of an epic nobody has taken.** If the epic is free, take
   the epic (`br update <epic> --assignee "$(git config user.email)" --status in_progress`),
-  then come back for its children.
+  then come back for its children with `br ready --epic <epic>`.
 - **Never take work out of a blocked epic** — it is blocked because the same files are
-  moving. The queue script enforces this; going around it via `br list`, `br search` or an
-  id in a document is the failure mode. If a bead is not in `br ready`, do not start it.
+  moving. Nothing computes this for you: read the epic before you take its child. Going
+  around the queue via `br list`, `br search` or an id in a document is the failure mode.
+  If a bead is not in `br ready`, do not start it.
 - **An epic is assigned, its children are claimed.** Owning an epic means seeing it to its
   DONE WHEN. Never `--claim` an epic bead as though it were a task.
 - **`br ready -t epic --unassigned`** lists epics nobody owns and nothing blocks — what you
   can hand to a colleague. Do not flip an epic to `in_progress` to hide it from a task
-  listing; the queue script already excludes epics.
+  listing; `br ready -t task -t bug` is how you leave epics out of one.
+- **A standalone bug legitimately has no epic.** `br ready -t bug` is where those surface,
+  and taking one needs no epic to be taken first.
 
 ### Backlog invariants
 
@@ -688,6 +775,18 @@ stop that loop.
 - **A label never restates a field.** Labels duplicating `issue_type`, and labels that were
   really a date, have been deleted. `mvp` and `phase-1/2/3` stay: they are roadmap, they are
   orthogonal to area, and the rules above already govern them.
+
+- **Triage labels are the third axis**, added 2026-09-16 for the `/triage` skill:
+  `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. Like `mvp`
+  and `phase-1/2/3` they are orthogonal to area, so the one-area-label rule is unchanged —
+  a triaged bead carries its area label _and_ a triage label. These five, the area list and
+  the roadmap list are the whole permitted vocabulary; anything else is still refused.
+  `wontfix` is a label **and** a close (`br close <id> --reason "wontfix: <why>"`), because
+  a label alone leaves the bead open in everybody's listing. And `ready-for-agent` /
+  `ready-for-human` are for work arriving from OUTSIDE the queue: for a bead already inside
+  an epic, `br ready` is the authority on whether it is takeable, since it computes blockers
+  and holds that a hand-applied label cannot. Mapping in
+  [`docs/agents/triage-labels.md`](docs/agents/triage-labels.md).
 
 - **`in_progress` means a worker is holding it now** — not "started once", not "nearly
   done". Stopping means setting it back to `open` in the same minute, because an unheld bead
@@ -855,7 +954,14 @@ Checked by eye at review. If that rots, file a `commit-msg` hook rather than dro
 - **Quality gates from every commit** — format, lint, test. Go and TypeScript held to the
   same bar.
 - **Observability:** structured logging via `log/slog` behind the logging interface — no
-  ad-hoc `fmt.Println`.
+  ad-hoc `fmt.Println`. Get the logger with `log.From(ctx)` (`internal/log`), never a stored
+  field: it carries module, request id, trace and span from whatever the context holds, with
+  no call site passing any of the four by hand, and a pre-commit ratchet refuses a new call
+  that does not go through it (`.githooks/check-log-context.mjs`). In a test, get the logger
+  from `internal/log/logtest.New(t)` instead of a discard sink: it is private to that test and
+  prints itself, grouped by trace, only when the test fails — never hand production code a
+  bare `io.Discard`-backed logger again. `go test -tags gtk3 -failfast -run '<Name>' ./<pkg>`
+  is the local command that shows a failing test's own debug log this way.
 - **Clean-only:** no backward-compatibility shims (greenfield — break and refactor freely),
   no dead code, no quick-win hacks. YAGNI.
 - **Respect the spine.** Never wrap PTY bytes in JSON-RPC (AD-1); the backend never sniffs
@@ -929,15 +1035,29 @@ changed.
 - **Transport:** one WebSocket — raw **binary** data plane + **JSON-RPC 2.0** control plane
   (AD-1).
 
+## Agent skills
+
+The `mattpocock/skills` engineering skills read their per-repo configuration from
+`docs/agents/`. Three files, and they are the skills' view of rules this file owns:
+
+| File                                                           | What it tells a skill                                                                                |
+| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| [`docs/agents/issue-tracker.md`](docs/agents/issue-tracker.md) | Issues live in **`br`**, not GitHub Issues and not markdown — the verbs, and the wayfinder mapping.  |
+| [`docs/agents/triage-labels.md`](docs/agents/triage-labels.md) | The five triage roles as `br` labels, orthogonal to the one mandatory area label.                    |
+| [`docs/agents/domain.md`](docs/agents/domain.md)               | Single-context: this file is the `CONTEXT.md`, and ADRs are in `docs/decisions/`, never `docs/adr/`. |
+
+They restate; they do not decide. Where one disagrees with this file, this file wins and
+the `docs/agents/` copy is the bug.
+
 ## This file wins over a skill
 
 The `beads-superpowers` plugin is installed for its process skills — brainstorming,
 writing-plans, test-driven-development, systematic-debugging — and they are worth having.
 Its tracker half is not: those skills were written for an older tracker under a different
 binary name, and by the plugin's own rule repository instructions win over skills.
-**Translate every tracker command in a skill to `br`.** Three do not survive a rename:
-"what next" is `scripts/br-queue.sh`, recall is `deja` and not the tracker at all, and
-export is `br sync --flush-only` to `.beads/issues.jsonl`.
+**Translate every tracker command in a skill to `br`.** Two do not survive a rename:
+recall is `deja` and not the tracker at all, and export is `br sync --flush-only` to
+`.beads/issues.jsonl`.
 
 The official `br` skill is installed too and carries the same kind of leftovers — config
 keys that do not exist in `br config schema`, and an id prefix that was never ours. Believe

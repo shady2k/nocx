@@ -188,10 +188,10 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 	cfg.AgentForward = eff.ResolvedOptions.AgentForward
 
 	// Desired mode (nocx-mlm7): the effective desiredMode is the
-	// connection-scope delivery axis (auto|raw|script|relay) and rides the
+	// connection-scope delivery axis (auto|raw|script|helper) and rides the
 	// config verbatim; the ssh layer gates open-time integration on it
 	// through profile.DesiredMode.DeliversScripts, which owns that rule
-	// (auto, script and relay publish and integrate; raw alone opens a
+	// (auto, script and helper publish and integrate; raw alone opens a
 	// plain shell).
 	cfg.DesiredMode = string(eff.ResolvedOptions.DesiredMode)
 
@@ -228,11 +228,18 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 	// transport ask is available, so the auth ladder for a password-capable
 	// profile never ends empty (tabby's model). ConnectionName is the
 	// profile's display name — the prompt names the connection it is asking
-	// about (nocx-s8jn). askerFor pins the profile id the remember path
+	// about (nocx-s8jn). AskerFor pins the profile id the remember path
 	// must update.
 	cfg.ConnectionName = prof.Name
+	// ProfileID travels beside it for the same reason (nocx-y6fh7 item 4,
+	// round 3): a helper-hosted dial's own interactive rung echoes both
+	// back on its password ask, and every destination-resolving caller in
+	// internal/ssh reaches the wire through the SAME resolveDialEndpoint —
+	// one owner of "which connection and profile is this", not a second
+	// stamping added at whichever call site happens to build the spawn.
+	cfg.ProfileID = prof.ID
 	if r.asker != nil {
-		cfg.PasswordRequester = r.askerFor(prof.ID)
+		cfg.PasswordRequester = r.AskerFor(prof.ID)
 	}
 	if o.PasswordSecret != "" || o.KeySecret != "" || o.KeyPassphraseSecret != "" {
 		cfg.Secrets = r.secrets

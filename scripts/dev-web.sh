@@ -113,6 +113,24 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# The helper artifacts BEFORE the server that embeds them, for the same reason
+# e2e/stand.ts does it (`//go:embed all:artifacts` takes whatever is on disk at
+# compile time) and for one this stand did not used to have: since ADR-0057
+# there is no Tier A behind the local helper, so a server built over an empty
+# artifacts directory is a stand where EVERY LOCAL PANE REFUSES — correctly,
+# and with no way to get one. They are gitignored, so a fresh checkout always
+# starts empty. `make helpers` is the one owner of the build matrix; this calls
+# it rather than carrying a second copy.
+#
+# require-local-helper is the SECOND directory and it is not optional here
+# either: this machine's own helper is what serves every pane, and
+# internal/helper/local stopped falling back to the deployable artifact
+# (nocx-50w7p.7) — so the target both builds the host's variant and asserts the
+# embed carries it. A stand built without it compiles cleanly and opens
+# nothing.
+echo "=== building the helper artifacts ==="
+make -C "$repo_root" helpers require-local-helper
+
 # Built rather than `go run`: go run wraps the binary in a child process that
 # survives a kill of the parent, and an orphaned backend holds the WS port
 # against the next run.

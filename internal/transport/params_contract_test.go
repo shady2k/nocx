@@ -131,6 +131,10 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"connections.trustHostKey": {
 			[]byte(`{"host":"host.example.com:22","key":"b2ZmZXJlZC1rZXktYmxvYg=="}`),
 		},
+		"connections.setIntegrationMethod": {
+			[]byte(`{"fingerprint":"SHA256:abc","method":"raw"}`),
+			[]byte(`{"fingerprint":"SHA256:abc","host":"host.example.com:22","profileId":"ssh-1","method":"helper"}`),
+		},
 		"dialog.openDirectory": {
 			[]byte(`{}`),
 		},
@@ -209,9 +213,6 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"ledger.query": {
 			[]byte(`{"scope":"everywhere"}`),
 		},
-		"lifecycle.establishAck": {
-			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","lane":"lane-1","domain":"domain-1","epoch":1,"generation":"generation-1"}`),
-		},
 		"lifecycle.recoverAck": {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","generation":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}`),
 		},
@@ -241,6 +242,25 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		},
 		"policy.set": {
 			[]byte(`{"policy":{}}`),
+		},
+		"policy.setRule": {
+			[]byte(`{"rule":{"selector":{"exact":[["df","-h"]]},"decision":"permit"}}`),
+			[]byte(`{"rule":{"id":"0123456789abcdef0123456789abcdef","selector":{"program":"df"},"decision":"refuse"}}`),
+			[]byte(`{"rule":{"selector":{"exact":[["df","-h"]]},"decision":"permit"},"runs":"future"}`),
+			[]byte(`{"rule":{"selector":{"exact":[["df","-h"]]},"decision":"permit"},"runs":"stop"}`),
+		},
+		"policy.forgetRule": {
+			[]byte(`{"id":"0123456789abcdef0123456789abcdef"}`),
+			[]byte(`{"id":"0123456789abcdef0123456789abcdef","runs":"ask"}`),
+			[]byte(`{"id":"0123456789abcdef0123456789abcdef","runs":"stop"}`),
+		},
+		"policy.explain": {
+			[]byte(`{"command":"df -h","effect":"observe"}`),
+			[]byte(`{"command":"rm -rf /tmp/x","effect":"mutate-destructive"}`),
+		},
+		"policy.classify": {
+			[]byte(`{"command":"df -h"}`),
+			[]byte(`{"command":"sort -o /tmp/out /tmp/in"}`),
 		},
 		"ports.pause": {
 			[]byte(`{"profileId":"profile-1","paused":false,"visible":true}`),
@@ -357,9 +377,6 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"shell.complete": {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","cwd":"/tmp","line":"echo","pos":4}`),
 		},
-		"shell.footprint.consent": {
-			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef"}`),
-		},
 		"shell.footprint.helperUninstall": {
 			[]byte(`{"profileId":"profile-1","fingerprint":"SHA256:abc","path":"~/.nocx/helper"}`),
 		},
@@ -395,6 +412,7 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		},
 		"agent.approve": {
 			[]byte(`{"runId":"run-1","attempt":1,"tool":"session.run","callId":"call-1","argHash":"hash","scope":"once"}`),
+			[]byte(`{"runId":"run-1","attempt":1,"tool":"session.run","callId":"call-1","argHash":"hash","scope":"expand"}`),
 		},
 		"agent.ask": {
 			[]byte(`{"askId":"ask-1","sessionId":"session-1","question":"What happened?","attachedContent":[{"itemId":"item-1","command":"echo hi","state":"exited"}],"cwd":"/tmp"}`),
@@ -734,6 +752,68 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		},
 		"detach": {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef"}`),
+		},
+		// The emitting view asks twice over: once before a person has picked
+		// a pane, and once for the pane they picked (nocx-02uci).
+		"agent.emitting": {
+			[]byte(`{}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef"}`),
+		},
+		// The calibration asks the same way, and answers with an action —
+		// never with a label, which is what the bead is falsified by
+		// (nocx-etejh).
+		"agent.calibration": {
+			[]byte(`{}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef"}`),
+		},
+		"agent.calibration.answer": {
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","action":"begin"}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","action":"abandon"}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","action":"capture","step":0}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","action":"skip","step":3}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","action":"redo","step":1}`),
+		},
+		// Listing asks nothing: a backend composes exactly one scope, so
+		// there is no workspace to select. `{}` is what the client sends and
+		// the only shape worth probing for a noParams() method.
+		"agentAccess.list": {
+			[]byte(`{}`),
+		},
+		// Forgetting names the one answer by the three facts the person was
+		// shown. The durable scope key is deliberately not among them — it is
+		// composed in internal/app, and a second speller of it here is how the
+		// two halves of one rule drift (nocx-6jbad).
+		"agentAccess.forget": {
+			// The machine is part of the address (nocx-50w7p.16): two
+			// machines' answers for one executable are two rows, so a
+			// payload without one names no row.
+			[]byte(`{"executable":"/run/current-system/sw/bin/claude","digest":"55640c4f3b8769e625c91e6aeaac3032c713a8bd0b83e04c9265772d7cb40825","workspace":"default","machine":{"kind":"local"}}`),
+		},
+		// Typing carries a pane and text and NEVER an agent or a state, both
+		// of which the backend reads for itself (nocx-dkawo.1). The submit
+		// key is asked for explicitly; absent is false, which is the safe
+		// direction.
+		"agent.type": {
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","text":"wake up"}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","text":"wake up","submit":true}`),
+		},
+		// A person's own rule for an agent (nocx-y6w66). The read takes
+		// nothing: the whole set is a handful of agents, and a page that asked
+		// for one row would have to keep the others in step with an edit made
+		// from somewhere else. The document is TEXT and not an object, because
+		// what a person edits is the rule itself.
+		"agent.rules": {
+			[]byte(`{}`),
+		},
+		"agent.rules.set": {
+			[]byte(`{"agent":"claude","document":"{\"agent\":\"claude\",\"anchors\":[],\"branches\":[],\"default\":\"unknown\"}"}`),
+		},
+		"agent.rules.setEnabled": {
+			[]byte(`{"agent":"claude","enabled":false}`),
+			[]byte(`{"agent":"claude","enabled":true}`),
+		},
+		"agent.rules.delete": {
+			[]byte(`{"agent":"claude"}`),
 		},
 	}
 	for method := range registered {

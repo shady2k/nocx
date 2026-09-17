@@ -9,6 +9,10 @@
   (`.internal/specs/2026-08-05-nocxify-delivery-modes-design.md`, §3.5 "three axes,
   never one enum"), AD-8 (one owner per behaviour), `nocx-f4o70`.
 
+> **Naming, 2026-08-31:** `relay` below is the historical name of the third
+> delivery mode and of the deployed remote binary; both are now called the
+> **helper**. The argument is left exactly as it was written (`nocx-0xq2s`).
+
 ## Context
 
 Deploying the helper binary on a remote host needs the user's permission. Two

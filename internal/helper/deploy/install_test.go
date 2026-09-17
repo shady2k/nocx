@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/helper/deploy"
+	"github.com/shady2k/nocx/internal/helper/proto"
 )
 
 // syntheticSource is an ArtifactSource serving a fixed stand-in artifact:
@@ -301,10 +302,34 @@ type fakeFS struct {
 	written       int  // bytes written across all binary Creates
 	failAt        int  // fail the write that crosses this byte; 0 = never
 	corruptWrites bool // corrupt every binary written
+	// fail is the per-operation fault knob: the next call to a named
+	// operation returns this error and clears the entry, so one Ensure can
+	// be broken at exactly one boundary and the retry after it is honest.
+	fail map[string]error
 }
 
 func newFakeFS() *fakeFS {
-	return &fakeFS{dirs: map[string]bool{"/": true}, files: map[string][]byte{}}
+	return &fakeFS{dirs: map[string]bool{"/": true}, files: map[string][]byte{}, fail: map[string]error{}}
+}
+
+// failNext makes the next call to op fail. The op names are this fake's own
+// vocabulary for the boundaries deploy.Ensure crosses: "lstat", "mkdir",
+// "create" (the binary's temporary), "createmarker", "syncdir", "rename",
+// "remove", "readdir", "readfile", "sync" and "close".
+func (f *fakeFS) failNext(op string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fail[op] = err
+}
+
+// takeLocked consumes a pending fault for op. The caller holds f.mu.
+func (f *fakeFS) takeLocked(op string) error {
+	err, ok := f.fail[op]
+	if !ok {
+		return nil
+	}
+	delete(f.fail, op)
+	return err
 }
 
 func (f *fakeFS) failAfterBytes(n int) {
@@ -388,6 +413,9 @@ func (f *fakeFS) corruptFile(path string) {
 func (f *fakeFS) Lstat(path string) (fs.FileInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.takeLocked("lstat"); err != nil {
+		return nil, err
+	}
 	if f.dirs[path] {
 		return fakeFileInfo{name: filepath.Base(path), dir: true}, nil
 	}
@@ -410,6 +438,9 @@ func (f *fakeFS) Mkdir(path string, mode os.FileMode) error {
 	if parent != path && !f.dirs[parent] {
 		return fs.ErrNotExist
 	}
+	if err := f.takeLocked("mkdir"); err != nil {
+		return err
+	}
 	f.dirs[path] = true
 	return nil
 }
@@ -420,6 +451,13 @@ func (f *fakeFS) Create(path string, mode os.FileMode) (deploy.File, error) {
 	if !f.dirs[filepath.Dir(path)] {
 		return nil, fs.ErrNotExist
 	}
+	op := "create"
+	if filepath.Base(path) == ".install-complete" {
+		op = "createmarker"
+	}
+	if err := f.takeLocked(op); err != nil {
+		return nil, err
+	}
 	f.creates++
 	if filepath.Base(path) != ".install-complete" {
 		f.binaryCreates++
@@ -427,11 +465,18 @@ func (f *fakeFS) Create(path string, mode os.FileMode) (deploy.File, error) {
 	return &fakeFile{fs: f, path: path}, nil
 }
 
-func (f *fakeFS) SyncDir(string) error { return nil }
+func (f *fakeFS) SyncDir(string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.takeLocked("syncdir")
+}
 
 func (f *fakeFS) Rename(src, dst string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.takeLocked("rename"); err != nil {
+		return err
+	}
 	if data, ok := f.files[src]; ok {
 		delete(f.files, src)
 		f.files[dst] = data
@@ -448,6 +493,9 @@ func (f *fakeFS) Rename(src, dst string) error {
 func (f *fakeFS) Remove(path string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.takeLocked("remove"); err != nil {
+		return err
+	}
 	if _, ok := f.files[path]; ok {
 		delete(f.files, path)
 		return nil
@@ -462,6 +510,9 @@ func (f *fakeFS) Remove(path string) error {
 func (f *fakeFS) ReadDir(dir string) ([]fs.FileInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.takeLocked("readdir"); err != nil {
+		return nil, err
+	}
 	if !f.dirs[dir] {
 		return nil, fs.ErrNotExist
 	}
@@ -482,6 +533,9 @@ func (f *fakeFS) ReadDir(dir string) ([]fs.FileInfo, error) {
 func (f *fakeFS) ReadFile(path string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.takeLocked("readfile"); err != nil {
+		return nil, err
+	}
 	data, ok := f.files[path]
 	if !ok {
 		return nil, fs.ErrNotExist
@@ -516,11 +570,18 @@ func (ff *fakeFile) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (ff *fakeFile) Sync() error { return nil }
+func (ff *fakeFile) Sync() error {
+	ff.fs.mu.Lock()
+	defer ff.fs.mu.Unlock()
+	return ff.fs.takeLocked("sync")
+}
 
 func (ff *fakeFile) Close() error {
 	ff.fs.mu.Lock()
 	defer ff.fs.mu.Unlock()
+	if err := ff.fs.takeLocked("close"); err != nil {
+		return err
+	}
 	if ff.fs.corruptWrites && len(ff.buf) > 0 {
 		ff.buf[0] ^= 0xFF
 	}
@@ -545,3 +606,102 @@ func (fi fakeFileInfo) IsDir() bool        { return fi.dir }
 func (fi fakeFileInfo) Sys() any           { return nil }
 
 var _ io.Writer = (*fakeFile)(nil)
+
+// TestEveryInstallBoundaryLeavesATreeTheNextAttemptCanFinish walks the dozen
+// boundaries Ensure crosses and asserts the interval stated on Ensure itself:
+// outside "the marker exists over a binary that hashes to the key", what is
+// left is a tree the next attempt REMOVES, and after the fault is healed the
+// very next call installs. The second half is the half a failure-path test
+// usually forgets — for every "returns an error when…" there is a paired "and
+// on a normal machine it succeeds", and here it is also what proves the
+// leftover is recoverable rather than merely absent.
+func TestEveryInstallBoundaryLeavesATreeTheNextAttemptCanFinish(t *testing.T) {
+	boom := errors.New("the filesystem said no")
+	for _, tc := range []struct {
+		name string
+		op   string
+		// setup puts the tree in the state that makes this boundary run at
+		// all: the reads only happen over an existing install, and the
+		// removal only happens over a tree that is already there.
+		setup func(t *testing.T, fs *fakeFS)
+	}{
+		{name: "the marker Lstat", op: "lstat"},
+		{name: "the install directory", op: "mkdir"},
+		{name: "the temporary file", op: "create"},
+		{name: "the sync of the binary", op: "sync"},
+		{name: "the close of the binary", op: "close"},
+		{name: "the rename into place", op: "rename"},
+		{name: "the directory sync", op: "syncdir"},
+		{name: "the marker", op: "createmarker"},
+		{
+			name:  "the verification read",
+			op:    "readfile",
+			setup: func(t *testing.T, fs *fakeFS) { installOnce(t, fs) },
+		},
+		{
+			name:  "the listing of an incomplete tree",
+			op:    "readdir",
+			setup: leaveIncompleteTree,
+		},
+		{
+			name:  "the removal of an incomplete tree",
+			op:    "remove",
+			setup: leaveIncompleteTree,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFakeFS()
+			if tc.setup != nil {
+				tc.setup(t, fs)
+			}
+			fs.failNext(tc.op, boom)
+
+			_, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"})
+			if err == nil {
+				t.Fatalf("a failing %s reported a successful install", tc.name)
+			}
+			if !errors.Is(err, boom) {
+				t.Fatalf("the failure does not carry the boundary's own error: %v", err)
+			}
+
+			// Healed. The next attempt finishes, whatever the last one left:
+			// a markerless tree is removed and reinstalled, a complete one is
+			// reused, and neither needs a human to clear anything.
+			path, hash, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"})
+			if err != nil {
+				t.Fatalf("the attempt after a failing %s could not install: %v", tc.name, err)
+			}
+			if hash != syntheticHash {
+				t.Fatalf("installed hash = %s, want %s", hash, syntheticHash)
+			}
+			if !fs.hasMarker(filepath.Dir(path)) {
+				t.Fatal("the recovered install carries no marker")
+			}
+			data, rerr := fs.ReadFile(path)
+			if rerr != nil {
+				t.Fatalf("read the recovered install: %v", rerr)
+			}
+			if sha256Hex(data) != syntheticHash {
+				t.Fatal("the recovered install does not hash to its directory's key")
+			}
+		})
+	}
+}
+
+// installOnce puts a complete install in place, so a boundary that only runs
+// over an existing one has something to run over.
+func installOnce(t *testing.T, fs *fakeFS) {
+	t.Helper()
+	if _, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}); err != nil {
+		t.Fatalf("prepare a complete install: %v", err)
+	}
+}
+
+// leaveIncompleteTree puts a markerless directory where the install goes: the
+// state an interrupted attempt leaves, and the one removeTree exists for.
+func leaveIncompleteTree(t *testing.T, fs *fakeFS) {
+	t.Helper()
+	dir := "/home/u/.nocx/helper/" + proto.Version + "-linux-amd64-" + syntheticHash
+	fs.mkdirAll(dir)
+	fs.touch(filepath.Join(dir, "nocx-helper"))
+}

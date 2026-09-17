@@ -180,7 +180,7 @@ func TestLedgerClose_RaisesAnAttestedBlockFinished(t *testing.T) {
 	if got.Attribution.Session != sid {
 		t.Errorf("Attribution.Session = %q, want %q", got.Attribution.Session, sid)
 	}
-	// At is NOT stamped here: ingress owns that stamp, so a relay replaying a
+	// At is NOT stamped here: ingress owns that stamp, so a helper replaying a
 	// buffered batch keeps its own instants (internal/notify/ingress.go).
 	if !got.At.IsZero() {
 		t.Errorf("At = %v, want the zero time — ingress stamps it, not the source", got.At)

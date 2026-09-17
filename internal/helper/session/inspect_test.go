@@ -242,16 +242,31 @@ func TestTheShellInTheForegroundIsNotAMissingDiagnostic(t *testing.T) {
 		argvBlob: map[int][]byte{4242: procargs2(1, "/bin/zsh", 4, []string{"-zsh"}, nil)},
 		format:   argvProcArgs2,
 	}}
-	for _, fg := range []int{0, 4242} {
-		obs := insp.Observe(4242, fg)
+	// The two cases stopped agreeing with nocx-nekvj, and the difference is
+	// the whole point: an unreadable group is an absence, while the shell's
+	// own group in front is a FACT the run-lease ladder needs — under
+	// ADR-0024's `set +m` it is the state a running command produces. What
+	// both still share is that neither is a JOB and neither is a diagnostic
+	// that went missing.
+	for _, tc := range []struct {
+		fg   int
+		want int
+	}{
+		{fg: 0, want: 0},
+		{fg: 4242, want: 4242},
+	} {
+		obs := insp.Observe(4242, tc.fg)
 		if obs == nil {
-			t.Fatalf("foregroundPgid %d produced no observation", fg)
+			t.Fatalf("foregroundPgid %d produced no observation", tc.fg)
 		}
-		if obs.ForegroundPgid != 0 || obs.ForegroundCommand != "" {
-			t.Errorf("foregroundPgid %d reported %d/%q, want nothing: the shell itself is not a job", fg, obs.ForegroundPgid, obs.ForegroundCommand)
+		if obs.ForegroundPgid != tc.want {
+			t.Errorf("foregroundPgid %d reported group %d, want %d", tc.fg, obs.ForegroundPgid, tc.want)
+		}
+		if obs.ForegroundCommand != "" {
+			t.Errorf("foregroundPgid %d named a command %q: the shell itself is not a job", tc.fg, obs.ForegroundCommand)
 		}
 		if slices.Contains(obs.Unavailable, proto.DiagnosticForegroundCommand) {
-			t.Errorf("foregroundPgid %d named foregroundCommand unavailable: there was nothing to ask about", fg)
+			t.Errorf("foregroundPgid %d named foregroundCommand unavailable: there was nothing to ask about", tc.fg)
 		}
 	}
 }

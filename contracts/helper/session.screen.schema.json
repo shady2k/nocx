@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.screen.schema.json",
+  "title": "HelperSessionScreenResult",
+  "description": "Result of the session service's screen op: the frame the session's runtime holds, plus the two facts that belong to the RUNTIME rather than to the screen. Both are here rather than in a second call because a frame and its provenance are one reading: a screen whose completeness is unknown is not a screen a write may be decided on (design §6.7), and asking twice would let the two answers disagree.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["frame", "revision", "completeness"],
+  "properties": {
+    "frame": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/screenFrame"
+    },
+    "revision": {
+      "description": "The runtime's monotonic clock at the read. It is the number an attaching client relates its cards and its live frame to (design §5), which is what makes 'the cards through R and the live frame at R, then the changes after R' expressible at all.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "completeness": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/completeness"
+    }
+  }
+}

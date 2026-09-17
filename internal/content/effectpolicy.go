@@ -33,6 +33,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // Decision is one entry of the matrix: what a run may do for an effect class,
@@ -57,9 +58,29 @@ func (d Decision) valid() bool {
 // EffectRow is one row of the matrix: the decision for one effect class plus
 // the resource scopes (including canonical content and workspace sub-scopes)
 // the decision applies within. A row with NO stated scope applies within the
-// grant's own bound — the run's session scope the mint supplies — and a call
-// naming a resource outside the row's scopes is refused, never silently
-// re-scoped (ADR-0020 decision 6: scope expansion invalidates prior approval).
+// grant's own bound — the run's session scope the mint supplies.
+//
+// A call naming a resource outside those scopes is never silently re-scoped
+// (ADR-0020 decision 6: scope expansion invalidates prior approval), and it
+// is not one outcome but two, because the two are different products and the
+// layer that owns each is different:
+//
+//   - Outside this row's EDITABLE scope, which an operator wrote and can
+//     widen, the policy ASKS — Verdict{Cause: OutOfScopeRowScope}. The
+//     question is answerable: widening the scope makes the same call run.
+//   - Outside an IMMUTABLE bound — the run fence the mint supplied, or the
+//     narrowed capability the tool holds — the answer is REFUSE,
+//     Verdict{Cause: OutOfScopeFence}. No answer a person can give makes the
+//     call executable, so asking would promise something the layer below
+//     refuses anyway. The fence is therefore checked FIRST.
+//
+// Neither of those is the enforcement. GrantScope.Contains (resource_scope.go,
+// its doc at :64-72) is a policy-time predicate over recorded scope ids and is
+// NEVER a filesystem authorization check: it does no provider
+// canonicalization, so it cannot see a symlink escape. The capability owns
+// that — internal/filesystem/scoped.go refuses out-of-scope reads on canonical
+// identity, and it refuses them whether this matrix permitted, asked or
+// refused. Two layers, both intact: the policy asks, the fence refuses.
 type EffectRow struct {
 	Decision Decision
 	Scopes   []GrantScope
@@ -192,7 +213,47 @@ func (p EffectPolicy) DecisionFor(e Effect) Decision {
 	return d
 }
 
-// DecisionForInvocation resolves one validated command, and this comment is
+// OutOfScopeCause says WHY a resource fell outside, because the two answers
+// are different products: a row scope a person can widen is a question, and a
+// fence they cannot is a refusal. The empty value is "nothing fell outside" —
+// a Verdict carrying a decision the resource layer did not reach.
+type OutOfScopeCause string
+
+const (
+	// OutOfScopeRowScope: the resource is outside the SELECTED row's own
+	// scopes, which an operator wrote and can widen. Editable, so the
+	// answer is ask, and the surface may offer to widen the scope.
+	OutOfScopeRowScope OutOfScopeCause = "row-scope"
+	// OutOfScopeFence: the resource is outside an immutable bound — the run
+	// fence the mint supplied, or the narrowed capability. Approval cannot
+	// make the call executable, so the answer is refuse and no expansion is
+	// offered.
+	OutOfScopeFence OutOfScopeCause = "fence"
+)
+
+// Verdict is what one evaluation answers. Decision is what happens; Cause and
+// Resource are what the surface needs in order to say why, and to offer the
+// only answer that would change it.
+//
+// Resource is the resource that fell outside, in the scope form a row states
+// it in — so a widening answer can be written from the verdict alone, without
+// re-deriving the scope from the command line a second time.
+//
+// Trace is HOW the decision was reached, in the order it was taken, and it is
+// present only when a caller asked for one (ExplainInvocation). It is nil for
+// every caller that wants the outcome and not the reason. When it is present
+// it is COMPLETE: it opens on the first thing the evaluator did and closes
+// where the verdict returned, and its last step carries this same Decision —
+// so a reader never has to wonder whether a step is missing off the end. The
+// vocabulary and each step's meaning are in effecttrace.go.
+type Verdict struct {
+	Decision Decision
+	Cause    OutOfScopeCause
+	Resource GrantScope
+	Trace    []TraceStep
+}
+
+// EvaluateInvocation resolves one validated command, and this comment is
 // the ONE place the composition order of the layers it crosses is written
 // down (ADR-0020 §7 as amended: the matrix decides, the narrowed capability
 // enforces). The layers compose most-restrictive-wins, and no layer is an
@@ -205,23 +266,63 @@ func (p EffectPolicy) DecisionFor(e Effect) Decision {
 // matrix answer and can never receive a rule exception. Then the SHAPE layer,
 // owned by InvocationRule.Matches in rules.go: a rule answers only what shape
 // this command line has, a matching permit is an exception to an ask row, and
-// among overlapping matching rules the most restrictive wins. Last the
-// RESOURCE layer, owned by EffectRow.Scopes together with GrantScope.Contains
-// in resource_scope.go: the resources the parser named must lie inside the
-// SELECTED row's scopes, into which WithRunScopes has already folded the run
-// fence — so the fence binds here as part of the row rather than as a second
-// list to consult.
+// among overlapping matching rules the most restrictive wins. A rule whose
+// selector covers more than one command line may only NARROW; the one form
+// that may widen carries the effect it was granted under, and this loop is
+// where that binding is checked against the effect the call classified as. Last the
+// RESOURCE layer, owned by resourceVerdict below.
 //
 // A rule is therefore an exception to the effect layer alone. A permit whose
 // invocation names a resource outside its row falls back to asking a person:
 // never to something more permissive, and never past a refusal.
-func (p EffectPolicy) DecisionForInvocation(e Effect, inv Invocation) Decision {
+//
+// The order above is also what the evaluator RECORDS, step by step, when a
+// caller asks for a trace (ExplainInvocation) — see effecttrace.go. It is
+// recorded here, as each step is taken, rather than derived from the result
+// afterwards, because a derivation would be this order written down a second
+// time and free to drift from it.
+func (p EffectPolicy) EvaluateInvocation(e Effect, inv Invocation, fence []GrantScope) Verdict {
+	return p.evaluateInvocation(e, inv, fence, nil)
+}
+
+// ExplainInvocation is EvaluateInvocation over the policy's own mint-supplied
+// fence, WITH the trace: the same evaluation, answering "why" as well as
+// "what". It is the paired opposite of DecisionForInvocation — same fence,
+// same answer, the whole of the reasoning instead of none of it — and it
+// exists so a surface can explain a decision without owning the order that
+// produced it.
+func (p EffectPolicy) ExplainInvocation(e Effect, inv Invocation) Verdict {
+	tr := &evalTrace{}
+	return tr.sealed(p.evaluateInvocation(e, inv, p.runFence, tr))
+}
+
+// evaluateInvocation is the ONE implementation of the composition order. tr is
+// nil for a caller that wants no trace, and every step call below is then a
+// nil check: the traced and untraced paths are the same path, so there is no
+// second order to keep in step with this one.
+func (p EffectPolicy) evaluateInvocation(e Effect, inv Invocation, fence []GrantScope, tr *evalTrace) Verdict {
 	if !inv.Parsed {
-		return DecisionAsk
+		tr.step(TraceStep{
+			Kind: TraceUnparsed, Decision: DecisionAsk,
+			Detail: "the command could not be read, so no row and no rule can speak about it",
+		})
+		return Verdict{Decision: DecisionAsk}
 	}
 	base := p.DecisionFor(e)
-	if base == DecisionRefuse || inv.Disqualified {
-		return base
+	tr.step(TraceStep{Kind: TraceEffectRow, Effect: e, Decision: base})
+	if base == DecisionRefuse {
+		tr.step(TraceStep{
+			Kind: TraceRowRefuses, Effect: e, Decision: base,
+			Detail: "the row refuses, and a rule is an exception to the effect layer alone, so no rule was read",
+		})
+		return Verdict{Decision: base}
+	}
+	if inv.Disqualified {
+		tr.step(TraceStep{
+			Kind: TraceDisqualified, Effect: e, Decision: base,
+			Detail: "the command uses a shell feature whose effect cannot be determined, so it takes the row's answer and no rule was read",
+		})
+		return Verdict{Decision: base}
 	}
 	decision := base
 	matched := false
@@ -230,7 +331,43 @@ func (p EffectPolicy) DecisionForInvocation(e Effect, inv Invocation) Decision {
 		if !rule.Matches(inv) {
 			continue
 		}
+		if rule.needsConfirmation() {
+			// The SECOND of this loop's two guards, and the other one
+			// is below. This rule's selector is loose, so what it
+			// covers is whatever the classifier makes of a command
+			// line nobody was shown — and it was saved while the
+			// classifier read commands differently. It was therefore
+			// agreed to on an account of the command that no longer
+			// holds, and it stays inert until a person reads what it
+			// now means and says so (RulesNeedingConfirmation,
+			// ConfirmRule). An EXACT rule is never skipped here: it
+			// names the literal command line the person was shown,
+			// and that does not move when the classifier learns to
+			// see more. Nor is a REFUSAL: only a permit is a claim a
+			// later reading can falsify, and inerting a refusal would
+			// drop it through to a row that may permit.
+			tr.step(TraceStep{
+				Kind: TraceRuleStale, RuleID: rule.ID, Decision: rule.Decision,
+				Detail: fmt.Sprintf(
+					"agreed to under reading %d of commands; commands are read as %d now, so it waits for a person",
+					rule.EvaluatorVersion, EvaluatorVersion),
+			})
+			continue
+		}
+		if rule.Decision == DecisionPermit && rule.GrantedUnder != "" && rule.GrantedUnder != e {
+			// The permit was granted while this command did something
+			// milder. It does not reach this call. This is the whole
+			// guard, and it lives here rather than in Matches because
+			// only this layer is told what the call classified as.
+			tr.step(TraceStep{
+				Kind: TraceRuleOtherEffect, RuleID: rule.ID,
+				Effect: rule.GrantedUnder, Decision: rule.Decision,
+				Detail: "granted while the command did something milder, so it does not reach this call",
+			})
+			continue
+		}
 		matched = true
+		tr.step(TraceStep{Kind: TraceRuleMatched, RuleID: rule.ID, Decision: rule.Decision})
 		if restrictiveRank(rule.Decision) > restrictiveRank(ruleDecision) {
 			ruleDecision = rule.Decision
 		}
@@ -243,56 +380,192 @@ func (p EffectPolicy) DecisionForInvocation(e Effect, inv Invocation) Decision {
 			decision = ruleDecision
 		}
 	}
-	if decision == DecisionPermit && !p.namedResourcesWithinRow(e, inv.Resources) {
-		return DecisionAsk
-	}
-	return decision
+	return p.resourceVerdict(e, p.rowFor(e).Scopes, decision, namedScopes(inv.Resources), fence, boundKindWise, tr)
 }
 
-// namedResourcesWithinRow is the resource layer of DecisionForInvocation:
-// every resource the command named must fall inside the selected row's
-// scopes. The row is the whole resource authority here because WithRunScopes
-// folds the run fence into every row at mint, which is also why the kernel's
-// own scope check reads the row and never the derived Grant.Scopes union.
+// DecisionForInvocation is EvaluateInvocation's decision alone, over the
+// policy's own mint-supplied fence. It is the retained shape for every caller
+// that wants the outcome and not the reason, and it builds no trace: the hot
+// path does not pay for an explanation nobody asked for. ExplainInvocation is
+// the same question with the reasoning attached.
+func (p EffectPolicy) DecisionForInvocation(e Effect, inv Invocation) Decision {
+	return p.EvaluateInvocation(e, inv, p.runFence).Decision
+}
+
+// EvaluateResources is the RESOURCE layer alone, for a call whose resources a
+// DECLARATION resolved rather than a command parser inferred. It is the
+// declared half of the same question EvaluateInvocation asks, answered by the
+// same function underneath, so the two paths cannot drift into two answers
+// again (design §5.2 — one evaluator, one typed cause).
 //
-// The bound is kind-wise, the same rule intersectScopeSet applies when a
-// selector meets the fence: a row narrows only the resource kinds it names,
-// and a kind no scope of the row names is not narrowed here. Anything else
-// would make a session-fenced run refuse every path a command mentions, since
-// a command's resources are inferred from a command line rather than declared
-// by a tool — unlike the resolved resources of a declaration, whose kinds the
-// grant's coverage already filtered, and which must therefore be contained
-// outright.
+// decision is the effect layer's answer for this call, already computed by the
+// caller; the resource layer can only make it more restrictive.
 //
-// Like the kernel's check this is the advisory lexical approximation, not the
-// enforcement: the capability resolves canonical identity (ADR-0020 §7), and
-// a call this predicate lets through can still be refused by it.
-func (p EffectPolicy) namedResourcesWithinRow(e Effect, report ResourceReport) bool {
-	scopes := p.rowFor(e).Scopes
-	if len(scopes) == 0 {
-		return true
+// The bound differs from a command's, and the difference is deliberate: a
+// declaration's resources are RESOLVED and their kinds were already filtered
+// by the grant's coverage, so each one must be contained OUTRIGHT — a row that
+// names no scope of that kind contains nothing, and the call is out of scope.
+// A command's resources are inferred from a command line instead, so they are
+// bounded kind-wise (see resourceVerdict).
+func (p EffectPolicy) EvaluateResources(e Effect, decision Decision, resources, fence []GrantScope) Verdict {
+	return p.resourceVerdict(e, p.rowFor(e).Scopes, decision, resources, fence, boundOutright, nil)
+}
+
+// EvaluateResourcesAcross is EvaluateResources for a CONJUNCTION — a call that
+// reaches several rows at once, so that several rows' scopes bound it TOGETHER
+// rather than one at a time.
+//
+// The scopes are UNIONED and not intersected, because the rows do not govern
+// the same resources. skills.install names a destination and a content item:
+// the destination is the fetch's, the content item is the write's, and each
+// belongs to the row that performs it. Intersecting would demand the fetched
+// address be inside the write row's scopes and refuse an install a person had
+// granted both halves of. What the union does NOT do is admit a resource no
+// reached row admits, which is the check that matters.
+//
+// Asking each row in turn would be the intersection by another name, which is
+// why this is one call over one scope set and not a loop over EvaluateResources
+// — the same rule as everywhere else here: one question, one evaluator.
+func (p EffectPolicy) EvaluateResourcesAcross(effects []Effect, decision Decision, resources, fence []GrantScope) Verdict {
+	var scopes []GrantScope
+	for _, e := range effects {
+		scopes = append(scopes, p.rowFor(e).Scopes...)
 	}
-	for _, resource := range report.Resources {
-		child, ok := namedResourceScope(resource)
-		if !ok {
-			continue
+	return p.resourceVerdict(WorstEffect(effects), scopes, decision, resources, fence, boundOutright, nil)
+}
+
+// scopeBound is how a resource set meets a scope set.
+type scopeBound int
+
+const (
+	// boundKindWise: a scope set narrows only the resource kinds it names,
+	// and a kind no scope names is not narrowed. An empty scope set bounds
+	// nothing. This is the rule intersectScopeSet applies when a selector
+	// meets the fence, and it is what a COMMAND's inferred resources get:
+	// anything else would make a session-fenced run refuse every path a
+	// command mentions.
+	boundKindWise scopeBound = iota
+	// boundOutright: every resource must lie inside some scope of the set,
+	// and an empty set therefore contains nothing. This is what a
+	// DECLARATION's resolved resources get.
+	boundOutright
+)
+
+// resourceVerdict is the resource layer of both paths, and the one place the
+// two causes are decided.
+//
+// The FENCE IS CHECKED FIRST, and that order is the whole point: the row
+// scopes have already had the fence folded into them at mint
+// (WithRunScopes), so a resource outside the fence is also outside the row.
+// Checking the row first would report every immutable bound as an editable
+// one and offer a question whose only useful answer does not exist.
+//
+// Both checks run for any decision that is not already a refusal, not only
+// for a permit. A row-scope miss under an ask row leaves the decision at ask
+// and adds the cause the surface needs to offer the widening; a fence miss
+// under an ask row turns it into the refusal it always was at the layer
+// below, rather than a question answered by "Approve" and then refused.
+//
+// The SCOPES ARE THE CALLER'S, not `p.rowFor(e).Scopes` looked up here, so
+// that a conjunction can hand in the union of every row it reaches
+// (EvaluateResourcesAcross) without a second copy of this logic existing to
+// disagree with this one. `e` is then only what the trace step is labelled
+// with.
+//
+// Like the kernel's own check this is the advisory lexical approximation, not
+// the enforcement: the capability resolves canonical identity (ADR-0020 §7),
+// and a call this predicate lets through can still be refused by it.
+func (p EffectPolicy) resourceVerdict(e Effect, scopes []GrantScope, decision Decision, resources, fence []GrantScope, bound scopeBound, tr *evalTrace) Verdict {
+	if decision == DecisionRefuse {
+		tr.step(TraceStep{
+			Kind: TraceResourceNotReached, Effect: e, Decision: decision,
+			Detail: "the decision was already a refusal, and the resource layer can only narrow, so no resource was compared",
+		})
+		return Verdict{Decision: decision}
+	}
+	if len(fence) > 0 {
+		if outside, ok := firstOutside(resources, fence, bound); ok {
+			tr.step(TraceStep{
+				Kind: TraceResourceOutsideFence, Effect: e, Decision: DecisionRefuse,
+				Detail: "outside the run's immutable bound, which no answer widens",
+			})
+			return Verdict{Decision: DecisionRefuse, Cause: OutOfScopeFence, Resource: outside}
 		}
-		bounded, inside := false, false
+	}
+	if bound == boundOutright && len(scopes) == 0 && len(resources) > 0 {
+		// NO scope at all is not a narrow selector somebody could widen: it
+		// is authority nobody minted. A grant whose matrix field was never
+		// set arrives here, and the only honest answer is the immutable one
+		// — there is no bound to expand, so the question would have no
+		// answer. Under boundKindWise the same emptiness means the opposite
+		// (see the constant's doc), which is why this is asked here and not
+		// inside firstOutside.
+		tr.step(TraceStep{
+			Kind: TraceResourceOutsideFence, Effect: e, Decision: DecisionRefuse,
+			Detail: "the row states no scope at all, so there is no bound to widen",
+		})
+		return Verdict{Decision: DecisionRefuse, Cause: OutOfScopeFence, Resource: resources[0]}
+	}
+	if outside, ok := firstOutside(resources, scopes, bound); ok {
+		tr.step(TraceStep{
+			Kind: TraceResourceOutsideRowScope, Effect: e, Decision: DecisionAsk,
+			Detail: "outside the row's own scopes, which an operator wrote and can widen",
+		})
+		return Verdict{Decision: DecisionAsk, Cause: OutOfScopeRowScope, Resource: outside}
+	}
+	tr.step(TraceStep{Kind: TraceResourceInside, Effect: e, Decision: decision})
+	return Verdict{Decision: decision}
+}
+
+// firstOutside returns the first resource not contained by scopes, under the
+// stated bound. First, not all of them: the verdict names ONE resource,
+// because the answer it offers is about that one and a person cannot answer a
+// list.
+func firstOutside(resources, scopes []GrantScope, bound scopeBound) (GrantScope, bool) {
+	if bound == boundKindWise && len(scopes) == 0 {
+		return GrantScope{}, false
+	}
+	for _, resource := range resources {
+		bounded := bound == boundOutright
+		inside := false
 		for _, scope := range scopes {
-			if scope.Kind != child.Kind {
-				continue
+			if bound == boundKindWise {
+				if scope.Kind != resource.Kind {
+					continue
+				}
+				bounded = true
 			}
-			bounded = true
-			if scope.Contains(child) {
+			// The scope is asked WHOLE: rebuilding it from kind and id
+			// drops a destination's subdomain marker (design §5.4), and a
+			// row that grants a host with its subdomains would then refuse
+			// one of them.
+			if scope.Contains(resource) {
 				inside = true
 				break
 			}
 		}
 		if bounded && !inside {
-			return false
+			return resource, true
 		}
 	}
-	return true
+	return GrantScope{}, false
+}
+
+// namedScopes is the command path's resource input: every resource the parser
+// named, in the scope form a row states it in. A resource with no scope form
+// is dropped rather than compared, because comparing an operand the parser
+// could not resolve against a real scope could only ever declare it inside
+// one (see scopeKindForVerb on ResourceUnknown).
+func namedScopes(report ResourceReport) []GrantScope {
+	out := make([]GrantScope, 0, len(report.Resources))
+	for _, resource := range report.Resources {
+		child, ok := namedResourceScope(resource)
+		if !ok {
+			continue
+		}
+		out = append(out, child)
+	}
+	return out
 }
 
 // scopeKindForVerb is the mapping from what a command DOES to a resource to
@@ -308,8 +581,8 @@ func (p EffectPolicy) namedResourcesWithinRow(e Effect, report ResourceReport) b
 // ResourceUnknown is decided explicitly and deliberately has NO scope kind.
 // It is the verb of an UnresolvedResource and never of a resolved Resource
 // (internal/assistant/cmdeffect.go emits it on the Unresolved slice alone),
-// so it cannot reach namedResourcesWithinRow, which walks Resources. Giving
-// it a kind would be worse than useless: the parser is saying it could not
+// so it cannot reach namedScopes, which walks Resources. Giving it a kind
+// would be worse than useless: the parser is saying it could not
 // determine what the operand is, and comparing that undetermined string
 // against a real scope could only ever declare it INSIDE one. Uncertainty is
 // answered a row earlier instead — ResourceReport.Effect sends any report
@@ -383,6 +656,45 @@ func (p EffectPolicy) WithRule(rule InvocationRule) EffectPolicy {
 	return p
 }
 
+// RulesNeedingConfirmation returns every rule that is inert because it was
+// saved under a different reading of commands, in document order. Skipping is
+// not silent: a rule that no longer applies and says nothing about it is a
+// permission that quietly stopped working, which is how a person learns to
+// distrust the page rather than the rule.
+func (p EffectPolicy) RulesNeedingConfirmation() []InvocationRule {
+	var stale []InvocationRule
+	for _, rule := range p.Rules {
+		if rule.needsConfirmation() {
+			stale = append(stale, rule)
+		}
+	}
+	return stale
+}
+
+// ConfirmRule rewrites one rule's EvaluatorVersion to the current one and
+// NOTHING else, returning the new policy. An unknown id returns p unchanged
+// and false.
+//
+// It is deliberately NOT a re-grant. It says "I have read what this now means
+// and I still mean it": the selector, the decision and the effect the permit
+// was granted under are untouched, and widening any of them is a different
+// gesture with a different question attached to it.
+func (p EffectPolicy) ConfirmRule(id string) (EffectPolicy, bool) {
+	if id == "" {
+		return p, false
+	}
+	for i, rule := range p.Rules {
+		if rule.ID != id {
+			continue
+		}
+		rules := append([]InvocationRule(nil), p.Rules...)
+		rules[i].EvaluatorVersion = EvaluatorVersion
+		p.Rules = rules
+		return p, true
+	}
+	return p, false
+}
+
 // RowScopes returns the effective scopes of ONE effect's row — the resource
 // bound the row's decision applies within. The policy consumer (the permit/
 // ask/refuse decision) checks the resource a call names against THIS set and
@@ -408,10 +720,7 @@ func (p EffectPolicy) rows() []EffectRow {
 // decision a person can answer, not an absence.
 func (p EffectPolicy) PermittedEffects() []Effect {
 	var out []Effect
-	for _, e := range []Effect{
-		EffectObserve, EffectMutateReversible, EffectMutateDestructive,
-		EffectPrivilegeChange, EffectDisclose, EffectCrossBoundary, EffectDelegate,
-	} {
+	for _, e := range latticeEffects {
 		if p.DecisionFor(e) != DecisionRefuse {
 			out = append(out, e)
 		}
@@ -453,9 +762,23 @@ func (p EffectPolicy) RunFence() []GrantScope {
 // declaration coverage intentionally includes its resource kinds even when a
 // row selector does not, so an offered call can still be refused by the row;
 // nocx-tyhel is where offer-time explanation learns to say so.
+//
+// THE MINT IS ALSO WHERE THE DEADLINE COMES FROM (nocx-1z1r1). ADR-0020 §5
+// calls the grant "a versioned, EXPIRING capability issued to one agent turn
+// or one execution"; the version was stamped here and the expiry was not, so
+// every recorded grant carried expires_at = 0 and nothing could compare it
+// to a clock. There is exactly one place a run's authority begins, and it is
+// this function, so this is where its end is stated: now + GrantLifetime.
+// Enforcement is elsewhere and deliberately not a predicate before dispatch
+// — agenttools wraps every capability constructor, so an expired grant
+// yields no capability at all (ADR-0028 decision 4).
 func (p EffectPolicy) AsGrant(runScopes []GrantScope) Grant {
 	effective := p.WithRunScopes(runScopes)
-	g := Grant{Version: 1, Policy: effective}
+	g := Grant{
+		Version:   1,
+		ExpiresAt: time.Now().Add(GrantLifetime).UnixMilli(),
+		Policy:    effective,
+	}
 	g.Effects = effective.PermittedEffects()
 	if len(effective.runFence) > 0 {
 		// Grant scopes are the run fence's declaration coverage. Row
@@ -575,10 +898,7 @@ func ResolvePolicy(global EffectPolicy, workspace *EffectPolicy, session Session
 	out.floor = floor
 	out.Rules = append([]InvocationRule(nil), out.Rules...)
 	out.Rules = append(out.Rules, session.Rules...)
-	for _, e := range []Effect{
-		EffectObserve, EffectMutateReversible, EffectMutateDestructive,
-		EffectPrivilegeChange, EffectDisclose, EffectCrossBoundary, EffectDelegate,
-	} {
+	for _, e := range latticeEffects {
 		d, ok := session.Decisions[e]
 		if !ok || !d.valid() {
 			continue
@@ -648,6 +968,10 @@ func ParseEffectPolicy(b []byte) (EffectPolicy, error) {
 	if err := dec.Decode(&p); err != nil {
 		return p, fmt.Errorf("%w: %v", ErrPolicySyntax, err)
 	}
+	// A document's rules get their defaults BEFORE the gate sees them: the
+	// minted id is what the duplicate check is over, and an unstated source
+	// is written rather than absent.
+	normalizeInvocationRules(p.Rules)
 	if err := validateInvocationRules(p.Rules); err != nil {
 		return EffectPolicy{}, fmt.Errorf("%w: %v", ErrPolicySyntax, err)
 	}

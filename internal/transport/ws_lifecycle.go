@@ -108,42 +108,6 @@ func validateLifecycleRecoverAckRaw(raw json.RawMessage) string {
 	return ""
 }
 
-// validateLifecycleEstablishAckRaw checks lifecycle.establishAck: the
-// {session, lane, domain, epoch, generation} addressing tuple of decision 9.
-// The generation is compared for equality by the publisher, so its shape is
-// left to that check; presence and bound are enforced here.
-func validateLifecycleEstablishAckRaw(raw json.RawMessage) string {
-	var p lifecycleEstablishAckParams
-	if msg := decodeParams(raw, &p); msg != "" {
-		return msg
-	}
-	if !isLowerHex(p.SessionID, 32) {
-		return "sessionId is required and must be the 32-hex id the backend minted"
-	}
-	if strings.TrimSpace(p.Lane) == "" {
-		return "lane is required"
-	}
-	if utf8.RuneCountInString(p.Lane) > maxIDRunes {
-		return "lane exceeds the id length bound"
-	}
-	if strings.TrimSpace(p.Domain) == "" {
-		return "domain is required"
-	}
-	if utf8.RuneCountInString(p.Domain) > maxIDRunes {
-		return "domain exceeds the id length bound"
-	}
-	if p.Epoch == 0 {
-		return "epoch is required and must be non-zero"
-	}
-	if strings.TrimSpace(p.Generation) == "" {
-		return "generation is required"
-	}
-	if utf8.RuneCountInString(p.Generation) > maxIDRunes {
-		return "generation exceeds the id length bound"
-	}
-	return ""
-}
-
 // lifecycleChangedNotification is the server-initiated lifecycle.changed
 // frame — contracted like the files.changed and git.changed notifications
 // because an unsolicited notification is exactly where an addressing or shape
@@ -205,6 +169,13 @@ func (s *WSServer) unregisterLifecycleLanes(sid session.ID) {
 func (s *WSServer) PublishLifecycleProjection(f lifecyclepub.Fact) {
 	s.syncLifecycleLedger(f)
 }
+
+// THE TWO TRANSITIONS THE FACT STREAM CANNOT CARRY are delivered through the
+// publisher's optional emitter, type-asserted there — so a drifting signature
+// on either method unwires them in silence. Pinned as a compile-time assertion
+// for that reason: the held Stop's delivery is the only consumer today, and a
+// test that reads the obligation itself would be the only thing that noticed.
+var _ lifecyclepub.AttemptTransitionEmitter = (*WSServer)(nil)
 
 // PublishLifecycle routes one published fact to the lane's session's current
 // subscriber and writes the notification. This is the Emitter half of
@@ -271,8 +242,18 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 	// An episode without a subscriber is not opened: the next attach replays
 	// the fact, and the episode opens then, when the ack can actually come
 	// back.
+	//
+	// BOTH drop paths are audible now (nocx-n14oo.8). This one returned in
+	// silence while the one below it said "no subscriber" out loud, and the
+	// difference is not cosmetic: a session opened by the BACKEND has no
+	// receiver at all — OpenSession creates no ring and no subscriber by
+	// design — so this is the branch a worker participant's pane takes, every
+	// time, and the whole establishment then expires with the only visible
+	// trace being the adapter's bare hello-timeout ten seconds later.
 	rx := s.getRx(sid)
 	if rx == nil {
+		s.log.Info("lifecycle.changed dropped: the session has no receiver",
+			"session", string(sid), "lane", f.Lane, "lifecycle", f.Lifecycle)
 		return
 	}
 	wconn, _ := rx.getSubscriber()
@@ -559,8 +540,23 @@ func (s *WSServer) handleLifecycleSubmitAttempt(ctx context.Context, wconn *wsCo
 					Client:        fmt.Sprintf("%d", wconn.id),
 					EnvironmentID: env.ID,
 					PaneID:        panePtr(sess.PaneID()),
-					Cwd:           att.Cwd,
-					Kind:          content.EntryShell,
+					// THE SESSION THIS COMMAND RAN IN (nocx-ie23r.6), from the
+					// same owner the pane above comes from: this handler
+					// already resolved `sess` from the connection's own state
+					// (state.get(sid)), so the column is the backend's fact and
+					// not the request's claim.
+					//
+					// This is the writer that matters most, because it is the
+					// one that CREATES the row for an ordinary command: the
+					// renderer sends this at Enter, ledger.bind then ADVANCES
+					// the row it created, and history.record closes it. A row
+					// created here with no session would keep no session for
+					// the rest of its life, and content's unreconciledCause
+					// reads exactly this column to decide whether a restored
+					// block can be told nobody was asked about its pipe.
+					SessionID: sessionPtr(sess.ID()),
+					Cwd:       att.Cwd,
+					Kind:      content.EntryShell,
 					// The submitting target's own word, never derived here
 					// from the lane or the run state (design §3.1): a person
 					// typing while the assistant works is the person's
@@ -622,32 +618,34 @@ func lifecycleSubmitErrorCode(err error) int {
 	}
 }
 
-// lifecycleSpecs declares the three lifecycle control methods (nocx-292k).
+// lifecycleSpecs declares the two lifecycle control methods (nocx-292k).
 //
-// They share ONE ordered submission, and the sharing is the point. The
-// renderer sends lifecycle.establishAck without awaiting it (it is
-// fire-and-forget in terminal-content.ts) and then awaits
-// lifecycle.submitAttempt before writing the command bytes to the pty — so
-// the two are adjacent on one socket, in that order. A concurrent
-// submission could start the submit first, and the kernel already reports
-// the domain PromptReady while its ACCEPT is still pending, so the attempt
-// would open before the shell was released from its handshake. The read
-// loop used to provide that ordering by accident, running everything
-// inline; control.NewOrderedSubmission is what states it.
+// ADR-0062 retired a third method, the renderer's establishment
+// acknowledgement, and with it the race
+// this ordered submission used to exist to close: the renderer used to send
+// that ack without awaiting it and then await lifecycle.submitAttempt before
+// writing the command bytes to the pty, and a concurrent submission could
+// start the submit first while the kernel already reported the domain
+// PromptReady with its ACCEPT still pending — opening the attempt before the
+// shell was released from its handshake. The accept is now flushed
+// synchronously inside Ingest, before the fact that reports PromptReady is
+// even published, so there is no window left in which the domain reports
+// ready with its accept undelivered. The two methods remain on one ordered
+// submission anyway: they are still transport-owned state on one socket, and
+// splitting them would buy nothing back.
 //
-// Not ImmediateSubmission: none of the three blocks waiting for a
-// resolution that arrives over the same socket, so they are outside the
-// closed ingress-critical set (registration.go), and claiming it would fail
-// the server build.
+// Not ImmediateSubmission: neither method blocks waiting for a resolution
+// that arrives over the same socket, so they are outside the closed
+// ingress-critical set (registration.go), and claiming it would fail the
+// server build.
 //
 // No capability gate: the lifecycle kernel, its lane registry and the
 // recovery episodes are transport-owned state with their own mutexes — the
 // sessionMachine rule ("transport lifecycle, not a store"), not a store any
 // capability owns.
 //
-// reg rather than regResponder: submitAttempt checks session ownership via
-// connState, and establishAck additionally checks that this connection is
-// still the session's current subscriber, so the handlers need connection
+// reg rather than regResponder: submitAttempt and recoverAck both check
+// session ownership via connState, so the handlers need connection
 // identity, not just a writer.
 func (s *WSServer) lifecycleSpecs() []methodSpec {
 	sub := control.NewOrderedSubmission("lifecycle", lifecycleQueueDepth)
@@ -658,15 +656,12 @@ func (s *WSServer) lifecycleSpecs() []methodSpec {
 		reg(sub, "lifecycle.recoverAck", params(validateLifecycleRecoverAckRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleRecoverAck(r, state, req) }
 		}),
-		reg(sub, "lifecycle.establishAck", params(validateLifecycleEstablishAckRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleEstablishAck(w, r, state, req) }
-		}),
 	}
 }
 
 // lifecycleQueueDepth bounds the ordered lifecycle queue. The traffic is one
-// submit per command and one ack per prompt on a single connection, so the
-// depth only has to absorb a burst; beyond it the submission refuses with
-// the ordinary saturation contract, which every one of the three answers
+// submit per command and an occasional recovery ack on a single connection,
+// so the depth only has to absorb a burst; beyond it the submission refuses
+// with the ordinary saturation contract, which both methods answer
 // fail-open.
 const lifecycleQueueDepth = 32

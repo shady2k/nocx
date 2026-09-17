@@ -148,7 +148,6 @@ function makeServices(over: Partial<GitPanelServices> = {}): GitPanelServices {
       .mockResolvedValue({ state: 'ok', outputTruncated: false, status: statusFixture() }),
     headMessage: vi.fn().mockResolvedValue({ state: 'ok', message: 'subject\n\nbody' }),
     remote: vi.fn().mockResolvedValue({ state: 'none' }),
-    grantConsent: vi.fn().mockResolvedValue({ state: 'granted' }),
     openUrl: vi.fn().mockResolvedValue({}),
     close: vi.fn().mockResolvedValue({ closed: true }),
     subscribeGitChanged: vi.fn().mockReturnValue(() => {}),
@@ -230,7 +229,6 @@ describe('the eight states', () => {
 
   it('ssh: every §6 refusal state renders from the wire, with its message naming what to do', async () => {
     const cases: { state: GitOpenResult['state']; message: string }[] = [
-      { state: 'consentRequired', message: '' },
       { state: 'unsupportedPlatform', message: 'we build no helper for darwin/amd64' },
       { state: 'deployFailed', message: 'installing the helper on srv failed: upload refused' },
       { state: 'execForbidden', message: 'the host refused the probe that would run the helper' },
@@ -688,45 +686,33 @@ describe('polling is coalesced by repository identity (D23)', () => {
   })
 })
 
-// ── The consent prompt (remote-helper design D8) ─────────────────────────
+// ── No feature surface may raise the tier (ADR-0068) ──────────────────────
 
-describe('the consent prompt', () => {
-  it('Accept raises the machine to the relay tier and re-opens: the fresh git.open proceeds past consentRequired', async () => {
-    const open = vi
-      .fn()
-      .mockResolvedValueOnce({ state: 'consentRequired' })
-      .mockResolvedValueOnce(openOk())
-    const services = makeServices({ open })
-    const store = track(createGitStore(services))
-    store.rescope(SSH_ORIGIN)
-    await settle()
-    expect(store.state()).toBe('consentRequired')
-
-    store.grantConsent()
-    await settle()
-    expect(mockHandle(services, 'grantConsent')).toHaveBeenCalledWith('s3')
-    // The accept re-opened the SAME scope, and the answer is now ok.
-    expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(2)
-    expect(store.state()).toBe('ready')
-    expect(store.binding()).toEqual({ bindingId: 'b1', toplevel: '/home/dev/repo' })
-  })
-
-  it('a failed accept is shown inline — the offer stays and the error is visible', async () => {
+describe('a machine with no helper-tier answer', () => {
+  // ADR-0068 removed the git panel's consent card: the connection, or the
+  // connect-time ask, decides the helper — never a feature surface — so
+  // git.open answers the SAME rejected call as raw or a denied answer
+  // (internal/app's refusedHelperReason), and the store carries no method
+  // to grant it any more (GitPanelServices has no grantConsent).
+  it('is the failed phase, naming what would change it, with nothing to accept', async () => {
     const services = makeServices({
-      open: vi.fn().mockResolvedValue({ state: 'consentRequired' }),
-      grantConsent: vi.fn().mockRejectedValue(new Error('consent store unwritable')),
+      open: vi
+        .fn()
+        .mockRejectedValue(
+          new Error(
+            'git.open: this connection has not yet been asked about the nocx helper — reconnect to be asked, or set its Delivery mode to Helper to allow it outright',
+          ),
+        ),
     })
     const store = track(createGitStore(services))
     store.rescope(SSH_ORIGIN)
     await settle()
-    expect(store.state()).toBe('consentRequired')
-
-    store.grantConsent()
-    await settle()
-    expect(store.consentError()).toContain('consent store unwritable')
-    expect(store.state()).toBe('consentRequired')
-    // The failed accept must not have re-opened — the offer stays put.
-    expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(1)
+    expect(store.phase()).toBe('failed')
+    expect(store.openError()).toContain('reconnect')
+    expect(store.binding()).toBeNull()
+    // Nothing in the store's surface can raise the tier: the accept path
+    // (grantConsent) does not exist on GitPanelServices at all.
+    expect('grantConsent' in services).toBe(false)
   })
 })
 

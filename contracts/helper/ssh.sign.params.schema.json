@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.sign.params.schema.json",
+  "title": "HelperSSHSignParams",
+  "description": "The helper asking the coordinator for one signature, because the private key is the coordinator's and never the helper's. Two fields of material-bearing shape and no more: which credential, and what to sign. There is deliberately no way to ask WHO a credential is — the public half travels in the probe's identity, which is where the party that holds the key already put it — so an empty challenge is refused rather than reinterpreted as a discovery question.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["credentialRef", "challenge", "algorithm"],
+  "properties": {
+    "credentialRef": {
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/credential"
+    },
+    "challenge": {
+      "description": "The bytes the peer asked to be signed, exactly as x/crypto/ssh handed them to the signer — the session id and the userauth request. Base64, required, and refused when empty: signing nothing is a request nobody makes.",
+      "type": "string",
+      "minLength": 1
+    },
+    "algorithm": {
+      "description": "The signature algorithm the caller expects, as the public key's own type string (`ssh-ed25519`, `ssh-rsa`, …). It is checked against the key the credential resolves to, so a mismatch is refused where the key is rather than producing a signature the peer would reject with a message about algorithms.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

@@ -49,7 +49,7 @@ Partially, and ephemerally:
   `protocolVersion`, `scriptVersion`, `lastObservedAt`) — "last OBSERVED via
   an accepted passport", never a live claim about the host.
 - Nothing persists _"this host's login shell is X"_ as a durable profile
-  field. The profile `DesiredMode` already reserves `relay` — the Tier-B
+  field. The profile `DesiredMode` already reserves `helper` — the Tier-B
   deployed binary, consent-gated — but no current field records a detected
   shell.
 
@@ -111,13 +111,13 @@ state, so the frequency question decides roadmap priority, not safety.
 
 **Tier B does not move up on this evidence.** One machine's `known_hosts`
 cannot support a roadmap change; the ADR itself ties Tier B's revisit to the
-relay (`nocx-if6` phase B, which makes the forwarded-port transport
+helper (which makes the forwarded-port transport
 disposable) and to richer remote metadata (`docs/architecture.md:203`). The
 no-transport environments are real but their frequency is unmeasured; the
 correct next step is a measurement, not a build. Keep Tier B deferred;
 revisit when either (a) a probe of this machine's hosts shows a material
 share of `sh`/`ash` remotes or `AllowTcpForwarding no` hosts, or (b) the
-relay lands.
+helper lands.
 
 ## What could not be determined, and what would settle it
 

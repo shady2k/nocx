@@ -95,7 +95,6 @@ type GitPanelState =
   | 'notARepository'
   | 'gitUnavailable'
   | 'gitTooOld'
-  | 'consentRequired'
   | 'unsupportedPlatform'
   | 'deployFailed'
   | 'execForbidden'
@@ -166,9 +165,6 @@ export interface GitStore {
    *  helperVersionMismatch states; null otherwise (remote-helper design
    *  §6). Each refusal state renders it, never a generic error. */
   refusalMessage(): string | null
-  /** The consent prompt's accept failure — rendered inline beside the
-   *  offer; null while nothing failed. */
-  consentError(): string | null
   /** The git version the capability probe found — the gitTooOld state
    *  renders it against the floor. */
   gitVersion(): string | null
@@ -187,10 +183,6 @@ export interface GitStore {
   /** Manual refresh: a poll under the current scope, or a re-open when the
    *  binding is gone (also the Retry for a failed open). */
   refresh(): void
-  /** The consent prompt's Accept (remote-helper design D8): raise the
-   *  session's machine to the relay tier and re-open — the fresh git.open
-   *  proceeds past consentRequired. */
-  grantConsent(): void
   /** True while a mutation is in flight — the controls that would issue
    *  another are disabled (D18). */
   mutationInFlight(): boolean
@@ -407,9 +399,6 @@ export function createGitStore(
    *  helperVersionMismatch; null otherwise. Each refusal state renders
    *  this — a state that renders a generic error is not done. */
   const [refusalMessage, setRefusalMessage] = createSignal<string | null>(null)
-  /** The consent prompt's accept failure — shown inline beside the offer,
-   *  never swallowed (AGENTS.md rule 3). */
-  const [consentError, setConsentError] = createSignal<string | null>(null)
   const [gitVersion, setGitVersion] = createSignal<string | null>(null)
   const [envState, setEnvState] = createSignal<'resolved' | 'degraded' | null>(null)
   const [envReason, setEnvReason] = createSignal<string | null>(null)
@@ -424,9 +413,12 @@ export function createGitStore(
   // store header). tooManyChanges gates on completeness, not on a
   // truncation boolean and not on the lists' length (D9). An SSH tab is
   // NOT decided here any more: the frontend's old guard never reached
-  // git.open on a remote tab, and the answer — ok, consentRequired, one
-  // of the §6 refusals — now comes from the wire (remote-helper design
-  // §6), exactly as it does for a local tab.
+  // git.open on a remote tab, and the answer — ok, one of the §6 refusals —
+  // now comes from the wire (remote-helper design §6), exactly as it does
+  // for a local tab. A machine with no helper-tier answer at all is not
+  // among these states (ADR-0068): git.open never asks, so that case
+  // arrives as a rejected call and is handled below, in openScope's catch,
+  // exactly like raw or a denied answer.
   const state = createMemo<GitPanelState>(() => {
     const o = origin()
     if (o === null) return 'noPane'
@@ -436,7 +428,6 @@ export function createGitStore(
       case 'notARepository':
       case 'gitUnavailable':
       case 'gitTooOld':
-      case 'consentRequired':
       case 'unsupportedPlatform':
       case 'deployFailed':
       case 'execForbidden':
@@ -757,7 +748,6 @@ export function createGitStore(
     setBinding(null)
     setPhase('opening')
     setOpenError(null)
-    setConsentError(null)
     epoch++ // the open's inline status is a status-producing response too
     // bindingId null: the open is not scoped to a binding — its response
     // either establishes one or is stale by generation (rule 1, open half).
@@ -843,20 +833,6 @@ export function createGitStore(
         setPhase('failed')
         setOpenError(messageOf(e))
       })
-  }
-
-  /** The consent prompt's Accept (remote-helper design D8): raise the
-   *  session's machine to the relay tier, then re-open — the fresh
-   *  git.open consults the selection again and now proceeds past
-   *  consentRequired. A failed accept is shown inline, never swallowed. */
-  function grantConsent(): void {
-    const o = untrack(origin)
-    if (o === null) return
-    setConsentError(null)
-    services.grantConsent(o.sessionId).then(
-      () => openScope(o),
-      (e) => setConsentError(messageOf(e)),
-    )
   }
 
   /** The commit form belongs to one repository: adopting a new binding
@@ -1257,7 +1233,6 @@ export function createGitStore(
     statusStale,
     openError,
     refusalMessage,
-    consentError,
     logState,
     log,
     logError,
@@ -1270,7 +1245,6 @@ export function createGitStore(
     rescope,
     setVisible,
     refresh,
-    grantConsent,
     mutationInFlight,
     mutationError,
     stage,

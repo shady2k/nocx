@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -12,7 +11,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/shady2k/nocx/internal/storage/storagetest"
 )
 
 // TestFilesRevealerWiredThroughProductionWiring proves the revealer is
@@ -30,8 +28,6 @@ import (
 // and the revealer reached the fake command with the containing
 // directory — the -32601 "not available" refusal would fail here.
 func TestFilesRevealerWiredThroughProductionWiring(t *testing.T) {
-	storagetest.IsolateWithHome(t)
-
 	// A fake revealer command on PATH: records argv, exits 0. The
 	// backend (in-process) inherits this PATH.
 	fakeDir := t.TempDir()
@@ -51,14 +47,9 @@ func TestFilesRevealerWiredThroughProductionWiring(t *testing.T) {
 	}
 	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
 
-	a, appErr := newTestApp(t)
-	if appErr != nil {
-		t.Fatalf("New(): %v", appErr)
-	}
-	if serr := a.Start(context.Background()); serr != nil {
-		t.Fatalf("Start: %v", serr)
-	}
-	defer a.Shutdown(context.Background())
+	// With this machine's helper installed: the session below is a local pane
+	// and a local pane is the daemon's (nocx-ie23r.3, ADR-0057).
+	a := newLocalPaneApp(t)
 
 	wsURL := "ws://127.0.0.1:" + strconv.Itoa(a.Transport.Port()) + "/session"
 	conn, _, dialErr := (&websocket.Dialer{

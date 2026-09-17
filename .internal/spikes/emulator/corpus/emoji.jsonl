@@ -1,0 +1,4 @@
+{"agent":"bash","argv":["bash","/home/dev/.herdr/worktrees/nocx/spike-emulator/.internal/spikes/emulator/corpus/scripts/emoji.sh"],"cols":120,"rows":40,"started":"2026-09-12T13:45:50.320626586Z","script":["+8000ms \"\""]}
+{"atMs":1,"offset":0,"data":"family \u003c👨‍👩‍👧‍👦\u003e\r\nafter family\r\n"}
+{"atMs":1,"offset":50,"data":"skin \u003c👍🏽\u003e\r\nafter skin\r\nflag \u003c🇷🇺\u003e\r\n"}
+{"atMs":1,"offset":96,"data":"after flag\r\nheart \u003c❤️\u003e\r\nafter heart\r\nplain \u003cab\u003e\r\nafter plain\r\n"}

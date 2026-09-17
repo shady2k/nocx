@@ -62,8 +62,11 @@ ENV GOTOOLCHAIN=local
 # installs dash on macOS and zsh on ubuntu.
 #
 # make, because the stand builds the remote helper's artifacts by calling
-# `make helpers` on its way up (e2e/stand.ts) rather than keeping a second
-# copy of that build matrix. Without it the suite dies in globalSetup.
+# `make helpers-this-machine` on its way up (e2e/stand.ts) rather than keeping a
+# second copy of that build matrix. Without it the suite dies in globalSetup —
+# and since nocx-ygxjv.10 that target also fetches the pinned libghostty-vt
+# archives and compiles the helper through Zig's cc, which is why Zig is
+# installed below and `xz-utils` is here.
 #
 # gnome-keyring and dbus, because one spec is ABOUT a machine that has a
 # working OS keystore — that a vault set up there is asked for a passphrase
@@ -74,7 +77,40 @@ ENV GOTOOLCHAIN=local
 # server in this image and none is wanted.
 RUN apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends \
-       bash dash make zsh openssh-client gnome-keyring dbus dbus-x11 \
+       bash dash make zsh openssh-client gnome-keyring dbus dbus-x11 xz-utils \
     && rm -rf /var/lib/apt/lists/*
+
+# THE PINNED ZIG, because the stand builds the helper artifacts with
+# `make helpers-this-machine` on its way up (e2e/stand.ts) and that target
+# compiles through Zig's cc: it is what gives the Linux helper a statically
+# linked musl libc, and `vtfetch cc` refuses any Zig but the pinned version.
+# The target fails without it.
+#
+# The darwin targets are NOT built here (nocx-trkgm). Those are the ones
+# cross-compiled from Linux against the committed .tbd stubs, the stand builds
+# this host's platform alone, and their exerciser is the release workflow's own
+# helpers job rather than this image.
+#
+# The VERSION is the one third_party/libghostty-vt/MANIFEST.json pins, and it
+# is repeated here rather than read from there because this build's context is
+# e2e/ — nothing from the repository root exists at image-build time. Drift is
+# caught rather than shipped: `make helpers` runs `vtfetch zig`, which refuses
+# any compiler but the pinned version, and the sha256 below is checked here.
+# The sha256 values are ziglang.org's own, from its download index.
+ARG ZIG_VERSION=0.16.0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) zig_arch=x86_64;  zig_sha=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00 ;; \
+      arm64) zig_arch=aarch64; zig_sha=ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17 ;; \
+      *) echo "unsupported arch $arch" >&2; exit 1 ;; \
+    esac; \
+    url="https://ziglang.org/download/${ZIG_VERSION}/zig-${zig_arch}-linux-${ZIG_VERSION}.tar.xz"; \
+    curl -fsSL "$url" -o /tmp/zig.tar.xz; \
+    echo "${zig_sha}  /tmp/zig.tar.xz" | sha256sum -c -; \
+    tar -xJf /tmp/zig.tar.xz -C /opt; \
+    rm /tmp/zig.tar.xz; \
+    ln -sf "/opt/zig-${zig_arch}-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig; \
+    zig version
 
 WORKDIR /work

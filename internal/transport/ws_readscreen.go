@@ -278,12 +278,26 @@ func (s *WSServer) runGrantFor(sessionID string) *content.Grant {
 	if s.agentPolicy == nil {
 		return nil
 	}
+	return s.runGrantFrom(s.agentPolicy.Policy(), sessionID)
+}
+
+// runGrantFrom is the mint itself, over ONE stated global document.
+//
+// It is split out for a caller that has a document the store does not hold
+// yet: a matrix write asks each live run whether it would decide differently
+// once the write lands, and the only honest way to ask is to mint that run's
+// authority AGAIN from the document the write leaves behind and compare the
+// two (runsUnreachedByRowWrite). That question must cross the same overlay,
+// the same session-selector rule and the same fence as the real mint, or it
+// would answer about an authority nobody would ever hold — so it crosses THIS
+// function, and there is no second mint to keep in step with.
+func (s *WSServer) runGrantFrom(global content.EffectPolicy, sessionID string) *content.Grant {
 	// The session's own answers overlay the global policy — an "allow in
 	// this session" is in force from the answer until the session ends, and
 	// the store (ws_sessionpolicy.go) is what ends it. The run grant's base
 	// scope is already this session, so the overlay carries no scope of its
 	// own: the run cannot reach outside its session anyway.
-	p := content.ResolvePolicy(s.agentPolicy.Policy(), nil, s.sessionPolicy.For(session.ID(sessionID)))
+	p := content.ResolvePolicy(global, nil, s.sessionPolicy.For(session.ID(sessionID)))
 	// The endpoint's session is the run-authoritative session resource. A
 	// policy may narrow paths or content, but an operator session selector
 	// names a different domain and must not erase the current session from
@@ -296,6 +310,16 @@ func (s *WSServer) runGrantFor(sessionID string) *content.Grant {
 		{Kind: content.ResourceContent, ID: "note"},
 		{Kind: content.ResourceContent, ID: "snippet"},
 		{Kind: content.ResourceDestination, ID: "*"},
+		// The environment a run may start a worker in (nocx-dkawo.8, A7 of
+		// the worker authority model). It is the LOCAL machine and only that:
+		// the spawner opens a local session, so a fence naming any other
+		// environment would offer an authority nothing could deliver. A
+		// remote participant needs the helper and is not this slice.
+		//
+		// Without this scope Registry.ForGrant's kind check silently omits
+		// workers.spawn and it is never offered — which is why the scope is
+		// minted here rather than assumed by the tool.
+		{Kind: content.ResourceEnvironment, ID: content.EnvironmentIDFor(content.EnvLocal, "")},
 	}
 	if s.skillsEnabled() {
 		scopes = append(scopes, content.GrantScope{Kind: content.ResourceContent, ID: "skill"})

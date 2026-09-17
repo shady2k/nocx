@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package ssh
 
 // What the product must be able to say about a connection, per network

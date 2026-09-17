@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.calibration.params.schema.json",
+  "title": "AgentCalibrationParams",
+  "description": "Params of the agent.calibration request: the read half of the guided calibration (nocx-etejh). Verifying a rule against a recording it happened to be pointed at proves nothing — a rule that never matches looks exactly like a rule that works — so the person produces the evidence: nocx asks them to drive their agent into a named state and labels the frame with the state it asked for. This request only LOOKS, and it is a pull rather than a subscription for the same reason agent.emitting is: the request is the looking, so a surface that has closed asks nothing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {
+    "sessionId": {
+      "description": "The enrolled pane whose agent is being calibrated, by its server-authoritative session id (AD-7). OPTIONAL: without it the answer carries only the list of panes nocx is watching, which is what a surface asks for before a person has picked one. Naming a pane that is no longer watched is not an error — the answer simply carries no calibration.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    }
+  }
+}

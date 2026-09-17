@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/workers.spawn.schema.json",
+  "title": "WorkersSpawnParams",
+  "description": "Parameters for the workers.spawn agent tool: start one worker in a terminal pane of its own and hand it a task. The person may be asked to approve it first, and a refusal is an answer. Nothing you do after this keeps the worker supervised — nocx watches it whether or not you ask again.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["command", "task"],
+  "properties": {
+    "command": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "description": "The command line that starts the worker, exactly as a person would type it — for example `claude`. It runs in the worker's own pane."
+    },
+    "task": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "description": "What this worker is for, in your own words. nocx queues this for delivery into the worker's own pane and delivers it as soon as the pane is free — this is how the worker is told what to do, not only a record of it — and it is also recorded, so a later workers.holdings can tell you what you started even if you have lost the context you started it from. A pane that stops on a question of its agent's own before it is ready — a folder-trust question, an approval — does not fail the call: the worker is live, the task has not reached it yet, and the result says so in taskTyped and waitingOn. It is already queued, though, and nocx delivers it the moment the pane frees up — whichever way that happens, whether you answer the question yourself (session.read to see it, session.keys to answer) or a person at that pane's keyboard does — so do not call workers.spawn again or send the task any other way. A pane that never becomes ready for any other reason fails the whole call rather than leaving a worker nobody told anything; workers.say can hand a worker something more once it is running, but this is how its first task arrives.\n\nTELL THE WORKER HOW TO REPORT, in this task, or it cannot: nocx will know when its process ends and will never know what it produced, and the record will say `abandoned` rather than `completed`. The instruction to include is exactly this — when you are finished, write to the file named by the NOCX_AGENT_REPORT environment variable: the first line `ok` or `fail`, and after it a few lines saying what you produced. Nothing else counts as reporting, and a worker that never writes it is not a failure — it is a worker nobody was told about."
+    }
+  },
+  "$defs": {
+    "result": {
+      "title": "WorkersSpawnResult",
+      "description": "The worker that now exists. It is live: its enrolment arrived, which is what proves the agent started — never that this call returned. Live is not the same as told: taskTyped says whether the task reached the worker.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "state", "taskTyped"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The worker's id."
+        },
+        "state": {
+          "type": "string",
+          "enum": ["live"],
+          "description": "Always live: a spawn that did not reach live is an error, not a result."
+        },
+        "taskTyped": {
+          "type": "boolean",
+          "description": "True when the task had already reached the worker's pane by the time this call returned. False when its pane stopped on a question of its agent's own first — waitingOn then says which kind — in which case the task is queued rather than lost: the worker is live and supervised, and nocx delivers the task on its own once the pane frees up."
+        },
+        "waitingOn": {
+          "type": "string",
+          "enum": ["permission_choice", "modal_choice"],
+          "description": "Present only when taskTyped is false because the pane is asking something. permission_choice: the agent raised a question of its own, such as a tool approval or whether to trust the directory it was started in. modal_choice: a menu is open that the agent did not raise. Either way, the queued task is delivered automatically once that question is answered — by you, with session.keys (session.read shows it first), or by a person at that pane's keyboard — so nothing further is needed to deliver it."
+        }
+      }
+    }
+  }
+}

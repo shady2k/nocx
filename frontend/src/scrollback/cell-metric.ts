@@ -22,10 +22,14 @@
 //   --term-cell-width  the cell width the frozen block must reproduce
 //   --term-cell-delta  cellWidth − naturalAdvance, applied as letter-spacing
 //
-// The correction is per character, so a line of N columns advances exactly
-// N × cellWidth (letter-spacing adds to every glyph's advance, wide glyphs
-// included; a two-column glyph still advances at the FALLBACK font's own
-// metric plus delta — see the report for the measured answer on that).
+// The correction is per TYPOGRAPHIC CHARACTER, which is not the same unit as
+// a terminal cell, and the difference is the whole of nocx-ec18. It cancels
+// cellWidth - naturalAdvance exactly for a single-column cluster whose
+// natural advance IS that naturalAdvance — which is most output, and why it
+// is kept. It cannot do so for anything else: a two-column cell takes ONE
+// tracking opportunity where the grid gives it two columns, and a glyph the
+// browser resolved in another font has no single delta that fits it and a
+// letter at once. Those cells are boxed instead (scrollback/cell-fit.ts).
 //
 // Refresh: the properties are republished whenever the renderer reports its
 // cell dims MAY have changed (mount after fonts load, grid resize, device
@@ -56,9 +60,12 @@ const PROBE_CLASS = 'cell-metric-probe'
 const PROBE_CHARS = 64
 
 /** The DOM's own natural per-character advance, measured from a hidden probe
- *  span that inherits the block's font (--font-family-mono, --font-size-
- *  terminal) by living inside the scrollback container. 0 when the probe
- *  cannot be measured (jsdom has no layout) — the caller publishes nothing. */
+ *  span. The font comes from `.cell-metric-probe` in the stylesheet, which
+ *  declares it explicitly — NOT from living inside the scrollback container,
+ *  which carries no font-family of its own (`.cmd-output` is where the block
+ *  gets one). Believing the inheritance story is how a second probe came to
+ *  be written against the UI font. 0 when the probe cannot be measured
+ *  (jsdom has no layout) — the caller publishes nothing. */
 export function measureNaturalAdvance(container: HTMLElement): number {
   const probe = ensureProbe(container)
   const rect = probe.getBoundingClientRect()

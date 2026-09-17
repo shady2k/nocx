@@ -155,6 +155,7 @@ var schemaLadder = []migrationStep{
 	{from: 14, to: 15, apply: migrateGrantScopeKinds14to15},
 	{from: 15, to: 16, apply: migrateRetireTheAPIRunCounter15to16, preflight: refuseAPIRunTablesFromANewerBuild, schemaDigest: "4688f8fcbae121444ed4726726fc598737220fd4fd09bc428e3230c13cfe3cd9"},
 	{from: 16, to: 17, apply: migrateAddSkillChecks16to17, schemaDigest: "cc4c6529598c845b19936ee4c11c3adff9a66162ec56b70743f3188dc132092e"},
+	{from: 17, to: 18, apply: migrateTerminationReasons17to18, schemaDigest: "f9d5269cf07e28beb22facac42548dcaebf74c3559b65ebec1a73ba7d112f982"},
 }
 
 // validateLadder validates the shipped ladder against the current schema.
@@ -291,23 +292,29 @@ func validateOnDiskSchemaShapeFor(ctx context.Context, conn *sql.Conn, version, 
 // shapes this build migrates. The current shape is derived from schemaV1 at
 // runtime so it has one source of truth rather than a second digest constant.
 var schemaShapeDigests = map[int]string{
-	14: "30be8a0ce52a6598a21616cab3b2931be9544065b9deb51c11741a77166f3c51",
-	15: "14c52ba462a0448ffb197467d4e512b37e4ca7557ffc10ff91a89428fd06637e",
-	// 16 is pinned now that schemaVersion moved to 17 (nocx-e5f55): until
+	14: "302e4e2479855b3aa0abdce4a9ecb0f3c5a8af7f06ad102f9a9049e6818fd4c2",
+	15: "75eb0aea40034a9db5c8f19648215e638234a9e9f0031a5a7275e2d8af7c3ff4",
+	// 16 is pinned now that schemaVersion moved past it (nocx-e5f55): until
 	// then 16 WAS current and its shape was derived at runtime by
 	// currentSchemaShape, which is exactly the branch that stops running the
-	// moment a newer version takes over as current. Taken from a database
-	// built with schemaV1 as it stood at 882f34b5 — the last commit before
-	// skill_checks was added — because the working tree's schemaV1 already
-	// carries that table and would pin the shape of a v16 that never
-	// existed, which Open would then accept without having checked anything.
-	16: "1bc470ff45e9b663c547a88312fad679686c9eebd6e8254ed758ed98e1563fc4",
+	// moment a newer version takes over as current. Taken from
+	// testdata/schema_v16.sql — the shape as it stood at 882f34b5, the last
+	// commit before skill_checks was added — because the working tree's
+	// schemaV1 already carries that table and would pin the shape of a v16 that
+	// never existed, which Open would then accept without having checked
+	// anything.
+	16: "014fa0face729e1f650b37d3d9ac7abb2d68490c98c3c6c48d6d74490702687f",
+	// 17 is pinned for the same reason, in the commit that dethroned it: it is
+	// testdata/schema_v17.sql, which is 16 plus skill_checks and is where
+	// executions.termination_reason still refused `answer-revoked`.
+	17: "623ffa936faf719fe2fad36b9a0e1393c0bfeabac4358a95f972559c92f5169a",
 }
 
 var historicalSchemaObjectNames = map[int]map[string]struct{}{
 	14: schema14ObjectNames(),
 	15: schema15ObjectNames(),
 	16: schema16ObjectNames(),
+	17: schema17ObjectNames(),
 }
 
 func schema14ObjectNames() map[string]struct{} {
@@ -362,10 +369,22 @@ func schema15ObjectNames() map[string]struct{} {
 
 // schema16ObjectNames is schema15's set with api_run_schema retired: the
 // 15→16 rung (migrateRetireTheAPIRunCounter15to16) drops that table and
-// nothing else, so this is the one line that differs.
+// nothing else, so this is the one line that differs. The `api_run*` tables it
+// used to version became ordinary tables of this file.
 func schema16ObjectNames() map[string]struct{} {
 	result := schema15ObjectNames()
 	delete(result, "table:api_run_schema")
+	return result
+}
+
+// schema17ObjectNames is schema16's set plus skill_checks: the 16→17 rung
+// (migrateAddSkillChecks16to17) adds that table and nothing else, so this is
+// the one line that differs. The 17→18 rung rebuilds `executions` to widen a
+// CHECK, which changes that table's DDL and not the set of names — which is
+// exactly why the digest and the names are pinned separately.
+func schema17ObjectNames() map[string]struct{} {
+	result := schema16ObjectNames()
+	result["table:skill_checks"] = struct{}{}
 	return result
 }
 
@@ -440,6 +459,11 @@ func schemaObjectNames(objects []sqliteSchemaObject) map[string]struct{} {
 	return names
 }
 
+// The DDL is NORMALISED before it is digested, and schema_shape_normalise.go
+// carries the argument: a table rebuild re-emits the table's name quoted, so a
+// verbatim digest refused every database that had ever been migrated on its
+// next open. What normalisation folds away cannot change the database the
+// statement produces; everything a shape is judged by survives it.
 func schemaObjectsDigest(objects []sqliteSchemaObject) string {
 	var shape strings.Builder
 	for _, object := range objects {
@@ -449,7 +473,7 @@ func schemaObjectsDigest(objects []sqliteSchemaObject) string {
 		shape.WriteString(`\x00`)
 		shape.WriteString(object.table)
 		shape.WriteString(`\x00`)
-		shape.WriteString(object.sql)
+		shape.WriteString(normaliseDDL(object.sql))
 		shape.WriteString(`\x00`)
 	}
 	sum := sha256.Sum256([]byte(shape.String()))
@@ -820,6 +844,113 @@ func migrateAddSkillChecks16to17(ctx context.Context, tx *sql.Tx) error {
   max_bytes   INTEGER NOT NULL DEFAULT 0
 ) STRICT`); err != nil {
 		return fmt.Errorf("add skill_checks table: %w", err)
+	}
+	return nil
+}
+
+// migrateTerminationReasons17to18 widens executions.termination_reason to
+// admit `answer-revoked` — the reason a run gets when a person takes back a
+// standing answer and chooses to stop the work running under it
+// (nocx-4yjwk.7).
+//
+// WHY THIS EXISTS AT ALL, and it is the general lesson rather than this
+// column's. The vocabulary is closed by the DATABASE and not only by the Go
+// constants, and the two halves are not wired to each other by the compiler.
+// A reason added to `content.TerminationReason` and not here does not fail
+// where it was written: it fails at the terminal close of a real run, where
+// terminalize logs a warning and returns, the run never reaches a terminal
+// state, no `agent.runState` is sent, and the startup sweep repairs it as
+// `interrupted` at the next start. The person watching sees a run that streams
+// forever. TestEveryTerminationReasonGoCanNameTheDatabaseAccepts is what turns
+// that into a failing test in the commit that adds the constant.
+//
+// It is a TABLE REBUILD for the reason 14→15 was: the widening is a CHECK and
+// SQLite has no ALTER for one. SQLite's documented four statements — create
+// beside, copy, drop, rename — all inside the caller's transaction, so the pair
+// of tables is never a state anything else can observe, and `foreign_key_check`
+// runs over the result before the stamp commits.
+//
+// THE PARTIAL FAILURES, ENUMERATED, because a rebuild is four statements and
+// the interval has to hold across all of them. Statement 1 fails: nothing has
+// changed. Statement 2 fails — a row the new CHECK refuses, or the disk fills
+// mid-copy — the extra table exists but is uncommitted. Statement 3 fails: both
+// tables exist, uncommitted. Statement 4 fails: `executions` is GONE and only
+// the new table exists, uncommitted. Every one of those ends the same way,
+// because none of them is committed and `applyStep` rolls the transaction back:
+// the file still answers `user_version = 16` and still holds schema 16's rows,
+// including the executions the copy had begun to duplicate. The next start
+// finds a database at 16, walks this rung again from the beginning, and there
+// is no repair step and nothing for a person to do. That is the whole reason
+// the stamp is written inside this transaction rather than beside it.
+//
+// The dependents are unaffected by the drop: `authority_grants.execution_id`
+// and `artifacts.execution_id` reference `executions(id)`, the ids are copied
+// unchanged, and foreign keys are suspended for the walk with
+// `PRAGMA foreign_key_check` inside the transaction standing in for them — so a
+// rebuild that lost a row fails here instead of committing a database nothing
+// can read consistently.
+//
+// A file that reaches here without the table is not a real schema 16 database
+// and the step is a no-op, exactly as 14→15 is: `schemaV1` runs right after the
+// walk and creates `executions` in the current shape, which is where a fresh
+// install gets it from too.
+//
+// THE DDL BELOW IS SCHEMA 17'S AND IS FROZEN AT IT. It duplicates schemaV1's
+// `executions` today because 17 is the current version, and the two must be
+// allowed to diverge the moment 18 exists — this statement is what a schema 16
+// file BECOMES on its way through 17, not what the current build creates.
+// TestAnUpgradedDatabaseAndAFreshOneHoldTheSameSchema is what keeps them equal
+// while they are supposed to be equal.
+func migrateTerminationReasons17to18(ctx context.Context, tx *sql.Tx) error {
+	var present int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT count(*) FROM sqlite_master WHERE type='table' AND name='executions'").Scan(&present); err != nil {
+		return fmt.Errorf("probe executions: %w", err)
+	}
+	if present == 0 {
+		return nil
+	}
+	statements := []string{
+		`CREATE TABLE executions_migrating (
+  id                  INTEGER PRIMARY KEY,
+  entry_id            TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  lane                TEXT,
+  attempt             INTEGER NOT NULL DEFAULT 1,
+  environment_obs_id  INTEGER NOT NULL REFERENCES environment_observations(id),
+  lease_deadline      INTEGER,
+  inactivity_deadline INTEGER,
+  interactivity       TEXT NOT NULL DEFAULT 'none'
+                      CHECK (interactivity IN ('none','stdin','tty','awaiting-takeover')),
+  process_group       TEXT,
+  started_at          INTEGER,
+  ended_at            INTEGER,
+  termination_reason  TEXT CHECK (termination_reason IN
+                      ('completed','failed','timeout','transport-gone','user-killed','agent-declined','interrupted','inactivity','output-budget','answer-revoked')),
+  executor            TEXT,
+  state               TEXT CHECK (state IN
+                      ('prepared','streaming','awaiting_approval','completed','cancelled','failed','interrupted')),
+  payload             TEXT NOT NULL DEFAULT '{}'
+) STRICT`,
+		`INSERT INTO executions_migrating
+			(id, entry_id, lane, attempt, environment_obs_id, lease_deadline, inactivity_deadline,
+			 interactivity, process_group, started_at, ended_at, termination_reason, executor, state, payload)
+			SELECT id, entry_id, lane, attempt, environment_obs_id, lease_deadline, inactivity_deadline,
+			 interactivity, process_group, started_at, ended_at, termination_reason, executor, state, payload
+			FROM executions`,
+		`DROP TABLE executions`,
+		`ALTER TABLE executions_migrating RENAME TO executions`,
+		// The rebuild drops the table and takes its indexes with it. schemaV1
+		// re-creates this one after the walk, but only because it is `IF NOT
+		// EXISTS` against a table that no longer has it — recreating it here
+		// keeps the shape whole INSIDE the transaction, so `foreign_key_check`
+		// and the stamp commit over a database that is already schema 17 and
+		// not one waiting for schemaV1 to finish it.
+		`CREATE INDEX IF NOT EXISTS executions_by_entry ON executions(entry_id, attempt)`,
+	}
+	for i, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("widen executions.termination_reason, statement %d: %w", i+1, err)
+		}
 	}
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
 	"testing"
 	"time"
@@ -42,14 +43,11 @@ func TestSessionIntegrationChanged_ObservedProcessOverTheWireConformsToContract(
 	pub.SetEmitter(e.ws)
 	sid := e.openSession(t, 1)
 
-	ch, child, err := lifecyclechannel.New(logger, pub,
+	ch, child := newLifecycleSocketPairAdapter(t, logger, pub,
 		lifecyclechannel.WithHelloTimeout(time.Hour),
 		lifecyclechannel.WithLossReporter(func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause) {
 			e.ws.NoteIntegrationLoss(lane, string(cause))
 		}))
-	if err != nil {
-		t.Fatalf("lifecyclechannel.New: %v", err)
-	}
 	t.Cleanup(func() { _ = child.Close() })
 	e.ws.RegisterLifecycleLane(ch.Lane(), session.ID(sid))
 	e.ws.RegisterIntegration(session.ID(sid), "/bin/zsh", IntegrationStarting, ssh.ReasonNone)
@@ -139,4 +137,27 @@ func TestSessionIntegrationChanged_ObservedProcessOverTheWireConformsToContract(
 	if got.Shell != "/bin/zsh" {
 		t.Errorf("shell = %q, want the launch's own answer, unrevised", got.Shell)
 	}
+}
+
+// newLifecycleSocketPairAdapter builds the adapter these two contract tests
+// drive, over a socketpair whose child end stands in for the shell.
+//
+// It used to be lifecyclechannel.New, which existed for the coordinator's own
+// forked shell and went with it (nocx-ie23r.3): this machine's panes are the
+// helper daemon's now, and their lifecycle bytes reach the coordinator over a
+// STREAM. What is under test here is neither carrier — it is the transport's
+// integration axis — so the cheapest real adapter is still a socketpair, built
+// from the two pieces that are production code either way.
+func newLifecycleSocketPairAdapter(t *testing.T, logger log.Logger, k lifecyclechannel.Kernel, opts ...lifecyclechannel.Option) (*lifecyclechannel.Adapter, *os.File) {
+	t.Helper()
+	parent, child, err := lifecyclechannel.NewSocketPair()
+	if err != nil {
+		t.Fatalf("lifecycle socketpair: %v", err)
+	}
+	ch, err := lifecyclechannel.NewStream(logger, k, parent, opts...)
+	if err != nil {
+		_ = child.Close()
+		t.Fatalf("lifecyclechannel.NewStream: %v", err)
+	}
+	return ch, child
 }

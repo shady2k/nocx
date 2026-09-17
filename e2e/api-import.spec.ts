@@ -49,12 +49,13 @@
  * row in the tree, a dialog on screen, a value in a field, a directory on
  * disk.
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  standalone as base,
   appReadyForInput,
   bindEndpoint,
   openImportDestination,

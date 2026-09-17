@@ -63,6 +63,28 @@ func (s *sqliteContent) CreateSession(ctx context.Context, sess Session) error {
 		if err != nil {
 			return fmt.Errorf("content: encode session metadata: %w", err)
 		}
+		// THE DEFAULT WORKSPACE IS A FALLBACK ROW THIS REPOSITORY ALREADY
+		// WRITES, and it is written here for the same reason it is written in
+		// ensureSessionRecorded: sessions.workspace_id is a foreign key, the
+		// default workspace is a coordinator-side CONSTANT rather than
+		// something a person created, and on a fresh profile nothing has
+		// created its row yet. Without this, the first pane a new install
+		// opens fails on a FOREIGN KEY constraint — which nothing noticed
+		// while no open wrote a session row on that path (nocx-ie23r.3).
+		//
+		// Guarded on the default, deliberately. Any other workspace id came
+		// off the pane → tab → workspace chain, so its row exists by
+		// construction, and inserting one here would be this repository
+		// minting a workspace — which belongs to LayoutRepository (AD-8) and
+		// would turn a caller's typo into a new workspace.
+		if sess.WorkspaceID == DefaultWorkspaceID {
+			if _, werr := s.db.ExecContext(ctx,
+				`INSERT INTO workspaces (id, name, created_at) VALUES (?, 'default', ?)
+				 ON CONFLICT(id) DO NOTHING`,
+				DefaultWorkspaceID, time.Now().UnixMilli()); werr != nil {
+				return werr
+			}
+		}
 		_, err = s.db.ExecContext(ctx,
 			`INSERT INTO sessions (id, workspace_id, started_at, payload) VALUES (?, ?, ?, ?)`,
 			// string(raw), not raw: `sessions` is STRICT and `payload` is
@@ -226,11 +248,34 @@ func (s *sqliteContent) Submit(ctx context.Context, in SubmitEntry) (SubmitResul
 		if in.Kind == EntryText {
 			phase, status = PhaseClosed, EntrySuccess
 		}
+		// session_id is PROVENANCE — which pipe this ran in — and the column
+		// is a real foreign key into the ledger's own sessions table, which
+		// every connection enforces (sqlite.go sets foreign_keys=ON at open).
+		// So it is BOUND THROUGH THE TABLE rather than taken on the caller's
+		// word: the subquery yields the id when a row names it and NULL when
+		// none does, which is one statement doing both the check and the
+		// write.
+		//
+		// REFUSING WAS THE OTHER CANDIDATE, and it is the wrong one for a
+		// reason no caller can repair: a writer that names a session does not
+		// own the row it names — the binding lifecycle writes it, at the
+		// open — so a refusal here would delete a command from the history
+		// because something this caller never had is missing. Minting the row
+		// instead (what ensureLedgerContext does for an agent capture) was
+		// rejected for ws_ledger.go's own stated reason: the binding owns
+		// that table, and a synthetic child of the fallback workspace would
+		// enter the carried-over set as a session no inventory can judge,
+		// which is reconciliation work about a pipe that never existed.
+		//
+		// Nullable is the schema's own answer for "the pipe is gone"
+		// (ON DELETE SET NULL, ADR-0019 §5); a session the ledger was never
+		// told about is the same column carrying the same fact one step
+		// earlier.
 		if _, err := tx.ExecContext(ctx, `INSERT INTO entries
 			(id, ingest_seq, client, digest, environment_id, pane_id, session_id, parent_id, pos,
 			 cwd, kind, source, intent, phase, status, submitted_at, started_at, ended_at,
 			 duration_ms, sensitivity, payload)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			VALUES (?, ?, ?, ?, ?, ?, (SELECT id FROM sessions WHERE id = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			in.ID, next, in.Client, digest, in.EnvironmentID, in.PaneID, in.SessionID,
 			in.ParentID, in.Pos, in.Cwd, string(in.Kind), string(in.Source), in.Intent,
 			string(phase), string(status), submittedAt, in.StartedAt, in.EndedAt, in.DurationMs,

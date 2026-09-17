@@ -111,7 +111,7 @@ func TestAuto_IsExpressibleAtEveryLayer(t *testing.T) {
 // the same value here, and would therefore hide the defect rather than show
 // it. Pinned directly.
 func TestValidDesiredMode_AcceptsAuto(t *testing.T) {
-	for _, m := range []DesiredMode{DesiredAuto, DesiredRaw, DesiredScript, DesiredRelay} {
+	for _, m := range []DesiredMode{DesiredAuto, DesiredRaw, DesiredScript, DesiredHelper} {
 		if !validDesiredMode(m) {
 			t.Errorf("validDesiredMode(%q) = false, want true", m)
 		}
@@ -139,7 +139,7 @@ func TestDeliversScripts(t *testing.T) {
 		{DesiredScript, true, "the same delivery, chosen explicitly"},
 		{DesiredMode(""), true, "no profile spoke — a direct host or an ad-hoc open"},
 		{DesiredRaw, false, "the user's opt-out: nothing is written"},
-		{DesiredRelay, true, "additive, not alternative: allowing the helper never withholds the scripts (§5.2)"},
+		{DesiredHelper, true, "additive, not alternative: allowing the helper never withholds the scripts (§5.2)"},
 		{DesiredMode("ask"), false, "not a mode; and an unknown value fails closed"},
 	}
 	for _, tc := range cases {

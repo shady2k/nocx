@@ -17,11 +17,11 @@
     "sessionEntry": {
       "type": "object",
       "additionalProperties": false,
+      "description": "One session a helper is holding. Its process is described by a UNION of two launch records — `launch` for a PTY the helper forked on its own machine, `remoteLaunch` for a shell channel it dialed — and exactly one is present. The other is ABSENT rather than filled in with zeros: a `launch` record beside a remote one would carry pid 0, which is the kernel's scheduler rather than a process on this machine, and a reader that trusted it would ask the OS about something nobody started (nocx-s8mfn, D10's 'the launch record is the authority').",
       "required": [
         "hostSessionId",
         "workspace",
         "startedAt",
-        "launch",
         "observed",
         "window",
         "lifecycleWindow",
@@ -29,6 +29,19 @@
         "writerEpoch",
         "exit"
       ],
+      "if": {
+        "description": "The session's process is a PTY this helper forked: the local launch record is carried and no remote one is.",
+        "required": ["launch"]
+      },
+      "then": {
+        "not": {
+          "required": ["remoteLaunch"]
+        }
+      },
+      "else": {
+        "description": "Otherwise the process is a shell channel on a connection this helper dialed, and the resolved destination is what its entry carries.",
+        "required": ["remoteLaunch"]
+      },
       "properties": {
         "hostSessionId": {
           "type": "object",
@@ -42,6 +55,7 @@
         "workspace": { "type": "string" },
         "startedAt": { "type": "string", "minLength": 1 },
         "launch": {
+          "description": "The LOCAL branch: what the helper recorded at the moment it forked this session's process. Absent when `remoteLaunch` is present.",
           "type": "object",
           "additionalProperties": false,
           "required": ["shell", "cwd", "pid", "pgid", "cols", "rows", "windowBytes"],
@@ -50,6 +64,40 @@
             "cwd": { "type": "string" },
             "pid": { "type": "integer" },
             "pgid": { "type": "integer" },
+            "cols": { "type": "integer", "minimum": 0 },
+            "rows": { "type": "integer", "minimum": 0 },
+            "windowBytes": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "remoteLaunch": {
+          "description": "The SSH branch: the destination the helper resolved and dialed, echoed so a reader of the inventory knows which machine this pane is on. The identity is a REFERENCE and never material — the credential's opaque handle, which the helper does not interpret.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "host",
+            "port",
+            "user",
+            "identityRef",
+            "shell",
+            "cwd",
+            "cols",
+            "rows",
+            "windowBytes"
+          ],
+          "properties": {
+            "host": { "type": "string", "minLength": 1 },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "user": { "type": "string", "minLength": 1 },
+            "identityRef": { "type": "string", "minLength": 1 },
+            "shell": {
+              "description": "The tier this session was launched FOR, from the closed set internal/helper/proto's SSHShellKind owns: `auto` when the profile pinned nothing, which is the honest value because the far side's own dispatcher decides which tier runs and its answer is not reported back. The set is deliberately NOT repeated here — one owner, and a copy would be a second vocabulary to keep in step.",
+              "type": "string",
+              "minLength": 1
+            },
+            "cwd": {
+              "description": "Empty, always, in this generation: the far login shell's directory is the far side's answer and this helper neither asks for it nor changes it. Present rather than omitted so a reader cannot mistake 'nobody resolved a directory here' for a wire that does not carry one.",
+              "type": "string"
+            },
             "cols": { "type": "integer", "minimum": 0 },
             "rows": { "type": "integer", "minimum": 0 },
             "windowBytes": { "type": "integer", "minimum": 0 }

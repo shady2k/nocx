@@ -89,6 +89,10 @@ describe('a restored tab says which blocks nobody could check (nocx-k6p18.5)', (
     ['timedOut', 'did not answer in time'],
     ['hostUnreachable', 'has not been reachable since nocx restarted'],
     ['vaultSealed', 'the vault is locked'],
+    // The one cause whose subject is the machine the person is sitting at
+    // (nocx-ie23r.2): its sentence has to name THAT helper, not "this host",
+    // or it sends them looking for a network problem that does not exist.
+    ['localEndpointUnreachable', "this machine's own helper could not be asked"],
   ]
   for (const [cause, sentence] of sentences) {
     it(`says why for ${cause}`, () => {

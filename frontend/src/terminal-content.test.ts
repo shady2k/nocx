@@ -219,7 +219,10 @@ interface MountOpts {
    *  handler bails on a disconnected target, so tests that exercise it need
    *  the pane in the tree. Default false — the copy-on-select tests do not. */
   attachToDocument?: boolean
-  /** Mount an SSH tab (the capability rail is SSH-only, nocx-4t37.2). */
+  /** Mount an SSH tab (the capability rail is SSH-only, nocx-4t37.2).
+   *  profileId '' is a hand-typed connection with no saved profile
+   *  (ADR-0069's own case for the connect-time ask's session-only answer) —
+   *  the same convention buildSSHPane uses, never undefined. */
   ssh?: { profileId: string; host: string }
   /** Host callbacks handed to the TerminalContent (TerminalContentHooks). */
   hooks?: Partial<TerminalContentHooks>
@@ -569,6 +572,194 @@ describe('SSH open host-key recovery', () => {
     try {
       expect(openSSHSession).toHaveBeenCalledTimes(1)
       expect(tab.pane.textContent).toContain('Host key was not trusted for db.example.com:22')
+    } finally {
+      teardown()
+    }
+  })
+})
+
+describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
+  it('on an already-trusted machine, asks about the method alone and retries once answered', async () => {
+    const openSSHSession = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new RpcError(
+          'nocx has not been told whether it may use its helper on db.example.com:22',
+          -32603,
+          {
+            host: 'db.example.com:22',
+            fingerprint: 'SHA256:trusted',
+            helperAsk: true,
+          },
+        ),
+      )
+      .mockResolvedValueOnce(makeSession())
+    const onHelperConsentAsk = vi.fn().mockResolvedValue('script')
+    const onHostKeyError = vi.fn()
+    const client = makeClient({ openSSHSession })
+
+    const { teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        ssh: { profileId: 'ssh:test:1', host: 'db.example.com' },
+        hooks: { onHelperConsentAsk, onHostKeyError },
+      },
+      client,
+    )
+    try {
+      expect(onHelperConsentAsk).toHaveBeenCalledWith(
+        {
+          host: 'db.example.com:22',
+          fingerprint: 'SHA256:trusted',
+          hostKey: null,
+          profileId: 'ssh:test:1',
+        },
+        expect.any(AbortSignal),
+      )
+      // The already-trusted case never raises the plain host-key dialog —
+      // there is nothing about the key for it to show.
+      expect(onHostKeyError).not.toHaveBeenCalled()
+      expect(openSSHSession).toHaveBeenCalledTimes(2)
+      expect(openSSHSession.mock.calls[0]).toEqual(openSSHSession.mock.calls[1])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('when the key is ALSO unknown, the combined evidence carries the nested host-key data and only one hook fires', async () => {
+    const openSSHSession = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new RpcError(
+          'a person must decide before nocx may use its helper on db.example.com:22',
+          -32603,
+          {
+            host: 'db.example.com:22',
+            fingerprint: 'SHA256:offered',
+            helperAsk: true,
+            hostKey: {
+              host: 'db.example.com:22',
+              knownHostsHost: 'nocx-v1-route:22',
+              algorithm: 'ssh-ed25519',
+              fingerprint: 'SHA256:offered',
+              key: 'a2V5',
+              changed: false,
+            },
+          },
+        ),
+      )
+      .mockResolvedValueOnce(makeSession())
+    const onHelperConsentAsk = vi.fn().mockResolvedValue('helper')
+    const onHostKeyError = vi.fn()
+    const client = makeClient({ openSSHSession })
+
+    const { teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        ssh: { profileId: 'ssh:test:1', host: 'db.example.com' },
+        hooks: { onHelperConsentAsk, onHostKeyError },
+      },
+      client,
+    )
+    try {
+      expect(onHelperConsentAsk).toHaveBeenCalledWith(
+        {
+          host: 'db.example.com:22',
+          fingerprint: 'SHA256:offered',
+          hostKey: {
+            host: 'db.example.com:22',
+            knownHostsHost: 'nocx-v1-route:22',
+            algorithm: 'ssh-ed25519',
+            fingerprint: 'SHA256:offered',
+            storedFingerprint: undefined,
+            key: 'a2V5',
+            changed: false,
+            profileId: 'ssh:test:1',
+          },
+          profileId: 'ssh:test:1',
+        },
+        expect.any(AbortSignal),
+      )
+      // ONE dialog answers both: the plain host-key hook never fires for a
+      // refusal the combined ask already claimed (owner's decision,
+      // 2026-09-16 — never two dialogs in sequence).
+      expect(onHostKeyError).not.toHaveBeenCalled()
+      expect(openSSHSession).toHaveBeenCalledTimes(2)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('closing the ask without an answer fails the open rather than retrying', async () => {
+    const openSSHSession = vi.fn().mockRejectedValue(
+      new RpcError(
+        'nocx has not been told whether it may use its helper on db.example.com:22',
+        -32603,
+        {
+          host: 'db.example.com:22',
+          fingerprint: 'SHA256:trusted',
+          helperAsk: true,
+        },
+      ),
+    )
+    const onHelperConsentAsk = vi.fn().mockResolvedValue(null)
+    const client = makeClient({ openSSHSession })
+
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        ssh: { profileId: 'ssh:test:1', host: 'db.example.com' },
+        hooks: { onHelperConsentAsk },
+        expectedReady: false,
+      },
+      client,
+    )
+    try {
+      expect(openSSHSession).toHaveBeenCalledTimes(1)
+      expect(tab.pane.textContent).toContain(
+        'The connection to db.example.com:22 needs an answer before it can continue',
+      )
+    } finally {
+      teardown()
+    }
+  })
+
+  // A hand-typed ssh with no saved connection has nowhere to keep the
+  // answer — connections.setIntegrationMethod writes nothing for it to
+  // persist — so the retry itself must carry the chosen method, for this
+  // session alone (ADR-0069's own words).
+  it('a hand-typed connection with no saved profile carries the chosen method on the retried open', async () => {
+    const openSSHSessionByHost = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new RpcError(
+          'nocx has not been told whether it may use its helper on db.example.com:22',
+          -32603,
+          {
+            host: 'db.example.com:22',
+            fingerprint: 'SHA256:trusted',
+            helperAsk: true,
+          },
+        ),
+      )
+      .mockResolvedValueOnce(makeSession())
+    const onHelperConsentAsk = vi.fn().mockResolvedValue('script')
+    const client = makeClient({ openSSHSessionByHost })
+
+    const { teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        ssh: { profileId: '', host: 'db.example.com' },
+        hooks: { onHelperConsentAsk },
+      },
+      client,
+    )
+    try {
+      expect(openSSHSessionByHost).toHaveBeenCalledTimes(2)
+      // First attempt: no override, since nothing has been answered yet.
+      expect(openSSHSessionByHost.mock.calls[0][5]).toBeUndefined()
+      // Retry: the method just chosen rides this open alone.
+      expect(openSSHSessionByHost.mock.calls[1][5]).toBe('script')
     } finally {
       teardown()
     }
@@ -1981,6 +2172,310 @@ describe('the recovery action chip in editor chrome (nocx-atyf.2)', () => {
   })
 })
 
+// The pane's waiting state for the `starting` interval (nocx-ui8q6.1):
+// ADR-0024 decision 8's "worst of both" — a raw, half-bootstrapped prompt a
+// keystroke could land on before the shell has proved itself either way.
+// These assert through the seams a user actually reaches (AGENTS.md rule 1):
+// the send seam a keystroke reaches or does not, and the DOM a person would
+// see — never the implementation's own bookkeeping.
+describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
+  const WAITING = '.nocx-integration-waiting'
+
+  it('shows the waiting state and no terminal grid while the axis is starting', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      integrationHandler(client)({
+        sessionId: client._sessions[0].sessionId,
+        status: 'starting',
+        shell: '/bin/zsh',
+      })
+      expect(tab.pane.querySelector(WAITING)).not.toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('none')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a key pressed while starting reaches no send path', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      integrationHandler(client)({
+        sessionId: client._sessions[0].sessionId,
+        status: 'starting',
+        shell: '/bin/zsh',
+      })
+      session.send.mockClear()
+      rendererOf(content)._fireData('x')
+      expect(session.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the axis reaching integrated reveals the terminal and takes the next keypress', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const sessionId = client._sessions[0].sessionId
+      integrationHandler(client)({ sessionId, status: 'starting', shell: '/bin/zsh' })
+      integrationHandler(client)({ sessionId, status: 'integrated', shell: '/bin/zsh' })
+
+      expect(tab.pane.querySelector(WAITING)).toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('')
+
+      const session = sessionOf(content)
+      session.send.mockClear()
+      rendererOf(content)._fireData('y')
+      expect(session.send).toHaveBeenCalledWith('y')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the axis reaching conventional reveals a working terminal, takes input, and still says why', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const sessionId = client._sessions[0].sessionId
+      integrationHandler(client)({ sessionId, status: 'starting', shell: '/bin/zsh' })
+      integrationHandler(client)({
+        sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/zsh',
+      })
+
+      expect(tab.pane.querySelector(WAITING)).toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('')
+      // The reason surface is a different axis from the waiting state and
+      // must keep working: `conventional` still raises the degraded-session
+      // card that says why there are no command blocks.
+      expect(tab.pane.querySelector('.nocx-integration-notice')).not.toBeNull()
+
+      const session = sessionOf(content)
+      session.send.mockClear()
+      rendererOf(content)._fireData('z')
+      expect(session.send).toHaveBeenCalledWith('z')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a session that never emits on the axis is never made to wait', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      expect(tab.pane.querySelector(WAITING)).toBeNull()
+      const session = sessionOf(content)
+      session.send.mockClear()
+      rendererOf(content)._fireData('a')
+      expect(session.send).toHaveBeenCalledWith('a')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a reattach that replays an already-integrated status never flashes the waiting state', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      // The backend replays the CURRENT status on attach (replayIntegration)
+      // rather than restarting the handshake at `starting` — reattach is a
+      // state, not an event, and this pane must never have seen `starting`
+      // at all for this to be a faithful reattach.
+      integrationHandler(client)({
+        sessionId: client._sessions[0].sessionId,
+        status: 'integrated',
+        shell: '/bin/zsh',
+      })
+      expect(tab.pane.querySelector(WAITING)).toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('lost is not starting: a session that integrated and lost its channel keeps its terminal and input', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const sessionId = client._sessions[0].sessionId
+      integrationHandler(client)({ sessionId, status: 'integrated', shell: '/bin/zsh' })
+      integrationHandler(client)({
+        sessionId,
+        status: 'lost',
+        reason: 'channel-lost',
+        shell: '/bin/zsh',
+      })
+
+      expect(tab.pane.querySelector(WAITING)).toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('')
+
+      const session = sessionOf(content)
+      session.send.mockClear()
+      rendererOf(content)._fireData('b')
+      expect(session.send).toHaveBeenCalledWith('b')
+    } finally {
+      teardown()
+    }
+  })
+
+  // The gap this bead closes (nocx-ui8q6.6): the open ack's own
+  // awaitsIntegration answers, before the FIRST session.integrationChanged
+  // can possibly have arrived (it is sent strictly after the ack, AD-7),
+  // whether this pane's grid should already be held. Without it, `_integration`
+  // is null from mount until that first fact and null read as "conventional
+  // by design" — the exact frame nocx-ui8q6.1 could not close, because it
+  // only ever acted on a fact that had not arrived yet.
+  it('a session the ack says will start `starting` never shows a live grid, even before the first fact', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      // No integrationHandler call yet — this is the ack's own promise
+      // acted on alone, before any session.integrationChanged exists.
+      expect(tab.pane.querySelector(WAITING)).not.toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('none')
+      session.send.mockClear()
+      rendererOf(content)._fireData('x')
+      expect(session.send).not.toHaveBeenCalled()
+
+      // The fact the ack promised, now arriving: nothing about the pane's
+      // state changes, because it was already waiting on it.
+      integrationHandler(client)({
+        sessionId: session.sessionId,
+        status: 'starting',
+        shell: '/bin/zsh',
+      })
+      expect(tab.pane.querySelector(WAITING)).not.toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('none')
+
+      integrationHandler(client)({
+        sessionId: session.sessionId,
+        status: 'integrated',
+        shell: '/bin/zsh',
+      })
+      expect(tab.pane.querySelector(WAITING)).toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('')
+      session.send.mockClear()
+      rendererOf(content)._fireData('y')
+      expect(session.send).toHaveBeenCalledWith('y')
+    } finally {
+      teardown()
+    }
+  })
+
+  // The other half of the same acceptance: an ack that says false must not
+  // wait either, whatever a stray fact says later this test does not send —
+  // the case this bead's brief names as most likely to regress.
+  it('a session the ack says never entered the axis is never made to wait, ack alone', async () => {
+    const session = makeSession({ awaitsIntegration: false })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      expect(tab.pane.querySelector(WAITING)).toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('')
+      session.send.mockClear()
+      rendererOf(content)._fireData('z')
+      expect(session.send).toHaveBeenCalledWith('z')
+    } finally {
+      teardown()
+    }
+  })
+
+  // nocx-ty0hc: the RECLAIM half of the same gap. handleAttach's ack, like
+  // handleOpen's, precedes replayIntegration's resend (AD-7), and a reclaimed
+  // pane reads awaitsIntegration off that attach ack through the identical
+  // ADOPTION seam (TerminalContentHooks.adoptSession) a restored tab actually
+  // takes — not a fresh open. Before this bead, ipc.ts's reclaimSession never
+  // asked the question at all and SessionHandle defaulted the field to
+  // `false`, so a reclaimed `starting` session showed a live grid from its
+  // very first frame, unconditionally.
+  it('a reclaimed pane whose attach ack says starting never shows a live grid, even before the first fact', async () => {
+    const client = makeClient()
+    const session = makeSession({ awaitsIntegration: true })
+    const hooks = { adoptSession: () => Promise.resolve(asSessionHandleForTest(session)) }
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), { hooks }, client)
+    try {
+      // No integrationHandler call yet — the attach ack's own promise acted
+      // on alone, before any session.integrationChanged exists.
+      expect(tab.pane.querySelector(WAITING)).not.toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('none')
+      session.send.mockClear()
+      rendererOf(content)._fireData('x')
+      expect(session.send).not.toHaveBeenCalled()
+
+      integrationHandler(client)({
+        sessionId: session.sessionId,
+        status: 'integrated',
+        shell: '/bin/zsh',
+      })
+      expect(tab.pane.querySelector(WAITING)).toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('')
+      session.send.mockClear()
+      rendererOf(content)._fireData('y')
+      expect(session.send).toHaveBeenCalledWith('y')
+    } finally {
+      teardown()
+    }
+  })
+
+  // The assertion the bead's brief names as most likely to break something
+  // else, written first: a reclaim whose session never asked for integration
+  // — the ordinary shape of a raw-mode pane taken back on restart — must show
+  // its terminal immediately. reclaimSession must never invent a `true` for
+  // a session with nothing to wait on, the way a shared default easily could.
+  it('a reclaimed pane whose session never asked for integration shows its terminal immediately', async () => {
+    const client = makeClient()
+    const session = makeSession({ awaitsIntegration: false })
+    const hooks = { adoptSession: () => Promise.resolve(asSessionHandleForTest(session)) }
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), { hooks }, client)
+    try {
+      expect(tab.pane.querySelector(WAITING)).toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('')
+      session.send.mockClear()
+      rendererOf(content)._fireData('z')
+      expect(session.send).toHaveBeenCalledWith('z')
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// The other half of the one-answerer change (ADR-0066, nocx-ygxjv.12). The
+// renderer stopped producing xterm's automatic replies to the program's own
+// queries — proved against the REAL engine in renderers/xterm.test.ts — and
+// this is the half that lives at the surface: the replies travelled
+// renderer.onData → session.send, which is ALSO the path a keystroke takes, so
+// removing the path with the replies would have left a terminal nobody can
+// type into. What this pins is the path, not the engine: a key reaching the
+// terminal still reaches the session, byte for byte and in order.
+describe('typing still reaches the session (nocx-ygxjv.12)', () => {
+  it('forwards every key the terminal produces, in order', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      session.send.mockClear()
+
+      // A word and the Enter that submits it: three separate onData events at
+      // xterm, and three writes at the pty.
+      rendererOf(content)._fireData('l')
+      rendererOf(content)._fireData('s')
+      rendererOf(content)._fireData('\r')
+
+      expect(session.send.mock.calls).toEqual([['l'], ['s'], ['\r']])
+    } finally {
+      teardown()
+    }
+  })
+})
+
 // Regression table for the two-axis lifecycle kernel (ADR-0024 §6). The
 // authority axis moves only on published facts; the buffer axis is a
 // renderer-owned presentation fact; no stream marker, submit or passport
@@ -2060,70 +2555,8 @@ describe('the lifecycle fact wires editor ownership (ADR-0024 §6)', () => {
         lifecycle: 'prompt_ready',
         domain: 'd1',
         epoch: 1,
-        generation: 'est-0000000000000000',
       })
       expect(editorOf(content).isVisible).toBe(true)
-      expect(client.dispatcher.call).toHaveBeenCalledWith('lifecycle.establishAck', {
-        sessionId: session.sessionId,
-        lane: 'lane-1',
-        domain: 'd1',
-        epoch: 1,
-        generation: 'est-0000000000000000',
-      })
-    } finally {
-      teardown()
-    }
-  })
-
-  // ADR-0024 decision 9 across an AD-9 reconnect. The acknowledgement is what
-  // flushes the backend's pending ACCEPT; nothing else does. An ack that was
-  // in flight when the socket dropped is rejected by the dispatcher
-  // (rejectAllPending) and the backend never saw it, so its accept is still
-  // pending — and the reattach replay carries the SAME generation, because
-  // only a fresh shell hello mints a new one. The renderer must therefore
-  // treat "sent" and "landed" as different states: claiming the generation
-  // optimistically suppressed the one retry that could still complete the
-  // handshake, and the tab stayed conventional until the accept expired.
-  it('re-acknowledges the replayed generation when the first acknowledgement never landed', async () => {
-    const client = makeClient()
-    const acks: unknown[] = []
-    let failNext = true
-    client.dispatcher.call.mockImplementation((method: string, params: unknown) => {
-      if (method !== 'lifecycle.establishAck') return Promise.resolve({})
-      acks.push(params)
-      if (failNext) {
-        failNext = false
-        return Promise.reject(new Error('ws closed'))
-      }
-      return Promise.resolve({ accepted: true })
-    })
-    const { teardown } = await mountTerminal(makeClipboard(), {}, client)
-    try {
-      const handler = lifecycleHandler(client)
-      const fact = {
-        lane: 'lane-1',
-        lifecycle: 'prompt_ready',
-        domain: 'd1',
-        epoch: 1,
-        generation: 'est-0000000000000000',
-      }
-      handler(fact)
-      await Promise.resolve()
-      await Promise.resolve()
-      expect(acks).toHaveLength(1)
-
-      // The reattach replay: same lane, same domain, same generation.
-      handler(fact)
-      await Promise.resolve()
-      await Promise.resolve()
-      expect(acks).toHaveLength(2)
-
-      // And once it HAS landed, a further replay is not acknowledged again —
-      // the accept is flushed and a second ack would only be refused.
-      handler(fact)
-      await Promise.resolve()
-      await Promise.resolve()
-      expect(acks).toHaveLength(2)
     } finally {
       teardown()
     }
@@ -2310,137 +2743,6 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
       })
       rendererOf(content)._fireRecoveryFence(freshRecovery.fence)
       expect(pending).toHaveLength(3)
-    } finally {
-      teardown()
-    }
-  })
-})
-
-describe('the establishment acknowledgement (ADR-0024 decision 9)', () => {
-  // The renderer half of the gate: the backend withholds the shell's ACCEPT
-  // — and therefore the shell's authority to suppress its native prompt —
-  // until this acknowledgement says the editor presentation is committed.
-  // Silence here is the fail-open direction, not a no-op: the handshake
-  // times out and the session stays a conventional terminal.
-  it('acknowledges a prompt_ready generation exactly once, after the fact is applied', async () => {
-    const client = makeClient()
-    const { teardown } = await mountTerminal(makeClipboard(), {}, client)
-    try {
-      const handler = lifecycleHandler(client)
-      const call = client.dispatcher.call
-
-      // No generation on the fact: there is no establishment episode open,
-      // so there is nothing to release and nothing is acknowledged.
-      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-      expect(call).not.toHaveBeenCalledWith('lifecycle.establishAck', expect.anything())
-
-      // A live transition and the post-open replay can carry the same
-      // backend-minted generation. Both apply idempotently, but only one
-      // acknowledgement may claim the generation.
-      const establishment = {
-        lane: 'lane-1',
-        lifecycle: 'prompt_ready',
-        domain: 'd1',
-        epoch: 1,
-        generation: 'est-0000000000000000',
-      } as const
-      handler(establishment)
-      handler(establishment)
-      const sid = client._sessions[0].sessionId
-      expect(call).toHaveBeenCalledWith('lifecycle.establishAck', {
-        sessionId: sid,
-        lane: 'lane-1',
-        domain: 'd1',
-        epoch: 1,
-        generation: 'est-0000000000000000',
-      })
-      expect(
-        call.mock.calls.filter((c: unknown[]) => c[0] === 'lifecycle.establishAck'),
-      ).toHaveLength(1)
-    } finally {
-      teardown()
-    }
-  })
-  it('does not let an old bind acknowledgement complete the new establishment episode', async () => {
-    const client = makeClient()
-    const pending: Array<{ resolve: (value: unknown) => void }> = []
-    client.dispatcher.call.mockImplementation((method: string) => {
-      if (method !== 'lifecycle.establishAck') return Promise.resolve({})
-      let resolve!: (value: unknown) => void
-      const promise = new Promise<unknown>((release) => {
-        resolve = release
-      })
-      pending.push({ resolve })
-      return promise
-    })
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
-    try {
-      const first = client._sessions[0]
-      const subscriptions = () =>
-        client.dispatcher.subscribe.mock.calls.filter(
-          (call: unknown[]) => call[0] === 'lifecycle.changed',
-        )
-      const firstHandler = subscriptions()[0]?.[1] as (params: unknown) => void
-      firstHandler({
-        sessionId: first.sessionId,
-        lane: 'lane-1',
-        lifecycle: 'prompt_ready',
-        domain: 'd1',
-        epoch: 1,
-        generation: 'est-old',
-      })
-      expect(pending).toHaveLength(1)
-
-      const onExit = first.onExit.mock.calls[0]?.[0] as
-        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
-      onExit?.({ sessionId: first.sessionId, cause: 'interrupted' })
-      expect(await content.reconnect()).toBe(true)
-
-      const second = client._sessions[1]
-      const secondHandler = subscriptions()[1]?.[1] as (params: unknown) => void
-      const freshFact = {
-        sessionId: second.sessionId,
-        lane: 'lane-1',
-        lifecycle: 'prompt_ready',
-        domain: 'd2',
-        epoch: 1,
-        generation: 'est-new',
-      } as const
-      secondHandler(freshFact)
-      expect(pending).toHaveLength(2)
-
-      // The new bind lands first. The old bind then resolves late and must
-      // not overwrite which generation the current bind has acknowledged.
-      pending[1]?.resolve({ accepted: true })
-      await Promise.resolve()
-      await Promise.resolve()
-      pending[0]?.resolve({ accepted: true })
-      await Promise.resolve()
-      await Promise.resolve()
-
-      secondHandler(freshFact)
-      expect(
-        client.dispatcher.call.mock.calls.filter(
-          (call: unknown[]) => call[0] === 'lifecycle.establishAck',
-        ),
-        'a late acknowledgement from the old bind must not mint a duplicate acknowledgement for the current bind',
-      ).toHaveLength(2)
-    } finally {
-      teardown()
-    }
-  })
-
-  it('never acknowledges a fact that names no live domain', async () => {
-    const client = makeClient()
-    const { teardown } = await mountTerminal(makeClipboard(), {}, client)
-    try {
-      const handler = lifecycleHandler(client)
-      const call = client.dispatcher.call
-      // native and lost carry no establishment; a running fact is past the
-      // gate. None of them may release an accept.
-      handler({ lane: 'lane-1', lifecycle: 'native' })
-      handler({ lane: 'lane-1', lifecycle: 'running', domain: 'd1', epoch: 1, generation: 'est-1' })
-      expect(call).not.toHaveBeenCalledWith('lifecycle.establishAck', expect.anything())
     } finally {
       teardown()
     }
@@ -4313,6 +4615,171 @@ describe('the projections consume the kernel through the composition root (ADR-0
       teardown()
     }
   })
+
+  it('a Ctrl-C while the command is still in flight cancels the submit (nocx-xn63t.6.12)', async () => {
+    const client = makeClient()
+    const submitAttempt = client.dispatcher.call
+    // Promise.withResolvers needs ES2024 and this project targets ES2021, so
+    // the resolver is captured via the executor form (the codebase pattern).
+    let resolveAttempt!: (v: unknown) => void
+    const attemptPromise = new Promise<unknown>((done) => {
+      resolveAttempt = done
+    })
+    submitAttempt.mockImplementation(() => attemptPromise)
+    const { content, ed, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    try {
+      const renderer = rendererOf(content)
+      const session = sessionOf(content)
+      const withScrollback = content as unknown as { scrollback: ScrollbackController }
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      session.send.mockClear()
+
+      ed.insertText('echo RACE')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // The round trip is in flight: the attempt was opened with the
+      // app-owned text, the block opened at submit is the running one, and
+      // not one byte has reached the pty.
+      expect(submitAttempt).toHaveBeenCalledWith(
+        'lifecycle.submitAttempt',
+        expect.objectContaining({ command: 'echo RACE' }),
+      )
+      expect(withScrollback.scrollback.blockManager.runningBlock).not.toBeNull()
+      expect(session.send).not.toHaveBeenCalled()
+
+      // Ctrl-C inside that window, which is the one path that turns bash
+      // 5.2's parse-resume race into a certainty: the held keys are flushed
+      // immediately behind the submitted line, so the pty would receive
+      // `echo RACE\r\x03` back to back and the shell can notice QUIT while
+      // its parser is consuming the accepted line — running what is left of
+      // it, which is not the command that was typed. The person's own
+      // gesture says the line is not to run, so it never goes out.
+      renderer._fireData('\x03')
+
+      resolveAttempt({
+        id: 'att-cancelled',
+        domain: 'd1',
+        state: 'open',
+        command: 'echo RACE',
+        cwd: FIXTURE_CWD,
+        host: '',
+        origin: 'app',
+        submitId: submitToken(client),
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+
+      // Waited on through the withdrawal's own observable, never on a
+      // duration: the running slot is free and the block it held is closed
+      // as abandoned — never successful. That is exactly what a submission
+      // withdrawn before its bytes leaves behind in the agent lane.
+      await vi.waitFor(() => expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull())
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('unknown')
+      // Neither the command nor the 0x03. The cancel is served by the
+      // withdrawal itself: nothing is running at the shell to interrupt, and
+      // a byte written here would be an interrupt the person never asked
+      // for — the second-owner defect the grid's own Ctrl+C already refuses.
+      expect(session.send).not.toHaveBeenCalled()
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      teardown()
+    }
+  })
+
+  it('the Ctrl-C discards the line it cancelled, and not the bytes after it (nocx-xn63t.6.12)', async () => {
+    const client = makeClient()
+    let resolveAttempt!: (v: unknown) => void
+    const attemptPromise = new Promise<unknown>((done) => {
+      resolveAttempt = done
+    })
+    client.dispatcher.call.mockImplementation(() => attemptPromise)
+    const { content, ed, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    try {
+      const renderer = rendererOf(content)
+      const session = sessionOf(content)
+      const withScrollback = content as unknown as { scrollback: ScrollbackController }
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      session.send.mockClear()
+
+      ed.insertText('echo RACE')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // Keys typed while the command was in flight are part of the pending
+      // line, and ^C discards that line — a terminal with ISIG set flushes
+      // the input queue it has not read yet, which is what every shell does
+      // with the half-typed command somebody interrupts.
+      renderer._fireData('ab')
+      expect(session.send).not.toHaveBeenCalled()
+
+      // What followed the ^C is not part of the line it discarded: after the
+      // flush the shell is at a fresh prompt, and these bytes belong to it,
+      // so they are delivered (the old behaviour for everything that is not
+      // the pending line) rather than swallowed with it.
+      renderer._fireData('\x03cd')
+      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['cd'])
+
+      resolveAttempt({
+        id: 'att-cancelled',
+        domain: 'd1',
+        state: 'open',
+        command: 'echo RACE',
+        cwd: FIXTURE_CWD,
+        host: '',
+        origin: 'app',
+        submitId: submitToken(client),
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      await vi.waitFor(() => expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull())
+      // The command never ran, and 'cd' is the only byte the pty ever saw.
+      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['cd'])
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      teardown()
+    }
+  })
+
+  it('a Ctrl-C after the command has gone out is delivered as it always was (nocx-xn63t.6.12)', async () => {
+    const client = makeClient()
+    const { content, ed, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    try {
+      const renderer = rendererOf(content)
+      const session = sessionOf(content)
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      session.send.mockClear()
+
+      ed.insertText('read x')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // This fake's attempt answers on its own, so the window closes with the
+      // write: the command and its CR are at the pty, and there is no pending
+      // line left for a ^C to cancel.
+      await vi.waitFor(() => expect(session.send.mock.calls.length).toBe(2))
+      renderer._fireData('\x03')
+
+      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['read x', '\r', '\x03'])
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      teardown()
+    }
+  })
 })
 
 describe('two attempts and the live region stay separate while running (nocx-m87n, nocx-zn4d, nocx-mu8s)', () => {
@@ -4658,6 +5125,93 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     }
   })
 
+  it('a running program is not resized by its own output growing (nocx-oikdu)', async () => {
+    // omp draws a box, and in nocx the box came back MANGLED — its top border
+    // truncated mid-row while its bottom corners sat at the full width. Two
+    // different widths in one box is one thing: the grid changed size while
+    // the program was drawing into it. Warp, running the same program on the
+    // same host, drew it whole.
+    //
+    // The path is scheduleLiveResize: it runs on every chunk of parsed output
+    // and ends in refitIfResized, whose height is runningLiveCap — the
+    // scroller less the RUNNING BLOCK'S HEADER. That header is measured live,
+    // so anything that changes its height mid-command (it gains a duration,
+    // it wraps) re-fits the grid and sends the pty a SIGWINCH in the middle of
+    // a repaint.
+    //
+    // A running program owns its grid. The pane changing size is still a
+    // resize — that one the user asked for — but the program's OWN output
+    // must never be.
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const renderer = rendererOf(content)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    const raf = globalThis.requestAnimationFrame
+    const fitViewport = renderer.fitViewport
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      cb(0)
+      return 0
+    }
+    try {
+      content.setVisible(true)
+      content.viewportChanged({ width: 800, height: 400 })
+      Object.defineProperty(withScrollback.scrollback.scrollbackArea, 'clientHeight', {
+        value: 300,
+        configurable: true,
+      })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'shell', command: 'omp' },
+      })
+      const block = withScrollback.scrollback.blockManager.runningBlock
+      expect(block).not.toBeNull()
+      let headerHeight = 24
+      block!.el.getBoundingClientRect = () => ({
+        height: headerHeight,
+        width: 800,
+        top: 0,
+        left: 0,
+        right: 800,
+        bottom: headerHeight,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      })
+
+      // First output: the grid is fitted once, to scroller minus header.
+      ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(100)
+      client._sessions[0].fireData('box top')
+      renderer._fireWriteParsed()
+      expect(fitViewport).toHaveBeenCalledTimes(2)
+
+      // The header grows by one row mid-command — the block gains its
+      // duration chip while omp is still drawing. Nothing about the PANE
+      // changed, so the program must not be resized.
+      headerHeight = 48
+      ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(140)
+      client._sessions[0].fireData('box bottom')
+      renderer._fireWriteParsed()
+
+      expect(fitViewport).toHaveBeenCalledTimes(2)
+    } finally {
+      globalThis.requestAnimationFrame = raf
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
   it('a program repainting the same rows does not yank the scroll (nocx-6w4z)', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
@@ -4981,6 +5535,151 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       Element.prototype.scrollIntoView = protoScrollIntoView
     }
   }
+  it('a finished command the ledger could not carry says so on the block (nocx-2vb9y)', async () => {
+    // The person's end of it. The freeze is unconditional and the record is
+    // not, so this block shows `exit 1` and reaches neither history nor the
+    // bell. Absence cannot carry that — a line typed at the native prompt is
+    // unrecorded by design and looks identical — so the block says it.
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const handler = factHandler(client)
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      // The backend echoed a submit token, so an app submit really happened —
+      // and this renderer holds no record carrying it.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-lost',
+          state: 'open',
+          origin: 'app',
+          submitId: 'sub-that-never-was',
+          command: 'make deploy',
+        },
+      })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-lost',
+          state: 'completed',
+          exitCode: 1,
+          fence: 'e'.repeat(64),
+        },
+      })
+
+      const block = withScrollback.scrollback.blockManager.blockForAttempt('att-lost')
+      expect(block).not.toBeNull()
+      expect(block!.el.dataset.recorded).toBe('no')
+      expect(block!.el.querySelector('.cmd-header-unrecorded')?.textContent).toBe('not recorded')
+      // And nothing was sent to the store, which is the fact the chip states.
+      expect(client.call.mock.calls.some((c) => c[0] === 'history.record')).toBe(false)
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('a refused attempt still runs the command, and the record it opened still carries the outcome (nocx-2vb9y)', async () => {
+    // The fail-open is deliberate: a control plane that is busy must never
+    // swallow a command. What it used to cost was the RECORD — the submit
+    // opened one carrying a token no attempt would ever echo, so the shell's
+    // own start looked shell-originated, opened a SECOND block, and the
+    // finished command could reach history and the bell through nothing but
+    // a fallback that guesses. This asserts the whole interval: the bytes go
+    // out, one block carries the command, and its authenticated completion
+    // is recorded with the app-owned text.
+    const client = makeClient()
+    const callMock = client.call
+    callMock.mockImplementation((method: string) => {
+      if (method === 'history.record') {
+        return Promise.resolve({
+          maskedCount: 0,
+          maskedKinds: [],
+          entryId: 'e-refused',
+          source: 'user',
+          redactions: [],
+          maskedCommand: 'make deploy',
+          captures: [],
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    client.dispatcher.call.mockImplementation(() =>
+      Promise.reject(new Error('control lane saturated')),
+    )
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const withSession = content as unknown as { session: SessionFake }
+    const session = withSession.session
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const handler = factHandler(client)
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.show()
+      ed.insertText('make deploy')
+      key(view, { key: 'Enter' })
+
+      // Fail-open, unchanged: the refusal did not eat the command.
+      await vi.waitFor(() =>
+        expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['make deploy', '\r']),
+      )
+
+      // The shell's own start, with no token — nothing minted one for this
+      // submit. It must bind to the block already open, not open a second.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-refused', state: 'open', origin: 'shell', command: 'make deploy' },
+      })
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-refused',
+          state: 'completed',
+          exitCode: 3,
+          fence: 'd'.repeat(64),
+        },
+      })
+
+      // Recorded — with the APP-OWNED text, which is the half a shell line
+      // may never contribute.
+      await vi.waitFor(() => {
+        const recordCall = callMock.mock.calls.find((c) => c[0] === 'history.record')
+        expect(recordCall).toBeTruthy()
+        const params = recordCall![1] as { command: string; exitCode: number }
+        expect(params.command).toBe('make deploy')
+        expect(params.exitCode).toBe(3)
+      })
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
   it('a submit at a live prompt opens the attempt with the app-owned text BEFORE the pty write', async () => {
     const client = makeClient()
     const submitAttempt = client.dispatcher.call
@@ -10754,6 +11453,85 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       expect(rec.el.dataset.outcome).not.toBe('failure')
       expect(rec.el.dataset.outcome).toBe('cancelled')
       expect(rec.el.classList.contains('cmd-block')).toBe(true)
+      expect(
+        rec.el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])')
+          ?.textContent,
+      ).toBe('Stopped')
+    } finally {
+      restore()
+      teardown()
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    }
+  })
+
+  it('a Stop accepted before the command started is armed, and its 130 still reads as stopped', async () => {
+    const client = makeClient()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      const handler = lifecycleHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('sleep 30')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-held-19',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'sleep 30',
+        },
+      })
+      const rec = scrollbackFor(content).blockManager.runningBlock!
+      // The app attempt is open and the shell has not begun the line: the
+      // backend ACCEPTS the gesture and holds the byte for the authenticated
+      // start (nocx-zas0d, internal/transport/ws_signal.go).
+      sessionOf(content).signal.mockResolvedValue({ signal: 'stop', outcome: 'held' })
+      vi.mocked(showToast).mockClear()
+
+      itemNamed(runningBlockMenu(content), 'stop')!.click()
+      expect(signalsSent(content)).toEqual(['stop'])
+
+      await vi.waitFor(() => expect(showToast).toHaveBeenCalled())
+      const calls = vi.mocked(showToast).mock.calls
+      const toast = calls[calls.length - 1]?.[0]
+      // Said out loud, and said as what it is: the stop is armed, not done.
+      expect(toast).toMatchObject({ level: 'info' })
+      expect(toast?.message).toContain('had not started yet')
+      expect(toast?.message).not.toContain('Nothing is running')
+      // The acceptance is kept, because the byte IS coming: reverting it
+      // would make the completion below — SIGINT's 130 — read as the
+      // program's own failure.
+      expect(rec.stopRequested).toBe(true)
+
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-held-19',
+          state: 'completed',
+          exitCode: 130,
+          completedAt: '2026-09-15T00:00:00Z',
+          fence: '7'.repeat(64),
+        },
+      })
+      expect(rec.status).toBe('cancelled')
+
+      await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
+      expect(rec.el.dataset.outcome).toBe('cancelled')
       expect(
         rec.el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])')
           ?.textContent,

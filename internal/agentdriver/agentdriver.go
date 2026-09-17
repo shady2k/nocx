@@ -43,8 +43,11 @@ package agentdriver
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
+	"sync/atomic"
 
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
 )
 
 // State is what a pane's screen is inviting. The set is closed; see the
@@ -55,8 +58,10 @@ const (
 	// StateFreeText means an input box is on screen and waiting. It is the
 	// ONLY state nocx may type into.
 	StateFreeText State = "free_text"
-	// StatePermissionChoice means the agent has raised a tool-approval
-	// dialog and is waiting on a human. Answering it answers the agent.
+	// StatePermissionChoice means the agent has raised a question of its own
+	// — a tool approval, or the folder-trust question it asks before it will
+	// start in a directory — and is waiting on a human. Answering it answers
+	// the agent.
 	StatePermissionChoice State = "permission_choice"
 	// StateModalChoice means a menu is up that the agent did not raise — a
 	// user-opened one such as /model. Also waiting on a human, and answering
@@ -66,6 +71,20 @@ const (
 	// or a background agent the main turn may be blocked on. No input is
 	// being invited even when an input box is visible.
 	StateWorking State = "working"
+	// StateError is the TUI's OWN error, drawn as chrome: the API is
+	// unreachable, overloaded, or the quota is gone. It earns its own value
+	// because the two neighbours are both wrong. StateUnknown would fold it
+	// into busy, and busy tells the person "it is running, leave it alone"
+	// when the truth is "come here, this will not resolve itself". And it is
+	// not a choice awaiting an answer, so it is not StatePermissionChoice
+	// either: there is nothing to answer.
+	//
+	// An error the agent PRINTED into its transcript and then went back to
+	// waiting is StateFreeText, deliberately. On the screen it is
+	// indistinguishable from idle because it IS idle — the agent finished,
+	// badly, and is waiting for you. Telling those apart needs meaning, and
+	// no driver reads meaning.
+	StateError State = "error"
 	// StateUnknown means the driver could not positively identify the state.
 	// Every caller treats it as busy.
 	StateUnknown State = "unknown"
@@ -78,7 +97,7 @@ const (
 func States() []State {
 	return []State{
 		StateFreeText, StatePermissionChoice, StateModalChoice,
-		StateWorking, StateUnknown, StateExited,
+		StateWorking, StateError, StateUnknown, StateExited,
 	}
 }
 
@@ -93,6 +112,79 @@ func (s State) Valid() bool {
 	return false
 }
 
+// Working reports whether s is a state in which WORK is in progress.
+//
+// It is a PREDICATE over the closed set, not a member of it, and the difference
+// is the whole of what the third facet had to get right: "has this pane
+// stopped moving" is a question only askable of a pane that is supposed to be
+// moving, so the progress facet needs to name the states it applies to — and a
+// pane that is working AND stalled is still, in every listing and every
+// comparison here, a pane whose state is StateWorking.
+//
+// StateError is deliberately NOT one of them. The TUI's own error is already a
+// state that says "come here", and its retry chrome animates on a timer of its
+// own; folding it into this predicate would give one condition two owners and
+// would report an agent that is visibly failing as merely slow.
+func (s State) Working() bool { return s == StateWorking }
+
+// Observation is a driver's whole answer about ONE frame: the scalar state,
+// and whatever else the rule was able to read off the same screen.
+//
+// # Why the answer stopped being a scalar
+//
+// It answered one question well and three requirements have each hit the same
+// wall. The claude task panel carries, per child, a name, a task, an elapsed
+// time and a token flow, and the whole panel reduced to the single word
+// "working". Progress needs a measurement beside the state, not instead of it.
+// And a declared checkpoint and a measured one must be shown side by side and
+// never merged, which is two values where there was one.
+//
+// # Extras are OPTIONAL, and that is a safety property rather than a courtesy
+//
+// A rule that extracts nothing observes exactly the scalar it observed before
+// extraction existed, with an empty Extras. So no agent regresses when the
+// shape grows, and nothing is invented for a screen that did not say it: a
+// missing field is ABSENT, never zero and never empty-string.
+//
+// # Extras never decide the state
+//
+// The branches of a rule document read predicates; extractors run beside that
+// evaluation and their yield is not visible to it. A rule that reads MORE off
+// a screen can therefore never answer that screen differently — which is what
+// keeps the closed set closed and keeps the typing decision where it was.
+type Observation struct {
+	// State is the closed-set answer, and it is exactly what Classify
+	// returns for the same frame.
+	State State
+	// Extras is one entry per extractor that matched at least one row, in
+	// document order. An extractor that matched nothing is absent rather
+	// than present and empty, because absent and empty are different claims
+	// and only one of them is true.
+	Extras []Extra
+	// InputBox is the agent's own input box, cursor included, from
+	// Document.InputBox. Empty (Last < First) when its anchor did not bind —
+	// the ordinary case while a dialog has replaced the box.
+	InputBox RowSpan
+	// MenuZone is the rows in which this agent can draw a menu, from
+	// Document.MenuZone. Empty for the same reason InputBox can be.
+	MenuZone RowSpan
+}
+
+// RowSpan is an inclusive row range of a frame, First through Last. A span
+// naming no row sets Last below First — never the zero value {0, 0}, which
+// would read as row zero alone — so a caller checks emptiness with a
+// comparison (Last < First) rather than a method this package would be the
+// only caller of.
+type RowSpan struct{ First, Last int }
+
+// Extra is one extractor's yield: the name the document gave it, and one map
+// per row it matched, from a capture group's name to the text it captured. A
+// group that did not participate in the match contributes no key.
+type Extra struct {
+	Name string
+	Rows []map[string]string
+}
+
 // Driver classifies one agent's screen. One implementation per agent (AD-8).
 type Driver interface {
 	// Agent names the agent this driver drives, as the enrolment act names
@@ -101,12 +193,37 @@ type Driver interface {
 	// Classify answers from the closed set, and never returns StateExited.
 	// It reads only the frame it is given: a driver holds no state between
 	// frames, because a rule that remembers is a rule that can be stuck.
-	Classify(f panegrid.Frame) State
+	Classify(f paneview.Frame) State
+}
+
+// Observer is the richer half of Driver: a driver whose rule can read VALUES
+// off the screen as well as name its state.
+//
+// It is a separate interface rather than a third method on Driver because
+// answering the scalar is the whole of what a driver must do — a driver that
+// only classifies is an observer that extracts nothing, and Registry.Observe
+// says so by lifting its answer. Nothing is required to implement this, and a
+// caller that only wants the state never looks for it.
+type Observer interface {
+	Driver
+	// Observe answers the whole observation for one frame. Its State is the
+	// same value Classify returns, and its Extras are whatever the rule
+	// could extract; the same no-memory contract applies.
+	Observe(f paneview.Frame) Observation
 }
 
 // Registry maps an agent name to its driver, and fails closed.
+//
+// The map holds what this BUILD ships. A person's own rules arrive through
+// SetRuleSource (rules.go) and are consulted on every lookup, because a rule
+// they are editing is meant to take effect on the pane they are looking at
+// rather than at the next start.
 type Registry struct {
 	byAgent map[string]Driver
+	// rules is the person's half, absent unless the composition root attached
+	// one. Atomic because it is read on the classify path of every frame while
+	// it is written outside it.
+	rules atomic.Pointer[ruleSourceBox]
 }
 
 // NewRegistry validates the wiring once, at the composition root.
@@ -131,20 +248,403 @@ func NewRegistry(drivers ...Driver) (*Registry, error) {
 // For returns the driver for an agent, and false when there is none. False is
 // a normal answer: most agents have no driver, and that is what keeps nocx out
 // of their panes.
+//
+// # What a false here means, and the three ways to reach one
+//
+// With a RuleSource attached, this is the ONE place that decides which rule
+// reads a pane, and the decision is the design's (D12, nocx-y6w66): a person's
+// document REPLACES the shipped rule for that agent entirely — never a
+// field-by-field merge, which would be two owners of one decision — and
+// switching detection off is not deleting, so the shipped rule is what comes
+// back when the document goes away.
+//
+// False is then the failing-closed direction of both of those: an agent with
+// no driver in this build, an agent whose detection was switched off, and an
+// agent whose own document could not be compiled all answer no driver at all,
+// which Observe lifts to StateUnknown. Unknown is treated as busy everywhere,
+// so a person's half-written file stops nocx typing into that pane rather than
+// falling back to a rule they were in the middle of replacing.
 func (r *Registry) For(agent string) (Driver, bool) {
 	if r == nil {
 		return nil, false
 	}
-	d, ok := r.byAgent[agent]
-	return d, ok
+	shipped, known := r.byAgent[agent]
+	if !known {
+		return nil, false
+	}
+	src := r.ruleSource()
+	if src == nil {
+		return shipped, true
+	}
+	state := src.RuleState(agent)
+	switch {
+	case state.Off, state.Broken:
+		return nil, false
+	case state.Driver != nil:
+		return state.Driver, true
+	default:
+		return shipped, true
+	}
 }
 
-// Classify is the failing-closed form of For: an agent with no driver answers
-// StateUnknown rather than an error the caller has to remember to handle.
-func (r *Registry) Classify(agent string, f panegrid.Frame) State {
+// Observe is the failing-closed form of For: an agent with no driver answers
+// StateUnknown with no extras, rather than an error the caller has to remember
+// to handle. A driver that is not an Observer answers the same way it always
+// did, lifted — which is the whole of what "extras are optional" means at this
+// seam.
+func (r *Registry) Observe(agent string, f paneview.Frame) Observation {
 	d, ok := r.For(agent)
 	if !ok {
-		return StateUnknown
+		return Observation{State: StateUnknown, InputBox: noRowSpan, MenuZone: noRowSpan}
 	}
-	return d.Classify(f)
+	if o, ok := d.(Observer); ok {
+		return o.Observe(f)
+	}
+	return Observation{State: d.Classify(f), InputBox: noRowSpan, MenuZone: noRowSpan}
+}
+
+// Classify is the scalar projection of Observe, and it is written as one so
+// there is a single evaluation behind both. Two paths answering one question
+// is how the two come to disagree on the frame nobody tried.
+func (r *Registry) Classify(agent string, f paneview.Frame) State {
+	return r.Observe(agent, f).State
+}
+
+// menuDisplacer is the optional half a Driver may implement (documentDriver
+// does) to answer Document.MenuDisplacesInputBox — the same "extras are
+// optional" shape Observer already is, applied to a per-agent declared fact
+// rather than a per-frame one.
+type menuDisplacer interface {
+	MenuDisplacesInputBox() bool
+}
+
+// MenuDisplacesInputBox answers whether agent's rule declares that a
+// permission/modal menu always displaces its input box (nocx-6q1uh.10):
+// false — fail closed, callers fall back to the wider MenuZone — for an
+// agent with no driver, one switched off, or a driver that never declares
+// it. Never a per-frame answer: this is a static fact about the RULE, read
+// once per call rather than carried on Observation, because it does not
+// change from one frame to the next the way Extras can.
+func (r *Registry) MenuDisplacesInputBox(agent string) bool {
+	d, ok := r.For(agent)
+	if !ok {
+		return false
+	}
+	m, ok := d.(menuDisplacer)
+	return ok && m.MenuDisplacesInputBox()
+}
+
+// SubagentsExtra is the name a rule document gives the extractor that reads an
+// agent's CHILD rows off its own chrome. It is a constant here rather than a
+// string at each reader because the document's vocabulary is this package's
+// contract: a caller that misspells it silently observes a pane with no
+// children, which is indistinguishable from a pane that has none.
+const SubagentsExtra = "subagents"
+
+// Subagent is one child agent the pane's agent has spawned, as the screen
+// names it.
+//
+// # Two fields, and the omissions are the decision
+//
+// The claude panel draws four things per row — a name, the task, an elapsed
+// time and a token flow — and only the first two survive this projection. The
+// reason is the emit seam downstream (internal/paneobserve): observations are
+// pushed on CHANGE, the elapsed time and the token count move on every single
+// frame, and there is no third answer. Carrying them and keying on them emits
+// per repaint, which is what "only changes travel" exists to prevent; carrying
+// them and NOT keying on them ships a clock that stops at whatever it read
+// when the row set last moved, which is worse than no clock because it looks
+// live. So what crosses is what is STABLE for the life of a row, and the
+// measurement stays in Extras for a caller that is looking at one frame.
+//
+// There is no running/finished flag for the same kind of reason, measured
+// rather than chosen: over claude-subagent's whole window no glyph on a child
+// row ever changes. A child that finishes LEAVES the panel, and its presence
+// is the whole of what the screen says about it.
+type Subagent struct {
+	// Name is the child's name — "Explore", not the pane's agent. Never
+	// empty: a row the screen did not name is not a child anybody could be
+	// shown, and it is dropped rather than rendered blank.
+	Name string
+	// Task is what it was given to do, and it is OPTIONAL. A panel row
+	// carries one only once the task has been drawn; absent means the screen
+	// did not say, which is a different claim from an empty task.
+	Task string
+}
+
+// Subagents projects the observation's extras onto the children the screen
+// named, in the order the panel drew them.
+//
+// It is here rather than at each reader because Extras is a generic map keyed
+// by a document's own vocabulary, and turning that vocabulary into meaning is
+// this package's job (AD-8). A watcher that reached into Extras itself would
+// be a second owner of what "subagents" means, and the two would disagree the
+// first time a rule was repaired.
+//
+// Nil when the rule extracted nothing — which is every agent with no such
+// extractor, and every frame of an agent that has spawned nothing.
+func (o Observation) Subagents() []Subagent {
+	var out []Subagent
+	for _, e := range o.Extras {
+		if e.Name != SubagentsExtra {
+			continue
+		}
+		for _, row := range e.Rows {
+			name := row["name"]
+			if name == "" {
+				continue
+			}
+			out = append(out, Subagent{Name: name, Task: row["task"]})
+		}
+	}
+	return out
+}
+
+// TranscriptExtra is the name a rule document gives the extractor that reads
+// the pane's TRANSCRIPT — the rows the agent printed, as opposed to the chrome
+// the TUI draws around them. It is a constant here for the same reason
+// SubagentsExtra is: the document's vocabulary is this package's contract, and
+// a caller that misspells it silently measures a pane with no transcript, which
+// is indistinguishable from a pane whose transcript has not moved.
+const TranscriptExtra = "transcript"
+
+// transcriptText is the capture group a transcript extractor reads a row's own
+// text into. Named once here rather than at each reader, because the projection
+// below is where that vocabulary stops being a map and becomes meaning.
+const transcriptText = "text"
+
+// Transcript projects the observation's extras onto the transcript rows the
+// rule read, one string per row, in the order it read them.
+//
+// The ORDER is the region's, and the region is anchored at the input box and
+// walks UP the screen — so the yield runs from the row nearest the chrome
+// backwards into the scrollback. Nothing downstream needs the order to be
+// anything else, and a caller that reordered it would be inventing a reading
+// the screen never had.
+//
+// Nil when the rule extracted nothing — which is every agent with no such
+// extractor, every pane whose transcript is empty, and every frame the region
+// could not reach. Nil is "no measurement", never "no change": only the second
+// of those can support a claim that something has stopped moving.
+func (o Observation) Transcript() []string {
+	var out []string
+	for _, e := range o.Extras {
+		if e.Name != TranscriptExtra {
+			continue
+		}
+		for _, row := range e.Rows {
+			out = append(out, row[transcriptText])
+		}
+	}
+	return out
+}
+
+// InputTextExtra is the name a rule document gives the extractor that reads
+// what is actually TYPED in the agent's own input box (nocx-6q1uh.18) — as
+// opposed to Document.InputBox, which is the box's whole chrome span, rule
+// rows included, and stays that wide on purpose (see claude.go's own note)
+// so a target minted from it still refuses the moment a menu displaces the
+// box. It is a constant here for the same reason SubagentsExtra,
+// TranscriptExtra and MenuExtra are: the document's vocabulary is this
+// package's contract, and a caller that misspells it silently reads a box
+// with no text ever typed into it, which is indistinguishable from a box
+// that is genuinely empty.
+const InputTextExtra = "inputText"
+
+// inputTextLine is the capture group an inputText extractor reads a
+// content row's own text into, once the prompt marker (or a continuation
+// row's own indent) has been stripped from the front of it.
+const inputTextLine = "line"
+
+// InputText projects the observation's inputText extractor into what is
+// actually typed in the agent's own input box, joined across the content
+// rows the rule read (top to bottom, in the order it read them) with the
+// prompt marker and any wrap indent already stripped.
+//
+// ok is false when this agent's rule carries no such extractor, or the
+// extractor's own anchor did not bind on this exact frame — which is every
+// frame a menu has displaced the box on, and every frame this build has no
+// rule for at all. It is deliberately NOT false merely because the box read
+// as empty: an idle prompt row still matches the rule's own grammar (a bare
+// "❯" with nothing captured after it), so ok=true, text="" is "the rule read
+// this box and it is empty", and a caller that only checked text=="" without
+// also checking ok could not tell that apart from "nothing was read here at
+// all" — the same "absent is not empty" contract Subagents and Transcript
+// already keep for their own extractors.
+func (o Observation) InputText() (text string, ok bool) {
+	for _, e := range o.Extras {
+		if e.Name != InputTextExtra {
+			continue
+		}
+		lines := make([]string, 0, len(e.Rows))
+		for _, row := range e.Rows {
+			lines = append(lines, row[inputTextLine])
+		}
+		return strings.Join(lines, "\n"), true
+	}
+	return "", false
+}
+
+// MenuExtra is the name a rule document gives the extractor that reads a
+// menu's rows AT and ABOVE the cursor — the question, its own selected
+// option, and every option above it. It is a constant here for the same
+// reason SubagentsExtra and TranscriptExtra are: the document's vocabulary is
+// this package's contract.
+const MenuExtra = "menu"
+
+// menuBelowExtra is the extractor that reads a menu's rows BELOW the cursor —
+// unexported, because nothing outside Menu's own projection reads it by name:
+// unlike Subagents and Transcript, which read one extractor's yield, Menu
+// composes two into a single ordered list, so the second name is this
+// package's own bookkeeping rather than a second public vocabulary word.
+const menuBelowExtra = "menuBelow"
+
+// The capture groups claude.rule.json's menu and menuBelow extractors name,
+// and the engine's own reserved row-index key (region.capture, predicate.go).
+const (
+	menuOptionKey   = "option"
+	menuQuestionKey = "question"
+	rowIndexKey     = "_row"
+)
+
+// Menu is one menu's whole reading of one frame: the question the agent or
+// the user is being asked, its options as drawn, which one is selected, and
+// the rows the menu occupies.
+type Menu struct {
+	// Question is the nearest non-option row above the topmost option, as
+	// drawn. It is the mechanical answer the rule's own walk produces, not
+	// necessarily the sentence a person would call "the question" — folder
+	// trust's real prompt sits several rows above a heading ("Security
+	// guide") the walk stops on first, because nothing shorter of reading the
+	// screen's PROSE (which this package never does, by design) tells the two
+	// apart. It is quoted here, and in the manifest, exactly as measured.
+	Question string
+	// Options is every option the menu drew, top to bottom, marker and
+	// numbering stripped.
+	Options []string
+	// Selected indexes Options, or -1 when no selection is drawn. In
+	// practice this package never observes the second case: the states Menu
+	// answers for both require the cursor to sit on a marked row.
+	Selected int
+	// Rows is the question row through the last option row, selection
+	// included.
+	Rows RowSpan
+	// Body is the rows between the question and the first (topmost) option —
+	// empty (Last < First) when the two are adjacent.
+	Body RowSpan
+}
+
+// Menu projects the observation's menu extractors into a menu, when the
+// screen was classified as one of the two states a menu can be answered on
+// and the walk found a genuine boundary above the cursor's own option.
+//
+// False is the ordinary answer for a permission_choice or modal_choice frame
+// whose cursor row is an option with nothing but more options (or the frame's
+// own top) above it: there is no question, so there is no row to type an
+// answer past and no menu target is possible (design §6.3). It is also the
+// answer for every other state, and for an agent whose rule extracted no menu
+// at all.
+func (o Observation) Menu() (Menu, bool) {
+	if o.State != StatePermissionChoice && o.State != StateModalChoice {
+		return Menu{}, false
+	}
+	above := extraRows(o.Extras, MenuExtra)
+	if len(above) == 0 {
+		return Menu{}, false
+	}
+	cursorOption, ok := above[0][menuOptionKey]
+	if !ok {
+		return Menu{}, false
+	}
+	cursorRow, ok := rowIndexOf(above[0])
+	if !ok {
+		return Menu{}, false
+	}
+	var aboveOptions []map[string]string
+	var question map[string]string
+	for _, row := range above[1:] {
+		if _, isOption := row[menuOptionKey]; isOption {
+			aboveOptions = append(aboveOptions, row)
+			continue
+		}
+		question = row
+		break
+	}
+	if question == nil {
+		// Every row the walk could reach was itself an option, or the walk
+		// ran out of frame — either way, no question bounds this menu.
+		return Menu{}, false
+	}
+	questionRow, ok := rowIndexOf(question)
+	if !ok {
+		return Menu{}, false
+	}
+
+	var belowOptions []map[string]string
+	for _, row := range extraRows(o.Extras, menuBelowExtra) {
+		if _, isOption := row[menuOptionKey]; !isOption {
+			break
+		}
+		belowOptions = append(belowOptions, row)
+	}
+
+	options := make([]string, 0, len(aboveOptions)+1+len(belowOptions))
+	for i := len(aboveOptions) - 1; i >= 0; i-- {
+		options = append(options, aboveOptions[i][menuOptionKey])
+	}
+	selected := len(options)
+	options = append(options, cursorOption)
+	for _, row := range belowOptions {
+		options = append(options, row[menuOptionKey])
+	}
+
+	firstOptionRow := cursorRow
+	if len(aboveOptions) > 0 {
+		if r, ok := rowIndexOf(aboveOptions[len(aboveOptions)-1]); ok {
+			firstOptionRow = r
+		}
+	}
+	lastOptionRow := cursorRow
+	if len(belowOptions) > 0 {
+		if r, ok := rowIndexOf(belowOptions[len(belowOptions)-1]); ok {
+			lastOptionRow = r
+		}
+	}
+
+	return Menu{
+		Question: question[menuQuestionKey],
+		Options:  options,
+		Selected: selected,
+		Rows:     RowSpan{First: questionRow, Last: lastOptionRow},
+		Body:     RowSpan{First: questionRow + 1, Last: firstOptionRow - 1},
+	}, true
+}
+
+// extraRows returns the named extractor's yield, or nil when the rule carries
+// no extractor by that name or it matched nothing on this frame — the same
+// absence Subagents and Transcript already read through their own loops over
+// Extras, pulled out once because Menu reads two names instead of one.
+func extraRows(extras []Extra, name string) []map[string]string {
+	for _, e := range extras {
+		if e.Name == name {
+			return e.Rows
+		}
+	}
+	return nil
+}
+
+// rowIndexOf reads the engine's own reserved "_row" key back into an int.
+// False when the row carries none — which a hand-built Extras value can do,
+// since nothing but region.capture is required to set it — or when it does
+// not parse, which is never true of a value that key produced.
+func rowIndexOf(row map[string]string) (int, bool) {
+	s, ok := row[rowIndexKey]
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }

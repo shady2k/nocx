@@ -2,19 +2,24 @@ package ssh
 
 // The helper-uninstall capability (remote-helper design D25): the way back
 // out of an installed helper. It is the removal half of the same lease the
-// installer uses — the write-capable SFTP subsystem over the pooled
-// connection — and it removes the WHOLE ~/.nocx/helper tree: every version
-// and any directory an interrupted install left incomplete, which is
-// exactly the kind a user cannot otherwise get rid of. Nothing else under
-// the home is touched (the shell bundle's files belong to the publisher).
+// installer uses — the write-capable SFTP stream — and it removes the WHOLE
+// ~/.nocx/helper tree: every version and any directory an interrupted install
+// left incomplete, which is exactly the kind a user cannot otherwise get rid
+// of. Nothing else under the home is touched (the shell bundle's files belong
+// to the publisher).
 //
 // D25's ordering is the CALLER's contract, stated here because the whole
 // point of the rule is that no helper may be running out of a directory
 // being deleted: the composition root closes every live helper channel on
-// the machine BEFORE this capability runs. This capability owns only the
-// dial-and-remove — acquire the lease, ask the SFTP server for the remote
-// home, remove the tree — and the raw *gossh.Client never leaves
-// internal/ssh, exactly as with UninstallIntegration.
+// the machine BEFORE this capability runs.
+//
+// # It removes; it does not dial, since nocx-50w7p.3
+//
+// The function takes a lease rather than a host and options. A dial here was
+// the coordinator opening its own ssh connection, which the owner's invariant
+// ends (plan §1-§3): the lease is handed in by the caller that acquired it
+// from this machine's helper, so the two halves of one capability are one
+// path and not two.
 
 import (
 	"context"
@@ -56,44 +61,32 @@ type uninstallFile struct{ File }
 
 var _ deploy.File = uninstallFile{}
 
-// UninstallHelper removes the helper install tree from a remote host
-// (remote-helper design D25): the whole ~/.nocx/helper tree, including
-// directories left incomplete by interrupted installs. removed reports
-// whether a helper tree existed at all: a host with nothing installed
-// uninstalls cleanly — a no-op that succeeds — so a user clicking remove
-// twice never sees a failure.
+// UninstallHelperTree removes the helper install tree over an already-acquired
+// lease (remote-helper design D25): the whole ~/.nocx/helper tree, including
+// directories left incomplete by interrupted installs. removed reports whether
+// a helper tree existed at all: a host with nothing installed uninstalls
+// cleanly — a no-op that succeeds — so a user clicking remove twice never sees
+// a failure.
 //
-// The caller must have closed every live helper channel on this machine
-// BEFORE calling (D25): no helper may be running out of a directory being
-// deleted. A helper running from a DIFFERENT nocx instance sharing the same
-// $HOME is out of this caller's reach and stated as such — the design
-// accepts it because the backend can only know about its own channels.
-func (rc *RealClient) UninstallHelper(ctx context.Context, host string, opts ...ConnectOption) (removed bool, err error) {
-	conn, err := rc.HelperInstallConn(ctx, host, opts...)
-	if err != nil {
-		return false, fmt.Errorf("ssh: helper uninstall %s: %w", host, err)
-	}
-	defer func() { _ = conn.Close() }()
-
+// The caller must have closed every live helper channel on this machine BEFORE
+// calling (D25): no helper may be running out of a directory being deleted. A
+// helper running from a DIFFERENT nocx instance sharing the same $HOME is out
+// of this caller's reach and stated as such — the design accepts it because the
+// backend can only know about its own channels.
+func UninstallHelperTree(ctx context.Context, conn HelperInstallConn) (removed bool, err error) {
 	home, err := conn.Home()
 	if err != nil {
-		return false, fmt.Errorf("ssh: helper uninstall %s: remote home: %w", host, err)
+		return false, fmt.Errorf("ssh: helper uninstall: remote home: %w", err)
 	}
 	root := path.Join(home, ".nocx", deploy.HelperRootName)
 	if _, err := conn.Lstat(root); err != nil {
 		if errors.Is(err, iofs.ErrNotExist) {
 			return false, nil // nothing installed — a clean no-op
 		}
-		return false, fmt.Errorf("ssh: helper uninstall %s: %w", host, err)
+		return false, fmt.Errorf("ssh: helper uninstall: %w", err)
 	}
 	if err := deploy.Uninstall(ctx, helperUninstallFS{conn}, home); err != nil {
-		return false, fmt.Errorf("ssh: helper uninstall %s: %w", host, err)
+		return false, fmt.Errorf("ssh: helper uninstall: %w", err)
 	}
 	return true, nil
 }
-
-// compile-time check: the capability is satisfied by *RealClient, which the
-// composition root wires without an adapter.
-var _ interface {
-	UninstallHelper(ctx context.Context, host string, opts ...ConnectOption) (removed bool, err error)
-} = (*RealClient)(nil)

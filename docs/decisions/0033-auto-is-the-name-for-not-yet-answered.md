@@ -10,6 +10,10 @@
   (`.internal/specs/2026-08-13-remote-helper-design.md`, D8), AD-5 (two-tier
   shell integration), `nocx-7iisi`, `nocx-f4o70`, `nocx-p15s`.
 
+> **Naming, 2026-08-31:** `relay` below is the historical name of the third
+> delivery mode and of the deployed remote binary; both are now called the
+> **helper**. The argument is left exactly as it was written (`nocx-0xq2s`).
+
 ## Context
 
 The delivery axis answers "what may nocx do with this destination":

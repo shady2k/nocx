@@ -83,7 +83,7 @@ const maxTransferSubjectRunes = 64
 //
 // At is deliberately not stamped, as at the session.ended and block.finished
 // raises: ingress is the first nocx-owned stage and stamps it once, so a
-// relay replaying a buffered batch keeps its own instants
+// helper replaying a buffered batch keeps its own instants
 // (internal/notify/ingress.go).
 func transferFinishedEvent(sess session.Session, out transferOutcome) notify.Event {
 	return notify.Event{

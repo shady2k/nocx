@@ -87,7 +87,7 @@ func TestPasswordAsker_RememberStoresAndBinds(t *testing.T) {
 	wire := &fakeWireAsker{ans: ssh.PasswordAnswer{Password: "hunter2", Remember: true}}
 	r, ps, creator := seededResolver(t, WithPasswordAsker(wire.ask))
 
-	asker := r.askerFor("p1")
+	asker := r.AskerFor("p1")
 	ans, err := asker.RequestConnectionPassword(context.Background(), ssh.PasswordRequest{
 		Connection: "prod-web", User: "deploy", Host: "web.example.com",
 	})
@@ -126,7 +126,7 @@ func TestPasswordAsker_UseOnceStoresNothing(t *testing.T) {
 	wire := &fakeWireAsker{ans: ssh.PasswordAnswer{Password: "once", Remember: false}}
 	r, ps, creator := seededResolver(t, WithPasswordAsker(wire.ask))
 
-	asker := r.askerFor("p1")
+	asker := r.AskerFor("p1")
 	ans, err := asker.RequestConnectionPassword(context.Background(), ssh.PasswordRequest{
 		Connection: "prod-web", User: "deploy", Host: "web.example.com",
 	})
@@ -152,7 +152,7 @@ func TestPasswordAsker_WireErrorPropagates(t *testing.T) {
 	wire := &fakeWireAsker{askErr: wireErr}
 	r, _, creator := seededResolver(t, WithPasswordAsker(wire.ask))
 
-	asker := r.askerFor("p1")
+	asker := r.AskerFor("p1")
 	_, err := asker.RequestConnectionPassword(context.Background(), ssh.PasswordRequest{
 		Connection: "prod-web", User: "deploy", Host: "web.example.com",
 	})
@@ -177,7 +177,7 @@ func TestPasswordAsker_SealedVaultPropagatesTheSealedError(t *testing.T) {
 		WithPasswordAsker(wire.ask),
 		WithSecretCreator(&fakeSecretCreator{createErr: vault.ErrVaultSealed}),
 	)
-	asker := r.askerFor("p1")
+	asker := r.AskerFor("p1")
 	_, err := asker.RequestConnectionPassword(context.Background(), ssh.PasswordRequest{
 		Connection: "prod-web", User: "deploy", Host: "web.example.com",
 	})
@@ -203,7 +203,7 @@ func TestPasswordAsker_SealedVaultDoesNotRetry(t *testing.T) {
 		WithPasswordAsker(wire.ask),
 		WithSecretCreator(creator),
 	)
-	asker := r.askerFor("p1")
+	asker := r.AskerFor("p1")
 	_, err := asker.RequestConnectionPassword(context.Background(), ssh.PasswordRequest{
 		Connection: "prod-web", User: "deploy", Host: "web.example.com",
 	})
@@ -225,7 +225,7 @@ func TestPasswordAsker_BindFailureNeverClaimsRemembered(t *testing.T) {
 
 	// A profile that does not exist anymore: findProfile fails, the
 	// binding cannot land.
-	asker := r.askerFor("ghost")
+	asker := r.AskerFor("ghost")
 	_, err := asker.RequestConnectionPassword(context.Background(), ssh.PasswordRequest{
 		Connection: "prod-web", User: "deploy", Host: "web.example.com",
 	})
@@ -248,7 +248,7 @@ func TestPasswordAsker_CreatorMissingFailsLoud(t *testing.T) {
 	// Replace the creator with nil — seededResolver wired one by default.
 	r.creator = nil
 
-	asker := r.askerFor("p1")
+	asker := r.AskerFor("p1")
 	_, err := asker.RequestConnectionPassword(context.Background(), ssh.PasswordRequest{
 		Connection: "prod-web", User: "deploy", Host: "web.example.com",
 	})

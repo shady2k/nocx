@@ -33,7 +33,7 @@
  *     invented at render time.
  *
  * What the checker deliberately cannot decide: whether a particular fallback
- * is a defect. `value={fvStr('relayConsent') || 'unknown'}` on a Select with no
+ * is a defect. `value={fvStr('helperConsent') || 'unknown'}` on a Select with no
  * required rule is display-only and fine; `value={fvNum('port') || 22}` next to
  * a required('Port') rule is the defect. That judgement lives in the baseline,
  * one reason line per entry, so a legitimate default is never silently

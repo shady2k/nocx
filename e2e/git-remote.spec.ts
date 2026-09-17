@@ -45,7 +45,7 @@
 // Timing: every wait is on an observable state change — a row appearing, a
 // badge appearing, a marker file existing. There is no waitForTimeout in
 // this file.
-import { appReadyForInput, test, expect, resolveBackend } from './harness'
+import { appReadyForInput, test, expect, promptReady, resolveBackend } from './harness'
 import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -64,8 +64,6 @@ const UNSTAGED = '[data-testid="git-unstaged-list"]'
 const COMMIT = '[data-testid="git-commit"]'
 const SUBJECT = '#git-commit-subject'
 const BODY = '#git-commit-body'
-const CONSENT = '[data-testid="git-consent-required"]'
-const ACCEPT = '[data-testid="git-consent-accept"]'
 const ROW = '.ui-collection-row'
 const TAB = '.nocx-tab'
 
@@ -284,11 +282,13 @@ test('a commit from the panel, on a remote host, through its own pre-commit hook
         port: Number(fixture.addr.split(':')[1]),
         user: 'e2e',
         keyPath: fixture.userKey,
-        // No shellIntegration option: the default destination mode (script)
-        // wraps and installs the launcher automatically, which is what
-        // makes the remote shell emit OSC 7 so the cwd — and with it the
-        // tab title and git.open's origin — lands. 'ask' would leave the
-        // session conventional and the panel would never see a cwd.
+        // No desiredMode option: the cascade's hardcoded default is Auto
+        // (ADR-0033), which is what makes this connect raise the
+        // connect-time ask (ADR-0069) below — an explicit Script or Helper
+        // would skip straight past it. Auto also wraps and installs the
+        // launcher automatically, which is what makes the remote shell
+        // emit OSC 7 so the cwd — and with it the tab title and git.open's
+        // origin — lands.
       },
     })
     createdProfileId = created?.id ?? null
@@ -303,29 +303,54 @@ test('a commit from the panel, on a remote host, through its own pre-commit hook
     await expect(option).toBeVisible({ timeout: 10_000 })
     await page.keyboard.press('Enter')
 
-    // The SSH tab opens and becomes active. The remote shell starts INSIDE
-    // the seeded repository (the fixture chdirs there) and the launcher
-    // rcfile dials the lifecycle channel, so the first prompt's OSC 7
-    // carries the repository path and the frontend records it VERIFIED.
-    //
-    // The tab title is deliberately NOT the cwd oracle: the lane seed sets
-    // programTitle to the ssh host (domain-environment.ts:235 — "the tab
-    // names the destination"), and pushTitle prefers programTitle over the
-    // cwd label. The panel is the right surface: the git store's rescope
-    // refuses to ask git.open for a session whose cwd is not verified, so
-    // the consent card appearing below is itself the proof the cwd landed.
-    await expect(page.locator(TAB)).toHaveCount(2, { timeout: 30_000 })
+    // The ask comes first, at the connection rather than the feature
+    // (ADR-0069): the host key is already trusted (trustHostKey, above),
+    // so this connect's probe succeeds and the ONLY unanswered question is
+    // the method — the same one-dialog surface the host-key ask uses
+    // (HostKeyDialog), titled for the method-only case. The open itself
+    // does not resolve — and the tab does not appear — until this is
+    // answered: openSessionWithHostKeyRecovery retries the open only after
+    // the dialog settles. Helper is chosen from the SegmentedControl and
+    // confirmed with Continue — there is no more one-click "Use the helper".
+    const helperDialog = page.getByRole('dialog').filter({ hasText: 'Choose how nocx connects' })
+    await expect(helperDialog).toBeVisible({ timeout: 30_000 })
+    await helperDialog.getByRole('radio', { name: 'Helper' }).click()
+    await helperDialog.getByRole('button', { name: 'Continue' }).click()
+    await expect(helperDialog).not.toBeVisible()
 
-    // The git panel answers for THAT tab. The ask comes first: consent at
-    // the feature (D8) — a fresh home has no grant for this host.
+    // The SSH tab opens and becomes active. Since ADR-0057 every pane is
+    // helper-hosted: the far nocx-helper spawns this shell through
+    // internal/pty (NewLocal), whose resolveCwd falls back to the login
+    // user's home when no cwd is given — the same place a REAL sshd starts
+    // a login shell. e2e-sshd's own -repo seeding only chdirs a shell IT
+    // serves directly; it does not reach a helper-hosted one. So the shell
+    // lands in e2e's home, not in the seeded repository, and this moves
+    // into the repository the way a person would: by typing `cd`.
+    await expect(page.locator(TAB)).toHaveCount(2, { timeout: 30_000 })
+    await promptReady(page)
+    await page.keyboard.type(`cd '${fixture.repo}'`)
+    await page.keyboard.press('Enter')
+
+    // Wait on the OBSERVABLE proof that the cwd landed, never on a
+    // duration: the prompt editor's own cwd chip (terminal-content.ts's
+    // `_applyEnvironmentView`, called on every OSC 7), the same signal
+    // local-drop.spec.ts and ops-indicator.spec.ts already wait on after a
+    // typed `cd`. The tab title is deliberately NOT used for this: the lane
+    // seed sets programTitle to the ssh host (domain-environment.ts:235 —
+    // "the tab names the destination"), and pushTitle prefers programTitle
+    // over the cwd label, so the title would never move.
+    await expect(
+      page.locator('.pane.active .nocx-editor-context .ui-prompt-context'),
+    ).toContainText(path.basename(fixture.repo), { timeout: 30_000 })
+
+    // The git panel answers for THAT tab. Consent was already granted at
+    // connect (ADR-0068: the git panel never asks) — the helper installed
+    // over the fixture's sftp subsystem the moment the retried open found
+    // the answer — and the cwd is now verified and inside the repository,
+    // so the store's rescope asks git.open for it and the branch badge is
+    // the store's own word that it answered.
     await page.locator(VIEW_GIT).click()
     await expect(page.locator(PANEL)).toBeVisible({ timeout: 30_000 })
-    await expect(page.locator(CONSENT)).toBeVisible({ timeout: 30_000 })
-    await page.locator(ACCEPT).click()
-
-    // Accept raises the machine to the relay tier: the helper installs over
-    // the fixture's sftp subsystem, the dial answers, and git.open returns
-    // ok. The branch badge is the store's own word for it.
     await expect(page.locator(BRANCH)).toBeVisible({ timeout: 60_000 })
     await expect(page.locator(BRANCH)).toHaveText('main')
 

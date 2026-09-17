@@ -1,23 +1,39 @@
 package ssh
 
 // The helper-install lease (remote-helper design D7, D20): a write-capable,
-// purpose-specific lease the deploy package installs the helper through. It
-// is the boundary ssh_uninstall.go already set — the raw *gossh.Client stays
+// purpose-specific lease the deploy package installs the helper through. It is
+// the boundary ssh_uninstall.go already set — the raw *gossh.Client stays
 // inside internal/ssh, and callers get purpose-specific capabilities — and
 // it is why the install cannot reuse the shell-integration publisher: that
 // publisher's manifest, generation, locking and foreign-root semantics
 // belong to the shell bundle under ~/.nocx, while the helper has its own
 // content-addressed layout and pruning rules (D7). One publisher serving
 // both would couple two unrelated deployment protocols.
+//
+// # Where the SFTP stream comes from, since nocx-50w7p.3
+//
+// The lease no longer opens its own subsystem on a connection it dialed. The
+// coordinator dials nothing (plan §1-§3): the LOCAL helper holds the pooled
+// connection and opens the `sftp` subsystem on it, and the coordinator wraps
+// the bytes it is handed. So the constructor takes a stream, and the pooled
+// client this file used to take is gone from the path entirely.
+//
+// What does NOT change is everything below the acquisition, and that is the
+// point of moving the transport rather than the consumer: the write surface,
+// the mkdir+chmod and create+chmod rules, the close-to-cancel, the loss
+// signal — all of it is the same code, tested by the same tests, over a stream
+// that happens to arrive from another process.
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	iofs "io/fs"
 	"os"
 	"sync"
 
 	"github.com/pkg/sftp"
-	gossh "golang.org/x/crypto/ssh"
 )
 
 // HelperInstallConn is the write-capable lease the helper installer holds
@@ -49,68 +65,126 @@ type HelperInstallConn interface {
 	// LostErr reports why the connection shut down. Meaningful once Done
 	// has closed; nil when the connection closed cleanly.
 	LostErr() error
-	// Close releases this lease's pooled reference. The SFTP session
-	// channel is closed first — the close-to-cancel mechanism that
-	// unblocks a call wedged against a silent server — so no call from
-	// this lease is in flight when the reference drops. Done is
-	// deliberately NOT closed.
+	// Close releases this lease. The stream is closed FIRST — the
+	// close-to-cancel mechanism that unblocks a call wedged against a silent
+	// server — so no call from this lease is in flight when it returns. Done
+	// is deliberately NOT closed.
 	Close() error
 }
 
-// helperInstallConn is the concrete HelperInstallConn. It holds its own
-// pooled reference, released exactly once (by Close or the loss watcher),
-// and the SFTP write primitives through the shared SFTPFS adapter — the
-// same adapter the shell-integration publisher uses, so mkdir+chmod,
-// create+chmod, rename, removal, fsync tolerance and status translation
-// have one implementation (AD-8).
+// helperInstallConn is the concrete HelperInstallConn. It holds the stream it
+// was handed and the SFTP write primitives through the shared SFTPFS adapter —
+// the same adapter the shell-integration publisher uses, so mkdir+chmod,
+// create+chmod, rename, removal, fsync tolerance and status translation have
+// one implementation (AD-8).
 type helperInstallConn struct {
 	*SFTPFS
-	sess *gossh.Session
-	sftp *sftp.Client // the lifecycle owner; SFTPFS runs the operations
+	stream io.ReadWriteCloser
+	sftp   *sftp.Client // the lifecycle owner; SFTPFS runs the operations
 
 	done   chan struct{}
 	closed chan struct{}
 
-	release     func()
-	releaseOnce sync.Once
-	closeOnce   sync.Once
-
-	lostErr error
+	closeOnce sync.Once
+	mu        sync.Mutex
+	lostErr   error
 }
 
-// newHelperInstallConn acquires an SFTP subsystem on the pooled connection
-// — the same acquisition FSConn uses, bounded by the same hard timeout so a
-// Background ctx cannot hang it — and wraps it with the write surface. On
-// any failure the pooled reference is released before returning.
-func newHelperInstallConn(client *gossh.Client, release func(), ctx context.Context) (*helperInstallConn, error) {
+// NewHelperInstallConn builds the write-capable lease over an SFTP stream that
+// somebody else opened — in production the local helper, through `ssh.open`,
+// which is what makes this machine's helper the only dialer.
+//
+// The version handshake runs inside ctx's bound, and the bound is enforced by
+// CLOSING THE STREAM: pkg/sftp's constructor has no context-aware form, and a
+// server that accepts the subsystem and then says nothing would otherwise hang
+// the install for as long as the caller's patience lasted. Closing the stream
+// unblocks the handshake goroutine, so this always returns within ctx or the
+// hard timeout and never leaks one.
+func NewHelperInstallConn(ctx context.Context, stream io.ReadWriteCloser) (HelperInstallConn, error) {
+	if stream == nil {
+		return nil, errors.New("ssh: helper install lease: no stream")
+	}
+	watch := &endWatch{inner: stream, onEnd: func(error) {}}
+	c := &helperInstallConn{
+		stream: watch,
+		done:   make(chan struct{}),
+		closed: make(chan struct{}),
+	}
+	watch.onEnd = func(err error) {
+		c.mu.Lock()
+		if c.lostErr == nil {
+			c.lostErr = err
+		}
+		c.mu.Unlock()
+		select {
+		case <-c.done:
+		default:
+			close(c.done)
+		}
+	}
+
 	openCtx, cancel := context.WithTimeout(ctx, fsHardTimeout)
 	defer cancel()
-	sess, sftpClient, err := openSFTPSubsystem(client, openCtx)
-	if err != nil {
-		release()
-		return nil, err
+
+	type handshake struct {
+		client *sftp.Client
+		err    error
 	}
-	c := &helperInstallConn{
-		SFTPFS:  NewSFTPFS(sftpClient),
-		sess:    sess,
-		sftp:    sftpClient,
-		done:    make(chan struct{}),
-		closed:  make(chan struct{}),
-		release: release,
-	}
-	// One watcher per lease: gossh.Client.Wait returns when the transport
-	// shuts down. Report loss and drop our reference so a dead entry cannot
-	// linger behind an unreleased lease.
+	ch := make(chan handshake, 1)
 	go func() {
-		c.lostErr = client.Wait()
-		close(c.done)
-		c.releaseOnce.Do(func() {
-			if c.release != nil {
-				c.release()
-			}
-		})
+		client, err := sftp.NewClientPipe(watch, watch)
+		ch <- handshake{client, err}
 	}()
+	select {
+	case <-openCtx.Done():
+		// Closing the stream is what unblocks the handshake; the goroutine's
+		// send is buffered, so it cannot leak on a receiver that has left.
+		_ = stream.Close()
+		<-ch
+		return nil, fmt.Errorf("ssh: helper install lease: %w", openCtx.Err())
+	case hs := <-ch:
+		if hs.err != nil {
+			_ = stream.Close()
+			return nil, hs.err
+		}
+		c.sftp = hs.client
+		c.SFTPFS = NewSFTPFS(hs.client)
+	}
 	return c, nil
+}
+
+// endWatch reports the FIRST failure or end its stream produced, which is what
+// gives the lease a loss signal without a *gossh.Client to wait on.
+//
+// Close is deliberately not an end: the interface says an intentional stop must
+// not read as connection loss, and a lease that reported its own release as a
+// fault would make every clean uninstall look like a dropped connection.
+type endWatch struct {
+	inner io.ReadWriteCloser
+	once  sync.Once
+	onEnd func(error)
+}
+
+func (w *endWatch) Read(p []byte) (int, error) {
+	n, err := w.inner.Read(p)
+	if err != nil {
+		w.end(err)
+	}
+	return n, err
+}
+
+func (w *endWatch) Write(p []byte) (int, error) {
+	n, err := w.inner.Write(p)
+	if err != nil {
+		w.end(err)
+	}
+	return n, err
+}
+
+func (w *endWatch) Close() error { return w.inner.Close() }
+
+func (w *endWatch) end(err error) {
+	w.once.Do(func() { w.onEnd(err) })
 }
 
 func (c *helperInstallConn) Home() (string, error) {
@@ -122,53 +196,29 @@ func (c *helperInstallConn) Done() <-chan struct{} { return c.done }
 func (c *helperInstallConn) LostErr() error {
 	select {
 	case <-c.done:
+		c.mu.Lock()
+		defer c.mu.Unlock()
 		return c.lostErr
 	default:
 		return nil
 	}
 }
 
-// Close releases this lease's pooled reference and stops any call still in
-// flight: the SFTP session channel is closed — which is what unblocks a
-// call wedged against a silent server — before the reference drops. The
-// sftp client's own Close then waits for its reader goroutine to observe
-// the channel close, so no reader from this lease outlives Close. Done is
-// deliberately NOT closed: an intentional stop must not read as connection
-// loss.
+// Close ends the lease and stops any call still in flight: the stream is
+// closed — which is what unblocks a call wedged against a silent server —
+// before the client is. The sftp client's own Close then waits for its reader
+// goroutine to observe the stream's end, so no reader from this lease outlives
+// Close. Done is deliberately NOT closed: an intentional stop must not read as
+// connection loss.
 func (c *helperInstallConn) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.closed)
-		_ = c.sess.Close()
-		_ = c.sftp.Close()
-		c.releaseOnce.Do(func() {
-			if c.release != nil {
-				c.release()
-			}
-		})
+		if c.stream != nil {
+			_ = c.stream.Close()
+		}
+		if c.sftp != nil {
+			_ = c.sftp.Close()
+		}
 	})
 	return nil
-}
-
-// HelperInstallConn acquires an owned lease on the pooled SSH connection
-// for host, running the write-capable SFTP subsystem the helper installer
-// needs (design D7). The same connection configuration (credentials, keys,
-// jump route) as a Connect to host is resolved and authorized: the lease is
-// bound by the same pool key (AD-4), and it holds its OWN pooled reference
-// — never the tab's — so closing the tab can never kill an in-flight
-// install underneath it. Release the lease with Close; on connection loss
-// the lease releases itself and Done closes.
-func (rc *RealClient) HelperInstallConn(ctx context.Context, host string, opts ...ConnectOption) (HelperInstallConn, error) {
-	acq, err := rc.acquirePooled(ctx, host, opts)
-	if err != nil {
-		return nil, err
-	}
-	// newHelperInstallConn returns a *helperInstallConn; returning it
-	// directly would box a typed nil into the HelperInstallConn interface
-	// on the error paths. Split the multi-value return so an error yields a
-	// nil interface.
-	c, err := newHelperInstallConn(acq.client, func() { rc.pool.Release(acq.handle) }, ctx)
-	if err != nil {
-		return nil, err
-	}
-	return c, nil
 }

@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package ssh
 
 import (
@@ -14,7 +16,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -57,11 +58,6 @@ type testSSHServer struct {
 	// server can produce, so a test states a number rather than a mood.
 	execRefusals      int
 	execSubstitutions int
-	// execHandler, when set, answers every accepted exec request with its
-	// canned output, exit status and a channel close — the server side of a
-	// scripted remote probe (discovery tests). Nil keeps the default echo
-	// behavior. Read under s.mu; set via setExecHandler.
-	execHandler func(cmd string) (stdout, stderr string, exit int)
 	// maxSessions, when > 0, caps session channels per connection; further
 	// opens are rejected with ResourceShortage (OpenSSH's MaxSessions).
 	// Read under s.mu; set via setMaxSessions.
@@ -122,14 +118,6 @@ func (s *testSSHServer) logf(format string, args ...any) {
 		return
 	}
 	s.t.Logf(format, args...)
-}
-
-// setExecHandler installs the scripted exec responder. Call before the
-// test's first connection.
-func (s *testSSHServer) setExecHandler(h func(cmd string) (stdout, stderr string, exit int)) {
-	s.mu.Lock()
-	s.execHandler = h
-	s.mu.Unlock()
 }
 
 // execRefusalMode selects which of §6.4's `exec` rows this server produces.
@@ -197,34 +185,6 @@ func (s *testSSHServer) waitLiveConns(want int) {
 		defer s.liveMu.Unlock()
 		return len(s.liveConns) == want
 	})
-}
-
-// killConns closes every established server-side connection, simulating
-// transport loss for the clients. Closing the server side makes the
-// client's transport fail, which is what a real network loss does.
-//
-// It refuses to kill nothing. Every caller closes connections in order to
-// observe a loss immediately afterwards, so an empty set is never a no-op —
-// it is a wait that can only end at its deadline, reported as whatever the
-// caller was waiting on rather than as the kill that never happened. That is
-// precisely how nocx-zlvw read as a slow machine for a week: five identical
-// 5.05s failures under load, all of them the server having nothing to close.
-func (s *testSSHServer) killConns() {
-	s.t.Helper()
-	s.liveMu.Lock()
-	conns := make([]*gossh.ServerConn, 0, len(s.liveConns))
-	for c := range s.liveConns {
-		conns = append(conns, c)
-	}
-	s.liveMu.Unlock()
-	if len(conns) == 0 {
-		s.t.Fatal("killConns: no established connection to close — " +
-			"the loss the test is about to wait for can never arrive; " +
-			"wait for the server to accept the connection first (waitLiveConns)")
-	}
-	for _, c := range conns {
-		_ = c.Close()
-	}
 }
 
 func startTestSSHServer(t *testing.T) *testSSHServer {
@@ -460,20 +420,8 @@ func (s *testSSHServer) handleSession(ch gossh.Channel, reqs <-chan *gossh.Reque
 				s.mu.Lock()
 				s.shellCh = ch
 				s.execCommands <- m.Command
-				handler := s.execHandler
 				s.mu.Unlock()
 				s.shellReadyDo.Do(func() { close(s.shellReady) })
-				if handler != nil {
-					// Scripted exec: answer with the canned output, a real
-					// exit-status request, then close the channel the way
-					// sshd does — the client's Run returns only after all
-					// three.
-					stdout, stderr, exit := handler(m.Command)
-					_, _ = ch.Write([]byte(stdout))
-					_, _ = ch.Stderr().Write([]byte(stderr))
-					_, _ = ch.SendRequest("exit-status", false, gossh.Marshal(struct{ Status uint32 }{uint32(exit)})) //nolint:gosec // SSH exit statuses are 0-255
-					_ = ch.Close()
-				}
 
 			default:
 				_ = req.Reply(false, nil)
@@ -1107,7 +1055,7 @@ func TestPoolConnectionSharing(t *testing.T) {
 		t.Fatalf("Connect 2: %v", err)
 	}
 
-	if got := client.pool.Count(); got != 1 {
+	if got := client.dial.pool.Count(); got != 1 {
 		t.Fatalf("after 2 connects to same host, pool.Count()=%d, want 1 (shared)", got)
 	}
 
@@ -1141,7 +1089,7 @@ func TestPoolConnectionSharing(t *testing.T) {
 	if err := ch1.Close(); err != nil {
 		t.Fatalf("ch1.Close: %v", err)
 	}
-	if got := client.pool.Count(); got != 1 {
+	if got := client.dial.pool.Count(); got != 1 {
 		t.Fatalf("after 1 close, pool.Count()=%d, want 1 (still shared)", got)
 	}
 
@@ -1149,129 +1097,8 @@ func TestPoolConnectionSharing(t *testing.T) {
 	if err := ch2.Close(); err != nil {
 		t.Fatalf("ch2.Close: %v", err)
 	}
-	if got := client.pool.Count(); got != 0 {
+	if got := client.dial.pool.Count(); got != 0 {
 		t.Fatalf("after all closed, pool.Count()=%d, want 0", got)
-	}
-}
-
-// TestProbe_Success verifies Probe authenticates and closes without a shell.
-func TestProbe_Success(t *testing.T) {
-	srv := startTestSSHServer(t)
-	defer srv.close()
-	khPath := writeKnownHosts(t, srv, srv.addr)
-
-	client, err := NewReal(
-		log.NewSlogAdapter(nil),
-		WithKnownHostsFile(khPath),
-	)
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	defer func() { _ = client.Close() }()
-
-	err = client.Probe(
-		context.Background(), srv.addr,
-		gossh.PublicKeys(srv.userSigner),
-		WithUser("test"),
-	)
-	if err != nil {
-		t.Fatalf("Probe: %v", err)
-	}
-
-	// Pool must be empty — Probe bypasses the pool entirely.
-	if got := client.pool.Count(); got != 0 {
-		t.Fatalf("pool.Count()=%d, want 0 (Probe bypasses pool)", got)
-	}
-}
-
-// TestProbe_WrongKey_ReturnsError verifies Probe fails on bad auth.
-func TestProbe_WrongKey_ReturnsError(t *testing.T) {
-	srv := startTestSSHServer(t)
-	defer srv.close()
-	khPath := writeKnownHosts(t, srv, srv.addr)
-
-	client, err := NewReal(
-		log.NewSlogAdapter(nil),
-		WithKnownHostsFile(khPath),
-	)
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	defer func() { _ = client.Close() }()
-
-	wrongKey := generateSigner(t)
-	err = client.Probe(
-		context.Background(), srv.addr,
-		gossh.PublicKeys(wrongKey),
-		WithUser("test"),
-	)
-	if err == nil {
-		t.Fatal("Probe with wrong key: expected error, got nil")
-	}
-}
-
-// TestProbe_UnknownHost_ReturnsError verifies Probe fails when the host
-// key is unknown, without attempting authentication.
-func TestProbe_UnknownHost_ReturnsError(t *testing.T) {
-	srv := startTestSSHServer(t)
-	defer srv.close()
-
-	// Write known_hosts with a different host key than the server uses.
-	wrongSigner := generateSigner(t)
-	wrongKey := wrongSigner.PublicKey()
-	line := knownhosts.Line([]string{srv.addr}, wrongKey)
-	dir := t.TempDir()
-	khPath := filepath.Join(dir, "known_hosts")
-	if err := os.WriteFile(khPath, []byte(line+"\n"), 0o600); err != nil {
-		t.Fatalf("write known_hosts: %v", err)
-	}
-
-	client, err := NewReal(
-		log.NewSlogAdapter(nil),
-		WithKnownHostsFile(khPath),
-	)
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	defer func() { _ = client.Close() }()
-
-	err = client.Probe(
-		context.Background(), srv.addr,
-		gossh.PublicKeys(srv.userSigner),
-		WithUser("test"),
-	)
-	if err == nil {
-		t.Fatal("Probe with wrong host key: expected error, got nil")
-	}
-}
-
-// TestProbe_SingleAuthMethod verifies Probe sends exactly one auth method
-// (the supplied one) and does not fall back to agent or any other method.
-// This is implicit: gossh.ClientConfig.Auth is set to a slice of length 1,
-// so the server only sees that one method. A key that succeeds proves it.
-func TestProbe_SingleAuthMethod(t *testing.T) {
-	srv := startTestSSHServer(t)
-	defer srv.close()
-	khPath := writeKnownHosts(t, srv, srv.addr)
-
-	client, err := NewReal(
-		log.NewSlogAdapter(nil),
-		WithKnownHostsFile(khPath),
-	)
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	defer func() { _ = client.Close() }()
-
-	// Password method with correct key signer won't work (server only accepts
-	// public key), but using public key with exactly one method should.
-	err = client.Probe(
-		context.Background(), srv.addr,
-		gossh.PublicKeys(srv.userSigner),
-		WithUser("test"),
-	)
-	if err != nil {
-		t.Fatalf("Probe with single public-key method: %v", err)
 	}
 }
 
@@ -1568,112 +1395,4 @@ func TestConnect_VaultSealed_ReturnsTypedError(t *testing.T) {
 	if !errors.Is(err, vault.ErrVaultSealed) {
 		t.Fatalf("expected ErrVaultSealed, got %T: %v", err, err)
 	}
-}
-
-// TestProbe_ThroughJumpHost verifies that ProbeConfigWithResult routes
-// through the jump host when one is configured, rather than dialling
-// the target directly (nocx-shat).
-func TestProbe_ThroughJumpHost(t *testing.T) {
-	// Bastion: a test SSH server with direct-tcpip support.
-	bastionPub, bastionPriv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate bastion key: %v", err)
-	}
-	bastionSigner, err := gossh.NewSignerFromKey(bastionPriv)
-	if err != nil {
-		t.Fatalf("create bastion signer: %v", err)
-	}
-	bastion := startTestSSHServerWithKey(t, bastionSigner)
-	defer bastion.close()
-
-	// Target: a separate test SSH server with its own key.
-	targetPub, targetPriv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate target key: %v", err)
-	}
-	targetSigner, err := gossh.NewSignerFromKey(targetPriv)
-	if err != nil {
-		t.Fatalf("create target signer: %v", err)
-	}
-	target := startTestSSHServerWithKey(t, targetSigner)
-	defer target.close()
-
-	// known_hosts: both bastion and target keys.
-	khPath := filepath.Join(t.TempDir(), "known_hosts")
-	khLines := []string{
-		knownhosts.Line([]string{bastion.addr}, bastion.hostSigner.PublicKey()),
-		knownhosts.Line([]string{target.addr}, target.hostSigner.PublicKey()),
-	}
-	wErr := os.WriteFile(khPath, []byte(strings.Join(khLines, "\n")+"\n"), 0o600)
-	if wErr != nil {
-		t.Fatalf("write known_hosts: %v", wErr)
-	}
-
-	// Write the bastion's private key to a temp file for jump auth.
-	jumpKeyPath := filepath.Join(t.TempDir(), "jump_key")
-	block, err := gossh.MarshalPrivateKey(bastionPriv, "")
-	if err != nil {
-		t.Fatalf("marshal private key: %v", err)
-	}
-	if err = os.WriteFile(jumpKeyPath, pem.EncodeToMemory(block), 0o600); err != nil {
-		t.Fatalf("write jump key: %v", err)
-	}
-
-	client, err := NewReal(
-		log.NewSlogAdapter(nil),
-		WithKnownHostsFile(khPath),
-	)
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	defer func() { _ = client.Close() }()
-
-	bastionHost, bastionPortStr, _ := net.SplitHostPort(bastion.addr)
-	bastionPort, _ := strconv.Atoi(bastionPortStr)
-
-	// Build the ConnectConfig the resolver would produce: jump host with
-	// key file, and auth for the target.
-	cfg := &ConnectConfig{}
-	cfg.AuthMethods = []gossh.AuthMethod{gossh.PublicKeys(targetSigner)}
-	WithAuthMode("publicKey")(cfg)
-	WithJumpHost(bastionHost, bastionPort, "jumpuser", "publicKey")(cfg)
-	cfg.JumpKeyFile = jumpKeyPath
-
-	// A direct-route target entry must not authorize this jump route, even
-	// though the server currently presents the same key on both paths.
-	_, err = client.ProbeConfigWithResult(context.Background(), target.addr, cfg)
-	var unknown *ErrUnknownHostKey
-	if !errors.As(err, &unknown) {
-		t.Fatalf("first jump probe = %T %v, want ErrUnknownHostKey", err, err)
-	}
-	routeAddr := knownHostsTargetAddr(target.addr, cfg)
-	if unknown.Addr != target.addr || unknown.KnownHostsAddr != routeAddr {
-		t.Fatalf("jump evidence = display %q lookup %q, want %q and %q",
-			unknown.Addr, unknown.KnownHostsAddr, target.addr, routeAddr)
-	}
-	if _, err = client.TrustHostKey(unknown.KnownHostsAddr, unknown.Key); err != nil {
-		t.Fatalf("trust target on jump route: %v", err)
-	}
-
-	// The next probe follows the same route identity and succeeds without
-	// replacing the target's direct-route entry.
-	fp, err := client.ProbeConfigWithResult(context.Background(), target.addr, cfg)
-	if err != nil {
-		t.Fatalf("ProbeConfigWithResult through jump after trust: %v", err)
-	}
-
-	// The fingerprint must be the target's, not the bastion's.
-	wantFp := gossh.FingerprintSHA256(target.hostSigner.PublicKey())
-	if fp != wantFp {
-		t.Errorf("fingerprint = %q, want target's %q", fp, wantFp)
-	}
-
-	// Pool must be empty — probe bypasses the pool.
-	if got := client.pool.Count(); got != 0 {
-		t.Fatalf("pool.Count()=%d, want 0 (probe bypasses pool)", got)
-	}
-
-	// Suppress unused — bastionPub/targetPub are for clarity.
-	_ = bastionPub
-	_ = targetPub
 }

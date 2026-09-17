@@ -87,3 +87,69 @@ func TestSetPaneCwd_UnknownPane(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNoSuchPane", setErr)
 	}
 }
+
+// PaneCwd — the reader that made the column worth writing twice (nocx-ty5ks).
+//
+// Restore reads the whole snapshot; a worker's spawn needs ONE pane's
+// directory, resolved from its id, because that is what says where the
+// coordinator is standing and therefore where the participant's pane opens.
+
+func TestPaneCwd_AnswersWhatTheRendererReported(t *testing.T) {
+	ctx := context.Background()
+	db, _ := newLedger(t)
+	aPaneUnder(t, db, "0198f2b0-0000-7000-8000-00000000f001",
+		"0198f2b0-0000-7000-8000-00000000f002", "0198f2b0-0000-7000-8000-00000000f003")
+	const paneID = "0198f2b0-0000-7000-8000-00000000f003"
+
+	if _, err := db.Layout().SetPaneCwd(ctx, paneID, "/home/dev/repos/iaam"); err != nil {
+		t.Fatalf("SetPaneCwd: %v", err)
+	}
+	got, err := db.Layout().PaneCwd(ctx, paneID)
+	if err != nil {
+		t.Fatalf("PaneCwd: %v", err)
+	}
+	if got != "/home/dev/repos/iaam" {
+		t.Fatalf("PaneCwd = %q, want the directory SetPaneCwd wrote", got)
+	}
+}
+
+// A pane whose shell has never reported one answers "", and that is an
+// answer rather than a failure: a pane with no shell integration reaches no
+// prompt, and a caller choosing a directory has to be able to act on it.
+func TestPaneCwd_APaneNobodyHasReportedForAnswersEmpty(t *testing.T) {
+	ctx := context.Background()
+	db, _ := newLedger(t)
+	const (
+		wsID   = "0198f2b0-0000-7000-8000-00000000f011"
+		tabID  = "0198f2b0-0000-7000-8000-00000000f012"
+		paneID = "0198f2b0-0000-7000-8000-00000000f013"
+	)
+	// Created with no cwd at all, which is the state of every pane whose
+	// shell has not reached a prompt nocx could verify.
+	if _, err := db.Layout().CreateWorkspace(ctx,
+		content.Workspace{ID: wsID, Name: "work"},
+		content.Tab{ID: tabID, WorkspaceID: wsID, Position: 0, Layout: content.LayoutRow},
+		content.Pane{ID: paneID, TabID: tabID, Kind: content.PaneLocal, SizeShare: 1},
+	); err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+
+	got, err := db.Layout().PaneCwd(ctx, paneID)
+	if err != nil {
+		t.Fatalf("PaneCwd: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("PaneCwd = %q, want no directory at all", got)
+	}
+}
+
+// And an id no pane carries is the OTHER fact, kept apart from the one above
+// for the reason SetPaneCwd keeps them apart: "nobody reported one" and
+// "there is no such pane" send a caller to different places.
+func TestPaneCwd_UnknownPane(t *testing.T) {
+	db, _ := newLedger(t)
+	if _, err := db.Layout().PaneCwd(context.Background(),
+		"0198f2b0-0000-7000-8000-0000000000fe"); !errors.Is(err, content.ErrNoSuchPane) {
+		t.Fatalf("err = %v, want ErrNoSuchPane", err)
+	}
+}

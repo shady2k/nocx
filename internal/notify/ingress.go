@@ -18,7 +18,7 @@ type Submitter interface {
 // suppressed event was destroyed, so the events most worth seeing were
 // exactly the ones nothing remembered.
 //
-// It is also the local interface a remote relay's notify service may later be
+// It is also the local interface a remote helper's notify service may later be
 // the remote half of: the remote helper design's D17 forbids a helper service
 // that has no local counterpart, so this type existing is the precondition,
 // not a speculative hook.
@@ -45,7 +45,7 @@ func NewIngress(feed *Feed, next Submitter, clock Clock) (*Ingress, error) {
 // deliberate: a delivery path that panics or blocks must not be able to lose
 // the record, because the record is the only thing that survives the moment.
 //
-// A non-zero At is left alone. A relay replaying a batch it buffered while
+// A non-zero At is left alone. A helper replaying a batch it buffered while
 // nothing was attached carries its own instants, and restamping them "now"
 // would file yesterday's session end as having happened at reconnect.
 func (i *Ingress) Admit(ctx context.Context, ev Event) (OccurrenceID, error) {

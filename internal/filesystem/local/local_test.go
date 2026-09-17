@@ -836,7 +836,7 @@ func TestReadNotChangedOnSteadyRead(t *testing.T) {
 	}
 }
 
-func TestWatchUnavailableUntilTheWatchingWave(t *testing.T) {
+func TestWatchUnavailableUntilTheWatchingGroup(t *testing.T) {
 	_, err := New().Watch(context.Background(), tempDir(t))
 	var wu *filesystem.ErrWatchUnavailable
 	if !errors.As(err, &wu) {

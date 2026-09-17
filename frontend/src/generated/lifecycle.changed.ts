@@ -42,10 +42,6 @@ export interface LifecycleChanged {
    */
   epoch?: number
   /**
-   * The backend-minted establishment generation of the domain (ADR-0024 decision 9): minted fresh for every accept-producing hello and present exactly when the fact names a domain. The renderer returns it in lifecycle.establishAck after committing the presentation that makes an editor available; the backend flushes the pending accept only for the exact generation — no acknowledgement, no accept.
-   */
-  generation?: string
-  /**
    * The attempt the lifecycle refers to, present when lifecycle is running. One attempt record per domain; the renderer keys the block model on its id and state. Completion fields (exitCode, completedAt, fence) are present exactly when the attempt completed — the kernel sets an exit status exactly once, only from an authenticated completion. fence is the render-ordering rendezvous of decision 7's carve-out: the shell writes the same 32 random bytes to the pty after the command's output, and the visual freeze waits for both this event and the matching fence bytes. A fence with no authenticated event behind it does nothing at all — it carries no authority, which is why it is publishable where the capability is not.
    */
   attempt?: {

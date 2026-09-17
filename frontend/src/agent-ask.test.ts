@@ -4,6 +4,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { AgentInputTarget } from './agent-ask'
 import type { GrantBlock } from './ask-entry'
 import type { AnswerBlockHandle, RunningBlockActions } from './scrollback/blocks'
+import { BlockNotice } from './ui/block-notice'
 
 class FakeDispatcher {
   calls: { method: string; params: unknown }[] = []
@@ -58,6 +59,7 @@ function makeTarget(grants: GrantBlock[] = []) {
     append: vi.fn(),
     toolCall: vi.fn(),
     reasoning: vi.fn(),
+    notice: vi.fn(() => new BlockNotice({ text: '' })),
     close: vi.fn(),
   }
   const onRefusal = vi.fn()
@@ -306,6 +308,7 @@ describe('AgentInputTarget', () => {
       append: vi.fn(),
       toolCall: vi.fn(),
       reasoning: vi.fn(),
+      notice: vi.fn(() => new BlockNotice({ text: '' })),
       close: vi.fn(),
     }
     let actions: RunningBlockActions | undefined
@@ -364,6 +367,7 @@ describe('AgentInputTarget', () => {
       append: vi.fn(),
       toolCall: vi.fn(),
       reasoning: vi.fn(),
+      notice: vi.fn(() => new BlockNotice({ text: '' })),
       close: vi.fn(),
     }
     let actions: RunningBlockActions | undefined
@@ -451,6 +455,7 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
       append: vi.fn(),
       toolCall: vi.fn(),
       reasoning: vi.fn(),
+      notice: vi.fn(() => new BlockNotice({ text: '' })),
       close: vi.fn(),
     }
     const openAnswer = vi.fn(() => handle)
@@ -492,6 +497,7 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
       append: vi.fn(),
       toolCall: vi.fn(),
       reasoning: vi.fn(),
+      notice: vi.fn(() => new BlockNotice({ text: '' })),
       close: vi.fn(),
     }
     const openAnswer = vi.fn(() => handle)
@@ -535,6 +541,7 @@ describe('AgentInputTarget refusal', () => {
       append: vi.fn(),
       toolCall: vi.fn(),
       reasoning: vi.fn(),
+      notice: vi.fn(() => new BlockNotice({ text: '' })),
       close: vi.fn(),
     }
     const onRefusal = vi.fn()
@@ -663,5 +670,136 @@ describe('AgentInputTarget dropped-delta gap (nocx-dw3.1)', () => {
       '— the inactivity bound is not active because shell integration is unavailable; the output bound is not active because shell integration is unavailable; only the wall-clock deadline remains active —',
     )
     expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3')
+  })
+  /**
+   * What the RUN says about ITSELF (nocx-4yjwk.1, design §5.3). Repeated
+   * scope-widening asks are capped, and a run that stopped asking must say
+   * so: a bound that goes quiet and reports nothing is the soft degrade
+   * AGENTS.md forbids — the person is left to infer it from questions that
+   * never arrive.
+   */
+  it('shows the notices a settled run states about itself', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('read every file under /repo')
+    const runId = dispatcher.next.run - 1
+
+    dispatcher.emit('agent.runState', {
+      runId,
+      state: 'completed',
+      notices: ['this run stopped asking to widen a scope after three asks'],
+    })
+
+    expect(handle.append).toHaveBeenCalledWith(
+      '— this run stopped asking to widen a scope after three asks —',
+    )
+    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3')
+  })
+
+  it('says nothing extra when a run states no notices', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('a quiet run')
+    const runId = dispatcher.next.run - 1
+
+    dispatcher.emit('agent.runState', { runId, state: 'completed' })
+
+    expect(handle.append).not.toHaveBeenCalled()
+    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3')
+  })
+
+  /**
+   * Two different facts, two lines. A bound that could not be ARMED and a
+   * bound the run stopped ASKING about are not the same sentence, and a
+   * joined one would state the wrong one of them.
+   */
+  it('keeps notices and unarmed bounds as separate lines', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('a run with both')
+    const runId = dispatcher.next.run - 1
+
+    dispatcher.emit('agent.runState', {
+      runId,
+      state: 'completed',
+      notices: ['this run stopped asking to widen a scope after three asks'],
+      unarmedBounds: [
+        'the inactivity bound is not active because shell integration is unavailable',
+      ],
+    })
+
+    const lines = (handle.append as unknown as { mock: { calls: unknown[][] } }).mock.calls.map(
+      (c) => c[0] as string,
+    )
+    expect(lines).toHaveLength(2)
+    expect(lines).toContain('— this run stopped asking to widen a scope after three asks —')
+    expect(lines).toContain(
+      '— the inactivity bound is not active because shell integration is unavailable; only the wall-clock deadline remains active —',
+    )
+  })
+})
+
+describe('AgentInputTarget standing-answer receipt routing (nocx-2019q)', () => {
+  const saved = (over: Record<string, unknown> = {}) => ({
+    runId: '7',
+    entryId: 'answer-1',
+    approved: true,
+    scope: 'always',
+    rule: 'df -h',
+    effect: 'observe',
+    ruleId: 'rule-42',
+    ...over,
+  })
+
+  it('draws the receipt on the turn that asked the question', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('will this need approval?')
+    const runId = dispatcher.next.run - 1
+    handle.el.dataset.entryId = 'answer-1'
+
+    dispatcher.emit('agent.standingAnswerSaved', saved({ runId: String(runId) }))
+
+    expect(handle.notice).toHaveBeenCalledTimes(1)
+  })
+
+  it('drops a receipt for a run this pane does not hold', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('will this need approval?')
+
+    // Another pane's run. Routed by id exactly as a delta is, so it lands
+    // where the question was asked and nowhere else.
+    dispatcher.emit('agent.standingAnswerSaved', saved({ runId: '999' }))
+
+    expect(handle.notice).not.toHaveBeenCalled()
+  })
+
+  /**
+   * An empty entry is not a wildcard. The contract requires a non-empty one
+   * (minLength 1) and the backend refuses to send a receipt without it, so
+   * anything arriving with none is off-contract — and drawing it on whatever
+   * block the run id found is the wrong block exactly as often as the right
+   * one.
+   */
+  it('drops a receipt that names no entry at all', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('will this need approval?')
+    const runId = dispatcher.next.run - 1
+    handle.el.dataset.entryId = 'answer-1'
+
+    dispatcher.emit('agent.standingAnswerSaved', saved({ runId: String(runId), entryId: '' }))
+
+    expect(handle.notice).not.toHaveBeenCalled()
+  })
+
+  it('drops a receipt whose entry names a different block', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('will this need approval?')
+    const runId = dispatcher.next.run - 1
+
+    // A stale or misrouted notification: the same guard the deltas use, and
+    // for the same reason — it must never be drawn on the wrong turn.
+    dispatcher.emit(
+      'agent.standingAnswerSaved',
+      saved({ runId: String(runId), entryId: 'answer-elsewhere' }),
+    )
+
+    expect(handle.notice).not.toHaveBeenCalled()
   })
 })

@@ -439,6 +439,23 @@ type LayoutRepository interface {
 	// read from the row rather than echoed from the request, so what the
 	// renderer draws is what the backend holds.
 	MovePane(ctx context.Context, paneID, tabID string) (Pane, error)
+	// PaneCwd answers where one pane is standing — the column SetPaneCwd
+	// writes and a restore reads. It is a read of that owner and not a
+	// second one: what it returns is exactly what the renderer last
+	// verified, and "" is a real answer meaning no cwd has ever been
+	// reported for this pane (a pane whose shell has no integration, or one
+	// that has not reached its first prompt).
+	//
+	// It exists because something other than a restore now needs it: a
+	// worker's pane opens where its coordinator's pane is standing
+	// (nocx-ty5ks), and resolving that from the pane id is this chain's job
+	// for the same reason WorkspaceForPane's is — one owner of the walk, so
+	// it cannot go out of step with the row.
+	//
+	// ErrNoSuchPane for an id no pane carries, never "" — the two are
+	// different facts and a caller choosing a directory must be able to tell
+	// "nobody reported one" from "there is no such pane".
+	PaneCwd(ctx context.Context, paneID string) (string, error)
 	// WorkspaceForPane walks pane → tab → workspace. This is what §4.5 means
 	// by workspaceId moving off the session: the backend owns the whole chain
 	// and RESOLVES the answer rather than being told it, so there is one

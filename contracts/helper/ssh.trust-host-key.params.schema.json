@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.trust-host-key.params.schema.json",
+  "title": "HelperSSHTrustHostKeyParams",
+  "description": "The helper asking the coordinator to RECORD a host key it has already been told to accept. The decision is not made here and cannot be: it travels in the probe's acceptOnTrust, set by the caller that has done whatever it does before a first connection, and the write lands in the coordinator's known_hosts through the single write path this repository has for it (ssh.RealClient.TrustHostKey). A helper that asks for this without being told to is asking for the same write any same-UID process on that machine could make for itself (D12), which is the trust model stated rather than a hole in it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["host", "algorithm", "key"],
+  "properties": {
+    "host": {
+      "description": "The storage identity, as in verify-host-key: the address for a direct route, the coordinator's own opaque route digest for a jump route.",
+      "type": "string",
+      "minLength": 1
+    },
+    "algorithm": {
+      "description": "The offered key's own type string, checked against the key bytes for the same reason it is on the verify half.",
+      "type": "string",
+      "minLength": 1
+    },
+    "key": {
+      "description": "The wire-format public key blob to record, base64. Public material, echoed from the handshake.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

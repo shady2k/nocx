@@ -53,15 +53,18 @@ func TestPublisherGrantEnrichedAndDelivered(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustIngest(t, pub, "T", env("L", h, 1, helloEvt()))
-	mustAckEstablishment(t, pub, r, "L", h)
 
 	mustIngest(t, pub, "T", env("L", h, 2, requestEvt("r-dom-1-0", lifecycle.EnvSudo, "", "", 0)))
 
 	grant := grantFrom(t, port)
 	// The grant addresses the PARENT: the adapter routes it to the parent's
 	// connection by this tuple.
-	if grant.Domain != h.Domain || grant.Epoch != h.Epoch || grant.Capability != h.Capability {
+	if grant.Domain != h.Domain || grant.Epoch != h.Epoch {
 		t.Fatalf("grant must be addressed to the parent, got dom=%s epoch=%d", grant.Domain, grant.Epoch)
+	}
+	// By the tuple, and by nothing secret (nocx-aqz7o).
+	if grant.Capability != (lifecycle.Capability{}) {
+		t.Fatal("the grant carries the parent's capability back down the inherited descriptor")
 	}
 	g := grant.Event.DomainGrant
 	if g == nil {
@@ -103,7 +106,6 @@ func TestPublisherGrantRefusedDeliversEmptyBootstrap(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustIngest(t, pub, "T", env("L", h, 1, helloEvt()))
-	mustAckEstablishment(t, pub, r, "L", h)
 
 	mustIngest(t, pub, "T", env("L", h, 2, requestEvt("r-dom-1-0", lifecycle.EnvSSH, "box", "", 22)))
 
@@ -134,7 +136,6 @@ func TestPublisherGrantWithoutBuilderDeliversEcho(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustIngest(t, pub, "T", env("L", h, 1, helloEvt()))
-	mustAckEstablishment(t, pub, r, "L", h)
 
 	mustIngest(t, pub, "T", env("L", h, 2, requestEvt("r-dom-1-0", lifecycle.EnvSu, "", "", 0)))
 
@@ -181,7 +182,6 @@ func TestPublisherPublishesTheChildsDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustIngest(t, pub, "T", env("L", parent, 1, helloEvt()))
-	mustAckEstablishment(t, pub, r, "L", parent)
 
 	// The parent asks for a child at pi@192.168.0.93, suspends, and the far
 	// shell establishes the child.
@@ -190,7 +190,6 @@ func TestPublisherPublishesTheChildsDestination(t *testing.T) {
 		Kind: lifecycle.KindDomainSuspended, DomainSuspended: &lifecycle.DomainSuspendedEvent{},
 	}))
 	mustIngest(t, pub, "T", env("L", child, 1, helloEvt()))
-	mustAckEstablishment(t, pub, r, "L", child)
 
 	// Every fact naming the child names where the child IS.
 	var named int

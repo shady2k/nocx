@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.spawn-ssh.params.schema.json",
+  "title": "HelperSessionSpawnSSHParams",
+  "description": "Params of the helper session service's spawn-ssh op: start one session whose process is a shell channel on a FAR host, opened on a connection THIS helper dials (nocx-50w7p.4). It is a second op beside `spawn` rather than a destination field on it, because every shape here is additionalProperties:false — a field added to `spawn` is a payload an older generation REJECTS, while a new op is one it answers unknown_op to — and because a destination on `spawn` would have to be absent on every local spawn, making its absence the common case. There is NO command and NO argv here: the remote command is the launch carrier, bounded and payload-free, built by the helper from internal/shellintegration. What the caller names is a DESTINATION and the shape of the session.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "workspace",
+    "destination",
+    "acceptOnTrust",
+    "hostKeyFingerprint",
+    "shell",
+    "cwd",
+    "cols",
+    "rows",
+    "windowBytes",
+    "desiredMode"
+  ],
+  "properties": {
+    "workspace": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/workspaceId"
+    },
+    "destination": {
+      "description": "Where the channel is opened and what it authenticates with: RESOLVED values, because alias resolution, ~/.ssh/config merging and the credential's own authorization against an endpoint stay in the coordinator, which is the party that reads the config and holds the binding. It $refs ssh.schema.json's own declaration rather than repeating it — one declaration of 'a resolved ssh destination', which is also what `probe` and `open` take (AD-8).",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/destination"
+    },
+    "acceptOnTrust": {
+      "description": "The CALLER's decision about a host key nobody has recorded, exactly as on a probe and a channel open: the helper may not trust a host on its own initiative, and the accept flow that sets this flag already ran in the coordinator.",
+      "type": "boolean"
+    },
+    "hostKeyFingerprint": {
+      "description": "The fingerprint the caller BELIEVES this host presents — the value its own known_hosts answered with, or the one a person just accepted. Empty means the caller has no expectation and the coordinator's verdict alone decides. When present it is ENFORCED before anything is authenticated: a handshake offering a different key ends the spawn with host-key-changed, with both fingerprints in the refusal's details. It is a local bind on top of the coordinator's verdict, not a substitute for it: the verdict travels over the helper's own connection and this value travelled with the REQUEST, so two facts must agree before a shell is opened on somebody's host.",
+      "type": "string"
+    },
+    "shell": {
+      "description": "The far shell this session is launched for, from shellintegration's own closed set. Empty means `auto`, which is the ordinary value: which shell a host logs you into is the host's business, and the far side's dispatcher decides at runtime.",
+      "type": "string",
+      "enum": ["", "auto", "bash", "zsh", "unknown"]
+    },
+    "cwd": {
+      "description": "Where the caller wants the far shell to start, and this generation can honour an EMPTY one only. A non-empty value is REFUSED BY NAME (bad_params) rather than accepted and ignored: the far login shell starts in the far account's own directory, the only routes that could move it travel as a command (which this wire refuses) or as an extension the launcher does not carry, and a field that accepted a value nothing acts on is the shape a later generation starts reading under a caller that never expected it.",
+      "type": "string",
+      "const": ""
+    },
+    "cols": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "rows": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "windowBytes": {
+      "description": "The requested bound on this session's output window, clamped by the helper exactly as `spawn`'s is: the cost is spent on somebody else's machine, so the helper keeps the last word, and what the session actually got is reported in the launch record.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "desiredMode": {
+      "description": "The caller's integration intent, in the set internal/profile declares as DesiredMode: `auto`, `raw`, `script`, `helper`. The helper applies that axis's OWN gate (profile.DesiredMode.DeliversScripts) rather than a copy of it — `raw` opens a plain login shell and integrates nothing, and an unrecognised value fails closed there, so a caller cannot invent its way into a launcher.",
+      "type": "string",
+      "enum": ["auto", "raw", "script", "helper"]
+    },
+    "agentToolEndpoint": {
+      "description": "The LOCAL socket each connection arriving on the far-side tool socket is forwarded into: this pane's own coordinator's tool endpoint on THIS machine, and the second half of `agentToolSocketPath`'s pair — one names a path on the far host, this names an endpoint on the machine the helper runs on. It travels per spawn for the same reason `session.spawn.params`'s field of that name does (nocx-50w7p.18): a helper daemon serves several coordinators of one account (D12), so an endpoint fixed at the daemon's own start would send a pane's far tool connections to a coordinator that never asked for that pane. A far socket path with no endpoint here is refused by name before anything is dialed.",
+      "type": "string"
+    },
+    "agentToolToken": {
+      "description": "The bearer the pane's agent presents to be admitted (nocx-50w7p.16): what the coordinator minted for THIS pane and its admission epoch. It is a SECRET, and this shape is not a place it rests — the far launcher renders it into the descriptor frame its shell reads, and it is never part of the launch record, the logs, or anything the helper hands a child process. Empty is a real state: a coordinator that requires no bearer sends none, and a pane whose frame carries none admits nobody answering to a token.",
+      "type": "string"
+    },
+    "agentToolsAbsent": {
+      "description": "WHY this pane's agent gets no nocx tools, from the closed set internal/shellintegration owns, or absent when nocx did not say (nocx-e2bws). It travels on this op because this is the route the reason is a fact about: a pane THIS machine's helper carries on a host with no nocx helper of its own has no bridge for the agent to run and no socket for it to dial, and a shell told nothing reports a path it was never given. A value this helper does not know is refused by name, and a value that contradicts `agentToolSocketPath` is refused in both directions.",
+      "type": "string"
+    },
+    "lifecycle": {
+      "description": "The caller's request for the authenticated lifecycle channel. THIS GENERATION DELIVERS THE PANE AND OPENS NO TUNNEL: the lifecycle channel is a remote loopback listener on the ssh connection and needs a forward on the helper's connection (nocx-50w7p.8). A request carrying one is answered with a session that has no lifecycle window, whose adopt-lifecycle answers null, and the helper logs the refusal by name. The two bearer values are accepted and never rendered anywhere: a capability with no channel behind it is a credential minted for nobody. Delivering the pane rather than refusing the request is ADR-0004's rule — an ordinary usable terminal is the one thing no failure path may suppress, and losing it to nocx's OWN optional work is the only way to lose it that is nocx's fault.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["lane", "domain", "epoch", "capability", "recovery"],
+      "properties": {
+        "lane": { "type": "string", "minLength": 1 },
+        "domain": { "type": "string", "minLength": 1 },
+        "epoch": { "type": "integer", "minimum": 1 },
+        "capability": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "recovery": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "idempotencyKey": {
+      "description": "The caller's name for the SPAWN, on exactly the terms `spawn` states: a repeat answers with the session the first one made rather than forking a second remote shell, which is what lets a pane's durable claim be written before the first irreversible effect.",
+      "type": "string",
+      "maxLength": 128
+    }
+  }
+}

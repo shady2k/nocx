@@ -34,6 +34,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"path"
 	"time"
 
 	"github.com/shady2k/nocx/internal/content"
@@ -74,6 +75,62 @@ type hostRouteResolver interface {
 	Resolve(profileID string) (host string, cfg *ssh.ConnectConfig, err error)
 }
 
+// localHelperRoute reaches THIS machine's own daemon (nocx-ie23r.2, extended by
+// nocx-ie23r.5). It is a seam of its own rather than a second method on
+// hostRouteResolver because the two have nothing in common but the generation:
+// a remote route is a saved connection and an ssh dial, a local one is a socket
+// in the person's own home, and folding one into the other would put a profile
+// lookup on a path that has no profile. helper_local.go's localHelperOpener is
+// the only implementation.
+//
+// IT IS ALSO THE CARRIER, and that composition is the point rather than
+// convenience: the connection this route asks about a generation is not the
+// connection an attachment rides (the ask may not start a daemon; an attachment
+// is an open-shaped act on this machine's daemon), and the object that owns
+// both is the one that owns this machine's route. See helper_local.go for the
+// two dial rules.
+type localHelperRoute interface {
+	LocalSessions(ctx context.Context, generation string) ([]client.SessionEntry, error)
+	hostedCarrier
+	// Release gives up the connection this route opened for ONE session that
+	// did not come back. It exists because the connection is opened before the
+	// attach can succeed (the lifecycle question comes first, on the same
+	// connection) and cannot be opened twice without breaking that pairing —
+	// so the outcome the route cannot see is told to it. A refused attach is
+	// not exotic: it is what a second coordinator meets on every session
+	// another one holds, and a socket per refusal kept until the process ends
+	// is a cost nobody would choose.
+	Release(sid string)
+	// noteHeld records that this daemon holds a session, which is the fact
+	// paneScreen.owner routes by (nocx-50w7p.5). A RE-ADOPTION is one of the
+	// two moments a session enters that set — the other is OpenHosted — so it
+	// is here rather than left to a caller to remember: a pane taken back is a
+	// pane this daemon is holding, and the scan the screen read does must say
+	// so.
+	noteHeld(sid session.ID)
+	// forgetHeld is the other end of the same interval, for the outcome where
+	// the daemon answered and does not hold the session: it is the only path to
+	// `absent`, and a pane that leaves this set must leave it here or the owner
+	// would keep routing to a terminal that is gone.
+	forgetHeld(sid session.ID)
+}
+
+// hostedCarrier is the connection a re-attachment is made over: it takes the
+// attachment a re-adopted pane's output and keystrokes ride, and it answers the
+// one other question the pass asks about a session it is taking back — the
+// lifecycle identity its shell is still speaking with (nocx-k6p18.31).
+//
+// ONE INTERFACE RATHER THAN TWO CALLBACKS, because on each route both are
+// properties of ONE connection and the choice of connection is the whole of
+// what differs: remotely the helper channel's client, which the registry owns,
+// and locally the coordinator's own connection to this machine's daemon, which
+// the opener owns. *client.Client satisfies it; so does localHelperOpener, by
+// forwarding both to the connection it holds.
+type hostedCarrier interface {
+	Attach(ctx context.Context, params proto.AttachParams) (*client.AttachedSession, error)
+	AdoptLifecycle(ctx context.Context, id client.HostSessionID) (*proto.LifecycleLaunch, error)
+}
+
 // sessionAdopter installs the transport-owned half of a re-adopted session:
 // the replay ring at the offset the recording ends at, the hole observer, the
 // output pump and the exit monitor. *transport.WSServer satisfies it; the
@@ -90,6 +147,15 @@ type readoptPass struct {
 	registry *helperRegistry
 	routes   hostRouteResolver
 	adopter  sessionAdopter
+	// local is this machine's own route (nocx-ie23r.2, extended by
+	// nocx-ie23r.5). It is a separate collaborator because it needs neither
+	// of the two above: a local binding names no saved connection, so there
+	// is nothing to resolve, and its daemon is reached over a socket in the
+	// person's own home rather than over an ssh exec lane. Nil is a
+	// legitimate wiring — a composition root that has no endpoint directory —
+	// and makes a local binding answer exactly as it did before this existed:
+	// `noInventory`.
+	local localHelperRoute
 	// timeout bounds one attempt; zero means readoptAttemptTimeout. It is a
 	// field rather than only a constant so the bound can be DRIVEN — a guard
 	// whose failure path no test can reach is a guard nobody has seen work.
@@ -117,7 +183,23 @@ const readoptAttemptTimeout = 15 * time.Second
 
 // Readopt is one attempt for one carried-over session.
 func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (sessionInventory, error) {
-	if rp == nil || rp.registry == nil || rp.routes == nil || rp.adopter == nil {
+	if rp == nil {
+		return nil, nil
+	}
+	// THIS MACHINE'S OWN SESSIONS ARE ASKED OVER A SOCKET (nocx-ie23r.2), and
+	// the branch comes FIRST because everything below it would refuse this
+	// binding for the wrong reason. The route requirements further down —
+	// Host, ProfileID, HelperCommand — are what an ssh exec lane needs, and a
+	// local session has none of them by design: its daemon is reached by
+	// dialling a socket named after its generation, and its route back is a
+	// generation plus the pane it was the pipe of (helper_local.go's
+	// OpenHosted says so at the field it leaves empty). Falling through would
+	// keep answering `noInventory` for every local session, which is the
+	// false "may still be running" this bead was filed to end.
+	if isLocalBinding(p) {
+		return rp.readoptLocal(ctx, p)
+	}
+	if rp.registry == nil || rp.routes == nil || rp.adopter == nil {
 		return nil, nil
 	}
 	bound := rp.timeout
@@ -158,41 +240,63 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 			account, host, p.Account, p.Host)
 	}
 	// CONSENT IS RE-ASKED, never assumed to have survived. Opening a helper
-	// channel to a machine is the act consent governs (D8), and a person who
-	// withdrew it between two runs must not have one opened silently.
+	// channel to a machine is the act consent governs (ADR-0034, ADR-0068),
+	// and a person who withdrew it between two runs must not have one
+	// opened silently.
 	if rp.registry.consent != nil && p.Fingerprint != "" {
 		resolver := newResolver(
 			withStore(rp.registry.consent),
 			// The artifact is not consulted and nothing is installed: this
 			// path connects to a helper the machine is ALREADY running. What
-			// is being asked is the machine's own decision, so the two inputs
-			// that decide it are supplied as satisfied and the answer comes
+			// is being asked is the machine's own decision, so the input
+			// that decides it is supplied as satisfied and the answer comes
 			// from the store.
 			withHelperArtifactAvailable(true),
-			withHelperRequested(true),
 		)
 		if resolver.Resolve(Machine{
 			Fingerprint: p.Fingerprint,
 			Mode:        profile.DesiredMode(cfg.DesiredMode),
-		}) != DesiredRelay {
+		}) != DesiredHelper {
 			return nil, fmt.Errorf(
 				"this machine no longer consents to the nocx helper, so %s was not asked about its sessions", p.Host)
 		}
 	}
 
+	// The install is rebuilt from the two facts the durable route KEPT —
+	// the binary's path and the generation — and the directory is the path's
+	// parent, which is the install's own identity in this level
+	// (consent.Install.Path records the same directory). Nothing here
+	// re-derives the install layout: a lane is opened with the directory the
+	// helper was installed into, whatever a later layout calls it.
 	f := &sessionFactory{
 		reg: rp.registry, sid: session.ID(p.SessionID), host: p.Host,
 		account: p.Account, opts: opts,
-		command: p.HelperCommand, expectHash: p.Generation,
+		install: installedHelper{
+			dir:        path.Dir(p.HelperCommand),
+			generation: p.Generation,
+			command:    p.HelperCommand,
+		},
 	}
 	h := &hostHelper{f: f, lanes: rp.registry.lanes, log: rp.registry.log}
 	h.mu.Lock()
 	c, outcome, connectErr := h.connectLocked(ctx)
 	h.mu.Unlock()
 	if connectErr != nil {
+		// nocx-73aln: this is the ONLY place a re-adoption's own connect
+		// failure reached a log line before — `unknown`'s cause and detail
+		// went to the store and nowhere else, so a re-adoption that failed at
+		// startup, for any reason, was invisible until a person opened a UI
+		// surface that reads unreconciled sessions. Warn, not Debug: the
+		// session this binding names is still running somewhere and this
+		// coordinator just failed to reach it.
+		rp.registry.log.Warn("re-adopting a session across a restart: could not reach its helper",
+			"session_id", p.SessionID, "generation", p.Generation, "host", p.Host, "error", connectErr)
 		return nil, fmt.Errorf("connect the helper holding this session: %w", connectErr)
 	}
 	if outcome.State != "" {
+		rp.registry.log.Warn("re-adopting a session across a restart: the helper refused",
+			"session_id", p.SessionID, "generation", p.Generation, "host", p.Host,
+			"state", outcome.State, "message", outcome.Message)
 		// A §6 refusal — a version or content mismatch, an exec the host
 		// refused, no helper serving that generation any more. Each is a
 		// reason nobody could be ASKED, so each is `unknown`. In particular
@@ -211,6 +315,8 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 		h.mu.Unlock()
 		return nil, fmt.Errorf("ask the helper holding this session what it holds: %w", err)
 	}
+	rp.registry.log.Debug("re-adopting a session across a restart: the helper's inventory",
+		"want_generation", p.Generation, "want_session", p.SessionID, "entries", entrySummaries(entries))
 
 	// THE ANSWER IS CAPTURED, not re-asked. The inventory handed back answers
 	// from the entries this one call returned, so the fact a verdict is
@@ -242,7 +348,22 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 		return inv, nil
 	}
 
-	if err := rp.readopt(ctx, p, cfg, h, c, *mine); err != nil {
+	if err := rp.readopt(ctx, p, session.Config{
+		Kind: session.KindRemote, Host: p.Host,
+		// The cwd is the HELPER's, read off the launch record it has kept
+		// since the shell started. The alternative is the pane's stored
+		// cwd, which is where the pane was opened and not where the shell
+		// is now, and a tab named after a directory the process left is a
+		// statement that used to be true.
+		Cwd:       launchCwd(mine),
+		PaneID:    p.PaneID,
+		ProfileID: p.ProfileID,
+		// No size: nothing here measured a viewport. The registry's own
+		// default stands until the client that claims this session
+		// resizes it, which it does on attach.
+		Remote:       cfg,
+		CredentialID: cfg.CredentialID,
+	}, h, c, *mine); err != nil {
 		// The session is LIVE and this coordinator could not take it. Said out
 		// loud, because a pane that quietly opened a second shell to the same
 		// host is the failure this bead exists to end, and the only trace of
@@ -256,17 +377,230 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 	return inv, nil
 }
 
+// readoptLocal is the local half of the same step: ask this machine's daemon
+// the ONE question, and — when it still holds the session — take it back.
+//
+// IT IS THE REMOTE HALF, ONE CARRIER OVER, and that is the whole of what this
+// function adds. The ask, the capture of the answer, the judge's rule and the
+// attach-and-adopt step are each a single behaviour that already exists; what
+// differs is that the route to the daemon is a socket in this person's own
+// home, the session's config names no host and no connection, and the
+// connection the attachment rides is the coordinator's own rather than one
+// helper channel per session (AGENTS.md, "look for the existing answer" — the
+// alternative was a second re-attach path that would have agreed with this one
+// until the first of them moved).
+//
+// EVERY FAILURE IS AN ERROR, so every failure is `unknown` with a cause. There
+// is no branch of this function that can produce `absent`: that verdict needs
+// an ACCOUNT that was asked and did not report the session, and a machine
+// whose helper did not answer has told nobody anything. A daemon that ANSWERS
+// and does not hold the session is the one path to `absent`, and it belongs to
+// the caller — this side only has to stop holding a connection nobody needs.
+//
+// A REFUSED ATTACH IS NOT `absent` EITHER, and it is not a lost session: the
+// daemon has just said the shell is there. The verdict is `live` — the session
+// exists; this coordinator merely could not take it — and the warn line says
+// why the pane will show up as a new shell instead.
+func (rp *readoptPass) readoptLocal(ctx context.Context, p content.PendingSession) (sessionInventory, error) {
+	if rp.local == nil {
+		// No local route is wired. The caller's own `noInventory` stands, and
+		// the session is not deleted on the strength of a missing collaborator.
+		return nil, nil
+	}
+	bound := rp.timeout
+	if bound <= 0 {
+		bound = readoptAttemptTimeout
+	}
+	// The bound is the same one the remote attempt carries and for the same
+	// reason: a daemon that accepts a connection and then stops talking must
+	// cost a start this much and not a start that never finishes. The pass is
+	// SYNCHRONOUS before the server listens, so an unbounded ask here is a
+	// backend that never serves.
+	ctx, cancel := context.WithTimeout(ctx, bound)
+	defer cancel()
+	asked, err := rp.local.LocalSessions(ctx, p.Generation)
+	if err != nil {
+		return nil, fmt.Errorf("ask this machine's helper what it holds: %w", err)
+	}
+	if asked == nil {
+		// No route was recorded for this binding. Nobody may be asked, which
+		// is the answer that stood before the local route existed. A daemon
+		// that ANSWERED with an empty list is a different thing and is judged
+		// `absent` below, which is why the two are not the same value.
+		return nil, nil
+	}
+	// THE ANSWER IS CAPTURED, not re-asked — the same rule and the same type
+	// the remote half uses, because the verdict and the re-adoption must be
+	// two consequences of ONE answer. Host and Account are empty here and that
+	// is exact rather than an omission: a local binding has neither, and an
+	// inventory that filled them in with this machine's name would be claiming
+	// a target the binding never named.
+	inv := &readoptedInventory{
+		generation: p.Generation,
+		live:       make(map[string]struct{}, len(asked)),
+	}
+	var mine *client.SessionEntry
+	for i := range asked {
+		if asked[i].HostSessionID.Generation != p.Generation {
+			continue
+		}
+		inv.live[asked[i].HostSessionID.Session] = struct{}{}
+		if asked[i].HostSessionID.Session == p.SessionID {
+			mine = &asked[i]
+		}
+	}
+	if mine == nil {
+		// THE DAEMON ANSWERED AND DOES NOT HOLD IT — the one path to `absent`.
+		// A pane that leaves this daemon leaves its set HERE, or the owner
+		// would go on routing the pane to a terminal that is gone and the
+		// refusal a person reads would name the wrong helper.
+		rp.local.forgetHeld(session.ID(p.SessionID))
+	}
+	if mine == nil || rp.adopter == nil || rp.registry == nil || rp.registry.registry == nil {
+		// Either the daemon answered and does not hold it — the one path to
+		// `absent`, which is the caller's to apply — or this coordinator has
+		// no transport to adopt into. Both answer with the inventory and
+		// nothing else: the ask released its own connection, so there is
+		// nothing here that could be left holding a socket.
+		return inv, nil
+	}
+	// THE CONFIG CARRIES THE DESTINATION, WHICH IS NOT ALWAYS LOCAL
+	// (nocx-50w7p.5). Being routed here says the CARRIER is this machine's
+	// daemon; it says nothing about where the session's shell runs, and a pane
+	// this bead moved onto the local daemon has a shell on somebody else's
+	// host. The destination therefore comes off the BINDING, and the carrier
+	// stays rp.local whatever it says: the attachment is this daemon's.
+	cfg := session.Config{
+		Kind: session.KindLocal,
+		// The cwd is the HELPER's, exactly as on the remote route: the launch
+		// record the daemon has kept since the shell started, not the pane's
+		// stored cwd, which is where the pane was opened. The union is read the
+		// same way here as there, because a local CARRIER says nothing about
+		// which branch the destination's record is on: an ssh pane this
+		// machine's daemon opened has no directory on THIS machine to report.
+		Cwd:    launchCwd(mine),
+		PaneID: p.PaneID,
+	}
+	if p.Host != "" {
+		// A remote destination, carried locally. Its remote half resolves the
+		// way the remote route resolves one, because the registry adopts a
+		// KindRemote session against a ConnectConfig.
+		if rp.routes == nil {
+			return nil, fmt.Errorf("re-adopt the session on %s: no route resolver is wired", p.Host)
+		}
+		host, resolved, rerr := rp.routes.Resolve(p.ProfileID)
+		if rerr != nil {
+			return nil, fmt.Errorf("resolve the connection this session was opened on: %w", rerr)
+		}
+		// THE RESOLVED DESTINATION MUST BE THE ONE THE BINDING NAMES. A profile
+		// edited between two runs resolves to a different host, and adopting
+		// the pane against it would bind this session to a machine nobody
+		// recorded — the inference nocx-k6p18.15 exists to forbid. The remote
+		// route checks the same pair before it opens consent or a channel, and
+		// a local carrier is no reason to trust the resolver more.
+		if host != p.Host {
+			return nil, fmt.Errorf(
+				"re-adopt the session on %s: the saved connection now resolves to %s — refusing to adopt it against a destination nobody recorded",
+				p.Host, host)
+		}
+		if resolved != nil && p.Account != "" && resolved.User != p.Account {
+			return nil, fmt.Errorf(
+				"re-adopt the session on %s: the saved connection now resolves to account %q and the binding names %q — refusing to adopt it against a destination nobody recorded",
+				p.Host, resolved.User, p.Account)
+		}
+		cfg.Kind = session.KindRemote
+		cfg.Host = host
+		cfg.Remote = resolved
+		cfg.ProfileID = p.ProfileID
+	}
+	if err := rp.readopt(ctx, p, cfg, nil, rp.local, *mine); err != nil {
+		// The session is LIVE and this coordinator could not take it. Said out
+		// loud, because the pane will otherwise open a second shell beside the
+		// one still running, and the only trace of it would be the absence of
+		// a row.
+		rp.registry.log.Warn("a local session that is still running could not be taken back; its pane will open a new shell instead",
+			"session_id", p.SessionID, "error", err)
+		rp.local.Release(p.SessionID)
+	} else {
+		// THE SESSION ENTERS THIS DAEMON'S SET ON RE-ADOPTION TOO
+		// (nocx-50w7p.5), and it is the same interval open uses: taken back is
+		// held. Without this a pane recovered after a restart would be in no
+		// helper's set, and the screen read — which asks the opener rather
+		// than the session's kind — would refuse a terminal this daemon is
+		// holding.
+		rp.local.noteHeld(session.ID(p.SessionID))
+	}
+	return inv, nil
+}
+
+// isLocalBinding reports whether this session's CARRIER is this machine's
+// daemon — a different question from where its DESTINATION is (nocx-50w7p.5).
+//
+// The two were one question until a remote destination could be carried by the
+// local daemon. A pane whose shell lives on somebody else's host, opened as a
+// channel by the daemon on THIS machine, carries Host and ProfileID; the old
+// test — "Host and ProfileID are empty" — therefore answered "remote" for it
+// and sent it down the route that demands a far-host HelperCommand it does not
+// have, so every such pane stayed unadopted across a restart.
+//
+// The discriminator is HelperCommand, and it is not a proxy for the carrier: it
+// is where the helper BINARY lives on the far host, which the bridge on that
+// host execs. A daemon reached over a socket on this machine has no such path,
+// and the remote route refuses to proceed without one (its own required-field
+// check above). So an empty value means the carrier is local as a matter of
+// what the value IS, not of what it happens to be empty of — the difference
+// between reading a fact the tree already carries and inventing a second field
+// to say it again.
+//
+// An id space no generation qualifies is still nobody's: a row without one is
+// refused here and left to a route that cannot judge it either.
+func isLocalBinding(p content.PendingSession) bool {
+	return p.Generation != "" && p.HelperCommand == ""
+}
+
+// entrySummaries is nocx-73aln's diagnostic: one line per entry a helper's
+// `sessions` op answered with, so a mismatch between what a binding names and
+// what the helper actually holds is a measurement rather than a guess.
+func entrySummaries(entries []client.SessionEntry) []string {
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, fmt.Sprintf("generation=%s session=%s exited=%t",
+			e.HostSessionID.Generation, e.HostSessionID.Session, e.Exit != nil))
+	}
+	return out
+}
+
 // readopt is the attach-and-adopt half, and it is deliberately the same half
 // OpenHosted runs: attach, adopt into the registry, register the helper
 // channel, hand the transport its ring and its pump. What differs is exactly
 // two things and no more — the attachment is not Fresh, and it resumes at the
 // offset this machine's recording ends at rather than at the window's base.
+//
+// IT IS ONE FUNCTION FOR TWO CARRIERS (nocx-ie23r.5). `cfg` is the config the
+// registry adopts under, so the remote route hands in a KindRemote config with
+// the ssh connection and the saved profile, and the local route hands in a
+// KindLocal one with neither; `h` is the remote route's helper channel, which
+// the registry indexes by session so an inventory can answer for it on a cold
+// start, and is nil locally because a local daemon's channel IS this
+// attachment (there is no second thing to reach through it). Everything else —
+// the lifecycle leg, the offset, the write lease, the rollback on every
+// failure — is the same act and must not have two copies.
+//
+// `carrier` IS THE ONE DIFFERENCE THAT IS A CONNECTION RATHER THAN A DECISION,
+// and it is a parameter because a CONNECTION has an owner on each route and
+// this function is not it. Remotely it is the helper channel's client, owned
+// by the registry entry `h` above; locally it is the coordinator's own
+// connection to this machine's daemon, owned by the opener that dialled it.
+// The alternative — passing a client and closing it here — would give this
+// function a lifetime it cannot see the end of, because the attachment lives
+// ON that client: a caller that closed it after the attach returned would
+// detach the session it had just recovered.
 func (rp *readoptPass) readopt(
 	ctx context.Context,
 	p content.PendingSession,
-	cfg *ssh.ConnectConfig,
+	cfg session.Config,
 	h *hostHelper,
-	c *client.Client,
+	carrier hostedCarrier,
 	entry client.SessionEntry,
 ) error {
 	sid := session.ID(p.SessionID)
@@ -289,8 +623,8 @@ func (rp *readoptPass) readopt(
 		// adapter, no half-adopted domain. What comes back is either the
 		// launch to adopt, "this session is conventional", or a reason the
 		// product will state (nocx-k6p18.31).
-		adoption := rp.adoptLifecycle(ctx, c, entry)
-		attached, err := c.Attach(ctx, proto.AttachParams{
+		adoption := rp.adoptLifecycle(ctx, carrier, entry)
+		attached, err := carrier.Attach(ctx, proto.AttachParams{
 			Subscriber: proto.SubscriberID(hex.EncodeToString(subscriberRaw[:])),
 			Session: proto.HostSessionID{
 				Generation: proto.GenerationID(entry.HostSessionID.Generation),
@@ -319,7 +653,7 @@ func (rp *readoptPass) readopt(
 		})
 		if err != nil {
 			adoption.abort()
-			return transport.HostedSessionOpen{}, fmt.Errorf("attach to the session still running on %s: %w", p.Host, err)
+			return transport.HostedSessionOpen{}, fmt.Errorf("attach to the session still running on %s: %w", reattachTarget(p), err)
 		}
 		// THE HOST'S OWN VERDICT ON A SHELL THAT ENDED WHILE WE WERE AWAY.
 		// The helper's exit notification fired once, at the moment the process
@@ -330,7 +664,13 @@ func (rp *readoptPass) readopt(
 		// been holding all along (nocx-k6p18.23). Carried BEFORE the adopt so
 		// the session can never be observed without it.
 		if entry.Exit != nil {
-			attached.AdoptExitStatus(*entry.Exit)
+			// The window frontier travels WITH the exit status (nocx-isjh4):
+			// entry.Window.Written is the offset this stream can never
+			// advance past now that the shell that would have advanced it is
+			// gone, and it is what lets this attachment reach EOF/Done on
+			// its own once it has actually read that far, instead of
+			// hanging forever waiting for bytes that will never come.
+			attached.AdoptExitStatus(*entry.Exit, proto.StreamOffset(entry.Window.Written))
 		}
 		if !attached.WriteGranted() {
 			// Another coordinator is holding this session's one write
@@ -343,36 +683,75 @@ func (rp *readoptPass) readopt(
 			_ = attached.Close()
 			adoption.abort()
 			return transport.HostedSessionOpen{}, fmt.Errorf(
-				"another nocx already holds the keyboard of this session on %s", p.Host)
+				"another nocx already holds the keyboard of this session on %s", reattachTarget(p))
 		}
-		sess, err := rp.registry.registry.Adopt(session.Config{
-			Kind: session.KindRemote, Host: p.Host,
-			// The cwd is the HELPER's, read off the launch record it has kept
-			// since the shell started. The alternative is the pane's stored
-			// cwd, which is where the pane was opened and not where the shell
-			// is now, and a tab named after a directory the process left is a
-			// statement that used to be true.
-			Cwd:       entry.Launch.Cwd,
-			PaneID:    p.PaneID,
-			ProfileID: p.ProfileID,
-			// No size: nothing here measured a viewport. The registry's own
-			// default stands until the client that claims this session
-			// resizes it, which it does on attach.
-			Remote:       cfg,
-			CredentialID: cfg.CredentialID,
-		}, sid, attached)
+		sess, err := rp.registry.registry.Adopt(ctx, cfg, sid, attached)
 		if err != nil {
 			_ = attached.Close()
 			adoption.abort()
 			return transport.HostedSessionOpen{}, fmt.Errorf("adopt the re-attached session: %w", err)
 		}
+		// THE FINGERPRINT IS RECORDED HERE TOO, exactly as a fresh open
+		// records it (helper_git.go's openFarHelper, helper_local.go's
+		// OpenHosted) — and it must be, because a re-adopted session's own
+		// channel is AttachedSession, which HostKeyFingerprint()'s own doc
+		// says "has no handshake of its own to have observed". Skipping this
+		// call left every re-adopted session answering "" forever (set-once,
+		// never set): a caller that consults the fingerprint to decide
+		// something — git.open's resolver, for the auto+consent-store branch
+		// — silently fails that lookup and refuses gracefully. A caller
+		// whose mode is an explicit answer (DesiredHelper) never reaches that
+		// lookup at all and finds nothing to warn it the session it is about
+		// to re-probe is one this coordinator cannot yet name by fingerprint
+		// (nocx-xn63t.6.5: measured driving git.open against a reconciled
+		// session immediately after a restart). p.Fingerprint is the same
+		// value recordHostedBinding already wrote to this session's durable
+		// row at open time, so this is not a new fact — only the first time
+		// it reaches the re-adopted, in-memory session object a live caller
+		// can actually read.
+		if p.Fingerprint != "" {
+			if rerr := rp.registry.registry.RecordHostKeyFingerprint(sid, p.Fingerprint); rerr != nil {
+				rp.registry.log.Warn("re-adopted session: its durable fingerprint could not be recorded",
+					"session_id", p.SessionID, "error", rerr)
+			}
+		}
 		// The registry entry is what makes `sessions.inventory` answer for
 		// this generation on a cold start, and it is written only now — after
 		// the attach and the adopt, so nothing claims a helper for a session
-		// this coordinator does not hold.
-		rp.registry.mu.Lock()
-		rp.registry.hosts[sid] = h
-		rp.registry.mu.Unlock()
+		// this coordinator does not hold. A LOCAL re-attachment has no such
+		// entry to write and says so by passing no helper: its channel is this
+		// attachment, and there is nothing else it could be reached through.
+		if h != nil {
+			// THE SAME HOLD openFarHelper TAKES (nocx-xn63t.6.3), taken here
+			// too (nocx-xn63t.6.5): from this point — before this session is
+			// even visible to a caller — until helperRegistry.SessionEnded
+			// reaches this entry, h's shared client is SESSION-HELD, and
+			// hostHelper.open's own refusing-outcome branch (refs==0) must
+			// not read that as "nothing references the helper" and close it
+			// out from under the PTY and lifecycle channel this same client
+			// carries. Without this, a re-adopted session's hostHelper kept
+			// hostedSession at its zero value forever — set-once like the
+			// fingerprint next to it — and the FIRST git.open against it (an
+			// ordinary notARepository refusal; frontend/src/git/git-store.ts's
+			// rescope() raises git.open for any SSH tab with a verified cwd,
+			// not only when the git panel is visible) closed the shared
+			// client and tore the session down with it. Measured against
+			// e2e/remote-coordinator-reclaim.spec.ts: a coordinator restart
+			// reconciled the session, and it went live-but-not-reclaimable
+			// the instant the returned pane's own cwd verification raised
+			// git.open — with no client ever asking for anything on it.
+			// Set under h.mu for the same reason openFarHelper does: helper(f)
+			// may already be finding this same entry from a concurrent
+			// git.open the instant this function returns.
+			h.mu.Lock()
+			h.hostedSession = true
+			h.mu.Unlock()
+			rp.registry.mu.Lock()
+			rp.registry.hosts[sid] = h
+			rp.registry.mu.Unlock()
+		} else {
+			rp.rearmLocal(sess, entry)
+		}
 		adopted = true
 		open := transport.HostedSessionOpen{
 			Session: sess, Host: p.Host, Account: p.Account,
@@ -387,7 +766,13 @@ func (rp *readoptPass) readopt(
 			// nothing at all is what this bead was filed for — absence on
 			// this axis means "conventional by design", and a shell that was
 			// integrated five minutes ago is not that.
-			IntegrationShell:  entry.Launch.Shell,
+			// THE LOCAL BRANCH ALONE, exactly as an open fills it
+			// (helper_local.go's OpenHosted): a pane whose process is a shell
+			// channel on somebody else's host has no shell on this machine to
+			// integrate, and empty on this axis is "do not register" rather
+			// than a gap. A record of zeros here would have claimed a shell
+			// named "" instead.
+			IntegrationShell:  localShell(&entry),
 			IntegrationStatus: adoption.status,
 			IntegrationReason: adoption.reason,
 		}
@@ -404,14 +789,100 @@ func (rp *readoptPass) readopt(
 	return err
 }
 
-// readoptedInventory answers for one generation on one host from the entries a
-// single `sessions` call returned.
+// launchCwd is the directory the HELPER recorded for a session, read off
+// whichever branch of the launch union its entry carries (nocx-s8mfn).
+//
+// ONE DERIVATION FOR BOTH ROUTES, and that is why it is a function: the far
+// route and this machine's route both re-adopt against the directory the
+// daemon has kept since the shell started, and the union is the same question
+// on both. A session taken back off a far helper is normally the PTY that host
+// forked — the local branch — but the same id space may hold a shell channel
+// it dialed, whose directory is the far side's answer and is empty in this
+// generation; and a local CARRIER says nothing about which branch applies,
+// since an ssh pane carried by this machine's daemon has no directory here to
+// report. Reading the local branch unconditionally would be reading a record
+// such a session does not have.
+//
+// Absent entries answer "" — the honest value, and the same one the wire's own
+// absence means. It is not a fallback to the pane's stored cwd, which is where
+// the pane was opened rather than where the shell is.
+func launchCwd(entry *client.SessionEntry) string {
+	switch {
+	case entry == nil:
+		return ""
+	case entry.Launch != nil:
+		return entry.Launch.Cwd
+	case entry.RemoteLaunch != nil:
+		return entry.RemoteLaunch.Cwd
+	default:
+		return ""
+	}
+}
+
+// localShell is the shell the helper FORKED on its own machine, or "" when
+// this session's process is not on it. It is the IntegrationShell an open
+// records (helper_local.go's OpenHosted), for the same reason: the
+// integration axis is about a shell on THIS machine, and a session on somebody
+// else's host has none to integrate.
+func localShell(entry *client.SessionEntry) string {
+	if entry == nil || entry.Launch == nil {
+		return ""
+	}
+	return entry.Launch.Shell
+}
+
+// reattachTarget names where a session is being taken back from, for the two
+// errors in readopt a person reads. A remote binding carries a host; a local
+// one carries none by construction (isLocalBinding), and "the session still
+// running on " with nothing after it is not a sentence.
+func reattachTarget(p content.PendingSession) string {
+	if p.Host != "" {
+		return p.Host
+	}
+	return "this machine"
+}
+
+// rearmLocal completes a LOCAL re-attachment with the one fact an open records
+// that an attach cannot.
+//
+// It is reached only for a local session (readopt's `h == nil`), and the split
+// is not cosmetic: the remote route's helper channel is registered in the
+// registry because an inventory answers through it on a cold start, while a
+// local session's connection belongs to the opener that opened it — the same
+// owner the pane's screen read asks, so a registry entry here would be a second
+// answer to a question that already has one.
+func (rp *readoptPass) rearmLocal(sess session.Session, entry client.SessionEntry) {
+	// THE PROCESS THE DAEMON STARTED is recorded exactly as an open records
+	// it (helper_local.go's OpenHosted), because two decisions read that fact:
+	// worker admission's root-pid check and agent approval's "this pane is
+	// ours". A re-attached pane that left it unknown would refuse both, which
+	// is the feature silently going away across a restart.
+	// AND ONLY WHEN THERE IS ONE, which is the union's answer: a pane whose
+	// process is a shell channel on a far host has no pid on this machine, and
+	// its entry carries no local branch at all (nocx-s8mfn).
+	if entry.Launch != nil && entry.Launch.Pid > 0 {
+		if err := rp.registry.registry.RecordOwnedProcessPID(sess.ID(), entry.Launch.Pid); err != nil {
+			rp.registry.log.Warn("a re-attached local pane's launch pid was not recorded",
+				"session_id", string(sess.ID()), "error", err)
+		}
+	}
+}
+
+// readoptedInventory answers for one generation from the entries a single
+// `sessions` call returned — over an ssh lane for a remote session, over this
+// machine's own socket for a local one.
 //
 // It answers from a captured set rather than by calling again, and that is the
 // point rather than an optimisation: the verdict and the re-adoption are then
 // two consequences of ONE answer. A second call could disagree with the first,
 // and the disagreement that costs something is the one where it fails and a
 // session already taken back is judged on an error.
+//
+// Host and Account are EMPTY for a local answer, and that is exact rather than
+// an omission: a local binding names no host, and an inventory that filled one
+// in with this machine's name would claim a target reconciliation could then
+// match against — which is the shape that turns a truthful "I do not hold
+// that" about somebody else's id into a deletion of live work.
 type readoptedInventory struct {
 	generation string
 	host       string

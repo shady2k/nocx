@@ -11,14 +11,20 @@
  * workbench, imported rows, the folder form, the run outcome, and the inherited
  * variable row.
  */
-import { test as base, expect } from '@playwright/test'
+import { expect } from '@playwright/test'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AddressInfo } from 'node:net'
 
-import { appReadyForInput, bindEndpoint, VaultBackend, type DisposableRoot } from './harness'
+import {
+  standalone as base,
+  appReadyForInput,
+  bindEndpoint,
+  VaultBackend,
+  type DisposableRoot,
+} from './harness'
 import { readStand } from './stand'
 
 const test = base

@@ -1,8 +1,8 @@
 # `.beads/` — the executable backlog
 
 The tracker is **`br`** ([beads_rust](https://github.com/Dicklesworthstone/beads_rust)).
-`br ready` to see work, `scripts/br-queue.sh` when the question is "what next", and
-[`AGENTS.md`](../AGENTS.md) for the rules — including the `bd` → `br` table, because
+`br ready` is the answer to "what next" — narrow it with `--epic`, `--parent`, `-t`
+or `-l` — and [`AGENTS.md`](../AGENTS.md) carries the rules — including the `bd` → `br` table, because
 the `beads-superpowers` plugin still speaks the old binary's name.
 
 ## What is in here, and what git carries

@@ -3,6 +3,7 @@
 // Extracted from Tab so the chrome layer never touches a session or renderer.
 // ═══════════════════════════════════════════════════════════════════════════
 
+import type { IntegrationMethod } from './host-key-dialog'
 import { XtermRenderer } from './renderers/xterm'
 import type { MarkerAdapter, TerminalRenderer } from './renderers/types'
 import { LifecycleClient } from './lifecycle/client'
@@ -12,6 +13,7 @@ import {
   freezeBlock as kernelFreezeBlock,
 } from './lifecycle/state'
 import { LifecycleProjections } from './lifecycle/projections'
+import type { UnattributedCommand } from './lifecycle/projections'
 import { CommandEditor } from './editor'
 import { machineName, remoteMachineName } from './machine-name'
 import { shellExtensions } from './shell-highlight'
@@ -49,19 +51,24 @@ import { secretCandidateExtension } from './secret-candidate'
 import { unresolvedRedactionField } from './unresolved-redactions'
 import { PromptVaultController } from './prompt-vault'
 import { VaultClient } from './vault-client'
-import { showToast } from './ui/toast'
+import { showToast, type ToastLevel } from './ui/toast'
 import type { SessionIntegrationChanged } from './generated/session.integrationChanged'
-import type { DriverState } from './pane-observation'
+import type { SessionToolSurfaceChanged } from './generated/session.toolSurfaceChanged'
+import type { DriverState, PaneChild } from './pane-observation'
 import type { SessionSignal } from './generated/session.signal'
 import {
   IntegrationSilenceStore,
   integrationMessage,
+  isAwaitingIntegration,
   isDegraded,
   safeSilenceStorage,
   subscribeIntegrationChanged,
+  subscribeToolSurfaceChanged,
   type OutputRecordingSource,
 } from './integration/status'
 import { mountIntegrationNotice } from './integration/notice'
+import { mountIntegrationWaiting } from './integration/waiting'
+import { mountToolSurfaceNotice } from './tool-surface-notice'
 import { mountRecoveryNotice } from './recovery-notice'
 import { mountUnreconciledNotice, type UnreconciledCause } from './unreconciled-notice'
 import { mountConnectionMark } from './connection-mark'
@@ -91,6 +98,7 @@ const RECORDING_UNKNOWN: OutputRecordingSource = {
   subscribe: () => () => {},
 }
 import { BlockReceipt } from './ui/block-receipt'
+import type { BlockNotice, BlockNoticeState } from './ui/block-notice'
 import type { HistoryRecord } from './generated/history.record'
 import {
   blockOutputText,
@@ -228,6 +236,18 @@ const RESIZE_ECHO_MS = 400
 const SETTLE_BACKSTOP_MS = 3000
 
 /**
+ * A Ctrl-C on the data plane: ETX, which the line discipline turns into
+ * SIGINT for the foreground group while ISIG is set, and which the shell's
+ * own line editor reads as "discard the line I am on".
+ *
+ * One byte, one spelling. It is named here because the renderer now decides
+ * about it — whether a submission still in flight is cancelled by it
+ * (nocx-xn63t.6.12) — and a literal '\x03' at that decision point would be
+ * the second spelling of the same key.
+ */
+const INTERRUPT = '\x03'
+
+/**
  * Whether a settle call failed because the backend no longer holds the
  * capture — it was destroyed by the tab closing, the vault sealing, the
  * transport dropping, or the record that carried it failing.
@@ -293,6 +313,79 @@ function hostKeyEvidenceFromOpenError(
   }
 }
 
+/** The connect-time helper ask (ADR-0068, owner's decision 2026-09-16):
+ *  an auto connection whose destination has no consent record is asked
+ *  before the open proceeds. hostKey is present only when the SAME dial
+ *  also discovered the key is unknown or changed — one dialog carries both
+ *  questions rather than raising two in sequence. Mirrors the backend's
+ *  open.helperConsent.schema.json exactly. */
+export interface HelperConsentAskEvidence {
+  host: string
+  fingerprint: string
+  hostKey: HostKeyErrorEvidence | null
+  profileId?: string
+}
+
+function helperConsentAskFromOpenError(
+  err: unknown,
+  profileId?: string,
+): HelperConsentAskEvidence | null {
+  if (!(err instanceof RpcError)) return null
+  const data: unknown = err.data
+  if (
+    !data ||
+    typeof data !== 'object' ||
+    !('helperAsk' in data) ||
+    data.helperAsk !== true ||
+    !('host' in data) ||
+    typeof data.host !== 'string' ||
+    !('fingerprint' in data) ||
+    typeof data.fingerprint !== 'string'
+  ) {
+    return null
+  }
+  let hostKey: HostKeyErrorEvidence | null = null
+  if ('hostKey' in data && data.hostKey && typeof data.hostKey === 'object') {
+    const hk: unknown = data.hostKey
+    if (
+      typeof hk === 'object' &&
+      hk !== null &&
+      'host' in hk &&
+      typeof hk.host === 'string' &&
+      'knownHostsHost' in hk &&
+      typeof hk.knownHostsHost === 'string' &&
+      'changed' in hk &&
+      typeof hk.changed === 'boolean' &&
+      'algorithm' in hk &&
+      typeof hk.algorithm === 'string' &&
+      'fingerprint' in hk &&
+      typeof hk.fingerprint === 'string' &&
+      'key' in hk &&
+      typeof hk.key === 'string'
+    ) {
+      hostKey = {
+        host: hk.host,
+        knownHostsHost: hk.knownHostsHost,
+        changed: hk.changed,
+        algorithm: hk.algorithm,
+        fingerprint: hk.fingerprint,
+        storedFingerprint:
+          'storedFingerprint' in hk && typeof hk.storedFingerprint === 'string'
+            ? hk.storedFingerprint
+            : undefined,
+        key: hk.key,
+        profileId,
+      }
+    }
+  }
+  return {
+    host: data.host,
+    fingerprint: data.fingerprint,
+    hostKey,
+    profileId,
+  }
+}
+
 /**
  * Whether `el` is somewhere the user types on purpose.
  *
@@ -344,6 +437,22 @@ interface HeldRange {
   readonly endOffset: number
 }
 
+/** The window between a person's submit and the command's own bytes reaching
+ *  the pty, as the grid's keystrokes see it: the keys typed into it, and
+ *  whether a Ctrl-C cancelled the submission they were waiting for.
+ *
+ *  Two facts, one object, because they are one state: a cancelled window
+ *  holds no keys — the interrupt discards the line it interrupted, and every
+ *  key in here belongs to that line. Read as one take (takeHeldWindow) for
+ *  the same reason. */
+interface HeldWindow {
+  /** The keys, in the order they were typed. A cancelled window holds none. */
+  keys: string[]
+  /** True once a Ctrl-C arrived in the window: the submission is not to be
+   *  written, and nothing held for it is delivered. */
+  cancelled: boolean
+}
+
 /** The host callbacks a tab may hand a TerminalContent. Named rather than
  *  positional: they are all optional functions, so any misalignment between
  *  them type-checks cleanly and fails only in front of a user. */
@@ -360,10 +469,13 @@ export interface TerminalContentHooks {
    *  apart, so it pushes the program title on its own hook. */
   onProgramTitleChange?: (programTitle: string) => void
   /** What an ENROLLED pane's driver says its screen is inviting
-   *  (nocx-szb40.3). Pushed like the program title, and for the same reason:
-   *  the content owns the session handle, the pane owns what the tab shows.
-   *  Null when the pane stops being observed. */
-  onPaneObservationChange?: (state: DriverState | null) => void
+   *  (nocx-szb40.3), and the child agents its own chrome named (nocx-o1v0h).
+   *  Pushed like the program title, and for the same reason: the content owns
+   *  the session handle, the pane owns what the tab shows. Null when the pane
+   *  stops being observed, and the children go with it — a pane nobody is
+   *  observing has no rows to show, which is a different thing from a pane
+   *  observed to have none. */
+  onPaneObservationChange?: (state: DriverState | null, children: readonly PaneChild[]) => void
   /** The session is an alias (not a saved profile) and can be adopted as a
    *  nocx connection. True = adoptable, false = not. */
   onAdoptabilityChange?: (adoptable: boolean) => void
@@ -415,6 +527,20 @@ export interface TerminalContentHooks {
    *  backend-issued known_hosts identity; mount then retries the same open.
    *  Abort closes a pending decision when the tab is closed. */
   onHostKeyError?: (evidence: HostKeyErrorEvidence, signal: AbortSignal) => Promise<boolean>
+  /** An SSH connection needs a person's choice of integration method for
+   *  this destination before it may proceed (ADR-0069's connect-time ask) —
+   *  with the host-key evidence carried alongside when the same dial also
+   *  needs a trust decision. The promise resolves with the chosen method
+   *  once it was written (to the saved connection's desiredMode, or —
+   *  absent a profileId — nowhere, since a hand-typed connection carries the
+   *  choice on the retried open instead); mount then retries. null means the
+   *  person closed the dialog, or trusted only the host key, without
+   *  choosing a method — the open fails. Abort closes a pending decision
+   *  when the tab is closed. */
+  onHelperConsentAsk?: (
+    ask: HelperConsentAskEvidence,
+    signal: AbortSignal,
+  ) => Promise<IntegrationMethod | null>
   /** The reference picker's setup offer needs the setup dialog (no OS key):
    *  the vault layer owns it — wired by main.tsx to
    *  vaultController.openSetup. */
@@ -455,6 +581,12 @@ export interface TerminalContentHooks {
    *  it is the same idea — a state names one page that repairs it — and
    *  wired by main.tsx to the Settings tab's Roles page. */
   onOpenRoles?: () => void
+  /** The approval receipt's second action: open Settings → Assistant
+   *  permissions,
+   *  where standing answers are managed (nocx-2019q). Beside onOpenRoles for
+   *  the same reason it is beside onCreateEndpoint — a line on screen names
+   *  the one page that governs what it is about — and wired by main.tsx. */
+  onManagePermissions?: () => void
   /** TAKE A LIVE SESSION BACK instead of opening a new one (design D5, §5).
    *
    *  The coordinator outlives this window, so a pane the layout chain brings
@@ -983,22 +1115,6 @@ export class TerminalContent extends BasePaneContent {
     fence: string
     generation: string
   } | null = null
-  /** The establishment generation whose acknowledgement is in flight, and the
-   *  one whose acknowledgement the backend accepted. Replays are intentionally
-   *  idempotent — the same projection may arrive from a live transition and
-   *  again from the post-open or post-reattach replay — so a generation is
-   *  claimed once while its ack is outstanding and permanently once it lands.
-   *
-   *  The two are kept apart because a FAILED ack must not count as one. An
-   *  ack in flight when the socket drops is rejected by the dispatcher
-   *  (rejectAllPending), and the backend never saw it: its pending ACCEPT is
-   *  still unflushed, and the reattach replay carries that same generation
-   *  because only a fresh shell hello mints a new one. Collapsing both states
-   *  into "acknowledged" made the renderer suppress the one retry that could
-   *  have completed the handshake, leaving the tab conventional until the
-   *  accept expired. */
-  private _establishmentAckInFlight: string | null = null
-  private _establishmentAcked: string | null = null
   /** Monotonic identity for the pane's current session bind. Async
    *  acknowledgements from an old shell may settle after reconnect, but they
    *  must never mutate the new shell's episode. */
@@ -1100,13 +1216,13 @@ export class TerminalContent extends BasePaneContent {
 
   // ── Capability rail (nocx-mlm7) ────────────────────────────────────
   /** The resolved destination mode from the open ack
-   *  (auto|raw|script|relay): the connection-scope default the capability
+   *  (auto|raw|script|helper): the connection-scope default the capability
    *  control starts from. auto is the initial value because it is what an
    *  unanswered destination resolves to everywhere else (ADR-0033) — the
    *  ack is authoritative and arrives shortly, and a placeholder that
    *  disagreed with the cascade's default is the two-defaults defect that
    *  ADR closed on the backend. raw refuses every rewrite and remote
-   *  write; relay allows the Tier-B binary. */
+   *  write; helper allows the Tier-B binary. */
   private _policy: DesiredMode = 'auto'
   /** The session's integration status, as the backend keeps revising it
    *  (nocx-dvql). It replaced the open ack's one-shot shellIntegrationReason,
@@ -1115,10 +1231,31 @@ export class TerminalContent extends BasePaneContent {
    *  channel lost mid-session. null means the session never asked for
    *  integration and there is nothing to say about it. */
   private _integration: SessionIntegrationChanged | null = null
+  /** The session handle's own `awaitsIntegration` — the open ack's field
+   *  (nocx-ui8q6.6) for a session this pane opened, or the attach ack's same
+   *  field (nocx-ty0hc) for one it reclaimed or reattached to. Either way it
+   *  says whether THIS session has just entered the axis `starting`, read
+   *  before `_integration` can hold a fact — the first
+   *  session.integrationChanged arrives strictly after the ack (AD-7), so
+   *  there is a gap in which `_integration` is still null and this is the
+   *  only thing that says whether null means "not yet" or "not ever".
+   *  Consulted by isAwaitingIntegration ONLY while `_integration` is null;
+   *  once a fact exists this is ignored; and it is set fresh on every
+   *  `_bindSession` call — first bind and rebind alike — so a reconnect's new
+   *  session is never judged by the old one's answer. */
+  private _awaitsIntegration = false
   /** The subscription to that status, dropped on dispose. */
   private _integrationUnsub: (() => void) | null = null
+  /** The launch-owned worker tool-surface result, independent of shell integration. */
+  private _toolSurface: SessionToolSurfaceChanged | null = null
+  private _toolSurfaceUnsub: (() => void) | null = null
+  private _toolSurfaceNoticeDispose: (() => void) | null = null
   /** The disposer for the mounted degraded-session card, when one is up. */
   private _noticeDispose: (() => void) | null = null
+  /** The disposer for the waiting card, mounted for exactly as long as the
+   *  axis reads `starting` (nocx-ui8q6.1). Null means the terminal grid is
+   *  showing — either the axis has answered, or this session never asked. */
+  private _integrationWaitingDispose: (() => void) | null = null
   /** The disposer for the reclaimed-pane card that names the output this
    *  session produced and nothing kept (nocx-fz4qa). Separate from the card
    *  above because the two report different KINDS of fact: that one is a
@@ -2033,8 +2170,16 @@ export class TerminalContent extends BasePaneContent {
       this.sshOpts.host,
       this.sshOpts.user,
       anchor,
+      this._sessionDesiredModeOverride,
     )
   }
+
+  /** A one-shot integration-method override for a hand-typed connection with
+   *  no saved profile, set once the connect-time ask (ADR-0069) is answered
+   *  for THIS session — there is nowhere else to keep the choice. Read by
+   *  openRequestedSession's retry; a profile-backed connection never sets
+   *  this, since its answer was written to the connection itself. */
+  private _sessionDesiredModeOverride: IntegrationMethod | undefined
 
   /**
    * Take back the session the coordinator is already running for this pane,
@@ -2072,6 +2217,31 @@ export class TerminalContent extends BasePaneContent {
       try {
         return await this.openRequestedSession()
       } catch (err) {
+        // The connect-time ask (ADR-0069) is checked FIRST: its shape is a
+        // superset of the plain host-key failure — it carries the same
+        // evidence, nested, when the key also needs a trust decision — so
+        // checking host-key-only second is what keeps a combined refusal
+        // from ever raising two dialogs in sequence.
+        const ask = helperConsentAskFromOpenError(err, this.sshOpts?.profileId)
+        if (ask && this.hooks.onHelperConsentAsk) {
+          const method = await this.hooks.onHelperConsentAsk(ask, signal)
+          if (!method) {
+            throw new Error(`The connection to ${ask.host} needs an answer before it can continue`)
+          }
+          if (signal.aborted) {
+            throw new Error('SSH open cancelled')
+          }
+          // A hand-typed connection (no saved profile) has nowhere to keep
+          // the answer — connections.setIntegrationMethod wrote nothing for
+          // it to persist — so the retry itself carries the chosen method,
+          // for this session alone (ADR-0069). A saved connection needs no
+          // override: the write already updated its desiredMode, and the
+          // resolver reads that fresh on every open.
+          if (!this.sshOpts?.profileId) {
+            this._sessionDesiredModeOverride = method
+          }
+          continue
+        }
         const evidence = hostKeyEvidenceFromOpenError(err, this.sshOpts?.profileId)
         if (!evidence || !this.hooks.onHostKeyError) {
           throw err
@@ -2435,6 +2605,19 @@ export class TerminalContent extends BasePaneContent {
               this._mutateSummonAnswers(() => handle.reasoning(text))
               this.scrollback?.scrollToBottom()
             },
+            // A line the turn states about itself grows the block exactly as
+            // a delta does, so it follows for the same reason — and it is
+            // forwarded EXPLICITLY, like the two above: the spread would
+            // carry the method and lose the follow, which is the gap nobody
+            // notices until one of the four event kinds stops scrolling.
+            notice: (state: BlockNoticeState) => {
+              let drawn!: BlockNotice
+              this._mutateSummonAnswers(() => {
+                drawn = handle.notice(state)
+              })
+              this.scrollback?.scrollToBottom()
+              return drawn
+            },
             // `model` is forwarded, and it was not: this wrapper took two
             // parameters where the handle takes three, so the "answered by
             // <model>" provenance nocx-e6kn2 added could never be painted —
@@ -2477,6 +2660,9 @@ export class TerminalContent extends BasePaneContent {
         // is fixed. A refusal with nowhere to go is how a person concludes
         // the feature is broken rather than unconfigured.
         onNoEndpoint: () => this.hooks.onCreateEndpoint?.(),
+        // Where a standing answer is managed, for the receipt the turn
+        // draws when one is saved (nocx-2019q).
+        openPermissions: () => this.hooks.onManagePermissions?.(),
         // A question's editor layer: the DOCUMENT-level surfaces only. The
         // shell highlighter and the completion surface stay with the shell
         // — prose is not a command and must not be painted as one — while
@@ -3183,6 +3369,26 @@ export class TerminalContent extends BasePaneContent {
                 error: String(error),
               })
             })
+        },
+        // A command whose authenticated outcome reached the projections and
+        // found no ledger record to carry it (nocx-2vb9y). Not repaired here:
+        // a repair that guessed a record would be the guess nocx-td6d4.10
+        // removed.
+        //
+        // `at: 'complete'` is the one that costs a finished command its
+        // history row and its notification, so it is also the one the PERSON
+        // must be able to see: the block freezes with its exit status either
+        // way, and a log the user never reads is exactly the soft degrade
+        // AGENTS.md refuses. The other two are diagnosis — they say how far
+        // the command got — and belong in the log alone.
+        (report: UnattributedCommand) => {
+          log.warn('nocx: a command the ledger could not carry', {
+            pane: this.pane.paneId,
+            ...report,
+          })
+          if (report.at === 'complete') {
+            this.scrollback?.blockManager.markUnrecorded(report.attemptId)
+          }
         },
       )
       this._projections.attach()
@@ -3908,6 +4114,10 @@ export class TerminalContent extends BasePaneContent {
       this._lifecycleUnsub = null
       this._integrationUnsub?.()
       this._integrationUnsub = null
+      this._toolSurfaceUnsub?.()
+      this._toolSurfaceUnsub = null
+      this._dropToolSurfaceNotice()
+      this._toolSurface = null
       this.session?.close()
       this.session = null
 
@@ -3915,18 +4125,15 @@ export class TerminalContent extends BasePaneContent {
       this._replayCompletions = []
       this._replayCommandOpen = false
       // The state that DESCRIBES the shell that is gone. The kernel's domains,
-      // the markers that point into a stream nobody is writing any more, the
-      // handshake generation that was acknowledged to a backend lane that no
-      // longer exists. Left standing, each of them would answer a question
-      // about the new shell with a fact about the old one.
+      // the markers that point into a stream nobody is writing any more.
+      // Left standing, each of them would answer a question about the new
+      // shell with a fact about the old one.
       this._recoveryAcking = false
       this._recoveryAckClaim = null
       this._projections?.reset()
       this.lifecycle.reset()
       this._disposeAllMarkers()
       this._recovery = null
-      this._establishmentAcked = null
-      this._establishmentAckInFlight = null
       this._sessionExited = false
       this._sessionLost = false
       this._liveness = null
@@ -3992,7 +4199,12 @@ export class TerminalContent extends BasePaneContent {
     renderer: XtermRenderer,
     rebind: boolean,
   ): Promise<boolean> {
-    const bindGeneration = ++this._bindGeneration
+    // Bumped for every bind, including this one: the recovery-ack claim
+    // further below (_recoveryAckClaim) reads this._bindGeneration directly
+    // to tell its own bind apart from a later one. Advancing it here has no
+    // local reader any more — the establishment-acknowledgement closures
+    // that used to capture it were removed with the mechanism (ADR-0062).
+    ++this._bindGeneration
     // The pane's own parts, which this method uses and never creates. A caller
     // that has not built them is a programming error rather than a state to
     // handle: mount() builds them before the first bind, and a rebind only
@@ -4034,76 +4246,20 @@ export class TerminalContent extends BasePaneContent {
       }
       // The kernel applies the fact and notifies onChange on a real
       // change; the ownership sync runs there, once.
+      //
+      // There used to be an establishment acknowledgement here (ADR-0024
+      // decision 9's old mechanism, a now-removed RPC call): the backend
+      // withheld the shell's accept until this renderer sent one back for
+      // the exact generation the fact carried. ADR-0062 removed it — the
+      // backend now flushes the accept on its own authority as soon as it
+      // is minted, because a pane the backend itself opens
+      // (WSServer.OpenSession) has no subscriber to ever send this
+      // acknowledgement, and such a pane could never establish. What made
+      // the removal safe is nocx-ui8q6.1: a pane whose axis reads
+      // `starting` shows no grid and drops keystrokes, so the window this
+      // mechanism used to guard — a suppressed prompt with an editor not
+      // yet ready — is now closed on the renderer's own side instead.
       this.lifecycle.applyFact(fact)
-      // ADR-0024 decision 9: the establishment is acknowledged only
-      // AFTER the presentation is committed — applyFact above is what
-      // makes the editor available (ownership syncs on its onChange).
-      // The backend flushes the pending accept, and the shell may
-      // suppress its native prompt, ONLY on this acknowledgement for
-      // this exact generation. Without it the handshake times out and
-      // the session stays conventional with a visible prompt, which is
-      // the fail-open direction: no window in which the prompt is
-      // suppressed and no editor exists.
-      if (
-        fact.lifecycle === 'prompt_ready' &&
-        fact.generation &&
-        fact.generation !== this._establishmentAckInFlight &&
-        fact.generation !== this._establishmentAcked &&
-        this.session
-      ) {
-        const generation = fact.generation
-        const sessionId = this.session.sessionId
-        this._establishmentAckInFlight = generation
-        new LifecycleClient(this.client.dispatcher)
-          .establishAck(sessionId, fact.lane, fact.domain ?? '', fact.epoch ?? 0, generation)
-          .then(() => {
-            if (this._bindGeneration !== bindGeneration || this.session?.sessionId !== sessionId) {
-              return
-            }
-            // Only a landed acknowledgement retires the generation. The
-            // backend has flushed the accept, so a later replay of the
-            // same projection needs no second ack.
-            this._establishmentAcked = generation
-            if (this._establishmentAckInFlight === generation) {
-              this._establishmentAckInFlight = null
-            }
-          })
-          .catch((e: unknown) => {
-            if (this._bindGeneration !== bindGeneration || this.session?.sessionId !== sessionId) {
-              return
-            }
-            // Release the claim: this generation was NOT acknowledged, and
-            // a replay carrying it again — the reattach case, where only a
-            // fresh shell hello would have minted a new one — is the retry
-            // that can still complete the handshake.
-            //
-            // A refusal is usually the backend's own bookkeeping (stale
-            // generation, superseded establishment, replaced subscriber),
-            // and then the replay simply does not come. Retrying costs one
-            // refused call in that case and recovers the session in the
-            // case that matters, so releasing is the safe direction.
-            //
-            // The MESSAGE, not just the error object: five distinct
-            // backend rules all refuse with -32603, and logging the
-            // error alone rendered as `{"code":-32603,"name":"RpcError"}`
-            // — identical for every one of them. A reader could see that
-            // the handshake had been refused and never which rule did it,
-            // which is how the cause of six failing specs stayed
-            // "unknown" across three triage rounds (nocx-cbtc). The
-            // backend names the rule in its own log; this is the half a
-            // trace carries.
-            if (this._establishmentAckInFlight === generation) {
-              this._establishmentAckInFlight = null
-            }
-            log.warn('nocx: establishment acknowledgement refused', {
-              reason: e instanceof Error ? e.message : String(e),
-              generation,
-              lane: fact.lane,
-              domain: fact.domain ?? '',
-              epoch: fact.epoch ?? 0,
-            })
-          })
-      }
     })
     this._lifecycleUnsub = lifecycleSubscription.unsubscribe
     const session = await this.openSessionWithHostKeyRecovery(signal)
@@ -4192,6 +4348,21 @@ export class TerminalContent extends BasePaneContent {
     // backend's own resolution, never from a second fetch that could
     // disagree with it.
     this._policy = session.desiredMode ?? 'auto'
+    // awaitsIntegration rides the session handle regardless of which ack
+    // produced it — the open ack (nocx-ui8q6.6) for a session this pane
+    // opened, the attach ack (nocx-ty0hc) for one it reclaimed or reattached
+    // to — and it is read and acted on HERE, before the subscription below
+    // and before anything has a chance to paint — this is what closes the gap
+    // nocx-ui8q6.1 left open: without it, `_integration` is null until the
+    // first fact and isAwaitingIntegration read that null as "conventional by
+    // design" even for a session the ack already said would start
+    // `starting`. Calling _syncIntegrationWaiting synchronously, in the same
+    // tick as the ack, means a session that IS about to start `starting`
+    // never has a frame in which its grid is live before its axis has
+    // answered — the fact just arrives a moment later on the subscription
+    // installed next.
+    this._awaitsIntegration = session.awaitsIntegration
+    this._syncIntegrationWaiting()
     // The integration axis is a SUBSCRIPTION, not a field of the ack: the
     // backend revises it as it learns (starting → integrated, or →
     // conventional with a reason, or → lost). Subscribed before anything
@@ -4200,6 +4371,10 @@ export class TerminalContent extends BasePaneContent {
     this._integrationUnsub = subscribeIntegrationChanged(this.client.dispatcher, (fact) => {
       if (fact.sessionId !== session.sessionId) return
       this._applyIntegration(fact)
+    })
+    this._toolSurfaceUnsub = subscribeToolSurfaceChanged(this.client.dispatcher, (fact) => {
+      if (fact.sessionId !== session.sessionId) return
+      this._applyToolSurface(fact)
     })
     // The statement is OBSERVED: until the first marker arrives, an auto
     // session honestly reads "Native input" — the launcher may be
@@ -4315,11 +4490,51 @@ export class TerminalContent extends BasePaneContent {
     // Held, never dropped, while a submitted command is still on its way to
     // the pty: the keyboard changed hands at the commit and the command
     // goes out an RPC later, so these bytes belong AFTER it (_heldRaw).
+    //
+    // DROPPED, never held, while the axis reads `starting` (nocx-ui8q6.1):
+    // that is a different mechanism for a different moment. `_heldRaw`
+    // reorders bytes around a submit that WILL be sent; a keystroke typed
+    // before the shell has proved itself has nowhere good to land — the
+    // owner rejected queueing it for later delivery on 2026-09-10 ("хранить
+    // там какие-то клавиши, а потом их куда-то отправлять — это странная
+    // идея"). So it is read, and then it is gone.
+    //
+    // AND A Ctrl-C IN THE WINDOW CANCELS THE SUBMISSION (nocx-xn63t.6.12):
+    // the command is never written, so nothing reaches bash behind it. The
+    // defect this closes is a byte-order one — upstream bash 5.2 checks QUIT
+    // while its parser consumes an accepted line and resumes from the index
+    // its readline buffer had reached, so `command\r\x03` delivered back to
+    // back ran the command's SUFFIX (CI run 35190081902 ran `cho RACE...` for
+    // a typed `echo RACE...`). Holding the interrupt and flushing it
+    // immediately behind the command is precisely that ordering, so the
+    // interrupt is not held and not flushed: it is the person's own "this
+    // line is not to run".
     renderer.onData((data: string) => {
-      if (this._heldRaw !== null) {
-        this._heldRaw.push(data)
+      if (isAwaitingIntegration(this._integration, this._awaitsIntegration)) return
+      const held = this._heldRaw
+      if (held !== null && !held.cancelled) {
+        const at = data.indexOf(INTERRUPT)
+        if (at < 0) {
+          held.keys.push(data)
+          return
+        }
+        // The interrupt discards the line it interrupts, which is every key
+        // held in this window: they are the pending line, and a terminal
+        // with ISIG set flushes the input it has not read yet.
+        held.keys = []
+        held.cancelled = true
+        // What followed the interrupt in the same read does NOT belong to
+        // the line it discarded — it was typed at the fresh prompt that
+        // discard leaves — so it is delivered rather than swallowed with
+        // what came before it.
+        const after = data.slice(at + 1)
+        if (after !== '') this.session?.send(after)
         return
       }
+      // No window, or one already cancelled: an ordinary keystroke, and the
+      // ordinary route. A second Ctrl-C lands here too, which is right — by
+      // now there is no pending line to discard, so it is the shell's own
+      // interrupt exactly as it is outside the window.
       this.session?.send(data)
     })
     // The pane's classification, for an enrolled agent pane. Registered
@@ -4329,7 +4544,7 @@ export class TerminalContent extends BasePaneContent {
     // of a pane that then sits still — which for a settled agent is
     // forever.
     session.onObservation((observation) => {
-      this.hooks.onPaneObservationChange?.(observation.state)
+      this.hooks.onPaneObservationChange?.(observation.state, observation.children ?? [])
     })
     session.onExit((exit) => {
       log.info('nocx: session exited', {
@@ -4456,6 +4671,11 @@ export class TerminalContent extends BasePaneContent {
     // makes equal usable geometry a no-op, so this presentation driver and
     // the live-region output driver never re-fit the same rectangle.
     if (this._mounted) {
+      // The pane's own size changed, so the running region's ceiling really
+      // did move — release the cap the running command is holding before
+      // anything reads it. This is the ONLY caller: a cap released from the
+      // output path is the resize-mid-repaint nocx-oikdu was.
+      this.scrollback?.invalidateRunningCap()
       this.fitUsableViewport(this.usableViewport(viewport))
       // And the live BOX, not only the grid inside it. The pane changing size
       // is the one resize the live-region path never heard about: it runs off
@@ -5229,6 +5449,7 @@ export class TerminalContent extends BasePaneContent {
     if (this._sessionExited) return
     this._integration = fact
     this._updateCapability()
+    this._syncIntegrationWaiting()
     if (!isDegraded(fact)) {
       // Recovered, or never failed. The card belongs to the state that
       // raised it and goes with it — and the terminal gets the space back,
@@ -5237,6 +5458,28 @@ export class TerminalContent extends BasePaneContent {
       return
     }
     this._maybeShowIntegrationNotice(fact)
+  }
+
+  private _applyToolSurface(fact: SessionToolSurfaceChanged): void {
+    if (this._disposed || this._sessionExited) return
+    this._toolSurface = fact
+    if (fact.status === 'available') {
+      this._dropToolSurfaceNotice()
+      return
+    }
+    if (!this._paneTarget || this._toolSurfaceNoticeDispose) return
+    this._toolSurfaceNoticeDispose = mountToolSurfaceNotice(this._paneTarget, {
+      fact,
+      onDismiss: () => this._dropToolSurfaceNotice(),
+    })
+    this.scheduleLiveResize()
+  }
+
+  private _dropToolSurfaceNotice(): void {
+    if (!this._toolSurfaceNoticeDispose) return
+    this._toolSurfaceNoticeDispose()
+    this._toolSurfaceNoticeDispose = null
+    this.scheduleLiveResize()
   }
 
   /** Where this pane reads the recording fact, with the honest fallback for
@@ -5320,6 +5563,43 @@ export class TerminalContent extends BasePaneContent {
     if (!this._noticeDispose) return
     this._noticeDispose()
     this._noticeDispose = null
+    this.scheduleLiveResize()
+  }
+
+  /** Show the waiting card and hide the terminal grid for exactly as long as
+   *  the axis reads `starting` (nocx-ui8q6.1) — ADR-0024 decision 8's "worst
+   *  of both": a raw, half-bootstrapped prompt a keystroke could land on
+   *  before the shell has proved itself either way. `isAwaitingIntegration`
+   *  is the ONE read of the fact (AD-8); the keystroke drop at the renderer's
+   *  onData reads the same two inputs rather than a flag mirrored from here.
+   *
+   *  Called from two moments (nocx-ui8q6.6, and nocx-ty0hc for the
+   *  reclaim/attach half): once synchronously in `_bindSession`, right after
+   *  the session handle's ack sets `_awaitsIntegration` and before this pane
+   *  can paint a frame, and again from `_applyIntegration`
+   *  whenever a fact arrives. The first call is what closes the gap between
+   *  the ack and the first session.integrationChanged — before it, this
+   *  method only ever ran on a fact, so a session the ack already knew would
+   *  start `starting` still had one live frame with nothing hiding it.
+   *
+   *  A session the ack said never entered the axis keeps `_integration` null
+   *  and `_awaitsIntegration` false, `isAwaitingIntegration` is false for it
+   *  on both calls, and this method is never asked to hide anything — the
+   *  terminal is live from its first frame, which is what "absence is
+   *  conventional by design" requires. */
+  private _syncIntegrationWaiting(): void {
+    const waiting = isAwaitingIntegration(this._integration, this._awaitsIntegration)
+    if (waiting) {
+      if (this._integrationWaitingDispose || !this._paneTarget) return
+      this._integrationWaitingDispose = mountIntegrationWaiting(this._paneTarget)
+      if (this.scrollback) this.scrollback.scrollbackLayout.style.display = 'none'
+      this.scheduleLiveResize()
+      return
+    }
+    if (!this._integrationWaitingDispose) return
+    this._integrationWaitingDispose()
+    this._integrationWaitingDispose = null
+    if (this.scrollback) this.scrollback.scrollbackLayout.style.display = ''
     this.scheduleLiveResize()
   }
 
@@ -6489,6 +6769,7 @@ export class TerminalContent extends BasePaneContent {
         // that must never be shown by accident: it is exactly the lie the
         // incident was reported as (nocx-7l4ex.12).
         let message: string
+        let level: ToastLevel = 'warning'
         switch (result.outcome) {
           case 'delivered':
             if (signal === 'stop') {
@@ -6496,6 +6777,34 @@ export class TerminalContent extends BasePaneContent {
               if (waiter) waiter.stopped = true
             }
             return
+          case 'held':
+            // ACCEPTED, NOT YET DELIVERED — and deliberately NOT reverted. The
+            // hold exists because an app attempt is open from submit, a round
+            // trip before its bytes reach the pty (ADR-0024 §5), and a byte
+            // written into that window is eaten by bash's own parser (upstream
+            // bash 5.2 resumes an accepted line at the index readline had
+            // reached: nocx-xn63t.6.11/.6.12). So the backend keeps the
+            // gesture and writes it the moment the shell authenticates the
+            // start.
+            //
+            // `stopRequested` is the renderer's evidence that a person asked
+            // for this command to stop and the backend took the request
+            // (nocx-9bpeq.19); a held Stop is that request, and dropping it
+            // here would make the very completion this causes — SIGINT's 130 —
+            // read as the program's own failure. The never-started case cannot
+            // be mislabelled by keeping it: an attempt that closes before its
+            // start freezes the block through blocks.ts's `abandonAttempt`,
+            // whose status is `unknown`, which draws no terminal chip and
+            // never consults this flag. A command that finishes with exit 0 is
+            // `success` whatever the flag says.
+            if (signal === 'stop') {
+              const waiter = targetBlock === null ? undefined : this.agentRuns.get(targetBlock)
+              if (waiter) waiter.stopped = true
+            }
+            level = 'info'
+            message =
+              'The command had not started yet, so the stop is armed: it will land the moment the command starts.'
+            break
           case 'unsupported':
             revertStopRequested()
             message =
@@ -6523,7 +6832,7 @@ export class TerminalContent extends BasePaneContent {
             message = 'nocx could not tell whether the command stopped.'
           }
         }
-        showToast({ level: 'warning', message })
+        showToast({ level, message })
       },
       (err: unknown) => {
         revertStopRequested()
@@ -6708,28 +7017,44 @@ export class TerminalContent extends BasePaneContent {
    *  been sent, and bytes crossing it would arrive at the pty AHEAD of the
    *  command. Measured: `hello\r` reaching the shell before `read x; …\r`,
    *  which runs `hello` as a command and leaves `read` waiting for a line
-   *  nobody typed. */
-  private _heldRaw: string[] | null = null
+   *  nobody typed.
+   *
+   *  Since nocx-xn63t.6.12 it also carries whether a Ctrl-C arrived in the
+   *  window, which cancels the submission rather than flushing the interrupt
+   *  behind it (see HeldWindow, and the onData handler that arms this). */
+  private _heldRaw: HeldWindow | null = null
 
-  /** Start holding: from here until releaseHeldRaw, the grid's bytes queue.
-   *  A second submit inside the window keeps the existing queue — the order
-   *  is the invariant, and re-arming would publish the earlier one twice. */
-  private holdRawUntilSubmitted(): void {
-    this._heldRaw ??= []
+  /** Start holding, and hand back the window being held in: from here until
+   *  takeHeldWindow, the grid's bytes queue.
+   *
+   *  A second submit inside the window JOINS the existing one — the order is
+   *  the invariant, and re-arming would publish the earlier queue twice — so
+   *  the window belongs to the pane, not to a submission, and every submit
+   *  waiting on it shares one cancellation. The caller keeps the object it is
+   *  handed rather than re-reading the field later: another submission can
+   *  take the queue in between, and what it took must not answer for this
+   *  one. */
+  private holdRawUntilSubmitted(): HeldWindow {
+    this._heldRaw ??= { keys: [], cancelled: false }
+    return this._heldRaw
   }
 
   /** Stop holding and hand back what was held, for the caller to send after
    *  the command. Detaching and flushing are two steps on purpose — the
    *  command's own bytes travel between them (see `write`).
    *
+   *  ONE take, with the keys and the cancellation in it together: they are
+   *  facts about the same window, and two reads could let a Ctrl-C land
+   *  between them and be missed by the write it was meant to stop.
+   *
    *  Nothing bounds this window with a timer, and nothing should: the write
-   *  is attempted on BOTH settlements of the attempt RPC (`.then(write,
-   *  write)`), and the dispatcher rejects every pending call when the socket
-   *  closes. The only way to stay held is a live socket whose backend never
-   *  answers — where the queued bytes had nowhere to go either, and which
-   *  the session's own input-stalled warning is what reports. */
-  private takeHeldRaw(): string[] {
-    const held = this._heldRaw ?? []
+   *  is attempted on BOTH settlements of the attempt RPC (`.then(() =>
+   *  write(block), …)`), and the dispatcher rejects every pending call when
+   *  the socket closes. The only way to stay held is a live socket whose
+   *  backend never answers — where the queued bytes had nowhere to go either,
+   *  and which the session's own input-stalled warning is what reports. */
+  private takeHeldWindow(): HeldWindow | null {
+    const held = this._heldRaw
     this._heldRaw = null
     return held
   }
@@ -6954,8 +7279,14 @@ export class TerminalContent extends BasePaneContent {
     this._lifecycleUnsub = null
     this._integrationUnsub?.()
     this._integrationUnsub = null
+    this._toolSurfaceUnsub?.()
+    this._toolSurfaceUnsub = null
+    this._toolSurfaceNoticeDispose?.()
+    this._toolSurfaceNoticeDispose = null
     this._noticeDispose?.()
     this._noticeDispose = null
+    this._integrationWaitingDispose?.()
+    this._integrationWaitingDispose = null
     this._recoveryNoticeDispose?.()
     this._recoveryNoticeDispose = null
     this._unreconciledNoticeDispose?.()
@@ -7176,9 +7507,13 @@ export class TerminalContent extends BasePaneContent {
     beforeWrite?: () => boolean
   }): { block: BlockRecord | null; ledgerId: number | null } {
     const { doc, recordLine, author, takeKeys, callerOwnsGlide, sendLine, beforeWrite } = opts
+    // The window this submission ARMS — null for the agent lane, whose bytes
+    // never hold the grid's queue (takeKeys). Held by reference, not
+    // re-read from the field later: see holdRawUntilSubmitted.
+    let heldWindow: HeldWindow | null = null
     if (takeKeys) {
       this.takeKeyboardToGrid()
-      this.holdRawUntilSubmitted()
+      heldWindow = this.holdRawUntilSubmitted()
     }
     // Where the command RUNS, captured before anything below can change it.
     // Entering an environment blanks `_cwd` (we know the host, not the
@@ -7191,7 +7526,7 @@ export class TerminalContent extends BasePaneContent {
     // record (CommandLedger.open refuses empty commands) and no block. The
     // shell still gets its newline — a conventional terminal stays
     // conventional.
-    const write = (): void => {
+    const write = (block: BlockRecord | null): void => {
       // This is deliberately after lifecycle.submitAttempt resolved: the
       // broker can withdraw the request during that round trip, and a
       // check at submit entry would miss the only unsafe window.
@@ -7204,8 +7539,24 @@ export class TerminalContent extends BasePaneContent {
       // BEHIND the keys that were waiting for it, which is the same
       // reordering with the operands swapped (measured: a bare `\r`
       // reaching the pty ahead of its own command line).
-      const held = this.takeHeldRaw()
+      const taken = this.takeHeldWindow()
       try {
+        // A Ctrl-C that arrived while this submission was in flight
+        // (nocx-xn63t.6.12): the line is not to run. Nor is it "run and then
+        // interrupt" — the interrupt came first, and writing the command
+        // would put it at the pty with the shell's line editor already told
+        // to discard the line. So the command is not written AT ALL, and
+        // there is nothing at the pty for an 0x03 to mean: no interrupt is
+        // written for it either.
+        //
+        // Read from the window THIS submission armed. Taking the queue tells
+        // us what the pane last held, which after another submission has
+        // taken it is not this window — and reading the cancellation from
+        // there would resurrect exactly the line the person withdrew.
+        if (heldWindow?.cancelled === true) {
+          this.withdrawSubmit(block)
+          return
+        }
         submitCommand(doc, {
           focusGrid: () => this.takeKeyboardToGrid(),
           sendDoc: sendLine,
@@ -7215,11 +7566,15 @@ export class TerminalContent extends BasePaneContent {
         // and holding the keys anyway would swallow them for the rest of
         // the session. Late at a prompt is a line the user can see and
         // erase; silently gone is not.
-        for (const data of held) this.session?.send(data)
+        //
+        // A cancelled window holds no keys — the interrupt discarded them —
+        // so this is empty on the withdrawal path by construction, never by
+        // a second rule about which keys a cancelled submission may carry.
+        for (const data of taken?.keys ?? []) this.session?.send(data)
       }
     }
     if (recordLine === '') {
-      write()
+      write(null)
       return { block: null, ledgerId: null }
     }
     // SEVERED (ADR-0024): the ssh attempt binding (expected passport id,
@@ -7284,7 +7639,17 @@ export class TerminalContent extends BasePaneContent {
       // shell's own start (if any) opens a shell-originated attempt and the
       // block binds to it — a conventional terminal stays conventional, and
       // the privacy rule holds either way.
-      write()
+      //
+      // NOT orphaned, deliberately, though no attempt will echo its token
+      // here either. Orphaning invites the next unattributed attempt to
+      // claim the record, and that is only sound when the next one really is
+      // this command — which holds on the refusal path below, where the
+      // bytes go out at a LIVE prompt and the shell's start follows them. A
+      // lane with no domain has no integration to produce a start at all, so
+      // the attempt that eventually arrives may belong to a different
+      // command entirely, and binding it here would store one command's exit
+      // status under another's text — the defect nocx-td6d4.10 removed.
+      write(block)
       return { block, ledgerId }
     }
     // ADR-0024 decision 5: the app-owned attempt opens BEFORE the bytes
@@ -7306,8 +7671,53 @@ export class TerminalContent extends BasePaneContent {
         ...(submitId ? { submitId } : {}),
         ...(opts.requestId ? { requestId: opts.requestId } : {}),
       })
-      .then(write, write)
+      .then(
+        () => write(block),
+        (err: unknown) => {
+          // STILL fail-open — the bytes go out either way, and swallowing a
+          // command because the control plane was busy is the worse failure.
+          // What changes is that it stops being invisible: this rejection and
+          // a success took the same silent path, so a refused submit and a
+          // healthy one were indistinguishable from every surface, while the
+          // record left behind could never be bound by token.
+          if (ledgerId !== null) this.ledger?.orphan(ledgerId)
+          log.warn('nocx: the lifecycle attempt was refused; the command runs unattributed', {
+            pane: this.pane.paneId,
+            ledgerId,
+            error: err instanceof Error ? err.message : String(err),
+          })
+          write(block)
+        },
+      )
     return { block, ledgerId }
+  }
+
+  /** Withdraw a submission whose bytes will never be written: the app-owned
+   *  block opened at its submit has no attempt that can complete it, so it is
+   *  frozen as abandoned — unknown, never successful — and the running slot
+   *  is freed.
+   *
+   *  ONE owner, reached by two triggers: the broker withdrawing its request
+   *  mid-round-trip (submitAgentCommand's AbortSignal) and a Ctrl-C arriving
+   *  while the command is still on its way to the pty (nocx-xn63t.6.12).
+   *  The second trigger is why this is a method rather than a line in the
+   *  agent path: two copies of "freeze it as abandoned" would agree
+   *  everywhere anyone looked and disagree in the one case nobody looked.
+   *
+   *  Nothing goes on the wire, deliberately. docs/lifecycle-protocol.md §14's
+   *  AbandonAttempt is the kernel's own call, with no outbound envelope of
+   *  its own, and the app-owned attempt the submitAttempt RPC already opened
+   *  is left exactly as the agent lane's withdrawal leaves one — the
+   *  withdrawal is the renderer declining to write, and the ledger record
+   *  stays unbound and running like that path's (it persists nothing: only a
+   *  completed record does, and its marker's disposal reclaims it). */
+  private withdrawSubmit(block: BlockRecord | null): void {
+    if (block === null) return
+    // Only while this submission still owns the running slot. A later
+    // command's block is not this submission's to abandon, and freezing it
+    // here would show a cancelled line as the one that ran.
+    if (this.scrollback?.blockManager.runningBlock !== block) return
+    this.scrollback.abandonUnbound(this.renderer?.cursorLine() ?? 0)
   }
 
   /** The run tool's renderer half (nocx-tjppv): submit a command through
@@ -7363,15 +7773,11 @@ export class TerminalContent extends BasePaneContent {
     let writeStarted = false
     let cancellationHandled = false
     const cleanupCancelled = (): void => {
-      if (openedBlock !== null) {
-        this.agentRuns.delete(openedBlock)
-        // The app-owned block has no attempt to complete it after a
-        // pre-execution withdrawal. Reuse the existing abandonment owner only
-        // while this submission still owns the running slot.
-        if (this.scrollback?.blockManager.runningBlock === openedBlock) {
-          this.scrollback.abandonUnbound(this.renderer?.cursorLine() ?? 0)
-        }
-      }
+      if (openedBlock !== null) this.agentRuns.delete(openedBlock)
+      // The app-owned block has no attempt to complete it after a
+      // pre-execution withdrawal — the ONE owner of that withdrawal, shared
+      // with the Ctrl-C that cancels a person's submission (nocx-xn63t.6.12).
+      this.withdrawSubmit(openedBlock)
       if (openedLedgerId !== null) this.runEntryIds.delete(openedLedgerId)
     }
     const cancel = (): void => {

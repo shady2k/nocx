@@ -760,11 +760,17 @@ func newDropEnv(t *testing.T) *dropEnv {
 			return ssh.NewStubChannel(logger), nil
 		},
 	})
-	ws := NewWSServer(logger, reg, WithProfileResolver(&fakeResolver{
-		resolveFn: func(string) (string, *ssh.ConnectConfig, error) {
-			return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
-		},
-	}))
+	ws := NewWSServer(logger, reg,
+		// The ssh pane this environment opens is this machine's helper's
+		// (nocx-50w7p.5). Every test built on this env measures what a drop
+		// NOTIFIES, which is downstream of the pane existing, so the pane is
+		// given the route it has in production.
+		sshHelperOpt(reg),
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(string) (string, *ssh.ConnectConfig, error) {
+				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)

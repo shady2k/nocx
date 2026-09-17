@@ -11,27 +11,41 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sync"
 
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/hostsvc"
 	"github.com/shady2k/nocx/internal/helper/client"
 )
 
-// NewFactory builds a git.RepoFactory over one helper client. The factory
-// owns the client: every repo it opens shares it, and the LAST repo to
-// close releases it — the helper process lives as long as any binding
-// references it, which is the design's one process per helper connection
-// (D4) bounded by the binding registry.
+// NewFactory builds a git.RepoFactory over one helper client.
+//
+// THE CLIENT'S LIFETIME IS NOT THIS FACTORY'S TO DECIDE (nocx-xn63t.6.3).
+// It used to be: the factory counted its own repos and closed the client
+// when the last one released, on the reasoning that the helper process
+// lives as long as any binding references it (D4's "one process per helper
+// connection", bounded by the binding registry). That reasoning broke the
+// moment a git.RepoFactory could be built over a client a LIVE SESSION was
+// also attached to (ADR-0057/ADR-0068: a pane's PTY is opened through the
+// far helper from the start, and internal/app's hostHelper hands that same
+// client to this factory for git.open). Every caller of NewFactory is
+// hostHelper (internal/app/helper_git.go, its only construction site), and
+// hostHelper already keeps its OWN reference count for exactly this
+// question — extended, since the fix, with whether a session is still
+// hosted on it. Two independent counters deciding when one connection dies
+// is the defect this fix removes, not a duplication to keep in step: a
+// factory that also closed the client on its last release always raced
+// ahead of hostHelper's own decision, closing a connection a live PTY and
+// lifecycle channel were still attached to — reproduced in
+// internal/app's TestGitOpenOnALiveFarHelperConnectionLeavesTheSessionAndLifecycleChannelOpen,
+// where a single git.open, opened and closed, tore down the session's
+// lifecycle channel about 3ms later. So Close is now the caller's business
+// alone; this factory only ever asks the client to answer requests.
 func NewFactory(c *client.Client) git.RepoFactory {
 	return &factory{client: c}
 }
 
 type factory struct {
 	client *client.Client
-
-	mu   sync.Mutex
-	refs int
 }
 
 // Open sends one git.open operation. The outcome is the domain OpenOutcome
@@ -45,24 +59,9 @@ func (f *factory) Open(ctx context.Context, cwd string) (git.Repo, git.OpenOutco
 	if res.State != git.OpenOK {
 		return nil, res.OpenOutcome, nil
 	}
-	f.mu.Lock()
-	f.refs++
-	f.mu.Unlock()
 	// The environment the helper resolved at start (D24) is stable for the
 	// helper's lifetime, so the open outcome is the fact and the poll never
 	return &repo{f: f, bindingID: res.BindingID, envState: res.EnvState, envReason: res.EnvReason}, res.OpenOutcome, nil
-}
-
-func (f *factory) release() {
-	f.mu.Lock()
-	if f.refs > 0 {
-		f.refs--
-	}
-	last := f.refs == 0
-	f.mu.Unlock()
-	if last {
-		_ = f.client.Close()
-	}
 }
 
 // repo is one binding on the helper: the service-issued id addresses every
@@ -73,8 +72,6 @@ type repo struct {
 
 	envState  git.EnvState
 	envReason string
-
-	closeOnce sync.Once
 }
 
 func (r *repo) Status(ctx context.Context) (git.Status, error) {
@@ -194,13 +191,13 @@ func (r *repo) RemoteURL(ctx context.Context) (string, error) {
 	return url, nil
 }
 
-// Close releases the shared helper client when this was the last repo of
-// its factory (the registry drains a binding's use-guard before closing it,
-// so no call races this).
-func (r *repo) Close() error {
-	r.closeOnce.Do(r.f.release)
-	return nil
-}
+// Close holds no exclusive resource of its own: the binding it named lives
+// on the far helper, addressed by bindingID, and the shared client this
+// repo called through belongs to hostHelper (internal/app/helper_git.go),
+// which decides when — and whether — that client actually closes (see
+// NewFactory's own comment). This return is therefore always nil rather
+// than a release this package no longer owns.
+func (r *repo) Close() error { return nil }
 
 // mutationCtx strips the caller's cancellation from a mutation's call
 // (D11): the helper refuses a cancel naming a mutation, and the backend

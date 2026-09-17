@@ -18,11 +18,12 @@
  * Git row's name element (scrollWidth vs clientWidth), because the defect
  * this exists for is clipped file names, not a width number moving.
  */
-import { test as base, expect } from '@playwright/test'
+import { expect } from '@playwright/test'
 import { mkdtempSync, appendFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  standalone as base,
   appReadyForInput,
   VaultBackend,
   bindEndpoint,

@@ -485,7 +485,7 @@ func TestNotifyRaise_StampsProgramRequestProvenance(t *testing.T) {
 	// The backend this session runs on, stamped with the same value the
 	// session.ended source uses (nocx-2gfh6). Without it the renderer cannot
 	// resolve the occurrence to a tab at all — its lookup compares the backend
-	// id, deliberately, so that a relay's sessions stay distinguishable — and
+	// id, deliberately, so that a helper's sessions stay distinguishable — and
 	// a program notification raised from a live tab rendered unactivatable.
 	if ev.Attribution.Backend != commandnames.LocalRoute {
 		t.Errorf("attribution.backend = %q, want %q", ev.Attribution.Backend, commandnames.LocalRoute)

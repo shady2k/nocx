@@ -37,6 +37,12 @@ import { HistoryStatusStore } from './history-status'
 import { FootprintClient } from './footprint-client'
 import { EndpointClient } from './endpoints'
 import { PolicyClient } from './policy-client'
+import { recordApprovalDecision } from './agent-approval-decision'
+import { EmittingClient } from './emitting-client'
+import { AgentAccessClient } from './agent-access-client'
+import { AgentRulesClient } from './agent-rules-client'
+import { CalibrationClient } from './calibration-client'
+import { TypingClient } from './typing-client'
 import { AgentClient } from './agent'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
@@ -49,6 +55,7 @@ import { BellIcon, CheckCircleIcon, PlugIcon, RefreshIcon, SettingsIcon } from '
 import { SettingsObserver } from './settings-observer'
 import { mountReadScreenHandler } from './read-screen'
 import { mountClientHost } from './client-host'
+import type { ApprovalFacts } from './client-host'
 import { mountRunCommandHandler } from './run-command'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import { bootstrapPlatform } from './platform'
@@ -106,8 +113,13 @@ import { applySSHReconnect, SSH_RECONNECT_KEY } from './reconnect-setting'
 import { applyPetsSettings, PETS_ENABLED_KEY, PETS_PACK_KEY, PETS_SIZE_KEY } from './pets/setting'
 import { mountWindowPet } from './pets/window-pet'
 import type { TunnelOpenResult } from './generated/tunnel.open'
-import { HostKeyDialog } from './host-key-dialog'
-import { OpenHostKeyRequestQueue, type OpenHostKeyRequest } from './host-key-controller'
+import {
+  OpenHostKeyRequestQueue,
+  type OpenHostKeyRequest,
+  HelperConsentAskQueue,
+  type HelperConsentAskRequest,
+} from './host-key-controller'
+import { HostKeyDialog, AgentApprovalDialog, type IntegrationMethod } from './host-key-dialog'
 import { SnippetsClient } from './snippets/snippets-client'
 import { SnippetsStore, type Snippet } from './snippets/snippets-store'
 import { SkillsClient } from './skills-client'
@@ -129,6 +141,7 @@ import { NotificationsPanel } from './notify/notifications-panel'
 import type { NotifyCatalogue } from './generated/notify.catalogue'
 import { createOverviewController } from './overview/overview-controller'
 import { needsForm } from './snippets/resolve'
+import { installCellDriftApi } from './scrollback/cell-drift'
 
 const NOTIFICATIONS_CENTRE_PREFIX = 'notifications.centre.'
 
@@ -244,6 +257,23 @@ function main(): void {
   const snippetsStore = new SnippetsStore(new SnippetsClient(dispatcher))
   const skillsStore = new SkillsStore(new SkillsClient(dispatcher))
   const policyClient = new PolicyClient(dispatcher)
+  // What an enrolled pane is emitting, and what its rule reads on it
+  // (nocx-02uci). A pull client with no state: the Settings page it feeds owns
+  // the interval, and there is nothing here to close.
+  const emittingClient = new EmittingClient(dispatcher)
+  const agentAccessClient = new AgentAccessClient(dispatcher)
+  // The guided calibration (nocx-etejh). Stateless in the same way: the walk
+  // it drives lives in the backend, keyed by the pane, so a window that goes
+  // away leaves nothing half-open.
+  const calibrationClient = new CalibrationClient(dispatcher)
+  // A person's own rule for an agent (nocx-y6w66). Stateless like its two
+  // neighbours: the documents live in files under the profile this build owns,
+  // and the page that edits them owns the one read it makes.
+  const rulesClient = new AgentRulesClient(dispatcher)
+  // The typing primitive (nocx-dkawo.1). Stateless like its two neighbours:
+  // every decision about whether a keystroke may be sent is taken in the
+  // backend, on a frame it reads itself, in the instant before each write.
+  const typingClient = new TypingClient(dispatcher)
   const vaultObserver = new VaultObserver(dispatcher)
   const vaultController = createVaultState(vaultClient)
   vaultObserver.start(() => {
@@ -331,31 +361,30 @@ function main(): void {
     if (!ask || approvalBusy()) return
     setApprovalBusy(true)
     try {
-      await dispatcher.call('agent.approve', {
-        runId: ask.runId,
-        attempt: ask.attempt,
-        tool: ask.tool,
-        callId: ask.callId,
-        argHash: ask.argHash,
-        approved,
-        // How far the answer reaches, as the person chose it in the prompt.
-        // It travels with the decision because the BACKEND applies it: a
-        // renderer that read the matrix, edited a row and wrote it back would
-        // be a second owner of the policy document, racing the settings page
-        // (nocx-gycwo, design §"Three wire changes").
-        scope,
-      } satisfies AgentApprove)
+      // The exchange itself is agent-approval-decision.ts: this surface owns
+      // the QUEUE — which question is up and which wait behind it — and that
+      // is a different job from putting one answer on the wire.
+      const recorded = await recordApprovalDecision(ask, approved, scope, {
+        dispatcher,
+        // The standing half did not stick. The decision itself stood, so
+        // nothing is refused; what must not happen is silence, which is how
+        // a person ends up being asked again a question they answered for
+        // good. Sticky, because it is about what will happen LATER and is
+        // therefore worth reading after the moment has passed.
+        onWarning: (sentence) => showToast({ level: 'warning', message: sentence, duration: 0 }),
+        onError: (message) =>
+          showToast({
+            level: 'danger',
+            message: `Could not record the decision: ${message}`,
+            duration: 0,
+          }),
+      })
       // Only a RECORDED decision closes the question. A refusal (a stale
       // binding — the question was already answered) keeps the prompt up:
       // the person sees the honest refusal and can answer anew or deny.
+      if (!recorded) return
       pendingApprovals.delete(ask.runId)
       nextApproval()
-    } catch (err) {
-      showToast({
-        level: 'danger',
-        message: `Could not record the decision: ${err instanceof Error ? err.message : String(err)}`,
-        duration: 0,
-      })
     } finally {
       setApprovalBusy(false)
     }
@@ -368,11 +397,49 @@ function main(): void {
   const [openHostKeyBusy, setOpenHostKeyBusy] = createSignal(false)
   const openHostKeys = new OpenHostKeyRequestQueue((request) => setPendingOpenHostKey(request))
 
+  // The connect-time helper ask (ADR-0068): raised on the first connect of
+  // an auto connection whose fingerprint has no consent record, on the SAME
+  // one-dialog surface as the host-key ask above (HostKeyDialog). A
+  // separate queue because it is a separate question — a tab can hit a
+  // plain host-key refusal while another hits the combined ask — but it is
+  // rendered through the same component below.
+  const [pendingHelperConsentAsk, setPendingHelperConsentAsk] =
+    createSignal<HelperConsentAskRequest | null>(null)
+  const [helperConsentAskBusy, setHelperConsentAskBusy] = createSignal(false)
+  const helperConsentAsks = new HelperConsentAskQueue((request) =>
+    setPendingHelperConsentAsk(request),
+  )
+
+  type AgentHostApproval = ApprovalFacts & {
+    resolve: (approved: boolean) => void
+  }
+  const pendingAgentHostApprovals: AgentHostApproval[] = []
+  const [activeAgentHostApproval, setActiveAgentHostApproval] =
+    createSignal<AgentHostApproval | null>(null)
+  const [agentHostApprovalBusy, setAgentHostApprovalBusy] = createSignal(false)
+  const nextAgentHostApproval = () => {
+    setActiveAgentHostApproval(pendingAgentHostApprovals.shift() ?? null)
+  }
+  const requestAgentHostApproval = (facts: ApprovalFacts): Promise<boolean> =>
+    new Promise((resolve) => {
+      pendingAgentHostApprovals.push({ ...facts, resolve })
+      if (!untrack(() => activeAgentHostApproval())) nextAgentHostApproval()
+    })
+  const decideAgentHostApproval = (approved: boolean) => {
+    const ask = activeAgentHostApproval()
+    if (!ask || agentHostApprovalBusy()) return
+    setAgentHostApprovalBusy(true)
+    ask.resolve(approved)
+    setActiveAgentHostApproval(null)
+    setAgentHostApprovalBusy(false)
+    nextAgentHostApproval()
+  }
+
   const acceptOpenHostKey = async (request: OpenHostKeyRequest) => {
     setOpenHostKeyBusy(true)
     try {
       await profileClient.trustHostKey(request.evidence.knownHostsHost, request.evidence.key)
-      openHostKeys.settleMatchingQueued(request)
+      openHostKeys.settleMatchingQueued(request, true)
       openHostKeys.settle(request, true)
     } catch (err) {
       showToast({
@@ -382,6 +449,65 @@ function main(): void {
       })
     } finally {
       setOpenHostKeyBusy(false)
+    }
+  }
+
+  // acceptHelperAskHostKey trusts the key half of a combined connect-time
+  // ask (ADR-0069, issue (b)): its own action, independent of the method
+  // choice below. Trusting does not answer the method — the request settles
+  // null, the same as Cancel — because the owner reversed the earlier
+  // "trust is a shared precondition" reading: the key is trusted, and the
+  // open still fails this once (no method was chosen), but the NEXT connect
+  // probes successfully and raises the method question alone.
+  const acceptHelperAskHostKey = async (request: HelperConsentAskRequest) => {
+    const hostKey = request.evidence.hostKey
+    if (!hostKey) return
+    setHelperConsentAskBusy(true)
+    try {
+      await profileClient.trustHostKey(hostKey.knownHostsHost, hostKey.key)
+      helperConsentAsks.settle(request, null)
+    } catch (err) {
+      showToast({
+        level: 'danger',
+        message: `Could not trust the host key: ${err instanceof Error ? err.message : String(err)}`,
+        duration: 0,
+      })
+    } finally {
+      setHelperConsentAskBusy(false)
+    }
+  }
+
+  // decideIntegrationMethod answers the connect-time ask with a chosen
+  // method (ADR-0069): written through the SAME RPC the editor's Delivery
+  // mode field ultimately reaches (connections.setIntegrationMethod ->
+  // profiles.patch's desiredMode), plus the machine's helper grant when the
+  // method is helper. The chosen method rides the settled promise so
+  // terminal-content.ts can carry it on the retried open for a hand-typed
+  // connection, which has nothing else to persist it to.
+  const decideIntegrationMethod = async (
+    request: HelperConsentAskRequest,
+    method: IntegrationMethod,
+  ) => {
+    setHelperConsentAskBusy(true)
+    try {
+      await profileClient.setIntegrationMethod(
+        request.evidence.fingerprint,
+        method,
+        request.evidence.host,
+        request.evidence.profileId,
+      )
+      helperConsentAsks.settleMatchingQueued(request, method)
+      helperConsentAsks.settle(request, method)
+    } catch (err) {
+      showToast({
+        level: 'danger',
+        message: `Could not save the connection method for ${request.evidence.host}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+        duration: 0,
+      })
+    } finally {
+      setHelperConsentAskBusy(false)
     }
   }
 
@@ -485,8 +611,26 @@ function main(): void {
   tm.outputRecording = historyStatusStore
   tm.onVaultSealed = () => vaultController.openUnlock('open this connection')
   tm.onHostKeyError = (evidence, signal) => openHostKeys.request(evidence, signal)
+  tm.onHelperConsentAsk = (ask, signal) => helperConsentAsks.request(ask, signal)
   tm.onSetupVault = () => vaultController.openSetup()
   tm.onCreateSecret = (name) => openSettingsPane().startNewSecret(name)
+  // -- The client host (nocx-uo1k6, design D3) -------------------------
+  // The coordinator runs as a daemon with no window of its own, so the
+  // native-host capabilities it cannot perform — a file picker, a browser
+  // open, a desktop banner, a window raise or a process-tree approval —
+  // are asked of this client and performed through the Wails bindings.
+  // Mounted unconditionally: a client with no Wails runtime still answers,
+  // saying so, because the coordinator must never be left waiting on a
+  // client that cannot act.
+  //
+  // EXACTLY ONCE, and the count is the contract. `host.request` is an ask
+  // that must be answered once, but the dispatcher keeps a SET of handlers
+  // per method, so a second mount answers every request a second time and the
+  // first resolution to land wins. There were two of these (nocx-pighx): this
+  // one, and a bare one further down that passed no approval surface — so the
+  // agent-tree question was answered by whichever mount was faster, and the
+  // one that had to wait for a person never was.
+  mountClientHost(dispatcher, undefined, undefined, requestAgentHostApproval)
   // A question refused for want of an endpoint: the toast names the
   // problem, this opens where it is fixed — Settings → Endpoints with the
   // editor already up on a blank one.
@@ -497,6 +641,10 @@ function main(): void {
   // names the one page that repairs it — and it reuses that seam for the
   // endpoints destination rather than growing a second one.
   tm.onOpenRoles = () => openSettingsPane().openPage('roles')
+  // The approval receipt's Manage permissions: the page that governs the
+  // standing answer the line is about (nocx-2019q). The same idea again — a
+  // fact on screen names the one page that manages it.
+  tm.onManagePermissions = () => openSettingsPane().openPage('policy')
   tm.onActivity = reportActivity
 
   // ── Backend-initiated readScreen requests (nocx-ljfwz) ─────────────
@@ -505,15 +653,6 @@ function main(): void {
   // pane that owns its grid; a request for a session no pane holds is
   // answered failed, honestly — never a hang.
   mountReadScreenHandler(dispatcher, (sessionId) => tm.terminalContentForSession(sessionId))
-
-  // -- The client host (nocx-uo1k6, design D3) -------------------------
-  // The coordinator runs as a daemon with no window of its own, so the
-  // native-host capabilities it cannot perform -- a file picker, a browser
-  // open, a desktop banner, a window raise -- are asked of this client and
-  // performed through the Wails bindings. Mounted unconditionally: a client
-  // with no Wails runtime still answers, saying so, because the coordinator
-  // must never be left waiting on a client that cannot act.
-  mountClientHost(dispatcher)
 
   // ── Backend-initiated run requests (nocx-tjppv) ─────────────────────
   // The broker's pull for the headline tool: the backend asks the renderer
@@ -560,6 +699,16 @@ function main(): void {
         // fallback, one place a store row can land (nocx-3o0ed.4).
         secretSource,
         skillsStore,
+        emittingClient,
+        agentAccessClient,
+        calibrationClient,
+        rulesClient,
+        typingClient,
+        // The window already names every pane in its tab strip, and the
+        // backend answers the emitting view with a session id and an agent
+        // name. This is the one place those two meet; deriving a name inside
+        // the Settings page would be a second owner of what a pane is called.
+        (sessionId: string) => tm.sessionDisplayName(sessionId),
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })
@@ -1740,6 +1889,18 @@ function main(): void {
             />
           )}
         </Show>
+        <Show when={activeAgentHostApproval()} keyed>
+          {(ask) => (
+            <AgentApprovalDialog
+              executable={ask.executable}
+              digest={ask.digest}
+              workspace={ask.workspace}
+              machine={ask.machine}
+              busy={agentHostApprovalBusy()}
+              onDecide={decideAgentHostApproval}
+            />
+          )}
+        </Show>
         <Show when={activeApproval()} keyed>
           {(ask) => (
             <AgentApprovalPrompt
@@ -1761,9 +1922,23 @@ function main(): void {
           {(request) => (
             <HostKeyDialog
               evidence={request.evidence}
+              helperAsk={null}
               busy={openHostKeyBusy()}
-              onAccept={() => void acceptOpenHostKey(request)}
+              onAcceptHostKey={() => void acceptOpenHostKey(request)}
+              onChooseMethod={() => {}}
               onClose={() => openHostKeys.settle(request, false)}
+            />
+          )}
+        </Show>
+        <Show when={pendingHelperConsentAsk()} keyed>
+          {(request) => (
+            <HostKeyDialog
+              evidence={request.evidence.hostKey}
+              helperAsk={{ fingerprint: request.evidence.fingerprint }}
+              busy={helperConsentAskBusy()}
+              onAcceptHostKey={() => void acceptHelperAskHostKey(request)}
+              onChooseMethod={(method) => void decideIntegrationMethod(request, method)}
+              onClose={() => helperConsentAsks.settle(request, null)}
             />
           )}
         </Show>
@@ -1787,6 +1962,11 @@ function main(): void {
     }
     setPendingOpenHostKey(null)
     setOpenHostKeyBusy(false)
+    while (pendingHelperConsentAsk()) {
+      pendingHelperConsentAsk()!.abort()
+    }
+    setPendingHelperConsentAsk(null)
+    setHelperConsentAskBusy(false)
   }
 
   dispatcher.onConnectionStateChange((state) => {
@@ -1855,6 +2035,10 @@ function main(): void {
         })
     })()
   })
+
+  // The frozen-line drift instrument (nocx-4n6sj): switched off, and the
+  // console surface is how it gets switched on for a week of dogfooding.
+  installCellDriftApi()
 
   // The dispatcher owns the first socket attempt; all stable clients, roots,
   // handlers and the connection-scoped lifecycle above are now installed.

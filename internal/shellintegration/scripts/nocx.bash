@@ -15,13 +15,21 @@ __nocx_loaded=1
 # --- Authenticated lifecycle channel (ADR-0024, docs/lifecycle-protocol.md) ---
 #
 # The command lifecycle rides a channel that is not the tty; every envelope
-# is authenticated by the per-epoch capability. The capability reaches the
-# shell substituted into the bootstrap script text (the launcher rcfile's
-# @CAP@, or the first line of the in-band raw-mode stream); it is NEVER in
-# the environment, never exported, and never written to a file. A shell
-# without a capability, a transport or an accept is a conventional terminal:
-# the native prompt stays visible and no lifecycle event is sent (ADR-0024
-# decisions 3 and 9).
+# THIS SHELL SENDS is authenticated by the per-epoch capability. The
+# capability reaches the shell through one of the two forms ADR-0049 left
+# standing (internal/shellintegration/capability_source.go): read once from
+# an inherited, already-unlinked descriptor and closed, or written into the
+# text of an rcfile that is itself delivered through a descriptor. Either
+# way it is NEVER in the environment, never exported, and never a filesystem
+# name. A shell without a capability, a transport or an accept is a
+# conventional terminal: the native prompt stays visible and no lifecycle
+# event is sent (ADR-0024 decisions 3 and 9).
+#
+# Nothing the shell RECEIVES carries a capability, and that asymmetry is the
+# point (nocx-aqz7o). This descriptor is inherited by every descendant of
+# this shell, so a bearer written on the inbound-to-the-shell direction would
+# be readable by exactly the actor the capability exists to exclude. Frames
+# arriving here are identified by domain and epoch, which are names.
 #
 # The envelope addresses lane, domain and epoch explicitly — they are names,
 # not secrets, and arrive via the launcher environment (NOCX_LIFECYCLE_*) or
@@ -349,11 +357,11 @@ __nocx_lc_init() {
         __cfg_ok=1
     fi
     if [[ "$__cfg_ok" != "1" ]]; then
-        return 1
+        return 0
     fi
     # Before the first read of any kind — __nocx_lc_read_frame below is one.
     if ! __nocx_lc_resolve_probe; then
-        return 1
+        return 0
     fi
     if [[ -n "$__nocx_lc_port" ]]; then
         # Remote / in-band transport: bash network redirection. The bind
@@ -369,7 +377,7 @@ __nocx_lc_init() {
         # readline writes the prompt to stderr, so the restored native
         # prompt (decisions 8/9) would be invisible.
         if ! { exec 200<>"/dev/tcp/127.0.0.1/$__nocx_lc_port"; } 2>/dev/null; then
-            return 1
+            return 0
         fi
         __nocx_lc_fd=200
     fi
@@ -386,21 +394,38 @@ __nocx_lc_init() {
     # variable and anyone can set it before starting a shell.
     __nocx_lc_json_escape "${NOCX_GENERATION-}"
     __nocx_lc_gen_esc=$__nocx_lc_json_escaped
-    __nocx_lc_send hello ',"shell":"bash","max_frame":'"$__nocx_lc_max_frame"',"gen":"'"$__nocx_lc_gen_esc"'"'
-    if ! __nocx_lc_read_frame; then
-        return 1
+    if ! __nocx_lc_send hello ',"shell":"bash","max_frame":'"$__nocx_lc_max_frame"',"gen":"'"$__nocx_lc_gen_esc"'"'; then
+        return 0
     fi
-    # Two independent substring checks, not one ordered pattern: the
+    if ! __nocx_lc_read_frame; then
+        return 0
+    fi
+    # Three independent substring checks, not one ordered pattern: the
     # envelope's field order is the adapter's, and a case pattern like
-    # *evt*cap* would silently reject a valid accept whose cap field
-    # precedes evt.
+    # *evt*dom* would silently reject a valid accept whose fields arrive in
+    # the other order.
+    #
+    # The identity checked is the DOMAIN and the EPOCH, not the capability.
+    # It used to be the capability, and that was wrong twice over: it made
+    # the kernel echo the bearer back onto a descriptor every descendant of
+    # this shell inherits (nocx-aqz7o), and it could never have authenticated
+    # the peer anyway — the hello one frame earlier hands that peer the
+    # capability. What the check is actually FOR is "is this accept mine",
+    # and the domain and the epoch answer that exactly, out of values that
+    # are already in this shell's environment and are not secrets. The epoch
+    # pattern keeps its trailing comma so that epoch 12 does not match 123;
+    # the envelope always has fields after the epoch, so the comma is there.
     case "$__nocx_lc_frame" in
         *'"evt":"accept"'*) : ;;
-        *) return 1 ;;
+        *) return 0 ;;
     esac
     case "$__nocx_lc_frame" in
-        *'"cap":"'"$__nocx_cap"'"'*) : ;;
-        *) return 1 ;;
+        *'"dom":"'"$__nocx_lc_dom_esc"'"'*) : ;;
+        *) return 0 ;;
+    esac
+    case "$__nocx_lc_frame" in
+        *'"epoch":'"$__nocx_lc_epoch"','*) : ;;
+        *) return 0 ;;
     esac
     __nocx_lc_active=1
     return 0
@@ -599,9 +624,11 @@ __nocx_lc_read_grant() {
 # amendment forbids inferring it from a title or a command word, because an
 # inferred set has no upper bound and no audit. This is that act, and it lives
 # HERE, in the integration script, rather than in a separate launcher binary,
-# for the reason ADR-0024 decision 2 gives: the per-epoch capability is
-# substituted into this file's text and never enters the environment, so a
-# child process could reach the descriptor and could not authenticate on it.
+# for the reason ADR-0024 decision 2 gives: the per-epoch capability is held by
+# THIS SHELL and never enters the environment, so a child process could reach
+# the descriptor and could not authenticate on it. "Could not" is only true
+# because the kernel writes no capability on the direction that descriptor
+# delivers either (nocx-aqz7o) — see the header of this file.
 #
 # The wrapper BRACKETS the agent instead of exec'ing it. §7.1 describes a
 # launcher that execs so its pid survives to carry a pin; the pin is what the
@@ -611,24 +638,44 @@ __nocx_lc_read_grant() {
 
 __nocx_agent_n=0
 __nocx_agent_enrolled=0
+__nocx_agent_pending=0
+__nocx_agent_cancelled=0
+__nocx_agent_rid=
 __nocx_agent_reason=
+__nocx_agent_helper_path="${NOCX_AGENT_HELPER_PATH:-nocx-helper}"
+__nocx_agent_tool_socket="${NOCX_TOOL_SOCKET:-}"
+__nocx_agent_launch_dir=
+__nocx_agent_launch_lease=
+__nocx_agent_old_exit=
+__nocx_agent_old_int=
+__nocx_agent_old_term=
+__nocx_agent_old_hup=
 
 # Read the answer to agent request $1 (bounded, same budget as a grant). Sets
-# __nocx_agent_enrolled and __nocx_agent_reason. Returns non-zero on timeout or
-# a dead channel, which the caller reads as a refusal.
+# __nocx_agent_enrolled, __nocx_agent_pending and __nocx_agent_reason. Returns
+# non-zero on timeout or a dead channel, which the caller reads as a refusal.
+#
+# With $2 = wait it has NO deadline, because what it waits for is a person: the
+# frame closing a question nocx is asking (nocx-cyhfw). Only Ctrl+C ends that
+# wait early, and it returns 130 — see __nocx_agent_await_answer.
 __nocx_lc_read_agent_answer() {
-    local __rid="$1" __t=0 __reason
+    local __rid="$1" __wait="${2:-}" __t=0 __reason
     __nocx_agent_enrolled=0
+    __nocx_agent_pending=0
     __nocx_agent_reason=
-    while (( __t < __nocx_lc_grant_timeout_s )); do
+    while [[ "$__wait" == wait ]] || (( __t < __nocx_lc_grant_timeout_s )); do
+        (( __nocx_agent_cancelled )) && return 130
         if ! __nocx_lc_probe_readable; then
             sleep 1
             __t=$(( __t + 1 ))
             continue
         fi
-        __nocx_lc_read_frame 1 || return 1
+        if ! __nocx_lc_read_frame 1; then
+            (( __nocx_agent_cancelled )) && return 130
+            return 1
+        fi
         case "$__nocx_lc_frame" in
-            *'"evt":"agent_enrolled"'*|*'"evt":"agent_withdrawn"'*) : ;;
+            *'"evt":"agent_enrolled"'*|*'"evt":"agent_withdrawn"'*|*'"evt":"agent_reported"'*) : ;;
             *'"evt":"refresh_request"'*) __nocx_lc_ans_refresh || true; continue ;;
             *) continue ;; # a stale frame (a late accept, an old grant): skip
         esac
@@ -646,6 +693,12 @@ __nocx_lc_read_agent_answer() {
         case "$__nocx_lc_frame" in
             *'"enrolled":true'*) __nocx_agent_enrolled=1 ;;
         esac
+        # A wait is never consent. The backend never sends both fields, and a
+        # frame that carries both is not one this reader may resolve in the
+        # agent's favour.
+        case "$__nocx_lc_frame" in
+            *'"pending":true'*) __nocx_agent_pending=1; __nocx_agent_enrolled=0 ;;
+        esac
         case "$__nocx_lc_frame" in
             *'"reason":"'*)
                 __reason="${__nocx_lc_frame#*\"reason\":\"}"
@@ -654,6 +707,7 @@ __nocx_lc_read_agent_answer() {
                 __nocx_agent_reason="$__nocx_lc_json_unescaped"
                 ;;
         esac
+        (( __nocx_agent_cancelled )) && return 130
         return 0
     done
     return 1
@@ -679,6 +733,271 @@ __nocx_agent_geometry() {
     (( __nocx_agent_rows > 0 )) || __nocx_agent_rows=24
 }
 
+# THE DECLARATION DROP: how a worker says what its work produced.
+#
+# The declaration is one of the two facts that may decide a worker participant's
+# state (D9), and it must come from the AGENT rather than from the shell: a
+# declaration synthesised from the agent's exit status would collapse two
+# facts the design keeps independent and make "completed" mean nothing beyond
+# "exited 0" — the self-matching sentinel the whole orchestration design was
+# written against.
+#
+# But the agent cannot send one itself. The lifecycle capability is
+# deliberately NOT exported (see __nocx_cap above, and the 2026-08-15 design's
+# D13: no bearer material in the environment), so a child process has nothing
+# to authenticate a frame with. What it can do is leave the verdict somewhere
+# the shell will look, and the shell — which holds the capability — sends it.
+#
+# The path is an ordinary environment variable and that is not a weakening: a
+# path names a rendezvous, it confers nothing, and mktemp gives it an
+# unguessable name and mode 0600 so only this user can write it. Anything in
+# the agent's own process tree can therefore declare, which is exactly the
+# principal the 2026-08-15 design's D14 already enrols and says so in the
+# approval — "allow this agent AND COMMANDS IT LAUNCHES".
+#
+# THE FORMAT IS FOR A SHELL TO PARSE AND FOR AN AGENT TO WRITE. First line
+# `ok` or `fail`; everything after it is what the agent says it produced.
+# Anything else — an empty file, a half-written one, a file some other program
+# happened to leave — is NOT a declaration and nothing is sent, so the
+# participant stays undeclared and the record calls it abandoned. Consent is
+# the presence of what we positively recognise, exactly as the enrolment
+# answer's is.
+__nocx_agent_report_path=
+# __nocx_agent_report_reason names WHY the drop above ended up empty
+# (nocx-xn63t.6.1): __nocx_agent_stage already says why a refusal happened
+# ("nocx: tool surface unavailable — %s"), and this one used to say nothing
+# at all — the mktemp failure that leaves __nocx_agent_report_path empty was
+# swallowed by its own `2>/dev/null`, so an agent that then wrote to
+# "$NOCX_AGENT_REPORT" (an empty string) got a shell error naming no setting
+# ("line 3: : No such file or directory") and the person watching learned
+# nothing. Named here so __nocx_agent_run can print it the same way stage's
+# reason already is.
+__nocx_agent_report_reason=
+__nocx_agent_report_open() {
+    __nocx_agent_report_path=
+    __nocx_agent_report_reason=
+    local __p
+    # ONE call, stderr merged into the same capture: on success mktemp
+    # writes nothing to stderr, so this is exactly the path; on failure
+    # $__p is empty and mktemp's own message is what run() reports below.
+    if ! __p="$(command mktemp "${TMPDIR:-/tmp}/nocx-agent-report.XXXXXX" 2>&1)"; then
+        __nocx_agent_report_reason="could not create a private report file${__p:+: $__p}"
+        return 1
+    fi
+    __nocx_agent_report_path="$__p"
+    return 0
+}
+
+# Read the drop and send the declaration, if there is one. Returns without
+# sending anything when there is not, which is the ordinary case for an agent
+# that was never told about this.
+__nocx_agent_report_send() {
+    local __rid="$1" __line __verdict= __body= __first=1 __ok
+    [[ -n "$__nocx_agent_report_path" && -r "$__nocx_agent_report_path" ]] || return 0
+    while IFS= read -r __line || [[ -n "$__line" ]]; do
+        if (( __first )); then
+            __verdict="$__line"
+            __first=0
+            continue
+        fi
+        __body="$__body$__line"$'\n'
+    done < "$__nocx_agent_report_path"
+    case "$__verdict" in
+        ok) __ok=true ;;
+        fail) __ok=false ;;
+        *) return 0 ;;
+    esac
+    # Bounded here as well as by the kernel, so an agent that wrote a
+    # transcript into the drop costs one truncation rather than a frame the
+    # backend refuses whole. Keep in step with lifecycle.MaxReportSummaryBytes.
+    __body="${__body:0:4000}"
+    __nocx_lc_json_escape "$__body"
+    __nocx_lc_send agent_report ',"request":"'"$__rid"'","ok":'"$__ok"',"summary":"'"$__nocx_lc_json_escaped"'"' || return 0
+    __nocx_lc_read_agent_answer "$__rid" || return 0
+    # "No orchestration, and the pane says so" (D4) applies to a declaration
+    # that was not kept just as it applies to an enrolment that was refused:
+    # an agent that reported into nowhere must not think it was heard.
+    case "$__nocx_lc_frame" in
+        *'"recorded":true'*) : ;;
+        *) builtin printf 'nocx: what you reported was not recorded%s\n' \
+               "${__nocx_agent_reason:+ — $__nocx_agent_reason}" >&2 ;;
+    esac
+}
+
+__nocx_agent_stage_reason=
+__nocx_agent_sweep() {
+    # The lease compares pid plus ps lstart, not pid alone. lstart has
+    # one-second granularity and busybox may not provide it: missing or
+    # changed data rejects staging or sweeps the directory, but same-second
+    # pid reuse is outside what this check can distinguish.
+    local __root="${TMPDIR:-/tmp}" __dir __pid __start
+    for __dir in "$__root"/nocx-agent-launch.*; do
+        [[ -d "$__dir" ]] || continue
+        [[ "$__dir" == "$__nocx_agent_launch_dir" ]] && continue
+        __pid=
+        __start=
+        if [[ -r "$__dir/lease" ]]; then
+            IFS= read -r __pid < "$__dir/lease" || __pid=
+            __start="$(command sed -n '2p' "$__dir/lease" 2>/dev/null)"
+        fi
+        if [[ -z "$__pid" || -z "$__start" ]] ||
+            ! kill -0 "$__pid" 2>/dev/null ||
+            [[ "$(ps -o lstart= -p "$__pid" 2>/dev/null | tr -s ' ')" != "$__start" ]]; then
+            command rm -rf -- "$__dir" 2>/dev/null || true
+        fi
+    done
+}
+
+__nocx_agent_cleanup() {
+    if [[ -n "$__nocx_agent_launch_dir" ]]; then
+        command rm -rf -- "$__nocx_agent_launch_dir" 2>/dev/null || true
+        __nocx_agent_launch_dir=
+        __nocx_agent_launch_lease=
+    fi
+}
+
+__nocx_agent_stage() {
+    local __helper="$1" __socket="$2" __root="${TMPDIR:-/tmp}" __dir __lease __config __start
+    __nocx_agent_stage_reason=
+    __nocx_agent_launch_dir=
+    __nocx_agent_launch_lease=
+    # NOCX SAID WHY THERE IS NO TOOL SURFACE (nocx-e2bws): the launch names a
+    # code, this shell owns the sentence. "Path is not configured" would send a
+    # person looking for a setting no host has.
+    if [[ -z "$__helper" || -z "$__socket" ]] && [[ -n "${NOCX_AGENT_TOOLS_ABSENT:-}" ]]; then
+        __nocx_agent_stage_reason='no nocx helper is installed on this host, so the agent gets no nocx tools'
+        return 1
+    fi
+    if [[ -z "$__helper" ]]; then
+        __nocx_agent_stage_reason='nocx helper path is not configured'
+        return 1
+    fi
+    if [[ -z "$__socket" ]]; then
+        __nocx_agent_stage_reason='nocx tool socket path is not configured'
+        return 1
+    fi
+    __nocx_agent_sweep
+    __dir="$(command mktemp -d "$__root/nocx-agent-launch.XXXXXX" 2>/dev/null)" || {
+        __nocx_agent_stage_reason='could not create the private launch directory'
+        return 1
+    }
+    if ! command chmod 700 "$__dir" 2>/dev/null; then
+        command rm -rf -- "$__dir" 2>/dev/null || true
+        __nocx_agent_stage_reason='could not secure the private launch directory'
+        return 1
+    fi
+    __lease="$__dir/lease"
+    __config="$__dir/mcp.json"
+    if ! (
+        umask 077
+        __start="$(ps -o lstart= -p "$$" 2>/dev/null | tr -s ' ')" || exit 1
+        [[ -n "$__start" ]] || exit 1
+        printf '%s\n%s\n' "$$" "$__start" > "$__lease" || exit 1
+        __nocx_lc_json_escape "$__helper" || exit 1
+        __helper_json="$__nocx_lc_json_escaped"
+        __nocx_lc_json_escape "$__socket" || exit 1
+        __socket_json="$__nocx_lc_json_escaped"
+        # THE AGENT'S BEARER, and the only place a child of this shell sees it
+        # (nocx-50w7p.16). It arrives as a NON-EXPORTED variable from the
+        # descriptor stage-1 read (capability_source.go), so nothing this shell
+        # runs inherits it; it is written here, 0600 inside the 0700 launch
+        # directory, and it goes in `env` rather than `args` because a far
+        # host's argv is world-readable and this file is not.
+        __nocx_lc_json_escape "${__nocx_agent_token:-}" || exit 1
+        __token_json="$__nocx_lc_json_escaped"
+        __env_json=
+        if [[ -n "$__token_json" ]]; then
+            __env_json=",\"env\":{\"NOCX_AGENT_TOKEN\":\"$__token_json\"}"
+        fi
+        printf '{"mcpServers":{"nocx":{"type":"stdio","command":"%s","args":["mcp","--socket","%s"]%s}}}\n' \
+            "$__helper_json" "$__socket_json" "$__env_json" > "$__config" || exit 1
+        command chmod 600 "$__lease" "$__config"
+    ); then
+        command rm -rf -- "$__dir" 2>/dev/null || true
+        __nocx_agent_stage_reason='could not write the private MCP configuration'
+        return 1
+    fi
+    __nocx_agent_launch_dir="$__dir"
+    __nocx_agent_launch_lease="$__lease"
+    return 0
+}
+
+__nocx_agent_capture_traps() {
+    __nocx_agent_old_exit="$(trap -p EXIT 2>/dev/null)" || __nocx_agent_old_exit=
+    __nocx_agent_old_int="$(trap -p INT 2>/dev/null)" || __nocx_agent_old_int=
+    __nocx_agent_old_term="$(trap -p TERM 2>/dev/null)" || __nocx_agent_old_term=
+    __nocx_agent_old_hup="$(trap -p HUP 2>/dev/null)" || __nocx_agent_old_hup=
+    trap '__nocx_agent_cleanup' INT
+    trap '__nocx_agent_cleanup' TERM HUP
+    trap '__nocx_agent_cleanup' EXIT
+}
+
+__nocx_agent_restore_traps() {
+    trap - EXIT INT TERM HUP
+    [[ -z "$__nocx_agent_old_exit" ]] || eval "$__nocx_agent_old_exit"
+    [[ -z "$__nocx_agent_old_int" ]] || eval "$__nocx_agent_old_int"
+    [[ -z "$__nocx_agent_old_term" ]] || eval "$__nocx_agent_old_term"
+    [[ -z "$__nocx_agent_old_hup" ]] || eval "$__nocx_agent_old_hup"
+    __nocx_agent_old_exit=
+    __nocx_agent_old_int=
+    __nocx_agent_old_term=
+    __nocx_agent_old_hup=
+}
+
+# Wait for the question raised on request $1 to close. Ctrl+C cancels the
+# launch and returns 130: the question stays on screen and an answer given
+# later is still kept for the next start, but the agent the person stopped
+# waiting for does not run. The INT trap is this function's alone and the one
+# it replaced is put back, whichever way the wait ends.
+__nocx_agent_await_answer() {
+    local __old_int __rc
+    __old_int="$(trap -p INT 2>/dev/null)" || __old_int=
+    __nocx_agent_cancelled=0
+    trap '__nocx_agent_cancelled=1' INT
+    __nocx_lc_read_agent_answer "$1" wait
+    __rc=$?
+    trap - INT
+    [[ -z "$__old_int" ]] || eval "$__old_int"
+    __nocx_agent_cancelled=0
+    return $__rc
+}
+
+# Enrol this pane for agent $1. Returns 0 when enrolled, with the interval's
+# request id in __nocx_agent_rid; 130 when the person pressed Ctrl+C while nocx
+# was asking; 1 for every refusal, with the backend's sentence, if it sent one,
+# in __nocx_agent_reason.
+#
+# THE QUESTION COMES FIRST (nocx-cyhfw). An agent nobody has answered for is not
+# refused: the backend answers "pending" inside the handshake's bound and puts
+# the question on screen. The wait for the answer is HERE, outside the
+# handshake, because it waits on a person — nocx-t7xds is what happened while it
+# sat inside the five-second bound. The frame that closes the question is never
+# consent: the enrolment sent after it is what the answer admits or refuses. A
+# question that closes with a sentence was never answered, and is not raised
+# again.
+__nocx_agent_enrol() {
+    local __agent="$1" __told=0 __rc
+    while :; do
+        __nocx_agent_reason=
+        __nocx_agent_geometry
+        __nocx_agent_rid="a-$__nocx_lc_dom-$(( __nocx_agent_n++ ))"
+        __nocx_lc_send agent_enrol ',"request":"'"$__nocx_agent_rid"'","agent":"'"$__agent"'","cols":'"$__nocx_agent_cols"',"rows":'"$__nocx_agent_rows" \
+            || return 1
+        __nocx_lc_read_agent_answer "$__nocx_agent_rid" || return 1
+        (( __nocx_agent_enrolled == 1 )) && return 0
+        (( __nocx_agent_pending == 1 )) || return 1
+        if (( ! __told )); then
+            builtin printf 'nocx: %s — answer it in nocx to start %s, or press Ctrl+C to cancel\n' \
+                "${__nocx_agent_reason:-nocx is asking a question}" "$__agent" >&2
+            __told=1
+        fi
+        __nocx_agent_await_answer "$__nocx_agent_rid"
+        __rc=$?
+        (( __rc == 0 )) || return $__rc
+        [[ -z "$__nocx_agent_reason" ]] || return 1
+    done
+}
+
 # Run agent $1 with the pane enrolled for its lifetime.
 #
 # THE REFUSAL IS VISIBLE AND THE AGENT STILL RUNS. "Failure is closed" (D4)
@@ -687,18 +1006,27 @@ __nocx_agent_geometry() {
 # declining to run a command because a feature of its own is unavailable. What
 # it does mean is that the pane says so, in the pane, where the person is
 # looking, and not only in a log the person never reads.
+#
+# A QUESTION IS NOT A REFUSAL. While nocx is asking whether the agent may use
+# its tools, the agent does not start; it starts when the question closes —
+# with tools after a yes, without them after a no — and not at all if the
+# person cancels the wait.
 __nocx_agent_run() {
-    local __agent="$1" __rid __rc
+    local __agent="$1" __rid __rc __stage_reason __staged=0
     shift
     if [[ "${__nocx_lc_active:-0}" != "1" ]]; then
         builtin printf 'nocx: not orchestrated — this pane has no lifecycle channel\n' >&2
         command "$__agent" "$@"
         return $?
     fi
-    __nocx_agent_geometry
-    __rid="a-$__nocx_lc_dom-$(( __nocx_agent_n++ ))"
-    if ! __nocx_lc_send agent_enrol ',"request":"'"$__rid"'","agent":"'"$__agent"'","cols":'"$__nocx_agent_cols"',"rows":'"$__nocx_agent_rows" \
-        || ! __nocx_lc_read_agent_answer "$__rid" || (( __nocx_agent_enrolled != 1 )); then
+    __nocx_agent_enrol "$__agent"
+    __rc=$?
+    if (( __rc == 130 )); then
+        builtin printf '\nnocx: cancelled — %s was not started\n' "$__agent" >&2
+        return 130
+    fi
+    __rid="$__nocx_agent_rid"
+    if (( __rc != 0 )); then
         if [[ -n "$__nocx_agent_reason" ]]; then
             builtin printf 'nocx: not orchestrated — %s\n' "$__nocx_agent_reason" >&2
         else
@@ -707,14 +1035,78 @@ __nocx_agent_run() {
         command "$__agent" "$@"
         return $?
     fi
-    command "$__agent" "$@"
+    if __nocx_agent_stage "${NOCX_AGENT_HELPER_PATH:-$__nocx_agent_helper_path}" \
+        "${NOCX_TOOL_SOCKET:-$__nocx_agent_tool_socket}"; then
+        __staged=1
+        __nocx_agent_capture_traps
+    else
+        __stage_reason="$__nocx_agent_stage_reason"
+        builtin printf 'nocx: tool surface unavailable — %s\n' "$__stage_reason" >&2
+    fi
+    # The drop is opened BEFORE the agent starts, or an agent that finished
+    # quickly would have had nowhere to write. A drop that could not be opened
+    # is not a refusal: the agent still runs, and the worker is simply one
+    # that cannot declare — which the record already has a name for. Said out
+    # loud, the same way stage's own refusal already is (nocx-xn63t.6.1):
+    # silence here used to mean the agent's own write to an empty
+    # "$NOCX_AGENT_REPORT" surfaced a shell error naming no setting at all.
+    if ! __nocx_agent_report_open; then
+        builtin printf 'nocx: no report drop for this agent — %s\n' "$__nocx_agent_report_reason" >&2
+    fi
+    # Claude's --mcp-config option is variadic: placing it before "$@" would
+    # swallow a user's positional prompt as another config path. Keep it last.
+    # If a future Claude subcommand rejects trailing flags, update this
+    # argv proof and feed the prompt through stdin instead of moving the flag
+    # ahead of user arguments.
+    # Cleared before the agent is exec'd: the staging above has taken its copy,
+    # nothing after this point needs the bearer, and a shell that ran a child
+    # with it still in its own variable space is one `printenv`-style accident
+    # away from publishing it (nocx-50w7p.16). The unset is the second lock on
+    # the same door — a non-exported variable is not inherited anyway — and it
+    # is kept because the cost is one builtin.
+    unset __nocx_agent_token 2>/dev/null || true
+    # `env VAR=val CMD ...`, not `VAR=val command CMD ...` (nocx-xn63t.6.1).
+    # Both bypass the same-named shell FUNCTION this file just defined
+    # (claude() calls __nocx_agent_run, so a bare `claude` here would
+    # recurse) — env execs a real binary off PATH, which can never resolve
+    # to a function in THIS shell, same as command's own guarantee. They are
+    # not equivalent on bash 3.2: a `VAR=val cmd` TEMPORARY assignment is a
+    # shell grammar construct, and 3.2's DEBUG trap — which this file's own
+    # __nocx_preexec_wrapper installs for shell integration — fires between
+    # the assignment and the traced command in a way that drops it before
+    # exec. Confirmed with `set -x` through the real bash-3.2 fixture: the
+    # trace showed the assignment and `command claude` as two separate
+    # traced steps with the wrapper's own trace in between, and the agent's
+    # own `echo "DROP=$NOCX_AGENT_REPORT"` printed nothing — empty, not
+    # unset, so the assignment happened and was lost before the child saw
+    # it. `env` has no such assignment step for the trap to land inside:
+    # the whole line is one traced command, on 3.2 and 5 alike.
+    if (( __staged )); then
+        command env "NOCX_AGENT_REPORT=$__nocx_agent_report_path" "$__agent" "$@" \
+            --mcp-config "$__nocx_agent_launch_dir/mcp.json"
+    else
+        command env "NOCX_AGENT_REPORT=$__nocx_agent_report_path" "$__agent" "$@"
+    fi
     __rc=$?
+    # The declaration goes BEFORE the withdraw, inside the interval the
+    # enrolment opened. It is the participant's own fact and the withdraw is
+    # the interval's end; sending them the other way round would report a
+    # verdict about a pane nocx had already stopped watching.
+    __nocx_agent_report_send "$__rid"
+    if [[ -n "$__nocx_agent_report_path" ]]; then
+        command rm -f -- "$__nocx_agent_report_path" 2>/dev/null
+        __nocx_agent_report_path=
+    fi
     # The other end of the interval, and it runs whatever the agent returned —
     # a crash, an interrupt and a clean exit all close it. The answer is read
     # and discarded: nothing here can act on a failed withdrawal, and the
     # backend closes the same interval again when the session's output ends.
-    __nocx_lc_send agent_withdraw ',"request":"'"$__rid"'"' || return $__rc
+    __nocx_lc_send agent_withdraw ',"request":"'"$__rid"'"' || true
     __nocx_lc_read_agent_answer "$__rid" || true
+    if (( __staged )); then
+        __nocx_agent_cleanup
+        __nocx_agent_restore_traps
+    fi
     return $__rc
 }
 

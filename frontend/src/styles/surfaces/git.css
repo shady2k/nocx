@@ -97,11 +97,12 @@
   font-size: var(--font-size-sm);
 }
 
-/* No .git-mutation-error / .git-consent-error here: a surface naming its own
-   error concept in its own danger colour is the second dialect the
-   error-vocabulary gate exists to prevent (nocx-8sudy). The mutation one had
-   no caller left; the consent refusal renders through the kit's
-   `ui-field-error`, which is the same words in the same colour everywhere. */
+/* No .git-mutation-error here: a surface naming its own error concept in
+   its own danger colour is the second dialect the error-vocabulary gate
+   exists to prevent (nocx-8sudy); it had no caller left. The panel's git
+   panel consent card is gone with it (ADR-0068: no feature surface may
+   offer to install the helper) — a session without it renders through the
+   ordinary failed-open StatusCard, no dialect of its own. */
 
 /* The whole-index controls sit above the lists; the refusal below them
    carries the D19 reason. The two actions split the rail between them. Sized to their

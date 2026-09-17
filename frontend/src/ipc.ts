@@ -15,9 +15,10 @@ import type {
 import type { SessionDisplaced } from './generated/session.displaced'
 import type { SessionLiveness } from './generated/session.liveness'
 import type { SessionObservationChanged } from './generated/session.observationChanged'
-import { isDriverState } from './pane-observation'
+import { isDriverState, isPaneProgress, readPaneChildren } from './pane-observation'
 import type { SessionSignal } from './generated/session.signal'
 import type { SecretsPaneClosed } from './generated/secrets.paneClosed'
+import type { WorkersTabCreated } from './generated/workers.tabCreated'
 
 /** The open ack's wire shape (contracts/open.schema.json): the server
  *  assigns the session id (AD-7), and the resolved destination mode rides the
@@ -48,6 +49,13 @@ type OpenResult = {
    *  is the one message that carries it. PROVENANCE ONLY — see
    *  SessionHandle.parent. */
   parent?: Open['parent']
+  /** Whether this open has just entered the session into the integration
+   *  axis `starting` (nocx-ui8q6.6): the fact that lets a pane tell "no
+   *  status yet" apart from "no status ever coming" in the gap before the
+   *  first session.integrationChanged, which arrives strictly after this ack
+   *  (AD-7). See SessionHandle.awaitsIntegration for what it does and does
+   *  not answer. */
+  awaitsIntegration?: Open['awaitsIntegration']
 }
 
 /**
@@ -424,6 +432,23 @@ export class SessionHandle {
      *  the ranges nothing kept. A recovered scrollback with a silent hole
      *  in it is the one outcome worse than a short one. */
     readonly recovered: SessionRecovery | null = null,
+    /** Whether the session's integration axis currently reads `starting`
+     *  (nocx-ui8q6.6, contracts/open.schema.json and — for a reclaimed or
+     *  reattached handle, nocx-ty0hc — contracts/attach.schema.json). It
+     *  answers one question only — is a session.integrationChanged
+     *  notification guaranteed to follow this ack — and only for the gap
+     *  before the first one arrives: once a fact exists, the pane reads the
+     *  fact (isAwaitingIntegration in integration/status.ts) and this is
+     *  ignored.
+     *
+     *  An OPEN reads it off the open ack; a RECLAIM (ipc.ts reclaimSession)
+     *  reads it off the attach ack instead, because that is the call that
+     *  actually claims the session — the same axis, asked through the other
+     *  door. The default here is `false` only for a caller that supplied
+     *  neither, which no longer includes reclaimSession: it is the safe
+     *  direction regardless, since a false default can only ever show a
+     *  terminal a fact later says to hide, never the other way round. */
+    readonly awaitsIntegration: boolean = false,
   ) {}
 
   send(data: string): void {
@@ -497,6 +522,12 @@ export class WSClient {
   // callback is exactly the one that would otherwise go on advertising a
   // terminal it no longer has.
   private displacedHandlers = new Set<(displaced: SessionDisplaced) => void>()
+
+  // workers.tabCreated subscribers (nocx-ui8q6.3): a participant's tab has
+  // appeared in the shared layout chain. Same shape as displacedHandlers —
+  // a client-level set, because the notification is a broadcast rather than
+  // addressed to one session.
+  private workerTabCreatedHandlers = new Set<(fact: WorkersTabCreated) => void>()
 
   constructor(private readonly dispatcherImpl: Dispatcher) {
     // Wire binary frame handling and session reattach on every connect/reconnect.
@@ -666,12 +697,27 @@ export class WSClient {
       if (typeof agent !== 'string' || agent === '') return
       const paneState = raw.state
       if (!isDriverState(paneState)) return
+      // The progress facet is guarded the same way and with the same
+      // consequence, because it is the same kind of claim about the same
+      // pane: a scalar from a set nobody can add to. It is NOT carried
+      // beside the children's tolerance — a child row is a separate claim
+      // and a malformed one costs the row, while this is one of the two
+      // things the observation is ABOUT.
+      const progress = raw.progress
+      if (!isPaneProgress(progress)) return
+      // The child rows travel BESIDE the state and are guarded separately,
+      // because they are a separate claim: a malformed row must cost the row
+      // and not the classification, and an observation whose children could
+      // not be read is still an observation about the pane.
+      const children = readPaneChildren(raw.children)
       state.observationCallback?.({
         sessionId: sid,
         instanceId: state.instanceId,
         sessionEpoch: state.sessionEpoch,
         agent,
         state: paneState,
+        progress,
+        ...(children === null ? {} : { children }),
       })
     })
 
@@ -747,6 +793,26 @@ export class WSClient {
         sessionEpoch: state.sessionEpoch,
       }
       for (const h of this.displacedHandlers) h(displaced)
+    })
+
+    // A participant's tab has appeared (nocx-ui8q6.3). Unlike session.displaced
+    // this names a session this client has never seen, so there is no prior
+    // SessionState to compare against — the check instead uses
+    // _currentInstanceId, which is ANY session already known on this
+    // connection: one WebSocket speaks to exactly one backend instance for
+    // its whole life (AD-7), so every session this client already holds
+    // shares the fact this notification carries, and an instanceId that
+    // disagrees with it can only be a fact queued before a reconnect this
+    // client has since completed. With no session known yet (a pathological
+    // first frame) there is nothing to judge it against, so it is accepted
+    // rather than refused for a question that cannot yet be asked.
+    this.dispatcher.subscribe('workers.tabCreated', (params: unknown) => {
+      if (!params || typeof params !== 'object') return
+      const raw = params as Record<string, unknown>
+      const known = this._currentInstanceId()
+      if (known !== null && raw.instanceId !== known) return
+      const fact = raw as unknown as WorkersTabCreated
+      for (const h of this.workerTabCreatedHandlers) h(fact)
     })
 
     // The backend dropped input for a session: its write queue is full,
@@ -886,12 +952,18 @@ export class WSClient {
 
   // openSSHSessionByHost opens a direct SSH session by hostname/alias,
   // resolved through ~/.ssh/config on the backend. No saved profile needed.
+  //
+  // desiredMode is the connect-time ask's one-shot answer for THIS session
+  // (ADR-0069): a hand-typed connection has no saved profile to write the
+  // choice onto, so a retry after the ask carries it here instead. Absent on
+  // an ordinary open.
   openSSHSessionByHost(
     cols: number,
     rows: number,
     host: string,
     user?: string,
     anchor: OpenAnchor = {},
+    desiredMode?: string,
   ): Promise<SessionHandle> {
     return this.dispatcher
       .call<OpenResult>('open', {
@@ -902,6 +974,7 @@ export class WSClient {
         kind: 'ssh',
         host,
         user,
+        ...(desiredMode ? { desiredMode } : {}),
         ...paneParam(anchor),
       })
       .then((result) => this._registerHandle(result, { cols, rows }))
@@ -933,6 +1006,8 @@ export class WSClient {
       result?.desiredMode ?? 'script',
       result?.parent ?? null,
       result?.workspaceId ?? '',
+      null,
+      result?.awaitsIntegration ?? false,
     )
   }
 
@@ -1164,11 +1239,27 @@ export class WSClient {
             // already has. Inventing them here would be the second owner
             // (AD-8) — and the one that is wrong, because it would be
             // guessing.
-            return new SessionHandle(this, entry.sessionId, '', 'script', null, '', {
-              bytes: recovered.length,
-              gaps,
-              size: recording.size,
-            })
+            //
+            // awaitsIntegration is different: it is asked, not guessed
+            // (nocx-ty0hc). This attach ack is the claim itself, so it is the
+            // one place this handle can learn the session's axis before
+            // handing the pane a grid — a default here would have been the
+            // exact defect this bead exists to close, not a safe omission
+            // like the fields above.
+            return new SessionHandle(
+              this,
+              entry.sessionId,
+              '',
+              'script',
+              null,
+              '',
+              {
+                bytes: recovered.length,
+                gaps,
+                size: recording.size,
+              },
+              result.awaitsIntegration,
+            )
           })
           .catch((err) => {
             // A refused claim leaves NOTHING behind: the map must not hold a
@@ -1189,6 +1280,28 @@ export class WSClient {
   onSessionDisplaced(cb: (displaced: SessionDisplaced) => void): () => void {
     this.displacedHandlers.add(cb)
     return () => this.displacedHandlers.delete(cb)
+  }
+
+  /** This connection's own backend instance id, read from any session this
+   *  client already holds (AD-7: a connection speaks to exactly one
+   *  instance for its whole life, so any one of them answers for all).
+   *  Null before this client has ever registered a session — the only case
+   *  in which a workers.tabCreated staleness check has nothing to compare
+   *  against. */
+  private _currentInstanceId(): string | null {
+    for (const state of this.sessions.values()) return state.instanceId
+    return null
+  }
+
+  /** Fires when workers.spawn mints a participant's tab (nocx-ui8q6.3),
+   *  while this client is connected to watch it happen — before this
+   *  window's next layout.read would have shown it. Broadcast, not
+   *  addressed to a session: every connected window is the audience,
+   *  because the fact is about the shared layout chain rather than about
+   *  the session running inside the new pane. Returns an unsubscribe. */
+  onWorkerTabCreated(cb: (fact: WorkersTabCreated) => void): () => void {
+    this.workerTabCreatedHandlers.add(cb)
+    return () => this.workerTabCreatedHandlers.delete(cb)
   }
 
   // --- data plane ---------------------------------------------------------

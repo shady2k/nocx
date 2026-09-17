@@ -219,9 +219,16 @@ func (k *fakeKernel) acceptFrame(f frame) bool {
 	return true
 }
 
+// sendAccept frames the accept the kernel actually sends — with NO cap field,
+// which is what makes this a check of the shell rather than of the fixture. A
+// descendant of this shell holds a reader on the same descriptor, so the
+// kernel stopped writing the bearer on this direction (nocx-aqz7o); a shell
+// that still demanded to see its capability echoed back would never establish
+// against the real kernel, and a fixture that kept sending one would not
+// notice.
 func (k *fakeKernel) sendAccept(conn net.Conn) {
-	body := fmt.Sprintf(`{"v":1,"lane":%q,"dom":%q,"epoch":%d,"seq":0,"cap":%q,"evt":"accept"}`,
-		testLane, testDom, testEpoch, k.cap)
+	body := fmt.Sprintf(`{"v":1,"lane":%q,"dom":%q,"epoch":%d,"seq":0,"evt":"accept"}`,
+		testLane, testDom, testEpoch)
 	var hdr [4]byte
 	// #nosec G115 — the accept frame is a fixed-size test fixture, far
 	// under the 64 KiB protocol cap.
@@ -239,8 +246,9 @@ func (k *fakeKernel) sendRefresh(rid string) {
 	if conn == nil {
 		k.t.Fatalf("no shell connection captured; the handshake never completed?")
 	}
-	body := fmt.Sprintf(`{"v":1,"lane":%q,"dom":%q,"epoch":%d,"seq":0,"cap":%q,"evt":"refresh_request","request":%q}`,
-		testLane, testDom, testEpoch, k.cap, rid)
+	// No cap, for the reason sendAccept gives.
+	body := fmt.Sprintf(`{"v":1,"lane":%q,"dom":%q,"epoch":%d,"seq":0,"evt":"refresh_request","request":%q}`,
+		testLane, testDom, testEpoch, rid)
 	var hdr [4]byte
 	// #nosec G115 — the refresh frame is a fixed-size test fixture, far
 	// under the 64 KiB protocol cap.
@@ -420,8 +428,6 @@ func startChannelShellCfgMode(t *testing.T, shell, scriptName, script string, op
 	if fakeBinDir != "" {
 		cmd.Env = append(cmd.Env, "PATH="+fakeBinDir+":"+os.Getenv("PATH"))
 	}
-	// The gate line sources the hooks, and the capability bootstrap first
-	// when this fixture has a lifecycle channel.
 	gate := filepath.Join(t.TempDir(), "gate")
 	gateBody := ". " + ShellQuote(scriptPath) + "\n"
 	if withLifecycle {

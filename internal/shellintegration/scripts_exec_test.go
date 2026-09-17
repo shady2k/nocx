@@ -138,6 +138,54 @@ echo NOCX_SOURCED_OK
 	}
 }
 
+// TestBashIntegration_SourcesUnderErrexit guards the fail-open path: an
+// ordinary shell with no lifecycle configuration must still finish sourcing
+// under a user's set -e and install the agent wrapper functions.
+func TestBashIntegration_SourcesUnderErrexit(t *testing.T) {
+	bash := requireShell(t, "bash")
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+	prog := `
+set -e
+export NOCX_SHELL_INTEGRATION=1
+source "$1"
+echo NOCX_ERREXIT_SOURCED
+type -t __nocx_agent_stage
+type -t claude
+`
+	out := runShellProg(t, bash, prog, script)
+	if !strings.Contains(out, "NOCX_ERREXIT_SOURCED") {
+		t.Fatalf("sourcing aborted under set -e; got %q", out)
+	}
+	if !strings.Contains(out, "function") {
+		t.Fatalf("agent functions were not defined under set -e; got %q", out)
+	}
+}
+
+// TestZshIntegration_SourcesUnderErrExit is the zsh twin: err_exit must not
+// turn the conventional no-channel path into a half-sourced shell.
+func TestZshIntegration_SourcesUnderErrExit(t *testing.T) {
+	zsh := requireShell(t, "zsh")
+	script := writeScriptFile(t, "nocx.zsh", zshScript)
+	prog := `
+setopt err_exit
+export NOCX_SHELL_INTEGRATION=1
+source "$1"
+print NOCX_ERREXIT_SOURCED
+typeset -f __nocx_agent_stage >/dev/null
+print NOCX_STAGE_DEFINED
+typeset -f claude >/dev/null
+print NOCX_AGENT_DEFINED
+`
+	out := runShellProg(t, zsh, prog, script)
+	if !strings.Contains(out, "NOCX_ERREXIT_SOURCED") {
+		t.Fatalf("sourcing aborted under err_exit; got %q", out)
+	}
+	if !strings.Contains(out, "NOCX_STAGE_DEFINED") ||
+		!strings.Contains(out, "NOCX_AGENT_DEFINED") {
+		t.Fatalf("agent functions were not defined under err_exit; got %q", out)
+	}
+}
+
 // TestBashMarkerOnlyBeatsHostilePrompt spawns a bash that sources nocx.bash
 // with NOCX_PROMPT_MODE=marker-only, with a hostile PROMPT_COMMAND that sets
 // PS1='HOSTILE$ ', and asserts the B-marker overlay wins — but ONLY once the

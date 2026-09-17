@@ -46,12 +46,13 @@
  * Every wait below is on an observable state change — a chip's text, a row's
  * badge, a request arriving at the fake — never on a duration.
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import {
+  standalone as base,
   appReadyForInput,
   VaultBackend,
   bindEndpoint,

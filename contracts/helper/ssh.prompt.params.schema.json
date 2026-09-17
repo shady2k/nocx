@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.prompt.params.schema.json",
+  "title": "HelperSSHPromptParams",
+  "description": "The helper asking the coordinator's UI the questions a server's keyboard-interactive challenge carries (nocx-50w7p.11). It is the ONE reverse op whose subject is a PERSON rather than a stored secret: `secret` returns material the coordinator already holds, while this returns something nobody holds until the question is asked. The server's own prompts travel with it \u2014 their text and whether the answer is echoed \u2014 because that is what makes the ask answerable by somebody who is not looking at the far host, and because a question of nocx's own invention would leave a person answering something the server did not ask.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["host", "port", "user", "prompts"],
+  "properties": {
+    "host": {
+      "description": "The host the question is about, as the RESOLVED value the destination carried. It is here so the ask can name the connection it belongs to: a bare 'enter password' box is how the wrong password ends up in the wrong connection.",
+      "type": "string",
+      "minLength": 1
+    },
+    "port": {
+      "description": "The resolved port, for the same reason and by the same rule.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "user": {
+      "description": "The resolved account the question names.",
+      "type": "string",
+      "minLength": 1
+    },
+    "prompts": {
+      "description": "The server's questions, in the order it asked them. An empty list is refused rather than answered with nothing: a keyboard-interactive challenge with no questions is a protocol event with no question to relay.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["prompt", "echo"],
+        "properties": {
+          "prompt": {
+            "description": "The question's text, verbatim from the far side. It is passed through unchanged: the person answers the server, not nocx.",
+            "type": "string"
+          },
+          "echo": {
+            "description": "Whether the answer is echoed. Load-bearing in a way that is easy to lose: a UI that does not know a question is secret would print the answer on a screen, and one that assumes every question is secret would hide a code the person has to read as they type it.",
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  }
+}

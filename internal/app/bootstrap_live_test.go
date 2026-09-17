@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package app
 
 // The bootstrap end to end, against the real OpenSSH server the live-sshd
@@ -29,8 +31,6 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
-	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/waittest"
 )
@@ -39,7 +39,7 @@ import (
 // whole epic, watched end to end.
 func TestLiveSshd_CarrierBootstrapReachesAcceptedDomain(t *testing.T) {
 	fx := startLiveSshd(t, true)
-	installer := &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))}
+	installer := liveBundleCarrier(t, fx)
 	kernel := newRecordingKernel()
 	ch, out := fx.connect(t, kernel, ssh.ShellBash, installer)
 
@@ -131,8 +131,8 @@ func TestLiveSshd_WithNothingPublishedTheSessionStillReachesAPrompt(t *testing.T
 // has landed.
 func TestLiveSshd_InputIsRefusedUntilTheTerminalOutcome(t *testing.T) {
 	fx := startLiveSshd(t, true)
-	installer := &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))}
-	if err := installer.EnsureInstalledRemote(context.Background(), fx.rawClient(t), fx.home); err != nil {
+	installer := liveBundleCarrier(t, fx)
+	if err := installer.EnsureInstalledRemote(context.Background(), fx.addr); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 	kernel := newRecordingKernel()
@@ -179,7 +179,7 @@ func TestLiveSshd_InputIsRefusedUntilTheTerminalOutcome(t *testing.T) {
 // still comes up — a conventional terminal with the fixture's own prompt.
 func TestLiveSshd_ForwardingRefusedStillReachesAConventionalPrompt(t *testing.T) {
 	fx := startLiveSshd(t, false)
-	installer := &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))}
+	installer := liveBundleCarrier(t, fx)
 	kernel := newRecordingKernel()
 	ch, out := fx.connect(t, kernel, ssh.ShellBash, installer)
 
@@ -207,7 +207,7 @@ func TestLiveSshd_ForwardingRefusedStillReachesAConventionalPrompt(t *testing.T)
 // becomes unknown rather than successful.
 func TestLiveSshd_ConnectionLossRevokesTheBootstrappedDomain(t *testing.T) {
 	fx := startLiveSshd(t, true)
-	installer := &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))}
+	installer := liveBundleCarrier(t, fx)
 	kernel := newRecordingKernel()
 	ch, _ := fx.connect(t, kernel, ssh.ShellBash, installer)
 

@@ -54,10 +54,10 @@ import (
 // channel is a connection to it. Without this a "restart" would meet a daemon
 // that had never spawned anything, and the tests below would be watching a
 // different scenario than the one they name.
-func sharedHelperPeer(svc *helpersession.Service) func(in io.Reader, out io.Writer) int {
+func sharedHelperPeer(t testing.TB, svc *helpersession.Service) func(in io.Reader, out io.Writer) int {
 	contentHash := syntheticArtifactHash
 	return func(in io.Reader, out io.Writer) int {
-		h := host.New(in, out, contentHash, "instance-1", discardLogger())
+		h := host.New(in, out, contentHash, "instance-1", discardLogger(t))
 		h.Register(hostsvc.New(localgit.NewFactory()))
 		h.Register(svc)
 		// The CONNECTION is bound to the service and not the other way round,
@@ -74,11 +74,11 @@ func sharedHelperPeer(svc *helpersession.Service) func(in io.Reader, out io.Writ
 	}
 }
 
-func sharedHelperService() *helpersession.Service {
+func sharedHelperService(t testing.TB) *helpersession.Service {
 	return helpersession.New(helpersession.Options{
 		Generation: proto.GenerationID(syntheticArtifactHash),
 		Spawner:    &scriptedSpawner{},
-		Log:        discardLogger(),
+		Log:        discardLogger(t),
 	})
 }
 
@@ -92,6 +92,17 @@ type scriptedSpawner struct {
 	mu      sync.Mutex
 	spawned int
 	procs   []*idleProcess
+	// ssh is what each `spawn-ssh` on this daemon ASKED FOR, in order, as the
+	// session service decoded it off the helper's wire (nocx-50w7p.16). It is
+	// recorded rather than dropped because a request is the only place a
+	// per-launch fact — the pane's bearer, the far host's tool paths — can be
+	// observed from outside the spawner, and the tests that read one assert
+	// what the LAUNCH carried rather than what the coordinator meant to send.
+	ssh []helpersession.SSHSpawnRequest
+	// failSSH makes the next ssh spawn fail with this error, which is how a
+	// test drives the helper's own refusal path: the failure a coordinator
+	// reads when the far shell channel could not be opened.
+	failSSH error
 }
 
 func (s *scriptedSpawner) Spawn(req helpersession.SpawnRequest) (helpersession.Process, error) {
@@ -102,6 +113,51 @@ func (s *scriptedSpawner) Spawn(req helpersession.SpawnRequest) (helpersession.P
 	s.procs = append(s.procs, p)
 	s.mu.Unlock()
 	return p, nil
+}
+
+// SpawnSSH is the ssh half of the same script: the daemon holds a shell
+// CHANNEL on a connection it dialed, which is what an ssh pane is now that
+// THIS machine's helper opens one (nocx-50w7p.5).
+//
+// The process it hands back is the same idle one the local half returns, and
+// deliberately so: the tests built on this endpoint are about WHICH helper
+// holds a session and what that helper answers, not about what runs inside it.
+// Nothing here dials — the real spawner would, and replacing it is the whole
+// reason this seam is scripted.
+//
+// THE PID IS A SCRIPTING ARTEFACT. A real ssh session has no pid on this
+// machine at all (the launch union carries none for that branch); the id here
+// is only what the idle process needs to be addressable in these tests, and
+// nothing in them reads a remote session's pid.
+func (s *scriptedSpawner) SpawnSSH(_ context.Context, req helpersession.SSHSpawnRequest) (helpersession.Process, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ssh = append(s.ssh, req)
+	if s.failSSH != nil {
+		// NOTHING IS STARTED AND THE REQUEST IS STILL RECORDED: a daemon that
+		// refused a launch is exactly the case a test compares against the one
+		// that accepted it.
+		return nil, s.failSSH
+	}
+	s.spawned++
+	pid := 4000 + s.spawned
+	p := &idleProcess{done: make(chan struct{}), pid: pid, id: req.SessionID}
+	s.procs = append(s.procs, p)
+	return p, nil
+}
+
+// sshSpawns is what this daemon was asked to open, in the order it was asked.
+func (s *scriptedSpawner) sshSpawns() []helpersession.SSHSpawnRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]helpersession.SSHSpawnRequest(nil), s.ssh...)
+}
+
+// refuseSSH makes every later ssh spawn fail with err.
+func (s *scriptedSpawner) refuseSSH(err error) {
+	s.mu.Lock()
+	s.failSSH = err
+	s.mu.Unlock()
 }
 
 // exitWith ends the one process this spawner started, with a status the helper
@@ -281,25 +337,31 @@ type coordinator struct {
 	reg     *helperRegistry
 	sess    *session.Reg
 	consent *consent.Store
+	// gitFor is the SAME selection closure ws_git.go's handleOpen would call
+	// (transport.GitFactoryFor), captured from the one helperGitFactory call
+	// that also built reg — a second call would build a second, unrelated
+	// registry, and a test driving git.open against reg's own hostHelpers
+	// needs the closure that actually looks them up in this reg.
+	gitFor transport.GitFactoryFor
 }
 
 func newCoordinator(t *testing.T, provider *fakeLaneProvider) *coordinator {
 	t.Helper()
 	source := stubArtifacts(t)
 	store, installs := testConsentStores(t)
-	_, reg := helperGitFactory(provider, source, store, installs, discardLogger())
-	sess := session.New(log.NewSlogAdapter(discardLogger()), nil)
+	gitFor, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	sess := session.New(log.NewSlogAdapter(discardLogger(t)), nil)
 	reg.registry = sess
-	return &coordinator{reg: reg, sess: sess, consent: store}
+	return &coordinator{reg: reg, sess: sess, consent: store, gitFor: gitFor}
 }
 
-// relayConnection is a saved connection whose destination mode is an explicit
-// relay — the person said "use the helper on this machine", which is the
+// helperConnection is a saved connection whose destination mode is an explicit
+// helper — the person said "use the helper on this machine", which is the
 // consent for the binary (§4.3). The fake probe lease reports no host-key
 // fingerprint, so an `auto` connection here would resolve to the consent ASK
 // rather than to a helper, and there would be nothing to take back.
-func relayConnection(user string) *ssh.ConnectConfig {
-	return &ssh.ConnectConfig{User: user, DesiredMode: string(profile.DesiredRelay)}
+func helperConnection(user string) *ssh.ConnectConfig {
+	return &ssh.ConnectConfig{User: user, DesiredMode: string(profile.DesiredHelper)}
 }
 
 // quit is this coordinator's process ending: every helper channel it holds is
@@ -333,8 +395,8 @@ func openHostedFixture(t *testing.T, c *coordinator, paneID string) content.Pend
 	opened, selected, err := c.reg.OpenHosted(ctx, session.Config{
 		Kind: session.KindRemote, Host: "host.example", Cwd: t.TempDir(),
 		PaneID: paneID, ProfileID: "profile-1",
-		Remote: relayConnection("u"),
-	})
+		Remote: helperConnection("u"),
+	}, "")
 	if err != nil {
 		t.Fatalf("open a helper-hosted session: %v", err)
 	}
@@ -362,7 +424,7 @@ func readoptFixture(t *testing.T, c *coordinator, routes *stubRoutes, adopter *s
 }
 
 func routesFor(p content.PendingSession) *stubRoutes {
-	return &stubRoutes{host: p.Host, cfg: relayConnection(p.Account)}
+	return &stubRoutes{host: p.Host, cfg: helperConnection(p.Account)}
 }
 
 // ── THE HAPPY PATH ────────────────────────────────────────────────────────
@@ -371,8 +433,8 @@ func routesFor(p content.PendingSession) *stubRoutes {
 // to the SAME host session, and puts it in the registry `sessions.live` reads —
 // keyed to the pane it was the pipe of, and without spawning a second shell.
 func TestAFreshCoordinatorTakesBackTheSessionStillRunningOnItsHost(t *testing.T) {
-	svc := sharedHelperService()
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
@@ -390,7 +452,7 @@ func TestAFreshCoordinatorTakesBackTheSessionStillRunningOnItsHost(t *testing.T)
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	adopter := &stubAdopter{}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second, routesFor(binding), adopter), time.Hour, quietLogger())
+		readoptFixture(t, second, routesFor(binding), adopter), time.Hour, quietLogger(t))
 
 	if len(rec.applied) != 1 || rec.applied[0].Verdict != content.VerdictLive {
 		t.Fatalf("verdict = %+v, want exactly one live — the helper holds the session", rec.applied)
@@ -433,6 +495,49 @@ func TestAFreshCoordinatorTakesBackTheSessionStillRunningOnItsHost(t *testing.T)
 	}
 }
 
+// TestAReadoptedSessionAnswersItsOwnHostKeyFingerprint (nocx-xn63t.6.5): a
+// re-adopted session's channel is AttachedSession, which HostKeyFingerprint's
+// own doc says has no handshake of its own to observe — so unless the
+// re-adopt records the durable fingerprint the way a fresh open does, the
+// session answers "" forever (set-once, never set). Found by driving
+// remote-coordinator-reclaim.spec.ts and ssh-helper-happy-path.spec.ts in the
+// container: git.open, called against a just-reconciled session, resolves by
+// mode alone for an explicit `helper` connection (skipping the fingerprint
+// entirely) and reaches its probe-and-install branch even though the session
+// it is about is one this coordinator cannot yet name by fingerprint —
+// destabilising the live session mid-probe. An `auto`+granted connection
+// happened to survive the same call only because ITS resolve branch needs the
+// fingerprint for the consent-store lookup and, finding none, refused
+// gracefully — an accident of a different code path, not a guarantee.
+func TestAReadoptedSessionAnswersItsOwnHostKeyFingerprint(t *testing.T) {
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+
+	first := newCoordinator(t, provider)
+	binding := openHostedFixture(t, first, "pane-1")
+	if binding.Fingerprint == "" {
+		t.Fatal("the fixture's own open recorded no fingerprint; nothing here would be proof of anything")
+	}
+
+	first.quit()
+	second := newCoordinator(t, provider)
+
+	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
+	adopter := &stubAdopter{}
+	reconcileSessions(context.Background(), rec, second.reg.inventories(),
+		readoptFixture(t, second, routesFor(binding), adopter), time.Hour, quietLogger(t))
+
+	sess, err := second.sess.Get(session.ID(binding.SessionID))
+	if err != nil {
+		t.Fatalf("the replacement coordinator does not hold the session it took back: %v", err)
+	}
+	if got := sess.HostKeyFingerprint(); got != binding.Fingerprint {
+		t.Fatalf("HostKeyFingerprint() = %q, want %q (the durable binding's own) — "+
+			"a caller that keys a decision on it, like git.open's consent-store lookup, "+
+			"cannot tell this machine apart from one it has never met", got, binding.Fingerprint)
+	}
+}
+
 // helperSessionsOnHost asks the daemon directly what it holds — the count that
 // says whether a second shell was spawned. Straight at the service rather than
 // over a lane, deliberately: this is the test's own instrument and must not be
@@ -472,8 +577,8 @@ func closeHelperSession(t *testing.T, svc *helpersession.Service, p content.Pend
 // code would have produced without re-adoption — `unknown`, never `absent` —
 // because that verdict is what stops a recording being deleted.
 func TestAnUnreachableHostNeverReadsAsTheSessionBeingGone(t *testing.T) {
-	svc := sharedHelperService()
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 
@@ -486,7 +591,7 @@ func TestAnUnreachableHostNeverReadsAsTheSessionBeingGone(t *testing.T) {
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	adopter := &stubAdopter{}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second, routesFor(binding), adopter), time.Hour, quietLogger())
+		readoptFixture(t, second, routesFor(binding), adopter), time.Hour, quietLogger(t))
 
 	if len(rec.applied) != 1 {
 		t.Fatalf("judgements = %+v, want exactly one", rec.applied)
@@ -513,8 +618,8 @@ func TestAnUnreachableHostNeverReadsAsTheSessionBeingGone(t *testing.T) {
 // verdict is unknown — "that generation is not running" is not "the session
 // does not exist".
 func TestAGenerationThatIsGoneIsNotTheSessionBeingGone(t *testing.T) {
-	svc := sharedHelperService()
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 
@@ -528,7 +633,7 @@ func TestAGenerationThatIsGoneIsNotTheSessionBeingGone(t *testing.T) {
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	adopter := &stubAdopter{}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second, routesFor(binding), adopter), time.Hour, quietLogger())
+		readoptFixture(t, second, routesFor(binding), adopter), time.Hour, quietLogger(t))
 
 	if len(rec.applied) != 1 {
 		t.Fatalf("judgements = %+v, want exactly one", rec.applied)
@@ -546,8 +651,8 @@ func TestAGenerationThatIsGoneIsNotTheSessionBeingGone(t *testing.T) {
 // path to absent, and it must still work — without it the recording of every
 // finished session would be kept for the retention age.
 func TestAHelperThatAnswersAndDoesNotHoldItStillProducesAbsent(t *testing.T) {
-	svc := sharedHelperService()
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 
@@ -560,7 +665,7 @@ func TestAHelperThatAnswersAndDoesNotHoldItStillProducesAbsent(t *testing.T) {
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	adopter := &stubAdopter{}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second, routesFor(binding), adopter), time.Hour, quietLogger())
+		readoptFixture(t, second, routesFor(binding), adopter), time.Hour, quietLogger(t))
 
 	if len(rec.applied) != 1 {
 		t.Fatalf("judgements = %+v, want exactly one", rec.applied)
@@ -578,19 +683,19 @@ func TestAHelperThatAnswersAndDoesNotHoldItStillProducesAbsent(t *testing.T) {
 // and its truthful "I do not hold that" would delete live work — which is the
 // exact hazard nocx-k6p18.15's ordering exists to prevent.
 func TestAConnectionThatNowLeadsElsewhereIsNotAsked(t *testing.T) {
-	svc := sharedHelperService()
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 
 	first.quit()
 	second := newCoordinator(t, provider)
-	routes := &stubRoutes{host: "somebody.else.example", cfg: relayConnection(binding.Account)}
+	routes := &stubRoutes{host: "somebody.else.example", cfg: helperConnection(binding.Account)}
 
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	adopter := &stubAdopter{}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second, routes, adopter), time.Hour, quietLogger())
+		readoptFixture(t, second, routes, adopter), time.Hour, quietLogger(t))
 
 	if len(rec.applied) != 1 {
 		t.Fatalf("judgements = %+v, want exactly one", rec.applied)
@@ -613,8 +718,8 @@ func TestAConnectionThatNowLeadsElsewhereIsNotAsked(t *testing.T) {
 // unreconciled list a person clears in one gesture, so it must arrive as
 // itself and not as a generic unreachable host.
 func TestASealedVaultIsReportedAsItselfAndNotAsAbsent(t *testing.T) {
-	svc := sharedHelperService()
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 
@@ -625,7 +730,7 @@ func TestASealedVaultIsReportedAsItselfAndNotAsAbsent(t *testing.T) {
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	adopter := &stubAdopter{}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second, routes, adopter), time.Hour, quietLogger())
+		readoptFixture(t, second, routes, adopter), time.Hour, quietLogger(t))
 
 	if len(rec.applied) != 1 {
 		t.Fatalf("judgements = %+v, want exactly one", rec.applied)
@@ -641,8 +746,8 @@ func TestASealedVaultIsReportedAsItselfAndNotAsAbsent(t *testing.T) {
 // behaviour that existed before re-adoption. Nothing is guessed, and no
 // connection is dialled to guess with.
 func TestASessionWithNoRouteIsLeftExactlyWhereItWas(t *testing.T) {
-	svc := sharedHelperService()
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	binding.ProfileID = ""
@@ -653,7 +758,7 @@ func TestASessionWithNoRouteIsLeftExactlyWhereItWas(t *testing.T) {
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	adopter := &stubAdopter{}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second, routes, adopter), time.Hour, quietLogger())
+		readoptFixture(t, second, routes, adopter), time.Hour, quietLogger(t))
 
 	if len(rec.applied) != 1 {
 		t.Fatalf("judgements = %+v, want exactly one", rec.applied)
@@ -672,8 +777,8 @@ func TestASessionWithNoRouteIsLeftExactlyWhereItWas(t *testing.T) {
 // hold: the verdict stays live so the recording survives, and nothing is left
 // in the registry pretending it was adopted.
 func TestATransportThatRefusesLeavesTheSessionLiveAndUnadopted(t *testing.T) {
-	svc := sharedHelperService()
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 
@@ -682,7 +787,7 @@ func TestATransportThatRefusesLeavesTheSessionLiveAndUnadopted(t *testing.T) {
 	adopter := &stubAdopter{refuse: errors.New("server is shutting down")}
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second, routesFor(binding), adopter), time.Hour, quietLogger())
+		readoptFixture(t, second, routesFor(binding), adopter), time.Hour, quietLogger(t))
 
 	if len(rec.applied) != 1 {
 		t.Fatalf("judgements = %+v, want exactly one", rec.applied)
@@ -707,8 +812,8 @@ func TestATransportThatRefusesLeavesTheSessionLiveAndUnadopted(t *testing.T) {
 // verdict stays LIVE, because the session exists and its recording must not be
 // deleted by the arrival of a second nocx.
 func TestASessionAnotherCoordinatorIsHoldingIsLeftToIt(t *testing.T) {
-	svc := sharedHelperService()
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	// first does NOT quit: it is still running, still attached, still holding
@@ -718,7 +823,7 @@ func TestASessionAnotherCoordinatorIsHoldingIsLeftToIt(t *testing.T) {
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	adopter := &stubAdopter{}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second, routesFor(binding), adopter), time.Hour, quietLogger())
+		readoptFixture(t, second, routesFor(binding), adopter), time.Hour, quietLogger(t))
 
 	if len(rec.applied) != 1 {
 		t.Fatalf("judgements = %+v, want exactly one", rec.applied)
@@ -757,9 +862,9 @@ func TestASessionThatEndedWhileNocxWasAwayCarriesTheHostsExitStatus(t *testing.T
 	svc := helpersession.New(helpersession.Options{
 		Generation: proto.GenerationID(syntheticArtifactHash),
 		Spawner:    spawner,
-		Log:        discardLogger(),
+		Log:        discardLogger(t),
 	})
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	first.quit()
@@ -774,7 +879,7 @@ func TestASessionThatEndedWhileNocxWasAwayCarriesTheHostsExitStatus(t *testing.T
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	adopter := &stubAdopter{}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second, routesFor(binding), adopter), time.Hour, quietLogger())
+		readoptFixture(t, second, routesFor(binding), adopter), time.Hour, quietLogger(t))
 
 	// The helper still HOLDS the session — an exited session is not a closed
 	// one — so the verdict is live and the recording survives to be read.
@@ -792,6 +897,70 @@ func TestASessionThatEndedWhileNocxWasAwayCarriesTheHostsExitStatus(t *testing.T
 	}
 	if status != exitCode {
 		t.Fatalf("exit status = %d, want %d — the host's own number, not a substitute", status, exitCode)
+	}
+}
+
+// TestAReadoptedAlreadyExitedSessionReleasesItsHelperWindow is nocx-isjh4's
+// closer 2, other door: a session whose shell died while no coordinator was
+// attached does not go on holding its helper window forever just because
+// the coordinator that eventually reads it got there through a re-adopt
+// rather than a live attach.
+//
+// It is the SAME scenario as
+// TestASessionThatEndedWhileNocxWasAwayCarriesTheHostsExitStatus, with one
+// difference that matters for what this test can observe: the adopter here
+// is a REAL *transport.WSServer, not stubAdopter — stubAdopter deliberately
+// never starts pumpToRing/monitorExit (its own doc: it exists to isolate
+// sessionReadopter's reconciliation logic from the transport), so it is
+// blind to exactly the mechanism this bead adds. AdoptExitStatus names the
+// offset this stream can never advance past; once this attachment's own
+// reader reaches it (driven by the REAL pumpToRing this WSServer starts),
+// Done fires and monitorExit runs EndSession through the ordinary path —
+// the same closer a shell exiting under a live coordinator already used.
+func TestAReadoptedAlreadyExitedSessionReleasesItsHelperWindow(t *testing.T) {
+	const exitCode = 7
+	spawner := &scriptedSpawner{}
+	svc := helpersession.New(helpersession.Options{
+		Generation: proto.GenerationID(syntheticArtifactHash),
+		Spawner:    spawner,
+		Log:        discardLogger(t),
+	})
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	first := newCoordinator(t, provider)
+	binding := openHostedFixture(t, first, "pane-1")
+	first.quit()
+
+	spawner.exitWith(t, exitCode)
+	waitForHelperExit(t, svc, binding)
+
+	second := newCoordinator(t, provider)
+	tp := transport.NewWSServer(log.NewSlogAdapter(discardLogger(t)), second.sess)
+	t.Cleanup(func() { _ = tp.Stop(context.Background()) })
+
+	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
+	pass := &readoptPass{registry: second.reg, routes: routesFor(binding), adopter: tp}
+	reconcileSessions(context.Background(), rec, second.reg.inventories(), pass, time.Hour, quietLogger(t))
+
+	if len(rec.applied) != 1 || rec.applied[0].Verdict != content.VerdictLive {
+		t.Fatalf("verdict = %+v, want live: the helper still holds this session", rec.applied)
+	}
+	if _, err := second.sess.Get(session.ID(binding.SessionID)); err != nil {
+		t.Fatalf("the finished session was not taken back: %v", err)
+	}
+
+	// The wait is on observable state — the helper's own aggregate budget —
+	// polled with a bound: draining runs on the coordinator's own read-pump
+	// goroutine and has no other signal this test can watch.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if used := svc.WindowBytesInUse(); used == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the re-adopted, already-exited session never released its helper window "+
+				"(window bytes in use = %d)", svc.WindowBytesInUse())
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -818,14 +987,14 @@ func waitForHelperExit(t *testing.T, svc *helpersession.Service, p content.Pendi
 // stays UNKNOWN, because nothing was asked about it.
 func TestConsentWithdrawnBetweenRunsStopsTheHelperBeingReached(t *testing.T) {
 	const machine = "SHA256:test-host"
-	svc := sharedHelperService()
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	first.quit()
 
 	// The binding records the machine the session runs on. A route whose mode
-	// is `auto` is the case where the STORE decides — an explicit relay mode
+	// is `auto` is the case where the STORE decides — an explicit helper mode
 	// is itself the consent (§4.3) and would not consult it.
 	binding.Fingerprint = machine
 	routes := &stubRoutes{host: binding.Host, cfg: &ssh.ConnectConfig{User: binding.Account}}
@@ -839,7 +1008,7 @@ func TestConsentWithdrawnBetweenRunsStopsTheHelperBeingReached(t *testing.T) {
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	adopter := &stubAdopter{}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second, routes, adopter), time.Hour, quietLogger())
+		readoptFixture(t, second, routes, adopter), time.Hour, quietLogger(t))
 
 	if len(rec.applied) != 1 {
 		t.Fatalf("judgements = %+v, want exactly one", rec.applied)
@@ -862,8 +1031,8 @@ func TestConsentWithdrawnBetweenRunsStopsTheHelperBeingReached(t *testing.T) {
 // the helper and takes the session back.
 func TestConsentStandingLetsTheSameBindingBeTakenBack(t *testing.T) {
 	const machine = "SHA256:test-host"
-	svc := sharedHelperService()
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	first.quit()
@@ -875,7 +1044,7 @@ func TestConsentStandingLetsTheSameBindingBeTakenBack(t *testing.T) {
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	adopter := &stubAdopter{}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second, routes, adopter), time.Hour, quietLogger())
+		readoptFixture(t, second, routes, adopter), time.Hour, quietLogger(t))
 
 	if len(rec.applied) != 1 || rec.applied[0].Verdict != content.VerdictLive {
 		t.Fatalf("verdict = %+v, want live", rec.applied)
@@ -892,8 +1061,8 @@ func TestConsentStandingLetsTheSameBindingBeTakenBack(t *testing.T) {
 // restored pane claims and then finds silent — no ring, no pump, nothing
 // reading the host.
 func TestATransportRefusingAfterTheAdoptTakesTheSessionBackOut(t *testing.T) {
-	svc := sharedHelperService()
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	first.quit()
@@ -902,7 +1071,7 @@ func TestATransportRefusingAfterTheAdoptTakesTheSessionBackOut(t *testing.T) {
 	adopter := &stubAdopter{refuseAfter: errors.New("re-attaching answered for another session")}
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second, routesFor(binding), adopter), time.Hour, quietLogger())
+		readoptFixture(t, second, routesFor(binding), adopter), time.Hour, quietLogger(t))
 
 	if len(rec.applied) != 1 || rec.applied[0].Verdict != content.VerdictLive {
 		t.Fatalf("verdict = %+v, want live — the helper answered that the session exists", rec.applied)
@@ -926,8 +1095,8 @@ func TestATransportRefusingAfterTheAdoptTakesTheSessionBackOut(t *testing.T) {
 // its pane quietly opens a second shell. Both are taken back, and neither
 // spawns anything.
 func TestTwoSessionsOnOneHostAreBothTakenBack(t *testing.T) {
-	svc := sharedHelperService()
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	one := openHostedFixture(t, first, "pane-1")
 	two := openHostedFixture(t, first, "pane-2")
@@ -940,7 +1109,7 @@ func TestTwoSessionsOnOneHostAreBothTakenBack(t *testing.T) {
 	rec := &recordingReconciler{pending: []content.PendingSession{one, two}}
 	adopter := &stubAdopter{}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second, routesFor(one), adopter), time.Hour, quietLogger())
+		readoptFixture(t, second, routesFor(one), adopter), time.Hour, quietLogger(t))
 
 	if len(rec.applied) != 2 {
 		t.Fatalf("judgements = %+v, want one per session", rec.applied)
@@ -974,8 +1143,8 @@ func TestTwoSessionsOnOneHostAreBothTakenBack(t *testing.T) {
 // The verdict is `timedOut`, which is a sentence a person can act on, and it is
 // emphatically not `absent`.
 func TestAHostThatNeverAnswersIsBoundedAndNeverReadsAsGone(t *testing.T) {
-	svc := sharedHelperService()
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	first.quit()
@@ -991,7 +1160,7 @@ func TestAHostThatNeverAnswersIsBoundedAndNeverReadsAsGone(t *testing.T) {
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	done := make(chan struct{})
 	go func() {
-		reconcileSessions(context.Background(), rec, second.reg.inventories(), pass, time.Hour, quietLogger())
+		reconcileSessions(context.Background(), rec, second.reg.inventories(), pass, time.Hour, quietLogger(t))
 		close(done)
 	}()
 	select {
@@ -1016,8 +1185,8 @@ func TestAHostThatNeverAnswersIsBoundedAndNeverReadsAsGone(t *testing.T) {
 // The paired positive for the bound: with the same field set, a host that DOES
 // answer is taken back rather than being cut off by its own guard.
 func TestTheBoundDoesNotCutOffAHostThatAnswers(t *testing.T) {
-	svc := sharedHelperService()
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	first.quit()
@@ -1028,7 +1197,7 @@ func TestTheBoundDoesNotCutOffAHostThatAnswers(t *testing.T) {
 	pass.timeout = 30 * time.Second
 
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
-	reconcileSessions(context.Background(), rec, second.reg.inventories(), pass, time.Hour, quietLogger())
+	reconcileSessions(context.Background(), rec, second.reg.inventories(), pass, time.Hour, quietLogger(t))
 
 	if len(rec.applied) != 1 || rec.applied[0].Verdict != content.VerdictLive {
 		t.Fatalf("verdict = %+v, want live", rec.applied)

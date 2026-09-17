@@ -1,5 +1,6 @@
 import { For, Show, createSignal } from 'solid-js'
 import { Tab } from './tab'
+import { SubagentRow } from './subagent-row'
 import { Button } from './ui/button'
 import { IconButton } from './ui/icon-button'
 import { ContextMenu } from './ui/context-menu'
@@ -27,7 +28,7 @@ import {
 import type { JSX, Setter } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { render } from 'solid-js/web'
-import type { PaneActivity, PaneActivitySource } from './pane-observation'
+import type { PaneActivity, PaneActivitySource, PaneChild } from './pane-observation'
 
 /**
  * The vertical strip's width bounds, in CSS pixels.
@@ -65,6 +66,11 @@ export interface PaneView {
   /** How strong that evidence is. The strip draws the difference; it never
    *  decides it. */
   readonly agentSource: PaneActivitySource | null
+  /** The child agents this pane's agent spawned, as the pane's own chrome
+   *  named them (nocx-o1v0h). Drawn as rows under this one, one generation
+   *  deep and no further, because the screen names no more than that. Empty
+   *  for almost every pane. */
+  readonly agentChildren?: readonly PaneChild[]
   readonly tooltip: string
   /** The tab's location for the strip's second line, or '' when the title already
    *  says it — see Tab.subtitle. */
@@ -119,6 +125,7 @@ interface PaneDisplayRecord {
   hasActivity: boolean
   agentStatus: PaneActivity | null
   agentSource: PaneActivitySource | null
+  agentChildren: readonly PaneChild[]
   colour: string | null
   pinned: boolean
   groupKey: string
@@ -137,6 +144,7 @@ function paneDisplayRecord(tab: PaneView): PaneDisplayRecord {
     hasActivity: tab.hasActivity,
     agentStatus: tab.agentStatus,
     agentSource: tab.agentSource,
+    agentChildren: tab.agentChildren ?? [],
     colour: tab.colour ?? null,
     pinned: tab.pinned === true,
     groupKey: tab.groupKey ?? '',
@@ -172,9 +180,37 @@ interface StripHeadingItem {
   readonly heading: string
 }
 
-function isHeading(item: StripHeadingItem | PaneView): item is StripHeadingItem {
+/**
+ * A CHILD AGENT'S ROW in the strip's flat list (nocx-o1v0h).
+ *
+ * It stands for something that has no pane: a child the pane's agent spawned,
+ * read off the parent's own screen. So it carries its parent rather than an id
+ * of its own — activating it activates the PARENT, because there is nothing
+ * else to go to — and it is drawn one generation in, never deeper, because the
+ * screen names no deeper.
+ *
+ * An object with a stable identity for the same reason a heading is one: `For`
+ * reconciles by REFERENCE, and rows rebuilt every tick would take the DOM,
+ * the focus and any drag in flight with them.
+ */
+interface StripSubagentItem {
+  readonly parentId: number
+  readonly parentPaneId: string
+  readonly name: string
+  readonly task: string
+  readonly depth: number
+}
+
+function isHeading(item: StripItem): item is StripHeadingItem {
   return 'heading' in item
 }
+
+function isSubagent(item: StripItem): item is StripSubagentItem {
+  return 'parentId' in item
+}
+
+/** The three things the strip draws, in one list. */
+type StripItem = StripHeadingItem | PaneView | StripSubagentItem
 
 /** How deep a row is drawn before the indent stops growing. A 240px column
  *  cannot indent forever, and a label squeezed to nothing is worse than a
@@ -414,6 +450,28 @@ abstract class TabStripBase implements TabStrip {
        * ADR-0012 §1 depends on. The rows here are the same PaneView objects
        * throughout, and a heading keeps its identity through `headingItems`.
        */
+      /**
+       * WHICH PARENTS HAVE THEIR CHILDREN FOLDED AWAY, and it is the
+       * collapsed set rather than the expanded one — so a pane whose agent
+       * has just spawned something shows it without being asked.
+       *
+       * That is the whole reason the default is open: a spawned child is
+       * work in flight, and a disclosure that hides work in flight by default
+       * is a disclosure nobody opens. Collapsing is remembered per pane and
+       * for as long as the strip lives, because a person who folded a row
+       * meant it; it is deliberately NOT persisted, because the children it
+       * was folding are gone by the next run.
+       */
+      const [collapsedParents, setCollapsedParents] = createSignal<ReadonlySet<number>>(new Set())
+      const childrenExpanded = (paneId: number): boolean => !collapsedParents().has(paneId)
+      const toggleChildren = (paneId: number): void => {
+        setCollapsedParents((prev) => {
+          const next = new Set(prev)
+          if (!next.delete(paneId)) next.add(paneId)
+          return next
+        })
+      }
+
       const headingItems = new Map<string, StripHeadingItem>()
       const headingItem = (key: string, heading: string): StripHeadingItem => {
         const cached = headingItems.get(`${key} ${heading}`)
@@ -422,6 +480,63 @@ abstract class TabStripBase implements TabStrip {
         headingItems.set(`${key} ${heading}`, item)
         return item
       }
+      /**
+       * ONE PARENT'S CHILD ROWS, cached by the name the screen gave each so
+       * `For` keeps their DOM across the repaint that follows every
+       * observation. The name is the only identity a child has — it has no id
+       * anywhere in the product — and the parent's own row supplies the rest.
+       *
+       * The cache is REBUILT from the current children on every pass rather
+       * than added to, so a child that has finished takes its entry with it.
+       * A map that only ever grew would hold a row per child a pane ever
+       * spawned for as long as the strip lived, which for the pane this
+       * feature exists for is the pane that spawns the most.
+       */
+      const subagentItems = new Map<number, Map<string, StripSubagentItem>>()
+      const childRows = (view: PaneView, children: readonly PaneChild[]): StripSubagentItem[] => {
+        const previous = subagentItems.get(view.id)
+        const next = new Map<string, StripSubagentItem>()
+        const depth = Math.min((display.records[view.id]?.depth ?? 0) + 1, MAX_DRAWN_DEPTH)
+        const rows = children.map((child) => {
+          const task = child.task ?? ''
+          const cached = previous?.get(child.name)
+          const item =
+            cached !== undefined && cached.task === task && cached.depth === depth
+              ? cached
+              : {
+                  parentId: view.id,
+                  parentPaneId: view.paneId,
+                  name: child.name,
+                  task,
+                  depth,
+                }
+          next.set(child.name, item)
+          return item
+        })
+        subagentItems.set(view.id, next)
+        return rows
+      }
+
+      /** A pane row followed by its children's rows — the one place the two
+       *  are put in order, so a child cannot end up under a different parent
+       *  by being appended at a second site. */
+      const rowWithChildren = (view: PaneView): StripItem[] => {
+        // ONLY THE VERTICAL STRIP HAS AN UNDER. The horizontal one is a row of
+        // tabs and draws no tree at all — the same rule lineage depth already
+        // follows (tab.css) — so it emits no child rows rather than emitting
+        // them and hiding them. Hidden-not-removed is the strip's doctrine for
+        // a row a person could bring back by clearing a filter or unfolding a
+        // workspace; there is no gesture that would bring these back here, and
+        // a row with no way to be seen is a row a test can pass on.
+        if (this.orientation !== 'vertical') return [view]
+        const children = display.records[view.id]?.agentChildren ?? []
+        if (children.length === 0 || !childrenExpanded(view.id)) {
+          subagentItems.delete(view.id)
+          return [view]
+        }
+        return [view, ...childRows(view, children)]
+      }
+
       /** Whether a row survives the strip's filter. Rows are HIDDEN rather
        *  than removed — a filtered row keeps its DOM, its identity and its
        *  place — so this is also what a heading has to ask before it draws:
@@ -478,24 +593,24 @@ abstract class TabStripBase implements TabStrip {
       const groupMembers = (key: string): PaneView[] =>
         paneViews().filter((v) => (display.records[v.id]?.groupKey ?? '') === key)
 
-      const items = (): Array<StripHeadingItem | PaneView> => {
+      const items = (): StripItem[] => {
         const rows = paneViews()
         const groups = groupStrip(rows, {
           key: (view) => display.records[view.id]?.groupKey ?? '',
           heading: (key) => groupHeadings().find((g) => g.key === key)?.heading ?? null,
         })
-        const out: Array<StripHeadingItem | PaneView> = []
+        const out: StripItem[] = []
         const gathered = new Set<string>()
         for (const row of rows) {
           const group = groups.find((g) => g.rows.includes(row))
           if (!group || group.heading === null) {
-            out.push(row)
+            out.push(...rowWithChildren(row))
             continue
           }
           if (gathered.has(group.key)) continue
           gathered.add(group.key)
           if (group.rows.some(matchesFilter)) out.push(headingItem(group.key, group.heading))
-          out.push(...group.rows)
+          for (const member of group.rows) out.push(...rowWithChildren(member))
         }
         return out
       }
@@ -540,7 +655,25 @@ abstract class TabStripBase implements TabStrip {
        *  as a function rather than a conditional inside the list so each
        *  branch is a plain expression — and so the Tab's props are read once,
        *  per item, exactly as they were before headings existed. */
-      const drawItem = (item: StripHeadingItem | PaneView): JSX.Element => {
+      const drawItem = (item: StripItem): JSX.Element => {
+        if (isSubagent(item)) {
+          // A CHILD HAS NO PANE OF ITS OWN, so activating its row activates
+          // the parent's — there is nowhere else to go, and a row that looks
+          // clickable and goes nowhere is worse than a row that is not. It
+          // follows the parent's filter and fold for the same reason: a child
+          // drawn under a hidden parent is a row with no parent.
+          const parent = paneViews().find((v) => v.id === item.parentId)
+          return (
+            <SubagentRow
+              name={item.name}
+              task={item.task}
+              depth={item.depth}
+              parentPaneId={item.parentPaneId}
+              hidden={parent === undefined || !matchesFilter(parent) || folded(parent)}
+              onActivate={() => this.onActivate?.(item.parentId)}
+            />
+          )
+        }
         if (isHeading(item)) {
           // THE HORIZONTAL STRIP DRAWS A WORKSPACE AS A PILL IN THE ROW, and
           // the vertical one as a heading over a column. Same object, same
@@ -727,6 +860,14 @@ abstract class TabStripBase implements TabStrip {
                 (display.records[item.id]?.groupKey ?? '')
             }
             onMenu={(paneId, x, y) => setMenu({ paneId, x, y })}
+            // THE DISCLOSURE FOR THE ROWS UNDERNEATH, and it appears only on
+            // a row that has any. `childCount` is what the `+N` says when
+            // they are folded away: a count is the smallest honest thing a
+            // collapsed row can say, and saying nothing is how a person stops
+            // noticing that a pane has children at all.
+            childCount={(display.records[item.id]?.agentChildren ?? []).length}
+            childrenExpanded={childrenExpanded(item.id)}
+            onToggleChildren={() => toggleChildren(item.id)}
           />
         )
       }

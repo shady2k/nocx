@@ -20,13 +20,11 @@
 // That probe is a real exec against the session's remote host: bounded and
 // read-only ("writes nothing" — helper_git.go:104-105's own comment), but it
 // is a remote action the ambient decoration would trigger on every debounced
-// settle, for a feature the user never asked to open. No consent is deployed
-// or asked for silently: an unconsented machine resolves to ConsentRequired
-// (helper_git.go:166-169) or a plain refusal, and git.open answers the
-// consentRequired RESULT state (ws_git.go:606-609) rather than installing
-// anything — the deploy only happens in the DesiredRelay branch
-// (helper_git.go:113-165), which requires a machine that has ALREADY resolved
-// to relay (prior consent, recorded in the consent.Store the resolver reads).
+// settle, for a feature the user never asked to open. Nothing is deployed or
+// asked for from here: since ADR-0068 no feature surface may raise the
+// helper, git.open answers a refusal state on a machine the connection has
+// not chosen the helper for, and the method itself is chosen only on the
+// connection or at connect (ADR-0069).
 //
 // Decision: skip non-local sessions outright. The remote PROBE — not a
 // deploy, not a prompt — is still a background exec this ambient feature
@@ -201,7 +199,7 @@ export function createBranchSource(
           // and this source never holds one (unlike GitStore's panel).
           void deps.close(res.bindingId).catch(() => {})
         } else if (myEpoch === epoch) {
-          // Every non-ok state (notARepository, consentRequired, noCwd,
+          // Every non-ok state (notARepository, noCwd,
           // gitUnavailable, gitTooOld, and the remote-helper refusals) is
           // ambient decoration's silence: no branch, and — deliberately —
           // no notify, no toast, no consent call. There is nothing to

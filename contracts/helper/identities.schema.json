@@ -9,7 +9,40 @@
       "type": "string"
     },
     "launchRecord": {
-      "description": "What the helper RECORDED at the moment it spawned. This is the canonical identity of a session and nothing read from the OS afterwards may overwrite it: argv is mutable by the process itself, a process can be replaced by exec, /proc does not exist on macOS and proc_pidinfo answers a different set of questions there. The helper's own record is the authority; OS inspection is a cross-check (see `observation`).",
+      "description": "What the helper RECORDED at the moment it spawned. This is the canonical identity of a session and nothing read from the OS afterwards may overwrite it: argv is mutable by the process itself, a process can be replaced by exec, /proc does not exist on macOS and proc_pidinfo answers a different set of questions there. The helper's own record is the authority; OS inspection is a cross-check (see `observation`). It is a DISCRIMINATED UNION since nocx-50w7p.4, because a session's process is either a PTY this helper owns or a shell channel on a remote host and the two have different facts: which branch it is, is the first question a decoder asks, so `kind` is required and exactly one branch is present.",
+      "oneOf": [
+        {
+          "required": ["kind", "local"],
+          "properties": {
+            "kind": { "const": "local" },
+            "local": { "$ref": "#/$defs/localLaunchRecord" }
+          },
+          "not": { "required": ["ssh"] }
+        },
+        {
+          "required": ["kind", "ssh"],
+          "properties": {
+            "kind": { "const": "ssh" },
+            "ssh": { "$ref": "#/$defs/sshLaunchRecord" }
+          },
+          "not": { "required": ["local"] }
+        }
+      ],
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "description": "Which branch this record is: `local` for a process on this machine, `ssh` for a shell channel on a connection the helper dialed. Required rather than inferred from which branch key is present, because 'which of these is it' is the FIRST question and inferring it makes an incomplete record indistinguishable from the other branch.",
+          "type": "string",
+          "enum": ["local", "ssh"]
+        },
+        "local": { "$ref": "#/$defs/localLaunchRecord" },
+        "ssh": { "$ref": "#/$defs/sshLaunchRecord" }
+      }
+    },
+    "localLaunchRecord": {
+      "description": "The launch record of a session whose process runs on THIS machine: a PTY the helper owns and its process group. It is the record every session had before the union existed, unchanged.",
       "type": "object",
       "additionalProperties": false,
       "required": ["shell", "cwd", "pid", "pgid", "cols", "rows", "windowBytes"],
@@ -32,6 +65,53 @@
         "rows": { "type": "integer", "minimum": 0, "maximum": 65535 },
         "windowBytes": {
           "description": "The output-window bound this session ACTUALLY got, after the helper's floor, ceiling and aggregate budget were applied to what the coordinator asked for. Reported rather than assumed: a caller whose request was clamped must be able to see that it was, because a silently ignored setting is the degrade the product must never hide. The session keeps this bound for its whole life — changing the setting affects the next session, never a running one.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "sshLaunchRecord": {
+      "description": "The launch record of a session whose process is a shell channel on a connection this helper dialed (nocx-50w7p.4). It has NO `pid` and NO `pgid` key at all, and that is the shape rather than an omission: the process is on another machine, its pid belongs to that machine's namespace, and the only value a record insisting on one could carry is 0 — the kernel scheduler — which a reader would then ask the OS about. Absence is the honest encoding, and `additionalProperties: false` is what makes an absence the decoder enforces rather than a convention.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "port",
+        "user",
+        "identityRef",
+        "shell",
+        "cwd",
+        "cols",
+        "rows",
+        "windowBytes"
+      ],
+      "properties": {
+        "host": {
+          "description": "The RESOLVED dial target, echoed so a reader of the inventory knows which machine this pane is on. Alias resolution and ~/.ssh/config merging stay in the coordinator, which is the party that reads the config.",
+          "type": "string",
+          "minLength": 1
+        },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "user": { "type": "string", "minLength": 1 },
+        "identityRef": {
+          "description": "The credential REFERENCE the channel authenticated with — the coordinator's opaque handle, which the helper echoes and never interprets. It is a reference and never material: no key or password is on this wire, and a rotation mints a new reference rather than changing this one.",
+          "type": "string",
+          "minLength": 1
+        },
+        "shell": {
+          "description": "The far shell this session was launched FOR, from the wire's closed set (auto|bash|zsh|unknown, spelled `auto`, `bash`, `zsh`, `unknown`). `auto` is the honest value for the ordinary case: the far side's own dispatcher decides which tier runs, and its answer is not reported back on this wire.",
+          "type": "string",
+          "enum": ["auto", "bash", "zsh", "unknown"]
+        },
+        "cwd": {
+          "description": "EMPTY, always, in this generation, and the key is kept rather than dropped because every reader of a launch record asks the same questions of whichever branch it holds. The far login shell starts in the far account's own directory, which this helper cannot see or move, so the record reports the resolution it performed — none. `spawn-ssh` refuses a caller's non-empty cwd by name rather than accepting one it could never honour, so this is a fact and not a placeholder.",
+          "type": "string",
+          "const": ""
+        },
+        "cols": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "rows": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "windowBytes": {
+          "description": "The output-window bound this session ACTUALLY got, on the same terms as the local branch's: clamped by the helper, reported rather than assumed, and fixed for the session's whole life.",
           "type": "integer",
           "minimum": 1
         }
@@ -114,6 +194,11 @@
           "description": "When the helper observed the end, RFC 3339 with nanoseconds and an offset.",
           "type": "string",
           "minLength": 1
+        },
+        "cause": {
+          "description": "WHY this ended when code/signal alone cannot say (nocx-y6fh7 item 6, round 3): a closed set, empty for the ordinary case. `keepalive-lost` is a connection this helper's OWN keepalive prober gave up on and closed itself — connection loss, not a clean exit — which the coordinator's ExitOutcome maps to Interrupted so the pane is offered the way back, distinct from the far side hanging up with no status at all, which carries no cause and stays exactly as it was.",
+          "type": "string",
+          "enum": ["keepalive-lost"]
         }
       }
     },
@@ -177,6 +262,61 @@
           "pattern": "^[0-9a-f]{32}$"
         }
       }
+    },
+    "screenCell": {
+      "description": "One column of a screen frame. Width is the load-bearing field and the reason a cell is not just a character: a double-width cluster occupies two columns, its first carries the grapheme at width 2 and its second is a continuation at width 0. A consumer that wants TEXT skips the width-0 cells; a consumer that wants a POSITION — which is what a chrome anchor is — reads the column index directly, and collapsing the two loses the second reading.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "width"],
+      "properties": {
+        "text": {
+          "description": "The whole grapheme cluster, and empty for a blank cell or a continuation. Text is a string and carries no position: a caller that needs to know where it sits reads its cell index.",
+          "type": "string"
+        },
+        "width": {
+          "description": "0 for a continuation or spacer column, 1 for a narrow cell, 2 for a wide cluster. Nothing else: a value outside the set is a shape this ABI does not have.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        }
+      }
+    },
+    "screenFrame": {
+      "description": "One screen as the emulator holds it: a rectangle of cells, the caret, and which buffer it is. The rows are a RECTANGLE and not trimmed text — lines is rows long and every line is cols long — because a consumer that reads a position must be able to index a column without knowing where a program stopped writing. This is the shape both readers of this ABI speak: a live session's screen and one screen of a replay.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cols", "rows", "cursorX", "cursorY", "cursorVisible", "altScreen", "lines"],
+      "properties": {
+        "cols": { "type": "integer", "minimum": 0 },
+        "rows": { "type": "integer", "minimum": 0 },
+        "cursorX": {
+          "description": "Cursor column, zero-indexed from the left of the active area. Zero-indexed while the sequences a program sends (CUP and friends) are one-indexed: an adapter that passed the program's own numbers through would be wrong by one on both axes.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "cursorY": { "type": "integer", "minimum": 0 },
+        "cursorVisible": {
+          "description": "DECTCEM (DEC mode 25). A program composing a frame hides the caret, and a renderer that painted one there would show the person something the program deliberately withdrew.",
+          "type": "boolean"
+        },
+        "altScreen": {
+          "description": "Whether the active buffer is the alternate screen. An OBSERVATION and never a decision: ADR-0024 decision 1 forbids it to open or complete an execution attempt.",
+          "type": "boolean"
+        },
+        "lines": {
+          "description": "One array per row, each cols cells long, in row-major order.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/screenCell" }
+          }
+        }
+      }
+    },
+    "completeness": {
+      "description": "What a runtime can honestly claim about the stream it holds. A closed set, spelled once here because both ends of this socket are the same Go package. An unrecognised spelling is NOT a claim a reader may strengthen, and the refusal is the READER's: a decoder of this shape would pass an invented string through unchanged, so the coordinator's conversion maps anything outside this set onto `unknown`, which is the state the write gate refuses in.",
+      "type": "string",
+      "enum": ["unknown", "complete", "lostIngest", "noFence", "evicted"]
     },
     "attachmentId": {
       "description": "One coordinator-to-helper connection and its lease. DISPOSABLE: it dies with the connection, it is what detach names, and it appears NOWHERE in the ledger — a durable row keyed by it would tie surviving work to a pipe.",
@@ -265,6 +405,83 @@
           "description": "Who holds it, when this request was refused; null otherwise. A refusal that does not say who holds it leaves the caller with nothing to do about it.",
           "type": ["string", "null"]
         }
+      }
+    },
+    "accessEpoch": {
+      "description": "A session's access epoch (nocx-6q1uh.6, spec §7.2): starts at 1 for every incarnation, rises only through session.access-bump, and is carried by every snapshot and every intent so a revocation can prove no intent declaring an older epoch may still commit. It is a SEPARATE concept from leaseEpoch (the write CAPABILITY's own lease, spec §6's attach/detach) and from the runtime's own control epoch (who directs a session): three different questions that happen to share a shape, kept apart the way sessionruntime.ControlEpoch's own doc keeps itself apart from leaseEpoch — merging any two would let an answer to one silently stand in for another.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "inputFenceValue": {
+      "description": "A session's per-input monotonic sequence (spec §5.4): the fence the owner assigns the moment it hands a write to the writer goroutine — never a byte offset, and never comparable across sessions. Read BEFORE a screen is read, so a snapshot's own inputFence never claims to be newer than the rows it is paired with.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "refusalCause": {
+      "description": "Why a session.intent wrote nothing, the closed set nocx-6q1uh.6 draws (spec §6.5). An unrecognised spelling is not a cause a reader may act on — the same closed-vocabulary rule `completeness` already states one level up.",
+      "type": "string",
+      "enum": [
+        "stale_target",
+        "incomparable",
+        "expired",
+        "forged",
+        "token_spent",
+        "snapshot_gone",
+        "completeness_unknown",
+        "cannot_encode",
+        "would_submit",
+        "access_revoked",
+        "no_read_barrier",
+        "commit_deadline",
+        "capacity",
+        "busy",
+        "closing"
+      ]
+    },
+    "intentState": {
+      "description": "Where one session.intent got to (spec §6.5). Deliberately not a boolean and never a bare 'failed': failed_partial (some bytes reached the program) and delivery_unknown (the write's completion was never reported, ordinarily a shutdown mid-write) are different facts a caller acts on differently, and collapsing them would answer 'the program has this' with the same spelling as 'nobody knows'.",
+      "type": "string",
+      "enum": [
+        "executed",
+        "refused",
+        "failed_partial",
+        "delivery_unknown",
+        "cancelled",
+        "in_progress"
+      ]
+    },
+    "intentRefusal": {
+      "description": "Why a session.intent was refused. RegionNow travels only on the response that produced this exact refusal; a replay or session.intent-status answers the same refusal with RegionOmitted instead, never a stale echo of what the screen looked like when this was first decided.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cause"],
+      "properties": {
+        "cause": { "$ref": "#/$defs/refusalCause" },
+        "regionNow": {
+          "description": "What is on screen now, normalised text, bounded to 16 KiB (regionTruncated marks the cut).",
+          "type": "string"
+        },
+        "regionTruncated": { "type": "boolean" },
+        "regionOmitted": { "type": "boolean" }
+      }
+    },
+    "intentResult": {
+      "description": "What became of one session.intent, or the compact record a replay or session.intent-status answers with instead of re-attempting it (spec §6.2, §6.5). refusal is present exactly when state is 'refused'; failed_partial and delivery_unknown never carry one, because the closed refusal vocabulary describes only why NOTHING was written, and both of those wrote something (or wrote a completion nobody can vouch for) rather than being refused outright.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "bytesWritten", "fenceAfter"],
+      "properties": {
+        "state": { "$ref": "#/$defs/intentState" },
+        "bytesWritten": { "type": "integer", "minimum": 0 },
+        "fenceAfter": { "$ref": "#/$defs/inputFenceValue" },
+        "retryAfterMs": {
+          "description": "Present only alongside state 'in_progress': how long before asking session.intent-status again is worth it.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "refusal": { "$ref": "#/$defs/intentRefusal" }
       }
     }
   }

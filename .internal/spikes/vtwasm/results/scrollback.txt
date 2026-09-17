@@ -1,0 +1,9 @@
+== scrollback cap sweep, same driver shape both sides, post-fix artifact ==
+wasm   cap=1 scrollback_rows=123	native scrollback_rows=218
+wasm   cap=100 scrollback_rows=123	native scrollback_rows=218
+wasm   cap=500 scrollback_rows=123	native scrollback_rows=218
+wasm   cap=1000 scrollback_rows=796	native scrollback_rows=796
+wasm   rep=1000 scrollback_rows=0	native scrollback_rows=0
+wasm   rep=10000 scrollback_rows=102	native scrollback_rows=102
+wasm   rep=65535 scrollback_rows=796	native scrollback_rows=796
+wasm   rep=65536 scrollback_rows=796	native scrollback_rows=796

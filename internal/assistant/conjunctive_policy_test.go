@@ -63,7 +63,7 @@ func TestAConjunctiveToolIsRefusedWhenEitherRowRefuses(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ResolveResources: %v", err)
 			}
-			outcome, _, _ := mw.kernel.decideInvocationWithReason(tool, resources, true, content.Invocation{Parsed: true})
+			outcome, _, _, _ := mw.kernel.decideInvocationWithReason(tool, resources, true, content.Invocation{Parsed: true})
 			if outcome != tc.want {
 				t.Fatalf("outcome = %v, want %v", outcome, tc.want)
 			}
@@ -88,7 +88,7 @@ func TestAConjunctiveToolAsksWhenEitherRowAsks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveResources: %v", err)
 	}
-	outcome, _, _ := mw.kernel.decideInvocationWithReason(tool, resources, true, content.Invocation{Parsed: true})
+	outcome, _, _, _ := mw.kernel.decideInvocationWithReason(tool, resources, true, content.Invocation{Parsed: true})
 	if outcome != policyAsk {
 		t.Fatalf("outcome = %v, want policyAsk", outcome)
 	}
@@ -116,7 +116,7 @@ func TestAnAlternativeToolKeepsDecidingOnItsSelectedRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveResources: %v", err)
 	}
-	if outcome, _, _ := mw.kernel.decideInvocationWithReason(selected, resources, true, invocation); outcome == policyRefuse {
+	if outcome, _, _, _ := mw.kernel.decideInvocationWithReason(selected, resources, true, invocation); outcome == policyRefuse {
 		t.Fatal("refusing mutate-destructive refused an observation: the alternation was lost")
 	}
 }

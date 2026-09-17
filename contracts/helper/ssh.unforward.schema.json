@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.unforward.schema.json",
+  "title": "HelperSSHUnforwardResult",
+  "description": "The empty answer an idempotent unforward gives. It is a named shape rather than `any` so the wire declares once what crosses — the same reason ssh.close's empty result is declared — and an empty JSON object is its whole content.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {}
+}

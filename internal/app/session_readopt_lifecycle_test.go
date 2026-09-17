@@ -29,12 +29,14 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/hostsvc"
 	localgit "github.com/shady2k/nocx/internal/git/local"
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	helpersession "github.com/shady2k/nocx/internal/helper/session"
 	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclecodec"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/session"
@@ -146,12 +148,12 @@ func (s *shellSide) drain() {
 }
 
 // recordingEmitter is the renderer's side of the publication boundary: it
-// acknowledges every establishment immediately (decision 9 — a renderer that
-// commits the editor presentation on receipt) and keeps every fact, which is
-// what a block is drawn from.
+// keeps every fact, which is what a block is drawn from. It used to also
+// acknowledge every establishment immediately, as a renderer that commits
+// the editor presentation on receipt would; ADR-0062 removed that step,
+// since the accept now flushes on the backend's own authority as soon as
+// the kernel mints it.
 type recordingEmitter struct {
-	pub *lifecyclepub.Publisher
-
 	mu    sync.Mutex
 	facts []lifecyclepub.Fact
 }
@@ -160,11 +162,6 @@ func (e *recordingEmitter) PublishLifecycle(f lifecyclepub.Fact) {
 	e.mu.Lock()
 	e.facts = append(e.facts, f)
 	e.mu.Unlock()
-	if f.Generation == "" || f.Domain == "" {
-		return
-	}
-	_ = e.pub.AcknowledgeEstablishment(
-		lifecycle.LaneID(f.Lane), lifecycle.DomainID(f.Domain), f.Epoch, f.Generation)
 }
 
 func (e *recordingEmitter) completed() []lifecyclepub.Fact {
@@ -197,7 +194,7 @@ func newIntegratedCoordinator(t *testing.T, provider *fakeLaneProvider) *integra
 	t.Helper()
 	c := newCoordinator(t, provider)
 	pub := lifecyclepub.New(lifecycle.New(lifecycle.Options{}))
-	em := &recordingEmitter{pub: pub}
+	em := &recordingEmitter{}
 	pub.SetEmitter(em)
 	c.reg.lifecycle = pub
 	return &integratedCoordinator{coordinator: c, emitter: em}
@@ -205,11 +202,11 @@ func newIntegratedCoordinator(t *testing.T, provider *fakeLaneProvider) *integra
 
 // helperWithIntegratedShells builds the shared daemon whose one shell holds a
 // lifecycle channel.
-func helperWithIntegratedShells(spawner *lifecycleSpawner) *helpersession.Service {
+func helperWithIntegratedShells(t testing.TB, spawner *lifecycleSpawner) *helpersession.Service {
 	return helpersession.New(helpersession.Options{
 		Generation: proto.GenerationID(syntheticArtifactHash),
 		Spawner:    spawner,
-		Log:        discardLogger(),
+		Log:        discardLogger(t),
 	})
 }
 
@@ -217,8 +214,8 @@ func helperWithIntegratedShells(spawner *lifecycleSpawner) *helpersession.Servic
 
 func TestACommandRunAfterTheReturnProducesABlock(t *testing.T) {
 	spawner := &lifecycleSpawner{}
-	svc := helperWithIntegratedShells(spawner)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := helperWithIntegratedShells(t, spawner)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 
 	first := newIntegratedCoordinator(t, provider)
 	binding := openHostedFixture(t, first.coordinator, "pane-1")
@@ -237,7 +234,7 @@ func TestACommandRunAfterTheReturnProducesABlock(t *testing.T) {
 	adopter := &stubAdopter{}
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger())
+		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger(t))
 
 	if adopted := adopter.adoptedIDs(); len(adopted) != 1 {
 		t.Fatalf("the session was not taken back at all (%v); there is nothing to run a command in", adopter.failure())
@@ -275,13 +272,144 @@ func TestACommandRunAfterTheReturnProducesABlock(t *testing.T) {
 	}
 }
 
+// TestAGitOpenAgainstAReadoptedSessionLeavesItsLifecycleChannelOpen
+// (nocx-xn63t.6.5): the second half of the regression
+// TestAReadoptedSessionAnswersItsOwnHostKeyFingerprint found but did not
+// close. That fix made a `helper` connection's git.open reach hostHelper.open
+// exactly as an `auto`+granted one always could (both now resolve
+// DesiredHelper the same way); this test is the proof that reaching it is
+// safe for a session a coordinator restart re-adopted.
+//
+// THE INVARIANT, BOTH ENDS NAMED (mirrors openFarHelper's own, nocx-xn63t.6.3,
+// git_open_live_far_helper_session_test.go's own doc comment): the hostHelper
+// a session's shared client lives in is SESSION-HELD from the moment it is
+// registered into helperRegistry.hosts — before the session is even visible
+// to a caller — until helperRegistry.SessionEnded reaches that entry. A git
+// binding opened and refused (refs==0) must never read "nothing references
+// the helper" and close the shared client while that hold stands, because the
+// SAME client also carries the session's live PTY and lifecycle channel.
+//
+// openFarHelper (a fresh open) sets hostHelper.hostedSession = true at
+// exactly that point (helper_git.go). session_readopt.go's readopt() builds
+// its own hostHelper for the SAME r.hosts map (a second constructor call,
+// `&hostHelper{f: f, ...}`) but never sets the field, so a re-adopted
+// session's hostHelper starts, and stays, with hostedSession false. The FIRST
+// git.open against it — the ordinary notARepository refusal any SSH tab gets
+// for a cwd that is not a repo, which frontend/src/git/git-store.ts's
+// rescope() raises automatically for every verified cwd and not only when
+// the git panel is visible — finds refs==0 and !hostedSession and closes the
+// shared client, tearing the session's lifecycle channel (and PTY) down with
+// it. Measured against e2e/remote-coordinator-reclaim.spec.ts in the
+// container: a `git.open` request is immediately followed, in the same
+// backend log, by `session closed` / `ending session` / a `close-session`
+// sent to the far helper, and then the lifecycle bridge reporting its own
+// end-of-stream loss — right after a coordinator restart reconciled the
+// session, with no client ever asking for anything on it.
+func TestAGitOpenAgainstAReadoptedSessionLeavesItsLifecycleChannelOpen(t *testing.T) {
+	spawner := &lifecycleSpawner{}
+	svc := helperWithIntegratedShells(t, spawner)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+
+	first := newIntegratedCoordinator(t, provider)
+	binding := openHostedFixture(t, first.coordinator, "pane-1")
+	shell, _ := spawner.theShell(t)
+	shell.drain()
+
+	shell.send(t, lifecycle.Event{Kind: lifecycle.KindHello, Hello: &lifecycle.Hello{Shell: "bash"}})
+	waittest.WaitFor(t, "the shell integrated with the coordinator that started it", func() bool {
+		return len(first.emitter.any()) > 0
+	})
+
+	first.quit()
+	second := newIntegratedCoordinator(t, provider)
+
+	// Observed directly, the same signal the bead's own log line names ("the
+	// lifecycle channel reports end-of-stream") and the same seam
+	// git_open_live_far_helper_session_test.go asserts against for a fresh
+	// open: it must never fire from a refusing git.open alone.
+	var lossMu sync.Mutex
+	var losses []lifecyclechannel.LossCause
+	second.reg.lifecycleLoss = func(_ lifecycle.LaneID, cause lifecyclechannel.LossCause) {
+		lossMu.Lock()
+		losses = append(losses, cause)
+		lossMu.Unlock()
+	}
+
+	adopter := &stubAdopter{}
+	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
+	reconcileSessions(context.Background(), rec, second.reg.inventories(),
+		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger(t))
+	if adopted := adopter.adoptedIDs(); len(adopted) != 1 {
+		t.Fatalf("the session was not taken back at all (%v); there is nothing to protect", adopter.failure())
+	}
+
+	sess, err := second.sess.Get(session.ID(binding.SessionID))
+	if err != nil {
+		t.Fatalf("the replacement coordinator does not hold the session it took back: %v", err)
+	}
+
+	// THE TRAFFIC UNDER TEST: git.open, exactly as the frontend's git-store
+	// raises it automatically for any SSH tab with a verified cwd (rescope) —
+	// a plain temp directory refuses as notARepository, the ordinary answer
+	// for a tab that never cd'd into a repository.
+	sel := second.gitFor(sess)
+	if sel.Factory == nil {
+		t.Fatalf("git.open selection carried no factory: refusal=%+v", sel.Refusal)
+	}
+	repo, outcome, err := sel.Factory.Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("git.open: %v", err)
+	}
+	if repo != nil {
+		_ = repo.Close()
+	}
+	if outcome.State == git.OpenOK {
+		t.Fatalf("git.open resolved OK against a plain directory; the fixture no longer proves a refusing outcome")
+	}
+
+	select {
+	case <-sess.Done():
+		t.Fatal("the re-adopted session ended when the refusing git.open closed its shared client")
+	default:
+	}
+
+	// THE COMMAND A USER TYPES RIGHT AFTER, exactly as
+	// TestACommandRunAfterTheReturnProducesABlock proves for the case with no
+	// git.open in between: if the shared client (and with it the lifecycle
+	// bridge) died silently under the refusing git.open above, nothing would
+	// ever publish this block, and this poll would time out rather than
+	// pass.
+	attempt := lifecycle.AttemptID("after-git-open")
+	shell.send(t, lifecycle.Event{
+		Kind: lifecycle.KindStart, Start: &lifecycle.Start{AttemptID: &attempt, Command: "make"},
+	})
+	code := 0
+	shell.send(t, lifecycle.Event{
+		Kind: lifecycle.KindComplete,
+		Complete: &lifecycle.Complete{
+			ExitCode: &code,
+			Fence:    lifecycle.FenceNonce{9, 9, 9},
+		},
+	})
+	waittest.WaitFor(t, "a command run after the refusing git.open still produced a completed block", func() bool {
+		return len(second.emitter.completed()) > 0
+	})
+
+	lossMu.Lock()
+	got := append([]lifecyclechannel.LossCause(nil), losses...)
+	lossMu.Unlock()
+	if len(got) != 0 {
+		t.Fatalf("the lifecycle channel reported loss from the refusing git.open alone: %v", got)
+	}
+}
+
 // The pane says it is integrated, because it is: the axis is what the product
 // renders, and a returned pane that produced blocks while the axis said
 // nothing would be the same silence in the other direction.
 func TestATakenBackPaneReportsItsIntegrationAndItsLane(t *testing.T) {
 	spawner := &lifecycleSpawner{}
-	svc := helperWithIntegratedShells(spawner)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := helperWithIntegratedShells(t, spawner)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 
 	first := newIntegratedCoordinator(t, provider)
 	binding := openHostedFixture(t, first.coordinator, "pane-1")
@@ -295,7 +423,7 @@ func TestATakenBackPaneReportsItsIntegrationAndItsLane(t *testing.T) {
 	adopter := &stubAdopter{}
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger())
+		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger(t))
 
 	open := adopter.lastOpen()
 	if open.LifecycleLane != lifecycle.LaneID(launch.Lane) {
@@ -318,8 +446,8 @@ func TestATakenBackPaneReportsItsIntegrationAndItsLane(t *testing.T) {
 // silent, which is the whole of what this bead refuses to ship.
 func TestAGenerationThatCannotHandBackTheChannelSaysSoInTheProduct(t *testing.T) {
 	spawner := &lifecycleSpawner{}
-	svc := helperWithIntegratedShells(spawner)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := helperWithIntegratedShells(t, spawner)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 
 	first := newIntegratedCoordinator(t, provider)
 	binding := openHostedFixture(t, first.coordinator, "pane-1")
@@ -331,12 +459,12 @@ func TestAGenerationThatCannotHandBackTheChannelSaysSoInTheProduct(t *testing.T)
 
 	// The generation that answers now is one from before adopt-lifecycle
 	// existed: it serves the frozen ABI and refuses everything newer.
-	provider.peer = olderGenerationPeer(svc)
+	provider.peer = olderGenerationPeer(t, svc)
 	second := newIntegratedCoordinator(t, provider)
 	adopter := &stubAdopter{}
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger())
+		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger(t))
 
 	if len(rec.applied) != 1 || rec.applied[0].Verdict != content.VerdictLive {
 		t.Fatalf("verdict = %+v, want live — a channel that cannot be re-established is not a session that is gone", rec.applied)
@@ -362,8 +490,8 @@ func TestAGenerationThatCannotHandBackTheChannelSaysSoInTheProduct(t *testing.T)
 // "conventional by design" is expressed, and a pane that never offered blocks
 // has nothing to have lost.
 func TestAConventionalSessionTakenBackSaysNothingAboutIntegration(t *testing.T) {
-	svc := sharedHelperService()
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := sharedHelperService(t)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 
 	first := newIntegratedCoordinator(t, provider)
 	binding := openHostedFixture(t, first.coordinator, "pane-1")
@@ -373,7 +501,7 @@ func TestAConventionalSessionTakenBackSaysNothingAboutIntegration(t *testing.T) 
 	adopter := &stubAdopter{}
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger())
+		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger(t))
 
 	open := adopter.lastOpen()
 	if open.IntegrationStatus != "" {
@@ -393,8 +521,8 @@ func TestAConventionalSessionTakenBackSaysNothingAboutIntegration(t *testing.T) 
 // what says so.
 func TestTheAdoptedChannelDoesNotReplayCommandsThatAlreadyRan(t *testing.T) {
 	spawner := &lifecycleSpawner{}
-	svc := helperWithIntegratedShells(spawner)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(svc)}
+	svc := helperWithIntegratedShells(t, spawner)
+	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 
 	first := newIntegratedCoordinator(t, provider)
 	binding := openHostedFixture(t, first.coordinator, "pane-1")
@@ -421,7 +549,7 @@ func TestTheAdoptedChannelDoesNotReplayCommandsThatAlreadyRan(t *testing.T) {
 	adopter := &stubAdopter{}
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	reconcileSessions(context.Background(), rec, second.reg.inventories(),
-		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger())
+		readoptFixture(t, second.coordinator, routesFor(binding), adopter), time.Hour, quietLogger(t))
 	if adopted := adopter.adoptedIDs(); len(adopted) != 1 {
 		t.Fatalf("the session was not taken back: %v", adopter.failure())
 	}
@@ -453,10 +581,10 @@ func TestTheAdoptedChannelDoesNotReplayCommandsThatAlreadyRan(t *testing.T) {
 // holding its sessions predates the op, which is a state the design
 // guarantees: two generations are resident at once, and one lingers for as
 // long as it holds a session.
-func olderGenerationPeer(svc *helpersession.Service) func(in io.Reader, out io.Writer) int {
+func olderGenerationPeer(t testing.TB, svc *helpersession.Service) func(in io.Reader, out io.Writer) int {
 	contentHash := syntheticArtifactHash
 	return func(in io.Reader, out io.Writer) int {
-		h := host.New(in, out, contentHash, "instance-1", discardLogger())
+		h := host.New(in, out, contentHash, "instance-1", discardLogger(t))
 		h.Register(hostsvc.New(localgit.NewFactory()))
 		h.Register(&generationWithoutAdoptLifecycle{Service: svc})
 		release := svc.Bind(h)

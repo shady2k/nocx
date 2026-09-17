@@ -1,12 +1,20 @@
 .PHONY: all init build build-server dev dev-web lint format test clean hooks ci ci-full \
-        ci-backend ci-linux ci-mac ci-os-split ci-frontend ci-e2e helpers \
-        print-os-pkgs print-portable-pkgs \
+        ci-backend ci-linux ci-mac ci-os-split ci-local-ssh-split ci-frontend ci-e2e \
+        helpers helper-local helpers-this-machine \
+        require-local-helper \
+        print-os-pkgs print-portable-pkgs print-local-ssh-pkgs \
+        print-os-local-ssh-pkgs print-portable-local-ssh-pkgs \
         lint-ci test-ci build-ci root-ci frontend-ci
 
 GO ?= go
 GOFUMPT ?= gofumpt
 GOLANGCI_LINT ?= golangci-lint
 PKG_CONFIG ?= pkg-config
+# The C compiler `make helpers` needs, on every target: Zig 0.16.0, the version
+# ghostty's build.zig.zon declares. A different Zig is different bytes, so
+# `vtfetch zig` checks the version and refuses rather than building something
+# nobody pinned. Install it (nixpkgs, brew, or ziglang.org) or pass ZIG=<path>.
+ZIG ?= zig
 
 # The Linux build targets webkit2gtk-4.1, the surface ADR-0007 decided for
 # this product. Wails v3 defaults to GTK4/WebKitGTK-6.0; the `gtk3` build tag
@@ -56,14 +64,51 @@ endif
 # into the artifact package's bin/ directory and embedded by
 # //go:embed all:bin. The 2x2 matrix was adopted in nocx-v1ltv,
 # which added the Intel macOS target.
-# CGO_ENABLED=0 is load-bearing: a static binary is what a helper on an
-# unknown remote host must be — no remote glibc, no dynamic-loader
-# surprises. The artifacts are gitignored; a fresh checkout compiles with
-# only the committed .gitignore embedded, and Artifact answers
-# ErrArtifactsNotBuilt until this target has run. `helpers` is a
-# prerequisite of the RELEASE build and of nothing else: ordinary
-# `go build`, `make build` and `make dev` must work with no artifacts
-# present.
+#
+# CGO_ENABLED=0 IS GONE FROM THIS TARGET (nocx-ygxjv.10): the helper links
+# ghostty's libghostty-vt (ADR-0065), which is a C library, so every target now
+# needs a C compiler and the archive built for it. What the zero USED to buy is
+# still the requirement, and it is now bought by the choice of archive instead
+# of by the absence of CGo:
+#
+#   * ON LINUX a helper on an unknown remote host must be static — no remote
+#     glibc, no dynamic-loader surprises — and that is the `-musl` triple's to
+#     give: the archive's libc is baked into its objects (the glibc pair is the
+#     same size and different bytes), and only the musl build comes out with no
+#     PT_INTERP and no DT_NEEDED. Measured, not assumed: the assertion is in the
+#     recipe below and in third_party/libghostty-vt/scripts/verify-link.sh.
+#   * ON macOS IT NEVER HELD ANYTHING (nocx-cm1ac, .internal/spikes/buildmatrix):
+#     the darwin helper this target has always produced already carries
+#     LC_LOAD_DYLIB for /usr/lib/libSystem.B.dylib and /usr/lib/libresolv.9.dylib,
+#     because Go's own darwin runtime links them. Read it back with `otool -L`, or
+#     from a Linux box with the debug/macho reader in `.internal/spikes/buildmatrix`.
+#
+# -linkmode=external IS REQUIRED, and Go does not choose it here. With
+# CGO_ENABLED=1 the helper pulls in the cgo variants of net, os/user and
+# runtime/cgo, but the program's own packages contain no `import "C"` — so
+# `go build` keeps the INTERNAL linker, which cannot resolve a libc symbol and
+# fails with `relocation target getaddrinfo not defined` and a pile of others
+# (measured: go1.26.7, both Linux targets). Passing the flag makes Zig's linker
+# resolve them, and it is not a workaround for the current state: a target's
+# link mode must not be a function of whether some future package imports C,
+# and nocx-ygxjv.2 adds exactly such a package.
+#
+# The artifacts are gitignored; a fresh checkout compiles with only the
+# committed .gitignore embedded, and Artifact answers ErrArtifactsNotBuilt until
+# this target has run.
+#
+# IT IS A PREREQUISITE OF EVERY TARGET THAT PRODUCES A RUNNABLE BINARY, and
+# that changed on 2026-09-04 with ADR-0057. It used to be the release build's
+# and nothing else's, on the true reasoning of the time: the artifacts served
+# the REMOTE panel, so a build without them cost a developer one button they
+# were not using. Since ADR-0057 there is no Tier A behind the local helper —
+# a local pane IS a session on this machine's daemon — so a binary built over
+# an empty artifacts directory cannot open a terminal AT ALL. It refuses every
+# pane, correctly and unusably.
+#
+# `go build ./...` still compiles with no artifacts present, and must: the
+# package embeds its own .gitignore so a bare checkout, CI's `go vet` and every
+# unit test build. Compiling is not the thing that broke.
 #
 # The e2e suite needs them too and calls this target itself, from the stand's
 # bring-up (e2e/stand.ts). It is deliberately NOT a prerequisite of ci-e2e:
@@ -71,19 +116,224 @@ endif
 # e2e/run-in-container.sh straight after a bare checkout. A prerequisite here
 # bought the make target artifacts CI would not have had, and two SSH git
 # specs that could only ever pass locally (nocx-eoijp).
+#
+# AND IT DOES NOT NEED ALL FOUR OF THEM (nocx-trkgm). The stand calls
+# `helpers-this-machine` below, which is this target with HELPER_TARGETS
+# narrowed to the one platform a run can ask for; this list stays the release's
+# four, unchanged.
 HELPER_TARGETS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 HELPER_ARTIFACT_DIR := internal/helper/deploy/artifacts/bin
 
-.PHONY: helpers
-helpers:
+# The local variant of the same artifact (nocx-50w7p.1): this machine's own
+# helper, built for the host platform alone and ONLY under this tag. It is a
+# directory of its own under bin/ because the artifact name is frozen as
+# nocx-helper-<goos>-<goarch>.gz and the platform is the whole of it, so two
+# variants of one platform cannot live side by side under one directory.
+HELPER_LOCAL_DIR := $(HELPER_ARTIFACT_DIR)/local
+HELPER_LOCAL_TAGS := nocx_local_ssh
+HELPER_LOCAL_PLATFORM := $(HOST_GOOS)/$(shell $(GO) env GOARCH)
+
+# WHAT `make helper-local` BUILDS, and it is a LIST because one app can run on
+# more than one platform: the macOS universal bundle carries both darwin
+# slices, so it must carry both darwin local variants, and the release's
+# helpers job passes all three this product ships for. The default is the host,
+# which is the only one a `make dev` binary can install — `go run` and `go
+# build` produce the host's architecture and nothing else.
+HELPER_LOCAL_TARGETS ?= $(HELPER_LOCAL_PLATFORM)
+
+# --- the pinned libghostty-vt archives (nocx-ygxjv.10) ------------------------
+#
+# third_party/libghostty-vt/MANIFEST.json is the pin: the ghostty commit, the
+# exact Zig, the build flags, and per target the sha256 of the archive and of
+# its matched headers. Nothing here repeats a hash — `vt-archives` verifies
+# against that file, and it is the only way these bytes reach the tree.
+#
+# `make helpers` therefore needs a pinned Zig (0.16.0, the version
+# build.zig.zon declares) and the archives, which come from the GitHub release
+# the manifest names (or from a local directory, with VT_ASSETS=<dir> — how the
+# tamper check and a pre-publish run are exercised).
+VT_MANIFEST := third_party/libghostty-vt/MANIFEST.json
+VT_ROOT := build/libghostty-vt
+VT_DIST := $(VT_ROOT)/dist
+VT_VENDOR := $(VT_ROOT)/vendor
+VT_STUBS := third_party/libghostty-vt/stubs
+
+# Where the helper's //go:embed reads the third-party notices (see
+# internal/helper/notices): a path in OUR tree, because an embed cannot escape
+# the package directory. The document itself is never committed — it is a
+# pinned asset like the archives — and this is the one generated file that
+# lives in the tree, which is why its directory carries a .gitignore.
+VT_NOTICES := internal/helper/notices/licenses/THIRD_PARTY_LICENSES.txt
+
+# VT_SOURCE is for a pin whose commit is not published yet — the coordinator
+# builds a fork branch's archives before pushing that branch. The recipe checks
+# the checkout is AT the manifest's commit, so this can be a different tree on
+# disk but never a different revision of one.
+VT_SOURCE ?=
+
+.PHONY: vt-archives vt-recipe-audit vt-recipe-pin vt-verify-link vt-helper-size
+
+# Fetch-and-verify. Every job that compiles a CGo package needs this FIRST: an
+# archive that is not the pinned one must stop a build, not link into it.
+#
+# IT ALSO STAGES THE NOTICES, and that is the second half of the same job
+# rather than a target of its own: THIRD_PARTY_LICENSES is one of the assets
+# the fetch verifies, and every binary that links these archives owes it. The
+# helper carries its copy inside the binary (internal/helper/notices, printed
+# by `nocx-helper --licenses`), so the document the fetch just verified is
+# copied to the path its embed reads — same bytes, one verification.
+vt-archives:
+	@$(GO) run ./cmd/vtfetch fetch --manifest $(VT_MANIFEST) --root $(VT_ROOT) \
+	  $(if $(VT_ASSETS),--base "$(VT_ASSETS)",)
+	@VT_ROOT="$(VT_ROOT)" third_party/libghostty-vt/scripts/stage-notices.sh $(VT_NOTICES)
+
+# TWO TARGETS, because a rebuild and a re-pin are opposite jobs and one name
+# for both is a target that always "fails" — `recipe.sh` exits non-zero when
+# the archives it built are not the pinned bytes, which on a rebuild is the
+# NORM (measured: the differing bytes are Zig's own .zig-cache object directory
+# names, which the objects embed and which source + toolchain + flags do not
+# determine; the header bundles and the source tarball DO reproduce).
+#
+# So neither is in a gate: `-audit` reads and reports, `-pin` writes. Publishing
+# is the coordinator's and is one command away; the README says which.
+#
+# Both also generate THIRD_PARTY_LICENSES from the archives they just built
+# (nocx-ygxjv.14), because "which components are inside this archive" is a
+# question only the bytes answer. A partial run (--only) skips it: the document
+# covers every target, so writing one from some of them would describe a pin
+# that does not exist.
+vt-recipe-audit:
+	@third_party/libghostty-vt/scripts/recipe.sh --out "$(VT_DIST)" \
+	  $(if $(VT_SOURCE),--source "$(VT_SOURCE)",)
+
+# Records what this build produced as the pin. That is the act of publishing a
+# new set of archives, so it is explicit and its diff is read before anything
+# is uploaded.
+vt-recipe-pin:
+	@third_party/libghostty-vt/scripts/recipe.sh --out "$(VT_DIST)" --update-manifest \
+	  $(if $(VT_SOURCE),--source "$(VT_SOURCE)",)
+
+# Prove every pinned archive links, and that the Linux ones link statically —
+# the property the helper needs, asserted on the artifact rather than assumed.
+vt-verify-link:
+	@third_party/libghostty-vt/scripts/verify-link.sh --base "$(VT_DIST)"
+
+# What the helper actually costs per target, and the numbers a size budget has
+# to be derived from.
+vt-helper-size:
+	@third_party/libghostty-vt/scripts/measure-helper-size.sh
+
+# The four helper targets, cross-compiled with the pinned Zig. The linux ones
+# get -tags vtmusl, which is what selects the manifest's musl archive: the
+# helper runs on a host nobody knows and must be static, and the archive's libc
+# is baked into its objects. internal/emulator/ghostty's cgo constraints name
+# both sides and say which build gets which.
+#
+# HOW EVERY HELPER ARTIFACT IS BUILT — one definition, two targets. `helpers`
+# builds the four deployable platforms with NO extra tags; `helper-local`
+# builds this host alone with nocx_local_ssh. `make helpers` never passes a tag
+# (see helper-local below), which is what makes "forgetting a flag cannot ship
+# an ssh client to a remote host" true by construction.
+#
+# Every property below is what makes an artifact installable on a host somebody
+# else controls, and a second copy of them is how the two targets drift:
+# -trimpath (no build directory inside the binary), -linkmode external against
+# the pinned Zig cc, stripped, gzip -9, and the static-linkage claim CHECKED on
+# each Linux artifact rather than assumed.
+#
+# $(1) targets, <goos>/<goarch>, whitespace-separated
+# $(2) output directory
+# $(3) extra build tags: empty, or a whitespace-free list
+define build_helper_artifacts
+zig="$$($(GO) run ./cmd/vtfetch zig --bin "$(ZIG)" --manifest $(VT_MANIFEST))" || exit 1; \
+for t in $(1); do \
+  os=$${t%/*}; arch=$${t#*/}; \
+  cc="$$($(GO) run ./cmd/vtfetch cc --target $$t --zig "$$zig" --manifest $(VT_MANIFEST))" || exit 1; \
+  tags="$(strip $(3))"; if [ "$$os" = linux ]; then tags="$${tags:+$$tags,}vtmusl"; fi; \
+  tagflag=""; [ -n "$$tags" ] && tagflag="-tags $$tags"; \
+  CGO_ENABLED=1 GOOS=$$os GOARCH=$$arch CC="$$cc" \
+    $(GO) build -trimpath -ldflags="-s -w -linkmode=external" $$tagflag \
+    -o $(2)/nocx-helper-$$os-$$arch ./cmd/nocx-helper || exit 1; \
+  case "$$os" in \
+    linux) $(GO) run ./cmd/vtfetch inspect --require-static \
+             $(2)/nocx-helper-$$os-$$arch >/dev/null || \
+           { echo "the linux/$$arch helper is dynamically linked; it must be static on an unknown host" >&2; exit 1; } ;; \
+  esac; \
+  gzip -9 -f $(2)/nocx-helper-$$os-$$arch || exit 1; \
+done
+endef
+
+helpers: vt-archives
 	@mkdir -p $(HELPER_ARTIFACT_DIR)
-	@for t in $(HELPER_TARGETS); do \
-	  os=$${t%/*}; arch=$${t#*/}; \
-	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath -ldflags="-s -w" \
-	    -o $(HELPER_ARTIFACT_DIR)/nocx-helper-$$os-$$arch ./cmd/nocx-helper || exit 1; \
-	  gzip -9 -f $(HELPER_ARTIFACT_DIR)/nocx-helper-$$os-$$arch || exit 1; \
-	done
+	@$(call build_helper_artifacts,$(HELPER_TARGETS),$(HELPER_ARTIFACT_DIR),)
 	@echo "helper artifacts: $(HELPER_ARTIFACT_DIR)/nocx-helper-{$(HELPER_TARGETS)}.gz"
+
+# THE HELPER THIS MACHINE RUNS ITSELF (nocx-50w7p.1, nocx-50w7p.7): the
+# artifact for every platform in HELPER_LOCAL_TARGETS, built with the ssh
+# client in it, into the embed's second directory (bin/local/, which has its
+# own //go:embed and its own source —
+# internal/helper/deploy/artifacts/source_local.go).
+#
+# It is the ONLY make target that passes nocx_local_ssh, and `helpers` must
+# never pass it: that tag decides whether a helper can dial ssh at all, and the
+# deployed artifact reaches hosts nobody here controls. Two targets, two tags,
+# one definition of how an artifact is built (build_helper_artifacts).
+#
+# IT IS NOT OPTIONAL (nocx-50w7p.7). This machine's helper is the route every
+# local pane takes (ADR-0057) and internal/helper/local no longer falls back to
+# the deployable artifact, so a build that did not run this target ships an app
+# that cannot open a terminal at all. That is why every target that produces a
+# runnable binary depends on `require-local-helper` below and not on this one:
+# building the variant and CHECKING the binary really embeds it are two acts,
+# and only the second one fails when the artifact lands somewhere //go:embed
+# does not read.
+helper-local: vt-archives
+	@mkdir -p $(HELPER_LOCAL_DIR)
+	@$(call build_helper_artifacts,$(HELPER_LOCAL_TARGETS),$(HELPER_LOCAL_DIR),$(HELPER_LOCAL_TAGS))
+	@for t in $(HELPER_LOCAL_TARGETS); do \
+	  echo "local helper artifact: $(HELPER_LOCAL_DIR)/nocx-helper-$${t%/*}-$${t#*/}.gz"; \
+	done
+
+# THE BUILD-TIME GATE, and the reason a target that ships or runs the app
+# depends on THIS rather than on helper-local: the local variant for every
+# platform the build can run on must be IN THE EMBED, not merely built. The
+# difference is not pedantic — an artifact written where //go:embed does not
+# read it leaves a binary that compiles cleanly and installs no helper, which is
+# exactly the failure the release workflow's own embeds-a-helper gate exists for
+# (nocx-mchgh). It is a test rather than a file listing for the same reason that
+# one is.
+#
+# NOCX_REQUIRE_LOCAL_ARTIFACTS carries the platform list, so the gate asserts
+# the platforms THIS build ships — both darwin slices for a universal bundle —
+# rather than whatever happens to be on disk.
+require-local-helper: helper-local
+	@NOCX_REQUIRE_LOCAL_ARTIFACTS="$(HELPER_LOCAL_TARGETS)" \
+	  $(GO) test ./internal/helper/deploy/artifacts -count=1
+
+# WHAT A RUN ON THIS MACHINE NEEDS FROM THE DEPLOYABLE SET (nocx-trkgm).
+#
+# `helpers` builds the four platforms this product SHIPS for. A run needs ONE,
+# and it is this machine's — because the platform is what the far host answers,
+# not what we guess: deploy.Probe reads `uname -s -m` over the connection
+# (internal/helper/deploy/platform.go) and every SSH target the e2e suite
+# reaches is cmd/e2e-sshd on loopback, so the artifact a run asks for is the
+# container's own platform, the same one `helper-local` builds.
+#
+# The four-target matrix cost 3 minutes of the e2e job's setup in CI (measured
+# 2026-09-17, run 35205572891: 09:54:14 → 09:57:18 for the helper artifacts,
+# the local helper and nocx-server together, against a cold Go cache). Three of
+# those four compiles could not be asked for by any spec in the suite. The
+# darwin pair keeps its exerciser — the release's own helpers job builds all
+# four on ubuntu-latest (release.yml), which is where the committed .tbd stubs
+# are exercised — and it is deliberately not this target's business.
+#
+# THE PLATFORM IS NOT WRITTEN DOWN HERE. HELPER_LOCAL_PLATFORM is the one
+# statement of "which machine this is", and a target-specific variable is how
+# the deployable list is narrowed for this target and its prerequisites without
+# moving HELPER_TARGETS for `helpers` itself — the same override the release
+# passes on the command line for HELPER_LOCAL_TARGETS.
+helpers-this-machine: HELPER_TARGETS := $(HELPER_LOCAL_PLATFORM)
+helpers-this-machine: helpers require-local-helper
 
 all: lint test build
 
@@ -106,7 +356,13 @@ build: build-server
 # desktop shell's dependency surface into a headless daemon for nothing.
 # Same -ldflags as the app, because a pair that cannot report one version is
 # the defect the update health check exists to catch.
-build-server:
+#
+# require-local-helper and not helper-local: this binary embeds BOTH artifact
+# directories, and since the local install stopped falling back to the
+# deployable artifact (nocx-50w7p.7) a coordinator built without the second one
+# serves no pane at all. The gate is what makes that a build failure here
+# rather than a refusal at the first window.
+build-server: helpers require-local-helper
 	CGO_ENABLED=0 $(GO) build -ldflags "$(LDFLAGS)" -o build/bin/nocx-server ./cmd/nocx-server
 
 # The shipped artefact. `-tags release` is what selects the real profile
@@ -115,7 +371,11 @@ build-server:
 # `production` is v3's tag for production build semantics (devtools off).
 # `helpers` is a prerequisite because the shipped binary embeds the
 # cross-compiled helper artefacts; without them Artifact answers
-# ErrArtifactsNotBuilt and the remote panel has nothing to install.
+# ErrArtifactsNotBuilt and the remote panel has nothing to install. Its
+# host-local companion is a prerequisite for a stronger reason: the local
+# install no longer falls back (nocx-50w7p.7), so an app built without it
+# installs no helper and every pane refuses. Both are gated, not merely built
+# — see require-local-helper.
 #
 # The coordinator is built here too, and with `release` and nothing else:
 # that tag is what selects the shipped profile directory (appdir.go), and a
@@ -123,7 +383,7 @@ build-server:
 # different vault and a different settings document from the window attached
 # to it. It is NOT built through build-server, which is the development
 # build of the same binary.
-build-release: helpers
+build-release: helpers require-local-helper
 	$(FRONTEND_BUILD)
 	$(GO) build -tags "$(strip release production $(WAILS_PLATFORM_TAGS))" -ldflags "$(LDFLAGS)" -o build/bin/nocx .
 	CGO_ENABLED=0 $(GO) build -tags release -ldflags "$(LDFLAGS)" -o build/bin/nocx-server ./cmd/nocx-server
@@ -133,7 +393,10 @@ build-release: helpers
 # no dev CLI without a Taskfile, and replicating the watcher is not worth
 # inventing one for — the dev-web target is the iteration path for frontend
 # work, this target is for exercising the real shell.
-dev:
+#
+# Both artifact directories, host platform, gated: a dev binary that cannot
+# install its own helper is a dev loop where no terminal opens.
+dev: helpers require-local-helper
 	$(FRONTEND_BUILD)
 	$(GO) run -tags "$(strip $(WAILS_PLATFORM_TAGS))" .
 
@@ -258,7 +521,10 @@ ci: lint-ci test-ci build-ci root-ci frontend-ci
 #
 # ci-os-split runs FIRST and costs seconds: it re-derives the OS package list
 # from the build constraints, so the partition below cannot drift silently
-# into dropping a package from both halves.
+# into dropping a package from both halves. ci-local-ssh-split runs beside it
+# for the other constraint the suite is partitioned by — the packages that
+# exist only under nocx_local_ssh, whose tagged tests ran in no job at all
+# before nocx-xk1di.
 #
 # ci-mac IS in this list now. It used to be excluded on the grounds that no CI
 # job corresponded to it — macos-latest ran the whole suite as `backend` — and
@@ -275,7 +541,7 @@ ci: lint-ci test-ci build-ci root-ci frontend-ci
 #
 # Order is cheapest-first: the drift check in seconds, the host gates next,
 # the Linux containers in minutes, e2e last because it is the longest.
-ci-full: ci-os-split ci ci-mac ci-backend ci-linux ci-frontend ci-e2e
+ci-full: ci-os-split ci-local-ssh-split ci ci-mac ci-backend ci-linux ci-frontend ci-e2e
 	@echo ""
 	@echo "=== every CI job green locally ==="
 
@@ -314,9 +580,135 @@ OS_PKG_DIRS := cmd/e2e-sshd internal/apicoll internal/app internal/contentkey \
                internal/helper/session internal/lifecyclechannel \
                internal/loginshell internal/nativeports internal/procwatch \
                internal/pty internal/reveal internal/ssh/mux \
-               internal/storage internal/update internal/vault/system
-OS_PKG_RE := (cmd/e2e-sshd|internal/apicoll|internal/app|internal/contentkey|internal/coordinator|internal/helper/endpoint|internal/helper/session|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/reveal|internal/ssh/mux|internal/storage|internal/update|internal/vault/system)
+               internal/storage internal/update internal/vault/system \
+               internal/peerpin internal/monoclock
+OS_PKG_RE := (cmd/e2e-sshd|internal/apicoll|internal/app|internal/contentkey|internal/coordinator|internal/helper/endpoint|internal/helper/session|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/reveal|internal/ssh/mux|internal/storage|internal/update|internal/vault/system|internal/peerpin|internal/monoclock)
+
+# internal/claudeconformance cannot run in CI: no runner can carry an
+# authenticated vendor CLI, and a `t.Fatal` is the honest result when it is
+# absent. Keep it out of the portable package set at the derivation rather than
+# re-spelling this exclusion in each Linux caller. This also excludes the
+# package's bash-only launch-cleanup proof; the host conformance gate runs it
+# alongside the live vendor checks.
+#
+# It also runs in a PASS OF ITS OWN in test-ci, after everything else, and that
+# is not tidiness. `go test` runs packages concurrently, and this package's two
+# external waits — a 90-second bound on a live vendor CLI, and a probe that
+# expects a SIGTERM'd bash to exit within ten seconds — lost that race against
+# internal/app on a six-core host: 119.890s and two failures beside it,
+# 16.823s and green alone, with the same binary and the same commit (nocx-nj9ab).
+# Widening either bound was the alternative and it is the wrong one: ten seconds
+# to die after SIGTERM is already a defect worth reporting, and the 90-second
+# bound only earns its keep if it means the vendor has actually hung.
+#
+# Splitting the pass also closed a hole beside it. test-ci built its package
+# list as the literal "./..." on a host that has GNU bash 3.2, and both
+# exclusions below are `grep -v` over that list — which removes nothing from a
+# single "./..." token. So on such a host the conformance package was never
+# actually excluded when Claude Code was absent, and the run failed with
+# "Claude Code is not installed" under a banner that had just said it would not
+# be run. The list is now always enumerated by `go list`, so a filter filters.
+CLAUDE_CONFORMANCE_PKG := internal/claudeconformance
+PORTABLE_EXEMPT_RE := (internal/claudeconformance)
 OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
+
+# --- the tests that exist only under nocx_local_ssh (nocx-xk1di) -------------
+#
+# THE GAP THIS CLOSES. The product ships its helper in two variants
+# (nocx-50w7p.1): the deployable artifact, built with NO tags, and this
+# machine's own — the same sources with nocx_local_ssh, which `make helper-local`
+# builds and a running app installs for itself. Everything that dials ssh lives
+# in the second: internal/helper/sshsvc and internal/helper/sshdial are files
+# that exist only under the tag, and internal/helper/session's spawn_ssh,
+# cmd/nocx-helper's client half and internal/app's acceptance test are the same
+# tag applied to packages that exist either way.
+#
+# Every Go target in this file passed `-tags gtk3` and nothing else, so that
+# half of the repository was compiled and tested by NOTHING — and not merely by
+# omission: a package whose Go files all carry the tag does not appear in
+# `go list ./...` at all, so it sat outside every package set the OS/portable
+# split hands to go test. The dead-code ratchet already adds the tag, for its
+# own reason (.githooks/check-deadcode.mjs: without it, every symbol whose
+# caller is the ssh service reads as unreachable). The tests did not.
+#
+# WHY AN ADDITIONAL PASS RATHER THAN THE TAG ON THE EXISTING ONE. Adding
+# nocx_local_ssh to the run already there would DELETE the untagged build from
+# CI instead of extending it: cmd/nocx-helper/sshclient_absent.go and its paired
+# sshservice_absent_test.go carry `!nocx_local_ssh`, and they are the assertion
+# that the artifact written to a host nobody here controls registers no ssh
+# service at all — the property plan §1 rests on, and the one a forgotten flag
+# would break. So the untagged run stays exactly as it is and this is a second
+# pass, scoped to the packages where a tagged file exists: those are the only
+# ones the tag can change, and running ./... twice would pay for the whole suite
+# a second time for nothing.
+#
+# What the untagged pass still proves, from two sides: cmd/nocx-helper's
+# absent-file test asserts the refusal a build with no client answers with, and
+# internal/helper/deploy/dependency_test.go asks `go list` for the real
+# dependency graph under each tag set — reaching no golang.org/x/crypto/ssh
+# without the tag, and reaching it with one. deploy/ is deliberately NOT in the
+# list below: it carries no tagged file, and its contract is the artifact
+# `make helpers` produces.
+#
+# The tagged pass re-runs the untagged tests of internal/app and
+# internal/helper/session too, because Go has no per-file test selection and
+# both packages hold tagged and untagged tests together. That is the cost of
+# package-level scoping, and it is the honest one: filtering by test name would
+# be a list that goes stale silently the first time a tagged test is added.
+#
+# THE HALVES. A tagged package is owned by the job that owns the package, by the
+# rule the suite already uses (ci-os-split): internal/app and
+# internal/helper/session are in OS_PKG_DIRS and so run in ci-mac and ci-linux,
+# while the rest are portable and run in ci-backend. The print targets below hand
+# each job its own half, and ci-local-ssh-split re-derives the whole set from the
+# build constraints, so this list cannot drift into a package whose tagged tests
+# then run nowhere — which is the defect being fixed.
+#
+# WHICH TARGETS TAKE THE PASS, and which deliberately do not. Every target that
+# stands for a CI job does: `test-ci` and `lint-ci` (what `make ci` runs), the
+# two local runners (scripts/ci-linux.sh, .githooks/containerized-tests.sh), and
+# every test step plus the Lint step in ci.yml — one step in ci-mac, and both
+# keyring legs in each of ci-backend and ci-linux. The release-tag storage run is
+# the one test step with no tagged counterpart, because internal/storage carries
+# no file behind the tag.
+#
+# `make test` and `make lint` stay single-pass on purpose: they are the raw
+# conveniences (one `go test ./...`, one `golangci-lint run ./...`), they stand
+# for no job, and the tagged pass costs a measured 221 s on internal/app — not a
+# price for a target somebody types by hand.
+#
+# internal/ssh joined the list with nocx-50w7p.5, and it is the one entry that is
+# not a helper package: it is the COORDINATOR's own package, split in place
+# because the dial half cannot move out (internal/ssh/helper_seams.go forbids
+# handing a *gossh.ClientConfig or a gossh.HostKeyCallback across). Its untagged
+# half is what cmd/nocx-server links — resolution, credential binding, the
+# known_hosts decision — and its tagged half is the pool and the dial, which the
+# local helper links and the coordinator never does. So it must run in BOTH
+# passes: without the tag its untagged tests (resolution, host keys, the key
+# queue) are the coordinator's own, and with it the dial tests, which would
+# otherwise run in no job at all.
+LOCAL_SSH_TAG := nocx_local_ssh
+LOCAL_SSH_RE := ^//go:build.*nocx_local_ssh
+LOCAL_SSH_PKG_DIRS := cmd/nocx-helper internal/app internal/helper/session \
+                      internal/helper/sshdial internal/helper/sshsvc \
+                      internal/helper/tunnelchan internal/ssh
+LOCAL_SSH_PKGS := $(addprefix ./,$(addsuffix /...,$(LOCAL_SSH_PKG_DIRS)))
+LOCAL_SSH_OS_PKGS := $(addprefix ./,$(addsuffix /...,$(filter $(OS_PKG_DIRS),$(LOCAL_SSH_PKG_DIRS))))
+LOCAL_SSH_PORTABLE_PKGS := $(filter-out $(LOCAL_SSH_OS_PKGS),$(LOCAL_SSH_PKGS))
+
+# The tag list every tagged pass passes, spelled once so a test pass and a lint
+# pass cannot disagree about what "the tagged build" is. Comma-joined: that is
+# the form `go help build` documents, and the form .githooks/check-deadcode.mjs
+# derives its own with. gtk3 is in it only where this host needs it
+# (WAILS_PLATFORM_TAGS); `comma` is the make idiom for a separator that cannot
+# be written literally inside a function call.
+comma := ,
+LOCAL_SSH_TAGS := $(LOCAL_SSH_TAG)$(if $(WAILS_PLATFORM_TAGS),$(comma)$(WAILS_PLATFORM_TAGS))
+
+# golangci-lint's type-checker IS the Go compiler: without the tag it does not
+# see a file that lives behind one, and the packages below are exactly those
+# whose files do. The lint pass gets the same composition the test pass does.
+GOLANGCI_LOCAL_SSH_TAGS := --build-tags=$(LOCAL_SSH_TAGS)
 
 # BOTH keyring variants here too, and the comment above already said so —
 # "both variants run over the whole partition" — while the recipe passed
@@ -327,11 +719,13 @@ OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
 # keyring is a fixture dimension that crosses both (nocx-aruz).
 ci-backend:
 	@echo "=== ci-backend: the portable half of ci.yml's backend-linux job ==="
-	./scripts/ci-linux.sh -- $$($(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)')
+	NOCX_LOCAL_SSH_PKGS='$(LOCAL_SSH_PORTABLE_PKGS)' \
+	  ./scripts/ci-linux.sh -- $$($(MAKE) -s print-portable-pkgs)
 
 ci-linux:
 	@echo "=== ci-linux: the OS-specific half of ci.yml's backend-linux job ==="
-	./scripts/ci-linux.sh -- $(OS_PKGS)
+	NOCX_LOCAL_SSH_PKGS='$(LOCAL_SSH_OS_PKGS)' \
+	  ./scripts/ci-linux.sh -- $(OS_PKGS)
 
 # ci-os-split re-derives the OS package list from the build constraints and
 # fails when OS_PKG_DIRS has drifted from it. Without this the list is a
@@ -377,13 +771,33 @@ print-os-pkgs:
 	@echo '$(OS_PKGS)'
 
 print-portable-pkgs:
-	@$(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)'
+	@$(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)' | grep -vE 'nocx/$(PORTABLE_EXEMPT_RE)(/|$$)'
+
+# The tagged set (nocx-xk1di), by the same rule: ci.yml's jobs ask for the half
+# they own rather than carrying a copy. print-local-ssh-pkgs is the whole set,
+# for the places with no half to attribute — ci-mac's lint pass and a host's
+# test-ci run it at once.
+print-local-ssh-pkgs:
+	@echo '$(LOCAL_SSH_PKGS)'
+
+print-os-local-ssh-pkgs:
+	@echo '$(LOCAL_SSH_OS_PKGS)'
+
+print-portable-local-ssh-pkgs:
+	@echo '$(LOCAL_SSH_PORTABLE_PKGS)'
 
 ci-os-split:
 	@echo "=== the OS split is derived from the build constraints, not remembered ==="
 	@derived=$$(grep -rlE '^//go:build.*$(GOOS_RE)' --include='*.go' \
 	  --exclude-dir=node_modules --exclude-dir=worktrees . \
 	  | grep -v '_test\.go$$' | xargs -n1 dirname | sed 's|^\./||' | sort -u \
+	  | while read -r d; do \
+	      p=$$d; nested=""; \
+	      while [ "$$p" != "." ] && [ -n "$$p" ]; do \
+	        if [ -f "$$p/go.mod" ]; then nested=1; break; fi; p=$$(dirname "$$p"); \
+	      done; \
+	      [ -z "$$nested" ] && echo "$$d"; \
+	    done \
 	  | tr '\n' ' '); \
 	missing=""; \
 	for d in $$derived; do \
@@ -400,6 +814,44 @@ ci-os-split:
 	  echo "FAIL: names a GOOS but is not in OS_PKG_DIRS:$$missing"; rc=1; fi; \
 	if [ -n "$$extra" ]; then \
 	  echo "FAIL: in OS_PKG_DIRS, names no GOOS, and is not in OS_EXEMPT:$$extra"; rc=1; fi; \
+	if [ $$rc = 0 ]; then echo "ok"; fi; \
+	exit $$rc
+
+# ci-local-ssh-split is the same check for the OTHER build constraint this file
+# is partitioned by (nocx-xk1di), and it exists for the same reason:
+# LOCAL_SSH_PKG_DIRS is a hand-kept copy of a fact the compiler already knows,
+# and a package that grows its first tagged file must not be able to leave its
+# tagged tests running in no CI job — which is exactly the defect being fixed
+# here, reached by omission rather than by a wrong list.
+#
+# Two differences from ci-os-split, both deliberate. It does NOT skip _test.go
+# files: internal/app and internal/helper/tunnelchan are packages whose only
+# tagged file is a test, and they are the whole reason the list exists. And it
+# also asserts the partition is not degenerate — a set that landed entirely in
+# one half would leave one job running an empty package list, which reads as a
+# pass while measuring nothing.
+ci-local-ssh-split:
+	@echo "=== the packages carrying $(LOCAL_SSH_TAG) are derived from the build constraints, not remembered ==="
+	@derived=$$(grep -rlE '$(LOCAL_SSH_RE)' --include='*.go' \
+	  --exclude-dir=node_modules --exclude-dir=worktrees . \
+	  | xargs -n1 dirname | sed 's|^\./||' | sort -u | tr '\n' ' '); \
+	listed="$(strip $(LOCAL_SSH_PKG_DIRS))"; \
+	missing=""; \
+	for d in $$derived; do \
+	  case " $$listed " in *" $$d "*) ;; *) missing="$$missing $$d";; esac; \
+	done; \
+	extra=""; \
+	for d in $$listed; do \
+	  case " $$derived " in *" $$d "*) ;; *) extra="$$extra $$d";; esac; \
+	done; \
+	rc=0; \
+	if [ -n "$$missing" ]; then \
+	  echo "FAIL: carries $(LOCAL_SSH_TAG) but is not in LOCAL_SSH_PKG_DIRS:$$missing"; \
+	  echo "      its tagged tests would run in no CI job"; rc=1; fi; \
+	if [ -n "$$extra" ]; then \
+	  echo "FAIL: in LOCAL_SSH_PKG_DIRS and carries no $(LOCAL_SSH_TAG) file:$$extra"; rc=1; fi; \
+	if [ -z "$(strip $(LOCAL_SSH_OS_PKGS))" ] || [ -z "$(strip $(LOCAL_SSH_PORTABLE_PKGS))" ]; then \
+	  echo "FAIL: the tagged set is entirely in one half, so one job would run an empty package list"; rc=1; fi; \
 	if [ $$rc = 0 ]; then echo "ok"; fi; \
 	exit $$rc
 
@@ -508,6 +960,16 @@ lint-ci:
 	@# the gate AGENTS.md names -- out entirely for anyone not on macOS.
 	@# Empty on macOS, so that runner keeps running exactly `run ./...`.
 	$(GOLANGCI_LINT) run $(GOLANGCI_BUILD_TAGS) ./...
+	@echo ""
+	@echo "=== golangci-lint (the packages that exist only under $(LOCAL_SSH_TAG)) ==="
+	@# A SECOND pass, because the tag and the absence of the tag select different
+	@# files. The pass above lints the untagged half — and is the only one that
+	@# ever sees cmd/nocx-helper's `!nocx_local_ssh` pair — while this one lints
+	@# the tagged files, which no lint pass in this repository had ever seen
+	@# (nocx-xk1di). Scoped to the packages that carry one, because the tag can
+	@# change no other package, and golangci-lint over ./... twice is minutes
+	@# spent to lint the same files again.
+	$(GOLANGCI_LINT) run $(GOLANGCI_LOCAL_SSH_TAGS) $(LOCAL_SSH_PKGS)
 
 # THE ONE PACKAGE A HOST IS NOT REQUIRED TO BE ABLE TO RUN, and why this
 # target is no longer a bare `go test ./...`.
@@ -558,7 +1020,7 @@ test-ci:
 	  notice=""; \
 	  if bash32=$$(./scripts/have-bash32.sh); then \
 	    echo "GNU bash 3.2 is present ($$bash32): the whole tree runs on this host"; \
-	    pkgs="./..."; \
+	    pkgs="$$($(GO) list ./...)"; \
 	  else \
 	    pkgs="$$($(GO) list ./... | grep -vE 'nocx/$(BASH32_PKG)(/|$$)')"; \
 	    notice="NOT RUN HERE: ./$(BASH32_PKG)/... — this host has no GNU bash 3.2\n\
@@ -568,8 +1030,34 @@ test-ci:
   does not. To run it here: sudo scripts/install-bash32.sh"; \
 	    printf '%b\n' "$$notice"; \
 	  fi; \
+	  run_claude=0; \
+	  if claude=$$(./scripts/have-claude.sh); then \
+	    echo "Claude Code is installed and authenticated ($$claude): vendor conformance runs on this host, in a pass of its own"; \
+	    claude_notice=""; \
+	    run_claude=1; \
+	  else \
+	    claude_rc=$$?; \
+	    if [ "$$claude_rc" -eq 1 ]; then \
+	      claude_notice="NOT RUN HERE: ./$(CLAUDE_CONFORMANCE_PKG)/... — Claude Code is not installed.\n\
+  Install Claude Code before running the vendor conformance check."; \
+	    else \
+	      claude_notice="NOT RUN HERE: ./$(CLAUDE_CONFORMANCE_PKG)/... — Claude Code is installed but not authenticated.\n\
+  Run 'claude auth login' before running the vendor conformance check."; \
+	    fi; \
+	    printf '%b\n' "$$claude_notice"; \
+	  fi; \
+	  pkgs="$$(printf '%s\n' "$$pkgs" | grep -vE 'nocx/$(CLAUDE_CONFORMANCE_PKG)(/|$$)')"; \
 	  $(GO) test -race -count=1 $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") $$pkgs; \
-	  if [ -n "$$notice" ]; then echo ""; printf '%b\n' "$$notice"; fi
+	  if [ "$$run_claude" -eq 1 ]; then \
+	    echo ""; \
+	    echo "--- ./$(CLAUDE_CONFORMANCE_PKG)/... alone: it drives a live vendor CLI ---"; \
+	    $(GO) test -race -count=1 $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") ./$(CLAUDE_CONFORMANCE_PKG)/...; \
+	    echo ""; \
+	    echo "--- TestARealClaudeCoordinatorAnswersTheFolderTrustDialog alone (nocx-f545a.5): a real Claude Code worker meets and answers its own folder-trust dialog ---"; \
+	    NOCX_REAL_CLAUDE_WORKER=1 $(GO) test -race -count=1 $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") -run '^TestARealClaudeCoordinatorAnswersTheFolderTrustDialog$$' ./internal/app; \
+	  fi; \
+	  if [ -n "$$notice" ]; then echo ""; printf '%b\n' "$$notice"; fi; \
+	  if [ -n "$$claude_notice" ]; then echo ""; printf '%b\n' "$$claude_notice"; fi
 	@echo ""
 	@echo "=== go test -race -tags release (the shipped profile directory) ==="
 	@# The shipped profile directory lives behind `-tags release`
@@ -577,6 +1065,16 @@ test-ci:
 	@# `backend` job runs this; this target did not, which is exactly the kind
 	@# of gap that makes a green local gate mean nothing.
 	$(GO) test -race -count=1 -tags release ./internal/storage/...
+	@echo ""
+	@echo "=== go test -race -tags $(LOCAL_SSH_TAGS) (this machine's helper, the one with the ssh client) ==="
+	@# The other build constraint the suite is partitioned by, and the second
+	@# pass it needs (nocx-xk1di): the run above is the UNTAGGED build — the
+	@# artifact `make helpers` ships — and these are the packages whose files
+	@# exist only under $(LOCAL_SSH_TAG). A package all of whose Go files carry
+	@# the tag does not appear in `go list ./...`, so no pass here ever compiled
+	@# it, let alone ran its tests. LOCAL_SSH_PKGS is derived and checked by
+	@# `make ci-local-ssh-split` — one list, asked for by ci.yml's jobs too.
+	$(GO) test -race -count=1 -tags "$(LOCAL_SSH_TAGS)" $(LOCAL_SSH_PKGS)
 
 build-ci:
 	@echo "=== go build ./... ==="

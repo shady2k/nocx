@@ -7,6 +7,17 @@
 #   scripts/ci-linux.sh --no-keyring    # without one only
 #   scripts/ci-linux.sh -- ./internal/ssh/...   # narrow the package set
 #
+# TWO PASSES PER VARIANT, since nocx-xk1di: the untagged build — what `make
+# helpers` ships to a host nobody here owns — and then the packages that exist
+# only under nocx_local_ssh, which is this machine's own helper and the ssh
+# client linked into it. The second pass is scoped rather than applied to the
+# whole set because the tag also EXCLUDES files (cmd/nocx-helper's
+# `!nocx_local_ssh` pair, the assertion that a shipped artifact registers no ssh
+# service), so one tagged run would be a deletion of coverage, not an addition.
+# `make ci-backend` and `make ci-linux` hand each job's half its own tagged list
+# in NOCX_LOCAL_SSH_PKGS; with nothing set the list is asked of the Makefile,
+# which is where it is derived from the build constraints.
+#
 # WHY THIS EXISTS. The pre-commit hook runs no tests at all (nocx-hzsiv): it is
 # a static gate — format, lint, types, ratchets, contracts — so nothing local
 # runs the Go suite the way the runner does unless you run it here. It used to
@@ -77,6 +88,33 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+# THE PACKAGES THAT EXIST ONLY UNDER nocx_local_ssh (nocx-xk1di), and the second
+# `go test` pass this runner did not have. A package whose Go files all carry
+# the tag does not appear in `go list ./...` AT ALL, so it was not merely
+# untested here — it was outside both package sets this script is handed, and
+# the local helper's ssh client went unrun by every gate in the repository.
+#
+# The list belongs to the Makefile, which derives it from the build constraints
+# and fails when it drifts (`make ci-local-ssh-split`), and it is asked over
+# `make -s` the way ci.yml's jobs ask for the two halves of the suite. `make
+# ci-backend` and `make ci-linux` pass the half their job owns in
+# NOCX_LOCAL_SSH_PKGS; a bare invocation gets the whole set, matching the
+# PKGS="./..." default above.
+if [ -n "${NOCX_LOCAL_SSH_PKGS:-}" ]; then
+    LOCAL_SSH_PKGS="$NOCX_LOCAL_SSH_PKGS"
+else
+    LOCAL_SSH_PKGS="$(cd "$REPO" && make -s print-local-ssh-pkgs)"
+fi
+
+# An empty list must not read as "the tagged packages passed": it is the shape
+# the defect had, and go test with no arguments would report the repository
+# root's absence of Go files rather than the omission.
+if [ -z "$LOCAL_SSH_PKGS" ]; then
+    printf 'ci-linux: the nocx_local_ssh package list is empty — refusing to run a suite that\n' >&2
+    printf '          would silently skip this machine'"'"'s helper (make -s print-local-ssh-pkgs).\n' >&2
+    exit 2
+fi
+
 if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1; then
     printf 'ci-linux: Docker/OrbStack is required.\n' >&2
     exit 1
@@ -111,7 +149,8 @@ fi
 run_variant() {
     _label="$1"
     _cmd="$2"
-    printf '\n=== backend-linux (%s) — %s, -count=1, %s ===\n' "$_label" "$CPU_LABEL" "$PKGS"
+    printf '\n=== backend-linux (%s) — %s, -count=1, %s + %s (nocx_local_ssh) ===\n' \
+        "$_label" "$CPU_LABEL" "$PKGS" "$LOCAL_SSH_PKGS"
     # shellcheck disable=SC2086 # CPU_FLAG must word-split away when empty.
     docker run --rm $CPU_FLAG \
         -v "$REPO:/src:ro" \
@@ -122,6 +161,7 @@ run_variant() {
         -e GOCACHE=/cache/gobuild \
         -e GOMODCACHE=/cache/gomod \
         -e PKGS="$PKGS" \
+        -e LOCAL_SSH_PKGS="$LOCAL_SSH_PKGS" \
         -e INNER="$_cmd" \
         -w /src \
         "$IMAGE" \
@@ -141,18 +181,25 @@ run_variant() {
 RC=0
 
 if [ "$RUN_NO_KEYRING" = 1 ]; then
-    run_variant "no Secret Service" 'go test -race -tags gtk3 -count=1 $PKGS' || RC=1
+    run_variant "no Secret Service" '
+        go test -race -tags gtk3 -count=1 $PKGS
+        go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
+    ' || RC=1
 fi
 
 if [ "$RUN_KEYRING" = 1 ]; then
     # Byte-for-byte the job's own sequence: a session bus, a daemon started
-    # with a login password, an explicit unlock, then the suite.
+    # with a login password, an explicit unlock, then the suite — and then the
+    # tagged pass, inside the same bus, because the tag selects files and not a
+    # different fixture: whichever keyring variant this is, the local helper's
+    # ssh client is exercised under it.
     run_variant "with Secret Service" '
         dbus-run-session -- bash -c "
             set -euo pipefail
             eval \"\$(echo -n nocx-ci | gnome-keyring-daemon --daemonize --login)\"
             echo -n nocx-ci | gnome-keyring-daemon --unlock
             go test -race -tags gtk3 -count=1 $PKGS
+            go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
         "' || RC=1
 fi
 

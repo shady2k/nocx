@@ -52,8 +52,20 @@ type fakeLedger struct {
 	failSubmit          bool
 	failCause           bool
 	rejectCanceledCause bool
-	nextExec            int64
-	submissions         []fakeSubmission
+	// finishHang makes FinishExecution block on the context it is handed
+	// rather than returning immediately — nocx-uhii1's "a ledger whose
+	// write hangs does not hang the dispatcher" case. finishCalls records,
+	// for every FinishExecution call, the facts a test needs about the
+	// context it ran on — captured AT CALL TIME, not read back afterward:
+	// the caller cancels its own finish context via defer once Dispatch
+	// returns (releasing it, as context hygiene requires), so a context
+	// reference read back after the call reports canceled regardless of
+	// what it was detached from. Only what was true at call time answers
+	// the question these tests ask.
+	finishHang  bool
+	finishCalls []finishCallRecord
+	nextExec    int64
+	submissions []fakeSubmission
 	// causes is every (turn, caused) pair AddCause was asked for, in call
 	// order — the relation nocx-h1l4o records. The fake assigns positions
 	// the way the store does (one counter per turn) so a test can assert
@@ -119,11 +131,41 @@ func (f *fakeLedger) StartExecution(_ context.Context, in content.StartExecution
 	return f.nextExec, nil
 }
 
-func (f *fakeLedger) FinishExecution(_ context.Context, _ int64, end content.FinishExecution) error {
+// finishCallRecord is what a test can know about one FinishExecution call
+// without holding on to the context itself.
+type finishCallRecord struct {
+	errAtCall   error
+	hasDeadline bool
+}
+
+func (f *fakeLedger) FinishExecution(ctx context.Context, _ int64, end content.FinishExecution) error {
+	_, hasDeadline := ctx.Deadline()
+	record := finishCallRecord{errAtCall: ctx.Err(), hasDeadline: hasDeadline}
+	f.mu.Lock()
+	f.finishCalls = append(f.finishCalls, record)
+	hang := f.finishHang
+	f.mu.Unlock()
+	if hang {
+		// Simulate a wedged store: block until the caller's own context
+		// gives up, then report exactly that. If this were called with
+		// the invocation's own (already-cancelled) context, it would
+		// return immediately with context.Canceled instead of blocking.
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.log = append(f.log, "finish:"+string(end.Status))
 	return nil
+}
+
+// finishCallRecords is what FinishExecution's context looked like at the
+// moment of each call, in call order — what nocx-uhii1's detachment tests
+// inspect.
+func (f *fakeLedger) finishCallRecords() []finishCallRecord {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]finishCallRecord(nil), f.finishCalls...)
 }
 
 // captures is every body CaptureOutput was handed, in call order — what a
@@ -375,27 +417,54 @@ func TestEinoAdapter_RefusalIsNotFramedAsToolOutput(t *testing.T) {
 	}
 }
 
-func TestPolicyNarrowRowRefusesOutsideRunFence(t *testing.T) {
+// TestPolicyNarrowRowAsksOutsideItsSelectorAndRefusesOutsideTheFence covers
+// both bounds of a narrowed row, because they are two different answers
+// (design §5.3, nocx-t6h2u): the operator's own selector is editable, so a
+// path outside it is a question, while the run fence is not, so a path
+// outside THAT is a refusal.
+//
+// Tool.Effect is set explicitly here, and that is load-bearing. The kernel
+// selects the row by t.Effect, not by t.Declaration.Effect; this test used to
+// set only the declaration, so t.Effect was "", every path missed the empty
+// row of an effect outside the lattice, and the narrowed row it names was
+// never consulted at all.
+func TestPolicyNarrowRowAsksOutsideItsSelectorAndRefusesOutsideTheFence(t *testing.T) {
 	policy := autonomousMatrix()
-	rowRoot := t.TempDir()
+	fenceRoot := t.TempDir()
+	rowRoot := filepath.Join(fenceRoot, "row")
 	policy.Observe.Scopes = []content.GrantScope{{
 		Kind: content.ResourcePath,
 		ID:   rowRoot,
 	}}
 	grant := policy.AsGrant([]content.GrantScope{
 		{Kind: content.ResourceSession, ID: "session-a"},
-		{Kind: content.ResourcePath, ID: "/"},
+		{Kind: content.ResourcePath, ID: fenceRoot},
 	})
 	kernel := &effectKernel{grant: grant}
 	tool := agenttools.Tool{
 		Declaration: agenttools.Declaration{Effect: []content.Effect{content.EffectObserve}},
+		Effect:      content.EffectObserve,
 	}
-	outside := filepath.Join(filepath.Dir(rowRoot), "outside.txt")
-	if kernel.inScope(tool, []agenttools.ResourceRef{{
-		Kind: content.ResourcePath,
-		ID:   outside,
-	}}, true) {
-		t.Fatalf("outside-row path %q passed the narrowed policy row", outside)
+	decide := func(path string) (policyOutcome, PolicyRefusalReason) {
+		outcome, reason, _, _ := kernel.decideInvocationWithReason(tool, []agenttools.ResourceRef{{
+			Kind: content.ResourcePath,
+			ID:   path,
+		}}, true, content.Invocation{Parsed: true})
+		return outcome, reason
+	}
+
+	if outcome, reason := decide(filepath.Join(rowRoot, "in.txt")); outcome != policyPermit || reason != "" {
+		t.Fatalf("in-row path gave outcome=%v reason=%q, want permit", outcome, reason)
+	}
+	outsideRow := filepath.Join(fenceRoot, "outside.txt")
+	if outcome, reason := decide(outsideRow); outcome != policyAsk || reason != "" {
+		t.Fatalf("path %q outside the row selector gave outcome=%v reason=%q, want ask — the selector is editable",
+			outsideRow, outcome, reason)
+	}
+	outsideFence := filepath.Join(filepath.Dir(fenceRoot), "beyond.txt")
+	if outcome, reason := decide(outsideFence); outcome != policyRefuse || reason != RefusedOutOfScope {
+		t.Fatalf("path %q outside the run fence gave outcome=%v reason=%q, want refuse/%s — the fence cannot be widened by an answer",
+			outsideFence, outcome, reason, RefusedOutOfScope)
 	}
 }
 
@@ -1386,7 +1455,7 @@ func TestNewClient_AssemblesFromTheEmbedOutsideTheRepo(t *testing.T) {
 	for _, tl := range internal.tools.All() {
 		names = append(names, tl.Name)
 	}
-	want := []string{"files.read", "fetch.url", "session.list", "session.read", "session.run", "session.wait", "files.edit", "files.create", "git.status", "notes.search", "notes.create", "notes.update", "notes.delete", "snippets.list", "snippets.create", "snippets.update", "snippets.delete", "snippets.reorder", "skills.read", "skills.create", "skills.update", "skills.delete", "skills.resolve", "skills.install"}
+	want := []string{"files.read", "fetch.url", "session.list", "session.read", "session.keys", "session.message", "session.run", "session.wait", "files.edit", "files.create", "git.status", "notes.search", "notes.create", "notes.update", "notes.delete", "snippets.list", "snippets.create", "snippets.update", "snippets.delete", "snippets.reorder", "skills.read", "skills.create", "skills.update", "skills.delete", "skills.resolve", "skills.install", "workers.holdings", "workers.spawn", "workers.say", "workers.wait", "workers.inbox", "workers.close"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("assembled tools = %v, want %v", names, want)
 	}

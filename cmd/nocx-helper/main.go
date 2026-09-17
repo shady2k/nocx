@@ -6,6 +6,8 @@
 //	                             serve every connection that reaches it
 //	nocx-helper bridge <gen>     connect to that generation's endpoint and
 //	                             copy bytes between it and stdin/stdout
+//	nocx-helper --licenses       print the third-party notices this binary
+//	                             carries (it links libghostty-vt statically)
 //
 // Locally the coordinator connects to the endpoint directly. Remotely
 // `bridge` runs over the pty-less ssh exec lane and the coordinator speaks the
@@ -37,17 +39,54 @@ import (
 
 	"github.com/shady2k/nocx/internal/git/hostsvc"
 	"github.com/shady2k/nocx/internal/git/local"
-	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/endpoint"
 	"github.com/shady2k/nocx/internal/helper/host"
+	helperlocal "github.com/shady2k/nocx/internal/helper/local"
+	"github.com/shady2k/nocx/internal/helper/notices"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/session"
+	nocxlog "github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/mcpstdio"
 )
 
 func main() {
 	// stdout is the wire — for the bridge it is literally the ssh channel —
 	// so every diagnostic goes to stderr (D22).
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	args := os.Args[1:]
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if len(args) == 3 && args[0] == "mcp" && args[1] == "--socket" && args[2] != "" {
+		if err := mcpstdio.Serve(ctx, os.Stdin, os.Stdout, args[2], log); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("mcp", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(args) == 1 && args[0] == "--licenses" {
+		// A binary that links libghostty-vt statically owes the licences of
+		// what is inside it, and this helper is distributed twice over: it
+		// ships inside the app for the local install, and it is written to
+		// hosts nobody here controls. Carrying the notices INSIDE it is what
+		// makes one installed file complete — D7's install is
+		// content-addressed on this binary alone, so a sibling file would be
+		// bytes the install's own completeness claim does not cover — and
+		// printing them is what makes them readable there.
+		//
+		// Handled before the executable is hashed and before any socket is
+		// touched: it answers a question about the FILE, so it must work on a
+		// host where nothing else about this binary does.
+		doc, err := notices.Document()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "nocx-helper: %v\n", err)
+			os.Exit(1)
+		}
+		if _, err := os.Stdout.Write(doc); err != nil {
+			fmt.Fprintf(os.Stderr, "nocx-helper: printing the third-party notices: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -72,17 +111,28 @@ func main() {
 	}
 	dir := endpoint.Dir(home)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	args := os.Args[1:]
 	switch {
 	case len(args) == 1 && args[0] == endpoint.ServeCommand:
-		os.Exit(serve(ctx, log, dir, generation, contentHash, exe))
+		// The DAEMON gets a file; the bridge keeps stderr alone, which is
+		// where D22 puts it and where somebody is actually reading (servelog.go).
+		serveLog, logFile := openServeLog(home, string(generation))
+		// This composition root's own wiring (nocx-n14oo.9): everything
+		// serve() calls with ctx from here on answers log.From(ctx) with
+		// serveLog, the same sink openServeLog just built (stderr, plus the
+		// generation's log file when one opened).
+		ctx = nocxlog.WithLogger(ctx, nocxlog.NewSlogAdapter(serveLog))
+		nocxlog.SetRoot(nocxlog.NewSlogAdapter(serveLog))
+		code := serve(ctx, serveLog, dir, generation, contentHash, exe)
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+		os.Exit(code)
 	case len(args) == 2 && args[0] == endpoint.BridgeCommand:
+		ctx = nocxlog.WithLogger(ctx, nocxlog.NewSlogAdapter(log))
+		nocxlog.SetRoot(nocxlog.NewSlogAdapter(log))
 		os.Exit(bridge(ctx, log, dir, proto.GenerationID(args[1]), generation, exe))
 	default:
-		fmt.Fprintf(os.Stderr, "usage: nocx-helper %s | nocx-helper %s <generation>\n",
+		fmt.Fprintf(os.Stderr, "usage: nocx-helper %s | nocx-helper %s <generation> | nocx-helper mcp --socket <path> | nocx-helper --licenses\n",
 			endpoint.ServeCommand, endpoint.BridgeCommand)
 		os.Exit(2)
 	}
@@ -97,7 +147,27 @@ func main() {
 // generation at the same time produce, and the socket is the only authority
 // present on both sides of it.
 func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.GenerationID, contentHash, exe string) int {
-	if alreadyServing(ctx, log, dir, generation, contentHash) {
+	// Everything that can fail and is not the endpoint happens BEFORE the
+	// bind. The instance id used to be minted after it, which left one window
+	// in which the socket existed and this process was about to exit without
+	// ever serving it — a socket with nothing behind it. Nothing repairs that
+	// from this side: the next helper's Listen dials it, is refused, and
+	// unlinks it (endpoint.clearStale), while a coordinator only ever reports
+	// it as no endpoint. Shrinking the window is cheap, so it is shrunk; what
+	// remains is bind → Serve, which cannot be removed because binding is what
+	// makes serving possible, and a prober cannot mistake it for a slow
+	// daemon: net.Listen creates the socket ALREADY LISTENING, so there is no
+	// state in which the file exists and nothing has bound it, and a daemon
+	// that is merely slow to reach its accept loop still accepts (the kernel
+	// queues it) and is told apart by the handshake budget rather than by the
+	// file.
+	instanceID, err := randomID()
+	if err != nil {
+		log.Error("instance id", "err", err)
+		return 1
+	}
+
+	if alreadyServing(ctx, log, dir, generation) {
 		log.Info("a helper of this generation is already serving", "generation", generation)
 		return 0
 	}
@@ -125,25 +195,73 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 	// division is the whole of D1 in code: a connection ending releases that
 	// connection's reader and its write capability, and every session, window
 	// and process survives it.
+	// A pane's tool endpoint is NOT read here, and that is the fix rather than
+	// an omission (nocx-50w7p.18). This process's environment is the one of
+	// whichever coordinator happened to start this generation, and this
+	// daemon's endpoint socket is keyed by the GENERATION rather than by a
+	// coordinator — so several coordinators ride one daemon (D12), and a value
+	// read here once described only the first of them. A pane opened by any
+	// other coordinator then carried that coordinator's tool socket, reaching
+	// an endpoint whose owner never asked for the pane. The endpoint travels
+	// on each spawn instead (proto.SpawnParams.AgentToolEndpoint), named by
+	// the only party that knows it.
+	//
+	// What a pane's shell must exec to reach this generation's MCP adapter IS
+	// this daemon's own fact: THIS binary. Taken from os.Executable() rather
+	// than handed down, because a path from the coordinator could name a
+	// different generation than the one that forks the shell. Unreadable is
+	// not fatal: the wrapper's PATH fallback stands and the pane says its tool
+	// surface is unavailable, which is the honest degrade rather than a daemon
+	// that refuses to serve (nocx-o36tr).
+	agentHelperPath, err := os.Executable()
+	if err != nil {
+		log.Warn("nocx-helper: cannot name its own executable for a pane's agent", "error", err)
+		agentHelperPath = ""
+	}
+	// THE SSH SERVICE THIS DAEMON SERVES, where the build has one
+	// (nocx-50w7p.2). The client and the service are opened here, beside the
+	// sessions and out of the accept loop, for the same reason they are: they
+	// are properties of the DAEMON, not of one connection — one client serves
+	// every host this machine hosts for its whole life — and they are released
+	// at shutdown with them.
+	//
+	// It is opened BEFORE the sessions, and that ordering is load-bearing
+	// rather than tidy: a helper-hosted pane's process is a shell channel on a
+	// connection this client dialed, so the session service is constructed
+	// WITH the spawner that client answers (nocx-50w7p.4). Building the
+	// sessions first would leave the pane seam nil on a build that can dial —
+	// which is the state the dependency test calls out by name: a local helper
+	// that refuses every ssh pane while announcing nothing wrong.
+	//
+	// holdSSHClient is a build fact: a helper built with nocx_local_ssh opens
+	// a client and a service and says so, and one built without it — every
+	// artifact `make helpers` produces, which is what reaches a host nobody
+	// here controls — returns a seam that registers nothing, so every ssh op is
+	// answered `unknown_service`.
+	sshCap, err := holdSSHClient(log)
+	if err != nil {
+		log.Error("ssh client", "err", err)
+		return 1
+	}
+	defer sshCap.release()
+
 	sessions := session.New(session.Options{
 		Generation: generation,
-		Spawner:    session.NewLocalSpawner(log, session.Shell{}),
+		Spawner:    session.NewLocalSpawner(log, session.Shell{}, agentHelperPath),
+		SSHSpawner: sshCap.sessionSpawner,
 		Inspector:  session.NewInspector(),
 		Log:        log,
 		Limits:     session.DefaultLimits(),
 	})
 	defer sessions.Close()
 
-	instanceID, err := randomID()
-	if err != nil {
-		log.Error("instance id", "err", err)
-		return 1
-	}
-
 	if err := endpoint.Serve(ctx, ln, func(conn net.Conn) {
 		h := host.New(conn, conn, contentHash, instanceID, log)
-		h.Register(hostsvc.New(factory))
-		h.Register(sessions)
+		// Which services this build answers is decided by
+		// registerHelperServices, in one place (services.go) — including
+		// whether an ssh service is among them, which is the whole of what
+		// nocx_local_ssh changes about a helper.
+		registerHelperServices(h, hostsvc.New(factory), sessions, sshCap)
 		// The connection is bound to the service, not the other way round:
 		// the sessions outlive it. These are the two lines that used to sit
 		// in main around one stdin/stdout connection and now sit inside the
@@ -174,23 +292,29 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 // hello-ok carrying this content hash is the fact (D4: liveness is a fact,
 // never an inference from an error).
 //
+// It takes the generation and NOT a content hash beside it, because they are
+// the same value — the generation IS this binary's content hash — and two
+// parameters for one fact is a drift waiting to be introduced.
+//
 // A "no" here is never a verdict either: it means this process saw nothing
 // serving and may try to bind. If it is wrong, Listen finds the live socket
 // and refuses.
-func alreadyServing(ctx context.Context, log *slog.Logger, dir string, generation proto.GenerationID, contentHash string) bool {
-	conn, err := endpoint.Dial(ctx, dir, generation)
-	if err != nil {
-		return false
-	}
-	carrier := client.NewSocketConn(conn)
-	c, err := client.Dial(ctx, client.Config{
-		Exec:       carrier,
-		ExpectHash: contentHash,
+func alreadyServing(ctx context.Context, log *slog.Logger, dir string, generation proto.GenerationID) bool {
+	// The local carrier, which is one thing and not two: the probe a daemon
+	// makes of its own generation and the connection a coordinator makes to it
+	// are the same dial, the same socket adapter and the same handshake, so
+	// there is no second implementation to drift.
+	//
+	// No binary is offered, and that is the whole difference between this
+	// caller and the coordinator's: a process that is about to bind the
+	// endpoint must not start a competitor for it.
+	c, err := helperlocal.Open(ctx, helperlocal.Config{
+		Dir:        dir,
+		Generation: generation,
 		Log:        log,
 	})
 	if err != nil {
-		_ = carrier.Close()
-		log.Info("something answers on the endpoint but it is not this helper", "err", err)
+		log.Info("nothing of this generation answers on the endpoint", "err", err)
 		return false
 	}
 	_ = c.Close()

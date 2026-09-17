@@ -37,6 +37,12 @@ export interface AgentRunState {
    */
   droppedDeltas?: number
   /**
+   * Human-readable sentences the RUN states about ITSELF — today, only that it stopped asking the person to widen a scope because it reached the bound on how often one answer may ask (design §5.3). Present only when there is one; a silent stop would be a soft degrade, and a notice on every run is a notice nobody reads.
+   *
+   * @minItems 1
+   */
+  notices?: [string, ...string[]]
+  /**
    * Human-readable sentences naming lease bounds that could not be armed because shell integration was unavailable. Present only when at least one bound did not apply; never null or empty.
    *
    * @minItems 1

@@ -122,6 +122,10 @@ func TestWSServer_Open_SSHProfile_RequestsIntegration(t *testing.T) {
 	reg.WithSSHFactory(rec.factory(logger))
 
 	ws := NewWSServer(logger, reg,
+		// The ssh panes this stand's two cases open are this machine's
+		// helper's (nocx-50w7p.5). Both measure the integration REQUEST the
+		// open makes, which is downstream of the pane existing.
+		sshHelperOpt(reg),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
 				return "host.example.com", &ssh.ConnectConfig{User: "test", Port: 22}, nil
@@ -155,7 +159,14 @@ func TestWSServer_Open_SSHDirectHost_RequestsIntegration(t *testing.T) {
 	resolver := newLauncherTestResolver()
 	resolver.add("pi@192.168.0.93", ssh.HostConfig{User: "pi", HostName: "192.168.0.93", Port: 22})
 
-	ws := NewWSServer(logger, reg, WithSSHConfigResolver(resolver, "/nonexistent/config"))
+	ws := NewWSServer(logger, reg,
+		// The ssh pane this case opens is this machine's helper's
+		// (nocx-50w7p.5). Its subject is the integration REQUEST a direct-host
+		// open makes, which is downstream of the pane existing. The stand one
+		// test below, which asserts a host SHAPE is refused before any open,
+		// stays unwired.
+		sshHelperOpt(reg),
+		WithSSHConfigResolver(resolver, "/nonexistent/config"))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)

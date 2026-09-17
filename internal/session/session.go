@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -362,6 +363,10 @@ type Registry interface {
 	Open(ctx context.Context, cfg Config) (Session, error)
 	Get(id ID) (Session, error)
 	Close(id ID) error
+	// EndSession is Close's sibling for a caller that knows nobody will ever
+	// want this session again (nocx-isjh4) — see Reg.EndSession's own doc for
+	// the full rule of which callers use which verb.
+	EndSession(id ID) error
 	List() []Session
 	// InstanceID is the backend instance every session this registry opens is
 	// stamped with — see Reg.InstanceID for why a claim cannot be judged
@@ -544,6 +549,23 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 			return nil, fmt.Errorf("ssh connect: %w", err)
 		}
 	} else {
+		// A LOCAL SESSION IS NOT OPENED HERE ANY MORE, and this says so in the
+		// same words the line above says it about ssh (nocx-ie23r.3). On this
+		// machine the pane belongs to the helper: the daemon owns the PTY, the
+		// coordinator adopts what the helper minted, and the shipped
+		// composition root supplies no local PTY factory at all — so there is
+		// exactly one constructor of a local PTY in the repository and it is
+		// not reachable from here.
+		//
+		// It is a refusal rather than a fallback, deliberately (ADR-0057):
+		// opening the pane by a second route would be the rarely executed path
+		// that diverges silently, and the person would get a terminal that
+		// looks like nocx and behaves differently in ways nobody chose. The
+		// factory survives as a SEAM because the registry is a general one and
+		// a test may legitimately supply a channel; nothing shipped does.
+		if r.ptf == nil {
+			return nil, fmt.Errorf("local sessions are opened by this machine's helper, not by the session registry (no local PTY factory wired)")
+		}
 		pt, perr := r.ptf.NewPTY(ctx, pty.Config{
 			Cwd:       cfg.Cwd,
 			Cols:      eff.Cols,
@@ -573,9 +595,14 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		sshOpts:      opts,
 		ch:           ch,
 		size:         eff,
-		log:          r.log.With("session_id", string(id)),
-		writeCh:      make(chan writeJob, writeQueueDepth),
-		writeDone:    make(chan struct{}),
+		// THE SESSION KEEPS THE EXCHANGE THAT OPENED IT (nocx-n14oo.3). A
+		// session outlives the call that made it and is written about from
+		// timers, pumps and goroutines that hold no context, so binding the
+		// caller's trace ONCE here is the only place it can be done — and it
+		// is what puts a pane's whole life under the spawn that asked for it.
+		log:       r.log.WithContext(ctx).With("session_id", string(id)),
+		writeCh:   make(chan writeJob, writeQueueDepth),
+		writeDone: make(chan struct{}),
 	}
 	s.startWriteLoop()
 
@@ -583,7 +610,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	r.sessions[id] = s
 	r.mu.Unlock()
 
-	r.log.Info("session opened", "id", string(id), "instance_id", string(r.instanceID), "epoch", epoch, "kind", kindName(cfg.Kind), "profile_id", cfg.ProfileID)
+	s.log.Info("session opened", "id", string(id), "instance_id", string(r.instanceID), "epoch", epoch, "kind", kindName(cfg.Kind), "profile_id", cfg.ProfileID)
 	if r.usageTracker != nil && cfg.ProfileID != "" {
 		r.usageTracker.SessionOpened(cfg.ProfileID)
 	}
@@ -593,7 +620,12 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 // Adopt registers a session whose execution channel was created by an
 // execution-host helper. The helper mints the id; the registry preserves it
 // rather than generating a second coordinator id (AD-7).
-func (r *Reg) Adopt(cfg Config, id ID, ch Channel) (Session, error) {
+// The context is the CALLER'S EXCHANGE and nothing else — no deadline is read
+// from it and no cancellation acted on. It is here because an adopted session
+// is the helper-hosted path, which is every local pane on this machine, and a
+// pane whose whole life is unattributable to the call that opened it is exactly
+// what made a failed spawn unreadable (nocx-n14oo.3).
+func (r *Reg) Adopt(ctx context.Context, cfg Config, id ID, ch Channel) (Session, error) {
 	if ch == nil {
 		return nil, errors.New("session: helper returned a nil channel")
 	}
@@ -617,7 +649,7 @@ func (r *Reg) Adopt(cfg Config, id ID, ch Channel) (Session, error) {
 		id: id, openedAt: time.Now(), identity: Identity{InstanceID: r.instanceID, Epoch: epoch},
 		parent: cfg.Parent, kind: cfg.Kind, host: cfg.Host, cwd: resolveSessionCwd(cfg.Cwd),
 		paneID: cfg.PaneID, profileID: cfg.ProfileID, credentialID: cfg.CredentialID,
-		sshOpts: opts, ch: ch, size: eff, log: r.log.With("session_id", string(id)),
+		sshOpts: opts, ch: ch, size: eff, log: r.log.WithContext(ctx).With("session_id", string(id)),
 		writeCh: make(chan writeJob, writeQueueDepth), writeDone: make(chan struct{}),
 	}
 	r.mu.Lock()
@@ -629,7 +661,7 @@ func (r *Reg) Adopt(cfg Config, id ID, ch Channel) (Session, error) {
 	r.sessions[id] = s
 	r.mu.Unlock()
 	s.startWriteLoop()
-	r.log.Info("helper session adopted", "id", string(id), "instance_id", string(r.instanceID), "epoch", epoch)
+	s.log.Info("helper session adopted", "id", string(id), "instance_id", string(r.instanceID), "epoch", epoch)
 	if r.usageTracker != nil && cfg.ProfileID != "" {
 		r.usageTracker.SessionOpened(cfg.ProfileID)
 	}
@@ -665,6 +697,87 @@ func (r *Reg) Get(id ID) (Session, error) {
 	return s, nil
 }
 
+// RecordOwnedProcessPID records the process the backend opened for a session.
+// The launch record is the only permitted source; callers must not derive this
+// value from a request or from the session's byte stream.
+func (r *Reg) RecordOwnedProcessPID(id ID, pid int) error {
+	if pid <= 0 {
+		return fmt.Errorf("owned process pid must be positive: %d", pid)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	s, ok := r.sessions[id]
+	if !ok {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	s.ownedProcessMu.Lock()
+	defer s.ownedProcessMu.Unlock()
+	if s.ownedProcessPID != 0 && s.ownedProcessPID != pid {
+		return fmt.Errorf("owned process pid already recorded for session: %s", id)
+	}
+	s.ownedProcessPID = pid
+	return nil
+}
+
+// RecordHostKeyFingerprint records the fingerprint a helper-hosted ssh
+// session's own dial verified, once, right after the spawn that opened it
+// (nocx-y6fh7 items 5 and 6's shared foundation).
+//
+// It exists because HostKeyFingerprint()'s ordinary path — asking the
+// session's own Channel — answers "" for one: AttachedSession is a data-plane
+// attachment to a session the HELPER dialed (ADR-0057), and it has no
+// handshake of its own to have observed. The coordinator is not blind to the
+// fact, though — its own verifyHostKey reverse handler computes the SAME
+// fingerprint, synchronously, in-process, the moment the helper's dial asks
+// it what to make of the offered key. internal/app captures that answer
+// (keyed by the same storage identity the dial resolved) and calls this,
+// right after the spawn it belongs to, rather than inventing a wire field:
+// nothing here crosses a process boundary that was not already crossing it.
+//
+// Set-once, like ownedProcessPID: a session that reconnects keeps the
+// fingerprint of the FIRST successful handshake, and a caller naming a
+// different one for the same session is refused rather than silently
+// overwriting evidence a consent decision may already be keyed by.
+func (r *Reg) RecordHostKeyFingerprint(id ID, fingerprint string) error {
+	if fingerprint == "" {
+		return fmt.Errorf("host key fingerprint must not be empty")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	s, ok := r.sessions[id]
+	if !ok {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	s.hostKeyFingerprintMu.Lock()
+	defer s.hostKeyFingerprintMu.Unlock()
+	if s.hostKeyFingerprint != "" && s.hostKeyFingerprint != fingerprint {
+		return fmt.Errorf("host key fingerprint already recorded for session: %s", id)
+	}
+	s.hostKeyFingerprint = fingerprint
+	return nil
+}
+
+// OwnedProcessPID returns the process the backend opened for id. The second
+// result distinguishes an absent process from a valid PID, including for
+// sessions opened through SSH.
+func (r *Reg) OwnedProcessPID(id ID) (int, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	s, ok := r.sessions[id]
+	if !ok {
+		return 0, false
+	}
+	s.ownedProcessMu.RLock()
+	defer s.ownedProcessMu.RUnlock()
+	if s.ownedProcessPID <= 0 {
+		return 0, false
+	}
+	return s.ownedProcessPID, true
+}
+
 func (r *Reg) Close(id ID) error {
 	r.mu.Lock()
 	s, ok := r.sessions[id]
@@ -677,8 +790,50 @@ func (r *Reg) Close(id ID) error {
 		return fmt.Errorf("session not found: %s", id)
 	}
 
-	r.log.Info("session closed", "id", string(id))
+	// The SESSION's logger, not the registry's: it carries the exchange that
+	// opened this session, so a close reads under the same trace as the open
+	// — which is the pairing somebody diagnosing a torn-down pane is looking
+	// for. Close has no context of its own to bind, and does not need one.
+	s.log.Info("session closed", "id", string(id))
 	err := s.Close()
+	if r.usageTracker != nil && s.profileID != "" {
+		r.usageTracker.SessionClosed(s.profileID)
+	}
+	return err
+}
+
+// EndSession removes id from the registry exactly as Close does, but ends
+// the underlying session rather than merely detaching from it (nocx-isjh4):
+// a helper-hosted session gives back its reserved window budget and key
+// claim, because this caller KNOWS nobody will ever want it again.
+//
+// Use this from: the pane's own close (the layout chain, or the explicit
+// "close" RPC) and a shell exit once its result has been persisted. Use
+// Close, never this, from anything that must leave a helper-hosted session
+// alive for a later coordinator — shutdown foremost among them, since a
+// session outlives the coordinator that opened it by design (D1/D3/D10).
+// Calling the wrong one is the two-owners-of-one-input defect AGENTS.md
+// names: whichever verb reaches a session first decides its fate, and only
+// one of them may ever be the wrong answer for shutdown.
+func (r *Reg) EndSession(id ID) error {
+	r.mu.Lock()
+	s, ok := r.sessions[id]
+	if ok {
+		delete(r.sessions, id)
+	}
+	r.mu.Unlock()
+
+	if !ok {
+		return fmt.Errorf("session not found: %s", id)
+	}
+
+	// Logged as "session closed" — the same phrase Close uses — because a log
+	// reader asking "did this session's row leave the registry" (worker_trace_
+	// test.go's own check, among others) cares that it did, not which of the
+	// two verbs did it; the verb split is a today's-caller distinction, not a
+	// second vocabulary for one outcome.
+	s.log.Info("session closed", "id", string(id))
+	err := s.EndSession()
 	if r.usageTracker != nil && s.profileID != "" {
 		r.usageTracker.SessionClosed(s.profileID)
 	}
@@ -794,6 +949,9 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	if cfg.ConnectionName != "" {
 		opts = append(opts, ssh.WithConnectionName(cfg.ConnectionName))
 	}
+	if cfg.ProfileID != "" {
+		opts = append(opts, ssh.WithProfileID(cfg.ProfileID))
+	}
 	if cfg.PasswordRequester != nil {
 		opts = append(opts, ssh.WithPasswordRequester(cfg.PasswordRequester))
 	}
@@ -811,7 +969,7 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	}
 	// The resolved destination mode rides the same path (nocx-mlm7):
 	// without this the profile's effective desiredMode dies here and every
-	// profile — raw or relay included — would integrate at open. A field
+	// profile — raw or helper included — would integrate at open. A field
 	// that is carried and discarded is worse than one that is missing.
 	if cfg.DesiredMode != "" {
 		opts = append(opts, ssh.WithDesiredMode(cfg.DesiredMode))
@@ -870,6 +1028,9 @@ func SSHOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 //
 // Deleted profile with open session: the session holds its own Channel
 // (SSH connection or PTY) and does not reference the profile store at
+// all. The ownedProcessPID is different: it is set only when the
+// composition root records a process the backend opened for this session.
+// Zero means that this session has no backend-owned process.
 type realSession struct {
 	id           ID
 	identity     Identity // the incarnation identity: instance + epoch, immutable
@@ -882,6 +1043,19 @@ type realSession struct {
 	profileID    string
 	credentialID string
 	sshOpts      []ssh.ConnectOption // the options the SSH connection was opened with; nil for local
+
+	// ownedProcessPID is protected separately so a transport caller can read
+	// the immutable launch fact without reaching into the registry lock.
+	ownedProcessMu  sync.RWMutex
+	ownedProcessPID int
+	// hostKeyFingerprintMu guards hostKeyFingerprint on the same terms
+	// ownedProcessMu guards its neighbour: a recorded fact set once, after
+	// the session already exists, read far more often than it is written.
+	// See RecordHostKeyFingerprint's own comment for why a helper-hosted
+	// session needs one at all — its channel (AttachedSession) cannot answer
+	// HostKeyFingerprint() the way a coordinator-dialed one can.
+	hostKeyFingerprintMu sync.RWMutex
+	hostKeyFingerprint   string
 
 	ch        Channel
 	log       log.Logger
@@ -948,14 +1122,26 @@ type writeResult struct {
 	err error
 }
 
-func (s *realSession) ID() ID                          { return s.id }
-func (s *realSession) Identity() Identity              { return s.identity }
-func (s *realSession) Parent() (Ref, bool)             { return s.parent, !s.parent.Zero() }
-func (s *realSession) Kind() Kind                      { return s.kind }
-func (s *realSession) PaneID() string                  { return s.paneID }
-func (s *realSession) OpenedAt() time.Time             { return s.openedAt }
-func (s *realSession) Host() string                    { return s.host }
-func (s *realSession) Cwd() string                     { return s.cwd }
+func (s *realSession) ID() ID              { return s.id }
+func (s *realSession) Identity() Identity  { return s.identity }
+func (s *realSession) Parent() (Ref, bool) { return s.parent, !s.parent.Zero() }
+func (s *realSession) Kind() Kind          { return s.kind }
+func (s *realSession) PaneID() string      { return s.paneID }
+func (s *realSession) OpenedAt() time.Time { return s.openedAt }
+func (s *realSession) Host() string        { return s.host }
+func (s *realSession) Cwd() string         { return s.cwd }
+
+// OwnedProcessPID exposes the launch fact to transport projections without
+// exposing a mutator on Session.
+func (s *realSession) OwnedProcessPID() (int, bool) {
+	s.ownedProcessMu.RLock()
+	defer s.ownedProcessMu.RUnlock()
+	if s.ownedProcessPID <= 0 {
+		return 0, false
+	}
+	return s.ownedProcessPID, true
+}
+
 func (s *realSession) ProfileID() string               { return s.profileID }
 func (s *realSession) CredentialID() string            { return s.credentialID }
 func (s *realSession) SSHOptions() []ssh.ConnectOption { return s.sshOpts }
@@ -1088,6 +1274,26 @@ func (s *realSession) Resize(ctx context.Context, reported Size) error {
 	return nil
 }
 
+// channelEnder is the optional verb a helper-hosted CHANNEL answers to
+// (internal/helper/client.AttachedSession.EndSession, nocx-isjh4): release
+// the helper's reserved window budget and key claim along with the
+// attachment, rather than merely detaching. A channel with no helper session
+// behind it — a bare PTY, an ssh.Channel — has nothing to release beyond
+// itself and answers only the plain io.Closer.
+type channelEnder interface {
+	EndSession(ctx context.Context) error
+}
+
+// Close ends this coordinator's OWN hold on the session and nothing more: it
+// detaches from a helper-hosted channel without telling the helper the
+// session is over. This is deliberately the ONLY thing it does, because it
+// is also what a coordinator giving up its session for reasons that have
+// nothing to do with the session's own fate must call — process shutdown
+// (AD-1/D1: a session outlives the coordinator that opened it) and a
+// re-adopt that lost the write-lease race to another coordinator
+// (internal/app/session_readopt.go), where the session must stay alive on
+// the helper for whoever already holds it. EndSession below is the other
+// verb, for a caller that KNOWS nobody will ever need this session again.
 func (s *realSession) Close() error {
 	var err error
 	s.closeOnce.Do(func() {
@@ -1100,6 +1306,31 @@ func (s *realSession) Close() error {
 		// unblocks the in-flight write; the loop then sees writeDone.
 		close(s.writeDone)
 		err = s.ch.Close()
+	})
+	return err
+}
+
+// EndSession ends this session FOR GOOD (nocx-isjh4): closer 1 (a pane's
+// helper session, the moment the pane leaves the layout), closer 2 (a shell
+// that exited, once the coordinator has persisted its result) and the
+// explicit "close" RPC all call it rather than Close, because all three
+// KNOW nobody will ever attach to this session again. A helper-hosted
+// channel releases its reserved window budget and key claim through it; any
+// other channel has nothing more to give up than Close already releases.
+//
+// It shares Close's closeOnce: whichever of the two verbs reaches this
+// session FIRST decides its fate, and that ordering is exactly what keeps
+// the two from disagreeing about a session's own life — see Close's doc.
+func (s *realSession) EndSession() error {
+	var err error
+	s.closeOnce.Do(func() {
+		s.log.Debug("ending session")
+		close(s.writeDone)
+		if ender, ok := s.ch.(channelEnder); ok {
+			err = ender.EndSession(context.Background())
+		} else {
+			err = s.ch.Close()
+		}
 	})
 	return err
 }
@@ -1152,6 +1383,17 @@ func (s *realSession) ExitOutcome() (ExitCause, int) {
 	// termination keeps the existing -1 status semantics.
 	var helperStatus interface{ ExitCode() int }
 	if errors.As(waitErr, &helperStatus) {
+		// A keepalive giving up is connection loss, not an authoritative
+		// exit (nocx-y6fh7 item 6, round 3): the helper names the cause on
+		// its ExitStatus DTO, read here through the SAME kind of optional
+		// interface probe as ExitCode itself, so this mapping stays free of
+		// any dependency on the helper's own wire types. Anything else —
+		// including the far side hanging up with no status at all, which
+		// carries no cause — is unchanged: an authoritative exit.
+		var causer interface{ ExitCause() string }
+		if errors.As(waitErr, &causer) && causer.ExitCause() == string(proto.ExitCauseKeepaliveLost) {
+			return ExitInterrupted, helperStatus.ExitCode()
+		}
 		return ExitExited, helperStatus.ExitCode()
 	}
 	return ExitInterrupted, 0
@@ -1164,6 +1406,12 @@ func (s *realSession) ExitOutcome() (ExitCause, int) {
 // check: remote channels that captured the key carry it, everything else
 // answers "".
 func (s *realSession) HostKeyFingerprint() string {
+	s.hostKeyFingerprintMu.RLock()
+	recorded := s.hostKeyFingerprint
+	s.hostKeyFingerprintMu.RUnlock()
+	if recorded != "" {
+		return recorded
+	}
 	if rc, ok := s.ch.(interface{ HostKeyFingerprint() string }); ok {
 		return rc.HostKeyFingerprint()
 	}

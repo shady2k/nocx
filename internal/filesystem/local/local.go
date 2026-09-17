@@ -425,7 +425,7 @@ func (p *Provider) Read(ctx context.Context, path string, maxBytes int64) (files
 }
 
 // Watch is declared by the Provider contract (spec §5.1), but watching is a
-// later wave of the design's sequence (§6 step 5): local watching lands with
+// later worker of the design's sequence (§6 step 5): local watching lands with
 // fsnotify, SFTP polling with the sftp provider. Until then a watch cannot be
 // established honestly — a Watch whose Events never fired would be a silent
 // lie the product could not surface — so the provider refuses with
@@ -464,7 +464,7 @@ func (p *Provider) Canonical(ctx context.Context, path string) (string, error) {
 }
 
 // Close releases provider-level resources. The local provider holds none
-// until the watching wave; the method exists so both providers keep the same
+// until the watching worker; the method exists so both providers keep the same
 // lifecycle (spec §5.1).
 func (p *Provider) Close() error { return nil }
 

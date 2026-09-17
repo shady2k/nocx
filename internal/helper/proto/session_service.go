@@ -42,6 +42,23 @@ import (
 const (
 	// OpSpawn starts a shell under a new PTY and returns its inventory entry.
 	OpSpawn = "spawn"
+	// OpSpawnSSH starts one session whose PROCESS is a shell channel on a
+	// connection THIS helper dialed — an ssh pane (nocx-50w7p.4).
+	//
+	// It is a second op beside `spawn` rather than a destination field on
+	// SpawnParams, and the freeze is what decides that rather than taste: every
+	// shape here is `additionalProperties: false`, so a field added to `spawn`
+	// is a payload an older generation REJECTS, while a new OP is one it
+	// answers `unknown_op` to — and `unknown_op` is what a coordinator already
+	// reads as "this machine's helper is older than this app". A destination
+	// folded into `spawn` would also have to be absent ON EVERY LOCAL SPAWN,
+	// which is a field whose absence is the common case and whose presence
+	// changes what the op means.
+	//
+	// It shares the launch union and the inventory entry with `spawn`: a
+	// session is a session, and a caller that spawned one and a caller that
+	// found one must hold the same value.
+	OpSpawnSSH = "spawn-ssh"
 	// OpSessions is the inventory: every live host session this generation
 	// holds.
 	OpSessions = "sessions"
@@ -107,10 +124,30 @@ type CloseSessionParams struct {
 // CloseSessionResult is empty; success is the answer that the session ended.
 type CloseSessionResult struct{}
 
-// SignalParams sends Signal to the session's process group.
+// SignalParams sends Signal to a process group of the session.
 type SignalParams struct {
 	Session HostSessionID `json:"session"`
 	Signal  int           `json:"signal"`
+	// Pgid names the group to signal. Zero — the level-1 shape, and still
+	// legitimate — means the SESSION's own group, which is the shell.
+	//
+	// It exists because a stop is two statements and not one (nocx-uvac6.11):
+	// name the addressee once, then signal THAT group through the whole
+	// escalation, so a shell that starts another job between SIGINT and
+	// SIGKILL is not hit by the second. The caller names it from the
+	// foreground group this session's own inventory entry reports, and it
+	// must be able to keep naming it — a helper that re-resolved "whatever is
+	// in front now" on every call would be the race the ladder exists to
+	// avoid.
+	//
+	// IT GRANTS THE CALLER NOTHING IT DID NOT ALREADY HAVE. Reaching this
+	// service means having authenticated as the account that owns the helper
+	// (D12 locally, ssh remotely), and that account may call kill(2) on the
+	// same group directly. So this is a convenience of ADDRESSING and not a
+	// widening of authority, which is why the helper signals what it is told
+	// rather than keeping a policy about which groups are allowed — the
+	// helper owns no policy (D3).
+	Pgid int `json:"pgid,omitempty"`
 }
 
 // SignalResult is empty; success is the answer that the signal was delivered.
@@ -128,6 +165,21 @@ const (
 	// only an inventory field because a reader waiting on a command must not
 	// have to poll to learn it finished.
 	EventSessionExit = "exit"
+	// EventSessionLiveness is what an ssh session's own keepalive prober
+	// learned about the far end since the last time it checked. Its params
+	// are a SessionLiveness (nocx-y6fh7 item 6).
+	//
+	// It is a NOTIFICATION, on the same reasoning EventSessionExit already
+	// gives: the party that can observe this is the helper — it holds the
+	// connection since ADR-0057 — and a coordinator polling for it would be
+	// asking a question the answer to which is "nothing has changed" almost
+	// every time. A session's terminal death is still reported through
+	// EventSessionExit exactly as any other end is (the prober closes the
+	// transport when it gives up, which is the ordinary channel-closed path
+	// every other exit takes); this event is for the NON-terminal half — the
+	// far end answering late, or not at all yet — which has no "the process
+	// ended" fact to ride.
+	EventSessionLiveness = "liveness"
 )
 
 // Notification is the payload of a TypeNotify frame: a service, an event and
@@ -192,7 +244,71 @@ type SpawnParams struct {
 	// helper passes its descriptor-side channel and these values to the shell.
 	// The capability is never copied into argv or environment.
 	Lifecycle *LifecycleLaunch `json:"lifecycle,omitempty"`
+	// IdempotencyKey is the caller's name for the SPAWN, not for the session
+	// (L7 of the local-helper design). The helper mints the session id, so the
+	// coordinator cannot record what it is about to get — but it can record
+	// what it is about to ask for, and this is that record: a pane's claim is
+	// written durably with this key BEFORE the spawn, and a spawn repeated
+	// with the same key answers with the session the first one made rather
+	// than forking a second shell.
+	//
+	// That is what lets the claim precede the first irreversible effect, which
+	// is the worker record's own rule and was bought by the same failure: a
+	// coordinator that dies between the helper's spawn and the durable binding
+	// leaves a live PTY no pane claims, and — with the daemon lifecycle
+	// unimplemented — the helper holds it forever.
+	//
+	// It is OPTIONAL and empty is legitimate: a caller that minted no claim
+	// gets no promise, which is what every level-1 caller has always had. It
+	// is opaque to the helper, which stores it and compares it and never
+	// parses it, and it is never a name a person typed — the helper owns no
+	// policy and persists no human-authored name (D3).
+	IdempotencyKey string `json:"idempotencyKey,omitempty"`
+	// AgentToolEndpoint is the tool endpoint ON THIS HELPER'S MACHINE that
+	// the pane this op starts belongs to: the CALLER's own tool socket
+	// (internal/toolendpoint's), which is what the shell's NOCX_TOOL_SOCKET
+	// names when the caller has one.
+	//
+	// It is a fact about the REQUEST and never about the daemon, and that is
+	// the whole of why it is here (nocx-50w7p.18). A helper generation's
+	// endpoint socket is keyed by the generation and not by a coordinator: one
+	// account's daemon serves several coordinators at once (D12), so a value
+	// this process read once from the environment of whichever coordinator
+	// started it is a value about THAT coordinator — and a pane opened by
+	// another one would carry it, reaching an endpoint that never asked for
+	// that pane. The pane's owner is the party that knows, so the pane's
+	// owner says it, per spawn.
+	//
+	// Empty is a real state rather than "not set yet": a coordinator that runs
+	// no tool endpoint has none to name (cmd/nocx-server answers nil, nil when
+	// it has no tool surface), and the pane then renders no NOCX_TOOL_SOCKET
+	// at all — the shell's own refusal text is what a user sees, which is the
+	// soft degrade nocx-2tesu exists to keep soft.
+	AgentToolEndpoint string `json:"agentToolEndpoint,omitempty"`
+	// AgentToolToken is the bearer that admits this pane's far agent, minted by
+	// the coordinator that opened the pane (nocx-50w7p.16): what the far
+	// launcher renders into the frame its shell reads, and what the agent's MCP
+	// bridge presents before its first request.
+	//
+	// IT IS ON THIS SHAPE BY ANALOGY WITH SSHSpawnParams AND OUT OF THE SAME
+	// NEED (nocx-e2bws): a pane on a far host is reached by a coordinator
+	// whose pid relation to the pane does not exist, so the endpoint cannot
+	// admit it by process ownership and needs the interval's bearer instead.
+	// A pane on THIS machine is admitted as its coordinator's own child, which
+	// is why the field is optional and empty for the ordinary local pane.
+	//
+	// It is a SECRET and this struct is not a place it rests: it goes into the
+	// launch options, which render it into the descriptor the shell reads —
+	// never into the agent env block, and never into a log line.
+	AgentToolToken string `json:"agentToolToken,omitempty"`
 }
+
+// MaxIdempotencyKey bounds the key a caller may mint. The helper keeps one
+// entry per live key for the life of the session it names, so the bound is
+// what keeps a caller's bookkeeping from becoming the helper's memory
+// footprint. It is stated here, next to the field, because the contract
+// declares it and an unenforced bound in a schema is theatre.
+const MaxIdempotencyKey = 128
 
 // LifecycleLaunch carries the coordinator-minted authenticated channel
 // bootstrap to the helper. Addressing is public; Capability and Recovery are
@@ -210,6 +326,211 @@ type LifecycleLaunch struct {
 // same value and cannot drift into two decoders.
 type SpawnResult struct {
 	Entry SessionEntry `json:"entry"`
+}
+
+// SSHShellKind is the far shell a remote session is launched FOR, in a closed
+// set.
+//
+// It is the same four-member vocabulary shellintegration.ShellKind already
+// owns, spelled here rather than imported because this package is the wire's
+// leaf: proto is linked by every helper, including the untagged artifact
+// deployed to somebody else's host, and that artifact carries no launcher
+// (plan §1). The pairing is checked rather than hoped for —
+// TestTheSSHShellKindSpellingsMatchTheLauncher is what keeps the two tables
+// from drifting, in the package that converts between them.
+type SSHShellKind string
+
+const (
+	// SSHShellAuto means the FAR side decides: the launcher emits one
+	// strictly-POSIX dispatcher that detects the login shell at runtime and
+	// execs the matching tier. It is the honest default, because which shell a
+	// host logs you into is the host's business and the coordinator has not
+	// always asked.
+	SSHShellAuto SSHShellKind = "auto"
+	// SSHShellBash and SSHShellZsh pin the tier a profile names.
+	SSHShellBash SSHShellKind = "bash"
+	SSHShellZsh  SSHShellKind = "zsh"
+	// SSHShellUnknown means "start it, integrate nothing, and say so" — never
+	// "substitute bash".
+	SSHShellUnknown SSHShellKind = "unknown"
+)
+
+// SSHMode is what the caller WANTS of this session's integration, in the
+// closed set internal/profile declares as DesiredMode.
+//
+// Spelled here for the leaf-package reason above, and the GATE is not spelled
+// here: whether a mode delivers shell integration is profile.DesiredMode
+// .DeliversScripts(), one predicate with one owner, which the helper's ssh
+// spawner asks directly (it is build-tagged, and a tagged helper links
+// internal/profile already through internal/ssh).
+type SSHMode string
+
+const (
+	// SSHModeAuto: the caller has not answered for this destination. Scripts
+	// as the default does, and the helper may be offered.
+	SSHModeAuto SSHMode = "auto"
+	// SSHModeRaw: nothing is added to the far side. A plain login shell, no
+	// carrier, no frames, no publish.
+	SSHModeRaw SSHMode = "raw"
+	// SSHModeScript and SSHModeHelper integrate through the script tiers.
+	SSHModeScript SSHMode = "script"
+	SSHModeHelper SSHMode = "helper"
+)
+
+// SSHSpawnParams starts one session whose process is a shell channel on a
+// connection this helper dials (nocx-50w7p.4).
+//
+// # There is no command here either, and this is the op it matters most for
+//
+// D3 refuses any op whose params carry a free-form []string, because an argv
+// reaches a command line on somebody else's machine. The remote command this
+// op results in is the launch CARRIER — bounded, payload-free, and built by
+// the helper from internal/shellintegration — and the caller cannot name it,
+// shorten it or substitute it. What the caller names is a DESTINATION and the
+// shape of the session, which is the same division `spawn` draws between the
+// environment and the program.
+//
+// The destination is RESOLVED (host, port, user) for the reason ProbeParams
+// states at length: alias resolution, ~/.ssh/config merging and the
+// credential's own authorization stay in the coordinator, which is the party
+// that reads the config and holds the binding.
+type SSHSpawnParams struct {
+	// Workspace is D15's reservation, as in SpawnParams.
+	Workspace WorkspaceID `json:"workspace"`
+	// Destination is where the channel is opened and what it authenticates
+	// with. Its identity is a REFERENCE plus, for a key, the public half the
+	// helper must declare before the coordinator is asked to sign.
+	Destination SSHDestination `json:"destination"`
+	// AcceptOnTrust is the CALLER's decision about a host key nobody has
+	// recorded, exactly as it is on a probe and on a channel open: the helper
+	// may not trust a host on its own initiative, and the accept flow that
+	// sets this flag already ran in the coordinator.
+	AcceptOnTrust bool `json:"acceptOnTrust"`
+	// HostKeyFingerprint is the fingerprint the caller BELIEVES this host
+	// presents — the value its own known_hosts answered with, or the one a
+	// person just accepted. Empty means the caller has no expectation and the
+	// coordinator's verdict alone decides.
+	//
+	// When it is present it is ENFORCED, before anything is authenticated: a
+	// handshake that offers a different key ends the spawn with
+	// `host-key-changed`. It is a local bind on top of the coordinator's
+	// verdict and not a substitute for it — the verdict travels over a
+	// connection this helper has, and this value travelled with the REQUEST —
+	// so two facts must agree before a shell is opened on somebody's host.
+	HostKeyFingerprint string `json:"hostKeyFingerprint"`
+	// Shell is the far shell this session is launched for. Empty means
+	// SSHShellAuto.
+	Shell SSHShellKind `json:"shell"`
+	// Cwd is where the caller wants the far shell to start, and this
+	// generation can only honour an EMPTY one.
+	//
+	// A non-empty value is refused by name rather than accepted and ignored.
+	// The far login shell starts in the far account's own directory and this
+	// helper has no mechanism to move it: the only ways to name a directory on
+	// the far side travel as a command (which this wire refuses) or as an
+	// extension the launcher does not carry. A field that accepted a value
+	// nothing acts on is the shape that a later generation starts reading
+	// under a caller that never expected it to — and the launch record has no
+	// `cwd` key for a remote session for the same reason: this helper resolved
+	// no directory, so it reports none.
+	Cwd string `json:"cwd"`
+	// Cols and Rows are the size the channel's pty is requested at.
+	Cols uint16 `json:"cols"`
+	Rows uint16 `json:"rows"`
+	// WindowBytes is the bound on this session's output window, clamped by the
+	// helper exactly as SpawnParams' is. Zero means the helper's default.
+	WindowBytes int64 `json:"windowBytes"`
+	// Lifecycle is optional, on the same terms as SpawnParams'.
+	//
+	// WHAT THE HELPER DOES WITH IT, stated rather than implied: it asks the far
+	// side for a loopback listener on the connection it dials (plan §6 — the
+	// lifecycle tunnel is a remote listener, never a coordinator-side one),
+	// renders the port into the launcher, and carries the capability in frame 2
+	// of the bootstrap. A request it CANNOT honour — the far side refused the
+	// listener — is refused by name before anything is spawned, so a caller
+	// never waits out a hello budget for a channel that was never opened. The
+	// two facts that the channel exists are the two a caller can already check:
+	// the session's lifecycle window, and what `adopt-lifecycle` answers.
+	Lifecycle *LifecycleLaunch `json:"lifecycle,omitempty"`
+	// DesiredMode is the caller's integration intent, and the helper applies
+	// profile.DesiredMode's own gate to it: `raw` opens a plain login shell
+	// and integrates nothing, and an unrecognised value fails closed.
+	DesiredMode SSHMode `json:"desiredMode"`
+	// AgentToolEndpoint is the LOCAL socket every connection arriving on the
+	// far-side tool socket is piped into: this pane's own coordinator's tool
+	// endpoint on THIS machine, which is the one that asked for the pane.
+	//
+	// It is the second half of the pair above and it is deliberately a second
+	// field: AgentToolSocketPath names a path on the FAR host, and this names
+	// the endpoint on the machine the helper runs on. They are different
+	// machines and different values, and one field could only have held the
+	// first (nocx-50w7p.14).
+	//
+	// It travels PER SPAWN for the reason SpawnParams.AgentToolEndpoint does,
+	// and it is the same defect one hop out (nocx-50w7p.18): a helper daemon
+	// serves several coordinators of one account (D12), so an endpoint fixed
+	// at the daemon's own start is a fact about whichever coordinator started
+	// it — and a pane opened by another one would have its far agent's tool
+	// connections forwarded to a coordinator that never asked for that pane.
+	//
+	// A far socket path with no endpoint here is REFUSED BY NAME before
+	// anything is dialed: a forward to nothing is the silent degrade a launch
+	// must never carry.
+	AgentToolEndpoint string `json:"agentToolEndpoint,omitempty"`
+	// AgentToolToken is the bearer the pane's agent presents to be admitted
+	// (nocx-50w7p.16): what the coordinator minted for THIS pane and its
+	// admission epoch, and what the endpoint on the coordinator's machine
+	// compares before it will admit a connection arriving on the far-side tool
+	// socket.
+	//
+	// It travels per request for the same reason AgentToolEndpoint does — a
+	// daemon serves several coordinators, and this is a fact about the pane one
+	// of them opened — and it is a SECRET, so the helper treats it as one: it
+	// reaches the far shell by the descriptor frame and is never part of the
+	// launch record, the logs, or anything the helper hands a child process.
+	// Empty is a real state: a coordinator that requires no bearer (the local
+	// tree rule admits those panes) sends none, and a pane whose frame carries
+	// none admits nobody answering to a token.
+	AgentToolToken string `json:"agentToolToken,omitempty"`
+	// AgentToolsAbsent is WHY this pane's agent gets no nocx tools, from the
+	// closed set internal/shellintegration owns (nocx-e2bws): the code, not a
+	// sentence, because the SHELL renders the sentence a person reads and the
+	// fact the shell cannot see is the reason.
+	//
+	// It travels on the ssh spawn because that is the route the reason is a
+	// fact about: THIS machine's helper carries a pane whose shell runs on a
+	// host with no nocx helper of its own, so there is no bridge for the agent
+	// to run there and no socket for it to dial — and a shell told nothing
+	// reports "path is not configured", which sends a person looking for a
+	// setting no host has.
+	//
+	// Empty is the honest state for every other pane: nocx did not say, and the
+	// shell keeps its own sentence.
+	AgentToolsAbsent string `json:"agentToolsAbsent,omitempty"`
+	// IdempotencyKey is the caller's name for the spawn, on exactly the terms
+	// SpawnParams states: a repeat answers with the session the first one made
+	// rather than forking a second remote shell.
+	IdempotencyKey string `json:"idempotencyKey,omitempty"`
+	// KeepaliveIntervalMS is how often, in milliseconds, THIS HELPER probes
+	// the far end once the channel is open. Zero means no probing at all.
+	//
+	// It travels here because the helper is the party that now HOLDS the ssh
+	// connection (ADR-0057): the coordinator has no transport of its own left
+	// to probe, so "how often" is a fact this spawn must carry rather than a
+	// setting the far side of the wire could apply on its own — the same
+	// reason Shell and DesiredMode travel per spawn rather than living in the
+	// helper's own defaults. Zero is a real, honest state (a profile with no
+	// interval configured), not a gap: nocx-y6fh7 item 6 measured that the
+	// pre-ADR-0057 coordinator-side prober silently vanished for every
+	// helper-hosted pane once the dial moved here and nothing replaced it —
+	// ssh-reconnect.spec.ts's silent-death and slow-host journeys had nothing
+	// left probing at all.
+	KeepaliveIntervalMS int64 `json:"keepaliveIntervalMs,omitempty"`
+	// KeepaliveCountMax is the number of consecutive keepalive failures this
+	// helper tolerates before it gives up on the channel, on the same terms
+	// ssh.ConnectConfig.KeepaliveCountMax already states for the coordinator's
+	// own (non-helper) dials. Meaningless when KeepaliveIntervalMS is zero.
+	KeepaliveCountMax int `json:"keepaliveCountMax,omitempty"`
 }
 
 // SessionsParams asks for the inventory. The workspace filter is D15's
@@ -276,10 +597,53 @@ type SessionEntry struct {
 	Exit *SessionExitStatus `json:"exit"`
 }
 
-// LaunchRecord is what the helper recorded at the moment it spawned. Nothing
-// read from the OS afterwards may overwrite it: this is the canonical identity
-// of the session (D10), and OS inspection is a cross-check against it.
+// LaunchKind discriminates the launch union (nocx-50w7p.4). It is a required
+// field of every branch rather than something a reader infers from which keys
+// are present, because "which of these is it" is the FIRST question a decoder
+// asks and inferring it from a key's presence makes an incomplete record
+// indistinguishable from the other branch.
+type LaunchKind string
+
+const (
+	// LaunchKindLocal is a process on THIS machine: a PTY, a pid and a
+	// process group the helper owns and signals.
+	LaunchKindLocal LaunchKind = "local"
+	// LaunchKindSSH is a shell channel on a connection this helper dialed:
+	// the process is on the far host and this machine has no pid for it.
+	LaunchKindSSH LaunchKind = "ssh"
+)
+
+// LaunchRecord is what the helper recorded at the moment it spawned.
+// Nothing read from the OS afterwards may overwrite it: this is the canonical
+// identity of the session (D10), and OS inspection is a cross-check against it.
+//
+// # Why it is a union now, and why the branches are separate TYPES
+//
+// A session's process is either a PTY this helper owns or a shell channel on a
+// remote host, and the two have different facts: a local shell has a pid and a
+// process group, a remote one has a destination and no pid AT ALL. Spelling
+// that as one flat record with an optional pid would be a record whose `pid`
+// key exists and reads 0 for a remote session — and 0 is the kernel scheduler,
+// so a reader that trusted the key would ask the OS about a process this
+// machine never started. Absence is the honest encoding, and a union with two
+// branch TYPES is how absence stops being a convention and becomes a fact the
+// decoder enforces: `sshLaunchRecord` declares no `pid` key, so no generation
+// can put one there and no reader can find one.
 type LaunchRecord struct {
+	// Kind is the discriminator, and it is required.
+	Kind LaunchKind `json:"kind"`
+	// Local is the branch for a process on this machine, and is absent for the
+	// other. Exactly one of the two is present; the schema enforces that with
+	// `oneOf`, and the helper always sets exactly one.
+	Local *LocalLaunchRecord `json:"local,omitempty"`
+	// SSH is the branch for a remote shell channel.
+	SSH *SSHLaunchRecord `json:"ssh,omitempty"`
+}
+
+// LocalLaunchRecord is the launch record a PTY session has always had. It is
+// the same seven facts as before the union existed — a local session's record
+// is unchanged, and only its position moved.
+type LocalLaunchRecord struct {
 	// Shell is the binary the helper actually started, as exec resolved it.
 	Shell string `json:"shell"`
 	// Cwd is the directory the helper started it in — the resolved one, not
@@ -300,6 +664,109 @@ type LaunchRecord struct {
 	// must be able to see that it was.
 	WindowBytes int64 `json:"windowBytes"`
 }
+
+// SSHLaunchRecord is the launch record of a session whose process is a shell
+// channel on a connection this helper dialed.
+//
+// # What is deliberately NOT here
+//
+// There is no `pid` and no `pgid`, and that is the shape rather than an
+// omission: the process is on another machine, its pid belongs to that
+// machine's namespace, and pid 0 — the only value left if a record insisted on
+// carrying one — is the kernel scheduler. A helper that wrote it would report
+// the scheduler's facts under this session's authority.
+//
+// There is no `cwd` VALUE either, and the key is kept rather than dropped:
+// every reader of a launch record asks the same five questions of whichever
+// branch it holds, and a key that exists in one branch and not the other is a
+// decoder that has to branch before it can parse. What it carries is the
+// honest answer — EMPTY — meaning this helper resolved no directory, because
+// the far login shell starts in the far account's own home and nothing on this
+// wire can see or move it. `spawn-ssh` refuses a caller's non-empty cwd by
+// name rather than accepting one it could never honour, so the empty value is
+// a fact and not a placeholder.
+type SSHLaunchRecord struct {
+	// Host, Port and User are the RESOLVED destination, echoed so a reader of
+	// the inventory knows which machine this pane is on. The identity is a
+	// REFERENCE and never material: the credential reference is the
+	// coordinator's opaque handle and the helper never interprets it.
+	Host        string `json:"host"`
+	Port        int    `json:"port"`
+	User        string `json:"user"`
+	IdentityRef string `json:"identityRef"`
+	// Shell is the far shell this session was launched FOR, in SSHShellKind's
+	// closed set. `auto` is the honest value for the ordinary case: the far
+	// side's own dispatcher decides which tier runs, and its answer is not
+	// reported back on this wire.
+	Shell string `json:"shell"`
+	// Cwd is empty, always, in this generation — see the type's own comment:
+	// the far login shell's directory is the far side's answer and this helper
+	// neither asks for it nor changes it.
+	Cwd string `json:"cwd"`
+	// Cols and Rows are the size the channel's pty was requested at. The
+	// CURRENT size is not here, for the same reason the local record omits it.
+	Cols uint16 `json:"cols"`
+	Rows uint16 `json:"rows"`
+	// WindowBytes is the bound this session actually got.
+	WindowBytes int64 `json:"windowBytes"`
+}
+
+// WindowBytes reports the output-window bound this session actually got, from
+// whichever branch the record is. It is a method rather than a field on the
+// union because the value belongs to the BRANCH: the two records carry it for
+// the same reason and it is one question to a reader.
+func (r LaunchRecord) WindowBytes() int64 {
+	switch {
+	case r.Local != nil:
+		return r.Local.WindowBytes
+	case r.SSH != nil:
+		return r.SSH.WindowBytes
+	}
+	return 0
+}
+
+// Shell names the shell this session runs, from whichever branch it is. For a
+// local session it is the resolved binary; for an ssh session it is the far
+// shell kind the launcher was built for.
+func (r LaunchRecord) Shell() string {
+	switch {
+	case r.Local != nil:
+		return r.Local.Shell
+	case r.SSH != nil:
+		return r.SSH.Shell
+	}
+	return ""
+}
+
+// LocalPid is the pid of a process THIS machine runs, and ZERO when the
+// session has no process here.
+//
+// Zero is the answer rather than a placeholder, and the caller acts on it: the
+// OS-evidence seam takes a pid, pid 0 is the scheduler, and a session with no
+// local process must therefore not be observed at all — which is exactly what
+// the helper does with this value (session.entry), rather than passing a zero
+// along and asking the kernel about the scheduler.
+func (r LaunchRecord) LocalPid() int {
+	if r.Local == nil {
+		return 0
+	}
+	return r.Local.Pid
+}
+
+// LocalPgid is the process group the helper owns for a LOCAL session, and zero
+// for one it does not own. Zero means "no group here", which the signal path
+// reads as "the session's own process, whatever kind it is" — for a remote
+// session that is the shell channel.
+func (r LaunchRecord) LocalPgid() int {
+	if r.Local == nil {
+		return 0
+	}
+	return r.Local.Pgid
+}
+
+// IsLocal reports whether this session's process runs on this machine. It is
+// the question the OS-evidence seam must ask before it is asked anything else.
+func (r LaunchRecord) IsLocal() bool { return r.Local != nil }
 
 // Observation is what the OS says about the process NOW. It is evidence: a
 // cross-check against the launch record and a source of the derived
@@ -466,6 +933,30 @@ type WindowSpan struct {
 	Written StreamOffset `json:"written"`
 }
 
+// SessionExitCause is WHY a session ended, in a closed set that is empty
+// (omitted) for the ordinary case: a process the far side actually ran to
+// completion or that closed with no cause this helper can name.
+//
+// It exists because "Code == -1, Signal == 0" is one shape with two
+// different meanings (nocx-y6fh7 item 6, round 3): the far side hanging up
+// mid-session with no status to report (TestAChannelLostMidSessionEndsThe
+// SessionWithAStatus, which stays exactly as it is), and THIS helper's own
+// keepalive prober giving up and closing the connection itself. Both leave
+// no process status to collect, so only the helper — the party running the
+// prober since ADR-0057 — can tell them apart, and it does so by naming the
+// cause rather than by the coordinator guessing from a code that is
+// identical either way.
+type SessionExitCause string
+
+const (
+	// ExitCauseKeepaliveLost is a connection this helper's OWN prober gave
+	// up on: it stopped believing the far end was there and closed the
+	// transport itself. This is CONNECTION LOSS, not a clean process exit —
+	// the coordinator's ExitOutcome maps it to Interrupted so the pane is
+	// offered the way back, the same offer any other channel loss gets.
+	ExitCauseKeepaliveLost SessionExitCause = "keepalive-lost"
+)
+
 // SessionExitStatus is how a session's process ended.
 type SessionExitStatus struct {
 	// Code is the exit status, or -1 when the process was killed by a signal
@@ -475,12 +966,40 @@ type SessionExitStatus struct {
 	Signal int `json:"signal,omitempty"`
 	// At is when the helper observed the end, RFC 3339 with nanoseconds.
 	At string `json:"at"`
+	// Cause names WHY this ended when Code/Signal alone cannot say — see
+	// SessionExitCause. Empty is the ordinary case: an authoritative exit,
+	// or a loss with no more specific cause to report.
+	Cause SessionExitCause `json:"cause,omitempty"`
 }
 
 // SessionExit is the EventSessionExit notification's params.
 type SessionExit struct {
 	Session HostSessionID     `json:"session"`
 	Status  SessionExitStatus `json:"status"`
+}
+
+// SessionLiveness is the EventSessionLiveness notification's params: one
+// ssh session's keepalive prober reporting whether the far end answered this
+// round, and how long it took when it did.
+//
+// It names the session rather than the destination the way SessionExit does,
+// for the same reason: this is a fact about a PROCESS this generation is
+// answerable for, not about a host in the abstract. A helper that shares one
+// pooled connection across several sessions (AD-4) reports against whichever
+// session's own spawn armed the prober; nothing here claims the fact for
+// every session on that connection, which is the coordinator's own concern
+// to fan out if it chooses to (session.Reg.ObserveHost already does, keyed
+// by host, for the sessions it is told about).
+type SessionLiveness struct {
+	Session HostSessionID `json:"session"`
+	// Responsive is this round's verdict: the far end answered a keepalive
+	// request before the deadline, or it did not.
+	Responsive bool `json:"responsive"`
+	// RoundTripMS is how long an answered round took, in milliseconds. Zero
+	// (and omitted) means unresponsive, or a first round with nothing yet to
+	// measure — the same "no measurement" reading the coordinator's own
+	// direct dials already give this fact (ssh.Reachability.RoundTrip).
+	RoundTripMS int64 `json:"roundTripMs,omitempty"`
 }
 
 // AckResult is deliberately empty, like ResizeResult: the answer to "did the

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/url"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -429,6 +430,12 @@ type agentRunState struct {
 	Error         string   `json:"error,omitempty"`
 	DroppedDeltas int      `json:"droppedDeltas,omitempty"`
 	UnarmedBounds []string `json:"unarmedBounds,omitempty"`
+	// Notices are what the RUN must state about ITSELF — today, only that it
+	// stopped asking to widen a scope because it reached the bound on how
+	// often one answer may ask (design §5.3). A silent stop is the soft
+	// degrade AGENTS.md forbids: the person is told the assistant stopped
+	// asking rather than left to infer it from questions that never arrive.
+	Notices []string `json:"notices,omitempty"`
 }
 
 // agentApprovalRequested is the agent.approvalRequested notification (design
@@ -471,6 +478,11 @@ type agentApprovalRequested struct {
 	// state — the surface must never present "we refuse to ask" and "we
 	// could not ask" as the same fact. Absent for non-command proposals.
 	Expansion *assistant.ExpansionFacts `json:"expansion,omitempty"`
+	// OutOfScope is present only when a resource of the call fell outside a
+	// bound (design §5.3, nocx-b453p). Without it the prompt's three widths
+	// — this call, this session, always — widen NOTHING that excluded the
+	// resource, so the next identical call asks again, for ever.
+	OutOfScope *agentApprovalOutOfScope `json:"outOfScope,omitempty"`
 	// Scripts is the whole of every file the proposed command NAMES, read
 	// at the moment the question was asked (nocx-872jc.3). Same kind of
 	// thing as Expansion and carried for the same reason: `bash deploy.sh`
@@ -488,6 +500,74 @@ type agentApprovalRequested struct {
 	// resolved to, which is what the person is actually being asked. Absent
 	// for every other proposal.
 	Install *assistant.ApprovalInstall `json:"install,omitempty"`
+}
+
+// agentApprovalOutOfScope is what fell outside, which bound it fell outside,
+// and whether an answer can move that bound. The offer is carried rather than
+// derived from the cause in the renderer for the reason the effect is
+// (ADR-0028 decision 4): the backend is what will apply the answer, so the
+// backend is what says whether it can be given.
+type agentApprovalOutOfScope struct {
+	Cause    string                `json:"cause"`
+	Resource content.GrantScope    `json:"resource"`
+	Widening agentApprovalWidening `json:"widening"`
+}
+
+// agentApprovalWidening is the offer, shaped like agentApprovalStanding for
+// the same reason: available says whether the prompt may show the answer, and
+// reason is what it says instead when it may not.
+type agentApprovalWidening struct {
+	Available bool   `json:"available"`
+	Reason    string `json:"reason"`
+}
+
+// wideningOffer decides whether the fourth answer may be shown. An editable
+// row scope is the ONLY yes: a fence — the run's own bound, or a narrowed
+// capability — cannot be moved by any answer, and offering a question whose
+// yes cannot be honoured is the lie §5.3 exists to remove.
+func wideningOffer(cause content.OutOfScopeCause) agentApprovalWidening {
+	if cause == content.OutOfScopeRowScope {
+		return agentApprovalWidening{Available: true}
+	}
+	return agentApprovalWidening{
+		Reason: "this bound is the run's own fence, and no answer here can widen it",
+	}
+}
+
+// agentStandingAnswerSaved is the agent.standingAnswerSaved notification
+// (nocx-2019q, contracts/agent.standingAnswerSaved.schema.json): the standing
+// half of an answer reached the store, and the turn that asked the question
+// says so where it was asked.
+//
+// It carries FACTS, not a sentence. The receipt reads in the words of the
+// button the person clicked, and those words are built once, on the surface
+// that offered the answer — a sentence minted here would be a second spelling
+// of one concept, which is the duplication AD-8 exists to prevent.
+type agentStandingAnswerSaved struct {
+	RunID string `json:"runId"`
+	// EntryID is the TURN's ledger entry, and it is NEVER EMPTY. The
+	// question the schema used to leave open — "can a receipt come from a
+	// run with no entry?" — is answered by the chain that produces one, and
+	// the chain has no branch: a receipt exists only where agent.approve
+	// found the run in pendingRuns; pendingRuns is filled by handleAsk
+	// alone, after the ledger transaction returned the turn's entry
+	// (SubmitAgentAsk answers with the ask id, which validateAgentAsk
+	// refuses empty); and handleAsk itself is refused when no content store
+	// is wired. So there is no producer of an empty one.
+	//
+	// Which is why notifyStandingAnswer REFUSES to send a receipt without
+	// it rather than sending one anyway: the renderer routes by this field
+	// and drops anything that is not the block's own, so a receipt with no
+	// entry is one nobody can ever see — the exact invisibility nocx-2019q
+	// was.
+	EntryID  string `json:"entryId"`
+	Approved bool   `json:"approved"`
+	Scope    string `json:"scope"`
+	Rule     string `json:"rule"`
+	Effect   string `json:"effect"`
+	// RuleID is what an Undo names, and it is empty exactly where an undo
+	// by id is not expressible: a session overlay and a matrix row.
+	RuleID string `json:"ruleId"`
 }
 
 type agentApprovalStanding struct {
@@ -523,6 +603,13 @@ const (
 	approveScopeOnce    = "once"
 	approveScopeSession = "session"
 	approveScopeAlways  = "always"
+	// approveScopeExpand is the fourth answer, and it is not a fourth WIDTH
+	// (design §5.3): it is the distinct administrative answer to an
+	// out-of-scope question — widen the row's scopes to cover the resource
+	// that fell outside AND approve this call, as one act. It is offered
+	// only where agent.approvalRequested said it could be, and refused
+	// everywhere else.
+	approveScopeExpand = "expand"
 )
 
 // approveParams is the agent.approve request (design §7.2): the full binding
@@ -609,6 +696,14 @@ type agentHandlers struct {
 	// today, and why the honest refusal is the product's own outcome rather
 	// than a stub.
 	expansions assistant.ExpansionSource
+	// workerStore is the worker record a coordinator run may start workers in and ask
+	// about (nocx-dkawo.8). Nil until the composition root wires one, which
+	// is what an unopened content store leaves.
+	workerStore assistant.WorkerRecord
+	// paneAccessBinder mints a run's DescendantPaneAccess/SessionReads
+	// (assistant.PaneAccessBinder, design §7.1, §7.3, Task 8). Nil is the
+	// honest shape for a build with no composition-root wiring yet.
+	paneAccessBinder assistant.PaneAccessBinder
 	// scripts reads the whole of a file a proposed command names, so the
 	// approval question can carry the script and not only its name
 	// (nocx-872jc.3). The server implements it; see ws_script.go for what
@@ -984,7 +1079,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// approval that suspends it, the resume that finishes it and every
 	// effect any of them run all log under one trace, across the several
 	// wire frames it takes (internal/log).
-	runCtx := log.WithTraceID(ctx, runTrace(askRes.RunID))
+	runCtx, _ := log.StartTrace(ctx, runTrace(askRes.RunID))
 	leaseDegradation := assistant.NewRunLeaseDegradation()
 	runControl := &agentRunControl{cancelDone: make(chan struct{})}
 	rc := askRunContext{
@@ -1450,7 +1545,14 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		AttemptLedger: h.attemptLedger,
 		Requester:     h.requester,
 		Expansions:    h.expansions,
-		Scripts:       h.scripts,
+		Workers:       h.workerStore,
+		// The one environment a spawn can reach in this slice: the machine
+		// nocx itself runs on. Derived through content's own id rule so the
+		// run fence and the tool's resolver name the same string without
+		// either restating the other.
+		WorkerEnvironment: content.EnvironmentIDFor(content.EnvLocal, ""),
+		PaneAccessBinder:  h.paneAccessBinder,
+		Scripts:           h.scripts,
 		// The run's OWN cwd — the directory this question carried and the
 		// ledger recorded with it — so `bash deploy.sh` in the approval
 		// window resolves against where the run was asked from and not
@@ -1734,6 +1836,13 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 		n.Effect, n.Resource = string(ap.Effect), ap.Resource
 		n.Finding, n.Classifier = ap.Finding, ap.Classifier
 		n.Expansion = ap.Expansion
+		if ap.OutOfScope != nil {
+			n.OutOfScope = &agentApprovalOutOfScope{
+				Cause:    string(ap.OutOfScope.Cause),
+				Resource: ap.OutOfScope.Resource,
+				Widening: wideningOffer(ap.OutOfScope.Cause),
+			}
+		}
 		n.Scripts = ap.Scripts
 		n.Install = ap.Install
 	} else {
@@ -1770,6 +1879,7 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 	if ap != nil {
 		proposal.Invocation = ap.Invocation
 		proposal.CommandInvocation = ap.CommandInvocation
+		proposal.OutOfScope = ap.OutOfScope
 	}
 	if !h.approvals.IsPending(proposal) {
 		if ap != nil {
@@ -1786,6 +1896,11 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 	// scripted-suspension test exercises and missing in the real one, which
 	// is a green suite over an "always" that writes no row.
 	h.approvals.NoteEffect(proposal)
+	// And the out-of-scope fact, for the same reason and by the same rule: a
+	// suspension that reached the wire without the middleware's own record
+	// would otherwise offer a widening nothing remembers how to apply. A nil
+	// fact notes nothing.
+	h.approvals.NoteOutOfScope(proposal)
 	if ap != nil {
 		invocation, hasInvocation, commandInvocation := h.approvals.InvocationFor(proposal)
 		n.Standing = standingOffer(invocation, hasInvocation, commandInvocation, proposal.Effect)
@@ -1808,7 +1923,7 @@ func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
 		return
 	}
-	ctx = log.WithTraceID(ctx, runTrace(p.RunID))
+	ctx, _ = log.StartTrace(ctx, runTrace(p.RunID))
 	h.pendingRunsMu.Lock()
 	rc, ok := h.pendingRuns[p.RunID]
 	h.pendingRunsMu.Unlock()
@@ -1886,7 +2001,7 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 	}
 	// The person's answer belongs to the run's exchange, not to a new one:
 	// the resume and everything it drives log under the ask's trace.
-	ctx = log.WithTraceID(ctx, runTrace(runID))
+	ctx, _ = log.StartTrace(ctx, runTrace(runID))
 	h.pendingRunsMu.Lock()
 	rc, ok := h.pendingRuns[runID]
 	h.pendingRunsMu.Unlock()
@@ -1912,6 +2027,17 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		return
 	}
 	if !p.Approved {
+		// "No, and widen it" is not an answer anybody can mean: the widening
+		// answer IS an approval. Refused rather than silently read as a
+		// plain decline, which would apply a decision the person did not
+		// give — an answer to a question they were not asked.
+		if p.Scope == approveScopeExpand {
+			_ = h.r.TryError(req.ID, RPCError{
+				Code:    -32602,
+				Message: "Invalid params: a widening is an approval — a decline is answered with once, session or always",
+			})
+			return
+		}
 		// The person declined (nocx-uvac6.1): the run is NOT over — the
 		// refusal becomes this call's result and the model answers it in
 		// words ("a refusal is an answer", systemprompt.go). The decline
@@ -1944,14 +2070,30 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 			})
 			return
 		}
+		// A no to a WIDENING question refuses that (effect, resource) for the
+		// rest of this run's life — not longer: the record is keyed by the
+		// run, so the next run asks again (design §5.3, both ends). Recorded
+		// after the decline settled, for the same reason the standing part is.
+		h.declineWidening(p, ap)
 		// The standing part is recorded only after the decline settled,
 		// so a loser can never write a row for a question it did not win.
-		warning := h.applyStandingAnswer(p, ap, rc.sessionID)
+		outcome := h.applyStandingAnswer(p, ap, rc.sessionID)
+		warning := outcome.warning
 		if warning != "" && p.Scope != approveScopeOnce {
 			// The standing write did not stick. The refusal is still
 			// this call's result, but it must not claim permanence the
 			// policy will not honour.
 			h.approvals.DowngradeDeclined(ap)
+		}
+		// A standing NO is a standing answer: "never ask me to run this
+		// again" configured something exactly as much as "always" did, and
+		// gets its receipt in the same words for the same reason. When the
+		// receipt cannot be routed, its sentence joins the response — and
+		// never the downgrade above, which is for a save that did NOT stick
+		// and is settled before this line by construction (`saved` and
+		// `warning` are the two faces of one outcome and never both set).
+		if msg := h.notifyStandingAnswer(ap, p, outcome, rc); msg != "" {
+			warning = msg
 		}
 		if rej := h.askSub.TrySubmit(ctx, control.Task{Run: func(taskCtx context.Context) {
 			h.resumeRunDeclined(taskCtx, rc, h.r)
@@ -1963,6 +2105,15 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		}
 		_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunStreaming), Warning: warning}))
 		return
+	}
+	// The offer is what makes the widening answer legitimate, and it is
+	// checked BEFORE the proposal is settled: an answer to a question that
+	// never offered it must leave the question exactly as it was.
+	if p.Scope == approveScopeExpand {
+		if msg := h.wideningRefusal(ap); msg != "" {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: msg})
+			return
+		}
 	}
 	if !h.approvals.Approve(ap) {
 		// The pending check passed but the approve lost the race (another
@@ -1976,7 +2127,36 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 	// The yes is recorded, and only now is the part of it that outlives
 	// this proposal: an answer the server went on to refuse — the race
 	// above — must not leave a standing rule behind it.
-	warning := h.applyStandingAnswer(p, ap, rc.sessionID)
+	var warning string
+	if p.Scope == approveScopeExpand {
+		if msg := h.applyWidening(ap); msg != "" {
+			// NEITHER half applied (design §5.3): the widening and the
+			// approval are one answer, so a store that refused the write
+			// must not leave a run resumed on an approval whose standing
+			// half vanished. The approval is revoked, which puts the
+			// question back to pending — the person answers it again,
+			// differently if they like — and this is therefore the one
+			// answer that is REFUSED rather than warned about.
+			h.approvals.Revoke(ap)
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: msg})
+			return
+		}
+	} else {
+		outcome := h.applyStandingAnswer(p, ap, rc.sessionID)
+		warning = outcome.warning
+		// THE RECEIPT (nocx-2019q). A standing answer that disappeared into
+		// the store with nothing on screen is a thing a person configured
+		// and cannot see: they learn about it later, by being un-asked a
+		// question they have forgotten answering. It is sent only when the
+		// write actually happened, so a receipt can never claim a rule the
+		// store refused — that failure travels in `warning`, on the
+		// response, and is the surface's to show — as is the one degrade
+		// this notification has of its own, a receipt with no turn to land
+		// on.
+		if msg := h.notifyStandingAnswer(ap, p, outcome, rc); msg != "" {
+			warning = msg
+		}
+	}
 	// The resume: the same run, the same stream context, the same binding —
 	// the middleware sees the approval and runs the call as the proposal's
 	// SUBSEQUENT attempt. The approval store is passed again, so the yes
@@ -1992,14 +2172,82 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 	_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunStreaming), Warning: warning}))
 }
 
+// wideningRefusal answers "may this proposal be widened at all", in the words
+// the person's surface would use. Empty means yes.
+//
+// The pending record is the source of truth, not the answer: a renderer that
+// sent scope "expand" for a question that never offered it is answering a
+// question nobody asked, and the row must not grow on the strength of it.
+func (h agentHandlers) wideningRefusal(ap assistant.Approval) string {
+	fact, ok := h.approvals.OutOfScopeFor(ap)
+	if !ok {
+		return "Invalid params: this question offered no widening — nothing about this call fell outside a scope"
+	}
+	if fact.Cause != content.OutOfScopeRowScope {
+		return "Invalid params: this question offered no widening — the bound it fell outside is the run's own fence, which no answer can move"
+	}
+	if _, effectKnown := h.approvals.EffectFor(ap); !effectKnown {
+		return "Invalid params: this question named no effect class, so there is no row to widen"
+	}
+	if h.globalPolicy == nil {
+		return "Invalid params: there is no policy store to widen a row in"
+	}
+	return ""
+}
+
+// applyWidening is the widening half of the answer: ONE store write that adds
+// the resource that fell outside to the row it fell outside of. It returns the
+// sentence the answer is refused with, or empty on success.
+//
+// The row is the GLOBAL matrix row, and deliberately so: a session overlay
+// carries decisions and invocation rules and has no scopes to grow, so a
+// "widen for this session only" would be an answer the storage cannot hold.
+// §5.3 says the answer widens the row's scopes, and the row is one document
+// with one owner — the same one the settings page writes through.
+func (h agentHandlers) applyWidening(ap assistant.Approval) string {
+	fact, ok := h.approvals.OutOfScopeFor(ap)
+	if !ok {
+		return "the widening could not be applied: the question no longer names what fell outside"
+	}
+	effect, ok := h.approvals.EffectFor(ap)
+	if !ok {
+		return "the widening could not be applied: the question named no effect class"
+	}
+	next, err := assistant.WidenRowScope(h.globalPolicy.Policy(), effect, fact.Resource)
+	if err == nil {
+		err = h.globalPolicy.SetPolicy(next)
+	}
+	if err != nil {
+		h.log.Warn("agent.approve: the row could not be widened, so nothing was approved",
+			"run", ap.RunID, "tool", ap.Tool, "effect", string(effect), "error", err)
+		return "the row could not be widened, so this call was not approved either: " + err.Error()
+	}
+	return ""
+}
+
+// declineWidening records a no to a widening question against the RUN. A
+// question that offered no widening records nothing — a plain decline is
+// already carried by the approval store's DeclineKind.
+func (h agentHandlers) declineWidening(p approveParams, ap assistant.Approval) {
+	fact, ok := h.approvals.OutOfScopeFor(ap)
+	if !ok || fact.Cause != content.OutOfScopeRowScope {
+		return
+	}
+	effect, ok := h.approvals.EffectFor(ap)
+	if !ok {
+		return
+	}
+	h.approvals.DeclineWidening(p.RunID, effect, fact.Resource)
+}
+
 // applyStandingAnswer records the part of a decision that outlives the
 // proposal it was given on: command proposals save an invocation rule, while
 // non-command proposals save the classified effect row. "in this session"
 // writes to the run's session overlay, "always" writes to the global policy,
 // and "once" writes nothing anywhere.
-func (h agentHandlers) applyStandingAnswer(p approveParams, ap assistant.Approval, sid session.ID) string {
+func (h agentHandlers) applyStandingAnswer(p approveParams, ap assistant.Approval, sid session.ID) standingAnswerOutcome {
 	if p.Scope == approveScopeOnce {
-		return ""
+		return standingAnswerOutcome{}
 	}
 	invocation, _, commandInvocation := h.approvals.InvocationFor(ap)
 	d := content.DecisionRefuse
@@ -2009,41 +2257,151 @@ func (h agentHandlers) applyStandingAnswer(p approveParams, ap assistant.Approva
 	if !commandInvocation {
 		effect, ok := h.approvals.EffectFor(ap)
 		if !ok {
-			return "the decision was applied to this call, but could not be saved as a standing answer: the question named no effect class"
+			return refusedStandingAnswer("the question named no effect class")
 		}
 		if p.Scope == approveScopeSession {
 			h.sessionPolicy.Set(sid, effect, d)
-			return ""
+			return standingAnswerOutcome{saved: true}
 		}
 		if h.globalPolicy == nil {
-			return "the decision was applied to this call, but there is no policy store to save it as a standing answer in"
+			return standingAnswerOutcome{warning: noPolicyStoreWarning}
 		}
-		next := h.globalPolicy.Policy().SetRowDecision(effect, d)
-		if err := h.globalPolicy.SetPolicy(next); err != nil {
-			return "the decision was applied to this call, but could not be saved as a standing answer: " + err.Error()
+		// Through the store's OWN locked seam, not a read, an edit on the
+		// copy and a whole-document write: the settings page and a second
+		// prompt write the same document, and whichever wrote last used to
+		// win with everything the other had said in it.
+		if err := h.globalPolicy.SetRowDecision(effect, d); err != nil {
+			return refusedStandingAnswer(err.Error())
 		}
-		return ""
+		return standingAnswerOutcome{saved: true}
 	}
 	rule, standingReason := content.StandingRule(invocation)
 	if standingReason != "" {
 		h.log.Warn("agent.approve: the standing answer was not recorded",
 			"run", p.RunID, "tool", p.Tool, "scope", p.Scope, "reason", standingReason)
-		return "the decision was applied to this call, but could not be saved as a standing answer: " + standingReason
+		return refusedStandingAnswer(standingReason)
 	}
 	rule.Decision = d
 	if p.Scope == approveScopeSession {
 		h.sessionPolicy.SetRule(sid, rule)
-		return ""
+		return standingAnswerOutcome{saved: true, rule: rule.Label()}
 	}
 	if h.globalPolicy == nil {
-		return "the decision was applied to this call, but there is no policy store to save it as a standing answer in"
+		return standingAnswerOutcome{warning: noPolicyStoreWarning}
 	}
-	next := h.globalPolicy.Policy().WithRule(rule)
-	if err := h.globalPolicy.SetPolicy(next); err != nil {
-		return "the decision was applied to this call, but could not be saved as a standing answer: " + err.Error()
+	// The same locked seam, and the same reason — plus the one this path
+	// needs on top of it: the STORED rule comes back, so the id the
+	// receipt's Undo names is the id the document actually wears rather
+	// than one this side minted and hoped for (AD-7).
+	stored, err := h.globalPolicy.SetRule(rule)
+	if err != nil {
+		return refusedStandingAnswer(err.Error())
 	}
+	return standingAnswerOutcome{saved: true, ruleID: stored.ID, rule: stored.Label()}
+}
+
+// standingAnswerOutcome is what became of the part of an answer that outlives
+// the proposal: whether it was written, what it covers, and the sentence the
+// person is owed when it was not.
+//
+// It is one value rather than three returns because the three are one fact
+// with three faces, and a caller that could see the warning without the save
+// — or the id without either — is a caller that can draw a receipt for a rule
+// that is not in the store.
+type standingAnswerOutcome struct {
+	// warning is the sentence to show when the standing part could not be
+	// recorded. The decision itself always stood; a store problem is not
+	// the person's to pay for.
+	warning string
+	// saved says a standing answer was WRITTEN — the whole of what a
+	// receipt may be drawn on.
+	saved bool
+	// ruleID is the stored invocation rule's id, and therefore what an
+	// Undo can name exactly. Empty for the answers no id addresses: a
+	// session overlay, which dies with its session, and a matrix row,
+	// which is edited rather than removed.
+	ruleID string
+	// rule is the canonical invocation the answer covers, in the spelling
+	// the question offered it in. Empty for a non-command answer, whose
+	// coverage is the effect row.
+	rule string
+}
+
+// noPolicyStoreWarning is the one sentence for "there is nowhere to save
+// this", written once because two spellings of it would drift.
+const noPolicyStoreWarning = "the decision was applied to this call, but there is no policy store to save it as a standing answer in"
+
+// refusedStandingAnswer wraps the reason one save failed in the sentence a
+// person reads. One owner of the words: every failure path here says the same
+// thing about what DID happen — the decision stood — and differs only in why
+// the standing half did not.
+func refusedStandingAnswer(reason string) standingAnswerOutcome {
+	return standingAnswerOutcome{
+		warning: "the decision was applied to this call, but could not be saved as a standing answer: " + reason,
+	}
+}
+
+// notifyStandingAnswer tells the turn that asked that a standing answer is now
+// in the store (nocx-2019q). It carries the same facts the QUESTION carried —
+// the direction, the width and the binding — and no sentence: the words a
+// receipt shows are the words of the button that was clicked, and that surface
+// is their one owner (AD-8).
+//
+// Nothing is sent when nothing was written, which is what makes a receipt on
+// screen true: "once" saves nothing, an egress question is refused a width
+// before it reaches here, and a refused write leaves `saved` false and its
+// sentence on the response instead.
+//
+// It ANSWERS with a sentence rather than sending in the one case where the
+// write stuck and the receipt cannot be routed — no turn entry — because a
+// receipt the renderer must drop is a thing the person configured and cannot
+// see, which is the soft degrade AGENTS.md forbids. The empty string means
+// there is nothing to report.
+//
+// IT IS ROUTED BY THE TURN, LIKE EVERY OTHER NOTIFICATION ABOUT A RUN, and
+// that is why `rc` is a parameter (nocx-2019q). The entry it carries used to
+// be the approvals store's — `EntryIDFor`, the PROPOSAL's ledger row, the one
+// the approved call runs as a subsequent attempt of. That is the entry this
+// file already sends beside a tool call as `actionEntryId`, and it is not a
+// routing key: the renderer compares `entryId` with the turn block's own and
+// drops anything else, exactly as it drops a stray delta (agent-ask.ts). So a
+// receipt addressed by the proposal was silently discarded for every run that
+// had a ledger — which is every run — and nobody ever saw one. Two entries,
+// two jobs (see agentRunToolCall above); this one wants the turn's.
+func (h agentHandlers) notifyStandingAnswer(ap assistant.Approval, p approveParams, outcome standingAnswerOutcome, rc askRunContext) string {
+	if !outcome.saved {
+		return ""
+	}
+	// No turn to land on: the receipt is REFUSED rather than sent, and the
+	// person is told on the response instead. Sending it would be the soft
+	// degrade AGENTS.md forbids — the renderer would drop it, the store
+	// would still hold the rule, and the only visible trace of an answer
+	// somebody gave would be their not being asked again months later. The
+	// trace above says nothing produces this, so it is logged at ERROR: it
+	// is a broken invariant, not a condition.
+	if rc.entryID == "" {
+		h.log.Error("agent.approve: the standing answer was saved but its receipt has no turn to land on",
+			"run", p.RunID, "tool", p.Tool, "scope", p.Scope)
+		return receiptWithoutTurnWarning
+	}
+	effect, _ := h.approvals.EffectFor(ap)
+	_ = h.r.TryNotify("agent.standingAnswerSaved", mustMarshal(agentStandingAnswerSaved{
+		RunID:    p.RunID,
+		EntryID:  rc.entryID,
+		Approved: p.Approved,
+		Scope:    p.Scope,
+		Rule:     outcome.rule,
+		Effect:   string(effect),
+		RuleID:   outcome.ruleID,
+	}))
 	return ""
 }
+
+// receiptWithoutTurnWarning is what a person reads when the answer stuck and
+// the receipt could not be routed. It says the true thing about what
+// happened — the answer IS saved — and names the surface that can show it,
+// because the turn no longer can.
+const receiptWithoutTurnWarning = "the answer was saved, but this turn could not be told about it — you can see and undo it in Manage permissions"
 
 // resumeRun re-drives a suspended run after the person's yes: the run
 // streams again (awaiting_approval → streaming), the Ask resumes from the
@@ -2106,12 +2464,12 @@ func validateAgentApproveRaw(raw json.RawMessage) string {
 		return "argHash is required and bounded"
 	}
 	switch p.Scope {
-	case approveScopeOnce, approveScopeSession, approveScopeAlways:
+	case approveScopeOnce, approveScopeSession, approveScopeAlways, approveScopeExpand:
 	default:
 		// No default: an answer with no scope is not "once". A default
 		// here would be a standing decision nobody expressed, and the
 		// schema requires the field for the same reason.
-		return "scope is required and must be one of once, session, always"
+		return "scope is required and must be one of once, session, always, expand"
 	}
 	return ""
 }
@@ -2236,11 +2594,23 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state 
 		State:         string(state),
 		DroppedDeltas: dropped,
 		UnarmedBounds: unarmedBounds,
+		Notices:       h.runNotices(rc.runID),
 	}
 	if wireError {
 		notification.Error = sentence
 	}
 	_ = r.TryNotify("agent.runState", mustMarshal(notification))
+}
+
+// runNotices is what this run must say about itself. Read at the terminal
+// rather than emitted when the bound was reached, because that is the moment
+// the person turns back to the answer — and because the fact is about the
+// whole run, not about the call that happened to be refused when it latched.
+func (h agentHandlers) runNotices(runID int64) []string {
+	if h.approvals == nil {
+		return nil
+	}
+	return h.approvals.RunNotices(strconv.FormatInt(runID, 10))
 }
 
 func unarmedRunLeaseSentences(rc askRunContext) []string {
@@ -2643,22 +3013,44 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 	if s.contentDB != nil {
 		attemptLedger = s.contentDB.Ledger()
 	}
-	build := func(w *wsConn, state *connState, r Responder) agentHandlers {
-		// clientID is the CONNECTION identity, deliberately: it binds ask
-		// idempotency to the connection (a reconnect mints a new one), never
-		// to a renderer-minted tab.
+	// buildFor is every dependency an agent handler has EXCEPT the two that
+	// only a connection can supply. It is split out because the run-stopping
+	// path has a caller that is not on the agent lane: policy.setRule and
+	// policy.forgetRule stop the runs a revoked answer left behind
+	// (stopRunsForRevokedAnswer), and they must terminalize through the same
+	// handler agent.cancel does. A second, partially-filled agentHandlers
+	// built beside this one would degrade silently the day terminalize learns
+	// to read another field.
+	buildFor := func(r Responder) agentHandlers {
 		return agentHandlers{
 			op: agentOp, dumpOp: dumpOp, configOp: configOp, endpointWired: endpointWired,
 			noteOp: noteOp, snippetOp: snippetOp, skills: skills, agentTools: agentTools,
 			credentials: credentials, client: client, askSub: askSub,
 			fetcher: s.agentFetcher, attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, expansions: s, scripts: s, knownMaterial: s.agentKnownMaterial,
+			workerStore: s.workerStore, paneAccessBinder: s.paneAccessBinder,
 			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
 			pendingRunsMu:        &s.pendingRunsMu,
 			personalInstructions: s.personalInstructionsText, skillsEnabled: s.skillsEnabled,
 			sessionPolicy: s.sessionPolicy, globalPolicy: s.agentPolicy,
-			log: s.log, state: state, clientID: connectionID(w), r: r,
+			log: s.log, r: r,
 		}
+	}
+	// The registration is the composition root's own hand-off point for the
+	// revocation path: this is where the agent handler's dependencies are
+	// assembled, so it is where the policy handlers are given the ONE way to
+	// terminalize a run. Reading pendingRuns from ws_policy.go and closing a
+	// run there would be a second terminal path, which is a second set of
+	// half-terminal states.
+	s.agentTerminalizer = buildFor
+	build := func(w *wsConn, state *connState, r Responder) agentHandlers {
+		// clientID is the CONNECTION identity, deliberately: it binds ask
+		// idempotency to the connection (a reconnect mints a new one), never
+		// to a renderer-minted tab.
+		h := buildFor(r)
+		h.state = state
+		h.clientID = connectionID(w)
+		return h
 	}
 	return []methodSpec{
 		reg(contentSub, "agent.ask", params(validateAgentAskRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
@@ -2680,7 +3072,196 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 	}
 }
 
+// ── the runs a revoked answer left behind (nocx-r4fh8, nocx-4yjwk.8) ──────
+
+// RunsUnreachedByRuleWrite reports the LIVE runs whose grant would decide
+// differently once one rule write lands — the runs a change or a forget does
+// not reach.
+//
+// A run's grant is minted when the run starts and is immutable for the run
+// (ADR-0020 decision 5), so a policy write never reaches one. This asks each
+// live run's OWN frozen policy the question, through
+// content.ChangedByRuleWrite; the reading of "using it" that produces, and the
+// reading it rejects, are written down at the count in ws_policy.go.
+//
+// It is a method on the server because the server owns the run registry. It
+// takes the registry's lock for the length of the walk and evaluates under it:
+// the walk is seven decisions over at most two probe invocations per run, all
+// of it pure comparison over frozen values, and holding the lock is what makes
+// the answer a snapshot rather than a set that never coexisted.
+func (s *WSServer) RunsUnreachedByRuleWrite(w content.RuleWrite) []int64 {
+	s.pendingRunsMu.Lock()
+	defer s.pendingRunsMu.Unlock()
+	var out []int64
+	for id, rc := range s.pendingRuns {
+		if rc.grant == nil {
+			// The run carries no grant, so it executes no tools and there
+			// is no decision for a rule to change. Not affected, and it is
+			// the honest answer rather than a conservative one: telling a
+			// person a run is affected when nothing it can do is governed
+			// is the imprecise reading this design rejected.
+			continue
+		}
+		if rc.grant.Policy.ChangedByRuleWrite(w) {
+			out = append(out, id)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// RunsUnreachedByRowWrite reports the LIVE runs whose authority would decide
+// differently once ONE matrix write lands — the runs a moved effect row does
+// not reach (nocx-4yjwk.8).
+//
+// It is RunsUnreachedByRuleWrite's twin and shares everything it can: the same
+// registry, the same "no grant, nothing to decide" answer, the same ascending
+// ids, the same snapshot discipline. What it cannot share is the question put
+// to each run, because a row write has no selector to probe — see
+// content/rowwrite.go, which is where that derivation is written down.
+//
+// It answers with the ROWS as well as the runs, and they come out of the same
+// walk on purpose: the sentence a stopped run records must name the change the
+// count was taken over. Those are not always the rows the DOCUMENT moved — the
+// approval prompt writes a row too (GlobalPolicyStore.SetRowDecision), so a
+// person can save a matrix that moves nothing in the document while a run
+// started before that prompt is still deciding under the old row. The rows a
+// person is told about are therefore the rows that moved for the runs, unioned
+// over them and put back into the lattice's order.
+//
+// The one thing it does that the rule twin does not is MINT AGAIN. A run's
+// rows have had the session overlay resolved into them and the run fence
+// folded into them, so the only comparable "after" is that same run's
+// authority minted from the document the write leaves behind. runGrantFrom is
+// the mint both this and the real run cross.
+//
+// The registry is snapshotted under its lock and the minting happens after it
+// is released, which is the one place this differs from the rule twin's
+// evaluate-under-the-lock. The mint reads the session policy store and the
+// settings store; taking their locks under pendingRunsMu would be a lock order
+// this file is the only place to state, and the snapshot is still what makes
+// the set of runs one that coexisted.
+func (s *WSServer) RunsUnreachedByRowWrite(after content.EffectPolicy) ([]int64, []content.Effect) {
+	type held struct {
+		id      int64
+		session string
+		policy  content.EffectPolicy
+	}
+	var runs []held
+	s.pendingRunsMu.Lock()
+	for id, rc := range s.pendingRuns {
+		if rc.grant == nil {
+			// No grant, so no tool and no decision for a row to move. The
+			// honest answer rather than the conservative one, for the
+			// reason the rule twin gives.
+			continue
+		}
+		runs = append(runs, held{id: id, session: string(rc.sessionID), policy: rc.grant.Policy})
+	}
+	s.pendingRunsMu.Unlock()
+
+	var out []int64
+	movedSet := map[content.Effect]bool{}
+	for _, run := range runs {
+		next := s.runGrantFrom(after, run.session)
+		if next == nil {
+			// The server has no policy store, so nothing here was minted
+			// from one and no write can move it.
+			continue
+		}
+		moved := run.policy.RowsMovedByRowWrite(next.Policy)
+		if len(moved) == 0 {
+			continue
+		}
+		out = append(out, run.id)
+		for _, e := range moved {
+			movedSet[e] = true
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	var movedRows []content.Effect
+	for _, e := range content.LatticeEffects() {
+		if movedSet[e] {
+			movedRows = append(movedRows, e)
+		}
+	}
+	return out, movedRows
+}
+
+// StopRunsForRevokedAnswer terminalizes the named runs because a person took
+// back an answer they were running under, and reports which it actually
+// stopped and which had already finished.
+//
+// It goes through handleCancel's path and adds nothing to it: the run is taken
+// out of the registry under pendingRunsMu, beginCancel claims it, the run
+// leases and the context are cancelled, finishCancel records the outcome and
+// terminalize writes the terminal close. A second way to end a run would be a
+// second set of half-terminal states, so there is no second way.
+//
+// THE REASON IS TermAnswerRevoked, AND IT IS NOT TermUserKilled (nocx-4yjwk.7).
+// The two are different facts: user-killed is a decision about THIS RUN — the
+// Stop button on this answer — and answer-revoked is a decision about a
+// PERMISSION, of which this run happened to be a consequence. A history query
+// can now tell them apart instead of reading every revocation as somebody
+// pressing Stop.
+//
+// It used to be TermUserKilled, and not because anybody judged them the same:
+// the durable vocabulary is closed by a CHECK constraint on
+// executions.termination_reason, so until that CHECK was widened by a rung on
+// the migration ladder the honest name could not be recorded at all.
+//
+// THE REASON IS METADATA AND THE SENTENCE IS THE WORDS. `answer-revoked` cannot
+// say "df -h", so the sentence still names WHICH answer was taken back, and it
+// is the part a person actually reads. The reason never replaces it.
+//
+// THE TWO OUTCOMES ARE BOTH REPORTED, and neither is a failure. A run that is
+// gone from the registry, or one beginCancel refuses, has already reached a
+// terminal state between the count and this call — the person asked for it to
+// stop and it has stopped, for its own reasons — and saying "stopped 3" when
+// one of them finished by itself would be a sentence that is not true. What
+// this cannot report is a terminal LEDGER write that fails: terminalize logs
+// it and the startup sweep repairs the run as interrupted, exactly as it does
+// for agent.cancel, and the run is cancelled from the engine's and the
+// person's point of view either way. That degrade is agent.cancel's, unchanged
+// and shared, rather than a second reporting channel invented here.
+func (s *WSServer) StopRunsForRevokedAnswer(
+	ctx context.Context, r Responder, ids []int64, sentence string,
+) (stopped, alreadyFinished []int64) {
+	if s.agentTerminalizer == nil {
+		// No agent methods are registered on this server, so no run in this
+		// list can be live. Every id is reported as already finished rather
+		// than as stopped: the caller's sentence must not claim a stop that
+		// nothing performed.
+		return nil, append([]int64(nil), ids...)
+	}
+	h := s.agentTerminalizer(r)
+	for _, id := range ids {
+		s.pendingRunsMu.Lock()
+		rc, ok := s.pendingRuns[id]
+		s.pendingRunsMu.Unlock()
+		if !ok || rc.control == nil || !rc.control.beginCancel() {
+			alreadyFinished = append(alreadyFinished, id)
+			continue
+		}
+		runCtx, _ := log.StartTrace(ctx, runTrace(id))
+		rc.control.cancelRunLeases()
+		rc.control.cancelContext()
+		rc.control.finishCancel(content.RunCancelled, content.TermAnswerRevoked, sentence, true)
+		h.terminalize(runCtx, rc, content.RunCancelled, content.TermAnswerRevoked, sentence, r)
+		stopped = append(stopped, id)
+	}
+	return stopped, alreadyFinished
+}
+
 // runTrace is the id of one agent exchange — the run — as every log line
 // belonging to it names it. One derivation, so the ask, the approval and
 // the resume cannot disagree about which exchange they are part of.
-func runTrace(runID int64) string { return "run-" + strconv.FormatInt(runID, 10) }
+//
+// It is DERIVED rather than minted because the exchange outlives the frame:
+// an ask parks, a person answers eight seconds later on a different request,
+// and there is nowhere between the two to keep an id. The run id is the name
+// the exchange already has, and internal/log hashes it into the W3C shape so
+// the result is joinable by something that is not us (nocx-4l2a5.1).
+func runTrace(runID int64) string {
+	return log.DeterministicTraceID("run-" + strconv.FormatInt(runID, 10))
+}

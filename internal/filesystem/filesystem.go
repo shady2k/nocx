@@ -5,7 +5,7 @@
 // # Why a second directory lister (spec D11)
 //
 // internal/completion already lists remote directories, through SSHCompleter
-// running bash over a DiscoveryConn. Under the AGENTS.md "one owner per
+// running a named probe on this machine's helper. Under the AGENTS.md "one owner per
 // behaviour" rule this must be justified rather than duplicated silently.
 //
 // They answer different questions. Completion asks "what does the shell think
@@ -34,7 +34,7 @@
 // # Watching
 //
 // Watch, WatchKind and WatchMode are part of the Provider and Handle
-// contracts (spec §5.1), but the watching wave — fsnotify locally, polling
+// contracts (spec §5.1), but the watching worker — fsnotify locally, polling
 // over SFTP — is a later step of the design's sequence (§6 step 5). Until
 // then the local provider's Watch refuses with ErrWatchUnavailable; the
 // Handle's set-replacement semantics are already live.

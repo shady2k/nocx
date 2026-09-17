@@ -228,7 +228,34 @@ var (
 // environment (ADR-0024 decision 2): a child process can reach the descriptor
 // and cannot authenticate on it. A refusal is printed in the pane and the agent
 // still runs, unorchestrated.
-const version = "43"
+// 44: the accept the shell waits for is identified by DOMAIN and EPOCH, not
+// by the capability echoed back at it (nocx-aqz7o). The kernel no longer
+// writes the bearer on the outbound direction at all, and it could not have
+// stayed: that direction is the descriptor every descendant of the shell
+// inherits, which is the one actor ADR-0024 made the capability mandatory
+// for. Every installed copy must be rewritten — a shell still sourcing 43
+// checks a `cap` field the kernel has stopped sending and never establishes.
+
+// 47: preserve every user-supplied Claude argument before appending nocx's
+// non-strict MCP configuration, so variadic parsing cannot consume prompts.
+// 48: identify private launch leases with pid and start time, preserve the
+// user's signal traps, and prove interruption cleans the launch directory.
+// 50: a pending enrolment holds the agent until the question closes, and
+// Ctrl+C cancels the launch (nocx-cyhfw). Every installed copy must be
+// rewritten: a shell still sourcing 49 reads a pending answer as a refusal and
+// starts the agent before the person has answered.
+// 53: the agent's report drop reaches it through `env VAR=val CMD`, not a
+// temporary `VAR=val command CMD` assignment (nocx-xn63t.6.1). Bash 3.2 —
+// macOS's /bin/bash — drops that assignment before the traced command execs
+// when this file's own DEBUG-trap preexec hook is installed: confirmed with
+// `set -x` against the real 3.2 fixture, where the assignment and the exec
+// appeared as two separate traced steps and the agent's own report drop
+// stayed empty. Also names why an empty drop went unexplained at all: a
+// failed `mktemp` for it used to be silent, unlike its sibling stage
+// refusal. Every installed copy must be rewritten: a shell still sourcing
+// 52 hands its agent no report path at all on 3.2, so no worker on macOS
+// could ever declare what it produced.
+const version = "53"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

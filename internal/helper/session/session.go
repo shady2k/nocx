@@ -9,7 +9,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/sessionruntime"
 )
 
 // One host session: a PTY, its process group, its bounded output window, its
@@ -70,12 +72,137 @@ type SpawnRequest struct {
 	Cols      uint16
 	Rows      uint16
 	Lifecycle *proto.LifecycleLaunch
+	// AgentToolToken is the bearer that admits this pane's far agent, minted by
+	// the coordinator that asked for the pane (nocx-50w7p.16 for the ssh route,
+	// nocx-e2bws for this one). It travels into the launch options and from
+	// there into the DESCRIPTOR the shell reads — never the environment block,
+	// never argv — because the far agent presents it to the endpoint, which
+	// admits nothing a bearer does not answer for.
+	//
+	// It exists on this request because a pane the far host's own helper spawns
+	// is a pane this coordinator cannot admit by process ownership either: the
+	// shell is on another machine, and the interval is opened by this value.
+	AgentToolToken string
+	// AgentToolEndpoint is THIS request's own tool endpoint on the helper's
+	// machine — the caller's socket, which the launch renders as the shell's
+	// NOCX_TOOL_SOCKET. It is carried per request rather than held by the
+	// spawner, because the daemon outlives its callers and serves several of
+	// them: a value fixed at the daemon's start describes whichever
+	// coordinator started it, and a pane opened by another one would carry
+	// it (nocx-50w7p.18). Empty means this caller runs no endpoint, and the
+	// launch then renders no NOCX_TOOL_SOCKET at all.
+	AgentToolEndpoint string
 }
 
 // Spawner starts a shell under a PTY. One implementation reaches internal/pty;
 // a test's reaches nothing.
 type Spawner interface {
 	Spawn(req SpawnRequest) (Process, error)
+}
+
+// SSHSpawnRequest is what the helper decided to open on a FAR host, after the
+// wire's params have been validated: a resolved destination, the shape of the
+// session, and the two launch decisions the spawner needs.
+//
+// There is no command here, and there is no way to put one: the remote command
+// is the launch carrier, built by the spawner from internal/shellintegration.
+// What the caller decides is a DESTINATION and whether this session
+// integrates, which is the same division SpawnRequest draws between the
+// environment and the program.
+type SSHSpawnRequest struct {
+	// SessionID is minted by the service before the channel is opened, so the
+	// launcher can identify the session on the far side without an installed
+	// script — the same reason SpawnRequest carries one.
+	SessionID string
+	// Destination is the resolved address, account and identity. The helper
+	// dials exactly this and resolves nothing.
+	Destination proto.SSHDestination
+	// AcceptOnTrust and HostKeyFingerprint are the caller's two statements
+	// about the host key: whether a key nobody recorded may be trusted, and
+	// which key the caller expects. See proto.SSHSpawnParams.
+	AcceptOnTrust      bool
+	HostKeyFingerprint string
+	// Shell is the far shell the launcher is built for.
+	Shell proto.SSHShellKind
+	// Mode is the caller's integration intent, carried through UNINTERPRETED.
+	// The gate that decides whether a mode integrates is
+	// profile.DesiredMode.DeliversScripts() and it has one owner: the spawner
+	// asks it, in the build-tagged file, because internal/profile is reachable
+	// only from a tagged helper and a second copy of the predicate here would
+	// be a second answer to one question (AD-8).
+	Mode proto.SSHMode
+	// AgentToolEndpoint is THIS request's own tool endpoint on the helper's
+	// machine: what every connection arriving on the far-side tool socket is
+	// forwarded into. It is a second value beside AgentToolSocketPath because
+	// it is a second machine — that one is a path on the far host, this one is
+	// a socket here — and it travels per request for the reason SpawnRequest's
+	// does: the daemon serves several coordinators, and a pane's tool
+	// connections belong to the one that opened the pane (nocx-50w7p.18).
+	// Empty means this caller runs no endpoint, and a far socket path with
+	// nothing behind it is then refused by name before anything is dialed.
+	AgentToolEndpoint string
+	// AgentToolToken is the bearer that admits this pane's far agent, minted by
+	// the coordinator that opened the pane and handed to the far launcher for
+	// the frame it reads into a non-exported variable (nocx-50w7p.16). It is a
+	// secret and this struct is not a place it rests: it goes into the launch
+	// options, which render it into the descriptor, and nowhere else.
+	AgentToolToken string
+	// AgentToolsAbsent is why this pane's agent gets no tool surface, from the
+	// closed set internal/shellintegration owns, or empty when nocx did not say
+	// (nocx-e2bws). It reaches the launcher's environment as a code; the SHELL
+	// renders the sentence a person reads.
+	AgentToolsAbsent string
+	Cols             uint16
+	Rows             uint16
+	// Lifecycle is the caller's request for the authenticated lifecycle
+	// channel. The spawner opens the far side's loopback listener for it,
+	// renders its addressing into the launcher, and puts the BEARER in frame 2
+	// — never in the command, because a bearer nothing can spend is a
+	// credential minted for nobody. A request the pane cannot honour (the far
+	// side refused a listener, or the far shell could not be integrated) is
+	// refused by name, or answered with a session whose lifecycle window does
+	// not exist and whose `adopt-lifecycle` is therefore null.
+	Lifecycle *proto.LifecycleLaunch
+	// KeepaliveInterval and KeepaliveCountMax arm this session's own prober,
+	// on exactly the terms ssh.ConnectConfig's fields already state for the
+	// coordinator's non-helper dials — zero disables it. They travel per
+	// request because the helper now holds the connection (ADR-0057) and has
+	// no profile of its own to read an interval from (nocx-y6fh7 item 6).
+	KeepaliveInterval time.Duration
+	KeepaliveCountMax int
+	// OnLiveness is called every time this session's prober learns something
+	// about the far end's reachability, for as long as the channel is open:
+	// whether it answered this round, and the round trip when it did (zero
+	// when it did not, or when nothing has been measured yet). Nil is
+	// ordinary — a caller that wants no observation (a probe, a test) passes
+	// none — and the spawner never invents a value to report through it.
+	//
+	// Spelled as two primitives rather than internal/ssh's own Reachability
+	// type on purpose: this file has no nocx_local_ssh build tag, and
+	// internal/ssh is in the untagged helper's forbidden dependency graph
+	// (internal/helper/deploy/dependency_test.go) — an ssh client must never
+	// reach the artifact written to somebody else's host. The tagged half
+	// (spawn_ssh.go) is where Reachability's two fields cross into these two
+	// arguments.
+	OnLiveness func(responsive bool, roundTrip time.Duration)
+}
+
+// SSHSpawner opens one shell channel on a far host and adapts it to Process.
+//
+// # Why it is a separate interface, and why nil is an answer
+//
+// A session whose process is a remote shell channel needs an ssh client, and a
+// helper carries one only when it was built with nocx_local_ssh (plan §1): the
+// artifact written to a host we do not own links none. So this seam is nil in
+// every untagged build, and a spawn-ssh that reaches one is REFUSED BY NAME
+// rather than answered with a session that cannot work — the same answer
+// cmd/nocx-helper gives for the whole ssh service, one op in.
+//
+// It takes a context because the connection to ask is the REQUEST's, not the
+// service's: a helper serves several coordinators at once (D12), and the
+// credential and the host-key verdict belong to the one that asked.
+type SSHSpawner interface {
+	SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process, error)
 }
 
 // Inspector is the OS-evidence seam (D10), and it draws two distinctions
@@ -176,12 +303,56 @@ type hostSession struct {
 	id              proto.HostSessionID
 	raw             [16]byte
 	workspace       proto.WorkspaceID
-	startedAt       time.Time
-	launch          proto.LaunchRecord
-	proc            Process
-	win             *window
+	// key is the idempotency key the spawn carried, or empty (L7). It is held
+	// so the row's removal can release the claim in the same critical section
+	// that removes the row — the closing end of the interval "a key names its
+	// session from before the fork until the row leaves the inventory". It is
+	// never reported: the key is the CALLER's record and the helper is only
+	// asked to honour it, not to publish it.
+	key       string
+	startedAt time.Time
+	launch    proto.LaunchRecord
+	proc      Process
+	win       *window
+	// runtime is this session's ONE terminal-state owner (ADR-0066): the
+	// emulator, the modes the program set, the committed geometry and the
+	// answers to the program's own questions. It is created in spawn before
+	// the first byte of output is read, and it lives exactly as long as the
+	// session does — an enrolment, an attachment and a coordinator coming and
+	// going are all inside that interval and none of them creates it or ends
+	// it (requirement 5 of nocx-ygxjv.12).
+	runtime *sessionruntime.Session
+	// screen is the emulator the runtime directs. It is held here for its
+	// LIFETIME and not for its behaviour: every read and every write goes
+	// through runtime, and Close is this object's to call because a runtime
+	// does not own the pair it was handed ("a runtime does not create a
+	// terminal, it directs one").
+	screen          emulator.Terminal
 	log             *slog.Logger
 	lifecycleBudget int64
+	// owner is this session's one I/O owner (nocx-6q1uh.3, spec §5): the
+	// goroutine that alone orders output ingest, runtime replies, client
+	// frames, intents and resize, and the only thing that ever calls
+	// s.proc.Read or s.proc.Write. It exists for the life of the session
+	// exactly like runtime and screen do — built in spawn before the first
+	// byte is read, ended in stop.
+	owner *sessionOwner
+	// tokens is this session's one-shot token book (nocx-6q1uh.4, spec
+	// §6.2), the SAME instance finishSpawn binds to owner via SetTokens —
+	// this copy is what a snapshot/target RPC handler (nocx-6q1uh.5) reaches
+	// through hs rather than through the owner, which it has no handle on.
+	tokens *tokenBook
+	// now is this session's clock, for the retained-snapshot ring below —
+	// s.now (Service's own seam) in production, a fake clock in a test that
+	// wants to drive snapshotMaxAge without a real wait.
+	now func() time.Time
+	// snapMu, snapNext and snapRing are the retained-snapshot ring
+	// (nocx-6q1uh.4, spec §6.1, snapshots.go): snapNext mints each
+	// SnapshotID from 1, and snapRing holds the last snapshotRing of them,
+	// indexed by id modulo the ring's width.
+	snapMu   sync.Mutex
+	snapNext SnapshotID
+	snapRing [snapshotRing]*retainedSnapshot
 
 	mu          sync.Mutex
 	subs        map[proto.SubscriberID]*subscriber
@@ -190,42 +361,68 @@ type hostSession struct {
 	writerAtt   proto.AttachmentID
 	epoch       proto.LeaseEpoch
 	exit        *proto.SessionExitStatus
-	stopped     bool
+	// exitedAt is when watchExit recorded exit, on the Service's clock seam
+	// (s.now, never wall time directly) — what the unclaimed-session TTL and
+	// eviction-under-pressure measure age against (nocx-isjh4). Zero while
+	// exit is nil.
+	exitedAt time.Time
+	stopped  bool
 }
 
-// pump moves bytes from the PTY into the window and nowhere else. Its interval
-// starts before each proc.Read and ends after that read's bytes reach win.write
-// (or win.close on EOF); throughout it MUST NOT take s.mu. write holds s.mu
-// from lease validation until proc.Write returns, so making pump contend on
-// that mutex would deadlock a blocked PTY write before the pump can drain it.
-// It never interprets a byte — it reads them to MOVE them (AD-6).
-func (s *hostSession) pump() {
-	buf := make([]byte, pageSize)
-	for {
-		n, err := s.proc.Read(buf)
-		if n > 0 {
-			s.win.write(buf[:n])
-		}
-		if err != nil {
-			if !errors.Is(err, io.EOF) {
-				s.log.Warn("session output ended", "session", s.id.Session, "err", err)
-			}
-			s.win.close()
-			return
-		}
-	}
+// exitInfo reports, under one lock, whether this session's shell has exited,
+// when, and whether a coordinator currently holds an attachment on it. The
+// three are read together because expiry and eviction both ask exactly one
+// question of a session — "is this an exited session nobody can still need"
+// — and a caller comparing three separately-timed reads could see one that
+// exited and was then attached, or was attached and then detached, as
+// something it never actually was at any single instant (nocx-isjh4,
+// amendments 3 and 4).
+func (s *hostSession) exitInfo() (exited bool, at time.Time, attached bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.exit != nil, s.exitedAt, len(s.attachments) > 0
 }
+
+// pump is gone (nocx-6q1uh.3): reading, ingesting and delivering to the
+// window are now the session's I/O owner's (owner.go, ingestOne/drainLocal/
+// handleReadEvent), for the reason its own doc names — this method took no
+// lock BECAUSE hostSession.write held one across proc.Write, and holding one
+// across a write is exactly what stalled a pane whose program floods output
+// and never reads its input (nocx-6q1uh.1). The owner replaces the lock
+// rather than working around it: everything pump did — ingest before
+// delivering to win, log a failure without stopping the move, close the
+// window on EOF or an error — is now that goroutine's, and it never
+// contends with a write because nothing it does blocks on one.
 
 // lifecyclePump moves raw lifecycle bytes from the helper-owned shell channel
 // into its bounded window. No decoder or policy exists on this host.
 func (s *hostSession) lifecyclePump(stream io.ReadWriteCloser) {
 	buf := make([]byte, pageSize)
+	// THE ONE FACT THAT SPLITS THE HELLO FAILURE IN TWO (nocx-n14oo.6).
+	//
+	// A pane that never integrates ends in a hello-timeout, reported by the
+	// backend twenty seconds and one process away, and until this counter
+	// nothing anywhere could say WHICH of the two failures it was: a shell
+	// that never wrote its hello — the rcfile did not run, or ran and could
+	// not reach fd 4 — or a hello that was written and did not survive the
+	// carriage. The first byte and the total are the whole of that answer.
+	first := true
+	var total int
 	for {
 		n, err := stream.Read(buf)
 		if n > 0 {
+			if first {
+				s.log.Info("lifecycle: the shell wrote its first bytes",
+					"session", s.id.Session, "bytes", n)
+				first = false
+			}
+			total += n
 			s.lifecycleWin.write(buf[:n])
 		}
 		if err != nil {
+			s.log.Info("lifecycle: the shell's channel ended",
+				"session", s.id.Session, "bytes_total", total,
+				"wrote_nothing", total == 0, "error", err)
 			s.lifecycleWin.close()
 			return
 		}
@@ -250,7 +447,8 @@ func (s *hostSession) lifecyclePump(stream io.ReadWriteCloser) {
 func (s *hostSession) watchExit(now func() time.Time, notify func(proto.SessionExit)) {
 	<-s.proc.Done()
 	err, _ := s.proc.WaitErr()
-	status := proto.SessionExitStatus{Code: 0, At: proto.FormatTime(now())}
+	exitedAt := now()
+	status := proto.SessionExitStatus{Code: 0, At: proto.FormatTime(exitedAt)}
 	if err != nil {
 		status.Code = -1
 		var coder interface{ ExitCode() int }
@@ -261,9 +459,23 @@ func (s *hostSession) watchExit(now func() time.Time, notify func(proto.SessionE
 		if errors.As(err, &sig) {
 			status.Signal = sig.Signal()
 		}
+		// WHY this process ended, when code/signal alone read identically for
+		// two different facts (nocx-y6fh7 item 6, round 3): a keepalive
+		// prober giving up on an ssh session's own connection wraps its
+		// WaitErr in a type naming the cause (sshsvc.keepaliveLostError),
+		// probed here the SAME optional-interface way as ExitCode/Signal —
+		// this file has no build tag and must never import the ssh-tagged
+		// package that defines it. Everything else, including a local
+		// process's ordinary end and the far side hanging up with no
+		// status at all, answers no cause and Cause stays empty.
+		var causer interface{ ExitCause() string }
+		if errors.As(err, &causer) {
+			status.Cause = proto.SessionExitCause(causer.ExitCause())
+		}
 	}
 	s.mu.Lock()
 	s.exit = &status
+	s.exitedAt = exitedAt
 	s.mu.Unlock()
 
 	// What the window actually cost, said once per session. D8 names the cost
@@ -275,7 +487,7 @@ func (s *hostSession) watchExit(now func() time.Time, notify func(proto.SessionE
 	s.log.Info("session exited", "session", s.id.Session,
 		"code", status.Code, "signal", status.Signal,
 		"produced", uint64(written), "retained", uint64(written-base),
-		"windowResidentBytes", s.win.allocated(), "windowBytes", s.launch.WindowBytes)
+		"windowResidentBytes", s.win.allocated(), "windowBytes", s.launch.WindowBytes())
 
 	notify(proto.SessionExit{Session: s.id, Status: status})
 }
@@ -310,12 +522,24 @@ func (s *hostSession) entry(inspector Inspector) proto.SessionEntry {
 	if writer != nil {
 		e.WriterEpoch = epoch
 	}
-	if inspector != nil && exit == nil {
+	// THE ONE PLACE A SESSION'S EVIDENCE IS TAKEN, and it is taken only where
+	// there is a process on THIS MACHINE to ask about.
+	//
+	// `s.launch.Pid` used to be read unconditionally, and a session whose
+	// process is somewhere else makes that a defect rather than a stale field:
+	// the union's remote branch has no pid at all, so the value here would be
+	// zero — and pid 0 is the kernel scheduler. The helper would then report
+	// the scheduler's argv, start time and state under this session's
+	// authority, which is the exact confusion the authority/evidence split
+	// exists to prevent. A remote session is observed by NOBODY, and its entry
+	// says so the way the schema already means: `observed: null` — "nobody
+	// could be asked".
+	if inspector != nil && exit == nil && s.launch.IsLocal() {
 		fg, err := s.proc.ForegroundProcessGroup()
 		if err != nil {
 			fg = 0
 		}
-		e.Observed = inspector.Observe(s.launch.Pid, fg)
+		e.Observed = inspector.Observe(s.launch.LocalPid(), fg)
 	}
 	return e
 }
@@ -493,8 +717,20 @@ func (s *hostSession) serve(ctx context.Context, sub *subscriber, log *slog.Logg
 	}
 }
 
+// serveLifecycle is the FIRST of the three hops the shell's hello takes to
+// reach the coordinator's adapter, and until nocx-n14oo.7 it said nothing
+// about the two facts that matter: that a frame went out, and what it had
+// sent when it stopped. A pump that reports only a FAILED send cannot be told
+// apart from one that never had anything to send.
 func (s *hostSession) serveLifecycle(ctx context.Context, sub *subscriber, log *slog.Logger) {
-	defer close(sub.lifecycleDone)
+	log = log.With("session", s.id.Session, "subscriber", sub.id)
+	firstSent := true
+	var totalSent int
+	defer func() {
+		log.Info("lifecycle: the coordinator's pump stopped",
+			"bytes_total", totalSent, "sent_nothing", totalSent == 0)
+		close(sub.lifecycleDone)
+	}()
 	for {
 		if ctx.Err() != nil {
 			return
@@ -534,6 +770,11 @@ func (s *hostSession) serveLifecycle(ctx context.Context, sub *subscriber, log *
 				log.Warn("lifecycle data not delivered", "session", s.id.Session, "err", err)
 				return
 			}
+			if firstSent {
+				log.Info("lifecycle: the shell's first bytes went to the coordinator", "bytes", len(data))
+				firstSent = false
+			}
+			totalSent += len(data)
 			sub.cursorMu.Lock()
 			sub.lifecycleSent += proto.StreamOffset(len(data))
 			sub.cursorMu.Unlock()
@@ -693,30 +934,53 @@ func (s *hostSession) releaseConnection(sink Sink) {
 
 // write applies one inbound data frame to the PTY, if and only if it comes
 // from the current holder of the write capability at the current lease epoch
-// and from the connection that owns that attachment. It holds s.mu from
-// validation through the return of s.proc.Write; lease transitions wait for
-// that interval to end, and pump MUST NOT acquire s.mu during its own
-// proc.Read-to-window-write interval.
+// and from the connection that owns that attachment.
+//
+// It holds s.mu ONLY for the lease checks, which is the fix nocx-6q1uh.1
+// asked for stated as a lock-discipline rule: this used to hold s.mu from
+// validation through the return of s.proc.Write, which is exactly what let a
+// blocked write starve pump's own read-to-window-write interval, since both
+// needed the same lock. The write itself is now a submission to this
+// session's I/O owner (owner.go), off s.mu entirely — the owner orders it
+// against every other input item on its own, and a lease transition here can
+// still never land inside somebody else's write, because the owner never
+// hands the writer two payloads at once.
+//
+// This still WAITS for the item's own outcome before answering, unlike a
+// client frame's other lane (a resize, an intent): that is a deliberate
+// choice beyond what the plan's literal text says, made to keep this
+// call's synchronous contract — the caller has always been told whether ITS
+// bytes reached the PTY, and changing that to "queued" would be a second,
+// unplanned change to what this RPC promises. See the task's report for the
+// alternative this rejects and why.
 func (s *hostSession) write(sink Sink, f proto.SessionFrame) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.writer == nil {
+		s.mu.Unlock()
 		return ErrNoWriter
 	}
 	attachment, ok := s.attachments[s.writerAtt]
 	if !ok || attachment.sink != sink || attachment.subscriber != *s.writer {
+		s.mu.Unlock()
 		return ErrNotTheWriter
 	}
 	held, err := proto.SessionBytes(string(*s.writer))
 	if err != nil || held != f.Subscriber {
+		s.mu.Unlock()
 		return ErrNotTheWriter
 	}
 	if f.Epoch != s.epoch {
+		s.mu.Unlock()
 		return ErrStaleLease
 	}
-	_, werr := s.proc.Write(f.Payload)
-	return werr
+	s.mu.Unlock()
+
+	done, submitErr := s.owner.submit(ownerItem{kind: itemClientFrame, payload: f.Payload})
+	if submitErr != nil {
+		return submitErr
+	}
+	res := <-done
+	return res.Err
 }
 
 func (s *hostSession) writeLifecycle(sink Sink, f proto.SessionFrame) error {
@@ -738,9 +1002,64 @@ func (s *hostSession) writeLifecycle(sink Sink, f proto.SessionFrame) error {
 	return err
 }
 
+// resize applies one size to the PTY and to the emulator TOGETHER, through the
+// runtime's geometry commit. It is the only way a session's size moves: a size
+// that reached the PTY without the screen would leave the two disagreeing about
+// every cell after a column, and the screen is what the program's own size
+// queries are answered from (ADR-0066).
+//
+// The commit is not atomic and does not pretend to be. If one side refuses,
+// the runtime puts the other back to the commit in force and publishes
+// nothing, so what is running and what the session describes stay one size —
+// see sessionruntime.Session.CommitGeometry, which owns that rule.
+//
+// It is a submission to the session's I/O owner (spec §5.6) rather than a
+// direct call, so a resize can never land between a validated intent and the
+// write it is about to make: both travel the owner's one ordered queue, and
+// CommitGeometry's own reply — the in-band size report a program that asked
+// for one is owed — reaches the PTY through the SAME writer, because
+// repairLocked and CommitGeometry hand it to Session.Commit's ReplySink,
+// which is this owner.
+func (s *hostSession) resize(cols, rows uint16) error {
+	g := sessionruntime.Geometry{
+		Cols: int(cols),
+		Rows: int(rows),
+		// No cell metrics cross the wire today; see ptyTerminal.Resize.
+		CellWidthPx:  0,
+		CellHeightPx: 0,
+	}
+	done, submitErr := s.owner.submit(ownerItem{kind: itemResize, resize: &g})
+	if submitErr != nil {
+		return submitErr
+	}
+	res := <-done
+	return res.Err
+}
+
 // stop ends the session's own goroutines and closes the PTY. It is what the
 // helper does on shutdown; ending a session on a caller's request is
 // close-session and is nocx-k6p18.7's.
+//
+// It is also where the runtime and its emulator are DESTROYED, which is the
+// closing end of the interval they draw: they are created in spawn, before the
+// first byte is read, and they end when the session ends and at no other
+// moment. A stopped PROCESS does not end them — an exited session stays in the
+// inventory carrying its status and its screen until somebody closes it.
+//
+// The shutdown ORDER (spec §5.7: stop admission, request termination,
+// interrupt the writer, read to EOF, resolve queued items, join, close the
+// readable side) is owner.stop's, not this method's — this call is graceful
+// with no deadline, which is the shape every existing caller of stop already
+// expected (nothing here passed a deadline before this task, and nothing
+// asks for a forced stop yet; a helper-shutdown caller with a deadline is
+// this same owner.stop, called differently, when that caller exists).
+// hostSession's own remaining job is exactly what it was: fail the runtime
+// and close the screen, in that order, once the owner has confirmed there is
+// nothing left for either of them to race.
+// stopGrace is how long a stopping session whose program was asked to end
+// waits for that program's tail before its PTY is closed under it.
+const stopGrace = 2 * time.Second
+
 func (s *hostSession) stop() {
 	s.mu.Lock()
 	if s.stopped {
@@ -750,6 +1069,27 @@ func (s *hostSession) stop() {
 	s.stopped = true
 	s.mu.Unlock()
 	s.releaseConnection(nil)
-	_ = s.proc.Close()
-	s.win.close()
+	if tailLost := s.owner.stop(true, time.Time{}); tailLost {
+		s.log.Warn("session owner: the drain did not reach EOF before shutdown", "session", s.id.Session)
+	}
+	// A graceful stop with no deadline never itself forces the detach path
+	// (spec §5.7) — this call site passes owner.stop none today, unlike a
+	// future helper-shutdown caller of this same method (the comment on
+	// stop itself). Checked anyway: owner.writerDetached is one-way and
+	// sticky, so it is true here only when an EARLIER call on this same
+	// owner already forced the detach, and that fact belongs in this
+	// session's own shutdown log rather than being silently absorbed into
+	// an ordinary close.
+	if s.owner.writerDetached() {
+		s.log.Warn("session owner: a stuck ssh writer was abandoned before this session closed", "session", s.id.Session)
+	}
+	// The runtime first, then the screen, and the order is the only one that
+	// names what happened: Fail makes the runtime refuse rather than serving a
+	// screen that is about to go, and the screen's Close then releases what
+	// the emulator owns. A read already in flight can still arrive between the
+	// two, which the owner reports as a closed terminal and nothing else.
+	if err := s.runtime.Fail("session ended"); err != nil {
+		s.log.Debug("session runtime already ended", "session", s.id.Session, "err", err)
+	}
+	s.screen.Close()
 }

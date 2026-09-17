@@ -221,7 +221,6 @@ describe('createBranchSource — every non-ok state', () => {
     'gitUnavailable',
     'gitTooOld',
     'noCwd',
-    'consentRequired',
     'unsupportedPlatform',
     'deployFailed',
     'execForbidden',

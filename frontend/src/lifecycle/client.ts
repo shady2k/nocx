@@ -17,7 +17,6 @@ import type { Dispatcher } from '../dispatcher'
 import type { LifecycleChanged } from '../generated/lifecycle.changed'
 import type { LifecycleFact } from './state'
 import type { LifecycleRecoverAck } from '../generated/lifecycle.recoverAck'
-import type { LifecycleEstablishAck } from '../generated/lifecycle.establishAck'
 import type { LifecycleSubmitAttempt } from '../generated/lifecycle.submitAttempt'
 
 /** One lifecycle fact after routing by its server-authoritative session id.
@@ -122,32 +121,5 @@ export class LifecycleClient {
    *  Lost → Native. */
   recoverAck(sessionId: string, generation: string): Promise<LifecycleRecoverAck> {
     return this.dispatcher.call('lifecycle.recoverAck', { sessionId, generation })
-  }
-
-  /** Acknowledge an establishment (ADR-0024 decision 9): the renderer has
-   *  processed the published prompt_ready fact for the exact {lane, domain,
-   *  epoch, generation} and committed the presentation that makes an editor
-   *  available. The backend flushes the pending accept only on this
-   *  acknowledgement — no acknowledgement, no accept, and the shell's
-   *  bounded handshake wait expires with its native prompt visible
-   *  (fail-open). The params are narrow: session identity, the lane/domain/
-   *  epoch addressing tuple and the backend-minted generation the fact
-   *  carried. The call is fire-and-forget from the renderer: a refusal (a
-   *  stale generation, a superseded establishment) is the backend's own
-   *  bookkeeping, and the session stays conventional. */
-  establishAck(
-    sessionId: string,
-    lane: string,
-    domain: string,
-    epoch: number,
-    generation: string,
-  ): Promise<LifecycleEstablishAck> {
-    return this.dispatcher.call('lifecycle.establishAck', {
-      sessionId,
-      lane,
-      domain,
-      epoch,
-      generation,
-    })
   }
 }

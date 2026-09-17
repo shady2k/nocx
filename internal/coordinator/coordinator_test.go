@@ -138,15 +138,12 @@ func startServer(t *testing.T, cfg coordinator.Config) *coordinator.Server {
 
 func shortDir(t *testing.T) string {
 	t.Helper()
-	// os.MkdirTemp under the system temp root keeps the resulting socket
-	// path well inside sun_path on macOS, where a nested t.TempDir plus the
-	// profile layout can exceed 104 bytes.
-	dir, err := os.MkdirTemp("", "nocxco")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return filepath.Join(dir, "run")
+	// storagetest.SocketDir, not a package-local os.MkdirTemp("", ...): that
+	// only shortened this file's own prefix and still resolved under
+	// TMPDIR, the same root IsolateWithHome moved off of on darwin
+	// (nocx-zmeu1). "run" is this package's own subdirectory, not part
+	// of the shared answer.
+	return filepath.Join(storagetest.SocketDir(t), "run")
 }
 
 // ask sends one request over the socket and returns the single response line.

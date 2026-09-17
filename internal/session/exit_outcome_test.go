@@ -174,6 +174,52 @@ func TestExitOutcome_NoWaitErrSeamIsInterrupted(t *testing.T) {
 	}
 }
 
+// A helper-hosted ssh session whose OWN keepalive prober gave up is
+// CONNECTION LOSS, not a clean exit (nocx-y6fh7 item 6, round 3): the two
+// read identically on Code/Signal alone (-1, no signal) and only the named
+// cause tells them apart from an ordinary "no status" loss.
+func TestExitOutcome_HelperKeepaliveLostCauseIsInterrupted(t *testing.T) {
+	s := sessionWithChannel(&waitErrChannel{
+		done: make(chan struct{}), waitErr: &fakeHelperExit{code: -1, cause: "keepalive-lost"}, waitSet: true,
+	})
+	cause, status := s.ExitOutcome()
+	if cause != ExitInterrupted {
+		t.Errorf("cause = %q, want %q", cause, ExitInterrupted)
+	}
+	if status != -1 {
+		t.Errorf("status = %d, want -1", status)
+	}
+}
+
+// The same helper exit shape with NO cause named stays exactly what it was
+// before this cause existed: an authoritative exit. This is the paired proof
+// item 6's brief asked for — the far side hanging up with no status is
+// unchanged.
+func TestExitOutcome_HelperExitWithNoCauseStaysExited(t *testing.T) {
+	s := sessionWithChannel(&waitErrChannel{
+		done: make(chan struct{}), waitErr: &fakeHelperExit{code: 3}, waitSet: true,
+	})
+	cause, status := s.ExitOutcome()
+	if cause != ExitExited {
+		t.Errorf("cause = %q, want %q", cause, ExitExited)
+	}
+	if status != 3 {
+		t.Errorf("status = %d, want 3", status)
+	}
+}
+
+// fakeHelperExit stands in for client.ExitStatus: it carries an exit code
+// AND, optionally, a named cause, exactly the two optional-interface seams
+// ExitOutcome probes.
+type fakeHelperExit struct {
+	code  int
+	cause string
+}
+
+func (f *fakeHelperExit) Error() string     { return "fake helper exit" }
+func (f *fakeHelperExit) ExitCode() int     { return f.code }
+func (f *fakeHelperExit) ExitCause() string { return f.cause }
+
 // ── fakes ─────────────────────────────────────────────────────────────────
 
 type wrapErr struct{ err error }

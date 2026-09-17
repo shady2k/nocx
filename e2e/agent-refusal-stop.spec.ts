@@ -36,11 +36,12 @@
  * state and the partial answer, then presses the real overflow-menu Stop. No
  * wait is a duration; every wait observes a DOM or fake state transition.
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  standalone as base,
   appReadyForInput,
   VaultBackend,
   bindEndpoint,

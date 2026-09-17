@@ -52,9 +52,10 @@ func (f *fakeRecordHistoryDB) Conversations() content.ConversationRepository { r
 func (f *fakeRecordHistoryDB) Backup(_ context.Context, _ string) error {
 	return content.ErrNotImplemented
 }
-func (f *fakeRecordHistoryDB) Close() error                                   { return nil }
-func (f *fakeRecordHistoryDB) Ledger() content.LedgerRepository               { return f }
-func (f *fakeRecordHistoryDB) Layout() content.LayoutRepository               { return nil }
+func (f *fakeRecordHistoryDB) Close() error                     { return nil }
+func (f *fakeRecordHistoryDB) Ledger() content.LedgerRepository { return f }
+func (f *fakeRecordHistoryDB) Layout() content.LayoutRepository { return nil }
+
 func (f *fakeRecordHistoryDB) APIRuns() content.APIRunRepository              { return nil }
 func (f *fakeRecordHistoryDB) SessionOutput() content.SessionOutputRepository { return nil }
 

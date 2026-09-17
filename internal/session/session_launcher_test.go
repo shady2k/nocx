@@ -126,6 +126,107 @@ func TestLocalSession_HasNoHostKeyFingerprint(t *testing.T) {
 	}
 }
 
+// TestRecordHostKeyFingerprint_AnswersOverAChannelThatCarriesNone is
+// nocx-y6fh7 items 5 and 6's shared foundation: a helper-hosted ssh session's
+// own channel (AttachedSession in production; reasonChannel here, which
+// carries no HostKeyFingerprint method at all) has nothing of its own to
+// answer with — the coordinator captured the fact somewhere else entirely
+// (its own verifyHostKey reverse handler) and must be able to hand it to the
+// session after the fact, the same way RecordOwnedProcessPID already lets a
+// launch fact arrive once the session already exists.
+func TestRecordHostKeyFingerprint_AnswersOverAChannelThatCarriesNone(t *testing.T) {
+	factory := &capturingSSHFactory{ch: &reasonChannel{}}
+	reg := launcherReg().WithSSHFactory(factory)
+
+	sess, err := reg.Open(context.Background(), Config{
+		Kind:   KindRemote,
+		Host:   "example.com",
+		Remote: &ssh.ConnectConfig{},
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = reg.Close(sess.ID()) }()
+
+	if got := sess.HostKeyFingerprint(); got != "" {
+		t.Fatalf("before recording, HostKeyFingerprint = %q, want \"\"", got)
+	}
+	if err := reg.RecordHostKeyFingerprint(sess.ID(), "SHA256:recorded"); err != nil {
+		t.Fatalf("RecordHostKeyFingerprint: %v", err)
+	}
+	if got := sess.HostKeyFingerprint(); got != "SHA256:recorded" {
+		t.Fatalf("after recording, HostKeyFingerprint = %q, want %q", got, "SHA256:recorded")
+	}
+}
+
+// TestRecordHostKeyFingerprint_RecordedValueOutranksTheChannels proves the
+// order HostKeyFingerprint checks: a RECORDED fact wins even when the
+// channel itself could also answer, because the recorded fact is the
+// coordinator's own verified verdict and a channel's own answer (a direct,
+// non-helper dial) is the fallback for when nothing was ever recorded.
+func TestRecordHostKeyFingerprint_RecordedValueOutranksTheChannels(t *testing.T) {
+	factory := &capturingSSHFactory{ch: &fingerprintChannel{fingerprint: "SHA256:fromchannel"}}
+	reg := launcherReg().WithSSHFactory(factory)
+
+	sess, err := reg.Open(context.Background(), Config{
+		Kind:   KindRemote,
+		Host:   "example.com",
+		Remote: &ssh.ConnectConfig{},
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = reg.Close(sess.ID()) }()
+
+	if err := reg.RecordHostKeyFingerprint(sess.ID(), "SHA256:recorded"); err != nil {
+		t.Fatalf("RecordHostKeyFingerprint: %v", err)
+	}
+	if got := sess.HostKeyFingerprint(); got != "SHA256:recorded" {
+		t.Fatalf("HostKeyFingerprint = %q, want the recorded value %q, not the channel's %q",
+			got, "SHA256:recorded", "SHA256:fromchannel")
+	}
+}
+
+// TestRecordHostKeyFingerprint_RefusesADifferentValueForTheSameSession is
+// set-once, on the same terms RecordOwnedProcessPID already states: a
+// session that somehow saw two different verdicts is a defect to surface,
+// never a silent overwrite of evidence a consent decision may already be
+// keyed by.
+func TestRecordHostKeyFingerprint_RefusesADifferentValueForTheSameSession(t *testing.T) {
+	factory := &capturingSSHFactory{ch: &reasonChannel{}}
+	reg := launcherReg().WithSSHFactory(factory)
+
+	sess, err := reg.Open(context.Background(), Config{
+		Kind:   KindRemote,
+		Host:   "example.com",
+		Remote: &ssh.ConnectConfig{},
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = reg.Close(sess.ID()) }()
+
+	if err := reg.RecordHostKeyFingerprint(sess.ID(), "SHA256:first"); err != nil {
+		t.Fatalf("first RecordHostKeyFingerprint: %v", err)
+	}
+	if err := reg.RecordHostKeyFingerprint(sess.ID(), "SHA256:second"); err == nil {
+		t.Fatal("a second, different fingerprint was accepted silently; want a refusal")
+	}
+	if got := sess.HostKeyFingerprint(); got != "SHA256:first" {
+		t.Fatalf("HostKeyFingerprint after the refused second write = %q, want the first value %q", got, "SHA256:first")
+	}
+}
+
+// TestRecordHostKeyFingerprint_RefusesAnUnknownSession names the failure
+// rather than panicking on a lookup that missed, the same shape
+// RecordOwnedProcessPID's own "session not found" answer has.
+func TestRecordHostKeyFingerprint_RefusesAnUnknownSession(t *testing.T) {
+	reg := launcherReg()
+	if err := reg.RecordHostKeyFingerprint(ID("no-such-session"), "SHA256:x"); err == nil {
+		t.Fatal("RecordHostKeyFingerprint on an unknown session id was accepted; want a refusal")
+	}
+}
+
 func TestRemoteSession_SessionIDMatchesAndLauncherWired(t *testing.T) {
 	launcher := &fakeLauncher{}
 	factory := &capturingSSHFactory{ch: &reasonChannel{reason: ssh.ReasonNone}}

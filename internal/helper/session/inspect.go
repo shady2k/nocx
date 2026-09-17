@@ -159,13 +159,31 @@ func (i *osInspector) Observe(pid, foregroundPgid int) *proto.Observation {
 		obs.Unavailable = append(obs.Unavailable, proto.DiagnosticState)
 	}
 
-	// A zero foreground group, or the shell's own, means no job is running:
-	// there is nothing to ask about, so nothing is reported and nothing is
-	// named missing. Saying so by omission is more honest than naming the
-	// shell as though it were a job. Only a group we HAVE and cannot name is a
-	// diagnostic that went missing.
-	if foregroundPgid > 0 && foregroundPgid != pid {
+	// The GROUP is evidence and is always reported; the COMMAND is a job's
+	// name and the shell has none.
+	//
+	// This used to omit the group too whenever it was the shell's own, on the
+	// reading that "the shell is in front" means "no job is running". That is
+	// true at a prompt and false for every command nocx starts, because
+	// ADR-0024 runs them with job control off (`set +m`) — the shell and its
+	// foreground command share one group for the whole time the command runs.
+	// So the one state the run-lease ladder most needs to recognise was the
+	// one the wire erased, and the coordinator could not tell it from "nobody
+	// could look": the first wants the terminal's interrupt written, the
+	// second is a refusal (nocx-nekvj).
+	//
+	// Classifying it stays the CALLER's, which is where the local pty already
+	// does it — pty.LocalPty.ForegroundJob compares the group it read against
+	// the shell it forked and answers ErrProtectedForeground. An observation
+	// that decided this for its reader would be a second owner of "may this
+	// group be signalled", and the two would disagree the day one changed.
+	if foregroundPgid > 0 {
 		obs.ForegroundPgid = foregroundPgid
+	}
+	// Only a group we HAVE and cannot name is a diagnostic that went missing.
+	// A shell is not a job, so naming it would put a lie in the sentence a
+	// person reads, and its absence is not something that went missing.
+	if foregroundPgid > 0 && foregroundPgid != pid {
 		if comm, err := i.src.comm(foregroundPgid); err == nil && comm != "" {
 			obs.ForegroundCommand = comm
 		} else {

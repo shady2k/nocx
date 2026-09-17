@@ -123,12 +123,13 @@
  * the prompt's body, which is a change every prompt in the app pays for and
  * therefore not one to make inside this bead.
  */
-import { test as base, expect, type Locator, type Page } from '@playwright/test'
+import { expect, type Locator, type Page } from '@playwright/test'
 import { createServer, type Server } from 'node:http'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  standalone as base,
   appReadyForInput,
   VaultBackend,
   bindEndpoint,

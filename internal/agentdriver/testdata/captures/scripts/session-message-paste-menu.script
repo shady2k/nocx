@@ -1,0 +1,10 @@
+14000 \r
+6000 \r
+7000 \x1b[B
+1500 \r
+9000 Run exactly this shell command and nothing else: touch marker.txt
+800 \r
+4000 \x1b[200~please wait\nfor my answer\x1b[201~
+6000
+1000 \r
+20000

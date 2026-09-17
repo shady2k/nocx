@@ -20,13 +20,14 @@
  * goes out of range". A field with no caption fell through to Field's own
  * error line, which is IN flow. These tests state the contract for both.
  */
-import { test as base, expect, type Locator, type Page } from '@playwright/test'
+import { expect, type Locator, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { openWorkbench, RATE_LIMIT, treeRow } from './api-workbench'
 import {
+  standalone as base,
   appReadyForInput,
   bindEndpoint,
   settingsReady,

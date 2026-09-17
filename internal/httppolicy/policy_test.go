@@ -244,7 +244,7 @@ func TestLoopbackHTTPAllowed(t *testing.T) {
 
 // TestUnsupportedSchemeRefused: anything that is not http or https is not a
 // destination this policy knows how to judge, so it is refused rather than
-// waved through.
+// workerd through.
 func TestUnsupportedSchemeRefused(t *testing.T) {
 	cl := newPolicyClient(Params{Component: "apisend", Route: Local()})
 	_, err := cl.Get("ftp://example.com/x")

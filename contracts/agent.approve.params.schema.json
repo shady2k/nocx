@@ -12,6 +12,6 @@
     "tool": { "type": "string", "minLength": 1, "maxLength": 256 },
     "callId": { "type": "string", "minLength": 1, "maxLength": 256 },
     "argHash": { "type": "string", "minLength": 1, "maxLength": 128 },
-    "scope": { "type": "string", "enum": ["once", "session", "always"] }
+    "scope": { "type": "string", "enum": ["once", "session", "always", "expand"] }
   }
 }

@@ -41,9 +41,9 @@ func newFakeConn() *fakeConn {
 	return &fakeConn{}
 }
 
-func (f *fakeConn) Exec(ctx context.Context, cmd string) (*ExecResult, error) {
+func (f *fakeConn) Sample(ctx context.Context, probe ProbeName) (*ExecResult, error) {
 	f.mu.Lock()
-	f.execs = append(f.execs, cmd)
+	f.execs = append(f.execs, string(probe))
 	block := f.block
 	f.mu.Unlock()
 
@@ -67,7 +67,7 @@ func (f *fakeConn) Exec(ctx context.Context, cmd string) (*ExecResult, error) {
 		return framed(knownRow), nil
 	}
 	if len(f.responses) == 0 {
-		return nil, errors.New("fake: no queued response for " + cmd)
+		return nil, errors.New("fake: no queued response for " + string(probe))
 	}
 	resp := f.responses[0]
 	f.responses = f.responses[1:]
@@ -168,8 +168,8 @@ func TestDetector_NormalHost_SelectsSSOnce(t *testing.T) {
 	if len(cmds) != 2 {
 		t.Fatalf("execs = %d, want 2 (one selection pass + one sample), got %v", len(cmds), cmds)
 	}
-	if cmds[0] != ssCmd || cmds[1] != ssCmd {
-		t.Errorf("execs = %v, want [%s, %s]", cmds, ssCmd, ssCmd)
+	if cmds[0] != string(ProbeSS) || cmds[1] != string(ProbeSS) {
+		t.Errorf("execs = %v, want [%s, %s]", cmds, string(ProbeSS), string(ProbeSS))
 	}
 	if s2.Duration <= 0 {
 		t.Error("Duration = 0, want a real wall time")
@@ -240,7 +240,7 @@ func TestDetector_UnsupportedOutput_TriesNextProbeOnce(t *testing.T) {
 		t.Fatalf("second probe = %q, want netstat", s2.Probe)
 	}
 	cmds := f.commands()
-	if len(cmds) != 3 || cmds[1] != netstatCmd || cmds[2] != netstatCmd {
+	if len(cmds) != 3 || cmds[1] != string(ProbeNetstat) || cmds[2] != string(ProbeNetstat) {
 		t.Errorf("execs = %v, want [ss, netstat, netstat]", cmds)
 	}
 }
@@ -257,7 +257,7 @@ func TestDetector_Exit127_AdvancesLadder(t *testing.T) {
 		t.Fatalf("probe = %q, want netstat (ss absent)", s.Probe)
 	}
 	cmds := f.commands()
-	if len(cmds) != 2 || cmds[0] != ssCmd || cmds[1] != netstatCmd {
+	if len(cmds) != 2 || cmds[0] != string(ProbeSS) || cmds[1] != string(ProbeNetstat) {
 		t.Errorf("execs = %v, want [ss, netstat]", cmds)
 	}
 }

@@ -28,7 +28,6 @@ package app
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -36,7 +35,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -59,14 +57,6 @@ import (
 // in-band dispatcher embeds it as NOCX_SESSION_ID (AD-7), and the nested
 // shell is treated as the owning session.
 const assemblySID = "aabbccddeeff00112233445566778899"
-
-// childCapRe finds a per-epoch capability. It is no longer looked for in
-// the composed LINE — ADR-0049 took both bearers out of the command, and
-// requestChild now asserts their absence — but in FRAME 2, which the
-// delivery writes onto the parent's terminal after ownership of the
-// multiplex socket has been proven. That is where the harness learns the
-// child's capability, by watching exactly what the product delivers.
-var childCapRe = regexp.MustCompile(`(?m)^([0-9a-f]{64})$`)
 
 // ---------------------------------------------------------------------------
 // The parent's terminal, as the typed delivery sees it.
@@ -167,48 +157,6 @@ func (w *harnessWindow) Close() error {
 	default:
 	}
 	return nil
-}
-
-// capability returns the per-epoch capability out of the secret frame the
-// delivery wrote, waiting for it to be written.
-//
-// It FAILS rather than returning false, which is not what it did before the
-// sleep sweep: this returned (zero, false) and each caller owned the sentence
-// it failed with. Those sentences differ — one is about frame 2 never carrying
-// the typed session's secret, the other about the late-hello proof needing a
-// capability — so `what` stays the caller's rather than being collapsed into
-// one message here. The bytes the child did write are the same question on
-// both paths, so the detail is this function's: whether nothing arrived or
-// something malformed did is what the timeout has to answer, and nothing else
-// on this path can.
-func (w *harnessWindow) capability(t *testing.T, what string) lifecycle.Capability {
-	t.Helper()
-	var cap lifecycle.Capability
-	waittest.WaitForTimeoutDetail(t, what,
-		60*time.Second,
-		func() string {
-			w.mu.Lock()
-			defer w.mu.Unlock()
-			return fmt.Sprintf("written=%q", string(w.written))
-		},
-		func() bool {
-			w.mu.Lock()
-			m := childCapRe.FindStringSubmatch(string(w.written))
-			w.mu.Unlock()
-			if m == nil {
-				return false
-			}
-			raw, err := hex.DecodeString(m[1])
-			if err != nil {
-				t.Fatalf("frame 2 capability %q does not decode: %v", m[1], err)
-			}
-			if len(raw) != len(cap) {
-				t.Fatalf("frame 2 capability is %d bytes, want %d", len(raw), len(cap))
-			}
-			copy(cap[:], raw)
-			return true
-		})
-	return cap
 }
 
 // harnessTerminals is the typedSessions seam: one window and one lifetime,
@@ -362,11 +310,11 @@ type sshChildHarness struct {
 	facts *factLog
 }
 
-// factLog records the published facts while acknowledging establishments
-// exactly as ackingEmitter does — the renderer's two jobs, in the order it
-// does them.
+// factLog records the published facts. It used to also acknowledge every
+// establishment, as ackingEmitter did; ADR-0062 removed that step, since the
+// accept now flushes on the backend's own authority as soon as the kernel
+// mints it.
 type factLog struct {
-	pub *lifecyclepub.Publisher
 	mu  sync.Mutex
 	all []lifecyclepub.Fact
 }
@@ -375,11 +323,6 @@ func (l *factLog) PublishLifecycle(f lifecyclepub.Fact) {
 	l.mu.Lock()
 	l.all = append(l.all, f)
 	l.mu.Unlock()
-	if f.Generation == "" || f.Domain == "" {
-		return
-	}
-	_ = l.pub.AcknowledgeEstablishment(
-		lifecycle.LaneID(f.Lane), lifecycle.DomainID(f.Domain), f.Epoch, f.Generation)
 }
 
 // attemptFor returns the id of the first attempt the given domain published
@@ -473,8 +416,16 @@ func newSSHChildHarness(t *testing.T, fx *liveSshd) *sshChildHarness {
 	var pub *lifecyclepub.Publisher
 	pub = lifecyclepub.New(k,
 		lifecyclepub.WithGrantBuilder(newChildGrantBuilder(logger,
-			func() *lifecyclepub.Publisher { return pub }, transports, sessions, typed)))
-	facts := &factLog{pub: pub}
+			func() *lifecyclepub.Publisher { return pub }, transports, sessions, typed,
+			// This harness runs no coordinator tool endpoint, and the ssh
+			// child it composes names none whatever answered: its shell runs
+			// on the far host (nestedToolSocket).
+			func() string { return "" },
+			// Nor a helper binary for the same reason: the child runs on
+			// another machine, where this one's install is not what it execs
+			// (nocx-e2bws).
+			func() string { return "" })))
+	facts := &factLog{}
 	pub.SetEmitter(facts)
 	kernel := &recordingKernel{Publisher: pub}
 	harness := &sshChildHarness{

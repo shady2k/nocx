@@ -2,8 +2,8 @@ package agenttools
 
 import "github.com/shady2k/nocx/internal/content"
 
-// The resource kinds a tool touches are the ledger's closed set — the same
-// six the grant_resources.resource_kind CHECK constraint allows
+// The resource kinds a tool touches are the ledger's closed set — the ones the
+// grant_resources.resource_kind CHECK constraint allows
 // (internal/content/sqlite.go) and content.ResourceKind names
 // (internal/content/ledger.go). AD-8: the ledger owns the vocabulary; this
 // package consumes it, never duplicates it. A kind added to the ledger is a
@@ -13,6 +13,11 @@ import "github.com/shady2k/nocx/internal/content"
 // ResourceKind's switch is the tripwire: a new kind that a declaration uses
 // but nobody has handled here fails assembly, which is how "forgot to
 // classify it" stops compiling in the ledger and stops assembling here.
+//
+// The membership is not stated here as a count, and no comment claims the two
+// sets agree — that claim fell behind the ledger twice and nothing caught it
+// (nocx-intbc). TestResourceKindSetMatchesTheLedger reads the ledger's own
+// source and fails when they diverge.
 var allResourceKinds = []content.ResourceKind{
 	content.ResourceEnvironment,
 	content.ResourceSession,
@@ -21,6 +26,7 @@ var allResourceKinds = []content.ResourceKind{
 	content.ResourceDestination,
 	content.ResourceTool,
 	content.ResourceContent,
+	content.ResourceWorkspace,
 }
 
 // supportedResourceKind reports whether k is a member this package knows how
@@ -30,7 +36,7 @@ func supportedResourceKind(k content.ResourceKind) bool {
 	switch k {
 	case content.ResourceEnvironment, content.ResourceSession, content.ResourcePath,
 		content.ResourceCredential, content.ResourceDestination, content.ResourceTool,
-		content.ResourceContent:
+		content.ResourceContent, content.ResourceWorkspace:
 		return true
 	default:
 		return false

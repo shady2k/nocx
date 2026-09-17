@@ -82,7 +82,9 @@ test('a file dropped on an SSH tab arrives on the far host', async ({ page }) =>
 
     // Seed the connection the way Settings would. The name is unique per run:
     // the stand's document store persists across runs in this home, and a
-    // stale profile would dial a dead fixture.
+    // stale profile would dial a dead fixture. This spec's subject is
+    // upload, not the connect-time ask (ADR-0069) — desiredMode is declared
+    // explicitly as script so the connection is never asked.
     const profileName = `e2e-upload-${Date.now()}`
     const created = await rpc<{ id: string }>(page, stand, 'profiles.create', {
       type: 'ssh',
@@ -92,6 +94,7 @@ test('a file dropped on an SSH tab arrives on the far host', async ({ page }) =>
         port: fixture.port,
         user: 'e2e',
         keyPath: fixture.userKey,
+        desiredMode: 'script',
       },
     })
     profileId = created.id

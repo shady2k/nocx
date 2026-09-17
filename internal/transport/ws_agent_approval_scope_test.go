@@ -36,7 +36,13 @@ type scopeHarness struct {
 	policy assistant.GlobalPolicy
 	sid    string
 	runID  int64
-	asked  agentApprovalRequested
+	// entryID is the TURN's own ledger entry — the one agent.ask answered
+	// with, and the one every notification about this turn must be routed
+	// by. Kept because a test that wants to check routing cannot rebuild it
+	// afterwards: the proposal has an entry of its own, and the whole class
+	// of defect here is the two being confused.
+	entryID string
+	asked   agentApprovalRequested
 }
 
 // suspendedRun leaves a run suspended on a readScreen-shaped policy ask
@@ -61,6 +67,7 @@ func suspendedNonCommandRun(t *testing.T, policy assistant.GlobalPolicy) *scopeH
 				Arguments: `{"sessionId":"session-a"}`, ArgHash: "hash-a",
 				Effect:   content.EffectObserve,
 				Resource: &content.GrantScope{Kind: content.ResourceSession, ID: "session-a"},
+				EntryID:  proposalEntryID,
 			}}
 		}},
 		{deltas: []string{"done"}},
@@ -81,6 +88,7 @@ func suspendedUnshowableRun(t *testing.T, policy assistant.GlobalPolicy) *scopeH
 				Resource:          &content.GrantScope{Kind: content.ResourceSession, ID: "session-a"},
 				Invocation:        content.Invocation{Parsed: false},
 				CommandInvocation: true,
+				EntryID:           proposalEntryID,
 			}}
 		}},
 		{deltas: []string{"done"}},
@@ -88,6 +96,17 @@ func suspendedUnshowableRun(t *testing.T, policy assistant.GlobalPolicy) *scopeH
 	return suspendedRunWith(t, policy, client)
 }
 
+// suspendedCommandRun leaves a run suspended on a COMMAND proposal — the one
+// whose standing answer is an invocation rule.
+//
+// Its EntryID is the PROPOSAL's ledger entry and is deliberately unlike the
+// turn's, which agent.ask answers with — as it is on every builder in this
+// file that carries an ApprovalRequest. In the product the kernel always sets
+// it (kernel.go escalate records the proposal before the latch trips, and its
+// ledger is nil only where the content store is, which agent.ask refuses
+// outright), so a harness leaving it empty describes a run that does not
+// exist — and, worse, makes the two entries indistinguishable in exactly the
+// test that has to tell them apart.
 func suspendedCommandRun(t *testing.T, policy assistant.GlobalPolicy, invocation content.Invocation) *scopeHarness {
 	t.Helper()
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
@@ -98,12 +117,18 @@ func suspendedCommandRun(t *testing.T, policy assistant.GlobalPolicy, invocation
 				Effect:     content.EffectObserve,
 				Resource:   &content.GrantScope{Kind: content.ResourcePath, ID: "/repo/a.txt"},
 				Invocation: invocation,
+				EntryID:    proposalEntryID,
 			}}
 		}},
 		{deltas: []string{"done"}},
 	}}
 	return suspendedRunWith(t, policy, client)
 }
+
+// proposalEntryID is the ledger entry the PROPOSAL was recorded under — what
+// ws_agent.go sends as `actionEntryId` beside every turn-routed notification,
+// and never as `entryId`.
+const proposalEntryID = "action-entry-1"
 
 // suspendedEgressRun is the same run suspended by the EGRESS gate: the
 // question a standing answer may never be given to.
@@ -143,7 +168,10 @@ func suspendedRunWith(t *testing.T, policy assistant.GlobalPolicy, client *scrip
 	if err := json.Unmarshal(raw, &asked); err != nil {
 		t.Fatalf("approvalRequested: %v", err)
 	}
-	return &scopeHarness{askHarness: h, policy: policy, sid: sid, runID: res.RunID, asked: asked}
+	return &scopeHarness{
+		askHarness: h, policy: policy, sid: sid,
+		runID: res.RunID, entryID: res.EntryID, asked: asked,
+	}
 }
 
 // answer is the renderer's literal payload for this run's proposal.
@@ -197,6 +225,14 @@ func (f failingPolicyStore) Policy() content.EffectPolicy {
 }
 
 func (f failingPolicyStore) SetPolicy(content.EffectPolicy) error { return f.err }
+
+func (f failingPolicyStore) SetRowDecision(content.Effect, content.Decision) error { return f.err }
+
+func (f failingPolicyStore) SetRule(content.InvocationRule) (content.InvocationRule, error) {
+	return content.InvocationRule{}, f.err
+}
+
+func (f failingPolicyStore) ForgetRule(string) (bool, error) { return false, f.err }
 
 // ── "once": exactly today's behaviour ─────────────────────────────────────
 

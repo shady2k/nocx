@@ -28,12 +28,15 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	nocxlog "github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/shellintegration"
 )
 
 // LifecycleDataPlane receives opaque lifecycle bytes from the coordinator.
@@ -59,6 +62,41 @@ var (
 	ErrBudget        = errors.New("session: the helper's aggregate window budget is exhausted")
 	ErrSpawn         = errors.New("session: the shell could not be started")
 	ErrSignal        = errors.New("session: signal is invalid or unavailable")
+	ErrBadKey        = errors.New("session: the idempotency key is longer than the protocol allows")
+	// ErrReplay is a capture the helper will not feed to an emulator: a
+	// geometry it refuses to allocate, marks it cannot honour, or a chunk the
+	// terminal would not take. It is BadParams rather than internal because
+	// the caller composed the request and can fix it.
+	ErrReplay = errors.New("session: the capture cannot be replayed")
+	// ErrNoSSHSpawner is a spawn-ssh this BUILD cannot answer: a helper built
+	// without nocx_local_ssh links no ssh client, so it has nothing to open a
+	// remote channel with (plan §1). It is not a misconfiguration the caller
+	// can repair in the request — it is a fact about the binary, which is why
+	// it carries its own code rather than being reported as a failed spawn:
+	// the caller's action is to use a helper built for this machine, not to
+	// retry or to look at the host.
+	ErrNoSSHSpawner = errors.New("session: this helper's build has no ssh client")
+	// ErrBadSSHParams is a spawn-ssh the helper will not perform because the
+	// REQUEST is incomplete: no host, a port outside the range, no user, no
+	// credential reference. It is a separate sentinel from ErrNoSSHSpawner on
+	// purpose — a caller that reads `no_ssh_client` goes looking at the binary,
+	// and one that reads `bad_params` goes looking at its own request. Folding
+	// the two would send every malformed request to the wrong place.
+	ErrBadSSHParams = errors.New("session: the ssh spawn request is incomplete")
+	// ErrCwdUnsupported is a spawn-ssh naming a directory for the far shell.
+	// This generation cannot honour one: a remote session's starting directory
+	// belongs to the far account, the launcher carries no way to move it, and
+	// the only route that could would be a caller-supplied command, which this
+	// wire refuses (D3). It is REFUSED rather than ignored — a field that
+	// accepted a value nothing acts on is the shape a later generation starts
+	// reading under a caller that never expected it to.
+	ErrCwdUnsupported = errors.New("session: a remote session's directory cannot be named on this wire")
+	// ErrRemotePgid is a signal addressed to a process GROUP of the far host.
+	// A group number is that kernel's namespace, this helper cannot see it,
+	// and the ssh protocol's signal request addresses the channel's command
+	// and nothing else — so a named group is refused by name rather than
+	// silently sent to the wrong thing.
+	ErrRemotePgid = errors.New("session: a remote process group cannot be addressed from this host")
 )
 
 // Limits are the helper's bounds on output windows: D8 asks for all three,
@@ -76,22 +114,52 @@ type Limits struct {
 	MaxWindowBytes int64
 	// BudgetBytes is the helper-wide aggregate. The worst case on a host is
 	// its live session count times the bound, in the helper's memory, on a VM
-	// that may be small — so the sum is bounded too, and the eviction rule is
-	// stated rather than left implicit: nothing is evicted, the SPAWN is
-	// refused. Killing somebody's running shell to make room for a new one is
-	// not a memory-management decision the helper is entitled to take.
+	// that may be small — so the sum is bounded too. A LIVE shell is never
+	// evicted to make room for a new one — killing somebody's running shell
+	// for that reason is not a memory-management decision the helper is
+	// entitled to take, and that half of the original rule stands. What no
+	// longer holds is "nothing is evicted": an EXITED session nobody has
+	// attached to since is not somebody's running work, and a spawn that
+	// would otherwise be refused first closes those, oldest exit first,
+	// before it is refused (nocx-isjh4, owner decision 2026-09-15,
+	// amendment 4).
 	BudgetBytes int64
+	// UnclaimedSessionTTL bounds how long an exited session may sit unclaimed
+	// before the helper closes it on its own, budget released, key claim
+	// released — through the same closer eviction and closeSession use. It
+	// exists because one abandoned exited session would otherwise pin its
+	// window budget indefinitely (nocx-isjh4, owner amendment 2026-09-15).
+	//
+	// IT DOES NOT MAKE THE PROCESS EXIT, and nothing else does either — checked
+	// rather than assumed (nocx-isjh4, coordinator review 2026-09-15):
+	// cmd/nocx-helper's serve() runs endpoint.Serve's accept loop until its ctx
+	// is cancelled (SIGINT/SIGTERM) or a fatal bind/accept error, with no read
+	// of the session count anywhere in that loop. So a generation with zero
+	// sessions is memory this closer bounds, not a process anything here
+	// reaps; the process's own lifetime is an external decision (whatever
+	// started it, or a person) both before and after this bead. Compared
+	// against the Service's clock seam (s.now); the SCHEDULE that evaluates it
+	// is a real-time ticker (SweepInterval below) rather than the injectable
+	// clock, because D5 forbids the helper deciding anything about a block's
+	// result, not running a timer — see SweepInterval's own doc.
+	UnclaimedSessionTTL time.Duration
 }
+
+// unclaimedSessionTTLDefault is D-amendment 3's number: a session nobody has
+// claimed within a day of its shell exiting is not going to be, and is closed
+// so its budget and the helper's own liveness are not spent on it forever.
+const unclaimedSessionTTLDefault = 24 * time.Hour
 
 // DefaultLimits are D8's numbers: a 4 MiB default raised from the coordinator
 // ring's shipped 256 KiB, a floor four times the credit limit, a ceiling that
 // bounds one corrupted value, and an aggregate that bounds the sum.
 func DefaultLimits() Limits {
 	return Limits{
-		DefaultWindowBytes: 4 << 20,
-		MinWindowBytes:     4 * creditLimit,
-		MaxWindowBytes:     64 << 20,
-		BudgetBytes:        512 << 20,
+		DefaultWindowBytes:  4 << 20,
+		MinWindowBytes:      4 * creditLimit,
+		MaxWindowBytes:      64 << 20,
+		BudgetBytes:         512 << 20,
+		UnclaimedSessionTTL: unclaimedSessionTTLDefault,
 	}
 }
 
@@ -108,6 +176,9 @@ func (l Limits) withDefaults() Limits {
 	}
 	if l.BudgetBytes <= 0 {
 		l.BudgetBytes = d.BudgetBytes
+	}
+	if l.UnclaimedSessionTTL <= 0 {
+		l.UnclaimedSessionTTL = d.UnclaimedSessionTTL
 	}
 	// D8's floor is ENFORCED, not merely documented, and the reason is
 	// measurable rather than aesthetic. The per-subscriber pump runs at most
@@ -141,29 +212,76 @@ type Options struct {
 	// generation rather than needing a lookup service (D10).
 	Generation proto.GenerationID
 	Spawner    Spawner
+	// SSHSpawner opens a session whose process is a shell channel on a far
+	// host (nocx-50w7p.4). NIL IS A BUILD FACT, not a misconfiguration: a
+	// helper built without nocx_local_ssh links no ssh client, so it has
+	// nothing to open a remote channel with, and the op is refused by name
+	// rather than answered with a session that could never carry bytes.
+	SSHSpawner SSHSpawner
 	// Inspector is optional: nil means this helper offers no OS evidence,
 	// which is the honest answer on a platform that has none.
 	Inspector Inspector
-	Log       *slog.Logger
-	Limits    Limits
+	// Screen builds the emulator each session's runtime is created over
+	// (ADR-0066): the screen, the modes and the answers to the program's own
+	// questions. Nil is the shipped engine — see defaultScreen, which is the
+	// one place that choice is named — so production leaves it nil and the
+	// seam exists for a test that needs a screen it can read back.
+	Screen ScreenFactory
+	Log    *slog.Logger
+	Limits Limits
 	// Now and NewID are seams for tests. Production leaves them nil.
 	Now   func() time.Time
 	NewID func() ([16]byte, error)
+	// SweepInterval is how often the unclaimed-session sweep (sweepExpired)
+	// runs ON ITS OWN, independent of a caller asking the inventory or
+	// spawning (nocx-isjh4, owner review 2026-09-15): those two lazy call
+	// sites never fire for a helper nobody calls again, which is
+	// exactly the orphan case amendment 3 exists for. Zero (the production
+	// default) uses defaultSweepInterval; tests that want to observe the
+	// scheduled sweep fire set it small and wait on state, never on a
+	// duration — the interval is real wall-clock time, D5's own clock
+	// seam (Now) is what the sweep still measures a session's age against.
+	SweepInterval time.Duration
 }
+
+// defaultSweepInterval is how often production runs the scheduled sweep. It
+// is independent of UnclaimedSessionTTL (default 24h): running far more
+// often than sessions actually expire costs one cheap map walk apiece, and
+// running less often would let an orphaned session's memory and the
+// process's own liveness (see Service.Close's doc on why the helper cares)
+// outlive its TTL by up to a whole interval.
+const defaultSweepInterval = 10 * time.Minute
 
 // Service is the helper's `session` service.
 type Service struct {
 	generation proto.GenerationID
 	spawner    Spawner
+	sshSpawner SSHSpawner
 	inspector  Inspector
+	screen     ScreenFactory
 	log        *slog.Logger
 	limits     Limits
 	now        func() time.Time
 	newID      func() ([16]byte, error)
+	// sweepStop ends the scheduled sweep goroutine (nocx-isjh4); closed
+	// exactly once, by sweepStopOnce, from Close.
+	sweepStop     chan struct{}
+	sweepStopOnce sync.Once
+	// sweepDone closes when the scheduled sweep goroutine has actually
+	// returned, so Close can wait for it rather than leaving it to exit on
+	// its own time — the same shape every other owned goroutine in this
+	// service (watchExit, the output pumps) is stopped by, via hs.stop.
+	sweepDone chan struct{}
 
 	mu       sync.Mutex
 	sessions map[string]*hostSession
-	budget   int64
+	// keys are the live idempotency claims (L7), one entry per key that a
+	// spawn is holding or has resolved. It is guarded by the same mutex as
+	// sessions BECAUSE the two are one fact: `keys[k].session != ""` implies
+	// `sessions[keys[k].session]` exists, and the only way to keep that true
+	// is to change both under one lock.
+	keys   map[string]*keyClaim
+	budget int64
 	// sinks are the connections currently bound, and there may be SEVERAL:
 	// D12 is same-UID trust, so any nocx under that account may connect, and
 	// the helper's accept loop serves them all at once. It is deliberately a
@@ -197,13 +315,21 @@ func New(opts Options) *Service {
 	s := &Service{
 		generation: opts.Generation,
 		spawner:    opts.Spawner,
+		sshSpawner: opts.SSHSpawner,
 		inspector:  opts.Inspector,
+		screen:     opts.Screen,
 		log:        opts.Log,
 		limits:     opts.Limits.withDefaults(),
 		now:        opts.Now,
 		newID:      opts.NewID,
 		sessions:   make(map[string]*hostSession),
+		keys:       make(map[string]*keyClaim),
 		sinks:      make(map[Sink]struct{}),
+		sweepStop:  make(chan struct{}),
+		sweepDone:  make(chan struct{}),
+	}
+	if s.screen == nil {
+		s.screen = defaultScreen
 	}
 	if s.log == nil {
 		s.log = slog.Default()
@@ -214,7 +340,40 @@ func New(opts Options) *Service {
 	if s.newID == nil {
 		s.newID = randomID
 	}
+	interval := opts.SweepInterval
+	if interval <= 0 {
+		interval = defaultSweepInterval
+	}
+	// RUN ON ITS OWN SCHEDULE, not only when a caller happens to ask
+	// something (nocx-isjh4, owner review): a helper nobody calls again is
+	// exactly the orphan case D-amendment 3 exists for, and inventory/spawn
+	// (the two lazy hooks — WindowBytesInUse is a pure observer and sweeps
+	// nothing) never fire for it. The interval is real wall-clock
+	// time — a ticker, not the injectable Now — because scheduling WHEN to
+	// look is a different question from what a session's age is measured
+	// against once looked at; sweepExpired still measures age with s.now
+	// alone, so a test can drive that half with a fake clock and this half
+	// with a real, short interval, without the two seams touching each other.
+	go s.sweepLoop(interval)
 	return s
+}
+
+// sweepLoop runs sweepExpired on a fixed real-time schedule until Close
+// stops it. It is a goroutine because the service otherwise starts none of
+// its own — spawn's watchers and pumps are per-session — and this is the
+// one piece of upkeep no session's own lifecycle can be asked to carry.
+func (s *Service) sweepLoop(interval time.Duration) {
+	defer close(s.sweepDone)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.sweepStop:
+			return
+		case <-ticker.C:
+			s.sweepExpired()
+		}
+	}
 }
 
 // Bind adds sink to the connections this service speaks on and returns the
@@ -255,10 +414,24 @@ func (s *Service) Bind(sink Sink) (release func()) {
 // Close ends every session this helper holds. It is process shutdown, not a
 // caller's request: ending one session deliberately is close-session and is
 // nocx-k6p18.7's verb.
+//
+// It also stops the scheduled sweep goroutine (nocx-isjh4) and waits for it
+// to actually exit, the same way every other goroutine this service owns is
+// stopped by hs.stop below — a Close that returned while the sweep was still
+// running could race a caller's own read of a Service it was just told is
+// finished with.
 func (s *Service) Close() {
+	s.sweepStopOnce.Do(func() { close(s.sweepStop) })
+	<-s.sweepDone
+
 	s.mu.Lock()
 	live := s.live()
 	s.sessions = make(map[string]*hostSession)
+	// Every claim goes with the rows it named: a key outliving the inventory
+	// it points into would answer a retry with a session that no longer
+	// exists. In-flight claims are released by their own spawn, which either
+	// resolves into the new map or removes itself from it.
+	s.keys = make(map[string]*keyClaim)
 	s.budget = 0
 	s.sinks = make(map[Sink]struct{})
 	s.mu.Unlock()
@@ -269,6 +442,17 @@ func (s *Service) Close() {
 
 // WindowBytesInUse is the aggregate this helper has committed. Exported so the
 // budget can be asserted on rather than inferred from behaviour.
+//
+// It does NOT sweep (nocx-isjh4, coordinator review 2026-09-15): it has no
+// production caller — it exists for a caller to OBSERVE the budget, and an
+// observer that changes what it observes cannot tell a real effect from its
+// own side effect. TestTheScheduledSweepReleasesAnOrphanedSessionOnItsOwn
+// passed with the scheduled loop deleted entirely, because this method's own
+// sweep was doing the work the test meant to be checking — a defect in the
+// test caught by AGENTS.md's own rules 1 and 2, not a caveat to note and
+// move past. The sweep still runs lazily wherever a caller other than a pure
+// observer touches the service — inventory() and evictForBudget (spawn's own
+// budget check) — and on its own schedule (sweepLoop).
 func (s *Service) WindowBytesInUse() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -290,9 +474,10 @@ func (s *Service) Name() string { return proto.ServiceSession }
 
 func (s *Service) Ops() []string {
 	return []string{
-		proto.OpSpawn, proto.OpSessions, proto.OpAttach, proto.OpAck,
+		proto.OpSpawn, proto.OpSpawnSSH, proto.OpSessions, proto.OpAttach, proto.OpAck,
 		proto.OpDetach, proto.OpResize, proto.OpCloseSession, proto.OpSignal,
-		proto.OpAdoptLifecycle,
+		proto.OpAdoptLifecycle, proto.OpScreen, proto.OpReplay,
+		proto.OpSnapshot, proto.OpTarget, proto.OpIntent, proto.OpIntentStatus, proto.OpAccessBump,
 	}
 }
 
@@ -300,6 +485,8 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 	switch op {
 	case proto.OpSpawn:
 		return host.SchemaFor(proto.SpawnParams{})
+	case proto.OpSpawnSSH:
+		return host.SchemaFor(proto.SSHSpawnParams{})
 	case proto.OpSessions:
 		return host.SchemaFor(proto.SessionsParams{})
 	case proto.OpAttach:
@@ -316,25 +503,67 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.SignalParams{})
 	case proto.OpAdoptLifecycle:
 		return host.SchemaFor(proto.AdoptLifecycleParams{})
+	case proto.OpScreen:
+		return host.SchemaFor(proto.ScreenParams{})
+	case proto.OpReplay:
+		return host.SchemaFor(proto.ReplayParams{})
+	case proto.OpSnapshot:
+		return host.SchemaFor(proto.SnapshotParams{})
+	case proto.OpTarget:
+		return host.SchemaFor(proto.TargetParams{})
+	case proto.OpIntent:
+		return host.SchemaFor(proto.IntentParams{})
+	case proto.OpIntentStatus:
+		return host.SchemaFor(proto.IntentStatusParams{})
+	case proto.OpAccessBump:
+		return host.SchemaFor(proto.AccessBumpParams{})
 	}
 	return nil
 }
 
-// RefusesCancel: no operation here refuses cancellation. Every one of them is
-// short and none half-applies — the long-running thing is the SESSION, and a
-// session is not a request.
-func (s *Service) RefusesCancel(string) bool { return false }
+// intentServiceMutations are the two ops a caller's cancelled context must
+// never be read as "not executed" (D11, nocx-6q1uh.6, spec §6.5's own
+// framing: "transport cancellation never implies not executed"). session.intent
+// runs to its commit point once the owner has it — bytes on a PTY cannot be
+// recalled, and a half-applied bump would leave some queued intents refused
+// under the new epoch and others still judged by the old one. Every other op
+// here is a single read with nothing to half-apply.
+var intentServiceMutations = map[string]bool{
+	proto.OpIntent:     true,
+	proto.OpAccessBump: true,
+}
+
+// RefusesCancel: session.intent and session.access-bump refuse cancellation
+// (above); every other operation here is short and none half-applies — the
+// long-running thing is the SESSION, and a session is not a request.
+func (s *Service) RefusesCancel(op string) bool { return intentServiceMutations[op] }
 
 // Refusal codes this service's errors for the wire, so the coordinator
 // switches on a code rather than on a message. ErrNoSuchSession is the one
 // that matters most: the coordinator's reconciliation turns exactly this code
 // into the `absent` verdict, and anything it cannot recognise stays `unknown`.
 func (s *Service) Refusal(err error) (string, json.RawMessage) {
+	// A REFUSAL MADE BY ANOTHER SERVICE CROSSES UNCHANGED, and it comes first
+	// because it is the only arm whose code this service did not invent.
+	//
+	// spawn-ssh asks the ssh service to open a channel, and everything that can
+	// go wrong there — an unreachable host, a credential the server refuses, a
+	// host key that changed, a sealed vault the coordinator answered with — is
+	// already a refusal in the caller's own vocabulary, carrying the evidence
+	// the coordinator rebuilds its typed error from. Dropping that code here
+	// and reporting `internal` instead would tell every caller that the helper
+	// broke, while the host-key sheet that should have been raised never was:
+	// the exact conflation internal/helper/sshsvc's own classifier exists to
+	// prevent, one service over.
+	var refusal *proto.Refusal
+	if errors.As(err, &refusal) {
+		return refusal.Code, refusal.Details
+	}
 	switch {
 	case errors.Is(err, ErrNoSuchSession):
 		return proto.ErrCodeNoSuchSession, nil
 	case errors.Is(err, ErrNotAttached), errors.Is(err, ErrBadSubscriber),
-		errors.Is(err, ErrAckAhead), errors.Is(err, ErrAckBehind):
+		errors.Is(err, ErrAckAhead), errors.Is(err, ErrAckBehind), errors.Is(err, ErrBadKey):
 		return proto.ErrCodeBadParams, nil
 	case errors.Is(err, ErrNoWriter), errors.Is(err, ErrNotTheWriter), errors.Is(err, ErrStaleLease):
 		return proto.ErrCodeWriteRefused, nil
@@ -342,8 +571,24 @@ func (s *Service) Refusal(err error) (string, json.RawMessage) {
 		return proto.ErrCodeWindowBudget, nil
 	case errors.Is(err, ErrSignal):
 		return proto.ErrCodeBadParams, nil
+	case errors.Is(err, ErrReplay):
+		return proto.ErrCodeBadParams, nil
 	case errors.Is(err, ErrSpawn):
 		return proto.ErrCodeSpawnFailed, nil
+	case errors.Is(err, ErrNoSSHSpawner):
+		return proto.ErrCodeNoSSHClient, nil
+	case errors.Is(err, ErrCwdUnsupported), errors.Is(err, ErrRemotePgid), errors.Is(err, ErrBadSSHParams):
+		return proto.ErrCodeBadParams, nil
+	case errors.Is(err, errBadTargetKind):
+		return proto.ErrCodeBadParams, nil
+	// session.target's own refusals (nocx-6q1uh.6, spec §6.1, §6.2): a
+	// transport-level code rather than an IntentResult.refusal, because
+	// target mints nothing a caller could poll session.intent-status for —
+	// there is no token yet to name one by.
+	case errors.Is(err, ErrSnapshotGone):
+		return "snapshot_gone", nil
+	case errors.Is(err, ErrCapacity):
+		return "capacity", nil
 	}
 	return "", nil
 }
@@ -355,7 +600,13 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 		if err := decode(params, &p); err != nil {
 			return nil, err
 		}
-		return s.spawn(p)
+		return s.spawn(ctx, p)
+	case proto.OpSpawnSSH:
+		var p proto.SSHSpawnParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.spawnSSH(ctx, p)
 	case proto.OpSessions:
 		var p proto.SessionsParams
 		if err := decode(params, &p); err != nil {
@@ -387,6 +638,48 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			}
 		}
 		return proto.AckResult{}, nil
+	case proto.OpScreen:
+		var p proto.ScreenParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.readScreen(p)
+	case proto.OpReplay:
+		var p proto.ReplayParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.replay(p)
+	case proto.OpSnapshot:
+		var p proto.SnapshotParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.snapshot(p)
+	case proto.OpTarget:
+		var p proto.TargetParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.target(p)
+	case proto.OpIntent:
+		var p proto.IntentParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.intent(ctx, p)
+	case proto.OpIntentStatus:
+		var p proto.IntentStatusParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.intentStatus(p)
+	case proto.OpAccessBump:
+		var p proto.AccessBumpParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.accessBump(p)
 	case proto.OpDetach:
 		var p proto.DetachParams
 		if err := decode(params, &p); err != nil {
@@ -403,7 +696,12 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 		if err != nil {
 			return nil, err
 		}
-		if err := hs.proc.Resize(ctx, p.Cols, p.Rows, 0, 0); err != nil {
+		// Through the runtime, so the PTY and the emulator take the size
+		// together and the commit in force is the one both are running at. The
+		// request's context is not threaded: the commit is two ioctls and a
+		// write on fds this process owns, and there is no partial state for a
+		// cancellation to leave behind.
+		if err := hs.resize(p.Cols, p.Rows); err != nil {
 			return nil, err
 		}
 		return proto.ResizeResult{}, nil
@@ -466,17 +764,66 @@ func decode(raw json.RawMessage, into any) error {
 //  4. start the output pump and the exit watcher. Both are attached to a
 //     session that already exists, so a process that exits between step 3 and
 //     step 4 is still observed: the watcher sees an already-closed Done.
-func (s *Service) spawn(p proto.SpawnParams) (proto.SpawnResult, error) {
+//
+// Before all four, and only when the caller minted one, comes the idempotency
+// claim (L7) — see claimKey. It is FIRST because the whole point of it is to
+// precede the first irreversible effect, and the budget reservation in step 1
+// is already one: a repeat that reserved a second window before discovering it
+// was a repeat would refuse itself at the budget on a helper with one session
+// left in it.
+func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.SpawnResult, err error) {
+	// THE PANE LAUNCH, SAID OUT LOUD (nocx-n14oo.2). This is where a pane's
+	// shell is actually started, and the three ways it can fail below used to
+	// return an ErrSpawn that named a cause nowhere. A backend waiting thirty
+	// seconds for a hello it will never get learns from these lines which
+	// shell was started, with what geometry, and whether it was given a
+	// lifecycle carrier at all.
+	ctx, lg, end := nocxlog.Start(ctx, nocxlog.NewSlogAdapter(s.log), "helper.session.spawn",
+		"cwd", p.Cwd, "cols", p.Cols, "rows", p.Rows,
+		"workspace", p.Workspace, "lifecycle_requested", p.Lifecycle != nil)
+	defer func() { end(err) }()
+	if len(p.IdempotencyKey) > proto.MaxIdempotencyKey {
+		return proto.SpawnResult{}, fmt.Errorf("%w: %d characters, the limit is %d",
+			ErrBadKey, len(p.IdempotencyKey), proto.MaxIdempotencyKey)
+	}
+	claim, existing, err := s.claimKey(ctx, p.IdempotencyKey)
+	if err != nil {
+		return proto.SpawnResult{}, err
+	}
+	if existing != nil {
+		return proto.SpawnResult{Entry: existing.entry(s.inspector)}, nil
+	}
+	// From here the claim is HELD: every return below either resolves it onto
+	// a registered session or releases it, and there is no path between them.
+	spawned := false
+	defer func() {
+		if !spawned {
+			s.releaseKey(claim)
+		}
+	}()
+
 	bound := s.clamp(p.WindowBytes)
 	reserved := bound
 	if p.Lifecycle != nil {
 		reserved += bound
 	}
 
+	// Eviction under pressure (nocx-isjh4): closes exited, unattached
+	// sessions oldest-exit-first when reserved would not otherwise fit,
+	// BEFORE the refusal below is decided — so a spawn that fits once they
+	// are gone never sees ErrBudget at all. A live shell, or an exited
+	// session a coordinator still holds, is never touched here.
+	s.evictForBudget(reserved)
+
 	s.mu.Lock()
-	if s.budget+reserved > s.limits.BudgetBytes {
+	committed := s.budget
+	if committed+reserved > s.limits.BudgetBytes {
 		s.mu.Unlock()
-		return proto.SpawnResult{}, fmt.Errorf("%w: %d bytes committed of %d", ErrBudget, s.budget, s.limits.BudgetBytes)
+		// The total is read UNDER the lock and carried out of it: reporting it
+		// from the field after unlocking is a read of shared state that another
+		// spawn may already have changed, which is a data race whatever it
+		// prints.
+		return proto.SpawnResult{}, fmt.Errorf("%w: %d bytes committed of %d", ErrBudget, committed, s.limits.BudgetBytes)
 	}
 	s.budget += reserved
 	s.mu.Unlock()
@@ -494,8 +841,10 @@ func (s *Service) spawn(p proto.SpawnParams) (proto.SpawnResult, error) {
 		s.mu.Lock()
 		s.budget -= reserved
 		s.mu.Unlock()
+		lg.Error("helper: could not mint a session id", "error", err)
 		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
 	}
+	lg = lg.With("session", proto.SessionHex(raw))
 
 	proc, err := s.spawner.Spawn(SpawnRequest{
 		SessionID: proto.SessionHex(raw),
@@ -504,88 +853,670 @@ func (s *Service) spawn(p proto.SpawnParams) (proto.SpawnResult, error) {
 		Cols:      cols,
 		Rows:      rows,
 		Lifecycle: p.Lifecycle,
+		// The pane's tool endpoint is THIS request's and never this daemon's:
+		// the endpoint socket is keyed by the generation, so several
+		// coordinators ride one daemon (D12) and the caller that opened the
+		// pane is the only party that knows which endpoint its tools belong
+		// to (nocx-50w7p.18).
+		AgentToolEndpoint: p.AgentToolEndpoint,
+		// The bearer the launch stages for this pane's agent (nocx-e2bws), on
+		// the same terms as the ssh route's: a fact about THIS request, minted
+		// by the coordinator that asked for the pane.
+		AgentToolToken: p.AgentToolToken,
 	})
 	if err != nil {
 		s.mu.Lock()
 		s.budget -= reserved
 		s.mu.Unlock()
+		lg.Error("helper: the pane's shell could not be started", "error", err)
 		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
 	}
+
+	return s.finishSpawn(claim, proc, proto.LaunchRecord{
+		Kind: proto.LaunchKindLocal,
+		Local: &proto.LocalLaunchRecord{
+			Shell:       proc.Shell(),
+			Cwd:         resolvedCwd(p.Cwd, proc),
+			Pid:         proc.Pid(),
+			Pgid:        processGroup(proc),
+			Cols:        cols,
+			Rows:        rows,
+			WindowBytes: bound,
+		},
+	}, spawnShape{
+		sessionID: proto.SessionHex(raw), raw: raw, workspace: p.Workspace, key: p.IdempotencyKey,
+		cols: cols, rows: rows, bound: bound, reserved: reserved, lifecycle: p.Lifecycle,
+	}, lg, &spawned)
+}
+
+// spawnSSH opens a session whose process is a shell channel on a FAR host
+// (nocx-50w7p.4).
+//
+// It is the same walk as spawn with three differences, and each is a fact
+// about what a remote session is rather than a variation of taste:
+//
+//   - the process comes from the SSHSpawner, which dials through this
+//     machine's helper-side ssh client and asks THIS request's coordinator
+//     connection for the credential and the host-key verdict;
+//   - the launch record is the union's SSH branch, which carries no pid, no
+//     pgid and no resolved cwd, because this machine has none of those facts;
+//   - the inventory's observed evidence stays null, because the OS-evidence
+//     seam answers about pids of THIS machine and there is no such pid here.
+//
+// Everything else — the idempotency claim, the budget, the runtime beside the
+// process, the window, the exit watcher — is the same code, and it is the same
+// code on purpose: a second copy of "a session is registered once its process
+// exists" is where the two kinds of session would start disagreeing.
+func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto.SpawnResult, err error) {
+	ctx, lg, end := nocxlog.Start(ctx, nocxlog.NewSlogAdapter(s.log), "helper.session.spawn-ssh",
+		"host", p.Destination.Host, "port", p.Destination.Port, "user", p.Destination.User,
+		"cols", p.Cols, "rows", p.Rows, "mode", p.DesiredMode, "lifecycle_requested", p.Lifecycle != nil)
+	defer func() { end(err) }()
+
+	// THE BUILD, FIRST, because it decides whether the rest of this function
+	// can mean anything. A helper without the tag links no ssh client, so
+	// there is no dial to make and no request that would work: the caller is
+	// told what the binary is rather than what this request was.
+	if s.sshSpawner == nil {
+		return proto.SpawnResult{}, fmt.Errorf("%w: build with nocx_local_ssh to open ssh panes", ErrNoSSHSpawner)
+	}
+	if verr := validateSSHSpawn(p); verr != nil {
+		// Renamed rather than assigned to the named return: this function's
+		// `err` is the one its deferred end() reports, and a shadowed error
+		// there is a failure whose cause and whose report can disagree.
+		return proto.SpawnResult{}, verr
+	}
+	if len(p.IdempotencyKey) > proto.MaxIdempotencyKey {
+		return proto.SpawnResult{}, fmt.Errorf("%w: %d characters, the limit is %d",
+			ErrBadKey, len(p.IdempotencyKey), proto.MaxIdempotencyKey)
+	}
+	claim, existing, err := s.claimKey(ctx, p.IdempotencyKey)
+	if err != nil {
+		return proto.SpawnResult{}, err
+	}
+	if existing != nil {
+		return proto.SpawnResult{Entry: existing.entry(s.inspector)}, nil
+	}
+	// From here the claim is HELD, exactly as in spawn: every return either
+	// resolves it onto a registered session or releases it.
+	spawned := false
+	defer func() {
+		if !spawned {
+			s.releaseKey(claim)
+		}
+	}()
+
+	bound := s.clamp(p.WindowBytes)
+	reserved := bound
+	if p.Lifecycle != nil {
+		reserved += bound
+	}
+
+	// See spawn's identical step: eviction under pressure runs before the
+	// refusal below is decided (nocx-isjh4).
+	s.evictForBudget(reserved)
+
+	s.mu.Lock()
+	committed := s.budget
+	if committed+reserved > s.limits.BudgetBytes {
+		s.mu.Unlock()
+		// The total is read UNDER the lock and carried out of it: reporting it
+		// from the field after unlocking is a read of shared state that another
+		// spawn may already have changed, which is a data race whatever it
+		// prints.
+		return proto.SpawnResult{}, fmt.Errorf("%w: %d bytes committed of %d", ErrBudget, committed, s.limits.BudgetBytes)
+	}
+	s.budget += reserved
+	s.mu.Unlock()
+
+	cols, rows := p.Cols, p.Rows
+	if cols == 0 {
+		cols = 80
+	}
+	if rows == 0 {
+		rows = 24
+	}
+	raw, err := s.newID()
+	if err != nil {
+		s.mu.Lock()
+		s.budget -= reserved
+		s.mu.Unlock()
+		lg.Error("helper: could not mint a session id", "error", err)
+		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
+	}
+	lg = lg.With("session", proto.SessionHex(raw))
+
+	// Minted before the dial so the liveness sink can name a session that
+	// does not exist as a *hostedSession yet — the same reason spawn's own
+	// exit watcher is armed against a raw id (finishSpawn) rather than
+	// waiting for one.
+	hostID := proto.HostSessionID{Generation: s.generation, Session: proto.SessionHex(raw)}
+
+	proc, err := s.sshSpawner.SpawnSSH(ctx, SSHSpawnRequest{
+		SessionID:          proto.SessionHex(raw),
+		Destination:        p.Destination,
+		AcceptOnTrust:      p.AcceptOnTrust,
+		HostKeyFingerprint: p.HostKeyFingerprint,
+		Shell:              p.Shell,
+		Mode:               p.DesiredMode,
+		// The pane's bearer, on the same terms as the endpoint above: a fact
+		// about THIS request (nocx-50w7p.16).
+		AgentToolToken: p.AgentToolToken,
+		// Per request, for the same reason `spawn`'s is (nocx-50w7p.18):
+		// what arrives on the far-side tool socket is FOR the coordinator
+		// that opened this pane, and only that coordinator can name its own
+		// endpoint on this machine.
+		AgentToolEndpoint: p.AgentToolEndpoint,
+		// Why there is no tool surface on this pane, when the caller said: a
+		// code from internal/shellintegration's closed set, rendered into the
+		// launch's environment for the shell to name to a person (nocx-e2bws).
+		AgentToolsAbsent: p.AgentToolsAbsent,
+		Cols:             cols,
+		Rows:             rows,
+		Lifecycle:        p.Lifecycle,
+		// The helper is the party holding this connection (ADR-0057), so it
+		// is the only party that can arm a prober against it — nocx-y6fh7
+		// item 6. A dead connection needs no separate report: the prober
+		// gives up by closing the transport, which ends this session's
+		// channel exactly as any other end does, and notifyExit below
+		// carries it from there. This sink is for the non-terminal half —
+		// the far end answering late or not yet — which has no exit to ride.
+		KeepaliveInterval: time.Duration(p.KeepaliveIntervalMS) * time.Millisecond,
+		KeepaliveCountMax: p.KeepaliveCountMax,
+		OnLiveness: func(responsive bool, roundTrip time.Duration) {
+			s.notifyLiveness(hostID, responsive, roundTrip)
+		},
+	})
+	if err != nil {
+		s.mu.Lock()
+		s.budget -= reserved
+		s.mu.Unlock()
+		lg.Error("helper: the remote shell channel could not be opened", "error", err)
+		// The refusal is the ssh service's own where it has one — a sealed
+		// vault, a changed host key, an unreachable host are all *proto.Refusal
+		// with a code the coordinator already switches on — and only what has
+		// no code becomes a spawn failure. Wrapping everything as ErrSpawn
+		// would send a person to look at the request when the answer is about
+		// the host.
+		var refusal *proto.Refusal
+		if errors.As(err, &refusal) {
+			return proto.SpawnResult{}, err
+		}
+		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
+	}
+
+	return s.finishSpawn(claim, proc, proto.LaunchRecord{
+		Kind: proto.LaunchKindSSH,
+		SSH: &proto.SSHLaunchRecord{
+			Host:        p.Destination.Host,
+			Port:        p.Destination.Port,
+			User:        p.Destination.User,
+			IdentityRef: p.Destination.Identity.CredentialOf().Ref,
+			Shell:       string(shellKindOrAuto(p.Shell)),
+			// Empty, always: this helper resolved no directory on the far
+			// side. See proto.SSHLaunchRecord.
+			Cwd:         "",
+			Cols:        cols,
+			Rows:        rows,
+			WindowBytes: bound,
+		},
+	}, spawnShape{
+		sessionID: proto.SessionHex(raw), raw: raw, workspace: p.Workspace, key: p.IdempotencyKey,
+		cols: cols, rows: rows, bound: bound, reserved: reserved, lifecycle: p.Lifecycle,
+	}, lg, &spawned)
+}
+
+// validateSSHSpawn refuses a remote spawn the helper will not perform, before
+// the claim is taken or anything is dialed.
+func validateSSHSpawn(p proto.SSHSpawnParams) error {
+	switch {
+	case p.Destination.Host == "":
+		return fmt.Errorf("%w: no host", ErrBadSSHParams)
+	case p.Destination.Port <= 0 || p.Destination.Port > 65535:
+		return fmt.Errorf("%w: port %d", ErrBadSSHParams, p.Destination.Port)
+	case p.Destination.User == "":
+		return fmt.Errorf("%w: no user", ErrBadSSHParams)
+	// The interactive rung is the one auth kind whose identity carries no
+	// reference BY DESIGN (proto.SSHIdentity's own comment: "the interactive
+	// rung — a person — carries neither"): there is nothing stored to name
+	// before the far side has even asked a question. Refusing it here was
+	// this check reading every auth kind through the password/key rule,
+	// which turned the ordinary "the profile named nothing, ask a person"
+	// path into ErrBadSSHParams before the ask could happen.
+	case p.Destination.Identity.Auth != proto.SSHAuthInteractive && p.Destination.Identity.CredentialOf().Ref == "":
+		return fmt.Errorf("%w: no credential reference", ErrBadSSHParams)
+	}
+	if p.Cwd != "" {
+		return fmt.Errorf("%w: %q", ErrCwdUnsupported, p.Cwd)
+	}
+	switch p.Shell {
+	case "", proto.SSHShellAuto, proto.SSHShellBash, proto.SSHShellZsh, proto.SSHShellUnknown:
+	default:
+		return fmt.Errorf("%w: shell %q is not one this helper launches", ErrBadSSHParams, p.Shell)
+	}
+	// The reason code is a CLOSED SET internal/shellintegration owns
+	// (agenttools.go: the codes, the environment variable's name and the
+	// render), and this asks the OWNER rather than keeping a second copy of the
+	// list. A code this build's shells cannot turn into a sentence is refused
+	// rather than exported: a shell handed one would report nothing at all, or
+	// worse, a sentence about a state nobody is in (nocx-e2bws).
+	if p.AgentToolsAbsent != "" && !shellintegration.AgentToolsAbsent(p.AgentToolsAbsent).Known() {
+		return fmt.Errorf("%w: agent tools absent reason %q is not one this helper knows", ErrBadSSHParams, p.AgentToolsAbsent)
+	}
+	// AND IT MAY NOT CONTRADICT A PATH — there is no path left to contradict,
+	// since the ssh route's far-host paths were deleted with the case they
+	// served (nocx-e2bws): a pane this machine's helper carries on a host with
+	// no helper of its own has no tool surface, and says so.
+	return nil
+}
+
+// shellKindOrAuto resolves the empty default, which the wire allows because it
+// is the ordinary value: a caller that has not pinned a tier means "the far
+// side decides".
+func shellKindOrAuto(kind proto.SSHShellKind) proto.SSHShellKind {
+	if kind == "" {
+		return proto.SSHShellAuto
+	}
+	return kind
+}
+
+// spawnShape is everything finishSpawn needs that is not the process itself:
+// the identity the session is registered under, the window accounting already
+// reserved, and the lifecycle request (which decides whether a second window is
+// reserved for the descriptor channel).
+type spawnShape struct {
+	sessionID string
+	// raw is the same id in the data plane's spelling. It travels BESIDE the
+	// hex rather than being derived from it in finishSpawn, because the bytes
+	// are what newID produced and the hex is what was made from them: parsing
+	// the hex back would be a second derivation of one fact, with a failure
+	// arm that can only fire if the first one is already broken.
+	raw       [16]byte
+	workspace proto.WorkspaceID
+	key       string
+	cols      uint16
+	rows      uint16
+	bound     int64
+	reserved  int64
+	lifecycle *proto.LifecycleLaunch
+}
+
+// finishSpawn builds the session around a process that ALREADY EXISTS: the
+// terminal beside it, the window, the launch record, the inventory row, and the
+// three goroutines that serve it.
+//
+// It is the second half of both spawn and spawn-ssh, and it is one function
+// rather than two copies because these are the steps that must agree about the
+// intervals D5 and D10 are written in: the session enters the inventory once
+// its process exists and not before, its claim resolves in the same critical
+// section that adds the row, and the runtime is created before the first byte
+// is read.
+//
+// On failure it releases the budget reservation and closes the process, and
+// reports `spawned` false through the pointer so the caller's deferred
+// releaseKey runs — there is no path on which a claim is resolved onto a
+// session that was never registered, and none on which a reserved window is
+// leaked by a spawn that produced nothing.
+func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.LaunchRecord, shape spawnShape, lg nocxlog.Logger, spawned *bool) (proto.SpawnResult, error) {
+	release := func() {
+		_ = proc.Close()
+		s.mu.Lock()
+		s.budget -= shape.reserved
+		s.mu.Unlock()
+	}
+	rt, screen, err := newSessionRuntime(s.screen, proc, shape.sessionID, shape.cols, shape.rows)
+	if err != nil {
+		// Nothing has been read from this process and nothing has been
+		// registered, so the spawn has produced nothing: end it rather than
+		// leave a process running with no terminal state behind it, give the
+		// reserved window back, and report the refusal the caller acts on.
+		release()
+		lg.Error("helper: the session's terminal could not be created", "error", err)
+		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
+	}
+	win := newWindow(shape.bound)
+	// The one I/O owner (nocx-6q1uh.3, spec §5), built over the runtime and
+	// bound to it as its ReplySink BEFORE anything ever reads from proc — no
+	// byte has been read yet (newSessionRuntime's whole reason for running
+	// here rather than lazily), so there is no window in which Ingest could
+	// run with no sink bound.
+	owner := newSessionOwner(proc, rt, win, s.log)
+	rt.SetReplies(owner)
+	// The session's one token book (nocx-6q1uh.4, spec §6.2), drawn over
+	// THIS incarnation and bound to the owner before anything can submit a
+	// token-bearing intent — the same ordering guarantee SetReplies already
+	// gives Ingest. hs below gets the same instance, for the RPC handlers
+	// (nocx-6q1uh.6) that mint and verify through hs rather than the owner.
+	tokens := newTokenBook(rt.Incarnation(), s.now)
+	owner.SetTokens(tokens)
+	// The runtime's control epoch is granted lazily, by the first
+	// session.intent this session ever receives (hostSession.ensureControl,
+	// intent_ops.go) — not here. Granting it eagerly at spawn would make
+	// ensureControl's own grant path dead code in every production spawn,
+	// since it checks-then-grants and would always find one already in
+	// force; see intent_ops.go's package doc for why the grant belongs
+	// there instead.
 	lifecycleWin := (*window)(nil)
 	lifecycleBudget := int64(0)
 	var lifecycleCarrier io.ReadWriteCloser
 	if lp, ok := proc.(LifecycleProcess); ok {
 		lifecycleCarrier = lp.Lifecycle()
 		if lifecycleCarrier != nil {
-			lifecycleWin = newWindow(bound)
-			lifecycleBudget = bound
+			lifecycleWin = newWindow(shape.bound)
+			lifecycleBudget = shape.bound
 		}
 	}
-	if p.Lifecycle != nil && lifecycleWin == nil {
+	if shape.lifecycle != nil && lifecycleWin == nil {
 		s.mu.Lock()
-		s.budget -= bound
+		s.budget -= shape.bound
 		s.mu.Unlock()
+		// A LIFECYCLE ASKED FOR AND NOT GIVEN. The caller will now wait out a
+		// hello budget for a channel that does not exist, and until this line
+		// the only sign of it was that timeout, ten seconds later and in
+		// another process. The ordinary cause is a launcher that declined the
+		// far shell (an unsupported shell kind), which is a session that
+		// integrates nothing rather than a failure of the pane; a helper whose
+		// far listener was REFUSED never reaches this line, because spawn-ssh
+		// refuses that request by name instead (sshsvc.OpenPaneListeners).
+		lg.Warn("helper: a lifecycle channel was asked for and the launcher provided none")
 	}
 	hs := &hostSession{
-		id:              proto.HostSessionID{Generation: s.generation, Session: proto.SessionHex(raw)},
-		raw:             raw,
-		workspace:       p.Workspace,
+		id:              proto.HostSessionID{Generation: s.generation, Session: shape.sessionID},
+		raw:             shape.raw,
+		workspace:       shape.workspace,
+		key:             shape.key,
 		startedAt:       s.now(),
 		proc:            proc,
-		win:             newWindow(bound),
+		win:             win,
+		runtime:         rt,
+		screen:          screen,
+		owner:           owner,
+		tokens:          tokens,
+		now:             s.now,
 		lifecycleWin:    lifecycleWin,
 		lifecycleBudget: lifecycleBudget,
 		// Retained for the life of the session, and only when there is a
 		// window behind it: a launch kept for a shell that never got a
 		// channel would be an identity a replacing coordinator could adopt
 		// and then hear nothing on (nocx-k6p18.31).
-		lifecycleLaunch: adoptableLaunch(p.Lifecycle, lifecycleWin),
+		lifecycleLaunch: adoptableLaunch(shape.lifecycle, lifecycleWin),
 		log:             s.log,
+		launch:          launch,
 		subs:            make(map[proto.SubscriberID]*subscriber),
 		attachments:     make(map[proto.AttachmentID]*attachment),
 	}
-	hs.launch = proto.LaunchRecord{
-		Shell:       proc.Shell(),
-		Cwd:         resolvedCwd(p.Cwd, proc),
-		Pid:         proc.Pid(),
-		Pgid:        processGroup(proc),
-		Cols:        cols,
-		Rows:        rows,
-		WindowBytes: bound,
-	}
+	// The book's tokens report themselves under this session's id — minted
+	// one line above, so it could not be named at newTokenBook time.
+	tokens.bindSession(hs.id)
 
 	s.mu.Lock()
-
 	s.sessions[hs.id.Session] = hs
+	// The claim resolves onto the row in the SAME critical section that adds
+	// it, so no reader can ever see a resolved claim naming a session the
+	// inventory does not hold.
+	s.resolveKeyLocked(claim, hs.id.Session)
+	*spawned = true
 	s.mu.Unlock()
-	go hs.pump()
+	go owner.run()
 	if lifecycleCarrier != nil {
 		go hs.lifecyclePump(lifecycleCarrier)
 	}
 	go hs.watchExit(s.now, s.notifyExit)
 
-	s.log.Info("session spawned", "session", hs.id.Session, "generation", string(s.generation),
-		"shell", hs.launch.Shell, "pid", hs.launch.Pid, "pgid", hs.launch.Pgid, "windowBytes", bound)
+	lg.Info("session spawned", "session", hs.id.Session, "generation", string(s.generation),
+		"kind", string(launch.Kind), "shell", launch.Shell(),
+		"pid", launch.LocalPid(), "pgid", launch.LocalPgid(), "windowBytes", shape.bound,
+		// The fact the hello-timeout hangs on: a pane with no carrier can
+		// never authenticate, and that is knowable here rather than a
+		// deadline later.
+		"lifecycle_carrier", lifecycleCarrier != nil)
 	return proto.SpawnResult{Entry: hs.entry(s.inspector)}, nil
+}
+
+// keyClaim is one live idempotency claim (L7). It is a pointer held by the
+// spawn that took it, so a claim that has been replaced in the map — released
+// and re-taken by a later spawn — can never be resolved or released by the
+// first one: identity is the check, never the key string.
+type keyClaim struct {
+	// key is empty for a caller that minted none. A claim with no key is a
+	// claim on nothing: it is never in the map, and resolving or releasing it
+	// does nothing, which is what keeps the keyless path free of branches.
+	key string
+	// done closes when the spawn holding this claim finished, either way. A
+	// repeat that arrives mid-flight waits on it rather than forking.
+	done chan struct{}
+	// session is the row this claim resolved onto, set under s.mu exactly
+	// once. Empty means the claim is still in flight.
+	session string
+}
+
+// claimKey takes the caller's idempotency claim, or answers with the session
+// that already holds it.
+//
+// THE INTERVAL, BOTH ENDS NAMED: a key names its session from BEFORE the fork
+// — the claim is registered here, under the same mutex the inventory is
+// guarded by, and the spawner is not called until it is held — until the row
+// it named LEAVES THE INVENTORY, which is closeSession or Close and nothing
+// else. Between those two moments exactly one session in this generation
+// answers to that key, and a spawn repeated with it returns that session's
+// entry rather than forking a second shell. A spawn that fails releases its
+// claim at the failure, so the key is reusable immediately and a pane is never
+// wedged by an attempt that produced nothing.
+//
+// The end is the ROW and not the process, deliberately: a session whose shell
+// has exited keeps its row and its exit status until somebody closes it (D5
+// makes that row the answer reconciliation reads), so the key must go on
+// naming it. Forking a fresh shell over a row whose exit status nobody has
+// read yet would be the coordinator losing the thing it came back for.
+//
+// Three answers: a claim to hold (existing nil), an existing session to return
+// (existing non-nil), or the caller's context ending while another spawn holds
+// the same key.
+func (s *Service) claimKey(ctx context.Context, key string) (claim *keyClaim, existing *hostSession, err error) {
+	if key == "" {
+		// No claim was minted, so there is nothing to hold and nothing to
+		// promise: two keyless spawns are two sessions, as they always were.
+		return &keyClaim{done: make(chan struct{})}, nil, nil
+	}
+	for {
+		s.mu.Lock()
+		held, ok := s.keys[key]
+		if !ok {
+			c := &keyClaim{key: key, done: make(chan struct{})}
+			s.keys[key] = c
+			s.mu.Unlock()
+			return c, nil, nil
+		}
+		if held.session != "" {
+			// Resolved. The invariant that both maps are written under this
+			// one mutex is what makes the lookup total rather than hopeful.
+			hs, live := s.sessions[held.session]
+			s.mu.Unlock()
+			if live {
+				return nil, hs, nil
+			}
+			// Unreachable while the invariant holds; treated as a released
+			// claim rather than trusted, because a claim pointing at nothing
+			// must never be an answer.
+			s.mu.Lock()
+			if s.keys[key] == held {
+				delete(s.keys, key)
+			}
+			s.mu.Unlock()
+			continue
+		}
+		// In flight. Waiting is what makes the claim precede the fork for a
+		// CONCURRENT repeat too — the case the whole mechanism exists for,
+		// since a coordinator's retry can race its own first attempt over a
+		// second connection.
+		s.mu.Unlock()
+		select {
+		case <-held.done:
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		}
+	}
+}
+
+// resolveKeyLocked binds a held claim to the row that was just registered. The
+// caller holds s.mu.
+func (s *Service) resolveKeyLocked(c *keyClaim, session string) {
+	if c.key != "" {
+		c.session = session
+	}
+	close(c.done)
+}
+
+// releaseKey gives a claim back after a spawn that produced no row. It is
+// idempotent by construction — the deferred release runs only when the spawn
+// did not resolve — and it removes the map entry only if this claim is still
+// the one in it.
+func (s *Service) releaseKey(c *keyClaim) {
+	if c.key != "" {
+		s.mu.Lock()
+		if s.keys[c.key] == c {
+			delete(s.keys, c.key)
+		}
+		s.mu.Unlock()
+	}
+	close(c.done)
 }
 
 // closeSession ends the PTY first, then removes its inventory row and releases
 // the reserved window budget. The row is present until this operation starts
 // and absent after it returns; a disconnect alone never reaches this path.
+//
+// It is also the closing end of the idempotency interval: the claim goes with
+// the row, in the same critical section, so the next spawn carrying that key
+// forks a new session instead of being handed one that no longer exists.
 func (s *Service) closeSession(p proto.CloseSessionParams) error {
 	hs, err := s.find(p.Session)
 	if err != nil {
 		return err
 	}
+	s.removeSession(hs, "close-session")
+	return nil
+}
+
+// removeSession is the one closer behind closeSession, the unclaimed-session
+// expiry sweep and eviction under budget pressure (nocx-isjh4): three
+// CALLERS of one closer, never three closers that could drift apart the way
+// AGENTS.md warns a second implementation always does. It ends the PTY
+// first, then removes the inventory row and releases the reserved window
+// budget and key claim in the same critical section that removes it —
+// exactly closeSession's own contract, restated here as the single
+// implementation.
+//
+// reason names WHICH of the three callers reached this session — logged
+// rather than left implicit, because the coordinator's own "session closed"
+// line is deliberately the SAME phrase for its own two verbs (Reg.Close and
+// Reg.EndSession, session.go's own comment), so this is the one place a
+// helper-hosted session's actual end can be told apart from a mere
+// coordinator detach at all (nocx-y6fh7 item D, round 3): "close-session"
+// means a coordinator explicitly asked (a pane leaving the layout, a shell
+// exit persisted, an explicit close, a failed open, a killed participant —
+// every proto.OpCloseSession caller collapses to this one reason on this
+// side of the wire, because the helper cannot see which of them asked);
+// "unclaimed-ttl" and "budget-pressure" are this helper's own housekeeping,
+// never a coordinator's doing.
+func (s *Service) removeSession(hs *hostSession, reason string) {
+	s.log.Info("helper: ending a host session", "session", hs.id.Session, "reason", reason)
 	hs.stop()
 
 	s.mu.Lock()
-	if current, ok := s.sessions[p.Session.Session]; ok && current == hs {
-		delete(s.sessions, p.Session.Session)
-		s.budget -= hs.launch.WindowBytes + hs.lifecycleBudget
+	if current, ok := s.sessions[hs.id.Session]; ok && current == hs {
+		delete(s.sessions, hs.id.Session)
+		if hs.key != "" {
+			if claim, held := s.keys[hs.key]; held && claim.session == hs.id.Session {
+				delete(s.keys, hs.key)
+			}
+		}
+		s.budget -= hs.launch.WindowBytes() + hs.lifecycleBudget
 	}
 	s.mu.Unlock()
-	return nil
+}
+
+// sweepExpired closes every exited, unattached session whose exit is at
+// least UnclaimedSessionTTL old (nocx-isjh4, owner amendment 3). D5 forbids
+// the helper deciding anything about a block's result, not running a timer
+// (coordinator review, 2026-09-15) — so what "the timer" measures is still
+// only this comparison against s.now(), but WHEN it is evaluated is now
+// twofold: on sweepLoop's own real-time schedule (SweepInterval, started
+// with the Service and stopped by Close) so an unclaimed session is bounded
+// even on a helper nobody ever calls again, and lazily on the two paths a
+// caller can still change something through: the inventory read, and before
+// a spawn's own budget check (which is also evictForBudget's first move, so
+// a spawn that fits once TTL'd sessions are gone never reaches
+// eviction-under-pressure at all). NOT WindowBytesInUse: it has no
+// production caller and exists to observe the budget, so it must not be the
+// thing that changes it — see its own doc.
+//
+// A LIVE shell is never touched: exitInfo reports exited=false for one, and
+// this never calls removeSession for it. Neither is an exited session a
+// coordinator still holds an attachment on — it may be mid-read of the
+// result it came back for, which is exactly the case D5's surviving half
+// exists to protect.
+func (s *Service) sweepExpired() {
+	now := s.now()
+	ttl := s.limits.UnclaimedSessionTTL
+	s.mu.Lock()
+	candidates := s.live()
+	s.mu.Unlock()
+	for _, hs := range candidates {
+		exited, at, attached := hs.exitInfo()
+		if !exited || attached {
+			continue
+		}
+		if now.Sub(at) >= ttl {
+			s.removeSession(hs, "unclaimed-ttl")
+		}
+	}
+}
+
+// evictForBudget runs sweepExpired first — a session already past its TTL is
+// freed before a live one is ever considered for by-pressure eviction — and
+// then, only if reserved still would not fit the aggregate budget, closes
+// exited, unattached sessions oldest-exit-first until it does or none are
+// left eligible (nocx-isjh4, owner amendment 4). It never touches a live
+// shell or an exited session a coordinator is attached to; the caller's own
+// budget check after this returns is what actually refuses the spawn, so
+// eviction that could not free enough still leaves the spawn's normal
+// refusal in force.
+func (s *Service) evictForBudget(reserved int64) {
+	s.sweepExpired()
+
+	s.mu.Lock()
+	fits := s.budget+reserved <= s.limits.BudgetBytes
+	candidates := s.live()
+	s.mu.Unlock()
+	if fits {
+		return
+	}
+
+	type evictable struct {
+		hs   *hostSession
+		at   time.Time
+		size int64
+	}
+	var pool []evictable
+	for _, hs := range candidates {
+		exited, at, attached := hs.exitInfo()
+		if !exited || attached {
+			continue
+		}
+		pool = append(pool, evictable{hs: hs, at: at, size: hs.launch.WindowBytes() + hs.lifecycleBudget})
+	}
+	sort.Slice(pool, func(i, j int) bool { return pool[i].at.Before(pool[j].at) })
+
+	for _, c := range pool {
+		s.mu.Lock()
+		fits = s.budget+reserved <= s.limits.BudgetBytes
+		s.mu.Unlock()
+		if fits {
+			return
+		}
+		s.removeSession(c.hs, "budget-pressure")
+	}
 }
 
 const maxSignal = 64
@@ -605,7 +1536,22 @@ func (s *Service) signal(p proto.SignalParams) error {
 	if !ok {
 		return fmt.Errorf("%w: process groups are unavailable", ErrSignal)
 	}
-	if err := signaller.SignalProcessGroup(hs.launch.Pgid, syscall.Signal(p.Signal)); err != nil {
+	// Zero means the session's own group, which is what every level-1 caller
+	// asked for and what the launch record names. A caller that named a group
+	// gets that group — see SignalParams.Pgid for why that is addressing and
+	// not authority.
+	// For a session whose process is on another machine, "the session's own
+	// group" resolves to ZERO: this helper owns no group there, the launch
+	// record carries none, and the process's own signaller reads zero as "the
+	// session's own process" and sends the channel's signal request. A caller
+	// that NAMED a group on such a session is refused by that signaller, by
+	// name, rather than having its request pointed at a number from a
+	// different kernel's namespace (ErrRemotePgid).
+	pgid := p.Pgid
+	if pgid <= 0 {
+		pgid = hs.launch.LocalPgid()
+	}
+	if err := signaller.SignalProcessGroup(pgid, syscall.Signal(p.Signal)); err != nil {
 		return fmt.Errorf("%w: %v", ErrSignal, err)
 	}
 	return nil
@@ -631,6 +1577,12 @@ func (s *Service) clamp(want int64) int64 {
 // can answer. The workspace filter is D15's reservation on the read side and
 // is empty in every level-1 call.
 func (s *Service) inventory(p proto.SessionsParams) proto.SessionsResult {
+	// Swept first (nocx-isjh4): a coordinator asking what this helper holds
+	// must not be answered with a row that has already outlived its
+	// unclaimed TTL, and a test advancing a fake clock and then reading the
+	// inventory is asking exactly that question.
+	s.sweepExpired()
+
 	s.mu.Lock()
 	live := s.live()
 	s.mu.Unlock()
@@ -726,6 +1678,33 @@ func (s *Service) notifyExit(e proto.SessionExit) {
 			Service: proto.ServiceSession, Event: proto.EventSessionExit, Params: e,
 		}); err != nil {
 			s.log.Warn("exit notification not delivered", "session", e.Session.Session, "err", err)
+		}
+	}
+}
+
+// notifyLiveness tells every bound connection what an ssh session's own
+// keepalive prober just learned about the far end (nocx-y6fh7 item 6). It is
+// notifyExit's sibling and shares its whole argument: a coordinator watching
+// this session must hear it whether or not another coordinator also is, and
+// nothing here is durable state the way an exit's status is (the OLD grade
+// is simply superseded by the next probe, and a coordinator that missed one
+// round learns the current answer on the very next).
+func (s *Service) notifyLiveness(id proto.HostSessionID, responsive bool, roundTrip time.Duration) {
+	s.mu.Lock()
+	sinks := make([]Sink, 0, len(s.sinks))
+	for sink := range s.sinks {
+		sinks = append(sinks, sink)
+	}
+	s.mu.Unlock()
+	live := proto.SessionLiveness{Session: id, Responsive: responsive}
+	if responsive && roundTrip > 0 {
+		live.RoundTripMS = roundTrip.Milliseconds()
+	}
+	for _, sink := range sinks {
+		if err := sink.SendNotification(proto.Notification{
+			Service: proto.ServiceSession, Event: proto.EventSessionLiveness, Params: live,
+		}); err != nil {
+			s.log.Warn("liveness notification not delivered", "session", id.Session, "err", err)
 		}
 	}
 }

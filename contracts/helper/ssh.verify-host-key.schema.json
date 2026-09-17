@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.verify-host-key.schema.json",
+  "title": "HelperSSHVerifyHostKeyResult",
+  "description": "The verdict, plus the evidence a person is shown when they are asked about it. `expected` carries the recorded fingerprint(s) exactly when the answer is `changed`, so a changed key can never be rendered without the value it changed from — and it is absent rather than empty for the other two, because 'nothing is recorded' and 'the recorded value is blank' are different facts and only one of them is true here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "fingerprint"],
+  "properties": {
+    "verdict": {
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/hostKeyVerdict"
+    },
+    "fingerprint": {
+      "description": "The SHA256 fingerprint of the offered key, in the `SHA256:base64` form ssh.FingerprintSHA256 produces.",
+      "type": "string",
+      "minLength": 1
+    },
+    "expected": {
+      "description": "The fingerprint(s) recorded for this host, comma-joined, present exactly when the verdict is `changed`. It is spelled the way the coordinator's own host-key error spells it (ErrHostKeyMismatch.Expected), so the sentence a person reads is the one the dial path has always shown.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

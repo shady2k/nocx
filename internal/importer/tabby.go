@@ -97,7 +97,7 @@ func ImportProfiles(cfg *TabbyConfig, repo profile.ProfileRepository, typeFilter
 
 		// Create, falling back to Update on duplicate — preserving the
 		// overwrite-on-reimport behaviour today's SaveProfile provided.
-		// Wave 3 routes this through the domain service properly.
+		// Group 3 routes this through the domain service properly.
 		if err := repo.CreateProfile(p); err != nil {
 			if errors.Is(err, profile.ErrProfileExists) {
 				if upErr := repo.UpdateProfile(p); upErr != nil {

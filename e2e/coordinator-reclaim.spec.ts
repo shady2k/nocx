@@ -56,13 +56,14 @@
  * shared stand accumulates every other spec's tabs, and a restore that put a
  * dozen of them on screen would be measuring somebody else's window.
  */
-import { test as base, expect, type Browser, type Page } from '@playwright/test'
+import { expect, type Browser, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { BASE_URL } from './base-url'
 import {
+  standalone as base,
   VaultBackend,
   bindEndpoint,
   clickIntoEditor,

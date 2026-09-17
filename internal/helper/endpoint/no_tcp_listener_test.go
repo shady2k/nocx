@@ -31,11 +31,14 @@ import (
 // thePath is every package a byte travels through between a coordinator and
 // the helper that serves it: the endpoint itself, the connection's protocol
 // engine, the session service behind it, the coordinator's client, and the
-// binary that is both ends of it.
+// binary that is both ends of it — plus, since nocx-50w7p.2, the ssh service a
+// coordinator asks to dial, which is a handler on this path and therefore bound
+// by the same rule (plan §11: a new package on this path is added here).
 var thePath = []string{
 	"../../../internal/helper/endpoint",
 	"../../../internal/helper/host",
 	"../../../internal/helper/session",
+	"../../../internal/helper/sshsvc",
 	"../../../internal/helper/client",
 	"../../../internal/helper/proto",
 	"../../../cmd/nocx-helper",

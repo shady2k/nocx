@@ -97,6 +97,23 @@ func (t *keepaliveTally) probe(ok bool) keepaliveVerdict {
 	return keepaliveUnresponsive
 }
 
+// keepaliveLossMarker is the optional seam a keepaliveTarget may implement to
+// record that IT is the party ending its own connection (nocx-y6fh7 item 6,
+// round 3): pooledSSHConn's markKeepaliveLost, read back by every sibling
+// channel through PooledConn.TaintReason. It is probed rather than added to
+// keepaliveTarget itself so this file's own tests can drive the give-up path
+// with a bare fake that has no such concept — the marker is a POOL fact, not
+// a prober one.
+type keepaliveLossMarker interface{ markKeepaliveLost() }
+
+// markKeepaliveLost tells target it is the connection ending itself, when it
+// carries that seam at all — a no-op for a target that does not.
+func markKeepaliveLost(target keepaliveTarget) {
+	if marker, ok := target.(keepaliveLossMarker); ok {
+		marker.markKeepaliveLost()
+	}
+}
+
 // errProbeSilent is returned when a probe did not come back inside its budget.
 // It is not one more failure: see the comment at its only use.
 var errProbeSilent = errors.New("ssh: keepalive probe did not return")
@@ -201,6 +218,7 @@ func startKeepalive(target keepaliveTarget, interval time.Duration, countMax int
 					// session's last word is "not answering" rather than
 					// silence (nocx-iarf9).
 					report(Reachability{Responsive: false})
+					markKeepaliveLost(target)
 					_ = target.Close()
 					// And WAIT for it. Closing the transport is what unparks
 					// the blocked call; returning before it does leaves a
@@ -211,6 +229,7 @@ func startKeepalive(target keepaliveTarget, interval time.Duration, countMax int
 				}
 				switch tally.probe(err == nil) {
 				case keepaliveGiveUp:
+					markKeepaliveLost(target)
 					_ = target.Close()
 					return
 				case keepaliveUnresponsive:

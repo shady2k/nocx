@@ -42,6 +42,42 @@ type LifecycleDataPlane interface {
 	LifecycleData(context.Context, proto.SessionFrame)
 }
 
+// ChannelDataPlane is the optional proxied-channel carrier: the raw bytes of
+// an ssh channel HELD BY the service that opened it. It is its own capability
+// because the identity is its own kind (proto.ChannelID, not a session) and
+// because exactly one service owns ssh connections — routing these frames by
+// anything but the service that can hold the channel would deliver them to
+// something with nowhere to put them.
+type ChannelDataPlane interface {
+	// ChannelData receives one inbound frame: bytes the coordinator wrote to
+	// a channel this service opened. The service moves them; it never
+	// interprets them (AD-6).
+	ChannelData(context.Context, proto.ChannelFrame)
+}
+
+// ResponseObserver is the optional capability a Service implements to be told
+// that the response to one of its calls is already on the wire.
+//
+// It exists for the one ordering a service cannot arrange for itself. A
+// handler that starts a background pump is a handler whose pump can write a
+// frame BEFORE the dispatcher has written the response — the response is
+// written after Call returns — so a caller that registers the thing the pump
+// writes about, keyed by an id it only learns FROM the response, has a window
+// in which bytes it has asked for are dropped as belonging to nobody.
+//
+// The window cannot be closed from the caller's side and must not be closed by
+// a sleep, so it is closed here: this hook runs AFTER h.respond, on the same
+// goroutine, which is a happens-before edge rather than a hope. A service that
+// implements it may start anything it deferred; a service that does not is
+// unaffected, which is what keeps this an optional capability rather than a
+// new obligation on every handler.
+type ResponseObserver interface {
+	// ResponseWritten is called once per SUCCESSFUL call, after its response
+	// frame has been written. result is what Call returned, so a service
+	// holding several deferred starts can tell which one this was.
+	ResponseWritten(ctx context.Context, op string, result any)
+}
+
 // RefusalCoder is an optional capability a Service implements to give its
 // errors machine-readable wire codes and structured details. When Call
 // returns an error the service recognises, its code (and details) cross on

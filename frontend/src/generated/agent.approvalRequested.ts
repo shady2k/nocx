@@ -29,6 +29,8 @@ export interface AgentApprovalRequested {
     | 'fetch.url'
     | 'session.list'
     | 'session.read'
+    | 'session.keys'
+    | 'session.message'
     | 'session.run'
     | 'session.wait'
     | 'files.edit'
@@ -49,6 +51,12 @@ export interface AgentApprovalRequested {
     | 'skills.delete'
     | 'skills.resolve'
     | 'skills.install'
+    | 'workers.holdings'
+    | 'workers.spawn'
+    | 'workers.say'
+    | 'workers.wait'
+    | 'workers.inbox'
+    | 'workers.close'
   /**
    * The model's call id for the proposed call — part of the binding.
    */
@@ -96,6 +104,29 @@ export interface AgentApprovalRequested {
      * The resource's id.
      */
     id: string
+  } | null
+  /**
+   * Present only when a resource of the proposed call fell outside a bound (design §5.3). It is what makes the question answerable: the prompt's three widths — this call, this session, always — widen NOTHING that excluded the resource, so without this fact the next identical call asks again, for ever. cause says which bound was missed and therefore whether any answer can move it; resource is the scope the row would have to grow to cover, in the form a row states it in, so the widening is applied from the question rather than re-derived from the arguments; widening is the offer itself, sent by the backend because the backend is what applies the answer.
+   */
+  outOfScope?: {
+    /**
+     * Which bound the resource fell outside. 'row-scope' is an operator's own selector on the effect row — editable, so an answer may widen it. 'fence' is the run fence or a narrowed capability, which no answer can move.
+     */
+    cause: 'row-scope' | 'fence'
+    /**
+     * The resource that fell outside — what the row would have to grow to cover.
+     */
+    resource: {
+      kind: 'path' | 'session' | 'environment' | 'credential' | 'destination' | 'content'
+      id: string
+    }
+    /**
+     * Whether the prompt may offer the widening answer (agent.approve scope 'expand'). Available only for cause 'row-scope': offering a question whose yes cannot be honoured is the failure this shape exists to remove, so a fence carries reason instead and no offer.
+     */
+    widening: {
+      available: boolean
+      reason: string
+    }
   } | null
   /**
    * skills.create and skills.update only: the first static scan finding in the bytes being proposed, naming the file it was found in — always SKILL.md, because that is the only file those two write. A skills.install proposal leaves this ABSENT and puts its findings in `install.files[].findings` instead, attached to the file each matched in: that question carries every file's bytes, so a finding is marked on the line it sits on, and a row repeating the first of them would be a second surface owning one fact (nocx-ojfuc.2). The path is stated rather than left out so this finding is the same shape skills.audit and skills.file carry; a surface handed a finding without one has to invent a subject for it.

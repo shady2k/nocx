@@ -1,7 +1,9 @@
 package session
 
 import (
+	"context"
 	"errors"
+	"io"
 	"os"
 	"strings"
 	"syscall"
@@ -34,6 +36,21 @@ func (p *stubPTY) Write(b []byte) (int, error) {
 func (p *stubPTY) Dir() string { return "/" }
 
 func (p *stubPTY) SignalProcessGroup(int, syscall.Signal) error { return nil }
+
+// InterruptWrite, WaitReadable and RawReadUntilAgain satisfy localPTY's
+// owner seam (nocx-6q1uh.3). stubPTY starts nothing and nothing ever spawns
+// a session I/O owner over it — Spawn fails before that point in every test
+// this fixture serves — so these are never called; they exist only so
+// *stubPTY still satisfies localPTY, the way Dir and SignalProcessGroup
+// already had to.
+func (p *stubPTY) InterruptWrite() error { return nil }
+
+func (p *stubPTY) WaitReadable(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (p *stubPTY) RawReadUntilAgain([]byte, func([]byte)) (bool, error) { return true, nil }
 
 // openDescriptors is how many descriptors this PROCESS holds. /dev/fd is the
 // one spelling both targets answer — on Linux it is a symlink to
@@ -131,6 +148,101 @@ func mustFailSpawn(t *testing.T, s *LocalSpawner, req SpawnRequest) {
 	}
 }
 
+// TestLocalSpawner_CarriesEachSpawnsOwnToolEndpointIntoItsLaunchScript is
+// nocx-2tesu's rendering half, re-shaped by nocx-50w7p.18: every enhanced
+// local pane carries ITS OWN request's tool endpoint as NOCX_TOOL_SOCKET, and
+// the pane's endpoint is never a value this spawner holds.
+//
+// The script is read twice from ONE spawner, and that repetition IS the
+// assertion — it is what the daemon-scoped field could not satisfy. A helper
+// endpoint socket is keyed by the generation rather than by a caller, so one
+// account's daemon serves several coordinators at once (D12); a value held
+// once (the old constructor argument, fed from this process's own environment)
+// rendered the first coordinator's socket into a pane another one asked for.
+//
+// The assertion reads the rendered launch SCRIPT rather than the process
+// environment: for the in-memory local tier the variable travels as an
+// `export` line inside the rcfile/script delivered over the inherited pipe
+// (LaunchOptions.AgentToolSocketPath -> launcherEnvBlock), exactly like the
+// remote tier's carrier already does — never as a second, ad hoc route
+// through the raw exec environment.
+func TestLocalSpawner_CarriesEachSpawnsOwnToolEndpointIntoItsLaunchScript(t *testing.T) {
+	cases := []struct {
+		name     string
+		session  string
+		endpoint string
+	}{
+		{"the app that started the daemon", "sess-tool-socket-a", "/run/user/1000/nocx/tool.sock"},
+		{"another coordinator of the same account on the same daemon", "sess-tool-socket-b", "/run/user/1000/nocx-dev/tool.sock"},
+	}
+	var script string
+	s := &LocalSpawner{
+		log:   log.NewSlogAdapter(nil),
+		shell: Shell{Path: "/bin/bash"},
+		openPTY: func(l log.Logger, cfg pty.Config) (localPTY, error) {
+			if len(cfg.ExtraFiles) == 0 {
+				t.Fatal("no script pipe was attached for the enhanced launch")
+			}
+			data, err := io.ReadAll(cfg.ExtraFiles[0])
+			if err != nil {
+				t.Fatalf("read the rendered launch script: %v", err)
+			}
+			script = string(data)
+			return &stubPTY{}, nil
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			script = ""
+			req := SpawnRequest{SessionID: tc.session, Cols: 80, Rows: 24, AgentToolEndpoint: tc.endpoint}
+			if _, err := s.Spawn(req); err != nil {
+				t.Fatalf("Spawn: %v", err)
+			}
+			if !strings.Contains(script, "NOCX_TOOL_SOCKET='"+tc.endpoint+"'") {
+				t.Fatalf("the launch script did not export this spawn's own tool endpoint %s: %q", tc.endpoint, script)
+			}
+		})
+	}
+}
+
+// TestLocalSpawner_OmitsToolSocketWhenTheRequestNamesNone is criterion 2's
+// half that belongs to this seam: a request that names no endpoint (the
+// zero value — the coordinator that asked runs no tool endpoint, which
+// cmd/nocx-server answers nil, nil for) renders a script that asks for
+// nothing, so the shell's own refusal text is what a user sees, rather than a
+// pane silently pointed at an empty path.
+func TestLocalSpawner_OmitsToolSocketWhenTheRequestNamesNone(t *testing.T) {
+	var script string
+	s := &LocalSpawner{
+		log:   log.NewSlogAdapter(nil),
+		shell: Shell{Path: "/bin/bash"},
+		openPTY: func(l log.Logger, cfg pty.Config) (localPTY, error) {
+			if len(cfg.ExtraFiles) == 0 {
+				t.Fatal("no script pipe was attached for the enhanced launch")
+			}
+			data, err := io.ReadAll(cfg.ExtraFiles[0])
+			if err != nil {
+				t.Fatalf("read the rendered launch script: %v", err)
+			}
+			script = string(data)
+			return &stubPTY{}, nil
+		},
+	}
+	req := SpawnRequest{SessionID: "sess-no-tool-socket", Cols: 80, Rows: 24}
+	if _, err := s.Spawn(req); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	// NOCX_TOOL_SOCKET= (an assignment) is what launcherEnvBlock renders when
+	// AgentToolSocketPath is set; the bare name still appears elsewhere in
+	// the embedded script, which READS the variable (nocx.bash's own
+	// __nocx_agent_tool_socket="${NOCX_TOOL_SOCKET:-}"), so a plain substring
+	// check for the name would fail on the script's own logic rather than on
+	// what this spawner rendered.
+	if strings.Contains(script, "NOCX_TOOL_SOCKET=") {
+		t.Fatalf("the launch script exported a tool socket no request named: %q", script)
+	}
+}
+
 // A localProcess must keep answering the three questions service.go asks it by
 // TYPE ASSERTION. They are unchecked at compile time there, so they are
 // checked here: a localPTY that omitted Dir or SignalProcessGroup would leave
@@ -148,5 +260,72 @@ func TestLocalProcess_KeepsTheAssertedSeams(t *testing.T) {
 	}
 	if _, ok := proc.(LifecycleProcess); !ok {
 		t.Error("localProcess no longer satisfies LifecycleProcess")
+	}
+}
+
+// THE PANE MUST BE GIVEN A RUNNABLE HELPER, NOT A BARE NAME (nocx-o36tr).
+//
+// The shell wrapper's fallback is `${NOCX_AGENT_HELPER_PATH:-nocx-helper}`, and
+// nothing in this repository puts a `nocx-helper` on PATH: `make helpers`
+// writes gzipped per-platform artifacts for remote deployment. So an
+// unconfigured pane stages an MCP server whose command cannot be executed, and
+// Claude Code shows "Nocx MCP Server — failed" with every other fact correct.
+//
+// The daemon that forks the shell IS the installed helper, so the path it
+// hands down is its own, and the generation the pane execs is the generation
+// that owns it.
+func TestLocalSpawner_CarriesTheHelperPathIntoTheLaunchScript(t *testing.T) {
+	const helper = "/home/dev/.nocx/helper/2-linux-amd64-abc/nocx-helper"
+	var script string
+	s := &LocalSpawner{
+		log:             log.NewSlogAdapter(nil),
+		shell:           Shell{Path: "/bin/bash"},
+		agentHelperPath: helper,
+		openPTY: func(l log.Logger, cfg pty.Config) (localPTY, error) {
+			if len(cfg.ExtraFiles) == 0 {
+				t.Fatal("no script pipe was attached for the enhanced launch")
+			}
+			data, err := io.ReadAll(cfg.ExtraFiles[0])
+			if err != nil {
+				t.Fatalf("read the rendered launch script: %v", err)
+			}
+			script = string(data)
+			return &stubPTY{}, nil
+		},
+	}
+	req := SpawnRequest{SessionID: "sess-helper-path", Cols: 80, Rows: 24}
+	if _, err := s.Spawn(req); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if !strings.Contains(script, "NOCX_AGENT_HELPER_PATH='"+helper+"'") {
+		t.Fatalf("the launch script did not export the helper path: %q", script)
+	}
+}
+
+// And a spawner nobody told one exports nothing, so the shell's own PATH
+// fallback still stands rather than the pane being pointed at an empty path.
+func TestLocalSpawner_OmitsTheHelperPathWhenNoneIsConfigured(t *testing.T) {
+	var script string
+	s := &LocalSpawner{
+		log:   log.NewSlogAdapter(nil),
+		shell: Shell{Path: "/bin/bash"},
+		openPTY: func(l log.Logger, cfg pty.Config) (localPTY, error) {
+			data, err := io.ReadAll(cfg.ExtraFiles[0])
+			if err != nil {
+				t.Fatalf("read the rendered launch script: %v", err)
+			}
+			script = string(data)
+			return &stubPTY{}, nil
+		},
+	}
+	req := SpawnRequest{SessionID: "sess-no-helper", Cols: 80, Rows: 24}
+	if _, err := s.Spawn(req); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	// The EXPORT line, not the name: the wrapper's own fallback
+	// `${NOCX_AGENT_HELPER_PATH:-nocx-helper}` is in the embedded script, so
+	// a test for the bare name finds the thing it is checking is absent.
+	if strings.Contains(script, "NOCX_AGENT_HELPER_PATH='") {
+		t.Fatalf("an unconfigured spawner exported a helper path: %q", script)
 	}
 }

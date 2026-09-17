@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.probe.schema.json",
+  "title": "HelperSSHProbeResult",
+  "description": "What one credential test answered: an outcome from the closed set, the classifier's own sentence beside it for the log and for the evidence a settings surface shows, the fingerprint of the host key the handshake saw when it reached one, and the evidence the two host-key outcomes carry. `detail` is a string and not a second enum because it is prose from the classifier rather than a decision the caller switches on: the outcome is the contract, the sentence is what a person reads.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["outcome", "detail"],
+  "properties": {
+    "outcome": {
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/probeOutcome"
+    },
+    "detail": {
+      "description": "The classifier's sentence — the same one ssh.ClassifyProbeError produces for the coordinator's own probe, so a person reading two paths sees one product.",
+      "type": "string"
+    },
+    "fingerprint": {
+      "description": "SHA256 fingerprint of the host key the handshake was offered, present whenever it reached one and absent when it did not (a host that never answered). It is here because the coordinator's own probe returned it beside its error and the settings surface STORES it: `host-key-unknown` is first contact with a machine, and a probe that could not say which key it saw would make the user's next connections indistinguishable from one another.",
+      "type": "string"
+    },
+    "hostKey": {
+      "description": "The evidence for the two host-key outcomes — the offered key's wire bytes and algorithm, and the recorded fingerprint when the answer is `changed` — in the same shape a refused channel's handshake carries. Nothing carries a Go value across this socket, so the coordinator REBUILDS ssh.ErrUnknownHostKey / ssh.ErrHostKeyMismatch from it, which is what keeps the accept sheet and the mismatch warning working unchanged. Absent for every other outcome, and for `host-key-unknown`/`host-key-changed` it is required by the allOf below.",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/hostKeyEvidence"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "enum": ["host-key-unknown", "host-key-changed"]
+          }
+        },
+        "required": ["outcome"]
+      },
+      "then": {
+        "required": ["outcome", "detail", "hostKey"]
+      }
+    }
+  ]
+}

@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/session.keys.schema.json",
+  "title": "SessionKeysParams",
+  "description": "Write one step under a target session.read minted for a worker you spawned (or one of its own workers): exactly one of key, text or option. A sequence is not one call — key is a single key name, never a list — so send one key, read the result, then decide the next one. tokenId is the target's tokenId from session.read, and it is spent at most once.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "tokenId"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The worker whose pane to write to, exactly as session.read read it."
+    },
+    "tokenId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The target's tokenId, from session.read's target.tokenId. It authorizes exactly this one step, against the exact frame session.read classified."
+    },
+    "key": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One physical key: Enter, Esc, Tab, BackTab, Backspace, Delete, Up, Down, Left, Right, Home, End, PageUp, PageDown, Insert, F1-F12, Space, or one chord Ctrl+<letter>, Alt+<key> or Shift+<key> (for example Ctrl+C). Never a list or a comma-joined sequence — two keys are two calls."
+    },
+    "text": {
+      "type": "string",
+      "description": "One atom of text, written as a paste — never submitted by itself. A newline or other control character is refused unless the program has bracketed paste on."
+    },
+    "option": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "An option's text exactly as session.read's target.menu.options showed it. Valid only for a menu target: nocx moves the selection to it and confirms, one key at a time, and refuses if the menu changes underneath the call."
+    }
+  },
+  "$defs": {
+    "result": {
+      "title": "SessionKeysResult",
+      "description": "What became of the step. A refusal is an answer too: nothing was written, and refusal.cause says why. failed_partial and delivery_unknown carry a true bytesWritten; every other state's bytesWritten is 0 or absent.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "state"],
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "description": "The session this step was sent to."
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "executed",
+            "refused",
+            "failed_partial",
+            "delivery_unknown",
+            "cancelled",
+            "in_progress",
+            "indeterminate"
+          ],
+          "description": "executed: the step was written and confirmed. refused: nothing was written; see refusal. failed_partial: some bytes reached the program, then the write failed. delivery_unknown: the write's completion was never reported (a shutdown mid-flight). cancelled: withdrawn before it committed. in_progress: an earlier attempt on the same token is still resolving; ask again shortly. indeterminate: this step's outcome could not be learned even after its deadline passed — it may or may not have reached the pane; look at the pane before acting again."
+        },
+        "bytesWritten": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Bytes actually written. Present and meaningful chiefly for failed_partial and delivery_unknown."
+        },
+        "steps": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many keys this call actually sent. 1 for a plain key or text atom; more for an option, which moves the selection one step at a time before confirming."
+        },
+        "refusal": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cause"],
+          "description": "Present only when state is refused.",
+          "properties": {
+            "cause": {
+              "type": "string",
+              "enum": [
+                "stale_target",
+                "incomparable",
+                "expired",
+                "forged",
+                "token_spent",
+                "snapshot_gone",
+                "completeness_unknown",
+                "cannot_encode",
+                "would_submit",
+                "access_revoked",
+                "no_read_barrier",
+                "commit_deadline",
+                "capacity",
+                "busy",
+                "closing"
+              ],
+              "description": "stale_target: the screen (or, for an option, the menu) moved since the target was minted. incomparable: the buffer, geometry or incarnation changed since the snapshot. expired: the target's 60s lifetime passed. forged: the token does not belong to this call's authority. token_spent: this token already carries a different canonical intent. snapshot_gone: the target's snapshot aged out of the helper's ring. completeness_unknown: the helper's own reply reserve overflowed and it can no longer state the screen's completeness. cannot_encode: this text cannot be turned into bytes the terminal's own modes accept. would_submit: a newline or control byte in text with bracketed paste off. access_revoked: this session's access epoch moved past what this step was admitted under. no_read_barrier: this session has no read barrier (an SSH channel today) and refuses every state-changing step. commit_deadline: this step reached its commit point after its own deadline. capacity: this session already holds the maximum number of live targets. busy: this session's intent queue is full. closing: this session is shutting down and admits nothing new."
+            },
+            "regionNow": {
+              "type": "string",
+              "description": "What the target's rows read right now, present only on the response that produced this refusal."
+            },
+            "regionTruncated": {
+              "type": "boolean",
+              "description": "True when regionNow was cut to its 16 KiB bound."
+            }
+          }
+        }
+      }
+    }
+  }
+}

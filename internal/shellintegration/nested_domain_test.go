@@ -71,9 +71,27 @@ type nestedKernel struct {
 	// answer carrying no `enrolled` field at all. The wrapper must read that
 	// as "not orchestrated", say so in the pane, and still run the agent.
 	refuseEnrolment bool
+	// agentMalformed sends a malformed lifecycle frame, so the wrapper must
+	// treat an answer it cannot parse as a refusal.
+	agentMalformed bool
+	// agentTimeout accepts the enrolment request but never answers it.
+	agentTimeout bool
+	// refuseReport makes the kernel answer a declaration with recorded:false,
+	// which is the state where the agent said something and nocx did not keep
+	// it — and the pane has to say so.
+	refuseReport bool
+	reportReason string
 	// enrolReason is the sentence a refusal carries, which is what the pane
 	// prints. Empty means the kernel refuses without one.
 	enrolReason string
+	// pendingEnrolment answers the FIRST agent_enrol with the verdict that
+	// waits on a person (nocx-cyhfw), and holds that question open until the
+	// test calls closeQuestion. Every later enrolment is answered as usual —
+	// enrolled, or refused with enrolReason when refuseAfterQuestion is set —
+	// which is what the stored answer makes of the start after a question.
+	pendingEnrolment    bool
+	refuseAfterQuestion bool
+	question            *frame
 	// rejected counts frames the kernel rejects: a wrong addressing tuple,
 	// a stale (non-increasing) sequence, or a frame addressed to the child
 	// domain after the parent restored (the child's interval ended — it
@@ -164,11 +182,34 @@ func (k *nestedKernel) accept(f frame, body []byte) {
 				k.t.Errorf("child hello after the child closed — a late frame slipped through")
 			}
 		}
-		k.sendAcceptLocked(f.Dom, f.Epoch, f.Cap)
+		k.sendAcceptLocked(f.Dom, f.Epoch)
 	case "domain_request":
 		k.grantLocked()
 	case "agent_enrol":
+		if k.agentTimeout {
+			return
+		}
+		if k.agentMalformed {
+			k.sendMalformedAgentAnswerLocked()
+			return
+		}
+		if k.pendingEnrolment && k.question == nil {
+			raised := f
+			k.question = &raised
+			k.encodeAgentAnswerLocked(f, lifecycle.Event{
+				Kind: lifecycle.KindAgentEnrolled,
+				AgentEnrolled: &lifecycle.AgentEnrolled{
+					RequestID: lifecycle.RequestID(f.Request),
+					Agent:     f.Agent,
+					Pending:   true,
+					Reason:    "nocx is asking whether " + f.Agent + " may use its tools",
+				},
+			})
+			return
+		}
 		k.sendAgentAnswerLocked(f, lifecycle.KindAgentEnrolled)
+	case "agent_report":
+		k.sendAgentAnswerLocked(f, lifecycle.KindAgentReported)
 	case "agent_withdraw":
 		k.sendAgentAnswerLocked(f, lifecycle.KindAgentWithdrawn)
 	case "domain_suspended":
@@ -218,11 +259,10 @@ func (k *nestedKernel) grantLocked() {
 		bootstrap = rc
 	}
 	env := lifecycle.Envelope{
-		Version:    lifecycle.ProtocolVersion,
-		Lane:       lifecycle.LaneID(testLane),
-		Domain:     lifecycle.DomainID(testDom),
-		Epoch:      testEpoch,
-		Capability: capBytes(k.t, testCap),
+		Version: lifecycle.ProtocolVersion,
+		Lane:    lifecycle.LaneID(testLane),
+		Domain:  lifecycle.DomainID(testDom),
+		Epoch:   testEpoch,
 		Event: lifecycle.Event{Kind: lifecycle.KindDomainGrant, DomainGrant: &lifecycle.DomainGrant{
 			RequestID: "r-" + testDom + "-0",
 			Env:       lifecycle.EnvSudo,
@@ -238,14 +278,16 @@ func (k *nestedKernel) grantLocked() {
 
 // sendAcceptLocked answers a hello with the accept for THAT domain (the
 // parent's accept carries the parent's addressing, the child's the child's).
-func (k *nestedKernel) sendAcceptLocked(dom string, epoch uint64, capHex string) {
+// It carries no capability, because the real kernel sends none on this
+// direction — the descriptor is inherited by every descendant of the shell
+// (nocx-aqz7o).
+func (k *nestedKernel) sendAcceptLocked(dom string, epoch uint64) {
 	env := lifecycle.Envelope{
-		Version:    lifecycle.ProtocolVersion,
-		Lane:       lifecycle.LaneID(testLane),
-		Domain:     lifecycle.DomainID(dom),
-		Epoch:      epoch,
-		Capability: capBytes(k.t, capHex),
-		Event:      lifecycle.Event{Kind: lifecycle.KindAccept, Accept: &lifecycle.Accept{}},
+		Version: lifecycle.ProtocolVersion,
+		Lane:    lifecycle.LaneID(testLane),
+		Domain:  lifecycle.DomainID(dom),
+		Epoch:   epoch,
+		Event:   lifecycle.Event{Kind: lifecycle.KindAccept, Accept: &lifecycle.Accept{}},
 	}
 	k.t.Logf("kernel sending accept for dom=%s epoch=%d", dom, epoch)
 	if _, err := lifecyclecodec.Encode(k.conn, env); err != nil {
@@ -261,30 +303,73 @@ func (k *nestedKernel) sendAgentAnswerLocked(f frame, kind lifecycle.EventKind) 
 	var evt lifecycle.Event
 	switch kind {
 	case lifecycle.KindAgentEnrolled:
+		refuse := k.refuseEnrolment || (k.question != nil && k.refuseAfterQuestion)
 		ans := &lifecycle.AgentEnrolled{
 			RequestID: lifecycle.RequestID(f.Request),
 			Agent:     f.Agent,
-			Enrolled:  !k.refuseEnrolment,
+			Enrolled:  !refuse,
 		}
-		if k.refuseEnrolment {
+		if refuse {
 			ans.Reason = k.enrolReason
 		}
 		evt = lifecycle.Event{Kind: kind, AgentEnrolled: ans}
+	case lifecycle.KindAgentReported:
+		// Recorded unless the test says otherwise, so a wrapper that ignored
+		// the answer and one that read it look different here.
+		evt = lifecycle.Event{Kind: kind, AgentReported: &lifecycle.AgentReported{
+			RequestID: lifecycle.RequestID(f.Request),
+			Recorded:  !k.refuseReport,
+			Reason:    k.reportReason,
+		}}
 	default:
 		evt = lifecycle.Event{Kind: kind, AgentWithdrawn: &lifecycle.AgentWithdrawn{
 			RequestID: lifecycle.RequestID(f.Request),
 		}}
 	}
+	k.encodeAgentAnswerLocked(f, evt)
+}
+
+// closeQuestion is the person answering, or nocx failing to put the question:
+// the frame that closes the question raised on the first enrolment, on that
+// enrolment's request id. It carries no verdict — reason is empty for an
+// answer and a sentence for a question nobody could be shown.
+func (k *nestedKernel) closeQuestion(reason string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.question == nil {
+		k.t.Fatal("closeQuestion before any question was raised")
+	}
+	f := *k.question
+	k.encodeAgentAnswerLocked(f, lifecycle.Event{
+		Kind: lifecycle.KindAgentEnrolled,
+		AgentEnrolled: &lifecycle.AgentEnrolled{
+			RequestID: lifecycle.RequestID(f.Request),
+			Agent:     f.Agent,
+			Reason:    reason,
+		},
+	})
+}
+
+func (k *nestedKernel) encodeAgentAnswerLocked(f frame, evt lifecycle.Event) {
+	kind := evt.Kind
 	env := lifecycle.Envelope{
-		Version:    lifecycle.ProtocolVersion,
-		Lane:       lifecycle.LaneID(testLane),
-		Domain:     lifecycle.DomainID(f.Dom),
-		Epoch:      f.Epoch,
-		Capability: capBytes(k.t, f.Cap),
-		Event:      evt,
+		Version: lifecycle.ProtocolVersion,
+		Lane:    lifecycle.LaneID(testLane),
+		Domain:  lifecycle.DomainID(f.Dom),
+		Epoch:   f.Epoch,
+		Event:   evt,
 	}
 	if _, err := lifecyclecodec.Encode(k.conn, env); err != nil {
 		k.t.Fatalf("encode %s: %v", kind, err)
+	}
+}
+
+func (k *nestedKernel) sendMalformedAgentAnswerLocked() {
+	body := []byte(`{"evt":`)
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], 7)
+	if _, err := k.conn.Write(append(hdr[:], body...)); err != nil {
+		k.t.Fatalf("write malformed agent answer: %v", err)
 	}
 }
 
@@ -295,10 +380,9 @@ func (k *nestedKernel) sendRefresh(rid string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	env := lifecycle.Envelope{
-		Version:    lifecycle.ProtocolVersion,
-		Lane:       lifecycle.LaneID(testLane),
-		Domain:     lifecycle.DomainID(testDom),
-		Capability: capBytes(k.t, testCap),
+		Version: lifecycle.ProtocolVersion,
+		Lane:    lifecycle.LaneID(testLane),
+		Domain:  lifecycle.DomainID(testDom),
 		Event: lifecycle.Event{Kind: lifecycle.KindRefreshRequest, RefreshRequest: &lifecycle.RefreshRequest{
 			RequestID: lifecycle.RequestID(rid),
 		}},
@@ -469,7 +553,27 @@ func assertUnsupportedSudoRunsConventionally(t *testing.T, s *channelShell, k *n
 // completed.
 func startNestedBashParent(t *testing.T, k *nestedKernel, binName, fakeBody string) *channelShell {
 	t.Helper()
-	bash := requireShell(t, "bash")
+	return startNestedBashParentTMPDIR(t, k, binName, fakeBody, t.TempDir())
+}
+
+// startNestedBashParentTMPDIR is startNestedBashParent with the shell's own
+// TMPDIR named explicitly, so a test can point it at a directory mktemp
+// cannot use (nocx-xn63t.6.1: a nonexistent one reproduces, on Linux, the
+// same "nothing written to the drop" shape CI saw only on darwin) without
+// disturbing every other caller of the ordinary starter.
+func startNestedBashParentTMPDIR(t *testing.T, k *nestedKernel, binName, fakeBody, tmpdir string) *channelShell {
+	t.Helper()
+	return startNestedBashParentBinTMPDIR(t, requireShell(t, "bash"), k, binName, fakeBody, tmpdir)
+}
+
+// startNestedBashParentBinTMPDIR is startNestedBashParentTMPDIR with the bash
+// BINARY named explicitly too, so a test can drive the real script through
+// macOS's frozen 3.2 (requireBash32) rather than whatever "bash" resolves to
+// on this machine — the CI Linux runner's own PATH puts a 5.x first, so
+// requireShell("bash") alone can never reach the version the ci-mac job
+// actually runs (nocx-xn63t.6.1).
+func startNestedBashParentBinTMPDIR(t *testing.T, bash string, k *nestedKernel, binName, fakeBody, tmpdir string) *channelShell {
+	t.Helper()
 
 	kernelFile, shellFile := lifecycleSocketpair(t)
 	k.shellFile = shellFile
@@ -494,13 +598,13 @@ func startNestedBashParent(t *testing.T, k *nestedKernel, binName, fakeBody stri
 		t.Fatalf("write fake %s: %v", binName, werr)
 	}
 
-	// #nosec G204 — bash is the requireShell-resolved path, not input; an
-	// interactive shell with an inherited descriptor is the only way to
-	// exercise the local transport shape.
+	// #nosec G204 — bash is requireShell- or requireBash32-resolved, never
+	// input; an interactive shell with an inherited descriptor is the only
+	// way to exercise the local transport shape.
 	cmd := exec.Command(bash, "-i")
 	cmd.ExtraFiles = []*os.File{shellFile} // becomes fd 3
 	cmd.Env = append(
-		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null", "PATH="+binDir+":"+os.Getenv("PATH")),
+		cleanEnv("HOME="+home, "TMPDIR="+tmpdir, "TERM=xterm", "HISTFILE=/dev/null", "PATH="+binDir+":"+os.Getenv("PATH")),
 		"NOCX_SHELL_INTEGRATION=1",
 		"NOCX_PROMPT_MODE=marker-only",
 		"NOCX_SESSION_ID=chansess",
@@ -522,6 +626,16 @@ func startNestedBashParent(t *testing.T, k *nestedKernel, binName, fakeBody stri
 	t.Cleanup(func() { _ = ptmx.Close(); _ = cmd.Process.Kill() })
 	s.waitForHandshake()
 	return s
+}
+
+// startNestedBash32Parent is a nestedParentStarter over macOS's frozen bash
+// 3.2 — requireBash32, never "bash" — so a test that must run against the
+// SAME bash the ci-mac job runs can ask for it explicitly rather than
+// whatever "bash" resolves to on this machine (nocx-xn63t.6.1: the Linux CI
+// runner's own PATH answers a 5.x first).
+func startNestedBash32Parent(t *testing.T, k *nestedKernel, binName, fakeBody string) *channelShell {
+	t.Helper()
+	return startNestedBashParentBinTMPDIR(t, requireBash32(t), k, binName, fakeBody, t.TempDir())
 }
 
 // driveNestedHappyInterval drives and asserts the §9 happy interval end to

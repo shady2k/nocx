@@ -17,11 +17,12 @@
  * It fails on a build whose boot activates panes[0]: the tab left in front
  * is the second one, and the first is what a naive boot would choose.
  */
-import { test as base, expect } from '@playwright/test'
+import { expect } from '@playwright/test'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  standalone as base,
   appReadyForInput,
   VaultBackend,
   bindEndpoint,

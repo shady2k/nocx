@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.emitting.params.schema.json",
+  "title": "AgentEmittingParams",
+  "description": "Params of the agent.emitting request: WHAT AN ENROLLED PANE IS EMITTING, and what its rule reads on it (nocx-02uci). The per-agent driver configuration design (2026-08-27, §5) is explicit that this view is not optional — 'a rule the user must write blind is a dead rule' — so a person editing or repairing a detection rule asks this for the pane they are looking at. It is a PULL and never a subscription, and that is the whole of its interval: the request IS the looking, so a surface that has closed asks nothing and nothing keeps reading a pane nobody is watching (the defect nocx-8hdia is an epic about). The reading decides nothing — it neither gates typing into the pane nor lights its indicator, which are the AD-6 amendment's two powers — so it is a read-out handed to the pane's own operator and not a third power.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {
+    "sessionId": {
+      "description": "The enrolled pane to read, by its server-authoritative session id (AD-7). OPTIONAL: without it the answer carries only the list of panes nocx is watching, which is what a surface asks for before a person has picked one. Naming a pane that is not enrolled — one whose observation closed while the surface was polling it — is not an error: the answer simply carries no reading, and the list says why.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    }
+  }
+}

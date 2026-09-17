@@ -9,6 +9,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/ssh"
 )
 
 func TestRealRegistry_ImplementsRegistry(t *testing.T) {
@@ -142,6 +143,25 @@ func TestRealRegistry_RemoteKind_ReturnsError(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for remote kind")
+	}
+}
+
+func TestOwnedProcessPID_UnknownForSSHSession(t *testing.T) {
+	reg := launcherReg().WithSSHFactory(&capturingSSHFactory{ch: &reasonChannel{}})
+	sess, err := reg.Open(context.Background(), Config{
+		Kind:   KindRemote,
+		Host:   "example.test",
+		Remote: &ssh.ConnectConfig{User: "alice"},
+		Cols:   80,
+		Rows:   24,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = reg.Close(sess.ID()) }()
+
+	if pid, known := reg.OwnedProcessPID(sess.ID()); known || pid != 0 {
+		t.Fatalf("SSH session process lookup = %d, %v; want absent", pid, known)
 	}
 }
 

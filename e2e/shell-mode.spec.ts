@@ -160,9 +160,12 @@ test('an SSH connection comes up integrated and its commands become blocks', asy
     const wsInfo = await resolveBackend(page)
 
     // Seed the connection the way Settings would: a profile pointing at the
-    // fixture, on the default destination mode (script). The name is unique per
-    // run: the nocx-server store persists across runs in this home, and a
-    // stale profile from an earlier run would dial a dead fixture.
+    // fixture. This spec's subject is block detection, not the connect-time
+    // ask (ADR-0069) — desiredMode is declared explicitly as script so the
+    // connection is never asked, rather than left at the hardcoded auto
+    // default. The name is unique per run: the nocx-server store persists
+    // across runs in this home, and a stale profile from an earlier run
+    // would dial a dead fixture.
     const profileName = `e2e-fixture-${Date.now()}`
     const created = await rpc<{ id: string }>(page, wsInfo.port, wsInfo.token, 'profiles.create', {
       type: 'ssh',
@@ -172,6 +175,7 @@ test('an SSH connection comes up integrated and its commands become blocks', asy
         port: Number(fixture.addr.split(':')[1]),
         user: 'e2e',
         keyPath: fixture.userKey,
+        desiredMode: 'script',
       },
     })
     createdId = created.id

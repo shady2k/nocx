@@ -10,20 +10,21 @@ import (
 	"time"
 
 	"github.com/pkg/sftp"
-	gossh "golang.org/x/crypto/ssh"
 )
 
-// FSConn is the lease surface the file manager holds on a pooled SSH
-// connection (spec §3, D3): a sibling of DiscoveryConn that exposes an SFTP
-// subsystem instead of exec. It owns its OWN pooled reference — never the
-// tab's — so closing the terminal that created it cannot drop the transport
-// underneath an in-flight read, and it shares the tab's connection when the
-// pool key matches (AD-4). The concrete implementation is *fsConn, returned
-// by RealClient.FSConn; the interface exists so feature packages can fake
-// the lease without a live connection.
+// FSConn is the lease surface the file manager holds (spec §3, D3): a sibling
+// of DiscoveryConn that exposes an SFTP subsystem instead of exec. The concrete
+// implementation is *fsConn, returned by NewFSConn over a stream this machine's
+// helper opened — the coordinator dials nothing (plan §3) — and the interface
+// exists so feature packages can fake the lease without a live connection.
 //
-// Release the lease with Close when the file manager stops; on connection
-// loss the lease releases itself and Done closes.
+// It holds its OWN channel on the helper's pooled connection — never the pane's
+// — so closing the terminal that created it cannot drop the transport
+// underneath an in-flight read, while an ordinary session to the same host and
+// identity still shares the connection it multiplexes over (AD-4).
+//
+// Release the lease with Close when the file manager stops; on stream loss the
+// lease reports loss through Done and LostErr.
 //
 // Cancellation is split, because pkg/sftp is split: exactly one public
 // *Client method takes a context — ReadDirContext — so listing is natively
@@ -148,10 +149,6 @@ type FSReadFile interface {
 // a refused session, a refused subsystem and a lost connection are different
 // facts and must map to different file-manager states.
 var (
-	// ErrFSSessionRefused is returned by FSConn when the server refused the
-	// additional session channel — OpenSSH's MaxSessions 1, or policy. The
-	// interactive shell holds the only channel; SFTP cannot run here.
-	ErrFSSessionRefused = errors.New("ssh: sftp session refused")
 	// ErrFSSubsystemRefused is returned by FSConn when the server refused
 	// the sftp subsystem request itself: the host runs SSH but no SFTP
 	// server (no sftp-server, a restricted shell, ForceCommand policy).
@@ -211,13 +208,17 @@ const fsHardTimeout = 30 * time.Second
 // lower it.
 const fsReadCap = 2 << 20
 
-// fsConn is the concrete FSConn. It holds its own pooled reference,
-// released exactly once (by Close, the loss watcher, or poison), and the
-// underlying connection closes when the LAST reference — tabs and leases
-// alike — releases.
+// fsConn is the concrete FSConn. Since nocx-50w7p.12 it is built over an SFTP
+// stream somebody else opened — in production this machine's helper, which owns
+// the pooled connection and hands over the bytes of one `ssh.open(sftp)`
+// channel (see NewFSConn). It therefore holds no pool reference of its own:
+// the reference is the helper's, and releasing it is closing the stream, which
+// is what Close and poison both do.
 type fsConn struct {
-	sess *gossh.Session // the SFTP session channel: closing it is the close-to-cancel mechanism
-	sftp *sftp.Client   // the SFTP subsystem
+	// stop closes the stream: the close-to-cancel mechanism that unblocks a
+	// non-context call wedged against a silent server.
+	stop func() error
+	sftp *sftp.Client // the SFTP subsystem over that stream
 
 	// done closes on transport shutdown (the loss signal); closed closes on
 	// Close; dead closes when the lane's hard timeout poisons the lease.
@@ -227,13 +228,15 @@ type fsConn struct {
 	done   chan struct{}
 	closed chan struct{}
 	dead   chan struct{}
+	// stopped closes when THIS lease stopped its own transport — Close, or
+	// the lane's poison. It is what keeps Done open in that case: the end of
+	// the stream that follows is our own doing, and the interface says an
+	// intentional stop must not read as connection loss.
+	stopped chan struct{}
 
-	release func()
-	// releaseOnce drops the pool reference exactly once whichever path
-	// fires first: Close, the loss watcher, or poison.
-	releaseOnce sync.Once
-	closeOnce   sync.Once
-	poisonOnce  sync.Once
+	closeOnce  sync.Once
+	poisonOnce sync.Once
+	stopOnce   sync.Once
 
 	// lostErr is written by the watcher before done closes, so reading it
 	// after <-done is ordered by the channel close.
@@ -246,155 +249,131 @@ type fsConn struct {
 	hardTimeout time.Duration
 }
 
-// newFSConn acquires an SFTP subsystem on the pooled connection: a fresh
-// session channel, an accepted sftp subsystem request, and a completed
-// version handshake. Every step is cancellable: the handshake runs in a
-// goroutine over the session's pipes, and closing the session — the only
-// handle the lease holds from the outside — is what unblocks it, so FSConn
-// always returns within ctx or the hard timeout and never leaks a goroutine.
-// On any failure the pooled reference is released before returning.
-func newFSConn(client *gossh.Client, release func(), ctx context.Context) (*fsConn, error) {
-	return newFSConnLane(client, release, ctx, fsHardTimeout)
-}
-
-func newFSConnLane(client *gossh.Client, release func(), ctx context.Context, hardTimeout time.Duration) (*fsConn, error) {
-	openCtx, cancel := context.WithTimeout(ctx, hardTimeout)
-	defer cancel()
-	sess, sftpClient, err := openSFTPSubsystem(client, openCtx)
+// NewFSConn builds a file-manager lease over an SFTP stream somebody else
+// opened — in production this machine's helper, through `ssh.open(sftp)`,
+// which is what makes the helper the only dialer (plan §3).
+//
+// The lease it answers is the SAME lease the file manager has always held: one
+// bounded lane of calls, a hard timeout that poisons the lease rather than
+// letting a slot be held forever, close-to-cancel for pkg/sftp's non-context
+// calls, and the typed error ladder in stateErr. What changed is where the
+// bytes come from and who holds the pooled reference — the helper, for both —
+// which is exactly the migration this epic performs: the transport moves, the
+// consumer does not.
+//
+// The version handshake runs inside ctx's bound, and the bound is enforced by
+// CLOSING THE STREAM: pkg/sftp's constructor has no context-aware form, and a
+// server that accepts the subsystem and then says nothing would otherwise hang
+// the file panel for as long as the caller's patience lasted. Closing the
+// stream unblocks the handshake goroutine, so this always returns within ctx or
+// the hard timeout and never leaks one. On failure the stream is closed before
+// returning, which releases the helper's channel.
+func NewFSConn(ctx context.Context, stream io.ReadWriteCloser) (FSConn, error) {
+	// The multi-value return is split rather than forwarded: newFSConnOverStream
+	// answers a *fsConn, and returning it directly would box a typed nil into
+	// the interface on the error paths, so `fc != nil` would lie.
+	fc, err := newFSConnOverStream(ctx, stream, fsHardTimeout)
 	if err != nil {
-		release()
 		return nil, err
 	}
-
-	c := &fsConn{
-		sess:        sess,
-		sftp:        sftpClient,
-		done:        make(chan struct{}),
-		closed:      make(chan struct{}),
-		dead:        make(chan struct{}),
-		release:     release,
-		lane:        make(chan struct{}, fsLaneCap),
-		hardTimeout: hardTimeout,
-	}
-	// One watcher per lease: gossh.Client.Wait returns when the transport
-	// shuts down. Report loss and drop our reference so a dead entry cannot
-	// linger behind an unreleased lease.
-	go func() {
-		c.lostErr = client.Wait()
-		close(c.done)
-		c.releaseOnce.Do(func() {
-			if c.release != nil {
-				c.release()
-			}
-		})
-	}()
-	return c, nil
+	return fc, nil
 }
 
-// openSFTPSubsystem acquires an SFTP subsystem on client: a fresh session
-// channel, an accepted sftp subsystem request, and a completed version
-// handshake. Every step is cancellable: the handshake runs in a goroutine
-// over the session's pipes, and closing the session — the only handle the
-// caller holds from the outside — is what unblocks it, so the function
-// always returns within ctx and never leaks a goroutine. On failure the
-// session is closed and nil returned; the caller still owns the pooled
-// reference and must release it. Both the FSConn lease and the
-// helper-install lease acquire through here, so the negotiation and its
-// refusal classification have one implementation.
-func openSFTPSubsystem(client *gossh.Client, ctx context.Context) (*gossh.Session, *sftp.Client, error) {
-	sess, err := client.NewSession()
-	if err != nil {
-		return nil, nil, classifyFSConnectError(err)
+// newFSConnOverStream is NewFSConn with the lane's backstop named, so a test can
+// prove a property about it without waiting on a duration.
+func newFSConnOverStream(ctx context.Context, stream io.ReadWriteCloser, hardTimeout time.Duration) (*fsConn, error) {
+	if stream == nil {
+		return nil, errors.New("ssh: sftp lease: no stream")
 	}
-	// The pipes are the sftp client's wire endpoints; the session stays
-	// with the lease so shutdown can close the channel itself. Closing only
-	// the client would send EOF (CloseWrite) and then WAIT for the server
-	// to close the channel — a non-replying server never does, so the
-	// session is what close-to-cancel closes.
-	pw, err := sess.StdinPipe()
-	if err != nil {
-		_ = sess.Close()
-		return nil, nil, err
-	}
-	pr, err := sess.StdoutPipe()
-	if err != nil {
-		_ = sess.Close()
-		return nil, nil, err
-	}
-	if err := sess.RequestSubsystem("sftp"); err != nil {
-		_ = sess.Close()
-		// x/crypto/ssh returns exactly "ssh: subsystem request failed" when
-		// the server replies false; anything else at this step is a
-		// transport failure — the connection died before the request could
-		// be answered. The shape is pinned by go.mod at v0.54.0 (mirrors
-		// classifyExecError), and the partition is complete: on a healthy
-		// connection a subsystem request can only be answered true or false.
-		if err.Error() == "ssh: subsystem request failed" {
-			return nil, nil, fmt.Errorf("%w: %v", ErrFSSubsystemRefused, err)
+	// The end of the stream is the lease's loss signal, and it is taken from
+	// the first failure either direction produced — the same endWatch the
+	// helper-install lease reads (one answer to "did this stream end", AD-8).
+	ended := make(chan struct{})
+	var (
+		endMu  sync.Mutex
+		endErr error
+	)
+	watch := &endWatch{inner: stream, onEnd: func(err error) {}}
+	watch.onEnd = func(err error) {
+		endMu.Lock()
+		if endErr == nil {
+			endErr = err
 		}
-		return nil, nil, fmt.Errorf("%w: %v", ErrFSLost, err)
+		endMu.Unlock()
+		close(ended) // endWatch's once makes this exactly one call
 	}
 
-	type openResult struct {
+	openCtx, cancel := context.WithTimeout(ctx, hardTimeout)
+	defer cancel()
+
+	type handshake struct {
 		client *sftp.Client
 		err    error
 	}
-	resCh := make(chan openResult, 1)
+	ch := make(chan handshake, 1)
 	go func() {
-		cl, err := sftp.NewClientPipe(pr, pw)
-		resCh <- openResult{cl, err}
+		client, err := sftp.NewClientPipe(watch, watch)
+		ch <- handshake{client, err}
 	}()
-
-	// The version handshake can hang against a server that accepts the
-	// subsystem and never answers INIT. Closing the session unblocks the
-	// handshake goroutine, exactly as Close unblocks a wedged call; the
-	// watcher fires on ctx.Done (including the caller's hard-timeout
-	// deadline, so a Background ctx still cannot hang the acquisition
-	// forever).
-	watchDone := make(chan struct{})
-	watchExit := make(chan struct{})
-	go func() {
-		defer close(watchExit)
-		select {
-		case <-ctx.Done():
-			_ = sess.Close()
-		case <-watchDone:
-		}
-	}()
-
-	var res openResult
+	var hs handshake
 	select {
-	case res = <-resCh:
-	case <-ctx.Done():
-		_ = sess.Close()
-		res = <-resCh // the close unblocked it; no goroutine outlives the call
+	case hs = <-ch:
+	case <-openCtx.Done():
+		// Closing the stream is what unblocks the handshake; the goroutine's
+		// send is buffered, so it cannot leak on a receiver that has left.
+		_ = stream.Close()
+		hs = <-ch
 	}
-	close(watchDone)
-	<-watchExit
-	// The deadline is the deterministic answer whenever it fired, even if
-	// the handshake result and the deadline became ready in the same
-	// select: a client that completed at the same moment the deadline
-	// fired is closed again, never handed out.
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		_ = sess.Close()
-		if res.client != nil {
-			_ = res.client.Close()
+	if ctxErr := openCtx.Err(); ctxErr != nil {
+		// The deadline is the deterministic answer whenever it fired, even
+		// if the handshake completed at the same moment: a client that
+		// arrived beside the deadline is closed again, never handed out.
+		if hs.client != nil {
+			_ = hs.client.Close()
 		}
 		if errors.Is(ctxErr, context.DeadlineExceeded) {
-			return nil, nil, fmt.Errorf("%w: remote did not complete the sftp version handshake", ErrFSTimedOut)
+			return nil, fmt.Errorf("%w: the remote never completed the sftp version handshake", ErrFSTimedOut)
 		}
-		return nil, nil, ctxErr
+		return nil, ctxErr
 	}
-	if res.err != nil {
-		_ = sess.Close()
-		if errors.Is(res.err, io.EOF) || errors.Is(res.err, io.ErrUnexpectedEOF) {
-			// The server accepted the subsystem and then the transport
-			// died before the version handshake completed.
-			return nil, nil, fmt.Errorf("%w: %v", ErrFSLost, res.err)
+	if hs.err != nil {
+		_ = stream.Close()
+		if errors.Is(hs.err, io.EOF) || errors.Is(hs.err, io.ErrUnexpectedEOF) {
+			// The far end accepted the subsystem and then the stream died
+			// before the version handshake completed — the helper's channel
+			// ending mid-handshake is the same fact as a lost connection.
+			return nil, fmt.Errorf("%w: %v", ErrFSLost, hs.err)
 		}
-		return nil, nil, fmt.Errorf("ssh: sftp handshake: %w", res.err)
+		return nil, fmt.Errorf("ssh: sftp handshake: %w", hs.err)
 	}
-	return sess, res.client, nil
+
+	c := &fsConn{
+		stop:        watch.Close,
+		sftp:        hs.client,
+		done:        make(chan struct{}),
+		closed:      make(chan struct{}),
+		dead:        make(chan struct{}),
+		stopped:     make(chan struct{}),
+		lane:        make(chan struct{}, fsLaneCap),
+		hardTimeout: hardTimeout,
+	}
+	// One watcher per lease: the stream ending is the transport shutting
+	// down. It reports loss — UNLESS this lease is what stopped the stream,
+	// which is the case the interface's Done doc carves out.
+	go func() {
+		<-ended
+		select {
+		case <-c.stopped:
+			return
+		default:
+		}
+		endMu.Lock()
+		err := endErr
+		endMu.Unlock()
+		c.lostErr = err
+		close(c.done)
+	}()
+	return c, nil
 }
 
 func (c *fsConn) Done() <-chan struct{} { return c.done }
@@ -408,42 +387,49 @@ func (c *fsConn) LostErr() error {
 	}
 }
 
-// Close releases this lease's pooled reference and stops any call still in
-// flight: the SFTP session channel is closed — which is what unblocks a
-// non-context call wedged against a silent server — before the reference
-// drops. The sftp client's own Close then waits for its reader goroutine to
-// observe the channel close, so no reader from this lease outlives Close.
-// Done is deliberately NOT closed: an intentional stop must not read as
-// connection loss.
+// Close ends the lease and stops any call still in flight: the stream is closed
+// first — which is what unblocks a non-context call wedged against a silent
+// server, and what releases the helper's channel — and the sftp client's own
+// Close then waits for its reader goroutine to observe the stream's end, so no
+// reader from this lease outlives Close. Done is deliberately NOT closed: an
+// intentional stop must not read as connection loss, and `stopped` is what tells
+// the loss watcher that the end it is about to see is ours.
 func (c *fsConn) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.closed)
-		_ = c.sess.Close()
-		_ = c.sftp.Close()
-		c.releaseOnce.Do(func() {
-			if c.release != nil {
-				c.release()
-			}
-		})
+		c.stopTransport()
+		if c.sftp != nil {
+			_ = c.sftp.Close()
+		}
 	})
 	return nil
 }
 
-// poison is the lane's hard-timeout response: the client and session are
-// closed — the only thing that unblocks a non-context call — the pooled
-// reference is released, and dead closes so every call, in flight and
-// future, reports ErrFSDead. A poisoned lease is terminal; it never
-// recovers and never retries.
+// stopTransport marks the lease as the party that ended the stream and closes
+// it, EXACTLY ONCE — Close and the lane's poison both reach it, and a second
+// close of the same channel is a panic rather than a harmless no-op. `stopped`
+// is closed first, before the stream, because that is the fact the loss watcher
+// reads when the end arrives.
+func (c *fsConn) stopTransport() {
+	c.stopOnce.Do(func() {
+		close(c.stopped)
+		if c.stop != nil {
+			_ = c.stop()
+		}
+	})
+}
+
+// poison is the lane's hard-timeout response: the stream and the client are
+// closed — the only thing that unblocks a non-context call — and dead closes so
+// every call, in flight and future, reports ErrFSDead. A poisoned lease is
+// terminal; it never recovers and never retries.
 func (c *fsConn) poison() {
 	c.poisonOnce.Do(func() {
 		close(c.dead)
-		_ = c.sess.Close()
-		_ = c.sftp.Close()
-		c.releaseOnce.Do(func() {
-			if c.release != nil {
-				c.release()
-			}
-		})
+		c.stopTransport()
+		if c.sftp != nil {
+			_ = c.sftp.Close()
+		}
 	})
 }
 
@@ -809,43 +795,4 @@ func (c *fsConn) Remove(path string) error {
 func isUnsupportedExtension(err error) bool {
 	var se *sftp.StatusError
 	return errors.As(err, &se) && se.FxCode() == sftp.ErrSSHFxOpUnsupported
-}
-
-// classifyFSConnectError maps a refused session channel open to the typed
-// session error. OpenSSH reports "resource shortage" for MaxSessions and
-// "administratively prohibited" for policy refusals; both mean SFTP cannot
-// run here. Anything that is not a channel refusal is a transport failure:
-// on a healthy connection an open is answered accept or reject, and
-// OpenChannelError is the only reject shape x/crypto/ssh produces.
-func classifyFSConnectError(err error) error {
-	var ocErr *gossh.OpenChannelError
-	if errors.As(err, &ocErr) {
-		return fmt.Errorf("%w: %v", ErrFSSessionRefused, err)
-	}
-	return fmt.Errorf("%w: %v", ErrFSLost, err)
-}
-
-// FSConn acquires an owned lease on the pooled SSH connection for host,
-// with an SFTP subsystem (spec §3, D3). It takes its OWN pooled reference —
-// never the tab's — so closing the creating tab can never kill an in-flight
-// read's connection underneath it, and the interactive session stays fully
-// usable while the file manager reads on its own channel. Release the lease
-// with Close when the file manager stops; on connection loss the lease
-// releases itself and Done closes.
-//
-// The same connection configuration (credentials, keys, jump route) as a
-// Connect to host is resolved and authorized: the lease is bound by the same
-func (rc *RealClient) FSConn(ctx context.Context, host string, opts ...ConnectOption) (FSConn, error) {
-	acq, err := rc.acquirePooled(ctx, host, opts)
-	if err != nil {
-		return nil, err
-	}
-	// newFSConn returns a *fsConn; returning it directly would box a typed
-	// nil into the FSConn interface on the error paths, and fc != nil would
-	// lie. Split the multi-value return so an error yields a nil interface.
-	fc, err := newFSConn(acq.client, func() { rc.pool.Release(acq.handle) }, ctx)
-	if err != nil {
-		return nil, err
-	}
-	return fc, nil
 }

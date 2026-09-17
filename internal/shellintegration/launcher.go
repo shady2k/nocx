@@ -29,10 +29,63 @@ const (
 	ReasonNoSecureTemp     RefusalReason = "no-secure-temp"
 )
 
+// ToolSocketEnvVar is the one spelling of the environment variable a shell
+// reads its nocx tool endpoint from (scripts/nocx.bash, scripts/nocx.zsh).
+// Every writer of it — this file's two renderers and, locally, the
+// composition root that hands the running endpoint's path down to the
+// helper daemon that forks the shell (internal/app/helper_local.go,
+// cmd/nocx-helper/main.go) — names it through this constant rather than
+// its own copy of the string, so the shell and every Go writer of the
+// variable can never spell it two different ways (nocx-2tesu).
+const ToolSocketEnvVar = "NOCX_TOOL_SOCKET"
+
+// AgentToolTokenEnvVar is the one spelling of the variable an agent's MCP
+// bridge reads the pane's bearer from (nocx-50w7p.16).
+//
+// It is NOT an environment variable nocx sets in a shell: the staging writes it
+// into the launch directory's mcp.json — 0600 in a 0700 directory — and the
+// agent's own MCP client is what puts it in the bridge's environment. That is
+// the whole point of the carrier: the far host's argv is world-readable, and a
+// shell's environment is inherited by everything it starts, while this reaches
+// exactly one child. Every reader and writer of the name goes through this
+// constant, so the Go side and the shells cannot spell it two ways.
+// #nosec G101 -- a variable NAME, not a credential: what it carries is minted per interval and never written here.
+const AgentToolTokenEnvVar = "NOCX_AGENT_TOKEN"
+
 // LaunchOptions carries what the start command must embed.
 type LaunchOptions struct {
 	SessionID string // NOCX_SESSION_ID for this session; never empty when Enhanced
 	Enhanced  bool   // request marker-only prompt mode (ADR-0006)
+	// AgentHelperPath and AgentToolSocketPath are non-secret paths used by the
+	// launch-owned MCP bridge. They are exported only when supplied; the
+	// lifecycle capability and report rendezvous remain outside this config.
+	AgentHelperPath     string
+	AgentToolSocketPath string
+	// AgentToolsAbsent says why this pane's agent has NO tool surface, from
+	// the closed set in agenttools.go. It is set exactly when both paths above
+	// are empty and nocx knows the reason — an ssh pane on a host with no
+	// installed helper, and any nested ssh (AgentToolsNoHelperOnHost) — and it
+	// travels as a non-secret environment entry so the shell's stage can name
+	// the reason to the person instead of reporting a path it was never given.
+	//
+	// Empty means "nocx did not say", which is a different state from any code
+	// in the set: a local pane whose coordinator runs no endpoint is a
+	// configuration a person can change, and the shell keeps its own sentence
+	// for it rather than being told the host has no helper.
+	AgentToolsAbsent AgentToolsAbsent
+	// AgentToolToken is the pane's tool bearer (nocx-50w7p.16): what the far
+	// agent's MCP bridge presents to be admitted, and what the pane's epoch
+	// bounds. It is LOWER-CASE HEX and it is a SECRET, so it travels by one of
+	// the two bearer transports and no others (capability_source.go, design
+	// D4): on the remote path it is a line in frame 2's payload, read once
+	// into a NON-EXPORTED shell variable and staged into the launch
+	// directory's mcp.json — never in this struct's env block, never in argv,
+	// never exported, and never a name on a filesystem outside that directory.
+	//
+	// It is a different value from Capability and is not a second spelling of
+	// it: Capability addresses the lifecycle channel, this admits tool calls,
+	// and each is bounded by its own interval.
+	AgentToolToken string
 	// The authenticated lifecycle channel (ADR-0024). Capability is the
 	// per-epoch bearer. On the carrier path it travels as FRAME 2 and
 	// reaches the shell through an inherited, already-unlinked descriptor
@@ -72,14 +125,6 @@ type LaunchOptions struct {
 	// together or not at all — a command whose digest names bytes nobody
 	// will send is a far side that blocks on a frame that never arrives.
 	StageDigest string
-	// BootstrapFD is the inherited descriptor the rcfile writes its two
-	// bootstrap progress facts to (internal/bootstrapprogress, nocx-yww2).
-	// It is deliberately independent of the lifecycle fields above: the
-	// progress channel is not the lifecycle channel, carries no authority
-	// and no capability, and is exported on its own so nothing couples the
-	// two. Zero means no progress reporting, which is what every remote
-	// tier gets — there is no second descriptor to hand a far shell.
-	BootstrapFD int
 }
 
 // RemoteLauncher builds the command string passed to an SSH session's
@@ -118,6 +163,18 @@ func launcherEnvBlock(opts LaunchOptions) string {
 		b.WriteString("NOCX_PROMPT_MODE=marker-only\n")
 		b.WriteString("NOCX_SESSION_ID=" + ShellQuote(opts.SessionID) + "\n")
 	}
+	if opts.AgentHelperPath != "" {
+		b.WriteString("NOCX_AGENT_HELPER_PATH=" + ShellQuote(opts.AgentHelperPath) + "\n")
+	}
+	if opts.AgentToolSocketPath != "" {
+		b.WriteString(ToolSocketEnvVar + "=" + ShellQuote(opts.AgentToolSocketPath) + "\n")
+	}
+	if opts.AgentToolsAbsent != "" {
+		// Non-secret and going into the shell's environment: the stage reads it
+		// to choose its sentence, and a person who inspects the pane sees the
+		// same code the launch was built from.
+		b.WriteString(AgentToolsAbsentEnvVar + "=" + ShellQuote(opts.AgentToolsAbsent.String()) + "\n")
+	}
 	// Lifecycle channel addressing and transport (ADR-0024). The capability
 	// is deliberately NOT here: it reaches the shell by one of the two forms
 	// in capability_source.go and must never appear in /proc/<pid>/environ.
@@ -132,16 +189,18 @@ func launcherEnvBlock(opts LaunchOptions) string {
 			b.WriteString("NOCX_LIFECYCLE_PORT=" + fmt.Sprintf("%d\n", opts.LifecyclePort))
 		}
 	}
-	// The bootstrap progress descriptor (nocx-yww2), in its own block and
-	// gated on nothing else: a fd NUMBER is not a secret, it authenticates
-	// nothing, and a shell that has this and no lifecycle channel still
-	// reports how far its startup got.
-	if opts.BootstrapFD > 0 {
-		b.WriteString("NOCX_BOOTSTRAP_FD=" + fmt.Sprintf("%d\n", opts.BootstrapFD))
-	}
 	b.WriteString("export NOCX_SHELL_INTEGRATION")
 	if opts.Enhanced {
 		b.WriteString(" NOCX_PROMPT_MODE NOCX_SESSION_ID")
+	}
+	if opts.AgentHelperPath != "" {
+		b.WriteString(" NOCX_AGENT_HELPER_PATH")
+	}
+	if opts.AgentToolSocketPath != "" {
+		b.WriteString(" " + ToolSocketEnvVar)
+	}
+	if opts.AgentToolsAbsent != "" {
+		b.WriteString(" " + AgentToolsAbsentEnvVar)
 	}
 	if opts.Lane != "" && opts.Domain != "" && opts.Epoch != 0 && opts.Capability != "" {
 		b.WriteString(" NOCX_LIFECYCLE_LANE NOCX_LIFECYCLE_DOMAIN NOCX_LIFECYCLE_EPOCH")
@@ -151,9 +210,6 @@ func launcherEnvBlock(opts LaunchOptions) string {
 		if opts.LifecyclePort > 0 {
 			b.WriteString(" NOCX_LIFECYCLE_PORT")
 		}
-	}
-	if opts.BootstrapFD > 0 {
-		b.WriteString(" NOCX_BOOTSTRAP_FD")
 	}
 	b.WriteString("\n")
 	return b.String()

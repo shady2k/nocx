@@ -23,13 +23,13 @@ package transport
 // changes accumulate as a set of dirty paths and are delivered once on
 // re-attach (spec §5.2).
 //
-// Until the watching wave lands (design §6 step 5: fsnotify locally,
+// Until the watching worker lands (design §6 step 5: fsnotify locally,
 // polling over SFTP, both provider-side), the change signal is a
 // transport-side digest-poll loop: files.watch installs the provider's
 // watch set (whose mode the response reports, degrading honestly to
 // polling when the provider refuses), and the loop re-lists each watched
 // path, comparing the listing digest — the same comparison the SFTP
-// watcher will perform. internal/filesystem is read-only for this wave and
+// watcher will perform. internal/filesystem is read-only for this worker and
 // exposes no watch-event seam, so this loop is the only change signal the
 // transport can produce; it is what the files.changed tests drive.
 
@@ -247,7 +247,7 @@ func validateFilesRevealRaw(raw json.RawMessage) string {
 type FilesystemProviderFactory func(sess session.Session, rootPath string) (filesystem.Provider, error)
 
 // FilesRevealer shows a path in the OS file manager (files.reveal). The
-// Wails runtime seam is a later wave (design §6 step 6); the interface is
+// Wails runtime seam is a later worker (design §6 step 6); the interface is
 // declared now so the handler exists, the local-only guard is enforced,
 // and an unwired revealer answers -32601 instead of silently doing
 // nothing.
@@ -1128,7 +1128,7 @@ func (h filesBindingHandlers) handleRead(ctx context.Context, state *connState, 
 // handleWatch replaces the binding's watch set (spec §5.2): the client sends
 // the set it currently wants and the backend diffs, so collapsing a
 // directory cannot leak a watch. The provider-side set is swapped atomically
-// by the registry; when the provider refuses (the watching wave has not
+// by the registry; when the provider refuses (the watching worker has not
 // landed), the transport degrades to its own digest-poll loop and reports
 // the degradation — the persistent "Polling" badge (spec §5.5) — rather than
 // a silent lie. The watch baseline is taken synchronously inside the
@@ -1170,7 +1170,7 @@ func (h filesBindingHandlers) handleWatch(ctx context.Context, state *connState,
 				_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 				return nil
 			}
-			// No reason: ErrWatchUnavailable says the watching wave (nocx-rkk9)
+			// No reason: ErrWatchUnavailable says the watching worker (nocx-rkk9)
 			// has not landed, which is a build-time fact and not a degrade.
 			// Polling is the designed and only mode today, it delivers the
 			// change signal the user asked for, and the mechanism under it is
@@ -1401,7 +1401,7 @@ func (h filesBindingHandlers) handleClose(ctx context.Context, state *connState,
 // backend refuses a remote binding rather than silently doing nothing,
 // because a UI-only guard is one bug away from being no guard (spec §5.2).
 // Without a wired revealer the method answers -32601 — the Wails runtime
-// seam is a later wave, and a reveal that did nothing would be a silent lie.
+// seam is a later worker, and a reveal that did nothing would be a silent lie.
 func (h filesBindingHandlers) handleReveal(ctx context.Context, state *connState, req jsonrpcRequest) {
 	if h.op == nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "files not available"})
@@ -1632,7 +1632,7 @@ func (s *WSServer) flushFilesChanged(sid session.ID, wconn Responder) {
 // filesPollLoop is the transport-side change detector for one binding: each
 // dispatch re-lists one selected path and compares its digest — the same
 // comparison the SFTP watcher will perform provider-side when the watching
-// wave lands (design §6 step 5). Until then this loop is the only change
+// worker lands (design §6 step 5). Until then this loop is the only change
 // signal, and it is what files.changed delivers.
 func (s *WSServer) filesPollBaseInterval() time.Duration {
 	interval := s.filesPollInterval

@@ -172,20 +172,19 @@ func TestExecuteFilesCreateCreatesScopedFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Narrow(edit escape): %v", err)
 	}
+	// The escape is refused by the capability, and that refusal LEAVES the
+	// tool as an error rather than becoming its result (nocx-4yjwk.5): the
+	// kernel's one predicate turns it into our sentence, because the
+	// stringification here names the escaped path. What the tool must prove
+	// is that nothing was written and no result was produced.
 	editOut, err := executeFilesEdit(toolTestContext(), editCapability, mustJSON(t, map[string]string{
 		"path": escapeExistingPath, "revision": snapshot.Revision, "patch": "PUT 1.=1:\n+changed",
 	}), toolSeams{})
-	if err != nil {
-		t.Fatalf("executeFilesEdit(escape): %v", err)
+	if !capabilityRefusal(err) {
+		t.Fatalf("executeFilesEdit(escape) = %q, %v — want the capability refusal the kernel seam classifies", editOut, err)
 	}
-	var editResult struct {
-		Status string `json:"status"`
-	}
-	if decodeErr := json.Unmarshal([]byte(editOut), &editResult); decodeErr != nil {
-		t.Fatalf("decode edit escape result: %v", decodeErr)
-	}
-	if editResult.Status != "refused" {
-		t.Fatalf("edit escape result = %s, want refused", editResult.Status)
+	if editOut != "" {
+		t.Fatalf("executeFilesEdit(escape) returned a result %q alongside its refusal", editOut)
 	}
 	// #nosec G304 -- path is created under t.TempDir's parent and cleaned up below.
 	outside, err := os.ReadFile(escapeTarget)
@@ -208,17 +207,11 @@ func TestExecuteFilesCreateCreatesScopedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	escapeOut, err := executeFilesCreate(toolTestContext(), escapeCapability, escapeArgs, toolSeams{})
-	if err != nil {
-		t.Fatalf("executeFilesCreate(escape): %v", err)
+	if !capabilityRefusal(err) {
+		t.Fatalf("executeFilesCreate(escape) = %q, %v — want the capability refusal the kernel seam classifies", escapeOut, err)
 	}
-	var escapeResult struct {
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal([]byte(escapeOut), &escapeResult); err != nil {
-		t.Fatalf("decode escape result: %v", err)
-	}
-	if escapeResult.Status != "refused" {
-		t.Fatalf("escape result = %s, want refused", escapeResult.Status)
+	if escapeOut != "" {
+		t.Fatalf("executeFilesCreate(escape) returned a result %q alongside its refusal", escapeOut)
 	}
 	if _, err := os.Stat(filepath.Clean(escapePath)); !os.IsNotExist(err) {
 		t.Fatalf("escaped file stat error = %v, want nonexistent", err)

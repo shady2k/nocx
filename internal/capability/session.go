@@ -18,10 +18,11 @@ type SessionService interface {
 	Get(id session.ID) (session.Session, error)
 	// Close tears down one session.
 	Close(id session.ID) error
+	// EndSession is Close's sibling for a caller that knows nobody will ever
+	// want this session again (nocx-isjh4) — see session.Reg.EndSession.
+	EndSession(id session.ID) error
 	// List returns every live session (sessions.status, attach addressing).
 	List() []session.Session
-	// Open creates a new session (the open handler's registry half).
-	Open(ctx context.Context, cfg session.Config) (session.Session, error)
 	// LastUsedForProfiles answers persisted last-used timestamps
 	// (sessions.status). An unwired tracker answers an empty map.
 	LastUsedForProfiles(profileIDs []string) (map[string]time.Time, error)
@@ -173,18 +174,18 @@ func (s *sessionService) Close(id session.ID) error {
 	return s.registry.Close(id)
 }
 
+func (s *sessionService) EndSession(id session.ID) error {
+	if err := s.guard.check(); err != nil {
+		return err
+	}
+	return s.registry.EndSession(id)
+}
+
 func (s *sessionService) List() []session.Session {
 	if !s.guard.ok() {
 		return nil
 	}
 	return s.registry.List()
-}
-
-func (s *sessionService) Open(ctx context.Context, cfg session.Config) (session.Session, error) {
-	if err := s.guard.check(); err != nil {
-		return nil, err
-	}
-	return s.registry.Open(ctx, cfg)
 }
 
 func (s *sessionService) LastUsedForProfiles(profileIDs []string) (map[string]time.Time, error) {

@@ -124,6 +124,26 @@ const (
 	// vault, so the ask cannot even be attempted. The one cause on this list
 	// that a person clears in one gesture.
 	CauseVaultSealed UnreconciledCause = "vaultSealed"
+	// CauseLocalEndpointUnreachable — THIS MACHINE's own daemon could not be
+	// asked (nocx-ie23r.2).
+	//
+	// It is its own cause and not one of the host ones because the subject is
+	// different, and the sentence a person reads has to name the right one:
+	// "this host has not been reachable" is a false statement about the
+	// machine somebody is sitting at, whose sessions are behind a socket in
+	// their own home directory rather than behind ssh. So is "this host
+	// refused the connection", which is what a missing socket reports at the
+	// syscall level — the dial to a socket nothing is serving is refused by
+	// the kernel, and reading that as a host that said no would send a person
+	// looking for a network problem that does not exist.
+	//
+	// Every way the local ask can fail lands here — no socket, a stale one, a
+	// handshake that never completed, a deadline — because all of them are one
+	// fact about one thing: this machine's helper did not answer. The remote
+	// causes keep their precision because there, what failed (a refused
+	// connection, a timeout, an unreachable host, a sealed credential) is
+	// something a person can act on differently.
+	CauseLocalEndpointUnreachable UnreconciledCause = "localEndpointUnreachable"
 )
 
 // PendingSession is one session carried over from a previous incarnation and

@@ -18,9 +18,12 @@ package transport
 // shell was actually started, and why integration was refused, declined or
 // lost. The two are combined here and nowhere else:
 //
-//   - the launch side (the local pty factory, and the ssh connect path)
-//     reports what it started and whether it was refused outright —
-//     RegisterIntegration;
+//   - the launch side reports what it started and whether it was refused
+//     outright — RegisterIntegration. That is the HOSTED opener for every
+//     local pane and every helper-backed remote one (the daemon forks the
+//     shell and only the opener sees its launch record), and the ssh connect
+//     path for the rest; internal/app's local pty factory used to be the
+//     first of those and was deleted with nocx-ie23r.3;
 //   - the kernel's published facts say when a domain went live —
 //     PublishLifecycle calls noteIntegrationLive;
 //   - the bootstrap says how the far side answered nocx's own setup, before
@@ -35,6 +38,8 @@ package transport
 // the transport's. One owner per question, on each side of the seam.
 
 import (
+	"context"
+
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/profile"
@@ -83,22 +88,6 @@ type integrationStatus struct {
 	observedProcess string
 }
 
-// Bootstrap progress stages as internal/bootstrapprogress spells them.
-// Declared here as plain strings for the same reason the loss causes are:
-// the transport does not import the reader, the composition root passes the
-// stage through, and a conformance test in the app package pins the two
-// spellings together.
-//
-// A stage is diagnostic and nothing else. It is not authenticated, it cannot
-// be (the descriptor it arrives on is inherited by every descendant of the
-// shell), and it therefore may never decide anything but which sentence the
-// product says about a failure that has already happened. It never opens an
-// attempt, never marks a session integrated and never emits on its own.
-const (
-	BootstrapStageStartupEntered = "startup-entered"
-	BootstrapStageUserRCReturned = "user-rc-returned"
-)
-
 // integrationChangedParams is the params object of the
 // session.integrationChanged notification. Contracted like every other
 // unsolicited notification, because a server-initiated frame has no request
@@ -141,17 +130,27 @@ func (s *WSServer) RegisterIntegration(sid session.ID, shell string, status stri
 	s.integrations[sid] = &integrationStatus{shell: shell, status: status, reason: reason}
 }
 
-// registerRemoteIntegration enters a REMOTE session into the integration
-// axis from what the ssh connect path already decided. A local session is
-// registered by the pty factory instead — it is the only thing that knows
-// which binary it exec'd — and returns early here rather than being answered
-// twice.
+// registerOpenedIntegration enters a session this open has just produced into
+// the integration axis, from whatever the open itself already decided.
+//
+// ONE OWNER, TWO SOURCES, and the sources do not overlap. A HOSTED open — this
+// machine's helper or another's — carries what it knows in its own result,
+// because the opener is the only thing that saw which binary the daemon
+// started and whether a lifecycle lane was established; before nocx-ie23r.3
+// that was internal/app's local pty factory saying the same sentence about a
+// shell it had forked itself. A REMOTE ssh open carries nothing, because
+// ShellIntegrationReason is the ssh channel's own answer and this is where the
+// session first exists as a session to hang it on.
 //
 // A session that asked for nothing and was refused nothing is not registered
 // at all, and so emits nothing: absence is how "conventional by design" is
 // expressed (the schema says so in as many words), and a raw-mode connection
 // has no integration to nag about.
-func (s *WSServer) registerRemoteIntegration(sess session.Session, cfg session.Config) {
+func (s *WSServer) registerOpenedIntegration(sess session.Session, cfg session.Config, hosted *HostedSessionOpen) {
+	if hosted != nil && hosted.IntegrationStatus != "" && hosted.IntegrationShell != "" {
+		s.RegisterIntegration(sess.ID(), hosted.IntegrationShell, hosted.IntegrationStatus, hosted.IntegrationReason)
+		return
+	}
 	if sess.Kind() != session.KindRemote {
 		return
 	}
@@ -175,6 +174,37 @@ func (s *WSServer) registerRemoteIntegration(sess session.Session, cfg session.C
 	s.RegisterIntegration(sess.ID(), remoteShellName(cfg.Remote), status, reason)
 }
 
+// sessionAwaitsIntegration answers whether sid has just entered the
+// integration axis in the `starting` state (nocx-ui8q6.6). It is read
+// immediately after registerOpenedIntegration decides sid's entry, before the
+// open ack is built, so the ack can state — as its own `awaitsIntegration`
+// field — whether a session.integrationChanged notification is guaranteed to
+// follow it.
+//
+// It is not a second opinion on the axis: registerOpenedIntegration already
+// wrote the one map this reads, under the one lock that guards it, and
+// nothing between that write and this read can move the axis — the launch
+// that produced the entry is still on this same goroutine, before the ack it
+// is answering has even been marshalled. Everything that COULD move it later
+// (noteIntegrationLive, applyIntegrationLoss, applyBootstrapOutcome,
+// applyShellReplaced) needs the session registered in this transport's
+// registry first, which does not happen until after this handler returns.
+//
+// False covers two different sessions on purpose: one that never entered the
+// axis at all (RegisterIntegration was never called — nothing is ever
+// coming), and one that entered it already resolved to `conventional` at
+// open (a fact IS coming, moments after this ack, but isAwaitingIntegration
+// on the renderer only ever gates `starting`, so neither has anything to make
+// a pane wait on). The renderer does not need to tell those two apart; it
+// only needs to know whether to hold the grid for the FIRST fact, and
+// `starting` is the only status that means yes.
+func (s *WSServer) sessionAwaitsIntegration(sid session.ID) bool {
+	s.integrationMu.Lock()
+	defer s.integrationMu.Unlock()
+	st, ok := s.integrations[sid]
+	return ok && st.status == IntegrationStarting
+}
+
 // remoteShellName is what the connect path asked the far host to run. A
 // profile pin is a real shell name; unpinned, the launcher emits a POSIX
 // dispatcher that detects the login shell AT THE FAR END, so the honest
@@ -191,33 +221,88 @@ func remoteShellName(cfg *ssh.ConnectConfig) string {
 
 // unregisterIntegration drops a session's axis, called from the same teardown
 // that drops its lanes so the map cannot grow with dead sessions.
+//
+// It wakes anyone in AwaitIntegration first: a session torn down mid-wait
+// (the tab closed, the process killed) is not going to answer, and a waiter
+// that only listened for a status change would hold its whole context
+// deadline for a session that no longer exists to change one.
 func (s *WSServer) unregisterIntegration(sid session.ID) {
 	s.integrationMu.Lock()
-	defer s.integrationMu.Unlock()
 	delete(s.integrations, sid)
-	delete(s.bootstrapStages, sid)
+	waiters := s.integrationWaiters[sid]
+	delete(s.integrationWaiters, sid)
+	s.integrationMu.Unlock()
+	for _, ch := range waiters {
+		close(ch)
+	}
 }
 
-// NoteBootstrapStage records how far a session's shell got through nocx's
-// rcfile. It records and nothing else: it emits no notification, changes no
-// status and cannot make a session integrated, because the descriptor it comes
-// from is inherited by every descendant of the shell and authenticates nobody
-// (ADR-0024 decision 4). The one thing it may do is make the next failure
-// legible — see applyIntegrationLoss.
+// IntegrationOutcome is what AwaitIntegration settles to.
+type IntegrationOutcome struct {
+	// Registered is false when sid never entered the axis at all — the same
+	// absence RegisterIntegration's own doc calls "conventional by design":
+	// a session that asked for nothing was refused nothing and has nothing
+	// to report. Status and Reason are meaningless when this is false.
+	Registered bool
+	// Status is one of the wire values above, always something other than
+	// IntegrationStarting: AwaitIntegration does not return while that is
+	// still current.
+	Status string
+	Reason ssh.RefusalReason
+}
+
+// AwaitIntegration blocks until sid's integration axis leaves `starting`, or
+// ctx ends first (nocx-ui8q6.4). It never derives that status itself — it
+// only reads the one map RegisterIntegration and emitIntegration already
+// write (AD-8) — and it wakes from the exact place those transitions already
+// converge: emitIntegration runs once after every actual change to the axis,
+// including the very first one a caller's RegisterIntegration produces, so
+// waking there needs no second classification of what counts as "resolved".
 //
-// Deliberately tolerant of arriving before the session is registered: the
-// shell writes its first fact as it starts, and the launch registers the axis
-// only once the pty is back.
-func (s *WSServer) NoteBootstrapStage(sid session.ID, stage string) {
-	if sid == "" || stage == "" {
-		return
+// ABSENCE IS A FAST ANSWER, not a wait. A session that never asked to be
+// tracked (RegisterIntegration never called for it) will never move, and
+// blocking on a map entry that will never exist would be waiting for an
+// event that cannot happen. The check and the registration below happen
+// under one lock acquisition, so a session that enters the axis, or leaves
+// `starting`, between the check and the wait is still observed: nothing here
+// can miss a transition that lands in the gap, because there is no gap.
+func (s *WSServer) AwaitIntegration(ctx context.Context, sid session.ID) (IntegrationOutcome, error) {
+	for {
+		s.integrationMu.Lock()
+		st, ok := s.integrations[sid]
+		if !ok {
+			s.integrationMu.Unlock()
+			return IntegrationOutcome{Registered: false}, nil
+		}
+		if st.status != IntegrationStarting {
+			out := IntegrationOutcome{Registered: true, Status: st.status, Reason: st.reason}
+			s.integrationMu.Unlock()
+			return out, nil
+		}
+		ch := make(chan struct{})
+		if s.integrationWaiters == nil {
+			s.integrationWaiters = make(map[session.ID][]chan struct{})
+		}
+		s.integrationWaiters[sid] = append(s.integrationWaiters[sid], ch)
+		s.integrationMu.Unlock()
+
+		select {
+		case <-ch:
+			// A wake is a "go look again", not an answer: the loop re-reads
+			// the map under the lock rather than trusting anything about why
+			// it fired, which is what lets the very first emission (still
+			// `starting`, for a session whose own launch reported that) cost
+			// one extra iteration instead of a second wake mechanism.
+		case <-ctx.Done():
+			// The channel this iteration registered is left in the map
+			// rather than removed here under a second lock acquisition: the
+			// next mutation (or unregisterIntegration on teardown) already
+			// pops and closes the whole per-session slice, so it is reclaimed
+			// on the very next event either way, and nothing reads a closed
+			// channel as a signal of anything.
+			return IntegrationOutcome{}, ctx.Err()
+		}
 	}
-	s.integrationMu.Lock()
-	defer s.integrationMu.Unlock()
-	if s.bootstrapStages == nil {
-		s.bootstrapStages = make(map[session.ID]string)
-	}
-	s.bootstrapStages[sid] = stage
 }
 
 // NoteIntegrationLoss records why a session's lifecycle transport ended and
@@ -333,12 +418,12 @@ func (s *WSServer) applyBootstrapOutcome(sid session.ID, reason ssh.RefusalReaso
 // handler's own emitIntegration — which runs after the ack, as AD-7 requires
 // — then sends the status this call had already recorded.
 //
-// The reason is deliberately the one the bound would have produced. The
-// vocabulary is a closed server enum whose extension belongs to the bootstrap
-// progress facts (nocx-yww2, whose `startup-did-not-return` the renderer
-// already names as not-yet-emittable), and inventing a value here would leave
-// the product with two words for one situation. What this adds is the timing
-// and the observation, which is exactly what the bead asked for.
+// The reason is deliberately the one the bound would have produced, and since
+// nocx-ie23r.3 it is the ONLY thing that produces it: the bootstrap-progress
+// descriptor that used to report where a startup stopped needed the
+// coordinator to fork the shell, and the daemon forks it now. Inventing a
+// value here would leave the product with two words for one situation. What
+// this adds is the timing and the observation.
 func (s *WSServer) NoteShellReplaced(sid session.ID, observed string) {
 	status, reason, changed := s.applyShellReplaced(sid, observed)
 	if !changed {
@@ -385,15 +470,13 @@ func (s *WSServer) applyShellReplaced(sid session.ID, observed string) (string, 
 	next := *st
 	next.observedProcess = observed
 	next.status = IntegrationConventional
-	// The stage, not the bound. nocx exec's the login shell itself, so a
-	// second exec on that pid before the hello can only have come from inside
-	// the shell's own startup — which is the same fact the bootstrap progress
-	// descriptor reports by falling silent after `startup-entered`
-	// (nocx-yww2), arriving here milliseconds after the fork instead of ten
-	// seconds later. Reporting the bound would name the detector rather than
-	// the event, and the two answers would then race: this one lands first
-	// and the first answer wins, so the vaguer word would be the one the user
-	// is left with.
+	// The startup, not the bound. The helper exec's the login shell itself,
+	// so a second exec on that pid before the hello can only have come from
+	// inside the shell's own startup, and this arrives milliseconds after the
+	// fork instead of ten seconds later. Reporting the bound would name the
+	// detector rather than the event, and the two answers would then race:
+	// this one lands first and the first answer wins, so the vaguer word
+	// would be the one the user is left with.
 	next.reason = ssh.ReasonStartupDidNotReturn
 	*st = next
 	return next.status, next.reason, true
@@ -433,15 +516,6 @@ func (s *WSServer) applyIntegrationLoss(sid session.ID, cause string) (string, s
 		// paths noticed does not change the answer the user needs.
 		next.status = IntegrationLost
 		next.reason = ssh.ReasonChannelLost
-	case s.bootstrapStages[sid] == BootstrapStageStartupEntered:
-		// nocx's rcfile began executing and the user's own startup file
-		// never gave control back, so the install line after it was never
-		// reached. Ahead of the cause arm on purpose: the stage says WHERE
-		// it stopped, the cause says only which of our own timers noticed,
-		// and the stage is the half a user can act on. It stays a stage and
-		// never becomes a culprit — see ssh.ReasonStartupDidNotReturn.
-		next.status = IntegrationConventional
-		next.reason = ssh.ReasonStartupDidNotReturn
 	case cause == LossCauseHelloTimeout:
 		next.status = IntegrationConventional
 		next.reason = ssh.ReasonHandshakeTimeout
@@ -536,7 +610,19 @@ func (s *WSServer) emitIntegration(sid session.ID) {
 	if ok {
 		snap = *st
 	}
+	// AwaitIntegration's wake, from inside the same lock that just read the
+	// snapshot above: this function runs once after every actual change to
+	// the axis (RegisterIntegration's caller, then noteIntegrationLive,
+	// applyIntegrationLoss, applyShellReplaced and applyBootstrapOutcome each
+	// call it exactly when they changed something), so it is the one place a
+	// waiter needs to be told to look again — never a second reader deciding
+	// on its own when the axis has "really" moved.
+	waiters := s.integrationWaiters[sid]
+	delete(s.integrationWaiters, sid)
 	s.integrationMu.Unlock()
+	for _, ch := range waiters {
+		close(ch)
+	}
 	if !ok {
 		return
 	}

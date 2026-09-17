@@ -1,0 +1,9 @@
+WHOLE zwj_family => "👨‍"/2 . "👩‍"/2 . "👧‍"/2 . "👦"/2 . . . . . . . . . . . . . cursor_x=8
+WHOLE skin_tone => "👍"/2 . "🏽"/2 . . . . . . . . . . . . . . . . . cursor_x=4
+WHOLE flag_ru => "🇷"/1 "🇺"/1 . . . . . . . . . . . . . . . . . . cursor_x=2
+WHOLE heart_vs16 => "❤️"/1 . . . . . . . . . . . . . . . . . . . cursor_x=1
+WHOLE combining => "á"/1 . . . . . . . . . . . . . . . . . . . cursor_x=1
+SPLIT zwj_family identical=21/24 first_bad=6
+SPLIT skin_tone identical=7/7 first_bad=-1
+SPLIT heart_vs16 identical=5/5 first_bad=-1
+SPLIT combining identical=2/2 first_bad=-1

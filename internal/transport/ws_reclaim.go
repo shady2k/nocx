@@ -96,8 +96,8 @@ type liveSessionResult struct {
 	Attached   bool    `json:"attached"`
 }
 
-// attachResult is the claim outcome (contracts/attach.schema.json). Both
-// booleans are always present and exactly one is true: a reader that cannot
+// attachResult is the claim outcome (contracts/attach.schema.json). Resumed
+// and Reset are always present and exactly one is true: a reader that cannot
 // tell "the server said no reset" from "the server did not mention reset"
 // cannot act on the answer, and the reset is the case where the renderer must
 // clear its decoder and its screen before a single byte is drawn (D7).
@@ -105,6 +105,13 @@ type attachResult struct {
 	Resumed bool   `json:"resumed"`
 	Reset   bool   `json:"reset"`
 	From    uint64 `json:"from"`
+	// AwaitsIntegration is attach's own half of nocx-ui8q6.6's field
+	// (contracts/attach.schema.json): whether this session's axis currently
+	// reads `starting`, so a session.integrationChanged is guaranteed to
+	// follow this ack via replayIntegration. Read the SAME way open reads it
+	// — sessionAwaitsIntegration, off the one axis map the transport already
+	// keeps (AD-8) — never re-derived from this handler's own state.
+	AwaitsIntegration bool `json:"awaitsIntegration"`
 }
 
 // sessionDisplacedParams is the params object of the session.displaced

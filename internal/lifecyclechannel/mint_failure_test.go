@@ -21,7 +21,7 @@ func TestNew_AFailedRandomReadCreatesNoAdapter(t *testing.T) {
 	randReader = failingReader{}
 	defer func() { randReader = prev }()
 
-	a, child, err := New(log.NewSlogAdapter(nil), newTestKernel())
+	a, child, err := newSocketPairAdapter(log.NewSlogAdapter(nil), newTestKernel())
 	if err == nil {
 		_ = a.Close()
 		_ = child.Close()

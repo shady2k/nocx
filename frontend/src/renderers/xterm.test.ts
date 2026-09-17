@@ -2093,3 +2093,77 @@ describe('XtermRenderer atlas invalidation', () => {
     expect(addon.atlasPageAdded.listenerCount).toBe(0)
   })
 })
+
+// ── One answerer: the browser stops answering the program (nocx-ygxjv.12) ──
+//
+// xterm's onData carries the person's input AND xterm's own automatic replies
+// to the program's queries. After ADR-0066 the terminal that owns the cursor,
+// the modes and the grid is the session runtime beside the PTY, so the browser
+// must produce no reply at all — while everything a person does still arrives.
+//
+// These are the REAL xterm (jsdom runs it, as the tests above do), so the
+// assertion is about the engine's own behaviour rather than about a mock's.
+describe('the browser answers no query of the program (nocx-ygxjv.12)', () => {
+  async function mountQueryRenderer(): Promise<{ r: XtermRenderer; received: string[] }> {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+    const received: string[] = []
+    r.onData((text) => received.push(text))
+    return { r, received }
+  }
+
+  /** Write program output and wait for the parser to have consumed it. The
+   *  barrier is the renderer's own parse-settle (a queued empty write), so
+   *  nothing here waits on a duration. */
+  async function programWrites(r: XtermRenderer, data: string): Promise<void> {
+    r.write(data)
+    await r.awaitWriteBarrier()
+  }
+
+  /** Dispatch a real keydown at xterm's hidden textarea — the production
+   *  path (xterm binds its key handling to the textarea with capture). */
+  function pressKey(r: XtermRenderer, init: KeyboardEventInit & { keyCode: number }): void {
+    const term = (r as unknown as Record<string, unknown>).term as { element: HTMLElement }
+    const textarea = term.element.querySelector('textarea')
+    expect(textarea).not.toBeNull()
+    const event = new KeyboardEvent('keydown', { ...init, bubbles: true })
+    // jsdom does not compute keyCode from `key`; xterm's encoder reads it.
+    Object.defineProperty(event, 'keyCode', { value: init.keyCode })
+    textarea!.dispatchEvent(event)
+  }
+
+  it('produces no data event for any query the program asks', async () => {
+    const { r, received } = await mountQueryRenderer()
+
+    // Every query xterm answers by itself, in one chunk: where the cursor is
+    // (DSR, and its DEC form), what the terminal is (DA1 and DA2), whether a
+    // mode is set (DECRQM), a setting's value (DECRQSS), and the colours
+    // (OSC 11 and OSC 4). Each one used to come back out of onData as xterm's
+    // own answer, and each must now be the runtime's.
+    await programWrites(
+      r,
+      '\x1b[6n\x1b[?6n\x1b[c\x1b[0c\x1b[>c\x1b[?1$p\x1b[4$p' +
+        '\x1bP$qm\x1b\\\x1b]11;?\x1b\\\x1b]4;1;?\x1b\\',
+    )
+
+    expect(received).toEqual([])
+    r.dispose()
+  })
+
+  it('still delivers what the person types, key by key', async () => {
+    const { r, received } = await mountQueryRenderer()
+
+    pressKey(r, { key: 'a', keyCode: 65 })
+    pressKey(r, { key: 'Enter', keyCode: 13 })
+    expect(received).toEqual(['a', '\r'])
+
+    // And a paste, which is input on the same path a keystroke takes.
+    r.paste('echo hi')
+    expect(received).toEqual(['a', '\r', 'echo hi'])
+    r.dispose()
+  })
+})

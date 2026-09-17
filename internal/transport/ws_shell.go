@@ -190,15 +190,6 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleFootprintUninstall(ctx, req) }
 		}),
-		reg(s.lane, "shell.footprint.consent", params(validateFootprintConsentRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := footprintHandlers{
-				r:        r,
-				consent:  s.helperConsent,
-				registry: s.registry,
-				log:      s.log,
-			}
-			return func(ctx context.Context, req jsonrpcRequest) { h.handleConsent(ctx, state, req) }
-		}),
 		regResponder(s.lane, "shell.footprint.helperUninstall", params(validateFootprintHelperUninstallRaw), func(r Responder) handlerFunc {
 			h := footprintHandlers{
 				r:                 r,
@@ -297,27 +288,6 @@ func validateFootprintUninstallRaw(raw json.RawMessage) string {
 		return "params must be a JSON object"
 	}
 	return validateProfileID(p.ProfileID)
-}
-
-// validateFootprintConsentRaw is the registered validator for
-// shell.footprint.consent: consent is granted against the host key of a
-// session this connection already owns, so the only field is the
-// backend-minted session id — the handler still checks ownership, which a
-// validator cannot see.
-func validateFootprintConsentRaw(raw json.RawMessage) string {
-	var p struct {
-		SessionID string `json:"sessionId"`
-	}
-	if msg := decodeParams(raw, &p); msg != "" {
-		return msg
-	}
-	if p.SessionID == "" {
-		return "sessionId is required"
-	}
-	if msg := validateSessionIDShape(p.SessionID); msg != "" {
-		return "sessionId " + msg
-	}
-	return ""
 }
 
 // validateFootprintHelperUninstallRaw is the registered validator for

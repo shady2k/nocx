@@ -31,6 +31,15 @@ var ErrArtifactsNotBuilt = errors.New("deploy: helper artifacts not built (run m
 // binaries such as nocx-helper that only use deploy's filesystem types.
 type embeddedSource struct{}
 
+// THIS IS THE COMPILE-TIME HALF of "production cannot reach the injection seam
+// in internal/helper/local's preferredLocal": the production source carries the
+// local companion by construction rather than by hope, so the branch that
+// installs a source's own artifact can only be taken by a caller that supplied
+// bytes of its own — a test. The runtime half is
+// TestTheProductionArtifactSourceCarriesTheLocalVariant in that package, which
+// holds the value the composition root actually passes (DefaultSource).
+var _ deploy.LocalArtifactSource = embeddedSource{}
+
 func (embeddedSource) Artifact(p deploy.Platform) (data []byte, contentHash string, err error) {
 	if a, ok := artifactsByPlatform[p]; ok {
 		return a.compressed, a.contentHash, nil
@@ -41,6 +50,20 @@ func (embeddedSource) Artifact(p deploy.Platform) (data []byte, contentHash stri
 		}
 	}
 	return nil, "", deploy.ErrUnsupportedPlatform
+}
+
+// LocalArtifact answers this machine's OWN helper — the variant built with
+// nocx_local_ssh, which is the same platform with an ssh client linked in. The
+// walk over its directory lives in source_local.go; this method exists so the
+// production source the composition root already passes around is the one that
+// carries both variants (deploy.LocalArtifactSource), rather than a second
+// source somebody has to remember to pass to the local install.
+//
+// Its error is not a fallback's trigger: a directory holding nothing for the
+// platform is what the local install reports, because a build without this
+// variant has no helper to install at all (nocx-50w7p.7).
+func (embeddedSource) LocalArtifact(p deploy.Platform) (data []byte, contentHash string, err error) {
+	return localSource{}.Artifact(p)
 }
 
 // DefaultSource is the artifact source production installs from. It is a
@@ -68,10 +91,27 @@ type artifact struct {
 var artifactsByPlatform map[deploy.Platform]artifact
 
 func init() {
-	artifactsByPlatform = make(map[deploy.Platform]artifact)
-	entries, err := fs.ReadDir(artifactsFS, "bin")
+	artifactsByPlatform = artifactsInDir(artifactsFS, "bin")
+}
+
+// artifactsInDir reads one embedded artifact directory. THE NAMING CONVENTION
+// LIVES HERE ONCE: an artifact is named nocx-helper-<goos>-<goarch>.gz, the
+// platform is the whole of the name, and a file that does not parse as one is
+// skipped rather than guessed at. Two directories are read this way — bin/,
+// which is what gets deployed, and bin/local/, which is what this machine runs
+// itself — and they are separate DIRECTORIES rather than longer names because
+// the name is already spoken for by the platform: two variants of one platform
+// cannot be told apart by a name that spells only the platform.
+//
+// A directory that is absent embeds nothing but its committed .gitignore, so
+// an empty result is the ordinary state of a checkout that has not built that
+// variant — which is why the callers distinguish "not built" by their own
+// error rather than by this function failing.
+func artifactsInDir(fsys fs.FS, dir string) map[deploy.Platform]artifact {
+	found := make(map[deploy.Platform]artifact)
+	entries, err := fs.ReadDir(fsys, dir)
 	if err != nil {
-		return
+		return found
 	}
 	for _, e := range entries {
 		if e.IsDir() {
@@ -87,7 +127,7 @@ func init() {
 			continue
 		}
 		p := deploy.Platform{GOOS: parts[0], GOARCH: parts[1]}
-		data, err := artifactsFS.ReadFile("bin/" + name)
+		data, err := fs.ReadFile(fsys, dir+"/"+name)
 		if err != nil {
 			continue
 		}
@@ -95,8 +135,9 @@ func init() {
 		if err != nil {
 			continue
 		}
-		artifactsByPlatform[p] = artifact{compressed: data, contentHash: contentHash}
+		found[p] = artifact{compressed: data, contentHash: contentHash}
 	}
+	return found
 }
 
 func hashGzip(data []byte) (string, error) {

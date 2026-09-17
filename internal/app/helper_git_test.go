@@ -30,10 +30,12 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/log/logtest"
 
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/hostsvc"
 	localgit "github.com/shady2k/nocx/internal/git/local"
+	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
 	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
@@ -41,6 +43,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	helpersession "github.com/shady2k/nocx/internal/helper/session"
+	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -63,7 +66,7 @@ func TestBridgeLifecycleCarriesOpaqueBytesAndCloses(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	bridgeLifecycle(peer, carrier)
+	bridgeLifecycle(nil, lifecycle.TransportID("tpt-test"), peer, carrier)
 
 	const outbound = "opaque lifecycle bytes"
 	writeDone := make(chan error, 1)
@@ -169,9 +172,8 @@ type fakeLaneConn struct {
 
 	startErr error
 
-	mu      sync.Mutex
-	closed  int
-	started string
+	mu     sync.Mutex
+	closed int
 }
 
 func newFakeLaneConn(peer func(stdin io.Reader, stdout io.Writer) int) *fakeLaneConn {
@@ -195,12 +197,13 @@ func newFakeLaneConn(peer func(stdin io.Reader, stdout io.Writer) int) *fakeLane
 func (f *fakeLaneConn) Stdin() io.WriteCloser { return f.stdin }
 func (f *fakeLaneConn) Stdout() io.Reader     { return f.stdout }
 func (f *fakeLaneConn) Stderr() io.Reader     { return f.stderr }
-func (f *fakeLaneConn) Start(command string) error {
-	f.mu.Lock()
-	f.started = command
-	f.mu.Unlock()
-	return f.startErr
-}
+
+// Start answers the one thing a helper-opened lane can be asked: whether the
+// exec it already performed failed. A COMMAND is not part of it any more —
+// client.LaneConn refuses one — so the fake records nothing, and its startErr
+// stands in for "the helper could not open the lane at all", which is the state
+// it was always modelling.
+func (f *fakeLaneConn) Start(string) error    { return f.startErr }
 func (f *fakeLaneConn) Wait() (int, error)    { <-f.exited; return f.exitCode, nil }
 func (f *fakeLaneConn) Done() <-chan struct{} { return make(chan struct{}) }
 func (f *fakeLaneConn) LostErr() error        { return nil }
@@ -212,33 +215,36 @@ func (f *fakeLaneConn) Close() error {
 	return f.stdin.Close()
 }
 
-// startedCommand is what the exec lane was asked to run: the whole point of
-// the remote half of D11 is that it is the BRIDGE and not the helper serving
-// over this channel.
-func (f *fakeLaneConn) startedCommand() string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.started
-}
-
 func (f *fakeLaneConn) closeCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.closed
 }
 
-// fakeLaneProvider hands out a fresh scripted lane per HelperConn call and
+// laneRequest is what the coordinator ASKED for, which is the whole of what
+// this side names any more: the machine whose install to run and the
+// generation of it. The command itself is the helper's to build (D3), and the
+// app-level test asserts the two facts; internal/helper/sshsvc asserts what
+// they turn into.
+type laneRequest struct {
+	machine    proto.Machine
+	generation proto.GenerationID
+}
+
+// fakeLaneProvider hands out a fresh scripted lane per LaneConn call and
 // records them, so a test can prove how many helpers were brought up. It
 // also serves the install surface the selection needs: a scripted probe
 // answer and an in-memory install lease, so the REAL deploy.Ensure runs
 // against a fake transport — the wiring under test is the production
-// wiring, only the SSH is fake.
+// wiring, only the SSH is fake (and, since nocx-50w7p.10, only the LANE the
+// helper would have opened: this double stands in for this machine's helper,
+// not for the coordinator's own dial).
 type fakeLaneProvider struct {
 	peer     func(in io.Reader, out io.Writer) int
 	startErr error
 
-	laneErr error // when set, every HelperConn fails: an unreachable host
-	// laneBlock, when set, parks every HelperConn on it (or on the caller's
+	laneErr error // when set, every LaneConn fails: an unreachable host
+	// laneBlock, when set, parks every LaneConn on it (or on the caller's
 	// context): a host that accepts nothing and refuses nothing, which is what
 	// a machine behind a black-holing firewall looks like.
 	laneBlock   chan struct{}
@@ -247,13 +253,14 @@ type fakeLaneProvider struct {
 	probeFail   error  // when set, DiscoveryConn fails
 	installFail error  // when set, HelperInstallConn fails
 
-	mu    sync.Mutex
-	conns []*fakeLaneConn
+	mu      sync.Mutex
+	conns   []*fakeLaneConn
+	request []laneRequest
 
 	install *fakeInstallConn
 }
 
-func (p *fakeLaneProvider) HelperConn(ctx context.Context, _ string, _ ...ssh.ConnectOption) (ssh.HelperConn, error) {
+func (p *fakeLaneProvider) LaneConn(ctx context.Context, _ string, machine proto.Machine, generation proto.GenerationID, _ ...ssh.ConnectOption) (helperclient.HelperConn, error) {
 	if p.laneErr != nil {
 		return nil, p.laneErr
 	}
@@ -268,8 +275,17 @@ func (p *fakeLaneProvider) HelperConn(ctx context.Context, _ string, _ ...ssh.Co
 	c.startErr = p.startErr
 	p.mu.Lock()
 	p.conns = append(p.conns, c)
+	p.request = append(p.request, laneRequest{machine: machine, generation: generation})
 	p.mu.Unlock()
 	return c, nil
+}
+
+// asked returns what the lane was asked for, for the one app-level assertion
+// about it.
+func (p *fakeLaneProvider) asked(i int) laneRequest {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.request[i]
 }
 
 func (p *fakeLaneProvider) DiscoveryConn(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.DiscoveryConn, error) {
@@ -318,9 +334,10 @@ type fakeProbeConn struct {
 func (f *fakeProbeConn) Exec(_ context.Context, _ string) (*ssh.ExecResult, error) {
 	return &ssh.ExecResult{Stdout: []byte(f.uname)}, nil
 }
-func (f *fakeProbeConn) Done() <-chan struct{} { return make(chan struct{}) }
-func (f *fakeProbeConn) LostErr() error        { return nil }
-func (f *fakeProbeConn) Close() error          { return nil }
+func (f *fakeProbeConn) Done() <-chan struct{}      { return make(chan struct{}) }
+func (f *fakeProbeConn) LostErr() error             { return nil }
+func (f *fakeProbeConn) Close() error               { return nil }
+func (f *fakeProbeConn) HostKeyFingerprint() string { return "SHA256:fake" }
 
 // fakeInstallConn is a HelperInstallConn whose FS is an in-memory map. The
 // REAL deploy.Ensure runs against it, so the selection's install path is
@@ -516,10 +533,10 @@ func (fi fakeInstallInfo) Sys() any           { return nil }
 // stands in for the installed binary, and the stub artifact source is what
 // the selection installed — the client's D21 verification is the real one,
 // and it must not depend on the embedded binaries existing.
-func realHelperPeer() func(in io.Reader, out io.Writer) int {
+func realHelperPeer(t testing.TB) func(in io.Reader, out io.Writer) int {
 	contentHash := syntheticArtifactHash
 	return func(in io.Reader, out io.Writer) int {
-		h := host.New(in, out, contentHash, "instance-1", discardLogger())
+		h := host.New(in, out, contentHash, "instance-1", discardLogger(t))
 		h.Register(hostsvc.New(localgit.NewFactory()))
 		h.Register(helpersession.New(helpersession.Options{
 			Generation: proto.GenerationID(contentHash),
@@ -535,10 +552,10 @@ func realHelperPeer() func(in io.Reader, out io.Writer) int {
 // service. Uninstall must refuse when this daemon cannot enumerate its live
 // sessions; treating the unknown service as an empty inventory would remove a
 // live helper executable without first closing its process.
-func helperPeerWithoutSession() func(in io.Reader, out io.Writer) int {
+func helperPeerWithoutSession(t testing.TB) func(in io.Reader, out io.Writer) int {
 	contentHash := syntheticArtifactHash
 	return func(in io.Reader, out io.Writer) int {
-		h := host.New(in, out, contentHash, "instance-1", discardLogger())
+		h := host.New(in, out, contentHash, "instance-1", discardLogger(t))
 		h.Register(hostsvc.New(localgit.NewFactory()))
 		if err := h.Serve(context.Background()); err != nil {
 			return 1
@@ -630,8 +647,13 @@ func (s *fakeRemoteSession) SSHOptions() []ssh.ConnectOption {
 	return []ssh.ConnectOption{ssh.WithDesiredMode(string(s.mode))}
 }
 
-func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+// discardLogger used to be a bare io.Discard sink shared by every caller, so
+// a failure showed only the assertion that tripped and none of the debug
+// lines that led to it (nocx-n14oo.10). It is now logtest.Slog(t): a buffer
+// private to the test that asked for it, dumped by t.Cleanup only when that
+// test fails.
+func discardLogger(t testing.TB) *slog.Logger {
+	return logtest.Slog(t)
 }
 
 // syntheticPayload is the stand-in for the embedded helper: real gzip
@@ -695,7 +717,7 @@ func stubArtifacts(t *testing.T) deploy.ArtifactSource {
 // persists — this bead owns no writer for it.
 func testConsentStores(t *testing.T) (*consent.Store, *consent.InstallStore) {
 	t.Helper()
-	logger := log.NewSlogAdapter(discardLogger())
+	logger := log.NewSlogAdapter(discardLogger(t))
 	store := seedGrantedDocument(t, t.TempDir(), "SHA256:test-host")
 	installs := consent.NewInstallStore(logger, storage.NewDocumentStore(t.TempDir()), "installs.json")
 	return store, installs
@@ -705,7 +727,7 @@ func configuredSelector(t *testing.T, provider *fakeLaneProvider) transport.GitF
 	t.Helper()
 	source := stubArtifacts(t)
 	store, installs := testConsentStores(t)
-	factory, _ := helperGitFactory(provider, source, store, installs, discardLogger())
+	factory, _ := helperGitFactory(provider, source, store, installs, discardLogger(t))
 	return factory
 }
 
@@ -715,7 +737,7 @@ func configuredSelector(t *testing.T, provider *fakeLaneProvider) transport.GitF
 // complete install afterwards — and a second consultation of the same host
 // uploads nothing (an already-complete directory is not reinstalled).
 func TestHelperSelectorInstallsTheArtifact(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	sel := configuredSelector(t, provider)
 	sess := &fakeRemoteSession{id: "s1", host: "host.example"}
 
@@ -775,7 +797,7 @@ func TestHelperSelectorFallsBackWhenArtifactsNotBuilt(t *testing.T) {
 // (D20), and the refusal stands rather than an install attempt.
 func TestHelperSelectorFallsBackOnUnsupportedPlatform(t *testing.T) {
 	provider := &fakeLaneProvider{uname: "Darwin x86_64"}
-	sel, _ := helperGitFactory(provider, helperartifacts.DefaultSource, nil, nil, discardLogger())
+	sel, _ := helperGitFactory(provider, helperartifacts.DefaultSource, nil, nil, discardLogger(t))
 	if got := sel(&fakeRemoteSession{host: "host.example"}); got.Factory != nil {
 		t.Fatalf("selection on an unsupported platform = %+v, want the empty refusal", got)
 	}
@@ -786,7 +808,7 @@ func TestHelperSelectorFallsBackOnUnsupportedPlatform(t *testing.T) {
 // the process dies when the last binding closes and is redialed on the
 // next open.
 func TestHelperSharesOneProcessAcrossOpens(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	sel := configuredSelector(t, provider)
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
 	if selection.Factory == nil {
@@ -850,7 +872,7 @@ func TestHelperSharesOneProcessAcrossOpens(t *testing.T) {
 // share one connection is not exposed, and sharing across principals would
 // be an authorization error.
 func TestHelperSessionsDoNotShareAProcess(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	sel := configuredSelector(t, provider)
 	dir := fixtureRepo(t)
 
@@ -882,17 +904,17 @@ func TestHelperSessionsDoNotShareAProcess(t *testing.T) {
 // not touch any other machine's helpers — the backend knows its own
 // channels by the host-key fingerprint that keys consent.
 func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	source := stubArtifacts(t)
-	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	if err := store.Grant("SHA256:machine-a"); err != nil {
 		t.Fatalf("grant a: %v", err)
 	}
 	if err := store.Grant("SHA256:machine-b"); err != nil {
 		t.Fatalf("grant b: %v", err)
 	}
-	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	factory, reg := helperGitFactory(provider, source, store, installs, discardLogger())
+	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
+	factory, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
 	dir := fixtureRepo(t)
 
 	selA := factory(&fakeRemoteSession{id: "s1", host: "host.example", fingerprint: "SHA256:machine-a"})
@@ -950,10 +972,10 @@ func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
 // the operation can be retried after the daemon is repaired.
 func TestHelperCloseHelpersForRefusesWhenSessionsCannotBeEnumerated(t *testing.T) {
 	const fingerprint = "SHA256:test-host"
-	provider := &fakeLaneProvider{peer: helperPeerWithoutSession()}
+	provider := &fakeLaneProvider{peer: helperPeerWithoutSession(t)}
 	source := stubArtifacts(t)
 	store, installs := testConsentStores(t)
-	factory, reg := helperGitFactory(provider, source, store, installs, discardLogger())
+	factory, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
 	dir := fixtureRepo(t)
 
 	selectionA := factory(&fakeRemoteSession{id: "s1", host: "host.example"})
@@ -1002,7 +1024,7 @@ func TestHelperCloseHelpersForRefusesWhenSessionsCannotBeEnumerated(t *testing.T
 // process — the factory must close the client (and so the lane) rather
 // than leaking it on the far host.
 func TestHelperDialFactory_RefusingOpenClosesTheLane(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	sel := configuredSelector(t, provider)
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
 	if selection.Factory == nil {
@@ -1051,29 +1073,39 @@ func TestHelperDialFactory_ExecForbiddenClosesTheLane(t *testing.T) {
 	}
 }
 
-// TestHelperSelectionConsentRequiredWritesNothing is D8's zero-write
-// invariant at the selection: a machine with no relay-tier answer gets the
-// ask — and not a byte is written to the host. No install lease is
-// acquired, no platform probe is even needed to decide that.
-func TestHelperSelectionConsentRequiredWritesNothing(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
+// TestHelperSelectionNoAnswerYetIsRefusedNeverAsked is ADR-0068 at the
+// git.open selection: a machine with no helper-tier answer at all gets the
+// SAME Refused the panel renders for raw or a denied answer — never the
+// ask, because git.open may not raise a machine's tier — and not a byte is
+// written to the host. No install lease is acquired, no platform probe is
+// even needed to decide that. The refusal names what would change it: the
+// connect-time ask ADR-0068 puts elsewhere.
+func TestHelperSelectionNoAnswerYetIsRefusedNeverAsked(t *testing.T) {
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	source := stubArtifacts(t)
-	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
-	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger())
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
+	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger(t))
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", fingerprint: "SHA256:never-answered"})
-	if !selection.ConsentRequired {
-		t.Fatalf("selection = %+v, want consentRequired for a machine with no answer", selection)
+	if selection.Factory != nil {
+		t.Fatalf("selection = %+v, want no factory for a machine with no answer", selection)
+	}
+	if selection.Refusal == nil || selection.Refusal.State != "" || selection.Refusal.Message == "" {
+		t.Fatalf("selection = %+v, want the Refused reason naming what would change it", selection)
+	}
+	if !strings.Contains(selection.Refusal.Message, "reconnect") {
+		t.Errorf("refusal = %q, want it to name reconnecting as what would change it — "+
+			"git.open must say what it cannot do, never offer to ask", selection.Refusal.Message)
 	}
 	if provider.install != nil && provider.install.uploadCount() != 0 {
-		t.Fatalf("consentRequired wrote %d uploads, want 0 — the ask must not leave a footprint", provider.install.uploadCount())
+		t.Fatalf("no-answer-yet wrote %d uploads, want 0 — a refusal must not leave a footprint", provider.install.uploadCount())
 	}
 	if got := provider.laneCount(); got != 0 {
-		t.Fatalf("consentRequired brought up %d helper lanes, want 0", got)
+		t.Fatalf("no-answer-yet brought up %d helper lanes, want 0", got)
 	}
 	if got := installs.All(); len(got) != 0 {
-		t.Fatalf("consentRequired recorded %d installs, want 0", len(got))
+		t.Fatalf("no-answer-yet recorded %d installs, want 0", len(got))
 	}
 }
 
@@ -1082,15 +1114,15 @@ func TestHelperSelectionConsentRequiredWritesNothing(t *testing.T) {
 // answers the resolver's Refused as a reason with no earned state, and
 // git.open's not-available error carries it.
 func TestHelperSelectionExplicitRawWritesNothing(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	source := stubArtifacts(t)
-	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
-	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger())
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
+	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger(t))
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredRaw})
-	if selection.Factory != nil || selection.ConsentRequired {
-		t.Fatalf("selection = %+v, want no factory and no ask for explicit raw", selection)
+	if selection.Factory != nil {
+		t.Fatalf("selection = %+v, want no factory for explicit raw", selection)
 	}
 	if selection.Refusal == nil || selection.Refusal.State != "" || selection.Refusal.Message == "" {
 		t.Fatalf("selection = %+v, want the Refused reason naming what to do", selection)
@@ -1104,11 +1136,11 @@ func TestHelperSelectionExplicitRawWritesNothing(t *testing.T) {
 // data is written only when the install actually succeeded — after a grant,
 // the selection installs and the observation store lists the machine.
 func TestHelperSelectionRecordsTheFootprintObservation(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	source := stubArtifacts(t)
 	store := seedGrantedDocument(t, t.TempDir(), "SHA256:test-host")
-	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger())
+	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
+	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger(t))
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
 	if selection.Factory == nil {
@@ -1134,23 +1166,20 @@ func TestHelperSelectionRecordsTheFootprintObservation(t *testing.T) {
 // been otherwise: while silence also resolved to script, refusing here would
 // have refused every user who never opened a connection's settings.
 func TestHelperSelectionExplicitScriptIsNotOfferedTheBinary(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	source := stubArtifacts(t)
-	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
-	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger())
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
+	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger(t))
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredScript})
-	if selection.ConsentRequired {
-		t.Fatalf("selection = %+v, want no ask for an explicit script — it is an answer", selection)
-	}
 	if selection.Factory != nil {
 		t.Fatalf("selection = %+v, want no factory for an explicit script — it was never upgraded", selection)
 	}
 	if selection.Refusal == nil {
 		t.Fatal("an explicit script produced neither an ask nor a refusal — the panel would have nothing to say")
 	}
-	if !strings.Contains(selection.Refusal.Message, "Relay") {
+	if !strings.Contains(selection.Refusal.Message, "Helper") {
 		t.Errorf("refusal = %q, want it to name a mode that DOES offer the helper — "+
 			"a refusal the user cannot act on is the dead end this bead exists to remove",
 			selection.Refusal.Message)
@@ -1160,19 +1189,25 @@ func TestHelperSelectionExplicitScriptIsNotOfferedTheBinary(t *testing.T) {
 	}
 }
 
-// TestTheExecLaneRunsTheBridgeForTheGenerationInstalled is the remote half of
-// the level-1 design's D11, asserted where the coordinator actually decides
-// it: what goes down the pty-less exec lane is `nocx-helper bridge
-// <generation>`, not the helper serving over that channel's stdin and stdout.
+// TestTheLaneNamesTheInstallAndTheGenerationTheCoordinatorInstalled is the
+// remote half of the level-1 design's D11, asserted where the coordinator
+// still decides it: what a lane is opened with is the machine's install
+// DIRECTORY and the generation that was installed.
 //
-// The distinction is the whole bead. With the helper serving the channel, its
-// sessions died with the channel; with the bridge, the channel reaches an
-// endpoint on the host that outlives it — which is what lets a session survive
-// a coordinator being replaced (D1). The generation is the content hash the
-// installer wrote, so the bridge can never reach a different generation's
-// sessions while two coexist on one host (D4).
-func TestTheExecLaneRunsTheBridgeForTheGenerationInstalled(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer()}
+// The COMMAND is not the coordinator's any more — that is the whole of
+// nocx-50w7p.10 and the reason this assertion changed shape. The helper builds
+// `<dir>/nocx-helper bridge <generation>` from these two facts (D3: an argv is
+// the capability this level exists not to hand out), and
+// internal/helper/sshsvc's lane test asserts what they turn into, against a
+// fixture that records the command it was asked to run.
+//
+// What is asserted HERE is that the two facts name the right thing: a wrong
+// generation would reach a DIFFERENT build's sessions while two coexist on one
+// host (D4), and a wrong directory would run a binary nobody installed. The
+// directory is compared against deploy's own layout rather than a literal,
+// because that layout is the one expression that says where an install is.
+func TestTheLaneNamesTheInstallAndTheGenerationTheCoordinatorInstalled(t *testing.T) {
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	sel := configuredSelector(t, provider)
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
 	if selection.Factory == nil {
@@ -1187,42 +1222,43 @@ func TestTheExecLaneRunsTheBridgeForTheGenerationInstalled(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = repo.Close() })
 
-	started := provider.lane(0).startedCommand()
-	fields := strings.Fields(started)
-	if len(fields) != 3 || fields[1] != endpoint.BridgeCommand {
-		t.Fatalf("the exec lane ran %q, want <path> %s <generation>: it must run the bridge, "+
-			"not a helper serving this channel", started, endpoint.BridgeCommand)
+	if provider.laneCount() != 1 {
+		t.Fatalf("lanes opened = %d, want the one this open rides", provider.laneCount())
 	}
-	// The generation the bridge was handed is a content hash. Asserted
-	// against the ERROR CLASS, and with a short directory, because
-	// endpoint.Path answers two questions in one call: socketName validates
-	// the generation, and Path then measures the JOINED path against the
-	// platform's sun_path bound. This passed t.TempDir(), which on macOS is a
-	// ~120-character /var/folders path and under `make ci-mac` a disposable
-	// root — so the LENGTH answer arrived wearing the generation answer's
-	// message and the test reported "not a content hash" about a temporary
-	// directory it was never about (nocx-k6p18.4). The product cannot reach
-	// that state: endpoint.Dir derives from $HOME and the socket lives under
-	// ~/.nocx/run. Both halves of the fix are deliberate — the short
-	// directory means only the generation can fail this call today, and the
-	// error class means a third failure mode added to Path tomorrow still
-	// cannot be read as this one.
+	asked := provider.asked(0)
+
+	// The generation is the content hash the installer wrote (D21) — the same
+	// value the handshake then verifies the far helper's hello-ok against —
+	// and it is a content hash by the wire's own validator, so the assertion
+	// above cannot pass on a value nothing would accept. The negative is in
+	// place so the line has teeth.
+	if string(asked.generation) != syntheticArtifactHash {
+		t.Fatalf("the lane names generation %q, want the hash the installer wrote (%q)",
+			string(asked.generation), syntheticArtifactHash)
+	}
 	const genCheckDir = "/tmp"
-	if _, err := endpoint.Path(genCheckDir, proto.GenerationID(fields[2])); errors.Is(err, endpoint.ErrBadGeneration) {
-		t.Fatalf("the generation the bridge was given is not a content hash: %v", err)
+	if _, err := endpoint.Path(genCheckDir, asked.generation); errors.Is(err, endpoint.ErrBadGeneration) {
+		t.Fatalf("the generation the lane was given is not a content hash: %v", err)
 	}
-	// And the negative, in place, so the line above cannot pass by being
-	// unfalsifiable: the same call must REJECT a generation that is not one.
 	for _, notAHash := range []string{"", "short", "not-hex-at-all-not-hex-at-all"} {
 		if _, err := endpoint.Path(genCheckDir, proto.GenerationID(notAHash)); !errors.Is(err, endpoint.ErrBadGeneration) {
 			t.Fatalf("endpoint.Path(%q) = %v, want ErrBadGeneration — the assertion above "+
 				"means nothing unless this check has teeth", notAHash, err)
 		}
 	}
-	// And it is the generation that was INSTALLED, which is what the dial then
-	// verifies the hello-ok's content hash against (D21).
-	if !strings.HasSuffix(path.Dir(fields[0]), "-"+fields[2]) {
-		t.Fatalf("the bridge names generation %q but the binary was installed at %q", fields[2], fields[0])
+
+	// The machine's directory is where THAT generation lives: the install
+	// lease's home, the platform the probe answered (the fake's "Linux
+	// x86_64") and deploy's own key for the build.
+	_, platform, available, perr := probeHelperPlatformAt(context.Background(), "host.example", nil,
+		provider, stubArtifacts(t))
+	if perr != nil || !available {
+		t.Fatalf("the platform probe this test compares against did not answer: available=%v err=%v", available, perr)
+	}
+	wantDir := path.Dir(deploy.InstalledPath("/home/u", platform, syntheticArtifactHash))
+	if asked.machine.Dir != wantDir {
+		t.Fatalf("the lane names install directory %q, want %q — deploy's own layout under the "+
+			"home the install lease answered", asked.machine.Dir, wantDir)
 	}
 }
 
@@ -1230,15 +1266,15 @@ func TestTheExecLaneRunsTheBridgeForTheGenerationInstalled(t *testing.T) {
 // available when the SSH carrier dies but the helper daemon still exists.
 // The binding keeps the hostHelper registered; only its client is lost.
 func TestHelperSessionsRedialsAfterCarrierLoss(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := logtest.Slog(t)
 	daemon := helpersession.New(helpersession.Options{
 		Generation: proto.GenerationID(syntheticArtifactHash),
-		Spawner:    helpersession.NewLocalSpawner(logger, helpersession.Shell{Path: "/bin/sh"}),
+		Spawner:    helpersession.NewLocalSpawner(logger, helpersession.Shell{Path: "/bin/sh"}, ""),
 		Log:        logger,
 	})
 	t.Cleanup(daemon.Close)
 	peer := func(in io.Reader, out io.Writer) int {
-		h := host.New(in, out, syntheticArtifactHash, "instance-1", discardLogger())
+		h := host.New(in, out, syntheticArtifactHash, "instance-1", discardLogger(t))
 		h.Register(hostsvc.New(localgit.NewFactory()))
 		h.Register(daemon)
 		release := daemon.Bind(h)

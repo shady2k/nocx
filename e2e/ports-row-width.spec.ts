@@ -312,6 +312,9 @@ test('a forwarded row keeps its destination readable at the default rail width, 
     // exist in this container without shared-infra changes. The destination
     // is the brief's failing example — the string the bug report shows
     // truncating on exactly this three-button row.
+    // This spec's subject is the ports row's layout, not the connect-time
+    // ask (ADR-0069) — desiredMode is declared explicitly as script so the
+    // connection is never asked.
     const profileName = `e2e-row-width-${Date.now()}`
     const created = await rpc<{ id: string }>(page, info.port, info.token, 'profiles.create', {
       type: 'ssh',
@@ -321,6 +324,7 @@ test('a forwarded row keeps its destination readable at the default rail width, 
         port: Number(fixture.addr.split(':')[1]),
         user: 'e2e',
         keyPath: fixture.userKey,
+        desiredMode: 'script',
         forwards: [
           {
             direction: 'remote',

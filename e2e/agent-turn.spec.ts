@@ -52,17 +52,19 @@
  * NOTHING HERE WAITS OUT A DURATION. Every wait is a poll on an observable
  * state change — the turn's `completed` chip, a store row — never a sleep.
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  standalone as base,
+  answerPermission,
   appReadyForInput,
-  VaultBackend,
   bindEndpoint,
   createAiEndpoint,
   setDefaultModel,
   settingsReady,
+  VaultBackend,
 } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
@@ -75,8 +77,6 @@ const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
 const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
 /* `run` is mutate-destructive and session.read observe (registry.go). */
-const DESTRUCTIVE_ROW = '.st-policy__row[data-effect="mutate-destructive"]'
-const OBSERVE_ROW = '.st-policy__row[data-effect="observe"]'
 const APPROVAL_TITLE = 'This action needs your approval'
 
 const test = base
@@ -316,11 +316,8 @@ async function configureAssistant(page: Page): Promise<void> {
   await page.locator(SETTINGS_ROLES_NAV).click()
   await setDefaultModel(page, ENDPOINT_NAME, 'e2e-model')
   await page.locator(SETTINGS_POLICY_NAV).click()
-  for (const row of [OBSERVE_ROW, DESTRUCTIVE_ROW]) {
-    const r = page.locator(row)
-    await expect(r).toBeVisible({ timeout: 15_000 })
-    await r.locator('select').first().selectOption({ label: 'Allowed' })
-    await expect(r.locator('.st-policy__state')).toContainText('Allowed', { timeout: 15_000 })
+  for (const effect of ['observe', 'mutate-destructive'] as const) {
+    await answerPermission(page, effect, 'Allowed')
   }
   await backToTerminal(page)
 }

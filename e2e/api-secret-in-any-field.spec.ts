@@ -16,12 +16,13 @@
  * load-bearing: before this epic it had no way to address a secret at all.
  * Every wait is on a UI or filesystem state, never a duration.
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  standalone as base,
   appReadyForInput,
   bindEndpoint,
   openImportDestination,

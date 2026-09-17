@@ -118,7 +118,22 @@ func (r *sessionRegistry) lookup(lane lifecycle.LaneID) (string, bool) {
 // option), so a captured *Publisher value would be nil for the lifetime of
 // the closure — the first real domain_request would dereference nil
 // (nocx-u7uh.29). The accessor resolves the variable at grant time.
-func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, transports *transportRegistry, sessions *sessionRegistry, typed *typedRunner) lifecyclepub.GrantBuilder {
+//
+// toolEndpoint is where a nested child's NOCX_TOOL_SOCKET comes from
+// (nocx-1n56d), and it is an accessor for the same reason pub is, one step
+// further along the same timeline: cmd/nocx-server starts this backend's tool
+// endpoint AFTER New returns and tells the App through SetLocalToolSocketPath,
+// so a value captured here would be empty for the life of the process. See
+// nestedToolSocket for what it answers and whose value it is.
+//
+// localHelperBinary is the same shape one field over, and it answers the other
+// half of a nested child's agent env: NOCX_AGENT_HELPER_PATH, the executable
+// the child's agent runs as its MCP adapter. It is this machine's INSTALLED
+// generation (localHelperOpener.installedHelperBinary), read per grant, and
+// never this process's environment — a backend started from inside a pane
+// inherits that pane's path, which belongs to another generation
+// (nocx-e2bws).
+func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, transports *transportRegistry, sessions *sessionRegistry, typed *typedRunner, toolEndpoint func() string, localHelperBinary func() string) lifecyclepub.GrantBuilder {
 	return func(req lifecyclepub.GrantRequest) (boot lifecyclepub.GrantBootstrap, err error) {
 		// Every outcome is logged, refusals loudest. A refusal here is
 		// invisible by construction — the publisher answers it with an
@@ -158,13 +173,58 @@ func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, tra
 		}
 		switch req.Env {
 		case lifecycle.EnvSudo, lifecycle.EnvSu:
-			return buildLocalChildBootstrap(p, sessions, req, parent.Transport, kind)
+			return buildLocalChildBootstrap(p, sessions, req, parent.Transport, kind, toolEndpoint, localHelperBinary)
 		case lifecycle.EnvSSH:
 			return buildSSHChildBootstrap(lg, p, sessions, req, kind, typed)
 		default:
 			return lifecyclepub.GrantBootstrap{}, fmt.Errorf("child domain: unsupported environment %q", req.Env)
 		}
 	}
+}
+
+// nestedToolSocket answers what a nested child's launch names as its tool
+// endpoint — the value the launcher renders as NOCX_TOOL_SOCKET, which is the
+// socket the agent started inside that child dials.
+//
+// IT ANSWERS FROM THE COORDINATOR, NEVER FROM THIS PROCESS'S ENVIRONMENT
+// (nocx-1n56d). Both nested launches used to read os.Getenv(ToolSocketEnvVar)
+// here, in the BACKEND's own process: nothing sets that variable in a
+// coordinator's environment — its only writers are pane launch scripts, one
+// shell down — so the launch named nothing at all, and in a backend somebody
+// started from inside a pane it named THAT pane's socket, which is a fact
+// about whoever launched this process and not about the child being composed.
+// The endpoint a child of this backend belongs to is this backend's own, and
+// the composition root already holds it: App.SetLocalToolSocketPath hands
+// cmd/nocx-server's own endpoint down to the local helper opener, which is
+// what every pane THIS machine opens carries to its shell
+// (localHelperOpener.toolEndpoint). One derivation, read per grant, so a
+// child cannot inherit a socket that was never its parent's.
+//
+// A CHILD THAT RUNS ON ANOTHER MACHINE IS TOLD NOTHING, which is the honest
+// state and not an omission. A local pane starts on this machine, where this
+// backend's socket is a path its shell can dial; a child on the far side of
+// an ssh connection cannot reach it, and a path named there would point that
+// host's agent at a socket nothing there answers — or, on a host running nocx
+// under the same account, at ANOTHER coordinator's endpoint, which is the
+// cross-coordinator delivery nocx-50w7p.18 exists to close. What a remote
+// shell should be given is not this socket but a far-side listener forwarding
+// into it, and whether a backend's tool socket is offered to a remote host at
+// all is an explicitly open question (nocx-e2bws, ADR-0064). Empty renders no
+// NOCX_TOOL_SOCKET whatsoever — never an empty assignment, which is the
+// difference between a shell that keeps its own fallback and one that dials
+// nothing at all (launcherEnvBlock, and stage1AgentEnv's twin for the far
+// side).
+//
+// endpoint is required: the composition root always wires it, and a backend
+// that runs no tool endpoint answers with the empty string through that same
+// accessor (cmd/nocx-server's startToolEndpoint answers nil, nil for a build
+// with no authorizer or dispatcher), which is the no-tool state this function
+// then renders faithfully.
+func nestedToolSocket(kind transportKind, endpoint func() string) string {
+	if !kind.local {
+		return ""
+	}
+	return endpoint()
 }
 
 // buildLocalChildBootstrap composes the sudo/su child: the child's bash
@@ -174,7 +234,7 @@ func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, tra
 // into the preserved fd; its final line closes the descriptor once bash has
 // read it, so the per-epoch capability it carries cannot be re-read by a
 // descendant.
-func buildLocalChildBootstrap(pub *lifecyclepub.Publisher, sessions *sessionRegistry, req lifecyclepub.GrantRequest, parentTransport lifecycle.TransportID, kind transportKind) (lifecyclepub.GrantBootstrap, error) {
+func buildLocalChildBootstrap(pub *lifecyclepub.Publisher, sessions *sessionRegistry, req lifecyclepub.GrantRequest, parentTransport lifecycle.TransportID, kind transportKind, toolEndpoint func() string, localHelperBinary func() string) (lifecyclepub.GrantBootstrap, error) {
 	sid, ok := sessions.lookup(req.Lane)
 	if !ok {
 		return lifecyclepub.GrantBootstrap{}, fmt.Errorf("child domain: no session registered for lane %s", req.Lane)
@@ -184,13 +244,23 @@ func buildLocalChildBootstrap(pub *lifecyclepub.Publisher, sessions *sessionRegi
 		return lifecyclepub.GrantBootstrap{}, err
 	}
 	opts := shellintegration.LaunchOptions{
-		SessionID:  sid,
-		Enhanced:   true,
-		Capability: hex.EncodeToString(h.Capability[:]),
-		Recovery:   hex.EncodeToString(h.Recovery[:]),
-		Lane:       string(req.Lane),
-		Domain:     string(h.Domain),
-		Epoch:      h.Epoch,
+		SessionID: sid,
+		Enhanced:  true,
+		// BOTH PATHS COME FROM THE COMPOSITION ROOT, and neither from this
+		// process's environment (nocx-1n56d for the socket, nocx-e2bws for
+		// the binary). This child's shell runs on THIS machine -- that is
+		// what a local transport means, and the remote case is refused
+		// below -- so the agent it starts must exec the helper generation
+		// THIS backend installed, which the opener holds and the environment
+		// does not: a backend launched from inside a pane inherits a path
+		// naming a different generation.
+		AgentHelperPath:     localHelperBinary(),
+		AgentToolSocketPath: nestedToolSocket(kind, toolEndpoint),
+		Capability:          hex.EncodeToString(h.Capability[:]),
+		Recovery:            hex.EncodeToString(h.Recovery[:]),
+		Lane:                string(req.Lane),
+		Domain:              string(h.Domain),
+		Epoch:               h.Epoch,
 	}
 	if kind.local {
 		opts.LifecycleFD = 3 // the inherited socketpair descriptor
@@ -295,15 +365,7 @@ func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, sessions
 	// to the digest of the stage-1 frame, so a command whose digest names
 	// bytes nobody will send is a far side blocking on a frame that never
 	// arrives.
-	opts := shellintegration.LaunchOptions{
-		SessionID:  sid,
-		Enhanced:   true,
-		Lane:       string(req.Lane),
-		Domain:     string(h.Domain),
-		Epoch:      h.Epoch,
-		Capability: hex.EncodeToString(h.Capability[:]),
-		Recovery:   hex.EncodeToString(h.Recovery[:]),
-	}
+	opts := sshChildLaunchOptions(sid, req, h)
 	stage, err := shellintegration.Stage1Frame(shellintegration.ShellAuto, opts)
 	if err != nil {
 		_ = ln.Close()
@@ -371,4 +433,43 @@ func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, sessions
 	go delivery.run(context.Background())
 
 	return lifecyclepub.GrantBootstrap{Domain: h.Domain, Epoch: h.Epoch, Bootstrap: line}, nil
+}
+
+// sshChildLaunchOptions composes the far-side launch's options for ONE minted
+// child, and it is a function of its own for one reason: the two ABSENCES in it
+// are the whole of what a nested ssh gets from nocx's tool surface, and a
+// value that must be absent is exactly what an assertion has to be able to
+// reach. Reading them off a live stage-1 frame is a test of the frame protocol
+// rather than of this decision, and the decision is one line each.
+//
+// BOTH TOOL-SURFACE FIELDS ARE EMPTY, AND NEITHER IS AN OMISSION (nocx-e2bws):
+//
+//   - AgentHelperPath: this child's shell runs on the far host of a NEW
+//     connection, and the executable its agent would run is THAT host's
+//     installed helper — a fact no party in this process holds. An
+//     os.Getenv("NOCX_AGENT_HELPER_PATH") here, which is what stood in this
+//     position, answers with THIS machine's path: the wrong machine, named
+//     confidently.
+//   - AgentToolSocketPath: this backend's endpoint is a path nothing there
+//     reaches (nocx-1n56d), and the far side's own socket is a listener this
+//     path does not create.
+//
+// The owner's decision of 2026-09-14 settles the case rather than the fields:
+// agent orchestration works where a nocx helper is INSTALLED on that machine
+// (the consent-gated install, and the only route that puts the `mcp` bridge
+// there), the integration bundle carries no executable, nothing else may put
+// one there, and a host neither nocx nor its owner installed a helper on gets
+// NO tools — the shell's own stage names why. Empty renders no
+// NOCX_AGENT_HELPER_PATH and no NOCX_TOOL_SOCKET at all, which is the launch
+// that says the truth.
+func sshChildLaunchOptions(sid string, req lifecyclepub.GrantRequest, h lifecycle.DomainHandle) shellintegration.LaunchOptions {
+	return shellintegration.LaunchOptions{
+		SessionID:  sid,
+		Enhanced:   true,
+		Lane:       string(req.Lane),
+		Domain:     string(h.Domain),
+		Epoch:      h.Epoch,
+		Capability: hex.EncodeToString(h.Capability[:]),
+		Recovery:   hex.EncodeToString(h.Recovery[:]),
+	}
 }

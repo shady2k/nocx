@@ -1,0 +1,310 @@
+{
+  "agent": "claude",
+  "anchors": [
+    {
+      "name": "bottomRule",
+      "kind": "searchUp",
+      "ruleGlyph": "─",
+      "floor": 0,
+      "minRow": 2
+    },
+    {
+      "name": "topRule",
+      "kind": "searchUp",
+      "from": "bottomRule",
+      "fromOffset": -2,
+      "ruleGlyph": "─",
+      "floor": 1,
+      "minRow": 1
+    },
+    {
+      "name": "prompt",
+      "kind": "offset",
+      "from": "topRule",
+      "offset": 1,
+      "requireCell": "❯",
+      "requireCol": 0
+    },
+    {
+      "name": "meter",
+      "kind": "offset",
+      "from": "prompt",
+      "offset": -2
+    },
+    {
+      "name": "boxBottom",
+      "kind": "offset",
+      "from": "bottomRule",
+      "offset": 0,
+      "requireBound": ["meter"]
+    },
+    {
+      "name": "modeLine",
+      "kind": "firstNonBlankBelow",
+      "from": "boxBottom"
+    },
+    {
+      "name": "taskPanelHead",
+      "kind": "firstNonBlankBelow",
+      "from": "modeLine"
+    },
+    {
+      "name": "overlayTop",
+      "kind": "searchUp",
+      "ruleGlyph": "▔",
+      "floor": 0,
+      "minRow": 1
+    },
+    {
+      "name": "cursor",
+      "kind": "cursor"
+    },
+    {
+      "name": "belowCursor",
+      "kind": "offset",
+      "from": "cursor",
+      "offset": 1
+    }
+  ],
+  "branches": [
+    {
+      "state": "permission_choice",
+      "when": [
+        {
+          "kind": "cursorOn",
+          "glyph": "❯"
+        },
+        {
+          "kind": "cursorOpensItsRow"
+        },
+        {
+          "kind": "numberedOptionAfterCursor"
+        },
+        {
+          "kind": "cursorAboveAnchorIfBound",
+          "anchor": "meter"
+        },
+        {
+          "kind": "nearestNonBlankAboveCursorContains",
+          "text": "Do you want to"
+        }
+      ]
+    },
+    {
+      "state": "modal_choice",
+      "when": [
+        {
+          "kind": "cursorOn",
+          "glyph": "❯"
+        },
+        {
+          "kind": "cursorOpensItsRow"
+        },
+        {
+          "kind": "numberedOptionAfterCursor"
+        },
+        {
+          "kind": "cursorAboveAnchorIfBound",
+          "anchor": "meter"
+        }
+      ]
+    },
+    {
+      "state": "permission_choice",
+      "when": [
+        {
+          "kind": "cursorOn",
+          "glyph": "❯"
+        },
+        {
+          "kind": "cursorOpensItsRow"
+        },
+        {
+          "kind": "cursorAboveAnchorIfBound",
+          "anchor": "meter"
+        },
+        {
+          "kind": "belowCursorContains",
+          "maxRows": 4,
+          "text": "Enter to confirm"
+        }
+      ]
+    },
+    {
+      "state": "working",
+      "when": [
+        {
+          "kind": "anchorUnbound",
+          "anchor": "meter"
+        },
+        {
+          "kind": "regionAny",
+          "anchor": "overlayTop",
+          "maxRows": 8,
+          "text": "Esc to close"
+        },
+        {
+          "kind": "regionAny",
+          "anchor": "overlayTop",
+          "up": true,
+          "maxRows": 2,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "glyphs": ["✻", "✢", "✽", "✶", "·", "*"],
+          "suffix": "…"
+        }
+      ]
+    },
+    {
+      "state": "unknown",
+      "when": [
+        {
+          "kind": "anchorUnbound",
+          "anchor": "meter"
+        }
+      ]
+    },
+    {
+      "state": "error",
+      "when": [
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "· Retrying in",
+          "glyphs": ["✻", "✢", "✽", "✶", "*"]
+        }
+      ]
+    },
+    {
+      "state": "error",
+      "when": [
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "Waiting for API response",
+          "glyphs": ["✻", "✢", "✽", "✶", "·", "*"]
+        }
+      ]
+    },
+    {
+      "state": "working",
+      "when": [
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "… (",
+          "suffix": ")",
+          "glyphs": ["✻", "✢", "✽", "✶", "·", "*"]
+        }
+      ]
+    },
+    {
+      "state": "working",
+      "when": [
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "glyphs": ["✻", "✢", "✽", "✶", "·", "*"],
+          "suffix": "…"
+        }
+      ]
+    },
+    {
+      "below": {
+        "anchor": "boxBottom",
+        "glyphs": ["●", "◯"],
+        "allMatched": "working",
+        "counterexample": "unknown"
+      }
+    },
+    {
+      "state": "working",
+      "when": [
+        {
+          "kind": "rowContains",
+          "anchor": "modeLine",
+          "text": "esc to interrupt"
+        }
+      ]
+    },
+    {
+      "state": "working",
+      "when": [
+        {
+          "kind": "rowContains",
+          "anchor": "modeLine",
+          "text": "/tasks to see subagents"
+        }
+      ]
+    },
+    {
+      "state": "free_text",
+      "when": [
+        {
+          "kind": "anchorBound",
+          "anchor": "prompt"
+        }
+      ]
+    }
+  ],
+  "extractors": [
+    {
+      "name": "subagents",
+      "anchor": "taskPanelHead",
+      "maxRows": 8,
+      "pattern": "^\\s*(?P<glyph>[●◯])\\s(?P<name>\\S+)(?:\\s{2,}(?P<task>\\S.*?))?(?:\\s{2,}(?P<elapsed>\\d+[smh])(?:\\s·\\s(?P<flow>[↑↓])\\s(?P<tokens>[0-9.]+k?)\\stokens)?)?$"
+    },
+    {
+      "name": "transcript",
+      "anchor": "meter",
+      "up": true,
+      "toEdge": true,
+      "skipStatusGlyphs": ["✻", "✢", "✽", "✶", "·", "*"],
+      "pattern": "^(?P<text>.*)$"
+    },
+    {
+      "name": "inputText",
+      "anchor": "topRule",
+      "maxRows": 2,
+      "states": ["free_text", "working"],
+      "pattern": "^(?:❯(?:\\x{00A0}(?P<line>.*))?|  (?P<line>\\S.*))$"
+    },
+    {
+      "name": "menu",
+      "anchor": "belowCursor",
+      "up": true,
+      "maxRows": 16,
+      "fromCol": "cursor",
+      "states": ["permission_choice", "modal_choice"],
+      "pattern": "^(?:(?:(?P<selected>❯)| ) (?:\\d+\\.\\s*)?(?P<option>\\S.*)|(?P<question>\\S.*))$"
+    },
+    {
+      "name": "menuBelow",
+      "anchor": "cursor",
+      "maxRows": 8,
+      "fromCol": "cursor",
+      "states": ["permission_choice", "modal_choice"],
+      "pattern": "^(?:(?:(?P<selected>❯)| ) (?:\\d+\\.\\s*)?(?P<option>\\S.*)|(?P<question>\\S.*))$"
+    }
+  ],
+  "inputBox": { "anchor": "topRule", "to": "bottomRule" },
+  "menuZone": { "anchor": "cursor", "up": true, "toEdge": true },
+  "menuDisplacesInputBox": true,
+  "default": "unknown"
+}

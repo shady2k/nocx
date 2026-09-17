@@ -116,7 +116,7 @@ func TestApprovalStore_InvocationForPreservesUnresolvedResources(t *testing.T) {
 		t.Fatalf("InvocationFor resources = %+v, want the unresolved shell variable", got.Resources)
 	}
 	saved := content.InvocationRule{
-		Pattern:  invocation.Commands,
+		Selector: content.InvocationSelector{Exact: invocation.Commands},
 		Decision: content.DecisionPermit,
 	}
 	if saved.Matches(got) {

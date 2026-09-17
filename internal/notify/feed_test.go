@@ -314,7 +314,7 @@ func TestFeedNeverCollapsesAcrossBackend(t *testing.T) {
 	// it. Session ids are only unique per backend, so collapsing these would
 	// merge two machines' runs into one row.
 	there := evEvent("s1", "build finished")
-	there.Attribution.Backend = "relay-7"
+	there.Attribution.Backend = "helper-7"
 	there.At = clk.Now()
 	f.Add(there)
 

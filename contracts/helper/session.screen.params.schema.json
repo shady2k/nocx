@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.screen.params.schema.json",
+  "title": "HelperSessionScreenParams",
+  "description": "Names the session whose screen is being read. The read is a QUESTION rather than a derivation: the emulator is the helper's (ADR-0066), and a coordinator cannot rebuild a screen from the bytes it receives because the helper's output window is bounded and reclaims what nobody read.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session"],
+  "properties": {
+    "session": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/hostSessionId"
+    }
+  }
+}

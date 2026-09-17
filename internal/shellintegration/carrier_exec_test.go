@@ -418,7 +418,22 @@ func TestLoader_EOFMidFrameNamesBootstrapInterrupted(t *testing.T) {
 	tmp := t.TempDir()
 	path := loaderPath(t, append(append([]string{}, loaderBaseTools...), "sha256sum")...)
 
-	s := startLoader(t, carrierFor(t, []byte(fakeStageOne)), loaderEnv(home, path, tmp), stdoutOnPipe)
+	// SIGHUP IS THE HARNESS'S ARTEFACT AND NOT THE SCENARIO (nocx-l9le4).
+	//
+	// The child is a session leader with the slave as its controlling
+	// terminal, so closing the master below hangs it up — and a
+	// non-interactive sh dies on SIGHUP by default, racing the native login
+	// it is supposed to reach. That race lost once on CI in 0.01s: a lost
+	// event, not a starved machine.
+	//
+	// What this test is about is a frame that STOPPED ARRIVING, which in the
+	// product is an ssh channel reaching EOF and hangs nothing up. Ignoring
+	// the signal makes the harness match that, and an ignored disposition
+	// survives the exec into the carrier, so the whole loader runs under it.
+	// Nothing the test asserts moves: a truncated frame is still not
+	// executed, and the native login still has to run.
+	s := startLoader(t, "trap '' HUP; "+carrierFor(t, []byte(fakeStageOne)),
+		loaderEnv(home, path, tmp), stdoutOnPipe)
 	s.waitFor(LoaderReadyToken)
 	h, err := FrameHeader(FrameStageSeq, 4096)
 	if err != nil {

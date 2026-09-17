@@ -1,0 +1,94 @@
+/* ── SubagentRow — a child agent's line in the strip (nocx-o1v0h) ─────────
+
+   One row per child agent the pane's agent spawned, drawn under the pane's
+   own row. Everything visual about it is here; the strip places it and never
+   repaints it.
+
+   IT IS QUIETER THAN A PANE ROW ON PURPOSE. A child is not a place you can
+   go — it has no pane, no pipe and nothing to close — so it is drawn as a
+   caption under the row that owns it rather than as a peer of it. Dim text, a
+   shorter line, no dot, no icon, no marks. If it read like a tab, a person
+   would try to close it. */
+
+.nocx-subagent {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  width: 100%;
+  margin: 0;
+  padding: 2px 10px 2px 10px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-dim);
+  font-size: var(--font-size-xs);
+  text-align: left;
+  cursor: pointer;
+}
+
+/* Only the vertical strip draws the tree — the horizontal one emits no child
+   rows at all (tab-strip.tsx), so there is nothing here to switch off by
+   orientation. What IS hidden is a row whose parent the filter hid or a
+   workspace folded away: a child under a hidden parent is a row with no
+   parent. */
+.nocx-subagent[data-hidden='true'] {
+  display: none;
+}
+
+.nocx-subagent:hover {
+  color: var(--color-text);
+}
+
+.nocx-subagent:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: -2px;
+}
+
+/* THE NAME, and it is the row's anchor: it never shrinks away, because a row
+   whose name has ellipsised to nothing has stopped saying which child it is. */
+.nocx-subagent__label {
+  flex: none;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* WHAT IT IS DOING. This is the half that gives way when the column is
+   narrow — the task is the sentence, and half a sentence still reads. */
+.nocx-subagent__task {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The indent, enumerated for the same reason tab.css enumerates its own: a
+   surface may not set an inline style (nocx/no-inline-markup), and the strip
+   clamps what it draws at six generations. A child is always at least one
+   generation in, so there is no depth-zero rule. The extra step past the
+   parent's indent is what makes the row read as belonging to it. */
+
+.tabstrip-vertical .nocx-subagent[data-depth='1'] {
+  padding-left: calc(10px + 1 * var(--space-3) + var(--space-4));
+}
+
+.tabstrip-vertical .nocx-subagent[data-depth='2'] {
+  padding-left: calc(10px + 2 * var(--space-3) + var(--space-4));
+}
+
+.tabstrip-vertical .nocx-subagent[data-depth='3'] {
+  padding-left: calc(10px + 3 * var(--space-3) + var(--space-4));
+}
+
+.tabstrip-vertical .nocx-subagent[data-depth='4'] {
+  padding-left: calc(10px + 4 * var(--space-3) + var(--space-4));
+}
+
+.tabstrip-vertical .nocx-subagent[data-depth='5'] {
+  padding-left: calc(10px + 5 * var(--space-3) + var(--space-4));
+}
+
+.tabstrip-vertical .nocx-subagent[data-depth='6'] {
+  padding-left: calc(10px + 6 * var(--space-3) + var(--space-4));
+}

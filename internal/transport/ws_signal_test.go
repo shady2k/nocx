@@ -249,16 +249,41 @@ func (f *fakeForegroundSession) SignalProcessGroup(_ int, sig syscall.Signal) er
 // driven through every branch without a pty or a shell.
 type fakeProtected struct {
 	attempt   lifecycle.AttemptID
+	pending   bool // the attempt is open and NOT started yet
+	holdable  bool // this caller's Stop may arm a hold for it (mayHold)
 	accept    bool // does the input queue take the byte
 	ends      bool // does the exact attempt leave open within the bound
 	writes    int
 	asked     int
+	held      int
 	waitedFor lifecycle.AttemptID
 }
 
 func (f *fakeProtected) Attempt() (lifecycle.AttemptID, bool) {
 	f.asked++
-	return f.attempt, f.attempt != ""
+	if f.attempt == "" || f.pending {
+		return "", false
+	}
+	return f.attempt, true
+}
+
+// StopTarget answers the Stop-shaped question: the started attempt, or — for
+// the caller that may hold — the attempt the shell has not begun, with the
+// hold armed (counted, because arming is the half of this seam that decides
+// whether a Stop pressed in the window survives).
+func (f *fakeProtected) StopTarget() (foregroundTarget, bool) {
+	f.asked++
+	if f.attempt == "" {
+		return foregroundTarget{}, false
+	}
+	if !f.pending {
+		return foregroundTarget{Attempt: f.attempt, Started: true}, true
+	}
+	if !f.holdable {
+		return foregroundTarget{}, false
+	}
+	f.held++
+	return foregroundTarget{Attempt: f.attempt}, true
 }
 
 func (f *fakeProtected) Interrupt(lifecycle.AttemptID) bool {
@@ -384,6 +409,76 @@ func TestForegroundSignal_StopOverAProtectedGroupWaitsForTheExactAttempt(t *test
 			}
 			if fb.waitedFor != attempt {
 				t.Fatalf("waited for attempt %q, want the exact one that was named (%q)", fb.waitedFor, attempt)
+			}
+		})
+	}
+}
+
+// TestForegroundSignal_StopWhenNoGroupCanBeSignalled is the policy's half of
+// the hold (nocx-zas0d), in the two callers that share this policy and the two
+// kernel answers that put a Stop on the terminal interrupt.
+//
+// The byte is the point of the refusal in every row: the line may still be on
+// its way to the pty, and bash 5.2 executes the SUFFIX of a line it is still
+// parsing when SIGINT lands (nocx-xn63t.6.11/.6.12).
+func TestForegroundSignal_StopWhenNoGroupCanBeSignalled(t *testing.T) {
+	const attempt = lifecycle.AttemptID("att-pending")
+	for _, tc := range []struct {
+		name      string
+		err       error
+		fb        *fakeProtected
+		want      foregroundOutcome
+		wantBytes int
+		wantHeld  int
+	}{
+		{
+			name: "a protected group with the attempt on the way is held",
+			err:  pty.ErrProtectedForeground, fb: &fakeProtected{attempt: attempt, pending: true, holdable: true, accept: true},
+			want: foregroundHeld, wantHeld: 1,
+		},
+		{
+			// The other way the kernel says "no group to signal": TIOCGPGRP has
+			// no job to name because none was ever made the foreground one,
+			// which is what a Stop before the shell began the line sees.
+			name: "no foreground group at all, with the attempt on the way, is held too",
+			err:  pty.ErrNoForeground, fb: &fakeProtected{attempt: attempt, pending: true, holdable: true, accept: true},
+			want: foregroundHeld, wantHeld: 1,
+		},
+		{
+			name: "a protected group with a started attempt takes the terminal interrupt",
+			err:  pty.ErrProtectedForeground, fb: &fakeProtected{attempt: attempt, accept: true, ends: true},
+			want: foregroundDelivered, wantBytes: 1,
+		},
+		{
+			name: "an attempt that is started is reached even with no foreground group",
+			err:  pty.ErrNoForeground, fb: &fakeProtected{attempt: attempt, accept: true, ends: true},
+			want: foregroundDelivered, wantBytes: 1,
+		},
+		{
+			name: "the run lease refuses what it cannot reach now",
+			err:  pty.ErrProtectedForeground, fb: &fakeProtected{attempt: attempt, pending: true, holdable: false, accept: true},
+			want: foregroundNothingRunning,
+		},
+		{
+			name: "nothing open in the session at all is the prompt",
+			err:  pty.ErrProtectedForeground, fb: &fakeProtected{accept: true},
+			want: foregroundNothingRunning,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sess := &fakeForegroundSession{err: tc.err}
+			got := stopForeground(log.NewSlogAdapter(nil), "sid", sess, 10*time.Millisecond, tc.fb)
+			if got != tc.want {
+				t.Fatalf("outcome = %q, want %q", got, tc.want)
+			}
+			if len(sess.calls) != 0 {
+				t.Fatalf("signals sent = %v, want none — no group may be signalled directly", sess.calls)
+			}
+			if tc.fb.writes != tc.wantBytes {
+				t.Fatalf("terminal interrupts written = %d, want %d", tc.fb.writes, tc.wantBytes)
+			}
+			if tc.fb.held != tc.wantHeld {
+				t.Fatalf("hold armed %d times, want %d", tc.fb.held, tc.wantHeld)
 			}
 		})
 	}
@@ -534,7 +629,12 @@ func protectedSignalServer(t *testing.T) (*websocket.Conn, *socketTap, *WSServer
 }
 
 // tapAckEstablishment is ackEstablishmentFrom for a tapped socket: the tap
-// owns the reader, so the establishment fact arrives through it.
+// owns the reader, so it waits for the establishment fact to arrive through
+// it rather than through a plain read. It used to also send the renderer's
+// establishment acknowledgement; ADR-0062 removed that step, since the
+// accept is flushed synchronously inside Ingest, before this fact is even
+// published. pub is unused now but kept in the signature to avoid touching
+// every call site.
 func tapAckEstablishment(t *testing.T, tap *socketTap, pub *lifecyclepub.Publisher, lane lifecycle.LaneID, h lifecycle.DomainHandle) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
@@ -552,11 +652,8 @@ func tapAckEstablishment(t *testing.T, tap *socketTap, pub *lifecyclepub.Publish
 				continue
 			}
 			f := env.Params
-			if f.Lane != string(lane) || f.Domain != string(h.Domain) || f.Epoch != h.Epoch || f.Generation == "" {
+			if f.Lane != string(lane) || f.Domain != string(h.Domain) || f.Epoch != h.Epoch {
 				continue
-			}
-			if err := pub.AcknowledgeEstablishment(lane, h.Domain, h.Epoch, f.Generation); err != nil {
-				t.Fatalf("AcknowledgeEstablishment: %v", err)
 			}
 			return
 		case <-time.After(100 * time.Millisecond):

@@ -15,6 +15,11 @@ import type { AgentStatusResult } from './generated/agent.status'
 import type { InputTarget } from './input-target'
 import type { GrantBlock } from './ask-entry'
 import type { AnswerBlockHandle, RunningBlockActions } from './scrollback/blocks'
+import type { AgentStandingAnswerSaved } from './generated/agent.standingAnswerSaved'
+import { standingAnswerReceipt } from './agent-approval-prompt'
+import { EFFECT_LABEL } from './effect-labels'
+import { PolicyClient } from './policy-client'
+import type { BlockNotice, BlockNoticeAction } from './ui/block-notice'
 
 export interface AgentAskSeams {
   dispatcher: Dispatcher
@@ -30,6 +35,11 @@ export interface AgentAskSeams {
   onTurnStart?: (askId: string) => void
   onTurnEnd?: (askId: string) => void
   onNoEndpoint?: () => void
+  /** Open the page where standing answers are managed — the receipt's second
+   *  action. Injected because a pane cannot know where Settings lives; absent
+   *  in a bare-bones embedding, and then the receipt simply does not offer
+   *  what nothing can do. */
+  openPermissions?: () => void
   status?: () => Promise<AgentStatusResult>
   editorExtensions?: () => Extension[]
 }
@@ -144,6 +154,7 @@ export class AgentInputTarget implements InputTarget {
       state: AgentRunState['state']
       error?: string
       droppedDeltas?: number
+      notices?: string[]
       unarmedBounds?: string[]
     },
   ): void {
@@ -170,6 +181,18 @@ export class AgentInputTarget implements InputTarget {
           : `— ${dropped} chunks of the answer were dropped while streaming; the full answer was saved —`,
       )
     }
+    // What the RUN says about ITSELF — today, only that it stopped asking a
+    // person to widen a scope because it hit the bound on how often one
+    // answer may ask (design §5.3). Its own line, never folded into the
+    // unarmed-bounds sentence: a bound that could not be ARMED and a bound
+    // the run stopped ASKING about are different facts, and one sentence
+    // carrying both would state the wrong one of them. A run that stopped
+    // asking and said nothing is exactly the soft degrade AGENTS.md forbids
+    // — the person would be left inferring it from questions that never come.
+    const notices = presentation.notices ?? []
+    if (notices.length > 0) {
+      run.handle.append(`— ${notices.join('; ')} —`)
+    }
     const unarmed = presentation.unarmedBounds ?? []
     if (unarmed.length > 0) {
       run.handle.append(`— ${unarmed.join('; ')}; only the wall-clock deadline remains active —`)
@@ -182,6 +205,73 @@ export class AgentInputTarget implements InputTarget {
       run.handle.close('failure', presentation.error ?? presentation.state)
     }
     this.seams.onTurnEnd?.(run.askId)
+  }
+
+  /**
+   * The receipt for one saved standing answer, and the two things a person
+   * can do about it.
+   *
+   * UNDO NAMES THE RULE, and that is the whole design. It forgets THAT id
+   * through policy.forgetRule and never restores a snapshot of the policy:
+   * an answer given between the save and the undo — by this person in another
+   * pane, or by the settings page — would be silently discarded by a restore,
+   * which is the same lost-write the backend seam was just fixed to prevent.
+   *
+   * `removed: false` is a SUCCESS. It means no rule wears that id, which is
+   * exactly the state undoing asked for, and the line says so plainly rather
+   * than raising an error at somebody about a thing they wanted.
+   */
+  private drawStandingAnswer(handle: AnswerBlockHandle, saved: AgentStandingAnswerSaved): void {
+    const manage: BlockNoticeAction | null =
+      this.seams.openPermissions === undefined
+        ? null
+        : { label: 'Manage permissions', onActivate: () => this.seams.openPermissions?.() }
+    const withManage = (...before: BlockNoticeAction[]): BlockNoticeAction[] =>
+      manage === null ? before : [...before, manage]
+
+    let notice: BlockNotice | null = null
+    let undoing = false
+    const undo = (): void => {
+      if (undoing || notice === null) return
+      undoing = true
+      const line = notice
+      // policy.forgetRule has an owner (AD-8); this dials it through that
+      // owner rather than growing a second spelling of the call beside it.
+      new PolicyClient(this.seams.dispatcher)
+        .forgetRule(saved.ruleId)
+        .then((result) => {
+          line.say({
+            text: result.removed
+              ? 'Undone — that answer is no longer saved.'
+              : 'That answer was already gone.',
+            actions: withManage(),
+          })
+        })
+        .catch((err: unknown) => {
+          undoing = false
+          line.say({
+            text: `It could not be undone: ${err instanceof Error ? err.message : String(err)}`,
+            tone: 'warning',
+            // Still offered: the rule is still there, so the act is still
+            // available, and a receipt that dropped its own action after a
+            // failed attempt would leave the person nowhere to try again.
+            actions: withManage({ label: 'Undo', onActivate: undo }),
+          })
+        })
+    }
+
+    notice = handle.notice({
+      text: standingAnswerReceipt(
+        saved.approved,
+        saved.scope,
+        saved.rule,
+        EFFECT_LABEL[saved.effect],
+      ),
+      // No id, no Undo: a session overlay and a matrix row are not
+      // addressable by one, and an action that cannot name what it would
+      // undo is a button that advertises what it cannot deliver.
+      actions: saved.ruleId === '' ? withManage() : withManage({ label: 'Undo', onActivate: undo }),
+    })
   }
 
   /** Subscribe once: deltas append to the run's block; the terminal state
@@ -256,6 +346,33 @@ export class AgentInputTarget implements InputTarget {
       const handle = run.handle
       if (handle.el.dataset.entryId !== r.entryId) return
       handle.reasoning(r.text)
+    })
+    // A STANDING ANSWER WAS WRITTEN (nocx-2019q). It is routed exactly as a
+    // delta is — the run id finds the turn, the entry id confirms the block —
+    // because it IS a fact about that run: the person answered the question
+    // this turn raised, and the place that answer belongs is the turn that
+    // raised it. Before this the rule went into the store and the terminal
+    // said nothing, so the only way to find out you had configured something
+    // was to stop being asked a question you had forgotten answering.
+    this.seams.dispatcher.subscribe('agent.standingAnswerSaved', (params: unknown) => {
+      const saved = params as AgentStandingAnswerSaved
+      // The wire says the run id as a STRING here, as agent.approvalRequested
+      // and agent.approve do — the whole approval exchange is in that
+      // vocabulary — while the ask that opened this turn minted a number.
+      // One conversion, at the one seam where the two meet.
+      const run = this.runs.get(Number(saved.runId))
+      if (!run) return
+      const handle = run.handle
+      // Routed EXACTLY as a delta is, with no escape hatch. The empty
+      // entryId this used to wave through was the schema's invention: it
+      // promised "empty when the proposal was never bound to an entry", and
+      // nothing on the backend can produce that (contracts/, and the trace
+      // at agentStandingAnswerSaved.EntryID). A wildcard for a value nobody
+      // sends is a second reading of routing that disagrees with every
+      // sibling here, and it would draw a receipt on whatever block the run
+      // id happened to find.
+      if (handle.el.dataset.entryId !== saved.entryId) return
+      this.drawStandingAnswer(handle, saved)
     })
     this.seams.dispatcher.subscribe('agent.runState', (params: unknown) => {
       const state = params as AgentRunState

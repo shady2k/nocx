@@ -407,8 +407,9 @@ problem, not the protocol's.
   than the controller-lease model level 2 assumes. That conflict is open and is the owner's.
 - **Migrations** — not needed while `content.db` is local and disposable. They become a
   prerequisite of level 2 (`nocx-lmb6v`), not of this.
-- **The word `relay`** — removed from the vocabulary; 411 occurrences remain in code and ADRs,
-  including type names such as `RelayConsent`. Its own chore, not smuggled into this work.
+- **The word `relay`** — removed from the vocabulary; 411 occurrences remained in code and
+  ADRs when this was written, including type names such as `RelayConsent`. Its own chore,
+  not smuggled into this work — done since as `nocx-0xq2s`.
 
 ## 8. Open questions
 

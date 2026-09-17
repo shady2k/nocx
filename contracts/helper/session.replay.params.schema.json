@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.replay.params.schema.json",
+  "title": "HelperSessionReplayParams",
+  "description": "One recorded capture, and where in it the caller wants screens. A capture is not a session: nothing is spawned, no PTY exists and no inventory row is minted — this is a reading of bytes through the emulator that may produce frames at all (ADR-0066 keeps the one emulator in the helper, and cmd/nocx-server is built CGO_ENABLED=0).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["cols", "rows", "through", "chunks"],
+  "properties": {
+    "cols": { "type": "integer", "minimum": 1 },
+    "rows": { "type": "integer", "minimum": 1 },
+    "through": {
+      "description": "How many chunks have been consumed at each mark, non-decreasing, one entry per frame the caller wants. The arithmetic belongs to the caller that owns the capture FORMAT (internal/agentcapture.ChunksThrough) and is deliberately not repeated on this side: two derivations of 'which chunk belongs to this mark' agree everywhere anybody looks and disagree on the day one of them moves.",
+      "type": "array",
+      "items": { "type": "integer", "minimum": 0 }
+    },
+    "chunks": {
+      "description": "The capture's bytes in stream order, base64 on the wire. RAW BYTES and never a JSON string: a PTY stream is not UTF-8, and encoding it as text would replace every byte that is not a valid sequence with U+FFFD before the emulator ever saw it — a replay that answers about a stream nobody recorded.",
+      "type": "array",
+      "items": { "type": "string", "contentEncoding": "base64" }
+    }
+  }
+}

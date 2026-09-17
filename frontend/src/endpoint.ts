@@ -2,6 +2,21 @@ export interface Endpoint {
   host: string
   port: number
   token: string
+  /**
+   * The W3C `traceparent` this connection should open under, if the caller
+   * that resolved the endpoint already has one.
+   *
+   * Empty in production: the desktop app has never had an exchange to
+   * continue before it opens its first socket. The e2e harness is the
+   * producer (nocx-n14oo.11) — one Playwright test mints one trace id and
+   * needs the backend lines its own connection causes to carry it, so it can
+   * print exactly those lines when the test fails instead of a shared
+   * backend log nobody can attribute. Dispatcher forwards this verbatim as a
+   * query parameter on the WebSocket URL; nothing here parses or validates
+   * it; the backend already does (log.ContinueTrace) and treats anything
+   * malformed as absent rather than as a reason to refuse the connection.
+   */
+  traceparent?: string
 }
 
 export type EndpointFailureKind =

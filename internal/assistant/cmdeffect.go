@@ -8,22 +8,21 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 )
 
-// CommandEffect derives the effect of one run command from its text and the
-// tool's reachable effect set. It is a PURE function of those facts: no
-// registry lookup, settings read, shell invocation, or runtime state.
-//
-// The parser deliberately does not pretend to be the person's shell. An alias
-// or shell function can make `ls` mean something else in their rc files, which
-// nocx does not read. A lowered call therefore becomes `observe`, whose
-// default policy is still "Ask every time"; a mistaken alias classification
-// loses only the blanket grant, not the chance to ask.
-//
-// The class is derived from the structural resource report. A report with only
-// resolved resources selects its mapped member; writes, deletes, network
-// access and unresolved parts select the set's worst member.
-// CommandInvocation is the parser result shared by effect classification and
-// invocation-rule policy. The parser is deliberately owned here: policy
-// consumers receive this result instead of tokenizing the command again.
+// CanonicalInvocation is parseCanonicalInvocation below, for the callers
+// outside this package that have to ask the SAME question a run asks about a
+// command line a person is looking at: policy.explain, which says what the
+// policy decides about it, and policy.classify, which reads one nobody has
+// run. It is deliberately the same function and not a second reading — an
+// explanation derived from a different parse would explain a decision nobody
+// took, which is the whole failure the trace exists to prevent.
+func CanonicalInvocation(command string) content.Invocation {
+	return parseCanonicalInvocation(command)
+}
+
+// parseCanonicalInvocation produces the content.Invocation shared by effect
+// classification and invocation-rule policy. The parser is deliberately owned
+// here: policy consumers receive this result instead of tokenizing the command
+// again.
 //
 // The invariant is `Disqualified ⇒ non-empty Unresolved`. Its CONVERSE has
 // never held: `Disqualified` is false for a path-prefixed program that a bare
@@ -78,11 +77,56 @@ func finalizeInvocation(inv content.Invocation, command string) content.Invocati
 	return inv
 }
 
-func commandEffect(inv content.Invocation, declared []content.Effect) content.Effect {
+// commandSelection is the one classification of a run command: the row that
+// governs it and every candidate its resources derived (nocx-jxq97). The
+// candidates are carried so an approval surface can say that a call both
+// reached a host and wrote a file while one row still governs the decision
+// (ADR-0020 §7). A command the parser could not read has no report to derive
+// from: it takes the declared worst and names nothing, because a candidate for
+// an unparsed command would be a guess offered as a fact.
+func commandSelection(inv content.Invocation, declared []content.Effect) content.EffectSelection {
 	if !inv.Parsed {
-		return content.WorstEffect(declared)
+		return content.EffectSelection{Effect: content.WorstEffect(declared)}
 	}
-	return inv.Resources.Effect(declared)
+	return inv.Resources.SelectEffect(declared)
+}
+
+// commandEffect derives the effect of one run command from its text and the
+// tool's reachable effect set. It is a PURE function of those facts: no
+// registry lookup, settings read, shell invocation, or runtime state.
+//
+// The parser deliberately does not pretend to be the person's shell. An alias
+// or shell function can make `ls` mean something else in their rc files, which
+// nocx does not read. A lowered call therefore becomes `observe`, whose
+// default policy is still "Ask every time"; a mistaken alias classification
+// loses only the blanket grant, not the chance to ask.
+//
+// The class is derived from the structural resource report. A report with only
+// resolved resources selects its mapped member; writes, deletes, network
+// access and unresolved parts select the set's worst member.
+func commandEffect(inv content.Invocation, declared []content.Effect) content.Effect {
+	return commandSelection(inv, declared).Effect
+}
+
+// ClassifyInvocation is commandEffect above, for the one caller outside this
+// package that has to ask the SAME question a run asks about a command NOBODY
+// HAS RUN: policy.classify, which reads a command line a person typed so that a
+// widening permit can be minted from a classification rather than from a word.
+//
+// It is deliberately the same function and not a second reading, for
+// CanonicalInvocation's reason one step further on. The parser answers what the
+// command IS; this answers which row governs it, and the permit the page then
+// writes carries that answer in GrantedUnder — where the evaluator checks it
+// against the effect the CALL classified as. Two readings would mint a permit
+// under one account of the command and enforce it under another, which is the
+// exact failure GrantedUnder exists to prevent.
+//
+// declared is the tool declaration table's answer and never a caller's opinion:
+// the effect a call classifies as is bounded by what a tool can reach at all,
+// and a set invented at the call site would classify against a machine that
+// does not exist.
+func ClassifyInvocation(inv content.Invocation, declared []content.Effect) content.Effect {
+	return commandEffect(inv, declared)
 }
 
 type readProgramRule struct {
@@ -223,7 +267,7 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 		}
 		return addResource(report, operands[len(operands)-1], content.ResourceWrite)
 	case "mv":
-		operands := resourceOperands("mv", args)
+		operands := resourceOperands("mv", args, &report)
 		if len(operands) == 0 {
 			return unresolvedCommand(report, program, "has no statically named operand")
 		}
@@ -233,7 +277,7 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 		}
 		return addResource(report, operands[len(operands)-1], content.ResourceWrite)
 	case "rm":
-		operands := resourceOperands("rm", args)
+		operands := resourceOperands("rm", args, &report)
 		if len(operands) == 0 {
 			return unresolvedCommand(report, program, "has no statically named path")
 		}
@@ -242,35 +286,19 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 		}
 		return report
 	case "tee":
-		for _, operand := range resourceOperands("tee", args) {
+		for _, operand := range resourceOperands("tee", args, &report) {
 			report = addResource(report, operand, content.ResourceWrite)
 		}
 		return report
 	case "sort":
-		for i := 0; i < len(args); i++ {
-			if args[i].value == "-o" || args[i].value == "--output" {
-				if i+1 >= len(args) {
-					return unresolvedCommand(report, program, "has an output option without a path")
-				}
-				report = addResource(report, args[i+1], content.ResourceWrite)
-				i++
-				continue
-			}
-			if strings.HasPrefix(args[i].value, "-o") && args[i].value != "-o" {
-				report = addResource(report, commandWordFact{value: strings.TrimPrefix(args[i].value, "-o"), dynamic: args[i].dynamic}, content.ResourceWrite)
-				continue
-			}
-			if strings.HasPrefix(args[i].value, "--output=") {
-				report = addResource(report, commandWordFact{value: strings.TrimPrefix(args[i].value, "--output="), dynamic: args[i].dynamic}, content.ResourceWrite)
-				continue
-			}
-			if !strings.HasPrefix(args[i].value, "-") {
-				report = addResource(report, args[i], content.ResourceRead)
-			}
+		// The output option and its three spellings are resolved by the same
+		// table curl uses, so a written option value has one owner.
+		for _, operand := range resourceOperands("sort", args, &report) {
+			report = addResource(report, operand, content.ResourceRead)
 		}
 		return report
 	case "uniq":
-		operands := resourceOperands("uniq", args)
+		operands := resourceOperands("uniq", args, &report)
 		for i, operand := range operands {
 			verb := content.ResourceRead
 			if i == len(operands)-1 && len(operands) > 1 {
@@ -282,7 +310,7 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 	case "source", ".":
 		// Sourcing runs in the current shell and can permanently change its
 		// environment; it is not subprocess execution of a file.
-		operands := resourceOperands(program, args)
+		operands := resourceOperands(program, args, &report)
 		if len(operands) == 0 {
 			return unresolvedCommand(report, program, "has no statically named source file")
 		}
@@ -297,7 +325,7 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 		}
 		return addResource(report, script, content.ResourceExecute)
 	case "curl":
-		operands := resourceOperands("curl", args)
+		operands := resourceOperands("curl", args, &report)
 		if len(operands) == 0 {
 			return unresolvedCommand(report, program, "has no statically named URL")
 		}
@@ -306,7 +334,7 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 		}
 		return report
 	case "ssh":
-		operands := resourceOperands("ssh", args)
+		operands := resourceOperands("ssh", args, &report)
 		if len(operands) == 0 {
 			return unresolvedCommand(report, program, "has no statically named destination")
 		}
@@ -321,7 +349,7 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 		}
 		return unresolvedCommand(report, program, "is not a recognized resource access form")
 	}
-	for _, operand := range readOperands(program, args) {
+	for _, operand := range readOperands(program, args, &report) {
 		report = addResource(report, operand, content.ResourceRead)
 	}
 	return report
@@ -371,6 +399,16 @@ func addResource(report content.ResourceReport, fact commandWordFact, verb conte
 		return report
 	}
 	report.Resources = append(report.Resources, content.Resource{Path: fact.value, Verb: verb})
+	return report
+}
+
+func addFeature(report content.ResourceReport, feature string) content.ResourceReport {
+	for _, existing := range report.Features {
+		if existing == feature {
+			return report
+		}
+	}
+	report.Features = append(report.Features, feature)
 	return report
 }
 
@@ -482,7 +520,29 @@ func isExecutablePath(program string) bool {
 		strings.HasPrefix(program, "../")
 }
 
-func resourceOperands(program string, args []commandWordFact) []commandWordFact {
+// featureWritesOptionNamedPath is recorded when a command writes a file to a
+// path named by one of its own option values rather than by an operand or a
+// shell redirection. A refusal matches this fact, never the spelling of the
+// token that carried it.
+//
+// The name is content's, not this package's: content owns the closed feature
+// vocabulary because it owns the rules that match it, and one fact carries one
+// name rather than two spellings that agree until they do not.
+const featureWritesOptionNamedPath = content.FeatureWritesOptionNamedPath
+
+// EvaluatorVersion is the reading of commands THIS file implements, and it is
+// content's constant rather than a second one: content owns the rules and
+// their evaluation, so it owns the version they were saved under, and a
+// constant declared here could not be compared against by content at all
+// (this package imports content, never the other way round). One fact, one
+// name.
+const EvaluatorVersion = content.EvaluatorVersion
+
+// resourceOperands returns the operands of an invocation, skipping options and
+// the values they consume. A skipped option value that is a path the command
+// WRITES is not silently dropped: it is appended to the report through the
+// pointer, because it is a resource exactly as an operand would be.
+func resourceOperands(program string, args []commandWordFact, report *content.ResourceReport) []commandWordFact {
 	operands := make([]commandWordFact, 0, len(args))
 	optionsEnded := false
 	for i := 0; i < len(args); i++ {
@@ -492,6 +552,16 @@ func resourceOperands(program string, args []commandWordFact) []commandWordFact 
 			continue
 		}
 		if !optionsEnded && strings.HasPrefix(arg.value, "-") {
+			if handled, resolved, target, consumed := optionWrittenTarget(program, args, i); handled {
+				if resolved {
+					*report = addResource(*report, target, content.ResourceWrite)
+					*report = addFeature(*report, featureWritesOptionNamedPath)
+				} else {
+					*report = unresolvedCommand(*report, program, "has an output option without a path")
+				}
+				i += consumed
+				continue
+			}
 			if optionTakesNextValue(program, arg.value) && i+1 < len(args) {
 				i++
 			}
@@ -500,6 +570,64 @@ func resourceOperands(program string, args []commandWordFact) []commandWordFact 
 		operands = append(operands, arg)
 	}
 	return operands
+}
+
+// optionWritesNextValue reports whether this option's VALUE is a path the
+// command writes. It is strictly a subset of optionTakesNextValue for any
+// program whose operands are read through resourceOperands: an entry here that
+// is missing there would never be consulted, because the value would already
+// have been taken for an operand. sort is the exception and is deliberate —
+// its branch consults this table directly so that "which option value is a
+// written path" has one owner rather than two.
+//
+// The distinction is per program and cannot be guessed from the letter.
+// curl -o and sort -o name output files; ssh -o is a config keyword, bash -o
+// is a shell option name, install -o is an owner, and grep -f is a pattern
+// file the command READS. install -t and cp -t also name a written path, but
+// targetDirectoryOperands has owned those since before this table existed and
+// records them as the write target rather than as a skipped option value.
+func optionWritesNextValue(program, option string) bool {
+	name := option
+	if i := strings.IndexByte(option, '='); i >= 0 {
+		name = option[:i]
+	}
+	switch program {
+	case "curl", "sort":
+		return name == "-o" || name == "--output"
+	default:
+		return false
+	}
+}
+
+// optionWrittenTarget resolves the target of a write-bearing option in the
+// three forms it can take: "-o file" and "--output file" (the value is the
+// next word), "--output=file" (attached after =), and "-ofile" (attached to a
+// short option).
+//
+// handled reports that args[i] is a write-bearing option; resolved reports
+// that it had a value at all, so a trailing "-o" becomes an unresolved report
+// rather than a silently ignored write. consumed is the number of ADDITIONAL
+// words taken.
+func optionWrittenTarget(program string, args []commandWordFact, i int) (handled, resolved bool, target commandWordFact, consumed int) {
+	arg := args[i]
+	if eq := strings.IndexByte(arg.value, '='); eq >= 0 {
+		if !optionWritesNextValue(program, arg.value) {
+			return false, false, commandWordFact{}, 0
+		}
+		return true, true, commandWordFact{value: arg.value[eq+1:], dynamic: arg.dynamic}, 0
+	}
+	if optionWritesNextValue(program, arg.value) {
+		if i+1 >= len(args) {
+			return true, false, commandWordFact{}, 0
+		}
+		return true, true, args[i+1], 1
+	}
+	// An attached short option: "-ofile" is "-o" and "file".
+	if !strings.HasPrefix(arg.value, "--") && len(arg.value) > 2 &&
+		optionWritesNextValue(program, arg.value[:2]) {
+		return true, true, commandWordFact{value: arg.value[2:], dynamic: arg.dynamic}, 0
+	}
+	return false, false, commandWordFact{}, 0
 }
 
 func shellScriptOperand(program string, args []commandWordFact) (commandWordFact, bool) {
@@ -599,8 +727,8 @@ func targetDirectoryOperands(program string, args []commandWordFact) ([]commandW
 	return operands, target
 }
 
-func readOperands(program string, args []commandWordFact) []commandWordFact {
-	operands := resourceOperands(program, args)
+func readOperands(program string, args []commandWordFact, report *content.ResourceReport) []commandWordFact {
+	operands := resourceOperands(program, args, report)
 	if program != "grep" && program != "rg" {
 		return operands
 	}

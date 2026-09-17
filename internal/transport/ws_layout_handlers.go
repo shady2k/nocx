@@ -776,10 +776,21 @@ func validatePaneMoveRaw(raw json.RawMessage) string {
 // A layout object is application-wide — a workspace created on one connection
 // is renamed on the next — and §7 forbids reading a right out of an id, so
 // there is nothing per-connection for this handler to consult.
+// layoutSessionCloser is the narrow seam the layout handlers use to end a
+// pane's helper-hosted session when the pane leaves the layout for good
+// (nocx-isjh4, closer 1). It is deliberately not sessionMachine: layout runs
+// under the content gate, never the session gate, and reaches session
+// lifecycle through this one verb alone — never the registry, a lane or a
+// ring directly. WSServer implements it.
+type layoutSessionCloser interface {
+	closeSessionsForPanes(paneIDs map[string]struct{})
+}
+
 type layoutHandlers struct {
-	op    capability.LayoutOperation
-	wired bool
-	r     Responder
+	op       capability.LayoutOperation
+	wired    bool
+	r        Responder
+	sessions layoutSessionCloser
 }
 
 func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
@@ -787,6 +798,14 @@ func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "layout store not available"})
 		return
 	}
+	// closedPanes names the panes a successful delete below just removed from
+	// the layout — set inside the switch, read after Run returns. Session
+	// teardown runs OUTSIDE the content gate, deliberately: ending a
+	// helper-hosted session round-trips the helper (AttachedSession.
+	// EndSession), and the content domain's gate must never block on the
+	// session domain's network call for the reason the two have separate
+	// gates at all (AD-8, one owner per behaviour).
+	var closedPanes map[string]struct{}
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.LayoutService) error {
 		switch req.Method {
 		case "layout.read":
@@ -842,7 +861,20 @@ func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 			if !h.decode(req, &p) {
 				return nil
 			}
+			// Every pane this workspace's open tabs hold, read BEFORE the
+			// delete: DeleteWorkspace marks every one of them closed_at, so a
+			// read taken after would find none of them (nocx-isjh4, closer 1
+			// — every layout deletion that removes panes, not only
+			// panes.close).
+			affected, snapErr := panesOfWorkspace(ctx, svc, p.ID)
+			if snapErr != nil {
+				h.answer(req, snapErr, nil)
+				return nil
+			}
 			err := svc.DeleteWorkspace(ctx, p.ID, p.replacement())
+			if err == nil {
+				closedPanes = affected
+			}
 			h.answer(req, err, func() any { return closedResponse{ID: p.ID} })
 		case "tabs.create":
 			var p tabCreateParams
@@ -894,7 +926,17 @@ func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 			if !h.decode(req, &p) {
 				return nil
 			}
+			// Every pane this tab holds, read before DeleteTab marks them
+			// all closed_at (nocx-isjh4, closer 1).
+			affected, snapErr := panesOfTab(ctx, svc, p.ID)
+			if snapErr != nil {
+				h.answer(req, snapErr, nil)
+				return nil
+			}
 			err := svc.DeleteTab(ctx, p.ID, p.replacement())
+			if err == nil {
+				closedPanes = affected
+			}
 			h.answer(req, err, func() any { return closedResponse{ID: p.ID} })
 		case "panes.create":
 			var p paneCreateParams
@@ -928,13 +970,63 @@ func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 				return nil
 			}
 			err := svc.DeletePane(ctx, p.ID, p.replacement())
+			if err == nil {
+				closedPanes = map[string]struct{}{p.ID: {}}
+			}
 			h.answer(req, err, func() any { return closedResponse{ID: p.ID} })
 		}
 		return nil
 	})
 	if err != nil {
 		answerOperationRefusal(h.r, req, err)
+		return
 	}
+	// Closer 1 of nocx-isjh4: a pane that just left the layout for good can
+	// never be reattached to again (its row survives for entries.pane_id, but
+	// nothing addresses it as open), so its session, if it still has one,
+	// ends here. Outside the content gate on purpose — see the comment on
+	// closedPanes above.
+	if h.sessions != nil {
+		h.sessions.closeSessionsForPanes(closedPanes)
+	}
+}
+
+// panesOfTab reads the open panes a tab currently holds, for a caller that
+// must know them BEFORE a delete marks them closed_at (nocx-isjh4).
+func panesOfTab(ctx context.Context, svc capability.LayoutService, tabID string) (map[string]struct{}, error) {
+	snap, err := svc.Snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]struct{}{}
+	for _, pane := range snap.Panes {
+		if pane.TabID == tabID {
+			out[pane.ID] = struct{}{}
+		}
+	}
+	return out, nil
+}
+
+// panesOfWorkspace reads the open panes every open tab of a workspace
+// currently holds, for the same before-the-delete reason panesOfTab exists.
+func panesOfWorkspace(ctx context.Context, svc capability.LayoutService, workspaceID string) (map[string]struct{}, error) {
+	snap, err := svc.Snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	tabs := map[string]struct{}{}
+	for _, tab := range snap.Tabs {
+		if tab.WorkspaceID == workspaceID {
+			tabs[tab.ID] = struct{}{}
+		}
+	}
+	out := map[string]struct{}{}
+	for _, pane := range snap.Panes {
+		if _, ok := tabs[pane.TabID]; ok {
+			out[pane.ID] = struct{}{}
+		}
+	}
+	return out, nil
 }
 
 func (h layoutHandlers) decode(req jsonrpcRequest, dst any) bool {
@@ -1009,7 +1101,7 @@ func (s *WSServer) layoutSpecs(contentSub control.Submission, lane control.Admis
 	}
 	wired := s.contentDB != nil
 	build := func(r Responder) handlerFunc {
-		h := layoutHandlers{op: op, wired: wired, r: r}
+		h := layoutHandlers{op: op, wired: wired, r: r, sessions: s}
 		return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 	}
 	specs := []struct {

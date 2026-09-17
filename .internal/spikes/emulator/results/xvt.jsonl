@@ -1,0 +1,329 @@
+{"probe":"1_grapheme_split","case":"zwj_family/whole","key":"bytes","value":25}
+{"probe":"1_grapheme_split","case":"zwj_family/whole","key":"row0","value":"\"👨\\u200d👩\\u200d👧\\u200d👦\"/2 . . . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/whole","key":"cursor","value":"2,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@1","key":"row0","value":"\"👨\\u200d👩\\u200d👧\\u200d👦\"/2 . . . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@1","key":"cursor","value":"2,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@1","key":"matches_whole","value":true}
+{"probe":"1_grapheme_split","case":"zwj_family/split@2","key":"row0","value":"\"👨\\u200d👩\\u200d👧\\u200d👦\"/2 . . . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@2","key":"cursor","value":"2,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@2","key":"matches_whole","value":true}
+{"probe":"1_grapheme_split","case":"zwj_family/split@3","key":"row0","value":"\"👨\\u200d👩\\u200d👧\\u200d👦\"/2 . . . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@3","key":"cursor","value":"2,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@3","key":"matches_whole","value":true}
+{"probe":"1_grapheme_split","case":"zwj_family/split@4","key":"row0","value":"\"👨\"/2 . \"👩\\u200d👧\\u200d👦\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@4","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@4","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"zwj_family/split@5","key":"row0","value":"\"👨\"/2 . \"👩\\u200d👧\\u200d👦\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@5","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@5","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"zwj_family/split@6","key":"row0","value":"\"👨\"/2 . \"👩\\u200d👧\\u200d👦\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@6","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@6","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"zwj_family/split@7","key":"row0","value":"\"👨\\u200d\"/2 . \"👩\\u200d👧\\u200d👦\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@7","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@7","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"zwj_family/split@8","key":"row0","value":"\"👨\\u200d\"/2 . \"👩\\u200d👧\\u200d👦\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@8","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@8","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"zwj_family/split@9","key":"row0","value":"\"👨\\u200d\"/2 . \"👩\\u200d👧\\u200d👦\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@9","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@9","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"zwj_family/split@10","key":"row0","value":"\"👨\\u200d\"/2 . \"👩\\u200d👧\\u200d👦\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@10","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@10","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"zwj_family/split@11","key":"row0","value":"\"👨\\u200d👩\"/2 . \"👧\\u200d👦\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@11","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@11","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"zwj_family/split@12","key":"row0","value":"\"👨\\u200d👩\"/2 . \"👧\\u200d👦\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@12","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@12","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"zwj_family/split@13","key":"row0","value":"\"👨\\u200d👩\"/2 . \"👧\\u200d👦\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@13","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@13","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"zwj_family/split@14","key":"row0","value":"\"👨\\u200d👩\\u200d\"/2 . \"👧\\u200d👦\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@14","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@14","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"zwj_family/split@15","key":"row0","value":"\"👨\\u200d👩\\u200d\"/2 . \"👧\\u200d👦\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@15","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@15","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"zwj_family/split@16","key":"row0","value":"\"👨\\u200d👩\\u200d\"/2 . \"👧\\u200d👦\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@16","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@16","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"zwj_family/split@17","key":"row0","value":"\"👨\\u200d👩\\u200d\"/2 . \"👧\\u200d👦\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@17","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@17","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"zwj_family/split@18","key":"row0","value":"\"👨\\u200d👩\\u200d👧\"/2 . \"👦\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@18","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@18","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"zwj_family/split@19","key":"row0","value":"\"👨\\u200d👩\\u200d👧\"/2 . \"👦\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@19","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@19","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"zwj_family/split@20","key":"row0","value":"\"👨\\u200d👩\\u200d👧\"/2 . \"👦\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@20","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@20","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"zwj_family/split@21","key":"row0","value":"\"👨\\u200d👩\\u200d👧\\u200d\"/2 . \"👦\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@21","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@21","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"zwj_family/split@22","key":"row0","value":"\"👨\\u200d👩\\u200d👧\\u200d\"/2 . \"👦\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@22","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@22","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"zwj_family/split@23","key":"row0","value":"\"👨\\u200d👩\\u200d👧\\u200d\"/2 . \"👦\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@23","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@23","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"zwj_family/split@24","key":"row0","value":"\"👨\\u200d👩\\u200d👧\\u200d\"/2 . \"👦\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"zwj_family/split@24","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"zwj_family/split@24","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"zwj_family/summary","key":"offsets_identical","value":"3/24"}
+{"probe":"1_grapheme_split","case":"zwj_family/summary","key":"first_divergent_offset","value":4}
+{"probe":"1_grapheme_split","case":"skin_tone/whole","key":"bytes","value":8}
+{"probe":"1_grapheme_split","case":"skin_tone/whole","key":"row0","value":"\"👍🏽\"/2 . . . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"skin_tone/whole","key":"cursor","value":"2,0"}
+{"probe":"1_grapheme_split","case":"skin_tone/split@1","key":"row0","value":"\"👍🏽\"/2 . . . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"skin_tone/split@1","key":"cursor","value":"2,0"}
+{"probe":"1_grapheme_split","case":"skin_tone/split@1","key":"matches_whole","value":true}
+{"probe":"1_grapheme_split","case":"skin_tone/split@2","key":"row0","value":"\"👍🏽\"/2 . . . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"skin_tone/split@2","key":"cursor","value":"2,0"}
+{"probe":"1_grapheme_split","case":"skin_tone/split@2","key":"matches_whole","value":true}
+{"probe":"1_grapheme_split","case":"skin_tone/split@3","key":"row0","value":"\"👍🏽\"/2 . . . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"skin_tone/split@3","key":"cursor","value":"2,0"}
+{"probe":"1_grapheme_split","case":"skin_tone/split@3","key":"matches_whole","value":true}
+{"probe":"1_grapheme_split","case":"skin_tone/split@4","key":"row0","value":"\"👍\"/2 . \"🏽\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"skin_tone/split@4","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"skin_tone/split@4","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"skin_tone/split@5","key":"row0","value":"\"👍\"/2 . \"🏽\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"skin_tone/split@5","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"skin_tone/split@5","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"skin_tone/split@6","key":"row0","value":"\"👍\"/2 . \"🏽\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"skin_tone/split@6","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"skin_tone/split@6","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"skin_tone/split@7","key":"row0","value":"\"👍\"/2 . \"🏽\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"skin_tone/split@7","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"skin_tone/split@7","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"skin_tone/summary","key":"offsets_identical","value":"3/7"}
+{"probe":"1_grapheme_split","case":"skin_tone/summary","key":"first_divergent_offset","value":4}
+{"probe":"1_grapheme_split","case":"flag_ru/whole","key":"bytes","value":8}
+{"probe":"1_grapheme_split","case":"flag_ru/whole","key":"row0","value":"\"🇷🇺\"/2 . . . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"flag_ru/whole","key":"cursor","value":"2,0"}
+{"probe":"1_grapheme_split","case":"flag_ru/split@1","key":"row0","value":"\"🇷🇺\"/2 . . . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"flag_ru/split@1","key":"cursor","value":"2,0"}
+{"probe":"1_grapheme_split","case":"flag_ru/split@1","key":"matches_whole","value":true}
+{"probe":"1_grapheme_split","case":"flag_ru/split@2","key":"row0","value":"\"🇷🇺\"/2 . . . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"flag_ru/split@2","key":"cursor","value":"2,0"}
+{"probe":"1_grapheme_split","case":"flag_ru/split@2","key":"matches_whole","value":true}
+{"probe":"1_grapheme_split","case":"flag_ru/split@3","key":"row0","value":"\"🇷🇺\"/2 . . . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"flag_ru/split@3","key":"cursor","value":"2,0"}
+{"probe":"1_grapheme_split","case":"flag_ru/split@3","key":"matches_whole","value":true}
+{"probe":"1_grapheme_split","case":"flag_ru/split@4","key":"row0","value":"\"🇷\"/2 . \"🇺\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"flag_ru/split@4","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"flag_ru/split@4","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"flag_ru/split@5","key":"row0","value":"\"🇷\"/2 . \"🇺\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"flag_ru/split@5","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"flag_ru/split@5","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"flag_ru/split@6","key":"row0","value":"\"🇷\"/2 . \"🇺\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"flag_ru/split@6","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"flag_ru/split@6","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"flag_ru/split@7","key":"row0","value":"\"🇷\"/2 . \"🇺\"/2 . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"flag_ru/split@7","key":"cursor","value":"4,0"}
+{"probe":"1_grapheme_split","case":"flag_ru/split@7","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"flag_ru/summary","key":"offsets_identical","value":"3/7"}
+{"probe":"1_grapheme_split","case":"flag_ru/summary","key":"first_divergent_offset","value":4}
+{"probe":"1_grapheme_split","case":"heart_vs16/whole","key":"bytes","value":6}
+{"probe":"1_grapheme_split","case":"heart_vs16/whole","key":"row0","value":"\"❤️\"/2 . . . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"heart_vs16/whole","key":"cursor","value":"2,0"}
+{"probe":"1_grapheme_split","case":"heart_vs16/split@1","key":"row0","value":"\"❤️\"/2 . . . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"heart_vs16/split@1","key":"cursor","value":"2,0"}
+{"probe":"1_grapheme_split","case":"heart_vs16/split@1","key":"matches_whole","value":true}
+{"probe":"1_grapheme_split","case":"heart_vs16/split@2","key":"row0","value":"\"❤️\"/2 . . . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"heart_vs16/split@2","key":"cursor","value":"2,0"}
+{"probe":"1_grapheme_split","case":"heart_vs16/split@2","key":"matches_whole","value":true}
+{"probe":"1_grapheme_split","case":"heart_vs16/split@3","key":"row0","value":"\"❤\"/1 \"️\"/0 . . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"heart_vs16/split@3","key":"cursor","value":"1,0"}
+{"probe":"1_grapheme_split","case":"heart_vs16/split@3","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"heart_vs16/split@4","key":"row0","value":"\"❤\"/1 \"️\"/0 . . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"heart_vs16/split@4","key":"cursor","value":"1,0"}
+{"probe":"1_grapheme_split","case":"heart_vs16/split@4","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"heart_vs16/split@5","key":"row0","value":"\"❤\"/1 \"️\"/0 . . . . . . . . . . . . . . . . . ."}
+{"probe":"1_grapheme_split","case":"heart_vs16/split@5","key":"cursor","value":"1,0"}
+{"probe":"1_grapheme_split","case":"heart_vs16/split@5","key":"matches_whole","value":false}
+{"probe":"1_grapheme_split","case":"heart_vs16/summary","key":"offsets_identical","value":"2/5"}
+{"probe":"1_grapheme_split","case":"heart_vs16/summary","key":"first_divergent_offset","value":3}
+{"probe":"2_combining_mark","case":"one_write","key":"row0","value":"\"a\"/1 \"́\"/0 . . . . . . . . . . . . . . . . . ."}
+{"probe":"2_combining_mark","case":"one_write","key":"cells_occupied","value":2}
+{"probe":"2_combining_mark","case":"one_write","key":"cursor_x","value":1}
+{"probe":"2_combining_mark","case":"split_write","key":"row0","value":"\"a\"/1 \"́\"/0 . . . . . . . . . . . . . . . . . ."}
+{"probe":"2_combining_mark","case":"split_write","key":"cells_occupied","value":2}
+{"probe":"2_combining_mark","case":"split_write","key":"cursor_x","value":1}
+{"probe":"3_modified_keys","case":"ctrl_left","key":"len","value":0}
+{"probe":"3_modified_keys","case":"ctrl_left","key":"hex","value":""}
+{"probe":"3_modified_keys","case":"ctrl_left","key":"esc","value":"\"\""}
+{"probe":"3_modified_keys","case":"shift_up","key":"len","value":0}
+{"probe":"3_modified_keys","case":"shift_up","key":"hex","value":""}
+{"probe":"3_modified_keys","case":"shift_up","key":"esc","value":"\"\""}
+{"probe":"3_modified_keys","case":"f5_shift","key":"len","value":0}
+{"probe":"3_modified_keys","case":"f5_shift","key":"hex","value":""}
+{"probe":"3_modified_keys","case":"f5_shift","key":"esc","value":"\"\""}
+{"probe":"3_modified_keys","case":"f5_plain","key":"len","value":5}
+{"probe":"3_modified_keys","case":"f5_plain","key":"hex","value":"1b5b31357e"}
+{"probe":"3_modified_keys","case":"f5_plain","key":"esc","value":"\"\\e[15~\""}
+{"probe":"3_modified_keys","case":"f5_ctrl","key":"len","value":0}
+{"probe":"3_modified_keys","case":"f5_ctrl","key":"hex","value":""}
+{"probe":"3_modified_keys","case":"f5_ctrl","key":"esc","value":"\"\""}
+{"probe":"3_modified_keys","case":"ctrl_shift_left","key":"len","value":0}
+{"probe":"3_modified_keys","case":"ctrl_shift_left","key":"hex","value":""}
+{"probe":"3_modified_keys","case":"ctrl_shift_left","key":"esc","value":"\"\""}
+{"probe":"3_modified_keys","case":"left_plain","key":"len","value":3}
+{"probe":"3_modified_keys","case":"left_plain","key":"hex","value":"1b5b44"}
+{"probe":"3_modified_keys","case":"left_plain","key":"esc","value":"\"\\e[D\""}
+{"probe":"4_function_keys","case":"f13","key":"len","value":3}
+{"probe":"4_function_keys","case":"f13","key":"hex","value":"efbfbd"}
+{"probe":"4_function_keys","case":"f13","key":"esc","value":"\"\\xEF\\xBF\\xBD\""}
+{"probe":"4_function_keys","case":"f13","key":"contains_u+fffd","value":true}
+{"probe":"4_function_keys","case":"f13_shift","key":"len","value":0}
+{"probe":"4_function_keys","case":"f13_shift","key":"hex","value":""}
+{"probe":"4_function_keys","case":"f13_shift","key":"esc","value":"\"\""}
+{"probe":"4_function_keys","case":"f13_shift","key":"contains_u+fffd","value":false}
+{"probe":"4_function_keys","case":"f12","key":"len","value":5}
+{"probe":"4_function_keys","case":"f12","key":"hex","value":"1b5b32347e"}
+{"probe":"4_function_keys","case":"f12","key":"esc","value":"\"\\e[24~\""}
+{"probe":"4_function_keys","case":"f12","key":"contains_u+fffd","value":false}
+{"probe":"4_function_keys","case":"f1","key":"len","value":3}
+{"probe":"4_function_keys","case":"f1","key":"hex","value":"1b4f50"}
+{"probe":"4_function_keys","case":"f1","key":"esc","value":"\"\\eOP\""}
+{"probe":"4_function_keys","case":"f1","key":"contains_u+fffd","value":false}
+{"probe":"5_insert_mode","case":"before_irm","key":"row0","value":"\"a\"/1 \"b\"/1 \"c\"/1 \"d\"/1 . . . . . . . . . . . . . . . ."}
+{"probe":"5_insert_mode","case":"after_set_irm","key":"enable_mode_callbacks","value":"[4]"}
+{"probe":"5_insert_mode","case":"after_set_irm","key":"mode_4_recorded","value":true}
+{"probe":"5_insert_mode","case":"after_print","key":"row0","value":"\"X\"/1 \"Y\"/1 \"c\"/1 \"d\"/1 . . . . . . . . . . . . . . . ."}
+{"probe":"5_insert_mode","case":"after_print","key":"row_text","value":"XYcd"}
+{"probe":"5_insert_mode","case":"after_print","key":"cursor_x","value":2}
+{"probe":"5_insert_mode","case":"decrqm","key":"esc","value":"\"\\e[4;1$y\""}
+{"probe":"5_insert_mode","case":"decrqm","key":"hex","value":"1b5b343b312479"}
+{"probe":"6_cursor_report_origin_mode","case":"decom_off","key":"api_cursor","value":"0,0"}
+{"probe":"6_cursor_report_origin_mode","case":"decom_off","key":"cpr_esc","value":"\"\\e[1;1R\""}
+{"probe":"6_cursor_report_origin_mode","case":"decom_on","key":"api_cursor","value":"0,4"}
+{"probe":"6_cursor_report_origin_mode","case":"decom_on","key":"cpr_esc","value":"\"\\e[5;1R\""}
+{"probe":"6_cursor_report_origin_mode","case":"decom_on","key":"cpr_hex","value":"1b5b353b3152"}
+{"probe":"6_cursor_report_origin_mode","case":"decom_on","key":"cpr_row","value":5}
+{"probe":"6_cursor_report_origin_mode","case":"decom_on","key":"cpr_col","value":1}
+{"probe":"6_cursor_report_origin_mode","case":"decom_off_at_row5","key":"api_cursor","value":"0,4"}
+{"probe":"6_cursor_report_origin_mode","case":"decom_off_at_row5","key":"cpr_esc","value":"\"\\e[5;1R\""}
+{"probe":"7_bounded_rep","case":"rep_100000","key":"rep_count","value":100000}
+{"probe":"7_bounded_rep","case":"rep_100000","key":"completed","value":true}
+{"probe":"7_bounded_rep","case":"rep_100000","key":"wall_ns","value":17174319}
+{"probe":"7_bounded_rep","case":"rep_100000","key":"wall_ms","value":"17.2"}
+{"probe":"7_bounded_rep","case":"rep_100000","key":"total_alloc_bytes","value":12065248}
+{"probe":"7_bounded_rep","case":"rep_100000","key":"heap_alloc_before_bytes","value":284646320}
+{"probe":"7_bounded_rep","case":"rep_100000","key":"heap_alloc_after_bytes","value":296711568}
+{"probe":"7_bounded_rep","case":"rep_100000","key":"mallocs","value":101258}
+{"probe":"7_bounded_rep","case":"rep_100000","key":"scrollback_len","value":1227}
+{"probe":"7_bounded_rep","case":"rep_100000","key":"cursor","value":"1,23"}
+{"probe":"7_bounded_rep","case":"rep_1000000","key":"rep_count","value":1000000}
+{"probe":"7_bounded_rep","case":"rep_1000000","key":"completed","value":true}
+{"probe":"7_bounded_rep","case":"rep_1000000","key":"wall_ns","value":171711770}
+{"probe":"7_bounded_rep","case":"rep_1000000","key":"wall_ms","value":"171.7"}
+{"probe":"7_bounded_rep","case":"rep_1000000","key":"total_alloc_bytes","value":123101904}
+{"probe":"7_bounded_rep","case":"rep_1000000","key":"heap_alloc_before_bytes","value":301398624}
+{"probe":"7_bounded_rep","case":"rep_1000000","key":"heap_alloc_after_bytes","value":424500528}
+{"probe":"7_bounded_rep","case":"rep_1000000","key":"mallocs","value":1012515}
+{"probe":"7_bounded_rep","case":"rep_1000000","key":"scrollback_len","value":10000}
+{"probe":"7_bounded_rep","case":"rep_1000000","key":"cursor","value":"1,23"}
+{"probe":"7_bounded_rep","case":"rep_10000000","key":"rep_count","value":10000000}
+{"probe":"7_bounded_rep","case":"rep_10000000","key":"completed","value":true}
+{"probe":"7_bounded_rep","case":"rep_10000000","key":"wall_ns","value":1727230399}
+{"probe":"7_bounded_rep","case":"rep_10000000","key":"wall_ms","value":"1727.2"}
+{"probe":"7_bounded_rep","case":"rep_10000000","key":"total_alloc_bytes","value":1224702176}
+{"probe":"7_bounded_rep","case":"rep_10000000","key":"heap_alloc_before_bytes","value":404279616}
+{"probe":"7_bounded_rep","case":"rep_10000000","key":"heap_alloc_after_bytes","value":873413352}
+{"probe":"7_bounded_rep","case":"rep_10000000","key":"mallocs","value":10125017}
+{"probe":"7_bounded_rep","case":"rep_10000000","key":"scrollback_len","value":10000}
+{"probe":"7_bounded_rep","case":"rep_10000000","key":"cursor","value":"1,23"}
+{"probe":"7_bounded_rep","case":"rep_1000000000_budget30s","key":"rep_count","value":1000000000}
+{"probe":"7_bounded_rep","case":"rep_1000000000_budget30s","key":"completed","value":false}
+{"probe":"7_bounded_rep","case":"rep_1000000000_budget30s","key":"wall_ns","value":30010034213}
+{"probe":"7_bounded_rep","case":"rep_1000000000_budget30s","key":"wall_ms","value":"30010.0"}
+{"probe":"7_bounded_rep","case":"rep_1000000000_budget30s","key":"total_alloc_bytes","value":23322834000}
+{"probe":"7_bounded_rep","case":"rep_1000000000_budget30s","key":"heap_alloc_before_bytes","value":507160464}
+{"probe":"7_bounded_rep","case":"rep_1000000000_budget30s","key":"heap_alloc_after_bytes","value":1202299848}
+{"probe":"7_bounded_rep","case":"rep_1000000000_budget30s","key":"mallocs","value":192922025}
+{"probe":"7_bounded_rep","case":"rep_1000000000_budget30s","key":"scrollback_len","value":10000}
+{"probe":"7_bounded_rep","case":"rep_1000000_scrollback100","key":"rep_count","value":1000000}
+{"probe":"7_bounded_rep","case":"rep_1000000_scrollback100","key":"completed","value":true}
+{"probe":"7_bounded_rep","case":"rep_1000000_scrollback100","key":"wall_ns","value":135645807}
+{"probe":"7_bounded_rep","case":"rep_1000000_scrollback100","key":"wall_ms","value":"135.6"}
+{"probe":"7_bounded_rep","case":"rep_1000000_scrollback100","key":"total_alloc_bytes","value":228111344}
+{"probe":"7_bounded_rep","case":"rep_1000000_scrollback100","key":"heap_alloc_before_bytes","value":612084952}
+{"probe":"7_bounded_rep","case":"rep_1000000_scrollback100","key":"heap_alloc_after_bytes","value":840196296}
+{"probe":"7_bounded_rep","case":"rep_1000000_scrollback100","key":"mallocs","value":1881112}
+{"probe":"7_bounded_rep","case":"rep_1000000_scrollback100","key":"scrollback_len","value":10000}
+{"probe":"7_bounded_rep","case":"rep_1000000_scrollback100","key":"cursor","value":"1,23"}
+{"probe":"7_bounded_rep","case":"rep_65535","key":"rep_count","value":65535}
+{"probe":"7_bounded_rep","case":"rep_65535","key":"completed","value":true}
+{"probe":"7_bounded_rep","case":"rep_65535","key":"wall_ns","value":9130993}
+{"probe":"7_bounded_rep","case":"rep_65535","key":"wall_ms","value":"9.1"}
+{"probe":"7_bounded_rep","case":"rep_65535","key":"total_alloc_bytes","value":15001120}
+{"probe":"7_bounded_rep","case":"rep_65535","key":"heap_alloc_before_bytes","value":716004072}
+{"probe":"7_bounded_rep","case":"rep_65535","key":"heap_alloc_after_bytes","value":731005192}
+{"probe":"7_bounded_rep","case":"rep_65535","key":"mallocs","value":125866}
+{"probe":"7_bounded_rep","case":"rep_65535","key":"scrollback_len","value":796}
+{"probe":"7_bounded_rep","case":"rep_65535","key":"cursor","value":"16,23"}
+{"probe":"7_bounded_rep","case":"rep_70000","key":"rep_count","value":70000}
+{"probe":"7_bounded_rep","case":"rep_70000","key":"completed","value":true}
+{"probe":"7_bounded_rep","case":"rep_70000","key":"wall_ns","value":9578886}
+{"probe":"7_bounded_rep","case":"rep_70000","key":"wall_ms","value":"9.6"}
+{"probe":"7_bounded_rep","case":"rep_70000","key":"total_alloc_bytes","value":15804208}
+{"probe":"7_bounded_rep","case":"rep_70000","key":"heap_alloc_before_bytes","value":727865608}
+{"probe":"7_bounded_rep","case":"rep_70000","key":"heap_alloc_after_bytes","value":743669816}
+{"probe":"7_bounded_rep","case":"rep_70000","key":"mallocs","value":132518}
+{"probe":"7_bounded_rep","case":"rep_70000","key":"scrollback_len","value":852}
+{"probe":"7_bounded_rep","case":"rep_70000","key":"cursor","value":"1,23"}
+{"probe":"8_resize","case":"shrink_height/before","key":"cursor","value":"3,23"}
+{"probe":"8_resize","case":"shrink_height/before","key":"rows","value":"[\"L01\" \"L02\" \"L03\" \"L04\" \"L05\" \"L06\" \"L07\" \"L08\" \"L09\" \"L10\" \"L11\" \"L12\" \"L13\" \"L14\" \"L15\" \"L16\" \"L17\" \"L18\" \"L19\" \"L20\" \"L21\" \"L22\" \"L23\" \"L24\"]"}
+{"probe":"8_resize","case":"shrink_height/after","key":"cursor","value":"3,9"}
+{"probe":"8_resize","case":"shrink_height/after","key":"height","value":10}
+{"probe":"8_resize","case":"shrink_height/after","key":"rows","value":"[\"L01\" \"L02\" \"L03\" \"L04\" \"L05\" \"L06\" \"L07\" \"L08\" \"L09\" \"L10\"]"}
+{"probe":"8_resize","case":"shrink_height/after","key":"scrollback_len","value":0}
+{"probe":"8_resize","case":"reflow_width/before","key":"width","value":20}
+{"probe":"8_resize","case":"reflow_width/before","key":"cursor","value":"5,2"}
+{"probe":"8_resize","case":"reflow_width/before","key":"rows","value":"[\"01234567890123456789\" \"01234567890123456789\" \"ABCDE\" \"\" \"\" \"\" \"\" \"\" \"\" \"\"]"}
+{"probe":"8_resize","case":"reflow_width/after","key":"width","value":10}
+{"probe":"8_resize","case":"reflow_width/after","key":"cursor","value":"5,2"}
+{"probe":"8_resize","case":"reflow_width/after","key":"rows","value":"[\"0123456789\" \"0123456789\" \"ABCDE\" \"\" \"\" \"\" \"\" \"\" \"\" \"\"]"}
+{"probe":"8_resize","case":"grow_height/after","key":"rows","value":"[\"hello\" \"world\" \"\" \"\" \"\" \"\" \"\" \"\" \"\" \"\"]"}
+{"probe":"9_c1_0x9c_in_osc","case":"title_bel","key":"title_events","value":"[\"X\\xe2\"]"}
+{"probe":"9_c1_0x9c_in_osc","case":"title_bel","key":"title_hex","value":"58e2"}
+{"probe":"9_c1_0x9c_in_osc","case":"title_bel","key":"screen_row0","value":"\"YZ\""}
+{"probe":"9_c1_0x9c_in_osc","case":"title_bel","key":"cursor_x","value":2}
+{"probe":"9_c1_0x9c_in_osc","case":"title_st","key":"title_events","value":"[\"X\\xe2\"]"}
+{"probe":"9_c1_0x9c_in_osc","case":"title_st","key":"title_hex","value":"58e2"}
+{"probe":"9_c1_0x9c_in_osc","case":"title_st","key":"screen_row0","value":"\"YZ\""}
+{"probe":"9_c1_0x9c_in_osc","case":"title_st","key":"cursor_x","value":2}
+{"probe":"9_c1_0x9c_in_osc","case":"title_bare_9c","key":"title_events","value":"[\"X\"]"}
+{"probe":"9_c1_0x9c_in_osc","case":"title_bare_9c","key":"title_hex","value":"58"}
+{"probe":"9_c1_0x9c_in_osc","case":"title_bare_9c","key":"screen_row0","value":"\"YZ\""}
+{"probe":"9_c1_0x9c_in_osc","case":"title_bare_9c","key":"cursor_x","value":2}
+{"probe":"9_c1_0x9c_in_osc","case":"title_ascii","key":"title_events","value":"[\"X-Y\"]"}
+{"probe":"9_c1_0x9c_in_osc","case":"title_ascii","key":"title_hex","value":"582d59"}
+{"probe":"9_c1_0x9c_in_osc","case":"title_ascii","key":"screen_row0","value":"\"Z\""}
+{"probe":"9_c1_0x9c_in_osc","case":"title_ascii","key":"cursor_x","value":1}
+{"probe":"10_reply_requires_reader","case":"no_reader","key":"write_returned_within_2s","value":false}
+{"probe":"10_reply_requires_reader","case":"with_reader","key":"write_ns","value":13650}
+{"probe":"10_reply_requires_reader","case":"with_reader","key":"reply_esc","value":"\"\\e[1;1R\""}
+{"probe":"11_graphics","case":"no_handler","key":"log_lines","value":"[\"unhandled sequence: DCS \\\"q\\\" \\\"\\\\\\\"1;1;2;2#0;2;0;0;0#0~~\\\"\" \"unhandled sequence: ESC \\\"\\\\\\\\\\\"\" \"unhandled sequence: APC \\\"Ga=T,f=24,s=1,v=1,i=42;AAAA\\\"\" \"unhandled sequence: ESC \\\"\\\\\\\\\\\"\"]"}
+{"probe":"11_graphics","case":"no_handler","key":"screen_unchanged","value":true}
+{"probe":"11_graphics","case":"no_handler","key":"screen_row0","value":"\"\""}
+{"probe":"11_graphics","case":"no_handler","key":"cursor","value":"0,0"}
+{"probe":"11_graphics","case":"no_handler","key":"reply_bytes","value":"\"\""}
+{"probe":"11_graphics","case":"with_handler","key":"dcs_deliveries","value":1}
+{"probe":"11_graphics","case":"with_handler","key":"apc_deliveries","value":1}
+{"probe":"11_graphics","case":"with_handler","key":"dcs_bytes","value":"\"\\\"1;1;2;2#0;2;0;0;0#0~~\""}
+{"probe":"11_graphics","case":"with_handler","key":"apc_bytes","value":"\"Ga=T,f=24,s=1,v=1,i=42;AAAA\""}
+{"probe":"11_graphics","case":"with_handler","key":"reply_bytes","value":"\"\""}
+{"probe":"api","case":"incremental","key":"touched_rows","value":3}
+{"probe":"api","case":"incremental","key":"touched_detail","value":"[0:{first:0 last:5} 1:{first:0 last:5} 2:nil]"}
+{"probe":"api","case":"softwrap","key":"row0","value":"\"0123456789\""}
+{"probe":"api","case":"softwrap","key":"row1","value":"\"ABCDEFGHIJ\""}
+{"probe":"api","case":"softwrap","key":"cursor","value":"9,1"}
+{"probe":"api","case":"softwrap","key":"touched_detail","value":"[0:{first:0 last:10} 1:{first:0 last:10} 2:nil 3:nil]"}
+{"probe":"api","case":"softwrap","key":"scrollback_len","value":0}
+{"probe":"api","case":"softwrap","key":"after_grow_row0","value":"\"0123456789\""}
+{"probe":"api","case":"softwrap","key":"after_grow_row1","value":"\"ABCDEFGHIJ\""}

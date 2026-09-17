@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/proc"
+	"github.com/shady2k/nocx/internal/remoteprobe"
 )
 
 // LocalRoute is the route identity of this machine. It is a constant rather
@@ -65,7 +66,7 @@ func (s *LocalSource) Identity() Identity {
 }
 
 func (s *LocalSource) Probe(ctx context.Context) (Probe, error) {
-	out, nonce, err := s.run(ctx, probeScript, ProbeDeadline, 256*1024)
+	out, nonce, err := s.run(ctx, PhaseProbe, ProbeDeadline, 256*1024)
 	if err != nil {
 		return Probe{}, err
 	}
@@ -73,24 +74,31 @@ func (s *LocalSource) Probe(ctx context.Context) (Probe, error) {
 }
 
 func (s *LocalSource) Scan(ctx context.Context, _ Probe) (Scan, error) {
-	out, nonce, err := s.run(ctx, scanScript, ScanDeadline, MaxScanBytes)
+	out, nonce, err := s.run(ctx, PhaseScan, ScanDeadline, MaxScanBytes)
 	if err != nil {
 		return Scan{}, err
 	}
 	return parseScan(out, nonce)
 }
 
-// run executes one script under the supervisor and returns its output only
+// run executes one phase's script under the supervisor and returns its output only
 // when the run COMPLETED. Anything else — the deadline, the output bound, a
 // non-zero exit, a cancelled context — returns an error and no bytes, so
 // there is no path by which a partial enumeration reaches the parser.
-func (s *LocalSource) run(ctx context.Context, script string, deadline time.Duration, maxBytes int) ([]byte, string, error) {
+func (s *LocalSource) run(ctx context.Context, phase Phase, deadline time.Duration, maxBytes int) ([]byte, string, error) {
 	nonce, err := newNonce()
 	if err != nil {
 		return nil, "", err
 	}
+	// The script is the SAME one the helper runs on a remote host — one
+	// declaration in internal/remoteprobe — so a local enumeration and a remote
+	// one cannot disagree about what a PATH scan is.
+	command, ok := remoteprobe.CommandNamesCommand(phase, nonce)
+	if !ok {
+		return nil, "", fmt.Errorf("commandnames: unknown enumeration phase %q", phase)
+	}
 	out, err := s.sup.Run(ctx, proc.Job{
-		Argv:     []string{s.shell, "-c", script, "nocx", nonce},
+		Argv:     []string{s.shell, "-c", command},
 		Env:      s.env,
 		Deadline: deadline,
 		MaxBytes: maxBytes,

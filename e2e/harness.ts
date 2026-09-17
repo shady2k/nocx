@@ -1,10 +1,27 @@
 import { test as base, expect as baseExpect, type Locator, type Page } from '@playwright/test'
 
 import { BASE_URL } from './base-url'
+import { attachFailureDiagnostics, registerBackendForTest } from './failure-context'
+import { reportStandingModals } from './modal-report'
 import { readStand } from './stand'
+import { traceIdForTest, traceparentForTest } from './trace-context.mts'
 
 export { expect } from '@playwright/test'
 export type { Page } from '@playwright/test'
+
+/**
+ * The one passphrase the SHARED stand's vault is ever set up with.
+ *
+ * A constant rather than a literal in each spec, because `resetStand` has to
+ * be able to unlock what a spec set up (see the vault paragraph there): two
+ * spellings of this would agree until the day one of them changed, and the
+ * symptom would be a top-sheet unlock prompt over somebody else's surface.
+ *
+ * Specs that bring their own backend own their own passphrase and must NOT
+ * use this — theirs is disposable with the backend, and several of them are
+ * about what a particular passphrase does.
+ */
+export const SHARED_VAULT_PASSPHRASE = 'master-passphrase-7'
 
 /**
  * Wait until the startup/reconnect overlay has left the top layer.
@@ -134,10 +151,17 @@ export async function clickIntoEditor(
 //
 // A spec that needs its OWN backend overrides this afterwards with
 // bindEndpoint(); its accessor wins whether the page shim runs before or after it.
-async function injectWailsShim(page: Page): Promise<void> {
+//
+// traceparent is optional and, when given, rides along on the SAME
+// ResolveBackend object the renderer already reads at startup — no second
+// binding, no second round trip. Dispatcher (frontend/src/dispatcher.ts)
+// reads endpoint.traceparent and appends it to the WebSocket URL; the
+// backend continues it at the connection's entry (internal/transport/ws.go,
+// log.ContinueTrace). See e2e/trace-context.ts for where it is minted.
+async function injectWailsShim(page: Page, traceparent?: string): Promise<void> {
   const stand = readStand()
   await page.addInitScript(
-    (opts: { p: number; t: string }) => {
+    (opts: { p: number; t: string; tp: string }) => {
       ;(window as unknown as { go: unknown }).go = {
         main: {
           WailsApp: {
@@ -150,6 +174,7 @@ async function injectWailsShim(page: Page): Promise<void> {
                 kind: '',
                 message: '',
                 remedy: '',
+                ...(opts.tp ? { traceparent: opts.tp } : {}),
               }),
             CheckForUpdate: () => Promise.resolve(null),
             ReportHealthy: () => Promise.resolve(),
@@ -158,7 +183,7 @@ async function injectWailsShim(page: Page): Promise<void> {
         },
       }
     },
-    { p: stand.port, t: stand.token },
+    { p: stand.port, t: stand.token, tp: traceparent ?? '' },
   )
 }
 
@@ -230,15 +255,56 @@ export const test = base.extend<object, { appReady: void }>({
     { scope: 'worker', auto: true, timeout: 120_000 },
   ],
 
-  page: async ({ page }, use) => {
+  page: async ({ page }, use, info) => {
+    // Attached before anything else touches the page, so a failure's printed
+    // block (nocx-n14oo.11) misses nothing this test's page ever did — the
+    // listeners are cheap and a passing test never prints what they collect.
+    const diagnostics = attachFailureDiagnostics(page)
+    // One trace per Playwright test, derived from its own id — stable across
+    // a retry, distinct from every other test's — so its own connection's
+    // backend lines are findable by trace_id alone (e2e/trace-context.ts).
+    const traceparent = traceparentForTest(info.testId)
     // BEFORE the test, not after it. A teardown answers for the test that has
     // just run and is skipped when that test dies badly; a setup answers for
     // the test that is about to run, which is the one whose result depends on
     // it. Whatever the last spec left — including a page that crashed with
     // eight tabs open — this is what the next one starts from.
     await resetStand()
-    await injectWailsShim(page)
+    await injectWailsShim(page, traceparent)
     await use(page)
+    // …and one thing is READ afterwards, on the way out of a test that
+    // failed: whichever modal was standing over the page, by name. See
+    // modal-report.ts for why that is a report and not an assertion.
+    await reportStandingModals(page, info)
+    await diagnostics.report(info, traceIdForTest(info.testId))
+  },
+})
+
+/**
+ * The suite's OTHER test object: no stand reset, no wails shim — and the same
+ * failure diagnostics.
+ *
+ * Forty-four specs bring their own backend (`VaultBackend`, the API fixture
+ * servers, the coordinator specs) and so must not have the shared stand reset
+ * underneath them. Every one of them said `import { test as base } from
+ * '@playwright/test'; const test = base`, which is a correct statement of "not
+ * the harness's test" and also an opt-out of anything the suite ever decides
+ * every spec should have. This is that statement with somewhere to put the
+ * second kind of thing: it is still `base`, it still resets nothing, and it
+ * cannot silently miss what the rest of the suite gets — today, the report
+ * that names the modal standing over a failed test.
+ *
+ * They import it as `standalone as base`, so `const test = base` and the files
+ * that call `base.describe` directly read exactly as they did. The alias is
+ * what keeps this a one-line change per spec rather than a rename sweep across
+ * files that also use `base` as a local for something else.
+ */
+export const standalone = base.extend<object>({
+  page: async ({ page }, use, info) => {
+    const diagnostics = attachFailureDiagnostics(page)
+    await use(page)
+    await reportStandingModals(page, info)
+    await diagnostics.report(info, traceIdForTest(info.testId))
   },
 })
 
@@ -338,9 +404,54 @@ async function resetStand(): Promise<void> {
     for (const row of snips.snippets) {
       await wire.call('snippets.delete', { id: row.id })
     }
+    // AND THE VAULT'S LOCK, which is the fourth piece of shared-stand state a
+    // spec inherits — and the only one no spec can be blamed for leaving,
+    // because the PRODUCT sets it and is right to (nocx-76wyh).
+    //
+    // Design D9: the vault seals when the last client leaves
+    // (internal/vault/presence.go). Every test here closes its context, and
+    // every spec that brings its own backend leaves the shared stand with no
+    // client attached for as long as it runs — which is longer than the
+    // detach window, so the shared vault seals. It stays sealed, and the next
+    // spec that touches a secret meets a sealed vault: the dispatcher's
+    // global seam raises the unlock prompt for ANY rpc that lands on one
+    // (quick-connect.tsx says so where it declines to offer its own row), and
+    // that prompt is a top-sheet at the app root, over whatever surface the
+    // spec was driving.
+    //
+    // That is nocx-76wyh, and presence.go's own header records the same
+    // signature from nocx-58q7d: "eighteen specs reported it as
+    // 'ui-prompt-overlay intercepts pointer events'". The click that fails is
+    // in the spec that inherited the lock, never in the one whose departure
+    // turned it — so no per-spec tidy-up can own this. It belongs here, where
+    // the other three shared documents are declared.
+    //
+    // UNSEALED, not sealed: a spec's first assertion describes an application
+    // whose secrets are available, and connections-settings.spec.ts's Connect
+    // walk needs them. Uninitialized is left alone — there is nothing to
+    // unlock, and the setup surface is a different flow with specs of its own.
+    const vault = (await wire.call('vault.status', {})) as { state: string }
+    if (vault.state === 'sealed') {
+      await wire.call('vault.unseal', { means: 'passphrase', secret: SHARED_VAULT_PASSPHRASE })
+    }
   } finally {
     wire.close()
   }
+}
+
+/**
+ * A spec's own view of the control plane: one JSON-RPC call at a time, over a
+ * socket opened for this purpose. The data plane is not touched — every frame
+ * here is text — which is why it is a TYPE and not the renderer's client.
+ *
+ * Named rather than inferred because specs hold it across a whole test (a
+ * restart changes the endpoint, not the shape), and a type spelled out of the
+ * function that mints it would make every caller depend on that function's
+ * identity.
+ */
+export interface ControlPlane {
+  call: (method: string, params: unknown) => Promise<unknown>
+  close: () => void
 }
 
 /** The wire shape of one control answer: `error` is present exactly when the
@@ -396,10 +507,7 @@ function sendOnce(
 
 /** One JSON-RPC call at a time over a socket opened for this purpose. The
  *  data plane is not touched: every frame here is text. */
-export async function openControlPlane(
-  port: number,
-  token: string,
-): Promise<{ call: (method: string, params: unknown) => Promise<unknown>; close: () => void }> {
+export async function openControlPlane(port: number, token: string): Promise<ControlPlane> {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/session`, `nocx.token.${token}`)
   await new Promise<void>((resolve, reject) => {
     const failed = (): void => reject(new Error(`e2e: control plane refused on port ${port}`))
@@ -657,10 +765,30 @@ export function collectionsDir(isolatedHome: string, name: string): string {
  * mid-test — vault surviving a restart is the thing under test — and `wails
  * dev` owns exactly one backend whose lifecycle Playwright cannot touch. The
  * requirement was never "override the bindings"; it was "run headless".
+ *
+ * traceparent defaults from the currently running test's own id
+ * (traceparentForTest, e2e/trace-context.ts) when the caller does not supply
+ * one — which is every one of the forty-some specs that call this today.
+ * None of them has to change for its backend's lines to carry a trace: the
+ * default is silent unless base.info() throws (no test running), in which
+ * case the connection simply opens with none, exactly as before this
+ * existed.
  */
-export async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promise<void> {
+export async function bindEndpoint(
+  page: Page,
+  endpoint: BackendEndpoint,
+  traceparent?: string,
+): Promise<void> {
+  let tp = traceparent
+  if (tp === undefined) {
+    try {
+      tp = traceparentForTest(base.info().testId)
+    } catch {
+      tp = ''
+    }
+  }
   await page.context().addInitScript(
-    (opts: { p: number; t: string }) => {
+    (opts: { p: number; t: string; tp: string }) => {
       const workbenchGo = {
         main: {
           WailsApp: {
@@ -673,6 +801,7 @@ export async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promi
                 kind: '',
                 message: '',
                 remedy: '',
+                ...(opts.tp ? { traceparent: opts.tp } : {}),
               }),
             CheckForUpdate: () => Promise.resolve(null),
             ReportHealthy: () => Promise.resolve(),
@@ -690,7 +819,7 @@ export async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promi
         set: () => undefined,
       })
     },
-    { p: endpoint.port, t: endpoint.token },
+    { p: endpoint.port, t: endpoint.token, tp },
   )
 }
 type ResolvableBackendResolution =
@@ -987,6 +1116,19 @@ export class VaultBackend {
       what: this.binary,
       timeoutMs: 30_000,
     })
+
+    // Attribute this backend to whichever test is running RIGHT NOW, so a
+    // failure's printed context (failure-context.ts) can find it without any
+    // spec having to register it by hand — the whole reason it lives here
+    // rather than being left to each spec's own bookkeeping. base.info()
+    // throws outside a running test (a script, a REPL); that is not this
+    // suite, so the failure is simply not tracked rather than raised.
+    try {
+      registerBackendForTest(base.info().testId, this)
+    } catch {
+      /* not running inside a Playwright test; nothing to attribute this to */
+    }
+
     return { port, token }
   }
 
@@ -999,13 +1141,32 @@ export class VaultBackend {
    * Every diagnosis then had to be guessed from the DOM. test-results/ is
    * already uploaded on failure (ci.yml), so that is where it goes.
    *
+   * UNDER THIS TEST'S OWN outputDir, not a name shared by every spec that
+   * starts a backend (nocx-ky68q). Every one of them wrote `nocx-server.log`
+   * to the same `test-results/nocx-server/` directory, so each stop()
+   * overwrote the last, and the CI artifact for a failing spec held whichever
+   * OTHER spec's backend happened to stop most recently — confirmed in run
+   * 35119868922, where the artifact's copy was 40 lines from an unrelated
+   * spec while the failing test's own log was already gone. testInfo's own
+   * outputDir is unique per test (and per retry), so two specs can no longer
+   * share the destination file no matter what order their backends stop in.
+   *
+   * Falls back to the old shared path only when there is no running test to
+   * ask (a script invoking VaultBackend directly) — a location is still
+   * better than nothing, and this is not the path any spec runs through.
+   *
    * Best-effort by construction: a harness that throws while trying to explain
    * a failure replaces the failure with its own.
    */
   private preserveLog(): void {
     if (!this.logPath) return
     try {
-      const dir = resolve(process.cwd(), 'test-results', 'nocx-server')
+      let dir: string
+      try {
+        dir = base.info().outputDir
+      } catch {
+        dir = resolve(process.cwd(), 'test-results', 'nocx-server')
+      }
       mkdirSync(dir, { recursive: true })
       copyFileSync(this.logPath, resolve(dir, basename(this.logPath)))
     } catch {
@@ -1111,4 +1272,226 @@ export async function openImportDestination(ask: Locator, page: Page): Promise<L
   if (await pencil.isVisible()) await pencil.click()
   await baseExpect(field).toBeVisible()
   return field
+}
+
+/**
+ * The words Settings -> Assistant permissions names one kind of work by.
+ *
+ * They are the product's own, from `frontend/src/effect-labels.ts`, which is
+ * their ONE owner: the approval prompt asks in them and the permissions page
+ * answers in them, so a spec that invented its own would be asserting a
+ * wording nothing ships. Restated here rather than imported because the e2e
+ * suite drives the built app and does not link the renderer's modules; if
+ * they drift, `answerPermission` fails on the row whose question no longer
+ * asks what these words say, and names both.
+ */
+const PERMISSION_WORDS = {
+  observe: 'read and inspect',
+  'mutate-reversible': 'make changes that can be undone',
+  'mutate-destructive': 'make changes that cannot be undone',
+  'privilege-change': 'gain more privilege',
+  disclose: 'send information out',
+  'cross-boundary': 'reach another host',
+  delegate: 'hand work to another agent',
+} as const
+
+export type PermissionEffect = keyof typeof PERMISSION_WORDS
+export type PermissionAnswer = 'Allowed' | 'Ask every time' | 'Never'
+
+/**
+ * The row for one kind of work, on Settings -> Assistant permissions.
+ *
+ * ALWAYS PRESENT, answered or not, and that is the page's shape rather than an
+ * accident of this helper (nocx-v8c5j): the questions are one list in a fixed
+ * order and a row does not move when it is answered. So the assertable thing
+ * is the row's ANSWER — `permissionAnswerControl` below — and never its
+ * presence in one of two lists, which is what a spec had to read before.
+ */
+export function permissionAnswer(page: Page, effect: PermissionEffect): Locator {
+  return page.locator('[data-answers="questions"]').locator(`[data-answer="row:${effect}"]`)
+}
+
+/** The wire's word for one of the three answers — what the control's value
+ *  actually is. The words a person reads are `PermissionAnswer`; these are
+ *  what the option carries, and the mapping lives here so a spec never has to
+ *  know it. */
+const ANSWER_VALUE: Record<PermissionAnswer, string> = {
+  Allowed: 'permit',
+  'Ask every time': 'ask',
+  Never: 'refuse',
+}
+
+/**
+ * The control that holds one row's answer.
+ *
+ * It is a select, and its VALUE is where the row stands — so an assertion goes
+ * through `toHaveValue` and never through the row's text. A row that draws
+ * every answer as an option contains all three words whatever it is set to,
+ * which makes `toContainText('Allowed')` a check that cannot fail.
+ */
+export function permissionAnswerControl(page: Page, effect: PermissionEffect): Locator {
+  return permissionAnswer(page, effect).getByRole('combobox')
+}
+
+/** Assert where one row stands, in the words a person reads. */
+export async function expectPermissionAnswer(
+  page: Page,
+  effect: PermissionEffect,
+  answer: PermissionAnswer,
+): Promise<void> {
+  await baseExpect(permissionAnswerControl(page, effect)).toHaveValue(ANSWER_VALUE[answer], {
+    timeout: 15_000,
+  })
+}
+
+/**
+ * Answer, or re-answer, one kind of work. The Assistant permissions page must
+ * already be open.
+ *
+ * There is no Save button and no draft: the control writes at once and the
+ * page adopts what a fresh read returns, so this waits on the control's value
+ * coming back as the store's own word for what it took.
+ *
+ * Returning an answer to "Ask every time" RELEASES it, and that is the one
+ * gesture with a preview in front of it — the same preview Forget always had.
+ * A caller asking for it here is asking for the whole gesture, so this takes
+ * it; what it does NOT do is answer the "work already running" question, for
+ * `forgetPermission`'s reason below.
+ */
+export async function answerPermission(
+  page: Page,
+  effect: PermissionEffect,
+  answer: PermissionAnswer,
+): Promise<void> {
+  // The row is addressed by its effect key, so this is where the words are
+  // checked: the question a person reads must still be the one these helpers
+  // and the approval prompt name (see `PERMISSION_WORDS`).
+  await baseExpect(permissionAnswer(page, effect)).toContainText(PERMISSION_WORDS[effect], {
+    timeout: 15_000,
+  })
+  const control = permissionAnswerControl(page, effect)
+  await baseExpect(control).toHaveCount(1, { timeout: 15_000 })
+
+  // Idempotent: a row already at this answer is answered, and selecting the
+  // value it already holds writes nothing by design.
+  if ((await control.inputValue()) === ANSWER_VALUE[answer]) return
+
+  await control.selectOption(ANSWER_VALUE[answer])
+
+  if (answer === 'Ask every time') {
+    const panel = page
+      .locator('.nocx-dialog__panel')
+      .filter({ has: page.locator('[data-permissions-panel="forget"]') })
+    await baseExpect(panel).toBeVisible({ timeout: 15_000 })
+    await panel.getByRole('button', { name: 'Forget it', exact: true }).click()
+    await baseExpect(panel).toHaveCount(0, { timeout: 15_000 })
+  }
+
+  await expectPermissionAnswer(page, effect, answer)
+}
+
+/**
+ * ONE STANDING ANSWER, in the list of answers a person has given.
+ *
+ * The sibling of `permissionAnswer` above, for the OTHER kind of thing that
+ * page lists. A row answers for a whole class of work and is addressed by its
+ * effect; a standing answer is addressed by the rule's id, which nobody on
+ * this side of the wire can know — the store mints it (AD-7) — so it is found
+ * by the SENTENCE it covers, which is what a person reads and the only handle
+ * they have.
+ *
+ * SCOPED TO THE ANSWERED LIST for `permissionAnswer`'s reason, and here the
+ * scoping is the whole assertion rather than a precaution: a rule appears in
+ * that list and NOWHERE ELSE — forgetting one removes it rather than moving it
+ * to the questions, because a rule is not a question anybody was asked. So its
+ * presence is "this answer stands" and its absence is "it has been taken
+ * back", and a section-blind locator could say neither.
+ */
+export function permissionRule(page: Page, covers: string): Locator {
+  return page
+    .locator('[data-answers="rules"]')
+    .locator('[data-answer^="rule:"]')
+    .filter({ hasText: covers })
+}
+
+/** Where one standing answer stands. Its own control, for
+ *  `permissionAnswerControl`'s reason: the row draws all three answers, so its
+ *  text says nothing about which one is in force. */
+export async function expectPermissionRule(
+  page: Page,
+  covers: string,
+  answer: PermissionAnswer,
+): Promise<void> {
+  await baseExpect(permissionRule(page, covers).getByRole('combobox')).toHaveValue(
+    ANSWER_VALUE[answer],
+    { timeout: 15_000 },
+  )
+}
+
+/**
+ * Take one standing answer back, through Forget. The Assistant permissions
+ * page must already be open.
+ *
+ * Waits on the answer LEAVING the list rather than on the panel closing, for
+ * `answerPermission`'s reason: there is no draft and no Save, so the store's
+ * own word — what a fresh read comes back with — is the only thing worth
+ * waiting for.
+ *
+ * It does NOT answer the "what happens to the work already running" question
+ * (nocx-r4fh8): a caller that forgets an answer while a run is still deciding
+ * under it has a decision to make, and making it here silently would be this
+ * helper choosing for the spec. Such a forget leaves the panel open with the
+ * question in it, and this fails on the answer that never left the list —
+ * which is the honest report.
+ */
+export async function forgetPermission(page: Page, covers: string): Promise<void> {
+  const row = permissionRule(page, covers)
+  await baseExpect(row).toHaveCount(1, { timeout: 15_000 })
+  // Releasing an answer is choosing "Ask every time" on the answer's own
+  // control (nocx-v8c5j): one gesture, and the preview it opens is the one
+  // Forget always had.
+  await row.getByRole('combobox').selectOption(ANSWER_VALUE['Ask every time'])
+  const panel = page
+    .locator('.nocx-dialog__panel')
+    .filter({ has: page.locator('[data-permissions-panel="forget"]') })
+  await baseExpect(panel).toBeVisible({ timeout: 15_000 })
+  await panel.getByRole('button', { name: 'Forget it', exact: true }).click()
+  await baseExpect(permissionRule(page, covers)).toHaveCount(0, { timeout: 15_000 })
+}
+
+/**
+ * Open one of the two writing panels on Assistant permissions, type a command
+ * into it, and have the BACKEND read it. Answers with the panel.
+ *
+ * It stops at the reading DELIBERATELY. Both panels begin the same way and
+ * then diverge — a permit is offered over the command WORD the reading
+ * answered with, a refusal over the exact parse or over a semantic feature the
+ * classifier recorded — and which of those a spec accepts, and what the offer
+ * must say before it does, is the claim the spec is making. A helper that
+ * pressed the save button would be making it instead, once, for every caller.
+ *
+ * The command is never run: `policy.classify` parses and classifies it. That
+ * is the property the whole gesture stands on and it is the backend's to keep,
+ * not this helper's to assume.
+ */
+export async function readCommandForPermission(
+  page: Page,
+  mode: 'allow' | 'refuse',
+  command: string,
+): Promise<Locator> {
+  await page
+    .getByRole('button', { name: mode === 'allow' ? '+ Allow a command…' : '+ Write a refusal' })
+    .click()
+  const panel = page
+    .locator('.nocx-dialog__panel')
+    .filter({ has: page.locator(`[data-permissions-panel="${mode}"]`) })
+  await baseExpect(panel).toBeVisible({ timeout: 15_000 })
+  // By its label, exactly: the kit mints an id for a field given a label and
+  // no id (nocx-4yjwk.9), so `The command` now names the input itself. The
+  // exact form is what makes that an assertion — `+ Allow a command…`'s action
+  // group is called "Read the command", and a substring match would be
+  // satisfied by the group whether or not the field has a name of its own.
+  await panel.getByLabel('The command', { exact: true }).fill(command)
+  await panel.getByRole('button', { name: 'Read this command', exact: true }).click()
+  return panel
 }

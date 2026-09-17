@@ -61,7 +61,7 @@
  * about, and it needs the real window.go rather than a stub.
  */
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
 import { awaitCoordinator } from './coordinator.mjs'
@@ -175,6 +175,35 @@ export function readStand(): StandManifest {
 }
 
 /**
+ * The shared stand's backend log so far, for a test that wants to say WHY it
+ * failed (nocx-n14oo.11). Bounded the way VaultBackend.logTail is: the whole
+ * run's log can be many megabytes by the time a late spec fails, and a
+ * failure report is not the place to print all of it.
+ *
+ * READS THE FILE, not the `backendLog` variable. globalSetup — which calls
+ * startStand() and owns that variable — runs in Playwright's ORCHESTRATOR
+ * process; every spec file runs in its own WORKER process, a separate
+ * process with its own copy of this module and its own `backendLog`,
+ * permanently empty. The log file under test-results/stand/ is the one
+ * channel both processes actually share, kept current by startStand's
+ * output handlers appending to it as the backend writes rather than only at
+ * teardown — so this is what a worker's failure report can actually read.
+ *
+ * Empty rather than throwing before the stand exists — a diagnostic that
+ * cannot find its own inputs must say so quietly, not replace the test's own
+ * failure with one about the machinery.
+ */
+export function standBackendLogTail(maxChars = 20_000): string {
+  let content: string
+  try {
+    content = readFileSync(path.join(repoRoot, 'test-results', 'stand', 'backend.log'), 'utf8')
+  } catch {
+    return ''
+  }
+  return content.length <= maxChars ? content : `…${content.slice(-maxChars)}`
+}
+
+/**
  * Take the launching shell's `$SHELL` out of what the backend inherits.
  *
  * It no longer decides anything, and that is the point of still removing it.
@@ -206,6 +235,13 @@ function withoutHostShell(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 let backend: ChildProcess | null = null
 let vite: ChildProcess | null = null
 let logDir = ''
+// Module-scope, not local to startStand: a failing test's diagnostics
+// (e2e/failure-context.ts) reads this WHILE THE RUN IS STILL GOING, to
+// filter it by that test's own trace_id. It used to be a variable local to
+// startStand's closure, flushed to disk only at stopStand — readable only
+// after the whole run, which is one run too late for a test that failed in
+// the middle of it (nocx-n14oo.11).
+let backendLog = ''
 
 function waitFor(what: string, probe: () => boolean, proc: ChildProcess, log: () => string) {
   return new Promise<void>((resolve, reject) => {
@@ -269,9 +305,35 @@ export async function startStand(): Promise<StandManifest> {
   // could never render. The suite needs them, so the suite builds them
   // (nocx-eoijp).
   //
-  // `make helpers`, not a second copy of the build matrix: HELPER_TARGETS and
-  // the CGO_ENABLED=0 static recipe have one owner, and it is the Makefile.
-  execFileSync('make', ['helpers'], { cwd: repoRoot, stdio: 'inherit' })
+  // ONE `make` TARGET, not a second copy of the build matrix: which platforms
+  // to build, the per-target Zig compiler and the pinned libghostty-vt
+  // archives have one owner, and it is the Makefile. Since nocx-ygxjv.10 the
+  // target it calls also fetches the archives from the release the manifest
+  // names and verifies them against it — so this line needs the image to carry
+  // the pinned Zig and the fetch to be able to reach that release, and it links
+  // a statically built helper on Linux rather than a purely Go one.
+  //
+  // AND IT IS `helpers-this-machine`, NOT `helpers` (nocx-trkgm). A run asks
+  // for the artifact of ONE platform, and it is this host's: the platform is
+  // what the FAR host answers, deploy.Probe reads `uname -s -m` over the
+  // connection (internal/helper/deploy/platform.go), and every SSH target this
+  // suite reaches is cmd/e2e-sshd on loopback. `helpers` builds the four
+  // platforms the product SHIPS for, and in CI that matrix was 3 minutes of the
+  // job's setup for three artifacts no spec could ask for (measured 2026-09-17,
+  // run 35205572891: 09:54:14 → 09:57:18 for the artifacts, the local helper
+  // and nocx-server together, against a cold Go cache).
+  //
+  // require-local-helper IS THE SECOND DIRECTORY, and it is the stand's because
+  // a stand without it is a stand where no pane opens: the local install
+  // stopped falling back to the deployable artifact (nocx-50w7p.7), and every
+  // spec in this suite drives a terminal. It builds this host's variant and
+  // then asserts the embed really carries it, which a bare `make helper-local`
+  // does not — the failure it catches is an artifact written where //go:embed
+  // does not read it. That target runs both halves, both for this host.
+  execFileSync('make', ['helpers-this-machine'], {
+    cwd: repoRoot,
+    stdio: 'inherit',
+  })
 
   // Built, not `go run`: go run wraps the binary in a child that survives a
   // kill of the parent, and an orphaned backend holds its profile's discovery
@@ -299,7 +361,18 @@ export async function startStand(): Promise<StandManifest> {
   const webPort = Number(process.env.NOCX_WEB_PORT ?? 5173)
   const baseURL = `http://127.0.0.1:${webPort}`
 
-  let backendLog = ''
+  backendLog = ''
+  // Truncated fresh, then appended to AS OUTPUT ARRIVES — not only at
+  // stopStand (nocx-n14oo.11). globalSetup runs in Playwright's own
+  // orchestrator process; every test file runs in a separate WORKER
+  // process, so a worker reading the `backendLog` module variable here
+  // would be reading its own process's copy, which startStand() never
+  // wrote a byte into. The file is the one channel the two processes
+  // actually share, so standBackendLogTail() below reads THIS file rather
+  // than the variable — the variable stays only for flush()'s vite.log
+  // sibling and for a possible future in-process reader.
+  const liveBackendLogPath = path.join(logDir, 'backend.log')
+  writeFileSync(liveBackendLogPath, '')
   // NO ARGUMENTS AND NO ADDRESS. nocx-server binds loopback on a port the OS
   // picks and takes no flags at all, which is what keeps a token off argv
   // (design §6); where it landed is the discovery socket's to say. The stand
@@ -310,8 +383,17 @@ export async function startStand(): Promise<StandManifest> {
     env: isolation.env,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
-  backend.stdout?.on('data', (b: Buffer) => (backendLog += b.toString()))
-  backend.stderr?.on('data', (b: Buffer) => (backendLog += b.toString()))
+  const onBackendOutput = (b: Buffer): void => {
+    backendLog += b.toString()
+    try {
+      appendFileSync(liveBackendLogPath, b)
+    } catch {
+      /* a failure report reading a log a byte short of the truth is still
+       * better than a crashed stand; this is a courtesy write. */
+    }
+  }
+  backend.stdout?.on('data', onBackendOutput)
+  backend.stderr?.on('data', onBackendOutput)
 
   const endpoint = await awaitCoordinator({
     readLog: () => backendLog,

@@ -89,7 +89,7 @@ const (
 	// whether a handle resolves; this is the wire bound before resolution.
 	maxSecretRowRunes = 128
 	// maxEnumRunes bounds the closed-set option fields (auth, desiredMode,
-	// relayConsent, portDiscovery, behaviorOnSessionEnd) and the profile
+	// helperConsent, portDiscovery, behaviorOnSessionEnd) and the profile
 	// type. Their value sets are short literals. An unrecognised value is
 	// deliberately NOT refused here — resolution falls back to the default
 	// for a stored value (nocx-mlm7) — so this is a wire bound, not a
@@ -270,7 +270,7 @@ func validateStoredOptions(o profile.StoredSSHProfileOptions) string {
 	if msg := boundedOptionalRunes("options.desiredMode", o.DesiredMode, maxEnumRunes); msg != "" {
 		return msg
 	}
-	if msg := boundedOptionalRunes("options.relayConsent", o.RelayConsent, maxEnumRunes); msg != "" {
+	if msg := boundedOptionalRunes("options.helperConsent", o.HelperConsent, maxEnumRunes); msg != "" {
 		return msg
 	}
 	if msg := boundedOptionalRunes("options.portDiscovery", o.PortDiscovery, maxEnumRunes); msg != "" {
@@ -437,7 +437,7 @@ func validatePatchRaw(raw json.RawMessage) string {
 					return msg
 				}
 			}
-		case "options.auth", "options.desiredMode", "options.relayConsent",
+		case "options.auth", "options.desiredMode", "options.helperConsent",
 			"options.portDiscovery", "options.behaviorOnSessionEnd":
 			if s, ok := v.(string); ok {
 				if msg := boundedRunes(path, s, maxEnumRunes); msg != "" {
@@ -2347,6 +2347,16 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 		regResponder(configSub, "profiles.patch", params(validatePatchRaw), func(r Responder) handlerFunc {
 			h := profileHandlers{op: configOp, wired: profilesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		// connections.setIntegrationMethod (ADR-0069) writes the connect-time
+		// ask's answer through the SAME configOp profiles.patch uses — never a
+		// second owner of desiredMode — and grants the helper's machine
+		// consent when the chosen method is helper. Registered here, under
+		// the config domain gate, rather than in seamSpecs: unlike
+		// connections.trustHostKey it can write the profile store.
+		regResponder(configSub, "connections.setIntegrationMethod", params(validateIntegrationMethodRaw), func(r Responder) handlerFunc {
+			h := integrationMethodHandlers{op: configOp, wired: profilesWired, granter: s.helperConsentWriter, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		}),
 		regResponder(configSub, "endpoints.list", noParams(), func(r Responder) handlerFunc {
 			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}

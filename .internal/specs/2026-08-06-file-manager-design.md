@@ -722,7 +722,7 @@ remote helper is the architecturally sanctioned path — `architecture.md:203` n
 remote metadata (file-tree)" as its revisit trigger and reserves the `metadata` msg-type for
 its feed — and it is a **later** epic (`nocx-if6`), consent-gated, that must augment polling
 and degrade back to it. Bending the current shell-integration scripts into a provisional
-relay is the trap.
+helper is the trap.
 
 ### 5.6 Lifecycle
 

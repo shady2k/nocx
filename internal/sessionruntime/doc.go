@@ -1,0 +1,111 @@
+// Package sessionruntime is the session runtime's state machine, written as an
+// executable contract BEFORE it is an implementation (bead nocx-ygxjv.1,
+// [ADR-0066]).
+//
+// # What is here and what is deliberately not
+//
+// These files declare the VOCABULARY: the states, the events, the errors and
+// the [Runtime] interface an implementation must satisfy. The contract exists
+// so that an implementation cannot choose the model by accident, the way
+// internal/lifecycle's kernel exists ahead of its transports.
+//
+// # The implementation has arrived, and it is judged by the same schedules
+//
+// nocx-ygxjv.9 lands it in runtime.go: [Session], a runtime over a real PTY and
+// the real emulator (internal/emulator, the adapter in internal/emulator/ghostty),
+// built by [New] from a [Config]. The schedules in contract_test.go are run
+// against it in schedules_test.go, constructed over instruments of its own
+// (harness_test.go), because that is the only way the contract can be evidence
+// about the product rather than about itself — and the three assertions in
+// those schedules that a real terminal cannot reach are named there, with the
+// reason, rather than relaxed here.
+//
+// Two things about the contract changed with the implementation, both of them
+// the same concept having had two owners:
+//
+//   - [Geometry] is internal/emulator's own type, aliased rather than
+//     re-declared, so a size has one owner;
+//   - [Emulator] carries the port's own signature for resize, so that the
+//     port's terminal SATISFIES it (asserted where the implementation is)
+//     instead of being wrapped in a second declaration that would drop the
+//     replies a program's in-band size report consists of.
+//
+// PLACED, AND IN PRODUCTION, SINCE nocx-ygxjv.12 — this paragraph used to say
+// the opposite and was left standing two rounds too long. The runtime is built
+// beside the helper's PTY by internal/helper/session (newSessionRuntime, called
+// from spawn before the first byte of output is read) and destroyed when the
+// session ends, and a coordinator reads its screen across the helper wire
+// (proto.OpScreen, nocx-ygxjv.3). What is STILL not here is the renderer's own
+// reply path: a mounted pane answering the program's questions from the
+// browser is a client-epic change (design §6.5), and until it lands the two
+// answerers ADR-0066 names both exist.
+//
+// The MODEL — a reference implementation of [Runtime] over the test's own
+// terminal, emulator and consumers, with no I/O behind any of them — and the
+// SCHEDULES that judge it live in this package's _test.go files. Every schedule
+// takes a [Runtime] and nothing else, and what it observes it observes through
+// the interface: the transitions it drives, the snapshot and the records the
+// interface answers with ([Runtime.Intents], [Runtime.ReportedGeometry],
+// [Runtime.IngestState]), and the instruments the runtime was constructed over
+// ([Runtime.Terminal], [Runtime.Emulator], [Runtime.Consumers]) — which a
+// schedule reads through the CONTRACT's instrument types
+// ([TerminalInstrument], [EmulatorInstrument]) rather than through any one
+// implementation's fixtures. So the same schedules run against the real runtime
+// when it arrives — provided it is CONSTRUCTED over instruments, which is what
+// those two types are for — and that is the only way the contract can be
+// evidence about the product rather than about itself.
+//
+// The construction is the HARNESS's and not an obligation on the ports. The
+// instrument capabilities are optional by design — a shipped runtime implements
+// [Terminal] and [Emulator] and nothing more — and a real runtime satisfies the
+// schedules that read the boundary by being built over instruments in its own
+// tests: a terminal and an emulator that record what they were handed and can
+// be told to refuse, wrapped around the real ones. The record is the wrapper's;
+// no shipped adapter keeps a log of the keystrokes it forwards, and no shipped
+// emulator refuses a size because a test said so. Every schedule that does not
+// read the boundary is satisfied by the ports alone.
+//
+// One thing in those files is the model's and NOT the contract's: the removable
+// rule set ([without] in model_test.go). Removing a rule is how the MODEL is
+// shown to be falsifiable — a shortcut it could have taken — and a real runtime
+// has no rules to switch off. The assertion a removal makes fail is a statement
+// about the contract and holds for any implementation; which rule's removal
+// fires which assertion is a statement about the model alone.
+//
+// # Why the vocabulary is production and the model is not
+//
+// Not an aesthetic choice. A new production package with no caller fails the
+// dead-code ratchet (AGENTS.md, "Is the code reachable?"), and a package with
+// only _test.go files fails `go build ./...`, which the build-ci target runs.
+// Types, constants and an interface are neither: `deadcode` answers "is this
+// FUNCTION reachable from main", and there are no functions here to answer
+// about. The model's own constructor and transitions are therefore in the test
+// files, where they belong until something implements them for real.
+//
+// # Composition, not absorption
+//
+// The runtime does NOT own the authenticated lifecycle. internal/lifecycle
+// already does — domains, epochs, capabilities, the sequence rule, the attempt
+// model and logical completion are its, and ADR-0024 decisions 2, 3, 5, 6, 7
+// and 8 are recorded against it. What the runtime owns is the RENDEZVOUS: the
+// meeting of an authenticated completion with the render fence the emulator
+// saw, which executes in the renderer today (frontend/src/scrollback/blocks.ts)
+// and moves here because the emulator moved here (ADR-0066). So the lifecycle
+// reaches this package through [AuthenticatedEvents], a port, and nothing in
+// here authenticates anything.
+//
+// # The write boundary already has an owner, and this does not become a second
+//
+// internal/helper/session.hostSession.write holds its mutex from validating the
+// writer, the attachment and proto.LeaseEpoch through the return of
+// proc.Write, so a lease transition can never land between the check and the
+// write. That lease's subject is a COORDINATOR ATTACHMENT: which connection may
+// write at all. [ControlEpoch] here has a different subject — which PRINCIPAL,
+// a person or an agent, is currently directing the session — and the two are
+// nested rather than parallel. A write is executed only when it carries a live
+// control epoch AND arrives over the attachment holding the carrier lease.
+// Declaring both, and the relation, is the point: proto.LeaseEpoch cannot be
+// declared the human/agent control epoch (today a person and an agent reach the
+// PTY through one of them), and a second counter with the SAME subject would be
+// the duplicate-owner defect AD-8 exists to prevent.
+package sessionruntime

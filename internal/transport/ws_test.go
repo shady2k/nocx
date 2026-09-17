@@ -1550,6 +1550,11 @@ func TestWSServer_OpenSSHError_ClassifiedError(t *testing.T) {
 
 	ws := NewWSServer(
 		logger, reg,
+		// The ssh pane this test opens is this machine's helper's
+		// (nocx-50w7p.5), and the FACTORY's error must still be the subject:
+		// the helper route reaches the same factory the direct route did, so
+		// the classified error on the wire is unchanged.
+		sshHelperOpt(reg),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(profileID string) (string, *ssh.ConnectConfig, error) {
 				return "host.example.com", &ssh.ConnectConfig{User: "test", Port: 22}, nil
@@ -2544,7 +2549,11 @@ func newReplayHarness(t *testing.T, forwards []profile.ForwardSpec) *replayHarne
 
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), reg,
-		WithTunnelConnector(tunnelTestClient(t, srv)),
+		// The ssh pane this harness opens is this machine's helper's
+		// (nocx-50w7p.5). The three replay cases measure what a stored-forward
+		// REPLAY does, which is downstream of the pane existing.
+		sshHelperOpt(reg),
+		WithTunnelConnector(tunnelTestConnector(t, srv)),
 		WithProfileResolver(&fixedProfileResolver{host: srv.addr, cfg: tunnelResolveConfig(srv)}),
 		WithProfileRepository(ps),
 	)
@@ -2696,6 +2705,11 @@ func shellCaptureHarness(t *testing.T) (*websocket.Conn, func() []ssh.ConnectOpt
 	})
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), reg,
+		// The ssh pane this harness opens is this machine's helper's
+		// (nocx-50w7p.5). Its subject is the ConnectOptions the registry built,
+		// where a shell pin either rides or does not — which is downstream of
+		// the pane existing.
+		sshHelperOpt(reg),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(profileID string) (string, *ssh.ConnectConfig, error) {
 				return "host.example.com", &ssh.ConnectConfig{User: "test"}, nil

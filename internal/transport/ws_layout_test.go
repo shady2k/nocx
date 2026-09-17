@@ -589,7 +589,7 @@ func TestLayoutRefusesRowsThatDoNotExist(t *testing.T) {
 // DECLARED wire: no contract in the repository names a tab as an address —
 // the pane object's tabId is the one occurrence and it is a field of an
 // object the renderer asked for, which is why it is named here rather than
-// waved through by a looser rule. The second is over a REAL notification off
+// workerd through by a looser rule. The second is over a REAL notification off
 // a real socket, so a payload built outside the schemas cannot slip past.
 func TestNoContractDeclaresATabAddress(t *testing.T) {
 	entries, err := os.ReadDir(contractDir)

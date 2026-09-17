@@ -14,6 +14,7 @@ package storagetest
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -79,7 +80,7 @@ func Isolate(t *testing.T) string {
 func IsolateWithHome(t *testing.T) string {
 	t.Helper()
 	Isolate(t)
-	home, err := os.MkdirTemp("", "nocx-test-home-")
+	home, err := os.MkdirTemp(DisposableRoot(), "nocx-home-")
 	if err != nil {
 		t.Fatalf("create the disposable home: %v", err)
 	}
@@ -88,8 +89,57 @@ func IsolateWithHome(t *testing.T) string {
 	return home
 }
 
+// SocketDir is a short directory under the same disposable root as
+// [IsolateWithHome], for a test that binds a unix socket directly — a
+// coordinator discovery socket, a worker tool endpoint, a bare helper
+// endpoint dialled by generation — and has no profile layout of its own to
+// isolate.
+//
+// t.TempDir() embeds the test's own name, and on macOS a TMPDIR of
+// /var/folders/<two random components>/T/ sits ahead of that (49 bytes
+// before the test's own name), so this had already grown three near-copies
+// of "make the directory short" before this one: internal/coordinator's
+// shortTempDir and shortDir, and internal/app's shortWorkerSocketDir. Each
+// shortened only the directory's own prefix — os.MkdirTemp("", "nocxbind"),
+// its siblings — which still resolves under TMPDIR and so still loses
+// whatever TMPDIR grows to next; it happened to leave enough room on this
+// runner and is exactly the fragility DisposableRoot was chosen over for
+// IsolateWithHome. This is the one answer, sharing that already-fixed root
+// instead of shortening a second, independent prefix under the same
+// vulnerable parent.
+func SocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(DisposableRoot(), "nocx-sock-")
+	if err != nil {
+		t.Fatalf("create a short socket directory: %v", err)
+	}
+	t.Cleanup(func() { removeUnderTempDir(t, dir) })
+	return dir
+}
+
+// DisposableRoot is where a disposable home and a socket directory are made,
+// the only root removeUnderTempDir will delete under, and the answer a fixture
+// checks before writing into what it believes is a disposable home.
+//
+// On macOS it is /tmp, not os.TempDir(). TMPDIR there is
+// /var/folders/<two random components>/T/, 49 bytes before the home's own
+// name, and a home is where this machine's helper binds its endpoint socket
+// (<home>/.nocx/run/<generation>.sock). That came to 108-109 bytes against
+// darwin's 103-byte limit (endpoint.maxSocketPath), so every internal/app test
+// that opens a pane was refused on the macOS runner with ErrPathTooLong, and
+// passed on Linux, whose TMPDIR is /tmp. A real user's home is short; only
+// the test's was not. nocx-lvdj3 met the same limit for the coordinator's
+// socket and shortened a prefix; a prefix still leaves the home at the mercy
+// of the runner's TMPDIR, so the root is chosen instead.
+func DisposableRoot() string {
+	if runtime.GOOS == "darwin" {
+		return "/tmp"
+	}
+	return os.TempDir()
+}
+
 // removeUnderTempDir deletes a tree only after proving it is inside the
-// system temporary directory, and fails the test loudly rather than deleting
+// disposable root (DisposableRoot), and fails the test loudly rather than deleting
 // anything else.
 //
 // The check is here because of what this helper is for: it hands a test a
@@ -105,7 +155,7 @@ func IsolateWithHome(t *testing.T) string {
 // legitimate path on the platform this ships to first.
 func removeUnderTempDir(t *testing.T, dir string) {
 	t.Helper()
-	root, err := filepath.EvalSymlinks(os.TempDir())
+	root, err := filepath.EvalSymlinks(DisposableRoot())
 	if err != nil {
 		t.Errorf("resolve the temporary root, so %q was NOT removed: %v", dir, err)
 		return

@@ -40,7 +40,6 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/notify"
-	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
@@ -254,6 +253,13 @@ type WSServer struct {
 	// model is offered no tools — the state before readScreen (see
 	// runGrantFor).
 	agentPolicy assistant.GlobalPolicy
+	// agentAccess is the durable record of which AGENT PROGRAMS a person has
+	// admitted to the tool endpoint — a different question from agentPolicy,
+	// which governs what nocx's own assistant may do. Named by the
+	// composition root; unset, the two agentAccess methods answer "not
+	// available" rather than an empty list, because "nothing is remembered"
+	// and "this window cannot see what is remembered" are different facts.
+	agentAccess AgentAccessStore
 	// liveEffects is which of that policy's seven rows govern anything at
 	// all: the effect classes at least one DECLARED tool carries. It is
 	// static, derived at build time from the tool declaration table, and it
@@ -297,16 +303,42 @@ type WSServer struct {
 	// Structured backup capability and native file saver. The operation is
 	// constructed after all options so it shares the current config gate.
 	backupService *backup.Service
-	// paneGrid is the backend's VT grid for ENROLLED panes (nocx-szb40.2,
-	// the AD-6 amendment). Nil is the normal state: a session without one
-	// runs exactly as it did before, and the byte path never depends on it.
-	paneGrid panegrid.Observer
+	// paneScreens is the store a watched pane's frame is read from
+	// (ADR-0066): the coordinator holds no emulator, so this is a question
+	// asked of the helper that owns the pane. Nil is the normal state: a
+	// session nobody watches runs exactly as it did before, and the byte path
+	// never depends on it.
+	paneScreens paneScreens
 	// paneObserver classifies an enrolled pane's grid and reports the
 	// changes (nocx-szb40.3). Nil when unwired, like paneGrid above.
 	paneObserver paneObserver
+	// paneAdmissions is the end of the ADMISSION INTERVAL a session's
+	// enrolment opened (ADR-0058, nocx-9mn6z). Nil when unwired: a session's
+	// end then closes the watch and the frame and leaves any admitted tool
+	// connection alone, which is what this server did before the seam existed.
+	paneAdmissions paneAdmissions
+	// agentRules is what a pane's rule READS on its frame, for the emitting
+	// view (nocx-02uci). Nil when unwired, and agent.emitting then answers
+	// that it is not available rather than a screen with no reading beside
+	// it — the half of that view the design says may not be missing.
+	agentRules agentRules
+	// agentRuleStore is where a person's OWN rule for an agent lives
+	// (nocx-y6w66). Nil when unwired, and the four agent.rules* methods then
+	// answer "not found" rather than a list of agents nobody can edit.
+	agentRuleStore agentRuleStore
+	// agentCalibration runs the guided calibration walk (nocx-etejh). Nil
+	// when unwired, and both agent.calibration methods then answer "not
+	// found" rather than a step list nobody can answer.
+	agentCalibration agentCalibrator
+	// agentTypist is the one thing in nocx that writes into an agent's pane
+	// (nocx-dkawo.1). Nil when unwired, and agent.type then answers "not
+	// found" — a surface must be able to tell "nocx cannot type here" from
+	// "the rule refused", because only one of those is repairable by
+	// calibrating.
+	agentTypist agentTypist
 	// sweepDone closes at Stop and is the coalescer's second end;
 	// sweepExited closes when the coalescer has actually returned, so Stop
-	// can be sure nothing is still sweeping. Same shape as panegrid's own
+	// can be sure nothing is still sweeping. Same shape as the watcher's own
 	// drain handshake: asking a goroutine to stop is not the same as it
 	// having stopped, and an interval whose close nobody waits for is an
 	// interval with one end.
@@ -363,11 +395,10 @@ type WSServer struct {
 	// empty helpers list — nothing is claimed installed that cannot be
 	// shown.
 	helperInstalls *consent.InstallStore
-	// helperConsent is the per-machine relay-tier answer store
-	// (remote-helper design D8): the write half shell.footprint.consent
-	// persists grants through. Wired through WithHelperConsentStore; when
-	// nil, the method refuses — the consent prompt is never offered by a
-	// server that cannot record the answer.
+	// helperConsent is the per-machine helper-tier answer store (ADR-0034,
+	// ADR-0068). Wired through WithHelperConsentStore; when nil,
+	// shell.footprint.helperUninstall skips revocation rather than
+	// claiming it.
 	helperConsent *consent.Store
 	// installedFactSeen bounds the write to once per domain: a lane
 	// publishes a fact at every prompt, and the installation it reports does
@@ -375,10 +406,13 @@ type WSServer struct {
 	installedFactMu   sync.Mutex
 	installedFactSeen map[string]struct{}
 
-	// remoteUninstaller removes the integration bundle on a remote host,
-	// owning the dial-and-call (P10). Wired through WithRemoteUninstaller;
-	// when nil, shell.footprint.uninstall answers an error and removes
-	// nothing — the status surface never offers the button without it.
+	// remoteUninstaller removes the integration bundle on a remote host. It no
+	// longer owns a dial of its own (nocx-50w7p.5): the carrier rides THIS
+	// MACHINE'S HELPER's probe lease and sftp channel, so what the transport
+	// holds is a capability whose transport is the helper's and whose only
+	// client is that lease. Wired through WithRemoteUninstaller; when nil,
+	// shell.footprint.uninstall answers an error and removes nothing — the
+	// status surface never offers the button without it.
 	remoteUninstaller RemoteUninstaller
 
 	// helperUninstaller removes a helper install tree on a remote host,
@@ -421,6 +455,11 @@ type WSServer struct {
 	// (connections.trustHostKey — accept-on-first-use). When nil, the
 	// handler returns a JSON-RPC error.
 	hostKeyTruster HostKeyTruster
+	// helperConsentWriter grants the machine's helper consent when the
+	// connect-time ask is answered "helper" (connections.setIntegrationMethod
+	// — ADR-0069). When nil, choosing helper fails; choosing raw or script
+	// needs no granter at all.
+	helperConsentWriter HelperConsentGranter
 	// probeResultStore records probe outcomes as operational evidence.
 	// When nil, probe results are not stored (the probe still runs and
 	// returns its outcome to the caller).
@@ -466,6 +505,13 @@ type WSServer struct {
 	// the run terminalizes or the process restarts.
 	pendingRuns   map[int64]askRunContext
 	pendingRunsMu sync.Mutex
+	// agentTerminalizer builds the agent handler a NON-agent caller needs in
+	// order to end a run through the one terminalization path (nocx-r4fh8:
+	// the settings page's "also stop the runs using it"). It is set by
+	// agentSpecs, which is where those dependencies are assembled, and it is
+	// nil until then — a server registered without the agent methods has no
+	// runs to stop and answers so rather than pretending it stopped none.
+	agentTerminalizer func(Responder) agentHandlers
 	// agentProbeSub runs endpoints.probe probes off the read loop: a
 	// streaming probe can take tens of seconds and must never freeze the
 	// socket that feeds every other tab. It is a bounded QUEUE, not the
@@ -615,14 +661,31 @@ type WSServer struct {
 	git        *registry.Registry
 	gitFactory git.RepoFactory
 	// gitHelperFor resolves the helper-backed repo factory selection
-	// git.open uses for an SSH session (the remote-helper design). When
-	// nil, or when the selection answers none of Factory, ConsentRequired
-	// and Refusal, git.open answers the not-available error for that
-	// session.
+	// git.open uses for an SSH session (ADR-0068). When nil, or when the
+	// selection answers neither Factory nor Refusal, git.open answers the
+	// not-available error for that session.
 	gitHelperFor GitFactoryFor
 	// helperSessionOpener selects the execution-host-owned PTY for remote
 	// opens when the existing helper resolver permits it.
 	helperSessionOpener HelperSessionOpener
+	// opener is the one path a session comes into existence by, shared
+	// between the `open` handler and the backend's own callers
+	// (nocx-dkawo.6). It is built where the method set is assembled, because
+	// that is where the admission gates it runs under exist — which is
+	// NewWSServer, so it is ready before the server serves anything.
+	opener *sessionOpener
+	// workerStore is the worker record a coordinator run reaches through its tools
+	// (nocx-dkawo.8). Wired by the composition root; nil leaves the two worker
+	// tools refusing with a sentence rather than starting a worker into
+	// nothing.
+	workerStore assistant.WorkerRecord
+	// paneAccessBinder mints a run's DescendantPaneAccess/SessionReads
+	// (design §7.1, §7.3, Task 8) — the kernel's side of the binding
+	// worker_auth.go's Admit does for the tool endpoint. Wired by the
+	// composition root; nil leaves every sessionId naming a descendant
+	// refused, which is the honest answer for a build with no hub wired
+	// yet.
+	paneAccessBinder assistant.PaneAccessBinder
 
 	// gitMu guards gitBindings and gitBySession: the transport's own
 	// bookkeeping for bindings it issued (internal/git exposes neither a
@@ -722,6 +785,27 @@ type WSServer struct {
 	lifecyclePub   *lifecyclepub.Publisher
 	lifecycleMu    sync.Mutex
 	lifecycleLanes map[lifecycle.LaneID]session.ID
+	// heldMu guards heldStops, and the lock ORDER is heldMu → lifecycleMu →
+	// the kernel's own lock, because the one read that both arms a hold and
+	// answers what it is for (sessionProtectedForeground.StopTarget) runs
+	// inside heldMu. Nothing takes those two in the other order, and no
+	// helper below calls an emitter, a session or the wire while either is
+	// held.
+	heldMu sync.Mutex
+	// heldStops is one accepted Stop per attempt, waiting for that attempt's
+	// authenticated start (nocx-zas0d, ws_signal.go). Keyed by attempt
+	// because the obligation is about one execution: the same Stop arriving
+	// twice is one obligation, and an attempt that never starts takes its
+	// hold with it when the publisher reports it closed.
+	heldStops map[lifecycle.AttemptID]session.ID
+	// signalSub and signalOps are the execution lane session.signal runs on
+	// (buildControlPlane), shared with the one other thing that is a signal:
+	// a held Stop being delivered when its attempt starts. One lane, so the
+	// bound that keeps a person's Stop off the socket read loop also bounds
+	// the delivery, and neither may wait on the other's permit while holding
+	// the shell channel's reader.
+	signalSub control.Submission
+	signalOps *capability.SessionOperations
 	// integrations is the per-session integration axis published as
 	// session.integrationChanged (nocx-dvql, ws_integration.go). Separate
 	// from lifecycleLanes because it answers a different question: that map
@@ -729,15 +813,18 @@ type WSServer struct {
 	// SESSION's launch started and how far it got.
 	integrationMu sync.Mutex
 	integrations  map[session.ID]*integrationStatus
-	// bootstrapStages is how far each session's shell got through nocx's
-	// rcfile (nocx-yww2). Its own map rather than a field of
-	// integrationStatus, because the two arrive in an order nothing
-	// controls: the shell can write its first fact microseconds after the
-	// fork, while the launch registers the axis only once the pty is back.
-	// A stage folded into the status would be dropped for arriving early,
-	// and the failure it explains is exactly the one where the shell was
-	// fast and then vanished.
-	bootstrapStages map[session.ID]string
+	// integrationWaiters holds, per session, the callers blocked in
+	// AwaitIntegration until that session's axis leaves `starting`
+	// (nocx-ui8q6.4, ws_integration.go). Guarded by integrationMu, the same
+	// lock as integrations: the two describe one fact — the axis is the
+	// stored answer and this is who is holding for the next revision of it —
+	// and a second lock would let a waiter miss a mutation that raced it.
+	integrationWaiters map[session.ID][]chan struct{}
+	// toolSurfaces is the retained launch result for the worker tool path.
+	// It is separate from integration because it answers a different question:
+	// whether the external coordinator can actually reach its tools.
+	toolSurfaceMu sync.Mutex
+	toolSurfaces  map[session.ID]toolSurfaceStatus
 	// recoveryMu guards recoveries: the per-session restoration episodes
 	// (ADR-0024 decision 8). The episode opens when a lost fact with a
 	// recovery fence routes to a live session, and is cancelled when the
@@ -975,8 +1062,8 @@ type RemoteCompleter interface {
 
 // WithCompleters attaches the completion sources for shell.complete
 // (nocx-w7h.15). local answers KindLocal sessions; remote answers
-// KindRemote sessions through a DiscoveryConn acquired with that session's
-// exact SSH options. Either may be nil — the handler then returns a stated
+// KindRemote sessions through a probe lease acquired with this machine's
+// helper under that session's exact SSH options. Either may be nil — the handler then returns a stated
 // empty reason for that session kind rather than a JSON-RPC error.
 func WithCompleters(local completion.Completer, remote RemoteCompleter) WSServerOption {
 	return func(s *WSServer) {
@@ -1055,6 +1142,15 @@ func WithAgentKnownMaterial(km assistant.KnownMaterial) WSServerOption {
 // nil/unset, ask runs carry no grant and the model is offered no tools.
 func WithAgentPolicy(p assistant.GlobalPolicy) WSServerOption {
 	return func(ws *WSServer) { ws.agentPolicy = p }
+}
+
+// WithAgentAccess attaches the record of which agent programs a person has
+// admitted to the tool endpoint, so the answers can be read back and unmade
+// (nocx-6jbad). Unset, agentAccess.list and agentAccess.forget answer "not
+// available": a window that cannot see the document must not draw an empty
+// list, which reads as "you have decided nothing".
+func WithAgentAccess(store AgentAccessStore) WSServerOption {
+	return func(ws *WSServer) { ws.agentAccess = store }
 }
 
 // WithLiveEffects names which effect classes a declared tool actually
@@ -1262,7 +1358,7 @@ func WithFilesystemRegistry(r *filesystem.Registry) WSServerOption {
 
 // WithFilesystemProviderFactory attaches the provider builder files.open
 // uses. The composition root decides which sessions get which providers —
-// local.New for local sessions today, the SFTP provider with the SFTP wave
+// local.New for local sessions today, the SFTP provider with the SFTP worker
 // (design §6 step 4) — and the transport never constructs a provider
 // itself (AD-8). When absent, files.open returns an error.
 func WithFilesystemProviderFactory(f FilesystemProviderFactory) WSServerOption {
@@ -1299,29 +1395,27 @@ type GitOpenRefusal struct {
 }
 
 // GitOpenSelection is the composition root's selection for one SSH session
-// (remote-helper design D8): a factory to open through, consentRequired to
-// answer, or a refusal naming the §6 state and what to do about it.
-// ConsentRequired, Refusal and Factory are mutually exclusive — the ask and
-// the refusal are the alternatives to opening, never a factory that
-// answers them.
+// (ADR-0068): a factory to open through, or a refusal naming the §6 state
+// and what to do about it. git.open never asks — the helper's tier is
+// decided at the connection, or at connect (ADR-0068) — so a machine with
+// no helper-tier answer is a Refusal here, exactly like raw or a denied
+// answer. Refusal and Factory are mutually exclusive.
 type GitOpenSelection struct {
 	Factory git.RepoFactory
-	// ConsentRequired — the session's machine has no relay-tier answer;
-	// git.open must answer the consentRequired state and the panel offers
-	// the consent flow. Set means Factory is nil.
-	ConsentRequired bool
 	// Refusal — the honest refusal when the machine cannot be served:
 	// unsupportedPlatform, deployFailed or execForbidden with the message
 	// naming what to do, or State "" with the reason for the resolver's
-	// Refused (raw, a denied answer). Set means Factory is nil.
+	// Refused (raw, a denied answer, or no helper-tier answer yet — each
+	// naming the connection setting that would change it). Set means
+	// Factory is nil.
 	Refusal *GitOpenRefusal
 }
 
 // GitFactoryFor resolves the helper-backed factory selection git.open uses
 // for an SSH session — the composition root's answer to "is a helper
-// available for this host, and may it be used" (the remote-helper design).
-// ConsentRequired and Refusal answer their states instead of opening; a
-// selection with none of the three answers the not-available error.
+// available for this host, and may it be used" (ADR-0068). Refusal answers
+// its state instead of opening; a selection with neither answers the
+// not-available error.
 
 // HostedSessionOpen is the synchronous result of selecting a helper-owned
 // session. Host, Account and Generation are facts used by later projections;
@@ -1381,8 +1475,24 @@ type HostedSessionOpen struct {
 	ObserveOutputHoles func(func(lost uint64, reason string))
 }
 
+// HelperSessionOpener is "this destination's helper opens the session".
+//
+// IT IS ASKED FOR EVERY DESTINATION, and that is the whole of what makes this
+// machine an entry in the inventory rather than a mode (L1 of the local-helper
+// design, D11 of level 1). Before nocx-ie23r.3 the call was made only on the
+// remote branch, so a local pane could not reach a helper even when one was
+// serving on its own socket; the opener answers "not mine" for what it does
+// not own, which is the same sentence it has always answered, now asked one
+// question more.
+//
+// claim is the idempotency key the coordinator wrote a durable claim under
+// BEFORE this call (L7), and the spawn carries it so a repeat answers with
+// the session the first one made rather than forking a second shell. Empty
+// means no claim was written and the caller is owed no promise — every remote
+// open today, whose spawn/binding interval is the same hole and is not this
+// bead's to close.
 type HelperSessionOpener interface {
-	OpenHosted(ctx context.Context, cfg session.Config) (HostedSessionOpen, bool, error)
+	OpenHosted(ctx context.Context, cfg session.Config, claim string) (HostedSessionOpen, bool, error)
 }
 
 func WithHelperSessionOpener(opener HelperSessionOpener) WSServerOption {
@@ -1499,6 +1609,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		laneCapacity:               DefaultControlLaneCapacity,
 		heartbeatReadWindow:        DefaultHeartbeatReadWindow,
 		domainWaitTimeout:          DefaultDomainConflictWaitTimeout,
+		toolSurfaces:               make(map[session.ID]toolSurfaceStatus),
 		domainMaxQueue:             DefaultDomainMaxQueue,
 		domainQueueDepth:           DefaultDomainQueueDepth,
 		controlDrainTimeout:        defaultControlDrainTimeout,
@@ -1575,6 +1686,13 @@ func (s *WSServer) buildControlPlane() {
 	// The per-operation queue submissions bound in-flight tasks per operation.
 	gates := s.domainGates()
 	immediate := control.ImmediateSubmission{}
+	// The signal lane, built here rather than inside signalSpecs because it
+	// has TWO users and must be one lane: the method a person's Stop calls,
+	// and the delivery of a Stop that was held for an attempt's start
+	// (nocx-zas0d, ws_signal.go). Both are the same act on the same session,
+	// so they share the bound and the serialisation.
+	s.signalOps = capability.NewSessionOperations(gates.session, lane, s.registry, s.profileUsage)
+	s.signalSub = s.operationQueue("signal")
 	// The request broker is constructed here, once the server's connection
 	// set exists: its delivery seams are this server's own snapshot and
 	// per-connection enqueue, and its resolution methods register on the
@@ -1594,7 +1712,7 @@ func (s *WSServer) buildControlPlane() {
 		s.hostSessionInventorySpecs(inventorySub)[0],
 		func() bool { return s.hostSessionInventory != nil },
 		"method not found: helper session inventory not wired"))
-	specs = append(specs, s.signalSpecs(lane, gates.session)...)
+	specs = append(specs, s.signalSpecs()...)
 	specs = append(specs, s.askResolverSpecs(immediate)...)
 	specs = append(specs, s.laneInteractivitySpec(immediate))
 	specs = append(specs, s.brokerSpecs(immediate)...)
@@ -1621,6 +1739,11 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.aboutSpecs()...)
 	specs = append(specs, s.lifecycleSpecs()...)
 	specs = append(specs, s.policySpecs()...)
+	specs = append(specs, s.agentAccessSpecs()...)
+	specs = append(specs, s.agentEmittingSpecs()...)
+	specs = append(specs, s.agentRuleStoreSpecs()...)
+	specs = append(specs, s.agentCalibrationSpecs()...)
+	specs = append(specs, s.agentTypeSpecs()...)
 	specs = append(specs, s.seamSpecs(lane, gates.session)...)
 	methods, err := buildMethodSpecs(specs)
 	if err != nil {
@@ -1939,6 +2062,59 @@ func (s *WSServer) getOrCreateRxAt(id session.ID, base uint64) *sessionRx {
 	rx := &sessionRx{ring: newOutputRingAt(base)}
 	s.rx[id] = rx
 	return rx
+}
+
+// WatchSessionOutput drains a session's replay ring into fn, from the ring's
+// oldest retained byte, until the ring closes or ctx is done.
+//
+// It exists so a caller that needs to SEE what a session produced never
+// has to become a second StartOutput admission. A session's PTY output is a
+// single-consumer stream — session.Session.StartOutput installs the one
+// handler that reads it, and OpenSession already starts that handler itself
+// (pumpToRing, in session_open.go) for every session it opens. A second
+// caller racing pumpToRing for that same admission is refused by
+// realSession.StartOutput on whichever goroutine loses, which is exactly
+// the bug this method exists to make impossible to write again
+// (nocx-7vx5t): the ring pumpToRing already fills is the one place
+// everybody downstream of it reads from, the way ringToConn reads it for a
+// renderer and recordSessionOutput reads it for the store.
+//
+// Used today by internal/app's local-pane tests, which open a pane through
+// the shipped Transport.OpenSession and need to read back what the shell
+// said without contending with the product's own pump for the session.
+//
+// Unlike ringToConn this applies no AD-10 credit flow control and takes no
+// subscriber slot — there is nothing here to protect a socket from, and
+// nothing here ever acks, so the ring is freed by the recorder or by a
+// real subscriber's acks alone, same as if this reader did not exist. A
+// hole or a reset in the ring — the execution-host cases ringToConn and
+// recordSessionOutput both handle — is reported as an error rather than
+// replayed, because neither can happen on a session this method's own
+// caller opened moments ago.
+func (s *WSServer) WatchSessionOutput(ctx context.Context, id session.ID, fn func(data []byte)) error {
+	rx := s.getRx(id)
+	if rx == nil {
+		return fmt.Errorf("transport: no output ring for session %s", id)
+	}
+	ring := rx.ring
+	pos := ring.oldestLocked()
+	for {
+		data, from, needsReset, hole := ring.snapshot(pos)
+		if hole != nil || needsReset {
+			return fmt.Errorf("transport: session %s output lost its place in the ring", id)
+		}
+		if len(data) == 0 {
+			if ring.waitForData(ctx, pos) {
+				return nil // ring closed
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			continue
+		}
+		fn(data)
+		pos = from + uint64(len(data))
+	}
 }
 
 // removeRx drops a session's receiver and returns it, or nil when another
@@ -2294,6 +2470,10 @@ type openParams struct {
 	// overrides the resolved user.
 	Host string `json:"host,omitempty"`
 	User string `json:"user,omitempty"`
+	// DesiredMode is a one-shot integration-method override for a direct-host
+	// ssh open with no saved profile (ADR-0069) — see OpenSpec.DesiredMode.
+	// Empty is the ordinary case.
+	DesiredMode string `json:"desiredMode,omitempty"`
 	// Shell pins the far shell the launcher must target (nocx-pu4.1): a
 	// user who knows their host runs zsh can say so, and where detection
 	// is wrong they have an override. Empty means detect — the launcher
@@ -2707,7 +2887,18 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	// ringToConn goroutines blocked in waitForData receive ctx.Done()
 	// and exit. r.Context() is NOT reliably cancelled for hijacked
 	// WebSocket connections.
-	ctx, cancel := context.WithCancel(r.Context())
+	//
+	// A caller that already has a trace for this exchange says so in the
+	// query string (nocx-n14oo.11): the desktop app never sends one, but the
+	// e2e harness mints one per Playwright test and passes it here as the
+	// same W3C header the wire already understands elsewhere, so every
+	// control frame this connection sends opens a child span of it — a
+	// failing test can then grep the backend's own log for its own trace_id
+	// instead of a backend log some other test happened to leave behind.
+	// An absent or malformed value leaves ContinueTrace a no-op: every
+	// request still opens its own trace, exactly as before this existed.
+	ctx := log.ContinueTrace(r.Context(), r.URL.Query().Get("traceparent"))
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	wconn := newWSConn(s, conn, s.nextConnID.Add(1))
 
@@ -2895,6 +3086,19 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	// them being passed the method or the id. A handler that goes on to
 	// drive an EXCHANGE (an agent run) adds the trace beside it.
 	ctx = log.WithRequestID(ctx, requestTag(wconn, req))
+	// AND THE FRAME IS A SPAN (nocx-4l2a5.3). The request id above is the
+	// transport's own token and joins nothing outside this process; the span
+	// is the W3C identity, so a frame that goes on to reach the tool endpoint,
+	// a helper or a session carries one exchange all the way down. A handler
+	// that drives a RUN opens its own trace over this, because a run outlives
+	// the frame that started it.
+	ctx, _ = log.StartSpan(ctx)
+	// One line every dispatched frame produces (nocx-n14oo.11): most control
+	// handlers never log at all when they succeed, so without this a
+	// connection's trace could go unrepresented in the backend log entirely
+	// even though every frame on it opened a span. This is what a failing
+	// e2e test's printed block actually finds by trace_id.
+	log.From(ctx).Debug("jsonrpc dispatch", "method", req.Method)
 	requestCtx := ctx
 	cancelRequest := func() {}
 	var cancelEntry *requestCancel
@@ -2981,7 +3185,7 @@ func desiredModeForAck(remote *ssh.ConnectConfig) string {
 		return string(profile.DefaultDesiredMode())
 	}
 	switch profile.DesiredMode(remote.DesiredMode) {
-	case profile.DesiredAuto, profile.DesiredRaw, profile.DesiredScript, profile.DesiredRelay:
+	case profile.DesiredAuto, profile.DesiredRaw, profile.DesiredScript, profile.DesiredHelper:
 		return remote.DesiredMode
 	default:
 		return string(profile.DefaultDesiredMode())
@@ -3148,8 +3352,10 @@ func (s *WSServer) pumpToRing(ctx context.Context, sess session.Session, ring *o
 	// first attach. It ends itself when the ring closes.
 	go s.recordSessionOutput(ctx, sess.ID(), ring)
 
+	// The bytes go to the recording and to nothing else: a frame is read from
+	// the runtime that owns the terminal (ADR-0066), never derived here from a
+	// stream whose middle the helper's bounded window may have reclaimed.
 	err := sess.StartOutput(ctx, func(data []byte) error {
-		s.feedPaneGrid(sess.ID(), data)
 		return ring.write(data)
 	})
 	// THE INTERVAL'S SECOND END IS NOT HERE, and it was, which made it no end
@@ -3307,13 +3513,41 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	<-sess.Done()
 
-	// The pane's backend grid closes here, first, because everything below
-	// this line tears down the things a frame could still be about. A session
-	// that is done can produce no further frame, which is what the AD-6
-	// amendment means by the interval's second end — and this is the end that
-	// covers an enrolment whose own withdrawal never came, because the shell
+	// EndSession, not Close (nocx-isjh4, closer 2), and FIRST — moved ahead
+	// of unwatchPane by nocx-xn63t.6.4. This call only ever does anything
+	// for a session whose shell exited with nobody else having touched the
+	// registry yet — Stop() and an explicit close both remove the registry
+	// row themselves, before their own Close/EndSession call can wake this
+	// goroutine, so this line is a no-op for either of them (Reg.Close/
+	// EndSession refuse an id already gone). For the case it DOES act on,
+	// the exit status and the session's recorded output are already this
+	// coordinator's own, in memory, before Done() ever fires — recorded via
+	// the notify path (internal/helper/client.Client.sessionExited) and the
+	// session-output ring this goroutine closes below — so nothing the
+	// "persist, then close" ordering ITSELF requires depends on running
+	// this before unwatchPane.
+	//
+	// What DOES require it: EndSession's own round trip (internal/helper/
+	// client's AttachedSession.EndSession) is this coordinator's only
+	// chance to tell the far helper the session is over, and unwatchPane
+	// ends in helperRegistry.SessionEnded, which — since nocx-xn63t.6.3 —
+	// legitimately closes that same shared client once no git binding
+	// holds it open. Called after unwatchPane, EndSession's CloseSession
+	// could find that client already gone: the far helper never hears it,
+	// and keeps listing a session this coordinator has already given up on
+	// until its own unclaimed-session TTL sweeps it — measured against
+	// e2e/remote-coordinator-reclaim.spec.ts's 60s bound. So the message
+	// that tells the far helper goes out while the connection to send it on
+	// is still guaranteed open.
+	_ = s.registry.EndSession(sess.ID())
+
+	// The pane's observation closes here, because everything below this line
+	// tears down the things a frame could still be about. A session that is
+	// done can produce no further frame, which is what the AD-6 amendment
+	// means by the interval's second end — and this is the end that covers
+	// an enrolment whose own withdrawal never came, because the shell
 	// holding it was killed rather than returning (nocx-szb40.5).
-	s.withdrawPaneGrid(sess.ID())
+	s.unwatchPane(sess.ID())
 
 	// The session died on its own: the close gate is terminal here too, so
 	// a resize in flight on a dead channel is cancelled and nothing new is
@@ -3331,7 +3565,6 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	// goroutine; exactly one of us may delete the bindings, because deleting
 	// them is also the one chance to announce them.
 	owns := s.removeRx(sess.ID()) != nil
-	_ = s.registry.Close(sess.ID())
 
 	// The two responsibilities this path used to drop. closeSession has had
 	// both since it was written; monitorExit is the OTHER teardown owner and
@@ -3583,8 +3816,50 @@ func (s *WSServer) closeSession(sid session.ID, sess session.Session) {
 	// (ws_sessionpolicy.go).
 	s.sessionPolicy.Drop(sid)
 	s.unregisterLifecycleLanes(sid)
+	// A held Stop belongs to an attempt, and an attempt belongs to a session:
+	// when the session ends there is nothing left for the obligation to be
+	// about, and it must not outlive the registry entry that named it
+	// (nocx-zas0d, ws_signal.go's heldStops).
+	s.dropHeldStopsFor(sid)
 	s.unregisterIntegration(sid)
 	s.discoverySessionClosed(sess)
+}
+
+// closeSessionsForPanes ends every session that is the pipe of one of
+// paneIDs — the layout domain's half of nocx-isjh4's closer 1. A pane that
+// has just left the layout for good can never be attached to again (its row
+// survives for entries.pane_id, but no open tab or workspace names it any
+// longer), so this is the moment its helper-hosted session, if it still has
+// one, must give its window budget back.
+//
+// It runs the SAME teardown the explicit "close" RPC runs (closeLane,
+// markCloseRequested, the registry close, then the transport teardown) so a
+// pane closed through the layout chain reads exactly like one closed by
+// hand — not a shell that "was interrupted" — and reuses that closer rather
+// than adding a second one (AGENTS.md, "look for the existing answer").
+//
+// A session with no pane (Config.PaneID empty, e.g. one opened for a
+// backend-internal purpose) is never matched and never touched.
+func (s *WSServer) closeSessionsForPanes(paneIDs map[string]struct{}) {
+	if len(paneIDs) == 0 {
+		return
+	}
+	for _, sess := range s.registry.List() {
+		pane := sess.PaneID()
+		if pane == "" {
+			continue
+		}
+		if _, ok := paneIDs[pane]; !ok {
+			continue
+		}
+		sid := sess.ID()
+		s.closeLane(sid)
+		s.markCloseRequested(sid)
+		if err := s.registry.EndSession(sid); err != nil {
+			s.log.Warn("closing a session whose pane left the layout", "session_id", string(sid), "error", err)
+		}
+		s.closeSession(sid, sess)
+	}
 }
 
 // --- profile/group control-plane handlers -------------------------------
@@ -3891,3 +4166,22 @@ func requestTag(wconn *wsConn, req jsonrpcRequest) string {
 	}
 	return tag
 }
+
+// SetWorkerRecord wires the worker record a coordinator run reaches through
+// workers.spawn and workers.holdings. Without it those tools refuse and say why: a
+// spawn accepted into a record that does not exist is exactly the unaccounted
+// agent the record was built to prevent.
+//
+// A setter rather than an option, for the reason the emitter is one: the
+// record is built from seams this server provides — its own session opener
+// among them — so it cannot exist before the server does. The window before
+// this line is empty, because no run can have been asked yet.
+func (s *WSServer) SetWorkerRecord(w assistant.WorkerRecord) { s.workerStore = w }
+
+// SetPaneAccessBinder wires the kernel's side of descendant-pane authority
+// (design §7.1, §7.3, Task 8): a coordinator run's session.read naming a
+// worker it spawned reaches PaneAccessBinder for its own runID. A setter
+// for the same reason SetWorkerRecord is one — the binder closes over the
+// composition root's hub and PaneReader, which do not exist before the
+// server does.
+func (s *WSServer) SetPaneAccessBinder(b assistant.PaneAccessBinder) { s.paneAccessBinder = b }

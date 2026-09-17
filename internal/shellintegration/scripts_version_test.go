@@ -174,6 +174,45 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// decoder that reads the grant, so a shell still sourcing 42 goes
 		// on running `exec 2>1` in the carrier loader (nocx-eoijp).
 		"43": "55c7fe381542aaceb58f8eec52c81d3224ee3da5003f5623b9305b856eb94c9f",
+		// 44: the accept is identified by domain and epoch. The kernel stopped
+		// echoing the capability on the outbound direction — the descriptor
+		// every descendant of the shell inherits — so a shell still sourcing
+		// 43 waits for a `cap` field that no longer arrives (nocx-aqz7o).
+		"44": "59cdeeb24d397d3b2ef4c3ccdd17c6de9c4e88a329aac25f880555e36b50c2de",
+		// 45: bash and zsh carry the DECLARATION (nocx-dkawo.12). The
+		// wrapper opens a drop before the agent starts, names it in
+		// NOCX_AGENT_REPORT, and sends what the agent wrote there as
+		// agent_report — inside the enrolment's interval and before the
+		// withdraw. Every installed copy must be rewritten: a shell still
+		// sourcing 44 can enrol a worker and can never say what it produced,
+		// so every worker it takes part in terminalizes as abandoned.
+		"45": "f1ae91b06be337ea944586139c77e1261bdf7fc1d325678e65ed405e153b0b02",
+		// 46: bash and zsh stage the enrolled agent's MCP configuration in a
+		// private lease directory rather than writing user-owned config files.
+		"46": "a91ef33f3d15c8af319bc62e1e705ee41206bf4669626bd5dec42c628e71adb6",
+		// 47: preserve the user's Claude flags and prompt before appending the
+		// variadic MCP configuration argument.
+		"47": "08c389e6b00ff30c110fc005d53bbc033ddc381cdb049ce30a7a7e08566ca31a",
+		// 48: identify private launch leases with pid and start time, preserve
+		// the user's signal traps, and prove interruption cleans the launch
+		// directory.
+		"48": "c648dc929b5a14e7e9d28a619f1873d35c7e47a1fdbf81654be66a037ec7a0be",
+		// 49: fail-open lifecycle initialization must not abort a shell running
+		// under errexit when no channel is configured or the channel fails.
+		"49": "4e2e4e3b628401720875b77fc3072d5a6c9b9d4f874265b58581ac01c7901214",
+		// 50: bash and zsh wait on a pending enrolment — the question nocx is
+		// asking — before they start the agent, and Ctrl+C cancels the launch
+		// (nocx-cyhfw). A shell still sourcing 49 reads the wait as a refusal
+		// and starts the agent before anybody has answered.
+		"50": "cfc9be48045ec8c8d505d4bd3446f406e3652c10463857c1ec359269d833e1c4",
+		"51": "d3faeae6c421c4cddf7989289b47ed704a1f8138e25044d798d63acb8ed19a65",
+		"52": "0f2d345dfc3e65fde991ff74f55c25d80bd627f0bb8331bb3d9f3fc368e2ed74",
+		// 53: the agent's report drop travels through `env VAR=val CMD`
+		// instead of a temporary `VAR=val command CMD` assignment, which
+		// bash 3.2 (macOS's /bin/bash) drops before the traced command
+		// execs once this file's own DEBUG-trap preexec hook is installed
+		// (nocx-xn63t.6.1).
+		"53": "393c7948e13e860668b39d9337fc47648d6c38914d2a39625b7a9ae219bd97f7",
 	}
 
 	h := sha256.New()

@@ -9,6 +9,9 @@ type BackendResolution = {
   kind: string
   message: string
   remedy: string
+  /** See Endpoint.traceparent. Absent on the real wails binding; the e2e
+   *  shim (e2e/harness.ts) is the only producer today. */
+  traceparent?: string
 }
 
 const NO_SERVER_FAILURE = {
@@ -39,6 +42,7 @@ function mapResolution(result: BackendResolution): EndpointResult {
         host: result.host,
         port: result.port,
         token: result.token,
+        traceparent: result.traceparent,
       },
     }
   }

@@ -20,7 +20,7 @@ import {
   type RendererMock,
 } from './test-support/panes-fixtures'
 import { isUuidv7 } from './layout/uuid7'
-import { Dispatcher } from './dispatcher'
+import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
 import { WSClient } from './ipc'
 import { LOCAL_BACKEND_ID, Pane, PaneManager } from './panes'
@@ -1574,6 +1574,74 @@ describe('PaneManager', () => {
     expect(errorNotice!.textContent).toContain('session failed')
   })
 
+  // A REFUSAL FROM THE BACKEND IS SHOWN IN FULL WHERE THE PANE DIED
+  // (nocx-ie23r.4, ADR-0057). There is no local fallback, so a helper that
+  // cannot be installed, started or handshaken means no pane — and what the
+  // person gets instead is the backend's own sentence, in the pane: what
+  // failed, why, and what to do. The Go side asserts the frame over the real
+  // socket; this is the renderer's half of the same contract, and it is
+  // asserted as three separate parts because a surface that showed only one of
+  // them would still satisfy a test that looked for one substring.
+  it('shows a helper refusal, all three of its parts, where the pane failed', async () => {
+    // The refusal an unreachable helper produces, verbatim: the message the
+    // backend renders (internal/transport/session_open_helper_refusal.go) with
+    // the two closed-set values beside it.
+    const refusal = new RpcError(
+      "Nocx installed this machine's helper and it did not start: " +
+        'fork/exec /home/dev/.nocx/helper/nocx-helper: permission denied. ' +
+        'Reinstall or update nocx — the helper ships inside the application, so a fresh copy is what ' +
+        'repairs it — then open the pane again.',
+      -32603,
+      { reason: 'start', action: 'reinstall-nocx' },
+    )
+    const client = makeClient({
+      openSession: vi.fn(() => Promise.reject(refusal)),
+    })
+
+    const { bar, panes } = setupTabBarDOM()
+    const clipboard = makeClipboard()
+    const gate = new ClipboardGate()
+    const banner = makeBanner()
+
+    const { PaneManager } = await import('./panes')
+    const { HorizontalTabStrip } = await import('./tab-strip')
+    const tabStrip = new HorizontalTabStrip()
+    const profileClient = {
+      list: () => Promise.resolve([]),
+      get: () => Promise.resolve(null),
+      create: () => Promise.resolve(''),
+      update: () => Promise.resolve(),
+      delete: () => Promise.resolve(),
+      connect: () => Promise.resolve(''),
+    } as unknown as import('./profiles').ProfileClient
+    const manager = new PaneManager(
+      bar,
+      bar,
+      panes,
+      client as unknown as import('./ipc').WSClient,
+      clipboard,
+      gate,
+      banner,
+      profileClient,
+      tabStrip,
+      makeLayoutStore().store,
+      makeUIStateBackend().newClient(),
+    )
+    void manager.openInitialPane()
+    await expect(manager.initialPaneReady).rejects.toThrow('initial pane failed to start')
+
+    const notice = panes.querySelector('.pane')?.querySelector('.pane-error')
+    expect(notice).not.toBeNull()
+    const text = notice!.textContent ?? ''
+
+    // What failed.
+    expect(text).toContain('did not start')
+    // Why — the concrete error, not the category.
+    expect(text).toContain('permission denied')
+    // What to do, which is the part a refusal is most likely to lose.
+    expect(text).toContain('Reinstall or update nocx')
+  })
+
   it('Tab.ready resolves true for a genuinely started tab', async () => {
     // initialPaneReady resolved above, proving the content-level signal resolved true.
     //
@@ -2885,6 +2953,7 @@ describe('a driver observation reaches the tab (nocx-szb40.3, nocx-szb40.4)', ()
           ...observationIdentity,
           agent: 'claude',
           state,
+          progress: 'moving',
         },
       })
     }
@@ -2936,6 +3005,142 @@ describe('a driver observation reaches the tab (nocx-szb40.3, nocx-szb40.4)', ()
         ]),
       )
       expect(indicators()[1]).toEqual(expected[1])
+    } finally {
+      realClient.close()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  // THE WHOLE OF nocx-o1v0h, at the seam a person looks at, off a real socket.
+  //
+  // A pane whose agent spawned children shows a row per child with its name
+  // and what it is doing — and the child rows come from the pane's OWN SCREEN.
+  // The backend reads the agent's task panel off a live VT grid; there is no
+  // vendor hook anywhere in this chain, which is the point: the two other
+  // tools that model subagents carry them over a hook, and with no hook they
+  // have no rows at all.
+  //
+  // It is deliberately the real client on a real frame rather than the
+  // fixture's fireObservation: the boundary guard that reads the rows is part
+  // of what has to work, and a fixture that hands typed objects straight to
+  // the callback would never exercise it.
+  it('draws a row per child agent, and clicking one goes to the parent pane', async () => {
+    vi.stubGlobal('WebSocket', MockWebSocket)
+    MockWebSocket.last = null
+    const realClient = new WSClient(new Dispatcher(fixedEndpoint(9877)))
+    const sessionId = '3123456789abcdef0011223344556677'
+    const identity = { instanceId: 'fedcba9876543210fedcba9876543210', sessionEpoch: 1 }
+
+    realClient.start()
+    await Promise.resolve()
+    const constructed: MockWebSocket | null = MockWebSocket.last
+    if (!constructed) throw new Error('no WebSocket was constructed')
+    const realSocket: MockWebSocket = constructed
+    realSocket.serverAccepts()
+
+    try {
+      const mounted = mountPaneManager(realClient as unknown as ClientFake)
+      await vi.waitFor(() => {
+        expect(realSocket.requests().filter((r) => r.method === 'sessions.live')).toHaveLength(1)
+      })
+      const live = realSocket.requests().find((r) => r.method === 'sessions.live')
+      if (live?.id === undefined) throw new Error('missing sessions.live request')
+      realSocket.deliverText({ jsonrpc: '2.0', id: live.id, result: { sessions: [] } })
+
+      await vi.waitFor(() => {
+        expect(realSocket.requests().filter((r) => r.method === 'open')).toHaveLength(1)
+      })
+      const open = realSocket.requests().find((r) => r.method === 'open')
+      if (open?.id === undefined) throw new Error('missing open request')
+      realSocket.deliverText({
+        jsonrpc: '2.0',
+        id: open.id,
+        result: {
+          sessionId,
+          ...identity,
+          cwd: FIXTURE_CWD,
+          desiredMode: 'script',
+          workspaceId: 'default',
+          parent: null,
+        },
+      })
+      const { manager, bar } = await mounted
+      // THE VERTICAL PLACEMENT, and the switch is load-bearing rather than
+      // incidental. Only the column draws a tree — a horizontal row of tabs
+      // has no under — so the strip emits no child rows at all in the other
+      // placement. Written against the default first, this test passed while
+      // a person would have seen nothing.
+      manager.replaceStrip(new (await import('./tab-strip')).VerticalTabStrip())
+
+      realSocket.deliverText({
+        jsonrpc: '2.0',
+        method: 'session.observationChanged',
+        params: {
+          sessionId,
+          ...identity,
+          agent: 'claude',
+          state: 'working',
+          progress: 'moving',
+          children: [{ name: 'Explore', task: 'List files in directory' }],
+        },
+      })
+
+      // The row, with both facts on it.
+      await vi.waitFor(() => {
+        const rows = bar.querySelectorAll('.nocx-subagent')
+        expect(rows).toHaveLength(1)
+        expect(rows[0].textContent).toContain('Explore')
+        expect(rows[0].textContent).toContain('List files in directory')
+      })
+
+      // A CHILD HAS NO PANE OF ITS OWN, so its row goes to the pane its
+      // parent runs in. Asserted by what a person would see — the parent's tab
+      // becomes the selected one — rather than by spying on the call: a second
+      // pane is opened and activated first, so the click has somewhere to
+      // come FROM and the assertion cannot pass by accident.
+      manager.newPane()
+      await vi.waitFor(() => {
+        expect(realSocket.requests().filter((r) => r.method === 'open')).toHaveLength(2)
+      })
+      const second = realSocket.requests().filter((r) => r.method === 'open')[1]
+      if (second?.id === undefined) throw new Error('missing second open request')
+      realSocket.deliverText({
+        jsonrpc: '2.0',
+        id: second.id,
+        result: {
+          sessionId: '4123456789abcdef0011223344556677',
+          ...identity,
+          cwd: FIXTURE_CWD,
+          desiredMode: 'script',
+          workspaceId: 'default',
+          parent: null,
+        },
+      })
+      const selected = (): (string | null)[] =>
+        [...bar.querySelectorAll('[role="tab"]')].map((t) => t.getAttribute('aria-selected'))
+      await vi.waitFor(() => expect(selected()).toEqual(['false', 'true']))
+
+      const childRow = bar.querySelector<HTMLElement>('.nocx-subagent')
+      if (childRow === null) throw new Error('the child row is not on screen')
+      childRow.click()
+      await vi.waitFor(() => expect(selected()).toEqual(['true', 'false']))
+
+      // And the pane's own indicator is decided by the pane's chrome, not by
+      // the row: the child arriving did not move it, and the child going away
+      // does not move it either.
+      const status = (): string | null =>
+        bar.querySelectorAll('[role="tab"]')[0].getAttribute('data-agent-status')
+      expect(status()).toBe('working')
+
+      realSocket.deliverText({
+        jsonrpc: '2.0',
+        method: 'session.observationChanged',
+        params: { sessionId, ...identity, agent: 'claude', state: 'working', progress: 'moving' },
+      })
+      await vi.waitFor(() => {
+        expect(bar.querySelectorAll('.nocx-subagent')).toHaveLength(0)
+      })
+      expect(status()).toBe('working')
     } finally {
       realClient.close()
       vi.unstubAllGlobals()
@@ -3125,5 +3330,150 @@ describe('a restored pane and the session the backend still holds', () => {
     )
 
     expect(returning.openSession).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ── nocx-ui8q6.3: a worker's tab appears while the person is looking ──────
+//
+// This is the seam a person actually reaches: workers.spawn mints a tab on
+// the backend, with nobody's own createTab call in flight to learn it from,
+// and workers.tabCreated is the only way this window is told before its next
+// layout.read. The tests below watch it happen in the renderer's own state —
+// the layout cache and the tab strip's DOM — never merely that a handler was
+// registered.
+describe('a worker participant tab appears live (nocx-ui8q6.3)', () => {
+  const workerFact = (tabId: string, paneId: string) => ({
+    tab: {
+      id: tabId,
+      workspaceId: 'workspace:default',
+      parentId: null,
+      name: null,
+      colour: null,
+      position: 1,
+      pinned: false,
+      layout: 'row' as const,
+      seenAt: null,
+    },
+    firstPane: {
+      id: paneId,
+      tabId,
+      cwd: '',
+      kind: 'local' as const,
+      endpoint: null,
+      sizeShare: 1,
+    },
+    sessionId: '99123456789abcdef0011223344556699',
+    instanceId: 'fedcba9876543210fedcba9876543210',
+    sessionEpoch: 1,
+    replayFrom: 0,
+    attached: false,
+  })
+
+  it('folds the tab into the layout cache and draws it in the strip', async () => {
+    const chain = makeLayoutStore()
+    const { client, bar, layout } = await mountPaneManager(
+      makeClient(),
+      undefined,
+      undefined,
+      undefined,
+      chain,
+    )
+    const before = bar.querySelectorAll('[role="tab"]').length
+
+    client._fireWorkerTabCreated(workerFact('worker-tab-1', 'worker-pane-1'))
+    await vi.waitFor(() => {
+      expect(layout.tabs().map((t) => t.id)).toContain('worker-tab-1')
+    })
+    await vi.waitFor(() => {
+      expect(bar.querySelectorAll('[role="tab"]').length).toBe(before + 1)
+    })
+  })
+
+  // THE DEFECT THIS CLOSES: a naive merge that only touched the layout cache
+  // would leave adoptionFor with nothing to find for the new pane, and the
+  // renderer would open a SECOND local shell over it — the agent process the
+  // tab is actually for keeps running with nobody attached. Wiring liveByPane
+  // before the cache is what makes the renderer reclaim instead.
+  it('reclaims the participant session already running, never opening a second one', async () => {
+    const chain = makeLayoutStore()
+    const { client } = await mountPaneManager(makeClient(), undefined, undefined, undefined, chain)
+    const openCallsBefore = client.openSession.mock.calls.length
+
+    const fact = workerFact('worker-tab-2', 'worker-pane-2')
+    client._fireWorkerTabCreated(fact)
+
+    await vi.waitFor(() => {
+      expect(client.reclaimSession).toHaveBeenCalledTimes(1)
+    })
+    expect(client.reclaimSession.mock.calls[0][0]).toMatchObject({
+      sessionId: fact.sessionId,
+      instanceId: fact.instanceId,
+      sessionEpoch: fact.sessionEpoch,
+      paneId: 'worker-pane-2',
+    })
+    // No new pane took the ordinary open path for this fact.
+    expect(client.openSession.mock.calls.length).toBe(openCallsBefore)
+  })
+
+  it('drops a fact naming a different backend instance than the one already known', async () => {
+    vi.stubGlobal('WebSocket', MockWebSocket)
+    MockWebSocket.last = null
+    const realClient = new WSClient(new Dispatcher(fixedEndpoint(9878)))
+    realClient.start()
+    await Promise.resolve()
+    const constructed: MockWebSocket | null = MockWebSocket.last
+    if (!constructed) throw new Error('no WebSocket was constructed')
+    const socket: MockWebSocket = constructed
+    socket.serverAccepts()
+
+    try {
+      // Establish one session, which is what teaches this client its own
+      // backend instance id (AD-7: every session on one connection shares
+      // it).
+      const openPromise = realClient.openSession(80, 24)
+      const opened = await vi.waitFor(() => {
+        const req = socket.requests().find((r) => r.method === 'open')
+        if (!req || req.id === undefined) throw new Error('no open request yet')
+        return req
+      })
+      socket.deliverText({
+        jsonrpc: '2.0',
+        id: opened.id,
+        result: {
+          sessionId: '1123456789abcdef0011223344556677',
+          instanceId: 'fedcba9876543210fedcba9876543210',
+          sessionEpoch: 1,
+          cwd: FIXTURE_CWD,
+          desiredMode: 'script',
+          workspaceId: 'default',
+          parent: null,
+        },
+      })
+      await openPromise
+
+      const seen: unknown[] = []
+      realClient.onWorkerTabCreated((fact) => seen.push(fact))
+
+      const staleFact = workerFact('worker-tab-stale', 'worker-pane-stale')
+      socket.deliverText({
+        jsonrpc: '2.0',
+        method: 'workers.tabCreated',
+        params: { ...staleFact, instanceId: '00000000000000000000000000000000' },
+      })
+      // A real one, from the SAME instance, proves the subscription itself
+      // works and that only the mismatched one was dropped.
+      const freshFact = workerFact('worker-tab-fresh', 'worker-pane-fresh')
+      socket.deliverText({
+        jsonrpc: '2.0',
+        method: 'workers.tabCreated',
+        params: freshFact,
+      })
+
+      await vi.waitFor(() => expect(seen).toHaveLength(1))
+      expect((seen[0] as { tab: { id: string } }).tab.id).toBe('worker-tab-fresh')
+    } finally {
+      realClient.close()
+      vi.unstubAllGlobals()
+    }
   })
 })

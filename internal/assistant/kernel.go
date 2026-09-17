@@ -53,8 +53,10 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/masking"
+	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/skill"
 )
 
@@ -89,6 +91,17 @@ const (
 	// RefusedFileChanged: the approved path no longer has the version the
 	// person agreed to, so the old approval does not cover this execution.
 	RefusedFileChanged PolicyRefusalReason = "refused-file-changed"
+	// RefusedExpired: the run's authority grant has passed its deadline
+	// (ADR-0020 §5 — the grant is a versioned, EXPIRING capability). Unlike
+	// every other reason here it is not about this call: nothing the model
+	// could propose has authority any more, because the interval the grant
+	// was issued for has closed. The capability constructor enforces it
+	// (agenttools wraps every Narrow, so an expired grant yields no
+	// capability at all); this reason is what turns that into an answer the
+	// model can explain instead of a terminal error about a constructor,
+	// and it is why the refusal comes BEFORE the attempt is opened rather
+	// than after.
+	RefusedExpired PolicyRefusalReason = "refused-expired"
 	// RefusedExpansionChanged: a value the person was shown beside the
 	// verbatim command moved between the question and this call, or could
 	// not be read again to check (nocx-4h0m7.5). Without substitution there
@@ -96,6 +109,24 @@ const (
 	// the DETECTOR that turns "silently did something else" into "loudly
 	// refused", which is the trade this repo makes everywhere else.
 	RefusedExpansionChanged PolicyRefusalReason = "refused-expansion-changed"
+	// The three bounds on the WIDENING ask (design §5.3, nocx-b453p). An
+	// out-of-scope resource inside an editable row scope is a question, and
+	// a question is an approval-fatigue channel: a model that keeps
+	// proposing out-of-scope resources can walk a person into widening a
+	// scope one prompt at a time. So the asking is bounded, and each bound
+	// has its own sentence, because "we already asked", "you said no" and
+	// "we have stopped asking" are three different facts about the run.
+	//
+	// RefusedWideningAsked: this exact (effect, resource) was already put to
+	// a person in this run. The second occurrence is answered, not re-asked.
+	RefusedWideningAsked PolicyRefusalReason = "refused-widening-asked"
+	// RefusedWideningDeclined: the person refused to widen the row for this
+	// (effect, resource), and that no holds for the rest of the run.
+	RefusedWideningDeclined PolicyRefusalReason = "refused-widening-declined"
+	// RefusedWideningCapped: this answer has already asked to widen a scope
+	// as often as one answer may. The person is told, in the run itself
+	// (WideningCapSentence) — a silent stop is a soft degrade.
+	RefusedWideningCapped PolicyRefusalReason = "refused-widening-capped"
 )
 
 // ToolFailedError is the FOURTH cause a run can end on, and the one the
@@ -128,6 +159,34 @@ func (e *ToolFailedError) Message() string {
 		return ""
 	}
 	return e.Err.Error()
+}
+
+// capabilityRefusal reports whether a tool's error is the NARROWED CAPABILITY
+// refusing the call as outside what it holds — the carve-out from
+// ToolFailedError above, and the one place that question is decided.
+//
+// The distinction is the whole of nocx-4yjwk.3. A tool that FAILED tried and
+// could not: the file was unreadable, the command would not start, the
+// endpoint was down. A capability that REFUSED never tried, because the call
+// it was handed is not one it can express at all — and that is a policy fact
+// in the capability's hands (ADR-0028 decision 4: the dispatcher narrows, it
+// does not check), so it is a refusal, and "a refusal is an answer"
+// (nocx-uvac6.1) applies to it exactly as it applies to the gate's own no.
+//
+// It reaches here at all only when the LEXICAL predicate the policy uses said
+// yes and the capability's canonical identity said no — a symlink inside the
+// fence resolving outside it. The policy asked, a person answered, and the
+// call then met the enforcement. Nothing about that ordering is wrong: the
+// lexical check is advisory by design and the capability is the enforcement.
+// What would be wrong is ending the run over it.
+//
+// Sentinel, never text: the message names a path and belongs to the provider,
+// and a predicate reading it would break the first time a message was
+// reworded. The list grows by addition — a capability that gains its own
+// out-of-scope sentinel joins it here rather than growing a second answer to
+// this question somewhere else.
+func capabilityRefusal(err error) bool {
+	return errors.Is(err, filesystem.ErrOutOfScope)
 }
 
 // EgressScreeningError marks a result withheld because the egress gate could
@@ -217,6 +276,19 @@ type ApprovalRequest struct {
 	ArgHash string `json:"argHash"`
 	// Effect is the effect class the gate decided on.
 	Effect content.Effect `json:"effect"`
+	// DerivedEffects are every class the call's own resources derived, which
+	// for a command naming resources of more than one kind is more than one
+	// (nocx-jxq97). Effect above remains the single row that governs the
+	// decision (ADR-0020 §7); this is what lets the surface also say that the
+	// call reached a host AND wrote a file, so a person is not answering
+	// about the network while a file is written on the strength of that
+	// answer. It is a complete account or empty — never partial — and it is
+	// empty for a call whose resources did not fully resolve, whose
+	// unresolved parts are carried with their reasons in Invocation.
+	//
+	// Internal checkpoint state, like Resources above, until the notification
+	// contract grows the shape that carries it to the renderer.
+	DerivedEffects []content.Effect `json:"-"`
 	// Resources are every resource resolved from the validated call. They are
 	// internal checkpoint state; Resource remains the singular wire projection
 	// until the notification contract grows its multi-resource shape.
@@ -266,6 +338,10 @@ type ApprovalRequest struct {
 	// shell could be asked at all — that fact and its reason. Absent for
 	// every non-command proposal.
 	Expansion *ExpansionFacts `json:"expansion,omitempty"`
+	// OutOfScope is present only when a resource of this call fell outside a
+	// bound (design §5.3). It is what makes the widening answer offerable,
+	// and its cause is what decides whether an offer may be made at all.
+	OutOfScope *OutOfScopeFact `json:"outOfScope,omitempty"`
 	// Scripts is the whole of every file the command NAMES, read now
 	// (nocx-872jc.3). It sits beside the verbatim command for the same
 	// reason Expansion does and with the same disclaimer: it is a READING,
@@ -279,6 +355,39 @@ type ApprovalRequest struct {
 	// the call runs; a script is advisory only, so binding one would change
 	// what approving means (see internal/assistant/script.go).
 	Scripts []ScriptReading `json:"scripts,omitempty"`
+}
+
+// OutOfScopeFact is the ask's account of the resource that fell outside a
+// bound, and of WHICH bound (design §5.3, nocx-b453p).
+//
+// It exists because the three widths an answer has — this call, this session,
+// always — widen NOTHING. A person shown an out-of-scope question without this
+// fact can press every button the prompt has and the next identical call asks
+// again, for ever; an ask a person cannot usefully answer is worse than a
+// refusal. With it the surface can offer the ONE answer that changes the
+// outcome, and the backend can apply that answer from the question alone.
+//
+// Cause is content.OutOfScopeRowScope when the bound is an operator's row
+// selector — editable, so the answer may widen it — and content.OutOfScopeFence
+// when it is the run fence or a narrowed capability, which no answer can widen.
+// A fence fact therefore carries no offer: offering a question whose yes cannot
+// be honoured is the lie this shape exists to remove.
+//
+// Resource is the scope the row would have to GROW TO COVER, in the form a row
+// states it in, so the widening is written from the verdict rather than
+// re-derived from the command line a second time.
+type OutOfScopeFact struct {
+	Cause    content.OutOfScopeCause `json:"cause"`
+	Resource content.GrantScope      `json:"resource"`
+}
+
+// SkillScanFinding is the first suspicious instruction pattern found in a
+// proposed skill body. It is evidence for the person approving the exact
+// bytes, never the body itself.
+type SkillScanFinding struct {
+	PatternID  string `json:"patternId"`
+	Line       string `json:"line"`
+	LineNumber int    `json:"lineNumber"`
 }
 
 // ApprovalClassifier is the classifier gate's fact carried with an approval
@@ -384,13 +493,35 @@ type effectKernel struct {
 	// send back, and the two exist for the same reason: the description
 	// the model was shown has to be true, and the only way to keep a
 	// description true is to check it (nocx-d6gn4.8.1).
-	results map[string]*jsonschema.Schema
+	results    map[string]*jsonschema.Schema
+	dispatcher *dispatchOperation
 	// resolutions are the plans skills.resolve produced in this run, by
 	// handle. They carry no source: where a route STARTED is established from
 	// the documents this run fetched, not from what the caller passed to
 	// skills.resolve (nocx-b6stz, routeSourceFromRun).
 	resolutions map[string]*skill.Resolution
 }
+
+// PaneAccessBinder mints, for ONE run, the DescendantPaneAccess and
+// PaneReader-backed SessionReads/PaneKeys-backed SessionKeys/PaneMessages-
+// backed SessionMessages that run needs to reach the panes of workers IT
+// spawned (design §7.1, §7.3, §6.4-§6.5, §8), plus the run's OWN controller
+// identity — the kernel's side of the same quintuple worker_auth.go's Admit
+// binds for the tool endpoint (ControllerIdentity, PaneAccess, SessionReads,
+// SessionKeys, and now SessionMessages alongside them, Task 10).
+// internal/app's composition root supplies the real closure, over its own
+// hub, PaneReader, PaneKeys, PaneMessages and session registry, called
+// fresh per run with THIS run's own runID (bound as KernelAuthority there)
+// — never a value fixed at start-up, because a run's own authority interval
+// is its own run. paneAccess/sessionReads/sessionKeys/sessionMessages are
+// `any` for the reason RunContext.PaneAccess already is: this package sits
+// below internal/app and cannot name any of their concrete types; identity
+// is session.Identity because RunContext.ControllerIdentity already is —
+// both packages import internal/session directly. A nil binder (a build
+// before Task 8's wiring, or a caller that never set one) leaves everything
+// zero, which every reader already treats as "no descendant authority
+// granted".
+type PaneAccessBinder func(runID, sessionID string) (paneAccess any, sessionReads any, sessionKeys any, sessionMessages any, identity session.Identity)
 
 // newEffectKernel builds the pipeline for one run. A schema that does
 // not compile is a broken declaration — the run fails here, loudly, rather
@@ -425,6 +556,20 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 	if len(seams) > 0 {
 		runSeams = seams[0]
 	}
+	// PaneAccess/SessionReads/ControllerIdentity are bound HERE, for this
+	// run's OWN runID — never inferred from a call's parameters (design
+	// §7.1) — the kernel's side of the same binding worker_auth.go's Admit
+	// does for the tool endpoint (nocx-6q1uh.8's second obligation). A run
+	// with no binder wired (a build before Task 8's composition-root
+	// wiring, or a caller that never set one) leaves everything zero,
+	// which every reader of them must already treat as "no descendant
+	// authority granted" — the same safe default PaneAccess already
+	// documents.
+	var paneAccess, sessionReads, sessionKeys, sessionMessages any
+	var controllerIdentity session.Identity
+	if runSeams.paneAccessBinder != nil {
+		paneAccess, sessionReads, sessionKeys, sessionMessages, controllerIdentity = runSeams.paneAccessBinder(runID, sessionID)
+	}
 	m := &effectKernel{
 		log:         logger,
 		grant:       grant,
@@ -442,6 +587,11 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 			Session:               sessionID,
 			AutomaticSessionItems: append([]string(nil), attached.AutomaticItems...),
 			MarkedSessionWindows:  markedWindows(attached.MarkedWindows),
+			ControllerIdentity:    controllerIdentity,
+			PaneAccess:            paneAccess,
+			SessionReads:          sessionReads,
+			SessionKeys:           sessionKeys,
+			SessionMessages:       sessionMessages,
 		},
 		resolutions: make(map[string]*skill.Resolution),
 		validators:  make(map[string]*jsonschema.Schema, len(registry.All())),
@@ -465,6 +615,11 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 			return nil, err
 		}
 		m.results[t.Name] = r
+	}
+	m.dispatcher = &dispatchOperation{
+		registry:   registry,
+		validators: m.validators,
+		results:    m.results,
 	}
 	return m, nil
 }
@@ -511,56 +666,6 @@ func compileResultSchema(t agenttools.Tool) (*jsonschema.Schema, error) {
 	return sch, nil
 }
 
-// checkResult holds the executor to the shape its contract declares. A
-// mismatch is OURS, never the model's: it means the description the model
-// was shown is a lie, and the honest outcome is a failed tool rather than a
-// result whose keys nobody can rely on.
-//
-// Applied at the one seam every carrier passes through, deliberately: a check
-// inside each executor would be several enforcement sites and the next
-// executor would be the one that forgot.
-func (m *effectKernel) checkResult(tool, out string) error {
-	v := m.results[tool]
-	if v == nil {
-		return nil
-	}
-	var doc any
-	dec := json.NewDecoder(strings.NewReader(out))
-	dec.UseNumber()
-	if err := dec.Decode(&doc); err != nil {
-		return fmt.Errorf("agent tool %q returned something that is not JSON: %w", tool, err)
-	}
-	if err := v.Validate(doc); err != nil {
-		return fmt.Errorf("agent tool %q returned a result its own contract does not allow, so what the model was told it returns is not true: %w", tool, err)
-	}
-	return nil
-}
-
-// validate applies the tool's compiled schema to the model's raw arguments.
-// The result is the parsed object the policy evaluates — the same object the
-// executor will receive, so the policy never decides about something that
-// may not be what executes.
-func (m *effectKernel) validate(decl agenttools.Tool, raw string) (map[string]any, error) {
-	v := m.validators[decl.Name]
-	if v == nil {
-		return nil, errors.New("no validator compiled for this tool")
-	}
-	var doc any
-	dec := json.NewDecoder(strings.NewReader(raw))
-	dec.UseNumber()
-	if err := dec.Decode(&doc); err != nil {
-		return nil, fmt.Errorf("arguments are not JSON: %w", err)
-	}
-	if err := v.Validate(doc); err != nil {
-		return nil, fmt.Errorf("arguments do not match the schema the model was shown: %w", err)
-	}
-	obj, ok := doc.(map[string]any)
-	if !ok {
-		return nil, errors.New("arguments are not an object")
-	}
-	return obj, nil
-}
-
 // classifyCall is the one proposal-to-effect conversion. A declaration may
 // name the validated argument carrying a shell command; every other tool keeps
 // its declared effect. The registry owns which tools carry commands, so this
@@ -589,47 +694,161 @@ const (
 	policyRefuse
 )
 
-func (m *effectKernel) decideInvocationWithReason(t agenttools.Tool, resources []agenttools.ResourceRef, resourceDeclaration bool, invocation content.Invocation) (policyOutcome, PolicyRefusalReason, string) {
+// The fourth result is the VERDICT the answer came from, and it is returned
+// rather than recomputed because the ask needs its cause and its resource: an
+// out-of-scope question that does not name what fell outside cannot offer the
+// only answer that would change it (design §5.3).
+func (m *effectKernel) decideInvocationWithReason(t agenttools.Tool, resources []agenttools.ResourceRef, resourceDeclaration bool, invocation content.Invocation) (policyOutcome, PolicyRefusalReason, string, content.Verdict) {
+	// The grant's own interval, before any row is consulted: past the
+	// deadline there is no authority for the matrix to read a decision out
+	// of. Deciding it here is what keeps the attempt out of the ledger — a
+	// call that never had authority is not an attempt — and what makes the
+	// refusal an ANSWER; the enforcement is the capability constructor,
+	// which cannot be reasoned around (agenttools.withinGrantLifetime).
+	if m.grant.Expired(time.Now()) {
+		return policyRefuse, RefusedExpired, "", content.Verdict{Decision: content.DecisionRefuse}
+	}
 	if reason, denied := m.floorRefusal(invocation, resources); denied {
-		return policyRefuse, RefusedByFloor, reason
+		return policyRefuse, RefusedByFloor, reason, content.Verdict{Decision: content.DecisionRefuse}
 	}
-	decision := m.decisionFor(t, invocation)
-	if decision == content.DecisionRefuse {
-		return policyRefuse, RefusedByDecision, ""
+	verdict := m.verdict(t, resources, resourceDeclaration, invocation)
+	switch verdict.Decision {
+	case content.DecisionRefuse:
+		// The two refusals have two sentences, and the CAUSE picks which:
+		// a resource outside an immutable bound is RefusedOutOfScope, and
+		// a row that simply refuses this effect is RefusedByDecision. A
+		// resource outside an EDITABLE row scope is no longer either — it
+		// is the ask below (design §5.3).
+		if verdict.Cause == content.OutOfScopeFence {
+			return policyRefuse, RefusedOutOfScope, "", verdict
+		}
+		return policyRefuse, RefusedByDecision, "", verdict
+	case content.DecisionPermit:
+		if isSkillMutationTool(t) {
+			return policyAsk, "", "", verdict
+		}
+		return policyPermit, "", "", verdict
+	default:
+		return policyAsk, "", "", verdict
 	}
-	if !m.inScope(t, resources, resourceDeclaration) {
-		return policyRefuse, RefusedOutOfScope, ""
-	}
-	if decision == content.DecisionPermit && isSkillMutationTool(t) {
-		return policyAsk, "", ""
-	}
-	if decision == content.DecisionPermit {
-		return policyPermit, "", ""
-	}
-	return policyAsk, "", ""
 }
 
-// decisionFor is the policy decision in the declaration's own terms. An
-// ALTERNATIVE set has one selected row and that row decides — ADR-0053's whole
-// mechanism, and the reason refusing mutate-destructive does not take lsblk
-// away with rm. A CONJUNCTION reaches every row on every successful call, so
-// the strictest of them decides: one refusal refuses the call, and one ask
-// asks about it, whatever the other rows say.
+// outOfScopeFact is the ask's half of a verdict: a row-scope miss is the only
+// cause a question may be built on, because it is the only one an answer can
+// change. A fence miss never reaches here — resourceVerdict turns it into a
+// refusal — and an ask with nothing outside carries no fact at all.
+func outOfScopeFact(verdict content.Verdict) *OutOfScopeFact {
+	if verdict.Cause == "" {
+		return nil
+	}
+	return &OutOfScopeFact{Cause: verdict.Cause, Resource: verdict.Resource}
+}
+
+// boundWideningAsk is the approval-fatigue bound on the widening question
+// (design §5.3): one ask per (effect, resource) per run, a cap per run, and a
+// declined widening that refuses that pair until the run ends. It returns the
+// refusal that must REPLACE the ask, or nil when the ask may be raised — and
+// it records the ask when it returns nil, so the count is of questions a
+// person actually met.
+//
+// Without an approval store there is nowhere to remember any of it, and the
+// unbounded ask is the old behaviour rather than a silent permit.
+func (m *effectKernel) boundWideningAsk(tool string, effect content.Effect, fact *OutOfScopeFact) *modelResult {
+	if fact == nil || fact.Cause != content.OutOfScopeRowScope || m.approvals == nil {
+		return nil
+	}
+	var reason PolicyRefusalReason
+	switch m.approvals.BeginWideningAsk(m.runID, effect, fact.Resource) {
+	case WideningAskRaise:
+		return nil
+	case WideningAskDuplicate:
+		reason = RefusedWideningAsked
+	case WideningAskDeclined:
+		reason = RefusedWideningDeclined
+	default:
+		reason = RefusedWideningCapped
+	}
+	return &modelResult{text: refusalResult(tool, reason, ""), kind: modelNocxMessage}
+}
+
+// verdict is the kernel's whole policy answer for one call, and it computes
+// none of it: the command half is content.EffectPolicy.EvaluateInvocation and
+// the DECLARED half is EvaluateResources, which is the same evaluator over
+// resources a declaration resolved rather than a parser inferred. The kernel
+// used to own a second containment predicate here (inScope), and owning two
+// is how the two paths came to answer one question differently.
+//
+// The declared half receives the command half's decision, so it can only make
+// the answer more restrictive; it replaces the verdict exactly when it found
+// something outside, because that is when it has a cause the command half
+// does not.
+func (m *effectKernel) verdict(t agenttools.Tool, resources []agenttools.ResourceRef, resourceDeclaration bool, invocation content.Invocation) content.Verdict {
+	fence := m.grant.Policy.RunFence()
+	v := m.invocationVerdict(t, invocation, fence)
+	// The resolver's nil/non-nil distinction is preserved: nil means the
+	// declaration names no resource, while an empty resolved list is a
+	// resource-bearing declaration whose current call touches none.
+	if !resourceDeclaration {
+		return v
+	}
+	declared := make([]content.GrantScope, 0, len(resources))
+	for _, resource := range resources {
+		declared = append(declared, content.GrantScope{Kind: resource.Kind, ID: resource.ID})
+	}
+	if d := m.declaredVerdict(t, v.Decision, declared, fence); d.Cause != "" {
+		return d
+	}
+	return v
+}
+
+// invocationVerdict is the effect layer, over whichever rows the declaration
+// reaches. An ALTERNATIVE set has one selected row and that row decides —
+// ADR-0053's whole mechanism, and the reason refusing mutate-destructive does
+// not take lsblk away with rm. A CONJUNCTION reaches every row on every
+// successful call, so the STRICTEST of them decides: one refusal refuses the
+// call, and one ask asks about it, whatever the other rows say.
 //
 // Taking it on WorstEffect alone was wrong in both directions and only looked
 // right for skills.install by accident. Refusing the write while permitting
 // the fetch still asked, because cross-boundary is the higher row and the
 // higher row was permitting; and had the rows been the other way round, an ask
 // on the lower row would have been silently upgraded to a permit.
-func (m *effectKernel) decisionFor(t agenttools.Tool, invocation content.Invocation) content.Decision {
+//
+// The strictest verdict is carried WHOLE and not reduced to its decision: a
+// refusal keeps the cause and the resource that produced it, which is what
+// decides between "no answer can move this" and a question worth asking.
+func (m *effectKernel) invocationVerdict(t agenttools.Tool, invocation content.Invocation, fence []content.GrantScope) content.Verdict {
 	if t.EffectRelation != agenttools.EffectsConjunctive {
-		return m.grant.Policy.DecisionForInvocation(t.Effect, invocation)
+		return m.grant.Policy.EvaluateInvocation(t.Effect, invocation, fence)
 	}
-	strictest := content.DecisionPermit
+	strictest := content.Verdict{Decision: content.DecisionPermit}
 	for _, effect := range t.Declaration.Effect {
-		strictest = stricterDecision(strictest, m.grant.Policy.DecisionForInvocation(effect, invocation))
+		strictest = stricterVerdict(strictest, m.grant.Policy.EvaluateInvocation(effect, invocation, fence))
 	}
 	return strictest
+}
+
+// declaredVerdict is the resource layer for resources a DECLARATION resolved.
+// For a conjunction the rows are asked TOGETHER — content.EvaluateResourcesAcross
+// carries the argument for the union — because the destination belongs to the
+// fetching row and the content item to the writing one, and asking each row
+// alone would refuse an install whose two halves were both granted.
+func (m *effectKernel) declaredVerdict(t agenttools.Tool, decision content.Decision, declared, fence []content.GrantScope) content.Verdict {
+	if t.EffectRelation != agenttools.EffectsConjunctive {
+		return m.grant.Policy.EvaluateResources(t.Effect, decision, declared, fence)
+	}
+	return m.grant.Policy.EvaluateResourcesAcross(t.Declaration.Effect, decision, declared, fence)
+}
+
+// stricterVerdict keeps whichever of two verdicts allows less, whole. It is
+// spelled on top of stricterDecision rather than beside it so the two rankings
+// cannot drift; ties keep the left, which is the accumulator, so a run of
+// permits does not churn the cause.
+func stricterVerdict(left, right content.Verdict) content.Verdict {
+	if stricterDecision(left.Decision, right.Decision) == right.Decision && right.Decision != left.Decision {
+		return right
+	}
+	return left
 }
 
 // stricterDecision orders the three answers by how little they allow. It is
@@ -670,109 +889,6 @@ func (m *effectKernel) floorRefusal(invocation content.Invocation, resources []a
 		scopes = append(scopes, content.GrantScope{Kind: resource.Kind, ID: resource.ID})
 	}
 	return m.grant.Policy.FloorRefusal(invocation, scopes)
-}
-
-// inScope is the policy's scope check: the resource the call names must be
-// inside the SELECTED EFFECT's row scopes. The run bound was folded into
-// every row at mint (EffectPolicy.WithRunScopes), so the row is the whole
-// resource authority here; Grant.Scopes is deliberately NOT consulted — it
-// is the derived all-rows union that exists for the declaration filter's
-// resource-kind coverage, and a decision that consulted it would let one
-// effect's scopes leak into another effect's call (an observe row scoped to
-// /home refusing /etc nowhere it matters). This is NOT the enforcement — the
-// capability is the enforcement (ADR-0028 decision 4) — and it is
-// deliberately the advisory lexical approximation of it: the capability
-// resolves canonical identity, the policy compares the spelled path. A call
-// this check lets through can still be refused by the capability; a call it
-// refuses never reaches the capability.
-// resolveResources is the one call-resource derivation. A nil resolver means
-// the declaration names no resource at all; a non-nil resolver may validly
-// return zero refs for this call. Resolver failures are malformed model
-// output because arguments were validated but could not identify the
-// declared authority.
-func (m *effectKernel) resolveResources(decl agenttools.Tool, args map[string]any) ([]agenttools.ResourceRef, bool, error) {
-	if decl.ResolveResources == nil {
-		return nil, false, nil
-	}
-	resources, err := decl.ResolveResources(args, m.runCtx)
-	if err != nil {
-		return nil, true, err
-	}
-	for _, resource := range resources {
-		if resource.Kind == "" || resource.ID == "" {
-			return nil, true, fmt.Errorf("resource resolver returned an incomplete resource")
-		}
-		declared := false
-		for _, kind := range decl.ResourceKinds {
-			if resource.Kind == kind {
-				declared = true
-				break
-			}
-		}
-		if !declared {
-			return nil, true, fmt.Errorf("resource resolver returned undeclared kind %q", resource.Kind)
-		}
-	}
-	return resources, true, nil
-}
-
-// inScope checks EVERY resolved resource against the selected effect row.
-// The resolver's nil/non-nil distinction is preserved: nil means the
-// declaration names no resource, while an empty resolved list is a
-// resource-bearing declaration whose current call touches none.
-//
-// This is the DECLARED half only. The resources a COMMAND names have no
-// resolver — they are the parser's report — and they meet the same row
-// inside content.EffectPolicy.DecisionForInvocation, which states the
-// composition order for both. Do not grow a second command-resource check
-// here.
-func (m *effectKernel) inScope(t agenttools.Tool, resources []agenttools.ResourceRef, resourceDeclaration bool) bool {
-	if !resourceDeclaration {
-		return true
-	}
-	for _, resource := range resources {
-		inside := false
-		for _, scope := range m.rowScopesFor(t) {
-			// The row's scope is asked WHOLE: rebuilding it from kind and id
-			// drops a destination's subdomain marker (design §5.4), and a
-			// row that grants a host with its subdomains would then refuse
-			// one of them.
-			inside = scope.Contains(
-				content.GrantScope{Kind: resource.Kind, ID: resource.ID},
-			)
-			if inside {
-				break
-			}
-		}
-		if !inside {
-			return false
-		}
-	}
-	return true
-}
-
-// rowScopesFor is which rows' scopes a call is measured against. For an
-// alternative set it is the SELECTED row, unchanged: consulting the others
-// would let one effect's scopes answer another effect's call, which is the
-// leak the comment above forbids.
-//
-// A CONJUNCTION is measured against every row it reaches, and their scopes
-// are taken TOGETHER rather than intersected — because the rows do not govern
-// the same resources. skills.install names a destination and a content item:
-// the destination is the fetch's, the content item is the write's, and each
-// belongs to the row that performs it. Intersecting would demand the fetched
-// address be inside the write row's scopes, refusing an install a person had
-// granted both halves of. What the union does NOT do is let a resource in
-// that no reached row admits, which is the check that matters.
-func (m *effectKernel) rowScopesFor(t agenttools.Tool) []content.GrantScope {
-	if t.EffectRelation != agenttools.EffectsConjunctive {
-		return m.grant.Policy.RowScopes(t.Effect)
-	}
-	var scopes []content.GrantScope
-	for _, effect := range t.Declaration.Effect {
-		scopes = append(scopes, m.grant.Policy.RowScopes(effect)...)
-	}
-	return scopes
 }
 
 // matchedResource is the singular wire projection of the first resolved
@@ -887,9 +1003,13 @@ func (m *effectKernel) bindApprovalScripts(ctx context.Context, req *ApprovalReq
 // same intent, never a new intent). The persisted interrupt state is the
 // proposal itself: the resume re-runs the pipeline and the approval record
 // decides whether the exact proposal may execute.
-func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any, resources []agenttools.ResourceRef, invocation content.Invocation, install *ApprovalInstall) error {
+func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any, resources []agenttools.ResourceRef, invocation content.Invocation, outOfScope *OutOfScopeFact, install *ApprovalInstall) error {
 	ap := m.proposalWithInvocation(decl.Name, callID, rawArgs, invocation)
 	ap.CommandInvocation = decl.CommandArg != ""
+	// The pending record carries the fact too: the answer arrives on another
+	// method, on another connection's turn, and by then only the record
+	// remembers which resource the widening would have to cover.
+	ap.OutOfScope = outOfScope
 	bindApprovalFileVersions(&ap, decl, resources)
 	var entryID string
 	if m.ledger != nil {
@@ -900,8 +1020,10 @@ func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callI
 		entryID = id
 	}
 	req := m.request(decl, callID, rawArgs, resources, install)
+	req.OutOfScope = outOfScope
 	req.CommandInvocation = decl.CommandArg != ""
 	req.Invocation = cloneInvocation(invocation)
+	req.DerivedEffects = commandSelection(invocation, decl.Declaration.Effect).Candidates
 	req.ArgHash = ap.ArgHash
 	req.EntryID = entryID
 	// After the ledger record and before the latch: the person is shown the
@@ -927,6 +1049,7 @@ func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callI
 func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, ask *ApprovalRequest, fact *classifierFact, resources []agenttools.ResourceRef, invocation content.Invocation) error {
 	ap := m.proposalWithInvocation(decl.Name, callID, rawArgs, invocation)
 	ap.CommandInvocation = decl.CommandArg != ""
+	ap.OutOfScope = ask.OutOfScope
 	bindApprovalFileVersions(&ap, decl, resources)
 	var entryID string
 	if m.ledger != nil {
@@ -939,6 +1062,7 @@ func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.T
 	ask.ArgHash = ap.ArgHash
 	ask.CommandInvocation = decl.CommandArg != ""
 	ask.Invocation = cloneInvocation(invocation)
+	ask.DerivedEffects = commandSelection(invocation, decl.Declaration.Effect).Candidates
 	ask.Classifier = approvalClassifier(fact)
 	ask.EntryID = entryID
 	m.bindApprovalExpansions(ctx, &ap, ask, decl, rawArgs)
@@ -1238,6 +1362,19 @@ func refusalResult(tool string, reason PolicyRefusalReason, kind DeclineKind, de
 		default:
 			return "REFUSED: the person declined your call to " + tool + " — it did not run. Say what you needed in words instead."
 		}
+	case RefusedWideningAsked:
+		return "REFUSED: nocx did not run your call to " + tool + ": it named something outside what this question may reach, and that exact resource was already put to the person in this answer. Do not propose it a third time — say what you needed in words."
+	case RefusedWideningDeclined:
+		return "REFUSED: nocx did not run your call to " + tool + ": the person refused to widen what this answer may reach to cover that resource. Do not propose it again in this answer."
+	case RefusedWideningCapped:
+		return "REFUSED: nocx did not run your call to " + tool + ": this answer has already asked the person to widen what it may reach as often as one answer may, so nocx has stopped asking. Work within what you were given, or say what you would need."
+	case RefusedExpired:
+		// The sentence says the authority ended, not that the call was
+		// wrong: nothing the model proposes next will run either, and
+		// telling it to propose something else would be an invitation to
+		// keep trying. Only the person can start a turn, so the answer is
+		// to say so in words.
+		return "REFUSED: nocx did not run your call to " + tool + ": the authority this question was given has expired. Nothing further will run under it. Say what you were about to do, in words, so the person can ask again."
 	case RefusedFileChanged:
 		reason := "the file changed since approval, so the old approval no longer applies"
 		if len(detail) > 0 && detail[0] != "" {
@@ -1440,15 +1577,8 @@ func (m *effectKernel) openAttempt(ctx context.Context, decl agenttools.Tool, ca
 	if m.ledger == nil {
 		return 0, "", errors.New("no attempt ledger wired — a tool call may not run without a durable attempt (design §6.4)")
 	}
-	envID := content.EnvironmentIDFor(content.EnvLocal, "")
-	if err := m.ledger.EnsureEnvironment(ctx, content.Environment{ID: envID, Kind: content.EnvLocal}); err != nil {
-		return 0, "", fmt.Errorf("environment: %w", err)
-	}
-	if _, err := m.ledger.RecordObservation(ctx, content.Observation{
-		EnvironmentID: envID,
-		Criticality:   content.CriticalityRoutine,
-	}); err != nil {
-		return 0, "", fmt.Errorf("observation: %w", err)
+	if err := prepareAttemptEnvironment(ctx, m.ledger); err != nil {
+		return 0, "", err
 	}
 
 	entryID := ""
@@ -1460,61 +1590,11 @@ func (m *effectKernel) openAttempt(ctx context.Context, decl agenttools.Tool, ca
 		}
 	}
 	if entryID == "" {
-		payloadBody := map[string]any{
-			"tool":   decl.Name,
-			"effect": decl.Effect,
-			"args":   json.RawMessage(rawArgs),
-		}
-		// The run id joins the attempt to its run (nocx-dw3.4). Where the
-		// grant permits the call and nobody is asked, the ledger is the
-		// ONLY account of what happened — so the attempt carries the run it
-		// happened in, and a reader joins question, run, attempt and answer
-		// into one thread exactly as the approval block does for an
-		// escalated call. Empty (the un-bound caller shape, AskParams) is
-		// recorded as no link rather than a misleading empty one.
-		if m.runID != "" {
-			payloadBody["runId"] = m.runID
-		}
-		// The complete resolved resource list is stored with the attempt.
-		// Keep the singular first-resource field for existing readers.
-		if len(resources) > 0 {
-			payloadBody["resources"] = resources
-			payloadBody["resource"] = matchedResource(resources)
-		}
-		// Whether this call's work becomes a top-level BLOCK — the
-		// declaration's own fact (nocx-9sqii). Stored with the attempt so a
-		// restored turn knows the block is the account of this call and
-		// draws no line beside it; the reader must not match the tool name,
-		// which would be a second copy of the tool table.
-		if decl.OpensBlock {
-			payloadBody["opensBlock"] = true
-		}
-		// The classifier block (bead nocx-kpy23, criterion 6): when the
-		// classifier was consulted and cleared the call, the attempt's own
-		// record carries the verdict and the model, so the audit shows
-		// which model saw the call and said clear. Without a classifier the
-		// payload is tool, effect, args and the run id — nothing else.
-		if classifierFact != nil {
-			payloadBody["classifier"] = classifierFact
-		}
-		payload, err := json.Marshal(payloadBody)
+		var err error
+		entryID, err = submitAttemptEntry(ctx, m.ledger, m.grant, decl, decl.Effect, m.runID, rawArgs, resources, classifierFact)
 		if err != nil {
-			return 0, "", fmt.Errorf("payload: %w", err)
+			return 0, "", err
 		}
-		res, err := m.ledger.Submit(ctx, content.SubmitEntry{
-			ID:            uuid.NewString(),
-			Client:        "agent",
-			EnvironmentID: envID,
-			Cwd:           "/",
-			Kind:          content.EntryAction,
-			Source:        content.SourceAssistant,
-			Intent:        decl.Name,
-			Payload:       string(payload),
-		})
-		if err != nil {
-			return 0, "", fmt.Errorf("submit: %w", err)
-		}
-		entryID = res.ID
 		// A new intent is a new cause of this turn. An APPROVED call is
 		// NOT: it runs as a subsequent attempt of the proposal's entry,
 		// which took its position when the person was asked — joining it
@@ -1523,14 +1603,9 @@ func (m *effectKernel) openAttempt(ctx context.Context, decl agenttools.Tool, ca
 		// and braces rather than the only guard.)
 		m.noteCause(ctx, entryID)
 	}
-	execID, err := m.ledger.StartExecution(ctx, content.StartExecution{
-		EntryID:  entryID,
-		Attempt:  attempt,
-		Executor: new("agent"),
-		Grant:    &m.grant,
-	})
+	execID, err := startAttemptExecution(ctx, m.ledger, m.grant, entryID, attempt)
 	if err != nil {
-		return 0, "", fmt.Errorf("start execution: %w", err)
+		return 0, "", err
 	}
 	return execID, entryID, nil
 }
@@ -1587,7 +1662,16 @@ func (m *effectKernel) closeAttempt(ctx context.Context, execID int64, reason co
 	if m.ledger == nil {
 		return nil
 	}
-	return m.ledger.FinishExecution(ctx, execID, content.FinishExecution{
+	// Same defect, same fix as attemptRecordingDispatcher.Dispatch
+	// (nocx-uhii1): by the time closeAttempt runs, the tool call it is
+	// closing out has already produced its terminal outcome, and this write
+	// must not be able to turn that into a failure just because the turn's
+	// own context ended in the meantime (a person closing the tab, or the
+	// turn's own deadline). detachedFinishContext carries this context's
+	// values but not its cancellation, bounded by its own short timeout.
+	finishCtx, cancel := detachedFinishContext(ctx)
+	defer cancel()
+	return m.ledger.FinishExecution(finishCtx, execID, content.FinishExecution{
 		EndedAt:           time.Now().UnixMilli(),
 		TerminationReason: reason,
 		Status:            status,
@@ -1628,7 +1712,7 @@ func (m *effectKernel) run(decl agenttools.Tool, ctx context.Context, capability
 	runCtx = withToolBound(runCtx, decl.ResultBound)
 	switch decl.Executes {
 	case agenttools.Dynamic:
-		reader, ok := capability.(*agenttools.SessionReader)
+		reader, ok := capability.(*agenttools.SessionDescendantCapability)
 		if !ok {
 			return "", fmt.Errorf("tool %q: capability is %T, not dynamic session capability", decl.Name, capability)
 		}
@@ -1759,13 +1843,9 @@ func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string)
 }
 
 func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawArgs string) (modelResult, error) {
-	// 1. Declaration lookup. A name absent from the registry is malformed
-	// model output, not a refusal — there is nothing to call.
-	decl, ok := k.registry.Lookup(name)
-	if !ok {
-		return modelResult{}, fmt.Errorf("%w: unknown tool %q", ErrMalformedModelOutput, name)
-	}
-	if decl.Name == "skills.create" && k.runSeams.skillDraft != nil {
+	// Skill drafting is model-adapter machinery: the generated arguments
+	// replace the model payload before the shared operation validates it.
+	if decl, ok := k.registry.Lookup(name); ok && decl.Name == "skills.create" && k.runSeams.skillDraft != nil {
 		// The person's own bytes go through untouched. Not an exemption
 		// from the interception below — the same rule reaching its base
 		// case: the summarizer exists to keep a model from writing a
@@ -1798,283 +1878,229 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		}
 	}
 
-	// 2. Parameter validation against the tool's schema: the file the
-	// model was shown, byte for byte, plus the ingress size bound.
-	if len(rawArgs) > maxArgsBytes {
-		return modelResult{}, fmt.Errorf("%w: tool %q: arguments exceed the %d-byte bound", ErrMalformedModelOutput, decl.Name, maxArgsBytes)
-	}
-	args, err := k.validate(decl, rawArgs)
-	if err != nil {
-		return modelResult{}, fmt.Errorf("%w: tool %q: %v", ErrMalformedModelOutput, decl.Name, err)
-	}
-	// The mechanical call classifier is deliberately after validation and
-	// before every policy/approval/ledger path. It selects one effect from the
-	// declaration's reachable set; unresolved input keeps the set's worst
-	// member. The returned invocation is the parser result reused by rule
-	// matching; it is never re-tokenized.
-	var invocation content.Invocation
-	decl, invocation = classifyCall(decl, args)
-	if decl.CommandArg == "" {
-		// Non-command tools have no invocation rules, but their existing
-		// matrix path remains unchanged.
-		invocation.Parsed = true
-	}
-
-	resources, resourceDeclaration, err := k.resolveResources(decl, args)
-	if err != nil {
-		return modelResult{}, fmt.Errorf("%w: tool %q: resolve resources: %v", ErrMalformedModelOutput, decl.Name, err)
-	}
-	if reason, denied := k.floorRefusal(invocation, resources); denied {
-		return modelResult{text: refusalResult(decl.Name, RefusedByFloor, "", reason), kind: modelNocxMessage}, nil
-	}
-	if decl.CommandArg != "" {
-		if command, ok := args[decl.CommandArg].(string); ok {
-			// The canonical parser intentionally splits shell operators for
-			// rule matching. Re-check the raw command only for the floor's
-			// exact self-replication signature, which would otherwise lose
-			// those operator bytes during tokenization.
-			if reason, denied := k.grant.Policy.FloorRawCommandRefusal(command); denied {
-				return modelResult{text: refusalResult(decl.Name, RefusedByFloor, "", reason), kind: modelNocxMessage}, nil
-			}
+	var execID int64
+	var entryID string
+	transform := func(prepared *preparedInvocation) error {
+		prepared.decl, prepared.invocation = classifyCall(prepared.decl, prepared.args)
+		if prepared.decl.CommandArg == "" {
+			prepared.invocation.Parsed = true
 		}
+		return nil
 	}
-	// 3. Policy — permit / ask / refuse over the ADR-0020 lattice.
-	//    FIRST, the person's own no (nocx-uvac6.1): the resume re-runs
-	//    this very call through the pipeline, and the refusal is the
-	//    call's result — the call must not run and must not be asked
-	//    about again (the approval was answered; a re-ask would be the
-	//    ask-forever loop the resume exists to end). Checked BEFORE
-	//    decide, and the exact proposal FIRST: a standing no is answered
-	//    with the person's own sentence, not the matrix's.
-	if k.approvals != nil {
-		if kind, declined := k.approvals.DeclinedKind(k.proposal(decl.Name, callID, rawArgs)); declined {
-			return modelResult{text: refusalResult(decl.Name, RefusedByPerson, kind), kind: modelNocxMessage}, nil
+	gate := func(prepared *preparedInvocation) (bool, *modelResult, error) {
+		decl := prepared.decl
+		args := prepared.args
+		resources := prepared.resources
+		invocation := prepared.invocation
+		if reason, denied := k.floorRefusal(invocation, resources); denied {
+			result := modelResult{text: refusalResult(decl.Name, RefusedByFloor, "", reason), kind: modelNocxMessage}
+			return false, &result, nil
 		}
-		if decl.CommandArg == "" {
-			if kind, standing := k.approvals.DeclinedEffect(k.runID, decl.Effect); standing {
-				return modelResult{text: refusalResult(decl.Name, RefusedByPerson, kind), kind: modelNocxMessage}, nil
-			}
-		} else if kind, standing := k.approvals.DeclinedInvocation(k.runID, invocation); standing {
-			// A command standing no matches only the canonical
-			// invocation that the person answered about.
-			return modelResult{text: refusalResult(decl.Name, RefusedByPerson, kind), kind: modelNocxMessage}, nil
-		}
-	}
-	outcome, refusal, floorReason := k.decideInvocationWithReason(decl, resources, resourceDeclaration, invocation)
-	skillMutation := isSkillMutationTool(decl)
-	switch outcome {
-	case policyRefuse:
-		// (nocx-uvac6.1) The refusal IS the call's result: a tool
-		// result with no error is text the model reads and answers —
-		// the system prompt promises exactly this ("A refusal is an
-		// answer"). ADR-0028 decision 2 previously treated refusal as
-		// a terminal error; this is the deliberate refinement at the
-		// SAME seam: the refusal category is still ours and still
-		// precedes the attempt — it just returns the refusal as the
-		// outcome instead of ending the run. No latch trip: the run
-		// continues, and every other call in this response is decided
-		// on its own merits.
-		return modelResult{text: refusalResult(decl.Name, refusal, "", floorReason), kind: modelNocxMessage}, nil
-	case policyAsk:
-		// Approval binds to the exact proposal: an approved call skips
-		// the ask; a changed argument hashes differently and does NOT
-		// resume under the old approval (design §7.2).
-		if !skillMutation {
-			ap := k.proposal(decl.Name, callID, rawArgs)
-			if k.approvals != nil && k.approvals.IsApproved(ap) {
-				break // the exact proposal was approved; verify before dispatch
-			}
-			return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation, nil)
-		}
-
-	}
-	// 3a. THE CALL IS RESOLVED BEFORE ANYTHING JUDGES IT (nocx-ojfuc.1).
-	//
-	// skills.install's whole argument is an address, and an address is not
-	// something anybody can approve: the name, the description, the files
-	// that will land and every scan finding in them are in a document nobody
-	// has fetched yet. So the fetch happens HERE — after the policy has
-	// decided the call's class is not refused and its destination is inside
-	// the row's scopes, before the classifier is consulted and before the
-	// person is asked — and what is asked about is a skill rather than a URL.
-	//
-	// THE ALTERNATIVE, REJECTED, WAS TO ASK FIRST AND FETCH AFTER. It is
-	// tempting because it makes the tool a plain post-approval executor like
-	// every neighbour, and it cannot work: the question would name an
-	// address, the person would approve an address, and the bytes that
-	// arrived afterwards would be whatever answered it. Recorded here rather
-	// than left out so the next reader knows it was weighed — internal/skill
-	// is built for this order (Preview shows, Install re-fetches and refuses
-	// unless the bytes are the ones shown), and reversing it would strand
-	// that machinery.
-	//
-	// The cost is stated rather than hidden: this is a NETWORK READ TO A
-	// SOURCE THE MODEL CHOSE, and it happens before the person has answered.
-	// That is exactly what the declaration's cross-boundary class is for, and
-	// it is the class the gate above just decided on — so nothing here
-	// reaches an address the person's policy did not already permit this run
-	// to reach. It writes nothing: Preview's only effect on this machine is a
-	// digest the store keeps so Install can refuse bytes that moved.
-	//
-	// It is skipped on an APPROVED resume, and that is not an optimisation.
-	// The resume re-runs this whole pipeline; a second preview would fetch
-	// the document as it is NOW and remember THAT digest, so Install would
-	// compare the current bytes against themselves and the "the bytes moved
-	// between the question and the answer" refusal would never fire again.
-	var installFacts *ApprovalInstall
-	if decl.Name == "skills.install" && !k.proposalApproved(decl.Name, callID, rawArgs) {
-		resolved, resolveErr := k.resolveSkillInstallFacts(ctx, decl, args)
-		if resolveErr != nil {
-			// The store's refusals are already sentences that name the step
-			// that refused, in the person's words, and nothing was written
-			// — so this reaches the model as an ANSWER, the way the skill
-			// summarizer's decline does, rather than failing the run.
-			k.info("agent tool: skills.install could not be resolved", "error", resolveErr)
-			return modelResult{
-				text: "I could not read a skill at that address, so nothing was proposed and nothing was installed: " + resolveErr.Error(),
-				kind: modelNocxMessage,
-			}, nil
-		}
-		installFacts = resolved
-	}
-	// 3b. The classifier (bead nocx-kpy23): a second, cheaper model
-	// judges the proposed call and may only RAISE suspicion — permit →
-	// ask — never lower it. Ordinary calls are consulted only where the
-	// policy says permit; skill mutations are deliberately consulted
-	// before their mandatory approval even when policy says ask. Refused
-	// calls are never changed by a verdict, and their latency stays off a
-	// path where a person is already waiting.
-	var classifierFact *classifierFact
-	if k.classifier != nil && !k.proposalApproved(decl.Name, callID, rawArgs) {
-		ask, fact, classifyErr := k.classifyProposal(ctx, decl, callID, rawArgs, args, resources, installFacts)
-		if classifyErr != nil {
-			// The classifier's INPUT gate could not see (the recognizer
-			// failed closed): nothing decides this call unseen and
-			// nothing leaves for the classifier — the run fails with a
-			// terminal error, exactly as the result gate fails the run
-			// when IT cannot see (step 7's screenErr path).
-			return modelResult{}, fmt.Errorf("agent tool %q: classifier gate: %w", decl.Name, classifyErr)
-		}
-		if ask != nil {
-			return modelResult{}, k.escalateClassifier(ctx, decl, callID, rawArgs, ask, fact, resources, invocation)
-		}
-		classifierFact = fact
-	}
-	if skillMutation && !k.proposalApproved(decl.Name, callID, rawArgs) {
-		if classifierFact != nil {
-			return modelResult{}, k.escalateClassifier(ctx, decl, callID, rawArgs, k.request(decl, callID, rawArgs, resources, installFacts), classifierFact, resources, invocation)
-		}
-		return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation, installFacts)
-	}
-
-	// An approved proposal may reach here through either policyAsk or the
-	// classifier's ask path; both must verify the captured versions now.
-	if k.approvals != nil {
-		ap := k.proposal(decl.Name, callID, rawArgs)
-		if k.approvals.IsApproved(ap) {
-			if verifyErr := k.approvals.VerifyApprovedFileVersions(ap); verifyErr != nil {
-				return modelResult{text: refusalResult(decl.Name, RefusedFileChanged, "", verifyErr.Error()), kind: modelNocxMessage}, nil
-			}
-			// AND THE VALUES, IMMEDIATELY BEFORE SUBMITTING (nocx-4h0m7.5).
-			// The verbatim command is what runs, so between reading a
-			// variable for the question and running the command there is a
-			// window. This closes it the only way that is not a rewrite:
-			// read the values AGAIN and compare with what the person was
-			// shown. It is a detector, not a fix — but it turns "silently
-			// did something else" into "loudly refused", which is the trade
-			// this repo makes everywhere else. Nothing expanded means
-			// nothing to compare, and the call proceeds.
-			if shown, ok := k.approvals.ApprovedExpansions(ap); ok && len(shown) > 0 {
-				if verifyErr := VerifyExpansions(ctx, k.runSeams.expansions, k.runCtx.Session, shown); verifyErr != nil {
-					return modelResult{text: refusalResult(decl.Name, RefusedExpansionChanged, "", verifyErr.Error()), kind: modelNocxMessage}, nil
+		if decl.CommandArg != "" {
+			if command, ok := args[decl.CommandArg].(string); ok {
+				if reason, denied := k.grant.Policy.FloorRawCommandRefusal(command); denied {
+					result := modelResult{text: refusalResult(decl.Name, RefusedByFloor, "", reason), kind: modelNocxMessage}
+					return false, &result, nil
 				}
 			}
 		}
+		if k.approvals != nil {
+			if kind, declined := k.approvals.DeclinedKind(k.proposal(decl.Name, callID, rawArgs)); declined {
+				result := modelResult{text: refusalResult(decl.Name, RefusedByPerson, kind), kind: modelNocxMessage}
+				return false, &result, nil
+			}
+			if decl.CommandArg == "" {
+				if kind, standing := k.approvals.DeclinedEffect(k.runID, decl.Effect); standing {
+					result := modelResult{text: refusalResult(decl.Name, RefusedByPerson, kind), kind: modelNocxMessage}
+					return false, &result, nil
+				}
+			} else if kind, standing := k.approvals.DeclinedInvocation(k.runID, invocation); standing {
+				result := modelResult{text: refusalResult(decl.Name, RefusedByPerson, kind), kind: modelNocxMessage}
+				return false, &result, nil
+			}
+		}
+		outcome, refusal, floorReason, verdict := k.decideInvocationWithReason(decl, resources, prepared.resourceDeclaration, invocation)
+		skillMutation := isSkillMutationTool(decl)
+		// What fell outside, and under which bound — nil unless something did.
+		// The ask carries it; the bound below decides whether the ask happens.
+		outOfScope := outOfScopeFact(verdict)
+		switch outcome {
+		case policyRefuse:
+			result := modelResult{text: refusalResult(decl.Name, refusal, "", floorReason), kind: modelNocxMessage}
+			return false, &result, nil
+		case policyAsk:
+			if !skillMutation {
+				ap := k.proposal(decl.Name, callID, rawArgs)
+				if k.approvals != nil && k.approvals.IsApproved(ap) {
+					break
+				}
+				if bounded := k.boundWideningAsk(decl.Name, decl.Effect, outOfScope); bounded != nil {
+					return false, bounded, nil
+				}
+				return false, nil, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation, outOfScope, nil)
+			}
+		}
+		// 3a. THE CALL IS RESOLVED BEFORE ANYTHING JUDGES IT (nocx-ojfuc.1).
+		//
+		// skills.install's whole argument is an address, and an address is
+		// not something anybody can approve: the name, the description, the
+		// files that will land and every scan finding in them are in a
+		// document nobody has fetched yet. So the fetch happens HERE — after
+		// the policy has decided the call's class is not refused and its
+		// destination is inside the row's scopes, before the classifier is
+		// consulted and before the person is asked — and what is asked about
+		// is a skill rather than a URL.
+		//
+		// THE ALTERNATIVE, REJECTED, WAS TO ASK FIRST AND FETCH AFTER. The
+		// question would name an address, the person would approve an
+		// address, and the bytes that arrived afterwards would be whatever
+		// answered it. internal/skill is built for this order: Preview shows,
+		// Install re-fetches and refuses unless the bytes are the ones shown.
+		//
+		// It is skipped on an APPROVED resume, and that is not an
+		// optimisation: a second preview would remember the CURRENT digest,
+		// so Install would compare the bytes against themselves and the
+		// "the bytes moved between the question and the answer" refusal
+		// would never fire again.
+		var installFacts *ApprovalInstall
+		if decl.Name == "skills.install" && !k.proposalApproved(decl.Name, callID, rawArgs) {
+			resolved, resolveErr := k.resolveSkillInstallFacts(ctx, decl, args)
+			if resolveErr != nil {
+				// The store's refusals are already sentences that name the
+				// step that refused, in the person's words, and nothing was
+				// written — so this reaches the model as an ANSWER, the way
+				// the skill summarizer's decline does, rather than failing
+				// the run.
+				k.info("agent tool: skills.install could not be resolved", "error", resolveErr)
+				result := modelResult{
+					text: "I could not read a skill at that address, so nothing was proposed and nothing was installed: " + resolveErr.Error(),
+					kind: modelNocxMessage,
+				}
+				return false, &result, nil
+			}
+			installFacts = resolved
+		}
+		var classifierFact *classifierFact
+		if k.classifier != nil && !k.proposalApproved(decl.Name, callID, rawArgs) {
+			ask, fact, classifyErr := k.classifyProposal(ctx, decl, callID, rawArgs, args, resources, installFacts)
+			if classifyErr != nil {
+				return false, nil, fmt.Errorf("agent tool %q: classifier gate: %w", decl.Name, classifyErr)
+			}
+			if ask != nil {
+				return false, nil, k.escalateClassifier(ctx, decl, callID, rawArgs, ask, fact, resources, invocation)
+			}
+			classifierFact = fact
+		}
+		if skillMutation && !k.proposalApproved(decl.Name, callID, rawArgs) {
+			if bounded := k.boundWideningAsk(decl.Name, decl.Effect, outOfScope); bounded != nil {
+				return false, bounded, nil
+			}
+			if classifierFact != nil {
+				ask := k.request(decl, callID, rawArgs, resources, installFacts)
+				ask.OutOfScope = outOfScope
+				return false, nil, k.escalateClassifier(ctx, decl, callID, rawArgs, ask, classifierFact, resources, invocation)
+			}
+			return false, nil, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation, outOfScope, installFacts)
+		}
+		if k.approvals != nil {
+			ap := k.proposal(decl.Name, callID, rawArgs)
+			if k.approvals.IsApproved(ap) {
+				if verifyErr := k.approvals.VerifyApprovedFileVersions(ap); verifyErr != nil {
+					result := modelResult{text: refusalResult(decl.Name, RefusedFileChanged, "", verifyErr.Error()), kind: modelNocxMessage}
+					return false, &result, nil
+				}
+				if shown, ok := k.approvals.ApprovedExpansions(ap); ok && len(shown) > 0 {
+					if verifyErr := VerifyExpansions(ctx, k.runSeams.expansions, k.runCtx.Session, shown); verifyErr != nil {
+						result := modelResult{text: refusalResult(decl.Name, RefusedExpansionChanged, "", verifyErr.Error()), kind: modelNocxMessage}
+						return false, &result, nil
+					}
+				}
+			}
+		}
+		var err error
+		execID, entryID, err = k.openAttempt(ctx, decl, callID, rawArgs, resources, classifierFact)
+		if err != nil {
+			return false, nil, fmt.Errorf("agent tool %q: record attempt: %w", decl.Name, err)
+		}
+		return true, nil, nil
 	}
-
-	// 4. The attempt is written BEFORE the call. If that write fails, no
-	// capability is constructed, next is not called, and the run fails
-	// with a terminal infrastructure error — an interrupted run can
-	// never be told "this may already have happened" when it cannot.
-	execID, entryID, err := k.openAttempt(ctx, decl, callID, rawArgs, resources, classifierFact)
-	if err != nil {
-		return modelResult{}, fmt.Errorf("agent tool %q: record attempt: %w", decl.Name, err)
+	request := ToolInvocation{
+		Context:    ctx,
+		Method:     name,
+		RunContext: k.runCtx,
+		Grant:      k.grant,
+		RawParams:  []byte(rawArgs),
 	}
-
-	// 5. The narrowed capability is constructed. The tool holds only
-	// this; it cannot exceed the grant because it never has more
-	// (ADR-0028 decision 4 — a check would leave it holding a full
-	// manager). A tool with no Narrow is declared-but-not-executable
-	// and is refused here, honestly.
-	if decl.Narrow == nil {
-		_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
-		return modelResult{}, fmt.Errorf("agent tool %q is declared but not executable: no capability constructor is wired", decl.Name)
-	}
-	capability, err := decl.Narrow(k.grant, resources, k.runCtx)
-	if err != nil {
-		_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
-		return modelResult{}, fmt.Errorf("agent tool %q: construct capability: %w", decl.Name, err)
-	}
-	// 5b. The call becomes VISIBLE (nocx-shxv0), here and not earlier
-	// or later. Not earlier, because a call that is refused, malformed
-	// or escalated has not happened — and an escalated one already has
-	// a surface of its own, the approval prompt, which two surfaces
-	// owning one input is exactly what AGENTS.md forbids. Not later,
-	// because a person must see what the assistant is doing WHILE it
-	// does it: a run tool's command can take a minute, and an account
-	// written after the fact is what the owner saw on 2026-08-22 —
-	// the block sitting below the answer written from it.
-	//
-	// It carries the arguments the tool is about to run on and the
-	// resolved resources derived from them, and never the result (see
-	// ToolCall's doc for why the result is left off). The arguments are
-	// the VALIDATED object from step 2, not the raw string: what is
-	// announced is what ran, and step 2 is where "what ran" was settled.
-	// Announced once per EXECUTION, so an approved egress resume — which
-	// passes the same call through this pipeline a second time —
-	// announces the same CallID again; the renderer keys on it and
-	// renders one call.
-	if k.onCall != nil {
-		if err := k.onCall(ToolCall{
-			Tool:       decl.Name,
+	outcome, dispatchErr := k.dispatcher.dispatch(request, transform, gate, func(prepared *preparedInvocation, _ agenttools.Capability) error {
+		if k.onCall == nil {
+			return nil
+		}
+		return k.onCall(ToolCall{
+			Tool:       prepared.decl.Name,
 			CallID:     callID,
-			Args:       args,
+			Args:       prepared.args,
 			EntryID:    entryID,
-			Effect:     decl.Effect,
-			Resource:   matchedResource(resources),
-			OpensBlock: decl.OpensBlock,
-		}); err != nil {
-			// The caller refused the write, which is the one thing that
-			// stops a run: the same contract onEvent has for a delta.
-			// The attempt is closed rather than left open — the
-			// interval closes with a terminal reason, never silently.
+			Effect:     prepared.decl.Effect,
+			Resource:   matchedResource(prepared.resources),
+			OpensBlock: prepared.decl.OpensBlock,
+		})
+	}, func(runCtx context.Context, decl agenttools.Tool, capability agenttools.Capability, raw []byte) (string, error) {
+		return k.runWithRetained(decl, callID, runCtx, capability, raw)
+	})
+	if dispatchErr != nil {
+		if outcome.prepared != nil && execID != 0 {
 			_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
-			return modelResult{}, err
 		}
-	}
-
-	// 6. Execution — in Go, against the narrowed capability. An
-	// APPROVED egress resume does not re-run the tool: the result that
-	// was withheld and shown to the person is retained (design §7.1's
-	// "send it as it is"), and re-running would repeat the effect and
-	// could produce a different result than the one approved.
-	out, runErr := k.runWithRetained(decl, callID, ctx, capability, []byte(rawArgs))
-	// 6b. The result is held to what the tool DECLARES it returns, before
-	// anything reads it — the egress gate or the model. Only a successful call
-	// has a result to check.
-	if runErr == nil {
-		if err := k.checkResult(decl.Name, out); err != nil {
+		if errors.Is(dispatchErr, ErrInvalidResult) && outcome.prepared != nil {
+			decl := outcome.prepared.decl
 			k.warn("agent tool: the result does not match its own contract",
-				"tool", decl.Name, "call", callID, "error", err)
-			_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
-			return modelResult{}, &ToolFailedError{Tool: decl.Name, Err: err}
+				"tool", decl.Name, "call", callID, "error", dispatchErr)
+			return modelResult{}, &ToolFailedError{Tool: decl.Name, Err: dispatchErr}
 		}
+		if errors.Is(dispatchErr, ErrUnknownMethod) || errors.Is(dispatchErr, ErrInvalidParams) {
+			return modelResult{}, fmt.Errorf("%w: tool %q: %v", ErrMalformedModelOutput, name, dispatchErr)
+		}
+		return modelResult{}, dispatchErr
 	}
+	if outcome.aborted != nil {
+		return *outcome.aborted, nil
+	}
+	prepared := outcome.prepared
+	decl := prepared.decl
+	resources := prepared.resources
+	out := outcome.output
+	runErr := outcome.runErr
 	if runErr == nil && decl.Name == "skills.resolve" {
 		var resolution skill.Resolution
 		if err := json.Unmarshal([]byte(out), &resolution); err == nil && resolution.Handle != "" {
 			k.resolutions[resolution.Handle] = &resolution
 		}
+	}
+
+	// 6c. A CAPABILITY REFUSAL IS AN ANSWER, NOT A FAULT (nocx-4yjwk.3).
+	// The narrowed capability refused a call it cannot express, which is
+	// the same kind of no the policy gate makes at step 3 — so it takes
+	// the same shape: OUR sentence, in the refused call's own slot, and
+	// the run continues. Before this, it left as a *ToolFailedError and
+	// ended the run on the provider's sentence about a path, which is what
+	// a person got back after being asked a question and answering it.
+	//
+	// BEFORE THE EGRESS GATE, deliberately. Nothing was read, so there is
+	// no result to screen; what would reach the gate is the capability's
+	// error text, whose only content is the path the model already named.
+	// Screening it could suspend the run for a person's decision about
+	// bytes that were never produced. Every other refusal in this pipeline
+	// returns unscreened for the same reason: the sentence is ours, and it
+	// says nothing the policy keeps from the person.
+	//
+	// The attempt closes here rather than being left open — the interval
+	// ends with a reason, always. TermFailed is the honest existing
+	// reason: this attempt did not do what it was opened for.
+	// TermAgentDeclined names the agent's own no, which this is not, and
+	// content owns that vocabulary.
+	if runErr != nil && capabilityRefusal(runErr) {
+		_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
+		return modelResult{text: refusalResult(decl.Name, RefusedOutOfScope, ""), kind: modelNocxMessage}, nil
 	}
 
 	// 7. Result ingest — the egress gate (design §7.1) FIRST, then the

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/policy.classify.params.schema.json",
+  "title": "PolicyClassifyParams",
+  "description": "Params for policy.classify: one command line a person typed, and nothing else. There is deliberately no effect here, which is the whole difference from policy.explain's params: that method is about a call that happened and the caller's effect is the fact, while this one is about a command nobody has run, so deriving the effect is the entire point — it is what the person is shown before they widen a permission, and what the resulting rule carries in grantedUnder. A caller that could state the effect here could state anything, and the permit would be typed after all.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["command"],
+  "properties": {
+    "command": {
+      "description": "The command line, exactly as the person typed it. The backend parses it with the SAME parser a run uses and NEVER executes it, so what is shown is the reading the enforcement would have.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    }
+  }
+}

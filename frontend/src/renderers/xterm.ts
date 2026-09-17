@@ -67,6 +67,18 @@ const MINIMUM_CONTRAST_RATIO = 4.5
 // waste of CPU.
 const FORCED_REFRESH_MS = 42
 
+// ── The program's queries are the runtime's to answer (nocx-ygxjv.12) ─────
+// xterm's onData mixes what the person typed with xterm's own automatic replies
+// to the program's queries, so the queries are swallowed at the parser instead
+// — see _refuseProgramQueries for the whole list and the reasoning.
+
+/** OSC 10/11/12: the foreground, background and cursor colours. */
+const OSC_COLOR_IDENTS = [10, 11, 12] as const
+
+/** OSC 4's colour QUERY payload: `index;?` items and nothing else. A payload
+ *  that sets a colour (`0;#ff0000`) is xterm's to apply and is not matched. */
+const OSC4_REPORT_RE = /^\d+;\?(?:;\d+;\?)*$/
+
 // ── Shift+Enter must reach the program as its own chord (nocx-nt70) ──────
 // A program that owns the keyboard cannot tell Shift+Enter from Enter: xterm
 // encodes both as a bare CR (\r) and drops the modifier. There are two
@@ -275,6 +287,10 @@ export class XtermRenderer implements TerminalRenderer {
   private recoverySubs: Array<(hex: string) => void> = []
   private fenceOscDisposable?: { dispose(): void }
   private snapshotOscDisposable?: { dispose(): void }
+  /** The parser handlers that refuse the program's own queries, so the one
+   *  terminal that answers it is the session runtime. Registered at mount and
+   *  dropped with the terminal — see _refuseProgramQueries. */
+  private programQueryHandlers: Array<{ dispose(): void }> = []
   private scrollDisposable?: { dispose(): void }
   private renderDisposable?: { dispose(): void }
   private _cachedCellHeight: number | null = null
@@ -399,6 +415,7 @@ export class XtermRenderer implements TerminalRenderer {
     })
     this.term = term
     this._applyLinkPolicy()
+    this._refuseProgramQueries(term)
 
     // The capture tracker (nocx-3j9b) lives for the renderer's whole life:
     // its generation counts every write, buffer switch, resize, clear and
@@ -1126,6 +1143,67 @@ export class XtermRenderer implements TerminalRenderer {
     }
     this.disposeSubs.push(cb)
   }
+
+  /**
+   * The browser stops answering the program (ADR-0066, nocx-ygxjv.12).
+   *
+   * xterm's onData carries TWO kinds of data and only one of them is the
+   * person's: what a key, a paste or a mouse report produced, and xterm's own
+   * AUTOMATIC REPLIES to the program's queries. Those replies are xterm
+   * answering from its cursor, its modes and its idea of the grid — and after
+   * ADR-0066 the terminal that owns those is the session runtime beside the
+   * PTY. A second answerer in a browser is two answers to one question, one of
+   * them from the wrong terminal and possibly from a window nobody is looking
+   * at.
+   *
+   * Removing the onData path would remove typing with it, and recognising
+   * replies by their shape after the fact cannot work: a program is free to
+   * print, and a person to paste, text that looks exactly like a cursor report.
+   * So the replies are refused where they are PRODUCED — at the parser —
+   * by registering, for each query, a handler that reports the sequence
+   * handled. xterm tries the most recently added handler first, so these take
+   * precedence over its own; each predicate swallows ONLY the query form, so
+   * OSC 10/11/12 with a colour (xterm SETTING its palette) and every
+   * non-reporting window operation still reach xterm.
+   *
+   * Deliberately NOT refused, and each for its own reason:
+   *   - Focus reports (CSI I / CSI O): not an answer to a query. They report
+   *     that the person moved their attention, like a click or a mouse report.
+   *   - Anything the person produced: keys, pastes, mouse reports.
+   *   - Window reports (CSI 14/16/18 t). xterm gates EVERY window operation,
+   *     reporting ones included, behind its `windowOptions`, which this
+   *     terminal does not set — so xterm answers none of them today and none
+   *     is refused here. A surface that ever sets that option is ADDING a
+   *     reply path, and is what must register the refusal at this function.
+   */
+  private _refuseProgramQueries(term: Terminal): void {
+    const keep = (d: { dispose(): void }): void => {
+      this.programQueryHandlers.push(d)
+    }
+    const parser = term.parser
+
+    // DSR: CSI 5n / CSI 6n and the DEC form CSI ? 6 n. Pure queries, both.
+    keep(parser.registerCsiHandler({ final: 'n' }, () => true))
+    keep(parser.registerCsiHandler({ prefix: '?', final: 'n' }, () => true))
+    // DA1 and DA2: CSI c (or CSI 0 c) and CSI > c.
+    keep(parser.registerCsiHandler({ final: 'c' }, () => true))
+    keep(parser.registerCsiHandler({ prefix: '>', final: 'c' }, () => true))
+    // DECRQM: CSI $ p (ANSI modes) and CSI ? $ p (private modes). xterm
+    // answers both from its own mode tables, and those tables belong to the
+    // session runtime now — the one ADR-0065 measures as not yet answering it.
+    keep(parser.registerCsiHandler({ intermediates: '$', final: 'p' }, () => true))
+    keep(parser.registerCsiHandler({ prefix: '?', intermediates: '$', final: 'p' }, () => true))
+    // DECRQSS: DCS $ q <setting> ST. xterm answers every setting, including an
+    // empty reply for one it does not know.
+    keep(parser.registerDcsHandler({ intermediates: '$', final: 'q' }, () => true))
+    // Colour reports: OSC 10/11/12 with a bare `?`, and an OSC 4 whose items
+    // are all `index;?`. A payload that SETS a colour falls through.
+    for (const ident of OSC_COLOR_IDENTS) {
+      keep(parser.registerOscHandler(ident, (data: string) => data === '?'))
+    }
+    keep(parser.registerOscHandler(4, (data: string) => OSC4_REPORT_RE.test(data)))
+  }
+
   dispose(): void {
     if (this._disposed) return
     // The provider holds a closure over the policy, which holds the tab's
@@ -1187,6 +1265,8 @@ export class XtermRenderer implements TerminalRenderer {
     this.writeParsedSubs = []
     this.clearSubs = []
     this.resetSubs = []
+    for (const d of this.programQueryHandlers) d.dispose()
+    this.programQueryHandlers = []
     if (this._themeUnsub !== null) {
       this._themeUnsub()
       this._themeUnsub = null

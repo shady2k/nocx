@@ -120,7 +120,7 @@ func TestAReadoptedSessionsRecordingContinuesWhereItStopped(t *testing.T) {
 	err := ws.ReadoptHostedSession(context.Background(), session.ID("sid-readopt"),
 		func(_ context.Context, from uint64) (HostedSessionOpen, error) {
 			resumedAt = from
-			sess, adoptErr := reg.Adopt(session.Config{Kind: session.KindRemote, Host: "h"},
+			sess, adoptErr := reg.Adopt(context.Background(), session.Config{Kind: session.KindRemote, Host: "h"},
 				session.ID("sid-readopt"), ch)
 			if adoptErr != nil {
 				return HostedSessionOpen{}, adoptErr
@@ -173,7 +173,7 @@ func TestASessionWithNoRecordingResumesAtTheStart(t *testing.T) {
 	err := ws.ReadoptHostedSession(context.Background(), session.ID("sid-nothing-recorded"),
 		func(_ context.Context, from uint64) (HostedSessionOpen, error) {
 			resumedAt = from
-			sess, adoptErr := reg.Adopt(session.Config{Kind: session.KindRemote, Host: "h"},
+			sess, adoptErr := reg.Adopt(context.Background(), session.Config{Kind: session.KindRemote, Host: "h"},
 				session.ID("sid-nothing-recorded"), ch)
 			if adoptErr != nil {
 				return HostedSessionOpen{}, adoptErr
@@ -220,7 +220,7 @@ func TestAReadoptAnsweringForAnotherSessionIsRefused(t *testing.T) {
 	ch := newReadoptChannel(nil)
 	err := ws.ReadoptHostedSession(context.Background(), session.ID("sid-asked-for"),
 		func(context.Context, uint64) (HostedSessionOpen, error) {
-			sess, adoptErr := reg.Adopt(session.Config{Kind: session.KindRemote, Host: "h"},
+			sess, adoptErr := reg.Adopt(context.Background(), session.Config{Kind: session.KindRemote, Host: "h"},
 				session.ID("sid-answered-with"), ch)
 			if adoptErr != nil {
 				return HostedSessionOpen{}, adoptErr
@@ -272,7 +272,7 @@ func TestTheHostsLostWindowIsRecordedAsAHostWindowGap(t *testing.T) {
 	var report func(uint64, string)
 	err := ws.ReadoptHostedSession(context.Background(), session.ID("sid-hole"),
 		func(context.Context, uint64) (HostedSessionOpen, error) {
-			sess, adoptErr := reg.Adopt(session.Config{Kind: session.KindRemote, Host: "h"},
+			sess, adoptErr := reg.Adopt(context.Background(), session.Config{Kind: session.KindRemote, Host: "h"},
 				session.ID("sid-hole"), ch)
 			if adoptErr != nil {
 				return HostedSessionOpen{}, adoptErr
@@ -325,7 +325,7 @@ func TestATakenBackSessionsIntegrationAndLaneAreBothRegistered(t *testing.T) {
 	started := false
 	err := ws.ReadoptHostedSession(context.Background(), session.ID("sid-axis"),
 		func(_ context.Context, _ uint64) (HostedSessionOpen, error) {
-			sess, adoptErr := reg.Adopt(session.Config{Kind: session.KindRemote, Host: "h"},
+			sess, adoptErr := reg.Adopt(context.Background(), session.Config{Kind: session.KindRemote, Host: "h"},
 				session.ID("sid-axis"), ch)
 			if adoptErr != nil {
 				return HostedSessionOpen{}, adoptErr
@@ -374,7 +374,7 @@ func TestATakenBackSessionWithNothingToSayStaysOffTheAxis(t *testing.T) {
 
 	err := ws.ReadoptHostedSession(context.Background(), session.ID("sid-quiet"),
 		func(_ context.Context, _ uint64) (HostedSessionOpen, error) {
-			sess, adoptErr := reg.Adopt(session.Config{Kind: session.KindRemote, Host: "h"},
+			sess, adoptErr := reg.Adopt(context.Background(), session.Config{Kind: session.KindRemote, Host: "h"},
 				session.ID("sid-quiet"), ch)
 			if adoptErr != nil {
 				return HostedSessionOpen{}, adoptErr
@@ -406,7 +406,7 @@ func TestARefusedReadoptDisposesTheLifecycleChannelItTookOver(t *testing.T) {
 	aborted := false
 	err := ws.ReadoptHostedSession(context.Background(), session.ID("sid-wanted"),
 		func(_ context.Context, _ uint64) (HostedSessionOpen, error) {
-			sess, adoptErr := reg.Adopt(session.Config{Kind: session.KindRemote, Host: "h"},
+			sess, adoptErr := reg.Adopt(context.Background(), session.Config{Kind: session.KindRemote, Host: "h"},
 				session.ID("sid-answered"), ch)
 			if adoptErr != nil {
 				return HostedSessionOpen{}, adoptErr

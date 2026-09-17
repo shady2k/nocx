@@ -47,6 +47,19 @@
 //	                        HTTP request through this server waits for it to
 //	                        know the bytes went over the connection rather
 //	                        than out of this machine's own interface.
+//	AUTH=<n>                the running count of connections that have
+//	                        COMPLETED authentication, printed as each one
+//	                        does. It is a counter, not an event log: a reader
+//	                        takes the LAST value and asserts on it, so
+//	                        "exactly one connection authenticated" is one
+//	                        number rather than a count of lines. A connection
+//	                        whose authentication was refused is never
+//	                        counted — the criterion it answers is about
+//	                        authenticated connections, and a refused handshake
+//	                        is a different failure. Read by
+//	                        e2e/ssh-helper-happy-path.spec.ts, whose first
+//	                        criterion is that a pane and Files on one host
+//	                        share ONE connection (nocx-50w7p.6).
 //	READY
 package main
 
@@ -84,7 +97,7 @@ func main() {
 func run() error {
 	banner := flag.String("banner", "", "sshd banner sent before authentication")
 	password := flag.String("password", "", "require password auth; accepts exactly this password and refuses every key")
-	repo := flag.String("repo", "", "seed a git repository at this path for the git acceptance spec: an initial commit, an untracked file whose name has a space, a quote, a leading dash and a newline, and a pre-commit hook that writes a marker outside the repository and prints more than one packet of output; the fixture chdirs into it so every served shell starts inside the repository")
+	repo := flag.String("repo", "", "seed a git repository at this path for the git acceptance spec: an initial commit, an untracked file whose name has a space, a quote, a leading dash and a newline, and a pre-commit hook that writes a marker outside the repository and prints more than one packet of output; the fixture chdirs into it, so a shell this process serves directly starts inside the repository — a helper-hosted shell does not: the far nocx-helper spawns it and starts it in the login user's home, like any real sshd's login shell")
 	flag.Parse()
 
 	if *repo != "" {
@@ -273,6 +286,17 @@ func serveConn(conn net.Conn, config *gossh.ServerConfig) {
 	if err != nil {
 		return
 	}
+	// AUTHENTICATED, and that is exactly where the count moves.
+	//
+	// NewServerConn returns only after the handshake AND the userauth exchange
+	// have both succeeded, so this line is one per connection a client
+	// actually got in on — not one per dial, and not one per connection that
+	// attempted. A refused client never reaches it, which is what makes the
+	// number usable as an assertion: e2e/ssh-helper-happy-path.spec.ts reads
+	// the count after a pane and Files have both been served and requires
+	// exactly 1, because one connection is what a shared pool means
+	// (nocx-50w7p.6).
+	printLine("AUTH=" + strconv.Itoa(noteAuthenticated()))
 	defer func() { _ = sshConn.Close() }()
 	fwd := &forwards{conn: sshConn, listeners: map[string]net.Listener{}}
 	defer fwd.closeAll()
@@ -388,6 +412,41 @@ func printLine(s string) {
 	defer stdoutMu.Unlock()
 	fmt.Println(s)
 	_ = os.Stdout.Sync()
+}
+
+// authenticated is the count of connections that have completed
+// authentication, and it is a STATE rather than a log: a reader asks it the
+// same way it asks everything else this fixture decides. serveConn prints it
+// as AUTH=<n> on every connection that gets in, which is what makes "exactly
+// one authenticated connection" a number a spec compares rather than a count
+// of lines it has to trust.
+//
+// It is ONE counter for the PROCESS, which is exactly right for the fixture —
+// one binary, one accept loop, one number for the far host. A Go test that
+// starts several servers in one process therefore shares it, and must assert
+// DELTAS from a baseline it takes itself rather than absolute values;
+// TestAuthCount_CountsAuthenticatedConnectionsOnly is written that way.
+//
+// Guarded by its own mutex rather than stdoutMu's: the two protect different
+// things (a count that is read on its own, and the interleaving of writes), and
+// sharing one lock would make the counter's test depend on the printer's.
+var authenticated struct {
+	mu sync.Mutex
+	n  int
+}
+
+// noteAuthenticated records one authenticated connection and answers with the
+// running count — the value the AUTH= line carries.
+//
+// There is deliberately NO read-only accessor beside it: a function only a test
+// calls is dead code by this repository's deadcode ratchet, and the test that
+// needs the number reads `authenticated.n` under its own lock the way the
+// printer does.
+func noteAuthenticated() int {
+	authenticated.mu.Lock()
+	defer authenticated.mu.Unlock()
+	authenticated.n++
+	return authenticated.n
 }
 
 // pipe splices an SSH channel and a TCP connection, returning when either
@@ -997,9 +1056,13 @@ func accountHome() string {
 }
 
 // seedRepo creates the acceptance repository at dir and chdirs the fixture
-// into it, so every served shell (and the git panel's cwd) starts inside
-// the repository. The repository carries its own git identity — a commit's
-// success never depends on the environment the fixture inherits.
+// into it, so a shell this process serves DIRECTLY starts inside the
+// repository. That covers the fixture's own PTY and exec paths; it does not
+// cover a helper-hosted session, where the far nocx-helper spawns the shell
+// through internal/pty (NewLocal), whose resolveCwd falls back to the
+// login user's home when no cwd is given — the same place a real sshd
+// starts a login shell. The repository carries its own git identity — a
+// commit's success never depends on the environment the fixture inherits.
 //
 // The contents are the acceptance test's three load-bearing pieces:
 //

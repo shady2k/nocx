@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.replay.schema.json",
+  "title": "HelperSessionReplayResult",
+  "description": "Result of the session service's replay op: one frame per mark, in the order the marks were given. A replay carries no revision and no completeness — those are a runtime's facts and there is no runtime here — and the shape of each frame is the same one a live session's screen read answers with, because two shapes would have been two decoders and the second would have been written by reading the first.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["frames"],
+  "properties": {
+    "frames": {
+      "description": "Never null: no marks is an empty array, which is an answer rather than a missing one.",
+      "type": "array",
+      "items": {
+        "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/screenFrame"
+      }
+    }
+  }
+}

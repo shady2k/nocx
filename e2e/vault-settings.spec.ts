@@ -12,11 +12,12 @@
  * Uses its own ports (19880/19881) so it never conflicts with vault.spec.ts
  * or the default dev-server port.
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { mkdtempSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  standalone as base,
   VaultBackend,
   appReadyForInput,
   bindEndpoint,

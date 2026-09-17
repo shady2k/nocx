@@ -1,13 +1,10 @@
 package app
 
-// The consent resolver (remote-helper design D8): what the helper selection
-// may do for one machine at one git.open. The 2026-08-10 footprint-consent
-// design wrote the relay arm of the auto ladder as "a suitable binary
-// exists for that platform" — forward structure before any helper existed;
-// the day one ships, that arm becomes true everywhere, and every user would
-// be asked, on every new machine, about a feature they never reached for.
-// D8 adds the second condition: auto resolves to relay only when a surface
-// on that connection has asked for the helper.
+// The consent resolver (ADR-0034, ADR-0068): what the helper selection may
+// do for one machine at one consultation. ConsentRequired is the resolver's
+// "no answer yet" outcome; only the connect-time caller may turn it into an
+// ask, and every other caller — git.open among them — treats it exactly
+// like Refused.
 
 import (
 	"encoding/json"
@@ -22,14 +19,14 @@ import (
 )
 
 // machineWithNoStoredAnswer is a machine whose host key has no stored
-// relay-tier answer and whose effective mode is the hardcoded auto default.
+// helper-tier answer and whose effective mode is the hardcoded auto default.
 var machineWithNoStoredAnswer = Machine{Fingerprint: "SHA256:unanswered"}
 
 var (
 	grantedMachine = Machine{Fingerprint: "SHA256:granted"}
 	explicitScript = Machine{Fingerprint: "SHA256:script", Mode: profile.DesiredScript}
 	explicitRaw    = Machine{Fingerprint: "SHA256:raw", Mode: profile.DesiredRaw}
-	explicitRelay  = Machine{Fingerprint: "SHA256:relay", Mode: profile.DesiredRelay}
+	explicitHelper = Machine{Fingerprint: "SHA256:helper", Mode: profile.DesiredHelper}
 )
 
 // seedGrantedDocument writes a version-1 consent document carrying a grant
@@ -52,19 +49,8 @@ func seedGrantedDocument(t *testing.T, dir, fingerprint string) *consent.Store {
 	return consent.NewStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(dir), "consent.json")
 }
 
-// TestShippingAHelperDoesNotOptEveryMachineIn is the stress test's finding
-// as an assertion: auto's relay arm was written as "a suitable binary
-// exists for that platform", which becomes true everywhere the day we ship
-// one.
-func TestShippingAHelperDoesNotOptEveryMachineIn(t *testing.T) {
-	r := newResolver(withHelperArtifactAvailable(true), withHelperRequested(false))
-	if got := r.Resolve(machineWithNoStoredAnswer); got == DesiredRelay {
-		t.Fatal("auto must not reach relay for a connection nothing asked the helper for")
-	}
-}
-
-// TestResolverLadder pins the whole decision table of D8. Every case names
-// what the user is shown, not how the code routes.
+// TestResolverLadder pins the whole decision table. Every case names what
+// the user is shown, not how the code routes.
 func TestResolverLadder(t *testing.T) {
 	store := seedGrantedDocument(t, t.TempDir(), grantedMachine.Fingerprint)
 	cases := []struct {
@@ -74,31 +60,25 @@ func TestResolverLadder(t *testing.T) {
 		want Outcome
 	}{
 		{
-			name: "auto with no stored answer, no surface asked: nothing at all",
-			opts: []option{withHelperArtifactAvailable(true), withHelperRequested(false)},
-			m:    machineWithNoStoredAnswer,
-			want: Refused,
-		},
-		{
-			name: "auto with no stored answer, surface asked: the ask",
-			opts: []option{withHelperArtifactAvailable(true), withHelperRequested(true)},
+			name: "auto with no stored answer: the ask (the connect-time caller's alone to raise)",
+			opts: []option{withHelperArtifactAvailable(true)},
 			m:    machineWithNoStoredAnswer,
 			want: ConsentRequired,
 		},
 		{
-			name: "auto with a stored grant, surface asked: relay",
-			opts: []option{withHelperArtifactAvailable(true), withHelperRequested(true), withStore(store)},
+			name: "auto with a stored grant: helper",
+			opts: []option{withHelperArtifactAvailable(true), withStore(store)},
 			m:    grantedMachine,
-			want: DesiredRelay,
+			want: DesiredHelper,
 		},
 		{
-			// D8's "script is an answer, not a gap", assertable only since
+			// "Script is an answer, not a gap", assertable only since
 			// ADR-0033 gave silence its own value: while script also carried
 			// every unconfigured connection, refusing here would have refused
 			// everyone. The refusal is not a dead end — refusedHelperReason
 			// names the modes that do offer the helper.
 			name: "explicit script: an answer, so neither the ask nor an upgrade",
-			opts: []option{withHelperArtifactAvailable(true), withHelperRequested(true)},
+			opts: []option{withHelperArtifactAvailable(true)},
 			m:    explicitScript,
 			want: Refused,
 		},
@@ -107,30 +87,24 @@ func TestResolverLadder(t *testing.T) {
 			// state, so it is askable exactly as silence is. This row and the
 			// one above are the whole difference between the two values.
 			name: "explicit auto: the same as silence — askable",
-			opts: []option{withHelperArtifactAvailable(true), withHelperRequested(true)},
+			opts: []option{withHelperArtifactAvailable(true)},
 			m:    Machine{Fingerprint: "SHA256:auto", Mode: profile.DesiredAuto},
 			want: ConsentRequired,
 		},
 		{
 			name: "explicit raw: nothing is written and nothing is asked",
-			opts: []option{withHelperArtifactAvailable(true), withHelperRequested(true)},
+			opts: []option{withHelperArtifactAvailable(true)},
 			m:    explicitRaw,
 			want: Refused,
 		},
 		{
-			name: "explicit relay: the explicit choice is the consent, even without a surface ask",
-			opts: []option{withHelperRequested(false)},
-			m:    explicitRelay,
-			want: DesiredRelay,
+			name: "explicit helper: the explicit choice is the consent",
+			opts: nil,
+			m:    explicitHelper,
+			want: DesiredHelper,
 		},
 		{
-			name: "no artifact for the platform: nothing to offer",
-			opts: []option{withHelperRequested(true)},
-			m:    machineWithNoStoredAnswer,
-			want: Refused,
-		},
-		{
-			name: "nothing known about the helper at all: fail closed",
+			name: "no artifact for the platform: nothing to offer, fail-closed default",
 			opts: nil,
 			m:    machineWithNoStoredAnswer,
 			want: Refused,
@@ -148,13 +122,13 @@ func TestResolverLadder(t *testing.T) {
 
 // TestResolverEmptyFingerprintNeverGrants: a machine whose host key was not
 // captured ("" — a stub channel, a session that never dialed) must never
-// resolve to relay on the strength of a shared empty key — even when a
+// resolve to helper on the strength of a shared empty key — even when a
 // foreign document carries an answer under "" (the store drops it).
 func TestResolverEmptyFingerprintNeverGrants(t *testing.T) {
 	store := seedGrantedDocument(t, t.TempDir(), "")
-	r := newResolver(withStore(store), withHelperArtifactAvailable(true), withHelperRequested(true))
-	if got := r.Resolve(Machine{Fingerprint: ""}); got == DesiredRelay {
-		t.Fatal("an empty host-key fingerprint must never resolve to relay")
+	r := newResolver(withStore(store), withHelperArtifactAvailable(true))
+	if got := r.Resolve(Machine{Fingerprint: ""}); got == DesiredHelper {
+		t.Fatal("an empty host-key fingerprint must never resolve to helper")
 	}
 }
 
@@ -165,8 +139,8 @@ func TestResolverGrantSurvivesStoreReopen(t *testing.T) {
 	dir := t.TempDir()
 	seedGrantedDocument(t, dir, grantedMachine.Fingerprint)
 	again := consent.NewStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(dir), "consent.json")
-	r := newResolver(withStore(again), withHelperArtifactAvailable(true), withHelperRequested(true))
-	if got := r.Resolve(grantedMachine); got != DesiredRelay {
-		t.Errorf("Resolve after store reopen = %q, want relay — the grant must persist", got)
+	r := newResolver(withStore(again), withHelperArtifactAvailable(true))
+	if got := r.Resolve(grantedMachine); got != DesiredHelper {
+		t.Errorf("Resolve after store reopen = %q, want helper — the grant must persist", got)
 	}
 }

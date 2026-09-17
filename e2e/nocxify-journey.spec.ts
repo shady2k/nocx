@@ -426,21 +426,21 @@ test('a hand-typed ssh: frozen local block, remote blocks, integrated second con
     // before the password prompt). The password is typed only after that —
     // a timed wait would race the prompt.
     await primary.waitConn(1, 30_000)
-    // Nothing was staged on disk: the run directory is empty, or was never
-    // created at all. Both mean the same thing and the second is what
-    // actually happens — ADR-0022 made the ssh command line the carrier, so
-    // no launcher is written anywhere (the comment above says as much about
-    // `.nocx/run/` being the removed path's staging directory).
-    //
-    // Written as a bare readdirSync, it threw ENOENT instead of asserting,
-    // and a spec cannot report on a directory by crashing on its absence.
-    // Its own sibling at step 7 already guards existence this way; this is
-    // the same check spelled the same way (nocx-c6z0 found it, having got
-    // past the failure that used to hide it).
-    const runDir = path.join(localHome(), '.nocx', 'run')
-    if (existsSync(runDir)) {
-      expect(readdirSync(runDir), 'staged bootstrap launcher consumed').toEqual([])
-    }
+    // There is no "the run directory is empty" check here any more
+    // (nocx-xn63t.6.7). `.nocx/run/` stopped being evidence of the removed
+    // launcher the day it became the CURRENT local helper's endpoint
+    // directory (internal/helper/endpoint/endpoint.go: DirName = "run",
+    // reused deliberately, nocx-k6p18.4) — the two never coexisted, but they
+    // share a literal name, and this spec's assertion was written for the
+    // first and read by a world in which the second already owns it. Every
+    // local pane asks this machine's helper first (internal/transport/
+    // session_open.go, nocx-50w7p.5), including the warmup block above, so
+    // by this point the helper is already listening on
+    // `.nocx/run/<generation>.sock` and the directory can never be empty
+    // again for the rest of the process's life. Confirmed red for this exact
+    // reason at 5355520c in a throwaway worktree with a brand-new disposable
+    // HOME — so it is not nocx-eyzkj's stale-HOME leftover either, and the
+    // 2026-09-15 "closed green" never held.
 
     // The password goes to the pty, not the editor: the command owns input.
     await page.keyboard.type(primaryPassword)
@@ -690,12 +690,10 @@ test('a hand-typed ssh: frozen local block, remote blocks, integrated second con
     expect(finalFact, 'fact re-read at step 7').toBeTruthy()
     expect(finalFact!.generation).toBe(manifest.generation)
 
-    // The staged argv launchers were consumed exactly once (nocx-sxdd): the
-    // local run directory is still empty after both connections (runDir is
-    // declared at step 1, where the first consumption is asserted).
-    if (existsSync(runDir)) {
-      expect(readdirSync(runDir)).toEqual([])
-    }
+    // The "argv launchers were consumed" check that stood here is gone with
+    // its premise (nocx-xn63t.6.7, and see the note at step 1): `.nocx/run/`
+    // is the live local helper endpoint directory now, not evidence of the
+    // removed launcher, and it is never empty once a local pane has opened.
   } finally {
     primary.proc.kill('SIGKILL')
     failHost.proc.kill('SIGKILL')

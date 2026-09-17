@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.open.schema.json",
+  "title": "HelperSSHOpenChannelResult",
+  "description": "The channel's identity, minted by the helper — the end that owns the channel — and echoed by the coordinator verbatim on every byte it writes and on the close. The coordinator cannot name the channel before this answer, which is why the helper may not send a byte of it until the answer is on the wire (host.ResponseObserver is what makes that a construction rather than a hope).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["channel"],
+  "properties": {
+    "channel": {
+      "description": "The channel id, as 32 hex characters. Opaque to the coordinator and never an authorization: same-UID trust already decides who may connect, and a guessed id buys a second stream on a connection the guesser is already authenticated for. Its job is routing.",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/channelId"
+    }
+  }
+}

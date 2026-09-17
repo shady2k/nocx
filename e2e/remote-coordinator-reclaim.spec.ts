@@ -94,13 +94,14 @@
  *    collapses into exactly the markerless layout nocx-k6p18.31 used to
  *    produce, editor and all.
  */
-import { test as base, expect, type Browser, type Page } from '@playwright/test'
+import { expect, type Browser, type Page } from '@playwright/test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 
 import { BASE_URL } from './base-url'
 import {
+  standalone as base,
   bindEndpoint,
   clickIntoEditor,
   openControlPlane,
@@ -118,8 +119,6 @@ const test = base
 const TAB = '.nocx-tab'
 const VIEW_GIT = 'button[data-view="git"]'
 const GIT_PANEL = '[data-testid="git-panel"]'
-const GIT_CONSENT = '[data-testid="git-consent-required"]'
-const GIT_ACCEPT = '[data-testid="git-consent-accept"]'
 
 /** The bell's rail button and the panel's rows, in the panel's own vocabulary
  *  — the same two notification-centre.spec.ts uses, and for the same reason:
@@ -395,20 +394,49 @@ async function createProfileAndOpen(
   return profileName
 }
 
-/** The shipped install gesture: the Git panel on a connected remote tab asks
- *  for consent, and accepting it puts the helper on the host. The branch line
- *  appearing is the panel's own statement that the helper answered. */
+/** The shipped install gesture: opening this AUTO connection for the first
+ *  time raises the connect-time ask (ADR-0069) — the host key is already
+ *  trusted (seedKnownHost, above), so the ask is method-only, on the same
+ *  one-dialog surface the host-key ask uses — and choosing Helper puts the
+ *  helper on the host. The open itself does not resolve, and the tab does
+ *  not appear, until the ask is answered.
+ *
+ *  The shell that comes up is NOT inside the seeded repository. Since
+ *  ADR-0057 every pane is helper-hosted: the far nocx-helper spawns it
+ *  through internal/pty (NewLocal), whose resolveCwd falls back to the
+ *  login user's home when no cwd is given — the same place a REAL sshd
+ *  starts a login shell. e2e-sshd's own `-repo` seeding only chdirs a shell
+ *  IT serves directly, so it never reaches this one. This function moves
+ *  into the repository the way a person would, with a typed `cd`, and waits
+ *  on the prompt editor's own cwd chip before asking the panel to open — the
+ *  same observable signal git-remote.spec.ts and local-drop.spec.ts wait on.
+ *  The branch line appearing afterwards is then the panel's own statement
+ *  that the helper answered for that repository; the git panel itself never
+ *  asks (ADR-0068). */
 async function installHelperThroughProduct(
   page: Page,
   endpoint: BackendEndpoint,
   fixture: SshdFixture,
+  repoPath: string,
 ): Promise<string> {
   const profileName = await createProfileAndOpen(page, endpoint, fixture)
+  const helperDialog = page.getByRole('dialog').filter({ hasText: 'Choose how nocx connects' })
+  await expect(helperDialog).toBeVisible({ timeout: 30_000 })
+  await helperDialog.getByRole('radio', { name: 'Helper' }).click()
+  await helperDialog.getByRole('button', { name: 'Continue' }).click()
+  await expect(helperDialog).not.toBeVisible()
   await expect(page.locator(TAB)).toHaveCount(2, { timeout: 30_000 })
+  await promptReady(page)
+  await page.keyboard.type(`cd '${repoPath}'`)
+  await page.keyboard.press('Enter')
+  await expect(page.locator('.pane.active .nocx-editor-context .ui-prompt-context')).toContainText(
+    basename(repoPath),
+    {
+      timeout: 30_000,
+    },
+  )
   await page.locator(VIEW_GIT).click()
   await expect(page.locator(GIT_PANEL)).toBeVisible({ timeout: 30_000 })
-  await expect(page.locator(GIT_CONSENT)).toBeVisible({ timeout: 30_000 })
-  await page.locator(GIT_ACCEPT).click()
   await expect(page.locator('[data-testid="git-branch"]')).toBeVisible({ timeout: 60_000 })
   return profileName
 }
@@ -457,7 +485,7 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
     // this test opens is a host a person could have set up.
     first = await freshClient(browser, endpoint)
     await promptReady(first)
-    const profileName = await installHelperThroughProduct(first, endpoint, fixture)
+    const profileName = await installHelperThroughProduct(first, endpoint, fixture, remoteCwd)
 
     // ── the build's tab, and it really is helper-hosted ───────────────────
     //
@@ -771,14 +799,24 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
     await expect(endedRow).toHaveCount(1, { timeout: 60_000 })
     await expect(endedRow).toContainText(/ended/)
 
-    // And the host agrees, from its own record of the process it owned.
+    // And the host agrees — by having let the session go. Closer 2
+    // (nocx-isjh4) changed what "the host agrees" means here: once the
+    // coordinator has RECORDED a shell's exit and closed its block — which
+    // the bell row just proved above — it calls EndSession, and the helper
+    // keeps an exited session's row only for as long as no coordinator has
+    // taken the result. So the host's own agreement is no longer a
+    // lingering `exit.code` this test can poll for after the fact; it is
+    // the row's ABSENCE, the same release `sessions.live` and
+    // `sessions.inventory` show for every session a coordinator has
+    // finished with. Polled on that state, not on a duration, because the
+    // release races the bell row above by an amount this test does not
+    // control.
     await expect
       .poll(
-        async () =>
-          helperSession(await inventory(endpoint), liveBefore.sessionId)?.exit?.code ?? null,
-        { timeout: 60_000, message: 'the helper never reported the build a real exit status' },
+        async () => helperSession(await inventory(endpoint), liveBefore.sessionId) !== undefined,
+        { timeout: 60_000, message: 'the host still lists a session it has already ended' },
       )
-      .toBe(EXIT_CODE)
+      .toBe(false)
 
     console.log(
       `remote reclaim: windowBytes=${hostBefore.launch.windowBytes} detachedBytes=${detachedBytes} ` +

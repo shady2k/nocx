@@ -112,6 +112,18 @@ jobs:
           go-version: '1.26'
           cache: true
 
+      # THE PINNED EMULATOR BYTES, BEFORE ANYTHING THAT LOADS A CGo PACKAGE.
+      # libghostty-vt is linked statically into the helper and the app
+      # (ADR-0065), so `go build`, `go test`, golangci-lint's type-checker and
+      # the dead-code ratchet in this job all compile CGo packages — and every
+      # one of them needs the archive and its matched headers present, and
+      # present as the PINNED bytes. Fetch-and-verify refuses a substituted
+      # archive instead of linking it, with a test that proves it refuses
+      # (internal/vtpin); third_party/libghostty-vt/MANIFEST.json is the pin
+      # and that directory's README is the argument for holding it this way.
+      - name: Fetch and verify the pinned libghostty-vt archives
+        run: make vt-archives
+
       - name: Install gofumpt
         run: go install mvdan.cc/gofumpt@latest
 
@@ -129,6 +141,19 @@ jobs:
         run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
       - name: Lint
         run: golangci-lint run ./...
+
+      # THE TAGGED HALF, as a SECOND pass rather than a tag on the one above:
+      # nocx_local_ssh selects which files EXIST, so adding it would drop
+      # cmd/nocx-helper's `!nocx_local_ssh` pair — the assertion that the
+      # artifact written to a host nobody here controls registers no ssh
+      # service — out of the type-checker instead of adding anything to it.
+      # Scoped to the packages that carry a tagged file, because the tag can
+      # change no other package's compilation. Every one of those files was
+      # unlinted by every job in this workflow until nocx-xk1di, and the list is
+      # the Makefile's (`make ci-local-ssh-split` derives and checks it) for the
+      # same reason the package sets below are.
+      - name: Lint (the local helper's ssh client, nocx_local_ssh)
+        run: golangci-lint run --build-tags=nocx_local_ssh $(make -s print-local-ssh-pkgs)
 
       - name: Build
         run: go build -tags gtk3 ./...
@@ -167,13 +192,42 @@ jobs:
         id: pkgs
         run: echo "list=$(make -s print-os-pkgs)" >> "$GITHUB_OUTPUT"
 
+      # THE TAGGED SET (nocx-xk1di), resolved the same way and for the same
+      # reason: one owner, asked over `make -s`, so the list this job runs is the
+      # list the Makefile derived from the build constraints. This job's half is
+      # the tagged packages that live in the OS set — internal/app and
+      # internal/helper/session; ci-backend carries the portable half.
+      - name: Resolve the tagged nocx_local_ssh package set
+        id: localssh
+        run: echo "list=$(make -s print-os-local-ssh-pkgs)" >> "$GITHUB_OUTPUT"
+
       - name: The OS split has not drifted
         run: make ci-os-split
+
+      # The other build constraint this suite is partitioned by, checked the
+      # same way and in every job for the same reason as the split above: a
+      # hand-kept list that drifts hides a package from every run, and hiding
+      # this one from every run is exactly how the tagged half went untested
+      # in the first place.
+      - name: The tagged set has not drifted
+        run: make ci-local-ssh-split
 
       - name: Test (the OS-specific packages)
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
         run: go test -race -tags gtk3 -count=1 $PKGS
+
+      # THE SECOND PASS. A package whose Go files all carry nocx_local_ssh does
+      # not appear in `go list ./...` at all, so it was not merely failing to be
+      # tested — it was outside every package set this job resolved — and this
+      # machine's helper, the variant with the ssh client linked in, is that
+      # shape. The tag is an ADDITION here rather than added to the run above,
+      # which would stop compiling the untagged build and take the shipped
+      # artifact's own assertion with it.
+      - name: Test (the local helper's ssh client, nocx_local_ssh)
+        env:
+          PKGS: ${{ steps.localssh.outputs.list }}
+        run: go test -race -tags gtk3,nocx_local_ssh -count=1 $PKGS
 
       # The shipped profile directory lives behind `-tags release`
       # (internal/storage/appdir.go), so the ordinary run never compiles it. One
@@ -218,6 +272,18 @@ jobs:
         with:
           go-version: '1.26'
           cache: true
+
+      # THE PINNED EMULATOR BYTES, BEFORE ANYTHING THAT LOADS A CGo PACKAGE.
+      # libghostty-vt is linked statically into the helper and the app
+      # (ADR-0065), so `go build`, `go test`, golangci-lint's type-checker and
+      # the dead-code ratchet in this job all compile CGo packages — and every
+      # one of them needs the archive and its matched headers present, and
+      # present as the PINNED bytes. Fetch-and-verify refuses a substituted
+      # archive instead of linking it, with a test that proves it refuses
+      # (internal/vtpin); third_party/libghostty-vt/MANIFEST.json is the pin
+      # and that directory's README is the argument for holding it this way.
+      - name: Fetch and verify the pinned libghostty-vt archives
+        run: make vt-archives
 
       # The shells internal/shellintegration drives. That package is portable Go,
       # so it rides here rather than with the OS split — and the bash VERSION it
@@ -265,13 +331,31 @@ jobs:
         id: pkgs
         run: echo "list=$(make -s print-portable-pkgs | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
 
+      # THE TAGGED SET (nocx-xk1di), resolved the same way and for the same
+      # reason: one owner, asked over `make -s`, so the list this job runs is the
+      # list the Makefile derived from the build constraints. This job's half is
+      # the portable tagged packages — cmd/nocx-helper, sshdial, sshsvc and
+      # tunnelchan; ci-mac and ci-linux carry the two that live in the OS set.
+      - name: Resolve the tagged nocx_local_ssh package set
+        id: localssh
+        run: echo "list=$(make -s print-portable-local-ssh-pkgs)" >> "$GITHUB_OUTPUT"
+
       - name: The OS split has not drifted
         run: make ci-os-split
+
+      # The other build constraint this suite is partitioned by, checked the
+      # same way and in every job for the same reason as the split above: a
+      # hand-kept list that drifts hides a package from every run, and hiding
+      # this one from every run is exactly how the tagged half went untested
+      # in the first place.
+      - name: The tagged set has not drifted
+        run: make ci-local-ssh-split
 
       - name: Test (with Secret Service)
         if: matrix.keyring == 'with-secret-service'
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
+          LOCAL_SSH_PKGS: ${{ steps.localssh.outputs.list }}
         run: |
           dbus-run-session -- bash <<'TESTEOF'
           set -euo pipefail
@@ -281,13 +365,19 @@ jobs:
           echo -n "nocx-ci" | gnome-keyring-daemon --unlock
           echo "=== Running tests ==="
           go test -race -tags gtk3 -count=1 $PKGS
+          echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
+          go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
           TESTEOF
 
       - name: Test (no Secret Service)
         if: matrix.keyring == 'no-secret-service'
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
-        run: go test -race -tags gtk3 -count=1 $PKGS
+          LOCAL_SSH_PKGS: ${{ steps.localssh.outputs.list }}
+        run: |
+          go test -race -tags gtk3 -count=1 $PKGS
+          echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
+          go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
 
   # ci-linux — the OS-SPECIFIC half of the Go suite on Linux.
   #
@@ -324,6 +414,18 @@ jobs:
           go-version: '1.26'
           cache: true
 
+      # THE PINNED EMULATOR BYTES, BEFORE ANYTHING THAT LOADS A CGo PACKAGE.
+      # libghostty-vt is linked statically into the helper and the app
+      # (ADR-0065), so `go build`, `go test`, golangci-lint's type-checker and
+      # the dead-code ratchet in this job all compile CGo packages — and every
+      # one of them needs the archive and its matched headers present, and
+      # present as the PINNED bytes. Fetch-and-verify refuses a substituted
+      # archive instead of linking it, with a test that proves it refuses
+      # (internal/vtpin); third_party/libghostty-vt/MANIFEST.json is the pin
+      # and that directory's README is the argument for holding it this way.
+      - name: Fetch and verify the pinned libghostty-vt archives
+        run: make vt-archives
+
       - name: Install Secret Service & dbus-x11
         if: matrix.keyring == 'with-secret-service'
         run: |
@@ -348,8 +450,25 @@ jobs:
         id: pkgs
         run: echo "list=$(make -s print-os-pkgs)" >> "$GITHUB_OUTPUT"
 
+      # THE TAGGED SET (nocx-xk1di), resolved the same way and for the same
+      # reason: one owner, asked over `make -s`, so the list this job runs is the
+      # list the Makefile derived from the build constraints. This job's half is
+      # the tagged packages that live in the OS set — internal/app and
+      # internal/helper/session; ci-backend carries the portable half.
+      - name: Resolve the tagged nocx_local_ssh package set
+        id: localssh
+        run: echo "list=$(make -s print-os-local-ssh-pkgs)" >> "$GITHUB_OUTPUT"
+
       - name: The OS split has not drifted
         run: make ci-os-split
+
+      # The other build constraint this suite is partitioned by, checked the
+      # same way and in every job for the same reason as the split above: a
+      # hand-kept list that drifts hides a package from every run, and hiding
+      # this one from every run is exactly how the tagged half went untested
+      # in the first place.
+      - name: The tagged set has not drifted
+        run: make ci-local-ssh-split
 
       - name: Build
         run: go build -tags gtk3 ./...
@@ -374,10 +493,25 @@ jobs:
         if: matrix.keyring == 'no-secret-service'
         run: node .githooks/check-deadcode.mjs --platform=linux/amd64
 
+      # BOTH MATRIX LEGS, unlike the ratchet above and for the difference
+      # between the two: deadcode is static analysis, whose answer cannot depend
+      # on whether a keyring is running, while this is the test suite — a
+      # package that reads through the keystore binding has to be exercised with
+      # one present and with one absent, which is the whole reason the axis
+      # exists (nocx-aruz).
+      #
+      # THE SECOND PASS, and the point of this job's change (nocx-xk1di). A
+      # package whose Go files all carry nocx_local_ssh does not appear in
+      # `go list ./...` at all, so it was outside every package set this job
+      # resolved — not failing to be tested, but never compiled. The tag is an
+      # ADDITION here rather than added to the run above, which would stop
+      # compiling the untagged build and take the shipped artifact's own
+      # assertion (cmd/nocx-helper's `!nocx_local_ssh` pair) with it.
       - name: Test (with Secret Service)
         if: matrix.keyring == 'with-secret-service'
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
+          LOCAL_SSH_PKGS: ${{ steps.localssh.outputs.list }}
         run: |
           dbus-run-session -- bash <<'TESTEOF'
           set -euo pipefail
@@ -387,13 +521,19 @@ jobs:
           echo -n "nocx-ci" | gnome-keyring-daemon --unlock
           echo "=== Running tests ==="
           go test -race -tags gtk3 -count=1 $PKGS
+          echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
+          go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
           TESTEOF
 
       - name: Test (no Secret Service)
         if: matrix.keyring == 'no-secret-service'
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
-        run: go test -race -tags gtk3 -count=1 $PKGS
+          LOCAL_SSH_PKGS: ${{ steps.localssh.outputs.list }}
+        run: |
+          go test -race -tags gtk3 -count=1 $PKGS
+          echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
+          go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
 
   ci-frontend:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
@@ -518,15 +658,104 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Nothing else. No setup-go, no setup-node, no `playwright install`: every
-      # one of those would provision a second copy of something the image
-      # already pins, and the copy is where drift starts. A runner that needs
-      # provisioning for this job is a sign the image stopped being the whole
-      # answer.
+      # buildx, because --cache-from/--cache-to are buildx's: the default
+      # `docker` driver takes the flags and does nothing with them.
+      - uses: docker/setup-buildx-action@v4
+
+      # THE IMAGE IS REBUILT IN EVERY JOB, and "cached after the first run" was
+      # only ever true on a developer's machine. Measured, run 35205572891 on
+      # 2026-09-17: `docker build -f e2e/Dockerfile` took 09:31:32 → 09:53:50,
+      # 22 minutes, and 9–16 minutes in the run before it. A runner starts with
+      # no image, and the docker volumes this script used to create empty
+      # (nocx-e2e-gocache/-gomod/-npmcache) are per-runner too, so nothing the
+      # job had built existed at its next start.
+      #
+      # So the layers go in the Actions cache, keyed by the Dockerfile itself:
+      # the context is e2e/, the Dockerfile copies nothing from it, and layer
+      # digests are content-addressed — an edited Dockerfile is a cache miss on
+      # the line that changed, which is the honest version of "key it on the
+      # Dockerfile and its context".
+      #
+      # mode=min (the default) is the whole cache here: the Dockerfile has one
+      # FROM, so the layers of the final image ARE the build's steps, and
+      # mode=max would only add back the files a later layer deletes. The export
+      # is ~1.1 GB — `docker image inspect nocx-e2e:local` reports that as the
+      # content size.
+      #
+      # BOTH MATRIX LEGS USE ONE SCOPE, deliberately. They build the same
+      # Dockerfile from the same context, so the layers they write are identical
+      # bytes under the same content-addressed keys, and an export that finds an
+      # entry already there is a hit rather than an error. A scope per project
+      # would double the storage to avoid a race whose outcome is the same bytes
+      # either way.
+      #
+      # `load: true` puts the result in this runner's image store under the tag
+      # the run step is told to use, so the script runs the image this step
+      # built rather than building its own copy.
+      - name: Build the e2e image
+        uses: docker/build-push-action@v7
+        with:
+          context: e2e
+          file: e2e/Dockerfile
+          tags: nocx-e2e:local
+          load: true
+          cache-from: type=gha,scope=nocx-e2e
+          cache-to: type=gha,scope=nocx-e2e
+
+      # THE CACHES ARE CONTENTS, NOT PROVISIONING, and that distinction is what
+      # keeps the comment below the run step true. Nothing here installs a Go
+      # toolchain or a node: what crosses into the job is what the image's own
+      # tools produced inside it — the module cache, the build cache, npm's
+      # tarball cache — mounted where a developer gets a named volume
+      # (e2e/run-in-container.sh maps $NOCX_E2E_CACHE_ROOT's subdirectories and
+      # creates nocx-e2e-* volumes only when it is unset).
+      #
+      # What it buys, from the same run: 09:54:14 → 09:57:18 spent building the
+      # helper artifacts and nocx-server against an empty /root/go/pkg/mod and
+      # an empty build cache, with `go: downloading …` in the log, and npm ci
+      # re-fetched the whole tree from the registry on every job.
+      #
+      # restore-keys, on all three: they are content-addressed and append-only,
+      # so the entries under an older lockfile are either exactly what this run
+      # needs or harmless extra bytes. An exact key match restores and skips the
+      # save, because an Actions cache entry is immutable.
+      - name: Cache the Go module cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/nocx-e2e-cache/go-mod
+          key: nocx-e2e-go-mod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: nocx-e2e-go-mod-${{ runner.os }}-
+
+      - name: Cache the Go build cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/nocx-e2e-cache/go-build
+          key: nocx-e2e-go-build-${{ runner.os }}-${{ hashFiles('go.sum', 'go.mod') }}
+          restore-keys: nocx-e2e-go-build-${{ runner.os }}-
+
+      - name: Cache the npm cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/nocx-e2e-cache/npm
+          key: nocx-e2e-npm-${{ runner.os }}-${{ hashFiles('package-lock.json', 'frontend/package-lock.json') }}
+          restore-keys: nocx-e2e-npm-${{ runner.os }}-
+
+      # Provisioning is still nothing, and caching is not provisioning: the Go
+      # toolchain, both browsers and the three shells are the image's, and every
+      # step above moves bytes between jobs rather than installing anything. No
+      # setup-go, no setup-node, no `playwright install` — each of those would
+      # put a second copy of something the image pins, and the copy is where
+      # drift starts. A runner that needs provisioning for this job is a sign
+      # the image stopped being the whole answer.
+      #
+      # The image is the one built above, and the caches are on the host; the
+      # container reaches both through the two variables here.
       - name: e2e (container)
         run: e2e/run-in-container.sh
         env:
           PW_PROJECTS: ${{ matrix.project }}
+          NOCX_E2E_IMAGE: nocx-e2e:local
+          NOCX_E2E_CACHE_ROOT: ${{ runner.temp }}/nocx-e2e-cache
 
       # Named per project: two jobs uploading one name is a collision, and
       # the trace you want is the one from the browser that failed.

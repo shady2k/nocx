@@ -3,7 +3,15 @@
 // Flat warp-style design (P0-1): no card borders, dividers between blocks,
 // subtle background tint on hover/select.
 
-import { serializeRange, serializeRangeSGR, serializeRangeText, fromITheme } from './serializer'
+import {
+  serializeRange,
+  serializeRangeSGR,
+  serializeRangeText,
+  fromITheme,
+  collectFitCandidates,
+} from './serializer'
+import { createCellFit, type CellFit, type FitCandidate } from './cell-fit'
+import { isEnabled as driftEnabled, recordFrozenBlock } from './cell-drift'
 import type { CapturedBody } from '../capture-client'
 import { getCurrentTheme } from '../renderers/theme-adapter'
 import type { CommandSnapshotStore } from '../command-snapshot'
@@ -12,6 +20,7 @@ import { wordRangeIn } from '../word-selection'
 import { createSecretChipUnresolved } from '../ui/secret-chip'
 import type { AgentRunToolCall } from '../generated/agent.runToolCall'
 import { createDisclosure, type Disclosure } from '../ui/disclosure'
+import { BlockNotice, type BlockNoticeState } from '../ui/block-notice'
 import type { Drive } from '../generated/agent.dump'
 import { reasoningStartsExpanded } from '../reasoning-expanded'
 import { showToast } from '../ui/toast'
@@ -455,6 +464,16 @@ export interface AnswerBlockHandle {
    *  note is created at the FIRST chunk, so a model that returns no
    *  reasoning renders nothing at all. */
   reasoning(this: void, text: string): void
+  /** Draw one line the TURN states about ITSELF, as a child in the seat it
+   *  arrived at — a standing answer that was just saved, and what can be
+   *  done about it (nocx-2019q). It is not part of the model's answer and
+   *  never enters the prose: the run of text being written is ENDED first,
+   *  so a delta arriving afterwards opens a new run BELOW the line rather
+   *  than continuing one above it and reading as though it came first.
+   *
+   *  The notice is handed back so the caller can restate it in place when
+   *  an action changes what it says. */
+  notice(this: void, state: BlockNoticeState): BlockNotice
   /** Close the block: success, failure with a renderable reason, or the
    *  distinct cancelled outcome shown as "stopped". */
   close(
@@ -607,11 +626,15 @@ export interface BlockRecord {
    *  completed attempt, and the completion notification can reach the
    *  renderer before the signal call's own response does over the same
    *  connection, so waiting for a confirmed `delivered` would still race a
-   *  freeze that got there first. Reverted to false if the outcome turns
-   *  out not to be `delivered` (nothing was actually done to the process),
-   *  so a stop that never happened cannot mislabel this block's real,
-   *  possibly much later, completion. Read once, by `freezeFromAttempt`,
-   *  to turn a nonzero exit into `cancelled` instead of `failure`. */
+   *  freeze that got there first. Reverted to false when the backend did
+   *  NOT take the request — `unsupported`, `unreconciled`, `nothing-running`
+   *  — so a stop that never happened cannot mislabel this block's real,
+   *  possibly much later, completion. It is KEPT for `held` (nocx-zas0d),
+   *  which is the backend saying it accepted the Stop and is holding the
+   *  byte until the shell has begun the command: the completion that stop
+   *  causes is SIGINT's 130, and reverting here would paint it as the
+   *  program's own failure. Read once, by `freezeFromAttempt`, to turn a
+   *  nonzero exit into `cancelled` instead of `failure`. */
   stopRequested: boolean
   /** Run once, after the VISUAL freeze has replaced `el`.
    *
@@ -2254,6 +2277,10 @@ export class BlockManager {
   /** Lazy container supplier bound to this manager's scrollback inner. */
   private _getContainer = (): HTMLElement => this._scrollbackInner
 
+  /** Кто решает, какой ячейке нужна коробка. Живёт при блоках, потому что
+   *  меряет в ИХ контейнере: там опубликован --term-cell-width. */
+  private _cellFit: CellFit = createCellFit(() => this._scrollbackInner)
+
   /**
    * Deselect the currently selected block without clearing the block list.
    * Safe to call from keyboard handlers (P0-4: Escape deselects).
@@ -2324,6 +2351,40 @@ export class BlockManager {
   /** The block bound to an attempt id — running or frozen. */
   blockForAttempt(attemptId: string): BlockRecord | null {
     return this._blocks.find((b) => b.attemptId === attemptId) ?? null
+  }
+
+  /**
+   * Say, on the block itself, that nothing recorded this command's outcome
+   * (nocx-2vb9y).
+   *
+   * The freeze is unconditional and the ledger record is not, so a finished
+   * command can carry its authenticated exit status and exist nowhere else —
+   * no history row, and no `A command finished` notification, because the
+   * backend was never told. ABSENCE CANNOT CARRY THAT: a line typed at the
+   * native prompt is unrecorded by design (its text may be a literal
+   * password), and it renders exactly the same. So the difference is stated
+   * rather than left to be inferred from a receipt that is not there.
+   *
+   * A muted chip in the header's own vocabulary, not a new surface: it sits
+   * with the duration and the exit status, through the same placement rule,
+   * because it is the same kind of fact about the same command. The word is
+   * `not recorded` and not an error word — the command ran, and it succeeded
+   * or failed on its own terms; what failed is nocx's memory of it.
+   *
+   * Idempotent by the chip's own identity class: the report that drives this
+   * can arrive more than once for one attempt, and a second chip would read
+   * as a second fact.
+   */
+  markUnrecorded(attemptId: string): void {
+    const rec = this.blockForAttempt(attemptId)
+    if (rec === null) return
+    rec.el.dataset.recorded = 'no'
+    const right = rec.el.querySelector('.cmd-header-right')
+    if (right === null || right.querySelector('.cmd-header-unrecorded') !== null) return
+    const chip = document.createElement('span')
+    chip.className = 'nocx-chip nocx-chip-muted cmd-header-unrecorded'
+    chip.textContent = 'not recorded'
+    placeHeaderChip(right, chip)
   }
 
   /**
@@ -2568,7 +2629,26 @@ export class BlockManager {
   ): void {
     rec.endLine = endLine
     const snapshot = fromITheme(getCurrentTheme())
-    const outputHtml = serializeRange(snapshot, getLine, rec.outputStart, endLine)
+    // The drift instrument (nocx-4n6sj) is the only reader of the column
+    // counts, and it ships switched off: no array, no accounting, and the
+    // serializer's hot path is what it was.
+    const driftCols = driftEnabled() ? [] : undefined
+    // ДВА ПРОХОДА, ОДНА РАСКЛАДКА. Первый называет ячейки и греет кэш одним
+    // пакетным замером; второй сериализует, и там boxOf уже чистое
+    // чтение Map. Поштучный замер во время сериализации был бы N
+    // принудительных раскладок в тот самый момент, когда блок подменяет
+    // живую область.
+    let boxOf: Parameters<typeof serializeRange>[5]
+    if (this._cellFit.begin()) {
+      const candidates: FitCandidate[] = []
+      collectFitCandidates(getLine, rec.outputStart, endLine, (chars, width, attrs) =>
+        candidates.push({ chars, width, face: { bold: attrs.bold, italic: attrs.italic } }),
+      )
+      this._cellFit.warm(candidates)
+      boxOf = (chars, width, attrs) =>
+        this._cellFit.boxOf(chars, width, { bold: attrs.bold, italic: attrs.italic })
+    }
+    const outputHtml = serializeRange(snapshot, getLine, rec.outputStart, endLine, driftCols, boxOf)
     // The DURABLE bodies, from the same rows and the same walk the frozen
     // block on screen is made of — so what comes back after a restart is
     // what was there, not a second reading of the buffer taken later.
@@ -2605,6 +2685,10 @@ export class BlockManager {
 
     this._reown(rec.el, newEl)
     rec.el = newEl
+    // BEFORE decoration: terminal-links rewrites ranges over the text nodes
+    // of these very rows, so a measurement taken after it would be reading
+    // a DOM the serializer did not produce.
+    if (driftCols) recordFrozenBlock(newEl, driftCols)
     // Anything that wanted to decorate this block had to wait for THIS
     // moment, because the line above threw the running element away. One
     // shot, cleared before it runs so a callback that re-enters cannot loop.
@@ -3067,6 +3151,20 @@ export class BlockManager {
         own(cel)
         showTyping()
       },
+      notice(state: BlockNoticeState): BlockNotice {
+        // The same seat rule a tool call follows: the backend's run of prose
+        // is closed here, so what the model writes next opens its own run
+        // under this line instead of growing the one above it.
+        endProse()
+        const drawn = new BlockNotice(state)
+        children.appendChild(drawn.root)
+        own(drawn.root)
+        // The turn is still in flight — the answer resumes after the person
+        // decides — so the stand-in returns to the tail, where the next
+        // thing written will land.
+        showTyping()
+        return drawn
+      },
       reasoning(text: string): void {
         if (text === '') return
         if (!reasoningNote) {
@@ -3172,6 +3270,10 @@ export class BlockManager {
 
   dispose(): void {
     this.clearAll()
+    // The cell-fit probe leaves with the blocks: `_own()` is the only way into
+    // `.scrollback-inner`, and `clearAll()` removes only what it owns, so a probe
+    // left behind would be a stray direct child for good.
+    this._cellFit.dispose()
     // Only when THIS manager created its own instance (BlockManagerOpts.
     // appVisibility absent): a caller-supplied one — the application's
     // shared instance (sidebar.tsx) — outlives any one manager and is not

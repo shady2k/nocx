@@ -66,12 +66,12 @@
  * credential-secrecy walk; this file owns tree geometry and keeps no second
  * copy of that question.
  */
-import { test as base, expect, type Locator } from '@playwright/test'
+import { expect, type Locator } from '@playwright/test'
 import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { collectionsDir, VaultBackend, type DisposableRoot } from './harness'
+import { standalone as base, collectionsDir, VaultBackend, type DisposableRoot } from './harness'
 import { openWorkbench, PLAYGROUND, RATE_LIMIT, treeRow, ZEN } from './api-workbench'
 import { readStand } from './stand'
 

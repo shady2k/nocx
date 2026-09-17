@@ -27,9 +27,11 @@ import type { LiveSession } from './generated/sessions.live'
 import { detectAgentStatus, type AgentStatus } from './agent-status'
 import {
   paneIndicator,
+  sameChildren,
   type PaneActivity,
   type PaneActivitySource,
   type DriverState,
+  type PaneChild,
 } from './pane-observation'
 import type { ConnectionCondition } from './connection-condition'
 import { startWakeReporter, type WakeObservation } from './wake-report'
@@ -80,7 +82,13 @@ import type {
 } from './pane-content'
 import { SURFACE_TERMINAL } from './pane-content'
 import type { SnippetProviderDeps } from './snippets/snippet-provider'
-import { TerminalContent, type HostKeyErrorEvidence, type PaneIdentity } from './terminal-content'
+import {
+  TerminalContent,
+  type HostKeyErrorEvidence,
+  type HelperConsentAskEvidence,
+  type PaneIdentity,
+} from './terminal-content'
+import type { IntegrationMethod } from './host-key-dialog'
 import type { SessionHomeSource } from './where/session-home'
 import type { BranchSource } from './where/branch-source'
 import type { OutputRecordingSource } from './integration/status'
@@ -125,6 +133,17 @@ export class Pane implements PaneHost {
    *  every pane. Never derived here: it is classified in the backend, where
    *  the grid lives, and arrives as session.observationChanged. */
   private _observation: DriverState | null = null
+  /** The child agents this pane's agent has spawned, as the pane's own chrome
+   *  named them (nocx-o1v0h). Empty for almost every pane. Like the
+   *  observation it is never derived here — the backend reads them off the
+   *  live grid and they arrive on the same notification.
+   *
+   *  Unlike the indicator, these are NOT withdrawn when the host stops
+   *  answering. The indicator is a call to act, so asserting it over a dead
+   *  pipe sends somebody to answer something that cannot be delivered; a
+   *  child row calls nobody — it says what the pane's screen last showed, and
+   *  it goes away when the observation does. */
+  private _observationChildren: readonly PaneChild[] = []
   private _connection: ConnectionCondition = 'reachable'
   /** Whether the content has declared its opening over (PaneHost.
    *  contentSettled). Output before that is the pane starting up, not
@@ -467,11 +486,22 @@ export class Pane implements PaneHost {
    *  exited, or the enrolment was withdrawn — and the indicator falls back to
    *  the title's weaker reading rather than holding a stale finding.
    */
-  updatePaneObservation(state: DriverState | null): void {
+  updatePaneObservation(state: DriverState | null, children: readonly PaneChild[] = []): void {
     if (this._disposed) return
-    if (state === this._observation) return
+    // Two facts, one notification, and the redraw is skipped only when
+    // NEITHER moved. A pane whose verdict held while its children changed is
+    // exactly the case the strip has to repaint, and comparing only the state
+    // would have made the rows go stale the moment they were interesting.
+    if (state === this._observation && sameChildren(children, this._observationChildren)) return
     this._observation = state
+    this._observationChildren = state === null ? [] : children
     this.onDisplayChange?.()
+  }
+
+  /** The child agents this pane's agent spawned, for the strip to draw under
+   *  it. Empty for a pane with none and for a pane nobody observes. */
+  get agentChildren(): readonly PaneChild[] {
+    return this._observationChildren
   }
 
   /** What the pane says about reaching its host. Kept because the agent
@@ -664,7 +694,7 @@ function insertionIndex(from: number, to: number, before: boolean): number {
  * string the notify feed stamps into every occurrence's backendId. It is
  * spelled here rather than imported from ports-client's LOCAL_TARGET_ID
  * because that constant answers a different question — which target the
- * ports methods scope to — and one of the two will change when the relay
+ * ports methods scope to — and one of the two will change when the helper
  * lands.
  *
  * Exported because the composition root needs it too: a session.focus push
@@ -818,6 +848,15 @@ export class PaneManager {
    *  or changed. Resolves true only after explicit trust; the content then
    *  retries the same open. */
   onHostKeyError?: (evidence: HostKeyErrorEvidence, signal: AbortSignal) => Promise<boolean>
+  /** Called when an SSH connection needs a person's choice of integration
+   *  method for this destination before it may proceed (ADR-0069's
+   *  connect-time ask). Resolves with the chosen method once it was
+   *  written; the content then retries the same open. null means declined
+   *  or cancelled. */
+  onHelperConsentAsk?: (
+    ask: HelperConsentAskEvidence,
+    signal: AbortSignal,
+  ) => Promise<IntegrationMethod | null>
   /** The strip's "show all workspaces" button was pressed. Wired by main.tsx
    *  to the overview controller's `open` — the surface's lifetime belongs to
    *  the composition root, and a PaneManager that owned an overlay would be
@@ -839,6 +878,12 @@ export class PaneManager {
    *  Roles, where the model that answers is chosen (nocx-rikz5). Relayed
    *  beside onCreateEndpoint, which the chip's other destination reuses. */
   onOpenRoles?: () => void
+  /** The approval receipt's second action: open Settings → Assistant
+   *  permissions,
+   *  where standing answers are managed (nocx-2019q). Beside onOpenRoles for
+   *  the same reason it is beside onCreateEndpoint — a line on screen names
+   *  the one page that governs what it is about — and wired by main.tsx. */
+  onManagePermissions?: () => void
   /** Called when the user performs a UI action that should reset the
    *  vault idle timer. Wired by main.tsx to vaultClient.activity(). */
   onActivity?: () => void
@@ -938,6 +983,35 @@ export class PaneManager {
           ? `"${name}" is now open in another window — this one is no longer connected to it`
           : 'A pane is now open in another window — this one is no longer connected to it',
       })
+    })
+
+    // A worker participant's tab has appeared (nocx-ui8q6.3): workers.spawn
+    // minted it directly, with nobody's createTab in flight for this window
+    // to learn it from, so this notification is the only way it is told
+    // before its next layout.read.
+    //
+    // THE LIVE ENTRY GOES IN liveByPane BEFORE THE ROW REACHES THE CACHE,
+    // and that order is the point: applyRemoteTab's own changed() fires
+    // renderFromLayout synchronously, which — adopting being the ordinary
+    // running state, exactly as it is for any row arriving mid-session —
+    // calls adopt() on the new row in the SAME turn. adopt() asks
+    // adoptionFor(row.id) exactly as it does for a row restored at boot, and
+    // that answer only exists if the entry is already in the map before
+    // adopt runs. Skipping this and letting the pane fall through to
+    // adoptionFor's "nothing here" branch would open a SECOND local shell
+    // over the participant's pane while the agent process the tab is
+    // actually for keeps running with nobody attached — the exact class of
+    // defect a soft degrade the UI contradicts (AGENTS.md).
+    this.client.onWorkerTabCreated((fact) => {
+      this.liveByPane.set(fact.firstPane.id, {
+        sessionId: fact.sessionId,
+        instanceId: fact.instanceId,
+        sessionEpoch: fact.sessionEpoch,
+        paneId: fact.firstPane.id,
+        replayFrom: fact.replayFrom,
+        attached: fact.attached,
+      })
+      this.layout.applyRemoteTab(fact.tab, fact.firstPane)
     })
 
     window.addEventListener('keydown', this.onKeydown, true)
@@ -1466,8 +1540,10 @@ export class PaneManager {
         onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
         onOpenRoles: this.onOpenRoles,
+        onManagePermissions: this.onManagePermissions,
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
-        onPaneObservationChange: (state) => paneRef.current?.updatePaneObservation(state),
+        onPaneObservationChange: (state, children) =>
+          paneRef.current?.updatePaneObservation(state, children),
         onConnectionConditionChange: (condition) =>
           paneRef.current?.updateConnectionCondition(condition),
         // Where the pane IS, recorded so a restart reopens it there
@@ -1561,13 +1637,15 @@ export class PaneManager {
         sessionHome: this.sessionHome,
         createBranchSource: this.createBranchSource,
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
-        onPaneObservationChange: (state) => paneRef.current?.updatePaneObservation(state),
+        onPaneObservationChange: (state, children) =>
+          paneRef.current?.updatePaneObservation(state, children),
         onConnectionConditionChange: (condition) =>
           paneRef.current?.updateConnectionCondition(condition),
         onActiveOriginChange: () => this.onActivePaneChange?.(),
         onPortsTargetChange: () => this.onActivePaneChange?.(),
         onVaultSealed: this.onVaultSealed,
         onHostKeyError: this.onHostKeyError,
+        onHelperConsentAsk: this.onHelperConsentAsk,
         onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
         onSnippetChord: this.onSnippetChord,
@@ -1575,6 +1653,7 @@ export class PaneManager {
         onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
         onOpenRoles: this.onOpenRoles,
+        onManagePermissions: this.onManagePermissions,
       },
     )
     const descriptor: ContentDescriptor = {
@@ -2454,7 +2533,7 @@ export class PaneManager {
    * on this machine, so the only pair that can match carries
    * internal/commandnames.LocalRoute's value — and an argument that is
    * accepted and dropped silently stops meaning anything by the time the
-   * relay lands and a second backend's sessions start arriving with ids of
+   * helper lands and a second backend's sessions start arriving with ids of
    * their own.
    *
    * The session comes from the content's own capability, so PaneManager never

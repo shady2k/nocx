@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.probe.params.schema.json",
+  "title": "HelperSSHProbeParams",
+  "description": "One credential test against one host, asked of the helper that dials. It carries the SAME destination every other op takes \u2014 resolved address, account, credential reference and route \u2014 rather than its own copy of the address, so a probe of a host behind a jump host is a probe of the host a person named. A probe that carried loose fields would be the one place a route could be forgotten, and a direct dial to an address that is only reachable through a bastion fails as 'unreachable' \u2014 a network problem, where the truth is a hop.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["destination", "acceptOnTrust"],
+  "properties": {
+    "destination": {
+      "description": "Where to dial, what to authenticate with, and which hosts it is reached through. Resolved by the coordinator, which reads ~/.ssh/config and holds the credential binding (plan \u00a73).",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/destination"
+    },
+    "acceptOnTrust": {
+      "description": "The coordinator's answer to 'may a host key this host has never presented be recorded'. It is the CALLER's decision travelling with the request: the coordinator sets it only after the accept flow it already owns has run (connections.trustHostKey), and the helper then asks for the write through trust-host-key. A helper therefore cannot turn 'ask the user' into 'trust it', and a `changed` verdict never reaches that write whatever this says \u2014 a changed key is the one signature of a machine in the middle.",
+      "type": "boolean"
+    }
+  }
+}

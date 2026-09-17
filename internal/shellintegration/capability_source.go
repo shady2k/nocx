@@ -57,6 +57,10 @@ func capabilityFromDescriptor(unsetVar string) string {
 	var b strings.Builder
 	b.WriteString("__nocx_cap=''\n")
 	b.WriteString("__nocx_lc_recovery=''\n")
+	// Declared here so that "this pane has no token" and "the token line was
+	// not reached" are one state, and so that the assignment below is the only
+	// writer of a non-empty value.
+	b.WriteString("__nocx_agent_token=''\n")
 	b.WriteString("case \"${" + CapabilityFDEnv + ":-}\" in\n")
 	b.WriteString("    ''|*[!0-9]*) ;;\n")
 	b.WriteString("    *)\n")
@@ -69,6 +73,14 @@ func capabilityFromDescriptor(unsetVar string) string {
 	b.WriteString("        { IFS= read -r __nocx_cap <&\"${" + CapabilityFDEnv + "}\" && IFS= read -r __nocx_lc_recovery <&\"${" + CapabilityFDEnv + "}\"; } 2>/dev/null || :\n")
 	// eval, not `exec {fd}<&-`: bash 3.2 has no {var} redirection form,
 	// and this is the same idiom the bootstrap descriptor is closed with.
+	// THE TOOL TOKEN IS THE THIRD LINE, and its own group because it may be
+	// absent: a pane with no tool surface writes no token, and an absent line
+	// must leave the variable EMPTY rather than abort the read that already
+	// delivered the capability (nocx-50w7p.16). `read` at end-of-file sets
+	// the variable empty and reports failure, and the fallback swallows that
+	// — which is the fail-closed direction: no token, nothing presented, the
+	// endpoint refuses by name.
+	b.WriteString("        { IFS= read -r __nocx_agent_token <&\"${" + CapabilityFDEnv + "}\"; } 2>/dev/null || :\n")
 	b.WriteString("        { eval \"exec ${" + CapabilityFDEnv + "}<&-\"; } 2>/dev/null || :\n")
 	b.WriteString("        ;;\n")
 	b.WriteString("esac\n")
@@ -78,6 +90,10 @@ func capabilityFromDescriptor(unsetVar string) string {
 	b.WriteString("unset " + CapabilityFDEnv + "\n")
 	b.WriteString(unsetVar + " __nocx_cap 2>/dev/null\n")
 	b.WriteString(unsetVar + " __nocx_lc_recovery 2>/dev/null\n")
+	// The same treatment the other two bearers get: the export attribute is
+	// dropped, because a user rc running under `set -a` would otherwise have
+	// published it in /proc/<pid>/environ before this line ran.
+	b.WriteString(unsetVar + " __nocx_agent_token 2>/dev/null\n")
 	return b.String()
 }
 

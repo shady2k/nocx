@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package ssh
 
 import (
@@ -6,36 +8,57 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/shady2k/nocx/internal/log"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
-// newTrustClient builds a RealClient whose known_hosts lives at the given
-// path (which may not exist yet).
-func newTrustClient(t *testing.T, khPath string) *RealClient {
-	t.Helper()
-	client, err := NewReal(
-		log.NewSlogAdapter(nil),
-		WithKnownHostsFile(khPath),
-	)
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	t.Cleanup(func() { _ = client.Close() })
-	return client
-}
-
+// probeOnce is one connection attempt that authenticates with exactly ONE
+// method and closes: the shape of a probe, built from the seams this package
+// still owns.
+//
+// It used to call RealClient.Probe, which went with the coordinator's dials
+// when every dial became the helper's (nocx-50w7p.10 — the settings probe now
+// asks this machine's helper, internal/helper/sshsvc). What these tests are
+// about is not the probe but ACCEPT-ON-FIRST-USE: an unknown key fails with its
+// evidence, the user trusts it, and the next connection succeeds. That is this
+// package's known_hosts and the typed error the handshake raises, and DialAuth
+// is the seam the helper's own probe goes through (sshsvc calls it with a
+// caller-built config), so the same rule is exercised one layer down rather
+// than retold.
 func probeOnce(t *testing.T, client *RealClient, srv *testSSHServer) error {
 	t.Helper()
-	return client.Probe(
-		context.Background(), srv.addr,
-		gossh.PublicKeys(srv.userSigner),
-		WithUser("test"),
-	)
+	cb, err := client.hostKeyCallbackFor("")
+	if err != nil {
+		t.Fatalf("host key callback: %v", err)
+	}
+	host, portText, err := net.SplitHostPort(srv.addr)
+	if err != nil {
+		t.Fatalf("split %q: %v", srv.addr, err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("port %q: %v", portText, err)
+	}
+	conn, err := client.DialAuth(context.Background(), PooledSpec{
+		Host: host,
+		Port: port,
+		User: "test",
+		Config: &gossh.ClientConfig{
+			User:            "test",
+			Auth:            []gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)},
+			HostKeyCallback: cb,
+			Timeout:         10 * time.Second,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	return conn.Close()
 }
 
 // TestTrustHostKey_UnknownKeyAccept_SecondProbeSucceeds is the product test
@@ -149,7 +172,7 @@ func TestHostKeyCallback_JumpRouteCoexistsWithDirectRoute(t *testing.T) {
 	client := newTrustClient(t, khPath)
 	remote := &net.TCPAddr{IP: net.ParseIP("192.0.2.10"), Port: 22}
 
-	directCB, err := client.hostKeyCallback()
+	directCB, err := client.hostKeyCallbackFor("")
 	if err != nil {
 		t.Fatalf("direct host key callback: %v", err)
 	}
@@ -181,7 +204,7 @@ func TestHostKeyCallback_JumpRouteCoexistsWithDirectRoute(t *testing.T) {
 
 	// knownhosts.New snapshots the file, so rebuild both callbacks after the
 	// trust write, as the next real Connect/Probe does.
-	directCB, err = client.hostKeyCallback()
+	directCB, err = client.hostKeyCallbackFor("")
 	if err != nil {
 		t.Fatalf("direct callback after trust: %v", err)
 	}

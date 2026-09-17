@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.type.schema.json",
+  "title": "AgentType",
+  "description": "The agent.type JSON-RPC result: what happened when nocx was asked to type into a pane it is watching (nocx-dkawo.1, D14 of the orchestration mechanism design). WHAT MAKES THIS SAFE IS REFUSAL, NOT MITIGATION. A mistimed keystroke does not merely fail to arrive — it ANSWERS whatever modal is on screen, and the modal a coding agent puts up is a tool approval whose first option is Yes. An earlier draft proposed sending Escape first so a mistimed keystroke would be recoverable; that is strictly worse, because Escape answers the modal too. So nocx types only into a positively identified free_text, under a rule that has earned the right to be typed against, and everything else receives nothing at all. THE REFUSAL IS A RESULT AND NOT AN ERROR: a submission into a pane that is asking a person to approve a tool is not a malformed request — the params were well formed and the pane was real — and a control that silently does nothing is indistinguishable from a broken one. DELIVERY IS UNACKNOWLEDGED: `submitted` means the pane's input queue accepted both writes, never that the agent acted on them; seeing the text echo in the input region would be evidence it was typed, not that it was read.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "agent", "outcome", "state"],
+  "properties": {
+    "sessionId": {
+      "description": "The pane the attempt was about, echoed so a surface that fired two of these can tell the answers apart without holding correlation state of its own.",
+      "type": "string"
+    },
+    "agent": {
+      "description": "Who the enrolment act said is running in that pane. Empty for a pane nocx is not watching, which is the one case where there is nobody to name.",
+      "type": "string"
+    },
+    "outcome": {
+      "description": "submitted: the text and the key that submits it were both accepted. typed: the text was accepted and no submit key was sent — either none was asked for, or the screen stopped being free text between the two writes, which is the one partial state this has and is named rather than folded into either neighbour, because the person can see the text in the input region and send or clear it. refused: nothing at all was written. The set is closed because a surface branches on it to decide what to say.",
+      "type": "string",
+      "enum": ["submitted", "typed", "refused"]
+    },
+    "state": {
+      "description": "The state that DECIDED, from internal/agentdriver's closed set. free_text when bytes were written; otherwise the state that refused them. unknown when nothing could read the screen at all — no rule with earned authority, no live grid, or a pane nocx is not watching — which is the same value every other consumer of that set treats as busy, so the failure direction is a refusal.",
+      "type": "string",
+      "enum": [
+        "free_text",
+        "permission_choice",
+        "modal_choice",
+        "working",
+        "error",
+        "unknown",
+        "exited"
+      ]
+    },
+    "reason": {
+      "description": "Why, in the words a person reads. Omitted exactly when the whole submission was accepted; empty would be a claim that there was a reason and it was nothing. A refusal nobody can read is how this degrades into typing blindly.",
+      "type": "string"
+    }
+  }
+}

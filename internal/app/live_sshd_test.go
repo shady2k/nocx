@@ -40,21 +40,16 @@ package app
 // carries, and the test asserts the home gains nothing else.
 
 import (
-	"bytes"
-	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
-	"io/fs"
 	"net"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -64,11 +59,8 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/shellintegration"
-	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/waittest"
 	gossh "golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // ---------------------------------------------------------------------------
@@ -81,13 +73,20 @@ type liveSshd struct {
 	signer    gossh.Signer // client key installed in authorized_keys
 	hostKey   gossh.PublicKey
 	clientRaw ed25519.PrivateKey // the raw client key, for the child-line ssh-agent fixture
-	client    *ssh.RealClient    // the pooled client, for the connection-loss proof
-	cmd       *exec.Cmd
-	logBuf    *lockedBuffer
-	// registeredLanes records the lane→session bindings the provider
-	// reported (the production RegisterLifecycleLane wiring); the tests
-	// assert the minted lane reached the session it belongs to.
-	registeredLanes []string
+	// clientKey is the same key written to a file, when the journey dials with
+	// a NAMED identity (`withClientKeyFile`). Empty means the fixture dials
+	// with the in-memory signer, which is every caller that predates it.
+	clientKey string
+	// liveSshdDial is the state only a DIALING build has: the pooled client the
+	// journeys open sessions with, the lanes the provider registered, and the
+	// launcher a stand replaces. Its DECLARATION is per build
+	// (live_sshd_dial_state_absent_test.go, live_sshd_dial_state_local_test.go)
+	// for the same reason RealClient's is — this fixture is one type in both
+	// builds and a struct's fields cannot carry a build tag. Nothing on this
+	// side of the split reads it.
+	liveSshdDial
+	cmd    *exec.Cmd
+	logBuf *lockedBuffer
 
 	// The seams the epic's end-to-end check (nocx-m8jwn.8) needs and the
 	// proofs above do not. Each is nil/empty by default, so every existing
@@ -102,10 +101,6 @@ type liveSshd struct {
 	// marker into every 32-byte read — which is exactly those two values
 	// and nothing else the kernel reads.
 	rand io.Reader
-	// launcher, when set, replaces the launcher adapter connect() would
-	// build. It is how the emitted remote command is recorded: the product
-	// deliberately never logs it (it used to carry both bearers).
-	launcher ssh.RemoteLauncher
 	// tmpRoot is the session's TMPDIR, fixture-owned so "any remote root we
 	// write to, including the temp root" is a directory the test can walk.
 	tmpRoot string
@@ -125,39 +120,14 @@ type liveSshdOption func(*liveSshdConfig)
 type liveSshdConfig struct {
 	extraConfig string
 	record      bool
-}
-
-// withSshdConfig appends lines to sshd_config. A Match block must be last,
-// and only one caller may use it, so it is a single string rather than a
-// list.
-func withSshdConfig(lines string) liveSshdOption {
-	return func(c *liveSshdConfig) { c.extraConfig = lines }
-}
-
-// withFarSideRecording turns on the three fixture-owned surfaces the canary
-// is asserted against on the far host: a private TMPDIR, a real HISTFILE, and
-// a recorder that writes the argv and the environment of the very process
-// that runs our exec request.
-//
-// The recorder has to run INSIDE that process, because the argv exists
-// nowhere else and not for long: sshd runs an exec request as
-// `<login shell> -c <request>`, and the loader immediately execs, which
-// replaces the argv. Nothing outside can look in time.
-//
-// The seam is `~/.bashrc`, and which seam it is was MEASURED rather than
-// assumed. $BASH_ENV is the obvious answer and it is the wrong one here: bash
-// reads $BASH_ENV for a non-interactive shell only when it does not think it
-// was started by sshd, and when SSH_CLIENT is in the environment it sources
-// `~/.bashrc` INSTEAD. A first attempt set BASH_ENV through sshd's SetEnv;
-// the variable arrived on the far side (verified in the session's own
-// environment) and the file was never sourced. So the recorder is sourced
-// from the fixture's own `~/.bashrc`, and BASH_ENV is left pointing at it as
-// well, so either rule fires and the records simply append.
-//
-// It writes to files and never to a descriptor of the session: a byte on
-// stdout here would land in the middle of the loader's frame protocol.
-func withFarSideRecording() liveSshdOption {
-	return func(c *liveSshdConfig) { c.record = true }
+	// clientKeyFile makes the fixture's own dial use an inline key FILE rather
+	// than an in-memory signer. The two authenticate with the SAME key and
+	// differ only in how the credential is named — which is what a profile
+	// difference looks like: `IdentityFile` names a path, while an explicit
+	// `AuthMethods` list names a value — and the publish reads the profile, so
+	// it is the option that decides whether a helper can be handed the
+	// credential at all.
+	clientKeyFile bool
 }
 
 // log is the product logger this fixture's compositions use.
@@ -166,13 +136,6 @@ func (fx *liveSshd) log() log.Logger {
 		return fx.logger
 	}
 	return log.NewSlogAdapter(nil)
-}
-
-// authCount is how many times the server accepted an authentication — the
-// observable that says whether a refusal cost the user a second credential
-// use. LogLevel VERBOSE is what makes it observable.
-func (fx *liveSshd) authCount() int {
-	return strings.Count(fx.logBuf.String(), "Accepted publickey")
 }
 
 // sshdBinary returns the sshd path, failing (not skipping) when absent.
@@ -329,6 +292,22 @@ func startLiveSshd(t *testing.T, allowForward bool, opts ...liveSshdOption) *liv
 		t.Fatalf("write authorized_keys: %v", err)
 	}
 
+	// The same key as a FILE, for the journeys that dial with a named identity
+	// rather than an in-memory signer. It lives beside the fixture's other
+	// material rather than under the session home: what a person's profile
+	// names is their own file, and the far side never reads it.
+	clientKeyPath := ""
+	if fxCfg.clientKeyFile {
+		clientKeyPEM, err := gossh.MarshalPrivateKey(clientRaw, "")
+		if err != nil {
+			t.Fatalf("marshal client key: %v", err)
+		}
+		clientKeyPath = filepath.Join(dir, "client_key")
+		if err := os.WriteFile(clientKeyPath, pem.EncodeToMemory(clientKeyPEM), 0o600); err != nil {
+			t.Fatalf("write client key: %v", err)
+		}
+	}
+
 	// The session HOME: a fresh fixture-owned directory (SetEnv override,
 	// verified on OpenSSH 9.2). Hermeticity is the point — the launcher's
 	// publish writes its bundle here, the hook always loads, and the
@@ -451,177 +430,20 @@ LogLevel VERBOSE
 			return strings.Contains(logBuf.String(), want)
 		})
 	return &liveSshd{
-		addr:      addr,
-		user:      userName,
-		home:      home,
-		signer:    clientSigner,
-		clientRaw: clientRaw,
-		hostKey:   hostSigner.PublicKey(),
-		cmd:       cmd,
-		logBuf:    logBuf,
-		tmpRoot:   tmpRoot,
-		recDir:    recDir,
-		histFile:  histFile,
+		liveSshdDial: newLiveSshdDial(),
+		addr:         addr,
+		user:         userName,
+		home:         home,
+		clientKey:    clientKeyPath,
+		signer:       clientSigner,
+		clientRaw:    clientRaw,
+		hostKey:      hostSigner.PublicKey(),
+		cmd:          cmd,
+		logBuf:       logBuf,
+		tmpRoot:      tmpRoot,
+		recDir:       recDir,
+		histFile:     histFile,
 	}
-}
-
-// knownHostsPath writes a known_hosts file carrying the fixture's host key
-// for the dial address and returns its path.
-func (fx *liveSshd) knownHostsPath(t *testing.T) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "known_hosts")
-	line := knownhosts.Line([]string{fx.addr}, fx.hostKey)
-	if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
-		t.Fatalf("write known_hosts: %v", err)
-	}
-	return path
-}
-
-// rawClient opens a production-compatible SSH client to the fixture. Tests
-// that exercise SFTP publication use this instead of reaching through
-// ssh.RealClient's connection pool.
-func (fx *liveSshd) rawClient(t *testing.T) *gossh.Client {
-	t.Helper()
-	client, err := gossh.Dial("tcp", fx.addr, &gossh.ClientConfig{
-		User: fx.user,
-		Auth: []gossh.AuthMethod{gossh.PublicKeys(fx.signer)},
-		HostKeyCallback: func(_ string, _ net.Addr, key gossh.PublicKey) error {
-			if !bytes.Equal(key.Marshal(), fx.hostKey.Marshal()) {
-				return fmt.Errorf("host key mismatch")
-			}
-			return nil
-		},
-		Timeout: 10 * time.Second,
-	})
-	if err != nil {
-		t.Fatalf("dial live sshd: %v", err)
-	}
-	t.Cleanup(func() { _ = client.Close() })
-	return client
-}
-
-// forceInstalledVersion turns the current committed bundle into an older,
-// still-valid activation. The next EnsureInstalledRemote must therefore
-// stage a new generation and atomically replace the existing manifest.
-func forceInstalledVersion(t *testing.T, home, oldVersion string) {
-	t.Helper()
-	root := filepath.Join(home, ".nocx")
-	manifestPath := filepath.Join(root, "manifest.json")
-	data, readErr := os.ReadFile(manifestPath) // #nosec G304 — manifestPath is under the fixture-owned t.TempDir home.
-	if readErr != nil {
-		t.Fatalf("read installed manifest: %v", readErr)
-	}
-	var manifest map[string]any
-	if decodeErr := json.Unmarshal(data, &manifest); decodeErr != nil {
-		t.Fatalf("decode installed manifest: %v", decodeErr)
-	}
-	generation, ok := manifest["generation"].(string)
-	if !ok || generation == "" {
-		t.Fatalf("installed manifest generation = %#v", manifest["generation"])
-	}
-	oldGeneration := "v" + oldVersion
-	if renameErr := os.Rename(
-		filepath.Join(root, "integration", generation),
-		filepath.Join(root, "integration", oldGeneration),
-	); renameErr != nil {
-		t.Fatalf("rename installed generation: %v", renameErr)
-	}
-	manifest["version"] = oldVersion
-	manifest["generation"] = oldGeneration
-	data, encodeErr := json.MarshalIndent(manifest, "", "  ")
-	if encodeErr != nil {
-		t.Fatalf("encode older manifest: %v", encodeErr)
-	}
-	data = append(data, '\n')
-	if writeErr := os.WriteFile(manifestPath, data, 0o600); writeErr != nil {
-		t.Fatalf("write older manifest: %v", writeErr)
-	}
-}
-
-// homeEntries lists the session home recursively, relative paths.
-func homeEntries(root string) []string {
-	var out []string
-	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || p == root {
-			return nil
-		}
-		rel, _ := filepath.Rel(root, p)
-		out = append(out, rel)
-		return nil
-	})
-	sort.Strings(out)
-	return out
-}
-
-// assertSessionLeftOnlyTheLauncherBundle fails unless the session home holds
-// nothing but the fixture's .bashrc and the launcher's own ~/.nocx bundle
-// (nocx-k47n), and no file anywhere contains the per-epoch capability — the
-// channel installs nothing and persists nothing beyond the rcfile text
-// (ADR-0024 decision 2).
-func assertSessionLeftOnlyTheLauncherBundle(t *testing.T, home, capability string) {
-	t.Helper()
-	for _, e := range homeEntries(home) {
-		if e == ".bashrc" || e == ".nocx" || strings.HasPrefix(e, ".nocx/") {
-			continue
-		}
-		t.Fatalf("session left an artifact in the remote home: %s", e)
-	}
-	found := ""
-	_ = filepath.WalkDir(home, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || found != "" {
-			return nil
-		}
-		b, err := os.ReadFile(p) // #nosec G304 — p comes from WalkDir over the fixture-owned session home.
-		if err == nil && strings.Contains(string(b), capability) {
-			found = p
-		}
-		return nil
-	})
-	if found != "" {
-		t.Fatalf("the per-epoch capability persisted on the remote host at %s — "+
-			"the channel must install nothing and persist nothing", found)
-	}
-}
-
-// stripControl removes ANSI/OSC escape sequences from terminal bytes,
-// leaving the text a user could see. The policy-diagnostic check runs on
-// this: the terminal legitimately carries structured markers (OSC 133
-// lifecycle, OSC 636 command snapshots, OSC 7 cwd) whose payloads — command
-// lists, function names — are telemetry, not diagnostics naming a policy.
-func stripControl(s string) string {
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		if s[i] != 0x1b {
-			b.WriteByte(s[i])
-			continue
-		}
-		if i+1 >= len(s) {
-			break
-		}
-		switch s[i+1] {
-		case '[': // CSI ... final byte
-			for j := i + 2; j < len(s); j++ {
-				if s[j] >= 0x40 && s[j] <= 0x7e {
-					i = j
-					break
-				}
-			}
-		case ']', 'P', '^', '_': // OSC / DCS / PM / APC ... BEL or ST
-			for j := i + 2; j < len(s); j++ {
-				if s[j] == 0x07 {
-					i = j
-					break
-				}
-				if s[j] == 0x1b && j+1 < len(s) && s[j+1] == '\\' {
-					i = j + 1
-					break
-				}
-			}
-		default: // plain two-byte escape; drop both
-			i++
-		}
-	}
-	return b.String()
 }
 
 // ---------------------------------------------------------------------------
@@ -657,51 +479,6 @@ func (r *recordingKernel) RequestDomain(lane lifecycle.LaneID, parent *lifecycle
 		r.mu.Unlock()
 	}
 	return h, err
-}
-
-// ackingEmitter acknowledges every published establishment immediately, as
-// the renderer does after committing the editor presentation (decision 9).
-// The live-sshd proofs drive the real shell over the real sshd against the
-// production composition; without the acknowledgement the accept is never
-// flushed and the session never enters enhanced mode, so the proofs would
-// assert against a conventional terminal.
-type ackingEmitter struct {
-	pub *lifecyclepub.Publisher
-}
-
-func (e ackingEmitter) PublishLifecycle(f lifecyclepub.Fact) {
-	if f.Generation == "" || f.Domain == "" {
-		return
-	}
-	_ = e.pub.AcknowledgeEstablishment(
-		lifecycle.LaneID(f.Lane), lifecycle.DomainID(f.Domain), f.Epoch, f.Generation)
-}
-
-// newRecordingKernel builds the observation seam the way production wires
-// it: publisher over the raw kernel, acking emitter bound, the publisher
-func newRecordingKernel(opts ...lifecyclepub.Option) *recordingKernel {
-	k := lifecycle.New(lifecycle.Options{})
-	pub := lifecyclepub.New(k, opts...)
-	pub.SetEmitter(ackingEmitter{pub: pub})
-	return &recordingKernel{Publisher: pub}
-}
-
-// capabilityHex is the bearer as the launch embedded it: the provider
-// hex-encodes the handle's capability into the rcfile text (never the
-// environment), so this is byte-for-byte the value the shell received.
-func (r *recordingKernel) capabilityHex() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return fmt.Sprintf("%x", r.capability)
-}
-
-// recoveryHex is the one-shot recovery fence as the launch embedded it. It is
-// the second bearer §11 assertion 7 names, and it is asserted against every
-// surface alongside the capability — "neither bearer" is two statements.
-func (r *recordingKernel) recoveryHex() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return fmt.Sprintf("%x", r.recovery)
 }
 
 // ---------------------------------------------------------------------------
@@ -767,377 +544,4 @@ func (l *lockedBuffer) String() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return string(l.b)
-}
-
-// connect opens a real SSH session to the fixture sshd through ssh.RealClient
-// with the app package's own lifecycle provider and launcher adapter — the
-// same composition root types app.go wires — and starts collecting the
-// terminal output. An optional installer exercises the saved-profile
-// publication path inside RealClient.Connect.
-func (fx *liveSshd) connect(t *testing.T, kernel *recordingKernel, shell ssh.ShellKind, installers ...ssh.RemoteInstaller) (ssh.Channel, *outputBuffer) {
-	t.Helper()
-	logger := fx.log()
-	client, err := ssh.NewReal(logger, ssh.WithKnownHostsFile(fx.knownHostsPath(t)))
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	t.Cleanup(func() { _ = client.Close() })
-	fx.client = client
-
-	provider := &remoteLifecycleProvider{
-		client: client,
-		kernel: kernel,
-		logger: logger,
-		registerLane: func(lane lifecycle.LaneID, sid string) {
-			fx.registeredLanes = append(fx.registeredLanes, string(lane)+"->"+sid)
-		},
-	}
-	var launcher ssh.RemoteLauncher = &remoteLauncherAdapter{inner: shellintegration.NewRemoteLauncher(), logger: logger}
-	if fx.launcher != nil {
-		launcher = fx.launcher
-	}
-
-	opts := []ssh.ConnectOption{
-		ssh.WithUser(fx.user),
-		ssh.WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(fx.signer)}),
-		ssh.WithPTYSize(100, 30, 0, 0),
-		ssh.WithTimeout(20 * time.Second),
-		ssh.WithSessionID("sid-live-sshd"),
-		ssh.WithEnhanced(),
-		ssh.WithShell(shell),
-		ssh.WithRemoteLifecycle(provider),
-		ssh.WithRemoteLauncher(launcher),
-	}
-	if len(installers) > 0 {
-		opts = append(opts, ssh.WithRemoteInstaller(installers[0]))
-	}
-	ch, err := client.Connect(context.Background(), fx.addr, opts...)
-	if err != nil {
-		t.Fatalf("connect to %s: %v", fx.addr, err)
-	}
-	t.Cleanup(func() { _ = ch.Close() })
-	out := &outputBuffer{}
-	go func() { _, _ = io.Copy(out, ch) }()
-	return ch, out
-}
-
-// runLine types one command line into the remote shell and waits for its
-// authenticated completion, returning the completed attempt.
-func runLine(t *testing.T, ch ssh.Channel, kernel *recordingKernel, line string, wantExit int) lifecycle.ExecutionAttempt {
-	t.Helper()
-	kernel.mu.Lock()
-	domain := kernel.domain
-	kernel.mu.Unlock()
-	if domain == "" {
-		t.Fatal("runLine called before a domain was minted")
-	}
-	if _, err := ch.Write([]byte(line + "\n")); err != nil {
-		t.Fatalf("write %q: %v", line, err)
-	}
-	// The command is deliberately slow enough to observe the open attempt:
-	// the kernel mints the attempt id on start, and the test needs it to
-	// follow the completion.
-	var att lifecycle.ExecutionAttempt
-	waittest.WaitForTimeout(t, "an open attempt for "+line, 15*time.Second, func() bool {
-		a, ok := kernel.OpenAttempt(domain)
-		if ok {
-			att = a
-		}
-		return ok
-	})
-	waittest.WaitForTimeout(t, "completion of "+line, 15*time.Second, func() bool {
-		a, ok := kernel.Attempt(att.ID)
-		if !ok {
-			return false
-		}
-		if a.State != lifecycle.AttemptCompleted {
-			return false
-		}
-		if a.ExitCode == nil || *a.ExitCode != wantExit {
-			t.Fatalf("attempt %s completed with exit %v, want %d", att.ID, a.ExitCode, wantExit)
-		}
-		att = a // the completed record: the fence it carries is the one on the wire
-		return true
-	})
-	return att
-}
-
-// ---------------------------------------------------------------------------
-// The proofs.
-
-// TestLiveSshd_BashReachesAcceptedDomain proves the primary path (nocx-u7uh.4
-// acceptance): a real bash shell on the other side of a real sshd reaches the
-// accepted domain with nothing installed there, and commands run there
-// produce authenticated start/complete with the right exit status and the
-// render fence on the terminal.
-func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
-	fx := startLiveSshd(t, true)
-	kernel := newRecordingKernel()
-	ch, out := fx.connect(t, kernel, ssh.ShellBash, &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))})
-
-	waittest.WaitForTimeout(t, "domain established", 15*time.Second, func() bool {
-		kernel.mu.Lock()
-		defer kernel.mu.Unlock()
-		if kernel.minted != 1 {
-			return false
-		}
-		d, ok := kernel.Domain(kernel.domain)
-		return ok && d.State == lifecycle.DomainEstablished
-	})
-
-	// The minted lane reached the session that owns it: the production
-	// RegisterLifecycleLane wiring (without it, every published fact is
-	// dropped at the transport and enhanced mode never engages).
-	if len(fx.registeredLanes) != 1 || !strings.HasSuffix(fx.registeredLanes[0], "->sid-live-sshd") {
-		t.Fatalf("registered lanes = %v, want exactly one lane bound to sid-live-sshd", fx.registeredLanes)
-	}
-
-	// Line 1: print a sentinel and stay open long enough for the test to
-	// observe the open attempt.
-	att0 := runLine(t, ch, kernel, "printf 'PROOF_BASH_123\\n'; sleep 0.3", 0)
-	// The render fence the kernel recorded must be the exact bytes the shell
-	// wrote to the terminal (protocol doc §8).
-	fence := fmt.Sprintf("\x1b]1337;NOCX_FENCE;%x\x07", att0.Fence)
-	waittest.WaitForTimeout(t, "sentinel output and fence", 10*time.Second, func() bool {
-		return strings.Contains(out.String(), "PROOF_BASH_123") &&
-			strings.Contains(out.String(), fence)
-	})
-
-	// Line 2: a failing command completes with exit status 1.
-	runLine(t, ch, kernel, "sh -c 'sleep 0.3; exit 1'", 1)
-
-	// The lane is back at a ready prompt for the domain.
-	waittest.WaitForTimeout(t, "lane back at PromptReady", 10*time.Second, func() bool {
-		kernel.mu.Lock()
-		defer kernel.mu.Unlock()
-		st, err := kernel.State(kernel.lane)
-		if err != nil {
-			return false
-		}
-		return st.Lifecycle == lifecycle.LifecyclePromptReady && st.Domain == kernel.domain
-	})
-
-	// The session ends with the shell. domain_closed is deliberately
-	// best-effort (the hook's own contract: the process exit may race the
-	// send, and the kernel then ends the domain via the transport-loss
-	// path, which the connection-loss test proves separately), so the
-	// assertion is the session ending, not a promised terminal state.
-	if _, err := ch.Write([]byte("exit\n")); err != nil {
-		t.Fatalf("write exit: %v", err)
-	}
-	waittest.WaitForTimeout(t, "session end after exit", 15*time.Second, func() bool {
-		select {
-		case <-ch.Done():
-			return true
-		default:
-			return false
-		}
-	})
-
-	// Nothing installed: the session home holds only the fixture .bashrc and
-	// the launcher's own ~/.nocx bundle, and no file carries the capability.
-	assertSessionLeftOnlyTheLauncherBundle(t, fx.home, kernel.capabilityHex())
-}
-
-// TestLiveSshd_RemoteBundleRepublishReplacesManifest proves nocx-340t
-// against OpenSSH itself: after a host has a committed older activation, a
-// second SFTP publish atomically replaces manifest.json instead of receiving
-// SSH_FX_FAILURE, and a subsequent enhanced session establishes its domain.
-func TestLiveSshd_RemoteBundleRepublishReplacesManifest(t *testing.T) {
-	fx := startLiveSshd(t, true)
-	installer := &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))}
-	client := fx.rawClient(t)
-	if err := installer.EnsureInstalledRemote(context.Background(), client, fx.home); err != nil {
-		t.Fatalf("first remote publish: %v", err)
-	}
-	forceInstalledVersion(t, fx.home, "0")
-
-	kernel := newRecordingKernel()
-	ch, _ := fx.connect(t, kernel, ssh.ShellBash, installer)
-	waittest.WaitForTimeout(t, "domain established after republish", 15*time.Second, func() bool {
-		kernel.mu.Lock()
-		defer kernel.mu.Unlock()
-		if kernel.minted != 1 {
-			return false
-		}
-		d, ok := kernel.Domain(kernel.domain)
-		return ok && d.State == lifecycle.DomainEstablished
-	})
-	if _, err := ch.Write([]byte("exit\n")); err != nil {
-		t.Fatalf("write exit: %v", err)
-	}
-}
-
-// TestLiveSshd_ForwardingRefusedStaysConventional proves the refusal
-// contract: a host whose sshd will not forward (AllowTcpForwarding no)
-// produces a conventional terminal with a visible native prompt, no dialog,
-// and no diagnostic naming a policy — refusal is detectable synchronously
-// but not distinguishable (ADR-0024 decision 4).
-func TestLiveSshd_ForwardingRefusedStaysConventional(t *testing.T) {
-	fx := startLiveSshd(t, false)
-	kernel := newRecordingKernel()
-	ch, out := fx.connect(t, kernel, ssh.ShellBash, &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))})
-
-	// The refusal is synchronous: no domain may ever be minted. The native
-	// prompt is the observable that the bootstrap has finished and the
-	// channel is ready for ordinary terminal input.
-	waittest.WaitForTimeoutDetail(t, "native prompt after refused forwarding", 20*time.Second,
-		func() string {
-			kernel.mu.Lock()
-			minted := kernel.minted
-			kernel.mu.Unlock()
-			return fmt.Sprintf("minted %d domain(s); terminal:\n%s", minted, out.String())
-		},
-		func() bool {
-			return strings.Contains(out.String(), "NATIVE_PROMPT>")
-		})
-	kernel.mu.Lock()
-	minted := kernel.minted
-	kernel.mu.Unlock()
-	if minted != 0 {
-		t.Fatalf("refused forwarding still minted %d domain(s)", minted)
-	}
-
-	// The fixture .bashrc names the prompt NATIVE_PROMPT>; with no live
-	// channel the marker-only overlay keeps it visible (ADR-0024 decision 9).
-	// Run a command only after the bootstrap has released input: the terminal
-	// is an ordinary usable shell.
-	if _, err := ch.Write([]byte("echo CONVENTIONAL_OK\n")); err != nil {
-		t.Fatalf("write echo: %v", err)
-	}
-	waittest.WaitForTimeout(t, "a usable conventional terminal", 20*time.Second, func() bool {
-		s := out.String()
-		return strings.Contains(s, "NATIVE_PROMPT>") && strings.Contains(s, "CONVENTIONAL_OK")
-	})
-
-	// No diagnostic naming the policy may leak into the user-visible output
-	// (the Go client's tcpip-forward refusal is not a terminal message, and
-	// nothing in the launcher or the hooks may print one). The scan runs on
-	// the control-stripped text: the terminal's structured markers (OSC 636
-	// command snapshots etc.) are telemetry, not diagnostics.
-	low := strings.ToLower(stripControl(out.String()))
-	for _, word := range []string{"forward", "tcpip", "AllowTcpForwarding", "refused"} {
-		if strings.Contains(low, word) {
-			t.Fatalf("refusal leaked a policy diagnostic (%q) into the terminal:\n%s", word, out.String())
-		}
-	}
-
-	// And the shell still ends cleanly.
-	if _, err := ch.Write([]byte("exit\n")); err != nil {
-		t.Fatalf("write exit: %v", err)
-	}
-}
-
-// TestLiveSshd_ConnectionLossRevokesDomain proves protocol §12: losing the
-// SSH connection revokes the domain and abandons its open attempt as
-// unknown — never success.
-func TestLiveSshd_ConnectionLossRevokesDomain(t *testing.T) {
-	fx := startLiveSshd(t, true)
-	kernel := newRecordingKernel()
-	ch, _ := fx.connect(t, kernel, ssh.ShellBash, &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))})
-
-	waittest.WaitForTimeout(t, "domain established", 15*time.Second, func() bool {
-		kernel.mu.Lock()
-		defer kernel.mu.Unlock()
-		if kernel.minted != 1 {
-			return false
-		}
-		d, ok := kernel.Domain(kernel.domain)
-		return ok && d.State == lifecycle.DomainEstablished
-	})
-
-	// Open a long-running attempt, then lose the SSH connection under it.
-	// Closing the pooled client is the faithful loss trigger: real OpenSSH
-	// forks per connection, so killing the sshd parent would leave the
-	// session's connection (and the forwarded port) alive — the transport
-	// loss path protocol §12 is about is the connection shutting down, which
-	// is what the client's Close does.
-	if _, err := ch.Write([]byte("sleep 60\n")); err != nil {
-		t.Fatalf("write sleep: %v", err)
-	}
-	var att lifecycle.ExecutionAttempt
-	waittest.WaitForTimeout(t, "the sleep attempt to be open", 15*time.Second, func() bool {
-		kernel.mu.Lock()
-		defer kernel.mu.Unlock()
-		a, ok := kernel.OpenAttempt(kernel.domain)
-		if ok {
-			att = a
-		}
-		return ok
-	})
-	if err := fx.client.Close(); err != nil {
-		t.Fatalf("close pooled client: %v", err)
-	}
-
-	// The domain is lost and the open attempt becomes unknown — never
-	// completed, never successful.
-	waittest.WaitForTimeout(t, "domain lost", 20*time.Second, func() bool {
-		kernel.mu.Lock()
-		defer kernel.mu.Unlock()
-		d, ok := kernel.Domain(kernel.domain)
-		return ok && d.State == lifecycle.DomainLost
-	})
-	waittest.WaitForTimeout(t, "open attempt unknown", 20*time.Second, func() bool {
-		kernel.mu.Lock()
-		defer kernel.mu.Unlock()
-		a, ok := kernel.Attempt(att.ID)
-		return ok && a.State == lifecycle.AttemptUnknown && a.ExitCode == nil
-	})
-}
-
-// TestLiveSshd_ZshAdapterReachesAcceptedDomain proves the zsh tier end to
-// end (deliverable 2): the zsh hook reaches the forwarded port through
-// zmodload zsh/net/tcp + ztcp, performs the same hello/accept handshake with
-// the same capability gating, and reports start/complete with the exit
-// status — no prompt suppression happens before accept.
-func TestLiveSshd_ZshAdapterReachesAcceptedDomain(t *testing.T) {
-	// zsh is a hard prerequisite (the launcher execs it on the far host);
-	// fail, never skip, with the container guidance — the go-tests image
-	// carries zsh, the host may not (nocx-gd84).
-	if _, err := exec.LookPath("zsh"); err != nil {
-		t.Fatalf("zsh is required by this test and missing from PATH.\n" +
-			"The zsh tier proof must not silently skip (nocx-gd84). Run the suite in the\n" +
-			"containerized runner: .githooks/containerized-tests.sh (the go-tests image\n" +
-			"carries zsh), or provision zsh on this host and re-run.")
-	}
-
-	fx := startLiveSshd(t, true)
-	kernel := newRecordingKernel()
-	ch, out := fx.connect(t, kernel, ssh.ShellZsh, &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))})
-
-	waittest.WaitForTimeoutDetail(t, "domain established", 15*time.Second,
-		func() string { return fmt.Sprintf("terminal:\n%s", out.String()) },
-		func() bool {
-			kernel.mu.Lock()
-			defer kernel.mu.Unlock()
-			if kernel.minted != 1 {
-				return false
-			}
-			d, ok := kernel.Domain(kernel.domain)
-			return ok && d.State == lifecycle.DomainEstablished
-		})
-
-	att := runLine(t, ch, kernel, "printf 'PROOF_ZSH_123\\n'; sleep 0.3", 0)
-	fence := fmt.Sprintf("\x1b]1337;NOCX_FENCE;%x\x07", att.Fence)
-	waittest.WaitForTimeout(t, "zsh sentinel output and fence", 10*time.Second, func() bool {
-		return strings.Contains(out.String(), "PROOF_ZSH_123") &&
-			strings.Contains(out.String(), fence)
-	})
-
-	// A failing command completes with exit status 1 over the zsh hook.
-	runLine(t, ch, kernel, "sh -c 'sleep 0.3; exit 1'", 1)
-
-	if _, err := ch.Write([]byte("exit\n")); err != nil {
-		t.Fatalf("write exit: %v", err)
-	}
-	// domain_closed is best-effort (see the bash proof); assert the session
-	// ended, not a promised terminal state.
-	waittest.WaitForTimeout(t, "session end after exit", 15*time.Second, func() bool {
-		select {
-		case <-ch.Done():
-			return true
-		default:
-			return false
-		}
-	})
 }

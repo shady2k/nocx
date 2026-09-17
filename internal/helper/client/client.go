@@ -16,6 +16,7 @@ import (
 	"sync"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
+	nocxlog "github.com/shady2k/nocx/internal/log"
 )
 
 // HelperConn is the pty-less exec lane the client rides (design D19): one
@@ -70,6 +71,44 @@ type Client struct {
 	pending     map[uint64]chan proto.Response
 	streams     map[uint64]*chunkStream
 	attachments map[[16]byte]*AttachedSession
+	// channels holds the proxied ssh channels this coordinator opened on this
+	// helper, keyed by the id the helper minted (channels.go). It is a
+	// separate map from attachments because the two are keyed by different
+	// identities and routed to different services; one map would make a
+	// channel id a possible key for a session lookup.
+	channels map[proto.ChannelID]*ChannelStream
+	// parkedChannels parks the frames of a channel whose open has not returned
+	// yet, so the first bytes of a stream are not lost to the round trip that
+	// names it. Bounded (channels.go), and emptied by the claim or by the
+	// loss. Distinct from pending above, which is the response waiters.
+	parkedChannels map[proto.ChannelID][][]byte
+	// parkedEnds parks the END of a channel whose open has not returned yet —
+	// the same window parkedChannels covers, one notification over. It is not a
+	// tidiness: a lane's bridge can fail in the microseconds between the
+	// helper's open answer and this side claiming the id, and a dropped end is
+	// a stream that never ends — the caller's read parks for ever and its dial
+	// reports a sentinel timeout for a fact that was already on the wire
+	// (nocx-50w7p.10 measured it: the same lane test, the same tree, red under
+	// load). Bounded by parkedChannelFrames, emptied by the claim or by the
+	// loss.
+	parkedEnds map[proto.ChannelID]parkedEnd
+	// forwards holds the remote listeners this coordinator asked for, keyed by
+	// the id the helper minted (forward.go). A listener's accepted connections
+	// are ordinary channels and live in the map above; this one owns the
+	// listener's lifetime and nothing else.
+	forwards map[proto.ForwardID]*Forward
+	// parkedForwards parks the announcements of a listener whose `ssh.forward`
+	// has not returned yet, so the first connection somebody makes to it is not
+	// lost to the round trip that names the listener. Bounded (forward.go), and
+	// emptied by the claim or by the loss. Distinct from parkedChannels above,
+	// which parks a CHANNEL's bytes rather than a listener's connections.
+	parkedForwards map[proto.ForwardID][]proto.ForwardedTCPIPEvent
+	// probeLeases holds the probe references this coordinator asked for, keyed
+	// by the id the helper minted (probes.go). A third map rather than a
+	// reuse of either above, for the reason the other two are separate: the
+	// three name different things, are ended by different ops, and one entry
+	// keyed by another's identity is how a `close` becomes an `unlease`.
+	probeLeases map[proto.LeaseID]*ProbeLease
 	nextID      uint64
 	lost        bool
 
@@ -78,6 +117,13 @@ type Client struct {
 	waitCh    chan waitResult
 	doneOnce  sync.Once
 	closeOnce sync.Once
+
+	// reverseCtx is the lifetime every reverse HANDLER runs under (reverse.go):
+	// it ends when the connection does, so a handler blocked on a person does
+	// not outlive the connection that asked it. cancelReverse is safe to call
+	// more than once and from more than one goroutine.
+	reverseCtx    context.Context
+	cancelReverse context.CancelFunc
 
 	lostErr error
 }
@@ -99,9 +145,43 @@ type chunkStream struct {
 // (D15): recorded and unused, reserved for a later reattach.
 func (c *Client) InstanceID() string { return c.instanceID }
 
+// PeerProcess is a carrier that can name the process at its other end. Only a
+// socket can: it was dialed, so the kernel stamped the peer, while an exec
+// lane's peer is a process on another machine.
+type PeerProcess interface {
+	PeerPID() (int, bool)
+}
+
+// PeerPID answers the pid of this client's helper, when its carrier is a socket
+// and the kernel can name one.
+//
+// The coordinator uses it to learn which process on this machine is the helper
+// whose forwarded connections may name a pane (nocx-50w7p.16) — and it is read
+// from the LIVE connection rather than remembered, so a helper that died and
+// was replaced is a different answer rather than the same stale one.
+func (c *Client) PeerPID() (int, bool) {
+	if carrier, ok := c.conn.(PeerProcess); ok {
+		return carrier.PeerPID()
+	}
+	return 0, false
+}
+
 // Done closes when the transport is lost: connection loss, server close,
 // keepalive failure. It does not close on Close.
 func (c *Client) Done() <-chan struct{} { return c.done }
+
+// LostErr reports why the transport shut down. Meaningful once Done has
+// closed; nil while the connection is alive, and nil when it closed cleanly.
+//
+// It is the same value Call puts in the error it fails a request with, so a
+// caller that watched Done can report the cause a request would have reported
+// — which is what a lease carrying several streams needs, since none of them
+// was in flight when the connection died.
+func (c *Client) LostErr() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lostErr
+}
 
 // Call sends one named operation and waits for its response. A refusal
 // (proto.Error) returns *RefusalError; a dead transport returns an error
@@ -118,13 +198,31 @@ func (c *Client) Call(ctx context.Context, service, op string, params, out any) 
 		}
 		raw = b
 	}
-	req := proto.Request{ID: id, Service: service, Op: op, Params: raw, Corr: randomCorr()}
+	req := proto.Request{
+		ID: id, Service: service, Op: op, Params: raw, Corr: randomCorr(),
+		// The exchange this call belongs to, so the helper's lines join what
+		// the backend was doing when it asked (nocx-n14oo.2).
+		Traceparent: nocxlog.SpanFrom(ctx).Traceparent(),
+	}
 	// D26: the correlation id the helper logs for this request is the
 	// SAME value the backend logs here — one trace across the two hops.
-	c.log.Debug("helper request", "service", service, "op", op, "corr", req.Corr)
+	//
+	// log.From(ctx), not a wrap of c.log (nocx-n14oo.9): the caller's own
+	// context is what carries the trace this request belongs to, and From
+	// also names the module without being told. c.log stays the client's
+	// fallback for the background pumps below, which own no request ctx.
+	nocxlog.From(ctx).Debug("helper request", "service", service, "op", op, "corr", req.Corr)
 	payload, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("helper: request: %w", err)
+	}
+	// A REQUEST IS NOT CHUNKED (D14 chunking is a response path), so a payload
+	// above one frame is refused rather than handed to EncodeFrame, which
+	// panics on it. The op that can actually reach this is the replay: its
+	// params carry a capture's bytes, and a capture is a file a person may have
+	// written.
+	if len(payload) > proto.MaxFrameBytes {
+		return fmt.Errorf("%w: %d bytes for %s.%s", ErrRequestTooLarge, len(payload), service, op)
 	}
 
 	ch := make(chan proto.Response, 1)
@@ -193,6 +291,11 @@ func (c *Client) Cancel(id uint64) {
 // registry drains its use-guards before closing, so no caller sees that.
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
+		// Closing ends the connection, which is the end of every reverse
+		// handler's lifetime too (reverse.go). Cancelled here as well as in
+		// lose, because a caller that closes a client whose carrier never
+		// reports the loss would otherwise leave a handler waiting.
+		c.cancelReverse()
 		_ = c.conn.Close()
 	})
 	return nil
@@ -210,19 +313,75 @@ func (c *Client) mintID() uint64 {
 // ErrLost rather than sent into the void.
 func (c *Client) lose(reason error) {
 	c.doneOnce.Do(func() {
-		c.lostErr = reason
+		// Every reverse handler still running is freed here: the connection
+		// that asked is gone, so an answer has nowhere to go (reverse.go).
+		c.cancelReverse()
 		c.mu.Lock()
+		// The cause is written UNDER the same mutex its readers take, which is
+		// what the field's own note in sendChannelData requires and what this
+		// line used to break: it was assigned before the lock, so LostErr — the
+		// accessor a lease watcher reads to report WHY its transport died — was
+		// an unsynchronized read against an unsynchronized write. The window was
+		// invisible while nobody read the field without also watching Done
+		// first, and a reader that does not is exactly what a lease's watcher is.
+		c.lostErr = reason
 		c.lost = true
 		matched := make([]*AttachedSession, 0, len(c.attachments))
 		for _, a := range c.attachments {
 			matched = append(matched, a)
 		}
 		c.attachments = make(map[[16]byte]*AttachedSession)
+		// Proxied channels end with the connection that carried them, and
+		// they are ended here rather than left registered so a reader parked
+		// in Read is released now instead of when it next looks at c.done.
+		channels := make([]*ChannelStream, 0, len(c.channels))
+		for _, s := range c.channels {
+			channels = append(channels, s)
+		}
+		c.channels = make(map[proto.ChannelID]*ChannelStream)
+		// Remote listeners end with it too, for the same reason one step out:
+		// a caller parked in Accept is waiting on the connection that just
+		// died, and leaving the listener registered would park it for ever.
+		forwards := make([]*Forward, 0, len(c.forwards))
+		for _, f := range c.forwards {
+			forwards = append(forwards, f)
+		}
+		c.forwards = make(map[proto.ForwardID]*Forward)
+		// Announcements nobody can claim any more: the listener they belong to
+		// is gone with the connection, and a paired stream held for one is a
+		// leak with a caller's name on it.
+		c.parkedForwards = make(map[proto.ForwardID][]proto.ForwardedTCPIPEvent)
+		// The park goes with them: nothing can claim it once the wire is
+		// gone, and a payload retained by a dead transport is a leak with a
+		// caller's name on it.
+		c.parkedChannels = make(map[proto.ChannelID][][]byte)
+		// The parked ends go with them, for the same reason: nothing can claim
+		// a stream on a wire that is gone.
+		c.parkedEnds = make(map[proto.ChannelID]parkedEnd)
 		c.mu.Unlock()
 		close(c.done)
+		for _, s := range channels {
+			// The transport died, so these streams are gone rather than
+			// exited: no end of theirs was this side's act and no process
+			// reported a status, which is exactly what a lane's Done
+			// reports (channels.go's endOfStream).
+			s.finish(fmt.Errorf("%w: %v", ErrLost, reason), endOfStream{})
+		}
 		for _, a := range matched {
 			a.finish()
 		}
+		for _, f := range forwards {
+			f.mu.Lock()
+			if f.cause == nil {
+				f.cause = fmt.Errorf("%w: %v", ErrLost, reason)
+			}
+			f.mu.Unlock()
+			f.close()
+		}
+		// Probe leases end with it too: a lease is a reference to a connection
+		// whose transport is this one, so a consumer watching Done must learn
+		// here rather than at its next probe, which may be minutes away.
+		c.endLeases(reason)
 	})
 }
 
@@ -236,6 +395,12 @@ func (c *Client) onFrame(ty proto.FrameType, payload []byte) {
 		c.verifyHelloOK(payload)
 	case proto.TypeResponse:
 		c.deliverResponse(payload)
+	case proto.TypeRequest:
+		// A request the HELPER sends this coordinator (reverse.go). It was
+		// `unexpected frame` until the ssh service existed, and dropping it is
+		// the one answer that always produces a hang: the helper is waiting
+		// for this, and nobody else will answer.
+		c.serveReverse(payload)
 	case proto.TypeChunk:
 		c.deliverChunk(payload)
 	case proto.TypeKeepAlive:
@@ -246,6 +411,8 @@ func (c *Client) onFrame(ty proto.FrameType, payload []byte) {
 		c.sessionData(payload)
 	case proto.TypeLifecycleData:
 		c.lifecycleData(payload)
+	case proto.TypeChannelData:
+		c.channelData(payload)
 	default:
 		c.log.Warn("unexpected frame", "type", ty)
 	}
@@ -257,11 +424,28 @@ func (c *Client) sessionNotify(payload []byte) {
 		c.log.Warn("malformed notify frame", "err", err)
 		return
 	}
-	if n.Service != proto.ServiceSession {
-		return
-	}
 	raw, err := json.Marshal(n.Params)
 	if err != nil {
+		return
+	}
+	switch n.Service {
+	case proto.ServiceSSH:
+		// The ssh service's events: a proxied channel's remote end is gone, a
+		// connection arrived on a listener this coordinator asked for, and a
+		// listener ended (channels.go, forward.go). Routed by service rather
+		// than folded into the session arm, because the two share nothing but
+		// the frame.
+		switch n.Event {
+		case proto.EventChannelClosed:
+			c.channelNotify(raw)
+		case proto.EventForwardedTCPIP:
+			c.forwardedTCPIP(raw)
+		case proto.EventForwardClosed:
+			c.forwardClosed(raw)
+		}
+		return
+	case proto.ServiceSession:
+	default:
 		return
 	}
 	switch n.Event {
@@ -269,6 +453,23 @@ func (c *Client) sessionNotify(payload []byte) {
 		c.sessionExited(raw)
 	case proto.EventSessionReset:
 		c.sessionReset(raw)
+	case proto.EventSessionLiveness:
+		c.sessionLiveness(raw)
+	}
+}
+
+// sessionLiveness is EventSessionLiveness arriving: what an ssh session's own
+// keepalive prober just learned (nocx-y6fh7 item 6). Delivered to every
+// attachment on the session, on the same terms sessionExited already uses —
+// a fact about the session, not about one reader.
+func (c *Client) sessionLiveness(raw json.RawMessage) {
+	var live proto.SessionLiveness
+	if err := json.Unmarshal(raw, &live); err != nil {
+		c.log.Warn("malformed session liveness notification", "err", err)
+		return
+	}
+	for _, a := range c.attachedTo(live.Session.Session, "") {
+		a.reportLiveness(live.Responsive, live.RoundTripMS)
 	}
 }
 
@@ -367,6 +568,13 @@ func (c *Client) lifecycleData(payload []byte) {
 			"bytes", len(f.Payload))
 		return
 	}
+	// THE MIDDLE HOP SAYS IT ARRIVED (nocx-n14oo.7). Only the DROP was
+	// reported here, so "the frame never came" and "the frame came and the
+	// bridge behind it did not move it" were the same silence. The lifecycle
+	// stream is a handshake and a trickle of events, not the data plane, so
+	// one line per frame costs nothing and answers the question directly.
+	c.log.Debug("lifecycle data frame arrived",
+		"session", fmt.Sprintf("%x", f.Session), "bytes", len(f.Payload))
 	a.deliverLifecycle(f.Payload)
 }
 

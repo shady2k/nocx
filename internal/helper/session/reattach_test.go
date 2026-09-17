@@ -228,7 +228,7 @@ func TestTheSessionSurvivesTheCoordinatorAndTheProcessRanAcrossTheGap(t *testing
 	// no caller over the wire can name it (D3).
 	svc := session.New(session.Options{
 		Generation: "content-hash",
-		Spawner:    session.NewLocalSpawner(discardLog(), session.Shell{Path: "/bin/sh", Args: []string{"-i"}}),
+		Spawner:    session.NewLocalSpawner(discardLog(), session.Shell{Path: "/bin/sh", Args: []string{"-i"}}, ""),
 		Inspector:  session.NewInspector(),
 		Log:        discardLog(),
 		Limits:     session.DefaultLimits(),
@@ -250,7 +250,7 @@ func TestTheSessionSurvivesTheCoordinatorAndTheProcessRanAcrossTheGap(t *testing
 	if handle.Generation != "content-hash" {
 		t.Fatalf("the handle names generation %q", handle.Generation)
 	}
-	if spawned.Entry.Launch.Pid == 0 {
+	if spawned.Entry.Launch.Local.Pid == 0 {
 		t.Fatal("no pid was recorded: the helper did not actually spawn anything")
 	}
 

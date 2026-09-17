@@ -24,19 +24,18 @@ hand.
 
 ## The verbs you actually use
 
-| `bd`                                       | `br`                                                |
-| ------------------------------------------ | --------------------------------------------------- |
-| `bd ready`                                 | `br ready`                                          |
-| `bd ready` meaning "what should I do next" | `scripts/br-queue.sh`                               |
-| `bd show <id>`                             | `br show <id>`                                      |
-| `bd update <id> --claim`                   | `br update <id> --claim`                            |
-| `bd close <id> --reason "..."`             | `br close <id> --reason "..."`                      |
-| `bd create "T" -t task -p 1`               | `br create "T" -t task -p 1`                        |
-| `bd dep add <child> <parent>`              | `br dep add <child> <parent>`                       |
-| `bd search <phrase>`                       | `br search <phrase>`                                |
-| `bd memories <word>`                       | `cm context "<what you are doing>" --json`          |
-| `bd dolt push` / `bd dolt pull`            | nothing — the JSONL is a tracked file, git moves it |
-| `bd merge-slot`                            | nothing — removed deliberately                      |
+| `bd`                            | `br`                                                |
+| ------------------------------- | --------------------------------------------------- |
+| `bd ready`                      | `br ready`                                          |
+| `bd show <id>`                  | `br show <id>`                                      |
+| `bd update <id> --claim`        | `br update <id> --claim`                            |
+| `bd close <id> --reason "..."`  | `br close <id> --reason "..."`                      |
+| `bd create "T" -t task -p 1`    | `br create "T" -t task -p 1`                        |
+| `bd dep add <child> <parent>`   | `br dep add <child> <parent>`                       |
+| `bd search <phrase>`            | `br search <phrase>`                                |
+| `bd memories <word>`            | `cm context "<what you are doing>" --json`          |
+| `bd dolt push` / `bd dolt pull` | nothing — the JSONL is a tracked file, git moves it |
+| `bd merge-slot`                 | nothing — removed deliberately                      |
 
 `br ready --json` returns a bare array, not `{issues: [...]}`; `br list --json` does
 return `{issues, total, ...}`. `br ready` has no `--parent` and no `--exclude-type`,

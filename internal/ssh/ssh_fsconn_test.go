@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package ssh
 
 import (
@@ -140,9 +142,6 @@ type fsTestServer struct {
 	listener   net.Listener
 	addr       string
 
-	mu          sync.Mutex
-	maxSessions int
-	sessions    int
 	// requestSeen is signaled once per SFTP request the never-reply server
 	// has swallowed, so a test knows a call is genuinely in flight before
 	// it acts. Buffered; drops when full.
@@ -185,12 +184,6 @@ func startFSTestServer(t *testing.T, mode fsServerMode) *fsTestServer {
 	return srv
 }
 
-func (s *fsTestServer) setMaxSessions(n int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.maxSessions = n
-}
-
 // killConns closes every established server-side connection, simulating
 // transport loss for the clients.
 func (s *fsTestServer) killConns() {
@@ -211,7 +204,13 @@ func (s *fsTestServer) acceptLoop(config *gossh.ServerConfig) {
 		if err != nil {
 			return
 		}
-		s.serveConn(conn, config)
+		// One goroutine per connection, because a connection is served for
+		// its WHOLE lifetime and a fixture that served it inline would accept
+		// the second one only after the first had ended. Nothing in the tests
+		// depended on that — every older one dialled a single connection —
+		// until the stream lease arrived and a test wanted two channels, or
+		// two leases, on the same machine.
+		go s.serveConn(conn, config)
 	}
 }
 
@@ -235,15 +234,11 @@ func (s *fsTestServer) serveConn(conn net.Conn, config *gossh.ServerConfig) {
 	for newChan := range chans {
 		switch newChan.ChannelType() {
 		case "session":
-			s.mu.Lock()
-			maxSessions := s.maxSessions
-			if maxSessions > 0 && s.sessions >= maxSessions {
-				s.mu.Unlock()
-				_ = newChan.Reject(gossh.ResourceShortage, "too many sessions")
-				continue
-			}
-			s.sessions++
-			s.mu.Unlock()
+			// No session cap here any more: it existed for the FSConn lease's
+			// own MaxSessions-1 case, and that case belongs to the helper now
+			// (the refusal it classifies crosses the wire as a channel
+			// refusal). A cap nobody can set is a fixture that answers a
+			// question the tests no longer ask.
 			ch, reqs, err := newChan.Accept()
 			if err != nil {
 				return
@@ -525,13 +520,6 @@ func fsTestClient(t *testing.T, srv *fsTestServer) *RealClient {
 	return client
 }
 
-func fsConnectOpts(srv *fsTestServer) []ConnectOption {
-	return []ConnectOption{
-		WithUser("test"),
-		WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)}),
-	}
-}
-
 func fsWriteKnownHosts(t *testing.T, srv *fsTestServer, addr string) string {
 	t.Helper()
 	line := knownhosts.Line([]string{addr}, srv.hostSigner.PublicKey())
@@ -543,15 +531,34 @@ func fsWriteKnownHosts(t *testing.T, srv *fsTestServer, addr string) string {
 	return path
 }
 
-// waitPoolEmpty polls the pool count down to zero, so a regression that
-// leaves a lease's reference behind fails the test instead of hanging it.
-func waitPoolEmpty(t *testing.T, client *RealClient) {
+// streamLeaseOn opens the fixture's sftp subsystem and hands the lease the
+// stream — the production shape since nocx-50w7p.12. The coordinator no longer
+// dials and holds no pool reference: this machine's helper owns the pooled
+// connection and proxies one `ssh.open(sftp)` channel to it, so what the file
+// manager is handed is bytes, and the raw stream is returned beside the lease
+// because "the channel died mid-transfer" is a fact about those bytes.
+//
+// The connection underneath still belongs to the test, which is what makes the
+// two failure shapes honest: closing the STREAM is a helper channel ending,
+// and killConns is the connection itself going away.
+func streamLeaseOn(t *testing.T, srv *fsTestServer, hardTimeout time.Duration) (*fsConn, io.ReadWriteCloser) {
 	t.Helper()
-	waittest.WaitForTimeoutDetail(t, "the pool to empty", 5*time.Second, func() string {
-		return fmt.Sprintf("pool count = %d, want 0", client.pool.Count())
-	}, func() bool {
-		return client.pool.Count() == 0
-	})
+	raw, dialed := helperStreamWithClient(t, fsTestClient(t, srv), srv)
+	t.Cleanup(func() { _ = dialed.Close() })
+	fc, err := newFSConnOverStream(context.Background(), raw, hardTimeout)
+	if err != nil {
+		t.Fatalf("a lease over the fixture's sftp stream: %v", err)
+	}
+	t.Cleanup(func() { _ = fc.Close() })
+	return fc, raw
+}
+
+// streamLease is streamLeaseOn with the production watchdog: every test that is
+// not ABOUT the hard timeout wants the lease a person's file panel gets.
+func streamLease(t *testing.T, srv *fsTestServer, hardTimeout time.Duration) *fsConn {
+	t.Helper()
+	fc, _ := streamLeaseOn(t, srv, hardTimeout)
+	return fc
 }
 
 // ---------------------------------------------------------------------------
@@ -569,11 +576,7 @@ func TestFSConn_ReadDir_ReturnsEntries(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(srv.rootDir, "sub"), 0o750); err != nil {
 		t.Fatalf("mkdir sub: %v", err)
 	}
-	client := fsTestClient(t, srv)
-	fc, err := client.FSConn(context.Background(), srv.addr, fsConnectOpts(srv)...)
-	if err != nil {
-		t.Fatalf("FSConn: %v", err)
-	}
+	fc := streamLease(t, srv, fsHardTimeout)
 
 	entries, err := fc.ReadDir(context.Background(), ".")
 	if err != nil {
@@ -592,7 +595,6 @@ func TestFSConn_ReadDir_ReturnsEntries(t *testing.T) {
 	if err := fc.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	waitPoolEmpty(t, client)
 }
 
 func TestFSConn_Stat_Lstat_RealPath(t *testing.T) {
@@ -603,11 +605,7 @@ func TestFSConn_Stat_Lstat_RealPath(t *testing.T) {
 	if err := os.Symlink("data.txt", filepath.Join(srv.rootDir, "link")); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
-	client := fsTestClient(t, srv)
-	fc, err := client.FSConn(context.Background(), srv.addr, fsConnectOpts(srv)...)
-	if err != nil {
-		t.Fatalf("FSConn: %v", err)
-	}
+	fc := streamLease(t, srv, fsHardTimeout)
 	defer func() { _ = fc.Close() }()
 
 	info, err := fc.Stat("data.txt")
@@ -670,11 +668,7 @@ func TestFSConn_ReadFile_ContentAndTruncation(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(srv.rootDir, "data.txt"), []byte("hello world"), 0o600); err != nil {
 		t.Fatalf("write data: %v", err)
 	}
-	client := fsTestClient(t, srv)
-	fc, err := client.FSConn(context.Background(), srv.addr, fsConnectOpts(srv)...)
-	if err != nil {
-		t.Fatalf("FSConn: %v", err)
-	}
+	fc := streamLease(t, srv, fsHardTimeout)
 	defer func() { _ = fc.Close() }()
 
 	data, truncated, err := fc.ReadFile(context.Background(), "data.txt", 100)
@@ -710,15 +704,11 @@ func TestFSConn_ReadFile_ContentAndTruncation(t *testing.T) {
 // file one byte past the bound is.
 func TestFSConn_ReadFile_EmptyAndBoundaries(t *testing.T) {
 	srv := startFSTestServer(t, fsModeReal)
-	client := fsTestClient(t, srv)
-	fc, err := client.FSConn(context.Background(), srv.addr, fsConnectOpts(srv)...)
-	if err != nil {
-		t.Fatalf("FSConn: %v", err)
-	}
+	fc := streamLease(t, srv, fsHardTimeout)
 	defer func() { _ = fc.Close() }()
 
 	// Empty file: a successful zero-byte read, never io.EOF.
-	if err = os.WriteFile(filepath.Join(srv.rootDir, "empty.txt"), nil, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(srv.rootDir, "empty.txt"), nil, 0o600); err != nil {
 		t.Fatalf("write empty: %v", err)
 	}
 	data, truncated, err := fc.ReadFile(context.Background(), "empty.txt", 100)
@@ -757,197 +747,159 @@ func TestFSConn_ReadFile_EmptyAndBoundaries(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Construction failures — three different facts, three different errors
+// Construction failures — what survives the move off the coordinator's dialer,
+// and where the rest went
 // ---------------------------------------------------------------------------
 
-// TestFSConn_Handshake_SessionRefused_MaxSessions proves the MaxSessions-1
-// case over a real channel open: the interactive shell holds the only
-// session channel, FSConn's NewSession is rejected with ResourceShortage,
-// and the shell stays fully usable.
-func TestFSConn_Handshake_SessionRefused_MaxSessions(t *testing.T) {
-	srv := startFSTestServer(t, fsModeReal)
-	srv.setMaxSessions(1)
-	client := fsTestClient(t, srv)
-	opts := fsConnectOpts(srv)
+// The session-refused (MaxSessions), subsystem-refused and unreachable-host
+// classifications left this file with the dial, and they did not evaporate:
+// they are the HELPER's now. A refused session channel is raised inside
+// internal/helper/sshsvc, crosses the wire as a refusal code, and is re-typed
+// on this side by the coordinator's channel adapter (internal/app's
+// sshOverHelper.translate maps ErrCodeChannelRefused to ErrFSSubsystemRefused).
+// Their assertions therefore live where the dial is — sshsvc's suite over its
+// own in-process server, and internal/app over a real helper — and this file
+// keeps the half a lease built over a stream can still fail at: the handshake.
 
-	tab, err := client.Connect(context.Background(), srv.addr, opts...)
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-	defer func() { _ = tab.Close() }()
-
-	fc, err := client.FSConn(context.Background(), srv.addr, opts...)
-	if !errors.Is(err, ErrFSSessionRefused) {
-		t.Fatalf("FSConn error = %v, want ErrFSSessionRefused", err)
-	}
-	if fc != nil {
-		t.Fatal("FSConn returned a lease alongside the refusal error")
-	}
-
-	// The interactive session survived the refusal.
-	if _, err := tab.Write([]byte("hi")); err != nil {
-		t.Fatalf("tab write after refusal: %v", err)
-	}
-	if got := readWithTimeout(t, tab); got != "echo:hi" {
-		t.Errorf("tab echo = %q, want %q", got, "echo:hi")
-	}
-}
-
-func TestFSConn_Handshake_SubsystemRefused(t *testing.T) {
-	srv := startFSTestServer(t, fsModeRefuseSubsystem)
-	client := fsTestClient(t, srv)
-
-	fc, err := client.FSConn(context.Background(), srv.addr, fsConnectOpts(srv)...)
-	if !errors.Is(err, ErrFSSubsystemRefused) {
-		t.Fatalf("FSConn error = %v, want ErrFSSubsystemRefused", err)
-	}
-	if fc != nil {
-		t.Fatal("FSConn returned a lease alongside the refusal error")
-	}
-	// The refused lease must not linger in the pool.
-	waitPoolEmpty(t, client)
-}
-
-// TestFSConn_Connect_Refused proves the dial-level failure: no connection
-// exists, so FSConn reports the dial error and no lease.
-func TestFSConn_Connect_Refused(t *testing.T) {
-	srv := startFSTestServer(t, fsModeReal)
-	client := fsTestClient(t, srv)
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	closedAddr := ln.Addr().String()
-	_ = ln.Close()
-
-	if _, err := client.FSConn(context.Background(), closedAddr, fsConnectOpts(srv)...); err == nil {
-		t.Fatal("FSConn to a refused port = nil error, want the dial error")
-	}
-	waitPoolEmpty(t, client)
-}
-
-// TestFSConn_Handshake_NeverInit_TimesOut proves construction cannot hang:
-// a server that accepts the subsystem and never answers the version
-// handshake is closed down by the hard timeout — closing the session is what
-// unblocks the handshake — and FSConn reports ErrFSTimedOut, releasing the
-// pooled reference.
+// TestFSConn_Handshake_NeverInit_TimesOut proves construction cannot hang: a
+// stream whose far end accepts the subsystem and never answers the version
+// handshake is closed down by the hard timeout — closing the stream is what
+// unblocks the handshake goroutine — and NewFSConn reports ErrFSTimedOut.
 func TestFSConn_Handshake_NeverInit_TimesOut(t *testing.T) {
 	srv := startFSTestServer(t, fsModeNeverInit)
-	client := fsTestClient(t, srv)
-
-	acq, err := client.acquirePooled(context.Background(), srv.addr, fsConnectOpts(srv))
-	if err != nil {
-		t.Fatalf("acquirePooled: %v", err)
-	}
-	fc, err := newFSConnLane(acq.client, func() { client.pool.Release(acq.handle) }, context.Background(), 300*time.Millisecond)
+	fc, err := newFSConnOverStream(context.Background(), helperStreamTo(t, fsTestClient(t, srv), srv), 300*time.Millisecond)
 	if !errors.Is(err, ErrFSTimedOut) {
-		t.Fatalf("FSConn error = %v, want ErrFSTimedOut", err)
+		t.Fatalf("NewFSConn error = %v, want ErrFSTimedOut", err)
 	}
 	if fc != nil {
-		t.Fatal("FSConn returned a lease alongside the timeout")
+		t.Fatal("NewFSConn returned a lease alongside the timeout")
 	}
-	waitPoolEmpty(t, client)
 }
+
+// TestFSConn_Handshake_StreamEndingIsLost is the other half of the same
+// interval: a stream that ends before the handshake completes is a LOST
+// connection and not a timeout, because the far end said nothing and then went
+// away rather than saying nothing and staying.
+func TestFSConn_Handshake_StreamEndingIsLost(t *testing.T) {
+	fc, err := NewFSConn(context.Background(), &eofStream{})
+	if !errors.Is(err, ErrFSLost) {
+		t.Fatalf("NewFSConn error = %v, want ErrFSLost", err)
+	}
+	if fc != nil {
+		t.Fatal("NewFSConn returned a lease alongside the loss")
+	}
+}
+
+// TestFSConn_RefusesAStreamItWasNotGiven: a lease with no bytes is not a lease
+// that reads nothing, and the refusal is named rather than discovered later by
+// the first call.
+func TestFSConn_RefusesAStreamItWasNotGiven(t *testing.T) {
+	if _, err := NewFSConn(context.Background(), nil); err == nil {
+		t.Fatal("NewFSConn(nil) was accepted: a lease over no bytes")
+	}
+}
+
+// eofStream is a stream that ends the moment anybody reads it — the shape of a
+// helper whose channel died between its own open and the handshake.
+type eofStream struct{}
+
+func (*eofStream) Read([]byte) (int, error)    { return 0, io.EOF }
+func (*eofStream) Write(p []byte) (int, error) { return len(p), nil }
+func (*eofStream) Close() error                { return nil }
 
 // ---------------------------------------------------------------------------
 // Lease semantics — the three properties DiscoveryConn's failures bought
 // ---------------------------------------------------------------------------
 
-// TestFSConn_Close_DoesNotCloseDone proves property 3: an intentional Close
-// must not read as connection loss, and a real transport loss must. Done
-// closes only on the latter.
+// TestFSConn_Close_DoesNotCloseDone proves property 3 on the stream lease: an
+// intentional Close must not read as connection loss, and a real stream end
+// must. Only the loss watcher closes Done, and `stopped` is what keeps our own
+// stop out of its way.
 func TestFSConn_Close_DoesNotCloseDone(t *testing.T) {
 	srv := startFSTestServer(t, fsModeReal)
-	client := fsTestClient(t, srv)
-	opts := fsConnectOpts(srv)
-
-	tab, err := client.Connect(context.Background(), srv.addr, opts...)
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-	defer func() { _ = tab.Close() }()
-	fc, err := client.FSConn(context.Background(), srv.addr, opts...)
-	if err != nil {
-		t.Fatalf("FSConn: %v", err)
-	}
+	fc, _ := streamLeaseOn(t, srv, fsHardTimeout)
 
 	if err := fc.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
+	// Done is open at this instant. That is an instantaneous negative and NOT
+	// the discriminator for the guard behind it: the loss watcher runs on its
+	// own goroutine, so the property is settled by the time the end has been
+	// handled and not by the microsecond after Close returns. The
+	// deterministic reader of that guard is
+	// TestFSConn_HardTimeout_PoisonsLease, where the poisoning call's own
+	// return orders the check (measured: with the guard removed, that test
+	// fails and this assertion alone does not).
 	select {
 	case <-fc.Done():
 		t.Fatal("Done closed on Close — an intentional stop read as connection loss")
 	default:
 	}
-	// The connection is still shared with the tab and fully usable.
-	if _, err := tab.Write([]byte("alive")); err != nil {
-		t.Fatalf("tab write after lease close: %v", err)
-	}
-	if got := readWithTimeout(t, tab); got != "echo:alive" {
-		t.Errorf("tab echo = %q, want %q", got, "echo:alive")
+	// The transport underneath is untouched: the fixture still serves, and a
+	// second channel on it is a working lease. That is what "the helper's
+	// pooled connection survives one channel closing" means from here.
+	other, _ := streamLeaseOn(t, srv, fsHardTimeout)
+	if _, err := other.Stat("."); err != nil {
+		t.Fatalf("a second channel on the same connection: %v", err)
 	}
 
 	srv.killConns()
 	select {
-	case <-fc.Done():
+	case <-other.Done():
 	case <-time.After(5 * time.Second):
-		t.Fatal("Done did not close after connection loss")
+		t.Fatal("Done did not close after the stream really ended")
 	}
-	if fc.LostErr() == nil {
-		t.Fatal("LostErr = nil after connection loss, want the transport error")
+	if other.LostErr() == nil {
+		t.Fatal("LostErr = nil after the stream ended, want the end's own error")
 	}
 }
 
-// TestFSConn_Close_ReleasesReference proves the interval invariant with both
-// ends named: from FSConn returning until Close returns, the pooled
-// reference is held; after Close returns it is released and the shared
-// connection survives for the tab.
-func TestFSConn_Close_ReleasesReference(t *testing.T) {
+// TestFSConn_Close_EndsTheStream proves the interval with both ends named: from
+// NewFSConn returning until Close returns the helper's channel is held, and
+// after Close returns it is gone. The stream ending IS the release — `ssh.close`
+// on the helper side is what drops its pooled reference — so this asserts the
+// bytes rather than a counter this process no longer owns.
+func TestFSConn_Close_EndsTheStream(t *testing.T) {
 	srv := startFSTestServer(t, fsModeReal)
-	client := fsTestClient(t, srv)
-	opts := fsConnectOpts(srv)
+	fc, raw := streamLeaseOn(t, srv, fsHardTimeout)
 
-	tab, err := client.Connect(context.Background(), srv.addr, opts...)
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-	defer func() { _ = tab.Close() }()
-	fc, err := client.FSConn(context.Background(), srv.addr, opts...)
-	if err != nil {
-		t.Fatalf("FSConn: %v", err)
-	}
-
-	// Held: tab + lease on one shared connection.
-	if got := client.pool.Count(); got != 1 {
-		t.Fatalf("pool count = %d, want 1", got)
+	if _, err := fc.Stat("."); err != nil {
+		t.Fatalf("Stat while the lease is held: %v", err)
 	}
 	if err := fc.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	// Released, but the connection stays up for the tab.
-	if got := client.pool.Count(); got != 1 {
-		t.Errorf("pool count after lease close = %d, want 1 (tab still holds it)", got)
+	// A read on the raw stream is the fixture's own view: it ends rather than
+	// blocking, because the channel went away.
+	readDone := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 1)
+		_, err := raw.Read(buf)
+		readDone <- err
+	}()
+	select {
+	case err := <-readDone:
+		if err == nil {
+			t.Fatal("the raw stream handed back a byte after Close")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stream outlived Close: the channel was never released")
 	}
-	if _, err := tab.Write([]byte("still-alive")); err != nil {
-		t.Fatalf("tab write after lease close: %v", err)
-	}
-	if got := readWithTimeout(t, tab); got != "echo:still-alive" {
-		t.Errorf("tab echo = %q, want %q", got, "echo:still-alive")
+	// And it was a close, not a loss: the lease's own ladder is the answer.
+	if _, err := fc.Stat("."); !errors.Is(err, ErrFSClosed) {
+		t.Fatalf("Stat after Close = %v, want ErrFSClosed", err)
 	}
 }
 
-// TestFSConn_Loss_MidCall proves a transport dying while a call is in flight
-// unblocks the call (the channel read fails, pkg/sftp broadcasts the loss to
-// every in-flight request), reports ErrFSLost, closes Done and reclaims the
-// pool.
+// TestFSConn_Loss_MidCall proves a stream ending while a call is in flight
+// unblocks the call (the stream read fails, pkg/sftp broadcasts the loss to
+// every in-flight request), reports ErrFSLost and closes Done. It is the
+// coordinator's half of "the helper's channel died mid-transfer": the bytes
+// stop arriving, and every call that was waiting on them returns a named
+// failure instead of hanging.
 func TestFSConn_Loss_MidCall(t *testing.T) {
 	srv := startFSTestServer(t, fsModeNeverReply)
-	client := fsTestClient(t, srv)
-	fc, err := client.FSConn(context.Background(), srv.addr, fsConnectOpts(srv)...)
-	if err != nil {
-		t.Fatalf("FSConn: %v", err)
-	}
+	fc := streamLease(t, srv, fsHardTimeout)
 
 	outCh := make(chan error, 1)
 	go func() {
@@ -967,17 +919,16 @@ func TestFSConn_Loss_MidCall(t *testing.T) {
 			t.Fatalf("Stat error = %v, want ErrFSLost", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("Stat did not return after transport loss")
+		t.Fatal("Stat did not return after the stream ended")
 	}
 	select {
 	case <-fc.Done():
 	case <-time.After(5 * time.Second):
-		t.Fatal("Done did not close after connection loss")
+		t.Fatal("Done did not close after the stream ended")
 	}
 	if fc.LostErr() == nil {
-		t.Fatal("LostErr = nil after connection loss, want the transport error")
+		t.Fatal("LostErr = nil after the stream ended, want the transport error")
 	}
-	waitPoolEmpty(t, client)
 }
 
 // ---------------------------------------------------------------------------
@@ -990,11 +941,7 @@ func TestFSConn_Loss_MidCall(t *testing.T) {
 // call. The concurrent Stat stays in flight, and only Close unblocks it.
 func TestFSConn_ReadDir_Cancel_DoesNotPoison(t *testing.T) {
 	srv := startFSTestServer(t, fsModeNeverReply)
-	client := fsTestClient(t, srv)
-	fc, err := client.FSConn(context.Background(), srv.addr, fsConnectOpts(srv)...)
-	if err != nil {
-		t.Fatalf("FSConn: %v", err)
-	}
+	fc := streamLease(t, srv, fsHardTimeout)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	rdCh := make(chan error, 1)
@@ -1052,20 +999,16 @@ func TestFSConn_ReadDir_Cancel_DoesNotPoison(t *testing.T) {
 
 // TestFSConn_HardTimeout_PoisonsLease proves the lane's backstop: a call a
 // server will never answer is killed by the hard timeout, which closes the
-// subsystem (unblocking the call), releases the pooled reference and reports
-// the lease dead — a visible terminal state, not a silent retry loop.
+// stream (unblocking the call) and reports the lease dead — a visible terminal
+// state, not a silent retry loop.
+//
+// Done stays OPEN after a poison, and that is the same rule Close follows: the
+// LEASE stopped the transport, so the end that follows is our own doing rather
+// than a fact about the host. Every call reports ErrFSDead, which is the state
+// a caller acts on.
 func TestFSConn_HardTimeout_PoisonsLease(t *testing.T) {
 	srv := startFSTestServer(t, fsModeNeverReply)
-	client := fsTestClient(t, srv)
-
-	acq, err := client.acquirePooled(context.Background(), srv.addr, fsConnectOpts(srv))
-	if err != nil {
-		t.Fatalf("acquirePooled: %v", err)
-	}
-	fc, err := newFSConnLane(acq.client, func() { client.pool.Release(acq.handle) }, context.Background(), 300*time.Millisecond)
-	if err != nil {
-		t.Fatalf("newFSConnLane: %v", err)
-	}
+	fc, _ := streamLeaseOn(t, srv, 300*time.Millisecond)
 
 	outCh := make(chan error, 1)
 	go func() {
@@ -1097,14 +1040,10 @@ func TestFSConn_HardTimeout_PoisonsLease(t *testing.T) {
 	if _, err := fc.ReadDir(context.Background(), "/x"); !errors.Is(err, ErrFSDead) {
 		t.Fatalf("ReadDir after poison = %v, want ErrFSDead", err)
 	}
-
-	// The poisoned lease released its pooled reference, so the connection
-	// is reclaimed and the transport shuts down — Done closes for real.
-	waitPoolEmpty(t, client)
 	select {
 	case <-fc.Done():
-	case <-time.After(5 * time.Second):
-		t.Fatal("Done did not close after the poisoned lease released the connection")
+		t.Fatal("Done closed on a poisoned lease: the lease stopped the stream itself, so this is not connection loss")
+	default:
 	}
 }
 
@@ -1116,7 +1055,6 @@ func TestFSConn_HardTimeout_PoisonsLease(t *testing.T) {
 // state check, is what releases it.
 func TestFSConn_Close_UnblocksNonContextCalls(t *testing.T) {
 	srv := startFSTestServer(t, fsModeNeverReply)
-	client := fsTestClient(t, srv)
 
 	// The lease's lane caps concurrent in-flight non-context calls at
 	// fsLaneCap (4), so all five non-context calls cannot be wedged at
@@ -1126,6 +1064,19 @@ func TestFSConn_Close_UnblocksNonContextCalls(t *testing.T) {
 	// round B — every call genuinely in flight before Close fires.
 	var fc FSConn
 	var err error
+
+	// ONE connection for both rounds, which is the shape production has: the
+	// helper pools the connection and every lease is one more channel on it.
+	// Dialing per round would measure the connection's goroutines rather than
+	// the lease's, which is what the leak check at the end is about.
+	dialed := dialFSFixture(t, fsTestClient(t, srv), srv)
+	newLease := func() {
+		var lerr error
+		fc, lerr = newFSConnOverStream(context.Background(), sftpStreamOver(t, dialed, srv), fsHardTimeout)
+		if lerr != nil {
+			t.Fatalf("a lease over the fixture's sftp stream: %v", lerr)
+		}
+	}
 
 	runRound := func(round string, calls []func(chan<- error)) {
 		n := len(calls)
@@ -1158,13 +1109,9 @@ func TestFSConn_Close_UnblocksNonContextCalls(t *testing.T) {
 			}
 		}
 		t.Logf("round %s: all %d non-context calls returned within %s of Close", round, n, time.Since(start))
-		waitPoolEmpty(t, client)
 	}
 
-	fc, err = client.FSConn(context.Background(), srv.addr, fsConnectOpts(srv)...)
-	if err != nil {
-		t.Fatalf("FSConn: %v", err)
-	}
+	newLease()
 	baseline := runtime.NumGoroutine()
 	runRound("A", []func(chan<- error){
 		func(outCh chan<- error) {
@@ -1185,10 +1132,7 @@ func TestFSConn_Close_UnblocksNonContextCalls(t *testing.T) {
 		},
 	})
 
-	fc, err = client.FSConn(context.Background(), srv.addr, fsConnectOpts(srv)...)
-	if err != nil {
-		t.Fatalf("FSConn round B: %v", err)
-	}
+	newLease()
 	runRound("B", []func(chan<- error){
 		func(outCh chan<- error) {
 			_, callErr := fc.ReadLink("/wedged")
@@ -1208,15 +1152,15 @@ func TestFSConn_Close_UnblocksNonContextCalls(t *testing.T) {
 		},
 	})
 
-	// No goroutine from either lease outlives Close: the leases were the
-	// only references, so closing them reclaimed the connections and the
-	// loss watchers exited with them.
+	// No goroutine from either lease outlives Close. The connection is the
+	// baseline's — it is held by this test and by the fixture serving it — so
+	// what this measures is the lease's own two goroutines (the handshake's,
+	// already joined, and the loss watcher reading the stream's end).
 	waittest.WaitForTimeoutDetail(t, "lease goroutines to exit after Close", 5*time.Second, func() string {
 		return fmt.Sprintf("goroutines = %d, want <= %d (lease goroutine outlived Close)", runtime.NumGoroutine(), baseline+1)
 	}, func() bool {
 		return runtime.NumGoroutine() <= baseline+1
 	})
-	waitPoolEmpty(t, client)
 }
 
 // ---------------------------------------------------------------------------
@@ -1225,20 +1169,11 @@ func TestFSConn_Close_UnblocksNonContextCalls(t *testing.T) {
 
 // newTestFSConnOn stands up a fixture server in mode and takes a lease on it
 // whose watchdog fires after hardTimeout. The lease is closed with the test.
-func newTestFSConnOn(t *testing.T, mode fsServerMode, hardTimeout time.Duration) (*fsConn, *fsTestServer, *RealClient) {
+func newTestFSConnOn(t *testing.T, mode fsServerMode, hardTimeout time.Duration) (*fsConn, *fsTestServer, io.ReadWriteCloser) {
 	t.Helper()
 	srv := startFSTestServer(t, mode)
-	client := fsTestClient(t, srv)
-	acq, err := client.acquirePooled(context.Background(), srv.addr, fsConnectOpts(srv))
-	if err != nil {
-		t.Fatalf("acquirePooled: %v", err)
-	}
-	fc, err := newFSConnLane(acq.client, func() { client.pool.Release(acq.handle) }, context.Background(), hardTimeout)
-	if err != nil {
-		t.Fatalf("newFSConnLane: %v", err)
-	}
-	t.Cleanup(func() { _ = fc.Close() })
-	return fc, srv, client
+	fc, raw := streamLeaseOn(t, srv, hardTimeout)
+	return fc, srv, raw
 }
 
 // newTestFSConn is the ordinary fixture: a real SFTP server, the production
@@ -1413,7 +1348,7 @@ func TestFSConn_WriteHalfRespectsTheLease(t *testing.T) {
 // closes the subsystem and is the only thing that unblocks it. The handle is
 // invalidated by the same event, so nothing survives the poisoning.
 func TestFSConn_WedgedWriteIsUnblockedByPoison(t *testing.T) {
-	fc, srv, client := newTestFSConnOn(t, fsModeStallWrites, 300*time.Millisecond)
+	fc, srv, _ := newTestFSConnOn(t, fsModeStallWrites, 300*time.Millisecond)
 	f, err := fc.Create(filepath.Join(srv.rootDir, "stalled.bin"))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -1446,7 +1381,6 @@ func TestFSConn_WedgedWriteIsUnblockedByPoison(t *testing.T) {
 	if werr := f.Close(); !errors.Is(werr, ErrFSDead) {
 		t.Fatalf("Close after poison = %v, want ErrFSDead", werr)
 	}
-	waitPoolEmpty(t, client)
 }
 
 // TestFSConn_PosixRenameUnsupportedIsDistinguishable pins the one error the

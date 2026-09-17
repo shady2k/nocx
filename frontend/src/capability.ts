@@ -13,12 +13,12 @@ import type { LifecycleState } from './lifecycle/state'
 //
 // On 2026-08-05 (nocx-mlm7) the launch-policy enum (auto|ask|off) was
 // itself replaced by three never-collapsed axes (spec §3.5):
-//   - DesiredMode (auto|raw|script|relay): what the user wants nocx to do
+//   - DesiredMode (auto|raw|script|helper): what the user wants nocx to do
 //     with this destination, resolved by the profile cascade;
-//   - ObservedDelivery (none|bootstrap-script|installed-script|relay): what
+//   - ObservedDelivery (none|bootstrap-script|installed-script|helper): what
 //     actually happened this session, read by the renderer from the markers;
-//   - RelayConsent (unknown|granted|denied): persisted per destination,
-//     consulted only for relay — script mode never reads it.
+//   - HelperConsent (unknown|granted|denied): persisted per destination,
+//     consulted only for helper — script mode never reads it.
 //
 // The action set is derived ONLY after both authorisation and technical
 // eligibility are resolved — the invariant that kills the worst defect in
@@ -28,27 +28,27 @@ import type { LifecycleState } from './lifecycle/state'
 /** What nocx observed about delivery this session — what actually happened,
  *  never what was intended. The second of the three axes (spec §3.5):
  *  'none' nothing arrived, 'bootstrap-script' the argv-staged launcher ran,
- *  'installed-script' the committed ~/.nocx/launch generation ran, 'relay'
+ *  'installed-script' the committed ~/.nocx/launch generation ran, 'helper'
  *  the Tier-B binary ran. Owned by the renderer, from the markers. */
-export type ObservedDelivery = 'none' | 'bootstrap-script' | 'installed-script' | 'relay'
+export type ObservedDelivery = 'none' | 'bootstrap-script' | 'installed-script' | 'helper'
 
 /** What the user wants nocx to do with this destination — the FIRST of the
  *  three axes (spec §3.5), resolved by the profile cascade and carried by
  *  the open ack. auto (the default, ADR-0033) is the name for "the user has
  *  not answered": it wraps and installs the scripts exactly as script does
- *  (N3), and additionally permits the relay to be OFFERED where a surface
+ *  (N3), and additionally permits the helper to be OFFERED where a surface
  *  reaches for it (D8). script is that same answer given explicitly, and is
- *  never upgraded. relay allows the deployed binary and still integrates:
+ *  never upgraded. helper allows the deployed binary and still integrates:
  *  the tiers are additive, so allowing it never withholds the scripts
  *  (§5.2). raw alone adds nothing — no rewrite, no remote write. There is
  *  no 'ask': asking is what auto does when no answer is stored for that
  *  host key. */
-export type DesiredMode = 'auto' | 'raw' | 'script' | 'relay'
+export type DesiredMode = 'auto' | 'raw' | 'script' | 'helper'
 
-/** Relay consent for a destination — the THIRD of the three axes (spec
- *  §3.5). Persisted per destination; script mode never reads it. Relay
+/** Helper consent for a destination — the THIRD of the three axes (spec
+ *  §3.5). Persisted per destination; script mode never reads it. Helper
  *  without 'granted' behaves as raw. */
-export type RelayConsent = 'unknown' | 'granted' | 'denied'
+export type HelperConsent = 'unknown' | 'granted' | 'denied'
 
 /** What nocx observes about the shell right now — semantic evidence, not
  *  keyboard ownership (that lives in input-state.ts). */
@@ -67,7 +67,7 @@ export type ShellState =
 export type InputPresentation = 'editor' | 'terminal'
 
 /** The connection-scope launch policy (nocx-4t37.2) was replaced by the
- *  DesiredMode axis (nocx-mlm7): auto, script and relay all integrate at
+ *  DesiredMode axis (nocx-mlm7): auto, script and helper all integrate at
  *  session open; raw alone refuses every rewrite and remote write. There is
  *  no 'ask' — N3 makes the script footprint automatic product behaviour. */
 

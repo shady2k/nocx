@@ -65,6 +65,52 @@ export type HistoryPort = (rec: CommandRecord, attempt: ExecutionAttempt) => Pro
  * record is bound and never from stream parsing. */
 export type AttemptBindPort = (record: CommandRecord, attempt: ExecutionAttempt) => void
 
+/** One command whose authenticated fact reached the projections and found no
+ *  ledger record to carry it (nocx-2vb9y).
+ *
+ *  This is NOT the shell-originated case, which is a design outcome and stays
+ *  silent: a line typed at the native prompt opens no record on purpose, and
+ *  reporting every one of them would bury the signal in the ordinary. It is
+ *  the case where the attempt itself claims app authority — the backend
+ *  echoed a submit token, or named the origin `app` — and nothing matched.
+ *
+ *  It exists because the loss is otherwise invisible from BOTH ends. The
+ *  block still freezes with its exit status, so the terminal says the command
+ *  finished; and history.record is never sent, so the backend has no request,
+ *  no error and no log to show. Two occurrences of exactly that were
+ *  diagnosed by reading rather than by evidence, and still did not settle
+ *  which route they took — hence `at`, which says how far the command got. */
+export interface UnattributedCommand {
+  /** `bind` — the running fact found no record. `complete` — the completion
+   *  did, which is the one that loses a finished command. Both can fire for
+   *  one attempt, and that pair is itself the diagnosis: the record was
+   *  missing from the start rather than consumed in between.
+   *
+   *  `abandon` is the other door, and it is why this reports a record rather
+   *  than only an attempt. A submitted command whose domain ended is
+   *  abandoned unread — it persists nothing, by design — and that is also
+   *  how the record a LATER completion needed can already be gone. Without
+   *  it, the loss that goes through this door reports nothing at all: the
+   *  completion that follows carries no app authority (the shell's own
+   *  start has no token), so the two branches above stay silent. */
+  readonly at: 'bind' | 'complete' | 'abandon'
+  /** Empty for `abandon`: nothing was attempting it. */
+  readonly attemptId: string
+  /** The backend echoed the token a submit minted, so an app submit really
+   *  happened and the record that carried it is gone. */
+  readonly hadSubmitId: boolean
+  readonly origin: 'app' | 'shell' | 'unknown'
+  readonly exitCode: number | null
+  /** Records the ledger still holds as running. Zero says the record was
+   *  never opened or is already closed; more than zero says one is pending
+   *  and this attempt could not claim it. */
+  readonly runningRecords: number
+}
+
+/** Reports an UnattributedCommand. Optional: the projections are usable
+ *  without it, and a test that does not pass one asserts nothing about it. */
+export type UnattributedPort = (report: UnattributedCommand) => void
+
 /** One observer that drives the ledger, history and block projections from
  *  the kernel. It holds no lifecycle state: the per-attempt `_bound` and
  *  `_done` sets are idempotency bookkeeping, not a second model — each
@@ -91,7 +137,25 @@ export class LifecycleProjections {
     private readonly blocks: BlockProjectionPort,
     private readonly persist: HistoryPort,
     private readonly bindAttempt?: AttemptBindPort,
+    private readonly unattributed?: UnattributedPort,
   ) {}
+
+  /** Report a command the ledger could not carry — see UnattributedCommand.
+   *  An attempt with neither a submit token nor an `app` origin is the
+   *  shell-originated case and is deliberately not reported. */
+  private reportUnattributed(at: 'bind' | 'complete', attempt: ExecutionAttempt): void {
+    const token = attempt.submitId
+    const hadSubmitId = typeof token === 'string' && token !== ''
+    if (!hadSubmitId && attempt.origin !== 'app') return
+    this.unattributed?.({
+      at,
+      attemptId: attempt.id,
+      hadSubmitId,
+      origin: attempt.origin ?? 'unknown',
+      exitCode: attempt.exitCode ?? null,
+      runningRecords: this.ledger.records().filter((r) => r.status === 'running').length,
+    })
+  }
 
   /** Subscribe to kernel changes and drive the projections once with the
    *  current state (a no-op until the first fact). */
@@ -146,7 +210,21 @@ export class LifecycleProjections {
     // the parent's own block outlives the whole nested session.
     if (this.kernel.endedDomains !== this._endedSeen) {
       this._endedSeen = this.kernel.endedDomains
-      if (this.ledger.abandonPending() !== null) this.blocks.abandonPending()
+      if (this.ledger.abandonPending() !== null) {
+        // A command the person submitted, ended by the domain rather than by
+        // an outcome: it persists nothing, which is correct, and it is also
+        // the moment a record a later completion would have needed stops
+        // existing. Reported for that second reason (nocx-2vb9y).
+        this.unattributed?.({
+          at: 'abandon',
+          attemptId: '',
+          hadSubmitId: false,
+          origin: 'app',
+          exitCode: null,
+          runningRecords: this.ledger.records().filter((r) => r.status === 'running').length,
+        })
+        this.blocks.abandonPending()
+      }
     }
     // A child domain took the lane: the remote session has begun, so the
     // local `ssh` block ends HERE rather than waiting for a completion that
@@ -169,6 +247,7 @@ export class LifecycleProjections {
       if (rec === null) {
         // Shell-originated: the attempt's line is the shell's own, which
         // may carry a literal password — no ledger record, no history.
+        this.reportUnattributed('bind', attempt)
         this.blocks.openBlock(attempt)
       } else {
         this.bindAttempt?.(rec, attempt)
@@ -185,7 +264,14 @@ export class LifecycleProjections {
     if (attempt.state === 'completed') {
       // Only a completed attempt persists, and only through its app-owned
       // record — the attempt's own command text never crosses to the store.
+      //
+      // The freeze is OUTSIDE that guard on purpose: an authenticated
+      // completion is the truth about the command whether or not anything
+      // recorded it. That asymmetry is exactly how a finished command can
+      // show its exit status and exist nowhere else, so the branch that
+      // records nothing says so rather than passing in silence (nocx-2vb9y).
       if (rec !== null) void this.persist(rec, attempt)
+      else this.reportUnattributed('complete', attempt)
       this.blocks.freezeBlock(attempt)
     } else {
       this.blocks.abandonBlock(attempt)

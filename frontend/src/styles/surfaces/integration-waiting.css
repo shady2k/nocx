@@ -1,0 +1,25 @@
+/* The pane's waiting state for the `starting` interval (nocx-ui8q6.1).
+
+   PLACEMENT ONLY. Everything visible inside is the kit's EmptyState and
+   Spinner, and a surface may place a kit component but never repaint it
+   (frontend/src/ui/README.md). There is deliberately no rule here for
+   anything that paints: wanting one would mean EmptyState is missing a
+   variant, and the fix would be in the kit.
+
+   Unlike the degraded-session notice and the recovery notice, this one does
+   not sit ALONGSIDE the terminal — it stands in for it. terminal-content.ts
+   hides the scrollback layout for exactly as long as this is mounted, so
+   `flex: 1 1 auto` is what fills the pane the terminal would otherwise
+   occupy, rather than the `flex: 0 0 auto` a card that shares the pane with
+   a live grid uses. */
+
+.nocx-integration-waiting {
+  --wails-draggable: no-drag;
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+}
+
+.nocx-integration-waiting .ui-empty-state {
+  flex: 1 1 auto;
+}

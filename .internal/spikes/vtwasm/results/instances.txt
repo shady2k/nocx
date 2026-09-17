@@ -1,0 +1,84 @@
+== wasm instances n=1 (64 KiB shim buffers) ==
+wasm instances=1 cols=120 rows=40 scrollback=10000 fill=2000
+  rss_before_bytes=5214208
+  instance_linear_bytes_total=2293760
+  instance_linear_bytes_each=2293760
+  rss_after_compile_bytes=37650432
+  rss_after_instances_bytes=35287040
+  rss_delta_bytes=-2363392
+  rss_per_instance_bytes=-2363392
+  go_heap_delta_bytes=8322376
+  liveness=1
+== wasm instances n=1 (1 MiB shim buffers) ==
+wasm instances=1 cols=120 rows=40 scrollback=10000 fill=2000
+  rss_before_bytes=5005312
+  instance_linear_bytes_total=4259840
+  instance_linear_bytes_each=4259840
+  rss_after_compile_bytes=37269504
+  rss_after_instances_bytes=41906176
+  rss_delta_bytes=4636672
+  rss_per_instance_bytes=4636672
+  go_heap_delta_bytes=9739752
+  liveness=1
+== native instances n=1 ==
+native instances=1 cols=120 rows=40 scrollback=10000 fill=2000
+  go_heap_delta_bytes=0
+  go_total_alloc_delta_bytes=2080
+  rss_bytes=7720960
+
+== wasm instances n=10 (64 KiB shim buffers) ==
+wasm instances=10 cols=120 rows=40 scrollback=10000 fill=2000
+  rss_before_bytes=5070848
+  instance_linear_bytes_total=22937600
+  instance_linear_bytes_each=2293760
+  rss_after_compile_bytes=37449728
+  rss_after_instances_bytes=75436032
+  rss_delta_bytes=37986304
+  rss_per_instance_bytes=3798630
+  go_heap_delta_bytes=34036304
+  liveness=10
+== wasm instances n=10 (1 MiB shim buffers) ==
+wasm instances=10 cols=120 rows=40 scrollback=10000 fill=2000
+  rss_before_bytes=5079040
+  instance_linear_bytes_total=42598400
+  instance_linear_bytes_each=4259840
+  rss_after_compile_bytes=36904960
+  rss_after_instances_bytes=83337216
+  rss_delta_bytes=46432256
+  rss_per_instance_bytes=4643226
+  go_heap_delta_bytes=48288704
+  liveness=10
+== native instances n=10 ==
+native instances=10 cols=120 rows=40 scrollback=10000 fill=2000
+  go_heap_delta_bytes=16
+  go_total_alloc_delta_bytes=2384
+  rss_bytes=7958528
+
+== wasm instances n=50 (64 KiB shim buffers) ==
+wasm instances=50 cols=120 rows=40 scrollback=10000 fill=2000
+  rss_before_bytes=5107712
+  instance_linear_bytes_total=114688000
+  instance_linear_bytes_each=2293760
+  rss_after_compile_bytes=36282368
+  rss_after_instances_bytes=250757120
+  rss_delta_bytes=214474752
+  rss_per_instance_bytes=4289495
+  go_heap_delta_bytes=148319096
+  liveness=50
+== wasm instances n=50 (1 MiB shim buffers) ==
+wasm instances=50 cols=120 rows=40 scrollback=10000 fill=2000
+  rss_before_bytes=5009408
+  instance_linear_bytes_total=212992000
+  instance_linear_bytes_each=4259840
+  rss_after_compile_bytes=37937152
+  rss_after_instances_bytes=303620096
+  rss_delta_bytes=265682944
+  rss_per_instance_bytes=5313659
+  go_heap_delta_bytes=219587216
+  liveness=50
+== native instances n=50 ==
+native instances=50 cols=120 rows=40 scrollback=10000 fill=2000
+  go_heap_delta_bytes=16
+  go_total_alloc_delta_bytes=3680
+  rss_bytes=9928704
+

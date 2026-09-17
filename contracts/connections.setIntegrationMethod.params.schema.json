@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/connections.setIntegrationMethod.params.schema.json",
+  "title": "ConnectionsSetIntegrationMethodParams",
+  "description": "Params for connections.setIntegrationMethod: the person's answer to the connect-time ask (ADR-0069) — a choice of integration method, not a yes/no about the helper. fingerprint is echoed verbatim from the open failure's helperConsentData (open.helperConsent.schema.json). When profileId names a saved connection, the method is written to that connection's desiredMode through the same write path profiles.patch uses; profileId absent (a hand-typed ssh with no saved connection) writes nothing here — the choice applies to that one open, carried instead on the open params' own desiredMode field. Choosing helper also records the machine's consent for fingerprint (ADR-0034); raw and script write nothing to the consent store.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["fingerprint", "method"],
+  "properties": {
+    "fingerprint": {
+      "description": "SHA256 fingerprint of the destination's host key, echoed from the open failure that raised the ask.",
+      "type": "string",
+      "minLength": 1
+    },
+    "host": {
+      "description": "The destination, for the backend's log line only. The write is keyed by fingerprint (consent) and profileId (desiredMode), never by host.",
+      "type": "string"
+    },
+    "profileId": {
+      "description": "The saved connection this answer belongs to. Absent for a hand-typed ssh with no saved profile.",
+      "type": "string"
+    },
+    "method": {
+      "description": "The chosen integration method, drawn from the modes the product can carry today (ADR-0069) — never 'auto', which is not an answer.",
+      "type": "string",
+      "enum": ["raw", "script", "helper"]
+    }
+  }
+}

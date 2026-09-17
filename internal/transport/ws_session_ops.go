@@ -111,9 +111,9 @@ type sessionLane struct {
 	startOnce sync.Once
 
 	// resized is called after a resize the session accepted, with the size it
-	// accepted. It exists so the pane's backend grid can follow the pane's
-	// geometry (nocx-szb40.5): both powers the AD-6 amendment grants a grid
-	// are POSITIONAL, so a grid left at the size it was enrolled at answers
+	// accepted. It exists so the pane's runtime follows the pane's geometry
+	// (nocx-szb40.5): both powers the AD-6 amendment grants are POSITIONAL,
+	// so a runtime left at the size it was enrolled at answers
 	// about a screen that never existed. It hangs off the APPLY rather than
 	// off the request because resizes coalesce — a lane that dropped three
 	// superseded sizes must tell the grid the one that landed, not all four.
@@ -358,7 +358,7 @@ func (s *WSServer) laneFor(sid session.ID, sess session.Session) *sessionLane {
 	if l, ok := s.lanes[sid]; ok {
 		return l
 	}
-	l := newSessionLane(sid, sess, s.log, func(cols, rows uint16) { s.resizePaneGrid(sid, cols, rows) })
+	l := newSessionLane(sid, sess, s.log, nil)
 	s.lanes[sid] = l
 	return l
 }

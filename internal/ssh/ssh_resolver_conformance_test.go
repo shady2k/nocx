@@ -50,11 +50,17 @@ Host nocx-test
     HostName 127.0.0.1
     Port 2222
     IdentityFile ~/.ssh/nocx_test_key
+    IdentitiesOnly yes
 
 Host tty-test
     HostName 192.0.2.20
     RemoteCommand top -d 1
     RequestTTY yes
+
+Host order-test
+    HostName 192.0.2.30
+    IdentityFile ~/.ssh/second_key
+    IdentityFile ~/.ssh/first_key
 `
 	if err := os.WriteFile(configPath, []byte(configContent), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -118,7 +124,7 @@ Host tty-test
 		}
 	})
 
-	// Test 4: Host with IdentityFile.
+	// Test 4: Host with IdentityFile, and IdentitiesOnly read beside it.
 	t.Run("host_with_identity_file", func(t *testing.T) {
 		resolver := NewSSHConfigResolver(logger, configPath, "")
 		cfg, err := resolver.ResolveConfig(context.Background(), "nocx-test")
@@ -131,11 +137,66 @@ Host tty-test
 		if cfg.Port != 2222 {
 			t.Errorf("Port = %d, want 2222", cfg.Port)
 		}
-		if cfg.IdentityFile == "" {
-			t.Error("IdentityFile should not be empty for nocx-test")
+		// EXACTLY the configured file: a config that names its own keys
+		// suppresses ssh's default list, so a resolver that appended the
+		// defaults would offer keys this host's configuration never named.
+		want := []string{expandPath("~/.ssh/nocx_test_key")}
+		if len(cfg.IdentityFiles) != 1 || cfg.IdentityFiles[0] != want[0] {
+			t.Errorf("IdentityFiles = %q, want %q", cfg.IdentityFiles, want)
 		}
-		if !strings.Contains(cfg.IdentityFile, "nocx_test_key") {
-			t.Errorf("IdentityFile = %q, want path containing nocx_test_key", cfg.IdentityFile)
+		if !cfg.IdentitiesOnly {
+			t.Error("IdentitiesOnly = false, want true: the directive is in the config")
+		}
+	})
+
+	// Test 4b: a host whose config names no key gets ssh's OWN default list,
+	// in ssh's own order — which is the whole reason the list is read from the
+	// oracle rather than hard-coded here.
+	t.Run("default_identity_files_come_from_ssh", func(t *testing.T) {
+		resolver := NewSSHConfigResolver(logger, configPath, "")
+		cfg, err := resolver.ResolveConfig(context.Background(), "dev")
+		if err != nil {
+			t.Fatalf("ResolveConfig dev: %v", err)
+		}
+		if len(cfg.IdentityFiles) == 0 {
+			t.Fatal("IdentityFiles is empty for a host that names no key: ssh always answers with its defaults")
+		}
+		if cfg.IdentitiesOnly {
+			t.Error("IdentitiesOnly = true, want false: no config names it for this host")
+		}
+		// Which defaults, and in which order, is the ssh version's business —
+		// that is the point of asking it. What is checked is that they ARE
+		// ssh's own default key names and not something this package made up.
+		for _, path := range cfg.IdentityFiles {
+			base := filepath.Base(path)
+			if !strings.HasPrefix(base, "id_") {
+				t.Errorf("IdentityFiles carries %q, which is not one of ssh's default identity files", path)
+			}
+			if !strings.Contains(path, string(filepath.Separator)+".ssh"+string(filepath.Separator)) {
+				t.Errorf("IdentityFiles carries %q, want a path under ~/.ssh", path)
+			}
+		}
+	})
+
+	// Test 4c: a config that names TWO keys answers with them in the order it
+	// wrote them, which is the order ssh offers them in — and the reason this
+	// list is the oracle's answer rather than one this package assembles. A
+	// resolver that sorted, deduplicated or re-derived a default order would
+	// change which key a host sees first.
+	t.Run("identity_file_order_is_the_configs", func(t *testing.T) {
+		resolver := NewSSHConfigResolver(logger, configPath, "")
+		cfg, err := resolver.ResolveConfig(context.Background(), "order-test")
+		if err != nil {
+			t.Fatalf("ResolveConfig order-test: %v", err)
+		}
+		want := []string{expandPath("~/.ssh/second_key"), expandPath("~/.ssh/first_key")}
+		if len(cfg.IdentityFiles) != len(want) {
+			t.Fatalf("IdentityFiles = %q, want %q", cfg.IdentityFiles, want)
+		}
+		for i := range want {
+			if cfg.IdentityFiles[i] != want[i] {
+				t.Errorf("IdentityFiles[%d] = %q, want %q", i, cfg.IdentityFiles[i], want[i])
+			}
 		}
 	})
 

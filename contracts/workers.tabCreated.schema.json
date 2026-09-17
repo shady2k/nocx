@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/workers.tabCreated.schema.json",
+  "title": "WorkersTabCreated",
+  "description": "Params of the workers.tabCreated JSON-RPC notification (nocx-ui8q6.3): a worker participant's tab, minted by workers.spawn, has appeared in the layout chain. workers.spawn writes the tab and pane rows directly (internal/app/workers.go), the same content-domain write tabs.create makes, but through no capability.LayoutOperation and therefore through no request a renderer sent — a person cannot learn of it by waiting on a response the way tabs.create's own caller does. This notification is the only way a connected renderer learns the tab exists before it next reads the whole chain. tab and firstPane are the SAME shapes tabs.create already returns (contracts/tabs.create.schema.json, contracts/panes.create.schema.json) — extended, not reinvented, because a renderer that already knows how to fold a tabs.create response into its layout cache folds this in exactly the same way. It is broadcast to every connected client rather than addressed to one session's subscriber: unlike lifecycle.changed or files.changed, a tab is not the property of the session running inside it (that session, opened by the backend rather than by an attach, has no subscriber of its own to resolve at emit time — a worker pane is never 'the session a renderer is looking through'), it is a row in the shared layout chain every window reads with layout.read, so every window is the audience. sessionId, instanceId and sessionEpoch are the participant's own session identity (session_open.go's OpenedSession), carried for two reasons: first, a renderer that wants to bring this tab up must ATTACH to the session already running inside it rather than OPEN a second one over the same pane (attach.schema.json takes exactly this triple) — sessions.live exists for the same handoff at startup, and this is its live-event twin, pushed once at the moment of creation rather than asked for with a second round trip. Second, it is what a STALE notification means for a tab fact that carries no lane and no epoch of its own the way lifecycle.changed does: one WebSocket speaks to exactly one backend instance for its whole life (AD-7), so an instanceId this connection has never seen from any session it already holds names a notification that could only have been queued before a reconnect this renderer has since completed, and it must be dropped rather than folded into a layout cache that belongs to the CURRENT instance. replayFrom and attached mirror sessions.live's own fields for the identical reason sessions.live carries them: a fresh attach has to be told where the replayable stream starts and whether somebody already holds it, and inventing a second vocabulary for the same two facts is exactly what AD-8 forbids.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tab",
+    "firstPane",
+    "sessionId",
+    "instanceId",
+    "sessionEpoch",
+    "replayFrom",
+    "attached"
+  ],
+  "properties": {
+    "tab": {
+      "description": "The tab workers.spawn minted, as stored — the same shape tabs.create returns.",
+      "$ref": "tabs.create.schema.json#/$defs/tab"
+    },
+    "firstPane": {
+      "description": "The participant's one pane, as stored — the same shape panes.create returns.",
+      "$ref": "panes.create.schema.json#/$defs/pane"
+    },
+    "sessionId": {
+      "description": "The participant's session id, server-minted and server-authoritative (AD-7). Not an addressing field — this notification is broadcast — but what a renderer that wants to bring the tab up passes to `attach` instead of `open`, so it takes back the session already running rather than starting a second one over the same pane.",
+      "type": "string",
+      "minLength": 1
+    },
+    "instanceId": {
+      "description": "The backend instance that minted the session (AD-7, nocx-3oupk) — the same field lifecycle.changed and sessions.live carry. A connection speaks to exactly one instance for its whole life, so the renderer compares this against the instanceId of any session it already holds from this connection and drops the notification on a mismatch: that mismatch names a fact queued before a reconnect this renderer has since completed, and folding it into the current layout cache would be applying a fact from a backend that is no longer the one behind this socket.",
+      "type": "string",
+      "minLength": 1
+    },
+    "sessionEpoch": {
+      "description": "The session's epoch within its backend instance, as minted at open (same vocabulary as attach's and sessions.live's sessionEpoch): distinguishes a later session that reuses this sessionId from the incarnation this notification is about.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "replayFrom": {
+      "description": "The oldest byte offset the session's replay ring still holds, exactly as sessions.live reports it. A renderer attaching to this session for the first time attaches here.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "attached": {
+      "description": "Whether a client already holds this session, exactly as sessions.live reports it. False at the moment of creation in the ordinary case — nobody has attached to a tab that has just appeared — but stated rather than assumed, on the same terms sessions.live states it.",
+      "type": "boolean"
+    }
+  }
+}

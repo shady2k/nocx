@@ -15,6 +15,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/paneobserve"
 	"github.com/shady2k/nocx/internal/session"
 )
@@ -22,22 +23,38 @@ import (
 // paneObserverSweep is how often the backend asks its watched panes what they
 // are now.
 //
-// It is a COALESCER, not a poll: Touch marks a pane dirty on the session read
-// path, and a pane that has not moved costs nothing at all. The interval is
-// what keeps an agent that repaints its token counter on every response chunk
-// from producing a classification per chunk. Nothing waits on it — a test
-// drives Sweep directly and asserts on the state change it produces, which is
-// why no test in this repository depends on this number.
+// It is BOUNDED POLLING of the panes somebody is watching, and what used to
+// make it something cheaper is gone: the dirty mark came from the session's
+// read path, and the coordinator no longer reads a session's bytes for a screen
+// (ADR-0066). So every sweep reads every watched pane — one frame read each per
+// tick — and what bounds the cost is this interval, MaxWatched, and the fact
+// that a pane whose classification did not change sends nothing. A pane that
+// has settled still costs its read; that is the price of an observer that
+// cannot be told a pane moved.
+//
+// What the interval buys is the coalescing it was written for: an agent that
+// repaints its token counter on every chunk produces one classification per
+// tick rather than one per chunk. Nothing waits on the number — a test drives
+// Sweep directly and asserts on the state change it produces, which is why no
+// test in this repository depends on it.
 const paneObserverSweep = 120 * time.Millisecond
 
 // paneObserver is the transport's half of the seam (AD-8). Narrow on purpose:
-// the transport may say a pane moved, may close an observation when the
-// session ends, and may ask what a pane currently is. It may not classify.
+// the transport may close an observation when the session ends, may drive a
+// sweep, and may ask what a pane currently is. It may not classify — and it may
+// no longer say a pane MOVED, because nothing tells the coordinator that any
+// more: the sweep reads what it watches.
 type paneObserver interface {
-	Touch(paneID string)
 	Unwatch(paneID string)
 	Sweep()
 	Snapshot(paneID string) (paneobserve.Observation, bool)
+	// Watching lists the panes under observation and the agent each was
+	// enrolled as. It is what the emitting view (nocx-02uci) asks first, and
+	// it is a read of the ENROLMENT rather than of a classification —
+	// Snapshot above is silent until a first sweep has produced one, and a
+	// view that waited for that would show its operator nothing on a settled
+	// screen.
+	Watching() []paneobserve.Enrolled
 }
 
 // WithPaneObserver attaches the backend's pane-observation watcher.
@@ -58,6 +75,41 @@ type observationChangedParams struct {
 	SessionEpoch uint64 `json:"sessionEpoch"`
 	Agent        string `json:"agent"`
 	State        string `json:"state"`
+	// Progress is the THIRD facet, beside the state rather than inside it:
+	// whether a pane that is working has moved lately (nocx-tnx44). It is
+	// always sent — a pane that is not working, and a pane whose rule reads
+	// no transcript, answer "moving" — because the receiver would otherwise
+	// have to tell an absent field from a moving pane, and the two are not
+	// the same claim.
+	Progress string `json:"progress"`
+	// Children is omitted when the pane's chrome named none, which is the
+	// ordinary case. `omitempty` is load-bearing rather than tidy: the
+	// schema's minItems refuses an empty array, because "the panel is not on
+	// screen" and "the panel is on screen and says nothing" are different
+	// claims and only the first is ever true here.
+	Children []observationChildParams `json:"children,omitempty"`
+}
+
+// observationChildParams is one child row on the wire. Two fields, and what is
+// missing is the decision: the panel also draws an elapsed time and a token
+// flow, and this notification is sent only when the answer CHANGES — see
+// internal/paneobserve for the interval that leaves them behind.
+type observationChildParams struct {
+	Name string `json:"name"`
+	Task string `json:"task,omitempty"`
+}
+
+// observationChildren renders the watcher's children onto the wire shape. Nil
+// in, nil out: a pane with no children carries no field at all.
+func observationChildren(children []agentdriver.Subagent) []observationChildParams {
+	if len(children) == 0 {
+		return nil
+	}
+	out := make([]observationChildParams, 0, len(children))
+	for _, c := range children {
+		out = append(out, observationChildParams{Name: c.Name, Task: c.Task})
+	}
+	return out
 }
 
 // runPaneObserverSweeps drives the coalescer for the life of the server.
@@ -113,6 +165,8 @@ func (s *WSServer) emitPaneObservation(sid session.ID, o paneobserve.Observation
 		SessionEpoch: ident.Epoch,
 		Agent:        o.Agent,
 		State:        string(o.State),
+		Progress:     string(o.Progress),
+		Children:     observationChildren(o.Children),
 	}
 	if err := wconn.TryNotify("session.observationChanged", mustMarshal(params)); err != nil {
 		s.log.Debug("write session.observationChanged", "session", sid, "error", err)

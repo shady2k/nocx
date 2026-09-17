@@ -10,12 +10,12 @@ package discovery
 //     internal/nativeports, wired here through WithLocalProvider.
 //
 // The seam is deliberately shaped for a THIRD implementation later: the
-// planned remote relay (nocx-if6 phase B) runs the same nativeports module
-// cross-compiled on the far host, and a relay provider implements this same
+// planned remote helper runs the same nativeports module
+// cross-compiled on the far host, and a helper provider implements this same
 // interface by querying that far side — dropped in beside local and
 // remote-command, not a fork of either. The only part that would change is
 // the scheduler's target→provider mapping (today a local-target special
-// case; the relay lands as another factory wired at the composition root).
+// case; the helper lands as another factory wired at the composition root).
 //
 // The domain knows nothing about how the listeners were obtained: this
 // interface is the whole boundary.

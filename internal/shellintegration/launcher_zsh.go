@@ -82,11 +82,12 @@ unset __nocx_f
 //     exit-time save (which replaces the file) preserves the old history.
 //     SAVEHIST and the read/write options are the user's own;
 //   - if the user's startup file execs or exits, control never reaches the
-//     install below: user startup wins. That outcome is no longer silent —
-//     the bootstrap progress descriptor carries "startup entered" before the
-//     source and "user rc returned" after it, so the product can say the
-//     startup did not return instead of reporting ten seconds of nothing
-//     (nocx-yww2). A top-level `return` in the user's file stops only that
+//     install below: user startup wins, and it does so SILENTLY — the
+//     bootstrap-progress descriptor that used to say where the startup
+//     stopped went with internal/app's local pty factory (nocx-ie23r.3),
+//     because the coordinator no longer forks the shell and cannot hand it
+//     a descriptor. The handshake bound is the detector again, as it is on
+//     every other tier. A top-level `return` in the user's file stops only that
 //     file — zsh resumes the source — which is indistinguishable from
 //     completion, so the install proceeds; that case is a reported
 //     limitation, not a silent equivalence (nocx-xs1d).
@@ -131,37 +132,12 @@ fi
 
 @ENV@
 
-# Bootstrap progress fact 1 of 2 (nocx-yww2): this rcfile began executing.
-# The bash tier's block, verbatim in intent and in wire vocabulary — one
-# reader parses both (internal/bootstrapprogress), and a second spelling
-# would be a second answer to the same question. The descriptor is one-way,
-# is NOT the lifecycle channel and confers no authority (ADR-0024 decision
-# 4). The group's stderr is discarded and an always-true fallback follows it
-# because a descriptor that is not open makes the REDIRECTION fail, which zsh
-# reports on the user's terminal and which an rc-set errexit would turn into
-# a dead session.
-__nocx_bp_fd="${NOCX_BOOTSTRAP_FD:-}"
-case "${__nocx_bp_fd}" in
-    ''|*[!0-9]*) __nocx_bp_fd='' ;;
-    *) { builtin printf 'startup-entered\n' >&"${__nocx_bp_fd}"; } 2>/dev/null || : ;;
-esac
-
 # User startup — first, and it wins.
 __nocx_user_rc="${__nocx_user_zdotdir:-$HOME}/.zshrc"
 if [[ -f "$__nocx_user_rc" ]]; then
     . "$__nocx_user_rc"
 fi
 
-# Bootstrap progress fact 2 of 2: the user's startup returned control.
-# Written BEFORE __nocx_cap is assigned below, so nothing the user's rc runs
-# can see the capability — the fact costs the availability window not one
-# byte — and the descriptor is closed immediately after, so no descendant of
-# this shell inherits a writer for it.
-if [ -n "${__nocx_bp_fd}" ]; then
-    { builtin printf 'user-rc-returned\n' >&"${__nocx_bp_fd}"; } 2>/dev/null || :
-    { eval "exec ${__nocx_bp_fd}>&-"; } 2>/dev/null || :
-fi
-unset __nocx_bp_fd
 
 # History: the transient ZDOTDIR shadowed the default history file (zsh
 # read history before startup files ran). Default HISTFILE to the native

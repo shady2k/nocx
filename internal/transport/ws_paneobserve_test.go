@@ -8,26 +8,29 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
+	"github.com/santhosh-tekuri/jsonschema/v6"
+
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/paneobserve"
+	"github.com/shady2k/nocx/internal/paneview/paneviewtest"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
-func newObservedWS(t *testing.T) (*WSServer, *panegrid.Store, *paneobserve.Watcher, *feedablePTY) {
+func newObservedWS(t *testing.T, cfg paneobserve.Config) (*WSServer, *paneviewtest.Views, *paneobserve.Watcher, *feedablePTY) {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	term := newFeedablePTY()
 	reg := session.New(logger, &feedableFactory{p: term})
-	store := panegrid.New(logger)
+	store := paneviewtest.NewViews(logger)
 	drivers, err := agentdriver.NewRegistry(agentdriver.Claude())
 	if err != nil {
 		t.Fatalf("registry: %v", err)
 	}
-	watch := paneobserve.New(logger, store, drivers)
-	ws := NewWSServer(logger, reg, WithPaneGrid(store), WithPaneObserver(watch))
+	watch := paneobserve.New(logger, store.Store, drivers, cfg)
+	ws := NewWSServer(logger, reg, WithPaneScreens(store.Store), WithPaneObserver(watch))
 	watch.SetEmitter(ws.EmitPaneObservation)
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
@@ -55,6 +58,7 @@ func TestSessionObservationChangedDTOConformsToContract(t *testing.T) {
 		SessionEpoch: 1,
 		Agent:        "claude",
 		State:        string(agentdriver.StateFreeText),
+		Progress:     string(paneobserve.ProgressMoving),
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -71,13 +75,16 @@ func TestSessionObservationChangedDTOConformsToContract(t *testing.T) {
 // not a duration.
 func TestSessionObservationChangedOverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "session.observationChanged.schema.json")
-	ws, store, watch, term := newObservedWS(t)
+	ws, store, watch, term := newObservedWS(t, paneobserve.Config{})
 	conn := connectWS(t, ws)
 	sid := openSessionOnConn(t, ws, conn, 1)
 
-	if err := store.Enrol(sid, 40, 14); err != nil {
+	if err := store.Watch(sid, 40, 14); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
+	// The pane's screen comes from the bytes this stand's program prints:
+	// in production the helper's runtime is what holds it.
+	term.feedsTo(store, sid)
 	watch.Watch(sid, "claude")
 	term.emit(t, claudeIdleChrome(40))
 
@@ -104,16 +111,263 @@ func TestSessionObservationChangedOverTheWireConformsToContract(t *testing.T) {
 	}
 }
 
+// The task panel, drawn where claude draws it: under the mode line, the pane's
+// own row first and one row per child below it.
+func claudeSubagentChrome(cols int) string {
+	return claudeIdleChrome(cols) +
+		"\x1b[14;1H  ● main" +
+		"\x1b[15;1H  ◯ Explore  List files in directory" +
+		"\x1b[9;3H"
+}
+
+// THE HAPPY PATH, off the real socket: a person watching a pane whose agent
+// spawned a child is sent that child's name and what it is doing.
+//
+// It is a separate test from the idle one above rather than an extra assertion
+// in it, because the interesting half is a payload shape the idle case never
+// produces — and validating a payload the test itself built proves the struct
+// is well-formed, never that the server sends it.
+//
+// Nothing here waits on a duration: it reads notifications until one carries
+// children, and the read itself is what has the deadline.
+func TestSessionObservationChangedCarriesTheChildRowsOverTheWire(t *testing.T) {
+	schema := loadSchema(t, "session.observationChanged.schema.json")
+	ws, store, watch, term := newObservedWS(t, paneobserve.Config{})
+	conn := connectWS(t, ws)
+	sid := openSessionOnConn(t, ws, conn, 1)
+
+	if err := store.Watch(sid, 60, 18); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	// The pane's screen comes from the bytes this stand's program prints:
+	// in production the helper's runtime is what holds it.
+	term.feedsTo(store, sid)
+	watch.Watch(sid, "claude")
+	term.emit(t, claudeSubagentChrome(60))
+
+	// The screen is fed in one write, but the session read path may split it,
+	// so a sweep can land on a half-painted panel and report the pane before
+	// the panel is whole. Every observation that arrives is validated; the one
+	// being waited for is the one that names a child, and the wait ends on
+	// THAT ARRIVING under a single deadline — never on a duration elapsing.
+	var got observationChangedParams
+	deadline := time.Now().Add(wantWithin)
+	for len(got.Children) == 0 {
+		msg, err := awaitFrame(conn, deadline, isNotification("session.observationChanged"))
+		if err != nil {
+			t.Fatalf("the panel was on screen and no observation ever named a child (last: %+v): %v", got, err)
+		}
+		f, ok := decodeFrame(msg)
+		if !ok {
+			t.Fatalf("undecodable notification: %s", msg)
+		}
+		validateJSON(t, schema, f.Params, "session.observationChanged params (real socket, task panel drawn)")
+		got = observationChangedParams{}
+		if err := json.Unmarshal(f.Params, &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+	}
+	if len(got.Children) != 1 {
+		t.Fatalf("children = %+v, want exactly the one child the panel drew", got.Children)
+	}
+	if got.Children[0].Name != "Explore" {
+		t.Errorf("child name = %q, want %q", got.Children[0].Name, "Explore")
+	}
+	if got.Children[0].Task != "List files in directory" {
+		t.Errorf("child task = %q, want %q", got.Children[0].Task, "List files in directory")
+	}
+	// The pane's OWN row heads that panel and is not a child of itself.
+	for _, c := range got.Children {
+		if c.Name == "main" {
+			t.Errorf("the pane's own row crossed as a child: %+v", got.Children)
+		}
+	}
+	// And the parent's own state is decided by its chrome, not by the row:
+	// a backgrounded agent keeps the input box live and shows no spinner, so
+	// this is exactly the frame a rule without the panel calls idle.
+	if got.State != string(agentdriver.StateWorking) {
+		t.Errorf("state = %q, want %q", got.State, agentdriver.StateWorking)
+	}
+}
+
+// fakeClock is the watcher's clock for the tests below, and it exists because
+// the threshold has TWO ends: a test that slept to reach the low one would be
+// measuring the machine, and the high one would cost it a minute per case.
+type fakeClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// A working pane with a transcript ABOVE its box: one row the agent printed,
+// the token meter, the two rules, the prompt, and a mode line that says the
+// turn is interruptible.
+//
+// The row above the meter is load-bearing. Without it the rule reads no
+// transcript at all, and a pane with no transcript can never be called stalled
+// — which is the honest answer and therefore the wrong fixture for this test.
+func claudeWorkingChrome(cols int) string {
+	rule := strings.Repeat("─", cols)
+	return "\x1b[2J" +
+		"\x1b[6;1H❯ echo hello" +
+		"\x1b[7;1H              0 tokens" +
+		"\x1b[8;1H" + rule +
+		"\x1b[9;1H❯ " +
+		"\x1b[10;1H" + rule +
+		"\x1b[12;1H  ⏵⏵ auto mode on · esc to interrupt" +
+		"\x1b[9;3H"
+}
+
+// THE THIRD FACET, off the real socket, and the case it exists for: a pane
+// whose chrome has stopped moving entirely is still reported as working and
+// STALLED.
+//
+// Nothing here sends a byte after the first frame. That is the point: the
+// transport's coalescer sweeps what has MOVED, and a hung agent — a suspended
+// process, a wedged one — moves nothing at all, so a sweep that only looked at
+// panes that had moved would never look at this one again. The only thing that
+// changes between the two notifications is the clock.
+func TestSessionObservationChangedCarriesAStalledProgressOverTheWire(t *testing.T) {
+	schema := loadSchema(t, "session.observationChanged.schema.json")
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	ws, store, watch, term := newObservedWS(t, paneobserve.Config{
+		Now:        clock.Now,
+		StallAfter: time.Minute,
+	})
+	conn := connectWS(t, ws)
+	sid := openSessionOnConn(t, ws, conn, 1)
+
+	if err := store.Watch(sid, 40, 14); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	// The pane's screen comes from the bytes this stand's program prints:
+	// in production the helper's runtime is what holds it.
+	term.feedsTo(store, sid)
+	watch.Watch(sid, "claude")
+	term.emit(t, claudeWorkingChrome(40))
+
+	// The first reading. The screen is fed in one write but the read path may
+	// split it, so observations until the pane reads working are all read and
+	// validated; the one this waits for is a working pane whose transcript has
+	// just been measured, which is moving by definition.
+	got := readUntil(t, conn, schema, func(o observationChangedParams) bool {
+		return o.State == string(agentdriver.StateWorking) && o.Progress == string(paneobserve.ProgressMoving)
+	})
+
+	// From here the pane sends nothing. Only the clock moves, and by more
+	// than the threshold, so the next observation is the one a stalled pane
+	// produces: the verdict it already had, and a progress that changed.
+	clock.advance(2 * time.Minute)
+	stalled := readUntil(t, conn, schema, func(o observationChangedParams) bool {
+		return o.Progress == string(paneobserve.ProgressStalled)
+	})
+	if stalled.State != string(agentdriver.StateWorking) {
+		t.Errorf("stalled pane's state = %q, want %q — progress must never displace the state it rides beside",
+			stalled.State, agentdriver.StateWorking)
+	}
+	if stalled.SessionID != got.SessionID || stalled.InstanceID != got.InstanceID {
+		t.Errorf("the stalled observation named a different pane: %+v against %+v", stalled, got)
+	}
+}
+
+// readUntil reads notifications until one satisfies want, validating every one
+// it reads — the wait ends on the observation ARRIVING, under a single
+// deadline, and never on a duration elapsing.
+func readUntil(t *testing.T, conn *websocket.Conn, schema *jsonschema.Schema, want func(observationChangedParams) bool) observationChangedParams {
+	t.Helper()
+	deadline := time.Now().Add(wantWithin)
+	for {
+		msg, err := awaitFrame(conn, deadline, isNotification("session.observationChanged"))
+		if err != nil {
+			t.Fatalf("no observation ever satisfied the wait: %v", err)
+		}
+		f, ok := decodeFrame(msg)
+		if !ok {
+			t.Fatalf("undecodable notification: %s", msg)
+		}
+		validateJSON(t, schema, f.Params, "session.observationChanged params (real socket)")
+		var got observationChangedParams
+		if err := json.Unmarshal(f.Params, &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if want(got) {
+			return got
+		}
+	}
+}
+
+// A pane with no children carries NO children field at all, rather than an
+// empty array. The two are different claims — "the panel is not on screen"
+// against "the panel is on screen and names nobody" — and the schema refuses
+// the second, so this is the assertion that keeps `omitempty` from being
+// quietly dropped as tidiness.
+func TestAPaneWithNoChildrenOmitsTheFieldEntirely(t *testing.T) {
+	raw, err := json.Marshal(observationChangedParams{
+		SessionID:    "sess-1",
+		InstanceID:   "inst-1",
+		SessionEpoch: 1,
+		Agent:        "claude",
+		State:        string(agentdriver.StateFreeText),
+		Progress:     string(paneobserve.ProgressMoving),
+		Children:     observationChildren(nil),
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "children") {
+		t.Errorf("a pane with no children said so on the wire: %s", raw)
+	}
+	validateJSON(t, loadSchema(t, "session.observationChanged.schema.json"), raw, "session.observationChanged DTO, no children")
+}
+
+// The DTO carrying children conforms too, including a child with no task — a
+// row the screen has drawn but not yet described. Absent, never empty.
+func TestSessionObservationChangedChildrenDTOConformsToContract(t *testing.T) {
+	raw, err := json.Marshal(observationChangedParams{
+		SessionID:    "sess-1",
+		InstanceID:   "inst-1",
+		SessionEpoch: 1,
+		Agent:        "claude",
+		State:        string(agentdriver.StateWorking),
+		Progress:     string(paneobserve.ProgressStalled),
+		Children: observationChildren([]agentdriver.Subagent{
+			{Name: "Explore", Task: "List files in directory"},
+			{Name: "Plan"},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), `"task":""`) {
+		t.Errorf("a child with no task claimed an empty one: %s", raw)
+	}
+	validateJSON(t, loadSchema(t, "session.observationChanged.schema.json"), raw, "session.observationChanged DTO with children")
+}
+
 // A pane that is enrolled but NOT watched produces nothing. The control for
 // the test above: without it a green run could mean "the classification
 // crossed" or "this socket says something whenever bytes move".
 func TestAnUnwatchedPaneSendsNoObservation(t *testing.T) {
-	ws, store, watch, term := newObservedWS(t)
+	ws, store, watch, term := newObservedWS(t, paneobserve.Config{})
 	conn := connectWS(t, ws)
 	sid := openSessionOnConn(t, ws, conn, 1)
-	if err := store.Enrol(sid, 40, 14); err != nil {
+	if err := store.Watch(sid, 40, 14); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
+	// The pane's screen comes from the bytes this stand's program prints:
+	// in production the helper's runtime is what holds it.
+	term.feedsTo(store, sid)
 	term.emit(t, claudeIdleChrome(40))
 
 	// The grid proves the bytes really arrived, so the silence below is the
@@ -138,12 +392,15 @@ func TestAnUnwatchedPaneSendsNoObservation(t *testing.T) {
 // never coming — and an indicator showing nothing for a pane nocx is actively
 // watching is exactly the soft degrade the UI contradicts.
 func TestAReattachingClientIsToldWhatThePaneAlreadyIs(t *testing.T) {
-	ws, store, watch, term := newObservedWS(t)
+	ws, store, watch, term := newObservedWS(t, paneobserve.Config{})
 	connA := connectWS(t, ws)
 	sid := openSessionOnConn(t, ws, connA, 1)
-	if err := store.Enrol(sid, 40, 14); err != nil {
+	if err := store.Watch(sid, 40, 14); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
+	// The pane's screen comes from the bytes this stand's program prints:
+	// in production the helper's runtime is what holds it.
+	term.feedsTo(store, sid)
 	watch.Watch(sid, "claude")
 	term.emit(t, claudeIdleChrome(40))
 	readNotification(t, connA, "session.observationChanged", wantWithin)
@@ -171,7 +428,6 @@ type countingObserver struct {
 	sweeps int
 }
 
-func (c *countingObserver) Touch(string)   {}
 func (c *countingObserver) Unwatch(string) {}
 func (c *countingObserver) Sweep() {
 	c.mu.Lock()
@@ -182,6 +438,8 @@ func (c *countingObserver) Sweep() {
 func (c *countingObserver) Snapshot(string) (paneobserve.Observation, bool) {
 	return paneobserve.Observation{}, false
 }
+
+func (c *countingObserver) Watching() []paneobserve.Enrolled { return nil }
 
 func (c *countingObserver) count() int {
 	c.mu.Lock()

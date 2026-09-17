@@ -39,8 +39,13 @@ func TestAgentEnrolProducesAnAnswerEcho(t *testing.T) {
 	if a.Envelope.Event.Kind != KindAgentEnrolled || a.Envelope.Event.AgentEnrolled == nil {
 		t.Fatalf("outbound must be an agent_enrolled, got %+v", a.Envelope.Event)
 	}
-	if a.Envelope.Domain != h.Domain || a.Envelope.Epoch != h.Epoch || a.Envelope.Capability != h.Capability {
+	if a.Envelope.Domain != h.Domain || a.Envelope.Epoch != h.Epoch {
 		t.Fatalf("answer must be addressed to the asking domain, got dom=%s epoch=%d", a.Envelope.Domain, a.Envelope.Epoch)
+	}
+	// Addressed by the tuple, and by nothing secret: the answer travels the
+	// descriptor every descendant of the shell inherits (nocx-aqz7o).
+	if a.Envelope.Capability != (Capability{}) {
+		t.Fatalf("answer carries the domain capability back to the shell")
 	}
 	ans := a.Envelope.Event.AgentEnrolled
 	if ans.RequestID != "r-agent-0" || ans.Agent != "claude" {

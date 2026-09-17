@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/vault"
@@ -112,21 +111,16 @@ func (rc *RealClient) addPublicKeyMethods(ctx context.Context, chain *[]authChai
 		return rc.addVaultKeyMethod(ctx, chain, cfg)
 	}
 
-	// File-based key path: explicit identity file from cfg.KeyFile resolved
-	// through ~/.ssh/config.
-	if resolved.identityFile != "" {
-		if signer, err := rc.loadKey(ctx, resolved.identityFile, cfg); err == nil {
-			*chain = append(*chain, authChainEntry{kind: kindPublicKey, method: gossh.PublicKeys(signer)})
-		}
-	}
-
-	// Default key discovery: try conventional paths as fallback.
-	for _, path := range defaultKeyPaths() {
+	// The identity files, in OpenSSH's own order: the `identityfile` lines of
+	// the resolved configuration — which is ssh's default list when the config
+	// names none, so this is the default key discovery as well, from ONE
+	// answer rather than from this list plus a hard-coded second one. A file
+	// that does not exist, or that is encrypted with a passphrase nobody
+	// stored, is skipped: ssh offers the next key, and it does not stop to ask
+	// for a passphrase a profile never named.
+	for _, path := range resolved.identityFiles {
 		signer, err := rc.loadKey(ctx, path, cfg)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
 			var encKeyErr *ErrEncryptedKey
 			if errors.As(err, &encKeyErr) {
 				rc.log.Debug("skipping encrypted key in chain", "path", path)
@@ -147,12 +141,32 @@ func (rc *RealClient) addPublicKeyMethods(ctx context.Context, chain *[]authChai
 // Any error — vault sealed, secret missing, malformed key material — is
 // propagated to the caller. There is no silent fallback to file-based keys.
 func (rc *RealClient) addVaultKeyMethod(ctx context.Context, chain *[]authChainEntry, cfg *ConnectConfig) error {
-	secret, err := rc.getSecretWithUnlock(ctx, cfg, cfg.KeySecretID, "load the stored key")
+	signer, err := rc.storedKeySigner(ctx, cfg)
 	if err != nil {
 		return err
 	}
+	*chain = append(*chain, authChainEntry{kind: kindPublicKey, method: gossh.PublicKeys(signer)})
+	return nil
+}
+
+// storedKeySigner loads the private key material a config's KeySecretID names
+// — with PassphraseSecretID when the key is encrypted — and answers the
+// signer. It is the SAME construction addVaultKeyMethod appends to a chain,
+// and it is a function of its own because a second caller needs the signer
+// rather than a link in a chain: the helper's `sign` reverse op signs a
+// challenge with a stored key without ever building an auth chain
+// (internal/ssh's own seam, used by internal/app's reverse handlers).
+//
+// It is a pure extraction and changes nothing about the path: the errors, the
+// laziness of the passphrase read, and the refusal to fall back to a file are
+// all as they were.
+func (rc *RealClient) storedKeySigner(ctx context.Context, cfg *ConnectConfig) (gossh.Signer, error) {
+	secret, err := rc.getSecretWithUnlock(ctx, cfg, cfg.KeySecretID, "load the stored key")
+	if err != nil {
+		return nil, err
+	}
 	if secret.IsEmpty() {
-		return fmt.Errorf("key material not found for vault secret %q", cfg.KeySecretID)
+		return nil, fmt.Errorf("key material not found for vault secret %q", cfg.KeySecretID)
 	}
 
 	var signer gossh.Signer
@@ -191,11 +205,9 @@ func (rc *RealClient) addVaultKeyMethod(ctx context.Context, chain *[]authChainE
 			return nil
 		})
 	}); useErr != nil {
-		return useErr
+		return nil, useErr
 	}
-
-	*chain = append(*chain, authChainEntry{kind: kindPublicKey, method: gossh.PublicKeys(signer)})
-	return nil
+	return signer, nil
 }
 
 func (rc *RealClient) addAgentMethods(chain *[]authChainEntry) {
@@ -306,19 +318,13 @@ func (rc *RealClient) agentAvailable() bool {
 	return os.Getenv("SSH_AUTH_SOCK") != ""
 }
 
-// defaultKeyPaths returns the conventional default private key paths.
-func defaultKeyPaths() []string {
-	home := os.Getenv("HOME")
-	if home == "" {
-		return nil
-	}
-	return []string{
-		filepath.Join(home, ".ssh", "id_ed25519"),
-		filepath.Join(home, ".ssh", "id_rsa"),
-		filepath.Join(home, ".ssh", "id_ecdsa"),
-	}
-}
-
+// loadKey reads and parses one private key file, unlocking it with the
+// profile's stored passphrase when it has one and the caller threaded one.
+//
+// A key path reached here may come from the profile, from ~/.ssh/config's
+// IdentityFile, or from the default list ssh -G answers with — there is no
+// longer a hard-coded list beside that answer, because two lists of "the keys
+// this machine would offer" is exactly the second implementation that drifts.
 func (rc *RealClient) loadKey(ctx context.Context, path string, cfg *ConnectConfig) (gossh.Signer, error) {
 	data, err := readFileFn(path)
 	if err != nil {

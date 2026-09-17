@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/session"
 )
 
 // ResourceRef is one resource a validated call resolves to. ID is the
@@ -70,6 +71,14 @@ type RunContext struct {
 	RunID     string
 	Workspace string
 	Session   string
+	// Participant is the worker participant this run IS, when the run belongs
+	// to a worker rather than to a coordinator. Empty for every ordinary run,
+	// and that emptiness is what narrowWorkerParticipant refuses on.
+	//
+	// It is an identity of the run and belongs here for the reason the others
+	// do: it is established once, by the authorizer, from the session the
+	// peer's process tree resolved to — never by anything the caller sends.
+	Participant string
 	// AutomaticSessionItems are renderer-owned screen attachments. They are
 	// immutable ids carried by this run so session.read can route them to the
 	// renderer even when the shell-originated attempt has no ledger row.
@@ -79,6 +88,49 @@ type RunContext struct {
 	// asked about, so a call that names the item without naming the window
 	// is answered inside the mark rather than past it (nocx-hp8p2.15).
 	MarkedSessionWindows []MarkedSessionWindow
+	// ControllerIdentity is the INCARNATION of Session — the backend instance
+	// that minted it and the session's own epoch (session.Identity) — never
+	// derived from Participant, which names a different incarnation
+	// (nocx-bm99e). It is established once, by the adapter that authenticated
+	// the caller (the tool endpoint or the kernel), from the session it
+	// admitted, and travels onto workers.RegisterRequest.CoordinatorIdentity
+	// and workers.Delegation.ControllerIdentity when this run spawns a
+	// worker: a delegation's authority is bound to WHICH INCARNATION of the
+	// controller session granted it, not to the session id alone.
+	ControllerIdentity session.Identity
+	// PaneAccess is the DescendantPaneAccess capability (internal/app) bound
+	// for this run by the same adapter, before dispatch — never inferred
+	// from a call's parameters (design §7.1). It is `any` because this
+	// package sits below internal/app in the dependency graph and cannot
+	// name the concrete type; a tool that reaches a descendant's pane types
+	// it at the point of use. Nil means no adapter bound one yet (Task 5/8
+	// wiring), which every reader of it must treat as "no descendant
+	// authority", never as a coordinator's own pane.
+	PaneAccess any
+	// SessionReads is session.read's helper-backed read path for a
+	// sessionId naming one of PaneAccess's descendants (assistant.PaneReader,
+	// design §6.1, Task 8): a single, composition-root-level value — unlike
+	// PaneAccess, which is minted fresh per call — bound by the same
+	// adapter alongside PaneAccess. `any` for the identical layering reason
+	// PaneAccess is `any`: internal/assistant, which calls it, sits below
+	// internal/app, which builds the one production implementation. Nil
+	// means no adapter bound one yet, which every sessionId naming a
+	// descendant must then refuse rather than guess at.
+	SessionReads any
+	// SessionKeys is session.keys' write path over PaneAccess's descendants
+	// (assistant.PaneKeys, design §6.4, §6.5, Task 9) — bound by the same
+	// adapter alongside PaneAccess and SessionReads, for the identical
+	// layering and nil-safety reasons SessionReads already documents. Nil
+	// means no adapter bound one yet, which session.keys must refuse rather
+	// than guess at.
+	SessionKeys any
+	// SessionMessages is session.message's queue-and-deliver path over
+	// PaneAccess's descendants (assistant.PaneMessages, design §8, Task 10)
+	// — bound by the same adapter alongside PaneAccess, SessionReads and
+	// SessionKeys, for the identical layering and nil-safety reasons
+	// SessionReads already documents. Nil means no adapter bound one yet,
+	// which session.message must refuse rather than guess at.
+	SessionMessages any
 }
 
 // MarkedSessionWindow is one person-marked row span: which item, and which
@@ -381,7 +433,7 @@ var declarations = []Declaration{
 	},
 	{
 		Name:             "session.read",
-		Description:      "Read an item in a terminal session, or the screen now when no item id is supplied; the answer carries whether the item is running or exited and its exit code when it has one. A full-screen program returns the current alternate screen, not a window into scrollback.",
+		Description:      "Read a terminal session's screen: your own pane when sessionId is omitted or names it, or a worker you spawned (or one of its own workers) by its sessionId. Reading your own pane can also name an item id to read a recorded block instead of the current screen. Reading a descendant carries its classification (what its screen is inviting) and, when target names a kind (menu, input, working or region), a target you can spend with session.keys or session.message.",
 		Effect:           []content.Effect{content.EffectObserve},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
@@ -391,7 +443,54 @@ var declarations = []Declaration{
 		ResolveResources: resourceSession,
 		Executes:         Dynamic,
 		Params:           "session.read.schema.json",
-		Narrow:           narrowSession,
+		Narrow:           narrowDescendants,
+	},
+	{
+		Name:        "session.keys",
+		Description: "Write one step under a target session.read minted for a worker you spawned (or one of its own workers): a single key, one text atom pasted (never submitted — a newline is refused unless the program has bracketed paste on), or a named menu option (chosen step by step until it is selected, then confirmed). A sequence is not one call: send Down, read again, then send the next key. tokenId comes from that session.read's target, and it is spent at most once.",
+		// MUTATE-DESTRUCTIVE: an option this call confirms can approve a
+		// tool call inside the worker or trust a directory on the person's
+		// behalf, and neither comes back. It is the worst case this one row
+		// covers — a plain key such as Down is far more often reversible —
+		// but the declaration has one effect class for the whole row.
+		//
+		// The DELEGATION effect this write ALSO requires — a session with
+		// no send-input on its chain refuses reachability entirely — is
+		// workers.EffectSendInput, resolved per call by
+		// DescendantPaneAccess.Resolve inside PaneKeys.Send (design §7.1),
+		// never this field: this row's Effect is the CONTENT policy's own
+		// classification, a different lattice (ADR-0020) answering a
+		// different question.
+		Effect:           []content.Effect{content.EffectMutateDestructive},
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 4 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
+		ResolveResources: resourceSession,
+		Executes:         InGo,
+		Params:           "session.keys.schema.json",
+		Narrow:           narrowDescendants,
+	},
+	{
+		Name:        "session.message",
+		Description: "Send a message to a worker's agent (or one of its own workers): queued (when \"free\") for delivery once the agent is free, or attempted immediately (when \"now\", under a target session.read minted of kind input or working). Delivery pastes the text, waits for it to echo, then presses Enter — reported as a phase, never a plain success flag. The disjoint form session.message { sessionId, cancel: id } withdraws a still-queued message; id makes a resend of the same call at-most-once.",
+		// MUTATE-DESTRUCTIVE for the same reason session.keys' own row
+		// is: a delivered message reaches the agent and is not
+		// reversible from here. The delegation effect this write also
+		// requires (send-input) is resolved per call by
+		// DescendantPaneAccess.Resolve inside PaneMessages.Send, exactly
+		// as session.keys' own row documents for itself.
+		Effect:           []content.Effect{content.EffectMutateDestructive},
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 4 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
+		ResolveResources: resourceSession,
+		Executes:         InGo,
+		Params:           "session.message.schema.json",
+		Narrow:           narrowDescendants,
 	},
 	{
 		Name:        "session.run",
@@ -777,6 +876,161 @@ var declarations = []Declaration{
 		Params:           "skills.install.schema.json",
 		Narrow:           narrowSkillsInstall,
 	},
+	{
+		Name:        "workers.holdings",
+		Description: "Ask what workers your own session is responsible for, and what each of them is doing. It takes no arguments: the session is the one you are running in. Reach for it at the start of a turn when you have lost track of what you started — nocx has been watching them the whole time, including across a restart of yours.",
+		// Reading a record nocx keeps about this session. It reaches no
+		// machine and changes nothing.
+		Effect: []content.Effect{content.EffectObserve},
+		// The task text and any summary come from a WORKER, which is an
+		// agent reading a machine. It is untrusted for the same reason
+		// session.read's output is.
+		OutputTrust:  OutputTrustUntrusted,
+		ResultBound:  ResultBound{MaxBytes: 16 << 10, Truncation: TruncationDropTail},
+		Deadline:     10 * time.Second,
+		Cancellation: CancellationReturnError,
+		// The SESSION, resolved from the run and never from an argument.
+		// This is A9's rule exactly: the holder's own resource lives inside
+		// the object, and the model has no way to name another. It is
+		// declared rather than left resourceless because a tool with no
+		// resource kind is offered under any grant carrying its effect, and
+		// "what is my session responsible for" is a question about a session
+		// — a grant that names none should not be offered it.
+		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
+		ResolveResources: resourceSession,
+		Executes:         InGo,
+		Params:           "workers.holdings.schema.json",
+		Narrow:           narrowWorkers,
+	},
+	{
+		Name:        "workers.spawn",
+		Description: "Start one worker in a terminal pane of its own and give it a task. Reach for this when a piece of work is genuinely separate and can run while you do something else — never to parallelise something you could just do. nocx watches the worker from the moment it starts, so you do not have to remember it: ask workers.holdings later and you will be told what it came to. Put the reporting instruction in the task — see the task field — or all you will ever be told is that the worker ended.",
+		// DELEGATE, and no eighth effect. Handing work to another agent is
+		// exactly what the seventh member of the closed lattice already
+		// names — it is in the grant_effects CHECK, in the policy contract
+		// and in the settings UI as "hand work to another agent". Adding a
+		// `spawn` member would cost eight coordinated edits to express what
+		// this one already expresses.
+		Effect:      []content.Effect{content.EffectDelegate},
+		OutputTrust: OutputTrustUntrusted,
+		ResultBound: ResultBound{MaxBytes: 4 << 10, Truncation: TruncationDropTail},
+		// Bounded by the enrolment interval rather than by the agent's work:
+		// this returns when the worker has STARTED, not when it has
+		// finished, and what happens after is the record's business.
+		Deadline:     60 * time.Second,
+		Cancellation: CancellationReturnError,
+		// The environment is WHERE the worker runs, and spawning into one
+		// outside the run's fence is scope expansion. The resolver names the
+		// only environment this slice can reach — the machine nocx itself
+		// runs on — so a fence that does not contain it refuses the call
+		// before any pane is minted.
+		ResourceKinds:    []content.ResourceKind{content.ResourceEnvironment},
+		ResolveResources: resourceLocalEnvironment,
+		Executes:         InGo,
+		Params:           "workers.spawn.schema.json",
+		Narrow:           narrowWorkers,
+	},
+	{
+		Name:        "workers.say",
+		Description: "Leave a message in one of your workers' mailboxes. It does not interrupt the worker: the message waits until the worker looks for it, so use this for what a worker will need next rather than for something that must happen now. You can only write to workers your own session started.",
+		// OBSERVE, and this is worth stating because SEND-INPUT looks like
+		// the obvious answer and is the wrong one. Send-input is TYPING into
+		// a pane, and it is what a human takeover suspends; leaving a
+		// message in a mailbox reaches nobody's keyboard, cannot answer a
+		// modal, and must go on working while a person is helping their own
+		// worker past a prompt. What it needs is membership, which every
+		// coordinator has over its own workers.
+		Effect:       []content.Effect{content.EffectObserve},
+		OutputTrust:  OutputTrustUntrusted,
+		ResultBound:  ResultBound{MaxBytes: 2 << 10, Truncation: TruncationDropTail},
+		Deadline:     10 * time.Second,
+		Cancellation: CancellationReturnError,
+		// The session, for workers.holdings' reason: the sender is the run's own
+		// session and the model has no way to name another.
+		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
+		ResolveResources: resourceSession,
+		Executes:         InGo,
+		Params:           "workers.say.schema.json",
+		Narrow:           narrowWorkers,
+	},
+	{
+		Name:        "workers.wait",
+		Description: "Hold your turn until one of your workers has something for you, then be told what your session holds. One call covers all of them: you wait on your worker, not on a worker. Nothing depends on your calling it — nocx watches your workers whether you wait or not — so a wait you skip costs you promptness and nothing else.",
+		// OBSERVE, for session.wait's reason and not by analogy with it:
+		// waiting exercises no authority of its own. It starts nothing, ends
+		// nothing and names nothing outside the session the grant already
+		// named; what it does is answer the question workers.holdings answers,
+		// later.
+		Effect:      []content.Effect{content.EffectObserve},
+		OutputTrust: OutputTrustUntrusted,
+		ResultBound: ResultBound{MaxBytes: 16 << 10, Truncation: TruncationDropTail},
+		// ABOVE THE WAIT'S OWN CEILING, not below it and not absent. The
+		// wait carries its own bound — `seconds`, at most 600 — and a
+		// declaration deadline under that would end the call while the worker
+		// was still inside the interval the caller asked for, which would
+		// look to a coordinator exactly like a worker that failed. session.wait
+		// gets to declare none because it runs in the renderer under the
+		// transport's run lease; an in-Go tool has no such second bound, so
+		// this one states a ceiling with a minute of slack over the largest
+		// wait anybody can ask for.
+		Deadline:         11 * time.Minute,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
+		ResolveResources: resourceSession,
+		Executes:         InGo,
+		Params:           "workers.wait.schema.json",
+		Narrow:           narrowWorkers,
+	},
+	{
+		Name:        "workers.inbox",
+		Description: "Read the mail your coordinator has left you. It takes no arguments beyond the position you are confirming: the mailbox is yours, and there is no way to name another. Reach for it when you start a turn and when you have finished a piece of work — mail waits, it does not interrupt, so what you were told is only told to you when you look.",
+		// OBSERVE, and for workers.say's reason read from the other end. Taking a
+		// message out of your own mailbox exercises no authority over anything
+		// but your own reading position: it starts nothing, ends nothing, and
+		// names nothing outside the participant the run already is.
+		Effect: []content.Effect{content.EffectObserve},
+		// A COORDINATOR wrote it, which is an agent, so it is untrusted for
+		// exactly the reason the coordinator's own view of a worker is.
+		OutputTrust:  OutputTrustUntrusted,
+		ResultBound:  ResultBound{MaxBytes: 16 << 10, Truncation: TruncationDropTail},
+		Deadline:     10 * time.Second,
+		Cancellation: CancellationReturnError,
+		// A PARTICIPANT, addressed as a sub-scope of ResourceWorkspace per
+		// A11 — see resourceParticipantWorkspace for why that is the kind and
+		// why it is the workspace rather than the pane. It is also what keeps
+		// this declaration off every coordinator's offer: nothing else mints a
+		// workspace scope, so only the grant the endpoint authorizer builds
+		// for a worker reaches this tool at all.
+		ResourceKinds:    []content.ResourceKind{content.ResourceWorkspace},
+		ResolveResources: resourceParticipantWorkspace,
+		Executes:         InGo,
+		Params:           "workers.inbox.schema.json",
+		// The OTHER capability. This is the only declaration that narrows to a
+		// participant, and it is what makes A8's two types load-bearing rather
+		// than decorative: a coordinator's run has no participant identity, so
+		// this narrow refuses it.
+		Narrow: narrowWorkerParticipant,
+	},
+	{
+		Name:        "workers.close",
+		Description: "End one of your workers. It stops the worker's process, so whatever it had not finished is not finished; reach for it when the work is done or is no longer wanted, never as a retry. You can only close workers your own session started.",
+		// MUTATE-DESTRUCTIVE, and it is not session.wait's `stop`. That one
+		// withdraws an authority already in flight — a command the person
+		// authorized, which stopping can only reduce. This ends a PROCESS
+		// THE PERSON MAY NEVER HAVE WATCHED START, whose work is lost with
+		// it and does not come back, and a person who wants to be asked
+		// before an agent kills things has a row to say so in.
+		Effect:           []content.Effect{content.EffectMutateDestructive},
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 2 << 10, Truncation: TruncationDropTail},
+		Deadline:         10 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
+		ResolveResources: resourceSession,
+		Executes:         InGo,
+		Params:           "workers.close.schema.json",
+		Narrow:           narrowWorkers,
+	},
 }
 
 // Assemble loads every declaration's params schema from fsys and builds the
@@ -852,9 +1106,49 @@ func assemble(fsys fs.FS, decls []Declaration) (Registry, error) {
 			problems = append(problems, fmt.Sprintf("%s: params schema in %q: %v", d.Name, d.Params, paramsErr))
 			continue
 		}
+		d.Narrow = withinGrantLifetime(d.Narrow)
 		tools = append(tools, Tool{Declaration: d, Effect: content.WorstEffect(d.Effect), ParamsSchema: params, ResultSchema: result})
 	}
 	return Registry{tools: tools}, joinProblems(problems)
+}
+
+// withinGrantLifetime is where ADR-0020 §5's "EXPIRING capability" is
+// enforced (nocx-1z1r1). The grant's deadline is stated at the mint
+// (content.EffectPolicy.AsGrant); this is the consumer that refuses one past
+// it.
+//
+// IT IS THE CONSTRUCTOR, NOT A CHECK BEFORE THE CALL. ADR-0028 decision 4
+// rejects the second shape — "a check before the call is advisory, because
+// the tool still holds a full session manager" — and expiry is the one bound
+// narrowing cannot express as a smaller object: there is no capability that
+// means "none". So the deadline is enforced by the constructor declining to
+// construct, which is the same guarantee by the same mechanism: the tool
+// cannot exceed the grant because it never has more than it, and past the
+// deadline it has nothing at all.
+//
+// IT WRAPS AT ASSEMBLY, ONCE, rather than inside each Narrow. The registry is
+// the only handle any consumer has on a constructor (Lookup and ForGrant
+// both return these tools), so a declaration added later inherits the bound
+// without its author remembering it, and there is no per-tool copy to drift.
+// The unwrapped functions stay reachable inside the package for their own
+// unit tests, which is what they are: a constructor, not authority.
+//
+// A CALL ALREADY RUNNING IS UNTOUCHED. This decides whether a NEW capability
+// exists; a capability handed to a tool while the grant was live goes on
+// working until that call ends. The grant is immutable once execution starts
+// (ADR-0020 §5), and a deadline that killed a running tool call mid-flight
+// would be a different and worse thing than one that refuses the next
+// attempt.
+func withinGrantLifetime(narrow Narrow) Narrow {
+	if narrow == nil {
+		return nil
+	}
+	return func(grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error) {
+		if grant.Expired(time.Now()) {
+			return nil, content.ErrGrantExpired
+		}
+		return narrow(grant, resources, runCtx)
+	}
 }
 
 // validateDeclaration checks a row's classification: every enum value must be

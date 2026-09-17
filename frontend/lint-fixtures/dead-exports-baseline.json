@@ -205,6 +205,11 @@
     },
     {
       "kind": "files",
+      "file": "src/generated/open.helperConsent.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
       "file": "src/generated/panes.move.ts",
       "symbol": ""
     },
@@ -395,11 +400,6 @@
     },
     {
       "kind": "types",
-      "file": "src/generated/policy.get.ts",
-      "symbol": "Rule"
-    },
-    {
-      "kind": "types",
       "file": "src/generated/shell.complete.ts",
       "symbol": "ShellEntry"
     },
@@ -431,6 +431,16 @@
     {
       "kind": "types",
       "file": "src/generated/tabs.reorder.ts",
+      "symbol": "Tab"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/workers.tabCreated.ts",
+      "symbol": "Pane"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/workers.tabCreated.ts",
       "symbol": "Tab"
     },
     {

@@ -25,9 +25,9 @@ type Channel interface {
 	ShellIntegrationReason() RefusalReason
 }
 
-// RemoteInstaller publishes the shell integration bundle on a remote host
-// over SSH/SFTP. Defined here (not in shellintegration) to avoid a cyclic
-// import.
+// RemoteInstaller puts the shell integration bundle on a remote host and
+// takes it away again. Defined here (not in shellintegration) to avoid a
+// cyclic import.
 //
 // It no longer answers "what should the session run": that was
 // RemoteStartCommand, the far-side `[ -x "$HOME/.nocx/launch" ]` guard, and
@@ -35,15 +35,30 @@ type Channel interface {
 // against the publish it runs concurrently with, so the session degraded
 // while the publish succeeded. The remote command now comes from the
 // launcher, unconditionally and whatever the publish did.
+//
+// # Why the publish and the removal now name the same thing
+//
+// The two halves rode different transports, and that asymmetry was the epic's
+// state rather than a preference (nocx-50w7p.15, closed by nocx-50w7p.5). The
+// PUBLISH is this machine's helper's: the helper dials the far host, answers
+// where the account's home is, and opens the sftp channel the bundle travels on
+// — all on the one pooled connection AD-4 keys by destination. So the publish
+// takes what a helper is handed and nothing more: the address the caller named
+// and the options it resolved with, exactly as the pane's own open does, because
+// a different naming of one destination is a different pool key and therefore a
+// second authentication.
+//
+// The REMOVAL was the coordinator's own dial — a pooled connection held here and
+// the raw client handed to the carrier — which made it the last connection this
+// process made and the last reason it held a client at all. It rides the same
+// lease and the same channel now, so this interface names a DESTINATION on both
+// halves and no *gossh.Client appears in it. That is what let the whole dial
+// path leave this package's untagged build: an interface that takes a
+// *gossh.Client is an interface that cannot be satisfied by a build without one.
 type RemoteInstaller interface {
-	EnsureInstalledRemote(ctx context.Context, sshClient *gossh.Client, remoteHome string) error
-	GetRemoteHome(sshClient *gossh.Client) (string, error)
-	// UninstallRemote removes the committed integration bundle on the host,
-	// over the SFTP carrier, and reports the two lists: root-relative paths
-	// removed and root-relative paths the user modified (left in place).
-	// Defined here with the other carrier methods so internal/ssh can own
-	// the dial-and-call (P10) without depending on shellintegration.
-	UninstallRemote(ctx context.Context, sshClient *gossh.Client, remoteHome string) (removed, conflicts []string, err error)
+	// EnsureInstalledRemote publishes the bundle into the remote account's
+	// home, as the far side reports it.
+	EnsureInstalledRemote(ctx context.Context, host string, opts ...ConnectOption) error
 }
 
 // modeAllowsIntegration reports whether the resolved destination mode
@@ -135,9 +150,13 @@ const (
 	// only channel for a reason was the session-open ack and this answer
 	// arrives ten seconds after it.
 	ReasonHandshakeTimeout RefusalReason = "handshake-timeout"
-	// ReasonStartupDidNotReturn means the shell started, nocx's rcfile began
-	// executing, and the user's own startup file never gave control back —
-	// so the install line after it was never reached (nocx-yww2). It is a
+	// ReasonStartupDidNotReturn means the shell started and the user's own
+	// startup file never gave control back, so nocx's install line after it
+	// was never reached (nocx-yww2). It used to be reached two ways — the
+	// rcfile's own progress descriptor falling silent, and the process
+	// observer seeing the shell replaced — and since nocx-ie23r.3 only the
+	// second: the descriptor needed the coordinator to fork the shell, and
+	// this machine's helper forks it now. It is a
 	// STAGE, deliberately not a cause: `exec` into a foreign terminal
 	// wrapper is the case that was measured, but a plain `exit`, a
 	// `tmux attach` that never returns, a keychain dialog and a shell that
@@ -339,6 +358,15 @@ const (
 type LaunchOptions struct {
 	SessionID string // NOCX_SESSION_ID for this session; never empty when Enhanced
 	Enhanced  bool   // request marker-only prompt mode (ADR-0006)
+	// The two far-host paths an agent pane's launch carries — the installed
+	// helper generation's executable and the far path its tool socket answers
+	// on — are NOT here, and their absence is deliberate (nocx-50w7p.14). A
+	// coordinator does not dial an ssh connection any more: this machine's
+	// helper does, and it is the party that renders the launch, names the far
+	// tool socket and forwards it (internal/helper/session's ssh spawner).
+	// Nothing in this package can reach a far host's filesystem, so a field
+	// here could only ever be empty — the surface nocx-e2bws was filed about.
+	//
 	// The authenticated lifecycle channel (ADR-0024). Capability is the
 	// per-epoch bearer: it travels as a bounded FRAME on the session
 	// channel and reaches the far shell through an inherited, already
@@ -440,16 +468,21 @@ type SSH interface {
 type ConnectOption func(*ConnectConfig)
 
 type ConnectConfig struct {
-	User            string
-	Port            int
-	KeyFile         string
-	UseAgent        bool
-	Cols            uint16
-	Rows            uint16
-	XPixel          uint16
-	YPixel          uint16
-	AuthMethods     []gossh.AuthMethod
-	KeyExchanges    []string
+	User         string
+	Port         int
+	KeyFile      string
+	UseAgent     bool
+	Cols         uint16
+	Rows         uint16
+	XPixel       uint16
+	YPixel       uint16
+	AuthMethods  []gossh.AuthMethod
+	KeyExchanges []string
+	// RemoteInstaller publishes the integration bundle on the far host, over
+	// the transport the carrier owns: this machine's helper since
+	// nocx-50w7p.15, which opens an sftp channel on the destination's pooled
+	// connection and writes the bundle under the account's own $HOME. Nil
+	// means this connection publishes nothing.
 	RemoteInstaller RemoteInstaller
 
 	// RemoteLauncher builds the start command for an integrated remote shell
@@ -457,7 +490,7 @@ type ConnectConfig struct {
 	// RemoteCommand (which refuses a command-line remote command); when it
 	// declines, openShell starts a plain shell and surfaces the reason on the
 	// channel. The RemoteInstaller is consulted before it in script mode so
-	// a saved connection publishes the bundle over SFTP.
+	// a saved connection publishes the bundle.
 	RemoteLauncher RemoteLauncher
 
 	// RemoteLifecycle establishes the authenticated lifecycle channel for
@@ -470,12 +503,12 @@ type ConnectConfig struct {
 	// prompt. Nil means no channel.
 	RemoteLifecycle RemoteLifecycle
 
-	// DesiredMode is the resolved destination mode (auto|raw|script|relay,
+	// DesiredMode is the resolved destination mode (auto|raw|script|helper,
 	// nocx-mlm7) stamped by the profile resolver. It is the open-time gate,
 	// read through profile.DesiredMode.DeliversScripts: auto (the default —
 	// ADR-0033), script, and empty (the direct-host default) publish the
 	// bundle and integrate; raw publishes nothing and opens a plain shell;
-	// relay does not integrate either, which is nocx-7k8ma. The transport
+	// helper does not integrate either, which is nocx-7k8ma. The transport
 	// also carries it verbatim to the open ack so the renderer sees the
 	// AXIS value — every mode must stay distinguishable from every other
 	// even where two of them gate integration the same way.
@@ -548,6 +581,14 @@ type ConnectConfig struct {
 	// password prompt can name which connection it is asking about
 	// (nocx-s8jn). Empty for direct-host opens, which never raise prompts.
 	ConnectionName string
+	// ProfileID is the saved profile's id, carried alongside ConnectionName
+	// for the same reason and by the same rule (nocx-y6fh7 item 4, round 3):
+	// a helper-hosted dial's own interactive rung echoes both back on its
+	// password ask, so the coordinator can bind a remembered password to
+	// the right profile (ADR-0017) whichever of this package's many
+	// destination-resolving callers the ask travelled through. Empty for a
+	// direct-host open, which has no profile to bind to.
+	ProfileID string
 
 	// PasswordRequester asks the user for a connection password when the
 	// server challenges and no stored material can answer. It powers the
@@ -700,9 +741,9 @@ func WithSessionID(id string) ConnectOption {
 	return func(c *ConnectConfig) { c.SessionID = id }
 }
 
-// WithDesiredMode sets the resolved destination mode (raw|script|relay,
+// WithDesiredMode sets the resolved destination mode (raw|script|helper,
 // nocx-mlm7), the open-time gate shellStartCommand consults: script (or
-// empty — the pre-mode default) publishes and integrates; raw and relay
+// empty — the pre-mode default) publishes and integrates; raw and helper
 // open a plain shell and publish nothing.
 func WithDesiredMode(mode string) ConnectOption {
 	return func(c *ConnectConfig) { c.DesiredMode = mode }
@@ -723,8 +764,11 @@ func WithShell(shell ShellKind) ConnectOption {
 
 // WithRemoteInstaller injects the bundle publisher for the remote session.
 // It remains an EXPLICIT opt-in, so a connection that does not ask for it
-// never SFTP-mutates a remote home (nocx-r52q). What it publishes no longer
+// never touches a remote home (nocx-r52q). What it publishes no longer
 // decides what the session runs — the carrier is emitted either way.
+//
+// The carrier is handed the destination and publishes over ITS OWN transport:
+// this machine's helper, since nocx-50w7p.15 (see RemoteInstaller).
 func WithRemoteInstaller(ri RemoteInstaller) ConnectOption {
 	return func(c *ConnectConfig) { c.RemoteInstaller = ri }
 }
@@ -743,6 +787,12 @@ func WithConnectionName(name string) ConnectOption {
 	return func(c *ConnectConfig) { c.ConnectionName = name }
 }
 
+// WithProfileID sets the profile id the connection was opened from,
+// alongside WithConnectionName and for the same reason.
+func WithProfileID(id string) ConnectOption {
+	return func(c *ConnectConfig) { c.ProfileID = id }
+}
+
 // WithPasswordRequester wires the connection-password ask into the
 // connect-time config. The session path decomposes a resolver-built
 // ConnectConfig into options and rebuilds it, so without this option the
@@ -754,10 +804,15 @@ func WithPasswordRequester(r ConnectionPasswordRequester) ConnectOption {
 
 // WithoutPasswordPrompt takes the prompt rung back off a dial that has
 // inherited it. It exists for PROBES: a probe answers a question the product
-// asked itself, so it may not stop and ask a person — the same boundary
-// firstAuthMethod already draws for the connectivity probe, which reports the
-// prompt rung as needing interaction rather than firing it
-// (TestPromptRung_ProbeNeverFiresTheAsk).
+// asked itself, so it may not stop and ask a person. It is the ONE mechanism
+// that draws that boundary — the coordinator's own connectivity probe
+// (RealClient.ProbeConfig, and with it firstAuthMethod) went with the dials
+// when every dial became the helper's (nocx-50w7p.10) — and the settings probe
+// and the install path's probe both append it (sshOverHelper.ProbeWithResult,
+// helper_git.go's platform probe), so a profile whose only credential is the
+// interactive rung declines at resolution
+// (ErrNoAuthMethod, from ResolveTarget's own ladder) rather than raising a
+// dialog nobody asked for.
 //
 // It is an option rather than a flag on the requester because the probe's
 // options are the SESSION's options: they are built once, for the destination,

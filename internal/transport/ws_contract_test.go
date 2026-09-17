@@ -1433,6 +1433,180 @@ func TestConnectionsTrustHostKey_OverTheWireConformsToContract(t *testing.T) {
 	}
 }
 
+func TestConnectionsSetIntegrationMethod_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "connections.setIntegrationMethod.schema.json")
+	for _, tc := range []integrationMethodResult{
+		{Fingerprint: "SHA256:abc", Method: "raw"},
+		{Fingerprint: "SHA256:abc", Method: "script", ProfileID: "ssh-1"},
+		{Fingerprint: "SHA256:abc", Method: "helper", ProfileID: "ssh-1"},
+	} {
+		raw, err := json.Marshal(tc)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		validateJSON(t, schema, raw, "connections.setIntegrationMethod result ("+tc.Method+")")
+	}
+}
+
+func TestConnectionsSetIntegrationMethod_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "connections.setIntegrationMethod.schema.json")
+	granter := &fakeHelperConsentGranter{}
+	srv := startIntegrationMethodServer(t, granter, nil)
+	conn := connectWS(t, srv)
+	defer conn.Close() //nolint:errcheck
+
+	resp := jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
+		"fingerprint": "SHA256:abc",
+		"method":      "helper",
+	})
+	var envelope struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct{}       `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("unexpected RPC error: %s", resp)
+	}
+	validateJSON(t, schema, envelope.Result, "connections.setIntegrationMethod result over the wire")
+}
+
+// ── the connect-time helper ask (ADR-0068) ──────────────────────────────
+
+// consentAskHelperOpener answers a remote destination with a scripted
+// ErrHelperConsentNeeded, standing in for internal/app's real connect-time
+// decision (helper_git.go's openHoldingLease — that decision has its own
+// unit tests in that package, against the resolver and the consent store
+// directly). What THIS proves is the wire half only: what answerOpenFailure
+// builds from that error is what the schema promises and what the real
+// socket actually sends — never a payload a test constructed itself.
+type consentAskHelperOpener struct {
+	err error
+}
+
+func (o *consentAskHelperOpener) OpenHosted(_ context.Context, cfg session.Config, _ string) (HostedSessionOpen, bool, error) {
+	if cfg.Kind != session.KindRemote {
+		return HostedSessionOpen{}, false, nil
+	}
+	return HostedSessionOpen{}, true, o.err
+}
+
+// TestOpenHelperConsentAsk_HelperOnly_OverTheWireConformsToContract: the key
+// is already trusted (Cause is nil) — the wire carries the helper question
+// alone, with no hostKey field at all.
+func TestOpenHelperConsentAsk_HelperOnly_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "open.helperConsent.schema.json")
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	ws := NewWSServer(logger, reg,
+		WithHelperSessionOpener(&consentAskHelperOpener{
+			err: NewHelperConsentNeeded("host.example.com:22", "SHA256:trusted", nil),
+		}),
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(string) (string, *ssh.ConnectConfig, error) {
+				return "host.example.com", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	resp := jsonrpcCall(t, conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "kind": "ssh", "profileId": "ssh:test:1",
+	})
+	var envelope struct {
+		Error *struct {
+			Code    int             `json:"code"`
+			Message string          `json:"message"`
+			Data    json.RawMessage `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, resp)
+	}
+	if envelope.Error == nil {
+		t.Fatalf("expected an open failure carrying the helper ask, got %s", resp)
+	}
+	if envelope.Error.Code != -32603 {
+		t.Errorf("code = %d, want -32603", envelope.Error.Code)
+	}
+	validateJSON(t, schema, envelope.Error.Data, "open error data (helper-only ask)")
+	var data helperConsentData
+	if err := json.Unmarshal(envelope.Error.Data, &data); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !data.HelperAsk || data.Fingerprint != "SHA256:trusted" || data.HostKey != nil {
+		t.Errorf("data = %+v, want helperAsk with the trusted fingerprint and no hostKey", data)
+	}
+}
+
+// TestOpenHelperConsentAsk_WithHostKey_OverTheWireConformsToContract: the
+// key is ALSO unknown, so the SAME refusal carries the host-key evidence
+// beside the helper question — one dialog, never two in sequence (owner's
+// decision, 2026-09-16).
+func TestOpenHelperConsentAsk_WithHostKey_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "open.helperConsent.schema.json")
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	cause := &ssh.ErrUnknownHostKey{
+		Addr:           "host.example.com:22",
+		KnownHostsAddr: "nocx-v1-route:22",
+		KeyAlgo:        "ssh-ed25519",
+		Fingerprint:    "SHA256:offered",
+		Key:            []byte("offered-key-blob"),
+	}
+	ws := NewWSServer(logger, reg,
+		WithHelperSessionOpener(&consentAskHelperOpener{
+			err: NewHelperConsentNeeded("host.example.com:22", "SHA256:offered", cause),
+		}),
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(string) (string, *ssh.ConnectConfig, error) {
+				return "host.example.com", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	resp := jsonrpcCall(t, conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "kind": "ssh", "profileId": "ssh:test:1",
+	})
+	var envelope struct {
+		Error *struct {
+			Code int             `json:"code"`
+			Data json.RawMessage `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, resp)
+	}
+	if envelope.Error == nil {
+		t.Fatalf("expected an open failure carrying the combined ask, got %s", resp)
+	}
+	validateJSON(t, schema, envelope.Error.Data, "open error data (combined ask)")
+	var data helperConsentData
+	if err := json.Unmarshal(envelope.Error.Data, &data); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !data.HelperAsk || data.HostKey == nil {
+		t.Fatalf("data = %+v, want helperAsk with nested hostKey evidence", data)
+	}
+	if data.HostKey.Fingerprint != "SHA256:offered" || data.HostKey.Changed {
+		t.Errorf("hostKey = %+v, want the offered, unchanged evidence", data.HostKey)
+	}
+}
+
 // ── history.query ─────────────────────────────────────────────────────────
 
 // The DTO's own conformance: field tags, omitempty behaviour, null-vs-omitted
@@ -1898,7 +2072,7 @@ func TestOpen_DTOConformsToContract(t *testing.T) {
 	for name, mode := range map[string]string{
 		"script": "script",
 		"raw":    "raw",
-		"relay":  "relay",
+		"helper": "helper",
 	} {
 		raw, err := json.Marshal(openResult{
 			SessionID:     "0123456789abcdef0123456789abcdef",
@@ -2038,6 +2212,7 @@ func TestOpen_OverTheWireConformsToContract(t *testing.T) {
 
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), reg,
+		sshHelperOpt(reg),
 		WithProfileResolver(&openProfileResolver{host: "host.example.com"}),
 		WithRemoteLauncher(&fakeRemoteLauncher{}),
 	)
@@ -2068,12 +2243,24 @@ func TestOpen_OverTheWireConformsToContract(t *testing.T) {
 	}
 	validateJSON(t, schema, envelope.Result, "open result (real socket)")
 	var got struct {
-		SessionID     string     `json:"sessionId"`
-		DesiredMode   string     `json:"desiredMode"`
-		EffectiveSize sizeResult `json:"effectiveSize"`
+		SessionID         string     `json:"sessionId"`
+		DesiredMode       string     `json:"desiredMode"`
+		EffectiveSize     sizeResult `json:"effectiveSize"`
+		AwaitsIntegration bool       `json:"awaitsIntegration"`
 	}
 	if err := json.Unmarshal(envelope.Result, &got); err != nil {
 		t.Fatalf("decode: %v", err)
+	}
+
+	// The channel refuses at open (ReasonNoSecureTemp below), so this
+	// session enters the axis already resolved to `conventional` rather than
+	// `starting` — the ack must say so honestly rather than promise a wait
+	// that closes on its very next fact (nocx-ui8q6.6). It is still true
+	// that a session.integrationChanged is coming (asserted below); false
+	// here says only that the renderer has nothing to hold the grid FOR,
+	// because isAwaitingIntegration never gates anything but `starting`.
+	if got.AwaitsIntegration {
+		t.Error("awaitsIntegration = true, want false: this session was already resolved to conventional at open, not left starting")
 	}
 
 	// The ack's size is READ OFF THE SESSION, not echoed from the params
@@ -2143,6 +2330,274 @@ func TestOpen_OverTheWireConformsToContract(t *testing.T) {
 	opened := sizeResult{Cols: cfg.Cols, Rows: cfg.Rows, XPixel: cfg.XPixel, YPixel: cfg.YPixel}
 	if want := sizeResultOf(sess.EffectiveSize()); opened != want {
 		t.Errorf("ssh channel opened at %+v, want the session's effective size %+v", opened, want)
+	}
+}
+
+// TestOpen_AwaitsIntegrationWhenStarting is the other half of nocx-ui8q6.6's
+// contract: TestOpen_OverTheWireConformsToContract proves awaitsIntegration
+// is false when this open already resolved to conventional; this proves it
+// is true when the open leaves the session `starting`, off the real socket,
+// and — the assertion this bead exists for — that the field's promise and
+// the actual first session.integrationChanged agree. Before this field, a
+// renderer reading the ack alone could not tell "a fact is coming" from "one
+// never will", which is exactly the interval nocx-ui8q6.1's grid-hiding
+// depended on and could not close from the ack side.
+//
+// integrationPTYFactory (ws_integration_test.go) registers the session as
+// `starting` from inside NewPTY — the open call itself — which is the real
+// composition root's own shape: the local factory is the only thing that
+// knows which binary it exec'd, and it says so before the open that spawned
+// it has even returned.
+func TestOpen_AwaitsIntegrationWhenStarting(t *testing.T) {
+	schema := loadSchema(t, "open.schema.json")
+	logger := log.NewSlogAdapter(nil)
+	f := &integrationPTYFactory{stub: pty.NewStub(logger)}
+	ws := NewWSServer(logger, session.New(logger, f))
+	f.ws.Store(ws)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCall(t, conn, "open", map[string]any{"cols": 80, "rows": 24})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("open: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "open result (starting)")
+	var got struct {
+		SessionID         string `json:"sessionId"`
+		AwaitsIntegration bool   `json:"awaitsIntegration"`
+	}
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.AwaitsIntegration {
+		t.Fatal("awaitsIntegration = false, want true: the factory registered this session as starting before the ack was marshalled")
+	}
+
+	// The promise the ack just made, kept: the first fact this session's own
+	// subscriber hears is the one awaitsIntegration said was coming.
+	first := readIntegration(t, conn, got.SessionID)
+	if first.Status != IntegrationStarting {
+		t.Errorf("first session.integrationChanged status = %q, want %q — the ack promised one and this is it",
+			first.Status, IntegrationStarting)
+	}
+}
+
+// TestOpen_AwaitsIntegrationFalseWhenNeverAsked proves the third case: a
+// plain local open with no launch-time integration record at all — the
+// production shape of a raw-mode session, or any pane whose factory never
+// calls RegisterIntegration — states awaitsIntegration false, and no
+// session.integrationChanged notification follows it. Absence is
+// "conventional by design" (registerOpenedIntegration's own words), and this
+// is the ack-side half of that: a renderer must never be left waiting on a
+// fact that registerOpenedIntegration decided, at open, would never come.
+func TestOpen_AwaitsIntegrationFalseWhenNeverAsked(t *testing.T) {
+	schema := loadSchema(t, "open.schema.json")
+	logger := log.NewSlogAdapter(nil)
+	ws := NewWSServer(logger, newRegWithStub(logger))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCall(t, conn, "open", map[string]any{"cols": 80, "rows": 24})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("open: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "open result (never asked)")
+	var got struct {
+		SessionID         string `json:"sessionId"`
+		AwaitsIntegration bool   `json:"awaitsIntegration"`
+	}
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.AwaitsIntegration {
+		t.Fatal("awaitsIntegration = true, want false: nothing registered this session onto the axis")
+	}
+
+	// Nothing is coming: a short, bounded wait finding no notification is
+	// the honest way to check an absence over a socket that could otherwise
+	// hang forever waiting for a frame nobody is going to send.
+	deadline := time.Now().Add(200 * time.Millisecond)
+	if msg, err := awaitFrame(conn, deadline, isNotification("session.integrationChanged")); err == nil {
+		t.Errorf("received session.integrationChanged for a session that never entered the axis: %s", msg)
+	}
+}
+
+// TestAttach_AwaitsIntegrationWhenStarting is attach's own half of
+// nocx-ui8q6.6's contract (nocx-ty0hc). The open ack precedes the open
+// handler's own first emission; the attach ack precedes replayIntegration's
+// resend for exactly the same reason (AD-7 orders every session-scoped
+// notification after its ack), so a renderer that attaches to a session
+// still `starting` needs the same promise the open ack already carries —
+// without it, a pane that reclaims or reattaches to a `starting` session has
+// nothing to hold its grid closed for the one frame before replayIntegration
+// arrives.
+//
+// The session is opened and drained on connA first so the test observes a
+// session that is STILL starting (nothing else has moved the axis), then
+// attached from connB — a fresh connection that has seen no fact for this
+// session yet, exactly the position a reclaiming pane is in.
+func TestAttach_AwaitsIntegrationWhenStarting(t *testing.T) {
+	schema := loadSchema(t, "attach.schema.json")
+	logger := log.NewSlogAdapter(nil)
+	f := &integrationPTYFactory{stub: pty.NewStub(logger)}
+	ws := NewWSServer(logger, session.New(logger, f))
+	f.ws.Store(ws)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	connA := connectWS(t, ws)
+	defer func() { _ = connA.Close() }()
+	openResp := jsonrpcCall(t, connA, "open", map[string]any{"cols": 80, "rows": 24})
+	var openEnvelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(openResp, &openEnvelope); err != nil {
+		t.Fatalf("unmarshal open: %v\nraw: %s", err, string(openResp))
+	}
+	if openEnvelope.Error != nil {
+		t.Fatalf("open: %+v", openEnvelope.Error)
+	}
+	var opened struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(openEnvelope.Result, &opened); err != nil {
+		t.Fatalf("decode open: %v", err)
+	}
+	// The open handler's own post-ack emission, drained here so the axis is
+	// known-starting rather than raced (integrationPTYFactory's own reason).
+	if first := readIntegration(t, connA, opened.SessionID); first.Status != IntegrationStarting {
+		t.Fatalf("first status = %q, want starting", first.Status)
+	}
+
+	connB := connectWS(t, ws)
+	defer func() { _ = connB.Close() }()
+	resp := jsonrpcCallWithID(t, connB, "attach", map[string]any{
+		"sessionId": opened.SessionID,
+		"offset":    0,
+	}, 2)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal attach: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("attach: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "attach result (starting)")
+	var got struct {
+		AwaitsIntegration bool `json:"awaitsIntegration"`
+	}
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.AwaitsIntegration {
+		t.Fatal("awaitsIntegration = false, want true: the session is still starting at the moment of this attach")
+	}
+
+	// The promise the attach ack just made, kept: the fact replayIntegration
+	// resends to THIS connection is the one the ack said was coming.
+	replayed := awaitIntegration(t, connB, opened.SessionID, IntegrationStarting)
+	if replayed.Status != IntegrationStarting {
+		t.Errorf("replayed status = %q, want %q — the ack promised one and this is it",
+			replayed.Status, IntegrationStarting)
+	}
+}
+
+// TestAttach_AwaitsIntegrationFalseWhenNeverAsked is attach's other half: a
+// session with no launch-time integration record at all states
+// awaitsIntegration false on its attach ack too, and — like the open half —
+// no session.integrationChanged notification ever follows it, on the
+// attaching connection or any other.
+func TestAttach_AwaitsIntegrationFalseWhenNeverAsked(t *testing.T) {
+	schema := loadSchema(t, "attach.schema.json")
+	logger := log.NewSlogAdapter(nil)
+	ws := NewWSServer(logger, newRegWithStub(logger))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	connA := connectWS(t, ws)
+	defer func() { _ = connA.Close() }()
+	openResp := jsonrpcCall(t, connA, "open", map[string]any{"cols": 80, "rows": 24})
+	var openEnvelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(openResp, &openEnvelope); err != nil {
+		t.Fatalf("unmarshal open: %v\nraw: %s", err, string(openResp))
+	}
+	if openEnvelope.Error != nil {
+		t.Fatalf("open: %+v", openEnvelope.Error)
+	}
+	var opened struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(openEnvelope.Result, &opened); err != nil {
+		t.Fatalf("decode open: %v", err)
+	}
+
+	connB := connectWS(t, ws)
+	defer func() { _ = connB.Close() }()
+	resp := jsonrpcCallWithID(t, connB, "attach", map[string]any{
+		"sessionId": opened.SessionID,
+		"offset":    0,
+	}, 2)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal attach: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("attach: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "attach result (never asked)")
+	var got struct {
+		AwaitsIntegration bool `json:"awaitsIntegration"`
+	}
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.AwaitsIntegration {
+		t.Fatal("awaitsIntegration = true, want false: nothing registered this session onto the axis")
+	}
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	if msg, err := awaitFrame(connB, deadline, isNotification("session.integrationChanged")); err == nil {
+		t.Errorf("received session.integrationChanged for a session that never entered the axis: %s", msg)
 	}
 }
 
@@ -2863,145 +3318,6 @@ func TestShellFootprintUninstall_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if len(got.Conflicts) != 1 || got.Conflicts[0] != "integration/v10/nocx.bash" {
 		t.Errorf("conflicts = %v, want the capability's list verbatim", got.Conflicts)
-	}
-}
-
-// ── shell.footprint.consent ─────────────────────────────────────────────
-
-func TestShellFootprintConsent_DTOConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "shell.footprint.consent.schema.json")
-	raw, err := json.Marshal(shellFootprintConsentResult{State: "granted"})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	validateJSON(t, schema, raw, "shell.footprint.consent DTO")
-}
-
-// fingerprintChannel is a StubChannel that carries a host public-key
-// fingerprint — the session-level fact shell.footprint.consent keys the
-// grant by (consent design §3.2).
-type fingerprintChannel struct {
-	*ssh.StubChannel
-	fingerprint string
-}
-
-func (c *fingerprintChannel) HostKeyFingerprint() string { return c.fingerprint }
-
-// TestShellFootprintConsent_OverTheWireConformsToContract runs the real
-// method off the real socket: an SSH session whose machine has no answer
-// is granted through the RPC, the result validates against the schema, and
-// the grant is durable — a store reconstruction reads it back.
-func TestShellFootprintConsent_OverTheWireConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "shell.footprint.consent.schema.json")
-	ctx := context.Background()
-	logger := log.NewSlogAdapter(nil)
-	dir := t.TempDir()
-	consents := consent.NewStore(logger, storage.NewDocumentStore(dir), "consent.json")
-	reg := newRegWithStub(logger)
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			return &fingerprintChannel{StubChannel: ssh.NewStubChannel(logger), fingerprint: "SHA256:consented"}, nil
-		},
-	})
-	ws := NewWSServer(logger, reg,
-		WithHelperConsentStore(consents),
-		WithProfileResolver(&fakeResolver{
-			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
-				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
-			},
-		}),
-	)
-	if err := ws.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer func() { _ = ws.Stop(ctx) }()
-	conn := connectWS(t, ws)
-	defer func() { _ = conn.Close() }()
-
-	sid := openSSHSession(t, conn, 1)
-	resp := vaultCall(t, conn, "shell.footprint.consent", map[string]any{"sessionId": sid}, 2)
-	if resp.Error != nil {
-		t.Fatalf("shell.footprint.consent: %+v", resp.Error)
-	}
-	validateJSON(t, schema, resp.Result, "shell.footprint.consent result (real socket)")
-
-	// The grant is durable: a store reconstructed over the same directory
-	// reads the answer the RPC persisted.
-	again := consent.NewStore(logger, storage.NewDocumentStore(dir), "consent.json")
-	if ans, ok := again.Lookup("SHA256:consented"); !ok || ans != consent.Granted {
-		t.Fatalf("Lookup after the RPC and a store reopen = %q/%v, want granted", ans, ok)
-	}
-}
-
-// TestShellFootprintConsent_OwnershipAndKeyRefusals: the accept is
-// authorised by connState (a connection grants only for a session it
-// owns) and a session with no host key never grants (consent design §3.2).
-func TestShellFootprintConsent_OwnershipAndKeyRefusals(t *testing.T) {
-	ctx := context.Background()
-	logger := log.NewSlogAdapter(nil)
-	consents := consent.NewStore(logger, storage.NewDocumentStore(t.TempDir()), "consent.json")
-	reg := newRegWithStub(logger)
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			// No fingerprint: the stub channel carries none.
-			return ssh.NewStubChannel(logger), nil
-		},
-	})
-	ws := NewWSServer(logger, reg,
-		WithHelperConsentStore(consents),
-		WithProfileResolver(&fakeResolver{
-			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
-				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
-			},
-		}),
-	)
-	if err := ws.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer func() { _ = ws.Stop(ctx) }()
-	conn := connectWS(t, ws)
-	defer func() { _ = conn.Close() }()
-	sid := openSSHSession(t, conn, 1)
-
-	// A session whose host key was never captured must not grant.
-	if resp := vaultCall(t, conn, "shell.footprint.consent", map[string]any{"sessionId": sid}, 2); resp.Error == nil || resp.Error.Code != -32602 {
-		t.Fatalf("consent for a keyless session = %+v, want the -32602 key refusal", resp)
-	}
-	// Missing sessionId: -32602.
-	if resp := vaultCall(t, conn, "shell.footprint.consent", map[string]any{}, 3); resp.Error == nil || resp.Error.Code != -32602 {
-		t.Fatalf("consent without sessionId = %+v, want -32602", resp)
-	}
-}
-
-// TestShellFootprintConsent_UnwiredStoreRefuses: a server with no consent
-// store wired refuses the accept — a consent prompt offered by a server
-// that cannot record the answer would fail at click time (AGENTS.md rule
-// 1).
-func TestShellFootprintConsent_UnwiredStoreRefuses(t *testing.T) {
-	ctx := context.Background()
-	logger := log.NewSlogAdapter(nil)
-	reg := newRegWithStub(logger)
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			return ssh.NewStubChannel(logger), nil
-		},
-	})
-	ws := NewWSServer(logger, reg,
-		WithProfileResolver(&fakeResolver{
-			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
-				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
-			},
-		}),
-	)
-	if err := ws.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer func() { _ = ws.Stop(ctx) }()
-	conn := connectWS(t, ws)
-	defer func() { _ = conn.Close() }()
-	sid := openSSHSession(t, conn, 1)
-	if resp := vaultCall(t, conn, "shell.footprint.consent", map[string]any{"sessionId": sid}, 2); resp.Error == nil || resp.Error.Code != -32603 {
-		t.Fatalf("consent without a store = %+v, want -32603", resp)
 	}
 }
 
@@ -4028,7 +4344,6 @@ func TestGitOpen_DTOConformsToContract(t *testing.T) {
 		"git unavailable":  {State: "gitUnavailable"},
 		"git too old":      {State: "gitTooOld", GitVersion: "2.20.1"},
 		"no cwd":           {State: "noCwd"},
-		"consent required": {State: "consentRequired"},
 		"unsupported platform": {
 			State:   "unsupportedPlatform",
 			Message: "we build no helper for darwin/amd64",
@@ -4370,6 +4685,7 @@ func TestGitOpen_OverTheWireConformsToContract_SSHHelper(t *testing.T) {
 	})
 	helper := newStubGitFactory()
 	ws := NewWSServer(logger, reg,
+		sshHelperOpt(reg),
 		WithGitRegistry(registry.New()),
 		WithGitRepoFactory(newStubGitFactory()),
 		WithGitHelperFactory(func(session.Session) GitOpenSelection {
@@ -4898,162 +5214,6 @@ func TestLifecycleRecoverAck_OverTheWireConformsToContract(t *testing.T) {
 	validateJSON(t, schema, env.Result, "lifecycle.recoverAck result (real socket)")
 }
 
-// ── lifecycle.establishAck (ADR-0024 decision 9) ─────────────────────────
-
-// The DTO's own conformance: the result is exactly {ok: true} — the schema
-// pins the key set and the value, so a future refactor that adds fields to
-// the acknowledgement fails here before any renderer could depend on it.
-func TestLifecycleEstablishAck_DTOConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "lifecycle.establishAck.schema.json")
-	raw, err := json.Marshal(map[string]bool{"ok": true})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	validateJSON(t, schema, raw, "lifecycle.establishAck DTO")
-}
-
-// The real method through the real socket: a pending establishment, the
-// renderer's exact five-field payload (the generation the published fact
-// carried), the actual result bytes validated against the schema — and the
-// accept reaching the transport ONLY after that acknowledgement, never
-// before (decision 9).
-func TestLifecycleEstablishAck_OverTheWireConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "lifecycle.establishAck.schema.json")
-	kernel := lifecycle.New(lifecycle.Options{})
-	pub := lifecyclepub.New(kernel)
-	e := newLifecycleTestEnv(t, WithLifecyclePublisher(pub))
-	pub.SetEmitter(e.ws)
-	sid := e.openSession(t, 1)
-	const lane = lifecycle.LaneID("lane-1")
-	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
-	port := &lifecycleRecordingPort{}
-	if err := pub.BindTransport("T", port); err != nil {
-		t.Fatal(err)
-	}
-	h, err := pub.RequestDomain(lane, nil, "T")
-	if err != nil {
-		t.Fatalf("RequestDomain: %v", err)
-	}
-	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
-	raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
-	var ready lifecyclepub.Fact
-	if err := json.Unmarshal(raw, &ready); err != nil {
-		t.Fatalf("decode prompt_ready: %v", err)
-	}
-	if ready.Generation == "" {
-		t.Fatal("the published prompt_ready fact must carry the establishment generation")
-	}
-	// No acknowledgement yet: the accept has not reached the transport.
-	if got := port.kinds(); len(got) != 0 {
-		t.Fatalf("accept flushed before the acknowledgement: %v", got)
-	}
-	resp := jsonrpcCallWithID(t, e.conn, "lifecycle.establishAck", map[string]any{
-		"sessionId": sid, "lane": string(lane), "domain": string(h.Domain),
-		"epoch": h.Epoch, "generation": ready.Generation,
-	}, 2)
-	var env struct {
-		Result json.RawMessage  `json:"result"`
-		Error  *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(resp, &env); err != nil {
-		t.Fatalf("establishAck: unmarshal: %v\nraw: %s", err, resp)
-	}
-	if env.Error != nil {
-		t.Fatalf("establishAck: %+v", env.Error)
-	}
-	validateJSON(t, schema, env.Result, "lifecycle.establishAck result (real socket)")
-	// The acknowledgement was the closing event: the accept went out once.
-	if got := port.kinds(); len(got) != 1 || got[0] != lifecycle.KindAccept {
-		t.Fatalf("after ack: %v, want exactly one accept", got)
-	}
-}
-
-// TestLifecycleEstablishAck_ReplacedSubscriberCantRelease: an old
-// connection's acknowledgement must not release an accept after the
-// subscriber has been replaced (decision 9; the brief's frontend-reconnect
-// item). connA opens the session and the establishment is pending; connB
-// attaches (the subscriber slot moves to connB); connA's late ack is
-// refused — only connB's ack flushes.
-func TestLifecycleEstablishAck_ReplacedSubscriberCantRelease(t *testing.T) {
-	kernel := lifecycle.New(lifecycle.Options{})
-	pub := lifecyclepub.New(kernel)
-	e := newLifecycleTestEnv(t, WithLifecyclePublisher(pub))
-	pub.SetEmitter(e.ws)
-	connA := e.conn
-	sid := e.openSession(t, 1)
-	const lane = lifecycle.LaneID("lane-1")
-	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
-	port := &lifecycleRecordingPort{}
-	if err := pub.BindTransport("T", port); err != nil {
-		t.Fatal(err)
-	}
-	h, err := pub.RequestDomain(lane, nil, "T")
-	if err != nil {
-		t.Fatalf("RequestDomain: %v", err)
-	}
-	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
-	raw := readNotification(t, connA, "lifecycle.changed", wantWithin)
-	var ready lifecyclepub.Fact
-	if err := json.Unmarshal(raw, &ready); err != nil {
-		t.Fatalf("decode prompt_ready: %v", err)
-	}
-
-	// connB attaches to the session: it becomes the current subscriber.
-	connB := connectWS(t, e.ws)
-	defer func() { _ = connB.Close() }()
-	at := jsonrpcCallWithID(t, connB, "attach", map[string]any{"sessionId": sid, "offset": 0}, 7)
-	var atEnv struct {
-		Error *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(at, &atEnv); err != nil {
-		t.Fatalf("attach: unmarshal: %v", err)
-	}
-	if atEnv.Error != nil {
-		t.Fatalf("attach: %+v", atEnv.Error)
-	}
-
-	// connA's late ack must not release the accept: it is no longer the
-	// subscriber.
-	resp := jsonrpcCallWithID(t, connA, "lifecycle.establishAck", map[string]any{
-		"sessionId": sid, "lane": string(lane), "domain": string(h.Domain),
-		"epoch": h.Epoch, "generation": ready.Generation,
-	}, 8)
-	var env struct {
-		Error *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(resp, &env); err != nil {
-		t.Fatalf("old ack: unmarshal: %v\nraw: %s", err, resp)
-	}
-	if env.Error == nil {
-		t.Fatal("a replaced connection's ack must be refused")
-	}
-	if got := port.kinds(); len(got) != 0 {
-		t.Fatalf("old connection's ack flushed the accept: %v", got)
-	}
-
-	// The current subscriber's ack (after its attach replay) is the only
-	// one that flushes.
-	_ = readNotification(t, connB, "lifecycle.changed", wantWithin) // the attach replay
-	resp = jsonrpcCallWithID(t, connB, "lifecycle.establishAck", map[string]any{
-		"sessionId": sid, "lane": string(lane), "domain": string(h.Domain),
-		"epoch": h.Epoch, "generation": ready.Generation,
-	}, 9)
-	// A FRESH struct: unmarshaling a success does not clear the Error
-	// pointer of the struct connA's refusal populated.
-	var env2 struct {
-		Error *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(resp, &env2); err != nil {
-		t.Fatalf("new ack: unmarshal: %v", err)
-	}
-	if env2.Error != nil {
-		t.Fatalf("current subscriber's ack: %+v", env2.Error)
-	}
-	if got := port.kinds(); len(got) != 1 || got[0] != lifecycle.KindAccept {
-		t.Fatalf("after current ack: %v, want exactly one accept", got)
-	}
-}
-
 // ── lifecycle.submitAttempt ────────────────────────────────────────────────
 
 // The DTO's own conformance: field tags, enum spelling, and the exact key
@@ -5270,14 +5430,11 @@ func TestSessionIntegrationChanged_OverTheWireConformsToContract(t *testing.T) {
 
 	// The composition root's two seams, verbatim: the loss cause crosses as
 	// its string, and the adapter's own constant is the single spelling.
-	ch, child, err := lifecyclechannel.New(logger, pub,
+	ch, child := newLifecycleSocketPairAdapter(t, logger, pub,
 		lifecyclechannel.WithHelloTimeout(50*time.Millisecond),
 		lifecyclechannel.WithLossReporter(func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause) {
 			e.ws.NoteIntegrationLoss(lane, string(cause))
 		}))
-	if err != nil {
-		t.Fatalf("lifecyclechannel.New: %v", err)
-	}
 	t.Cleanup(func() { _ = child.Close() })
 	e.ws.RegisterLifecycleLane(ch.Lane(), session.ID(sid))
 	e.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone)
@@ -6159,8 +6316,13 @@ func TestPolicyGet_OverTheWireConformsToContract(t *testing.T) {
 	validateJSON(t, schema, envelope.Result, "policy.get result (real socket)")
 }
 
-// The policy.set result's conformance: {ok: true}, asserted off the real
-// socket after a set the validator accepted.
+// The policy.set result's conformance, asserted off the real socket after a
+// set the validator accepted. It used to answer {ok: true}; it now answers
+// what the write did to the work already running (nocx-4yjwk.8), and the three
+// branches of that — the question, the future-only apply and the stop — are
+// driven against real live runs in
+// TestPolicySetRuns_OverTheWireConformsToContract. This one keeps the plain
+// case, where no run is in flight at all.
 func TestPolicySet_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "policy.set.schema.json")
 	h, _ := newPolicyHarness(t)
@@ -6184,6 +6346,204 @@ func TestPolicySet_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("policy.set: %+v", envelope.Error)
 	}
 	validateJSON(t, schema, envelope.Result, "policy.set result (real socket)")
+}
+
+// The policy.setRule result off the REAL socket: the id the mint gave the
+// rule and whether it was added. It is the third row of the contracts
+// README's table and the one that counts — a payload the test built would
+// prove the struct is well-formed, not that the handler sends it. Both
+// branches are driven, because "added" is the field a DTO case could get
+// right while the handler answered the same value for both.
+func TestPolicySetRule_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "policy.setRule.schema.json")
+	h, _ := newPolicyHarness(t)
+
+	added := policyRuleResultBytes(t, h, map[string]any{
+		"selector": map[string]any{"exact": []any{[]any{"df", "-h"}}},
+		"decision": "permit",
+	})
+	validateJSON(t, schema, added, "policy.setRule added (real socket)")
+
+	var first policySetRuleResult
+	if err := json.Unmarshal(added, &first); err != nil {
+		t.Fatalf("unmarshal %s: %v", added, err)
+	}
+	replaced := policyRuleResultBytes(t, h, map[string]any{
+		"id":       first.ID,
+		"selector": map[string]any{"exact": []any{[]any{"df", "-k"}}},
+		"decision": "refuse",
+	})
+	validateJSON(t, schema, replaced, "policy.setRule replaced (real socket)")
+}
+
+// The policy.forgetRule result off the REAL socket, both branches: a rule
+// that was there, and an id naming nothing — which is a success carrying
+// removed:false, so the contract has to accept it as readily as the other.
+func TestPolicyForgetRule_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "policy.forgetRule.schema.json")
+	h, _ := newPolicyHarness(t)
+
+	added := policyRuleResultBytes(t, h, map[string]any{
+		"selector": map[string]any{"exact": []any{[]any{"df", "-h"}}},
+		"decision": "permit",
+	})
+	var stored policySetRuleResult
+	if err := json.Unmarshal(added, &stored); err != nil {
+		t.Fatalf("unmarshal %s: %v", added, err)
+	}
+
+	for _, id := range []string{stored.ID, stored.ID} { // the second is now unknown
+		raw := jsonrpcCall(t, h.conn, "policy.forgetRule", map[string]any{"id": id})
+		var envelope struct {
+			Result json.RawMessage  `json:"result"`
+			Error  *jsonrpcErrorObj `json:"error"`
+		}
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			t.Fatalf("unmarshal: %v\nraw: %s", err, string(raw))
+		}
+		if envelope.Error != nil {
+			t.Fatalf("policy.forgetRule: %+v", envelope.Error)
+		}
+		validateJSON(t, schema, envelope.Result, "policy.forgetRule result (real socket)")
+	}
+}
+
+// The policy.explain result off the REAL socket. Every shape of it is driven,
+// because the optional halves are exactly where a handler and a schema drift:
+// a permitted call (no cause, no resource), a call whose resource fell outside
+// the row's own scopes (both present), and a refusing row (whose trace says the
+// rules were never read). A payload this test built would prove the struct is
+// well-formed; only the socket proves the handler sends it.
+func TestPolicyExplain_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "policy.explain.schema.json")
+	h, store := newPolicyHarness(t)
+
+	var p content.EffectPolicy
+	p.Observe = content.EffectRow{
+		Decision: content.DecisionPermit,
+		Scopes:   []content.GrantScope{{Kind: content.ResourcePath, ID: "/workspace"}},
+	}
+	p.MutateDestructive = content.EffectRow{Decision: content.DecisionRefuse}
+	p.Rules = []content.InvocationRule{{
+		ID:               "df-answered",
+		Selector:         content.InvocationSelector{Exact: [][]string{{"df", "-h"}}},
+		Decision:         content.DecisionPermit,
+		Source:           content.SourceAnswered,
+		EvaluatorVersion: content.EvaluatorVersion,
+	}}
+	if err := store.SetPolicy(p); err != nil {
+		t.Fatalf("seed policy: %v", err)
+	}
+
+	for name, params := range map[string]map[string]any{
+		"permitted":        {"command": "df -h", "effect": "observe"},
+		"out of row scope": {"command": "cat /etc/hosts", "effect": "observe"},
+		"refusing row":     {"command": "rm -rf /workspace/x", "effect": "mutate-destructive"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			validateJSON(t, schema, policyExplainResultBytes(t, h, params),
+				"policy.explain "+name+" (real socket)")
+		})
+	}
+}
+
+// The policy.classify result off the REAL socket. Both halves are driven,
+// because a schema and a handler drift exactly where a field is conditional:
+// an ELIGIBLE reading (program, commands and the effect a permit would be
+// bound to) and a REFUSED one (no effect at all, and the reason in words).
+// A payload this test built would prove the struct is well-formed; only the
+// socket proves the handler sends it.
+func TestPolicyClassify_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "policy.classify.schema.json")
+	h, _ := newPolicyHarness(t)
+
+	for name, command := range map[string]string{
+		"eligible":         "df -h",
+		"carries features": "sort -o /tmp/out /tmp/in",
+		"refused":          "sudo df -h",
+	} {
+		t.Run(name, func(t *testing.T) {
+			validateJSON(t, schema, policyClassifyResultBytes(t, h, command),
+				"policy.classify "+name+" (real socket)")
+		})
+	}
+}
+
+// policyClassifyResultBytes drives policy.classify and hands back the raw
+// result bytes, so what is asserted is what the socket carried.
+func policyClassifyResultBytes(t *testing.T, h *askHarness, command string) json.RawMessage {
+	t.Helper()
+	raw := jsonrpcCall(t, h.conn, "policy.classify", map[string]any{"command": command})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(raw))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("policy.classify: %+v", envelope.Error)
+	}
+	return envelope.Result
+}
+
+// TestPolicyClassifyResult_NeverSendsANullList: "never a null" is a property of
+// the SHAPE, for the reason policyResult's own test states — a refused reading
+// builds neither list, and no construction site has to remember.
+func TestPolicyClassifyResult_NeverSendsANullList(t *testing.T) {
+	raw, err := json.Marshal(policyClassifyResult{Reason: "refused"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		t.Fatalf("unmarshal %s: %v", raw, err)
+	}
+	if got := string(keys["commands"]); got != "[]" {
+		t.Fatalf("commands = %s, want []", got)
+	}
+	if got := string(keys["features"]); got != "[]" {
+		t.Fatalf("features = %s, want []", got)
+	}
+	validateJSON(t, loadSchema(t, "policy.classify.schema.json"), raw,
+		"policy.classify DTO for a refused reading")
+}
+
+// policyExplainResultBytes drives policy.explain and hands back the raw result
+// bytes, so what is asserted is what the socket carried.
+func policyExplainResultBytes(t *testing.T, h *askHarness, params map[string]any) json.RawMessage {
+	t.Helper()
+	raw := jsonrpcCall(t, h.conn, "policy.explain", params)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(raw))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("policy.explain: %+v", envelope.Error)
+	}
+	return envelope.Result
+}
+
+// policyRuleResultBytes drives policy.setRule and hands back the raw result
+// bytes, so the schema validates what the socket carried rather than a
+// re-marshalled decode of it.
+func policyRuleResultBytes(t *testing.T, h *askHarness, rule map[string]any) json.RawMessage {
+	t.Helper()
+	raw := jsonrpcCall(t, h.conn, "policy.setRule", map[string]any{"rule": rule})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(raw))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("policy.setRule: %+v", envelope.Error)
+	}
+	return envelope.Result
 }
 
 // ── ledger.open / ledger.bind / ledger.close ─────────────────────────────
@@ -6328,6 +6688,22 @@ func TestLedgerReads_DTOsConformToContract(t *testing.T) {
 		"empty ledger": {
 			Entries: []ledgerEntryWire{}, Scope: "everywhere",
 			Exhausted: true, HasRows: false, Coverage: nil,
+		},
+		// THE EIGHTH CAUSE, through the DTO (nocx-ie23r.2). It is the value
+		// the local inventory produces when this machine's own helper cannot
+		// be asked, and the schema is what decides whether the renderer can
+		// ever be handed it: a Go string this build sends and the contract
+		// refuses would be a refusal at the far end of a socket, which is the
+		// failure the contract directory exists to make impossible.
+		"a row nobody could ask about, on this machine": {
+			Entries: []ledgerEntryWire{{
+				ID: "01924f9c-0000-7000-8000-000000000003", Seq: 9,
+				EnvID: "local", Host: nil, Cwd: "/repo", Kind: "shell", Source: "user",
+				Intent: "make watch", Phase: "open", Status: "pending",
+				SubmittedAt: started, MaskedKinds: []string{}, Redactions: []redactionWire{},
+				Unreconciled: new(string(content.CauseLocalEndpointUnreachable)),
+			}},
+			Scope: "everywhere", Exhausted: true, HasRows: true, Coverage: nil,
 		},
 	}
 	querySchema := loadSchema(t, "ledger.query.schema.json")

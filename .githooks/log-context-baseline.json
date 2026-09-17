@@ -1,0 +1,2351 @@
+{
+  "//": [
+    "DO NOT EDIT MANUALLY. Regenerate with `node .githooks/update-log-context-baseline.mjs`.",
+    "",
+    "Every entry is a logging call check-log-context.mjs could not prove goes through",
+    "log.From(ctx) (module/trace/span/request travel automatically only on that path,",
+    "internal/log/context.go). It may only shrink: migrating a call site onto",
+    "log.From(ctx) and re-running this script drops its entry; nothing else does.",
+    "",
+    "Keyed on file + the trimmed call line, not a line number, so an unrelated edit",
+    "above a baselined line does not make this file churn — the same tradeoff",
+    "check-control-goroutines.mjs makes for its own baseline."
+  ],
+  "violations": [
+    {
+      "file": ".internal/spikes/vtwasm/internal/vt/vt.go",
+      "line": 317,
+      "text": "panic(\"vt: \" + err.Error())"
+    },
+    {
+      "file": ".internal/spikes/vtwasm/internal/vt/vt.go",
+      "line": 271,
+      "text": "panic(\"vt: \" + name + \": \" + err.Error())"
+    },
+    {
+      "file": "cmd/agent-capture/main.go",
+      "line": 203,
+      "text": "return &usageError{message: \"replay: \" + err.Error()}"
+    },
+    {
+      "file": "cmd/agent-capture/main.go",
+      "line": 141,
+      "text": "return &usageError{message: err.Error()}"
+    },
+    {
+      "file": "cmd/agent-capture/main.go",
+      "line": 196,
+      "text": "return &usageError{message: err.Error()}"
+    },
+    {
+      "file": "cmd/nocx-helper/main.go",
+      "line": 339,
+      "text": "log.Error(\"bridge\", \"generation\", want, \"err\", err)"
+    },
+    {
+      "file": "cmd/nocx-helper/main.go",
+      "line": 98,
+      "text": "log.Error(\"content hash\", \"err\", err)"
+    },
+    {
+      "file": "cmd/nocx-helper/main.go",
+      "line": 183,
+      "text": "log.Error(\"endpoint\", \"err\", err)"
+    },
+    {
+      "file": "cmd/nocx-helper/main.go",
+      "line": 93,
+      "text": "log.Error(\"executable\", \"err\", err)"
+    },
+    {
+      "file": "cmd/nocx-helper/main.go",
+      "line": 109,
+      "text": "log.Error(\"home\", \"err\", err)"
+    },
+    {
+      "file": "cmd/nocx-helper/main.go",
+      "line": 166,
+      "text": "log.Error(\"instance id\", \"err\", err)"
+    },
+    {
+      "file": "cmd/nocx-helper/main.go",
+      "line": 61,
+      "text": "log.Error(\"mcp\", \"err\", err)"
+    },
+    {
+      "file": "cmd/nocx-helper/main.go",
+      "line": 282,
+      "text": "log.Error(\"serve\", \"err\", err)"
+    },
+    {
+      "file": "cmd/nocx-helper/main.go",
+      "line": 243,
+      "text": "log.Error(\"ssh client\", \"err\", err)"
+    },
+    {
+      "file": "cmd/nocx-helper/main.go",
+      "line": 171,
+      "text": "log.Info(\"a helper of this generation is already serving\", \"generation\", generation)"
+    },
+    {
+      "file": "cmd/nocx-helper/main.go",
+      "line": 180,
+      "text": "log.Info(\"another helper took the endpoint first\", \"generation\", generation)"
+    },
+    {
+      "file": "cmd/nocx-helper/main.go",
+      "line": 348,
+      "text": "log.Info(\"bridge ended\", \"err\", err)"
+    },
+    {
+      "file": "cmd/nocx-helper/main.go",
+      "line": 279,
+      "text": "log.Info(\"connection ended\", \"err\", err)"
+    },
+    {
+      "file": "cmd/nocx-helper/main.go",
+      "line": 317,
+      "text": "log.Info(\"nothing of this generation answers on the endpoint\", \"err\", err)"
+    },
+    {
+      "file": "cmd/nocx-helper/main.go",
+      "line": 186,
+      "text": "log.Info(\"serving\", \"endpoint\", ln.Addr(), \"generation\", generation, \"binary\", exe)"
+    },
+    {
+      "file": "cmd/nocx-helper/main.go",
+      "line": 218,
+      "text": "log.Warn(\"nocx-helper: cannot name its own executable for a pane's agent\", \"error\", err)"
+    },
+    {
+      "file": "cmd/nocx-helper/servelog.go",
+      "line": 72,
+      "text": "lg.Info(\"helper log file\", \"path\", path)"
+    },
+    {
+      "file": "cmd/nocx-helper/servelog.go",
+      "line": 57,
+      "text": "stderrOnly.Warn(\"helper log file unavailable; logging to stderr only\", \"path\", path, \"err\", err)"
+    },
+    {
+      "file": "cmd/nocx-helper/servelog.go",
+      "line": 63,
+      "text": "stderrOnly.Warn(\"helper log file unavailable; logging to stderr only\", \"path\", path, \"err\", err)"
+    },
+    {
+      "file": "cmd/nocx-helper/sshclient_local.go",
+      "line": 42,
+      "text": "log.Info(\"ssh service: this helper dials; the artifact it came from was built with nocx_local_ssh\")"
+    },
+    {
+      "file": "cmd/nocx-server/main.go",
+      "line": 161,
+      "text": "logger.Error(\"closing the discovery socket\", \"error\", err)"
+    },
+    {
+      "file": "cmd/nocx-server/main.go",
+      "line": 135,
+      "text": "logger.Error(\"closing the worker socket\", \"error\", closeErr)"
+    },
+    {
+      "file": "cmd/nocx-server/main.go",
+      "line": 61,
+      "text": "logger.Error(\"nocx-server stopped\", \"error\", err)"
+    },
+    {
+      "file": "cmd/nocx-server/main.go",
+      "line": 165,
+      "text": "logger.Info(\"nocx-server ready\","
+    },
+    {
+      "file": "cmd/nocx-server/main.go",
+      "line": 175,
+      "text": "logger.Info(\"nocx-server shutting down\")"
+    },
+    {
+      "file": "internal/agentcalib/verify.go",
+      "line": 198,
+      "text": "v.Reason = err.Error()"
+    },
+    {
+      "file": "internal/agentrule/agentrule.go",
+      "line": 198,
+      "text": "return strings.TrimPrefix(err.Error(), \"agentdriver: \")"
+    },
+    {
+      "file": "internal/agentrule/store.go",
+      "line": 252,
+      "text": "st.problem = statErr.Error()"
+    },
+    {
+      "file": "internal/agenttyping/agenttyping.go",
+      "line": 264,
+      "text": "return *t.refuse(paneID, \"\", agentdriver.StateUnknown, err.Error())"
+    },
+    {
+      "file": "internal/apicoll/environment.go",
+      "line": 143,
+      "text": "bad = append(bad, MalformedRef{RelPath: rel, Reason: err.Error()})"
+    },
+    {
+      "file": "internal/apicoll/folder.go",
+      "line": 278,
+      "text": "bad = append(bad, MalformedRef{RelPath: rel, Reason: err.Error()})"
+    },
+    {
+      "file": "internal/apicoll/folder.go",
+      "line": 297,
+      "text": "bad = append(bad, MalformedRef{RelPath: rel, Reason: err.Error()})"
+    },
+    {
+      "file": "internal/apicoll/folder.go",
+      "line": 302,
+      "text": "bad = append(bad, MalformedRef{RelPath: rel, Reason: err.Error()})"
+    },
+    {
+      "file": "internal/apicoll/folder.go",
+      "line": 249,
+      "text": "bad = append(bad, MalformedRef{RelPath: rel, Reason: walkErr.Error()})"
+    },
+    {
+      "file": "internal/apicoll/substitute.go",
+      "line": 67,
+      "text": "return fmt.Sprintf(\"%s: %s\", ErrUnresolvedVariable.Error(), strings.Join(parts, \", \"))"
+    },
+    {
+      "file": "internal/apiimport/postman.go",
+      "line": 876,
+      "text": "c.itemise(\"graphql body on \"+item, \"it could not be read: \"+err.Error())"
+    },
+    {
+      "file": "internal/apiimport/postman.go",
+      "line": 895,
+      "text": "c.itemise(\"graphql body on \"+item, \"it could not be rewritten as a JSON body: \"+err.Error())"
+    },
+    {
+      "file": "internal/apiimport/postman.go",
+      "line": 441,
+      "text": "c.itemise(\"request \"+clip(it.Name.String()), \"its request object could not be read: \"+err.Error())"
+    },
+    {
+      "file": "internal/apisend/sender.go",
+      "line": 529,
+      "text": "Failure:      &Failure{Phase: phase, Reason: err.Error(), Err: err},"
+    },
+    {
+      "file": "internal/apisend/sender.go",
+      "line": 1156,
+      "text": "return Trust{State: TrustUncheckedUntrusted, Reason: err.Error()}"
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 1809,
+      "text": "Body:  \"That change was refused, so the previous routing is still in effect: \" + err.Error(),"
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 1122,
+      "text": "contentKeyErr = keyErr.Error()"
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 1191,
+      "text": "historyStatus.Raise(transport.HistoryDegradeInvalidBudget, budgetErr.Error())"
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 1204,
+      "text": "historyStatus.Raise(transport.HistoryDegradeOpenFailed, openErr.Error())"
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 2456,
+      "text": "logger.Info(\"application initialized\")"
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 728,
+      "text": "logger.Info(\"backend log file\", \"path\", logFilePath)"
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 738,
+      "text": "logger.Info(\"log level\", \"level\", \"debug\", \"var\", logLevelEnvVar)"
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 329,
+      "text": "logger.Warn(\"clean start could not close the last session's tabs; they may reopen later\", \"error\", err)"
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 1880,
+      "text": "logger.Warn(\"debounce window unreadable; falling back to the default\","
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 1939,
+      "text": "logger.Warn(\"notification delivery failed\", \"target\", r.Route.Destination.Target, \"error\", r.Err)"
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 1933,
+      "text": "logger.Warn(\"notification refused\", \"error\", out.Err)"
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 1777,
+      "text": "logger.Warn(\"notification routing cell unreadable; treating it as off\","
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 1804,
+      "text": "logger.Warn(\"notification routing table refused; the previous routing stays live\", \"error\", err)"
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 322,
+      "text": "logger.Warn(\"restore-on-startup setting unreadable; opening on what was left\", \"error\", err)"
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 733,
+      "text": "logger.Warn(\"unrecognised log level; using the build's default\","
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 2358,
+      "text": "logger.Warn(\"worker: a participant's exit was not recorded\","
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 1017,
+      "text": "slogger.Info(\"the OS keystore is in play\","
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 1027,
+      "text": "slogger.Info(\"the OS keystore is out of play; the file provider is the vault's store\","
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 1032,
+      "text": "slogger.Info(\"vault system-provider availability probe\","
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 707,
+      "text": "slogger.Warn(\"backend log file unavailable; logging to stderr only\","
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 713,
+      "text": "slogger.Warn(\"backend log file unavailable; logging to stderr only\","
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 1194,
+      "text": "slogger.Warn(\"durable command history unavailable; starting without it\", \"reason\", \"no content key\")"
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 1190,
+      "text": "slogger.Warn(\"durable command history unavailable; starting without it\", \"reason\", budgetErr)"
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 1203,
+      "text": "slogger.Warn(\"durable command history unavailable; starting without it\", \"reason\", openErr)"
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 1121,
+      "text": "slogger.Warn(\"encrypted local stores unavailable; starting without them\", \"reason\", keyErr)"
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 1324,
+      "text": "slogger.Warn(\"file-manager reveal unavailable\", \"reason\", filesRevealerErr)"
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 1145,
+      "text": "slogger.Warn(\"notes unavailable; starting without them\", \"reason\", noteErr)"
+    },
+    {
+      "file": "internal/app/app.go",
+      "line": 1388,
+      "text": "transport.WithBuildInfo(version.Info()),"
+    },
+    {
+      "file": "internal/app/helper_git.go",
+      "line": 152,
+      "text": "log.Info(\"helper unavailable: install failed\","
+    },
+    {
+      "file": "internal/app/helper_git.go",
+      "line": 205,
+      "text": "log.Info(\"helper unavailable: no artifact for the platform\","
+    },
+    {
+      "file": "internal/app/helper_git.go",
+      "line": 142,
+      "text": "log.Info(\"helper unavailable: the platform probe failed\","
+    },
+    {
+      "file": "internal/app/helper_git.go",
+      "line": 197,
+      "text": "log.Info(\"helper unavailable: the platform probe failed\","
+    },
+    {
+      "file": "internal/app/helper_git.go",
+      "line": 175,
+      "text": "log.Warn(\"helper installed but the footprint observation was not recorded\","
+    },
+    {
+      "file": "internal/app/helper_git.go",
+      "line": 156,
+      "text": "Message: \"installing the helper on \" + sess.Host() + \" failed: \" + err.Error(),"
+    },
+    {
+      "file": "internal/app/helper_git.go",
+      "line": 235,
+      "text": "Message: \"the host refused the probe that would run the helper: \" + err.Error(),"
+    },
+    {
+      "file": "internal/app/helper_git.go",
+      "line": 1679,
+      "text": "outcome := git.OpenOutcome{Message: err.Error()}"
+    },
+    {
+      "file": "internal/app/helper_git.go",
+      "line": 1690,
+      "text": "outcome.Message = \"no nocx helper is running on \" + host + \" for the generation nocx installed, and it could not be started: \" + err.Error()"
+    },
+    {
+      "file": "internal/app/helper_git.go",
+      "line": 1683,
+      "text": "outcome.Message = \"the helper installed on \" + host + \" answered with a different protocol version or content than nocx installed — reinstall it to recover (\" + err.Error() + \")\""
+    },
+    {
+      "file": "internal/app/helper_git.go",
+      "line": 1693,
+      "text": "outcome.Message = \"the host did not answer with the nocx helper: \" + err.Error()"
+    },
+    {
+      "file": "internal/app/helper_reverse.go",
+      "line": 436,
+      "text": "return &proto.Refusal{Code: proto.ErrCodeNoAuthChannel, Message: err.Error()}"
+    },
+    {
+      "file": "internal/app/helper_reverse.go",
+      "line": 433,
+      "text": "return &proto.Refusal{Code: proto.ErrCodePromptCancelled, Message: err.Error()}"
+    },
+    {
+      "file": "internal/app/helper_reverse.go",
+      "line": 564,
+      "text": "return &proto.Refusal{Code: proto.ErrCodeVaultSealed, Message: err.Error()}"
+    },
+    {
+      "file": "internal/app/helper_reverse.go",
+      "line": 585,
+      "text": "return badReverseParams(\"malformed params: \" + err.Error())"
+    },
+    {
+      "file": "internal/app/helper_reverse.go",
+      "line": 304,
+      "text": "return nil, &proto.Refusal{Code: proto.ErrCodeNeedsInteractive, Message: err.Error()}"
+    },
+    {
+      "file": "internal/app/helper_reverse.go",
+      "line": 542,
+      "text": "return nil, badReverseParams(\"the host is not host:port: \" + err.Error())"
+    },
+    {
+      "file": "internal/app/helper_reverse.go",
+      "line": 549,
+      "text": "return nil, badReverseParams(\"the key is not a public key: \" + err.Error())"
+    },
+    {
+      "file": "internal/app/session_reconcile.go",
+      "line": 110,
+      "text": "j.Detail = err.Error()"
+    },
+    {
+      "file": "internal/app/session_reconcile.go",
+      "line": 186,
+      "text": "j.Detail = readoptErr.Error()"
+    },
+    {
+      "file": "internal/app/session_reconcile.go",
+      "line": 212,
+      "text": "logger.Info(\"recordings of sessions nobody could ask about were removed by age\","
+    },
+    {
+      "file": "internal/app/session_reconcile.go",
+      "line": 200,
+      "text": "logger.Warn(\"a carried-over session could not be reconciled\","
+    },
+    {
+      "file": "internal/app/session_reconcile.go",
+      "line": 350,
+      "text": "logger.Warn(\"could not read which sessions are pending for the vault-sealed retry\", \"error\", err)"
+    },
+    {
+      "file": "internal/app/session_reconcile.go",
+      "line": 210,
+      "text": "logger.Warn(\"the recordings of unreachable hosts could not be bounded by age\", \"error\", sweepErr)"
+    },
+    {
+      "file": "internal/app/session_reconcile.go",
+      "line": 83,
+      "text": "logger.Warn(\"the sessions carried over from the last start could not be listed\", \"error\", err)"
+    },
+    {
+      "file": "internal/app/session_reconcile.go",
+      "line": 260,
+      "text": "msg := strings.ToLower(err.Error())"
+    },
+    {
+      "file": "internal/app/typed_line.go",
+      "line": 430,
+      "text": "lg.Debug(\"typed ssh: the abort frame could not be written\", \"error\", werr)"
+    },
+    {
+      "file": "internal/app/typed_line.go",
+      "line": 453,
+      "text": "lg.Debug(\"typed ssh: the abort frame could not be written\", \"error\", werr)"
+    },
+    {
+      "file": "internal/app/typed_line.go",
+      "line": 489,
+      "text": "lg.Info(\"typed ssh: the session came up integrated on the user's own connection\","
+    },
+    {
+      "file": "internal/app/typed_line.go",
+      "line": 422,
+      "text": "lg.Warn(\"typed ssh: ownership of the control socket was never proven; the session stays a plain ssh\","
+    },
+    {
+      "file": "internal/app/typed_line.go",
+      "line": 450,
+      "text": "lg.Warn(\"typed ssh: the master refused the lifecycle forward; the session stays a plain ssh\","
+    },
+    {
+      "file": "internal/app/typed_line.go",
+      "line": 604,
+      "text": "lg.Warn(\"typed ssh: the publish did not commit; the far side decides whether an earlier generation is still valid\","
+    },
+    {
+      "file": "internal/app/typed_line.go",
+      "line": 493,
+      "text": "lg.Warn(\"typed ssh: the session did not integrate; the far side is at a native login shell\","
+    },
+    {
+      "file": "internal/assistant/classifier.go",
+      "line": 326,
+      "text": "s := err.Error()"
+    },
+    {
+      "file": "internal/assistant/connection.go",
+      "line": 83,
+      "text": "res.Error = err.Error()"
+    },
+    {
+      "file": "internal/assistant/connection.go",
+      "line": 113,
+      "text": "res.Error = err.Error()"
+    },
+    {
+      "file": "internal/assistant/execute.go",
+      "line": 1081,
+      "text": "return marshalFilesMutation(filesMutationResult{Path: p.Path, Status: \"refused\", Reason: err.Error()})"
+    },
+    {
+      "file": "internal/assistant/execute.go",
+      "line": 1106,
+      "text": "return marshalFilesMutation(filesMutationResult{Path: p.Path, Status: \"refused\", Reason: err.Error()})"
+    },
+    {
+      "file": "internal/assistant/expansion.go",
+      "line": 907,
+      "text": "return \"the shell did not answer, so no value could be read: \" + err.Error()"
+    },
+    {
+      "file": "internal/assistant/kernel.go",
+      "line": 137,
+      "text": "// arm concatenated err.Error(), which is what dragged eino's"
+    },
+    {
+      "file": "internal/assistant/kernel.go",
+      "line": 2014,
+      "text": "result := modelResult{text: refusalResult(decl.Name, RefusedExpansionChanged, \"\", verifyErr.Error()), kind: modelNocxMessage}"
+    },
+    {
+      "file": "internal/assistant/kernel.go",
+      "line": 2009,
+      "text": "result := modelResult{text: refusalResult(decl.Name, RefusedFileChanged, \"\", verifyErr.Error()), kind: modelNocxMessage}"
+    },
+    {
+      "file": "internal/assistant/kernel.go",
+      "line": 1250,
+      "text": "result = runErr.Error()"
+    },
+    {
+      "file": "internal/assistant/kernel.go",
+      "line": 1457,
+      "text": "return \"FAILED: nocx ran your call to \" + tool + \" and it did not succeed: \" + err.Error() +"
+    },
+    {
+      "file": "internal/assistant/kernel.go",
+      "line": 1869,
+      "text": "return modelResult{text: notCapturable.Error(), kind: modelNocxMessage}, nil"
+    },
+    {
+      "file": "internal/assistant/kernel.go",
+      "line": 1976,
+      "text": "text: \"I could not read a skill at that address, so nothing was proposed and nothing was installed: \" + resolveErr.Error(),"
+    },
+    {
+      "file": "internal/assistant/presentation.go",
+      "line": 161,
+      "text": "info, err := candidate.Info(context.Background())"
+    },
+    {
+      "file": "internal/assistant/script.go",
+      "line": 255,
+      "text": "return \"this file could not be read: \" + err.Error()"
+    },
+    {
+      "file": "internal/assistant/wiretap.go",
+      "line": 169,
+      "text": "\"elapsed\", time.Since(started), \"error\", err.Error())"
+    },
+    {
+      "file": "internal/assistant/wiretap.go",
+      "line": 161,
+      "text": "w.write(\"TRANSPORT ERROR\\n\" + err.Error())"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "line": 978,
+      "text": "panic(\"capability: invalid operation disposition: \" + err.Error())"
+    },
+    {
+      "file": "internal/commandnames/service.go",
+      "line": 217,
+      "text": "reason := \"command names could not be listed: \" + err.Error()"
+    },
+    {
+      "file": "internal/commandnames/service.go",
+      "line": 119,
+      "text": "return s.serveLastOrFail(id, StateFailed, \"command names unavailable: \"+err.Error())"
+    },
+    {
+      "file": "internal/content/ledger_agent_sqlite.go",
+      "line": 42,
+      "text": "panic(\"content: mint id: \" + err.Error()) // rand.Read never fails on supported platforms"
+    },
+    {
+      "file": "internal/content/rules.go",
+      "line": 269,
+      "text": "return InvocationRule{}, err.Error()"
+    },
+    {
+      "file": "internal/coordinator/spawn.go",
+      "line": 137,
+      "text": "logger.Info(\"coordinator: spawned nocx-server\", \"pid\", cmd.Process.Pid, \"path\", s.cfg.Path)"
+    },
+    {
+      "file": "internal/credential/secret.go",
+      "line": 99,
+      "text": "// `slog.Info(\"connected\", \"password\", secret)` cannot leak."
+    },
+    {
+      "file": "internal/discovery/discovery.go",
+      "line": 468,
+      "text": "return probeResult{kind: outcomeTransient, class: \"exec failed: \" + err.Error()}"
+    },
+    {
+      "file": "internal/discovery/schedule.go",
+      "line": 509,
+      "text": "Classification: \"discovery connection unavailable: \" + acquireErr.Error(),"
+    },
+    {
+      "file": "internal/filesystem/local/local.go",
+      "line": 292,
+      "text": "info, err := de.Info() // lstat"
+    },
+    {
+      "file": "internal/git/local/local.go",
+      "line": 594,
+      "text": "slog.Warn(\"git: numstat read failed; no rows will carry counts\","
+    },
+    {
+      "file": "internal/git/local/shellenv.go",
+      "line": 137,
+      "text": "c.state, c.reason = envDegraded, err.Error()"
+    },
+    {
+      "file": "internal/git/local/shellenv.go",
+      "line": 247,
+      "text": "return nil, &degradedError{reason: err.Error()}"
+    },
+    {
+      "file": "internal/git/local/shellenv.go",
+      "line": 139,
+      "text": "return nil, git.EnvDegraded, err.Error()"
+    },
+    {
+      "file": "internal/git/registry/registry.go",
+      "line": 257,
+      "text": "return git.EnvDegraded, err.Error()"
+    },
+    {
+      "file": "internal/helper/client/reverse.go",
+      "line": 172,
+      "text": "lg.Debug(\"reverse request ok\")"
+    },
+    {
+      "file": "internal/helper/client/reverse.go",
+      "line": 132,
+      "text": "lg.Info(\"reverse request\", \"service\", req.Service, \"op\", req.Op, \"corr\", req.Corr) // D26"
+    },
+    {
+      "file": "internal/helper/client/reverse.go",
+      "line": 136,
+      "text": "lg.Warn(\"coordinator refused a reverse request\", \"code\", code, \"message\", message)"
+    },
+    {
+      "file": "internal/helper/client/reverse.go",
+      "line": 157,
+      "text": "lg.Warn(\"reverse handler refused\", \"code\", code, \"error\", err)"
+    },
+    {
+      "file": "internal/helper/client/reverse.go",
+      "line": 169,
+      "text": "refuse(proto.ErrCodeInternal, \"result: \"+err.Error())"
+    },
+    {
+      "file": "internal/helper/client/reverse.go",
+      "line": 163,
+      "text": "refuse(proto.ErrCodeInternal, err.Error())"
+    },
+    {
+      "file": "internal/helper/client/reverse.go",
+      "line": 158,
+      "text": "resp.Error = &proto.Error{Code: code, Message: err.Error(), Details: details}"
+    },
+    {
+      "file": "internal/helper/host/host.go",
+      "line": 451,
+      "text": "fail(code, err.Error(), details)"
+    },
+    {
+      "file": "internal/helper/host/host.go",
+      "line": 445,
+      "text": "fail(proto.ErrCodeBadParams, err.Error(), nil)"
+    },
+    {
+      "file": "internal/helper/host/host.go",
+      "line": 456,
+      "text": "fail(proto.ErrCodeInternal, \"result: \"+err.Error(), nil)"
+    },
+    {
+      "file": "internal/helper/host/host.go",
+      "line": 419,
+      "text": "lg.Debug(\"request ok\", \"duration_ms\", ms)"
+    },
+    {
+      "file": "internal/helper/host/host.go",
+      "line": 411,
+      "text": "lg.Info(\"request\", \"id\", req.ID, \"service\", req.Service, \"op\", req.Op, \"corr\", req.Corr) // D26"
+    },
+    {
+      "file": "internal/helper/host/host.go",
+      "line": 428,
+      "text": "lg.Warn(\"helper refused the request\", \"code\", code, \"message\", message)"
+    },
+    {
+      "file": "internal/helper/host/host.go",
+      "line": 416,
+      "text": "lg.Warn(\"request failed\", \"duration_ms\", ms, \"error\", err)"
+    },
+    {
+      "file": "internal/helper/local/fs.go",
+      "line": 95,
+      "text": "info, err := e.Info()"
+    },
+    {
+      "file": "internal/helper/session/session.go",
+      "line": 730,
+      "text": "log.Info(\"lifecycle: the coordinator's pump stopped\","
+    },
+    {
+      "file": "internal/helper/session/session.go",
+      "line": 774,
+      "text": "log.Info(\"lifecycle: the shell's first bytes went to the coordinator\", \"bytes\", len(data))"
+    },
+    {
+      "file": "internal/helper/session/session.go",
+      "line": 770,
+      "text": "log.Warn(\"lifecycle data not delivered\", \"session\", s.id.Session, \"err\", err)"
+    },
+    {
+      "file": "internal/helper/session/session.go",
+      "line": 691,
+      "text": "log.Warn(\"session data not delivered\", \"session\", s.id.Session, \"err\", err)"
+    },
+    {
+      "file": "internal/helper/session/session.go",
+      "line": 662,
+      "text": "log.Warn(\"session reset not delivered\", \"session\", s.id.Session, \"err\", err)"
+    },
+    {
+      "file": "internal/helper/sshsvc/channel.go",
+      "line": 414,
+      "text": "cause = \"the helper could not write to the coordinator: \" + werr.Error()"
+    },
+    {
+      "file": "internal/helper/sshsvc/channel.go",
+      "line": 428,
+      "text": "cause = err.Error()"
+    },
+    {
+      "file": "internal/helper/sshsvc/channel.go",
+      "line": 453,
+      "text": "ch.finish(err.Error(), nil)"
+    },
+    {
+      "file": "internal/helper/sshsvc/channel.go",
+      "line": 665,
+      "text": "if err.Error() == \"ssh: subsystem request failed\" {"
+    },
+    {
+      "file": "internal/helper/sshsvc/channel.go",
+      "line": 657,
+      "text": "return &proto.Refusal{Code: proto.ErrCodeChannelRefused, Message: err.Error()}"
+    },
+    {
+      "file": "internal/helper/sshsvc/channel.go",
+      "line": 666,
+      "text": "return &proto.Refusal{Code: proto.ErrCodeChannelRefused, Message: err.Error()}"
+    },
+    {
+      "file": "internal/helper/sshsvc/forward.go",
+      "line": 271,
+      "text": "f.finish(s, \"the helper could not write to the coordinator: \"+err.Error())"
+    },
+    {
+      "file": "internal/helper/sshsvc/forward.go",
+      "line": 223,
+      "text": "f.finish(s, err.Error())"
+    },
+    {
+      "file": "internal/helper/sshsvc/forward.go",
+      "line": 413,
+      "text": "return err.Error()"
+    },
+    {
+      "file": "internal/helper/sshsvc/probeops.go",
+      "line": 399,
+      "text": "if err.Error() == \"ssh: command \"+command+\" failed\" {"
+    },
+    {
+      "file": "internal/helper/sshsvc/probeops.go",
+      "line": 388,
+      "text": "return &proto.Refusal{Code: proto.ErrCodeExecLost, Message: err.Error()}"
+    },
+    {
+      "file": "internal/helper/sshsvc/probeops.go",
+      "line": 402,
+      "text": "return &proto.Refusal{Code: proto.ErrCodeExecLost, Message: err.Error()}"
+    },
+    {
+      "file": "internal/helper/sshsvc/probeops.go",
+      "line": 385,
+      "text": "return &proto.Refusal{Code: proto.ErrCodeExecProhibited, Message: err.Error()}"
+    },
+    {
+      "file": "internal/helper/sshsvc/probeops.go",
+      "line": 383,
+      "text": "return &proto.Refusal{Code: proto.ErrCodeExecSessionRefused, Message: err.Error()}"
+    },
+    {
+      "file": "internal/helper/sshsvc/shell.go",
+      "line": 279,
+      "text": "return nil, &proto.Refusal{Code: proto.ErrCodeChannelRefused, Message: err.Error()}"
+    },
+    {
+      "file": "internal/helper/sshsvc/toolsocket.go",
+      "line": 174,
+      "text": "\"refusal\", errPaneToolEndpointUnreachable.Error(),"
+    },
+    {
+      "file": "internal/lifecyclepub/publisher.go",
+      "line": 611,
+      "text": "ans.Reason = err.Error()"
+    },
+    {
+      "file": "internal/lifecyclepub/publisher.go",
+      "line": 665,
+      "text": "ans.Reason = err.Error()"
+    },
+    {
+      "file": "internal/mcpstdio/mcpstdio.go",
+      "line": 248,
+      "text": "_ = writer.errorResponse(request.ID, -32603, \"internal error\", err.Error())"
+    },
+    {
+      "file": "internal/mcpstdio/mcpstdio.go",
+      "line": 217,
+      "text": "if writeErr := writer.errorResponse(request.ID, -32600, \"invalid request\", err.Error()); writeErr != nil {"
+    },
+    {
+      "file": "internal/mcpstdio/mcpstdio.go",
+      "line": 570,
+      "text": "return writer.errorResponse(id, -32000, \"tool endpoint unavailable\", err.Error())"
+    },
+    {
+      "file": "internal/mcpstdio/mcpstdio.go",
+      "line": 635,
+      "text": "return writer.toolError(id, err.Error())"
+    },
+    {
+      "file": "internal/monoclock/monoclock_darwin.go",
+      "line": 20,
+      "text": "panic(\"monoclock: clock_gettime(CLOCK_MONOTONIC_RAW): \" + err.Error())"
+    },
+    {
+      "file": "internal/monoclock/monoclock_linux.go",
+      "line": 22,
+      "text": "panic(\"monoclock: clock_gettime(CLOCK_MONOTONIC): \" + err.Error())"
+    },
+    {
+      "file": "internal/nativeports/provider.go",
+      "line": 54,
+      "text": "Classification: \"local port discovery failed: \" + err.Error(),"
+    },
+    {
+      "file": "internal/nativeports/provider.go",
+      "line": 49,
+      "text": "Classification: err.Error(),"
+    },
+    {
+      "file": "internal/notify/catalogue.go",
+      "line": 446,
+      "text": "panic(\"notify: the shipped catalogue is malformed: \" + err.Error())"
+    },
+    {
+      "file": "internal/reveal/reveal.go",
+      "line": 66,
+      "text": "msg := name + \": \" + err.Error()"
+    },
+    {
+      "file": "internal/session/session.go",
+      "line": 454,
+      "text": "panic(\"session: \" + err.Error())"
+    },
+    {
+      "file": "internal/settings/settings.go",
+      "line": 1215,
+      "text": "slog.Warn(\"settings: failed to read persisted state, starting fresh\", \"error\", err)"
+    },
+    {
+      "file": "internal/settings/settings.go",
+      "line": 1227,
+      "text": "slog.Warn(\"settings: migration failed, starting fresh\", \"error\", migrateErr)"
+    },
+    {
+      "file": "internal/shellintegration/publish_fs.go",
+      "line": 129,
+      "text": "info, err := e.Info() // lstat semantics: a symlink entry reports the link"
+    },
+    {
+      "file": "internal/shellintegration/publisher.go",
+      "line": 1278,
+      "text": "return nil, &InvalidManifestError{Path: path, Reason: err.Error()}"
+    },
+    {
+      "file": "internal/skill/discover.go",
+      "line": 357,
+      "text": "info, err := entry.Info()"
+    },
+    {
+      "file": "internal/skill/discover.go",
+      "line": 203,
+      "text": "slog.Warn(\"skill: cannot hash skill\", \"skill\", skName, \"provenance\", root.Provenance, \"error\", hashErr)"
+    },
+    {
+      "file": "internal/skill/discover.go",
+      "line": 251,
+      "text": "slog.Warn(\"skill: close root failed\", \"root\", root.Dir, \"error\", closeErr)"
+    },
+    {
+      "file": "internal/skill/discover.go",
+      "line": 288,
+      "text": "slog.Warn(\"skill: close skill file failed\", \"path\", path, \"error\", closeErr)"
+    },
+    {
+      "file": "internal/skill/discover.go",
+      "line": 300,
+      "text": "slog.Warn(\"skill: close skill file failed\", \"path\", path, \"error\", closeErr)"
+    },
+    {
+      "file": "internal/skill/discover.go",
+      "line": 173,
+      "text": "slog.Warn(\"skill: description too long\", \"skill\", name, \"characters\", length, \"limit\", maxDescriptionRunes)"
+    },
+    {
+      "file": "internal/skill/discover.go",
+      "line": 137,
+      "text": "slog.Warn(\"skill: invalid frontmatter\", \"skill\", name)"
+    },
+    {
+      "file": "internal/skill/discover.go",
+      "line": 146,
+      "text": "slog.Warn(\"skill: invalid name\", \"skill\", name, \"name\", skName)"
+    },
+    {
+      "file": "internal/skill/discover.go",
+      "line": 152,
+      "text": "slog.Warn(\"skill: missing description\", \"skill\", name)"
+    },
+    {
+      "file": "internal/skill/discover.go",
+      "line": 97,
+      "text": "slog.Warn(\"skill: root entry cap reached\", \"root\", root.Dir, \"cap\", MaxEntriesPerRoot)"
+    },
+    {
+      "file": "internal/skill/discover.go",
+      "line": 92,
+      "text": "slog.Warn(\"skill: root unavailable\", \"root\", root.Dir, \"error\", err)"
+    },
+    {
+      "file": "internal/skill/discover.go",
+      "line": 102,
+      "text": "slog.Warn(\"skill: skill directory is a symlink\", \"skill\", name)"
+    },
+    {
+      "file": "internal/skill/discover.go",
+      "line": 124,
+      "text": "slog.Warn(\"skill: SKILL.md is a symlink\", \"skill\", name)"
+    },
+    {
+      "file": "internal/skill/discover.go",
+      "line": 118,
+      "text": "slog.Warn(\"skill: SKILL.md unavailable\", \"skill\", name, \"error\", statErr)"
+    },
+    {
+      "file": "internal/skill/discover.go",
+      "line": 131,
+      "text": "slog.Warn(\"skill: SKILL.md unreadable\", \"skill\", name, \"error\", readErr)"
+    },
+    {
+      "file": "internal/skill/github.go",
+      "line": 205,
+      "text": "message := strings.ToLower(err.Error())"
+    },
+    {
+      "file": "internal/skill/install.go",
+      "line": 223,
+      "text": "slog.Info(\"skill: installed from a URL\","
+    },
+    {
+      "file": "internal/skill/store_doc.go",
+      "line": 474,
+      "text": "result.DocumentError = err.Error()"
+    },
+    {
+      "file": "internal/skill/store_doc.go",
+      "line": 497,
+      "text": "result.DocumentError = err.Error()"
+    },
+    {
+      "file": "internal/skill/store_doc.go",
+      "line": 489,
+      "text": "result.DocumentError = usageErr.Error()"
+    },
+    {
+      "file": "internal/skill/store_doc.go",
+      "line": 481,
+      "text": "slog.Debug(\"skill: first-seen dates were not stamped\", \"error\", stampErr)"
+    },
+    {
+      "file": "internal/skill/store_doc.go",
+      "line": 485,
+      "text": "slog.Debug(\"skill: idle skills were not evaluated\", \"error\", autoErr)"
+    },
+    {
+      "file": "internal/skill/store_doc.go",
+      "line": 478,
+      "text": "slog.Debug(\"skill: usage counters were not flushed\", \"error\", flushErr)"
+    },
+    {
+      "file": "internal/skill/write.go",
+      "line": 238,
+      "text": "slog.Warn(\"skill: index cap reached\", \"cap\", MaxIndexed)"
+    },
+    {
+      "file": "internal/ssh/aliases.go",
+      "line": 180,
+      "text": "return &UnavailableInfo{Reason: \"no-ssh-binary\", Detail: err.Error()}"
+    },
+    {
+      "file": "internal/ssh/aliases.go",
+      "line": 185,
+      "text": "return &UnavailableInfo{Reason: \"parse-failure\", Detail: err.Error()}"
+    },
+    {
+      "file": "internal/ssh/aliases.go",
+      "line": 183,
+      "text": "return &UnavailableInfo{Reason: \"timeout\", Detail: err.Error()}"
+    },
+    {
+      "file": "internal/ssh/probe.go",
+      "line": 40,
+      "text": "return OutcomeHostKeyChanged, keyMismatch.Error(), nil"
+    },
+    {
+      "file": "internal/ssh/probe.go",
+      "line": 36,
+      "text": "return OutcomeHostKeyUnknown, unknownKey.Error(), nil"
+    },
+    {
+      "file": "internal/ssh/probe.go",
+      "line": 52,
+      "text": "return OutcomeNeedsInteractive, encKey.Error(), nil"
+    },
+    {
+      "file": "internal/ssh/probe.go",
+      "line": 46,
+      "text": "return OutcomeRejected, authErr.Error(), nil"
+    },
+    {
+      "file": "internal/ssh/probe.go",
+      "line": 61,
+      "text": "return OutcomeUnreachable, err.Error(), nil"
+    },
+    {
+      "file": "internal/ssh/probe.go",
+      "line": 58,
+      "text": "return OutcomeUnreachable, netErr.Error(), nil"
+    },
+    {
+      "file": "internal/ssh/ssh_real_dial.go",
+      "line": 748,
+      "text": "msg := err.Error()"
+    },
+    {
+      "file": "internal/ssh/typed_wrap.go",
+      "line": 272,
+      "text": "w.refused(inv, ReasonNoControlPath, \"no control socket directory could be owned: \"+rootErr.Error())"
+    },
+    {
+      "file": "internal/toolendpoint/endpoint.go",
+      "line": 727,
+      "text": "requestLog.Error(\"tool endpoint: \" + invalid.Error())"
+    },
+    {
+      "file": "internal/transport/session_open_helper_consent.go",
+      "line": 104,
+      "text": "resp := newJSONRPCError(req.ID, -32603, ask.Error())"
+    },
+    {
+      "file": "internal/transport/session_open.go",
+      "line": 598,
+      "text": "return \"\", refuse(-32603, \"the pane's claim on this session could not be minted: \"+err.Error())"
+    },
+    {
+      "file": "internal/transport/session_open.go",
+      "line": 233,
+      "text": "return OpenedSession{}, refuse(-32602, \"Invalid params: \"+wsErr.Error())"
+    },
+    {
+      "file": "internal/transport/ws_agent_calibration.go",
+      "line": 246,
+      "text": "_ = r.TryError(req.ID, RPCError{Code: -32602, Message: \"Invalid params: \" + err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_agent_calibration.go",
+      "line": 219,
+      "text": "_ = r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_agent_rules.go",
+      "line": 200,
+      "text": "_ = r.TryError(req.ID, RPCError{Code: -32602, Message: method + \": \" + err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_agent.go",
+      "line": 2776,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: \"Invalid params: \" + err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_agent.go",
+      "line": 1033,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error() + \" — reassign the answering role in Settings → Roles\"})"
+    },
+    {
+      "file": "internal/transport/ws_agent.go",
+      "line": 1008,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: errNoEndpoint.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_agent.go",
+      "line": 2636,
+      "text": "// Nothing here appends err.Error() (nocx-avogl.3). It used to, in the default"
+    },
+    {
+      "file": "internal/transport/ws_agent.go",
+      "line": 1424,
+      "text": "h.terminalize(ctx, rc, content.RunFailed, content.TermFailed, materialErr.Error(), r)"
+    },
+    {
+      "file": "internal/transport/ws_agent.go",
+      "line": 2223,
+      "text": "return \"the row could not be widened, so this call was not approved either: \" + err.Error()"
+    },
+    {
+      "file": "internal/transport/ws_agent.go",
+      "line": 2274,
+      "text": "return refusedStandingAnswer(err.Error())"
+    },
+    {
+      "file": "internal/transport/ws_agent.go",
+      "line": 2298,
+      "text": "return refusedStandingAnswer(err.Error())"
+    },
+    {
+      "file": "internal/transport/ws_agentaccess.go",
+      "line": 193,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32000, Message: \"could not forget this answer: \" + err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_api_handlers.go",
+      "line": 731,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_api_handlers.go",
+      "line": 327,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: taken.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_api_handlers.go",
+      "line": 410,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_api_handlers.go",
+      "line": 739,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_api_handlers.go",
+      "line": 434,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_api_handlers.go",
+      "line": 582,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_api_handlers.go",
+      "line": 663,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_api_handlers.go",
+      "line": 636,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(importErr), Message: importErr.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_api_handlers.go",
+      "line": 647,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(importErr), Message: importErr.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_api_handlers.go",
+      "line": 615,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(previewErr), Message: previewErr.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_api_handlers.go",
+      "line": 397,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(resolveErr), Message: resolveErr.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_api_handlers.go",
+      "line": 459,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: apiSendErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_api_handlers.go",
+      "line": 1453,
+      "text": "row.Error = joinReasons(row.Error, err.Error())"
+    },
+    {
+      "file": "internal/transport/ws_assistant.go",
+      "line": 224,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_assistant.go",
+      "line": 384,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_assistant.go",
+      "line": 630,
+      "text": "return err.Error()"
+    },
+    {
+      "file": "internal/transport/ws_auth.go",
+      "line": 230,
+      "text": "http.Error(w, \"forbidden\", http.StatusForbidden)"
+    },
+    {
+      "file": "internal/transport/ws_auth.go",
+      "line": 242,
+      "text": "http.Error(w, \"unauthorized\", http.StatusUnauthorized)"
+    },
+    {
+      "file": "internal/transport/ws_capture.go",
+      "line": 105,
+      "text": "Name: handle.Name, Partial: true, Error: rwErr.Error(),"
+    },
+    {
+      "file": "internal/transport/ws_capture.go",
+      "line": 154,
+      "text": "Name: realName, Partial: true, Error: rwErr.Error(),"
+    },
+    {
+      "file": "internal/transport/ws_capture.go",
+      "line": 254,
+      "text": "rpcErr := RPCError{Code: code, Message: err.Error()}"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1090,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1320,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1372,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1610,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1568,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: setErr.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1246,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: werr.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1344,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: werr.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1876,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: \"Parse Tabby config: \" + err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1461,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: \"settings.getSnapshot: \" + err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1613,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: \"settings.reset: \" + err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1689,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: \"settings.secretExists: \" + err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 950,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 999,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1204,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1327,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1332,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1379,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1384,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1255,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: loadErr.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1571,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: setErr.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1122,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: code, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 971,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: profileMethodErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 986,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: profileMethodErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1226,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: profileMethodErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1278,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: profileMethodErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1296,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: profileMethodErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1418,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: profileMethodErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1062,
+      "text": "errs = append(errs, profileErrorEntry{ID: id, Error: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 139,
+      "text": "if name, ok := strings.CutPrefix(err.Error(), unknownField); ok {"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 644,
+      "text": "if name, ok := strings.CutPrefix(err.Error(), unknownField); ok {"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 1179,
+      "text": "if strings.Contains(err.Error(), lit) {"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 409,
+      "text": "return err.Error()"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 548,
+      "text": "return err.Error()"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 595,
+      "text": "return err.Error()"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 613,
+      "text": "return err.Error()"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 805,
+      "text": "return err.Error()"
+    },
+    {
+      "file": "internal/transport/ws_config_handlers.go",
+      "line": 838,
+      "text": "return err.Error()"
+    },
+    {
+      "file": "internal/transport/ws_download.go",
+      "line": 496,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_download.go",
+      "line": 526,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_download.go",
+      "line": 489,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: downloadErrorCode(openErr), Message: openErr.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_download.go",
+      "line": 454,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_download.go",
+      "line": 468,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(srcErr), Message: srcErr.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_download.go",
+      "line": 711,
+      "text": "http.Error(w, \"gone\", http.StatusGone)"
+    },
+    {
+      "file": "internal/transport/ws_download.go",
+      "line": 724,
+      "text": "http.Error(w, \"gone\", http.StatusGone)"
+    },
+    {
+      "file": "internal/transport/ws_download.go",
+      "line": 734,
+      "text": "http.Error(w, \"gone\", http.StatusGone)"
+    },
+    {
+      "file": "internal/transport/ws_download.go",
+      "line": 750,
+      "text": "http.Error(w, \"gone\", http.StatusGone)"
+    },
+    {
+      "file": "internal/transport/ws_download.go",
+      "line": 801,
+      "text": "http.Error(w, \"the transfer failed\", http.StatusInternalServerError)"
+    },
+    {
+      "file": "internal/transport/ws_download.go",
+      "line": 799,
+      "text": "http.Error(w, \"the transfer was cancelled\", http.StatusInternalServerError)"
+    },
+    {
+      "file": "internal/transport/ws_download.go",
+      "line": 702,
+      "text": "http.Error(w, \"this connection cannot carry a download\", http.StatusInternalServerError)"
+    },
+    {
+      "file": "internal/transport/ws_download.go",
+      "line": 728,
+      "text": "http.Error(w, \"this download is already being fetched\", http.StatusConflict)"
+    },
+    {
+      "file": "internal/transport/ws_download.go",
+      "line": 391,
+      "text": "p.Error = err.Error()"
+    },
+    {
+      "file": "internal/transport/ws_endpoints.go",
+      "line": 49,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_files.go",
+      "line": 893,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_files.go",
+      "line": 1437,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_files.go",
+      "line": 905,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_files.go",
+      "line": 912,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_files.go",
+      "line": 970,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_files.go",
+      "line": 1006,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_files.go",
+      "line": 1064,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_files.go",
+      "line": 1101,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_files.go",
+      "line": 1107,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_files.go",
+      "line": 1162,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_files.go",
+      "line": 1170,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_files.go",
+      "line": 1371,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_files.go",
+      "line": 1389,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_files.go",
+      "line": 1418,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_files.go",
+      "line": 1072,
+      "text": "Message: err.Error(),"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 635,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 716,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 722,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 764,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 770,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 802,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 813,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 846,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 865,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 897,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 903,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 931,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 937,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 965,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 971,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 1010,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 1016,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 1050,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 1056,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 1089,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 1100,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 1128,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_git.go",
+      "line": 1135,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})"
+    },
+    {
+      "file": "internal/transport/ws_groups.go",
+      "line": 130,
+      "text": "if oldErr != nil && newErr != nil && oldErr.Error() == newErr.Error() {"
+    },
+    {
+      "file": "internal/transport/ws_groups.go",
+      "line": 130,
+      "text": "if oldErr != nil && newErr != nil && oldErr.Error() == newErr.Error() {"
+    },
+    {
+      "file": "internal/transport/ws_groups.go",
+      "line": 248,
+      "text": "if oldErr != nil && newErr != nil && oldErr.Error() == newErr.Error() {"
+    },
+    {
+      "file": "internal/transport/ws_groups.go",
+      "line": 248,
+      "text": "if oldErr != nil && newErr != nil && oldErr.Error() == newErr.Error() {"
+    },
+    {
+      "file": "internal/transport/ws_groups.go",
+      "line": 398,
+      "text": "if oldErr != nil && newErr != nil && oldErr.Error() == newErr.Error() {"
+    },
+    {
+      "file": "internal/transport/ws_groups.go",
+      "line": 398,
+      "text": "if oldErr != nil && newErr != nil && oldErr.Error() == newErr.Error() {"
+    },
+    {
+      "file": "internal/transport/ws_groups.go",
+      "line": 294,
+      "text": "NewValue:  newErr.Error(),"
+    },
+    {
+      "file": "internal/transport/ws_groups.go",
+      "line": 300,
+      "text": "OldValue:  oldErr.Error(),"
+    },
+    {
+      "file": "internal/transport/ws_groups.go",
+      "line": 115,
+      "text": "Reason: err.Error(),"
+    },
+    {
+      "file": "internal/transport/ws_groups.go",
+      "line": 223,
+      "text": "Reason: err.Error(),"
+    },
+    {
+      "file": "internal/transport/ws_helper_sessions.go",
+      "line": 37,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_history_record.go",
+      "line": 387,
+      "text": "h.status.Raise(HistoryDegradeWriteFailed, runErr.Error())"
+    },
+    {
+      "file": "internal/transport/ws_integration_method.go",
+      "line": 138,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: \"Record helper consent failed: \" + err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_integration_method.go",
+      "line": 124,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: code, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_layout_handlers.go",
+      "line": 1044,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: layoutErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_ledger_capture.go",
+      "line": 190,
+      "text": "h.invalid(req, err.Error())"
+    },
+    {
+      "file": "internal/transport/ws_ledger.go",
+      "line": 696,
+      "text": "h.invalid(req, err.Error())"
+    },
+    {
+      "file": "internal/transport/ws_lifecycle_recover.go",
+      "line": 135,
+      "text": "_ = r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_lifecycle.go",
+      "line": 504,
+      "text": "_ = r.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_note_handlers.go",
+      "line": 41,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: noteErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_note_handlers.go",
+      "line": 53,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: noteErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_note_handlers.go",
+      "line": 65,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: noteErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_note_handlers.go",
+      "line": 77,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: noteErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_note_handlers.go",
+      "line": 88,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: noteErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_note_handlers.go",
+      "line": 100,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: noteErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_policy.go",
+      "line": 656,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: \"policy.set: \" + err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_policy.go",
+      "line": 864,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: \"policy.setRule: \" + err.Error() +"
+    },
+    {
+      "file": "internal/transport/ws_policy.go",
+      "line": 868,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: \"policy.setRule: \" + err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_policy.go",
+      "line": 921,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: \"policy.forgetRule: \" + err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_policy.go",
+      "line": 669,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: \"policy.set: \" + err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_policy.go",
+      "line": 871,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: \"policy.setRule: \" + err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_policy.go",
+      "line": 128,
+      "text": "return \"policy: \" + err.Error()"
+    },
+    {
+      "file": "internal/transport/ws_probe.go",
+      "line": 357,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: \"Invalid key: not base64: \" + err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_probe.go",
+      "line": 363,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: \"Trust host key failed: \" + err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_roles.go",
+      "line": 95,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_roles.go",
+      "line": 104,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_roles.go",
+      "line": 75,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: endpointMethodErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_roles.go",
+      "line": 163,
+      "text": "return err.Error()"
+    },
+    {
+      "file": "internal/transport/ws_roles.go",
+      "line": 203,
+      "text": "return err.Error()"
+    },
+    {
+      "file": "internal/transport/ws_script.go",
+      "line": 149,
+      "text": "return at + \" could not be read: \" + err.Error()"
+    },
+    {
+      "file": "internal/transport/ws_secrets_detect.go",
+      "line": 90,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: \"secrets.detect: \" + err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_secrets.go",
+      "line": 172,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_secrets.go",
+      "line": 232,
+      "text": "Message: parseErr.Error(),"
+    },
+    {
+      "file": "internal/transport/ws_secrets.go",
+      "line": 340,
+      "text": "Message: verr.Error(),"
+    },
+    {
+      "file": "internal/transport/ws_session_handlers.go",
+      "line": 993,
+      "text": "_ = r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_session_handlers.go",
+      "line": 306,
+      "text": "_ = respond(r, newJSONRPCError(req.ID, -32602, \"Invalid params: \"+err.Error()))"
+    },
+    {
+      "file": "internal/transport/ws_session_handlers.go",
+      "line": 325,
+      "text": "msg = err.Error() // unclassifiable — use the raw wrapped error"
+    },
+    {
+      "file": "internal/transport/ws_session_record.go",
+      "line": 555,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_session_record.go",
+      "line": 129,
+      "text": "s.historyStatus.Raise(HistoryDegradeWriteFailed, err.Error())"
+    },
+    {
+      "file": "internal/transport/ws_session_record.go",
+      "line": 286,
+      "text": "s.historyStatus.Raise(HistoryDegradeWriteFailed, err.Error())"
+    },
+    {
+      "file": "internal/transport/ws_shell_footprint.go",
+      "line": 357,
+      "text": "Message: \"helper uninstall refused because live helper sessions could not be ended: \" + closeErr.Error(),"
+    },
+    {
+      "file": "internal/transport/ws_shell_footprint.go",
+      "line": 385,
+      "text": "Message: \"the helper was removed from \" + host + \" but machine consent could not be revoked: \" + rerr.Error(),"
+    },
+    {
+      "file": "internal/transport/ws_shell_footprint.go",
+      "line": 402,
+      "text": "Message: \"the helper was removed from \" + host + \" but the local footprint could not be updated: \" + rerr.Error(),"
+    },
+    {
+      "file": "internal/transport/ws_skill_audit.go",
+      "line": 178,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_skill_audit.go",
+      "line": 195,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_skill_audit.go",
+      "line": 241,
+      "text": "\"elapsed\", time.Since(askedAt), \"error\", err.Error())"
+    },
+    {
+      "file": "internal/transport/ws_skill_audit.go",
+      "line": 255,
+      "text": "Message: fmt.Sprintf(\"%s (endpoint %q, model %q)\", err.Error(), endpoint.Name, model),"
+    },
+    {
+      "file": "internal/transport/ws_skill_audit.go",
+      "line": 325,
+      "text": "stored, storedErr = \"no\", putErr.Error()"
+    },
+    {
+      "file": "internal/transport/ws_skill_check.go",
+      "line": 138,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_skill_check.go",
+      "line": 160,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: getErr.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_skill_handlers.go",
+      "line": 213,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_skill_handlers.go",
+      "line": 224,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_skill_handlers.go",
+      "line": 235,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_skill_handlers.go",
+      "line": 246,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_skill_handlers.go",
+      "line": 254,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_skill_handlers.go",
+      "line": 279,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_skill_handlers.go",
+      "line": 297,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_skill_handlers.go",
+      "line": 314,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_skill_handlers.go",
+      "line": 326,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_snippet_handlers.go",
+      "line": 42,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: snippetMethodErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_snippet_handlers.go",
+      "line": 54,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: snippetMethodErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_snippet_handlers.go",
+      "line": 70,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: snippetMethodErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_snippet_handlers.go",
+      "line": 85,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: snippetMethodErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_snippet_handlers.go",
+      "line": 97,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: snippetMethodErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_sshconfig.go",
+      "line": 90,
+      "text": "Detail: err.Error(),"
+    },
+    {
+      "file": "internal/transport/ws_tunnel.go",
+      "line": 164,
+      "text": "_ = r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_tunnel.go",
+      "line": 177,
+      "text": "_ = r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_tunnel.go",
+      "line": 94,
+      "text": "msg := err.Error()"
+    },
+    {
+      "file": "internal/transport/ws_upload.go",
+      "line": 1528,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_upload.go",
+      "line": 1577,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_upload.go",
+      "line": 1430,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_upload.go",
+      "line": 1454,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(probeErr), Message: probeErr.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_upload.go",
+      "line": 1443,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(sinkErr), Message: sinkErr.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_upload.go",
+      "line": 2177,
+      "text": "http.Error(w, \"Content-Length does not match the declared size\", http.StatusBadRequest)"
+    },
+    {
+      "file": "internal/transport/ws_upload.go",
+      "line": 2171,
+      "text": "http.Error(w, \"Content-Length is required\", http.StatusBadRequest)"
+    },
+    {
+      "file": "internal/transport/ws_upload.go",
+      "line": 2072,
+      "text": "http.Error(w, \"forbidden\", http.StatusForbidden)"
+    },
+    {
+      "file": "internal/transport/ws_upload.go",
+      "line": 2153,
+      "text": "http.Error(w, \"gone\", http.StatusGone)"
+    },
+    {
+      "file": "internal/transport/ws_upload.go",
+      "line": 2164,
+      "text": "http.Error(w, \"gone\", http.StatusGone)"
+    },
+    {
+      "file": "internal/transport/ws_upload.go",
+      "line": 2190,
+      "text": "http.Error(w, \"gone\", http.StatusGone)"
+    },
+    {
+      "file": "internal/transport/ws_upload.go",
+      "line": 2227,
+      "text": "http.Error(w, \"the transfer failed\", http.StatusInternalServerError)"
+    },
+    {
+      "file": "internal/transport/ws_upload.go",
+      "line": 2225,
+      "text": "http.Error(w, \"the transfer was cancelled\", http.StatusInternalServerError)"
+    },
+    {
+      "file": "internal/transport/ws_upload.go",
+      "line": 2144,
+      "text": "http.Error(w, \"this connection cannot carry an upload\", http.StatusInternalServerError)"
+    },
+    {
+      "file": "internal/transport/ws_upload.go",
+      "line": 2168,
+      "text": "http.Error(w, \"this upload already has a body\", http.StatusConflict)"
+    },
+    {
+      "file": "internal/transport/ws_upload.go",
+      "line": 282,
+      "text": "if name, ok := strings.CutPrefix(err.Error(), unknownField); ok {"
+    },
+    {
+      "file": "internal/transport/ws_upload.go",
+      "line": 1257,
+      "text": "p.Error = err.Error()"
+    },
+    {
+      "file": "internal/transport/ws_vault.go",
+      "line": 315,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_vault.go",
+      "line": 274,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: code, Message: err.Error(), Data: reasonForError(err)})"
+    },
+    {
+      "file": "internal/transport/ws_vault.go",
+      "line": 333,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: code, Message: err.Error(), Data: reasonForError(err)})"
+    },
+    {
+      "file": "internal/transport/ws_vault.go",
+      "line": 404,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: code, Message: err.Error(), Data: reasonForError(err)})"
+    },
+    {
+      "file": "internal/transport/ws_vault.go",
+      "line": 468,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: code, Message: err.Error(), Data: reasonForError(err)})"
+    },
+    {
+      "file": "internal/transport/ws_vault.go",
+      "line": 505,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: code, Message: err.Error(), Data: reasonForError(err)})"
+    },
+    {
+      "file": "internal/transport/ws_vault.go",
+      "line": 435,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: errCode, Message: err.Error(), Data: reasonForError(err)})"
+    },
+    {
+      "file": "internal/transport/ws_vault.go",
+      "line": 129,
+      "text": "Message: msgPrefix + err.Error(),"
+    },
+    {
+      "file": "internal/transport/ws_vault.go",
+      "line": 182,
+      "text": "return RPCError{Code: fallback, Message: err.Error()}"
+    },
+    {
+      "file": "internal/transport/ws.go",
+      "line": 4009,
+      "text": "panic(\"marshal: \" + err.Error())"
+    },
+    {
+      "file": "internal/transport/ws.go",
+      "line": 1722,
+      "text": "panic(\"nocx: control-plane registration: \" + err.Error())"
+    },
+    {
+      "file": "internal/transport/ws.go",
+      "line": 2976,
+      "text": "s.log.Warn(\"jsonrpc invalid request\", \"len\", len(data), \"category\", err.Error())"
+    },
+    {
+      "file": "internal/tunnel/dynamic.go",
+      "line": 239,
+      "text": "msg := strings.ToLower(err.Error())"
+    },
+    {
+      "file": "internal/vault/system/system.go",
+      "line": 386,
+      "text": "s := strings.ToLower(err.Error())"
+    },
+    {
+      "file": "internal/vault/vault.go",
+      "line": 196,
+      "text": "logger.Warn(\"reconciliation blocked\", \"entry\", e.String())"
+    },
+    {
+      "file": "internal/vtpin/bundle.go",
+      "line": 136,
+      "text": "info, err := d.Info()"
+    },
+    {
+      "file": "internal/workers/ids.go",
+      "line": 31,
+      "text": "panic(\"worker: no entropy for a participant id: \" + err.Error())"
+    },
+    {
+      "file": "internal/workers/workers.go",
+      "line": 422,
+      "text": "func (e *PaneNeverTypable) Error() string { return ErrPaneNeverTypable.Error() + \": \" + e.Detail }"
+    },
+    {
+      "file": "main.go",
+      "line": 128,
+      "text": "logger.Error(\"application error\", \"error\", err)"
+    }
+  ]
+}

@@ -1,0 +1,447 @@
+package agentdriver
+
+// The closed predicate set.
+//
+// A rule document composes these and can invent none. That closure is the
+// safety property: a person may say WHERE to look and WHAT to look for, and
+// may not lift a bound the engine enforces — a region's cap, the cursor's
+// unforgeability, the exact column a marker must occupy.
+//
+// Every predicate here is a pure function of one paneview.Frame. Nothing
+// remembers a previous frame, because Driver's own contract forbids it: "a
+// rule that remembers is a rule that can be stuck".
+
+import (
+	"regexp"
+	"strconv"
+	"strings"
+
+	"github.com/shady2k/nocx/internal/paneview"
+)
+
+// cursorOn answers whether the cursor's OWN cell carries this text.
+//
+// This is the predicate an agent cannot forge. Printed text cannot take the
+// cursor: the TUI parks it after every repaint, so a "❯ 1. Yes" an agent wrote
+// into its own transcript sits under no cursor and matches nothing.
+func cursorOn(f paneview.Frame, glyph string) bool {
+	cell, ok := cellAt(f, f.CursorX, f.CursorY)
+	return ok && cell.Text == glyph
+}
+
+// rowOpensWith answers whether the first NON-BLANK cell of a row is this text.
+// The transcript is indented and the chrome is not, so "opens with" is what
+// separates a marker from the same glyph wrapped into a sentence.
+func rowOpensWith(f paneview.Frame, row int, glyph string) bool {
+	col, ok := firstNonBlankCol(f, row)
+	if !ok {
+		return false
+	}
+	cell, ok := cellAt(f, col, row)
+	return ok && cell.Text == glyph
+}
+
+// cellAtCol answers whether an EXACT column of a row carries this text.
+//
+// This is deliberately not rowOpensWith, and the two must never be folded
+// together: the input box requires its marker at column 0 exactly, while a
+// menu marker may open an indented row. The box is one of the two markers the
+// driver's safety argument rests on, and widening it would weaken that.
+func cellAtCol(f paneview.Frame, row, col int, glyph string) bool {
+	cell, ok := cellAt(f, col, row)
+	return ok && cell.Text == glyph
+}
+
+// fullWidthRule answers whether a row is nothing but one repeated cell, edge
+// to edge. It does NOT skip zero-width continuation cells, unlike Frame.Text:
+// a rule is a statement about every column, and a row that needs interpreting
+// to look like one is not one.
+func fullWidthRule(f paneview.Frame, row int, glyph string) bool {
+	if row < 0 || row >= len(f.Lines) || f.Cols <= 0 {
+		return false
+	}
+	line := f.Lines[row]
+	if len(line) < f.Cols {
+		return false
+	}
+	for x := 0; x < f.Cols; x++ {
+		if line[x].Text != glyph {
+			return false
+		}
+	}
+	return true
+}
+
+// rowContains reads the anchor's OWN row. Every other text predicate here
+// looks above or below an anchor; the mode line has to be read where it sits.
+func rowContains(f paneview.Frame, row int, text string) bool {
+	if row < 0 || row >= f.Rows {
+		return false
+	}
+	return strings.Contains(f.Text(row), text)
+}
+
+// nearestNonBlankAbove walks up from a row and returns the first row with any
+// non-blank cell, rendered whole.
+func nearestNonBlankAbove(f paneview.Frame, row int) (string, bool) {
+	for i := row - 1; i >= 0; i-- {
+		if _, ok := firstNonBlankCol(f, i); ok {
+			return f.Text(i), true
+		}
+	}
+	return "", false
+}
+
+// opensWithGlyph answers whether a scanned row's own first NON-BLANK
+// character is one of the given glyphs — the region-scanned counterpart of
+// rowOpensWith, needed because regionAny visits rows the region found rather
+// than one fixed anchor row.
+//
+// It is Contains's replacement where the grammar needs identity of the row's
+// OPENING content rather than mere presence anywhere in it: "·" and "*" are
+// ordinary characters an agent's own prose uses constantly, so Contains let a
+// transcript line that merely mentioned one of Claude's six spinner glyphs
+// satisfy a bound meant to recognise the spinner itself (nocx-nru89.9).
+//
+// It is deliberately independent of col0Only, and TrimLeft rather than a
+// stricter column-0 check is why: col0Only decides which rows the region even
+// VISITS — a POSITION property, enforced by skipping indented candidates
+// before this ever runs — while this decides what a visited row's own content
+// OPENS with — an IDENTITY property. Folding the two together would leave a
+// region that never sets col0Only unable to ask "opens with" at all, and
+// would make col0Only a mere restatement of this check wherever both are set
+// on the same predicate — which is exactly what the col0Only-alone bound
+// tests exist to catch when this function is temporarily removed instead.
+func opensWithGlyph(text string, glyphs []string) bool {
+	trimmed := strings.TrimLeft(text, " ")
+	for _, g := range glyphs {
+		if strings.HasPrefix(trimmed, g) {
+			return true
+		}
+	}
+	return false
+}
+
+// region is a search area computed from an anchor rather than from a fixed
+// row, and its bounds belong to the engine.
+//
+// maxRows is the cap that stops an agent whose printed lines abut the chrome
+// from extending the area a forged marker would be looked for in. stopAtBlank
+// and col0Only look similar and are not: a blank row ENDS the region, while an
+// indented row is merely SKIPPED. The status stack is a contiguous run of
+// unindented rows, so both are needed and neither substitutes for the other.
+//
+// skipStatusGlyphs is the third kind of bound, and it exists for the region
+// that reads the TRANSCRIPT rather than the chrome. Everything between the
+// input box and the agent's own output is the pane's STATUS STACK — a spinner
+// row, sometimes a tip row or a wrapped error line under it — and its height is
+// not fixed, so a region anchored at the box's own chrome and reading up must
+// STEP OVER it. Without that step the region would either end on the spinner or
+// measure the spinner's own timer as growth, and a spinner that keeps ticking
+// would report a hung agent as moving forever (nocx-tnx44).
+//
+// Where the stack ends is read off the glyphs: the TOPMOST row of the leading
+// run of non-blank rows that carries one of these in its first cell is the
+// stack's last row, and everything at or below it is read by nothing. The
+// cell is the row's own FIRST CELL and not its first non-blank one, because the
+// stack is drawn at column 0 while the agent's output is indented — a check
+// that trimmed indentation would mistake a markdown bullet the agent printed
+// for chrome and hide every row under it.
+//
+// A leading run with none of these glyphs is not a stack at all: a transcript
+// that FILLS the pane abuts the box with nothing drawn between, and the region
+// must read it whole rather than discard whatever happens to sit next to the
+// chrome.
+//
+// What that rule costs is one shape, stated here rather than discovered later:
+// a status row with NO glyph in its first cell and drawn ABOVE the stack's
+// glyph row would be read as transcript. The corpus never draws one — the stack
+// grows upward from the box as a tip line, then the spinner row that carries
+// the glyph — and the failure direction is a pane reported as moving, which is
+// the cheap one.
+//
+// toEdge says the region's bound is the FRAME's own edge in its direction
+// rather than a row count, and the engine permits it only for a region that
+// reads UP — see Document.validate, which is where that argument is stated.
+//
+// colFrom renders every visited row starting at that column rather than
+// column 0 — zero means column 0, which is exactly f.Text's own rendering, so
+// every existing region is unaffected. It exists for the menu grammar: an
+// option list's own column of alignment is the CURSOR's, not a fixed one a
+// document could name, because the same agent draws it at column 1 in an
+// inline dialog and at column 3 inside an overlay panel (measured off
+// 2.1.266-model's capture). A region built with RegionSpec.FromCol="cursor"
+// carries the frame's CursorX here, and it is set once, by RegionSpec.at,
+// rather than re-read per row — the cursor does not move while one frame is
+// being read.
+type region struct {
+	anchor           int
+	up               bool
+	maxRows          int
+	col0Only         bool
+	stopAtBlank      bool
+	skipStatusGlyphs []string
+	toEdge           bool
+	colFrom          int
+}
+
+// stackTop answers where the status stack the region begins in ends: the row
+// its walk may start above, or the anchor itself when there is no stack.
+func (r region) stackTop(f paneview.Frame) int {
+	top := -1
+	for y := r.anchor - 1; y >= 0; y-- {
+		if _, ok := firstNonBlankCol(f, y); !ok {
+			// A blank row ends the leading run. Everything above it is the
+			// agent's own output, which is why the stack can be found at all
+			// without knowing how tall it is.
+			break
+		}
+		if opensAtColumnZero(f, y, r.skipStatusGlyphs) {
+			top = y
+		}
+	}
+	if top < 0 {
+		return r.anchor
+	}
+	return top
+}
+
+// opensAtColumnZero answers whether a row's own FIRST CELL is one of the
+// glyphs — the POSITIONAL counterpart of opensWithGlyph, and the one this
+// question needs. The status stack is drawn at column 0 and the agent's own
+// transcript is indented, so identity alone is not enough: "* item" two columns
+// into a markdown list the agent printed is not a spinner, and a bound that
+// could not tell them apart would step over the transcript it was written to
+// measure.
+func opensAtColumnZero(f paneview.Frame, row int, glyphs []string) bool {
+	cell, ok := cellAt(f, 0, row)
+	if !ok {
+		return false
+	}
+	for _, g := range glyphs {
+		if cell.Text == g {
+			return true
+		}
+	}
+	return false
+}
+
+// eachRow walks the region once, in order, handing every candidate row's own
+// index and right-trimmed text to visit, and stops when visit says so or the
+// region ends.
+//
+// It is the ONE walk. anyRow is this with a boolean out-parameter and capture
+// is this collecting, so the cap, the blank terminator, the indent skip, the
+// status-stack step and the frame's own edge are enforced in a single place — a
+// second walk written beside it is a second set of bounds, and the whole
+// argument for the region is that its bounds are the engine's.
+func (r region) eachRow(f paneview.Frame, visit func(y int, text string) bool) {
+	start := r.anchor
+	if r.up && len(r.skipStatusGlyphs) > 0 {
+		start = r.stackTop(f)
+	}
+	for i := 0; r.toEdge || i < r.maxRows; i++ {
+		y := start + 1 + i
+		if r.up {
+			y = start - 1 - i
+		}
+		if y < 0 || y >= f.Rows {
+			return
+		}
+		text := rowTextFrom(f, y, r.colFrom)
+		if strings.TrimSpace(text) == "" {
+			if r.stopAtBlank {
+				return
+			}
+			continue
+		}
+		if r.col0Only {
+			if col, ok := firstNonBlankCol(f, y); !ok || col != 0 {
+				continue
+			}
+		}
+		if !visit(y, text) {
+			return
+		}
+	}
+}
+
+// anyRow reports whether any row inside the region satisfies match, which is
+// handed the row's text right-trimmed.
+func (r region) anyRow(f paneview.Frame, match func(text string) bool) bool {
+	found := false
+	r.eachRow(f, func(_ int, text string) bool {
+		if match(text) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// capture is the region's OTHER answer, and the half predicate.go did not have
+// until the driver had to report a subagent panel it could plainly see. Every
+// predicate above says yes or no about a row; this reads values out of one.
+//
+// The pattern chooses WHAT comes out. The region chooses WHERE the rows come
+// from, and a document cannot widen it — which is the same argument maxRows
+// carries for a forged spinner, applied to a forged panel row. A group that did
+// not participate in a match contributes no key, so an absent field is absent
+// rather than empty.
+//
+// Every row also carries "_row", the frame's own visible row index, decimal.
+// It is the engine's own bookkeeping rather than a document's capture group —
+// nothing here can WRITE it (a pattern that also named a group "_row" would
+// simply be overwritten below) — and it exists for a projection that has to
+// turn several matched rows back into a RowSpan, which a generic
+// map[string]string otherwise has no position for. Observation.Menu is the
+// first reader.
+func (r region) capture(f paneview.Frame, re *regexp.Regexp) []map[string]string {
+	names := re.SubexpNames()
+	var out []map[string]string
+	r.eachRow(f, func(y int, text string) bool {
+		m := re.FindStringSubmatch(text)
+		if m == nil {
+			return true
+		}
+		row := make(map[string]string, len(names)+1)
+		for i, name := range names {
+			if i == 0 || name == "" || m[i] == "" {
+				continue
+			}
+			row[name] = m[i]
+		}
+		row["_row"] = strconv.Itoa(y)
+		out = append(out, row)
+		return true
+	})
+	return out
+}
+
+// numberedOption matches the option grammar after a menu marker: optional
+// spaces, one or more digits, a dot, a space.
+func numberedOption(s string) bool {
+	s = strings.TrimLeft(s, " ")
+	digits := 0
+	for digits < len(s) && s[digits] >= '0' && s[digits] <= '9' {
+		digits++
+	}
+	if digits == 0 || digits+1 >= len(s) {
+		return false
+	}
+	return s[digits] == '.' && s[digits+1] == ' '
+}
+
+// belowVerdict is why this predicate is not a boolean.
+//
+// Three cases have to stay apart, and a boolean collapses two of them in the
+// expensive direction: everything down there is recognised chrome; something
+// down there is NOT, which must answer unknown; or nothing is drawn down there
+// at all, which decides nothing and must fall through to the branches after
+// it. Folding the middle into the last turns a refusal into free_text, and a
+// wrong free_text is a keystroke into whatever appears next.
+type belowVerdict int
+
+const (
+	belowNothing belowVerdict = iota
+	belowAllMatched
+	belowCounterexample
+)
+
+// belowAnchorOpensOnlyWith reads what is drawn below the first non-blank row
+// beneath an anchor — chrome territory the transcript cannot reach, because
+// the transcript scrolls above the input box.
+//
+// The frame's own bottom edge is the cap here, and that is the engine owning
+// the bound as much as maxRows is elsewhere: there is nothing below the last
+// row to reach.
+func belowAnchorOpensOnlyWith(f paneview.Frame, anchor int, glyphs []string) belowVerdict {
+	mode, ok := firstNonBlankRowBelow(f, anchor)
+	if !ok {
+		return belowNothing
+	}
+	out := belowNothing
+	for y := mode + 1; y < f.Rows; y++ {
+		col, ok := firstNonBlankCol(f, y)
+		if !ok {
+			continue
+		}
+		cell, ok := cellAt(f, col, y)
+		if !ok {
+			continue
+		}
+		matched := false
+		for _, g := range glyphs {
+			if cell.Text == g {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return belowCounterexample
+		}
+		out = belowAllMatched
+	}
+	return out
+}
+
+// ── frame arithmetic ──────────────────────────────────────────────────────
+//
+// These were claude.go's until the rule became a document. They are not
+// predicates — they are how a predicate reads a row — and they are here rather
+// than beside one agent because every rule needs them.
+
+func cellAt(f paneview.Frame, x, y int) (paneview.Cell, bool) {
+	if y < 0 || y >= len(f.Lines) {
+		return paneview.Cell{}, false
+	}
+	if x < 0 || x >= len(f.Lines[y]) {
+		return paneview.Cell{}, false
+	}
+	return f.Lines[y][x], true
+}
+
+func firstNonBlankCol(f paneview.Frame, y int) (int, bool) {
+	if y < 0 || y >= len(f.Lines) {
+		return 0, false
+	}
+	for x, c := range f.Lines[y] {
+		if c.Width == 0 {
+			continue
+		}
+		if strings.TrimSpace(c.Text) != "" {
+			return x, true
+		}
+	}
+	return 0, false
+}
+
+// rowTextFrom renders a row from a column onwards, so a marker's own cell does
+// not have to be trimmed off the front of the text it introduces.
+func rowTextFrom(f paneview.Frame, y, from int) string {
+	if y < 0 || y >= len(f.Lines) {
+		return ""
+	}
+	var b strings.Builder
+	for x, c := range f.Lines[y] {
+		if x < from || c.Width == 0 {
+			continue
+		}
+		if c.Text == "" {
+			b.WriteByte(' ')
+			continue
+		}
+		b.WriteString(c.Text)
+	}
+	return strings.TrimRight(b.String(), " ")
+}
+
+func firstNonBlankRowBelow(f paneview.Frame, y int) (int, bool) {
+	for i := y + 1; i < f.Rows && i < len(f.Lines); i++ {
+		if _, ok := firstNonBlankCol(f, i); ok {
+			return i, true
+		}
+	}
+	return 0, false
+}

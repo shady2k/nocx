@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/log"
@@ -17,7 +18,7 @@ func TestAdopt_PreservesSSHOptionsUntilClose(t *testing.T) {
 		Port:    2222,
 		KeyFile: "/tmp/e2e-key",
 	}
-	sess, err := reg.Adopt(Config{
+	sess, err := reg.Adopt(context.Background(), Config{
 		Kind:   KindRemote,
 		Host:   "remote.example",
 		Remote: remote,

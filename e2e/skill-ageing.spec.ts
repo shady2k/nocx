@@ -6,12 +6,13 @@
  * Every wait observes a DOM state, a model request, or a file written by the
  * backend. This spec deliberately contains no waitForTimeout or sleep.
  */
-import { test as base, expect, type Locator, type Page } from '@playwright/test'
+import { expect, type Locator, type Page } from '@playwright/test'
 import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  standalone as base,
   appReadyForInput,
   createAiEndpoint,
   documentDir,

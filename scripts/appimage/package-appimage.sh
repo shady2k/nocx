@@ -35,6 +35,20 @@ mkdir -p dist
 mkdir -p AppDir/usr/bin
 cp "$BIN" AppDir/usr/bin/nocx
 
+# ── Third-party notices ──────────────────────────────────────
+# The image is how the product reaches a Linux user, and it carries the helper
+# — the binary that links libghostty-vt statically (ADR-0065) — inside the
+# copy of the app that installs it. So the licences of what is in the image
+# travel with it, and usr/share/doc/<name> is where a distribution keeps
+# exactly this.
+#
+# The bytes are the PIN's own document, staged by the one script that owns
+# where the notices come from — never a copy made here — and the check at the
+# end of this script reads them back OUT of the packaged artefact, so a file
+# that was in the AppDir and an image that dropped it cannot be confused.
+third_party/libghostty-vt/scripts/stage-notices.sh \
+  AppDir/usr/share/doc/nocx/THIRD_PARTY_LICENSES.txt
+
 # .desktop file — required for linuxdeploy to recognise the app.
 # `Icon` is not decoration: appimagetool refuses to package without
 # one ("Icon entry not found in desktop file"), and the value must
@@ -225,6 +239,21 @@ extracted="$(mktemp -d)"
 test -x "$extracted/squashfs-root/usr/bin/nocx-server" \
   || { echo "nocx-server is not in the AppImage"; exit 1; }
 file "$extracted/squashfs-root/usr/bin/nocx-server" | grep -q 'ELF 64-bit'
+
+# The notices are asserted from the IMAGE, for the reason above: an AppDir
+# check would pass on an image that dropped them, and the image is what a user
+# downloads. The expectation is the pin's own sha256 — the same number the
+# staging step verified — so this fails on a document that is merely
+# present as well as on one that is absent.
+echo "=== third-party notices are in the image ==="
+shipped="$extracted/squashfs-root/usr/share/doc/nocx/THIRD_PARTY_LICENSES.txt"
+pinned="$(go run ./cmd/vtfetch meta | sed -n 's/^licenses_sha256=//p')"
+[ -n "$pinned" ] || { echo "no licenses sha256 in third_party/libghostty-vt/MANIFEST.json"; exit 1; }
+test -f "$shipped" || { echo "the AppImage carries no third-party notices"; exit 1; }
+got="$(sha256sum "$shipped" | awk '{print $1}')"
+[ "$got" = "$pinned" ] || { echo "the AppImage's notices are not the pinned document: $got != $pinned"; exit 1; }
+echo "AppImage notices: $got is the pinned document"
+
 rm -rf "$extracted"
 
 sha256sum dist/*

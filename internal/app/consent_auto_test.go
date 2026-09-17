@@ -46,7 +46,7 @@ func TestAbsentModeResolvesToOneValue(t *testing.T) {
 	// The resolver's own reading of "nothing was set" must be the same value.
 	// A machine with an empty Mode is a connection the cascade never spoke
 	// for — a direct host or an ad-hoc destination.
-	r := newResolver(withHelperArtifactAvailable(true), withHelperRequested(true))
+	r := newResolver(withHelperArtifactAvailable(true))
 	absent := r.Resolve(Machine{Fingerprint: "SHA256:absent"})
 	declared := r.Resolve(Machine{Fingerprint: "SHA256:declared", Mode: cascadeDefault})
 
@@ -56,15 +56,15 @@ func TestAbsentModeResolvesToOneValue(t *testing.T) {
 	}
 }
 
-// TestExplicitScriptIsNeverRaisedToTheAsk is D8's rule, which only became
-// assertable once silence stopped resolving to script. A user who chose
-// script has answered; the ask is for those who have not.
+// TestExplicitScriptIsNeverRaisedToTheAsk, which only became assertable
+// once silence stopped resolving to script. A user who chose script has
+// answered; the ask is for those who have not.
 func TestExplicitScriptIsNeverRaisedToTheAsk(t *testing.T) {
-	r := newResolver(withHelperArtifactAvailable(true), withHelperRequested(true))
+	r := newResolver(withHelperArtifactAvailable(true))
 
 	if got := r.Resolve(explicitScript); got == ConsentRequired {
 		t.Error("an explicit script was raised to the consent ask — " +
-			"D8: script is an answer, not a gap")
+			"script is an answer, not a gap")
 	}
 	if got := r.Resolve(machineWithNoStoredAnswer); got != ConsentRequired {
 		t.Errorf("an unanswered machine resolved to %q, want %q — "+
@@ -79,7 +79,7 @@ func TestExplicitScriptIsNeverRaisedToTheAsk(t *testing.T) {
 // raw gets a mode the resolver does not recognise, and fails closed into
 // Refused.
 func TestExplicitAutoIsAskableLikeSilence(t *testing.T) {
-	r := newResolver(withHelperArtifactAvailable(true), withHelperRequested(true))
+	r := newResolver(withHelperArtifactAvailable(true))
 
 	explicitAuto := Machine{Fingerprint: "SHA256:auto", Mode: profile.DesiredAuto}
 	if got := r.Resolve(explicitAuto); got != ConsentRequired {
@@ -87,14 +87,14 @@ func TestExplicitAutoIsAskableLikeSilence(t *testing.T) {
 	}
 }
 
-// TestRelayIsAdditiveNotAlternative states §5.2 as an assertion instead of
+// TestHelperIsAdditiveNotAlternative states §5.2 as an assertion instead of
 // prose: "declining a deployed binary must not also decline shell scripts —
 // different risks", and the inverse holds for the same reason. A user at
-// relay has allowed the helper; nothing about that answer says they gave up
+// helper has allowed the binary; nothing about that answer says they gave up
 // the blocks.
 //
 // It failed in the direction nobody looks: picking the MOST capable mode on
-// the axis delivered the LEAST, because the open-time gate had refused relay
+// the axis delivered the LEAST, because the open-time gate had refused helper
 // since the days the Tier-B carrier did not exist, and the helper landing
 // did not move it (nocx-7k8ma).
 //
@@ -102,18 +102,18 @@ func TestExplicitAutoIsAskableLikeSilence(t *testing.T) {
 // each true of a broken product: the resolver alone cannot see that the
 // shell was left plain, and the gate alone cannot see that the helper was
 // allowed.
-func TestRelayIsAdditiveNotAlternative(t *testing.T) {
-	// The helper half: an explicit relay is the consent, with no surface
+func TestHelperIsAdditiveNotAlternative(t *testing.T) {
+	// The helper half: an explicit helper is the consent, with no surface
 	// having to ask (§4.3).
-	r := newResolver(withHelperArtifactAvailable(true), withHelperRequested(false))
-	if got := r.Resolve(explicitRelay); got != DesiredRelay {
-		t.Errorf("relay resolved to %q, want %q — the explicit choice is the consent", got, DesiredRelay)
+	r := newResolver(withHelperArtifactAvailable(true))
+	if got := r.Resolve(explicitHelper); got != DesiredHelper {
+		t.Errorf("helper resolved to %q, want %q — the explicit choice is the consent", got, DesiredHelper)
 	}
 
 	// The scripts half: the same session still publishes the bundle and
 	// integrates, exactly as auto and script do.
-	if !profile.DesiredRelay.DeliversScripts() {
-		t.Error("a relay session does not integrate — allowing the binary " +
+	if !profile.DesiredHelper.DeliversScripts() {
+		t.Error("a helper session does not integrate — allowing the binary " +
 			"silently declined the shell scripts, which §5.2 forbids in both directions")
 	}
 

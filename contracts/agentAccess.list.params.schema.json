@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agentAccess.list.params.schema.json",
+  "title": "AgentAccessListParams",
+  "description": "Params for agentAccess.list: none. The answers this backend holds are the whole of what it can list — there is no workspace to select, because a backend composes exactly one scope.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {}
+}

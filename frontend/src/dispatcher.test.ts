@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { EndpointProvider, EndpointResult } from './endpoint'
 import {
+  CONNECT_ATTEMPT_TIMEOUT_MS,
   Dispatcher,
   HEARTBEAT_IDLE_WINDOW_MS,
   SATURATION_TOAST_WINDOW_MS,
@@ -196,6 +197,42 @@ describe('dispatcher endpoint state machine', () => {
     expect(socket().url).toBe('ws://second-host:1002/session')
   })
 
+  // nocx-n14oo.11: a failing e2e test reads its own connection's backend
+  // lines by trace_id, which only works if the socket that test's page opens
+  // actually carries the id the harness minted. This is the one seam that
+  // proves it does, without a real backend: the endpoint the provider
+  // resolves is the harness's shim (frontend/src/endpoint.ts:traceparent),
+  // and the URL constructed from it is what the wire actually receives.
+  it('carries traceparent on the connection URL when the endpoint supplies one', async () => {
+    const provider = new TestEndpointProvider()
+    provider.enqueue({
+      ok: true,
+      endpoint: {
+        host: 'h',
+        port: 1,
+        token: 't',
+        traceparent: '00-0123456789abcdef0123456789abcdef-0123456789abcdef-01',
+      },
+    })
+    const d = new Dispatcher(provider)
+
+    await connected(d)
+
+    expect(socket().url).toBe(
+      'ws://h:1/session?traceparent=00-0123456789abcdef0123456789abcdef-0123456789abcdef-01',
+    )
+  })
+
+  it('omits the traceparent query parameter entirely when the endpoint has none', async () => {
+    const provider = new TestEndpointProvider()
+    provider.enqueue({ ok: true, endpoint: { host: 'h', port: 1, token: 't' } })
+    const d = new Dispatcher(provider)
+
+    await connected(d)
+
+    expect(socket().url).toBe('ws://h:1/session')
+  })
+
   it('publishes each state transition exactly once, including timer-fired connecting', async () => {
     const provider = new TestEndpointProvider()
     const d = new Dispatcher(provider)
@@ -341,6 +378,87 @@ describe('dispatcher endpoint state machine', () => {
     await flush()
     expect(d.connectionState).toEqual({ kind: 'online' })
     expect(provider.calls).toBe(1)
+  })
+
+  /**
+   * The overlay's own `canRetry` only draws Retry for `waiting` and
+   * `blocked` — never `connecting` — so a `connecting` attempt that never
+   * settles (a stalled coordinator discovery, or a WebSocket that never
+   * fires open/error/close) is a `connecting` with no way out: no Retry to
+   * click, and nothing else moves the state. This is the losing order
+   * behind connection-overlay.spec.ts:237 and :324 (nocx-oez54, nocx-61k0g):
+   * an automatic background reconnect can win the race against a person's
+   * deliberate Retry and leave a hung attempt behind it, and there was no
+   * deadline to recover from that. A give-up deadline is the fix, matching
+   * the same shape of problem already solved for the heartbeat and for the
+   * ssh keepalive (nocx-y6fh7).
+   */
+  it('gives up a connecting attempt that never settles, so Retry can act again', async () => {
+    const provider = new TestEndpointProvider()
+    let hungResolve!: (result: EndpointResult) => void
+    provider.resolveImpl = () =>
+      new Promise<EndpointResult>((resolve) => {
+        hungResolve = resolve
+      })
+    const d = new Dispatcher(provider)
+    const states: string[] = []
+    d.onConnectionStateChange((state) => states.push(state.kind))
+
+    d.start()
+    await flush()
+    expect(d.connectionState).toEqual({ kind: 'connecting' })
+    expect(provider.calls).toBe(1)
+
+    // Short of the deadline: still connecting, still no way out.
+    vi.advanceTimersByTime(CONNECT_ATTEMPT_TIMEOUT_MS - 1)
+    await flush()
+    expect(d.connectionState).toEqual({ kind: 'connecting' })
+
+    vi.advanceTimersByTime(1)
+    await flush()
+    expect(d.connectionState.kind).toBe('waiting')
+    expect(d.reconnectPending).toBe(true)
+
+    // The abandoned call resolving late must not resurrect the attempt it
+    // belonged to — the same guarantee `_openSocket` already gives a
+    // superseded socket's late `open`.
+    hungResolve(SUCCESS)
+    await flush()
+    expect(d.connectionState.kind).toBe('waiting')
+    expect(MockWebSocket.all).toHaveLength(0)
+
+    // And Retry — which was hidden the whole time — now actually retries
+    // instead of being swallowed as "already connecting".
+    provider.resolveImpl = null
+    provider.enqueue(SUCCESS)
+    d.retryNow()
+    await flush()
+    expect(d.connectionState).toEqual({ kind: 'connecting' })
+    socket().serverAccepts()
+    await flush()
+    expect(d.connectionState).toEqual({ kind: 'online' })
+  })
+
+  it('gives up a socket that never fires open, error or close, and closes it', async () => {
+    const provider = new TestEndpointProvider()
+    const d = new Dispatcher(provider)
+
+    d.start()
+    await flush()
+    expect(MockWebSocket.all).toHaveLength(1)
+    const hungSocket = socket()
+    expect(hungSocket.closeCalled).toBe(false)
+
+    vi.advanceTimersByTime(CONNECT_ATTEMPT_TIMEOUT_MS)
+    await flush()
+    expect(d.connectionState.kind).toBe('waiting')
+    expect(hungSocket.closeCalled).toBe(true)
+
+    // A stale open firing on the abandoned socket must not flip the state
+    // back to online.
+    hungSocket.serverAccepts()
+    await flush()
+    expect(d.connectionState.kind).toBe('waiting')
   })
 })
 
@@ -672,6 +790,37 @@ describe('control-plane saturation visibility', () => {
     })
     await vi.dynamicImportSettled()
     expect(toasts()).toHaveLength(1)
+  })
+
+  it('an outbound stall drops the socket, because the connection cannot deliver what it owes (nocx-mrtvy)', async () => {
+    // outbound.stalled is what a full refreshable queue sends through its one
+    // reserved slot after dropping a frame (internal/transport/outbound:
+    // "the renderer treats it as a cue to reconnect"). Until this handler it
+    // treated it as nothing: the notification arrived, found no subscriber,
+    // and was discarded — so every frame that episode dropped was lost for
+    // good, with no resync and nothing said. Its INBOUND twin,
+    // control.saturated, was handled all along.
+    const provider = new TestEndpointProvider()
+    const d = new Dispatcher(provider)
+    await connected(d)
+    let disconnects = 0
+    d.onDisconnect(() => {
+      disconnects++
+    })
+    const ws = socket()
+    const inFlight = d.call('history.query', {})
+
+    ws.deliverText({ jsonrpc: '2.0', method: 'outbound.stalled' })
+
+    // The existing close path, deliberately: it rejects what is pending,
+    // publishes waiting, schedules the retry and fires onDisconnect — the
+    // same route the heartbeat's dead socket takes. Reconnecting is what
+    // makes every store re-read; a handler that only logged would leave the
+    // renderer confidently displaying state the backend has moved past.
+    expect(ws.closeCalled).toBe(true)
+    expect(disconnects).toBe(1)
+    expect(d.reconnectPending).toBe(true)
+    await expect(inFlight).rejects.toThrow()
   })
 })
 

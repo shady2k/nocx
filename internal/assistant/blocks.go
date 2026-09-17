@@ -36,8 +36,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/agenttools"
+	"github.com/shady2k/nocx/internal/paneview"
+	"github.com/shady2k/nocx/internal/sessionruntime"
 )
 
 const (
@@ -48,6 +52,104 @@ const (
 )
 
 var ErrSessionItemNotFound = errors.New("no such item in this session")
+
+// ── the descendant read path (design §6.1, §11 "kept, deliberately") ──────
+//
+// session.read naming one of the caller's DESCENDANTS is read through
+// PaneReader, which internal/app builds over the real helper client and the
+// agent rule (session_targets.go) — never through RendererRequester, which
+// stays reserved for the run's OWN pane (spec §11). This package cannot
+// name internal/app's concrete types (app depends on assistant, not the
+// reverse — the same layering RunContext.PaneAccess already lives with), so
+// PaneReader.Read's access parameter is `any`: the RunContext.PaneAccess
+// value, forwarded here untouched and type-asserted back to its concrete
+// type at app's own point of use inside the Read implementation.
+
+// TargetView is one minted target (design §6.1–§6.3): the signed token, the
+// rows and kind it was minted for, and — for a menu — the menu it was
+// minted over.
+type TargetView struct {
+	Token     string
+	TokenID   string
+	Kind      sessionruntime.TargetKind
+	Rows      sessionruntime.RowRange
+	Region    string
+	Menu      *agentdriver.Menu
+	ExpiresAt time.Time
+}
+
+// MessageView is one queued session.message, as session.read's
+// pendingMessages reports it (design §8). Task 8 declared the shape PaneRead
+// needs before Task 10 built the queue behind it, with Phase as a plain
+// string; Task 10 replaces that with the closed MessagePhase set
+// (execute_session_message.go) rather than adding a second type for the same
+// field. Pending is empty and DeliveryLost nil until a PaneMessages is wired
+// (paneReader.SetMessages, internal/app/session_targets.go).
+type MessageView struct {
+	ID           string
+	Namespace    string
+	Phase        MessagePhase
+	BytesWritten int
+	BoxContents  string
+}
+
+// PaneRead is one session.read of a descendant's pane: the frame the
+// helper's snapshot carried, what the agent rule classified it as, and — on
+// request — the target minted from that same frame (design §6.1).
+type PaneRead struct {
+	Frame          paneview.Frame
+	Classification agentdriver.State
+	Target         *TargetView
+	Pending        []MessageView
+	DeliveryLost   *time.Time
+	ReadBarrier    bool
+}
+
+// PaneReader is session.read's helper-backed read path for a sessionId
+// naming one of the caller's descendants. internal/app's concrete
+// implementation is the one production value; RunContext.SessionReads
+// carries it as `any` for the reason explained above, and executeSessionRead
+// asserts this interface at the point of use.
+type PaneReader interface {
+	Read(ctx context.Context, access any, sessionID string, want *sessionruntime.TargetKind, rows *sessionruntime.RowRange) (PaneRead, error)
+}
+
+// sessionRowRange is a target's rows on the wire — BOTH ends inclusive,
+// exactly as sessionruntime.RowRange and agentdriver.RowSpan already state
+// them internally. It is a distinct wire shape from blockSpan (a ledger or
+// screen WINDOW, whose End is one PAST the last line): reusing blockSpan
+// here would silently change what "end" means depending on which field of
+// the same result you read.
+type sessionRowRange struct {
+	First int `json:"first"`
+	Last  int `json:"last"`
+}
+
+type sessionMenuWire struct {
+	Question string           `json:"question"`
+	Options  []string         `json:"options"`
+	Selected int              `json:"selected"`
+	Rows     sessionRowRange  `json:"rows"`
+	Body     *sessionRowRange `json:"body,omitempty"`
+}
+
+type sessionTargetWire struct {
+	Token       string           `json:"token"`
+	TokenID     string           `json:"tokenId"`
+	Kind        string           `json:"kind"`
+	Rows        sessionRowRange  `json:"rows"`
+	Region      string           `json:"region,omitempty"`
+	Menu        *sessionMenuWire `json:"menu,omitempty"`
+	ExpiresAtMs int64            `json:"expiresAtMs"`
+}
+
+type sessionMessageWire struct {
+	ID           string `json:"id"`
+	Namespace    string `json:"namespace"`
+	Phase        string `json:"phase"`
+	BytesWritten int    `json:"bytesWritten,omitempty"`
+	BoxContents  string `json:"boxContents,omitempty"`
+}
 
 // boundBlockText applies the window's BYTE bound — the line count is what
 // the model aims with, and this is the budget it cannot overrun with 2000
@@ -160,6 +262,28 @@ type sessionReadResult struct {
 	Cursor    *readScreenCursor `json:"cursor,omitempty"`
 	Identity  *readScreenIdent  `json:"identity,omitempty"`
 	Note      string            `json:"note,omitempty"`
+	// Classification, Target, PendingMessages and ReadBarrier are set only
+	// for a sessionId naming a descendant (design §6.1, §7.1, §8, Task 8) —
+	// absent for the run's own pane, which keeps the renderer path above
+	// unchanged and has no target, classification or read barrier to
+	// report.
+	Classification  string               `json:"classification,omitempty"`
+	Target          *sessionTargetWire   `json:"target,omitempty"`
+	PendingMessages []sessionMessageWire `json:"pendingMessages,omitempty"`
+	ReadBarrier     *bool                `json:"readBarrier,omitempty"`
+	// DeliveryStateLost is set only after a coordinator restart, for a
+	// descendant pane this PaneMessages instance holds no queue record for
+	// (design §8.6, Task 10): the in-memory queue does not survive a
+	// restart, so nothing here reports a per-message outcome — only that
+	// anything before Since is unknown.
+	DeliveryStateLost *sessionDeliveryLostWire `json:"deliveryStateLost,omitempty"`
+}
+
+// sessionDeliveryLostWire is design §8.6's "a read afterwards reports
+// deliveryStateLost: { since }" — an object rather than a bare timestamp, so
+// the wire shape has room to grow without becoming a second type.
+type sessionDeliveryLostWire struct {
+	SinceMs int64 `json:"since"`
 }
 
 type blockSpan struct {
@@ -257,23 +381,43 @@ func applyMarkedWindow(reader *agenttools.SessionReader, id string, start, count
 	*count = mark.Count
 }
 
-func executeSessionRead(ctx context.Context, reader *agenttools.SessionReader, source SessionSource, requester RendererRequester, args json.RawMessage) (string, error) {
+func executeSessionRead(ctx context.Context, cap *agenttools.SessionDescendantCapability, source SessionSource, requester RendererRequester, args json.RawMessage) (string, error) {
 	bound, err := toolBound(ctx)
 	if err != nil {
 		return "", err
 	}
+	if cap == nil || cap.SessionReader == nil {
+		return "", errors.New("session.read: capability carries no session reader")
+	}
+	reader := cap.SessionReader
 	var p struct {
-		ID    string `json:"id"`
-		Start int    `json:"start"`
-		Count int    `json:"count"`
+		SessionID string `json:"sessionId"`
+		ID        string `json:"id"`
+		Start     int    `json:"start"`
+		Count     int    `json:"count"`
+		Target    string `json:"target"`
 	}
 	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
 		return "", fmt.Errorf("session.read: args: %w", unmarshalErr)
 	}
-	sessionID := reader.SessionID()
+	ownSession := reader.SessionID()
 	if p.Start < 0 || p.Count < 0 {
 		return "", errors.New("session.read: start and count must be non-negative")
 	}
+	targetSessionID := p.SessionID
+	if targetSessionID == "" {
+		targetSessionID = ownSession
+	}
+	// A sessionId naming a DESCENDANT is read through PaneReader — never
+	// through the renderer, which stays reserved for the run's own pane
+	// (design §11 "kept, deliberately"). This branches on the sessionId
+	// alone, before any grant check: reader.Allows only ever covers the
+	// run's OWN session, and a descendant's authority is PaneAccess, a
+	// completely different capability (§7.1).
+	if targetSessionID != ownSession {
+		return executeDescendantSessionRead(ctx, cap, targetSessionID, p.Target, bound.MaxBytes)
+	}
+	sessionID := ownSession
 	if !reader.Allows(sessionID) {
 		return "", fmt.Errorf("session.read: session %q is outside the run's grant", sessionID)
 	}
@@ -339,6 +483,135 @@ func executeSessionRead(ctx context.Context, reader *agenttools.SessionReader, s
 		return "", fmt.Errorf("session.read: marshal result: %w", err)
 	}
 	return string(b), nil
+}
+
+// descendantTargetKinds is the closed set session.read's own `target`
+// parameter accepts (design §6.3) — the same four kinds sessionruntime
+// names, spelled out here because the schema validates the string and this
+// is where it becomes the typed value PaneReader.Read wants.
+var descendantTargetKinds = map[string]sessionruntime.TargetKind{
+	string(sessionruntime.TargetMenu):    sessionruntime.TargetMenu,
+	string(sessionruntime.TargetInput):   sessionruntime.TargetInput,
+	string(sessionruntime.TargetWorking): sessionruntime.TargetWorking,
+	string(sessionruntime.TargetRegion):  sessionruntime.TargetRegion,
+}
+
+// executeDescendantSessionRead is session.read's path for a sessionId
+// naming one of the caller's descendants (design §6.1, §7.1, §11 "kept,
+// deliberately"): PaneReader — never RendererRequester, which stays
+// reserved for the run's own pane — asks the helper for a snapshot,
+// classifies it with the agent rule, and, when target names a kind, mints
+// one from that same frame.
+func executeDescendantSessionRead(ctx context.Context, cap *agenttools.SessionDescendantCapability, sessionID, target string, maxBytes int64) (string, error) {
+	if cap.PaneAccess == nil || cap.SessionReads == nil {
+		return "", fmt.Errorf("session.read: %q is not this run's own session and no descendant pane authority is wired for this run", sessionID)
+	}
+	reader, ok := cap.SessionReads.(PaneReader)
+	if !ok {
+		return "", fmt.Errorf("session.read: session reads capability is %T, not a PaneReader", cap.SessionReads)
+	}
+	var want *sessionruntime.TargetKind
+	if target != "" {
+		kind, valid := descendantTargetKinds[target]
+		if !valid {
+			return "", fmt.Errorf("session.read: %q is not a target kind this tool knows", target)
+		}
+		want = &kind
+	}
+	read, err := reader.Read(ctx, cap.PaneAccess, sessionID, want, nil)
+	if err != nil {
+		return "", fmt.Errorf("session.read: %w", err)
+	}
+	out := descendantSessionReadResult(sessionID, read, maxBytes)
+	b, err := json.Marshal(out)
+	if err != nil {
+		return "", fmt.Errorf("session.read: marshal descendant result: %w", err)
+	}
+	return string(b), nil
+}
+
+// frameText joins a frame's rows into the same shape executeSessionScreen
+// already produces from the renderer's own frame body: one line per row,
+// blanks kept, cells joined in column order.
+func frameText(f paneview.Frame) string {
+	lines := make([]string, 0, len(f.Lines))
+	for _, row := range f.Lines {
+		var b strings.Builder
+		for _, cell := range row {
+			b.WriteString(cell.Text)
+		}
+		lines = append(lines, b.String())
+	}
+	return strings.Join(lines, "\n")
+}
+
+// descendantSessionReadResult renders one PaneRead into session.read's wire
+// shape. classification is "none" for a non-agent pane, matching PaneRead's
+// own documented meaning for the zero agentdriver.State rather than an
+// empty string a reader might mistake for "not reported".
+func descendantSessionReadResult(sessionID string, read PaneRead, maxBytes int64) sessionReadResult {
+	fullText := frameText(read.Frame)
+	text, _ := boundBlockText(fullText, 0, len(read.Frame.Lines), maxBytes)
+	classification := string(read.Classification)
+	if classification == "" {
+		classification = "none"
+	}
+	readBarrier := read.ReadBarrier
+	out := sessionReadResult{
+		SessionID:      sessionID,
+		State:          "screen",
+		Source:         "helper",
+		Text:           text,
+		Classification: classification,
+		ReadBarrier:    &readBarrier,
+	}
+	if len(text) < len(fullText) {
+		out.Truncated = true
+		out.Dropped = int64(len(fullText) - len(text))
+		out.Remaining = out.Dropped
+	}
+	for _, m := range read.Pending {
+		// Built field-by-field rather than a naked sessionMessageWire(m)
+		// conversion: MessageView.Phase is the closed MessagePhase type
+		// (Task 10), sessionMessageWire.Phase stays a plain wire string, and
+		// Go's struct conversion requires identical field types, not merely
+		// identical underlying types.
+		out.PendingMessages = append(out.PendingMessages, sessionMessageWire{
+			ID: m.ID, Namespace: m.Namespace, Phase: string(m.Phase),
+			BytesWritten: m.BytesWritten, BoxContents: m.BoxContents,
+		})
+	}
+	if read.Target != nil {
+		out.Target = sessionTargetWireFrom(read.Target)
+	}
+	if read.DeliveryLost != nil {
+		out.DeliveryStateLost = &sessionDeliveryLostWire{SinceMs: read.DeliveryLost.UnixMilli()}
+	}
+	return out
+}
+
+func sessionTargetWireFrom(t *TargetView) *sessionTargetWire {
+	wire := &sessionTargetWire{
+		Token:       t.Token,
+		TokenID:     t.TokenID,
+		Kind:        string(t.Kind),
+		Rows:        sessionRowRange{First: t.Rows.First, Last: t.Rows.Last},
+		Region:      t.Region,
+		ExpiresAtMs: t.ExpiresAt.UnixMilli(),
+	}
+	if t.Menu != nil {
+		menu := &sessionMenuWire{
+			Question: t.Menu.Question,
+			Options:  t.Menu.Options,
+			Selected: t.Menu.Selected,
+			Rows:     sessionRowRange{First: t.Menu.Rows.First, Last: t.Menu.Rows.Last},
+		}
+		if t.Menu.Body.Last >= t.Menu.Body.First {
+			menu.Body = &sessionRowRange{First: t.Menu.Body.First, Last: t.Menu.Body.Last}
+		}
+		wire.Menu = menu
+	}
+	return wire
 }
 
 func executeSessionItemScreen(ctx context.Context, sessionID, itemID string, requester RendererRequester, start, count int, maxBytes int64) (string, error) {

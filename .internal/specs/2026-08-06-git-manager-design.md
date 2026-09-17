@@ -53,7 +53,7 @@ did not, and an adversarial review found two boundaries it had silently walked a
 | **AD-1**, cwd on the wire  | "cwd/OSC/prompt markers do **not** cross the control plane… only feed UI + the next `open{cwd}`" — **amended 2026-08-02** (`nocx-m64b`): typed facts derived from renderer state **may** cross, the test being "the backend receives a value it could not have inferred from the stream, never a byte stream it must interpret" | `git.open{cwd}` sends the verified OSC 7 cwd as a typed string. It passes the amendment's test — a path is not a byte stream and the backend parses no VT. Precedent, twice: `history.record` carries a `cwd` today, and `files.open` sends the verified cwd as `rootPath` (`files-client.ts:23`). Naming it here is the obligation revision 1 missed |
 | **AD-9**, reconnect        | The backend session and its replay ring survive a dropped WebSocket. The file manager states the consequence explicitly: "**A binding is bounded by its session, not by its WebSocket**… Losing the WebSocket changes nothing" (`file-manager-design.md:370`)                                                                   | Bindings here are session-bounded too, and `git.changed` resolves its destination **at emit time** exactly as `files.changed` does. Revision 1 said the opposite ("every binding is gone on reconnect") and was wrong                                                                                                                                 |
 | **AD-6**, byte-blindness   | The backend never parses the byte stream; OSC 7 is surfaced frontend-side                                                                                                                                                                                                                                                       | Unchanged and relied upon: this is _why_ the cwd must be a wire parameter rather than something the backend reads for itself                                                                                                                                                                                                                          |
-| **AD-2 / deferred Tier-B** | A cross-compiled Go helper "augmenting the remote shell, **feeding** the reserved `metadata` msg-type". A one-way feed — nothing there defines request/response process execution                                                                                                                                               | D3 defers the remote case to it, and the deferred bead carries the honest statement that an **operation channel is a protocol decision the relay does not have yet** — not merely "a second implementation"                                                                                                                                           |
+| **AD-2 / deferred Tier-B** | A cross-compiled Go helper "augmenting the remote shell, **feeding** the reserved `metadata` msg-type". A one-way feed — nothing there defines request/response process execution                                                                                                                                               | D3 defers the remote case to it, and the deferred bead carries the honest statement that an **operation channel is a protocol decision the helper does not have yet** — not merely "a second implementation"                                                                                                                                          |
 | **AD-8 / one owner**       | One owner per behaviour; find the existing answer and extend it                                                                                                                                                                                                                                                                 | Three existing answers are reused rather than re-written: the binding/registry shape, the store's response-scope discipline (D17), and `files.changed`'s notification contract                                                                                                                                                                        |
 
 ## 3. Decisions
@@ -75,7 +75,7 @@ did not, and an adversarial review found two boundaries it had silently walked a
 | D13 | **Refresh is polling, gated on the sidebar's `visible()`** — the same accessor Ports gates its sampling on (`sidebar.tsx:40`) — plus a manual refresh and the D12 post-mutation status                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | fsnotify on `.git` (a second refresh mechanism), a recursive worktree watch (a second `.gitignore` implementation), OSC 133 command-end (`filesystem` D5 rejected it: an agent is one long command), and window-focus gating — **no such predicate exists in this codebase**; inventing one is new application state with its own owner and tests, and it is not in this epic                            |
 | D14 | **What the panel cannot do, it does not draw.** On an SSH tab the mutation controls are **absent**, not disabled                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Disabled buttons with a tooltip. `files.reveal` set this precedent: a disabled control advertises a capability the surface does not have                                                                                                                                                                                                                                                                 |
 | D15 | **`internal/git` declares its own `Caller` interface** rather than importing `internal/filesystem`'s identical one                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Hoisting a shared `Caller` into a third package, or importing across feature packages. A consumer-declared interface is the Go idiom; the duplication is one method signature                                                                                                                                                                                                                            |
-| D16 | **The local/remote seam is one `Repo` interface of named operations**, the same shape the file manager's `Provider` has. Spawning, process groups and pipes are private to `local`; the domain types and the porcelain parser are shared; argv construction is linked by whatever spawns git. **Hardened 2026-08-13: no operation accepts argv, and there is no exception** — not a read-only variant, not a debug build. orca's relay reached the same named-operation conclusion independently and kept one generic `git.exec`; that single exception cost it a 300-line allowlist validator whose own comment records that `--file /etc/passwd --list` leaks file contents | A process-shaped seam (`Run(argv, stdin, out) → exit`). It reads as the narrower abstraction, but it makes the relay **emulate a local process** — group signals, pipes, an exit status — to satisfy a contract written from the local case. `exec` is one channel; a WebSocket to the helper is another (owner, 2026-08-06)                                                                             |
+| D16 | **The local/remote seam is one `Repo` interface of named operations**, the same shape the file manager's `Provider` has. Spawning, process groups and pipes are private to `local`; the domain types and the porcelain parser are shared; argv construction is linked by whatever spawns git. **Hardened 2026-08-13: no operation accepts argv, and there is no exception** — not a read-only variant, not a debug build. orca's relay reached the same named-operation conclusion independently and kept one generic `git.exec`; that single exception cost it a 300-line allowlist validator whose own comment records that `--file /etc/passwd --list` leaks file contents | A process-shaped seam (`Run(argv, stdin, out) → exit`). It reads as the narrower abstraction, but it makes the helper **emulate a local process** — group signals, pipes, an exit status — to satisfy a contract written from the local case. `exec` is one channel; a WebSocket to the helper is another (owner, 2026-08-06)                                                                            |
 | D17 | **Every response carries the scope it was issued for plus a monotonic status epoch, and is dropped if either is stale.** `{tabId, generation, bindingId, epoch}`; the epoch advances before **every** status-producing request — each mutation and each manual refresh, not only "each refresh cycle"                                                                                                                                                                                                                                                                                                                                                                         | "One request in flight at a time", and a generation that moves only on re-scope. Neither orders two requests issued under one scope: a poll begun _before_ a mutation carries the same generation and can still overwrite the mutation's fresh status afterwards. The Files store owns the scope half of this answer already (rule 2, `files-store.ts:12`); the epoch is the ordering half it needs here |
 | D18 | **A mutation is bounded by an interval with both ends named, and mutations run in one lane.** It may only _begin_ on the store's current binding, at most one is in flight, and its _result_ applies only under D17. An in-flight mutation is never cancelled                                                                                                                                                                                                                                                                                                                                                                                                                 | Cancelling a mutation on re-bind — killing `git commit` mid-hook can leave `index.lock` and a half-run hook, a cure worse than the disease. And letting two mutations overlap: their statuses can return out of order and leave the panel showing a repository state that never existed                                                                                                                  |
 | D19 | **Stage-all and unstage-all are their own wire operations with named commands, and both refuse while a conflict is unresolved**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Sending the rendered rows as `paths[]` — under D9's cap that is "stage the prefix we showed". And running either one blind during a merge: both are destructive, measured, not reasoned — see D19 in full                                                                                                                                                                                                |
@@ -140,16 +140,16 @@ swapping. The supporting argument was that a higher seam would force the remote
 implementation to parse porcelain a second time, which AD-8 forbids.
 
 **That argument is void, and the owner is right.** The remote implementation is not foreign
-code: AD-2 is "one Go codebase, multiple build targets", and the relay is one of those
+code: AD-2 is "one Go codebase, multiple build targets", and the helper is one of those
 targets. It links the _same_ `porcelain.Parse`. The parser is shared by construction at any
 seam level, so it never was an argument for one.
 
 What remains is the objection against the process shape, and it is decisive: **`exec` is one
-channel, the relay is another, and a process-shaped interface makes the second channel
+channel, the helper is another, and a process-shaped interface makes the second channel
 emulate the first.** `argv`, `stdin`, a live `stdout` sink, an exit status, an isolated
 process group and an `INT → TERM → KILL` escalation are facts about spawning a child on this
 machine. Over a WebSocket to a helper there is no process group to signal and no pipe to
-close; the relay would have to reproduce those semantics as protocol obligations in order to
+close; the helper client would have to reproduce those semantics as protocol obligations in order to
 satisfy a contract written from the local case. That is a local implementation detail leaking
 into the shared contract — the same defect in the opposite direction.
 
@@ -164,14 +164,14 @@ What each side then owns:
 
 - **`local`** spawns git. Process groups, the `INT → TERM → KILL` escalation, the early-cut
   protocol, the resolved environment — all of it is private to this package, where it
-  belongs, and none of it is a promise the relay has to keep.
-- **`relay`** (later) sends operations to the helper over the control channel. Cancellation
+  belongs, and none of it is a promise the helper has to keep.
+- **`remote`** (later) sends operations to the helper over the control channel. Cancellation
   is a message; bounding is enforced on the machine doing the work, which is the only place
   it can be enforced cheaply.
 - **Shared, machine-independent**: the domain types, `porcelain.Parse`, and the bounding
-  constants. Note which side of the relay `gitargs` falls on: argv is spawning vocabulary,
+  constants. Note which side of the seam `gitargs` falls on: argv is spawning vocabulary,
   so it is linked by whatever **actually spawns git** — `local`, and the copy of `local`
-  compiled into the helper build — and **not** by the relay _client_. The client sends named
+  compiled into the helper build — and **not** by the helper _client_. The client sends named
   operations; if it built argv it would either put process vocabulary on the wire or compute
   an answer nobody uses. The helper is not a third implementation: it is `local`, running on
   the other machine, which is what AD-2's "one core, multiple build targets" buys.
@@ -184,7 +184,7 @@ What each side then owns:
 the mechanism its channel actually has.
 
 The remote work is then one implementation of one interface — _given_ a channel, which the
-relay does not have yet (§2). Because the seam is operation-shaped, the protocol that has to
+helper does not have yet (§2). Because the seam is operation-shaped, the protocol that has to
 be designed is a request/response over a closed set of named operations, which is a great
 deal easier to specify, version and test than a generic remote-process pipe would have been.
 
@@ -234,7 +234,7 @@ So:
 
 ### Out — each a refusal, not an omission
 
-- **The remote repository.** Waits on the relay, `nocx-if6` phase B (D3). Filed there as a
+- **The remote repository.** Waits on the helper, `nocx-if6` phase B (D3). Filed there as a
   child that carries the exec-channel protocol question (§2).
 - **discard / restore.** The one action that destroys work with no undo. Its own bead, with
   a confirmation design, and it must handle the three cases the panel would otherwise
@@ -291,7 +291,7 @@ internal/git/
   binding.go      Binding, Handle, Registry, Acquire      (mirrors filesystem/binding.go)
   bounds.go       MaxStatusEntries and the work ceilings, shared as policy
   spawn/          linked ONLY by code that runs git — local here, and local inside the
-    porcelain.go    helper build. NOT by the relay client, which sends named operations:
+    porcelain.go    helper build. NOT by the helper client, which sends named operations:
     gitargs.go      a client that built argv or parsed porcelain would either put process
                     vocabulary on the wire or compute an answer nobody uses
   errors.go       the errors transport switches on
@@ -301,21 +301,21 @@ internal/git/
     diff.go       the three diff invocations and their bounded result
     commit.go     commit orchestration
     capability.go git presence + version probe, cached
-  relay/          (deferred, nocx-if6 phase B) Repo over the relay's operation channel
+  remote/         (deferred, nocx-if6 phase B) Repo over the helper's operation channel
 ```
 
 The split is D16's: `git/` is what both machines share, `git/local/` is everything true only
 about spawning a child here. `commit.go` and `diff.go` sit under `local/` because they
 _orchestrate invocations_; what they produce — `CommitOutcome`, `Diff` and their states —
-is declared in `git.go`, so the relay implementation returns the same values without
+is declared in `git.go`, so the helper implementation returns the same values without
 inheriting the local mechanics.
 
 #### The `Repo` seam (D16)
 
 ```go
 // Repo is one repository on one machine. It is the whole local/remote seam:
-// local spawns git here, relay sends operations to the helper there, and
-// nothing above this interface knows which. ctx is the entire cancellation
+// local spawns git here, the helper client sends operations to the deployed
+// helper there, and nothing above this interface knows which. ctx is the entire cancellation
 // contract — each implementation honours it with the mechanism its channel
 // has, and neither imposes the other's.
 type Repo interface {
@@ -338,8 +338,8 @@ type Repo interface {
 // implementations.
 //
 // local: probe capability, run rev-parse, build a Repo on the answer.
-// relay: send one open operation to the helper and build a client Repo on its
-// answer. One round trip, not three.
+// helper: send one open operation to the deployed helper and build a client
+// Repo on its answer. One round trip, not three.
 type RepoFactory interface {
     Open(ctx context.Context, cwd string) (Repo, OpenOutcome, error)
 }
@@ -370,9 +370,9 @@ earlier:
 
 Every value these interfaces return — `Completeness`, each diff state, the commit outcome
 and its truncation mark — is declared in `git.go`, machine-independently, **so that the
-relay can report it too.** The test each one has to pass: _does it describe what the user is
+helper can report it too.** The test each one has to pass: _does it describe what the user is
 being shown, or how a local pipe was cut?_ `Cut` failed that test and was removed from the
-domain in revision 6 — it is the fact that `local` killed a child, which the relay could
+domain in revision 6 — it is the fact that `local` killed a child, which the helper could
 only reproduce by pretending to have processes. It stays private to `local`, which maps it
 to `tooLarge` or to an incomplete `Completeness` before returning through `Repo`.
 
@@ -452,7 +452,7 @@ seam. Probing capability and running `rev-parse` are the two things that must ha
 a `Repo` exists, so revision 5 left them in the composition layer — where they could only be
 `os/exec`, which is local mechanics back above the seam with no remote counterpart. They now
 live inside the factory's implementations: `local` probes and runs `rev-parse` here; the
-relay sends **one** open operation and lets the helper do both there, which is also one
+helper client sends **one** open operation and lets the helper do both there, which is also one
 round trip instead of three.
 
 Every outcome other than (4) is a **state in the result**, not a JSON-RPC error:
@@ -1052,16 +1052,16 @@ last good status on screen, and `cwdFollow: false` not re-binding.
 - **New epic**, labelled `mvp`, acceptance criterion = the happy path in §7, with §4's Out
   list named in it. Children per §6, sequenced with `blocks` so the ready front stays ~3.
 - **`nocx-terg`** — stays separate; `bd dep add nocx-terg <this-epic>`.
-- **New bead under `nocx-if6`**: "the Git panel works on an SSH tab, over the relay". It
+- **New bead under `nocx-if6`**: "the Git panel works on an SSH tab, over the helper". It
   carries D3's reasoning **and** the honest statement from §2: the reserved `metadata`
-  msg-type is a one-way feed, so the relay needs a channel it does not have, and designing
+  msg-type is a one-way feed, so the helper needs a channel it does not have, and designing
   it is a protocol decision rather than a coding task. Because the seam is operation-shaped
   (D16), what that protocol must carry is a **closed set of named operation
   requests and responses** — `open`, `status`, `diff`, `stage`, `unstage`, `stageAll`,
   `unstageAll`, `commit`, `headMessage` — plus cancellation, results bounded on the machine
   doing the work, and the domain outcomes of §5.1. **Not** stdin, separated stderr or an
   exit status: those are the vocabulary of the process-shaped seam this design rejected, and
-  asking the relay for them would reintroduce it through the bead.
+  asking the helper for them would reintroduce it through the bead.
 - **New standalone beads**: discard; branch checkout/create; push/pull/PR (an epic); hunk
   staging; split diff; syntax highlighting inside the diff; conflicts as a surface;
   running the panel's commit in the tab's live environment (D6); window-focus gating of
@@ -1102,7 +1102,7 @@ the measurement is a task and not an opinion.
 ## 10. Review history
 
 - **2026-08-06, revision 1** — brainstormed with the owner (`nocx-5nej`). Five decisions
-  taken by the owner directly: the termic-shaped slice, local-only with the relay carrying
+  taken by the owner directly: the termic-shaped slice, local-only with the helper carrying
   the remote case, live cwd-following repository resolution, unified diff in a tab, and
   stage/unstage/commit/amend with discard held back.
 - **2026-08-06, revision 2** — adversarial review against the code (codex). Fifteen
@@ -1114,7 +1114,7 @@ the measurement is a task and not an opinion.
   the text: cancelling an in-flight mutation on re-bind (D18 — the cure is worse), the
   claim that `git.open{cwd}` crosses a boundary AD-1 forbids (§2 — AD-1's 2026-08-02
   amendment permits it and two shipped methods already rely on that), and the framing of
-  the relay deferral (§2, §8 — the direction is architecture-sanctioned; what is missing
+  the helper deferral (§2, §8 — the direction is architecture-sanctioned; what is missing
   is a protocol, and that now rides in the bead). **All three pushbacks were accepted by
   the reviewer.**
 - **2026-08-06, revision 3** — second adversarial pass on revision 2. Eleven findings, ten
@@ -1145,23 +1145,23 @@ the measurement is a task and not an opinion.
   reviewer confirmed the revision-3 measurement and withdrew its unborn-branch prescription.
 - **2026-08-06, revision 5 — the owner moved the seam**, and the argument that had been
   defending its old position was void. Revisions 1–4 put the local/remote boundary at the
-  process (`Runner.Run(argv, stdin, out)`), justified by "a higher seam would make the relay
+  process (`Runner.Run(argv, stdin, out)`), justified by "a higher seam would make the helper
   parse porcelain twice". The owner's objection: the git binary is **one channel** and the
-  relay's WebSocket is another, so a process-shaped interface forces the second to emulate
-  the first. It is decisive, and the counter-argument collapses on AD-2 — the relay is a
+  helper's WebSocket is another, so a process-shaped interface forces the second to emulate
+  the first. It is decisive, and the counter-argument collapses on AD-2 — the helper is a
   build target of _this_ codebase, so it links the _same_ parser at any seam level, and the
   duplication was never on the table. D16 is rewritten: the seam is `Repo`, a closed set of
   named operations, mirroring the file manager's `Provider`; spawning, process groups,
   pipes and the early-cut protocol are now private to `internal/git/local`, and every state
-  a user can observe is declared machine-independently so the relay can report it too.
+  a user can observe is declared machine-independently so the helper can report it too.
 - **2026-08-06, revision 6** — a pass aimed squarely at the debris a late boundary move
   leaves, which is what it found. Seven findings, all accepted. Moving the seam had left
   repository resolution with **no abstraction to run in**: capability and `rev-parse` must
   happen before a `Repo` exists, so revision 5 left them in the composition layer as
   `os/exec` — local mechanics back above the seam. Hence `RepoFactory`. `Cut` had been kept
-  in the domain types in the name of "the relay can report it too" while being exactly the
-  thing the relay cannot have: it is now private to `local`. `gitargs` had been assigned to
-  "every implementation", conflating the relay _client_ (which sends operations) with the
+  in the domain types in the name of "the helper can report it too" while being exactly the
+  thing the helper cannot have: it is now private to `local`. `gitargs` had been assigned to
+  "every implementation", conflating the CLIENT (which sends operations) with the
   helper (which is `local` on the other machine). And the two-boolean status completeness
   had a state that rendered as complete when it was not — a traversal cut below the record
   cap — now one `Completeness` discriminator. Plus three pieces of stale vocabulary.
@@ -1172,7 +1172,7 @@ the measurement is a task and not an opinion.
   had ended up with two owners — the factory outcome and a `Repo` method that could
   disagree with it — and the method is gone. The `gitargs` ownership fixed in revision 6's
   prose still read the old way in D16's decision row, which is the row an implementer
-  copies. The deferred relay bead still asked for stdin, separated stderr and an exit
+  copies. The deferred helper bead still asked for stdin, separated stderr and an exit
   status — the vocabulary of the rejected seam, which would have reintroduced it through
   the backlog. And `Cut`, removed from the domain, was still named in a public diff result
   and its test.

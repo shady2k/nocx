@@ -636,7 +636,17 @@ describe('SettingsContent', () => {
       'Connections',
       'Endpoints',
       'Roles',
-      'Agent policy',
+      'Assistant permissions',
+      // Beside the permissions page and not the same subject: that one
+      // governs nocx's own assistant, this lists the foreign programs a
+      // person admitted to nocx's tools (nocx-6jbad).
+      'Agent access',
+      'Agent screens',
+      // The rule that reads an agent, before the pages about it: the emitting
+      // view shows what a rule reads and calibration checks whether it is any
+      // good, and this is where the rule itself comes from (nocx-y6w66).
+      'Agent rules',
+      'Calibrate an agent',
       // Skills is an ASSISTANT page and the last of them (nocx-fe7fe.1). It
       // sat under Application beside Backup, and it sat there TWICE, because
       // `skills.enabled` declares section "Skills" and that minted a second

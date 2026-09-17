@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { EFFECT_KEYS } from './policy-client'
-import { EFFECT_LABEL, effectHeading } from './effect-labels'
+import { EFFECT_LABEL } from './effect-labels'
 
 describe('effect labels', () => {
   it('names every effect class the wire can carry', () => {
@@ -17,15 +17,11 @@ describe('effect labels', () => {
     }
   })
 
-  // The canonical form is the mid-sentence one, because a heading is derivable
-  // from it and the reverse is not: lower-casing a heading would maul a label
-  // that ever begins with a proper noun. The prompt reads the label straight
-  // ("wants to read and inspect"); the page asks for the heading.
-  it('a heading is the same words, capitalised — one wording, two registers', () => {
+  // Every caller reads a label INSIDE a sentence, on both surfaces, so there
+  // is one register and no capitalised variant to keep in step with it.
+  it('reads mid-sentence, so no caller has to lower-case it', () => {
     for (const key of EFFECT_KEYS) {
-      const label = EFFECT_LABEL[key]
-      expect(effectHeading(key)).toBe(label[0].toUpperCase() + label.slice(1))
+      expect(EFFECT_LABEL[key][0]).toBe(EFFECT_LABEL[key][0].toLowerCase())
     }
-    expect(effectHeading('observe')).toBe('Read and inspect')
   })
 })

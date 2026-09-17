@@ -9,11 +9,14 @@ package transport
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/storage"
 )
 
@@ -95,7 +98,6 @@ func TestPolicySet_PersistsAndTheRunMintSeesIt(t *testing.T) {
 	})
 	var envelope struct {
 		Error *jsonrpcErrorObj `json:"error"`
-		OK    bool             `json:"ok"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		t.Fatalf("policy.set %s: %v", raw, err)
@@ -114,22 +116,32 @@ func TestPolicySet_PersistsAndTheRunMintSeesIt(t *testing.T) {
 // TestPolicySet_PreservesStoredRulesWhenRowsOnlyPayloadOmitsThem proves the
 // document owner protects standing answers from a forgetful matrix caller:
 // policy.set carries only rows, then a fresh store reads the persisted rule
-// back unchanged.
+// back unchanged. It is the store's own invariant, and it stays asserted even
+// though the wire no longer tests it — a matrix write may not name rules at
+// all now, so this is the belt behind that braces.
+//
+// The rule is seeded through the store's one-rule seam rather than by handing
+// SetPolicy a literal. A literal has no id and no source, and the document is
+// normalised on the way back IN (ParseEffectPolicy mints the id an operator
+// did not write), so comparing the reload against the literal compared a rule
+// with the same rule after the gate had finished with it — and that assertion
+// had been red since the provenance fields landed.
 func TestPolicySet_PreservesStoredRulesWhenRowsOnlyPayloadOmitsThem(t *testing.T) {
 	dir := t.TempDir()
 	doc := storage.NewDocumentStore(dir)
 	const name = "agent-policy.json"
 	store := assistant.NewGlobalPolicyStore(doc, name)
-	rule := content.InvocationRule{
-		Pattern:  [][]string{{"df", "-h"}},
-		Decision: content.DecisionPermit,
-	}
-	initial := content.EffectPolicy{
+	if err := store.SetPolicy(content.EffectPolicy{
 		Observe: content.EffectRow{Decision: content.DecisionAsk},
-		Rules:   []content.InvocationRule{rule},
+	}); err != nil {
+		t.Fatalf("seed matrix: %v", err)
 	}
-	if err := store.SetPolicy(initial); err != nil {
-		t.Fatalf("seed policy: %v", err)
+	rule, err := store.SetRule(content.InvocationRule{
+		Selector: content.InvocationSelector{Exact: [][]string{{"df", "-h"}}},
+		Decision: content.DecisionPermit,
+	})
+	if err != nil {
+		t.Fatalf("seed rule: %v", err)
 	}
 	h := newAskHarnessWithOpts(t, mustClient(t), WithAgentPolicy(store))
 
@@ -314,4 +326,557 @@ func TestPolicyGet_UnnamedLiveEffectsIsAnEmptyListNotANull(t *testing.T) {
 		t.Fatalf("live with no seam = %s, want []", got)
 	}
 	validateJSON(t, loadSchema(t, "policy.get.schema.json"), env.Result, "policy.get result (live seam unnamed)")
+}
+
+// TestPolicySet_DoesNotCarryRulesSoAConcurrentAnswerSurvives is the
+// regression of nocx-39bly, written as the sequence it actually is rather
+// than as the shape of the patch that used to hide it.
+//
+// The page reads the document. A rule is written through the store by
+// another caller — that caller is the approval prompt, and it is why no
+// merge on the READ side can help: the page's copy is stale by construction.
+// The page then saves the matrix it read, and a renderer serialising an empty
+// rule list sends `rules: []`, which is not absent and which the old
+// nil-guard in SetPolicy could not see.
+//
+// The fix is that policy.set is a MATRIX write: a document naming rules is
+// refused at the wire, and the sentence says where one rule goes instead.
+func TestPolicySet_DoesNotCarryRulesSoAConcurrentAnswerSurvives(t *testing.T) {
+	h, store := newPolicyHarness(t)
+
+	// The page reads.
+	read := jsonrpcCall(t, h.conn, "policy.get", nil)
+	var got struct {
+		Result policyResult     `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(read, &got); err != nil {
+		t.Fatalf("policy.get %s: %v", read, err)
+	}
+	if got.Error != nil {
+		t.Fatalf("policy.get error: %+v", got.Error)
+	}
+	if len(got.Result.Policy.Rules) != 0 {
+		t.Fatalf("seeded rules = %+v, want none", got.Result.Policy.Rules)
+	}
+
+	// The prompt writes a standing answer, one rule at a time.
+	saved, err := store.SetRule(content.InvocationRule{
+		Selector: content.InvocationSelector{Exact: [][]string{{"df", "-h"}}},
+		Decision: content.DecisionPermit,
+		Source:   content.SourceAnswered,
+	})
+	if err != nil {
+		t.Fatalf("the prompt could not save its standing answer: %v", err)
+	}
+
+	// The page saves the matrix it read a moment ago, rules and all — which
+	// for a renderer holding an empty list is `rules: []`.
+	raw := jsonrpcCall(t, h.conn, "policy.set", map[string]any{
+		"policy": map[string]any{
+			"observe": map[string]any{"decision": "permit", "scopes": []any{}},
+			"rules":   []any{},
+		},
+	})
+	var env struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("policy.set %s: %v", raw, err)
+	}
+	if env.Error == nil || env.Error.Code != -32602 {
+		t.Fatalf("policy.set naming rules = %s, want -32602: the matrix write may not carry rules", raw)
+	}
+	if !strings.Contains(env.Error.Message, "policy.setRule") {
+		t.Fatalf("policy.set refusal = %q, want it to name policy.setRule", env.Error.Message)
+	}
+
+	// And the answer the person gave is still there.
+	rules := store.Policy().Rules
+	if len(rules) != 1 || rules[0].ID != saved.ID {
+		t.Fatalf("rules after the page's save = %+v, want the prompt's %q intact", rules, saved.ID)
+	}
+}
+
+// ── policy.setRule / policy.forgetRule ────────────────────────────────────
+
+// setRule drives policy.setRule over the real socket and answers with the
+// result and the error, so each test asserts the one it is about.
+func setRule(t *testing.T, h *askHarness, rule map[string]any) (policySetRuleResult, *jsonrpcErrorObj) {
+	t.Helper()
+	raw := jsonrpcCall(t, h.conn, "policy.setRule", map[string]any{"rule": rule})
+	var env struct {
+		Result policySetRuleResult `json:"result"`
+		Error  *jsonrpcErrorObj    `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("policy.setRule %s: %v", raw, err)
+	}
+	return env.Result, env.Error
+}
+
+func forgetRule(t *testing.T, h *askHarness, id string) (policyForgetRuleResult, *jsonrpcErrorObj) {
+	t.Helper()
+	raw := jsonrpcCall(t, h.conn, "policy.forgetRule", map[string]any{"id": id})
+	var env struct {
+		Result policyForgetRuleResult `json:"result"`
+		Error  *jsonrpcErrorObj       `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("policy.forgetRule %s: %v", raw, err)
+	}
+	return env.Result, env.Error
+}
+
+// exactRuleParams is the wire form of a rule over one literal command line —
+// what the renderer sends: what the rule says, and nothing about where it
+// came from.
+func exactRuleParams(command ...string) map[string]any {
+	tokens := make([]any, 0, len(command))
+	for _, token := range command {
+		tokens = append(tokens, token)
+	}
+	return map[string]any{
+		"selector": map[string]any{"exact": []any{tokens}},
+		"decision": "permit",
+	}
+}
+
+// seedTwoRules puts two rules and a non-default matrix in the store, through
+// the store's own one-rule seam.
+func seedTwoRules(t *testing.T, store *assistant.GlobalPolicyStore) []content.InvocationRule {
+	t.Helper()
+	if err := store.SetPolicy(content.EffectPolicy{
+		Observe: content.EffectRow{
+			Decision: content.DecisionPermit,
+			Scopes:   []content.GrantScope{{Kind: content.ResourcePath, ID: "/workspace"}},
+		},
+		MutateDestructive: content.EffectRow{Decision: content.DecisionRefuse},
+	}); err != nil {
+		t.Fatalf("seed matrix: %v", err)
+	}
+	var seeded []content.InvocationRule
+	for _, command := range [][]string{{"df", "-h"}, {"uname", "-a"}} {
+		saved, err := store.SetRule(content.InvocationRule{
+			Selector: content.InvocationSelector{Exact: [][]string{command}},
+			Decision: content.DecisionPermit,
+		})
+		if err != nil {
+			t.Fatalf("seed rule %v: %v", command, err)
+		}
+		seeded = append(seeded, saved)
+	}
+	return seeded
+}
+
+// TestPolicySetRule_AddsOneAndTouchesNothingElse — criterion 1 at the wire.
+// A person writing a third rule keeps the two they had and the matrix they
+// set; the whole document is not rewritten to add one object to it.
+func TestPolicySetRule_AddsOneAndTouchesNothingElse(t *testing.T) {
+	h, store := newPolicyHarness(t)
+	seeded := seedTwoRules(t, store)
+	before := store.Policy()
+
+	got, rpcErr := setRule(t, h, exactRuleParams("free", "-m"))
+	if rpcErr != nil {
+		t.Fatalf("policy.setRule error: %+v", rpcErr)
+	}
+	if !got.Added {
+		t.Fatalf("result = %+v, want added=true for a rule that was not there", got)
+	}
+
+	after := store.Policy()
+	if len(after.Rules) != 3 {
+		t.Fatalf("rules = %d, want 3", len(after.Rules))
+	}
+	if after.Rules[0].ID != seeded[0].ID || after.Rules[1].ID != seeded[1].ID || after.Rules[2].ID != got.ID {
+		t.Fatalf("rules = %+v, want the two seeded then %q, in document order", after.Rules, got.ID)
+	}
+	for _, e := range []content.Effect{
+		content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive,
+		content.EffectPrivilegeChange, content.EffectDisclose, content.EffectCrossBoundary,
+		content.EffectDelegate,
+	} {
+		if after.DecisionFor(e) != before.DecisionFor(e) ||
+			!reflect.DeepEqual(after.RowScopes(e), before.RowScopes(e)) {
+			t.Fatalf("row %s changed when one rule was written", e)
+		}
+	}
+}
+
+// TestPolicySetRule_ReplacesByIDInPlace — criterion 2 at the wire.
+func TestPolicySetRule_ReplacesByIDInPlace(t *testing.T) {
+	h, store := newPolicyHarness(t)
+	seeded := seedTwoRules(t, store)
+
+	replacement := exactRuleParams("df", "-k")
+	replacement["id"] = seeded[0].ID
+	replacement["decision"] = "refuse"
+	got, rpcErr := setRule(t, h, replacement)
+	if rpcErr != nil {
+		t.Fatalf("policy.setRule error: %+v", rpcErr)
+	}
+	if got.Added {
+		t.Fatalf("result = %+v, want added=false: replacing is not adding", got)
+	}
+	if got.ID != seeded[0].ID {
+		t.Fatalf("result id = %q, want the id it named %q", got.ID, seeded[0].ID)
+	}
+
+	rules := store.Policy().Rules
+	if len(rules) != 2 {
+		t.Fatalf("rules = %d, want 2 — the count does not grow on a replace", len(rules))
+	}
+	if rules[0].ID != seeded[0].ID || rules[0].Decision != content.DecisionRefuse {
+		t.Fatalf("rules[0] = %+v, want the replacement in position 0", rules[0])
+	}
+	if rules[1].ID != seeded[1].ID {
+		t.Fatalf("rules[1] = %q, want the untouched %q", rules[1].ID, seeded[1].ID)
+	}
+}
+
+// TestPolicySetRule_TheIDIsServerAuthoritative — criterion 3, both halves,
+// at the seam a renderer reaches. A rule with no id is accepted and the
+// answer carries the minted one; a rule carrying an id that names nothing is
+// -32602. A renderer may replace a rule it can SEE, and may not choose the
+// identity of a new one (AD-7).
+func TestPolicySetRule_TheIDIsServerAuthoritative(t *testing.T) {
+	h, store := newPolicyHarness(t)
+
+	got, rpcErr := setRule(t, h, exactRuleParams("df", "-h"))
+	if rpcErr != nil {
+		t.Fatalf("policy.setRule with no id: %+v", rpcErr)
+	}
+	if got.ID == "" {
+		t.Fatalf("result = %+v, want the minted id — there is nowhere else to learn it", got)
+	}
+	if store.Policy().Rules[0].ID != got.ID {
+		t.Fatalf("stored id = %q, want the answered %q", store.Policy().Rules[0].ID, got.ID)
+	}
+
+	invented := exactRuleParams("uname", "-a")
+	invented["id"] = "a-name-the-renderer-chose"
+	_, rpcErr = setRule(t, h, invented)
+	if rpcErr == nil || rpcErr.Code != -32602 {
+		t.Fatalf("policy.setRule with an invented id = %+v, want -32602", rpcErr)
+	}
+	if n := len(store.Policy().Rules); n != 1 {
+		t.Fatalf("rules after the refusal = %d, want the 1 that was there", n)
+	}
+}
+
+// TestPolicyForgetRule_RemovesOneAndUnknownIsNotAnError — criterion 4 at the
+// wire. The rest of the document survives, and forgetting what is already
+// gone succeeds saying so.
+func TestPolicyForgetRule_RemovesOneAndUnknownIsNotAnError(t *testing.T) {
+	h, store := newPolicyHarness(t)
+	seeded := seedTwoRules(t, store)
+	before := store.Policy()
+
+	got, rpcErr := forgetRule(t, h, seeded[0].ID)
+	if rpcErr != nil {
+		t.Fatalf("policy.forgetRule error: %+v", rpcErr)
+	}
+	if !got.Removed {
+		t.Fatalf("result = %+v, want removed=true", got)
+	}
+	rules := store.Policy().Rules
+	if len(rules) != 1 || rules[0].ID != seeded[1].ID {
+		t.Fatalf("rules after the forget = %+v, want only %q", rules, seeded[1].ID)
+	}
+	for _, e := range []content.Effect{content.EffectObserve, content.EffectMutateDestructive} {
+		if store.Policy().DecisionFor(e) != before.DecisionFor(e) {
+			t.Fatalf("row %s changed when one rule was forgotten", e)
+		}
+	}
+
+	again, rpcErr := forgetRule(t, h, seeded[0].ID)
+	if rpcErr != nil {
+		t.Fatalf("forgetting an unknown id raised %+v; the rule is already not there", rpcErr)
+	}
+	if again.Removed {
+		t.Fatalf("forgetting an unknown id = %+v, want removed=false", again)
+	}
+}
+
+// TestPolicySetRule_RefusesWhatTheContentGateRefuses: there is no second
+// validator on the wire either. A hasFeature selector that permits is the
+// asymmetry content owns, and it is refused as invalid params rather than
+// accepted-and-ignored.
+func TestPolicySetRule_RefusesWhatTheContentGateRefuses(t *testing.T) {
+	h, store := newPolicyHarness(t)
+
+	_, rpcErr := setRule(t, h, map[string]any{
+		"selector": map[string]any{
+			"hasFeature": map[string]any{"program": "tar", "feature": "writes-option-named-path"},
+		},
+		"decision": "permit",
+	})
+	if rpcErr == nil || rpcErr.Code != -32602 {
+		t.Fatalf("a permitting hasFeature rule = %+v, want -32602", rpcErr)
+	}
+	if n := len(store.Policy().Rules); n != 0 {
+		t.Fatalf("rules after the refusal = %d, want none", n)
+	}
+}
+
+// TestPolicySetRule_NoConfigurationPathNamesATool: ADR-0028 decision 4 holds
+// at the new door too. A rule is over a command word in a parsed invocation
+// and there is no key here in which a TOOL could be named — an unknown field
+// is invalid params, so the vocabulary cannot be extended by sending one.
+func TestPolicySetRule_NoConfigurationPathNamesATool(t *testing.T) {
+	h, _ := newPolicyHarness(t)
+	rule := exactRuleParams("df", "-h")
+	rule["tool"] = "readScreen"
+	_, rpcErr := setRule(t, h, rule)
+	if rpcErr == nil || rpcErr.Code != -32602 {
+		t.Fatalf("policy.setRule naming a tool = %+v, want -32602", rpcErr)
+	}
+}
+
+// TestPolicyRuleMethods_UnwiredAreUnavailable: without the composition root's
+// seam both answer method-not-found, the same way policy.get does.
+func TestPolicyRuleMethods_UnwiredAreUnavailable(t *testing.T) {
+	h := newAskHarness(t, mustClient(t)) // no WithAgentPolicy
+	for method, params := range map[string]map[string]any{
+		"policy.setRule":    {"rule": exactRuleParams("df", "-h")},
+		"policy.forgetRule": {"id": "0123456789abcdef0123456789abcdef"},
+	} {
+		raw := jsonrpcCall(t, h.conn, method, params)
+		var env struct {
+			Error *jsonrpcErrorObj `json:"error"`
+		}
+		if err := json.Unmarshal(raw, &env); err != nil {
+			t.Fatalf("%s %s: %v", method, raw, err)
+		}
+		if env.Error == nil || env.Error.Code != -32601 {
+			t.Fatalf("%s without wiring = %s, want -32601", method, raw)
+		}
+	}
+}
+
+// TestPolicySetParams_SchemaAndValidatorBothRefuseRules keeps the two ends of
+// the contract saying the same thing about the one key that matters here.
+// The params contract declares the document may not name rules and the
+// registered validator refuses it; a schema that allowed what the validator
+// refuses would be a contract the renderer could satisfy and the server would
+// not, which is the drift the whole directory exists to prevent.
+func TestPolicySetParams_SchemaAndValidatorBothRefuseRules(t *testing.T) {
+	schema := loadSchema(t, "policy.set.params.schema.json")
+	spec, ok := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil))).methods["policy.set"]
+	if !ok {
+		t.Fatalf("policy.set is not registered")
+	}
+	for _, raw := range []json.RawMessage{
+		json.RawMessage(`{"policy":{"rules":[]}}`),
+		json.RawMessage(`{"policy":{"observe":{"decision":"permit","scopes":[]},"rules":[]}}`),
+	} {
+		if err := validateJSONErr(schema, raw); err == nil {
+			t.Fatalf("the params schema accepted a matrix write naming rules: %s", raw)
+		}
+		msg := spec.validate(raw)
+		if msg == "" {
+			t.Fatalf("the registered validator accepted a matrix write naming rules: %s", raw)
+		}
+		if !strings.Contains(msg, "policy.setRule") {
+			t.Fatalf("refusal %q does not name policy.setRule, so it does not say where one rule goes", msg)
+		}
+	}
+}
+
+// ── policy.explain (nocx-8nktm) ──────────────────────────────────────────
+
+// explainOverTheSocket asks policy.explain the way a page asks it, and decodes
+// what came back. It decodes into the shape the CONTRACT declares — not into
+// an anonymous struct naming the fields the test is about — so a field the
+// handler stopped sending is a field this test stops seeing.
+func explainOverTheSocket(t *testing.T, h *askHarness, command string, effect content.Effect) policyExplainResult {
+	t.Helper()
+	raw := jsonrpcCall(t, h.conn, "policy.explain", map[string]any{
+		"command": command, "effect": string(effect),
+	})
+	var envelope struct {
+		Result policyExplainResult `json:"result"`
+		Error  *jsonrpcErrorObj    `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(raw))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("policy.explain: %+v", envelope.Error)
+	}
+	return envelope.Result
+}
+
+func explainKinds(r policyExplainResult) []content.TraceKind {
+	out := make([]content.TraceKind, 0, len(r.Trace))
+	for _, step := range r.Trace {
+		out = append(out, step.Kind)
+	}
+	return out
+}
+
+// TestPolicyExplain_AnswersWhyInTheOrderItWasDecided is the seam a person
+// reaches: they are looking at a command and a decision, and they ask why.
+//
+// The assertions are about ORDER and about the step that was ACTUALLY TAKEN.
+// A refusing row is read before any rule, so a person whose standing permit
+// did not apply must be told the rules were never reached — "it lost" and "it
+// was never read" are different sentences, and only the second one is true.
+func TestPolicyExplain_AnswersWhyInTheOrderItWasDecided(t *testing.T) {
+	h, store := newPolicyHarness(t)
+	var p content.EffectPolicy
+	p.Observe = content.EffectRow{
+		Decision: content.DecisionAsk,
+		Scopes:   []content.GrantScope{{Kind: content.ResourcePath, ID: "/workspace"}},
+	}
+	p.MutateDestructive = content.EffectRow{Decision: content.DecisionRefuse}
+	p.Rules = []content.InvocationRule{{
+		ID:               "df-answered",
+		Selector:         content.InvocationSelector{Exact: [][]string{{"df", "-h"}}},
+		Decision:         content.DecisionPermit,
+		Source:           content.SourceAnswered,
+		EvaluatorVersion: content.EvaluatorVersion,
+	}}
+	if err := store.SetPolicy(p); err != nil {
+		t.Fatalf("seed policy: %v", err)
+	}
+
+	permitted := explainOverTheSocket(t, h, "df -h", content.EffectObserve)
+	if permitted.Decision != content.DecisionPermit {
+		t.Fatalf("df -h decided %q, want permit", permitted.Decision)
+	}
+	if got := explainKinds(permitted); len(got) != 3 ||
+		got[0] != content.TraceEffectRow ||
+		got[1] != content.TraceRuleMatched ||
+		got[2] != content.TraceResourceInside {
+		t.Fatalf("trace = %v, want the row, then the rule that permitted, then the resource layer", got)
+	}
+	if permitted.Trace[1].RuleID != "df-answered" {
+		t.Errorf("the permitting step names %q, want the rule a person can take back", permitted.Trace[1].RuleID)
+	}
+	if permitted.Cause != "" || permitted.Resource != nil {
+		t.Errorf("a permitted call carries a cause %q and a resource %+v", permitted.Cause, permitted.Resource)
+	}
+
+	outside := explainOverTheSocket(t, h, "cat /etc/hosts", content.EffectObserve)
+	if outside.Cause != content.OutOfScopeRowScope || outside.Resource == nil ||
+		outside.Resource.ID != "/etc/hosts" {
+		t.Fatalf("out-of-scope answer = %+v, want the editable row scope and the resource that fell outside", outside)
+	}
+	if got := explainKinds(outside); len(got) == 0 || got[len(got)-1] != content.TraceResourceOutsideRowScope {
+		t.Fatalf("trace = %v, want it to close on the resource step that decided", got)
+	}
+
+	shadowed := explainOverTheSocket(t, h, "df -h", content.EffectMutateDestructive)
+	if shadowed.Decision != content.DecisionRefuse {
+		t.Fatalf("a refusing row decided %q, want refuse", shadowed.Decision)
+	}
+	if got := explainKinds(shadowed); len(got) != 2 ||
+		got[0] != content.TraceEffectRow || got[1] != content.TraceRowRefuses {
+		t.Fatalf("trace = %v, want the row consulted and then the rules NOT consulted", got)
+	}
+	for _, step := range shadowed.Trace {
+		if step.RuleID != "" {
+			t.Fatalf("step %+v names a rule the evaluator never read", step)
+		}
+	}
+}
+
+// TestPolicyExplain_RefusesAnEffectWithNoRow keeps the wire's gate on the
+// caller's one derived input. An effect outside the lattice has no row, so the
+// evaluator would answer with the ask an absent row decides — and a page would
+// draw a typo as a policy decision.
+func TestPolicyExplain_RefusesAnEffectWithNoRow(t *testing.T) {
+	h, _ := newPolicyHarness(t)
+	raw := jsonrpcCall(t, h.conn, "policy.explain", map[string]any{
+		"command": "df -h", "effect": "read-everything",
+	})
+	var envelope struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(raw))
+	}
+	if envelope.Error == nil || envelope.Error.Code != -32602 {
+		t.Fatalf("an effect the matrix has no row for answered %s, want invalid params", raw)
+	}
+}
+
+// TestPolicyGet_NamesTheRulesAwaitingReview: a loose permit saved under an
+// earlier reading of commands is INERT, and the wire says which ones are.
+//
+// The renderer cannot work this out and must not try. The predicate joins
+// three facts about a rule to the reading of commands running now — a version
+// number no result carries — and a second implementation of it in TypeScript
+// would agree everywhere anyone looked and disagree somewhere nobody did,
+// while telling a person a permission works. So the answer travels, the way
+// "live" does, and the page renders it.
+//
+// The exact rule beside it is the control: it names the literal command line
+// the person was shown, its meaning does not move, and it is never waiting on
+// anybody. A test that seeded only the stale rule could not tell a correct
+// answer from a list of every rule.
+func TestPolicyGet_NamesTheRulesAwaitingReview(t *testing.T) {
+	h, store := newPolicyHarness(t)
+	var p content.EffectPolicy
+	p.Observe = content.EffectRow{Decision: content.DecisionAsk}
+	p = p.WithRule(content.InvocationRule{
+		ID:               "df-observe",
+		Selector:         content.InvocationSelector{Program: "df"},
+		Decision:         content.DecisionPermit,
+		GrantedUnder:     content.EffectObserve,
+		CreatedAt:        time.Unix(1700000000, 0).UTC(),
+		Source:           content.SourceAnswered,
+		EvaluatorVersion: content.EvaluatorVersion - 1,
+	}).WithRule(content.InvocationRule{
+		ID:               "uptime-exact",
+		Selector:         content.InvocationSelector{Exact: [][]string{{"uptime"}}},
+		Decision:         content.DecisionPermit,
+		CreatedAt:        time.Unix(1700000000, 0).UTC(),
+		Source:           content.SourceAnswered,
+		EvaluatorVersion: content.EvaluatorVersion - 1,
+	})
+	if err := store.SetPolicy(p); err != nil {
+		t.Fatalf("seed policy: %v", err)
+	}
+
+	raw := jsonrpcCall(t, h.conn, "policy.get", nil)
+	var env struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("policy.get %s: %v", raw, err)
+	}
+	if env.Error != nil {
+		t.Fatalf("policy.get error: %+v (%s)", env.Error, raw)
+	}
+	validateJSON(t, loadSchema(t, "policy.get.schema.json"), env.Result, "policy.get result (real socket)")
+
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(env.Result, &keys); err != nil {
+		t.Fatalf("result %s: %v", env.Result, err)
+	}
+	if got := string(keys["awaitingReview"]); got != `["df-observe"]` {
+		t.Fatalf("awaitingReview = %s, want [\"df-observe\"] — the loose permit alone", got)
+	}
+}
+
+// TestPolicyResult_AwaitingReviewIsNeverANull: "never a null" is a property of
+// the SHAPE, for the reason live's own test states — a DTO built without the
+// list still marshals [], so no construction site has to remember.
+func TestPolicyResult_AwaitingReviewIsNeverANull(t *testing.T) {
+	raw, err := json.Marshal(policyResult{Policy: content.EffectPolicy{}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		t.Fatalf("unmarshal %s: %v", raw, err)
+	}
+	if got := string(keys["awaitingReview"]); got != "[]" {
+		t.Fatalf("awaitingReview = %s, want []", got)
+	}
+	validateJSON(t, loadSchema(t, "policy.get.schema.json"), raw, "policy.get DTO with no awaiting-review list")
 }

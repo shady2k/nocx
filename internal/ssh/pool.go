@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package ssh
 
 import (
@@ -6,6 +8,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/shady2k/nocx/internal/log"
 	gossh "golang.org/x/crypto/ssh"
@@ -39,6 +42,24 @@ type pooledSSHConn struct {
 	// away (proved in TestKeepaliveTickerStopsOnClose). Nil when keepalive is
 	// disabled or this is a test fake.
 	stopKeepalive func()
+	// keepaliveArmOnce guards armKeepalive (nocx-y6fh7 item 6): AD-4 shares
+	// one connection across every caller for the same destination+identity,
+	// and dial order among them is NOT the caller that wants a prober — a
+	// pane's own shell channel and an unrelated lease (a probe, an sftp
+	// publish) race for the same pool entry, and measurement found the
+	// publish consistently winning the race for an INTEGRATED pane (it runs
+	// before the spawn by design, nocx-50w7p.21), silently discarding
+	// keepalive settings that were only ever captured at dial time. Arming
+	// is therefore a SEPARATE act any holder may request, idempotent via
+	// this guard, so whichever caller actually wants a prober gets to start
+	// it — a caller that never asks (interval zero) never fires it at all,
+	// which is what lets the one that does win regardless of who dialed.
+	keepaliveArmOnce sync.Once
+	// keepaliveLost records that THIS connection's own prober is the party
+	// closing it, set BEFORE the close so a sibling reading it back through
+	// PooledConn.TaintReason (ReasonKeepaliveLost) never observes the close
+	// without the reason (nocx-y6fh7 item 6, round 3).
+	keepaliveLost atomic.Bool
 	// dead records that this connection has been closed, so the pool can
 	// refuse to hand it to anyone else. See isDead.
 	dead atomic.Bool
@@ -124,6 +145,36 @@ func (c *pooledSSHConn) SendRequest(name string, wantReply bool, payload []byte)
 // a transport that cannot be probed is the honest answer.
 var errNoGlobalRequests = errors.New("ssh: transport carries no global requests")
 
+// armKeepalive starts this connection's prober at most once, with whichever
+// caller's (interval, countMax, observe) reaches here first — see
+// keepaliveArmOnce's own comment for why "first" is a caller that actually
+// asks, not a caller that happened to dial. Interval <= 0 is a caller that
+// wants no prober and must not consume the one slot a connection has: it is
+// checked BEFORE the Once fires, so a probe or a publish leasing the same
+// destination ahead of a pane's own shell channel leaves the slot open for
+// whichever caller's interval is the first non-zero one.
+func (c *pooledSSHConn) armKeepalive(interval time.Duration, countMax int, observe LivenessObserver) {
+	if interval <= 0 {
+		return
+	}
+	c.keepaliveArmOnce.Do(func() {
+		stop, _ := startKeepalive(c, interval, countMax, observe)
+		c.setKeepaliveStop(stop)
+	})
+}
+
+// markKeepaliveLost records that this connection's own prober is the one
+// closing it, before it does — the same "reason before close" order
+// CloseTainted keeps for its own cap. It is unexported because only the
+// prober started against this connection may set it: nothing else may claim
+// a connection died on that authority.
+func (c *pooledSSHConn) markKeepaliveLost() { c.keepaliveLost.Store(true) }
+
+// KeepaliveLost reports whether this connection's own keepalive prober is
+// the one that closed it (nocx-y6fh7 item 6, round 3), read back by
+// PooledConn.TaintReason.
+func (c *pooledSSHConn) KeepaliveLost() bool { return c.keepaliveLost.Load() }
+
 // setKeepaliveStop arms the prober's cancel after the connection exists. The
 // prober is started with this connection as the thing it closes when it gives
 // up, so the two are constructed in that order and the field is written after
@@ -207,9 +258,18 @@ func (k poolKey) jumpRouteKey() string {
 }
 
 // refCount tracks how many tabs (channels) reference a pooled connection.
-// Guarded by the pool mutex.
+// n is guarded by the pool mutex. detachCount and closeReason are the
+// detached-writer bookkeeping a helper's SSH sessions need (spec §5.7,
+// nocx-6q1uh.3): detachCount (also guarded by the pool mutex) is how many
+// detached writers THIS connection currently holds, given back to the
+// pool's own live gauge when the connection actually closes, whichever way
+// that happens; closeReason is set once, by CloseTainted, before the close
+// it names, so every handle sharing this connection — a sibling channel —
+// can read back why its own session ended.
 type refCount struct {
-	n int
+	n           int
+	detachCount int
+	closeReason atomic.Value // string, unset until CloseTainted
 }
 
 // poolHandle is a reference to a pooled connection, returned by Acquire.
@@ -231,6 +291,19 @@ type poolHandle struct {
 	releaseOnce sync.Once
 }
 
+// closeReason is the name CloseTainted gave this handle's connection when it
+// closed it (spec §5.7's detached-writer cap), or "" for a connection that
+// has not been (or was not) closed that way. Every handle sharing the
+// connection reads the same value, because they share the *refCount it is
+// stored on.
+func (h *poolHandle) closeReason() string {
+	if h == nil || h.ref == nil {
+		return ""
+	}
+	v, _ := h.ref.closeReason.Load().(string)
+	return v
+}
+
 // ConnPool is a ref-counted ssh.Client connection pool (AD-4). Channels
 // multiplex over one connection per poolKey; the connection closes when the
 // last tab releases its reference. The pool wraps the dial logic: on a cache
@@ -245,7 +318,39 @@ type ConnPool struct {
 	// dial is the connection factory (injected for testing; production sets
 	// it to a function that calls gossh.Dial).
 	dial func(key poolKey) (sshClientConn, error)
+
+	// detachedWriters is how many detached writers this pool currently
+	// holds, summed across every connection (spec §5.7's maxDetachedWriters,
+	// "counted per helper process" — one ConnPool serves the whole helper
+	// for its life, which is what makes this pool the process-wide gauge).
+	// Guarded by mu.
+	detachedWriters int
 }
+
+// maxDetachedWriters bounds how many writers this pool's connections
+// currently hold detached (spec §5.7): a fail-closed cap on one helper
+// process's worst case, since golang.org/x/crypto/ssh gives no per-channel
+// interrupt and a write stuck behind a zero-sized window can only ever be
+// abandoned, never cancelled. Each one still holds a goroutine and a
+// connection open until its peer lets it go.
+const maxDetachedWriters = 8
+
+// ReasonDetachedWriterCap is why CloseTainted closes a connection when the
+// cap above is already spent — the one name both the pool's own bookkeeping
+// and a sibling channel reading it back (poolHandle.closeReason,
+// sshsvc.ShellChannel via *PooledConn) use, so there is exactly one spelling
+// of this cause (AGENTS.md, "Look for the existing answer").
+const ReasonDetachedWriterCap = "detached_writer_cap"
+
+// ReasonKeepaliveLost is why a sibling channel's session ends when this
+// connection's OWN keepalive prober gave up and closed it (nocx-y6fh7 item
+// 6, round 3) — a connection loss the prober itself declared, read back the
+// same way ReasonDetachedWriterCap is, through PooledConn.TaintReason, so
+// every session sharing the connection reports the SAME cause: the prober
+// watches the connection, not any one session's channel, and no single
+// channel's own Wait() could otherwise learn why the transport under it
+// went away.
+const ReasonKeepaliveLost = "keepalive_lost"
 
 // poolEntry holds a connection and its ref count.
 type poolEntry struct {
@@ -412,6 +517,11 @@ func (p *ConnPool) Release(h *poolHandle) {
 				delete(p.pool, h.key)
 			}
 			toClose = h.conn
+			// Every detached writer this connection ever held ends with it
+			// (mux teardown unblocks every remaining channel), so the cap's
+			// live gauge gives those slots back here rather than never.
+			p.detachedWriters -= h.ref.detachCount
+			h.ref.detachCount = 0
 			p.log.Debug("pool connection closed (last ref)",
 				"host", h.key.host, "user", h.key.user, "port", h.key.port)
 		}
@@ -423,6 +533,59 @@ func (p *ConnPool) Release(h *poolHandle) {
 	if toClose != nil {
 		_ = toClose.Close()
 	}
+}
+
+// Taint marks h's connection so Acquire never hands it to a new caller again
+// (spec §5.7's first detach): removing it from the pool map is enough — an
+// existing handle's Release still finds it by h.ref/h.conn regardless, so
+// siblings already holding a reference are unaffected and the connection
+// closes exactly when the last of them releases, as any entry at ref zero
+// does. h's own reference is untouched; the caller still owns it and must
+// eventually Release it like any other.
+//
+// Taint also records one more detached writer against this pool
+// (maxDetachedWriters, "per helper process"). Once the pool already holds
+// the cap, Taint escalates instead: it closes h's connection AT ONCE
+// (CloseTainted, ReasonDetachedWriterCap) rather than waiting for the last
+// release — the cap is fail-closed rather than a leak.
+func (p *ConnPool) Taint(h *poolHandle) {
+	if h == nil || h.pool != p {
+		return
+	}
+	p.mu.Lock()
+	h.ref.detachCount++
+	p.detachedWriters++
+	exceeded := p.detachedWriters > maxDetachedWriters
+	if !exceeded {
+		if entry, ok := p.pool[h.key]; ok && entry.ref == h.ref {
+			delete(p.pool, h.key)
+		}
+	}
+	p.mu.Unlock()
+	if exceeded {
+		p.CloseTainted(h, ReasonDetachedWriterCap)
+	}
+}
+
+// CloseTainted closes h's connection NOW, ending every sibling channel on it
+// rather than waiting for the last release. reason is recorded on the
+// shared refCount BEFORE the close, so any handle sharing this connection —
+// a sibling — reads it back through poolHandle.closeReason once its own
+// Wait/Read notices the connection is gone.
+func (p *ConnPool) CloseTainted(h *poolHandle, reason string) {
+	if h == nil || h.pool != p {
+		return
+	}
+	h.ref.closeReason.Store(reason)
+	p.mu.Lock()
+	if entry, ok := p.pool[h.key]; ok && entry.ref == h.ref {
+		delete(p.pool, h.key)
+	}
+	p.detachedWriters -= h.ref.detachCount
+	h.ref.detachCount = 0
+	p.mu.Unlock()
+	p.log.Warn("closing a tainted ssh connection", "host", h.key.host, "user", h.key.user, "port", h.key.port, "reason", reason)
+	_ = h.conn.Close()
 }
 
 // CloseAll closes all pooled connections regardless of ref count.

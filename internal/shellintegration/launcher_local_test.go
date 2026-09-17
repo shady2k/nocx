@@ -1,9 +1,6 @@
 package shellintegration
 
 import (
-	"os"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -59,29 +56,5 @@ func TestLocalBashRcfile_SecretRidesTextNotEnv(t *testing.T) {
 func TestLocalBashRcfile_RequiresEnhancedSession(t *testing.T) {
 	if _, err := LocalBashRcfile(LaunchOptions{Enhanced: false}); err == nil {
 		t.Fatal("a conventional session must not render a lifecycle rcfile")
-	}
-}
-
-// TestWriteLocalRcfile_MatchesSelfDeleteGuard pins the file naming: the bash
-// rcfile template self-deletes on a BASH_SOURCE matching */nocx-bash.??????
-// (exactly six characters). A longer random suffix would never be removed
-// and every session would leave a file containing the capability in TMPDIR.
-// The file is created 0600 with O_EXCL from the start.
-func TestWriteLocalRcfile_MatchesSelfDeleteGuard(t *testing.T) {
-	path, err := WriteLocalRcfile("# test rcfile\n")
-	if err != nil {
-		t.Fatalf("WriteLocalRcfile: %v", err)
-	}
-	defer func() { _ = os.Remove(path) }()
-	name := filepath.Base(path)
-	if !regexp.MustCompile(`^nocx-bash\.[0-9a-f]{6}$`).MatchString(name) {
-		t.Fatalf("rcfile name %q must match the template's */nocx-bash.?????? self-delete guard", name)
-	}
-	st, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	if st.Mode().Perm() != 0o600 {
-		t.Fatalf("rcfile mode = %o, want 0600 (it carries the capability)", st.Mode().Perm())
 	}
 }

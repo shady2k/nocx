@@ -126,6 +126,46 @@ describe('TextField', () => {
     expect(label.getAttribute('for')).toBe('host')
   })
 
+  /**
+   * A LABEL WITHOUT AN ID IS ALWAYS WRONG, so the kit answers it rather than
+   * asking every caller to remember.
+   *
+   * The `for`/`id` pair was derived from `id` alone: a caller that passed a
+   * label and no id got `<label for="">` bound to an input with no id at all,
+   * which announces the control as UNNAMED — worse than the bare input,
+   * because the visible text says a name is there. It was three callers on the
+   * day it was found, one of them the box a command is typed into to become a
+   * permission, and nothing in the component could ever have made it right.
+   */
+  it('names the input when the caller gave a label and no id', () => {
+    subject({ label: 'The command' })
+    const input = screen.getByLabelText('The command')
+    expect(input.getAttribute('class')).toBe('ui-text-field__input')
+  })
+
+  // Two fields wearing the same label are two controls, and a generated id
+  // that repeated would bind one label to both — the same unnamed control by
+  // another route.
+  it('gives two id-less fields ids of their own', () => {
+    render(() => (
+      <>
+        <TextField label="The command" value="a" />
+        <TextField label="The command" value="b" />
+      </>
+    ))
+    const [first, second] = screen.getAllByLabelText('The command')
+    expect(first.id).not.toBe('')
+    expect(first.id).not.toBe(second.id)
+  })
+
+  // A caller that names its own id still owns it: `createFormValidation`
+  // focuses a field by the id the surface chose, and a kit that overrode it
+  // would leave the submit gate pointing at nothing.
+  it('never overrides an id the caller gave', () => {
+    subject({ id: 'host', label: 'Host' })
+    expect(screen.getByLabelText('Host').id).toBe('host')
+  })
+
   it('is focusable via tab', () => {
     subject()
     const input = screen.getByRole('textbox')
@@ -184,6 +224,28 @@ describe('TextField', () => {
     subject({ multiline: true, value: '', label: 'Private Key' })
     const label = document.querySelector('label')
     expect(label?.textContent?.trim()).toBe('Private Key')
+  })
+
+  // The height, and the reason it is a prop rather than a four-row default:
+  // four rows is right for a password, a commit message or a phrase, and wrong
+  // for a DOCUMENT (a rule a person edits, a captured request), where the
+  // person needs the shape of what they are editing rather than four lines of
+  // it. The alternative was a surface setting a height from OUTSIDE, which is
+  // repainting a kit component and would let the two heights drift.
+  it('shows four lines unless the caller asks for a document', () => {
+    subject({ multiline: true, value: 'x' })
+    expect(screen.getByRole('textbox').getAttribute('rows')).toBe('4')
+  })
+
+  it('shows as many lines as the caller asked for', () => {
+    subject({ multiline: true, rows: 16, value: 'x' })
+    expect(screen.getByRole('textbox').getAttribute('rows')).toBe('16')
+  })
+
+  it('ignores rows on a single-line field, where the browser owns the height', () => {
+    const { container } = subject({ rows: 16, value: 'x' })
+    expect(container.querySelector('textarea')).toBeNull()
+    expect(container.querySelector('input')?.hasAttribute('rows')).toBe(false)
   })
 
   it('renders description on multiline variant', () => {
@@ -328,10 +390,9 @@ describe('composition with Field', () => {
 
 /**
  * The commit gesture (nocx-gihi6). A field whose value is WRITTEN rather than
- * merely validated cannot write per keystroke — the Agent policy page's scope
- * field is checked by `ParseEffectPolicy`, which rejects a non-absolute path,
- * so a half-typed `/w` would be a refused write and a toast on every character
- * of `/workspace`. Blur and Enter are the same gesture ("I am done with this
+ * merely validated cannot write per keystroke — a backend that rejects a
+ * half-typed value turns down every character of `/workspace` and raises a
+ * toast apiece. Blur and Enter are the same gesture ("I am done with this
  * value") and the kit says so once, rather than every caller pairing `onBlur`
  * with a hand-rolled keydown.
  */

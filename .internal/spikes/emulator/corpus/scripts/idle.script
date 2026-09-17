@@ -1,0 +1,5 @@
+# A program that needs no input: the single delay keeps it on screen and then
+# ends the capture. Nothing is typed, deliberately: a quit keystroke would make
+# htop, vim and less restore the normal screen (?1049l) and the corpus would
+# record a blank screen instead of the alternate one it is here to measure.
+8000

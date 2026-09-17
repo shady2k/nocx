@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.close.schema.json",
+  "title": "HelperSSHCloseChannelResult",
+  "description": "The empty answer an idempotent close gives. It is a declared shape and not a bare `true` so that a later generation adding a fact to this answer (bytes moved, a reason the close was already true) has a named place to put it and a version to do it under.",
+  "type": "object",
+  "additionalProperties": false
+}

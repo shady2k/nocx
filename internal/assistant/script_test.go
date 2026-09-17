@@ -198,11 +198,16 @@ func TestApprovalQuestion_EveryScriptTheCommandNamesArrives(t *testing.T) {
 
 // A command that names no file draws NO affordance: the field is absent, not
 // an empty array, so the surface has nothing to render and says nothing.
+//
+// The path it lists is the run's OWN directory, and that is not decoration: a
+// path outside the run fence is refused rather than asked about (design §5.3,
+// nocx-4yjwk.1), and a refusal never reaches a question at all — so a command
+// naming `/etc` here would assert nothing about readings.
 func TestApprovalQuestion_ACommandThatNamesNoFileCarriesNoReading(t *testing.T) {
 	dir := t.TempDir()
 	source := &fileScriptSource{}
 
-	req := askAbout(t, source, dir, "ls -la /etc")
+	req := askAbout(t, source, dir, "ls -la "+dir)
 
 	if req.Scripts != nil {
 		t.Fatalf("scripts = %+v, want none: the command names no file", req.Scripts)

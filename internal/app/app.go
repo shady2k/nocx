@@ -16,11 +16,13 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/agentapproval"
+	"github.com/shady2k/nocx/internal/agentcalib"
 	"github.com/shady2k/nocx/internal/agentdriver"
+	"github.com/shady2k/nocx/internal/agentrule"
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apifetch"
@@ -28,7 +30,6 @@ import (
 	"github.com/shady2k/nocx/internal/app/clienthost"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
-	"github.com/shady2k/nocx/internal/bootstrapprogress"
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/completion"
@@ -43,21 +44,22 @@ import (
 	gitlocal "github.com/shady2k/nocx/internal/git/local"
 	"github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/helper/consent"
+	"github.com/shady2k/nocx/internal/helper/deploy"
 	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
+	helperlocal "github.com/shady2k/nocx/internal/helper/local"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/lifecycleremote"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/loginshell"
 	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/notify"
-	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/paneobserve"
+	"github.com/shady2k/nocx/internal/paneview"
+	"github.com/shady2k/nocx/internal/peerpin"
 	"github.com/shady2k/nocx/internal/procwatch"
 	"github.com/shady2k/nocx/internal/profile"
-	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/reveal"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
@@ -67,6 +69,7 @@ import (
 	"github.com/shady2k/nocx/internal/snippet"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
+	"github.com/shady2k/nocx/internal/toolendpoint"
 	"github.com/shady2k/nocx/internal/transfer"
 	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/uistate"
@@ -75,6 +78,8 @@ import (
 	"github.com/shady2k/nocx/internal/vault/file"
 	"github.com/shady2k/nocx/internal/vaultreset"
 	"github.com/shady2k/nocx/internal/version"
+	"github.com/shady2k/nocx/internal/workers"
+	"github.com/shady2k/nocx/internal/workspace"
 )
 
 // noteBackupAdapter is the backup's view of the notes store. The store takes
@@ -94,19 +99,23 @@ func (a *noteBackupAdapter) ReplaceNotes(notes []note.Note) error {
 }
 
 type App struct {
-	Logger           log.Logger
-	Pty              session.PTYFactory
-	Session          *session.Reg
-	Transport        *transport.WSServer
-	ShellIntegration shellintegration.ShellIntegration
-	Updater          update.Updater
-	Profiles         profile.ProfileRepository
-	Credentials      credential.SecretStore
-	skills           assistant.SkillLibrary
+	Logger              log.Logger
+	Session             *session.Reg
+	Transport           *transport.WSServer
+	ToolDispatcher      assistant.ToolDispatcher
+	ToolAuthorizer      toolendpoint.Authorizer
+	ToolSurfaceObserver toolendpoint.Observer
+	agentEnroller       *paneEnroller
+	ShellIntegration    shellintegration.ShellIntegration
+	Updater             update.Updater
+	Profiles            profile.ProfileRepository
+	Credentials         credential.SecretStore
+	skills              assistant.SkillLibrary
 	// vaultCloser releases the vault's background worker and seals it at
 	// shutdown. Held as a minimal interface rather than *vault.Vault so the
 	// composition root keeps depending on behaviour instead of a type.
-	vaultCloser interface{ Close() }
+	vaultCloser       interface{ Close() }
+	toolSurfaceCloser interface{ Close() }
 	// noteCloser closes the notes database on shutdown; nil when the store
 	// never opened.
 	noteCloser interface{ Close() error }
@@ -123,6 +132,41 @@ type App struct {
 	// sessions inventory. Kept here so the composition root's ownership is
 	// explicit; the registry itself remains private to app.
 	helperRegistry *helperRegistry
+	// helperArtifacts is where the helper binaries come from. It is held
+	// rather than reached for because THIS MACHINE is one of the hosts they
+	// are installed on (L1): the remote path takes it through the registry,
+	// and Start installs the local generation from the same source, so one
+	// artifact source answers "which build" for every host including this
+	// one.
+	helperArtifacts deploy.ArtifactSource
+	// localHelper is this machine's own entry in that inventory: the route a
+	// local pane is opened through. Held here because Start is what tells it
+	// which generation was installed, and Shutdown is what releases its
+	// connection — the sessions behind it survive both, which is the epic.
+	localHelper *localHelperOpener
+	// sessionReconciler and sessionRoutes are reconcileSessions's own two
+	// inputs (nocx-73aln), held here rather than closed over at New because
+	// the CALL moved to Start. A REMOTE session's re-adoption dials THIS
+	// machine's own local helper for its lane's carrier
+	// (nocx-50w7p.10 — the coordinator itself opens no ssh exec lane any
+	// more), and that carrier answers nothing until installLocalHelper has
+	// run: before it, localHelperOpener.installed is empty and every such
+	// lane refuses with "this machine's nocx helper is not installed" — the
+	// refusal a re-adoption attempt met at New, silently, because New runs
+	// before Start installs anything. A carried-over LOCAL session was
+	// unaffected (its ask dials the generation the binding names, on a probe
+	// connection that may not start one — routeDir's own doc), which is why
+	// this went unnoticed until a REMOTE one crossed a restart. Reconciling
+	// from Start, after installLocalHelper and still before Transport.Start
+	// begins listening, keeps the "the pass finishes before a client can ask"
+	// invariant reconcileSessions's own doc names, while giving it a carrier
+	// that can actually answer.
+	sessionReconciler content.SessionReconciler
+	sessionRoutes     hostRouteResolver
+	// paneViews is the store every observation, typing decision and worker
+	// read goes through (nocx-ygxjv.3): the composition root's object, held
+	// here for the same reason the enroller and the registry are.
+	paneViews *paneview.Store
 
 	// procs owns the process observation (nocx-cgzc); closed at shutdown so
 	// its kernel queue and its goroutine do not outlive the process.
@@ -354,6 +398,18 @@ type optionSet struct {
 	// with keystoreReal, and logged, so a keychain prompt during a run can
 	// be traced to the test that asked for it.
 	keystoreReason string
+	// noLocalHelper suppresses the local helper install at Start. Test-only,
+	// and for the same reason WithLogFilePath is: the install writes four
+	// megabytes into ~/.nocx/helper, and storagetest.Isolate does not move
+	// HOME, so a test that has not asked for it would be installing into the
+	// developer's real home once per Start.
+	noLocalHelper bool
+	// helperArtifacts is where Start installs the local generation from when
+	// a caller names it. Test-only: a test that opts the install back IN
+	// supplies bytes of its own, so it never depends on `make helpers` having
+	// run and never writes four megabytes to prove a two-line wiring. nil
+	// means the embedded artifacts, which is production.
+	helperArtifacts deploy.ArtifactSource
 	// forgeAPIBase and forgeRawBase override the GitHub resolver endpoints.
 	// Empty values retain the resolver's production defaults.
 	forgeAPIBase string
@@ -404,6 +460,34 @@ func WithLogFilePath(path string) Option {
 // never opens Settings gets exactly the behaviour this constant described
 // before it had a control beside it.
 const notifyDebounceWindow = 8 * time.Second
+
+// workerFactDeadline is how long a worker's fact may sit undispatched before
+// the person is told (D2 of the 2026-08-24 orchestration mechanism design).
+//
+// It is a placeholder with both ends of the interval named, and deliberately
+// not a measured value: §10.8 says a number wrong in either direction breaks
+// the backstop — too short and a thinking coordinator is escalated past, too
+// long and the person learns late — and that it probably differs by fact
+// class, which needs the fan-out nocx-dkawo.4 brings to measure at all. Five
+// minutes is chosen to be longer than an agent turn and shorter than the
+// interval in which a person forgets they started a worker.
+const workerFactDeadline = 5 * time.Minute
+
+// workerParticipantBound is how many non-terminal participants one worker may
+// hold, and workerEnrolmentDeadline is how long a registration waits for the
+// launcher's enrolment before it is terminalized.
+//
+// Both are named here for the reason the fact deadline is: they are the
+// product's numbers, and internal/worker names the interval rather than
+// choosing its length. The bound is deliberately small for one-worker workerStore
+// (D15) and is one of the nine open in §10.9; the enrolment deadline has to
+// cover a shell drawing its first prompt and an agent binary starting, and
+// nothing longer, because every second past that is a registration holding a
+// record open for a launcher that is never going to arrive.
+const (
+	workerParticipantBound  = 8
+	workerEnrolmentDeadline = 30 * time.Second
+)
 
 // The bounds of that setting, as durations, because a duration is what the
 // thing IS — the seconds the registry stores are derived from these and never
@@ -583,12 +667,17 @@ func New(opts ...Option) (*App, error) {
 	// Warn to the backend, and why the cause of a whole class of e2e failures
 	// stayed "unknown" across three triage rounds (nocx-cbtc, nocx-xplc).
 	//
-	// An env var rather than a setting: the thing you need to turn up is the
-	// startup of a session that is already going wrong, and a setting is read
-	// from a store this runs before. Unrecognised values fall back to info
-	// rather than failing — a mistyped level must never stop the app starting,
-	// and the fallback says so in the log.
-	logLevel := slog.LevelInfo
+	// An env var rather than a setting: the thing you need to turn DOWN is a
+	// dev build that is saying everything, and the thing you need to turn up
+	// is the startup of a session that is already going wrong — and a setting
+	// is read from a store this runs before. Unrecognised values fall back to
+	// the build's default rather than failing: a mistyped level must never
+	// stop the app starting, and the fallback says so in the log.
+	// The DEFAULT is the build's, not this line's: a dev build says everything
+	// and a shipped one says what a person's own disk should carry
+	// (internal/log's build split, nocx-4l2a5.2). The variable below still
+	// wins over both.
+	logLevel := log.DefaultLevel()
 	levelName := strings.ToLower(strings.TrimSpace(os.Getenv(logLevelEnvVar)))
 	badLevel := ""
 	switch levelName {
@@ -596,6 +685,11 @@ func New(opts ...Option) (*App, error) {
 	case "debug":
 		logLevel = slog.LevelDebug
 	case "info":
+		// SET, not skipped. It was a bare case while the default was info, and
+		// leaving it bare now would make NOCX_LOG_LEVEL=info a no-op on the
+		// build whose default is debug — the one build somebody would type it
+		// on (nocx-4l2a5.2).
+		logLevel = slog.LevelInfo
 	case "warn", "warning":
 		logLevel = slog.LevelWarn
 	case "error":
@@ -636,7 +730,8 @@ func New(opts ...Option) (*App, error) {
 	// Said after the logger exists, so it lands in the file too — and said at
 	// all, because a level that silently did not apply is worse than no knob.
 	if badLevel != "" {
-		logger.Warn("unrecognised log level; using info",
+		logger.Warn("unrecognised log level; using the build's default",
+			"default", logLevel.String(),
 			"var", logLevelEnvVar, "value", badLevel, "known", "debug, info, warn, error")
 	}
 	if logLevel == slog.LevelDebug {
@@ -666,20 +761,42 @@ func New(opts ...Option) (*App, error) {
 	// a per-session observer would mean a kernel queue and a goroutine per
 	// tab.
 	procs := procwatch.New(logger)
-	// One login-shell resolver, built here and injected: "which shell is this
-	// user's login shell" is one question with one owner (nocx-wwz0), and the
-	// composition root is where the platform half gets wired in.
-	ptf := &localPTYFactory{
-		log: logger, shint: shint, transports: childTransports,
-		shells: loginshell.New(), procs: procs,
-	}
-	sess := session.New(logger, ptf)
+	// THIS MACHINE'S PANES ARE THE HELPER'S (L1, ADR-0057). The opener is
+	// built here and its generation arrives at Start, which is where the
+	// install happens; everything else it needs is bound below as the seams
+	// it reaches come into existence.
+	// THE BOOK OF SPAWN-MINTED BEARERS lives on the opener because that is the
+	// party that launches a pane and learns its session id (nocx-50w7p.16), and
+	// it is built HERE so that the approval service below can be wired to the
+	// same one: two books would bind bearers nobody presented.
+	// SHARED WITH THE REVERSE HANDLERS BELOW (nocx-y6fh7 items 5, 6): the
+	// coordinator's own verifyHostKey answer is what this opener reads back
+	// after a spawn to give a helper-hosted session a fingerprint its wire
+	// does not carry. Built here, once, so both sides hold the SAME map
+	// rather than two that could drift.
+	hostKeys := newHostKeyObserver()
+	localOpener := &localHelperOpener{log: slogger, procs: procs, spawnTokens: &spawnTokens{}, hostKeys: hostKeys}
+	// THE REGISTRY HAS NO LOCAL PTY FACTORY, and that is the point of
+	// nocx-ie23r.3 rather than an omission. There is exactly one constructor
+	// of a local PTY in this repository and it lives in the daemon
+	// (internal/helper/session), so nothing in this process forks a shell any
+	// more; a local open reaches the helper, and if it cannot, it refuses.
+	// Reg.Open says so by name when something asks it for a local session
+	// anyway, in the same words it has always used for a missing ssh factory.
+	sess := session.New(logger, nil)
 
 	// SSH config resolver: shared by both the SSH client and the profile
 	// resolver so the authorization comparison matches canonical hostnames.
 	// AD-4: nocx asks OpenSSH via ssh -G; the injected resolver is the sole
 	// path through which ~/.ssh/config is read.
 	home, _ := os.UserHomeDir()
+	// THE ROUTE'S DIRECTORY IS KNOWN NOW AND THE INSTALL IS NOT, which is why
+	// they are two setters rather than one (nocx-ie23r.5). Reconciliation runs
+	// at New — before Start has installed anything — and a carried-over local
+	// session is judged by asking this machine's daemon the question a binding
+	// names the generation for, on a probe connection that reaches an endpoint
+	// it may not start. That needs the directory and nothing else.
+	localOpener.routeDir(home)
 	sshConfigPath := filepath.Join(home, ".ssh", "config")
 	sshCfgResolver := ssh.NewSSHConfigResolver(logger, sshConfigPath, "")
 
@@ -698,17 +815,44 @@ func New(opts ...Option) (*App, error) {
 		probes:   defaultMasterProbes,
 	}
 
-	// SSH client (AD-4): real client on x/crypto/ssh, honors ~/.ssh/config.
+	// This is the SSH resolver and trust client, not a connection: it holds no
+	// gossh.Client, opens no channel and dials nothing, because
+	// cmd/nocx-server is built without nocx_local_ssh and that is the build in
+	// which the dial half does not exist (internal/ssh/ssh_real.go). What it
+	// does is what the coordinator owes: resolve a destination through
+	// ~/.ssh/config, bind and authorize the credential, decide a host key from
+	// this process's known_hosts, and answer the two seams a caller with no
+	// connection asks (CheckHostKey, SignWithStoredKey).
+	//
+	// THE SESSION REGISTRY IS DELIBERATELY LEFT WITHOUT A FACTORY. It used to
+	// be handed one here (`WithSSHFactory`, over this same client), and that
+	// wiring was the last thing in this process that could have dialed a far
+	// host: `session.Reg.Open`'s remote arm calls it (session.go), and the
+	// transport's own check that an ssh destination is a helper's
+	// (session_open.go) is what made the arm unreachable rather than what
+	// removed it. nocx-50w7p.5 removes it from the composition root, so no
+	// shipped wiring can reach `r.ssh.Connect` at all; the seam itself stays
+	// in internal/session, where the transport's stands legitimately stand in
+	// a channel for a session without a pty (ADR-0057's reasoning: a factory
+	// is a seam, and nothing shipped supplies one).
 	sshClient, err := ssh.NewReal(logger, ssh.WithConfigResolver(sshCfgResolver))
 	if err != nil {
 		return nil, fmt.Errorf("ssh client: %w", err)
 	}
-	sess = sess.WithSSHFactory(&sshFactoryAdapter{client: sshClient})
+	// The tunnel transport (nocx-50w7p.8): every forward, every remote
+	// listener and every routed API request rides a channel on THIS MACHINE'S
+	// HELPER. The ssh client above is still what RESOLVES and AUTHORIZES a
+	// destination — that is the coordinator's job and stays here — but it no
+	// longer dials for these tenants. It is built here, beside the client it
+	// resolves through, because the three wiring sites below are spread across
+	// this function and one value feeds all of them.
+	tunnelChans := helperTunnelConnector(localOpener, sshClient, slogger)
 
 	// Vault (ADR-0011 as amended): owns provider routing, key material and
 	// the seal lifecycle. Two providers are compiled on every platform:
 	// system (OS keychain) and file (encrypted document).
 	docStore := storage.NewDocumentStore(paths.ConfigDir())
+	agentApprovals := agentapproval.NewStore(logger, docStore, "agent-approvals.json")
 	profileStore := profile.NewJSONStoreWithDocStore(docStore, "profiles.json")
 	// The snippet library is the same document family: one versioned
 	// document under the profile directory, sharing the docStore. The id
@@ -752,7 +896,13 @@ func New(opts ...Option) (*App, error) {
 	// for stored credential material (design §8.1), so it cannot be
 	// constructed before the store that holds the values.
 	apiCollections := apicoll.NewCollections(paths)
-	apiRoutes := &apiRouteLeaser{client: sshClient}
+	// The route lease rides this machine's helper (nocx-50w7p.8): a send
+	// through a connection opens a direct-tcpip channel on the helper, which
+	// dials the profile's destination. The lease is still pool-keyed and
+	// authorized like a tab — resolution and the credential's authorization
+	// against the endpoint happen here (ssh.RealClient.ResolveTarget) before
+	// the helper is asked for anything.
+	apiRoutes := &apiRouteLeaser{tunnels: tunnelChans}
 	// The import's URL entrance gets the SAME route table the sender has,
 	// so "through prod-bastion" means one thing in this product: a fetch
 	// and a send that name one connection lease the same pooled SSH
@@ -780,13 +930,13 @@ func New(opts ...Option) (*App, error) {
 	// produces no passport. The delivery planner reads it to choose the
 	// compact installed line; without it every host bootstraps.
 	installedFacts := ssh.NewInstalledFactStore(logger, docStore, "installed-facts.json")
-	// The helper consent (remote-helper design D8; the 2026-08-10 consent
-	// design): the per-machine relay-tier answer, keyed by the remote
+	// The helper consent (ADR-0034, ADR-0068; the 2026-08-10 consent
+	// design): the per-machine helper-tier answer, keyed by the remote
 	// host's public-key fingerprint, and the observed helper installs the
 	// footprint surface lists. Both are backend-owned and persisted; the
-	// consent decision at git.open and the footprint listing read them, so
-	// without these lines the consent path is reachable from its own tests
-	// and nowhere else (AGENTS.md check 5).
+	// consent decision at connect and at git.open, and the footprint
+	// listing, read them, so without these lines the consent path is
+	// reachable from its own tests and nowhere else (AGENTS.md check 5).
 	helperConsent := consent.NewStore(logger, docStore, "helper-consent.json")
 	helperInstalls := consent.NewInstallStore(logger, docStore, "helper-installs.json")
 	// The helper-backed git factory and the registry that owns its live
@@ -794,8 +944,46 @@ func New(opts ...Option) (*App, error) {
 	// both the factory's per-session helpers and the uninstall surface's
 	// close-before-remove, so a machine's channels are closed by the same
 	// bookkeeping that started them.
-	helperFactory, helperReg := helperGitFactory(sshClient, helperartifacts.DefaultSource, helperConsent, helperInstalls, slogger)
+	// The ssh transport this coordinator uses for each lease (nocx-50w7p.3).
+	// overHelper opens channels on THIS MACHINE'S HELPER, which is the owner's
+	// invariant made real for one consumer: the install lease no longer dials
+	// from this process. The git lane and the platform probe still do, and
+	// installLeaseRoutes names that split in one place rather than hiding it.
+	overHelper := &sshOverHelper{local: localOpener, resolve: sshClient, log: slogger}
+	// The named probes ride the same connection to this machine's helper, and
+	// the same resolver: what each consumer asks for is a LEASE on a
+	// destination, and the helper is what dials it (nocx-50w7p.9).
+	probes := &helperProbes{local: localOpener, resolve: sshClient}
+	// The script-mode bundle publish, over the same two halves (nocx-50w7p.15):
+	// the home is a named probe on a lease, the bundle rides an sftp channel,
+	// and both name the destination the pane's own open named so the helper's
+	// pool hands them ONE authenticated connection. It is assigned onto the
+	// carrier HERE rather than at its construction, because the helper halves
+	// did not exist then — and before either option list below captures the
+	// carrier, which is what makes the assignment visible to both.
+	remoteInstaller.bundle = &helperBundlePublisher{
+		probes: probes, channels: overHelper, publish: shint, log: slogger,
+	}
+	// ONE value for "who serves which lease", read twice: the git factory takes
+	// it and so does the file panel's factory below. Two literals would be two
+	// answers to one question, and the second would be the one that drifts.
+	sshLeases := installLeaseRoutes{viaLocal: overHelper, probes: probes}
+	helperFactory, helperReg := helperGitFactory(
+		sshLeases, helperartifacts.DefaultSource, helperConsent, helperInstalls, slogger)
+	// AND THE SAME OBJECT ANSWERS THE FAR PANE'S TOOL SURFACE (nocx-e2bws): it
+	// holds this machine's helper's connection, so the install lease and the far
+	// socket are one owner asked two questions. The registry takes the value
+	// directly rather than through installLeaseRoutes, because a forwarding
+	// method per op would put a capability on a dispatch that has no use for it
+	// — the narrowness rule this file's own comments keep.
+	helperReg.tools = overHelper
 	helperReg.registry = sess
+	localOpener.registry = sess
+	// The one seam the transport asks for every destination. hostedOpeners is
+	// a dispatch and nothing else: this machine's opener answers for a local
+	// pane, the helper registry for a remote one, and neither learns the
+	// other's question (see helper_local.go).
+	hosted := &hostedOpeners{local: localOpener, remote: helperReg}
 	// ContentDB (ADR-0018, amended 2026-08-01): the one SQLite database for
 	// unbounded private content, encrypted at rest by the adiantum VFS
 	// (ncruces/go-sqlite3 — no cgo). The real store is constructed below,
@@ -854,6 +1042,26 @@ func New(opts ...Option) (*App, error) {
 	credResolver := credential.NewResolver(v, func(err error) bool {
 		return errors.Is(err, vault.ErrVaultSealed)
 	}, v)
+
+	// THE ANSWERS THIS COORDINATOR GIVES ITS HELPER (nocx-50w7p.2). A helper
+	// that dials has to ask for the material it may present, a signature it
+	// cannot make, a verdict on a host key it has no file to consult, and —
+	// since nocx-50w7p.11 — the answer only a PERSON has. Every one of those
+	// answers already lives in this process (the vault, the ssh client's
+	// known_hosts, the renderer), and they are bound here, where the vault and
+	// the client exist. The prompt seam is filled in below, once the transport
+	// that raises the question is built: this root builds the transport late,
+	// so the holder is what lets one registry be complete either way.
+	helperPrompts := &helperPrompt{log: slogger}
+	localOpener.setReverseHandlers(helperReverseHandlers(sshClient, credResolver, helperPrompts, hostKeys, slogger))
+	// The destination half of the same client (nocx-50w7p.5): an ssh pane is
+	// hosted by THIS machine's helper, so the opener must resolve the address and
+	// the credential's authorization before the daemon is asked to dial — the
+	// two decisions that stay in the party reading ~/.ssh/config. It is the same
+	// *ssh.RealClient the reverse handlers above sign through, bound at the same
+	// point for the same reason: both halves need the vault and the profile
+	// store, which exist by now and did not at New.
+	localOpener.setSSHTargets(sshClient)
 
 	// API requests resolve only opaque secrow handles through the capability
 	// seam. The terminal's ResolveLine remains name-based; this adapter is
@@ -1069,7 +1277,7 @@ func New(opts ...Option) (*App, error) {
 	// sampling every 10 s while the panel is visible and nothing is
 	// paused.
 	discoverySched := discovery.NewScheduler(
-		sshClient, logger,
+		probes, logger,
 		discovery.WithLocalProvider(func(l log.Logger) discovery.Provider {
 			return nativeports.NewProvider(l)
 		}),
@@ -1166,7 +1374,7 @@ func New(opts ...Option) (*App, error) {
 		// nothing and says so, and history.status carries the consequence.
 		transport.WithSessionOutputRecorder(contentDB.SessionOutput()),
 		transport.WithHistoryStatus(historyStatus),
-		transport.WithProber(&proberAdapter{client: sshClient}),
+		transport.WithProber(&proberAdapter{helper: overHelper, client: sshClient}),
 		transport.WithProfileService(profileSvc),
 		transport.WithSnippets(snippetSvc),
 		transport.WithNotes(noteSvc),
@@ -1179,6 +1387,11 @@ func New(opts ...Option) (*App, error) {
 		// dependency.
 		transport.WithBuildInfo(version.Info()),
 		transport.WithHostKeyTruster(&proberAdapter{client: sshClient}),
+		// connections.setIntegrationMethod's helper arm (ADR-0069): the same
+		// consent store the connect-time decision (openHoldingLease) and the
+		// git-lane selection both read, so a grant this writes is the answer
+		// either reads back.
+		transport.WithHelperConsentWriter(helperConsent),
 		// The remote shell launcher (nocx-xs1d), adapted across the two
 		// identically-named declarations and wired into every ConnectConfig
 		// the transport builds. Before this line the launcher was reachable
@@ -1201,22 +1414,25 @@ func New(opts ...Option) (*App, error) {
 		// listing and the consent path share the composition root.
 		transport.WithHelperConsentStore(helperConsent),
 		transport.WithHelperInstallStore(helperInstalls),
-		// The uninstall capability (nocx-mlm7 P10, design §9): *ssh.RealClient
-		// satisfies transport.RemoteUninstaller without an adapter — the
-		// signatures are identical. The capability owns the dial-and-call
-		// (acquire the pooled connection, ask the carrier for the remote
-		// home, run Publisher.Uninstall over SFTP); the raw SSH client
-		// never leaves internal/ssh. Wired beside the installer P8 added:
-		// a saved connection that publishes can also remove.
-		transport.WithRemoteUninstaller(sshClient),
-		// The tunnel connector (nocx-8gix): *ssh.RealClient satisfies
-		// tunnel.Connector without an adapter — the signatures are
-		// identical — so a forward acquires its OWN pooled connection
-		// lease through the same client a tab uses, authorized and
-		// pool-keyed exactly like a tab (spec §7.3, AD-4). Before this
-		// line the whole forward model was reachable from its own tests
-		// and nowhere else (AGENTS.md check 5).
-		transport.WithTunnelConnector(sshClient),
+		// The uninstall capability (nocx-mlm7 P10, design §9, moved by
+		// nocx-50w7p.5): the carrier rides THIS MACHINE'S HELPER — a probe lease
+		// for the far account's home, then an sftp channel off the same pooled
+		// connection the publish already uses — so the removal no longer dials
+		// from this process and no raw client leaves it. The method signature is
+		// the same as the one *ssh.RealClient used to satisfy, which is why the
+		// transport and its handler needed no edit at all; what changed is the
+		// party behind it. A build with no helper wired refuses by name at the
+		// act rather than quietly removing nothing.
+		transport.WithRemoteUninstaller(remoteInstaller),
+		// The tunnel connector (nocx-8gix, moved by nocx-50w7p.8): a forward
+		// acquires a lease on this machine's helper, which opens a
+		// direct-tcpip channel per connection and a remote listener for -R.
+		// The destination is resolved and authorized HERE, by the party that
+		// reads ~/.ssh/config and holds the credential binding, and the
+		// helper dials exactly what it is told. Before this line the whole
+		// forward model was reachable from its own tests and nowhere else
+		// (AGENTS.md check 5).
+		transport.WithTunnelConnector(tunnelChans),
 		// Port discovery (nocx-wzc4.2): the scheduler owns the cadence
 		// (settle sample, prompt debounce, hidden-tab pause, one-in-flight
 		// — spec §4) and acquires its OWN pooled discovery lease per
@@ -1237,7 +1453,7 @@ func New(opts ...Option) (*App, error) {
 		// silently dialing the target directly.
 		transport.WithCompleters(
 			completion.NewLocal(),
-			&routedSSHCompleter{client: sshClient},
+			&routedSSHCompleter{probes: probes},
 		),
 		// Command discovery's shared half (carrier design §8, nocx-m8jwn.6).
 		// One backend-owned, in-memory cache serves every tab: the PATH
@@ -1248,7 +1464,7 @@ func New(opts ...Option) (*App, error) {
 		// nowhere else (AGENTS.md check 5).
 		transport.WithCommandNames(&commandNamesRouter{
 			svc:    commandnames.New(time.Now, logger),
-			client: sshClient,
+			probes: probes,
 		}),
 
 		transport.WithProbeResultStore(probeResultStore),
@@ -1267,7 +1483,10 @@ func New(opts ...Option) (*App, error) {
 		// factory is the caller that makes the package reachable from
 		// main() (AGENTS.md check 5).
 		transport.WithFilesystemRegistry(filesystem.New()),
-		transport.WithFilesystemProviderFactory(filesystemProviderFactory(sshClient)),
+		// The lease is this machine's helper's since nocx-50w7p.12: the sftp
+		// channel rides the same pooled connection the pane does, so a terminal
+		// and its Files panel authenticate once (AD-4, plan §3).
+		transport.WithFilesystemProviderFactory(filesystemProviderFactory(sshLeases)),
 		// Git (spec §5.1). The registry is the only route to a bound
 		// repository; the factory is the local one, and it is what makes
 		// internal/git reachable from main() at all — until this line
@@ -1277,18 +1496,22 @@ func New(opts ...Option) (*App, error) {
 		// The factory resolves the shell environment in the background
 		// from construction (nocx-6pz0) and is stopped at shutdown.
 		transport.WithGitRepoFactory(gitFactory),
-		// The helper-backed factory selection (remote-helper design D8):
-		// SSH sessions get a repository served over the helper when the
-		// machine's consent resolves to relay, and the refusal (or the
-		// consentRequired ask) stands otherwise. The helper client, the
-		// git factory over it and the consent path are reachable from
+		// The helper-backed factory selection (ADR-0068): SSH sessions get
+		// a repository served over the helper when the machine's consent —
+		// decided at the connection, or at connect — resolves to helper,
+		// and the refusal stands otherwise; this surface never raises the
+		// ask itself. The helper client, the git factory over it and the
+		// consent path are reachable from
 		// main() only through this line (AGENTS.md check 5). The second
 		// return is the registry that OWNS the live helper channels; the
 		// uninstall surface needs it to close them before removing an
 		// install directory (D25), so the same registry is wired there.
 		transport.WithGitHelperFactory(helperFactory),
-		transport.WithHelperSessionOpener(helperReg),
-		transport.WithHostSessionInventory(&helperSessionInventories{registry: helperReg}),
+		transport.WithHelperSessionOpener(hosted),
+		// The inventory asks the TWO parties that hold sessions: this machine's
+		// opener (its ssh panes included, nocx-s8mfn) and the far registry. It
+		// is the same pair, in the same order, that paneScreen.owner routes by.
+		transport.WithHostSessionInventory(&helperSessionInventories{registry: helperReg, local: localOpener}),
 		// The D25 channel closer (remote-helper design D25): the registry
 		// closes every live helper channel on a machine before
 		// shell.footprint.helperUninstall removes its install directory —
@@ -1300,7 +1523,7 @@ func New(opts ...Option) (*App, error) {
 		// capability owns the dial-and-remove (acquire the write-capable
 		// install lease, discover the remote home, run deploy.Uninstall
 		// over SFTP); the raw SSH client never leaves internal/ssh.
-		transport.WithRemoteHelperUninstaller(sshClient),
+		transport.WithRemoteHelperUninstaller(overHelper),
 		// The file-manager reveal (nocx-ngf3u): the OS-specific revealer
 		// behind the interface that already exists (FilesRevealer, one
 		// method). This is the same per-OS problem internal/contentkey
@@ -1330,7 +1553,34 @@ func New(opts ...Option) (*App, error) {
 	// built HERE, ahead of the publisher, because both ends need it — the
 	// publisher opens and closes intervals through it, and the transport feeds
 	// it from the session read path.
-	paneGrid := panegrid.New(logger)
+	// The pane store: the set of panes nocx is watching, and the read of their
+	// screens from the helpers that own them (ADR-0066). It holds NO emulator
+	// — cmd/nocx-server is built CGO_ENABLED=0 and the one emulator is beside
+	// each PTY — so the frame every consumer below acts on is a question asked
+	// of the process that holds the terminal.
+	screenSource := newPaneScreen(slogger, sess, localOpener, helperReg)
+	paneViews := paneview.NewStore(logger, screenSource)
+	// The worker's rendezvous, built before the enroller because it is what the
+	// enroller notifies (nocx-dkawo.7). An enrolment is the ONE moment nocx
+	// knows an agent started rather than inferring it, so a registration
+	// waits on this and on nothing else — not on a dispatch returning, which
+	// is not delivery.
+	workerEnrol := newWorkerEnrolments(logger, sess)
+	agentApprovalService := newAgentApprovalService(sess, agentApprovals, string(workspace.Default))
+	// ONE LAUNCH, ONE BEARER: the interval a pane's agent opens binds the bearer
+	// its launch already carried, so what the far shell staged and what the
+	// endpoint accepts are the same value (nocx-50w7p.16).
+	agentApprovalService.SetSpawnTokens(localOpener.spawnTokens)
+	// The other consumer of a session's end (nocx-e2bws): the registry that
+	// opened a far pane's tool socket ends it on the same event that retires the
+	// pane's bearer, so one interval has one closing edge.
+	agentApprovalService.farToolSockets = helperReg
+	// The declaration's carrier, built beside the rendezvous and wired into
+	// the same publisher: a participant says what its work produced over the
+	// authenticated channel it is already enrolled on (ADR-0024 decision 2).
+	// Its destination is bound after the record exists, for the same reason
+	// the supervisor's is.
+	workerReport := &workerReporter{lanes: childSessions, enrol: workerEnrol, now: time.Now, log: logger}
 	// One driver per agent (AD-8), validated once, here. NewRegistry fails
 	// only on a wiring mistake — a driver that cannot name its agent, or two
 	// for one agent — and a wiring mistake belongs to process start rather
@@ -1342,50 +1592,108 @@ func New(opts ...Option) (*App, error) {
 	if driversErr != nil {
 		return nil, fmt.Errorf("pane drivers: %w", driversErr)
 	}
-	// What turns a grid into something a person or a wave can act on
+	// Where a person's OWN rule for an agent lives (nocx-y6w66): one document
+	// per agent this build ships a rule for, under the profile directory THIS
+	// build owns — so a dev stand keeps its own and the installed app keeps
+	// its own. Attached to the SAME registry the watcher, the calibration and
+	// the typist already share, which is what makes an edit take effect on the
+	// next frame of the pane a person is looking at rather than at the next
+	// start. The shipped rules go in as the seed and are never written out:
+	// that is what lets a later release improve an install nobody edited.
+	ruleStore, rulesErr := agentrule.New(paths.ConfigDir(), paneDrivers.ShippedRules())
+	if rulesErr != nil {
+		return nil, fmt.Errorf("agent rules: %w", rulesErr)
+	}
+	paneDrivers.SetRuleSource(ruleStore)
+	// What turns a grid into something a person or a worker can act on
 	// (nocx-szb40.3): it classifies a watched pane and reports only the
 	// CHANGES. Built here because both ends need it — the enroller opens an
 	// observation beside the grid's interval, and the transport touches it
 	// from the session read path and is where its reports go.
-	paneWatch := paneobserve.New(logger, paneGrid, paneDrivers)
-	// The establishment bound is stated here for the same reason the hello
-	// timeouts below are: how long a minted accept may wait for the
-	// renderer's acknowledgement before the domain is rolled back and the
-	// session falls back to a conventional terminal (ADR-0024 decision 9) is
-	// a product decision, and the composition root is where product
-	// decisions belong. It is the shell's own handshake budget, so the
-	// backend never outwaits the shell it is gating.
+	//
+	// The stall threshold is stated rather than left to the zero value,
+	// because it is the seam the per-agent setting arrives through
+	// (nocx-y6w66): production's clock is the watcher's own default and the
+	// number is the package's until that setting has one.
+	paneWatch := paneobserve.New(logger, paneViews, paneDrivers, paneobserve.Config{
+		StallAfter: paneobserve.DefaultStallAfter,
+	})
+	// The guided calibration (nocx-etejh): nocx asks a person to drive their
+	// agent into a named state and labels the frame with the state it asked
+	// for. It reads the grid through the same Observer the watcher does, so
+	// the frame a label lands on is the frame the product classifies, and it
+	// writes its sets under the profile directory THIS build owns — a dev
+	// stand keeps its own, like every other document here.
+	calibrationStore, calibrationErr := agentcalib.NewFileStore(paths.ConfigDir())
+	if calibrationErr != nil {
+		return nil, fmt.Errorf("agent calibration store: %w", calibrationErr)
+	}
+	// The registry goes in beside the store because a labelled set is only
+	// half of a verdict (nocx-jse6x): the calibration replays a set against
+	// the agent's own rule and answers whether that rule has earned the right
+	// to be typed against. The SAME registry the watcher classifies through,
+	// so the rule a person is shown a verdict about is the rule that reads
+	// their pane.
+	paneCalibration := agentcalib.New(logger, paneViews, calibrationStore, paneDrivers, paneReplay{local: localOpener})
+	paneEnrol, paneEnrolErr := newPaneEnroller(
+		logger, childSessions, paneViews, paneWatch, agentApprovalService,
+	)
+	if paneEnrolErr != nil {
+		return nil, fmt.Errorf("pane enroller: %w", paneEnrolErr)
+	}
 	var lifecyclePub *lifecyclepub.Publisher
 	lifecyclePub = lifecyclepub.New(lifecycleKernel,
-		lifecyclepub.WithEstablishmentTimeout(lifecycle.HelloTimeout),
+		// The gate that decides every handshake gets a voice (nocx-n14oo.8).
+		lifecyclepub.WithLogger(logger),
 		// The child-domain bootstrap builder (nocx-u7uh.11): the single
 		// owner of "how do we reach a host" (ADR-0022) behind the
 		// domain_grant outbound. The kernel stays the sole minter; this
 		// closure mints through the publisher and composes the opaque
 		// launch text the parent executes.
 		lifecyclepub.WithGrantBuilder(newChildGrantBuilder(logger,
-			func() *lifecyclepub.Publisher { return lifecyclePub }, childTransports, childSessions, typedSSH)),
+			func() *lifecyclepub.Publisher { return lifecyclePub }, childTransports, childSessions, typedSSH,
+			// The endpoint a nested child on THIS machine is told, which is
+			// this backend's own (nocx-1n56d). Read through the opener rather
+			// than captured, because cmd/nocx-server publishes its tool socket
+			// after New returns and names it through SetLocalToolSocketPath —
+			// the same value every local pane here carries to its shell, so a
+			// nested child cannot be pointed at a socket that is not its
+			// parent's.
+			localOpener.toolEndpoint,
+			// And the binary that child's agent execs as its MCP adapter,
+			// from the same holder and never from this process's environment
+			// (nocx-e2bws).
+			localOpener.installedHelperBinary)),
 		// The enrolment act (nocx-szb40.5): the agent wrapper in the shell
 		// bundle asks over this same authenticated channel, and this is what
-		// answers. Wired here rather than defaulted anywhere, because an
-		// unwired enroller refuses every enrolment — the fail-closed half of
-		// D4, and the opposite of the grant builder above it.
-		lifecyclepub.WithAgentEnroller(newPaneEnroller(logger, childSessions, paneGrid, paneWatch)))
+		// an unwired enroller refuses: the fail-closed half of D4, and the
+		// opposite of the grant builder above it.
+		lifecyclepub.WithAgentEnroller(workerEnrol.hookInto(paneEnrol)),
+		// The second fact's carrier. Unwired it refuses every report and says
+		// so, which is the same fail-closed stance as the enroller above.
+		lifecyclepub.WithAgentReporter(workerReport))
 	// The pty factory drives the channel against the PUBLISHER, not the raw
 	// kernel: every mutation an adapter causes must reach the renderer as a
 	// published fact, and the publisher is the only thing that projects them.
-	ptf.kernel = lifecyclePub
+	localOpener.kernel = lifecyclePub
 	// Helper-hosted sessions use this same publisher; their byte carrier is
 	// remote, but lifecycle facts still follow the coordinator's session route.
 	helperReg.lifecycle = lifecyclePub
 	// The remote lifecycle transport (ADR-0024 decision 2 "Over SSH",
-	// bead nocx-u7uh.4): the composition root implements the ssh layer's
-	// RemoteLifecycle seam with the lifecycle kernel and the ssh client —
-	// the channel rides the SAME pooled connection the session uses
-	// (AD-4), and refusal (the remote sshd will not forward) leaves the
-	// session conventional. Before this line the remote adapter was
-	// reachable from its own tests and nowhere else (AGENTS.md check 5).
-	remoteLifecycle := &remoteLifecycleProvider{client: sshClient, kernel: lifecyclePub, logger: logger, transports: childTransports}
+	// bead nocx-u7uh.4; moved onto this machine's helper by nocx-50w7p.8):
+	// the composition root implements the ssh layer's RemoteLifecycle seam
+	// with the lifecycle kernel and the tunnel lease — the listener on the
+	// far side is a `forward` on this helper, and the shell's connection
+	// back arrives as a forwarded channel over it. Refusal (the remote sshd
+	// will not forward) leaves the session conventional. Before this line
+	// the remote adapter was reachable from its own tests and nowhere else
+	// (AGENTS.md check 5).
+	remoteLifecycle := &remoteLifecycleProvider{tunnels: tunnelChans, kernel: lifecyclePub, logger: logger, transports: childTransports}
+	// The answers a person gave about which agents may use nocx's tools, so a
+	// settings surface can read them back and unmake one. Appended here
+	// rather than in the literal above because the service is built with the
+	// session registry, which does not exist that early (nocx-6jbad).
+	tpOpts = append(tpOpts, transport.WithAgentAccess(agentApprovalService))
 	tpOpts = append(tpOpts, transport.WithRemoteLifecycle(remoteLifecycle))
 	tpOpts = append(tpOpts, transport.WithLifecyclePublisher(lifecyclePub))
 
@@ -1676,8 +1984,51 @@ func New(opts ...Option) (*App, error) {
 	)
 	// The same store the publisher enrols into, on its other end: the
 	// transport is what feeds it, from the session's own read path.
-	tpOpts = append(tpOpts, transport.WithPaneGrid(paneGrid), transport.WithPaneObserver(paneWatch))
+	// And the rules those panes are read through, for the emitting view
+	// (nocx-02uci): the SAME registry the watcher classifies with, so the
+	// reading a person is shown is the reading the product acted on. A
+	// second registry here would be a second answer to one question.
+	// And the one thing in nocx that writes INTO an enrolled pane
+	// (nocx-dkawo.1). It is built from the same three the rest of this
+	// paragraph is built from — the grid it reads a frame off, the registry
+	// whose rule classifies it, and the calibration that says whether that
+	// rule has earned the right to be typed against — plus the session
+	// registry, which is where a pane's input queue is. A second grid or a
+	// second registry here would be a second answer to the question a
+	// keystroke is decided on.
+	// Named rather than inlined, because the worker's wake reaches THIS one
+	// (nocx-dkawo.3). A second typist would be a second answer to "may nocx
+	// write into this pane", decided against a second grid.
+	paneTyping := newPaneTypist(logger, paneViews, paneDrivers, paneCalibration, paneWatch, sess)
+	tpOpts = append(tpOpts, transport.WithPaneScreens(paneViews),
+		transport.WithPaneObserver(paneWatch), transport.WithAgentRules(paneDrivers),
+		transport.WithAgentRuleStore(ruleStore),
+		transport.WithAgentCalibration(paneCalibration),
+		transport.WithAgentTypist(paneTyping),
+		// The third end of a session's enrolment (nocx-9mn6z): the watch and
+		// the frame are closed by the two above, and the ANSWER that admitted
+		// the pane's agent's tool connection is closed by this one. The
+		// approval service owns that answer, so it is what is wired — the
+		// enroller closes the same interval by lane on the shell's own
+		// withdrawal, and both call Forget.
+		transport.WithPaneAdmissions(agentApprovalService))
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
+	// The prompt seam a helper's keyboard-interactive challenge needs is the
+	// transport's own connection-password ask — the same one the coordinator's
+	// dial path uses, so a helper's question and a dial's question raise one
+	// dialog with one set of outcomes (prompt cancelled, no renderer
+	// attached, the sealed vault). The transport is built here and the
+	// registry was bound above with the vault and the ssh client, which is
+	// what the holder exists for.
+	helperPrompts.set(tp)
+	agentApprovalService.SetRequester(tp)
+	toolSurface := newToolSurfaceMonitor(toolSurfaceDeadline, func(fact toolSurfaceFact) {
+		status := "unavailable"
+		if fact.Available {
+			status = "available"
+		}
+		tp.BroadcastToolSurface(fact.SessionID, status, fact.Reason)
+	})
 	// The feed's change hint, bound now that the server exists: every
 	// mutation tells the attached renderers the revision moved. It carries
 	// the revision only, so it rides the refreshable outbound queue and a
@@ -1746,7 +2097,18 @@ func New(opts ...Option) (*App, error) {
 		}
 	}
 	remoteLifecycle.registerLane = registerLane
-	ptf.registerLane = registerLane
+	// A HELPER-HOSTED LOCAL PANE REGISTERS THE SAME TWO FACTS, by two seams
+	// rather than one closure, because the transport already owns half of it:
+	// the hosted open path binds the lane to its session through
+	// laneRegistrar, and what is left is the child-domain half — which
+	// transport a nested sudo/su rides, and which session a lane speaks for
+	// when the worker record and the pane enroller ask (nocx-u7uh.11). The
+	// shell inherits the daemon's descriptor exactly as it inherited this
+	// process's before, so the parent transport is still a local one.
+	localOpener.noteChildDomainParent = func(t lifecycle.TransportID, lane lifecycle.LaneID, sid string) {
+		childTransports.register(t, transportKind{local: true})
+		childSessions.register(lane, sid)
+	}
 	// The bootstrap's terminal outcome (carrier design §5.5, §6.1), routed
 	// by the same lane the lifecycle facts use. It is a THIRD seam onto the
 	// integration axis and it has to be: the bootstrap concludes before any
@@ -1779,31 +2141,20 @@ func New(opts ...Option) (*App, error) {
 	// session.integrationChanged. The cause crosses as its string so the
 	// transport does not depend on the adapter package — the adapter's
 	// constants remain the single spelling.
-	ptf.reportIntegration = func(sid, shell, status string, reason ssh.RefusalReason) {
-		tp.RegisterIntegration(session.ID(sid), shell, status, reason)
-	}
-	ptf.noteLifecycleLoss = func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause) {
+	localOpener.lifecycleLoss = func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause) {
 		tp.NoteIntegrationLoss(lane, string(cause))
 	}
 	// The same seam for a HELPER-hosted session's channel, opened or taken
 	// back (nocx-k6p18.31). One sink and not two: the axis does not care
 	// which transport carried the lane, and the loss cause spelling has one
 	// owner either way.
-	helperReg.lifecycleLoss = ptf.noteLifecycleLoss
+	helperReg.lifecycleLoss = localOpener.lifecycleLoss
 	// The third seam onto the same axis (nocx-cgzc): the observer says the
 	// shell was replaced before it ever answered, and the transport decides
 	// whether that still applies. The factory does not decide it, because
 	// only the transport knows whether the session has integrated since.
-	ptf.reportShellReplaced = func(sid, observed string) {
+	localOpener.reportShellReplaced = func(sid, observed string) {
 		tp.NoteShellReplaced(session.ID(sid), observed)
-	}
-	// And how far the shell got through nocx's rcfile (nocx-yww2), which is
-	// what turns the dominant failure from "ten seconds of silence" into a
-	// stage. Routed by session id rather than by lane: the progress
-	// descriptor belongs to the session, carries no domain and confers no
-	// authority, so it never touches the lane registry.
-	ptf.noteBootstrapStage = func(sid, stage string) {
-		tp.NoteBootstrapStage(session.ID(sid), stage)
 	}
 	// The connection/SSH material seam uses the same resolver as the egress
 	// gate. The auth ladder resolves on the dial — PHASE TWO of the open,
@@ -1817,6 +2168,11 @@ func New(opts ...Option) (*App, error) {
 		connection.WithRemoteInstaller(remoteInstaller),
 	)
 	tp.SetProfileResolver(resolver)
+	// The helper's own password ask (nocx-y6fh7 item 4, round 3) correlates
+	// to a profile through the SAME resolver: set here, once the resolver
+	// exists, for the reason helperPrompt.set already gives — the resolver
+	// is built after helperReverseHandlers is wired.
+	helperPrompts.setProfiles(resolver)
 	// The same resolver the transport uses, handed to the API route table.
 	// It is set here rather than at construction for the reason the
 	// transport's own holder gives: the resolver needs the transport (the
@@ -1844,36 +2200,233 @@ func New(opts ...Option) (*App, error) {
 	// set of helpers this process already holds, which on a cold start is none,
 	// and writing it out is what keeps the two sources of an inventory — held
 	// and re-adopted — visibly the same argument.
-	reconcileSessions(ctx, contentDB.Reconcile(),
-		helperReg.inventories(),
-		&readoptPass{registry: helperReg, routes: resolver, adopter: tp},
-		content.DefaultUnreconciledRetention, slogger)
+	// THE WORKER RECORD (nocx-dkawo.2). Built here because every seam it needs
+	// exists only now: the pane and the session from the layout chain and the
+	// one session opener, the enrolment from the rendezvous above, and the
+	// process exit from the registry.
+	//
+	// The record itself is IN MEMORY and is minted here, empty. It holds
+	// participants of this backend's own making, and under D5 every one of
+	// them dies with this process, so the record's lifetime and its
+	// participants' lifetime are the same interval by construction — see
+	// internal/workers/memory.go. Nothing is carried across a start, and there
+	// is nothing to sweep at one.
+	//
+	// The supervisor's destination is bound AFTER the registrar, because the
+	// two need each other: a registrar cannot be constructed without a
+	// supervisor to attach, and a supervisor has nowhere to report until the
+	// registrar exists. Two-phase wiring at the composition root, which is
+	// the ordinary shape for a cycle between two things the root owns — the
+	// same shape as the emitter and the liveness observer above.
+	workerSup := &workerSupervisor{sessions: sess, log: logger}
+	// The undispatched fact set and its two routes out (nocx-dkawo.3): the
+	// coordinator by a wake through the SAME typist agent.type reaches, the
+	// human by a deadline through the notification pipeline built above. The
+	// deadline's number is stated here because the composition root is where
+	// the product's real values live — and it is a placeholder with both ends
+	// named, not a measurement: §10.8 of the orchestration design puts that in
+	// nocx-dkawo.4, where fan-out makes the escalated fraction measurable.
+	workerBackstop := workers.NewBackstop(logger,
+		&workerWaker{typist: paneTyping, log: logger},
+		&workerEscalation{raise: notifyIngress, log: logger},
+		workers.WithFactDeadline(workerFactDeadline))
+	workerRecord := workers.NewRegistrar(
+		workers.NewMemoryStore(),
+		&workerSpawner{
+			layout: contentDB.Layout(), opener: tp, sessions: sess,
+			// tp is also the shell-integration axis's one owner (AD-8): the
+			// same server instance that registers a session's axis at open
+			// is what a spawn asks whether it ever answered (nocx-ui8q6.4).
+			integration: tp,
+			enrolments:  workerEnrol,
+			// readiness is what deliverTask uses to know a participant's pane
+			// became typable at spawn (nocx-66gd0): paneWatch is the SAME
+			// watcher the enrolment act opens an observation on. The task
+			// itself is no longer typed from here (design §9, Task 11) — it
+			// is enqueued through descendantPaneMessages once this
+			// participant is live (workerRecord.SetTaskQueue below), which is
+			// the SAME PaneKeys/PaneMessages step path session.keys and
+			// session.message already spend targets through — never a second
+			// door onto a pane's input queue.
+			readiness: paneWatch,
+			// Participants are minted in the default workspace until a
+			// coordinator names its own. It is the workspace the ledger
+			// already records every session nobody named one for, so this
+			// adds no new answer to "where does an unplaced thing go".
+			workspace: string(workspace.Default),
+			// tp again (nocx-ui8q6.3): the same server instance that mints
+			// the tab's session is what tells a connected renderer the tab
+			// exists, over the same connection registry integration and
+			// opener already reach through.
+			announce: tp,
+			log:      logger,
+		},
+		workerEnrol,
+		workerSup,
+		workers.WithLogger(logger),
+		workers.WithBackstop(workerBackstop),
+		// The seam a coordinator's workers.close reaches. Unwired it refuses,
+		// which is the right answer: reporting a worker ended that is still
+		// running is the one thing a close must never do.
+		workers.WithCloser(&workerCloser{sessions: sess, log: logger}),
+		workers.WithBound(workerParticipantBound),
+		workers.WithEnrolmentDeadline(workerEnrolmentDeadline),
+	)
+	toolDispatcher, toolDispatcherErr := assistant.NewToolDispatcher(
+		agentToolRegistry, workerRecord, content.EnvironmentIDFor(content.EnvLocal, ""),
+	)
+	if toolDispatcherErr != nil {
+		return nil, fmt.Errorf("worker dispatcher: %w", toolDispatcherErr)
+	}
+	toolDispatcher, toolDispatcherErr = assistant.NewAttemptRecordingDispatcher(
+		agentToolRegistry, toolDispatcher, contentDB.Ledger(),
+	)
+	if toolDispatcherErr != nil {
+		return nil, fmt.Errorf("worker dispatcher ledger: %w", toolDispatcherErr)
+	}
+	// The record is handed in so the authorizer can tell the two callers
+	// apart: a session it holds a live participant for is a WORKER calling
+	toolAuthorizer, toolAuthorizerErr := newToolAuthorizer(
+		peerpin.SystemPinner{}, sess, paneViews, workerRecord, string(workspace.Default),
+		agentApprovalService,
+	)
+	if toolAuthorizerErr != nil {
+		return nil, fmt.Errorf("tool authorizer: %w", toolAuthorizerErr)
+	}
+	// Descendant-pane authority and its helper-backed read path (design §7,
+	// §6.1, Task 8). The hub resolves reach through workerRecord and finds
+	// each session's helper through screenSource — the SAME lookup a
+	// screen read already uses (panescreen.go's owner), never a second
+	// derivation of "which helper holds this pane's terminal" — and bounds
+	// an unacknowledged access-epoch bump by the real monotonic clock.
+	// descendantPaneReader mints targets over that same hub's helper lookup
+	// and classifies with paneDrivers, the SAME agent rule registry the
+	// watcher and the calibration already share (paneWatch is also this
+	// reader's answer for "what agent does this pane run").
+	accessHub := newPaneAccessHub(workerRecord, screenSource, systemMonoClock{})
+	// A caller of session.read/keys/message names a descendant by
+	// workers.spawn's own "id" (workers.ParticipantID,
+	// contracts/tools/workers.spawn.schema.json's result) — the only id it
+	// is ever given — while Resolve and every helper call beneath it are
+	// keyed by that pane's REAL backend session
+	// (paneAccessParticipants' own doc, pane_access.go). workerEnrol is the
+	// one place this backend already tracks that translation globally, for
+	// every participant regardless of nesting depth.
+	accessHub.BindParticipants(workerEnrol)
+	toolAuthorizer.BindPaneAccess(accessHub)
+	descendantPaneReader := newPaneReader(accessHub, paneWatch, paneDrivers)
+	toolAuthorizer.BindSessionReads(descendantPaneReader)
+	// session.keys' write path (design §6.4, §6.5, Task 9), over the SAME
+	// hub and reader session.read already built above — never a second
+	// helper lookup, authority chain or clock.
+	descendantPaneKeys := newPaneKeys(descendantPaneReader, accessHub)
+	toolAuthorizer.BindSessionKeys(descendantPaneKeys)
+	// session.message's queue-and-deliver path (design §8, Task 10), over
+	// the SAME PaneKeys/PaneReader session.keys and session.read already
+	// built above — never a second write mechanism. descendantPaneReader
+	// needs a back-reference to it for PaneRead.Pending/DeliveryLost
+	// (session_targets.go's own paneMessagesSource doc explains the
+	// two-phase wiring this SetMessages call is for).
+	descendantPaneMessages := newPaneMessages(descendantPaneKeys, descendantPaneReader, accessHub, paneDrivers, time.Now())
+	descendantPaneReader.SetMessages(descendantPaneMessages)
+	toolAuthorizer.BindSessionMessages(descendantPaneMessages)
+	// The owed task, re-homed (design §9, Task 11): a spawn that meets a
+	// question no longer marks a debt for a later answer call to pay — it
+	// enqueues a "when=free" message through this SAME queue, namespace
+	// "nocx", id "task", and any answer that frees the prompt (a
+	// coordinator's session.keys, or a person pressing Enter) lets the queue
+	// deliver it.
+	// Two-phase, for the cycle workerRecord.SetTaskQueue's own doc names:
+	// descendantPaneMessages needs accessHub, and accessHub needs
+	// workerRecord's own address to resolve a chain through.
+	workerRecord.SetTaskQueue(descendantPaneMessages)
+	// The kernel's own side of the same binding (design §7.3): a
+	// coordinator run's session.read naming a worker IT spawned reaches
+	// this for its own runID, bound fresh per run as KernelAuthority —
+	// never a value fixed here at start-up, because a run's own authority
+	// interval is its own run.
+	tp.SetPaneAccessBinder(func(runID, sessionID string) (any, any, any, any, session.Identity) {
+		var identity session.Identity
+		if s, err := sess.Get(session.ID(sessionID)); err == nil {
+			identity = s.Identity()
+		}
+		access := accessHub.Bind(sessionID, identity, KernelAuthority{RunID: runID})
+		return access, descendantPaneReader, descendantPaneKeys, descendantPaneMessages, identity
+	})
+	workerSup.exited = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, e workers.Exit) {
+		if _, err := workerRecord.Exited(ctx, id, l, e); err != nil {
+			logger.Warn("worker: a participant's exit was not recorded",
+				"participant", string(id), "error", err)
+		}
+	}
+	// The coordinator's own two calls reach the record through the transport
+	// (nocx-dkawo.8). Bound post-construction for the same reason the emitter
+	// is: the server is built above, and the record needs it.
+	tp.SetWorkerRecord(workerRecord)
+	workerReport.declare = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, d workers.Declaration) error {
+		_, err := workerRecord.Declared(ctx, id, l, d)
+		return err
+	}
+	// THIS MACHINE IS ONE OF THE GENERATIONS ASKED (nocx-ie23r.2), and it is
+	// also where a session that is still there is TAKEN BACK (nocx-ie23r.5).
+	// The route is the local opener itself, which already owns every fact of
+	// this machine: the endpoint directory Start's install and the ask both
+	// need, the generations it may dial, and the ONE connection to this
+	// machine's daemon that every pane — and every frame read — rides.
+	//
+	// THE CALL ITSELF RUNS FROM START, NOT HERE (nocx-73aln). It used to run
+	// at this line, on the reasoning that only the GENERATION a verdict is
+	// judged by comes off each binding rather than off this process's own
+	// install — true for judging, but nocx-50w7p.10 later made a REMOTE
+	// session's re-adoption also OPEN A LANE through this machine's own local
+	// helper, and opening a lane needs that helper's connection, which needs
+	// its generation to be the one Start's installLocalHelper puts on disk.
+	// Running reconciliation here asked a carrier that could not yet answer
+	// for anything remote, and it failed silently: `unknown`, never a crash,
+	// so nothing but a fresh coordinator missing a still-running session ever
+	// showed it. New stays a wiring method — installing here is the "brain
+	// method" nocx-ie23r.5 already refused for this same opener — so the
+	// inputs are captured now and the call moves to Start, after
+	// installLocalHelper and still before Transport.Start begins listening,
+	// which keeps the "the pass finishes before a client can ask" invariant
+	// this pass has always needed.
+	sessionReconciler := contentDB.Reconcile()
+	sessionRoutes := hostRouteResolver(resolver)
 
 	app := &App{
-		Logger:           logger,
-		Pty:              ptf,
-		Session:          sess,
-		Transport:        tp,
-		UploadSources:    tp.UploadSources(),
-		ShellIntegration: shint,
-		Profiles:         profileStore,
-		Credentials:      v,
-		skills:           skills,
-		vaultCloser:      v,
-		noteCloser:       noteCloser,
-		discoverySched:   discoverySched,
-		gitFactory:       gitFactory,
-		helperRegistry:   helperReg,
-		logFilePath:      logFilePath,
-		logFile:          logFile,
-		procs:            procs,
-		attentionHost:    attentionHost,
-		notifyToast:      notifyToast,
-		notifyFeed:       notifyFeed,
-		notifyIngress:    notifyIngress,
-		notifyWindow:     notifyWindow,
-		UIState:          uiStateStore,
-		slogger:          slogger,
+		Logger:              logger,
+		Session:             sess,
+		Transport:           tp,
+		ToolDispatcher:      toolDispatcher,
+		ToolAuthorizer:      toolAuthorizer,
+		ToolSurfaceObserver: toolSurface,
+		agentEnroller:       paneEnrol,
+		toolSurfaceCloser:   toolSurface,
+		UploadSources:       tp.UploadSources(),
+		ShellIntegration:    shint,
+		Profiles:            profileStore,
+		Credentials:         v,
+		skills:              skills,
+		vaultCloser:         v,
+		noteCloser:          noteCloser,
+		discoverySched:      discoverySched,
+		gitFactory:          gitFactory,
+		helperRegistry:      helperReg,
+		helperArtifacts:     localHelperArtifacts(o),
+		localHelper:         localOpener,
+		sessionReconciler:   sessionReconciler,
+		sessionRoutes:       sessionRoutes,
+		paneViews:           paneViews,
+		logFilePath:         logFilePath,
+		logFile:             logFile,
+		procs:               procs,
+		attentionHost:       attentionHost,
+		notifyToast:         notifyToast,
+		notifyFeed:          notifyFeed,
+		notifyIngress:       notifyIngress,
+		notifyWindow:        notifyWindow,
+		UIState:             uiStateStore,
+		slogger:             slogger,
 	}
 
 	// ── the client host (nocx-uo1k6, design D3) ────────────────────────
@@ -2187,445 +2740,263 @@ func appendRouteHops(cfg *ssh.ConnectConfig, hops *[]endpointHop) {
 	appendRouteHops(hopCfg, hops)
 }
 
-type localPTYFactory struct {
-	log    log.Logger
-	shint  shellintegration.ShellIntegration
-	kernel lifecyclechannel.Kernel
-	// shells answers which shell this user logs in with. Injected because the
-	// platform half is a subprocess against the OS account database, and
-	// because the answer decides the tier: it is the single call site of the
-	// value (nocx-wwz0).
-	shells loginshell.Resolver
-	// transports records each local adapter's transport kind so the child
-	// grant builder knows the child rides the inherited descriptor
-	// (nocx-u7uh.11).
-	transports *transportRegistry
-	// registerLane binds a minted lifecycle lane to the session that owns
-	// it, so published facts route to the right subscriber. Wired at the
-	// composition root once the transport exists; nil (tests, or a server
-	// without lifecycle wiring) leaves facts unrouted, which is the safe
-	// direction — the renderer keys enhanced mode on the fact, and an
-	// unregistered lane is a conventional terminal.
-	registerLane func(lane lifecycle.LaneID, sid string)
-	// reportIntegration enters a session into the integration axis the
-	// product renders (nocx-dvql): what this factory started, and how far
-	// it got before it handed the pty back. Only this factory knows which
-	// binary was exec'd, so only it may answer — the transport registers
-	// remote sessions from the ssh path instead. Nil (tests, or a server
-	// without the wiring) leaves the session unregistered, which emits
-	// nothing, which is the safe direction.
-	reportIntegration func(sid, shell, status string, reason ssh.RefusalReason)
-	// noteLifecycleLoss carries the adapter's loss cause to the same axis.
-	// It is a separate seam from the published lifecycle facts because a
-	// handshake that expires establishes no domain and therefore publishes
-	// no fact at all — the silence this bead exists to end.
-	noteLifecycleLoss func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause)
-	// procs watches the process this factory forked, so a shell replaced
-	// out of the user's own startup files is noticed when it happens rather
-	// than when the handshake bound expires ten seconds later (nocx-cgzc).
-	// Injected because the observation is per-OS; nil (tests, or a server
-	// without the wiring) leaves the bound as the only detector, which is
-	// where the product was before.
-	procs procwatch.Watcher
-	// reportShellReplaced carries one observation to the session's
-	// integration axis. Separate from reportIntegration because it answers
-	// a different question — reportIntegration says what the launch did,
-	// this says what happened to it afterwards — and because only the
-	// transport may decide whether an observation still applies.
-	reportShellReplaced func(sid, observed string)
-	// noteBootstrapStage carries how far the shell got through nocx's rcfile
-	// to the same axis (nocx-yww2). A third seam and not a variant of the
-	// two above, because it is the only one that speaks BEFORE anything has
-	// failed: the handshake bound can say a session did not integrate, and
-	// only these facts can say where it stopped. Diagnostic only — nothing
-	// reached through here may grant authority, and the transport's
-	// NoteBootstrapStage emits nothing on its own.
-	noteBootstrapStage func(sid, stage string)
-}
-
-// lifecyclePTY is an enhanced session's pty plus the lifecycle channel whose
-// descriptor the shell inherited. It exists so the channel dies with the
-// session that owns it: a conventional session is a bare pty and carries no
-// channel at all, which is the observable difference ADR-0024 decision 4 is
-// about.
-type lifecyclePTY struct {
-	pty.Pty
-	ch *lifecyclechannel.Adapter
-	// stopWatch releases this session's process observation. Nil when
-	// nothing is watching — no observer wired, or a platform that cannot
-	// look.
-	stopWatch func()
-	// bp is the bootstrap progress reader, when one was created. It dies
-	// with the session for the same reason the channel does: both are
-	// descriptors this session's shell inherited, and a reader outliving its
-	// shell would report a stage for a session that no longer exists.
-	bp *bootstrapprogress.Reader
-}
-
-// WaitErr forwards the shell's wait result from the pty this wraps
-// (nocx-o3amz). It exists because lifecyclePTY embeds the pty.Pty INTERFACE,
-// and a concrete type's method is not promoted through an embedded interface:
-// *pty.LocalPty.WaitErr — the only thing that knows what cmd.Wait returned —
-// was invisible to the optional-method assertion session.ExitOutcome makes, so
-// every enhanced local session classified as a LOSS. The tab hung about marked
-// "Connection lost" on a clean `exit`, and the shell's status was discarded.
-//
-// Anything else optional a pty grows needs the same forward, for the same
-// reason. The `(nil, false)` answer is not a stand-in for a clean exit: it says
-// this pty made no report, which ExitOutcome maps to a loss without inventing
-// a status.
-func (p *lifecyclePTY) WaitErr() (error, bool) {
-	provider, ok := p.Pty.(interface{ WaitErr() (error, bool) })
-	if !ok {
-		return nil, false
-	}
-	return provider.WaitErr()
-}
-
-// SignalForeground forwards the signal to the pty this wraps, for exactly the
-// reason WaitErr above does and with a costlier consequence (nocx-7l4ex.13).
-//
-// Without it the optional-method assertion in realSession.SignalForeground
-// found nothing on an ENHANCED local session, answered pty.ErrNoForeground for
-// every signal, and session.signal told the person "nothing is running in this
-// pane" while their command plainly was — the incident nocx-92gfl.4 was filed
-// as. The shell's protected process group had nothing to do with it: nothing
-// ever asked the pty at all.
-//
-// ForegroundProcessGroup travels with it because it is the same seam asked a
-// question instead of told to act, and a wrapper that can signal a group it
-// cannot name is half-wired in the way that hides.
-func (p *lifecyclePTY) SignalForeground(sig syscall.Signal) error {
-	sg, ok := p.Pty.(interface {
-		SignalForeground(sig syscall.Signal) error
-	})
-	if !ok {
-		return pty.ErrNoForeground
-	}
-	return sg.SignalForeground(sig)
-}
-
-func (p *lifecyclePTY) ForegroundProcessGroup() (int, error) {
-	fg, ok := p.Pty.(interface{ ForegroundProcessGroup() (int, error) })
-	if !ok {
-		return 0, pty.ErrNoForeground
-	}
-	return fg.ForegroundProcessGroup()
-}
-
-// ForegroundJob and SignalProcessGroup travel with the two above for the
-// reason the comment on SignalForeground already gives, and they are here
-// because that reason was proved a second time (nocx-i5a1k's sibling).
-//
-// nocx-uvac6.11 split a stop into "name the addressee once" and "signal that
-// exact group", and a stop now ASKS ForegroundJob before it signals anything.
-// This wrapper forwarded SignalForeground and ForegroundProcessGroup and not
-// these two, so on an ENHANCED local session the optional-method assertion in
-// realSession.ForegroundJob found nothing, answered pty.ErrNoForeground, and
-// session.signal told the person "nothing is running in this pane" about a
-// full-screen program that plainly was — nocx-92gfl.4 word for word, through
-// a door that did not exist when it was closed.
-//
-// The rule this seam keeps: every method of the pty signal seam is forwarded
-// here, or none is. A wrapper that answers some of them is not degraded, it
-// is wrong, and it is wrong silently — nothing fails to compile and the
-// answer it gives is a plausible one.
-func (p *lifecyclePTY) ForegroundJob() (int, error) {
-	fg, ok := p.Pty.(interface{ ForegroundJob() (int, error) })
-	if !ok {
-		return 0, pty.ErrNoForeground
-	}
-	return fg.ForegroundJob()
-}
-
-func (p *lifecyclePTY) SignalProcessGroup(pgid int, sig syscall.Signal) error {
-	sg, ok := p.Pty.(interface {
-		SignalProcessGroup(pgid int, sig syscall.Signal) error
-	})
-	if !ok {
-		return pty.ErrNoForeground
-	}
-	return sg.SignalProcessGroup(pgid, sig)
-}
-
-func (p *lifecyclePTY) Close() error {
-	err := p.Pty.Close()
-	_ = p.ch.Close()
-	// The pid is the OS's to reuse the moment the shell is reaped, so a
-	// watch that outlived its session would be a watch on somebody else's
-	// process.
-	if p.stopWatch != nil {
-		p.stopWatch()
-	}
-	if p.bp != nil {
-		_ = p.bp.Close()
-	}
-	return err
-}
-
-func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
-	env := f.shint.ActivationEnv(cfg.Enhanced)
-	if !cfg.Enhanced || f.kernel == nil {
-		return pty.NewLocal(f.log, cfg, pty.WithExtraEnv(env))
-	}
-	// Which shell the user logs in with, and which local tier starts it. One
-	// resolution, one log line, one decision — everything below reads them
-	// (nocx-wwz0). Before this the answer was the constant "bash", so on macOS,
-	// whose default login shell has been zsh since Catalina, every local tab
-	// opened a shell the user had not chosen and none of their own environment.
-	shell := f.shells.Resolve()
-	kind := shellintegration.LocalShellKind(shell.Path)
-	f.log.Info("local session shell resolved",
-		"shell", shell.Path, "source", string(shell.Source), "tier", string(kind))
-
-	if kind == shellintegration.ShellUnknown {
-		// fish, csh, tcsh, dash, anything: started as itself, integrated not
-		// at all, and SAID so. Substituting bash here is the defect this bead
-		// is; degrading silently is the one AGENTS.md names. The activation
-		// env is the conventional one — a shell that will not be integrated
-		// must not be told it is being integrated.
-		cfg.Command = shell.Path
-		cfg.Args = []string{"-l"}
-		p, err := pty.NewLocal(f.log, cfg, pty.WithExtraEnv(f.shint.ActivationEnv(false)))
-		if err != nil {
-			return nil, err
-		}
-		f.log.Warn("no local shell-integration tier for this login shell; the session is conventional",
-			"shell", shell.Path, "reason", string(ssh.ReasonUnsupportedShell))
-		// Reported here and only here. A local session's status has one owner
-		// — this factory, the only thing that knows which binary it exec'd —
-		// and registerRemoteIntegration returns early for local sessions, so
-		// a reason carried on the session's optional-method seam instead
-		// would be a write nothing reads: the fish user's tab would degrade
-		// exactly as silently as before this bead.
-		f.report(cfg.SessionID, shell.Path, transport.IntegrationConventional, ssh.ReasonUnsupportedShell)
-		return p, nil
-	}
-	// Enhanced: the shell reports its lifecycle over a descriptor that is not
-	// the tty (ADR-0024 decision 2). The child end goes in as fd 3; the parent
-	// end stays here and is pumped by the adapter.
-	// The handshake bound is set here rather than left to the adapter's
-	// default: how long a shell may take to prove itself before the session
-	// falls back to conventional is a product decision, and the composition
-	// root is where product decisions belong.
-	ch, child, err := lifecyclechannel.New(f.log, f.kernel,
-		lifecyclechannel.WithHelloTimeout(lifecycle.HelloTimeout),
-		lifecyclechannel.WithLossReporter(f.noteLifecycleLoss))
-	if err != nil {
-		return nil, err
-	}
-	// The bootstrap progress descriptor (nocx-yww2): a SECOND, one-way
-	// descriptor, never the lifecycle channel and never its codec. It carries
-	// two unauthenticated facts about how far the rcfile got, and the reason
-	// it is a separate object rather than two more frames is the rule it must
-	// not break — every envelope on the lifecycle channel is authenticated,
-	// and these cannot be. A failure to create it costs the diagnosis, never
-	// the session: the shell starts anyway and the handshake bound goes back
-	// to being the only detector.
-	bp, bpChild := f.newBootstrapProgress(cfg.SessionID)
-	if f.transports != nil {
-		f.transports.register(ch.TransportID(), transportKind{local: true})
-	}
-	// The local bootstrap (nocx-u7uh.21, extended to zsh by nocx-wwz0): the
-	// user's own login shell starts with a transient artefact carrying THIS
-	// session's capability and recovery fence in its TEXT — never in the
-	// environment (ADR-0024 decision 2) — and the non-secret addressing as
-	// NOCX_LIFECYCLE_* env, exactly the way the remote tier learns them.
-	// shellintegration.LaunchOptions is the single description of "how a shell
-	// learns its addressing and its capability", and LocalEnhancedLaunch owns
-	// the per-tier difference between them: a transient rcfile for bash, a
-	// transient ZDOTDIR for zsh, because zsh has no --rcfile.
-	launch := ch.Launch()
-	local, rerr := shellintegration.LocalEnhancedLaunch(shell.Path, kind, shellintegration.LaunchOptions{
-		SessionID:   cfg.SessionID,
-		Enhanced:    true,
-		Capability:  launch.Capability,
-		Recovery:    launch.Recovery,
-		Lane:        string(launch.Lane),
-		Domain:      string(launch.Domain),
-		Epoch:       launch.Epoch,
-		LifecycleFD: 3, // the child end of the socketpair, via ExtraFiles
-		BootstrapFD: bootstrapFD(bpChild),
-	})
-	if rerr != nil {
-		f.log.Warn("local lifecycle bootstrap failed; session stays conventional",
-			"shell", shell.Path, "tier", string(kind), "error", rerr)
-		_ = ch.Close()
-		_ = child.Close()
-		closeProgress(bp, bpChild)
-		// No channel and no bootstrap: the user's OWN login shell, plain, with
-		// a visible native prompt (the script's init bails without config).
-		// The activation env is the conventional one — a shell that will not
-		// be integrated must not be told it is being integrated.
-		cfg.Command = shell.Path
-		cfg.Args = []string{"-i"}
-		p, perr := pty.NewLocal(f.log, cfg, pty.WithExtraEnv(f.shint.ActivationEnv(false)))
-		if perr != nil {
-			return nil, perr
-		}
-		// The session asked for integration and will not get it, so it says
-		// so — with `unknown`, because the failure is a local bootstrap error
-		// and none of the refusal vocabulary describes it. `unknown` is a
-		// real visible answer, never a synonym for success, which is what the
-		// renderer would read an absent reason as.
-		f.report(cfg.SessionID, shell.Path, transport.IntegrationConventional, ssh.ReasonUnknown)
-		return p, nil
-	}
-	cfg.Command = local.Command
-	cfg.Args = local.Args
-	// Descriptor order is the contract: fd 3 is the lifecycle channel, fd 4
-	// the bootstrap progress pipe, and the rcfile reads both numbers from the
-	// environment block LaunchOptions rendered above. Appending the progress
-	// end second is what makes bootstrapFD's answer true.
-	p, err := pty.NewLocal(f.log, cfg,
-		pty.WithExtraEnv(env), pty.WithExtraEnv(local.Env), pty.WithExtraFiles(extraFiles(child, bpChild)...))
-	// The child ends are the shell's once the fork has happened; this process
-	// keeps no reference either way.
-	_ = child.Close()
-	if bpChild != nil {
-		_ = bpChild.Close()
-	}
-	if err != nil {
-		_ = ch.Close()
-		if bp != nil {
-			_ = bp.Close()
-		}
-		// The shell erases the artefact itself once it has read it; on a spawn
-		// failure there is no shell, so the capability would sit in TMPDIR
-		// until the machine cleaned it.
-		local.Cleanup()
-		return nil, err
-	}
-	// Bind the lane to the session that will receive its facts. Without
-	// this, published lifecycle facts are dropped (the transport routes by
-	// lane registration) and enhanced mode never engages — the whole
-	// lifecycle stack reachable only from its own tests (AGENTS.md check 5).
-	if cfg.SessionID != "" && f.registerLane != nil {
-		f.registerLane(ch.Lane(), cfg.SessionID)
-	}
-	// The lane is bound first, deliberately: the loss reporter resolves a
-	// lane to its session, so a handshake that expired between the two
-	// would have nowhere to land. Registering the axis afterwards is the
-	// safe order — the status is only emitted after the open ack anyway.
-	f.report(cfg.SessionID, p.Shell(), transport.IntegrationStarting, ssh.ReasonNone)
-	// Watched only here, on the one path that has a handshake to shorten.
-	// A session already reported conventional has nothing an observation
-	// could bring forward, and watching it could only produce noise.
-	return &lifecyclePTY{Pty: p, ch: ch, bp: bp, stopWatch: f.watchForReplacement(cfg.SessionID, p)}, nil
-}
-
-// watchForReplacement asks the observer to say when the shell this factory
-// just started stops being the process running under its pid — the takeover
-// nocx-cgzc measured, where a wrapper execs out of the user's own startup
-// file milliseconds after the fork and the product finds out ten seconds
-// later.
-//
-// It is a SECOND detector, never a replacement for the first: the handshake
-// bound still bounds the handshake, and a platform that cannot observe an
-// exec (or a kernel that refuses the watch) degrades to exactly the product
-// that shipped before this — which is why the failure is a Debug line and
-// not an error the session carries.
-func (f *localPTYFactory) watchForReplacement(sid string, p *pty.LocalPty) func() {
-	if sid == "" || f.procs == nil || f.reportShellReplaced == nil {
-		return nil
-	}
-	pid := p.Pid()
-	if pid <= 0 {
-		return nil
-	}
-	shell := p.Shell()
-	stop, err := f.procs.Started(pid, shell, func(obs procwatch.Observation) {
-		f.log.Info("the shell this session started was replaced before it answered",
-			"session", sid, "pid", obs.PID, "started", shell, "observed", obs.Name)
-		f.reportShellReplaced(sid, obs.Name)
-	})
-	if err != nil {
-		f.log.Debug("this session's shell is not watched for replacement",
-			"session", sid, "error", err)
-		return nil
-	}
-	return stop
-}
-
-// report enters this session into the integration axis, when the wiring
-// exists. A local session that never asked for integration never reaches
-// here, and so emits nothing at all: absence is how "conventional by design"
-// is expressed, and a session with nothing to say must not nag.
-func (f *localPTYFactory) report(sid, shell, status string, reason ssh.RefusalReason) {
-	if sid == "" || shell == "" || f.reportIntegration == nil {
-		return
-	}
-	f.reportIntegration(sid, shell, status, reason)
-}
-
-// newBootstrapProgress creates this session's progress reader, or reports
-// nothing at all. Both halves are legitimate outcomes: a session with no
-// session id has nowhere to route a stage, a factory with no sink has nobody
-// to tell, and a pipe that cannot be created costs a diagnosis rather than a
-// terminal. Every caller downstream treats a nil reader as "no progress
-// reporting", which is exactly where the product was before this existed.
-func (f *localPTYFactory) newBootstrapProgress(sid string) (*bootstrapprogress.Reader, *os.File) {
-	if sid == "" || f.noteBootstrapStage == nil {
-		return nil, nil
-	}
-	bp, child, err := bootstrapprogress.New(f.log, func(stage bootstrapprogress.Stage) {
-		f.noteBootstrapStage(sid, string(stage))
-	})
-	if err != nil {
-		f.log.Warn("bootstrap progress channel unavailable; a startup that does not return will report only a timeout",
-			"session", sid, "error", err)
-		return nil, nil
-	}
-	return bp, child
-}
-
-// bootstrapFD is the descriptor number the rcfile writes its progress facts
-// to: 4, because ExtraFiles hands the shell fd 3 first and the lifecycle
-// channel is always that one. Zero when there is no progress pipe, which the
-// rcfile's own guard reads as "report nothing".
-func bootstrapFD(child *os.File) int {
-	if child == nil {
-		return 0
-	}
-	return 4
-}
-
-// extraFiles assembles the descriptors the shell inherits, in the order their
-// numbers depend on.
-func extraFiles(lifecycleChild, progressChild *os.File) []*os.File {
-	if progressChild == nil {
-		return []*os.File{lifecycleChild}
-	}
-	return []*os.File{lifecycleChild, progressChild}
-}
-
-// closeProgress releases both ends on a path that will not start a shell.
-func closeProgress(bp *bootstrapprogress.Reader, child *os.File) {
-	if bp != nil {
-		_ = bp.Close()
-	}
-	if child != nil {
-		_ = child.Close()
-	}
-}
-
 func (a *App) Start(ctx context.Context) error {
+	// THE COMPOSITION ROOT PUTS ITS LOGGER IN THE CONTEXT (nocx-n14oo.9): from
+	// here on, anything this call passes ctx to answers log.From(ctx) with
+	// a.Logger — module, request id, trace and span attached automatically,
+	// with no call site threading them by hand. SetRoot is the net under
+	// that: a path that reaches log.From with a context nobody wired (a
+	// background goroutine, a context.Background() a few calls down) still
+	// gets a.Logger rather than the package's bare default.
+	ctx = log.WithLogger(ctx, a.Logger)
+	log.SetRoot(a.Logger)
 	a.Logger.Info("starting application services")
 
 	home, err := os.UserHomeDir()
 	if err != nil {
 		a.Logger.Warn("shellintegration: could not determine home dir", "error", err)
-	} else if err := a.ShellIntegration.EnsureInstalled(home); err != nil {
-		a.Logger.Warn("shellintegration: install failed", "error", err)
+	} else {
+		if ierr := a.ShellIntegration.EnsureInstalled(home); ierr != nil {
+			a.Logger.Warn("shellintegration: install failed", "error", ierr)
+		}
+		a.installLocalHelper(ctx, home)
 	}
 
-	return a.Transport.Start(ctx)
+	// nocx-73aln: reconciliation runs from here now, once installLocalHelper
+	// above has had its chance to put this machine's own generation on disk
+	// (see the App.sessionReconciler/sessionRoutes fields for why it moved).
+	// Unconditional, exactly as it always was at New: a home directory this
+	// process could not resolve leaves the LOCAL route broken —
+	// installLocalHelper already warned above — never a reason to skip
+	// judging every OTHER carried-over session too, and the pass still
+	// finishes before Transport.Start below lets a client ask.
+	//
+	// THIS PASS MUST NEVER SUSPEND ON A PERSON (nocx-xn63t.6.10, round 2). A
+	// re-adoption whose credential lives in a sealed vault reaches
+	// Vault.EnsureUnsealed, which CAN wait for a client to attach and answer
+	// an unlock prompt — but no client can attach until THIS call returns,
+	// since Transport.Start is the next line. Round 1 of this bead primed
+	// the vault's presence tracking before this line (WSServer.PrimePresence,
+	// since removed) so EnsureUnsealed would suspend instead of refusing at
+	// once; the CI failure it fixed went green, but nothing had measured
+	// what a suspend here actually costs. reconcileSessions runs every
+	// pending session's Readopt call SEQUENTIALLY, each bounded by
+	// readoptAttemptTimeout, so N password-authenticated sessions pending
+	// across a restart would each cost that bound in full before Start
+	// could finish — TestReconcileSessions_IfPresenceIsPrimedTooEarly...
+	// (session_readopt_vault_test.go) pins the shape so priming presence
+	// here is never reintroduced. Left unprimed, as it is now,
+	// EnsureUnsealed answers from the "nobody will ever report presence to
+	// this vault" branch instead — exactly the branch a headless package's
+	// own vault is always in — and refuses at once
+	// (TestReconcileSessions_PreListenPassRefusesPromptlyEvenWithN...).
+	reconcileSessions(ctx, a.sessionReconciler, a.helperRegistry.inventories(),
+		&readoptPass{
+			registry: a.helperRegistry, routes: a.sessionRoutes, adopter: a.Transport,
+			local: a.localHelper,
+		},
+		content.DefaultUnreconciledRetention, a.slogger)
+
+	if err := a.Transport.Start(ctx); err != nil {
+		return err
+	}
+
+	// THE RETRY: a session left pending with CauseVaultSealed — "the one
+	// cause on this list that a person clears in one gesture"
+	// (content/reconcile.go) — gets exactly that gesture a chance to answer.
+	// The id set is captured HERE, once, right after this pass returns —
+	// see retryReconciler's own comment for why it must be fixed rather than
+	// re-filtered by cause on every later poll. Every OTHER cause (an
+	// unreachable host, a timeout) is unchanged by a client attaching, so it
+	// is left for the pass above. See retryVaultSealedSessions for why the
+	// retry itself is a poll and not one suspended attempt.
+	if ids := vaultSealedSessionIDs(ctx, a.sessionReconciler, a.slogger); len(ids) > 0 {
+		go a.retryVaultSealedSessions(ctx, ids)
+	}
+
+	return nil
+}
+
+// vaultSealedRetryAttempt bounds ONE poll of retryVaultSealedSessions. Short
+// on purpose — see that function's own comment for why a suspend is the
+// wrong shape for this loop and a short, repeated ask is the right one.
+const vaultSealedRetryAttempt = time.Second
+
+// vaultSealedRetryBudget is how long the poll keeps trying before it leaves a
+// session `unknown` for good this run. Generous on purpose: unlike
+// readoptAttemptTimeout (bounding a HOST that may simply be off),
+// this bounds a PERSON reaching for their passphrase, which the coordinator
+// cannot hurry.
+const vaultSealedRetryBudget = 2 * time.Minute
+
+// retryVaultSealedSessions is App.Start's second pass, run once Transport.Start
+// has returned so a client CAN attach and answer — the first pass
+// (reconcileSessions above) must never suspend on that, because nothing can
+// attach until it returns (nocx-xn63t.6.10, round 2's whole finding).
+//
+// IT POLLS RATHER THAN SUSPENDING ONCE, and that is not a stylistic choice:
+// Vault.EnsureUnsealed's suspend is answered by `vault.unlockResolved`, the
+// RPC a renderer sends after the person's passphrase has ALREADY unsealed the
+// vault — it is the resolution of a SPECIFIC outstanding ask, not a general
+// "the vault changed" event. A caller that unseals the vault another way —
+// `vault.unseal` on its own, which is what a script (and this bead's own
+// e2e/ssh-helper-happy-path.spec.ts) does, or a person unlocking from
+// Settings while unrelated to any raised prompt — wakes nobody who is
+// suspended inside a DIFFERENT EnsureUnsealed call, because Unseal itself
+// resolves no pending ask (internal/vault/vault.go's Unseal, read end to
+// end: it sets rootKey and calls wakeAutoSeal, and touches nothing in
+// unlock.go). Measured directly: a single long-suspended retry attempt
+// timed out at its own bound with "context deadline exceeded" 15s after the
+// container's own log showed `vault unsealed`, never having noticed.
+//
+// A short, REPEATED attempt sidesteps the whole handshake: each one is a
+// fresh EnsureUnsealed call, and a fresh call checks State first
+// (StateUnsealed: return nil, before ever touching a requester or a
+// suspension) — so the poll needs nothing to resolve anything, only for one
+// attempt to start after the vault is actually unsealed. Bounded so a vault
+// that is never unsealed this run costs vaultSealedRetryBudget once, in the
+// background, and not a goroutine leaked for the rest of the process.
+//
+// ids IS FIXED FOR THE WHOLE POLL (retryReconciler's own comment has the
+// reason: an attempt's own timeout can itself read back as a different,
+// non-retried cause). What DOES shrink here is which of ids the loop still
+// bothers asking about: an id an inventory now owns has been taken back —
+// reconcileSessions will keep confirming it cheaply through that inventory
+// for as long as it stays in retryReconciler's set, so removing it once
+// owned is what lets the loop stop before vaultSealedRetryBudget elapses
+// rather than spending the whole budget after everything already succeeded.
+func (a *App) retryVaultSealedSessions(ctx context.Context, ids map[string]struct{}) {
+	remaining := make(map[string]struct{}, len(ids))
+	for id := range ids {
+		remaining[id] = struct{}{}
+	}
+	deadline := time.Now().Add(vaultSealedRetryBudget)
+	for len(remaining) > 0 && time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		reconcileSessions(ctx, retryReconciler{a.sessionReconciler, remaining}, a.helperRegistry.inventories(),
+			&readoptPass{
+				registry: a.helperRegistry, routes: a.sessionRoutes, adopter: a.Transport,
+				local: a.localHelper, timeout: vaultSealedRetryAttempt,
+			},
+			content.DefaultUnreconciledRetention, a.slogger)
+		for _, inv := range a.helperRegistry.inventories() {
+			for id := range remaining {
+				if inv.Owns(id) {
+					delete(remaining, id)
+				}
+			}
+		}
+	}
+}
+
+// localHelperArtifacts is the artifact source Start installs the local
+// generation from: the embedded binaries, unless a test said it may not write
+// one into the home it is running under.
+func localHelperArtifacts(opt optionSet) deploy.ArtifactSource {
+	if opt.noLocalHelper {
+		return nil
+	}
+	if opt.helperArtifacts != nil {
+		return opt.helperArtifacts
+	}
+	return helperartifacts.DefaultSource
+}
+
+// installLocalHelper is step 6 of the local-helper design's start order: the
+// current generation is installed if it is absent. This machine is an entry in
+// the helper inventory like any other (L1), so it gets the same installer the
+// remote path gets, from the same embedded artifact, keyed by the same content
+// hash — the filesystem is simply the transport (L2). No consent is asked and
+// none is owed: the binary arrives with the app, under the account already
+// running it, and asking a person for permission to run part of the program
+// they just started is theatre (L3, ADR-0057).
+//
+// It installs and it does not START anything: a daemon is begun by the first
+// caller that reaches for the endpoint, and nothing reaches for it until local
+// panes are opened through the helper (nocx-ie23r.3).
+//
+// A failure is still not a refused start: the backend must serve whatever
+// happens to one machine's helper, and a refused start would take every other
+// machine down with it. But a local pane DOES depend on this install now, and
+// the refusal that answers for it EXISTS. So the failure is RECORDED here
+// rather than announced — a person who has not asked for a terminal is not
+// interrupted by a daemon they cannot act on — and it is raised AT THE ACT by
+// nocx-ie23r.4 (L4): the person opening a pane is told what failed, why and
+// what to do.
+//
+// It costs 34 ms on a cold home and 3 ms on a warm one, measured on Linux with
+// the 4.2 MB artifact this build embeds — the warm cost being the verification
+// read the completeness check makes. That answers §6's second open question:
+// first-run latency is not felt, so the install stays here rather than moving
+// in front of the window.
+func (a *App) installLocalHelper(ctx context.Context, home string) {
+	if a.helperArtifacts == nil {
+		return
+	}
+	installed, err := helperlocal.Install(ctx, a.helperArtifacts, home)
+	if err != nil {
+		a.Logger.Warn("helper: the local generation is not installed", "error", err)
+		// The refusal is raised at the ACT and not here (ADR-0057): a person
+		// who has not asked for a terminal has not been harmed, and a startup
+		// toast about a daemon is noise they cannot act on. So the failure is
+		// RECORDED rather than announced, and the pane they do open is told
+		// what broke, why and what to do (nocx-ie23r.4).
+		if a.localHelper != nil {
+			a.localHelper.installFailed(err)
+		}
+		return
+	}
+	a.Logger.Info("helper: the local generation is installed",
+		"generation", string(installed.Generation), "binary", installed.Binary)
+	// The install and the open route agree on ONE generation and ONE home,
+	// because they are told them together. A route that resolved the home
+	// itself would be a second answer to "where does this machine's helper
+	// live", and the two would agree until somebody moved HOME.
+	if a.localHelper != nil {
+		a.localHelper.installedLocalGeneration(installed)
+	}
+}
+
+// SetLocalToolSocketPath tells this machine's local helper opener where THIS
+// backend's tool endpoint is, so a local pane it starts can reach the worker
+// tools nocx-rowqt built (nocx-2tesu).
+//
+// It is called LATER than every other Set* in this file and later than
+// Start: whether this backend is running a tool endpoint at all is decided
+// outside internal/app, by cmd/nocx-server's composition root, which starts
+// the endpoint only after Start returns (it needs a.ToolAuthorizer and
+// a.ToolDispatcher, which Start is what populates) and only when both are
+// non-nil. So the caller is cmd/nocx-server, after it has that answer —
+// never New, never Start.
+//
+// path is the endpoint's own SocketPath(), asked of it rather than
+// recomputed: internal/toolendpoint is the one owner of the socket's name
+// (AD-8), and an empty path is the honest answer when there is no endpoint
+// to ask — see localHelperOpener.toolSocketPath's own doc for why that is a
+// real state a pane must carry faithfully, not an unset default.
+func (a *App) SetLocalToolSocketPath(path string) {
+	if a.localHelper != nil {
+		a.localHelper.setToolSocketPath(path)
+	}
 }
 
 func (a *App) Shutdown(ctx context.Context) {
 	a.Logger.Info("shutting down application")
 	if err := a.Transport.Stop(ctx); err != nil {
 		a.Logger.Error("transport shutdown error", "error", err)
+	}
+	// After the transport, so no pane can still be opening. The daemon and
+	// every session on it survive this — closing the connection is this
+	// coordinator leaving, not the sessions ending.
+	if a.toolSurfaceCloser != nil {
+		a.toolSurfaceCloser.Close()
+	}
+	if a.localHelper != nil {
+		a.localHelper.close()
 	}
 	// After the transport, so nothing is still writing a note.
 	if a.noteCloser != nil {
@@ -2672,27 +3043,26 @@ func (a *App) Shutdown(ctx context.Context) {
 	}
 }
 
-// sshFactoryAdapter adapts ssh.SSH to session.SSHFactory.
-type sshFactoryAdapter struct {
-	client ssh.SSH
-}
-
-func (a *sshFactoryAdapter) Connect(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.Channel, error) {
-	return a.client.Connect(ctx, host, opts...)
-}
-
-// proberAdapter adapts ssh.RealClient to transport.Prober and
-// transport.HostKeyTruster (the same client owns known_hosts for both).
+// proberAdapter answers transport.Prober through THIS MACHINE'S HELPER and
+// transport.HostKeyTruster through this process's own ssh client, and the split
+// between the two fields is the whole of what it is.
+//
+// A probe is a DIAL, and dials are the helper's (the owner's invariant of
+// 2026-09-13, plan §3): sshOverHelper asks it, the helper authenticates with
+// material the coordinator hands over the reverse channel, and the verdict on a
+// host key the helper has never seen comes back here to be decided from this
+// process's known_hosts. What is NOT the helper's is the WRITE: accepting a key
+// is a change to ~/.ssh/known_hosts, that file is this process's, and the
+// helper links no knownhosts at all (a forbidden import in the artifact
+// deployed to somebody else's host). So the two methods of one wiring point
+// have two owners, named here rather than blurred.
 type proberAdapter struct {
+	helper *sshOverHelper
 	client *ssh.RealClient
 }
 
-func (a *proberAdapter) Probe(ctx context.Context, host string, cfg *ssh.ConnectConfig) error {
-	return a.client.ProbeConfig(ctx, host, cfg)
-}
-
 func (a *proberAdapter) ProbeWithResult(ctx context.Context, host string, cfg *ssh.ConnectConfig) (string, error) {
-	return a.client.ProbeConfigWithResult(ctx, host, cfg)
+	return a.helper.ProbeWithResult(ctx, host, cfg)
 }
 
 func (a *proberAdapter) TrustHostKey(ctx context.Context, addr string, key []byte) (string, error) {
@@ -3024,9 +3394,15 @@ func bootstrapProductReason(lg log.Logger, o shellintegration.Outcome, publishEr
 // remoteLifecycleProvider implements ssh.RemoteLifecycle with the lifecycle
 // kernel and the ssh client (ADR-0024 decision 2 "Over SSH"; bead
 type remoteLifecycleProvider struct {
-	client *ssh.RealClient
-	kernel lifecyclechannel.Kernel
-	logger log.Logger
+	// tunnels is the transport the far side's loopback listener is asked for
+	// through: a `forward` on THIS MACHINE'S HELPER (nocx-50w7p.8). It was the
+	// coordinator's own ssh client until the owner's invariant moved the dial
+	// (plan §3), and the channel's semantics are unchanged — the lease still
+	// resolves to a pooled connection per destination, and the shell's
+	// connection back still arrives as a channel over it.
+	tunnels sshTunnelLeaser
+	kernel  lifecyclechannel.Kernel
+	logger  log.Logger
 	// reportLoss carries the remote adapter's §6.2 loss cause to the session
 	// integration axis, keyed by the adapter's own lane. Wired at the
 	// composition root once the server exists; nil reports nowhere, which is
@@ -3047,7 +3423,7 @@ type remoteLifecycleProvider struct {
 
 // Establish implements ssh.RemoteLifecycle.
 func (p *remoteLifecycleProvider) Establish(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.RemoteLifecycleLaunch, io.Closer, error) {
-	tc, err := p.client.TunnelConn(ctx, host, opts...)
+	tc, err := p.tunnels.TunnelConn(ctx, host, opts...)
 	if err != nil {
 		return ssh.RemoteLifecycleLaunch{}, nil, fmt.Errorf("lifecycle tunnel lease: %w", err)
 	}
@@ -3121,7 +3497,13 @@ func (p *remoteLifecycleProvider) Establish(ctx context.Context, host string, op
 // after one send would drop a pool reference other tabs and forwards are
 // counting on, and would cost every send a new authentication.
 type apiRouteLeaser struct {
-	client *ssh.RealClient
+	// tunnels leases the connection a routed send rides: a direct-tcpip
+	// channel on THIS MACHINE'S HELPER (nocx-50w7p.8), resolved and
+	// authorized by this process before the helper is asked. It was
+	// *ssh.RealClient until the dial moved (plan §3), and the lease is still
+	// pool-keyed by the resolved destination, so a send through a connection
+	// reaches the same host through the same connection a tab does.
+	tunnels sshTunnelLeaser
 
 	// mu guards the resolver, which is set after construction. The
 	// transport's own resolverHolder has the same shape for the same
@@ -3158,8 +3540,9 @@ func (l *apiRouteLeaser) LeaseForProfile(ctx context.Context, profileID string) 
 	}
 	// The WHOLE resolved config rides one option, exactly as a forward's
 	// does (ws_tunnel.go): credentials, jump route and authorized endpoints
-	// together, so the lease is pool-keyed and authorized like a tab.
-	return l.client.TunnelConn(ctx, host, func(dst *ssh.ConnectConfig) { *dst = *cfg })
+	// together, so the lease is resolved and authorized like a tab and the
+	// helper holds one pooled connection per resolved destination (AD-4).
+	return l.tunnels.TunnelConn(ctx, host, func(dst *ssh.ConnectConfig) { *dst = *cfg })
 }
 
 // apiSecretMaterial is the composition root's join between the capability's

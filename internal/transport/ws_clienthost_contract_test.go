@@ -61,6 +61,8 @@ func TestHostResolved_DTOConformsToContract(t *testing.T) {
 	for name, p := range map[string]hostResolvedParams{
 		"ok with a path":               {Outcome: "ok", Path: "/home/dev/key"},
 		"ok with none":                 {Outcome: "ok"},
+		"approval granted":             {Outcome: "ok", Approved: new(true)},
+		"approval denied":              {Outcome: "ok", Approved: new(false)},
 		"cancelled":                    {Outcome: "cancelled"},
 		"failed":                       {Outcome: "failed", Error: "no D-Bus session"},
 		"unavailable":                  {Outcome: "unavailable", Error: "this client has no native host"},

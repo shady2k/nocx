@@ -29,16 +29,14 @@
 package lifecyclepub
 
 import (
-	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"fmt"
-	"io"
 	"reflect"
 	"sync"
 	"time"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
+	nocxlog "github.com/shady2k/nocx/internal/log"
 )
 
 // Fact is the published lifecycle fact: the params of the lifecycle.changed
@@ -62,12 +60,6 @@ type Fact struct {
 	// and epoch remain the only authority the renderer is given, and the
 	// capability and raw frames still never cross (decision 7).
 	Destination *Destination `json:"destination,omitempty"`
-	// Generation is the backend-minted establishment generation of the
-	// domain (decision 9): minted fresh for every accept-producing hello,
-	// present exactly when the fact names a domain. The renderer returns it
-	// in lifecycle.establishAck after committing the editor presentation;
-	// the backend flushes the pending accept only for the exact generation.
-	Generation string `json:"generation,omitempty"`
 	// Recovery is present exactly when this lost fact opens a restoration
 	// episode (ADR-0024 decision 8): the one-shot fence the shell will
 	// write to the pty at its next prompt boundary, and the generation the
@@ -252,7 +244,6 @@ type Kernel interface {
 	Ingest(t lifecycle.TransportID, env lifecycle.Envelope) ([]lifecycle.Outbound, error)
 	NotifyGap(t lifecycle.TransportID, d lifecycle.DomainID, garbageBytes, garbageFrames int) ([]lifecycle.Outbound, error)
 	Deliver(out lifecycle.Outbound) error
-	EstablishmentTimeout(domain lifecycle.DomainID) error
 	TransportLost(t lifecycle.TransportID) error
 	RecoverLane(lane lifecycle.LaneID) error
 	SubmitAttempt(domain lifecycle.DomainID, command, cwd, host, submitID string) (lifecycle.ExecutionAttempt, error)
@@ -267,17 +258,24 @@ type Kernel interface {
 type Option func(*options)
 
 type options struct {
-	establishTimeout time.Duration
-	grantBuilder     GrantBuilder
-	agentEnroller    AgentEnroller
+	grantBuilder  GrantBuilder
+	agentEnroller AgentEnroller
+	agentReporter AgentReporter
+	log           nocxlog.Logger
 }
 
-// WithEstablishmentTimeout bounds how long a minted accept may wait for the
-// renderer's acknowledgement before the domain is rolled back (decision 9).
-// Zero uses lifecycle.HelloTimeout, which mirrors the shell's own bounded
-// handshake wait (protocol §5): the backend never outwaits the shell.
-func WithEstablishmentTimeout(d time.Duration) Option {
-	return func(o *options) { o.establishTimeout = d }
+// WithLogger gives the publisher a voice (nocx-n14oo.8).
+//
+// This package decides every handshake in the product and, until this
+// existed, wrote nothing at all. An accept that never reaches the shell (a
+// dead port, a lost transport) and an accept the shell simply never got
+// around to reading both ended as one bare `hello-timeout` line from the
+// adapter ten seconds later — which is the difference between a broken
+// transport and a shell that stalled reading its own channel, read as the
+// same event. Without a logger the default is silent, which is what a test
+// and an embedding without wiring want.
+func WithLogger(l nocxlog.Logger) Option {
+	return func(o *options) { o.log = l }
 }
 
 // GrantBuilder composes the bootstrap for a child domain requested over the
@@ -341,6 +339,49 @@ type AgentEnroller interface {
 	Withdraw(lane lifecycle.LaneID)
 }
 
+// EnrolmentPending is the verdict an enroller returns when the answer waits on
+// a person: nocx is asking whether the agent may use its tools (nocx-cyhfw).
+//
+// It exists because the two waits cannot nest. The enrolment is a handshake
+// between programs, bounded at seconds by the shell; the question waits on
+// somebody reading it and has no deadline. Blocking the first on the second
+// meant nobody could answer in time (nocx-t7xds), and refusing instead meant
+// the agent started before anybody had answered. So the caller is told to wait
+// — inside the handshake's bound — and told again, on the same request, when
+// the question closes.
+//
+// Settled delivers exactly once: nothing when a person answered, and a
+// sentence when the question could not be put or its answer could not be kept.
+// It opens nothing and admits nothing. The caller enrols again after it, and
+// that enrolment is the one a grid opens for.
+type EnrolmentPending struct {
+	Reason  string
+	Settled <-chan string
+}
+
+func (p *EnrolmentPending) Error() string { return p.Reason }
+
+// AgentReporter records what a worker participant says its own work produced
+// (nocx-dkawo.7). It is a SEPARATE seam from the enroller above, not a third
+// method on it, because the two answer different questions and one of them is
+// almost always absent: every integrated shell may enrol, and only a pane the
+// backend spawned as a participant has a record to declare into.
+//
+// Report returns an error the participant is shown, for the same reason
+// Enrol does: a declaration that could not be recorded must say so in the
+// person's own pane rather than in a log they never read.
+type AgentReporter interface {
+	Report(lane lifecycle.LaneID, ok bool, summary string) error
+}
+
+// WithAgentReporter wires the seam behind the agent_report / agent_reported
+// pair. Without it every report is REFUSED and says so — a declaration that
+// looked accepted while nothing recorded it is the silent degrade this whole
+// record exists to prevent.
+func WithAgentReporter(r AgentReporter) Option {
+	return func(o *options) { o.agentReporter = r }
+}
+
 // WithAgentEnroller wires the seam that keeps a pane's grid behind the
 // agent_enrol / agent_withdraw pair.
 //
@@ -352,32 +393,6 @@ type AgentEnroller interface {
 // must not be able to look established while nothing is watching (D4).
 func WithAgentEnroller(e AgentEnroller) Option {
 	return func(o *options) { o.agentEnroller = e }
-}
-
-// Establishment sentinel errors, returned by AcknowledgeEstablishment.
-var (
-	ErrNoPendingEstablishment  = errors.New("lifecyclepub: no establishment is pending acknowledgement")
-	ErrEstablishmentGeneration = errors.New("lifecyclepub: acknowledgement generation does not match the pending establishment")
-)
-
-// estKey addresses one establishment episode: a domain on a lane in an
-// epoch. Pending accepts are keyed by domain/epoch — never by lane or
-// adapter alone, because one transport carries several domains (nested
-// ssh/sudo/su), and a parent's acknowledgement can never authorize a child
-// (decision 9).
-type estKey struct {
-	lane   lifecycle.LaneID
-	domain lifecycle.DomainID
-	epoch  uint64
-}
-
-// pendingAccept is one minted accept awaiting the renderer's
-// acknowledgement: the exact outbound envelope to flush, the generation the
-// acknowledgement must name, and the establishment bound.
-type pendingAccept struct {
-	gen   string
-	out   lifecycle.Outbound
-	timer *time.Timer
 }
 
 // Emitter is where published facts go: the WSServer at the composition root,
@@ -396,6 +411,40 @@ type ProjectionEmitter interface {
 	PublishLifecycleProjection(f Fact)
 }
 
+// AttemptTransitionEmitter receives the two transitions of one attempt that
+// the published Fact cannot carry, and cannot be extended to carry without
+// claiming something else:
+//
+//   - the shell AUTHENTICATED ITS START. Fact.Attempt.StartedAt is the SUBMIT
+//     time (the attempt exists from submit, before its bytes reach the pty —
+//     decision 5), so a lane's projection is byte-identical before and after
+//     the start attaches and the change-dedupe suppresses the notification.
+//     publishLaneProjection exists for the ledger's half of this transition;
+//     this is the transport's.
+//   - the attempt LEFT OPEN WITHOUT ONE. applyPromptReady clears the lane's
+//     attempt reference as soon as it PRIMES it (kernel.go: an open attempt
+//     the shell reached a prompt over may still be the start's target), so the
+//     prompt_ready that later closes that attempt derives a fact identical to
+//     the one already emitted — the closer is invisible in the fact stream and
+//     in the lane's own projection, which by then names no attempt at all.
+//
+// The two are one interface because they are two answers about one attempt,
+// both read the same way: the open attempts of a lane, before and after a
+// mutation that succeeded (transitionsBelow). An emitter that does not
+// implement this interface is not told, which is every emitter that has no
+// state resting on either transition.
+type AttemptTransitionEmitter interface {
+	// PublishAttemptStarted reports that this already-open attempt is now
+	// started — the shell has authenticated the line it belongs to, which is
+	// the first moment an interrupt may be written for it without landing in
+	// bash's parser (nocx-zas0d).
+	PublishAttemptStarted(attempt lifecycle.AttemptID)
+	// PublishAttemptClosed reports that this attempt has left `open`, with no
+	// start ever having been authenticated for it. An obligation held against
+	// that start can never be discharged and must be dropped.
+	PublishAttemptClosed(attempt lifecycle.AttemptID)
+}
+
 // Publisher wraps the kernel, forwards every mutation, and projects the
 // affected lane into a Fact on each change. It is safe for concurrent use:
 // per-lane serialization comes from the kernel (and from the single adapter
@@ -403,35 +452,36 @@ type ProjectionEmitter interface {
 type Publisher struct {
 	kernel Kernel
 
-	mu               sync.Mutex
-	emitter          Emitter
-	last             map[lifecycle.LaneID]Fact
-	known            map[lifecycle.LaneID]struct{}
-	dest             map[lifecycle.DomainID]Destination // ssh children's destinations (nocx-ax79)
-	gen              map[estKey]string                  // current establishment generation per episode
-	pending          map[estKey]pendingAccept           // accepts awaiting the renderer's ack (decision 9)
-	establishTimeout time.Duration
-	grantBuilder     GrantBuilder
-	agentEnroller    AgentEnroller
+	mu            sync.Mutex
+	emitter       Emitter
+	last          map[lifecycle.LaneID]Fact
+	known         map[lifecycle.LaneID]struct{}
+	dest          map[lifecycle.DomainID]Destination // ssh children's destinations (nocx-ax79)
+	grantBuilder  GrantBuilder
+	agentEnroller AgentEnroller
+	agentReporter AgentReporter
+	log           nocxlog.Logger
 }
 
 // New builds a Publisher over the kernel. The emitter is bound separately
 // with SetEmitter.
 func New(k Kernel, opts ...Option) *Publisher {
-	o := options{establishTimeout: lifecycle.HelloTimeout}
+	var o options
 	for _, opt := range opts {
 		opt(&o)
 	}
+	if o.log == nil {
+		o.log = nocxlog.NewSlogAdapter(nil)
+	}
 	return &Publisher{
-		kernel:           k,
-		last:             make(map[lifecycle.LaneID]Fact),
-		known:            make(map[lifecycle.LaneID]struct{}),
-		dest:             make(map[lifecycle.DomainID]Destination),
-		gen:              make(map[estKey]string),
-		pending:          make(map[estKey]pendingAccept),
-		establishTimeout: o.establishTimeout,
-		grantBuilder:     o.grantBuilder,
-		agentEnroller:    o.agentEnroller,
+		kernel:        k,
+		last:          make(map[lifecycle.LaneID]Fact),
+		known:         make(map[lifecycle.LaneID]struct{}),
+		dest:          make(map[lifecycle.DomainID]Destination),
+		grantBuilder:  o.grantBuilder,
+		agentEnroller: o.agentEnroller,
+		agentReporter: o.agentReporter,
+		log:           o.log,
 	}
 }
 
@@ -486,13 +536,6 @@ func (p *Publisher) RequestDomain(lane lifecycle.LaneID, parent *lifecycle.Domai
 // moment — the shell is already past its accept, so the lane goes live in one
 // step and the renderer has to be told, or the pane it just took back would
 // hold a live authenticated domain and go on rendering as a plain terminal.
-//
-// The published fact carries no establishment generation, and that is
-// deliberate rather than an omission: decision 9 defers an accept until the
-// renderer acknowledges the presentation, and there is no accept here to
-// defer. The shell was accepted by the coordinator that is gone and never
-// un-accepted. The renderer's own guard is the field's presence, so nothing
-// there needs to know about this path.
 func (p *Publisher) AdoptDomain(lane lifecycle.LaneID, domain lifecycle.DomainID, epoch uint64, capability lifecycle.Capability, recovery lifecycle.FenceNonce, t lifecycle.TransportID) (lifecycle.DomainHandle, error) {
 	h, err := p.kernel.AdoptDomain(lane, domain, epoch, capability, recovery, t)
 	if err != nil {
@@ -583,10 +626,23 @@ func (p *Publisher) answerAgentEnrolment(ask lifecycle.Envelope, out lifecycle.O
 		case req == nil:
 			ans.Reason = "the enrolment carried no request"
 		default:
-			if err := p.agentEnroller.Enrol(lane, ans.Agent, req.Cols, req.Rows); err != nil {
-				ans.Reason = err.Error()
-			} else {
+			err := p.agentEnroller.Enrol(lane, ans.Agent, req.Cols, req.Rows)
+			var pending *EnrolmentPending
+			switch {
+			case err == nil:
 				ans.Enrolled = true
+			case errors.As(err, &pending) && pending.Settled != nil:
+				// The caller is told to wait, now, inside the handshake's
+				// bound — and told again when the question closes. A wait
+				// with no channel to close it would hold the caller for ever,
+				// so it falls to the refusal below instead.
+				ans.Pending = true
+				ans.Reason = pending.Reason
+				_ = p.kernel.Deliver(out)
+				go p.closeQuestion(out, ans.RequestID, ans.Agent, pending.Settled)
+				return
+			default:
+				ans.Reason = err.Error()
 			}
 		}
 	case lifecycle.KindAgentWithdrawn:
@@ -597,21 +653,74 @@ func (p *Publisher) answerAgentEnrolment(ask lifecycle.Envelope, out lifecycle.O
 	_ = p.kernel.Deliver(out)
 }
 
-// projection, ordering the replies (decision 9): mutation → publish → only
-// then the accept, and the accept only on a real acknowledgement. Published
+// closeQuestion tells the caller that the question its enrolment waited on has
+// closed, on the same request and to the same domain. It runs on a goroutine of
+// its own because a person is not on the pump's clock.
+//
+// The frame is built from the request's identity and nothing else. It carries
+// no Enrolled and no Pending, so nothing in it can be read as consent: consent
+// only ever answers an enrolment that opened a grid, and the caller sends that
+// enrolment after reading this. A domain that ended while the person was
+// reading is not an error here — the shell that asked is gone with it.
+func (p *Publisher) closeQuestion(asked lifecycle.Outbound, rid lifecycle.RequestID, agent string, settled <-chan string) {
+	reason := <-settled
+	closing := asked
+	closing.Envelope.Event = lifecycle.Event{
+		Kind:          lifecycle.KindAgentEnrolled,
+		AgentEnrolled: &lifecycle.AgentEnrolled{RequestID: rid, Agent: agent, Reason: reason},
+	}
+	if err := p.kernel.Deliver(closing); err != nil {
+		p.log.Debug("lifecycle: the frame closing an agent question was not delivered",
+			"lane", string(closing.Envelope.Lane), "domain", string(closing.Envelope.Domain),
+			"request", string(rid), "error", err)
+	}
+}
+
+// answerAgentReport fills the verdict and delivers it.
+//
+// Every silent path is a refusal, exactly as in answerAgentEnrolment: a nil
+// seam, a nil payload or a seam that errored all leave Recorded false. Nothing
+// here can produce a "recorded" except a seam that actually wrote the
+// declaration and said so.
+func (p *Publisher) answerAgentReport(ask lifecycle.Envelope, out lifecycle.Outbound) {
+	ans := out.Envelope.Event.AgentReported
+	if ans == nil {
+		_ = p.kernel.Deliver(out)
+		return
+	}
+	req := ask.Event.AgentReport
+	switch {
+	case p.agentReporter == nil:
+		ans.Reason = "this backend is not wired to record what an agent produced"
+	case req == nil:
+		ans.Reason = "the report carried no declaration"
+	default:
+		if err := p.agentReporter.Report(out.Envelope.Lane, req.OK, req.Summary); err != nil {
+			ans.Reason = err.Error()
+		} else {
+			ans.Recorded = true
+		}
+	}
+	_ = p.kernel.Deliver(out)
+}
+
+// projection, ordering the replies: mutation → publish → deliver. Published
 // on failure as well as success: the one mutation a kernel makes on a
 // rejected frame (the domain is closed and the lane falls to native while
 // the frame is being quarantined) is a state change the renderer must see.
 // Every other rejection leaves the projection unchanged and the change-dedupe
 // suppresses the emission.
 //
-// An accept-producing hello opens an establishment episode BEFORE the fact
-// goes out: the generation is minted and the pending accept recorded first,
-// so an acknowledgement that lands with (or synchronously from) the
-// emission finds it. The decision-9 ordering is about the FLUSH, which
-// still happens only after the ack. refresh_request is never deferred — it
-// restores authority and visible-prompt behaviour, grants no suppression
-// authority, and delaying it behind frontend publication can only prolong a
+// ADR-0062 retired the wait this comment used to describe: an accept-
+// producing hello used to open an establishment episode and hold the accept
+// until a renderer acknowledgement flushed it, so a pane the backend itself
+// opened — which subscribes nobody — could never establish. The accept now
+// goes out with refresh_request in the same delivery pass below, on the
+// backend's own authority, as soon as the kernel has minted it. Nothing
+// about the ORDER changed: publish still precedes delivery, and
+// refresh_request is still never deferred behind it — it restores authority
+// and visible-prompt behaviour, grants no suppression authority, and
+// delaying it behind frontend publication can only prolong a
 // desynchronization.
 func (p *Publisher) shouldPublishStartedAttempt(env lifecycle.Envelope) bool {
 	if env.Event.Kind != lifecycle.KindStart || env.Event.Start == nil || env.Event.Start.AttemptID != nil {
@@ -625,7 +734,73 @@ func (p *Publisher) shouldPublishStartedAttempt(env lifecycle.Envelope) bool {
 	return ok && !attempt.Started
 }
 
+// openAttemptsOf reads the lane's open attempts with the one bit the published
+// Fact cannot carry — whether each has been STARTED — and it is the read both
+// transition reports are defined against (AttemptTransitionEmitter). It must be
+// taken BEFORE the mutation whose transitions it is asked about, and it returns
+// nil when the lane holds nothing open, which is the ordinary state between
+// commands.
+func (p *Publisher) openAttemptsOf(lane lifecycle.LaneID) map[lifecycle.AttemptID]bool {
+	if lane == "" {
+		return nil
+	}
+	snap, err := p.kernel.State(lane)
+	if err != nil {
+		return nil
+	}
+	return p.openAttemptsIn(snap)
+}
+
+// openAttemptsIn is openAttemptsOf over a snapshot the caller already read.
+func (p *Publisher) openAttemptsIn(snap lifecycle.LaneSnapshot) map[lifecycle.AttemptID]bool {
+	if len(snap.OpenAttempts) == 0 {
+		return nil
+	}
+	open := make(map[lifecycle.AttemptID]bool, len(snap.OpenAttempts))
+	for _, id := range snap.OpenAttempts {
+		att, ok := p.kernel.Attempt(id)
+		if !ok {
+			continue
+		}
+		open[id] = att.Started
+	}
+	return open
+}
+
+// transitionsBelow reports to the emitter every transition of the attempts in
+// `before` that the published Fact cannot carry, and it is the ONLY place
+// either one is reported from, whatever mutation caused it. It runs after that
+// mutation succeeded, outside every lock, and reads nothing further when the
+// emitter has not asked for these transitions.
+func (p *Publisher) transitionsBelow(before map[lifecycle.AttemptID]bool) {
+	if len(before) == 0 {
+		return
+	}
+	p.mu.Lock()
+	e := p.emitter
+	p.mu.Unlock()
+	te, ok := e.(AttemptTransitionEmitter)
+	if !ok {
+		return
+	}
+	for attempt, wasStarted := range before {
+		current, ok := p.kernel.Attempt(attempt)
+		switch {
+		case !ok || current.State != lifecycle.AttemptOpen:
+			te.PublishAttemptClosed(attempt)
+		case !wasStarted && current.Started:
+			te.PublishAttemptStarted(attempt)
+		}
+	}
+}
+
 func (p *Publisher) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) error {
+	// The lane's open attempts are read BEFORE the mutation — the only moment
+	// they can be — because a prompt_ready that closes one also clears the
+	// lane's own reference to it, leaving nothing afterwards to compare
+	// against. The ledger's own forced projection keeps the narrower condition
+	// it was written with (shouldPublishStartedAttempt above).
+	before := p.openAttemptsOf(env.Lane)
 	forceStartedProjection := p.shouldPublishStartedAttempt(env)
 	outs, err := p.kernel.Ingest(t, env)
 	if err != nil {
@@ -634,11 +809,6 @@ func (p *Publisher) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) erro
 	}
 	for _, out := range outs {
 		switch out.Envelope.Event.Kind {
-		case lifecycle.KindAccept:
-			if bErr := p.beginEstablishment(out); bErr != nil {
-				p.publishLane(env.Lane)
-				return bErr
-			}
 		case lifecycle.KindDomainGrant:
 			// The grant is the answer to the parent's own request — it
 			// grants no suppression authority and no new state, so it is
@@ -646,6 +816,11 @@ func (p *Publisher) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) erro
 			// the parent is blocked waiting for it before it can launch
 			// the child.
 			p.buildAndDeliverGrant(out)
+		case lifecycle.KindAgentReported:
+			// A declaration is answered on the same terms as an enrolment:
+			// the participant is blocked on the verdict, and Recorded stays
+			// false unless a seam actually wrote the fact.
+			p.answerAgentReport(env, out)
 		case lifecycle.KindAgentEnrolled, lifecycle.KindAgentWithdrawn:
 			// Same shape and the same reason: the caller is blocked waiting
 			// for the verdict before it launches the agent, and the answer
@@ -657,133 +832,43 @@ func (p *Publisher) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) erro
 			p.answerAgentEnrolment(env, out)
 		}
 	}
+	p.transitionsBelow(before)
 	if forceStartedProjection {
 		p.publishLaneProjection(env.Lane)
 	}
 	p.publishLane(env.Lane)
 	for _, out := range outs {
 		switch out.Envelope.Event.Kind {
-		case lifecycle.KindAccept, lifecycle.KindDomainGrant,
+		case lifecycle.KindDomainGrant,
 			lifecycle.KindAgentEnrolled, lifecycle.KindAgentWithdrawn:
-			continue // accept is deferred (decision 9); the rest were delivered with their answers
+			continue // already delivered above, with their answers
+		case lifecycle.KindAccept:
+			p.deliverAccept(out)
+			continue
 		}
 		_ = p.kernel.Deliver(out) // best-effort; the shell times out in the safe direction
 	}
 	return nil
 }
 
-// beginEstablishment records one minted accept awaiting the renderer's
-// acknowledgement (decision 9). Every accept-producing hello mints a fresh
-// backend-minted generation — a fresh episode, so an old connection's
-// acknowledgement (an old generation) can never release a newer accept —
-// and arms the establishment bound. A later hello for the same domain
-// supersedes the pending accept.
-func (p *Publisher) beginEstablishment(out lifecycle.Outbound) error {
+// deliverAccept flushes a minted accept on the backend's own authority
+// (ADR-0062): the accept goes out exactly like refresh_request, as soon as
+// the kernel has minted it, rather than waiting for a renderer that a
+// backend-opened pane (WSServer.OpenSession) has none to acknowledge it.
+// Logged because "flushed" and "never reached the shell" otherwise arrive
+// identically — one bare `hello-timeout` line from the adapter ten seconds
+// later — which is the distinction that mattered when this used to be a
+// wait rather than a delivery (nocx-n14oo.8).
+func (p *Publisher) deliverAccept(out lifecycle.Outbound) {
 	env := out.Envelope
-	key := estKey{lane: env.Lane, domain: env.Domain, epoch: env.Epoch}
-	// Minted before anything is recorded: an establishment that cannot be
-	// told apart from the previous one is not begun at all. The domain then
-	// never establishes and the shell falls back — the same fail-open every
-	// other refusal on this path takes.
-	genHex, err := p.randomHex(8)
-	if err != nil {
-		return err
-	}
-	gen := "est-" + genHex
-	p.mu.Lock()
-	if cur, ok := p.pending[key]; ok && cur.timer != nil {
-		cur.timer.Stop()
-	}
-	p.gen[key] = gen
-	p.pending[key] = pendingAccept{gen: gen, out: out}
-	p.mu.Unlock()
-	p.armEstablishmentTimer(key, gen)
-	return nil
-}
-
-func (p *Publisher) armEstablishmentTimer(key estKey, gen string) {
-	t := time.AfterFunc(p.establishTimeout, func() { p.establishmentTimedOut(key, gen) })
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	pend, ok := p.pending[key]
-	if !ok || pend.gen != gen {
-		t.Stop() // acked or superseded before the timer armed
+	if err := p.kernel.Deliver(out); err != nil {
+		p.log.Warn("lifecycle: the accept could not be flushed",
+			"lane", string(env.Lane), "domain", string(env.Domain), "epoch", env.Epoch,
+			"error", err)
 		return
 	}
-	pend.timer = t
-	p.pending[key] = pend
-}
-
-// establishmentTimedOut is the bound of one establishment episode: no
-// acknowledgement arrived, so the accept is dropped and the domain rolled
-// back if it is still awaiting its accept (decision 9). A reconnect accept
-// for an already-live domain is dropped instead — the shell keeps its
-// visible prompt either way — and the kernel leaves it live.
-func (p *Publisher) establishmentTimedOut(key estKey, gen string) {
-	p.mu.Lock()
-	pend, ok := p.pending[key]
-	if !ok || pend.gen != gen {
-		p.mu.Unlock()
-		return // acked or superseded meanwhile
-	}
-	delete(p.pending, key)
-	p.mu.Unlock()
-	if err := p.kernel.EstablishmentTimeout(key.domain); err == nil {
-		p.publishLane(key.lane) // the revoke changed the lane; the dedupe suppresses a no-op
-	}
-}
-
-// AcknowledgeEstablishment is the renderer's establishment acknowledgement
-// (decision 9): the transport has already validated that the acknowledging
-// connection owns the session and is its current subscriber, and forwards
-// the ack here. The acknowledgement must name the exact generation of the
-// pending accept — anything else is stale or foreign and is refused. On a
-// match the accept is flushed, and only on a real acknowledgement. The
-// domain must still be established and current: Deliver refuses an accept
-// for a domain that was revoked or lost in the meantime (its safe state is
-// already published or being published).
-func (p *Publisher) AcknowledgeEstablishment(lane lifecycle.LaneID, domain lifecycle.DomainID, epoch uint64, generation string) error {
-	key := estKey{lane: lane, domain: domain, epoch: epoch}
-	p.mu.Lock()
-	pend, ok := p.pending[key]
-	if !ok {
-		p.mu.Unlock()
-		return ErrNoPendingEstablishment
-	}
-	if pend.gen != generation {
-		p.mu.Unlock()
-		return ErrEstablishmentGeneration
-	}
-	if pend.timer != nil {
-		pend.timer.Stop()
-	}
-	delete(p.pending, key)
-	out := pend.out
-	p.mu.Unlock()
-	return p.kernel.Deliver(out)
-}
-
-// randReader is the randomness seam, the same shape internal/shellintegration
-// already uses for its own: a package var so a test can make the source fail,
-// because "for every external call your code makes there is a test where that
-// call fails" (AGENTS.md) and crypto/rand is one.
-var randReader io.Reader = rand.Reader
-
-// randomHex mints the establishment GENERATION. It is not an authenticator,
-// but it is a discriminator against a stale actor — a late acknowledgement
-// from a previous episode must not release the accept of a newer one — and
-// the check is `pend.gen != generation`, an equality. Two zero values compare
-// equal, so a source that failed would let exactly the stale ack this value
-// exists to reject through, and would let a superseded timer cancel a live
-// establishment. It is also echoed by the far side, so it must be
-// unguessable as well as distinct. A failed read is therefore an error, not
-// a tolerated zero (nocx-s16k8).
-func (p *Publisher) randomHex(n int) (string, error) {
-	b := make([]byte, n)
-	if _, err := io.ReadFull(randReader, b); err != nil {
-		return "", fmt.Errorf("lifecyclepub: the randomness source failed; no establishment generation was minted: %w", err)
-	}
-	return hex.EncodeToString(b), nil
+	p.log.Debug("lifecycle: the accept was flushed",
+		"lane", string(env.Lane), "domain", string(env.Domain), "epoch", env.Epoch)
 }
 
 // Domain returns the read model of one domain, forwarding to the kernel. The
@@ -819,10 +904,16 @@ func (p *Publisher) OpenAttempt(domain lifecycle.DomainID) (lifecycle.ExecutionA
 // only prolongs the desynchronization).
 func (p *Publisher) NotifyGap(t lifecycle.TransportID, d lifecycle.DomainID, garbageBytes, garbageFrames int) error {
 	lane := ""
+	var before map[lifecycle.AttemptID]bool
 	if dom, ok := p.kernel.Domain(d); ok {
 		lane = string(dom.Lane)
+		// Framing corruption can REVOKE a lane outright (the desync budgets),
+		// and a revoke closes every attempt it holds open — the same closure as
+		// any other, read the same way, before the mutation.
+		before = p.openAttemptsOf(dom.Lane)
 	}
 	outs, err := p.kernel.NotifyGap(t, d, garbageBytes, garbageFrames)
+	p.transitionsBelow(before)
 	if lane != "" {
 		p.publishLane(lifecycle.LaneID(lane))
 	}
@@ -837,8 +928,6 @@ func (p *Publisher) NotifyGap(t lifecycle.TransportID, d lifecycle.DomainID, gar
 // Lost, and each affected lane publishes a lost fact. Unaffected lanes derive
 // unchanged and the dedupe suppresses them.
 func (p *Publisher) TransportLost(t lifecycle.TransportID) error {
-	// Cancel every pending establishment whose domain rides the lost
-	// transport: an accept for a dead domain must never flush (decision 9).
 	p.mu.Lock()
 	lanes := make([]lifecycle.LaneID, 0, len(p.known))
 	for l := range p.known {
@@ -846,34 +935,29 @@ func (p *Publisher) TransportLost(t lifecycle.TransportID) error {
 	}
 	p.mu.Unlock()
 	attempts := make(map[lifecycle.LaneID]lifecycle.AttemptID)
+	// Loss CLOSES every attempt the affected lanes held open (the kernel marks
+	// them unknown), and that closure is reported like any other — read from
+	// the same snapshot the attempt below is read from, before the mutation.
+	openBefore := make(map[lifecycle.LaneID]map[lifecycle.AttemptID]bool)
 	for _, l := range lanes {
 		st, err := p.kernel.State(l)
-		if err != nil || st.Attempt == "" || st.Domain == "" {
+		if err != nil || st.Domain == "" {
 			continue
 		}
 		d, exists := p.kernel.Domain(st.Domain)
-		if exists && d.Transport == t {
-			attempts[l] = st.Attempt
-		}
-	}
-	// Cancel every pending establishment whose domain rides the lost
-	// transport: an accept for a dead domain must never flush (decision 9).
-	p.mu.Lock()
-	for key, pend := range p.pending {
-		d, ok := p.kernel.Domain(key.domain)
-		if !ok || d.Transport != t {
+		if !exists || d.Transport != t {
 			continue
 		}
-		if pend.timer != nil {
-			pend.timer.Stop()
+		if st.Attempt != "" {
+			attempts[l] = st.Attempt
 		}
-		delete(p.pending, key)
+		openBefore[l] = p.openAttemptsIn(st)
 	}
-	p.mu.Unlock()
 	if err := p.kernel.TransportLost(t); err != nil {
 		return err
 	}
 	for _, l := range lanes {
+		p.transitionsBelow(openBefore[l])
 		if attemptID, ok := attempts[l]; ok {
 			p.publishLostLane(l, attemptID)
 			continue
@@ -901,10 +985,19 @@ func (p *Publisher) RecoverLane(lane lifecycle.LaneID) error {
 // editor submit, before the pty bytes) and publishes the lane's move to
 // running.
 func (p *Publisher) SubmitAttempt(domain lifecycle.DomainID, command, cwd, host, submitID string) (lifecycle.ExecutionAttempt, error) {
+	// A submit can CLOSE an attempt: one the shell reached a prompt over and no
+	// start ever attached to is closed by the next submit (kernel.go's
+	// SubmitAttempt), and that closure is invisible in the fact stream for the
+	// same reason the prompt_ready one is — it is read before the mutation.
+	var before map[lifecycle.AttemptID]bool
+	if d, ok := p.kernel.Domain(domain); ok {
+		before = p.openAttemptsOf(d.Lane)
+	}
 	att, err := p.kernel.SubmitAttempt(domain, command, cwd, host, submitID)
 	if err != nil {
 		return att, err
 	}
+	p.transitionsBelow(before)
 	p.publishLane(att.Lane)
 	return att, nil
 }
@@ -913,10 +1006,15 @@ func (p *Publisher) SubmitAttempt(domain lifecycle.DomainID, command, cwd, host,
 // publishes the attempt's lane: the attempt's state becomes unknown, which is
 // a projection change even though the lane stays running.
 func (p *Publisher) AbandonAttempt(id lifecycle.AttemptID) error {
+	var before map[lifecycle.AttemptID]bool
+	if att, ok := p.kernel.Attempt(id); ok {
+		before = p.openAttemptsOf(att.Lane)
+	}
 	err := p.kernel.AbandonAttempt(id)
 	if err != nil {
 		return err
 	}
+	p.transitionsBelow(before)
 	if att, ok := p.kernel.Attempt(id); ok {
 		p.publishLane(att.Lane)
 	}
@@ -935,7 +1033,6 @@ func (p *Publisher) ReplayLane(lane lifecycle.LaneID) {
 		return
 	}
 	p.mu.Lock()
-	p.stampGenLocked(lane, &f)
 	p.last[lane] = f
 	e := p.emitter
 	p.mu.Unlock()
@@ -952,7 +1049,6 @@ func (p *Publisher) publishLaneProjection(lane lifecycle.LaneID) {
 		return
 	}
 	p.mu.Lock()
-	p.stampGenLocked(lane, &f)
 	e := p.emitter
 	p.mu.Unlock()
 	if pe, ok := e.(ProjectionEmitter); ok {
@@ -969,7 +1065,6 @@ func (p *Publisher) publishLane(lane lifecycle.LaneID) {
 		return
 	}
 	p.mu.Lock()
-	p.stampGenLocked(lane, &f)
 	if last, seen := p.last[lane]; seen && reflect.DeepEqual(last, f) {
 		p.mu.Unlock()
 		return
@@ -993,25 +1088,8 @@ func (p *Publisher) publishLostLane(lane lifecycle.LaneID, attemptID lifecycle.A
 		return
 	}
 	f.Attempt = attemptFact(attempt)
-	p.mu.Lock()
-	p.stampGenLocked(lane, &f)
-	p.mu.Unlock()
 	if pe, ok := p.emitter.(ProjectionEmitter); ok {
 		pe.PublishLifecycleProjection(f)
 	}
 	p.publishLane(lane)
-}
-
-// fact naming a domain. A reconnect hello mints a fresh generation, so the
-// replayed fact differs from the previous one and the dedupe lets it out —
-// that replay is what carries the fresh generation to the renderer for the
-// acknowledgement (decision 9: no deadlock on reconnect).
-func (p *Publisher) stampGenLocked(lane lifecycle.LaneID, f *Fact) {
-	if f.Domain == "" {
-		return
-	}
-	key := estKey{lane: lane, domain: lifecycle.DomainID(f.Domain), epoch: f.Epoch}
-	if g, ok := p.gen[key]; ok {
-		f.Generation = g
-	}
 }

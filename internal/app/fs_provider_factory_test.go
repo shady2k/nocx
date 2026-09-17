@@ -19,8 +19,15 @@ import (
 // factorySession is a minimal session.Session: the factory reads Kind, Host
 // and SSHOptions and nothing else, so everything below them answers the
 // zero value rather than pretending to a terminal this double does not have.
+//
+// host and opts are the two the factory actually reads, and they are fields
+// because the acceptance test for a remote Files provider needs a real
+// destination and the connect options a locked profile would carry; every
+// other test leaves them zero.
 type factorySession struct {
 	kind session.Kind
+	host string
+	opts []ssh.ConnectOption
 }
 
 func (s factorySession) ID() session.ID             { return "s1" }
@@ -42,7 +49,7 @@ func (s factorySession) OpenedAt() time.Time { return time.Time{} }
 
 func (s factorySession) Kind() session.Kind              { return s.kind }
 func (s factorySession) PaneID() string                  { return "" }
-func (s factorySession) Host() string                    { return "" }
+func (s factorySession) Host() string                    { return s.host }
 func (s factorySession) Cwd() string                     { return "/" }
 func (s factorySession) ProfileID() string               { return "" }
 func (s factorySession) CredentialID() string            { return "" }
@@ -50,7 +57,7 @@ func (s factorySession) Write([]byte) (int, error)       { return 0, nil }
 func (s factorySession) EnqueueWrite([]byte) bool        { return true }
 func (s factorySession) Close() error                    { return nil }
 func (s factorySession) Done() <-chan struct{}           { return make(chan struct{}) }
-func (s factorySession) SSHOptions() []ssh.ConnectOption { return nil }
+func (s factorySession) SSHOptions() []ssh.ConnectOption { return s.opts }
 func (s factorySession) EffectiveSize() session.Size     { return session.DefaultSize() }
 
 func (s factorySession) Resize(context.Context, session.Size) error {

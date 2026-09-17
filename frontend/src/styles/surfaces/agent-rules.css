@@ -1,0 +1,30 @@
+/* A person's own rule for an agent (nocx-y6w66): one section per agent, with
+   the rule it is read by beside the controls that change it. Layout only — the
+   kit owns every component's paint, and the classes below place them. */
+
+.st-rules__state {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+/* The sentence says what nocx will DO with this agent, so it is allowed to be
+   the widest thing here and to wrap: a refusal read halfway is a refusal
+   believed. */
+.st-rules__summary {
+  flex: 1 1 auto;
+}
+
+.st-rules__controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+/* Where the documents live, under the sections rather than above them: it is
+   what a person reads after deciding the page is not enough for the edit they
+   want to make. */
+.st-rules__files {
+  margin: 0;
+}

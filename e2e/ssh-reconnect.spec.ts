@@ -166,7 +166,10 @@ async function wire(page: Page, home: string): Promise<Wired> {
 
   const endpoint = await resolveBackend(page)
   // Unique per run: the stand's store persists across runs in this home, and a
-  // stale profile would dial a relay that no longer exists.
+  // stale profile would dial a relay that no longer exists. This spec's
+  // subject is the silent-death reconnect, not the connect-time ask
+  // (ADR-0069) — desiredMode is declared explicitly as script so the
+  // connection is never asked.
   const profileName = `e2e-reconnect-${Date.now()}`
   const created = await rpc<{ id: string }>(page, endpoint, 'profiles.create', {
     type: 'ssh',
@@ -178,6 +181,7 @@ async function wire(page: Page, home: string): Promise<Wired> {
       keyPath: fixture.userKey,
       keepaliveInterval: KEEPALIVE_INTERVAL_MS,
       keepaliveCountMax: KEEPALIVE_COUNT_MAX,
+      desiredMode: 'script',
     },
   })
   return { fixture, proxy, profileId: created.id, profileName }

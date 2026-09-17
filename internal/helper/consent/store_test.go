@@ -75,7 +75,7 @@ func TestStoreGrantsArePerFingerprint(t *testing.T) {
 
 // TestStoreEmptyFingerprintNeverGrants: an empty fingerprint is never a
 // machine — no document can answer for it, so a host whose key was not
-// captured can never resolve to relay on the strength of a shared empty
+// captured can never resolve to helper on the strength of a shared empty
 // key.
 func TestStoreEmptyFingerprintNeverGrants(t *testing.T) {
 	dir := t.TempDir()
@@ -165,5 +165,45 @@ func TestRevokeForgetsTheMachineAnswer(t *testing.T) {
 	again := NewStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(dir), "consent.json")
 	if _, ok := again.Lookup("SHA256:abc"); ok {
 		t.Fatal("revoked consent resurrected after reopening the store")
+	}
+}
+
+// TestDeniedSurvivesReopen: nothing writes Denied any more (ADR-0069 removed
+// Deny with its last caller), but a document an earlier build wrote, or one
+// this package's own tests seed directly, must still read back as denied —
+// Resolve's Refused branch depends on Lookup reporting it accurately.
+func TestDeniedSurvivesReopen(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(dir), "consent.json")
+	if err := s.setAnswer("SHA256:abc", Denied); err != nil {
+		t.Fatalf("setAnswer: %v", err)
+	}
+	ans, ok := s.Lookup("SHA256:abc")
+	if !ok || ans != Denied {
+		t.Fatalf("Lookup = %q/%v, want denied", ans, ok)
+	}
+	again := NewStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(dir), "consent.json")
+	ans, ok = again.Lookup("SHA256:abc")
+	if !ok || ans != Denied {
+		t.Fatalf("Lookup after reopen = %q/%v, want denied — it must survive a reconstruction", ans, ok)
+	}
+}
+
+// TestDeniedThenGrantOverwrites: a machine denied by an earlier build (or a
+// seeded document) that is later granted gets ONE current answer, not the
+// first one forever — setAnswer is a plain overwrite, and this pins that
+// both directions work, not just Grant-then-Grant (already covered by the
+// persistence tests above).
+func TestDeniedThenGrantOverwrites(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(dir), "consent.json")
+	if err := s.setAnswer("SHA256:abc", Denied); err != nil {
+		t.Fatalf("setAnswer: %v", err)
+	}
+	if err := s.Grant("SHA256:abc"); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	if ans, ok := s.Lookup("SHA256:abc"); !ok || ans != Granted {
+		t.Fatalf("Lookup after Denied then Grant = %q/%v, want granted", ans, ok)
 	}
 }

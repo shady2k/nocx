@@ -41,8 +41,8 @@ describe('must trip', () => {
     })
   })
 
-  it('flags a string-literal fallback: value={fvStr("relayConsent") || "unknown"}', () => {
-    const v = scan('<input value={fvStr("relayConsent") || "unknown"} />')
+  it('flags a string-literal fallback: value={fvStr("helperConsent") || "unknown"}', () => {
+    const v = scan('<input value={fvStr("helperConsent") || "unknown"} />')
     expect(v).toHaveLength(1)
     expect(v[0]).toMatchObject({ prop: 'value', operator: '||', fallback: '"unknown"' })
   })

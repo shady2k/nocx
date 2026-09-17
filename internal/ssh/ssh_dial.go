@@ -1,3 +1,13 @@
+//go:build nocx_local_ssh
+
+// This file dials: it builds the per-target gossh.ClientConfig, resolves a
+// route through a possible jump host, and performs the network dial. It is
+// nocx_local_ssh-gated because the coordinator makes no ssh connection at all
+// — cmd/nocx-server is never built with the tag, and the local helper is
+// (plan 2026-09-13 §1, §3). What is left untagged in this package is
+// resolution and the host-key decision, which a build with no client still
+// owns.
+
 package ssh
 
 import (
@@ -50,8 +60,8 @@ func (rc *RealClient) poolKeyFor(ctx context.Context, resolved *resolvedConfig, 
 	identity := string(cfg.SecretID)
 	if identity == "" {
 		keyPath := cfg.KeyFile
-		if keyPath == "" {
-			keyPath = resolved.identityFile
+		if keyPath == "" && len(resolved.identityFiles) > 0 {
+			keyPath = resolved.identityFiles[0]
 		}
 		if keyPath != "" {
 			identity = publicKeyFingerprint(keyPath)
@@ -143,8 +153,8 @@ func (rc *RealClient) jumpRouteKey(ctx context.Context, cfg *ConnectConfig) stri
 		}
 		if keyFile != "" {
 			jumpKey.identity = keyFile
-		} else if jumpResolved.identityFile != "" {
-			jumpKey.identity = jumpResolved.identityFile
+		} else if len(jumpResolved.identityFiles) > 0 {
+			jumpKey.identity = jumpResolved.identityFiles[0]
 		}
 	}
 
@@ -395,15 +405,51 @@ func (d *dialer) dialViaJumpHost(ctx context.Context, cfg *ConnectConfig, resolv
 	// DialContext respects ctx cancellation — no watchdog needed for this step.
 	conn, err := jumpClient.DialContext(ctx, "tcp", targetAddr)
 	if err != nil {
-		d.client.pool.Release(jumpHandle)
+		d.client.dial.pool.Release(jumpHandle)
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 		return nil, fmt.Errorf("dial target %s through jump: %w", targetAddr, err)
 	}
 
-	// gossh.NewClientConn has no context-aware form. Same watchdog pattern
-	// as dialDirect: close conn on ctx.Done() to unblock the handshake.
+	target, err := d.handshakeOver(ctx, conn, targetAddr, targetCfg)
+	if err != nil {
+		d.client.dial.pool.Release(jumpHandle)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("ssh client conn through jump: %w", err)
+	}
+	// The target's Close closes the gossh.Client AND releases the bastion
+	// handle. When the last target through this bastion closes, the bastion's
+	// refcount drops to zero and the bastion connection closes. The bastion
+	// handle is released exactly once because pooledSSHConn.Close is guarded
+	// by its own sync.Once.
+	// Same ownership rule as the direct dial above, and it matters more
+	// here: this wrapper's Close is what releases the bastion's own pool
+	// handle, so a prober closing the raw target would strand the jump
+	// connection for the life of the process.
+	pconn := &pooledSSHConn{
+		client:  target,
+		release: func() { d.client.dial.pool.Release(jumpHandle) },
+	}
+	stop, _ := startKeepalive(pconn, cfg.KeepaliveInterval, cfg.KeepaliveCountMax, cfg.Liveness)
+	pconn.setKeepaliveStop(stop)
+	return pconn, nil
+}
+
+// handshakeOver runs the client handshake on an ALREADY-OPEN connection: the
+// step a route takes once the hop before it has dialed the next address, and
+// the one x/crypto/ssh has no context-aware form for. The watchdog is what
+// makes cancellation real — closing the connection unblocks NewClientConn —
+// and the goroutine is drain-safe because the buffered channel (size 1) means
+// its send always succeeds.
+//
+// It is extracted from dialViaJumpHost rather than written a second time for
+// the helper's routed dial: two watchdogs are two chances to leave one of them
+// without the drain, and the failure mode of a watchdog without a drain is a
+// leaked goroutine per cancelled connection.
+func (d *dialer) handshakeOver(ctx context.Context, conn net.Conn, addr string, cfg *gossh.ClientConfig) (*gossh.Client, error) {
 	type hsResult struct {
 		clientConn gossh.Conn
 		chans      <-chan gossh.NewChannel
@@ -412,7 +458,7 @@ func (d *dialer) dialViaJumpHost(ctx context.Context, cfg *ConnectConfig, resolv
 	}
 	ch := make(chan hsResult, 1)
 	go func() {
-		cc, chans, reqs, err := gossh.NewClientConn(conn, targetAddr, targetCfg)
+		cc, chans, reqs, err := gossh.NewClientConn(conn, addr, cfg)
 		ch <- hsResult{cc, chans, reqs, err}
 	}()
 
@@ -420,31 +466,13 @@ func (d *dialer) dialViaJumpHost(ctx context.Context, cfg *ConnectConfig, resolv
 	case <-ctx.Done():
 		_ = conn.Close() // unblocks NewClientConn
 		<-ch             // drain goroutine
-		d.client.pool.Release(jumpHandle)
 		return nil, ctx.Err()
 	case r := <-ch:
 		if r.err != nil {
 			_ = conn.Close()
-			d.client.pool.Release(jumpHandle)
-			return nil, fmt.Errorf("ssh client conn through jump: %w", r.err)
+			return nil, r.err
 		}
-		target := gossh.NewClient(r.clientConn, r.chans, r.reqs)
-		// The target's Close closes the gossh.Client AND releases the bastion
-		// handle. When the last target through this bastion closes, the bastion's
-		// refcount drops to zero and the bastion connection closes. The bastion
-		// handle is released exactly once because pooledSSHConn.Close is guarded
-		// by its own sync.Once.
-		// Same ownership rule as the direct dial above, and it matters more
-		// here: this wrapper's Close is what releases the bastion's own pool
-		// handle, so a prober closing the raw target would strand the jump
-		// connection for the life of the process.
-		pconn := &pooledSSHConn{
-			client:  target,
-			release: func() { d.client.pool.Release(jumpHandle) },
-		}
-		stop, _ := startKeepalive(pconn, cfg.KeepaliveInterval, cfg.KeepaliveCountMax, cfg.Liveness)
-		pconn.setKeepaliveStop(stop)
-		return pconn, nil
+		return gossh.NewClient(r.clientConn, r.chans, r.reqs), nil
 	}
 }
 
@@ -460,19 +488,7 @@ func (d *dialer) dialViaJumpHost(ctx context.Context, cfg *ConnectConfig, resolv
 // nested JumpConfig and dials through the next hop when present.
 func (d *dialer) acquireJumpHost(ctx context.Context, cfg *ConnectConfig) (*poolHandle, *gossh.Client, error) {
 	// Prefer JumpConfig (set by the resolver for multi-hop) over flat fields.
-	jumpCfg := cfg.JumpConfig
-	if jumpCfg == nil {
-		jumpCfg = &ConnectConfig{
-			User:               cfg.JumpUser,
-			Port:               cfg.JumpPort,
-			KeyFile:            cfg.JumpKeyFile,
-			AuthMode:           cfg.JumpAuthMode,
-			JumpHost:           "",
-			Secrets:            cfg.JumpSecrets,
-			SecretID:           cfg.JumpSecretID,
-			PassphraseSecretID: cfg.JumpPassphraseSecretID,
-		}
-	}
+	jumpCfg := jumpConnectConfig(cfg)
 
 	jumpResolved, err := d.client.resolveConfig(ctx, cfg.JumpHost, jumpCfg)
 	if err != nil {
@@ -496,18 +512,18 @@ func (d *dialer) acquireJumpHost(ctx context.Context, cfg *ConnectConfig) (*pool
 	}
 
 	jumpKey := d.client.poolKeyFor(ctx, jumpResolved, jumpCfg)
-	handle, err := d.client.pool.AcquireDial(ctx, jumpKey, d.client.dialJumpForConnect(ctx, cfg.JumpHost, jumpResolved, jumpCfg))
+	handle, err := d.client.dial.pool.AcquireDial(ctx, jumpKey, d.client.dialJumpForConnect(ctx, cfg.JumpHost, jumpResolved, jumpCfg))
 	if err != nil {
 		return nil, nil, err
 	}
 	pconn, ok := handle.conn.(*pooledSSHConn)
 	if !ok {
-		d.client.pool.Release(handle)
+		d.client.dial.pool.Release(handle)
 		return nil, nil, fmt.Errorf("internal: jump pool entry is not *pooledSSHConn (%T)", handle.conn)
 	}
 	jumpClient, ok := pconn.client.(*gossh.Client)
 	if !ok {
-		d.client.pool.Release(handle)
+		d.client.dial.pool.Release(handle)
 		return nil, nil, fmt.Errorf("internal: jump client is not *gossh.Client (%T)", pconn.client)
 	}
 	return handle, jumpClient, nil

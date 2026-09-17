@@ -457,6 +457,13 @@ func (f *fakeSessionRegistry) Close(id session.ID) error {
 	return nil
 }
 
+func (f *fakeSessionRegistry) EndSession(id session.ID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.sessions, id)
+	return nil
+}
+
 func (f *fakeSessionRegistry) List() []session.Session {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -567,7 +574,8 @@ func (f *fakeContentDB) Ledger() content.LedgerRepository              { return 
 
 // Layout is unused by these tests: the fake predates the layout chain and no
 // capability reaches it (nocx-isoph.1).
-func (f *fakeContentDB) Layout() content.LayoutRepository               { return nil }
+func (f *fakeContentDB) Layout() content.LayoutRepository { return nil }
+
 func (f *fakeContentDB) APIRuns() content.APIRunRepository              { return nil }
 func (f *fakeContentDB) SessionOutput() content.SessionOutputRepository { return nil }
 

@@ -23,11 +23,11 @@
   "violations": [
     {
       "file": "src/connections.tsx",
-      "line": 2414,
+      "line": 2640,
       "column": 27,
       "prop": "value",
       "operator": "||",
-      "lhs": "fvStr('relayConsent')",
+      "lhs": "fvStr('helperConsent')",
       "fallback": "'unknown'",
       "reason": "Select with no required rule; the fallback is display-only, so no validator or model can disagree with it."
     }

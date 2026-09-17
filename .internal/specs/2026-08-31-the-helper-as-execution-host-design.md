@@ -101,7 +101,8 @@ coordinator replacement stays sequential.
   `session.displaced`, shipped as `nocx-oevq4`). **Unchanged here**; the multi-coordinator
   case is document 2 (§7).
 
-**The nocxify delivery-modes design**: §3.4 named `relay` as the Tier-B carrier and deferred
+**The nocxify delivery-modes design**: §3.4 named the Tier-B carrier — then spelled `relay`,
+now `helper` — and deferred
 it "so the seam it lands in is decided now rather than forked into later" — this is that
 seam. §3.5's three axes are kept whole; which carrier delivered integration is the
 observed-delivery axis's answer. §5.2's additive rule is kept.
@@ -489,7 +490,7 @@ a reader never copies the whole window to send a frame. The assertion is on **al
 after fill → consume → idle**, not on buffer length.
 
 **It resolves through the cascade that already exists** — profile → group → global → hardcoded
-default — the one `DesiredMode` and `PortDiscovery` use. **Not** `RelayConsent`, which an earlier
+default — the one `DesiredMode` and `PortDiscovery` use. **Not** `HelperConsent`, which an earlier
 draft cited here and which is explicitly the opposite: `profile.go:123` says consent is
 "persisted per destination and NEVER inherited", and `:479` keeps it out of the sparse layer for
 that reason.

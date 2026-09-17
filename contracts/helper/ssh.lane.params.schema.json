@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.lane.params.schema.json",
+  "title": "HelperSSHLaneParams",
+  "description": "One pty-less EXEC LANE to open on a pooled connection: the destination resolved by the coordinator, the INSTALL whose helper to run there, and the generation that names the build. There is no command and no argv — see `machine` — and the two facts together name exactly one installed binary, which the helper builds the invocation from.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["destination", "machine", "generation"],
+  "properties": {
+    "destination": {
+      "description": "What to connect to and what to authenticate as, the same resolved shape `probe` and `open` take.",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/destination"
+    },
+    "machine": {
+      "description": "Which installed helper of that machine to run: the install DIRECTORY the coordinator installed into. It is the narrowest honest identity — a lane runs `<dir>/nocx-helper bridge <generation>` and nothing else — and it is the fact both of the coordinator's paths already hold: the install it just completed, and the binary path a reopened session's durable route carries.",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/machine"
+    },
+    "generation": {
+      "description": "The content hash the installer wrote (D7, D21). Naming it is what stops a lane from reaching a DIFFERENT generation's sessions, and what lets two generations coexist on one host while an old one still holds somebody's shell.",
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/generationId"
+    }
+  }
+}

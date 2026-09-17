@@ -55,7 +55,7 @@
  * picker, a directory on disk, a row in the tree, a request in the server's
  * own log, a line on the sshd's stdout.
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -63,6 +63,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  standalone as base,
   appReadyForInput,
   bindEndpoint,
   openImportDestination,

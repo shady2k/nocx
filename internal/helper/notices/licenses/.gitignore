@@ -1,0 +1,11 @@
+# The pinned third-party notices, staged here by
+# third_party/libghostty-vt/scripts/stage-notices.sh — from `make vt-archives`,
+# which is also what verifies the bytes against MANIFEST.json — and embedded by
+# //go:embed all:licenses.
+#
+# The document itself is never committed: the pin is the release, and the
+# release is where a consumer gets it. This committed file is what lets a fresh
+# checkout COMPILE — the `all:` prefix includes dotfiles, so the embed always
+# matches at least this file, and notices.Document answers ErrNotBuilt until
+# the document is staged.
+THIRD_PARTY_LICENSES.txt

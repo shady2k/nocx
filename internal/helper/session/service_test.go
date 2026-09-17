@@ -357,7 +357,7 @@ func TestSpawnPutsTheSessionInTheInventoryWithWhatTheHelperRecorded(t *testing.T
 	if entry.StartedAt == "" {
 		t.Error("no start time: D3 names it among the diagnostics the helper owns")
 	}
-	if entry.Launch.Shell != "/bin/fake" || entry.Launch.Pid != 4242 {
+	if entry.Launch.Local.Shell != "/bin/fake" || entry.Launch.Local.Pid != 4242 {
 		t.Errorf("launch record = %+v, want what the helper spawned", entry.Launch)
 	}
 
@@ -458,16 +458,16 @@ func TestTheWindowBoundIsClampedAndReported(t *testing.T) {
 	svc := newService(t, newSink(), &fakeSpawner{}, limits)
 
 	tooSmall := call[proto.SpawnResult](t, svc, proto.OpSpawn, proto.SpawnParams{WindowBytes: 1024}).Entry
-	if tooSmall.Launch.WindowBytes != limits.MinWindowBytes {
-		t.Errorf("a 1 KiB request got %d, want the floor %d", tooSmall.Launch.WindowBytes, limits.MinWindowBytes)
+	if tooSmall.Launch.WindowBytes() != limits.MinWindowBytes {
+		t.Errorf("a 1 KiB request got %d, want the floor %d", tooSmall.Launch.WindowBytes(), limits.MinWindowBytes)
 	}
 	tooBig := call[proto.SpawnResult](t, svc, proto.OpSpawn, proto.SpawnParams{WindowBytes: 1 << 40}).Entry
-	if tooBig.Launch.WindowBytes != limits.MaxWindowBytes {
-		t.Errorf("a 1 TiB request got %d, want the ceiling %d", tooBig.Launch.WindowBytes, limits.MaxWindowBytes)
+	if tooBig.Launch.WindowBytes() != limits.MaxWindowBytes {
+		t.Errorf("a 1 TiB request got %d, want the ceiling %d", tooBig.Launch.WindowBytes(), limits.MaxWindowBytes)
 	}
 	unset := call[proto.SpawnResult](t, svc, proto.OpSpawn, proto.SpawnParams{}).Entry
-	if unset.Launch.WindowBytes != limits.DefaultWindowBytes {
-		t.Errorf("an unset request got %d, want the default %d", unset.Launch.WindowBytes, limits.DefaultWindowBytes)
+	if unset.Launch.WindowBytes() != limits.DefaultWindowBytes {
+		t.Errorf("an unset request got %d, want the default %d", unset.Launch.WindowBytes(), limits.DefaultWindowBytes)
 	}
 }
 
@@ -919,8 +919,8 @@ func TestResizeReachesThePTY(t *testing.T) {
 	// and a record that silently tracked the current size would be a fact
 	// that goes stale while claiming to be authoritative.
 	inv := call[proto.SessionsResult](t, svc, proto.OpSessions, proto.SessionsParams{})
-	if inv.Sessions[0].Launch.Cols != 80 {
-		t.Errorf("the launch record now says %d columns: it records the launch, not the present", inv.Sessions[0].Launch.Cols)
+	if inv.Sessions[0].Launch.Local.Cols != 80 {
+		t.Errorf("the launch record now says %d columns: it records the launch, not the present", inv.Sessions[0].Launch.Local.Cols)
 	}
 }
 
@@ -942,7 +942,7 @@ func TestObservationIsEvidenceAndNeverOverwritesTheLaunchRecord(t *testing.T) {
 	entry := spawnOne(t, svc)
 	inv := call[proto.SessionsResult](t, svc, proto.OpSessions, proto.SessionsParams{})
 	got := inv.Sessions[0]
-	if got.Launch.Shell != "/bin/fake" || got.Launch.Pid != 4242 {
+	if got.Launch.Local.Shell != "/bin/fake" || got.Launch.Local.Pid != 4242 {
 		t.Fatalf("the launch record was overwritten by observation: %+v", got.Launch)
 	}
 	if got.Observed == nil {
@@ -1021,9 +1021,9 @@ func TestSignalSendsTheRequestedSignalToTheOwnedProcessGroup(t *testing.T) {
 	if got != syscall.SIGTERM {
 		t.Fatalf("signal = %v, want %v", got, syscall.SIGTERM)
 	}
-	if gotPgid != entry.Launch.Pgid {
+	if gotPgid != entry.Launch.Local.Pgid {
 		t.Fatalf("signal pgid = %d, want the launched process group %d",
-			gotPgid, entry.Launch.Pgid)
+			gotPgid, entry.Launch.Local.Pgid)
 	}
 }
 
@@ -1041,6 +1041,28 @@ func TestTheServiceIsNamedAfterTheReservedNameAndTakesNoArgv(t *testing.T) {
 		proto.OpAck: true, proto.OpDetach: true, proto.OpResize: true,
 		proto.OpCloseSession: true, proto.OpSignal: true,
 		proto.OpAdoptLifecycle: true,
+		// The ssh pane (nocx-50w7p.4): a session whose process is a shell
+		// channel on a far host. Its params carry a resolved destination and a
+		// public key — scalars, a map and a byte string — and NO free-form
+		// []string, which is the rule this test exists to hold: the remote
+		// command it results in is the launcher the helper builds, and no
+		// caller can name one.
+		proto.OpSpawnSSH: true,
+		// The screen reads (nocx-ygxjv.3): one asks a session's runtime for
+		// the frame it holds, the other feeds a capture to a PTY-less
+		// emulator. Both take scalars and a session handle, so neither
+		// carries a free-form []string past the registration rule below.
+		proto.OpScreen: true, proto.OpReplay: true,
+		// The session surface's one-shot write path (nocx-6q1uh.6, spec §6):
+		// a consistent read, a signed target minted from it, the write
+		// itself, a non-mutating status poll for the same token, and the
+		// access-epoch bump a revocation sends ahead of a session's queued
+		// intents (§7.2). service.go registers all five (registerOps) —
+		// this list is what the test itself enumerates ops against, so it
+		// went stale the moment that task added them, reporting every one
+		// of them "undeclared" rather than reporting an actual gap.
+		proto.OpSnapshot: true, proto.OpTarget: true, proto.OpIntent: true,
+		proto.OpIntentStatus: true, proto.OpAccessBump: true,
 	}
 	for _, op := range svc.Ops() {
 		if !want[op] {

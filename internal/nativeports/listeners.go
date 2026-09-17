@@ -20,10 +20,10 @@
 //     never to an empty list.
 //
 // The module is deliberately transport-agnostic: it reads the kernel of
-// whatever machine it runs on. The planned remote relay (nocx-if6 phase B)
-// cross-compiles this same module to the far host and ships the results
-// back; the local provider in this package is one consumer, a relay
-// provider later is another, and neither forks the read.
+// whatever machine it runs on. The planned remote helper cross-compiles
+// this same module to the far host and ships the results back; the local
+// provider in this package is one consumer, a helper provider later is
+// another, and neither forks the read.
 package nativeports
 
 import (

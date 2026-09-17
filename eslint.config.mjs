@@ -19,6 +19,12 @@ export default tseslint.config(
       '.claude/**',
       'frontend/**',
       'spike/**',
+      // .internal/ is specs, plans and throwaway measurement spikes — a
+      // spike's reference script is Node written to be read once and deleted,
+      // and holding it to the product's lint is how a measurement turns into
+      // an afternoon of config. 'spike/**' above already says this for the
+      // older location; this is the same rule for where they live now.
+      '.internal/**',
       '*.config.mjs',
       // Playwright run artefacts, for the reason .prettierignore already
       // records: both tools walk the filesystem rather than the git index, so a

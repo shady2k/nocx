@@ -8,11 +8,12 @@
  * Uses its own ports (19890/19891) as prescribed by the brief.
  */
 
-import { test as base, expect } from '@playwright/test'
+import { expect } from '@playwright/test'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  standalone as base,
   VaultBackend,
   appReadyForInput,
   bindEndpoint,

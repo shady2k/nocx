@@ -1172,6 +1172,29 @@ func (s *sqliteContent) ReorderTabs(ctx context.Context, workspaceID string, ids
 // WorkspaceForPane is the derivation §4.5 moved off the session: one join,
 // walked on every ask, so the answer follows a pane that is dragged into
 // another tab instead of going stale in a copy.
+func (s *sqliteContent) PaneCwd(ctx context.Context, paneID string) (string, error) {
+	if s.closed.Load() {
+		return "", ErrClosed
+	}
+	var cwd sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		// Open panes only, on the same reasoning as the walk below: a closed
+		// pane's cwd is where it WAS, and a caller choosing where to start a
+		// program must not be handed the directory of a pane nobody is
+		// looking at any more.
+		`SELECT cwd FROM panes WHERE id = ? AND closed_at IS NULL`, paneID,
+	).Scan(&cwd)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("%w: %s", ErrNoSuchPane, paneID)
+	}
+	if err != nil {
+		return "", err
+	}
+	// NULL and "" are the same fact here — nobody has reported a cwd for this
+	// pane — and the interface says so in one word rather than two.
+	return cwd.String, nil
+}
+
 func (s *sqliteContent) WorkspaceForPane(ctx context.Context, paneID string) (string, error) {
 	if s.closed.Load() {
 		return "", ErrClosed

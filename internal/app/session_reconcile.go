@@ -225,10 +225,21 @@ func reconcileSessions(
 // The default is `hostUnreachable` rather than anything more specific: an
 // error this build cannot classify is still an error, and an unclassified
 // failure must not fall through to something that reads as an answer.
+//
+// THE LOCAL BRANCH IS FIRST AND IT OUTRANKS THE REST (nocx-ie23r.2). Asking
+// this machine is a different act from asking a host: the failure it can
+// produce is a missing, stale or silent socket in the person's own home, and
+// every generic branch below would describe it as somebody else's problem —
+// `connectionRefused` most of all, since a dial to a socket nothing serves is
+// refused by the kernel. The marker is attached at the one place that dials,
+// so an error that carries it is an error about the local endpoint by
+// construction rather than by inspection.
 func causeFor(err error) content.UnreconciledCause {
 	switch {
 	case err == nil:
 		return content.CauseNotYetAsked
+	case errors.Is(err, errLocalEndpointUnreachable):
+		return content.CauseLocalEndpointUnreachable
 	case errors.Is(err, vault.ErrVaultSealed), errors.Is(err, vault.ErrVaultUninitialized),
 		errors.Is(err, vault.ErrNoUnlockClient), errors.Is(err, vault.ErrUnlockSuspended):
 		return content.CauseVaultSealed
@@ -246,8 +257,104 @@ func causeFor(err error) content.UnreconciledCause {
 	// sentinel, so the alternative to reading the words is reporting every
 	// one of them as the same thing. Either way the verdict is unknown, so the
 	// worst a wrong guess costs is a less precise sentence.
-	if strings.Contains(strings.ToLower(err.Error()), "connection refused") {
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "connection refused") {
 		return content.CauseConnectionRefused
 	}
+	// The vault sentinels reached the same way (nocx-xn63t.6.10, round 2):
+	// a REMOTE re-adoption's credential ask crosses the ssh lane's own
+	// reverse-request boundary — this machine's local helper daemon, then
+	// the coordinator's reverse handler, then back — and nothing on that
+	// round trip is a Go error any more by the time it reaches here, only
+	// its message (helper_reverse.go answers a JSON-RPC-shaped error; the
+	// lane's own client reconstructs a string from it). So the
+	// errors.Is(...vault.ErrX) branch above catches a LOCAL session's
+	// direct EnsureUnsealed call and nothing that went out over a lane —
+	// which was every password-authenticated REMOTE session, and is why
+	// retryReconciler's own filter silently retried nothing: every one of
+	// them read as CauseHostUnreachable instead, this test's own words are
+	// the vault's (ErrNoUnlockClient, ErrVaultSealed, ErrUnlockSuspended)
+	// verbatim, so matching them here is the same last resort the line
+	// above already is, not a new risk.
+	switch {
+	case strings.Contains(msg, "no client connected to show unlock prompt"),
+		strings.Contains(msg, "no client attached to unlock the vault"),
+		strings.Contains(msg, "vault is sealed"):
+		return content.CauseVaultSealed
+	}
 	return content.CauseHostUnreachable
+}
+
+// retryReconciler narrows a SessionReconciler's Pending to a FIXED set of
+// session ids, decided once by App.Start's retry (nocx-xn63t.6.10, round 2)
+// from whichever sessions the pre-listen pass left pending with
+// CauseVaultSealed — "the one cause on this list that a person clears in one
+// gesture" (content/reconcile.go). Pending, asked again unfiltered, would
+// otherwise repeat EVERY session still on the pending row, including ones
+// already judged VerdictLive (the sqlite reconciler keeps a live session's
+// row pending on purpose) — and helperRegistry.inventories() does not cover
+// every carrier a session might be judged through, a LOCAL one least of all,
+// so a second Readopt attempt against an already-attached session is a
+// second Attach racing the first for its one write lease (nocx-k6p18.16),
+// not a no-op; TestASessionsScreenOutlivesTheCoordinatorThatOpenedIt is what
+// caught the retry doing exactly that before this filter existed.
+//
+// THE SET IS FIXED RATHER THAN RE-READ BY CAUSE ON EVERY POLL, and that is
+// the second thing this type had to get right, not a simplification of the
+// first: a retry ATTEMPT's own per-try bound can itself expire while still
+// waiting on the vault (Vault.EnsureUnsealed's suspend, cut off by
+// readoptPass's own ctx), and that "context deadline exceeded" crosses the
+// same ssh-lane reverse-request boundary the original refusal did, arriving
+// at causeFor as a bare string with no surviving Go sentinel — so it can
+// read back as CauseTimedOut or CauseHostUnreachable on the very next Pending
+// call. A cause-filtered Pending would then drop the session from its own
+// retry the moment one attempt was unlucky about when in its window the
+// person answered — measured directly: the retry's first attempt timed out
+// one second after the container's own log showed the vault unsealed, its
+// cause read back as something other than vaultSealed, and an earlier,
+// per-cause-filtered version of this type stopped retrying for good, one
+// attempt short of the fix actually working. The fixed id set does not need
+// to shrink for correctness either: once a session is live,
+// reconcileSessions finds it through helperRegistry.inventories() and asks
+// LiveSessions rather than re-running Readopt, which is cheap — retrying a
+// resolved id for the rest of the budget costs one inventory lookup, not a
+// re-adoption attempt. retryVaultSealedSessions still removes an id once an
+// inventory owns it, so the loop can stop early rather than spending the
+// whole budget once everything is settled.
+type retryReconciler struct {
+	content.SessionReconciler
+	ids map[string]struct{}
+}
+
+func (r retryReconciler) Pending(ctx context.Context) ([]content.PendingSession, error) {
+	all, err := r.SessionReconciler.Pending(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := all[:0]
+	for _, p := range all {
+		if _, ok := r.ids[p.SessionID]; ok {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+// vaultSealedSessionIDs reads Pending ONCE, right after the pre-listen pass,
+// and answers the fixed set retryVaultSealedSessions polls for the rest of
+// this run's startup — see retryReconciler's own comment for why fixed,
+// read once, beats re-filtering by cause on every later poll.
+func vaultSealedSessionIDs(ctx context.Context, rec content.SessionReconciler, logger *slog.Logger) map[string]struct{} {
+	pending, err := rec.Pending(ctx)
+	if err != nil {
+		logger.Warn("could not read which sessions are pending for the vault-sealed retry", "error", err)
+		return nil
+	}
+	ids := make(map[string]struct{})
+	for _, p := range pending {
+		if p.Cause == content.CauseVaultSealed {
+			ids[p.SessionID] = struct{}{}
+		}
+	}
+	return ids
 }

@@ -1,0 +1,356 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.schema.json",
+  "title": "HelperABISSHVocabulary",
+  "description": "The shared vocabulary of the helper ABI's ssh service: what a credential reference is, what a probe can answer, what a destination is, which channels this generation opens, where a channel connects, and the identity of a remote listener. It declares $defs and nothing else, so one concept has one declaration (AD-8) \u2014 the same discipline identities.schema.json applies to sessions, applied to the second subject this wire grew (nocx-50w7p.2, extended by nocx-50w7p.3's proxied channels, nocx-50w7p.8's forwards and nocx-50w7p.11's jump routes and prompt rung). The service speaks in BOTH directions: `probe`, `open`, `close`, `forward` and `unforward` are forward ops the helper answers, and `secret`, `sign`, `prompt`, `verify-host-key` and `trust-host-key` are reverse ops the helper ASKS the coordinator, over the same connection its own request arrived on.",
+  "$defs": {
+    "credential": {
+      "description": "An opaque handle on one credential, minted by the COORDINATOR and echoed back by the helper verbatim. The helper never interprets either field, and that is the whole authorization story on this wire: it cannot ask for material the coordinator did not name. The spelling is namespaced \u2014 `vault:<id>`, `file:<path>`, `agent:<key fingerprint>` \u2014 and parsed only by the coordinator, which is what lets one wire carry a stored key, an inline key file and an agent key without the helper knowing which it holds. PassphraseRef exists because a key and the passphrase that unlocks it are two stored secrets \u2014 resolving one where the other was meant is how a wrong-but-valid password gets tried against a server \u2014 and it is a REFERENCE and never material: the coordinator is the party that parses a private key, so a passphrase never reaches the helper at all.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref"],
+      "properties": {
+        "ref": {
+          "description": "Names the material the credential's auth kind presents: the password for password auth, the private key for key auth.",
+          "type": "string",
+          "minLength": 1
+        },
+        "passphraseRef": {
+          "description": "Names the passphrase of an encrypted key. Omitted for a password credential and for an unencrypted key.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "authKind": {
+      "description": "How a dial authenticates, in a closed set. It is the COORDINATOR's decision and not the helper's: the coordinator is the party that knows which credential it holds, and a helper that guessed would send the wrong rung of the ladder against somebody's machine. `password` presents a stored secret; `key` proves possession of a private key by signing, and it covers all THREE places a key lives (the vault, an inline file, the ssh-agent) because the wire only ever needs a signature; `interactive` answers the server's OWN keyboard-interactive questions from the coordinator's UI and carries no credential at all, because the person is the credential.",
+      "type": "string",
+      "enum": ["password", "key", "interactive"]
+    },
+    "purpose": {
+      "description": "What the material a helper asks for is FOR, in a closed set. The purpose is load-bearing rather than decorative: the read is stanced (internal/credential), so a password and a passphrase are resolved through different declarations, different reasons in the vault's own audit, and \u2014 where a profile carries policy \u2014 potentially different answers.",
+      "type": "string",
+      "enum": ["password", "passphrase"]
+    },
+    "probeOutcome": {
+      "description": "The closed set of answers a probe can give. The spellings are ssh.ProbeOutcome's own, character for character: the coordinator classifies its own probes with ssh.ClassifyProbeError, and a second vocabulary for one fact is what AD-8 exists to prevent. `accepted` and `host-key-unknown` are different answers for the same reason a first connection is not a failure; `host-key-changed` is never conflated with it, because a changed key is the one signature of a machine in the middle. An unclassifiable failure is NOT a member here \u2014 it is a refusal of the op, so that 'the server refused this credential' and 'nobody knows what happened' stay apart.",
+      "type": "string",
+      "enum": [
+        "accepted",
+        "rejected",
+        "unreachable",
+        "host-key-unknown",
+        "host-key-changed",
+        "needs-interactive"
+      ]
+    },
+    "hostKeyVerdict": {
+      "description": "The closed set of answers to 'what is this host key'. Naming three outcomes is what lets a helper \u2014 which links no knownhosts and has no callback to consult \u2014 act on the coordinator's answer: `trusted` is the absence of a host-key error in internal/ssh rather than a value it stores, and `changed` must never be answered as `unknown`, because accepting an unknown key and accepting a changed one are the two different decisions this vocabulary exists to keep apart.",
+      "type": "string",
+      "enum": ["trusted", "changed", "unknown"]
+    },
+    "identity": {
+      "description": "The credential a dial authenticates with: a password's material, or the KEY QUEUE a key dial declares. Which field a kind uses is a decision rather than a convention, and this schema enforces it in both directions \u2014 `credential` belongs to password, `keys` belongs to key, and BOTH are forbidden on the interactive rung, where the person IS the credential. A key is a LIST because ssh's `publickey` method IS a query per key: the helper declares each public half and the far side answers whether it would accept a signature with it, so a connection whose key is not the first one offered is an ordinary connection \u2014 an agent holding several keys, a home directory with more than one default key in it \u2014 rather than a failed authentication, and not a second ATTEMPT against one host, which is what MaxAuthTries bounds. Each entry carries the reference the coordinator signs through, because the private half never crosses: `sign` is exactly a challenge and a signature.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["auth"],
+      "properties": {
+        "credential": {
+          "$ref": "#/$defs/credential"
+        },
+        "auth": {
+          "$ref": "#/$defs/authKind"
+        },
+        "keys": {
+          "description": "The key QUEUE this identity offers, in the order the helper must DECLARE it, and it is required for key auth \u2014 a helper asked to sign with a key it was not given would have to invent one. One entry for a credential the coordinator named, and several where OpenSSH itself would offer several; the order is the offer order, not a preference.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/keyOffer"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "auth": {
+                "const": "password"
+              }
+            },
+            "required": ["auth"]
+          },
+          "then": {
+            "required": ["credential"],
+            "properties": {
+              "keys": false
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "auth": {
+                "const": "key"
+              }
+            },
+            "required": ["auth"]
+          },
+          "then": {
+            "required": ["keys"],
+            "properties": {
+              "credential": false
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "auth": {
+                "const": "interactive"
+              }
+            },
+            "required": ["auth"]
+          },
+          "then": {
+            "properties": {
+              "credential": false,
+              "keys": false
+            }
+          }
+        }
+      ]
+    },
+    "keyOffer": {
+      "description": "ONE key of an identity's queue: the public half the helper declares, and the reference it signs through when the far side asks for a signature. The two travel together because they are one fact at two moments of the same handshake \u2014 an entry whose reference did not belong to its public half would be a signature with a key nobody asked about, which is the shape that mismatch would take.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["credential", "publicKey"],
+      "properties": {
+        "credential": {
+          "$ref": "#/$defs/credential"
+        },
+        "publicKey": {
+          "description": "The wire-format public key blob (RFC 4253 \u00a76.6) as base64. Public material: it is what the peer learns on the first packet, and it is what lets the helper declare which key it is offering before it can be asked to sign with it.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "destination": {
+      "description": "One RESOLVED destination: the address, the account, what to authenticate as, the route it is reached through, and the identity its host key is stored under. Its address parts are typed fields and never one `user@host:port` string, because a spelling would have to be parsed again on the far side by something that is not allowed to guess. This is the declaration `probe`, `open`, `forward`, `lease` and `lane` all take \u2014 a probe that carried its own copy of the same three facts would be a second place for a route to be forgotten, which is the difference between 'does this credential work' being answered about the host a person named and about a host they cannot reach.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "port", "user", "identity"],
+      "properties": {
+        "host": {
+          "description": "The dial target: an address, never an alias, because it is what the coordinator's own dial path resolved.",
+          "type": "string",
+          "minLength": 1
+        },
+        "port": {
+          "description": "The resolved port. Required rather than defaulted here: a helper that picked 22 would be making a decision the profile already made.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "user": {
+          "description": "The resolved account.",
+          "type": "string",
+          "minLength": 1
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "jumps": {
+          "description": "The hosts this destination is reached THROUGH, in dial order: Jumps[0] is dialed from this machine, each next hop through the one before it, and the destination through the last. A flat, ORDERED LIST rather than a nesting, so traversal order has exactly one spelling; the coordinator flattens its own recursive jump chain into it and the helper walks it from the front.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/hop"
+          }
+        },
+        "knownHostsAddr": {
+          "description": "The address this destination's host key is STORED under \u2014 the coordinator's own storage identity for it, which is NOT the dial address when the destination is reached through a jump host. The derivation is the coordinator's (known_hosts is its file and the route digest is its rule), and it travels with the destination so a helper cannot look up a line nobody wrote. Empty means the dial address, which is the direct route's answer.",
+          "type": "string",
+          "minLength": 1
+        },
+        "connectionName": {
+          "description": "The saved profile's display name, both fields the COORDINATOR's own value and echoed back unchanged on `password-prompt` (nocx-y6fh7 item 4, round 3): the coordinator that resolved this destination is the same one that will answer a password ask, so it puts what it already knows on the request rather than asking the helper to look anything up. Empty for a destination with no saved profile.",
+          "type": "string",
+          "minLength": 1
+        },
+        "profileId": {
+          "description": "The saved profile's id, for the same reason and by the same rule as connectionName.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "channelKind": {
+      "description": "The closed set of PROXIED CHANNELS this generation opens. A kind names a protocol the helper itself implements; it is never a command, an argv or a free-form string list \u2014 host.Register refuses a bare []string outright (D3) \u2014 so a caller that wants a different channel adds a member here in a generation, with a protocol bump and a test. `sftp` is a session channel carrying the sftp SUBSYSTEM: the helper moves its bytes and does not speak the protocol, which is why pkg/sftp stays in the coordinator. `direct-tcpip` is a channel to an ADDRESS on the far side's network: it is the outbound half of a forward (-L) and of every SOCKS CONNECT, and it takes the `target` a subsystem open does not (nocx-50w7p.8).",
+      "type": "string",
+      "enum": ["sftp", "direct-tcpip"]
+    },
+    "channelId": {
+      "description": "One proxied channel's identity, minted by the helper and echoed verbatim by the coordinator. It is 32 hex characters \u2014 sixteen raw bytes on the data plane \u2014 and it is opaque in both directions: the coordinator never derives it and the helper never lets a caller choose it.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "channelTarget": {
+      "description": "One address a channel is opened to, TYPED: two fields and never one \"host:port\" string, because a spelling would have to be parsed again on the far side by something that is not allowed to guess, and the one caller that legitimately carries a name rather than an address \u2014 a SOCKS CONNECT \u2014 still carries a NAME and a PORT. An IPv6 literal therefore crosses without brackets and is joined there.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "port"],
+      "properties": {
+        "host": {
+          "description": "The address or name to connect to, resolved on the FAR side. Empty is refused: an address that names nothing is not a target.",
+          "type": "string",
+          "minLength": 1
+        },
+        "port": {
+          "description": "The port, 0-65535. 0 is legal on a LISTENER (the server allocates, and the answer carries what it allocated) and refused on a direct-tcpip target, where the far side would answer a connection to port 0 with a refusal of its own.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        }
+      }
+    },
+    "forwardId": {
+      "description": "One remote listener's identity, minted by the helper and echoed verbatim by the coordinator. It is a SEPARATE identity from a channel id rather than a second use of it: a channel is one stream somebody holds, a listener is the thing streams arrive ON, and the two are created and ended by different ops (`close` versus `unforward`). An id that could be either would make those interchangeable at the type level while meaning different things on the wire.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "leaseId": {
+      "description": "One probe lease's identity: a reference the HELPER holds on a pooled ssh connection, minted by the helper and echoed verbatim by the coordinator. It is 32 hex characters, opaque in both directions, and it is neither a channelId nor a forwardId because the three name different things that different ops end: a channel is a stream somebody holds, a listener is the thing streams arrive on, and a lease is a REFERENCE to a connection held for as long as a caller wants commands run on the same transport.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "probeRun": {
+      "description": "What every named probe needs and nothing more: the lease it runs on. It is one $def and not five inline fields so that 'a probe runs on a lease' has one declaration \u2014 and so a probe added later cannot grow a destination of its own, which would be a second way to say which connection this is.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lease"],
+      "properties": {
+        "lease": {
+          "description": "The reference this probe runs under. A lease this helper does not hold \u2014 a helper that restarted holds nothing \u2014 is refused as exec_lost rather than as a bad request: the connection it named is gone, which is the fact the caller acts on.",
+          "$ref": "#/$defs/leaseId"
+        }
+      }
+    },
+    "portProbe": {
+      "description": "One rung of port discovery's ladder, in the spellings internal/discovery reports as 'which dialect produced this sample'. A NAME and not a command: the caller chooses which probe to run, and the helper owns what it is (the text lives in internal/remoteprobe, which both ends link).",
+      "type": "string",
+      "enum": ["ss", "netstat", "busybox-netstat", "lsof", "sockstat"]
+    },
+    "commandNamesPhase": {
+      "description": "Which half of the PATH enumeration to run, in a closed set of two. Two members rather than a flag because they are bounded differently: the cheap invalidation probe runs once per session, the full scan runs once per target and is shared.",
+      "type": "string",
+      "enum": ["probe", "scan"]
+    },
+    "probeExecResult": {
+      "description": "What every named probe answers: the captured streams, the remote exit status, and whether a capture bound was hit. It is ONE shape for all five probes deliberately \u2014 each caller classifies these facts its own way (discovery reads exit 127 as 'tool absent' and lsof's exit 1 as a valid empty sample, completion rejects an unframed answer, deploy refuses a nonzero status outright) and none of those are decisions the helper may take on the caller's behalf. `truncated` means the answer is a PREFIX: a partial table must never be read as a complete one, which for port discovery is the difference between 'no listeners' and 'I could not see them'.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stdout", "stderr", "exitStatus", "truncated"],
+      "properties": {
+        "stdout": {
+          "description": "The command's standard output, base64 in JSON ([]byte). Bounded by the helper's own capture cap; reaching it sets truncated rather than quietly returning less.",
+          "type": "string",
+          "contentEncoding": "base64"
+        },
+        "stderr": {
+          "description": "The command's standard error, same encoding. Carried rather than merged: completion rejects an unframed answer and discovery reports a bounded excerpt, and both need to see what the far side said.",
+          "type": "string",
+          "contentEncoding": "base64"
+        },
+        "exitStatus": {
+          "description": "The remote command's exit status, and it is an ANSWER rather than a failure: a missing tool exits 127, lsof exits 1 when nothing matched, a policy wrapper exits whatever it likes. The helper never folds a nonzero status into a refusal.",
+          "type": "integer",
+          "minimum": -1
+        },
+        "truncated": {
+          "description": "True when the capture bound was hit or the remote died mid-write \u2014 the payload is a prefix and must be treated as one.",
+          "type": "boolean"
+        }
+      }
+    },
+    "machine": {
+      "description": "The identity of ONE machine's installed helper, as a lane names it: the install DIRECTORY the coordinator installed the generation into. A helper install is content-addressed and immutable (D7) \u2014 `deploy.Ensure` writes `<home>/.nocx/helper/<version>-<goos>-<goarch>-<hash>/nocx-helper`, and the coordinator records that directory as the install's own identity (`consent.Install.Path`, and the route a reopened session's durable record carries). The directory is therefore the ONE fact both paths already hold, and it is what makes a command unnecessary on this wire: the helper appends the binary's name and the bridge subcommand from its own install layout (D3), so the only thing a caller can point a lane at is a directory holding a helper.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dir"],
+      "properties": {
+        "dir": {
+          "description": "Absolute path of the install directory, as `deploy.Ensure` returned it (`consent.Install.Path` is the same value).",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "hostKeyEvidence": {
+      "description": "What a handshake knows about the host key it was offered or refused, in a shape that can cross a process boundary: the two addresses the key is known by, its algorithm, its wire bytes so an accept can be recorded without a second handshake, its fingerprint, and \u2014 for a `changed` key only \u2014 the recorded fingerprint it differs from. It exists because nothing carries a Go value across this socket: the coordinator REBUILDS ssh.ErrUnknownHostKey / ssh.ErrHostKeyMismatch from these fields, and every path that switched on the type (the accept sheet, the mismatch warning, the settings surface's hostKeyInfoFromError) goes on working unchanged. `expected` is present exactly when the answer is `changed`, so a changed key can never be rendered without the value it changed from.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["addr", "knownHostsAddr", "algorithm", "key", "fingerprint"],
+      "properties": {
+        "addr": {
+          "description": "The address the handshake was against.",
+          "type": "string"
+        },
+        "knownHostsAddr": {
+          "description": "The STORAGE identity the key was looked up under: the same as `addr` for a direct route, and the field the accept path must write back.",
+          "type": "string"
+        },
+        "algorithm": {
+          "description": "The offered key's ssh algorithm, e.g. `ssh-ed25519`.",
+          "type": "string"
+        },
+        "key": {
+          "description": "The offered public key's wire bytes (RFC 4253 \u00a76.6), base64 in JSON \u2014 Go marshals []byte that way \u2014 so the accept path can record it without a second handshake.",
+          "type": "string"
+        },
+        "fingerprint": {
+          "description": "The offered key's SHA256 fingerprint.",
+          "type": "string"
+        },
+        "expected": {
+          "description": "The recorded fingerprint(s) a `changed` key differs from. Present exactly then; a `host-key-unknown` answer has none.",
+          "type": "string"
+        }
+      }
+    },
+    "hop": {
+      "description": "One INTERMEDIATE host a destination is reached through: a destination in every respect except that it carries no route of its own. `additionalProperties: false` is what says so \u2014 a hop cannot nest a route inside a route, which would leave the helper deciding which traversal order was meant. Each hop authenticates separately and its host key is verified separately, because a route is a chain of independent handshakes and not one connection with a longer address.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "port", "user", "identity"],
+      "properties": {
+        "host": {
+          "description": "The hop's dial target: an address, never an alias, for the reason a destination's is.",
+          "type": "string",
+          "minLength": 1
+        },
+        "port": {
+          "description": "The hop's resolved port.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "user": {
+          "description": "The hop's resolved account. It is the hop's own and never the destination's: a bastion is a different machine with different accounts on it.",
+          "type": "string",
+          "minLength": 1
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "knownHostsAddr": {
+          "description": "The address this hop's host key is STORED under, when that is not its dial address. A hop that is itself reached through a later hop has a route-derived one. Empty means the dial address, which is the ordinary case.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

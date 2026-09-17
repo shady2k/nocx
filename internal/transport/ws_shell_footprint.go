@@ -32,7 +32,6 @@ import (
 	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
-	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 )
 
@@ -43,11 +42,16 @@ import (
 const footprintPath = "~/.nocx"
 
 // RemoteUninstaller removes nocx's shell integration from a remote host.
-// The single implementation is *ssh.RealClient, whose UninstallIntegration
-// acquires the pooled connection the way Connect does, asks the SFTP carrier
-// for the remote home and delegates Publisher.Uninstall to it — the raw SSH
-// client never leaves internal/ssh. Wired at the composition root; when not
-// wired, shell.footprint.uninstall answers an error and removes nothing.
+//
+// The single implementation is the composition root's carrier
+// (internal/app's remoteInstallerAdapter.UninstallIntegration), which rides
+// THIS MACHINE'S HELPER: a probe lease answers the account's home and an sftp
+// channel off the same pooled connection carries the removal. It no longer
+// reaches internal/ssh's client at all, and that is nocx-50w7p.5's change
+// rather than a detail of it — the coordinator holds no ssh client now, so a
+// capability here cannot be one whose implementation dials. Wired at the
+// composition root; when not wired, shell.footprint.uninstall answers an error
+// and removes nothing.
 type RemoteUninstaller interface {
 	UninstallIntegration(ctx context.Context, host string, opts ...ssh.ConnectOption) (removed, conflicts []string, err error)
 }
@@ -133,12 +137,11 @@ type footprintHandlers struct {
 	// footprint without connecting. When nil, the helpers list is empty —
 	// nothing is claimed installed that cannot be shown.
 	helperInstalls *consent.InstallStore
-	// consent is the per-machine relay-tier answer store (remote-helper
-	// design D8): the write half shell.footprint.consent persists grants
-	// through. When nil, the method refuses — the consent prompt is never
-	// offered by a server that cannot record the answer.
-	consent  *consent.Store
-	registry session.Registry
+	// consent is the per-machine helper-tier answer store (ADR-0034,
+	// ADR-0068): shell.footprint.helperUninstall reads and revokes it
+	// (ADR-0034 §5.3 — revocation stays on the footprint screen). When
+	// nil, revocation is skipped rather than claimed.
+	consent *consent.Store
 	// helperUninstaller removes a helper install tree on a remote host
 	// (D25); closer closes every live helper channel on the machine
 	// BEFORE the tree is removed — the order D25 is written around. Both
@@ -159,66 +162,12 @@ func WithHelperInstallStore(store *consent.InstallStore) WSServerOption {
 	return func(s *WSServer) { s.helperInstalls = store }
 }
 
-// WithHelperConsentStore attaches the per-machine relay-tier answer store
-// behind shell.footprint.consent (remote-helper design D8): the accept
-// RPC the git panel's consent prompt calls. Without it the method refuses
-// — an accept offered but not persistable would fail at click time, which
-// AGENTS.md rule 1 forbids.
+// WithHelperConsentStore attaches the per-machine helper-tier answer store
+// behind shell.footprint.helperUninstall's revocation (ADR-0034 §5.3): the
+// footprint screen's remove clears the machine's consent along with its
+// install tree. Without it revocation is skipped rather than claimed.
 func WithHelperConsentStore(store *consent.Store) WSServerOption {
 	return func(s *WSServer) { s.helperConsent = store }
-}
-
-// shellFootprintConsentResult is the result of shell.footprint.consent,
-// matching contracts/shell.footprint.consent.schema.json exactly: the
-// machine has been raised to the relay tier (D8).
-type shellFootprintConsentResult struct {
-	State string `json:"state"`
-}
-
-// handleConsent serves shell.footprint.consent: the git panel's Accept —
-// raise the session's machine to the relay tier (D8). The machine is
-// resolved from the SESSION the requesting connection owns (connState,
-// D15) and keyed by its host public-key fingerprint — never a
-// client-supplied fingerprint, never a session the caller does not own.
-// An empty fingerprint refuses: consent under one would make every
-// machine share one answer (consent design §3.2).
-//
-//	--> {"jsonrpc":"2.0","id":1,"method":"shell.footprint.consent","params":{"sessionId":"…"}}
-//	<-- {"jsonrpc":"2.0","id":1,"result":{"state":"granted"}}
-func (h footprintHandlers) handleConsent(ctx context.Context, state *connState, req jsonrpcRequest) {
-	if h.consent == nil {
-		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "shell.footprint.consent is not available (no consent store wired)"})
-		return
-	}
-	var params struct {
-		SessionID string `json:"sessionId"`
-	}
-	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
-		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: sessionId required"})
-		return
-	}
-	sid := session.ID(params.SessionID)
-	if !state.has(sid) {
-		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sessionId"})
-		return
-	}
-	sess, err := h.registry.Get(sid)
-	if err != nil {
-		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sessionId"})
-		return
-	}
-	fp := sess.HostKeyFingerprint()
-	if fp == "" {
-		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: this session has no host key — consent cannot be granted"})
-		return
-	}
-	if err := h.consent.Grant(fp); err != nil {
-		h.log.Warn("shell.footprint.consent failed", "host", sess.Host(), "error", err)
-		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "shell.footprint.consent: " + err.Error()})
-		return
-	}
-	h.log.Info("helper consent granted", "host", sess.Host())
-	_ = h.r.TryResult(req.ID, mustMarshal(shellFootprintConsentResult{State: string(consent.Granted)}))
 }
 
 // shellFootprintDestination is one destination's footprint on the wire,

@@ -84,6 +84,11 @@ type lifecycleAdoption struct {
 	adapter *lifecyclechannel.Adapter
 	peer    net.Conn
 	lane    lifecycle.LaneID
+	// log is the readopt pass's own logger, carried so the bridge this
+	// adoption starts can say what it carries. It is bound here rather than
+	// reached for at attachTo, which runs on the transport's goroutine with
+	// no registry in scope.
+	log log.Logger
 }
 
 // adoptLifecycle asks the helper for the identity this session's shell is
@@ -94,7 +99,7 @@ type lifecycleAdoption struct {
 // the session unusable and must not refuse the re-adoption. The pane comes
 // back either way — live output, restored ledger, a working terminal — and the
 // difference is whether it goes on producing blocks or says why it cannot.
-func (rp *readoptPass) adoptLifecycle(ctx context.Context, c *client.Client, entry client.SessionEntry) lifecycleAdoption {
+func (rp *readoptPass) adoptLifecycle(ctx context.Context, carrier hostedCarrier, entry client.SessionEntry) lifecycleAdoption {
 	kernel, ok := rp.registry.lifecycle.(lifecyclechannel.AdoptingKernel)
 	if !ok || rp.registry.lifecycle == nil {
 		// A coordinator built without a lifecycle kernel (a headless tool, a
@@ -102,7 +107,7 @@ func (rp *readoptPass) adoptLifecycle(ctx context.Context, c *client.Client, ent
 		// never offers shell integration to anybody.
 		return lifecycleAdoption{}
 	}
-	launch, err := c.AdoptLifecycle(ctx, entry.HostSessionID)
+	launch, err := carrier.AdoptLifecycle(ctx, entry.HostSessionID)
 	if err != nil {
 		rp.registry.log.Warn("the lifecycle channel of a session taken back could not be re-established; its pane will not produce blocks",
 			"session_id", entry.HostSessionID.Session, "error", err)
@@ -150,6 +155,7 @@ func (rp *readoptPass) adoptLifecycle(ctx context.Context, c *client.Client, ent
 		adapter: adapter,
 		peer:    peerConn,
 		lane:    adapter.Lane(),
+		log:     log.NewSlogAdapter(rp.registry.log),
 	}
 }
 
@@ -165,7 +171,9 @@ func (a lifecycleAdoption) attachTo(open *transport.HostedSessionOpen, attached 
 	var abortOnce sync.Once
 	open.LifecycleLane = a.lane
 	open.StartLifecycle = func() {
-		startOnce.Do(func() { bridgeLifecycle(peer, attached.Lifecycle()) })
+		startOnce.Do(func() {
+			bridgeLifecycle(a.log, adapter.TransportID(), peer, attached.Lifecycle())
+		})
 	}
 	open.AbortLifecycle = func() {
 		abortOnce.Do(func() {

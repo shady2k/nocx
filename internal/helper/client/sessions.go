@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/pty"
 )
 
 // HostSessionID is the coordinator's view of a helper-owned session identity.
@@ -57,6 +60,11 @@ type ExitStatus struct {
 	Code   int    `json:"code"`
 	Signal int    `json:"signal,omitempty"`
 	At     string `json:"at"`
+	// Cause is proto.SessionExitCause's wire spelling, carried as a plain
+	// string for the reason every other field on this boundary is: nothing
+	// above internal/helper/client sees a proto type. Empty is the ordinary
+	// case (nocx-y6fh7 item 6, round 3).
+	Cause string `json:"cause,omitempty"`
 }
 
 // Error lets the existing session.ExitOutcome mapping consume the helper's
@@ -69,11 +77,62 @@ func (e *ExitStatus) Error() string {
 
 func (e *ExitStatus) ExitCode() int { return e.Code }
 
+// ExitCause exposes Cause through the same optional-interface seam
+// session.ExitOutcome already probes ExitCode() through, so a keepalive-lost
+// connection reads as Interrupted rather than an anonymous Exited (nocx-y6fh7
+// item 6, round 3).
+func (e *ExitStatus) ExitCause() string { return e.Cause }
+
+// RemoteLaunch is the SSH branch of the wire's launch union
+// (proto.SSHLaunchRecord, nocx-50w7p.4): a session whose process is a shell
+// channel on a connection this machine's helper dialed.
+//
+// # Why it is a second field rather than a second Launch type
+//
+// The wire carries the union as `launch.kind` plus one populated branch, and
+// this boundary projects it as TWO GO VALUES: `Launch` for a process on this
+// machine and `RemoteLaunch` for one that is not, distinguished by which is
+// non-nil. That is a projection and not a second encoding — nothing above this
+// boundary switches on a string tag, and the two branches are two different
+// sets of facts rather than two spellings of one.
+//
+// It carries no pid, no pgid and no cwd, by CONSTRUCTION and not by omission:
+// the process is on another machine, its pid belongs to that machine's
+// namespace, and the directory it started in is that machine's answer. The
+// wire's ssh branch has no such keys at all, so nothing here can invent one.
+type RemoteLaunch struct {
+	Host        string `json:"host"`
+	Port        int    `json:"port"`
+	User        string `json:"user"`
+	IdentityRef string `json:"identityRef"`
+	Shell       string `json:"shell"`
+	Cwd         string `json:"cwd"`
+	Cols        uint16 `json:"cols"`
+	Rows        uint16 `json:"rows"`
+	WindowBytes int64  `json:"windowBytes"`
+}
+
 type SessionEntry struct {
-	HostSessionID   HostSessionID `json:"hostSessionId"`
-	Workspace       string        `json:"workspace"`
-	StartedAt       string        `json:"startedAt"`
-	Launch          LaunchRecord  `json:"launch"`
+	HostSessionID HostSessionID `json:"hostSessionId"`
+	Workspace     string        `json:"workspace"`
+	StartedAt     string        `json:"startedAt"`
+	// Launch is the LOCAL branch of the wire's launch union: the record a
+	// helper-hosted local pane has always had, unchanged.
+	//
+	// IT IS ABSENT — never a record of zeros — when RemoteLaunch is present, and
+	// that absence is load-bearing (nocx-s8mfn). The contract this DTO feeds
+	// (contracts/sessions.inventory.schema.json) carries the union and requires
+	// exactly one branch, because a reader that found a `launch` record beside a
+	// remote one would be reading a pid of 0: the kernel's scheduler rather than
+	// the process the helper spawned, on a machine the session is not on. The
+	// projection is therefore "one value the other nil" — what the wire's own
+	// oneOf says — rather than a filled-in local record with a zero in it.
+	Launch *LaunchRecord `json:"launch,omitempty"`
+	// RemoteLaunch is the SSH branch, present exactly when this session's
+	// process is a remote shell channel. When it is present, Launch is nil:
+	// there is no process on this machine to describe, and the wire sends no
+	// local record for one.
+	RemoteLaunch    *RemoteLaunch `json:"remoteLaunch,omitempty"`
 	Observed        *Observation  `json:"observed"`
 	Window          WindowSpan    `json:"window"`
 	LifecycleWindow WindowSpan    `json:"lifecycleWindow"`
@@ -81,6 +140,9 @@ type SessionEntry struct {
 	WriterEpoch     uint64        `json:"writerEpoch"`
 	Exit            *ExitStatus   `json:"exit"`
 }
+
+// IsRemote reports whether this session's process is on a remote host.
+func (e SessionEntry) IsRemote() bool { return e.RemoteLaunch != nil }
 
 // Sessions asks one helper generation for the sessions it currently holds.
 // An empty answer is an answer and is returned as a non-nil empty slice.
@@ -147,14 +209,17 @@ func (c *Client) AdoptLifecycle(ctx context.Context, id HostSessionID) (*proto.L
 	return result.Lifecycle, nil
 }
 
-// Signal sends one signal to the helper-owned process group.
-func (c *Client) Signal(ctx context.Context, id HostSessionID, sig int) error {
+// Signal sends one signal to a helper-owned process group. A zero pgid means
+// the session's own group; a named one is the addressee a stop ladder resolved
+// once and keeps (proto.SignalParams.Pgid).
+func (c *Client) Signal(ctx context.Context, id HostSessionID, pgid, sig int) error {
 	return c.Call(ctx, proto.ServiceSession, proto.OpSignal, proto.SignalParams{
 		Session: proto.HostSessionID{
 			Generation: proto.GenerationID(id.Generation),
 			Session:    id.Session,
 		},
 		Signal: sig,
+		Pgid:   pgid,
 	}, nil)
 }
 
@@ -163,14 +228,31 @@ func mapSessionEntry(in proto.SessionEntry) SessionEntry {
 		HostSessionID: HostSessionID{Generation: string(in.Session.Generation), Session: in.Session.Session},
 		Workspace:     string(in.Workspace),
 		StartedAt:     in.StartedAt,
-		Launch: LaunchRecord{
-			Shell: in.Launch.Shell, Cwd: in.Launch.Cwd, Pid: in.Launch.Pid,
-			Pgid: in.Launch.Pgid, Cols: in.Launch.Cols, Rows: in.Launch.Rows,
-			WindowBytes: in.Launch.WindowBytes,
+		Window:        WindowSpan{Base: uint64(in.Window.Base), Written: uint64(in.Window.Written)},
+		LifecycleWindow: WindowSpan{
+			Base: uint64(in.LifecycleWindow.Base), Written: uint64(in.LifecycleWindow.Written),
 		},
-		Window:          WindowSpan{Base: uint64(in.Window.Base), Written: uint64(in.Window.Written)},
-		LifecycleWindow: WindowSpan{Base: uint64(in.LifecycleWindow.Base), Written: uint64(in.LifecycleWindow.Written)},
-		WriterEpoch:     uint64(in.WriterEpoch),
+		WriterEpoch: uint64(in.WriterEpoch),
+	}
+	// The union is projected as two Go values, and exactly one of them is
+	// populated — the wire enforces that with oneOf, so this switch is a
+	// translation rather than a guess. A record that somehow carried neither
+	// branch leaves BOTH zero, which is the honest projection of "this helper
+	// described no process": it is not a local session with pid 0.
+	switch {
+	case in.Launch.Local != nil:
+		out.Launch = &LaunchRecord{
+			Shell: in.Launch.Local.Shell, Cwd: in.Launch.Local.Cwd, Pid: in.Launch.Local.Pid,
+			Pgid: in.Launch.Local.Pgid, Cols: in.Launch.Local.Cols, Rows: in.Launch.Local.Rows,
+			WindowBytes: in.Launch.Local.WindowBytes,
+		}
+	case in.Launch.SSH != nil:
+		out.RemoteLaunch = &RemoteLaunch{
+			Host: in.Launch.SSH.Host, Port: in.Launch.SSH.Port, User: in.Launch.SSH.User,
+			IdentityRef: in.Launch.SSH.IdentityRef, Shell: in.Launch.SSH.Shell,
+			Cwd: in.Launch.SSH.Cwd, Cols: in.Launch.SSH.Cols, Rows: in.Launch.SSH.Rows,
+			WindowBytes: in.Launch.SSH.WindowBytes,
+		}
 	}
 	if in.Writer != nil {
 		writer := string(*in.Writer)
@@ -194,7 +276,7 @@ func mapSessionEntry(in proto.SessionEntry) SessionEntry {
 		}
 	}
 	if in.Exit != nil {
-		out.Exit = &ExitStatus{Code: in.Exit.Code, Signal: in.Exit.Signal, At: in.Exit.At}
+		out.Exit = &ExitStatus{Code: in.Exit.Code, Signal: in.Exit.Signal, At: in.Exit.At, Cause: string(in.Exit.Cause)}
 	}
 	return out
 }
@@ -228,8 +310,16 @@ type AttachedSession struct {
 	// exitMu guards the immutable helper status. The notification records a
 	// snapshot before finish closes done, and WaitErr keeps returning it after
 	// close so the session layer can classify the complete interval.
-	exitMu          sync.Mutex
-	exit            *ExitStatus
+	exitMu sync.Mutex
+	exit   *ExitStatus
+	// exitFinalOffset is set only by AdoptExitStatus (nocx-isjh4): the
+	// window offset a RE-ADOPTED, already-exited session can never advance
+	// past, because the shell that would have advanced it is already gone.
+	// Guarded alongside exit; nil for every other session, including one
+	// that exits normally while THIS attachment is live (that path ends
+	// through sessionExited/finish directly and needs no target — there is
+	// always more that COULD arrive until the process is observed to end).
+	exitFinalOffset *proto.StreamOffset
 	offset          proto.StreamOffset
 	lifecycleOffset proto.StreamOffset
 	// pendingReset and pendingLifecycleReset count the live resets that have
@@ -247,6 +337,10 @@ type AttachedSession struct {
 	// holeObs is the coordinator's observer for a hole in this session's
 	// output — see OnOutputHole. Guarded by mu; fired outside it.
 	holeObs func(lost uint64, reason string)
+	// livenessObs is the coordinator's observer for this session's own
+	// keepalive prober (nocx-y6fh7 item 6) — see OnLiveness. Guarded by mu;
+	// fired outside it, on the same terms holeObs already is.
+	livenessObs func(responsive bool, roundTripMS int64)
 }
 
 // inbound is one item in an attachment's delivery order: bytes the wire
@@ -274,6 +368,29 @@ type inbound struct {
 func (c *Client) Spawn(ctx context.Context, params proto.SpawnParams) (SessionEntry, error) {
 	var result proto.SpawnResult
 	if err := c.Call(ctx, proto.ServiceSession, proto.OpSpawn, params, &result); err != nil {
+		return SessionEntry{}, err
+	}
+	return mapSessionEntry(result.Entry), nil
+}
+
+// SpawnSSH opens a session whose process is a shell channel on a FAR host —
+// a remote pane (nocx-50w7p.4). The helper dials through its own ssh client
+// and answers with the same inventory entry every other session answers with,
+// whose RemoteLaunch is populated instead of Launch.
+//
+// It returns the helper's refusal unchanged, and those refusals are the
+// caller's to switch on: `no_ssh_client` (this machine's helper was built
+// without an ssh client), `unreachable` / `rejected` / `needs-interactive` /
+// `host-key-unknown` / `host-key-changed` (the destination, in the vocabulary
+// the probe already reports), `vault_sealed` (the material could not be read),
+// `no_auth_channel` (no coordinator connection to ask), `channel_refused` (the
+// server would not give the helper a session or would not start the command)
+// and `bad_params` (the request itself). None of them is a spawn failure: a
+// failed spawn is `spawn_failed`, and telling the two apart is what keeps a
+// person looking at the host rather than at their own request.
+func (c *Client) SpawnSSH(ctx context.Context, params proto.SSHSpawnParams) (SessionEntry, error) {
+	var result proto.SpawnResult
+	if err := c.Call(ctx, proto.ServiceSession, proto.OpSpawnSSH, params, &result); err != nil {
 		return SessionEntry{}, err
 	}
 	return mapSessionEntry(result.Entry), nil
@@ -519,6 +636,27 @@ func (a *AttachedSession) OnOutputHole(f func(lost uint64, reason string)) {
 	a.mu.Unlock()
 }
 
+// OnLiveness registers the coordinator's observer for this session's own
+// keepalive prober, exactly as OnOutputHole registers one for a hole: nil
+// means nobody is watching, and this is ordinary for a local pane, which the
+// helper never probes (session_service.go's own note on
+// EventSessionLiveness).
+func (a *AttachedSession) OnLiveness(f func(responsive bool, roundTripMS int64)) {
+	a.mu.Lock()
+	a.livenessObs = f
+	a.mu.Unlock()
+}
+
+// reportLiveness tells the observer what a liveness notification said.
+func (a *AttachedSession) reportLiveness(responsive bool, roundTripMS int64) {
+	a.mu.Lock()
+	obs := a.livenessObs
+	a.mu.Unlock()
+	if obs != nil {
+		obs(responsive, roundTripMS)
+	}
+}
+
 // reportHole tells the observer what the reset said was lost. A reset whose
 // gap the helper did not name states no bounds, and inventing them here —
 // from the distance between the cursor and the resume point — would be the
@@ -557,17 +695,65 @@ func (a *AttachedSession) reportHole(gap *proto.Gap) {
 // number with one owner, not two answers to "how did it end". It is refused
 // once a status is already recorded, so a notification that does arrive is
 // never overwritten by a staler inventory read.
-func (a *AttachedSession) AdoptExitStatus(status ExitStatus) {
+//
+// finalOffset is the SAME inventory row's window frontier (SessionEntry.
+// Window.Written) — the offset this stream can never advance past, because
+// the shell that would have advanced it is already gone. "Reads whatever the
+// window kept, and reaches EOF" above describes the intent, not what Read
+// does on its own: take() (this file) returns only on new data or on
+// a.done, and nothing closes a.done for this attachment without this call —
+// so before this fix a coordinator that re-adopted an already-exited,
+// unattached session hung its reader forever instead of reaching EOF, and
+// neither monitorExit nor EndSession ever ran for it (nocx-isjh4, closer 2's
+// other door; found in review, not by a wire change — SessionEntry already
+// carries Window on the existing wire). checkFullyDrained below is what
+// actually closes a.done, once this attachment's own read cursor reaches
+// finalOffset — called here for the (rare) case nothing is left to read at
+// all, and again after every Read that moves the cursor toward it.
+func (a *AttachedSession) AdoptExitStatus(status ExitStatus, finalOffset proto.StreamOffset) {
 	a.exitMu.Lock()
-	if a.exit == nil {
+	already := a.exit != nil
+	if !already {
 		snapshot := status
 		a.exit = &snapshot
+		target := finalOffset
+		a.exitFinalOffset = &target
 	}
 	a.exitMu.Unlock()
+	if !already {
+		a.checkFullyDrained()
+	}
+}
+
+// checkFullyDrained ends this attachment's session (nocx-isjh4) once its own
+// read cursor has reached the point AdoptExitStatus named as the offset an
+// already-exited session's window will never advance past. A no-op when no
+// exit was ever adopted here (exitFinalOffset nil) — a session whose shell
+// exits while this coordinator holds it ends through sessionExited/finish
+// directly, with no target to compare against, because "more could still
+// arrive" is true right up to that notification.
+//
+// Finishing here reaches the SAME monitorExit path a live coordinator's own
+// shell exit does (both close a.done through finish), so a re-adopted,
+// already-exited session releases its helper session exactly as closer 2
+// already does for the case where a coordinator was attached the whole time.
+func (a *AttachedSession) checkFullyDrained() {
+	a.exitMu.Lock()
+	target := a.exitFinalOffset
+	a.exitMu.Unlock()
+	if target == nil {
+		return
+	}
+	a.mu.Lock()
+	reached := a.offset >= *target
+	a.mu.Unlock()
+	if reached {
+		a.finish()
+	}
 }
 
 func (a *AttachedSession) recordExit(status proto.SessionExitStatus) {
-	snapshot := &ExitStatus{Code: status.Code, Signal: status.Signal, At: status.At}
+	snapshot := &ExitStatus{Code: status.Code, Signal: status.Signal, At: status.At, Cause: string(status.Cause)}
 	a.exitMu.Lock()
 	if a.exit == nil {
 		a.exit = snapshot
@@ -646,6 +832,11 @@ func (a *AttachedSession) Read(p []byte) (int, error) {
 			}
 		}
 	}
+	// Checked on every Read, not only when it moves the cursor: a caller
+	// that reads with a zero-length buffer or hits a reset-only item still
+	// deserves the check, and checkFullyDrained is itself a no-op unless
+	// AdoptExitStatus named a target (nocx-isjh4).
+	a.checkFullyDrained()
 	return n, nil
 }
 
@@ -760,18 +951,39 @@ func (a *AttachedSession) Write(p []byte) (int, error) {
 	if epoch == 0 {
 		return 0, errors.New("helper session attachment has no write lease")
 	}
-	frame := proto.EncodeSessionFrame(proto.SessionFrame{
-		Session: a.session, Subscriber: a.subscriber, Epoch: epoch, Payload: p,
-	})
+	// One write may be larger than one frame may carry (a big paste), and
+	// EncodeFrame panics above MaxFrameBytes rather than corrupting the wire.
+	// So the payload is cut into consecutive session frames, each leaving
+	// room for the session frame's own header inside the envelope; they are
+	// written under one writeMu hold, so no other writer's frame lands
+	// between them and the PTY receives the bytes in order.
+	overhead := len(proto.EncodeSessionFrame(proto.SessionFrame{
+		Session: a.session, Subscriber: a.subscriber, Epoch: epoch,
+	}))
+	chunk := proto.MaxFrameBytes - overhead
 	a.client.writeMu.Lock()
 	defer a.client.writeMu.Unlock()
-	// The inner session frame is the ENVELOPE'S payload, never the lane's:
-	// from the first write until this attachment is closed, every byte this
-	// method puts on the lane is inside exactly one TypeSessionData frame —
-	// the way attachedLifecycle.Write wraps its own in TypeLifecycleData, and
-	// the way every other producer on this wire wraps its own.
-	if _, err := a.client.conn.Stdin().Write(proto.EncodeFrame(proto.TypeSessionData, 0, 0, frame)); err != nil {
-		return 0, err
+	written := 0
+	for written < len(p) || (len(p) == 0 && written == 0) {
+		end := written + chunk
+		if end > len(p) {
+			end = len(p)
+		}
+		frame := proto.EncodeSessionFrame(proto.SessionFrame{
+			Session: a.session, Subscriber: a.subscriber, Epoch: epoch, Payload: p[written:end],
+		})
+		// The inner session frame is the ENVELOPE'S payload, never the lane's:
+		// from the first write until this attachment is closed, every byte this
+		// method puts on the lane is inside exactly one TypeSessionData frame —
+		// the way attachedLifecycle.Write wraps its own in TypeLifecycleData, and
+		// the way every other producer on this wire wraps its own.
+		if _, err := a.client.conn.Stdin().Write(proto.EncodeFrame(proto.TypeSessionData, 0, 0, frame)); err != nil {
+			return written, err
+		}
+		if len(p) == 0 {
+			break
+		}
+		written = end
 	}
 	return len(p), nil
 }
@@ -795,4 +1007,176 @@ func (a *AttachedSession) Close() error {
 	a.finish()
 	return a.client.Call(context.Background(), proto.ServiceSession, proto.OpDetach,
 		proto.DetachParams{Attachment: attachment}, nil)
+}
+
+// EndSession releases this attachment AND asks the helper to close the
+// session itself, which is what gives its reserved window budget back
+// (nocx-isjh4). It is a SEPARATE verb from Close and must stay one:
+// internal/session.realSession.Close calls it for a session the coordinator
+// is done with for good — the pane it was the pipe of has left the layout, a
+// shell exit has been persisted, or the user asked to close it directly —
+// while a caller that merely lost a re-adopt race (another coordinator holds
+// the write lease, or this coordinator's own adopt failed after a successful
+// attach) calls plain Close: the session stays live under whoever already
+// holds it, and ending it there would be the exact defect this method exists
+// to avoid causing anywhere else (see internal/app/session_readopt.go).
+//
+// The local bookkeeping Close performs is repeated here rather than
+// delegated to it, so this sends ONE round trip to the helper — closing a
+// session already implies detaching every attachment on it — instead of a
+// detach followed by a redundant close.
+//
+// THE ORDER IS THE POINT (nocx-xn63t.6.4). The round trip runs FIRST, and
+// the local bookkeeping — including a.finish(), which is what closes Done()
+// — runs only once it returns. Before this, finish() ran first: Done()
+// closed, and only the next line sent CloseSession. A caller reacting to
+// Done() by tearing down the shared client — helperRegistry.SessionEnded
+// legitimately does exactly that once no git binding holds the client open,
+// internal/app/helper_git.go, nocx-xn63t.6.3 — could then close the
+// transport before the close-session request had even reached the wire.
+// The far helper never heard it, and kept the session in its own inventory
+// until its unclaimed-session TTL swept it, minutes past any caller's
+// remaining patience (e2e/remote-coordinator-reclaim.spec.ts measured it
+// against a 60s bound). CloseSession's own failure — a dead transport,
+// ErrLost — must still run the local half so this attachment does not hang
+// forever, which is why the error is captured rather than returned early.
+func (a *AttachedSession) EndSession(ctx context.Context) error {
+	id := a.hostID()
+	err := a.client.CloseSession(ctx, id)
+	a.client.mu.Lock()
+	delete(a.client.attachments, a.subscriber)
+	a.client.mu.Unlock()
+	a.finish()
+	return err
+}
+
+// ── the signal seam (nocx-ie23r.3) ───────────────────────────────────────────
+//
+// THE WHOLE SEAM, OR NONE OF IT. internal/session reaches a channel's signal
+// methods by optional-method ASSERTION, so a channel that answers some of them
+// is not degraded — it is wrong, and it is wrong silently: nothing fails to
+// compile, and what the product says instead is "nothing is running in this
+// pane" about a command that plainly is (nocx-92gfl.4, twice, through two
+// different missing methods). internal/app's lifecyclePTY wrapper stated that
+// rule for the local pty it wrapped; this is the same rule for the channel
+// that replaced it.
+//
+// WHY IT LANDS HERE NOW. Before nocx-ie23r.3 no helper-hosted session was ever
+// asked to stop a job: the run-lease ladder only ever ran against a local pty
+// the coordinator itself had forked. Now every local pane is a helper session,
+// so the ladder's three questions have to be answerable over the wire or the
+// stop button stops working on this machine.
+//
+// The ADDRESSEE IS RESOLVED ONCE AND KEPT, which is the whole point of
+// ForegroundJob being separate from SignalForeground (nocx-uvac6.11): a shell
+// that starts another job between SIGINT and SIGKILL must not be hit by the
+// second, so the caller names a group and then signals that group.
+
+// ErrNoForegroundJob is a session whose foreground group this generation
+// cannot name: the OS could not be asked, or the helper's observation carries
+// no foreground group. It is typed rather than silent so a caller can tell
+// "there is nothing running" from "nobody could look" — the second is a
+// diagnosis and the first is an answer.
+var ErrNoForegroundJob = errors.New("helper: this session's foreground process group is not known")
+
+// signalTimeout bounds one signal-seam call. It is a REQUEST bound and not a
+// policy: the ladder's own timing is the transport's, and what this stops is a
+// stop button that hangs on a helper that has gone quiet.
+const signalTimeout = 5 * time.Second
+
+func (a *AttachedSession) hostID() HostSessionID {
+	return HostSessionID{Generation: string(a.generation), Session: proto.SessionHex(a.session)}
+}
+
+// ForegroundJob names the process group in front of this session's terminal,
+// as the HELPER's own observation of the host reports it. It is evidence read
+// from the operating system on the machine the shell is actually on, which is
+// the only place the question can be answered — the coordinator may be on a
+// different machine entirely.
+func (a *AttachedSession) ForegroundJob() (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), signalTimeout)
+	defer cancel()
+	entries, err := a.client.Sessions(ctx)
+	if err != nil {
+		return 0, err
+	}
+	id := a.hostID()
+	for i := range entries {
+		if entries[i].HostSessionID != id {
+			continue
+		}
+		// The pid comes from the branch that HAS one: a remote session's
+		// process is on another machine and its local record is absent, so a
+		// session with no local branch compares against no shell group (0) —
+		// which is the honest answer, and the observation is nil for such a
+		// session anyway (the helper has no pid here to inspect).
+		launchPID := 0
+		if entries[i].Launch != nil {
+			launchPID = entries[i].Launch.Pid
+		}
+		return classifyForegroundObservation(entries[i].Observed, launchPID)
+	}
+	// The helper answered and does not hold this session. Said as its own
+	// sentence rather than as ErrNoForegroundJob: "there is no job in front"
+	// and "there is no session" are different facts, and answering both the
+	// same way would let a stop button report a quiet pane about one that has
+	// ended.
+	return 0, fmt.Errorf("helper: this generation no longer holds session %s", a.hostID().Session)
+}
+
+// classifyForegroundObservation turns the helper's evidence into the answer
+// the run-lease ladder is written against. It is a function of its own because
+// it is a DECISION and the rest of ForegroundJob is transport — and because
+// what broke was this, not the wire (nocx-nekvj).
+//
+// THE THREE ANSWERS ARE THREE DIFFERENT FACTS and collapsing any two is how
+// the stop button lies:
+//
+//   - a group that is NOT the shell's own is a job, and it is returned to be
+//     signalled;
+//   - the SHELL'S OWN group in front is protected. It is not an absence: under
+//     ADR-0024 nocx runs commands with job control off, so this is the state a
+//     running command produces for its whole life, and the ladder answers it
+//     by writing the terminal's interrupt rather than by signalling a group
+//     that contains the shell;
+//   - no group at all means nobody could look, which is a diagnosis. It must
+//     not read as ErrNoForeground, or a caller reports a quiet pane about a
+//     command that is plainly running.
+//
+// This mirrors pty.LocalPty.ForegroundJob exactly, and deliberately: the local
+// pty reads the raw group and compares it against the shell it forked. Before
+// nocx-ie23r.3 that was the only implementation, and every local pane now goes
+// through this one instead. Two implementations of one predicate is the
+// regression with a delay fuse AGENTS.md warns about, so this one is written
+// to give the same answers rather than its own.
+func classifyForegroundObservation(obs *Observation, launchPID int) (int, error) {
+	if obs == nil || obs.ForegroundPgid <= 0 {
+		return 0, ErrNoForegroundJob
+	}
+	if launchPID > 0 && obs.ForegroundPgid == launchPID {
+		return 0, pty.ErrProtectedForeground
+	}
+	return obs.ForegroundPgid, nil
+}
+
+// SignalProcessGroup signals the exact group a previous ForegroundJob named.
+func (a *AttachedSession) SignalProcessGroup(pgid int, sig syscall.Signal) error {
+	ctx, cancel := context.WithTimeout(context.Background(), signalTimeout)
+	defer cancel()
+	return a.client.Signal(ctx, a.hostID(), pgid, int(sig))
+}
+
+// SignalForeground is the ONE-SHOT form: whatever is in front right now.
+//
+// It is composed from the two above rather than being a third question asked
+// of the helper, so there is one answer to "which group is in front" and one
+// answer to "signal this group". A helper that resolved the foreground itself
+// on this call would be a second derivation, and the two would disagree in
+// exactly the window the ladder cares about.
+func (a *AttachedSession) SignalForeground(sig syscall.Signal) error {
+	pgid, err := a.ForegroundJob()
+	if err != nil {
+		return err
+	}
+	return a.SignalProcessGroup(pgid, sig)
 }

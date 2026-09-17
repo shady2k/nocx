@@ -1,6 +1,8 @@
 package shellintegration
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -182,6 +184,227 @@ func agentWrapperSaysSoWhenEnrolmentIsRefused(t *testing.T, start nestedParentSt
 	// interval that never opened would close somebody else's.
 	if hasEvent(k, "agent_withdraw") {
 		t.Error("a refused enrolment still sent a withdrawal")
+	}
+}
+
+// ── The question comes first (nocx-cyhfw) ────────────────────────────────
+//
+// The first start of an agent nobody has answered for used to be REFUSED the
+// moment the question was raised, and the wrapper did what it does with any
+// refusal: it started the agent without tools while the dialog was still on
+// screen, and told the person to start it again after answering. The owner's
+// rule is the other way round — ask first, then start.
+
+// questionAgentBody is an agent that says whether the question had closed when
+// it started. The test creates the flag immediately BEFORE it closes the
+// question, so an agent started while the person was still reading prints the
+// BEFORE line: "the agent waited" is an assertion about order, not about how
+// long the test looked away.
+func questionAgentBody(flag string) string {
+	return "#!/bin/sh\nif [ -e '" + flag + "' ]; then echo AGENT-RAN-AFTER-ANSWER; else echo AGENT-RAN-BEFORE-ANSWER; fi\n"
+}
+
+func waitForOutput(t *testing.T, s *channelShell, text string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(s.output(), text) {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("the pane never showed %q; output=%q", text, s.output())
+}
+
+func eventsOf(k *nestedKernel, evt string) []kernelEvent {
+	var out []kernelEvent
+	for _, e := range k.events() {
+		if e.Evt == evt {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// raiseQuestion types the agent's name into a pane whose kernel answers with a
+// question, and returns once the pane says it is waiting on it.
+func raiseQuestion(t *testing.T, start nestedParentStarter, configure func(*nestedKernel)) (*nestedKernel, *channelShell, string) {
+	t.Helper()
+	k := newNestedKernel(t)
+	k.pendingEnrolment = true
+	if configure != nil {
+		configure(k)
+	}
+	flag := filepath.Join(t.TempDir(), "question-closed")
+	s := start(t, k, "claude", questionAgentBody(flag))
+	if _, err := s.ptmx.Write([]byte("claude\n")); err != nil {
+		t.Fatalf("type claude: %v", err)
+	}
+	waitForEvent(t, k, "agent_enrol")
+	// The pane says what it is waiting for and how to stop waiting.
+	waitForOutput(t, s, "Ctrl+C")
+	return k, s, flag
+}
+
+func closeQuestionWith(t *testing.T, k *nestedKernel, flag, reason string) {
+	t.Helper()
+	if err := os.WriteFile(flag, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	k.closeQuestion(reason)
+}
+
+func TestBashAgentWrapperWaitsForTheAnswerBeforeTheAgentStarts(t *testing.T) {
+	agentWrapperWaitsForTheAnswerBeforeTheAgentStarts(t, startNestedBashParent)
+}
+
+func TestZshAgentWrapperWaitsForTheAnswerBeforeTheAgentStarts(t *testing.T) {
+	agentWrapperWaitsForTheAnswerBeforeTheAgentStarts(t, startNestedZshParent)
+}
+
+func agentWrapperWaitsForTheAnswerBeforeTheAgentStarts(t *testing.T, start nestedParentStarter) {
+	t.Helper()
+	k, s, flag := raiseQuestion(t, start, nil)
+	if out := s.output(); strings.Contains(out, "not orchestrated") {
+		t.Fatalf("a question on screen was reported as a refusal; output=%q", out)
+	}
+
+	closeQuestionWith(t, k, flag, "")
+	waitForOutput(t, s, "AGENT-RAN-")
+	withdraw := waitForEvent(t, k, "agent_withdraw")
+
+	out := s.output()
+	if strings.Contains(out, "AGENT-RAN-BEFORE-ANSWER") {
+		t.Fatalf("the agent started while the question was still on screen; output=%q", out)
+	}
+	if n := strings.Count(out, "AGENT-RAN-AFTER-ANSWER"); n != 1 {
+		t.Errorf("the agent ran %d times after the answer, want exactly 1; output=%q", n, out)
+	}
+	if strings.Contains(out, "not orchestrated") {
+		t.Errorf("an answered question left the agent unorchestrated; output=%q", out)
+	}
+	// Twice: once to raise the question, once to be admitted by its answer.
+	// The interval is the SECOND enrolment's, so that is what is withdrawn.
+	enrols := eventsOf(k, "agent_enrol")
+	if len(enrols) != 2 {
+		t.Fatalf("the pane sent %d enrolments, want 2 — the question, then the admission", len(enrols))
+	}
+	if got, want := withdraw.Body["request"], enrols[1].Body["request"]; got != want {
+		t.Errorf("the withdrawal names %v, want the enrolment that opened the interval, %v", got, want)
+	}
+}
+
+func TestBashAgentWrapperStartsWithoutToolsAfterANo(t *testing.T) {
+	agentWrapperStartsWithoutToolsAfterANo(t, startNestedBashParent)
+}
+
+func TestZshAgentWrapperStartsWithoutToolsAfterANo(t *testing.T) {
+	agentWrapperStartsWithoutToolsAfterANo(t, startNestedZshParent)
+}
+
+// A no is the owner's "start it without tools": the agent the person typed
+// still runs, after the answer, and the pane says why it has no tools.
+func agentWrapperStartsWithoutToolsAfterANo(t *testing.T, start nestedParentStarter) {
+	t.Helper()
+	k, s, flag := raiseQuestion(t, start, func(k *nestedKernel) {
+		k.refuseAfterQuestion = true
+		k.enrolReason = "agent approval was denied for claude"
+	})
+
+	closeQuestionWith(t, k, flag, "")
+	waitForOutput(t, s, "AGENT-RAN-")
+
+	out := s.output()
+	if strings.Contains(out, "AGENT-RAN-BEFORE-ANSWER") {
+		t.Fatalf("the agent started while the question was still on screen; output=%q", out)
+	}
+	if n := strings.Count(out, "AGENT-RAN-AFTER-ANSWER"); n != 1 {
+		t.Errorf("the agent ran %d times after the answer, want exactly 1; output=%q", n, out)
+	}
+	if !strings.Contains(out, "nocx: not orchestrated — agent approval was denied for claude") {
+		t.Errorf("the pane did not say why the agent has no tools; output=%q", out)
+	}
+	if n := len(eventsOf(k, "agent_enrol")); n != 2 {
+		t.Errorf("the pane sent %d enrolments, want 2 — the question, then the one the answer refused", n)
+	}
+	if hasEvent(k, "agent_withdraw") {
+		t.Error("a refused enrolment still sent a withdrawal")
+	}
+}
+
+func TestBashAgentWrapperStartsWithoutToolsWhenNobodyCouldBeAsked(t *testing.T) {
+	agentWrapperStartsWithoutToolsWhenNobodyCouldBeAsked(t, startNestedBashParent)
+}
+
+func TestZshAgentWrapperStartsWithoutToolsWhenNobodyCouldBeAsked(t *testing.T) {
+	agentWrapperStartsWithoutToolsWhenNobodyCouldBeAsked(t, startNestedZshParent)
+}
+
+// A question that closes with a sentence was never answered: the pane prints
+// the sentence and starts the agent without tools, and does NOT enrol again —
+// that would raise the same undeliverable question and wait on it for ever.
+func agentWrapperStartsWithoutToolsWhenNobodyCouldBeAsked(t *testing.T, start nestedParentStarter) {
+	t.Helper()
+	k, s, flag := raiseQuestion(t, start, nil)
+
+	closeQuestionWith(t, k, flag, "nocx could not ask whether claude may use its tools: no window is open")
+	waitForOutput(t, s, "AGENT-RAN-")
+
+	out := s.output()
+	if n := strings.Count(out, "AGENT-RAN-AFTER-ANSWER"); n != 1 {
+		t.Errorf("the agent ran %d times, want exactly 1; output=%q", n, out)
+	}
+	if !strings.Contains(out, "nocx: not orchestrated — nocx could not ask whether claude may use its tools: no window is open") {
+		t.Errorf("the pane did not say why the agent has no tools; output=%q", out)
+	}
+	if n := len(eventsOf(k, "agent_enrol")); n != 1 {
+		t.Errorf("the pane sent %d enrolments, want 1 — an unaskable question is not raised again", n)
+	}
+	if hasEvent(k, "agent_withdraw") {
+		t.Error("an enrolment that never opened still sent a withdrawal")
+	}
+}
+
+func TestBashAgentWrapperCancelsTheLaunchOnCtrlC(t *testing.T) {
+	agentWrapperCancelsTheLaunchOnCtrlC(t, startNestedBashParent)
+}
+
+func TestZshAgentWrapperCancelsTheLaunchOnCtrlC(t *testing.T) {
+	agentWrapperCancelsTheLaunchOnCtrlC(t, startNestedZshParent)
+}
+
+// Ctrl+C while the question is up is the owner's "cancel": the agent does not
+// start, the command reports the interrupt, and the answer arriving afterwards
+// starts nothing — the person already said they did not want that launch.
+func agentWrapperCancelsTheLaunchOnCtrlC(t *testing.T, start nestedParentStarter) {
+	t.Helper()
+	k, s, flag := raiseQuestion(t, start, nil)
+
+	if _, err := s.ptmx.Write([]byte{0x03}); err != nil {
+		t.Fatalf("press Ctrl+C: %v", err)
+	}
+	if _, err := s.ptmx.Write([]byte("echo \"RC=$?\"\n")); err != nil {
+		t.Fatalf("type echo: %v", err)
+	}
+	waitForOutput(t, s, "RC=130")
+
+	closeQuestionWith(t, k, flag, "")
+	// Arithmetic in the line, so the pane's echo of what was typed cannot
+	// satisfy the wait for what the shell printed.
+	if _, err := s.ptmx.Write([]byte("echo \"STILL-HERE-$((20+22))\"\n")); err != nil {
+		t.Fatalf("type echo: %v", err)
+	}
+	waitForOutput(t, s, "STILL-HERE-42")
+
+	out := s.output()
+	if strings.Contains(out, "AGENT-RAN") {
+		t.Fatalf("a cancelled launch started the agent; output=%q", out)
+	}
+	if n := len(eventsOf(k, "agent_enrol")); n != 1 {
+		t.Errorf("the pane sent %d enrolments, want 1 — a cancelled launch enrols nothing more", n)
+	}
+	if hasEvent(k, "agent_withdraw") {
+		t.Error("a cancelled launch sent a withdrawal for an interval that never opened")
 	}
 }
 

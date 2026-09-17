@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.target.schema.json",
+  "title": "HelperSessionTargetResult",
+  "description": "A minted, one-shot target (nocx-6q1uh.6, spec §6.2): a signed token a caller presents back to session.intent to spend it, and the id session.intent-status polls by without ever re-transmitting the signed value.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["token", "tokenId", "expiresAtMs"],
+  "properties": {
+    "token": {
+      "description": "The whole signed target, opaque to the caller.",
+      "type": "string",
+      "minLength": 1
+    },
+    "tokenId": {
+      "description": "Names the same target without exposing its signature: 32 lowercase hex characters, the same 16-raw-byte convention a host session id already uses.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "expiresAtMs": {
+      "description": "Unix milliseconds after which this token verifies expired.",
+      "type": "integer"
+    }
+  }
+}

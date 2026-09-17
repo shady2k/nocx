@@ -39,8 +39,13 @@ func TestDomainRequestProducesGrantEcho(t *testing.T) {
 	}
 	// The grant addresses the parent: the adapter routes it to the parent's
 	// connection by this tuple.
-	if g.Envelope.Domain != hA.Domain || g.Envelope.Epoch != hA.Epoch || g.Envelope.Capability != hA.Capability {
+	if g.Envelope.Domain != hA.Domain || g.Envelope.Epoch != hA.Epoch {
 		t.Fatalf("grant must be addressed to the parent, got lane=%s dom=%s epoch=%d", g.Envelope.Lane, g.Envelope.Domain, g.Envelope.Epoch)
+	}
+	// By the tuple alone: the grant carries no bearer of its own back down
+	// the inherited descriptor (nocx-aqz7o).
+	if g.Envelope.Capability != (Capability{}) {
+		t.Fatalf("grant carries the parent's capability back to the shell")
 	}
 	grant := g.Envelope.Event.DomainGrant
 	if grant.RequestID != "r-dom-0" || grant.Env != EnvSSH || grant.Host != "box.example.com" ||

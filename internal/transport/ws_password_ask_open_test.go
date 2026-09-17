@@ -57,6 +57,10 @@ func TestWSServer_OpenPasswordAsk_DoesNotBlockTheReadLoop(t *testing.T) {
 	})
 
 	ws = NewWSServer(logger, reg,
+		// The ssh pane this test opens is this machine's helper's
+		// (nocx-50w7p.5). Its subject is that the password ASK does not block
+		// the read loop, which is downstream of the pane existing.
+		sshHelperOpt(reg),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
 				return "host.example.com", &ssh.ConnectConfig{

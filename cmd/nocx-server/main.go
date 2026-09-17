@@ -26,7 +26,9 @@ import (
 
 	"github.com/shady2k/nocx/internal/app"
 	"github.com/shady2k/nocx/internal/coordinator"
+	nocxlog "github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/storage"
+	"github.com/shady2k/nocx/internal/toolendpoint"
 	"github.com/shady2k/nocx/internal/version"
 )
 
@@ -85,12 +87,55 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
+	// ONE SINK FROM HERE ON (nocx-halpn, nocx-4l2a5.2). The logger above
+	// writes to stderr, and internal/coordinator/spawn.go gives the daemon it
+	// launches no stderr at all — os/exec makes a nil Stderr /dev/null. So
+	// every line this process wrote through it was discarded in the shipped
+	// product, including the tool endpoint's diagnostic for the one failure
+	// that most needs one: an error nobody classified. It survived a dev run
+	// only because scripts/dev-web.sh redirects into a temp file nobody is
+	// told about.
+	//
+	// The app opens the backend log file and logs to it AND to stderr, so
+	// taking its logger is what makes the two halves of this process one log.
+	// It cannot be taken earlier: the file lives in the profile directory the
+	// app resolves, and nothing above this line has anywhere to write.
+	logger = a.Slog()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// This composition root's own copy of the wiring App.Start does
+	// internally (nocx-n14oo.9): a.Shutdown below and anything else this
+	// file calls with ctx directly — not through App — answer log.From(ctx)
+	// with the same logger, rather than the package default.
+	ctx = nocxlog.WithLogger(ctx, nocxlog.NewSlogAdapter(logger))
 	if startErr := a.Start(ctx); startErr != nil {
 		return startErr
 	}
 	defer a.Shutdown(ctx)
+	workerSocket, err := startToolEndpoint(a, coordinator.RuntimeDir(paths),
+		coordinator.SystemPeerCredentials{}, coordinator.SystemPathOwner{},
+		coordinator.SelfUID(), logger)
+	if err != nil {
+		return err
+	}
+	if workerSocket != nil {
+		// A local pane is opened on a SEPARATE process — this machine's own
+		// helper daemon (cmd/nocx-helper) — and that process learns this
+		// backend's tool.sock only by being told: see
+		// App.SetLocalToolSocketPath and, past the process boundary,
+		// internal/helper/endpoint.Ensure (nocx-2tesu). Asked of the
+		// endpoint rather than recomputed from its directory, because
+		// internal/toolendpoint is the one owner of the socket's name
+		// (AD-8) and this is the only call site outside it that needs to
+		// know the value.
+		a.SetLocalToolSocketPath(workerSocket.SocketPath())
+		defer func() {
+			if closeErr := workerSocket.Close(); closeErr != nil {
+				logger.Error("closing the worker socket", "error", closeErr)
+			}
+		}()
+	}
 
 	// After Start, so the address and the token exist to be handed out.
 	// The token is read by the socket and by nothing else on this path: it
@@ -129,6 +174,37 @@ func run(logger *slog.Logger) error {
 	<-sig
 	logger.Info("nocx-server shutting down")
 	return nil
+}
+
+// startToolEndpoint publishes the worker socket only when the application has
+// both sides of the common worker pipeline. A missing authorizer is a deliberate
+// refusal to publish, not a socket that rejects every request.
+func startToolEndpoint(a *app.App, dir string, peers coordinator.PeerCredentials, owner coordinator.PathOwner, selfUID uint32, logger *slog.Logger) (*toolendpoint.Endpoint, error) {
+	if a == nil || a.ToolAuthorizer == nil || a.ToolDispatcher == nil {
+		return nil, nil
+	}
+	endpoint, err := toolendpoint.New(toolendpoint.Config{
+		Dir:      dir,
+		Peers:    peers,
+		Owner:    owner,
+		SelfUID:  selfUID,
+		Auth:     a.ToolAuthorizer,
+		Dispatch: a.ToolDispatcher,
+		Observer: a.ToolSurfaceObserver,
+		Logger:   logger,
+		// THE LANE: the process whose forwarded connections may name a pane.
+		// Asked of the app rather than decided here because the answer is
+		// which process this coordinator dialed its helper as, and the app is
+		// what holds that connection (nocx-50w7p.16).
+		Lane: a.ToolLane,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := endpoint.Start(); err != nil {
+		return nil, err
+	}
+	return endpoint, nil
 }
 
 // wsBackend is the part of the running WS server this binary needs, which

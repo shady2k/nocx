@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.sign.schema.json",
+  "title": "HelperSSHSignResult",
+  "description": "The signature, in the wire encoding of an ssh signature (a string format followed by a string blob, RFC 4253 §6.6) — the form x/crypto/ssh's own Unmarshal reads back into a Signature, which is how the helper hands it to the library unchanged. The encoding is the library's and not ours on purpose: a bespoke struct here would be a second decoder for a value the library already knows how to read.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["signature"],
+  "properties": {
+    "signature": {
+      "description": "The marshalled ssh signature, base64.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

@@ -10,6 +10,7 @@ import {
   attrsToStyle,
   serializeLine,
   serializeRange,
+  collectFitCandidates,
   serializeRangeSGR,
   serializeRangeText,
   DEFAULT_SNAPSHOT,
@@ -613,5 +614,349 @@ describe('serializeRangeSGR and serializeRangeText', () => {
     const getLine = (y: number) => lines[y]
     const sgr = serializeRangeSGR(getLine, 0, 1)
     expect(sgr.split('\n')[0].endsWith('\u001b[0m')).toBe(true)
+  })
+})
+
+// ── Column accounting for the drift instrument (nocx-4n6sj) ────────────────
+//
+// The walk already steps by getWidth(); it just threw the number away. The
+// drift instrument needs it, because "is this frozen line wider than its
+// columns" cannot be asked of the DOM alone: serializeRange deliberately
+// JOINS soft-wrapped rows, so a line legitimately wider than the block is
+// indistinguishable from a mislaid one without the column count the grid
+// itself used.
+describe('serializeRange column accounting', () => {
+  it('reports one column per single-width cell', () => {
+    const lines = [makeLine('abc')]
+    const cols: number[] = []
+    serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 0, cols)
+    expect(cols).toEqual([3])
+  })
+
+  it('counts a wide cell as the two columns the grid gives it', () => {
+    // xterm hands a CJK cell over as ONE cell of width 2; the spacer that
+    // follows it is skipped by the walk. Two columns, one character — the
+    // exact case a per-character correction cannot express.
+    const lines = [lineWith({ chars: 'あ', width: 2 }, { chars: '', width: 0 }, { chars: 'x' })]
+    const cols: number[] = []
+    const html = serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 0, cols)
+    // Two characters printed, three columns occupied. This is the pair a
+    // single letter-spacing delta cannot reconcile, and the reason the
+    // count has to come from the grid rather than from the string.
+    expect(html).toContain('あx')
+    expect(cols).toEqual([3])
+  })
+
+  it('drops the columns of the trailing spaces the walk trims', () => {
+    // The emitted text is "ab"; a count of 5 would report drift on every
+    // padded row in the buffer.
+    const lines = [makeLine('ab   ')]
+    const cols: number[] = []
+    const html = serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 0, cols)
+    expect(html).toBe('<span class="term-line">ab</span>')
+    expect(cols).toEqual([2])
+  })
+
+  it('sums the columns of soft-wrapped rows joined into one logical line', () => {
+    const lines = [makeLine('abc'), new BufferLine('de', true)]
+    const cols: number[] = []
+    const html = serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 1, cols)
+    expect(html).toBe('<span class="term-line">abcde</span>')
+    expect(cols).toEqual([5])
+  })
+
+  it('stays aligned with the emitted rows when leading blanks are trimmed', () => {
+    // The leading empties are readline's erased echo, dropped by the walk.
+    // A cols array that still carried them would pair every line with the
+    // wrong count — the failure that makes an instrument worse than none.
+    const lines = [makeLine('   '), makeLine('   '), makeLine('xy')]
+    const cols: number[] = []
+    const html = serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 2, cols)
+    expect(html).toBe('<span class="term-line">xy</span>')
+    expect(cols).toEqual([2])
+  })
+
+  it('is optional: the shipped call sites pass nothing and get today’s HTML', () => {
+    const lines = [makeLine('abc')]
+    expect(serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 0)).toBe(
+      '<span class="term-line">abc</span>',
+    )
+  })
+})
+
+// ── Коробки по колонкам (nocx-ec18) ────────────────────────────────────────
+//
+// Коробка — единственный способ задать глифу продвижку: CSS не умеет
+// назначить её текстовому кластеру без layout-объекта вокруг него. Здесь
+// проверяется РАЗМЕТКА; что она даёт нужную ширину — в e2e.
+describe('serializeRange cell boxes', () => {
+  const boxEverything = () => ({ cols: 1, fit: 1 })
+  const boxNothing = () => null
+
+  it('оборачивает ячейку, которую классификатор не пропустил', () => {
+    const lines = [makeLine('a\u{1F5D1}b')]
+    const html = serializeRange(
+      DEFAULT_SNAPSHOT,
+      (y) => lines[y],
+      0,
+      0,
+      undefined,
+      (chars) => (chars === '\u{1F5D1}' ? { cols: 1, fit: 1 } : null),
+    )
+    expect(html).toBe(
+      '<span class="term-line">a<span class="term-cell" data-cols="1">\u{1F5D1}</span>b</span>',
+    )
+  })
+
+  it('передаёт классификатору ячейку целиком и по одному разу', () => {
+    // Ячейка не равна кодпоинту, а спейсер после широкой не должен породить
+    // второй вызов.
+    const seen: Array<[string, number]> = []
+    const lines = [lineWith({ chars: '漢', width: 2 }, { chars: '', width: 0 }, { chars: 'x' })]
+    const cols: number[] = []
+    serializeRange(
+      DEFAULT_SNAPSHOT,
+      (y) => lines[y],
+      0,
+      0,
+      cols,
+      (chars, width) => {
+        seen.push([chars, width])
+        return width === 2 ? { cols: 2, fit: 1 } : null
+      },
+    )
+    expect(seen).toEqual([
+      ['漢', 2],
+      ['x', 1],
+    ])
+    expect(cols).toEqual([3])
+  })
+
+  it('отвергает вердикт, не равный колонкам ячейки', () => {
+    // «Одна колонка» для ячейки шириной две — это сдвиг, которого в сетке
+    // нет. Лучше сегодняшний поток, чем выдуманная геометрия.
+    const lines = [lineWith({ chars: '漢', width: 2 }, { chars: '', width: 0 })]
+    expect(
+      serializeRange(
+        DEFAULT_SNAPSHOT,
+        (y) => lines[y],
+        0,
+        0,
+        undefined,
+        () => ({ cols: 1, fit: 1 }),
+      ),
+    ).not.toContain('term-cell')
+    expect(
+      serializeRange(
+        DEFAULT_SNAPSHOT,
+        (y) => lines[y],
+        0,
+        0,
+        undefined,
+        () => ({ cols: 3, fit: 1 }),
+      ),
+    ).not.toContain('term-cell')
+    expect(
+      serializeRange(
+        DEFAULT_SNAPSHOT,
+        (y) => lines[y],
+        0,
+        0,
+        undefined,
+        () => ({ cols: 2, fit: 1 }),
+      ),
+      // lineWith ставит явный fg (палитра 7), поэтому коробка несёт style —
+      // как и в тесте про атрибуты ниже. Проверяется data-cols и содержимое.
+    ).toContain('<span class="term-cell" data-cols="2" style="color:#a9b1d6">漢</span>')
+  })
+
+  it('никогда не склеивает коробки друг с другом', () => {
+    const lines = [makeLine('⬢⬢')]
+    const html = serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 0, undefined, boxEverything)
+    expect(html).toBe(
+      '<span class="term-line">' +
+        '<span class="term-cell" data-cols="1">⬢</span>' +
+        '<span class="term-cell" data-cols="1">⬢</span>' +
+        '</span>',
+    )
+  })
+
+  it('снова склеивает обычные раны после коробки', () => {
+    const lines = [makeLine('⬢abc')]
+    const html = serializeRange(
+      DEFAULT_SNAPSHOT,
+      (y) => lines[y],
+      0,
+      0,
+      undefined,
+      (chars) => (chars === '⬢' ? { cols: 1, fit: 1 } : null),
+    )
+    expect(html).toBe(
+      '<span class="term-line"><span class="term-cell" data-cols="1">⬢</span>abc</span>',
+    )
+  })
+
+  it('обрезает хвостовой отступ после коробки, а саму коробку — нет', () => {
+    const lines = [makeLine('⬢   ')]
+    const cols: number[] = []
+    const html = serializeRange(
+      DEFAULT_SNAPSHOT,
+      (y) => lines[y],
+      0,
+      0,
+      cols,
+      (chars) => (chars === '⬢' ? { cols: 1, fit: 1 } : null),
+    )
+    expect(html).toBe(
+      '<span class="term-line"><span class="term-cell" data-cols="1">⬢</span></span>',
+    )
+    expect(cols).toEqual([1])
+  })
+
+  it('несёт атрибуты ячейки на самой коробке и отдаёт их классификатору', () => {
+    const faces: boolean[] = []
+    const lines = [lineWith({ chars: '⬢', bold: true, fg: 1, fgMode: XTERM_CM_P16 })]
+    const html = serializeRange(
+      DEFAULT_SNAPSHOT,
+      (y) => lines[y],
+      0,
+      0,
+      undefined,
+      (_c, _w, attrs) => {
+        faces.push(attrs.bold)
+        return { cols: 1, fit: 1 }
+      },
+    )
+    expect(faces).toEqual([true])
+    expect(html).toContain('class="term-cell" data-cols="1" style="')
+    expect(html).toContain('font-weight:bold')
+  })
+
+  it('экранирует содержимое коробки', () => {
+    const lines = [makeLine('<')]
+    const html = serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 0, undefined, boxEverything)
+    expect(html).toContain('<span class="term-cell" data-cols="1">&lt;</span>')
+  })
+
+  it('при fit === 1 не ставит лишнего узла', () => {
+    // Обёртка нужна только ради scale; при единице она была бы узлом на
+    // каждую коробку ради `scale(1)`. Разметка обязана остаться байт в байт
+    // той же, что до появления масштаба.
+    const lines = [makeLine('a\u{1F5D1}b')]
+    const html = serializeRange(
+      DEFAULT_SNAPSHOT,
+      (y) => lines[y],
+      0,
+      0,
+      undefined,
+      (chars) => (chars === '\u{1F5D1}' ? { cols: 1, fit: 1 } : null),
+    )
+    expect(html).toBe(
+      '<span class="term-line">a<span class="term-cell" data-cols="1">\u{1F5D1}</span>b</span>',
+    )
+    expect(html).not.toContain('term-cell-ink')
+  })
+
+  it('при fit < 1 ужимает КРАСКУ отдельной обёрткой', () => {
+    const lines = [makeLine('a\u{1F5D1}b')]
+    const html = serializeRange(
+      DEFAULT_SNAPSHOT,
+      (y) => lines[y],
+      0,
+      0,
+      undefined,
+      (chars) => (chars === '\u{1F5D1}' ? { cols: 1, fit: 0.5714 } : null),
+    )
+    expect(html).toBe(
+      '<span class="term-line">a<span class="term-cell" data-cols="1">' +
+        '<span class="term-cell-ink" style="--cell-fit:0.5714">\u{1F5D1}</span>' +
+        '</span>b</span>',
+    )
+  })
+
+  it('оставляет фон ячейки на коробке, а не на обёртке', () => {
+    // Трансформация, поставленная на саму коробку, ужала бы вместе с
+    // краской и её фон — attrsToStyle вешает background именно на коробку,
+    // — и цветная ячейка стала бы вдвое у́же соседних. Ради этого обёртка и
+    // существует отдельным элементом.
+    const lines = [lineWith({ chars: '\u{1F5D1}', bg: 4, bgMode: XTERM_CM_P16 })]
+    const html = serializeRange(
+      DEFAULT_SNAPSHOT,
+      (y) => lines[y],
+      0,
+      0,
+      undefined,
+      () => ({
+        cols: 1,
+        fit: 0.5714,
+      }),
+    )
+    expect(html).toContain('<span class="term-cell" data-cols="1" style="')
+    expect(html).toMatch(/<span class="term-cell" data-cols="1" style="[^"]*background:[^"]*"/)
+    expect(html).toContain('<span class="term-cell-ink" style="--cell-fit:0.5714">')
+    // Обёртка несёт ТОЛЬКО множитель.
+    expect(html).not.toMatch(/class="term-cell-ink" style="[^"]*background/)
+  })
+
+  it('экранирует содержимое обёрнутой коробки', () => {
+    const lines = [makeLine('<')]
+    const html = serializeRange(
+      DEFAULT_SNAPSHOT,
+      (y) => lines[y],
+      0,
+      0,
+      undefined,
+      () => ({
+        cols: 1,
+        fit: 0.5,
+      }),
+    )
+    expect(html).toContain(
+      '<span class="term-cell" data-cols="1">' +
+        '<span class="term-cell-ink" style="--cell-fit:0.5">&lt;</span></span>',
+    )
+  })
+
+  it('без классификатора даёт ровно сегодняшнюю строку', () => {
+    const lines = [makeLine('a\u{1F5D1}b')]
+    const plain = serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 0)
+    expect(plain).toBe('<span class="term-line">a\u{1F5D1}b</span>')
+    expect(serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 0, undefined, boxNothing)).toBe(
+      plain,
+    )
+  })
+
+  it('не доходит до семантических эмиссий', () => {
+    const lines = [makeLine('a\u{1F5D1}b')]
+    expect(serializeRangeText((y) => lines[y], 0, 0)).toBe('a\u{1F5D1}b')
+    expect(serializeRangeSGR((y) => lines[y], 0, 0)).toBe('a\u{1F5D1}b')
+  })
+})
+
+describe('collectFitCandidates', () => {
+  it('видит ровно те ячейки, о которых потом спросят при сериализации', () => {
+    // Если сбор и сериализация разойдутся хоть в одной ячейке, кэш будет
+    // холодным именно там, и коробка не появится — молча.
+    const lines = [makeLine('a\u{1F5D1}b'), new BufferLine('⬢x', true)]
+    const collected: Array<[string, number]> = []
+    collectFitCandidates(
+      (y) => lines[y],
+      0,
+      1,
+      (chars, width) => collected.push([chars, width]),
+    )
+    const asked: Array<[string, number]> = []
+    serializeRange(
+      DEFAULT_SNAPSHOT,
+      (y) => lines[y],
+      0,
+      1,
+      undefined,
+      (chars, width) => {
+        asked.push([chars, width])
+        return null
+      },
+    )
+    expect(collected).toEqual(asked)
   })
 })

@@ -59,6 +59,9 @@ var executors = map[string]func(ctx context.Context, cap agenttools.Capability, 
 	"files.edit":       executeFilesEdit,
 	"files.create":     executeFilesCreate,
 	"session.list":     executeSessionListTool,
+	"session.read":     executeSessionReadTool,
+	"session.keys":     executeSessionKeysTool,
+	"session.message":  executeSessionMessageTool,
 	"notes.search":     executeNotesSearch,
 	"notes.create":     executeNotesCreate,
 	"notes.update":     executeNotesUpdate,
@@ -74,6 +77,12 @@ var executors = map[string]func(ctx context.Context, cap agenttools.Capability, 
 	"skills.delete":    executeSkillsDelete,
 	"skills.resolve":   executeSkillsResolve,
 	"skills.install":   executeSkillsInstall,
+	"workers.holdings": executeWorkerHoldings,
+	"workers.spawn":    executeWorkerSpawn,
+	"workers.say":      executeWorkerSay,
+	"workers.wait":     executeWorkerWait,
+	"workers.close":    executeWorkerClose,
+	"workers.inbox":    executeWorkerInbox,
 }
 
 // SkillSource is the assistant's seam onto the skill library. The index is
@@ -116,6 +125,21 @@ type toolSeams struct {
 	// against a guessed directory would show the WRONG file, which is the
 	// one failure on this surface a person cannot see.
 	cwd string
+	// workerStore is the worker record. Nil is the ordinary shape for every caller
+	// that is not the transport, and it is also the honest answer where the
+	// encrypted store never opened: the tools refuse and say so, rather than
+	// starting a worker into a record that would not hold it.
+	workerStore WorkerRecord
+	// workerEnvironment names the environment a spawn would reach. It is a
+	// SEAM value and not an argument for the reason resourceLocalEnvironment
+	// is a constant: the spawner opens a local session, so a parameter would
+	// let the model name an environment nothing could deliver.
+	workerEnvironment string
+	// paneAccessBinder mints THIS run's DescendantPaneAccess/SessionReads
+	// (PaneAccessBinder, kernel.go) — nil is the honest shape for a caller
+	// that never wired one, which leaves every sessionId naming a
+	// descendant refused rather than guessed at.
+	paneAccessBinder PaneAccessBinder
 }
 
 type noteSearchRow struct {
@@ -885,6 +909,48 @@ func executeSessionListTool(ctx context.Context, cap agenttools.Capability, args
 	return executeSessionList(ctx, reader, seams.sessions, args)
 }
 
+// executeSessionReadTool is session.read's InGo-executor-map entry — the
+// tool ENDPOINT's path (runDeclaredTool consults this map regardless of the
+// declaration's own Executes, unlike the kernel's dispatch switch). It has
+// no renderer requester of its own (toolSeams carries none: an external
+// tool-endpoint connection has no renderer attached), so the run's own pane
+// falls back to the same "no renderer requester is wired" refusal any other
+// requester-less caller already gets; a sessionId naming a descendant is
+// unaffected, since PaneReader travels on the capability itself rather than
+// through a requester.
+func executeSessionReadTool(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	reader, ok := cap.(*agenttools.SessionDescendantCapability)
+	if !ok {
+		return "", fmt.Errorf("session.read: capability is %T, not *agenttools.SessionDescendantCapability", cap)
+	}
+	return executeSessionRead(ctx, reader, seams.sessions, nil, args)
+}
+
+// executeSessionKeysTool is session.keys' InGo-executor-map entry (design
+// §6.4, §6.5, Task 9), the same InGo path executeSessionReadTool takes: it
+// carries no renderer requester and needs none, since a descendant's write
+// path travels on the capability's SessionKeys field, never through a
+// requester.
+func executeSessionKeysTool(ctx context.Context, cap agenttools.Capability, args json.RawMessage, _ toolSeams) (string, error) {
+	reader, ok := cap.(*agenttools.SessionDescendantCapability)
+	if !ok {
+		return "", fmt.Errorf("session.keys: capability is %T, not *agenttools.SessionDescendantCapability", cap)
+	}
+	return executeSessionKeys(ctx, reader, args)
+}
+
+// executeSessionMessageTool is session.message's InGo-executor-map entry
+// (design §8, Task 10), the same InGo path executeSessionKeysTool takes: no
+// renderer requester is needed, since a descendant's message path travels on
+// the capability's SessionMessages field.
+func executeSessionMessageTool(ctx context.Context, cap agenttools.Capability, args json.RawMessage, _ toolSeams) (string, error) {
+	reader, ok := cap.(*agenttools.SessionDescendantCapability)
+	if !ok {
+		return "", fmt.Errorf("session.message: capability is %T, not *agenttools.SessionDescendantCapability", cap)
+	}
+	return executeSessionMessage(ctx, reader, args)
+}
+
 // filesReadResult is the tool's return: total (the file's size), the window
 // that was ACTUALLY returned (which clamps to the file — a window past the
 // end is answered honestly, never as an error), and the text. Binary content
@@ -960,6 +1026,30 @@ func executeFilesRead(ctx context.Context, cap agenttools.Capability, args json.
 	return string(b), nil
 }
 
+// A CAPABILITY REFUSAL LEAVES THESE TOOLS AS AN ERROR (nocx-4yjwk.5).
+//
+// files.edit and files.create answer an editor failure as a tool result —
+// {"status":"refused"} with the editor's own reason — and that is right for a
+// FAILURE: a stale revision, an unwritable file, a patch that does not apply
+// are outcomes the model must read and act on, and they name only what the
+// model already named. It is wrong for the narrowed capability's ErrOutOfScope,
+// which is not a failure at all but the enforcement refusing a call it cannot
+// express — a policy fact, whose stringification names an absolute path outside
+// the grant and the shape of the fence that stopped it. Answered here, it
+// reached the model verbatim, which is exactly what refusalResult's contract
+// forbids.
+//
+// So the capability refusal is HANDED UP rather than answered: the kernel's one
+// predicate recognises it at the single seam that decides fault-or-answer
+// (kernel.go step 6c, nocx-4yjwk.3) and returns OUR sentence. That is a second
+// CALL SITE of capabilityRefusal, deliberately, and not a second predicate —
+// the alternative, minting our sentence here, would put the fault-or-answer
+// decision back in each tool, which is the spread that made files.read and
+// these two disagree in the first place.
+//
+// The interval: from the capability's refusal — nothing was written, and the
+// error carries no result — until the kernel closes the attempt and returns
+// refusalResult(RefusedOutOfScope). Every other error keeps the result it had.
 type filesMutationResult struct {
 	Path     string `json:"path"`
 	Status   string `json:"status"`
@@ -985,6 +1075,9 @@ func executeFilesEdit(ctx context.Context, cap agenttools.Capability, args json.
 	}
 	result, err := editor.Edit(ctx, p.Path, p.Revision, p.Patch)
 	if err != nil {
+		if capabilityRefusal(err) {
+			return "", err
+		}
 		return marshalFilesMutation(filesMutationResult{Path: p.Path, Status: "refused", Reason: err.Error()})
 	}
 	return marshalFilesMutation(filesMutationResult{Path: p.Path, Status: "applied", Revision: result.Revision})
@@ -1007,6 +1100,9 @@ func executeFilesCreate(ctx context.Context, cap agenttools.Capability, args jso
 	}
 	result, err := editor.Create(ctx, p.Path, p.Content)
 	if err != nil {
+		if capabilityRefusal(err) {
+			return "", err
+		}
 		return marshalFilesMutation(filesMutationResult{Path: p.Path, Status: "refused", Reason: err.Error()})
 	}
 	return marshalFilesMutation(filesMutationResult{Path: p.Path, Status: "created", Revision: result.Revision})

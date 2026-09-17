@@ -5,46 +5,61 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	_ "embed"
 	"encoding/hex"
 	"errors"
-	"fmt"
-	"strconv"
 	"strings"
+
+	"github.com/shady2k/nocx/internal/remoteprobe"
 )
 
-//go:embed scripts/nocx_complete.bash
-var completionScript string
-
-// ExecConn is the minimal surface the SSH completer needs from a
-// DiscoveryConn lease. internal/ssh.DiscoveryConn satisfies it.
-type ExecConn interface {
-	Exec(ctx context.Context, cmd string) (*ExecResult, error)
+// ProbeConn is the minimal surface the SSH completer needs from a probe lease:
+// ONE completion probe, named, with its typed arguments.
+//
+// There is no command in this interface and that is the whole change D3 forced
+// (nocx-50w7p.9): the script is a fixed program that lives in
+// internal/remoteprobe, the helper links the same package and runs it on the
+// pooled connection, and what crosses the wire is a line, a caret and a nonce.
+// A `Exec(ctx, cmd)` seam here would be a coordinator composing shell text and
+// handing it to another process to put on somebody's machine.
+type ProbeConn interface {
+	Complete(ctx context.Context, probe CompletionProbe) (*ExecResult, error)
 	Close() error
 }
 
-// ExecResult mirrors ssh.ExecResult so the completion package does not
-// import internal/ssh.
-type ExecResult struct {
-	Stdout     []byte
-	Stderr     []byte
-	ExitStatus int
-	Truncated  bool
+// CompletionProbe is one completion question: the typed arguments the fixed
+// script takes.
+//
+// Cwd and Line are the user's, and they are the reason the script is fixed
+// rather than composed per request: both arrive as quoted ARGUMENTS to it. Pos
+// is the caret's byte offset in the line and Limit the caller's own bound on
+// candidates.
+type CompletionProbe struct {
+	Cwd   string
+	Line  string
+	Pos   int
+	Limit int
+	Nonce string
 }
 
-// ExecConnProvider creates an ExecConn for the given host. The composition
-// root wires a function that calls sshClient.DiscoveryConn.
-type ExecConnProvider func(ctx context.Context, host string) (ExecConn, error)
+// ExecResult mirrors what a probe lease returns, so this package does not
+// import the wire — it is remoteprobe.Result, declared once for the reason the
+// probe names are: the helper describes what it captured and this package reads
+// it, and two structs with the same four fields would be the pair that drifts.
+type ExecResult = remoteprobe.Result
 
-// SSHCompleter runs completion on a remote host through a second shell —
-// the DiscoveryConn lane of ADR-0020. The user's line is never touched;
-// no keystroke is ever forwarded (ADR-0004 §2).
+// ProbeConnProvider creates a ProbeConn for the given host. The composition
+// root wires a function that asks this machine's helper for a lease on it.
+type ProbeConnProvider func(ctx context.Context, host string) (ProbeConn, error)
+
+// SSHCompleter runs completion on a remote host through a second shell — the
+// probe lane of ADR-0020. The user's line is never touched; no keystroke is
+// ever forwarded (ADR-0004 §2).
 type SSHCompleter struct {
-	provider     ExecConnProvider
+	provider     ProbeConnProvider
 	generateRand func() (string, error) // nonce generator; crypto/rand by default
 }
 
-func NewSSH(provider ExecConnProvider) *SSHCompleter {
+func NewSSH(provider ProbeConnProvider) *SSHCompleter {
 	return &SSHCompleter{
 		provider:     provider,
 		generateRand: defaultGenerateRand,
@@ -53,7 +68,7 @@ func NewSSH(provider ExecConnProvider) *SSHCompleter {
 
 // NewSSHWithRand is for tests: it pins the nonce generator so the response
 // framing is deterministic.
-func NewSSHWithRand(provider ExecConnProvider, randFn func() (string, error)) *SSHCompleter {
+func NewSSHWithRand(provider ProbeConnProvider, randFn func() (string, error)) *SSHCompleter {
 	return &SSHCompleter{provider: provider, generateRand: randFn}
 }
 
@@ -66,18 +81,13 @@ func defaultGenerateRand() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-// maxCompletionCmdLen caps the remote completion command. A script that
-// outgrows the cap must refuse rather than emit a command the far host
-// cannot exec. 32 KiB matches the launcher's own cap.
-const maxCompletionCmdLen = 32 * 1024
-
 // Complete implements Completer for a remote bash host.
 //
-// It builds a bash command that runs the embedded completion script via
-// a quoted heredoc — no temp file, no printf escaping, and the heredoc
-// delimiter carries the nonce so it is unique per request. Results are
-// framed with the same nonce so a banner-polluted answer is rejected
-// whole.
+// It mints the nonce the script frames its answer with, asks for one probe
+// through the lease, and parses what came back. The framing is what makes a
+// banner-polluted answer rejectable WHOLE: a login banner, an MOTD or a chatty
+// rc file lands on the same stream, and half-parsing one is how a banner line
+// becomes a completion candidate.
 func (c *SSHCompleter) Complete(ctx context.Context, req Request) (*Response, error) {
 	if err := ctx.Err(); err != nil {
 		return emptyResponse("cancelled"), nil
@@ -85,7 +95,7 @@ func (c *SSHCompleter) Complete(ctx context.Context, req Request) (*Response, er
 
 	conn, err := c.provider(ctx, req.Host)
 	if err != nil {
-		return nil, fmt.Errorf("completion lease: %w", err)
+		return nil, err
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -101,51 +111,26 @@ func (c *SSHCompleter) Complete(ctx context.Context, req Request) (*Response, er
 		limit = 200
 	}
 
-	cmd := buildRemoteCommand(req.Cwd, req.Line, req.Pos, limit, nonce)
-	if len(cmd) > maxCompletionCmdLen {
-		return emptyResponse("completion script too large"), nil
-	}
-
-	result, err := conn.Exec(ctx, cmd)
+	result, err := conn.Complete(ctx, CompletionProbe{
+		Cwd:   req.Cwd,
+		Line:  req.Line,
+		Pos:   req.Pos,
+		Limit: limit,
+		Nonce: nonce,
+	})
 	if err != nil {
-		return classifyExecError(err), nil
+		return classifyProbeError(err), nil
 	}
 
 	return parseCompletionOutput(result.Stdout, nonce, limit), nil
-}
-
-// buildRemoteCommand constructs the bash command sent to the remote host.
-// The command pipes the embedded script via a quoted heredoc — the
-// delimiter includes the nonce so it cannot collide with the script
-// content, and the quoted delimiter suppresses shell expansion so the
-// script body is delivered verbatim.
-func buildRemoteCommand(cwd, line string, pos, limit int, nonce string) string {
-	delim := "NOCXEOF_" + nonce
-	return fmt.Sprintf(
-		"bash -s -- %s %s %d %d %s << '%s'\n%s\n%s\n",
-		shellQuote(cwd),
-		shellQuote(line),
-		pos,
-		limit,
-		shellQuote(nonce),
-		delim,
-		completionScript,
-		delim,
-	)
-}
-
-// shellQuote wraps s in single quotes, escaping embedded single quotes
-// with the POSIX '\” idiom.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // parseCompletionOutput extracts candidates from the framed response.
 // A response whose nonce markers are missing or mismatched is rejected
 // whole — a banner-polluted answer must never be half-parsed.
 func parseCompletionOutput(stdout []byte, nonce string, limit int) *Response {
-	startMarker := "NONCE:" + nonce + ":START"
-	endMarker := "NONCE:" + nonce + ":END"
+	startMarker := remoteprobe.CompletionStart(nonce)
+	endMarker := remoteprobe.CompletionEnd(nonce)
 
 	scanner := bufio.NewScanner(bytes.NewReader(stdout))
 	inPayload := false
@@ -199,26 +184,35 @@ func parseCompletionOutput(stdout []byte, nonce string, limit int) *Response {
 	return &Response{Candidates: candidates, Truncated: truncated}
 }
 
-// classifyExecError maps known SSH exec errors to a soft response. The
-// dropdown must never show a spinner that never resolves; every failure
-// path surfaces a stated reason.
-func classifyExecError(err error) *Response {
-	switch {
-	case errors.Is(err, context.Canceled):
+// classifyProbeError maps a probe's failure onto a soft response. The dropdown
+// must never show a spinner that never resolves; every failure path surfaces a
+// stated reason.
+//
+// The kinds are TYPED now rather than matched against the error's text, which
+// is what this used to do: the failure crosses the helper wire as a code and
+// arrives as remoteprobe's own kind, so a sentence spelled differently in
+// another process can no longer turn a refusal into "completion unavailable".
+func classifyProbeError(err error) *Response {
+	if errors.Is(err, context.Canceled) {
 		return emptyResponse("cancelled")
-	case errors.Is(err, context.DeadlineExceeded):
-		return emptyResponse("timed out")
-	default:
-		msg := err.Error()
-		if strings.Contains(msg, "exec request refused") {
-			return emptyResponse("remote host refused completion exec")
-		}
-		if strings.Contains(msg, "additional exec session refused") {
-			return emptyResponse("remote host limits sessions; completion unavailable")
-		}
-		if strings.Contains(msg, "exec connection lost") {
-			return emptyResponse("connection lost during completion")
-		}
-		return emptyResponse("completion unavailable: " + strconv.Quote(msg))
 	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return emptyResponse("timed out")
+	}
+	var probeErr *remoteprobe.Error
+	if errors.As(err, &probeErr) {
+		switch probeErr.Kind {
+		case remoteprobe.KindSessionRefused:
+			return emptyResponse("remote host limits sessions; completion unavailable")
+		case remoteprobe.KindExecProhibited:
+			return emptyResponse("remote host refused completion exec")
+		case remoteprobe.KindCommandTooLong:
+			return emptyResponse("completion probe too large for this host")
+		case remoteprobe.KindConnectionLost:
+			return emptyResponse("connection lost during completion")
+		case remoteprobe.KindLeaseClosed:
+			return emptyResponse("completion unavailable")
+		}
+	}
+	return emptyResponse("completion unavailable")
 }

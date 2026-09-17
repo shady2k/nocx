@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.lease.params.schema.json",
+  "title": "HelperSSHLeaseParams",
+  "description": "One pooled reference to acquire for a resolved destination, so that the named probes have a connection to run on rather than one dial per command. It takes the same destination shape `probe` and `open` take — resolved host, port, user and identity — because alias resolution, ~/.ssh/config merging and the credential's authorization against an endpoint stay in the coordinator, which is the party that reads the config and holds the binding. It is deliberately not a channel: nothing is opened on the connection here, and no bytes move.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["destination", "acceptOnTrust"],
+  "properties": {
+    "destination": {
+      "description": "What to connect to and what to authenticate as.",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/destination"
+    },
+    "acceptOnTrust": {
+      "description": "The coordinator's answer to 'may a host key this host has never presented be recorded', carried exactly as probe.params carries it: the helper may not decide that for itself, and the decision travels with the call that started the handshake. False is the ordinary value and produces the host-key-unknown refusal below.",
+      "type": "boolean"
+    }
+  }
+}

@@ -24,10 +24,15 @@ type Options struct {
 // use: each public method serializes on an internal mutex, applies its
 // transition, and hands the outbound envelopes it produced (accept,
 // refresh_request) back to the caller UNSENT — the caller owns delivery
-// ordering (ADR-0024 decision 9: an accept must not reach the shell before
-// the renderer has acknowledged the published fact). Deliver sends one
-// such envelope to its transport's port, outside the lock. Invalid events
-// mutate nothing and return a sentinel error (errors.go).
+// ordering. Deliver sends one such envelope to its transport's port, outside
+// the lock, and is the closing event of ACCEPT's own gate: a domain is not
+// live — lifecycle events are rejected with ErrDomainPending — until its
+// minted accept has actually been delivered (decision 9's "live means past
+// ACCEPT", not merely minted). The publisher (internal/lifecyclepub) is the
+// caller in production and delivers an accept on its own authority as soon
+// as it is minted (ADR-0062); this package does not know or care when
+// Deliver is called, only that events are refused until it is. Invalid
+// events mutate nothing and return a sentinel error (errors.go).
 type Kernel struct {
 	mu       sync.Mutex
 	now      func() time.Time
@@ -272,6 +277,8 @@ func (k *Kernel) ingestLocked(t TransportID, env Envelope) ([]Outbound, error) {
 		out, err = k.applyAgentEnrol(d, ls, env)
 	case KindAgentWithdraw:
 		out, err = k.applyAgentWithdraw(d, ls, env)
+	case KindAgentReport:
+		out, err = k.applyAgentReport(d, ls, env)
 	default:
 		return nil, ErrIllegalEvent
 	}
@@ -459,7 +466,16 @@ func (k *Kernel) SubmitAttempt(domain DomainID, command, cwd, host, submitID str
 		return ExecutionAttempt{}, ErrOversizeCommand
 	}
 	if open := k.openAttemptFor(d.ID); open != nil {
-		return ExecutionAttempt{}, ErrAttemptOpen
+		if !open.racedPromptReady {
+			return ExecutionAttempt{}, ErrAttemptOpen
+		}
+		// A fresh submit finding a PRIMED attempt still open is the other
+		// half of applyPromptReady's invariant: a second prompt_ready would
+		// have closed it, and a fresh submit instead is the same fact
+		// arriving a different way — the shell reached a ready prompt a
+		// second time with nothing ever attaching. Close it, then proceed
+		// exactly as if nothing had been open.
+		open.State = AttemptUnknown
 	}
 	aid, err := k.newAttemptID()
 	if err != nil {
@@ -704,12 +720,64 @@ func (k *Kernel) applyComplete(d *Domain, ls *laneState, env Envelope) ([]Outbou
 	return nil, nil
 }
 
+// applyPromptReady is the domain's answer to a race that has two genuinely
+// different causes producing the SAME wire shape — a prompt_ready arriving
+// over an attempt SubmitAttempt opened but nothing has Started yet — and
+// only one of the two may ever be assumed:
+//
+//  1. The DEBUG trap's start is a few milliseconds behind PROMPT_COMMAND's
+//     own prompt_ready for the very same command (nocx-xn63t.6.1: CI runs
+//     35143163428 and 35163055392, ~7-10ms apart). The start is still
+//     coming.
+//  2. An interrupt landed before the command ever reached the DEBUG trap —
+//     readline discarded the whole line — and no start is ever coming.
+//     Reproduced deliberately and reliably (not rarely: 40/40 iterations)
+//     by TestInterruptRightAfterEnterNeverStartsWithoutASecondPromptReady,
+//     which races \x03 against a just-submitted, fully-typed line through a
+//     real bash.
+//
+// The wire cannot tell these apart at the moment this prompt_ready arrives
+// — only the NEXT event can, which is why the attempt is not closed here on
+// the first one. THE INTERVAL, both ends: an open-and-unstarted attempt
+// becomes PRIMED the first time a prompt_ready arrives over it (case 1's
+// signature, taken on faith once), and a PRIMED attempt closes as
+// AttemptUnknown on the first of two events — a SECOND prompt_ready here,
+// or a fresh SubmitAttempt finding it still open — because either one means
+// the shell reached a full prompt cycle a second time with no start ever
+// attaching, which case 1 cannot produce and only case 2 can. A start
+// arriving before either of those still attaches, PRIMED or not —
+// applyStart's `open != nil && !open.Started` arm does not consult the
+// flag — which is what keeps the attempt's SubmitID/ledger binding alive
+// through case 1 rather than minting a disconnected replacement (an
+// earlier version of this fix closed the attempt on the FIRST prompt_ready
+// unconditionally; that made the kernel's own bookkeeping consistent but
+// broke exactly this binding, and a webkit container run against it still
+// failed e2e/terminal-screen-register-mockup-pass.spec.ts:110 — differently,
+// on a stalled row instead of a rejected envelope).
 func (k *Kernel) applyPromptReady(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {
 	if err := k.requireActive(d, ls); err != nil {
 		return nil, err
 	}
 	if open := k.openAttemptFor(d.ID); open != nil {
-		return nil, ErrPromptOverAttempt
+		if open.Started {
+			return nil, ErrPromptOverAttempt // a program is running; the shell is lying about its prompt
+		}
+		if open.racedPromptReady {
+			// The second prompt_ready with no start between them: case 2.
+			// Close it the same way replayLifecycleFacts already closes an
+			// open attempt the shell's own snapshot does not claim
+			// (kernel.go ~1013): "open, but the shell is not running it".
+			open.State = AttemptUnknown
+			k.setLifecycle(ls, LifecyclePromptReady, d.ID, "")
+			return nil, nil
+		}
+		// First prompt_ready over it: prime it and report the lane's own
+		// honest state — the shell really is at a prompt right now,
+		// whichever case this turns out to be — but leave the attempt
+		// itself untouched so an imminent start still attaches to it.
+		open.racedPromptReady = true
+		k.setLifecycle(ls, LifecyclePromptReady, d.ID, "")
+		return nil, nil
 	}
 	k.setLifecycle(ls, LifecyclePromptReady, d.ID, "")
 	return nil, nil
@@ -831,7 +899,7 @@ func (k *Kernel) applyAgentEnrol(d *Domain, ls *laneState, env Envelope) ([]Outb
 	if req.Cols <= 0 || req.Rows <= 0 || req.Cols > maxPaneDimension || req.Rows > maxPaneDimension {
 		return nil, ErrBadRequest
 	}
-	return []Outbound{k.agentOutbound(d, Event{
+	return []Outbound{k.outbound(d, Event{
 		Kind:          KindAgentEnrolled,
 		AgentEnrolled: &AgentEnrolled{RequestID: req.RequestID, Agent: req.Agent},
 	})}, nil
@@ -848,41 +916,97 @@ func (k *Kernel) applyAgentWithdraw(d *Domain, ls *laneState, env Envelope) ([]O
 	if req.RequestID == "" || !requestIDRe.MatchString(string(req.RequestID)) {
 		return nil, ErrRequestIDShape
 	}
-	return []Outbound{k.agentOutbound(d, Event{
+	return []Outbound{k.outbound(d, Event{
 		Kind:           KindAgentWithdrawn,
 		AgentWithdrawn: &AgentWithdrawn{RequestID: req.RequestID},
 	})}, nil
 }
 
-// agentOutbound addresses an answer back to the domain that asked, by the same
-// tuple the adapter routes a grant by.
-func (k *Kernel) agentOutbound(d *Domain, evt Event) Outbound {
+// applyAgentReport validates a participant's declaration and echoes it for the
+// seam that records it.
+//
+// The kernel keeps nothing here, exactly as it keeps nothing for an
+// enrolment, and for the same reason: a declaration is not lifecycle state —
+// it may not open, complete or alter an execution attempt (ADR-0024 decision
+// 1) — and a kernel that held it would be a second place where "what did this
+// participant produce" is answered. What only the kernel can do is say the
+// frame really came from this domain in this epoch; after that the fact
+// belongs to whoever owns the worker record, which is not this package.
+//
+// The summary is bounded HERE and not at the seam, because the bound is a
+// property of the frame: a report longer than this could not be sent at all,
+// and refusing it where the frame is parsed is what stops the rest of the
+// stack from having to have an opinion about length.
+func (k *Kernel) applyAgentReport(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {
+	if err := k.requireActive(d, ls); err != nil {
+		return nil, err
+	}
+	req := env.Event.AgentReport
+	if req.RequestID == "" || !requestIDRe.MatchString(string(req.RequestID)) {
+		return nil, ErrRequestIDShape
+	}
+	if len(req.Summary) > MaxReportSummaryBytes {
+		return nil, ErrBadRequest
+	}
+	return []Outbound{k.outbound(d, Event{
+		Kind:          KindAgentReported,
+		AgentReported: &AgentReported{RequestID: req.RequestID},
+	})}, nil
+}
+
+// outbound addresses one kernel→shell envelope to the domain that asked, by
+// the tuple the adapter routes by: lane, domain and epoch. It is the ONE
+// place that builds an outbound envelope, so that what follows is decided
+// once rather than four times.
+//
+// # The outbound direction carries no capability, deliberately
+//
+// It used to carry it on every frame, and that undid what the capability is
+// for (nocx-aqz7o). ADR-0024 makes the per-epoch capability mandatory rather
+// than belt-and-braces for one named actor: a DESCENDANT of the shell, which
+// inherits the lifecycle descriptor because bash's redirection is not
+// close-on-exec and exec.Cmd.ExtraFiles clears FD_CLOEXEC. The transport
+// stops whatever can only write to the terminal; the capability was supposed
+// to stop that descendant. Writing the capability back onto the same
+// descriptor, in cleartext, on the very first frame of the handshake, handed
+// it to the actor it exists to exclude — a passive read, needing no ptrace
+// and no /proc, by exactly the actor the ADR names and does not exclude.
+//
+// Nothing needed it. The kernel is the only sender on this direction; the
+// shell already holds the capability it was given at bootstrap, so an echo
+// authenticates nobody to anybody. Its one production reader was the accept
+// check in the integration scripts, which used it as an "is this frame
+// mine" test — and could not have been authenticating the peer, because the
+// shell's own hello carries the capability to that peer one frame earlier.
+// The scripts now make that test on the domain and epoch, which are the
+// non-secret halves of the same tuple and are already in the shell's
+// environment.
+//
+// What this does NOT close: a domain_grant's bootstrap payload is the child
+// shell's rcfile text, and for a local nested environment that text contains
+// the CHILD's capability. It rides this same descriptor, and it is inherent
+// to the design — the parent has to receive something to hand its child.
+// That is a separate exposure with a separate answer, and it is not this one.
+func (k *Kernel) outbound(d *Domain, evt Event) Outbound {
 	return Outbound{
 		Transport: d.Transport,
 		Envelope: Envelope{
 			Version: ProtocolVersion, Lane: d.Lane, Domain: d.ID,
-			Epoch: d.Epoch, Capability: d.capability,
+			Epoch: d.Epoch,
 			Event: evt,
 		},
 	}
 }
 
 func (k *Kernel) grantOutbound(d *Domain, req *DomainRequest) Outbound {
-	return Outbound{
-		Transport: d.Transport,
-		Envelope: Envelope{
-			Version: ProtocolVersion, Lane: d.Lane, Domain: d.ID,
-			Epoch: d.Epoch, Capability: d.capability,
-			Event: Event{Kind: KindDomainGrant, DomainGrant: &DomainGrant{
-				RequestID: req.RequestID,
-				Env:       req.Env,
-				Host:      req.Host,
-				User:      req.User,
-				Port:      req.Port,
-				Opts:      req.Opts,
-			}},
-		},
-	}
+	return k.outbound(d, Event{Kind: KindDomainGrant, DomainGrant: &DomainGrant{
+		RequestID: req.RequestID,
+		Env:       req.Env,
+		Host:      req.Host,
+		User:      req.User,
+		Port:      req.Port,
+		Opts:      req.Opts,
+	}})
 }
 
 func (k *Kernel) applySnapshot(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {
@@ -1032,25 +1156,11 @@ func (k *Kernel) Deliver(out Outbound) error {
 }
 
 func (k *Kernel) acceptOutbound(d *Domain) Outbound {
-	return Outbound{
-		Transport: d.Transport,
-		Envelope: Envelope{
-			Version: ProtocolVersion, Lane: d.Lane, Domain: d.ID,
-			Epoch: d.Epoch, Capability: d.capability,
-			Event: Event{Kind: KindAccept, Accept: &Accept{}},
-		},
-	}
+	return k.outbound(d, Event{Kind: KindAccept, Accept: &Accept{}})
 }
 
 func (k *Kernel) refreshOutbound(d *Domain, rid RequestID) Outbound {
-	return Outbound{
-		Transport: d.Transport,
-		Envelope: Envelope{
-			Version: ProtocolVersion, Lane: d.Lane, Domain: d.ID,
-			Epoch: d.Epoch, Capability: d.capability,
-			Event: Event{Kind: KindRefreshRequest, RefreshRequest: &RefreshRequest{RequestID: rid}},
-		},
-	}
+	return k.outbound(d, Event{Kind: KindRefreshRequest, RefreshRequest: &RefreshRequest{RequestID: rid}})
 }
 
 // requireActive enforces that the domain is live, established (not
@@ -1282,8 +1392,11 @@ func (k *Kernel) newAttemptID() (AttemptID, error) {
 // Exactly what stopped it before, unchanged: the per-frame bearer. Ingest
 // authenticates domain, transport, epoch and capability before it consults
 // any state, and adoption alters none of that — a descendant of the shell
-// that inherited the descriptor still cannot produce the capability, and a
-// frame from any OTHER domain still names an id this kernel does not hold.
+// that inherited the descriptor cannot produce the capability, because the
+// only place it could have READ one is the channel itself and the outbound
+// direction no longer writes it there (see outbound; it did until
+// nocx-aqz7o, and while it did this sentence was false). A frame from any
+// OTHER domain still names an id this kernel does not hold.
 // What adoption adds is one more holder of the capability: the replacing
 // coordinator, which is the same trust class that minted it in the first
 // place and which already owns the session's keyboard and its whole output

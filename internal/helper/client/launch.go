@@ -25,6 +25,12 @@ type Config struct {
 	ExpectHash  string     // the content hash the installer wrote (D21)
 	SentinelTTL time.Duration
 	Log         *slog.Logger
+	// Reverse is the closed set of ops this coordinator answers when the
+	// HELPER asks (reverse.go). Nil is a real configuration and not a
+	// missing one: a caller with nothing to offer answers every reverse
+	// request with unknown_service, which is what a helper built against a
+	// newer generation needs to hear rather than wait forever for.
+	Reverse *ReverseRegistry
 }
 
 // DefaultSentinelTTL is the handshake budget when Config leaves SentinelTTL
@@ -58,16 +64,25 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 	}
 
 	c := &Client{
-		conn:        cfg.Exec,
-		cfg:         cfg,
-		log:         cfg.Log,
-		nonce:       nonce,
-		pending:     make(map[uint64]chan proto.Response),
-		streams:     make(map[uint64]*chunkStream),
-		attachments: make(map[[16]byte]*AttachedSession),
-		done:        make(chan struct{}),
-		hsCh:        make(chan error, 1),
+		conn:           cfg.Exec,
+		cfg:            cfg,
+		log:            cfg.Log,
+		nonce:          nonce,
+		pending:        make(map[uint64]chan proto.Response),
+		streams:        make(map[uint64]*chunkStream),
+		attachments:    make(map[[16]byte]*AttachedSession),
+		channels:       make(map[proto.ChannelID]*ChannelStream),
+		parkedChannels: make(map[proto.ChannelID][][]byte),
+		parkedEnds:     make(map[proto.ChannelID]parkedEnd),
+		forwards:       make(map[proto.ForwardID]*Forward),
+		parkedForwards: make(map[proto.ForwardID][]proto.ForwardedTCPIPEvent),
+		done:           make(chan struct{}),
+		hsCh:           make(chan error, 1),
 	}
+	// The reverse handlers' lifetime (reverse.go): the CONNECTION's, not the
+	// handshake's. Dial's own ctx governs bringing the helper up and is
+	// deliberately not the parent — the client outlives it by design.
+	c.reverseCtx, c.cancelReverse = context.WithCancel(context.Background())
 
 	hello := proto.Hello{Version: proto.Version, Nonce: nonce, Corr: randomCorr()}
 	raw, err := json.Marshal(hello)
@@ -198,6 +213,17 @@ func (c *Client) pump() {
 				// status. EOF implies the process ended, and the channel
 				// close that ended our read is what unblocks Wait.
 				r := <-c.waitCh
+				if r.err != nil {
+					// The lane ended with no exit status at all: nothing said
+					// how it ended, which is what a transport that went looks
+					// like. Classified as loss rather than as "not our helper"
+					// — and it is the SAME answer the other producer reaches
+					// (the lane's Done, which the select above watches), so a
+					// caller cannot get one of two sentences depending on
+					// which of them fired first.
+					c.handshakeDone(fmt.Errorf("%w: %v", ErrLost, r.err))
+					return
+				}
 				if r.code == exitVersionMismatch {
 					c.handshakeDone(ErrVersionMismatch)
 					return

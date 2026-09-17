@@ -4,30 +4,45 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
+
+	"github.com/shady2k/nocx/internal/remoteprobe"
 )
 
-// ExecResult is one remote command's answer, mirroring what the SSH
-// discovery lease returns. The package deliberately does not import
-// internal/ssh: the seam is one method, and keeping it here is what lets the
-// service be tested without a network.
-type ExecResult struct {
-	Stdout     []byte
-	ExitStatus int
-	Truncated  bool
-}
+// ExecResult is one enumeration half's answer, in the shared probe vocabulary:
+// the captured stdout, the remote exit status, and whether a capture bound was
+// hit (Truncated — the output is a PREFIX, and a prefix of an enumeration is
+// exactly the partial answer that may not be published).
+type ExecResult = remoteprobe.Result
 
-// ExecConn is a lease on a remote connection that can run one command.
+// Phase names which half of the enumeration to run. The spellings are
+// remoteprobe's, because "which phase is this" is one fact on both sides of the
+// helper wire (AD-8) — the coordinator picks it and the helper owns what it is.
+type Phase = remoteprobe.CommandNamesPhase
+
+const (
+	// PhaseProbe is the cheap per-session invalidation probe.
+	PhaseProbe = remoteprobe.CommandNamesProbe
+	// PhaseScan is the full enumeration of executable names on PATH.
+	PhaseScan = remoteprobe.CommandNamesScan
+)
+
+// ExecConn is a lease on a remote connection that can run one HALF of the
+// enumeration.
+//
+// It names a phase and never a command: the two shell programs live in
+// internal/remoteprobe, the helper links the same package and runs them on the
+// pooled connection, and what crosses this seam is a phase and a nonce (D3 —
+// no free-form exec crosses the helper wire).
 type ExecConn interface {
-	Exec(ctx context.Context, cmd string) (*ExecResult, error)
+	Enumerate(ctx context.Context, phase Phase, nonce string) (*ExecResult, error)
 	Close() error
 }
 
 // ExecConnProvider acquires a lease for one call. The composition root wires
-// the SSH client's DiscoveryConn — the same pooled lane completion and port
-// discovery use, so a jump route reuses one connection instead of dialing
-// the target directly.
+// this machine's helper — the same pooled lane completion and port discovery
+// use, so a jump route reuses one connection instead of dialing the target
+// directly.
 type ExecConnProvider func(ctx context.Context) (ExecConn, error)
 
 // RemoteSource enumerates one remote route's PATH over the discovery lane.
@@ -55,7 +70,7 @@ func (s *RemoteSource) Identity() Identity {
 }
 
 func (s *RemoteSource) Probe(ctx context.Context) (Probe, error) {
-	out, nonce, err := s.run(ctx, probeScript, ProbeDeadline)
+	out, nonce, err := s.run(ctx, PhaseProbe, ProbeDeadline)
 	if err != nil {
 		return Probe{}, err
 	}
@@ -63,14 +78,14 @@ func (s *RemoteSource) Probe(ctx context.Context) (Probe, error) {
 }
 
 func (s *RemoteSource) Scan(ctx context.Context, _ Probe) (Scan, error) {
-	out, nonce, err := s.run(ctx, scanScript, ScanDeadline)
+	out, nonce, err := s.run(ctx, PhaseScan, ScanDeadline)
 	if err != nil {
 		return Scan{}, err
 	}
 	return parseScan(out, nonce)
 }
 
-func (s *RemoteSource) run(ctx context.Context, script string, deadline time.Duration) ([]byte, string, error) {
+func (s *RemoteSource) run(ctx context.Context, phase Phase, deadline time.Duration) ([]byte, string, error) {
 	nonce, err := newNonce()
 	if err != nil {
 		return nil, "", err
@@ -84,7 +99,7 @@ func (s *RemoteSource) run(ctx context.Context, script string, deadline time.Dur
 	}
 	defer func() { _ = conn.Close() }()
 
-	res, err := conn.Exec(ctx, remoteCommand(script, nonce))
+	res, err := conn.Enumerate(ctx, phase, nonce)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return nil, "", fmt.Errorf("%w: %v", ErrScanDeadline, err)
@@ -101,24 +116,4 @@ func (s *RemoteSource) run(ctx context.Context, script string, deadline time.Dur
 		return nil, "", fmt.Errorf("commandnames: remote sh exited %d", res.ExitStatus)
 	}
 	return res.Stdout, nonce, nil
-}
-
-// remoteCommand wraps the script in a quoted heredoc, the same shape
-// internal/completion uses for the same reason: no temp file on the far
-// side, no printf escaping, and a delimiter carrying the nonce so it cannot
-// collide with the script's own text. The quoted delimiter suppresses
-// expansion, so the body arrives verbatim.
-func remoteCommand(script, nonce string) string {
-	delim := "NOCXCN_" + nonce
-	var b strings.Builder
-	b.WriteString("sh -s ")
-	b.WriteString(nonce)
-	b.WriteString(" << '")
-	b.WriteString(delim)
-	b.WriteString("'\n")
-	b.WriteString(script)
-	b.WriteString("\n")
-	b.WriteString(delim)
-	b.WriteString("\n")
-	return b.String()
 }

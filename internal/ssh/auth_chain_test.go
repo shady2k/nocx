@@ -1,3 +1,5 @@
+//go:build nocx_local_ssh
+
 package ssh
 
 import (
@@ -9,13 +11,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/credential"
-	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/zalando/go-keyring"
 	gossh "golang.org/x/crypto/ssh"
@@ -41,7 +40,7 @@ func TestAuthChainOrderAuto(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	resolved := &resolvedConfig{identityFile: keyPath, user: "alice", hostName: "h"}
+	resolved := &resolvedConfig{identityFiles: []string{keyPath}, user: "alice", hostName: "h"}
 	cfg := &ConnectConfig{
 		Secrets:  store,
 		SecretID: id,
@@ -94,7 +93,7 @@ func TestAuthChainFilterByAuthMode(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	resolved := &resolvedConfig{identityFile: keyPath, user: "alice", hostName: "h"}
+	resolved := &resolvedConfig{identityFiles: []string{keyPath}, user: "alice", hostName: "h"}
 
 	// auth=password should EXCLUDE publicKey bucket, include password buckets.
 	cfg := &ConnectConfig{Secrets: store, SecretID: id, AuthMode: "password"}
@@ -162,7 +161,7 @@ func TestAuthChainLateBindCredential(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	resolved := &resolvedConfig{identityFile: keyPath, user: "alice", hostName: "example.com", port: 22}
+	resolved := &resolvedConfig{identityFiles: []string{keyPath}, user: "alice", hostName: "example.com", port: 22}
 	cfg := &ConnectConfig{
 		Secrets:  store,
 		SecretID: id,
@@ -192,23 +191,55 @@ func TestAuthChainLateBindCredential(t *testing.T) {
 	}
 }
 
-func TestAuthChainDefaultKeyDiscovery(t *testing.T) {
+// TestAuthChainOffersEveryResolvedIdentityFile is the coordinator's own half of
+// default key discovery: the chain turns EVERY identity file the resolver
+// answered with into a public-key rung, skips the ones it cannot read, and
+// invents no list of its own.
+//
+// That last part is the point of the test. The chain used to append a hard-coded
+// `~/.ssh/id_ed25519, id_rsa, id_ecdsa` after the resolved file, so this
+// machine's keys were decided in two places that disagreed — on the order, on
+// the key types ssh 10 knows, and on every configuration that names its own
+// files. The list is the resolver's now, which is why the ORDER is asserted
+// where the resolution is (TestResolveTargetDiscoversTheDefaultKeysInTheResolvers
+// Order and the conformance test against ssh -G): a chain entry carries an
+// auth METHOD, and this package can no more read the key back out of one than
+// ssh can.
+func TestAuthChainOffersEveryResolvedIdentityFile(t *testing.T) {
 	rc := newTestRealClient(t)
 	ctx := context.Background()
-	// No identityFile, no password, no agent — should fall back to default
-	// key files in ~/.ssh/id_*. Those won't exist in test, so chain may be
-	// empty or contain only promptPassword.
-	resolved := &resolvedConfig{user: "alice", hostName: "h"}
-	cfg := &ConnectConfig{}
 
-	chain, err := rc.buildAuthChain(ctx, resolved, cfg)
-	// We expect at least promptPassword in the chain (or an error if no methods).
+	// Three DISTINCT paths: writeTestKey names its file the same thing every
+	// time, so one directory would make the "two files" below one file written
+	// twice — and a count of two would then prove nothing about the list.
+	first := writeTestKey(t, t.TempDir())
+	secondDir := t.TempDir()
+	second := writeTestKey(t, secondDir)
+	missing := filepath.Join(secondDir, "id_rsa") // this fixture's home has no such key
+
+	resolved := &resolvedConfig{
+		identityFiles: []string{missing, first, second},
+		user:          "alice", hostName: "h",
+	}
+
+	chain, err := rc.buildAuthChain(ctx, resolved, &ConnectConfig{})
 	if err != nil {
-		// A chain with nothing to send is acceptable here.
-		if !errors.Is(err, errNoUsableAuth) {
-			t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("buildAuthChain: %v", err)
+	}
+
+	var keyRungs int
+	for _, m := range chain {
+		if m.kind == kindPublicKey {
+			keyRungs++
 		}
-		return
+	}
+	if keyRungs != 2 {
+		t.Fatalf("the chain offers %d key rung(s), want 2 (the two that exist; %s is not there)", keyRungs, missing)
+	}
+	if last := chain[len(chain)-1]; last.kind != kindHostbased {
+		// The prompt rung is the last PASSWORD-capable one; hostbased closes
+		// the chain, exactly as it did before this change.
+		t.Fatalf("chain ends with %v, want the hostbased rung as before", last.kind)
 	}
 	foundPrompt := false
 	for _, m := range chain {
@@ -217,7 +248,7 @@ func TestAuthChainDefaultKeyDiscovery(t *testing.T) {
 		}
 	}
 	if !foundPrompt {
-		t.Error("chain should include promptPassword as last resort")
+		t.Error("chain should include promptPassword as its last password-capable resort")
 	}
 }
 
@@ -309,21 +340,6 @@ func TestLoadKeyWithStoredPassphrase(t *testing.T) {
 	}
 }
 
-// newTestRealClient builds a RealClient with test-safe defaults.
-func newTestRealClient(t *testing.T) *RealClient {
-	t.Helper()
-	dir := t.TempDir()
-	rc, err := NewReal(
-		log.NewSlogAdapter(nil), // nil handler → slog falls back
-		WithKnownHostsFile(filepath.Join(dir, "known_hosts")),
-		WithConfigResolver(NewStubConfigResolver()),
-	)
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	return rc
-}
-
 // writeTestKey writes an ed25519 private key to dir/key and returns its path.
 func writeTestKey(t *testing.T, dir string) string {
 	t.Helper()
@@ -362,174 +378,7 @@ func TestConnectConfigNewFields(t *testing.T) {
 	}
 }
 
-// TestProbeFirstMethodFromExplicitAuthMethods verifies that the probe picks
-// the same first method buildAuthChain would — no hardcoded expectation,
-// so the test stays correct when the chain's order changes deliberately.
-func TestProbeFirstMethodFromExplicitAuthMethods(t *testing.T) {
-	rc := newTestRealClient(t)
-	ctx := context.Background()
-	resolved := &resolvedConfig{user: "alice", hostName: "h"}
-
-	// Use two distinguishable types: public key (gossh.PublicKeys) and
-	// password (gossh.Password). firstAuthMethod must pick the first entry,
-	// which is the public-key method — if it picks the password method
-	// instead, the concrete type won't match chain[0].method.
-	dir := t.TempDir()
-	keyPath := writeTestKey(t, dir)
-	signer, err := rc.loadKey(ctx, keyPath, nil)
-	if err != nil {
-		t.Fatalf("loadKey: %v", err)
-	}
-	explicit := []gossh.AuthMethod{
-		gossh.PublicKeys(signer),
-		gossh.Password("fallback"),
-	}
-	cfg := &ConnectConfig{AuthMethods: explicit}
-
-	chain, err := rc.buildAuthChain(ctx, resolved, cfg)
-	if err != nil {
-		t.Fatalf("buildAuthChain: %v", err)
-	}
-
-	method, err := firstAuthMethod(chain)
-	if err != nil {
-		t.Fatalf("firstAuthMethod: %v", err)
-	}
-	if method == nil {
-		t.Fatal("firstAuthMethod returned nil method for explicit AuthMethods")
-	}
-	if len(chain) == 0 {
-		t.Fatal("buildAuthChain returned empty chain for explicit AuthMethods")
-	}
-	if chain[0].method == nil {
-		t.Fatal("buildAuthChain's first entry has nil method for explicit AuthMethods")
-	}
-	// gossh.AuthMethod is incomparable (unexported function-typed method),
-	// so we use reflect.TypeOf for a safe concrete-type comparison.
-	// Using two different method types (publicKey vs password) means a
-	// type mismatch proves firstAuthMethod picked the wrong entry.
-	methodType := reflect.TypeOf(method)
-	chainType := reflect.TypeOf(chain[0].method)
-	if methodType != chainType {
-		t.Errorf("firstAuthMethod returned %v, but buildAuthChain's first entry is %v; did it pick entry 1 (password) instead of entry 0?", methodType, chainType)
-	}
-}
-
-// TestProbeFirstMethodKeyboardInteractive verifies that:
-//   - with a stored secret and AuthMode=keyboardInteractive, firstAuthMethod
-//     returns a keyboard-interactive method (not a plain password method);
-//   - without a stored secret, firstAuthMethod returns ErrEncryptedKey
-//     (needs-interactive).
-func TestProbeFirstMethodKeyboardInteractive(t *testing.T) {
-	keyring.MockInit()
-	rc := newTestRealClient(t)
-	ctx := context.Background()
-	resolved := &resolvedConfig{user: "alice", hostName: "h"}
-
-	t.Run("with stored secret", func(t *testing.T) {
-		store := newTestStore()
-		id, err := store.Create(ctx, credential.NewSecret("secret-pw"))
-		if err != nil {
-			t.Fatalf("Create: %v", err)
-		}
-		cfg := &ConnectConfig{Secrets: store, SecretID: id, AuthMode: "keyboardInteractive"}
-
-		chain, err := rc.buildAuthChain(ctx, resolved, cfg)
-		if err != nil {
-			t.Fatalf("buildAuthChain: %v", err)
-		}
-
-		method, err := firstAuthMethod(chain)
-		if err != nil {
-			t.Fatalf("firstAuthMethod with stored secret: %v", err)
-		}
-		if method == nil {
-			t.Fatal("firstAuthMethod returned nil method for keyboardInteractive with stored secret")
-		}
-
-		// Concrete-type assertion: the method must be keyboard-interactive,
-		typeName := fmt.Sprintf("%T", method)
-		if strings.Contains(strings.ToLower(typeName), "password") {
-			t.Errorf("firstAuthMethod returned a password-type method (%s), want keyboard-interactive", typeName)
-		}
-	})
-
-	t.Run("without stored secret", func(t *testing.T) {
-		cfg := &ConnectConfig{Secrets: nil, SecretID: "", AuthMode: "keyboardInteractive"}
-		chain, err := rc.buildAuthChain(ctx, resolved, cfg)
-		if err != nil {
-			t.Fatalf("buildAuthChain: %v", err)
-		}
-
-		_, err = firstAuthMethod(chain)
-		if err == nil {
-			t.Fatal("firstAuthMethod: expected ErrEncryptedKey for keyboardInteractive without stored secret, got nil")
-		}
-		var encErr *ErrEncryptedKey
-		if !errors.As(err, &encErr) {
-			t.Fatalf("firstAuthMethod: expected *ErrEncryptedKey, got %T: %v", err, err)
-		}
-	})
-}
-
 // memSecretStore is an in-memory credential.SecretStore for tests.
-type memSecretStore struct {
-	mu   sync.Mutex
-	m    map[credential.SecretID]credential.Secret
-	next int
-}
-
-func (s *memSecretStore) Create(_ context.Context, value credential.Secret) (credential.SecretID, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.next++
-	id := credential.SecretID(fmt.Sprintf("mem-%d", s.next))
-	if s.m == nil {
-		s.m = make(map[credential.SecretID]credential.Secret)
-	}
-	s.m[id] = value
-	return id, nil
-}
-
-func (s *memSecretStore) Get(_ context.Context, id credential.SecretID) (credential.Secret, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	v, ok := s.m[id]
-	if !ok {
-		return credential.Secret{}, nil
-	}
-	return v, nil
-}
-
-func (s *memSecretStore) Resolve(ctx context.Context, id credential.SecretID, why credential.Stance) (credential.Secret, error) {
-	return credential.NewResolver(s, nil, nil).Resolve(ctx, id, why)
-}
-
-func (s *memSecretStore) Delete(_ context.Context, id credential.SecretID) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.m, id)
-	return nil
-}
-
-func (s *memSecretStore) Exists(_ context.Context, id credential.SecretID) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, ok := s.m[id]
-	return ok, nil
-}
-
-var testSecretCounter int
-
-func newTestStore() *memSecretStore {
-	return &memSecretStore{}
-}
-
-func newTestSecretID() credential.SecretID {
-	testSecretCounter++
-	return credential.SecretID(fmt.Sprintf("test-secret-id-%d", testSecretCounter))
-}
-
 // sealedStore returns vault.ErrVaultSealed on every Get, simulating a
 // locked vault at connect time.
 type sealedStore struct{}
@@ -592,7 +441,8 @@ func TestAddVaultKeyMethod_PlainKey(t *testing.T) {
 	}
 	var chain []authChainEntry
 
-	// resolved.identityFile is empty so file path is not triggered.
+	// resolved.identityFiles is empty, so no file rung is built and the
+	// vault key is the only publicKey entry.
 	resolved := &resolvedConfig{}
 	if err := rc.addPublicKeyMethods(ctx, &chain, resolved, cfg); err != nil {
 		t.Fatalf("addPublicKeyMethods: %v", err)
@@ -728,7 +578,7 @@ func TestAddVaultKeyMethod_NoDiskAccess(t *testing.T) {
 	}
 	defer func() { readFileFn = orig }()
 
-	// Set resolved.identityFile to an existing file with garbage content.
+	// Point the resolved identity files at a file with garbage content.
 	// The spy on readFileFn will catch any attempted read — the vault key
 	// path must never call it.
 	dir := t.TempDir()
@@ -742,7 +592,7 @@ func TestAddVaultKeyMethod_NoDiskAccess(t *testing.T) {
 		KeySecretID: id,
 	}
 	var chain []authChainEntry
-	resolved := &resolvedConfig{identityFile: garbageFile}
+	resolved := &resolvedConfig{identityFiles: []string{garbageFile}}
 
 	if err := rc.addPublicKeyMethods(ctx, &chain, resolved, cfg); err != nil {
 		t.Fatalf("addPublicKeyMethods: %v", err)
@@ -817,66 +667,6 @@ func TestNoAuthMaterial_ConnectSaysWhichMethodHasNothing(t *testing.T) {
 	}
 }
 
-func TestNoAuthMaterial_ProbeSaysTheSameThingAsConnect(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("SSH_AUTH_SOCK", "")
-	rc := newTestRealClient(t)
-	ctx := context.Background()
-	resolved := &resolvedConfig{user: "root", hostName: "192.168.0.57", port: 22}
-	cfg := &ConnectConfig{AuthMode: "publicKey"}
-
-	chain, err := rc.buildAuthChain(ctx, resolved, cfg)
-	if err != nil {
-		t.Fatalf("buildAuthChain: %v", err)
-	}
-	if _, err := firstAuthMethod(chain); !errors.Is(err, errNoUsableAuth) {
-		t.Fatalf("expected errNoUsableAuth from a chain with nothing to send, got %v", err)
-	}
-
-	// …and the probe turns it into the same answer the connect path gives,
-	// so Test and Connect cannot disagree about the same connection.
-	_, probeErr := rc.probeConfig(ctx, "192.168.0.57", cfg)
-	var noAuth *ErrNoAuthMethod
-	if !errors.As(probeErr, &noAuth) {
-		t.Fatalf("expected ErrNoAuthMethod from the probe, got %T: %v", probeErr, probeErr)
-	}
-	if noAuth.Mode != "publicKey" {
-		t.Fatalf("probe lost the mode: %+v", noAuth)
-	}
-}
-
-func TestProbeConfig_KeyPathReadAndParseFailuresHaveTheSamePublicError(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("SSH_AUTH_SOCK", "")
-	garbage := filepath.Join(home, "not-a-private-key")
-	if err := os.WriteFile(garbage, []byte("ordinary file contents"), 0o600); err != nil {
-		t.Fatalf("write garbage key fixture: %v", err)
-	}
-
-	rc := newTestRealClient(t)
-	paths := []string{filepath.Join(home, "missing-key"), garbage}
-	var publicError string
-	for _, path := range paths {
-		_, err := rc.probeConfig(context.Background(), "192.168.0.57", &ConnectConfig{
-			AuthMode: "publicKey",
-			KeyFile:  path,
-		})
-		var noAuth *ErrNoAuthMethod
-		if !errors.As(err, &noAuth) {
-			t.Fatalf("keyPath %q: got %T %v, want ErrNoAuthMethod", path, err, err)
-		}
-		if publicError == "" {
-			publicError = err.Error()
-		} else if err.Error() != publicError {
-			t.Fatalf("keyPath failures differ on the public seam: first %q, next %q", publicError, err.Error())
-		}
-		if strings.Contains(err.Error(), path) {
-			t.Fatalf("public error leaked the probed path %q: %q", path, err)
-		}
-	}
-}
-
 // TestNoAuthMaterial_JumpDialSaysWhichMethodHasNothing is the bastion-side
 // sibling of the two above. dialJumpForConnect builds its own auth chain and
 // dials the bastion directly, so it needs the same empty-chain guard: without
@@ -904,4 +694,11 @@ func TestNoAuthMaterial_JumpDialSaysWhichMethodHasNothing(t *testing.T) {
 	if strings.Contains(err.Error(), "no supported methods remain") {
 		t.Fatalf("the handshake message leaked into the user's answer: %v", err)
 	}
+}
+
+var testSecretCounter int
+
+func newTestSecretID() credential.SecretID {
+	testSecretCounter++
+	return credential.SecretID(fmt.Sprintf("test-secret-id-%d", testSecretCounter))
 }

@@ -145,6 +145,69 @@ describe('feed store', () => {
     store.destroy()
   })
 
+  it('chases a hint that arrived under an in-flight read, with no further mutation', async () => {
+    // The window this closes: the hint for N+1 arrives while the read for N is
+    // still open, refetch hands back the in-flight promise, and the hint is
+    // gone. On a quiet feed nothing else mutates, so the row the user was just
+    // told about never appears — which is the cost nocx-dl1o0 reports.
+    const held = deferred<NotifyFeedRead>()
+    const read = vi
+      .fn()
+      .mockResolvedValueOnce(snapshot({ revision: 1, unreadCount: 0 }))
+      .mockReturnValueOnce(held.promise)
+      .mockResolvedValue(snapshot({ revision: 3, unreadCount: 1, occurrences: [OCC] }))
+    const { client } = fakeClient({ read })
+    const d = fakeDispatcher()
+    const store = createFeedStore(client, d)
+    await vi.waitFor(() => expect(store.readKnown()).toBe(true))
+
+    d.emit(2)
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2))
+    // The second mutation lands while the read for the first is still open.
+    d.emit(3)
+    // And the server answers that read from before it: a snapshot that does
+    // not carry revision 3.
+    held.resolve(snapshot({ revision: 2, unreadCount: 0 }))
+
+    // NOTHING FURTHER IS EMITTED. Reaching the announced revision is the
+    // store's own job, because on a quiet feed there is no next hint.
+    await vi.waitFor(() => expect(store.occurrences()).toEqual([OCC]))
+    expect(read).toHaveBeenCalledTimes(3)
+    // And the chase settles: a snapshot that carries the hinted revision ends
+    // it, so a flood still costs one extra round trip and not one per hint.
+    await tick()
+    expect(read).toHaveBeenCalledTimes(3)
+    store.destroy()
+  })
+
+  it('forgets a pending hint across a reconnect, so a restarted backend cannot loop the chase', async () => {
+    // A pending hint is a revision in the OLD backend's numbering. A restart
+    // resets that numbering, so every snapshot afterwards is below it — and a
+    // chase that compares them would refetch forever.
+    const held = deferred<NotifyFeedRead>()
+    const read = vi
+      .fn()
+      .mockResolvedValueOnce(snapshot({ revision: 9, unreadCount: 0 }))
+      .mockReturnValueOnce(held.promise)
+      .mockResolvedValue(snapshot({ revision: 1, unreadCount: 0 }))
+    const { client } = fakeClient({ read })
+    const d = fakeDispatcher()
+    const store = createFeedStore(client, d)
+    await vi.waitFor(() => expect(store.readKnown()).toBe(true))
+
+    d.emit(10)
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2))
+    d.emit(11)
+    d.reconnect()
+    // The restarted backend answers below everything the old one numbered.
+    held.resolve(snapshot({ revision: 1, unreadCount: 0 }))
+
+    await tick()
+    await tick()
+    expect(read).toHaveBeenCalledTimes(2)
+    store.destroy()
+  })
+
   it('ignores a hint at or below its own revision', async () => {
     const { client, read } = fakeClient({
       read: vi.fn().mockResolvedValue(snapshot({ revision: 5 })),
@@ -168,6 +231,7 @@ describe('feed store', () => {
       .fn()
       .mockResolvedValueOnce(snapshot({ revision: 5, unreadCount: 2, occurrences: [OCC] }))
       .mockReturnValueOnce(late.promise)
+      .mockResolvedValue(snapshot({ revision: 6, unreadCount: 2, occurrences: [OCC] }))
     const { client } = fakeClient({ read })
     const d = fakeDispatcher()
     const store = createFeedStore(client, d)
@@ -181,6 +245,13 @@ describe('feed store', () => {
     await tick()
 
     expect(store.unreadCount()).toBe(1)
+    expect(store.occurrences()).toEqual([OCC])
+    // Discarding it is not the end of the matter: revision 6 was announced
+    // and this response did not carry it, so the store still owes that read.
+    // Dropping the stale snapshot must not also drop the hint.
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(3))
+    await tick()
+    expect(read).toHaveBeenCalledTimes(3)
     expect(store.occurrences()).toEqual([OCC])
     store.destroy()
   })

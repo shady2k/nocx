@@ -36,6 +36,11 @@ var (
 	// refusal so the caller can tell "this may have happened" (D12) from
 	// "this was refused".
 	ErrLost = errors.New("helper: connection lost")
+	// ErrRequestTooLarge — the request did not fit one frame. Requests are not
+	// chunked (D14's chunking is a response path), so this is a refusal rather
+	// than a wait: the caller must ask for less, and the ops that can reach it
+	// carry something bounded by a person's file.
+	ErrRequestTooLarge = errors.New("helper: request does not fit one frame")
 )
 
 // exitVersionMismatch is the helper's exit code for a refused protocol

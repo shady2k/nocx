@@ -34,6 +34,15 @@
       "type": "integer",
       "minimum": 1
     },
+    "notices": {
+      "description": "Human-readable sentences the RUN states about ITSELF — today, only that it stopped asking the person to widen a scope because it reached the bound on how often one answer may ask (design §5.3). Present only when there is one; a silent stop would be a soft degrade, and a notice on every run is a notice nobody reads.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
     "unarmedBounds": {
       "description": "Human-readable sentences naming lease bounds that could not be armed because shell integration was unavailable. Present only when at least one bound did not apply; never null or empty.",
       "type": "array",

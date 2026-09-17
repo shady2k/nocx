@@ -2,6 +2,7 @@ import { Dispatcher } from './dispatcher'
 import type { ConnectionTestResult } from './generated/connections.probe'
 import type { SettingsSet } from './generated/settings.set'
 import type { TrustHostKeyResult } from './generated/connections.trustHostKey'
+import type { ConnectionsSetIntegrationMethodResult } from './generated/connections.setIntegrationMethod'
 import type { SaveKeyMaterialMintResult } from './generated/secrets.saveKeyMaterial'
 import type { BackupCreateResult } from './generated/backup.create'
 import type { BackupRestorePreview as RestorePreview } from './generated/backup.preview'
@@ -63,15 +64,15 @@ export interface SSHProfileOptions {
   jumpPassword?: string // Jump server password
   jumpAuthMode?: AuthMode // Jump server auth mode
   agentForward?: boolean
-  /** Desired destination mode (raw|script|relay, nocx-mlm7): the
+  /** Desired destination mode (raw|script|helper, nocx-mlm7): the
    *  connection-scope default the tab's capability control starts from.
    *  script (the default — N3) wraps and installs automatically; raw adds
-   *  nothing; relay is consent-gated. */
-  desiredMode?: 'raw' | 'script' | 'relay'
-  /** Relay consent for this destination (unknown|granted|denied, spec
+   *  nothing; helper is consent-gated. */
+  desiredMode?: 'raw' | 'script' | 'helper'
+  /** Helper consent for this destination (unknown|granted|denied, spec
    *  §3.5). Persisted per destination, never inherited; script mode never
-   *  reads it. Relay without granted behaves as raw. */
-  relayConsent?: 'unknown' | 'granted' | 'denied'
+   *  reads it. Helper without granted behaves as raw. */
+  helperConsent?: 'unknown' | 'granted' | 'denied'
   canBeJumpServer?: boolean // Whether this profile can be used as a jump server
   portDiscovery?: 'auto' | 'ask' | 'off'
   /** Stored forwards, opened when the connection comes up (spec §8, D5). */
@@ -482,6 +483,26 @@ export class ProfileClient {
    */
   trustHostKey(knownHostsHost: string, key: string): Promise<TrustHostKeyResult> {
     return this.call('connections.trustHostKey', { host: knownHostsHost, key })
+  }
+
+  /**
+   * connections.setIntegrationMethod — record the person's answer to the
+   * connect-time ask (ADR-0069): a choice of integration method, not a
+   * yes/no about the helper. fingerprint is echoed verbatim from the open
+   * failure's helperConsentData; host travels for the backend's log line
+   * only. profileId names the saved connection the method is written to
+   * (through the SAME write path the connection editor uses) — absent for a
+   * hand-typed connection, which has nowhere to keep the answer. Choosing
+   * helper also grants the machine's consent by fingerprint (ADR-0034); raw
+   * and script write nothing to that store.
+   */
+  setIntegrationMethod(
+    fingerprint: string,
+    method: 'raw' | 'script' | 'helper',
+    host?: string,
+    profileId?: string,
+  ): Promise<ConnectionsSetIntegrationMethodResult> {
+    return this.call('connections.setIntegrationMethod', { fingerprint, method, host, profileId })
   }
 
   /**

@@ -1,4 +1,4 @@
-// Package consent is the per-machine relay-tier consent for the remote
+// Package consent is the per-machine helper-tier consent for the remote
 // helper (remote-helper design D8; the 2026-08-10 footprint-consent design
 // §3.2, §3.3, §5.3).
 //
@@ -22,7 +22,7 @@ import (
 	"github.com/shady2k/nocx/internal/storage"
 )
 
-// Answer is the stored relay-tier answer for one machine.
+// Answer is the stored helper-tier answer for one machine.
 type Answer string
 
 const (
@@ -30,9 +30,10 @@ const (
 	// machine may run the helper, and the next git.open installs it.
 	Granted Answer = "granted"
 	// Denied — the user declined. The machine is never asked again and is
-	// never silently upgraded. This bead has no writer for it (the ask
-	// surface is nocx-1xxa's); the resolver honours the value so a later
-	// writer changes behaviour without touching the decision.
+	// never silently upgraded. Written by Deny, from the connect-time ask
+	// (ADR-0068); the resolver has honoured the value since before that
+	// writer existed, so this changed behaviour without touching the
+	// decision (nocx-j49sp).
 	Denied Answer = "denied"
 )
 
@@ -46,7 +47,7 @@ type answerDocument struct {
 
 const answerDocumentVersion = 1
 
-// Store persists per-machine relay-tier answers as one atomic JSON document
+// Store persists per-machine helper-tier answers as one atomic JSON document
 // (the InstalledFactStore shape): load-once, fail-closed, temp-file+fsync
 // writes. A missing, corrupt, unreadable or future-versioned document reads
 // as "no answers" — a torn file never grants anything, and an unwritable
@@ -94,7 +95,7 @@ func (s *Store) Lookup(fingerprint string) (Answer, bool) {
 var ErrEmptyFingerprint = errors.New("helper consent: refusing a grant under an empty host fingerprint")
 
 // Grant records that the machine identified by the remote host's public-key
-// fingerprint has been raised to the relay tier (D8): the user accepted the
+// fingerprint has been raised to the helper tier (D8): the user accepted the
 // helper for this host from the git panel's consent prompt. Consent is per
 // machine — keyed by the host key, never the session, the tab or the
 // account (consent design §3.2) — and the answer persists for the next
@@ -105,6 +106,18 @@ var ErrEmptyFingerprint = errors.New("helper consent: refusing a grant under an 
 // here and forgotten on the next start — an unwritable store never
 // authorizes a remote write it cannot show (consent design §6).
 func (s *Store) Grant(fingerprint string) error {
+	return s.setAnswer(fingerprint, Granted)
+}
+
+// setAnswer is Grant's write. It once also served Deny (nocx-k32ql), which
+// wrote Denied from the connect-time ask's yes/no shape; ADR-0069 replaced
+// that ask with a choice of integration method, under which choosing raw or
+// script writes nothing to this store at all — a fingerprint record answers
+// "may a binary be deployed here", never "which method" — so nothing calls
+// Deny any more and it is gone with its last caller. Denied itself stays a
+// valid Answer: Resolve still switches on it, and Lookup can still report it
+// for a fingerprint Revoke has not cleared.
+func (s *Store) setAnswer(fingerprint string, answer Answer) error {
 	if fingerprint == "" {
 		return ErrEmptyFingerprint
 	}
@@ -112,10 +125,10 @@ func (s *Store) Grant(fingerprint string) error {
 	defer s.mu.Unlock()
 	s.loadLocked()
 	prev, existed := s.answers[fingerprint]
-	s.answers[fingerprint] = Granted
+	s.answers[fingerprint] = answer
 	if err := s.writeDocLocked(); err != nil {
-		// Roll the in-memory answer back: a failed persist is not a
-		// grant. The map must never report what the document does not.
+		// Roll the in-memory answer back: a failed persist is not an
+		// answer. The map must never report what the document does not.
 		if existed {
 			s.answers[fingerprint] = prev
 		} else {

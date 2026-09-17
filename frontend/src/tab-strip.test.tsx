@@ -393,3 +393,141 @@ describe('the new-note row', () => {
     expect(() => row.click()).not.toThrow()
   })
 })
+
+// ── The children a pane's agent spawned (nocx-o1v0h) ──────────────────────
+//
+// The rows come from the pane's OWN SCREEN — the backend reads the agent's
+// task panel off a live VT grid and sends the names on the same notification
+// that carries the pane's state. Nothing here is a hook, and nothing about a
+// child decides anything about its parent.
+
+function withChildren(pane: PaneView, ...children: { name: string; task?: string }[]): PaneView {
+  return { ...pane, agentChildren: children }
+}
+
+function subagentRows(): HTMLElement[] {
+  return [...document.querySelectorAll('.nocx-subagent')] as HTMLElement[]
+}
+
+// Found by its ACCESSIBLE NAME, the way a person using assistive technology
+// finds it — not by its position among the row's controls, which would pass
+// just as well if the control were the close button.
+function disclosure(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('.nocx-tab [aria-label$="subagents"]')
+}
+
+describe('VerticalTabStrip subagent rows', () => {
+  it('draws one row per child, with its name and what it is doing', () => {
+    const { strip } = setupVerticalStrip()
+    strip.addPane(
+      withChildren(
+        makePane(1, 'claude', '~/repos/nocx'),
+        { name: 'Explore', task: 'List files in directory' },
+        { name: 'Plan', task: 'Draft the change' },
+      ),
+    )
+
+    const rows = subagentRows()
+    expect(rows).toHaveLength(2)
+    expect(rows[0]?.textContent).toContain('Explore')
+    expect(rows[0]?.textContent).toContain('List files in directory')
+    expect(rows[1]?.textContent).toContain('Plan')
+  })
+
+  // The rows are drawn UNDER the row they belong to, and one generation in.
+  // A child row that floated to the end of the list would say nothing about
+  // whose child it is, which is most of what it has to say.
+  it('places the rows immediately under their parent, one generation in', () => {
+    const { strip } = setupVerticalStrip()
+    strip.addPane(withChildren(makePane(1, 'claude', '~/a'), { name: 'Explore' }))
+    strip.addPane(makePane(2, 'shell', '~/b'))
+
+    const drawn = [...document.querySelectorAll('.nocx-tab, .nocx-subagent')] as HTMLElement[]
+    expect(drawn.map((el) => el.className)).toEqual(['nocx-tab', 'nocx-subagent', 'nocx-tab'])
+    expect(drawn[1]?.getAttribute('data-depth')).toBe('1')
+  })
+
+  // EXPANDED BY DEFAULT, because a spawned child is work in flight. The
+  // chevron is there to fold it away, not to reveal it.
+  it('shows the rows without being asked, and folds them to a count on request', () => {
+    const { strip } = setupVerticalStrip()
+    strip.addPane(withChildren(makePane(1, 'claude', '~/a'), { name: 'Explore' }, { name: 'Plan' }))
+    expect(subagentRows()).toHaveLength(2)
+    expect(getTabEl(0)?.getAttribute('data-disclosure')).toBe('expanded')
+    expect(getTabEl(0)?.textContent).not.toContain('+2')
+
+    disclosure()!.click()
+    expect(subagentRows()).toHaveLength(0)
+    expect(getTabEl(0)?.getAttribute('data-disclosure')).toBe('collapsed')
+    // Folded away is not gone: the count is what keeps a person from
+    // forgetting the pane has children at all.
+    expect(getTabEl(0)?.textContent).toContain('+2')
+
+    disclosure()!.click()
+    expect(subagentRows()).toHaveLength(2)
+    expect(getTabEl(0)?.textContent).not.toContain('+2')
+  })
+
+  // A pane with no children is exactly the strip it always was: no control,
+  // no count, no extra row.
+  it('draws no disclosure at all for a pane whose agent spawned nothing', () => {
+    const { strip } = setupVerticalStrip()
+    strip.addPane(makePane(1, 'shell', '~/a'))
+    expect(getTabEl(0)?.getAttribute('data-disclosure')).toBe('leaf')
+    expect(disclosure()).toBeNull()
+    expect(subagentRows()).toHaveLength(0)
+  })
+
+  // A CHILD HAS NO PANE OF ITS OWN. Clicking its row goes to the pane its
+  // parent runs in, because that is the only place there is to go — and a row
+  // that looks clickable and goes nowhere is worse than one that is not.
+  it('activates the parent pane when a child row is clicked', () => {
+    const { strip } = setupVerticalStrip()
+    strip.addPane(makePane(1, 'shell', '~/a'))
+    strip.addPane(withChildren(makePane(2, 'claude', '~/b'), { name: 'Explore' }))
+    const activated: number[] = []
+    strip.onActivate = (id) => activated.push(id)
+
+    subagentRows()[0]?.click()
+    expect(activated).toEqual([2])
+    expect(subagentRows()[0]?.getAttribute('aria-controls')).toBe('pane-2')
+  })
+
+  // The rows follow the parent's filter, because a child drawn under a hidden
+  // parent is a row with no parent.
+  it('hides a child whose parent the filter hid', () => {
+    const { strip } = setupVerticalStrip()
+    strip.addPane(withChildren(makePane(1, 'claude', '~/a'), { name: 'Explore' }))
+    strip.addPane(makePane(2, 'server-01', '~/b'))
+
+    const input = getSearchInput()!
+    input.value = 'server'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+
+    expect(subagentRows()[0]?.getAttribute('data-hidden')).toBe('true')
+  })
+
+  // A CHILD FACT MAY NEVER DECIDE THE PARENT'S STATE, at the last seam it
+  // could have gone wrong: the row a person actually looks at. Children
+  // arriving, changing and going away leave the parent's indicator exactly
+  // where it was.
+  it('leaves the parent indicator untouched as children come and go', () => {
+    const { strip } = setupVerticalStrip()
+    const base = { ...makePane(1, 'claude', '~/a'), agentStatus: 'working' as const }
+    strip.addPane(base)
+    const status = (): string | null => getTabEl(0)?.getAttribute('data-agent-status') ?? null
+    expect(status()).toBe('working')
+
+    strip.refreshPane(withChildren(base, { name: 'Explore' }))
+    expect(subagentRows()).toHaveLength(1)
+    expect(status()).toBe('working')
+
+    strip.refreshPane(withChildren(base, { name: 'Explore' }, { name: 'Plan' }))
+    expect(subagentRows()).toHaveLength(2)
+    expect(status()).toBe('working')
+
+    strip.refreshPane(base)
+    expect(subagentRows()).toHaveLength(0)
+    expect(status()).toBe('working')
+  })
+})

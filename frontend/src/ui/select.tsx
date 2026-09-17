@@ -14,6 +14,17 @@ import { Index, Show, createEffect } from 'solid-js'
 export interface SelectOption {
   value: string
   label: string
+  /**
+   * Whether this option can be taken.
+   *
+   * A choice a caller cannot offer is DRAWN and disabled rather than omitted:
+   * a person who remembers three answers and is shown two concludes the third
+   * is gone, and a control that quietly has fewer options than the concept it
+   * governs cannot say why. Where the answer DOES come from belongs in the
+   * label — see Assistant permissions, which is what this was added for
+   * (nocx-v8c5j).
+   */
+  disabled?: boolean
 }
 
 export interface SelectProps {
@@ -87,7 +98,11 @@ export function Select(props: SelectProps) {
           contract as row-list and tabs: the element survives, the value and
           the label update in place. */}
       <Index each={props.options}>
-        {(opt) => <option value={opt().value}>{opt().label}</option>}
+        {(opt) => (
+          <option value={opt().value} disabled={opt().disabled === true}>
+            {opt().label}
+          </option>
+        )}
       </Index>
     </select>
   )

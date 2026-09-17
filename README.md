@@ -351,7 +351,7 @@ The executable backlog lives in beads, not markdown, and in `.beads/issues.jsonl
 which is a tracked file — so a clone has it:
 
 ```bash
-scripts/br-queue.sh          # what to work on next: taken epics' fronts, plus standalone bugs
+br ready                     # what to work on next (--epic/--parent/-t/-l to narrow)
 br show <id>                 # view an issue
 br update <id> --claim       # claim work
 br close <id> --reason "..." # complete work, with evidence a stranger can check
@@ -456,3 +456,11 @@ TBD. Dependencies are MIT and Apache 2.0 — preserve their copyright notices:
   - © 2012–2013 Christopher Jeffrey
 - `@xterm/addon-*` — MIT, © The xterm.js authors (each addon LICENSE repeats its own line)
 - `vite` — MIT, © 2019–present VoidZero Inc. and Vite contributors (devDependency, build-time only)
+
+The helper links `libghostty-vt` statically, and it brings licences no list
+here could keep straight — ghostty, Highway, Wuffs, uucode, simdutf and Zig's
+`compiler_rt` — so those are generated from the pinned archives instead of
+copied: the shipped distribution carries them (`Contents/Resources/` in the
+macOS bundle, `usr/share/doc/nocx/` in the AppImage) and
+`nocx-helper --licenses` prints the helper's own copy. See
+[`third_party/libghostty-vt/README.md`](third_party/libghostty-vt/README.md).

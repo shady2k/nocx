@@ -17,8 +17,10 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
+	nocxlog "github.com/shady2k/nocx/internal/log"
 )
 
 // ExitVersionMismatch is the exit code a helper LAUNCHED DIRECTLY over the
@@ -48,12 +50,20 @@ type Host struct {
 	instanceID  string
 	log         *slog.Logger
 
-	// mu guards out, services, requests and streamSeq. One mutex is enough:
-	// the critical sections are tiny, and the writer mutex is what keeps
-	// concurrent responses from interleaving mid-frame.
+	// mu guards out, services, requests, streamSeq, and the reverse-request
+	// table below. One mutex is enough: the critical sections are tiny, and
+	// the writer mutex is what keeps concurrent responses from interleaving
+	// mid-frame.
 	mu       sync.Mutex
 	services []Service
 	requests map[uint64]pendingRequest
+
+	// reverse holds the answers this host is waiting for: the requests IT sent
+	// to the coordinator (Ask, reverse.go), keyed by the ids it minted. It is
+	// the mirror of requests, which holds the cancels the CALLER may send for
+	// the requests this host is serving.
+	reverse    map[uint64]chan proto.Response
+	reverseSeq uint64
 
 	// streamSeq mints the stream ids chunked responses are keyed by (D14):
 	// the sentinel and its chunks may interleave with other responses, and
@@ -231,6 +241,12 @@ func (h *Host) frame(ctx context.Context, ty proto.FrameType, payload []byte) {
 			defer h.inflight.Done()
 			h.request(ctx, req)
 		}()
+	case proto.TypeResponse:
+		// An answer to a request THIS helper sent (Ask, reverse.go). Until the
+		// ssh service there was no such request, so this frame had no handler
+		// and fell to the default branch — logged as unexpected and dropped,
+		// which for a reverse request would have been a hang.
+		h.reverseResponse(payload)
 	case proto.TypeCancel:
 		h.cancel(payload)
 	case proto.TypeKeepAlive:
@@ -239,6 +255,8 @@ func (h *Host) frame(ctx context.Context, ty proto.FrameType, payload []byte) {
 		h.sessionData(ctx, payload)
 	case proto.TypeLifecycleData:
 		h.lifecycleData(ctx, payload)
+	case proto.TypeChannelData:
+		h.channelData(ctx, payload)
 	default:
 		h.log.Warn("unexpected frame", "type", ty)
 	}
@@ -313,6 +331,41 @@ func (h *Host) SendLifecycleData(f proto.SessionFrame) error {
 	return h.write(proto.TypeLifecycleData, proto.EncodeSessionFrame(f))
 }
 
+// channelData handles an inbound proxied-channel frame: it is routed to the
+// ssh service — the one service that can hold such a channel — and DROPPED
+// when this generation has none.
+//
+// The drop path is the same one the session plane has, and for the same
+// reason: a generation built without the ssh service (every deployed artifact,
+// by build tag) can still be sent these frames by a coordinator, and an
+// unknown type byte is garbage the decoder resyncs through — one byte at a
+// time, through whatever follows, which for a proxied channel is a live sftp
+// stream. Recognising the frame turns that into one dropped write.
+func (h *Host) channelData(ctx context.Context, payload []byte) {
+	f, err := proto.DecodeChannelFrame(payload)
+	if err != nil {
+		h.log.Warn("malformed channel data frame", "err", err, "bytes", len(payload))
+		return
+	}
+	if svc := h.serviceByName(proto.ServiceSSH); svc != nil {
+		if plane, ok := svc.(ChannelDataPlane); ok {
+			plane.ChannelData(WithConnection(ctx, h), f)
+			return
+		}
+	}
+	h.log.Warn("channel data frame dropped: no ssh service in this generation",
+		"channel", f.Channel.String(), "bytes", len(f.Payload))
+}
+
+// SendChannelData writes one proxied-channel frame to the wire: the helper's
+// own read of a channel, on its way to the coordinator that opened it. It is
+// the outbound half of ChannelDataPlane and lives on the host for the reason
+// SendSessionData does — the wire and its writer mutex are the host's, and a
+// second writer would interleave mid-frame.
+func (h *Host) SendChannelData(f proto.ChannelFrame) error {
+	return h.write(proto.TypeChannelData, proto.EncodeChannelFrame(f))
+}
+
 // SendNotification writes one unsolicited fact: a live reset, an exit. It
 // rides as a TypeNotify frame on the same wire as the data frames, so it is
 // ORDERED with respect to them — which is what lets a reader see exactly which
@@ -340,41 +393,79 @@ func (h *Host) request(ctx context.Context, req proto.Request) {
 		stop()
 	}()
 
-	h.log.Info("request", "id", req.ID, "service", req.Service, "op", req.Op, "corr", req.Corr) // D26
+	// The exchange the CALLER is in becomes this request's parent, so the
+	// helper's lines join what the backend was doing when it asked
+	// (nocx-n14oo.2). A caller that sent no header is served under a trace of
+	// its own; the daemon serves several coordinators and refusing one for
+	// want of telemetry would be the observability costing more than what it
+	// observes.
+	reqCtx = nocxlog.ContinueTrace(reqCtx, req.Traceparent)
+	reqCtx, _ = nocxlog.StartSpan(reqCtx)
+	// The entry stays at INFO and keeps its message and its corr: D26 is a
+	// contract about what both sides of the hop write down, and a per-request
+	// line demoted to debug is a contract kept only when somebody remembered
+	// to turn debug on. What the span adds is the exchange around it and an
+	// outcome underneath.
+	lg := nocxlog.NewSlogAdapter(h.log).WithContext(reqCtx).
+		With("id", req.ID, "corr", req.Corr, "op", req.Service+"."+req.Op)
+	lg.Info("request", "id", req.ID, "service", req.Service, "op", req.Op, "corr", req.Corr) // D26
+	started := time.Now()
+	end := func(err error) {
+		ms := time.Since(started).Milliseconds()
+		if err != nil {
+			lg.Warn("request failed", "duration_ms", ms, "error", err)
+			return
+		}
+		lg.Debug("request ok", "duration_ms", ms)
+	}
 
+	// EVERY REFUSAL SAYS SO. All four below used to answer the caller and
+	// write nothing, so a helper that refused a request left the backend
+	// holding an error whose origin was a guess — the same shape as the
+	// unclassified dispatch failure of nocx-1w3my, one process over.
 	resp := proto.Response{ID: req.ID}
+	fail := func(code, message string, details json.RawMessage) {
+		lg.Warn("helper refused the request", "code", code, "message", message)
+		resp.Error = &proto.Error{Code: code, Message: message, Details: details}
+		end(errors.New(code))
+		h.respond(resp)
+	}
+
 	svc := h.serviceByName(req.Service)
 	if svc == nil {
-		resp.Error = &proto.Error{Code: proto.ErrCodeUnknownService, Message: "no service named " + req.Service}
-		h.respond(resp)
+		fail(proto.ErrCodeUnknownService, "no service named "+req.Service, nil)
 		return
 	}
 	schema := svc.ParamsSchema(req.Op)
 	if schema == nil {
-		resp.Error = &proto.Error{Code: proto.ErrCodeUnknownOp, Message: "no op " + req.Op + " on service " + req.Service}
-		h.respond(resp)
+		fail(proto.ErrCodeUnknownOp, "no op "+req.Op+" on service "+req.Service, nil)
 		return
 	}
 	if _, err := schema.Decode(req.Params); err != nil {
-		resp.Error = &proto.Error{Code: proto.ErrCodeBadParams, Message: err.Error()}
-		h.respond(resp)
+		fail(proto.ErrCodeBadParams, err.Error(), nil)
 		return
 	}
 	result, err := svc.Call(reqCtx, req.Op, req.Params)
 	if err != nil {
 		code, details := refusal(svc, err)
-		resp.Error = &proto.Error{Code: code, Message: err.Error(), Details: details}
-		h.respond(resp)
+		fail(code, err.Error(), details)
 		return
 	}
 	raw, err := json.Marshal(result)
 	if err != nil {
-		resp.Error = &proto.Error{Code: proto.ErrCodeInternal, Message: "result: " + err.Error()}
-		h.respond(resp)
+		fail(proto.ErrCodeInternal, "result: "+err.Error(), nil)
 		return
 	}
 	resp.Result = raw
+	end(nil)
 	h.respond(resp)
+	// AFTER the write, and that is the whole of this hook's contract
+	// (ResponseObserver): a service whose handler deferred a pump gets to
+	// start it knowing the caller's answer is already on the wire, so the
+	// caller has a chance to register what the pump will write about.
+	if observer, ok := svc.(ResponseObserver); ok {
+		observer.ResponseWritten(reqCtx, req.Op, result)
+	}
 }
 
 // connKey carries the connection a request arrived on into the request's

@@ -55,6 +55,10 @@ func TestPresentationSearchNeverEscapesGrant(t *testing.T) {
 	cfg := PresentationConfig{Lazy: true, Essential: []string{}, SchemaTokenLimit: 1}
 	p := reg.Project(grant, cfg)
 	got := toolNames(reg.Search(grant, "read", p.Visible))
+	// session.read is inside this grant — observe, over a session — so it is
+	// an eligible hidden tool that a search for "read" should find. What the
+	// test forbids is a tool from OUTSIDE the grant, and files.read, which
+	// needs a path, is still absent.
 	want := []string{"session.read"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("search = %v, want only eligible hidden tools %v", got, want)

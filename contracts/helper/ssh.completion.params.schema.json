@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.completion.params.schema.json",
+  "title": "HelperSSHCompletionParams",
+  "description": "The completion probe for one line at one caret. cwd and line are the USER's, and they are the reason this command is composed from a fixed script rather than trusted: both arrive as quoted ARGUMENTS to it, which is a data question, and neither can become shell syntax. The line's maximum length is bounded by the composer (a command that outgrows its bound is refused as exec_too_long rather than sent to die in a remote execve), not here — a schema bound on a line would be a second, smaller authority for the same fact.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["lease", "cwd", "line", "pos", "limit", "nonce"],
+  "properties": {
+    "lease": {
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/leaseId"
+    },
+    "cwd": {
+      "description": "The session's current directory, from OSC 7. An argument to the script and never syntax.",
+      "type": "string"
+    },
+    "line": {
+      "description": "The command line being completed, verbatim and unfinished. An argument to the script and never syntax.",
+      "type": "string"
+    },
+    "pos": {
+      "description": "The caret's byte offset in the line.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "limit": {
+      "description": "The caller's bound on candidates, applied by the script. Required: a default chosen here would be a second answer to a bound the caller already owns.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "nonce": {
+      "description": "The invocation's frame marker: the script prints it around its answer and the caller accepts nothing else. It also rides the heredoc delimiter, so the delimiter cannot collide with the script's own text.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

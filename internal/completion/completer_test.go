@@ -232,12 +232,12 @@ func TestLocalCompleter_HiddenFiles(t *testing.T) {
 type fakeExecConn struct {
 	execResult *completion.ExecResult
 	execErr    error
-	lastCmd    string
+	lastProbe  completion.CompletionProbe
 	closed     bool
 }
 
-func (f *fakeExecConn) Exec(_ context.Context, cmd string) (*completion.ExecResult, error) {
-	f.lastCmd = cmd
+func (f *fakeExecConn) Complete(_ context.Context, probe completion.CompletionProbe) (*completion.ExecResult, error) {
+	f.lastProbe = probe
 	return f.execResult, f.execErr
 }
 
@@ -259,7 +259,7 @@ func TestSSHCompleter_Success(t *testing.T) {
 		"NONCE:" + nonce + ":END\n"
 
 	conn := &fakeExecConn{execResult: &completion.ExecResult{Stdout: []byte(stdout)}}
-	provider := func(_ context.Context, _ string) (completion.ExecConn, error) {
+	provider := func(_ context.Context, _ string) (completion.ProbeConn, error) {
 		return conn, nil
 	}
 	c := completion.NewSSHWithRand(provider, fixedRand(nonce))
@@ -300,7 +300,7 @@ func TestSSHCompleter_BannerPollution(t *testing.T) {
 		"NONCE:" + nonce + ":END\n"
 
 	conn := &fakeExecConn{execResult: &completion.ExecResult{Stdout: []byte(stdout)}}
-	c := completion.NewSSHWithRand(func(_ context.Context, _ string) (completion.ExecConn, error) {
+	c := completion.NewSSHWithRand(func(_ context.Context, _ string) (completion.ProbeConn, error) {
 		return conn, nil
 	}, fixedRand(nonce))
 
@@ -328,7 +328,7 @@ func TestSSHCompleter_MissingEndMarker(t *testing.T) {
 		"path\tfile.txt\t/home/user/file.txt\t0\n"
 
 	conn := &fakeExecConn{execResult: &completion.ExecResult{Stdout: []byte(stdout)}}
-	c := completion.NewSSHWithRand(func(_ context.Context, _ string) (completion.ExecConn, error) {
+	c := completion.NewSSHWithRand(func(_ context.Context, _ string) (completion.ProbeConn, error) {
 		return conn, nil
 	}, fixedRand(nonce))
 
@@ -356,7 +356,7 @@ func TestSSHCompleter_NoStartMarker(t *testing.T) {
 		"NONCE:" + nonce + ":END\n"
 
 	conn := &fakeExecConn{execResult: &completion.ExecResult{Stdout: []byte(stdout)}}
-	c := completion.NewSSHWithRand(func(_ context.Context, _ string) (completion.ExecConn, error) {
+	c := completion.NewSSHWithRand(func(_ context.Context, _ string) (completion.ProbeConn, error) {
 		return conn, nil
 	}, fixedRand(nonce))
 
@@ -377,7 +377,7 @@ func TestSSHCompleter_NoStartMarker(t *testing.T) {
 
 func TestSSHCompleter_ExecError(t *testing.T) {
 	conn := &fakeExecConn{execErr: context.Canceled}
-	c := completion.NewSSHWithRand(func(_ context.Context, _ string) (completion.ExecConn, error) {
+	c := completion.NewSSHWithRand(func(_ context.Context, _ string) (completion.ProbeConn, error) {
 		return conn, nil
 	}, fixedRand("abcd"))
 
@@ -397,7 +397,7 @@ func TestSSHCompleter_ExecError(t *testing.T) {
 }
 
 func TestSSHCompleter_LeaseError(t *testing.T) {
-	c := completion.NewSSHWithRand(func(_ context.Context, _ string) (completion.ExecConn, error) {
+	c := completion.NewSSHWithRand(func(_ context.Context, _ string) (completion.ProbeConn, error) {
 		return nil, context.DeadlineExceeded
 	}, fixedRand("abcd"))
 
@@ -418,7 +418,7 @@ func TestSSHCompleter_CancelledContext(t *testing.T) {
 	cancel()
 
 	called := false
-	c := completion.NewSSHWithRand(func(_ context.Context, _ string) (completion.ExecConn, error) {
+	c := completion.NewSSHWithRand(func(_ context.Context, _ string) (completion.ProbeConn, error) {
 		called = true
 		return nil, nil
 	}, fixedRand("abcd"))
@@ -461,7 +461,7 @@ func TestParseCompletionOutput_CommandCandidate(t *testing.T) {
 func parseViaSSH(t *testing.T, stdout, nonce string) *completion.Response {
 	t.Helper()
 	conn := &fakeExecConn{execResult: &completion.ExecResult{Stdout: []byte(stdout)}}
-	c := completion.NewSSHWithRand(func(_ context.Context, _ string) (completion.ExecConn, error) {
+	c := completion.NewSSHWithRand(func(_ context.Context, _ string) (completion.ProbeConn, error) {
 		return conn, nil
 	}, fixedRand(nonce))
 	resp, err := c.Complete(context.Background(), completion.Request{

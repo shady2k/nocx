@@ -75,7 +75,7 @@ func TestASkillsWriteNeverAutoPermits(t *testing.T) {
 		t.Fatalf("ResolveResources: %v", err)
 	}
 
-	outcome, _, _ := mw.kernel.decideInvocationWithReason(tool, resources, true, content.Invocation{Parsed: true})
+	outcome, _, _, _ := mw.kernel.decideInvocationWithReason(tool, resources, true, content.Invocation{Parsed: true})
 	if outcome != policyAsk {
 		t.Fatalf("outcome = %v, want policyAsk: a skill outlives the run whose grant authorised it", outcome)
 	}
@@ -100,7 +100,7 @@ func TestASkillsDeleteNeverAutoPermits(t *testing.T) {
 		t.Fatalf("ResolveResources: %v", err)
 	}
 
-	outcome, _, _ := mw.kernel.decideInvocationWithReason(tool, resources, true, content.Invocation{Parsed: true})
+	outcome, _, _, _ := mw.kernel.decideInvocationWithReason(tool, resources, true, content.Invocation{Parsed: true})
 	if outcome != policyAsk {
 		t.Fatalf("outcome = %v, want policyAsk: deleting a skill must ask before removal", outcome)
 	}

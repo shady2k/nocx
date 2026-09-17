@@ -90,7 +90,7 @@ describe('ScrollbackController restorePast (nocx-l21ib.3)', () => {
       configurable: true,
     })
     // Not following: the public door must stay shut...
-    ;(controller as unknown as { _following: boolean })._following = false
+    ;(controller as unknown as { _tail: { report: (v: boolean) => void } })._tail.report(false)
     controller.scrollToBottom()
     expect(scrollTo).not.toHaveBeenCalled()
 
@@ -335,8 +335,8 @@ describe('finished command landing', () => {
   type ScrollIntoViewSpy = (arg?: ScrollIntoViewOptions | boolean) => void
 
   function setFollowing(controller: ScrollbackController, following: boolean): void {
-    const state = controller as unknown as { _following: boolean }
-    state._following = following
+    const state = controller as unknown as { _tail: { report: (v: boolean) => void } }
+    state._tail.report(following)
   }
 
   function finishWithMeasuredBlock(
@@ -1006,7 +1006,7 @@ describe('the pane moves rather than jumping (nocx-i4h04.2)', () => {
     // from the bottom keeps its position, and the glide would be a second
     // owner of it.
     const { controller, frames } = movingController([500, 440])
-    ;(controller as unknown as { _following: boolean })._following = false
+    ;(controller as unknown as { _tail: { report: (v: boolean) => void } })._tail.report(false)
 
     controller.beginBlock('ls', '~', 0, 1)
 

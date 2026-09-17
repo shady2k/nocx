@@ -13652,6 +13652,122 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
+  // nocx-yfpxl, and the measurement is nocx-nleo1's: across four container
+  // runs the follow sentinel ALWAYS intersected the scrollback area, so
+  // following is not switched off by the full-screen program — and yet
+  // atBottom read false with 57px of overflow at scrollTop 0, and the sample
+  // differed in three of four identical runs. That is a scroll issued against
+  // a scrollHeight that has not grown yet: it lands short, and nothing after
+  // it moves the pane again.
+  it('holds the seated tail through the growth that lands after the scroll (nocx-yfpxl)', async () => {
+    const deliveries: Array<{ el: Element; deliver: (height: number) => void }> = []
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        private disconnected = false
+
+        constructor(private readonly callback: ResizeObserverCallback) {}
+
+        observe(el: Element): void {
+          deliveries.push({
+            el,
+            deliver: (height: number) => {
+              // A disconnected observer receives nothing, which is the whole
+              // point of the test: the old code stopped listening after one
+              // delivery.
+              if (this.disconnected) return
+              this.callback(
+                [{ target: el, contentRect: { height } } as unknown as ResizeObserverEntry],
+                this,
+              )
+            },
+          })
+        }
+
+        unobserve(): void {}
+
+        disconnect(): void {
+          this.disconnected = true
+        }
+      },
+    )
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask')
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      if (method === 'agent.cancel')
+        return Promise.resolve({ runId: 42, state: 'cancelled', cancelled: true })
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'what is on screen?')
+      await vi.waitFor(() => expect(answer.dataset.entryId).toBe('entry-42'))
+      const delta = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runDelta',
+      )?.[1] as ((params: unknown) => void) | undefined
+      delta!({ runId: 42, entryId: 'entry-42', text: 'a long streamed answer' })
+
+      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+      const area = scrollback.scrollbackArea
+      // The full-screen state the probe measured: the program fills the
+      // scroller exactly, so there is nothing to scroll YET.
+      let scrollHeight = 816
+      let scrollTop = 0
+      Object.defineProperty(area, 'clientHeight', { configurable: true, value: 816 })
+      Object.defineProperty(area, 'scrollHeight', { configurable: true, get: () => scrollHeight })
+      // A scroller clamps a write AT THE MOMENT OF THE WRITE and keeps the
+      // clamped value — which is exactly why a scroll issued before the
+      // content grew is lost rather than merely early.
+      const clamp = (value: number): number =>
+        Math.max(0, Math.min(value, Math.max(0, scrollHeight - area.clientHeight)))
+      Object.defineProperty(area, 'scrollTop', {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => {
+          scrollTop = clamp(value)
+        },
+      })
+      Object.defineProperty(area, 'scrollTo', {
+        configurable: true,
+        value: (options: { top: number }) => {
+          scrollTop = clamp(options.top)
+        },
+      })
+
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+      expect(answer.parentElement).toBe(scrollback.scrollbackInner)
+
+      const seated = deliveries.find((entry) => entry.el === answer)
+      expect(seated).toBeDefined()
+      // The delivery that arrives while the node still has its overlay box —
+      // the moment the old code took for proof and stopped listening.
+      seated!.deliver(120)
+      // And the growth, one layout later: the seated answer owns its box and
+      // the transcript is finally taller than the viewport.
+      scrollHeight = 946
+      seated!.deliver(230)
+
+      expect(area.scrollTop + area.clientHeight).toBeGreaterThanOrEqual(area.scrollHeight - 2)
+    } finally {
+      teardown()
+      vi.unstubAllGlobals()
+    }
+  })
+
   // nocx-hp8p2.8. The live region is where a RUNNING command's output is —
   // the block holds only its header until the freeze — so an answer seated
   // after the block element alone reads as spliced into the middle of `top`.

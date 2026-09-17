@@ -6655,12 +6655,28 @@ export class TerminalContent extends BasePaneContent {
       // or a long streamed answer remains below the fold.
       followSeatedTail()
       // WebKit can apply the class/style change after this task's scroll
-      // height read. Its initial ResizeObserver delivery is the first
-      // observable point at which the final answer owns its seated box.
+      // height read, so the scroll above can be issued against a scrollHeight
+      // that has not grown yet — it then lands short and stays there, which is
+      // the measured shape of this failure (nocx-nleo1: the follow sentinel
+      // intersecting while atBottom was false, with 57px of overflow at
+      // scrollTop 0, and three different scroller states across identical
+      // runs).
+      //
+      // The FIRST ResizeObserver delivery is not the answer either: it carries
+      // the box the node has at the moment observation starts, which for a
+      // just-reparented node can still be the pre-growth one. So HOLD the tail
+      // through the growth instead of scrolling once more — every delivery that
+      // reports a new height re-issues the scroll, and the first one that
+      // repeats a height is the growth having stopped, which is an observable
+      // and not a duration.
       if (settle && typeof ResizeObserver !== 'undefined') {
-        const observer = new ResizeObserver(() => {
-          observer.disconnect()
+        let seatedHeight = -1
+        const observer = new ResizeObserver((entries) => {
+          const height = entries[entries.length - 1]?.contentRect.height ?? seatedHeight
+          const grew = height !== seatedHeight
+          seatedHeight = height
           followSeatedTail()
+          if (!grew) observer.disconnect()
         })
         observer.observe(tail)
       }

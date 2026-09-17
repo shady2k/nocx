@@ -3596,6 +3596,12 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	// went on resolving that lane to a session nobody can reach.
 	s.cancelRecovery(sess.ID())
 	s.unregisterLifecycleLanes(sess.ID())
+	// The Stop records and the holds are the session's too (nocx-zas0d), and
+	// they carried the same defect: dropped only by closeSession, so every
+	// stopped command of a shell that exited on its own stayed in memory for
+	// the life of the process.
+	s.dropStopStatesFor(sess.ID())
+	s.dropHeldStopsFor(sess.ID())
 	s.unregisterIntegration(sess.ID())
 
 	// Port discovery (nocx-wzc4.2): if this was the last session on its

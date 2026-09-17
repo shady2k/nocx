@@ -1359,3 +1359,33 @@ func tapWaitForID(t *testing.T, tap *socketTap, id int) json.RawMessage {
 	t.Fatalf("no response to id %d", id)
 	return nil
 }
+
+// ── the records end with the session, however it ends (review 3, leak) ─────
+
+// TestHeldStop_AShellThatExitsTakesItsStopRecordsWithIt: a session whose shell
+// simply exits is torn down by monitorExit, not by closeSession — and that is
+// the ORDINARY way a session ends. The Stop records and the holds are the
+// session's, so they must go on that path too, or a long-lived server keeps one
+// per stopped command for the life of the process.
+func TestHeldStop_AShellThatExitsTakesItsStopRecordsWithIt(t *testing.T) {
+	s := newHeldStopStand(t)
+	s.establish(t)
+	s.submit(t, 5, "sleep 30")
+	attempt := lifecycle.AttemptID(s.appAttemptID)
+	if got := s.stop(t, 6); got != string(foregroundHeld) {
+		t.Fatalf("a Stop before the start answered %q, want %q", got, foregroundHeld)
+	}
+	// The state the case is ABOUT, asserted rather than assumed: a hold and its
+	// record exist before the shell goes.
+	if !s.ws.heldStopArmed(attempt) || !s.ws.stopStateKnown(attempt) {
+		t.Fatal("the held Stop recorded no hold or no record; the case below would be vacuous")
+	}
+
+	// The shell exits on its own. Nothing closes the session by hand.
+	submitCommand(t, s.conn, s.sid, "exit")
+	waittest.WaitForDetail(t, "the exited session's Stop records to be dropped",
+		func() string {
+			return fmt.Sprintf("held=%v record=%v", s.ws.heldStopArmed(attempt), s.ws.stopStateKnown(attempt))
+		},
+		func() bool { return !s.ws.heldStopArmed(attempt) && !s.ws.stopStateKnown(attempt) })
+}

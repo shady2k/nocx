@@ -879,10 +879,22 @@ func (s *WSServer) submitHeldStop(attempt lifecycle.AttemptID) {
 func (s *WSServer) deliverHeldStop(ctx context.Context, sid session.ID, attempt lifecycle.AttemptID) {
 	op, err := s.signalOps.ForSession(sid)
 	if err != nil {
-		s.log.Info("foreground signal: the held Stop is discarded — the session is gone",
+		// ForSession refuses only when the registry has no such session, so
+		// this is the session-GONE case and not a refusal to run: there is no
+		// subscriber left to tell, and the record dies with the session at
+		// dropStopStatesFor. The obligation is still settled rather than left
+		// behind (one hold, one settlement), and the log is Info rather than a
+		// warning about a person's Stop, because a tab that no longer exists
+		// cannot be shown anything.
+		s.log.Info("foreground signal: the held Stop ends with its session",
 			"session_id", string(sid), "attempt", string(attempt), "error", err)
 		_, _ = s.claimHeldStop(attempt)
 		s.recordStopSettled(attempt, signalDeliveryUndelivered)
+		// No notice: notification resolves the session's CURRENT subscriber
+		// (notifySignalUndelivered), and this session has none — it is not in
+		// the registry at all. Calling it would log a warning about a person's
+		// Stop for a tab that no longer exists and send nothing. The record
+		// goes at dropStopStatesFor, with the session that owns it.
 		return
 	}
 	bytePathUsed := false

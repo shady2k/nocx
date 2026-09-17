@@ -287,6 +287,38 @@ describe('reacting to a command', () => {
     expect(r.mood).toBe('pleased') // the mood still lands
   })
 
+  it('records the answer it gave, and the record outlives the drawing', () => {
+    // The reaction itself is four frames. What a person is owed is that the
+    // command they ran was answered, and that fact does not expire with the
+    // drawing that delivered it.
+    let p = react(standing(A), 'success')
+    expect(p.answered).toBe('meow')
+    for (let i = 0; i < 60 * 3; i++) p = step(p, env(), 1 / 60, seq(0.5))
+    expect(p.activity).not.toBe('meow')
+    expect(p.answered).toBe('meow')
+  })
+
+  it('gives an answer owed from mid-air once it lands', () => {
+    // The seconds after the animal arrives are a fall, which is exactly when
+    // the first command of a session finishes. Without the debt that answer
+    // is simply lost.
+    let p = react({ ...newPet(200, 0), locomotion: 'fall' as const }, 'success')
+    expect(p.owed).toBe('meow')
+    expect(p.answered).toBeNull()
+    for (let i = 0; i < 120 && p.owed !== null; i++) p = step(p, env(), 1 / 60, seq(0.5))
+    expect(p.locomotion).toBe('idle')
+    expect(p.activity).toBe('meow')
+    expect(p.answered).toBe('meow')
+    expect(p.owed).toBeNull()
+  })
+
+  it('owes the failing answer too, and pays that one', () => {
+    let p = react({ ...newPet(200, 0), locomotion: 'fall' as const }, 'failure')
+    for (let i = 0; i < 120 && p.owed !== null; i++) p = step(p, env(), 1 / 60, seq(0.5))
+    expect(p.activity).toBe('scratch')
+    expect(p.answered).toBe('scratch')
+  })
+
   it('lets the mood decay back to calm on its own', () => {
     let p = react(standing(A), 'failure')
     expect(p.mood).toBe('worried')

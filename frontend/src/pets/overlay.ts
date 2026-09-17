@@ -339,6 +339,8 @@ export class PetOverlay {
         mood: heard.mood,
         moodHold: heard.moodHold,
         attending: heard.attending,
+        answered: heard.answered,
+        owed: heard.owed,
       }
       this._alive = true
     }
@@ -708,6 +710,13 @@ export class PetOverlay {
     // the activity bar — and it is the only window onto a module that
     // deliberately takes no clicks and holds no text.
     this._layer.dataset.doing = doing
+    // `doing` is the blink and `answer` is what it said. A reaction is a once
+    // drawing about a second long, and one owed from mid-air is not given
+    // until the animal lands, so sampling `doing` for it catches the answer
+    // only if the sample falls inside the blink. This keeps the last answer
+    // the pet actually gave, which is what the feature owes a person: you ran
+    // something, and the cat answered.
+    this._layer.dataset.answer = this._pet.answered ?? 'none'
     this._layer.dataset.mood = this._pet.mood
     this._layer.dataset.watching = this._pet.attending ?? 'nothing'
     this._layer.dataset.phase = this._pet.phase

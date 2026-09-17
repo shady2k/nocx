@@ -470,6 +470,27 @@ describe('a pet over a pane', () => {
     expect(pet.playing).toBe('itch')
   })
 
+  it('leaves the answer on the layer after the drawing has finished', async () => {
+    // What the e2e suite reads. `data-doing` carries the blink and a poll can
+    // miss it between two samples; `data-answer` is the answer itself, and it
+    // is still there when the cat has gone back to grooming.
+    const s = stand([200])
+    const pet = overlayOn(s)
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+    s.pump(3)
+    const layer = s.host.querySelector<HTMLElement>('.pet-layer')!
+    expect(layer.dataset.answer).toBe('none')
+    pet.reactTo('success')
+    s.pump(1 / 60)
+    expect(layer.dataset.answer).toBe('meow')
+    s.pump(3)
+    expect(layer.dataset.doing).not.toContain('meow')
+    expect(layer.dataset.answer).toBe('meow')
+    pet.reactTo('failure')
+    s.pump(1 / 60)
+    expect(layer.dataset.answer).toBe('scratch')
+  })
+
   it('keeps a once clip through its final frame before changing activity', async () => {
     const s = stand([200])
     const pet = overlayOn(s)

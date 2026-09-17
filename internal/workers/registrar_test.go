@@ -39,6 +39,17 @@ type memStore struct {
 	// taking its wake-up channel and selecting on it, which is the one
 	// ordering that cannot be produced by racing two goroutines and hoping.
 	duringHeldBy func()
+	// duringResolve is that same instrument for the ordering this package's
+	// Resolve-against-Revoke trials did not get from racing two goroutines at
+	// all: measured 2026-09-17, 50 runs of that trial under load on the
+	// unmodified branch produced the revoke-first ordering on every trial, so
+	// the resolve's half of the race was never observed (nocx-xn63t.4.7). It
+	// runs once, at the top of the first store call resolveLocked makes
+	// (ParticipantBySession), which access.go makes while holding storeMu —
+	// so a test that blocks here holds the resolve inside its critical
+	// section, and spends the block starting the revoke and leaving it
+	// contending for that mutex.
+	duringResolve func()
 }
 
 func newMemStore() *memStore {
@@ -355,6 +366,10 @@ func (m *memStore) CoordinatorSession(_ context.Context, id ID) (string, error) 
 func (m *memStore) ParticipantBySession(_ context.Context, sessionID string) (Participant, error) {
 	if err := m.hit("participantbysession"); err != nil {
 		return Participant{}, err
+	}
+	if f := m.duringResolve; f != nil {
+		m.duringResolve = nil
+		f()
 	}
 	if sessionID == "" {
 		return Participant{}, fmt.Errorf("no such session %q: %w", sessionID, ErrNoSuchParticipant)

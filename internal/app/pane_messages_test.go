@@ -17,6 +17,8 @@ import (
 
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/assistant"
+	helperclient "github.com/shady2k/nocx/internal/helper/client"
+	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/paneview"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/sessionruntime"
@@ -91,16 +93,40 @@ type fakeMsgReader struct {
 	mu             sync.Mutex
 	frame          paneview.Frame
 	classification agentdriver.State
-	// available is which target kind currently mints from this frame — ""
-	// means none (an unidentifiable input box, modelling a menu up).
+	// available is the kind this frame HONESTLY offers: TargetInput for a
+	// readable input box, TargetMenu for a real menu, "" for a frame that
+	// offers the caller nothing (a menu covering the box, or a box nobody
+	// can read).
 	available sessionruntime.TargetKind
 	rows      sessionruntime.RowRange
 	tokenSeq  int
 	readErr   error
 	agent     string
+	// chain/accessEpoch are what a minted target's own coordinator record
+	// carries (design §6.2) — a test that SPENDS one of this reader's tokens
+	// through the REAL paneKeys needs them, because PaneKeys re-checks
+	// StillHolds on the chain before committing a step.
+	chain       workers.Chain
+	accessEpoch uint64
 
+	// reads counts every Read, minted or not. It is what makes a probe's
+	// POLLING visible to a test that must assert on it without sleeping:
+	// "the delivery re-read the pane at least this many times" is an
+	// observable state change, never a duration.
+	reads     int
 	mintCalls []sessionruntime.TargetKind
 	records   map[string]targetRecord
+
+	// bookCapacity models the helper's token book (spec §6.2): at most this
+	// many LIVE slots, and a mint with none free is refused `capacity`
+	// exactly as the helper refuses it, before a token exists. 0 means
+	// unlimited. liveSlots counts the mints this reader has handed out,
+	// which is what makes a probe that MINTS WITHOUT SPENDING visible: it
+	// holds a slot nobody asked for. capacityRefusals counts the refusals,
+	// so a test can say which of the two happened rather than guess.
+	bookCapacity     int
+	liveSlots        int
+	capacityRefusals int
 
 	// flipAfterMints, when > 0, switches which kind is available starting
 	// from the mint call AFTER this many have been recorded — modelling a
@@ -108,6 +134,12 @@ type fakeMsgReader struct {
 	// check and the Enter mint) keyed on call count, never on a real wait.
 	flipAfterMints   int
 	flippedAvailable sessionruntime.TargetKind
+
+	// onRead, when non-nil, runs after the nth Read (1-based) with r's own
+	// lock RELEASED — so a hook may call setBox/setClassification without
+	// deadlocking. That is how a test makes the pane repaint after a read
+	// (an echo arriving late) rather than on a timer.
+	onRead func(n int)
 }
 
 func newFakeMsgReader(boxText string) *fakeMsgReader {
@@ -129,15 +161,61 @@ func newFakeMsgReader(boxText string) *fakeMsgReader {
 // that never read one is not a caller the production code admits.
 func mintInputTarget(t *testing.T, reader *fakeMsgReader, access any, sessionID string) string {
 	t.Helper()
-	want := sessionruntime.TargetInput
-	read, err := reader.Read(context.Background(), access, sessionID, &want, nil)
+	return mintTarget(t, reader, access, sessionID, sessionruntime.TargetInput)
+}
+
+// mintTarget mints a target of any kind through reader.Read, exactly as a
+// caller's own prior session.read would (design §6.1) — the general form of
+// mintInputTarget below, for a caller answering a MENU rather than typing
+// into the box. It returns the tokenID, empty when nothing of that kind
+// minted from the frame as it stands.
+func mintTarget(t *testing.T, reader *fakeMsgReader, access any, sessionID string, kind sessionruntime.TargetKind) string {
+	t.Helper()
+	read, err := reader.Read(context.Background(), access, sessionID, &kind, nil)
 	if err != nil {
-		t.Fatalf("mint input target: %v", err)
+		t.Fatalf("mint %s target: %v", kind, err)
 	}
 	if read.Target == nil {
 		return ""
 	}
 	return read.Target.TokenID
+}
+
+// realMenuFrame replays a real permission-menu moment from the corpus and
+// answers it with the state the SHIPPED claude rule classifies it as — the
+// pair a real pane hands session.read, rather than a synthetic frame beside
+// a classification a test asserted by hand. The premise (this frame IS a
+// menu moment) is checked here, so no assertion below can quietly rest on a
+// frame that stopped being one.
+func realMenuFrame(t *testing.T) (paneview.Frame, agentdriver.State) {
+	t.Helper()
+	frame := happyReplayCapture(t, "claude-permission", 49000)
+	state := messagesTestRules(t).Classify("claude", frame)
+	if state != agentdriver.StatePermissionChoice && state != agentdriver.StateModalChoice {
+		t.Fatalf("claude-permission@49s classifies as %q, want a menu state", state)
+	}
+	return frame, state
+}
+
+// menuUp puts reader on a real permission-menu moment: the corpus's own
+// frame, the shipped rule's own classification, and no input target minting
+// from it (nocx-6q1uh.10's measurement — a menu always displaces claude's
+// input box, so the box's own span goes unbound).
+//
+// Earlier tests here modelled "a menu is up" as available == "" alone,
+// beside a synthetic empty box. That model stopped being the whole truth the
+// moment the readiness probe stopped minting to find out: a probe that reads
+// the pane instead of minting from it asks the frame and the classification,
+// and a fake that says "no target mints here" while drawing an ordinary
+// readable box answers a question no real pane can be in.
+func menuUp(t *testing.T, reader *fakeMsgReader) {
+	t.Helper()
+	frame, state := realMenuFrame(t)
+	reader.mu.Lock()
+	defer reader.mu.Unlock()
+	reader.frame = frame
+	reader.classification = state
+	reader.available = ""
 }
 
 func (r *fakeMsgReader) setBox(text string) {
@@ -146,10 +224,34 @@ func (r *fakeMsgReader) setBox(text string) {
 	r.frame = boxFrame(text)
 }
 
+func (r *fakeMsgReader) setClassification(state agentdriver.State) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.classification = state
+}
+
 func (r *fakeMsgReader) setAvailable(kind sessionruntime.TargetKind) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.available = kind
+}
+
+func (r *fakeMsgReader) readCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.reads
+}
+
+func (r *fakeMsgReader) mintedKinds() []sessionruntime.TargetKind {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]sessionruntime.TargetKind(nil), r.mintCalls...)
+}
+
+func (r *fakeMsgReader) bookState() (live, refusals int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.liveSlots, r.capacityRefusals
 }
 
 func (r *fakeMsgReader) AgentFor(string) string { return r.agent }
@@ -161,31 +263,69 @@ func (r *fakeMsgReader) Record(tokenID string) (targetRecord, bool) {
 	return rec, ok
 }
 
-func (r *fakeMsgReader) Read(_ context.Context, access any, _ string, want *sessionruntime.TargetKind, _ *sessionruntime.RowRange) (assistant.PaneRead, error) {
+func (r *fakeMsgReader) Read(_ context.Context, access any, sessionID string, want *sessionruntime.TargetKind, _ *sessionruntime.RowRange) (assistant.PaneRead, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.readErr != nil {
-		return assistant.PaneRead{}, r.readErr
+		err := r.readErr
+		r.mu.Unlock()
+		return assistant.PaneRead{}, err
 	}
+	r.reads++
+	n := r.reads
 	read := assistant.PaneRead{Frame: r.frame, Classification: r.classification}
-	if want == nil {
-		return read, nil
+	if want != nil {
+		r.mintCalls = append(r.mintCalls, *want)
+		offered := r.available
+		if r.flipAfterMints > 0 && len(r.mintCalls) > r.flipAfterMints {
+			offered = r.flippedAvailable
+		}
+		// A read asking for a kind this frame does not offer does NOT fail:
+		// the read path falls back to a target over the whole screen
+		// (session_targets.go's chooseTargetRows), which the helper mints and
+		// the token book counts like any other, and the caller simply gets a
+		// kind it did not ask for. That fallback is not a detail here — one
+		// such mint per messagePollInterval is exactly how the book the owner
+		// hit filled (nocx-xn63t.4.1) — so the fake models it rather than
+		// answering "nothing minted".
+		kind := offered
+		if kind == "" || *want != kind {
+			kind = sessionruntime.TargetRegion
+		}
+		switch {
+		case r.bookCapacity > 0 && r.liveSlots >= r.bookCapacity:
+			// The helper's own token-book refusal (spec §6.2): a full book
+			// refuses BEFORE a token exists, as a wire refusal — the same
+			// *RefusalError the real client hands internal/app.
+			r.capacityRefusals++
+			r.mu.Unlock()
+			r.afterRead(n)
+			return assistant.PaneRead{}, &helperclient.RefusalError{Code: proto.ErrCodeCapacity, Message: "session: capacity"}
+		default:
+			r.tokenSeq++
+			r.liveSlots++
+			tokenID := fmt.Sprintf("tok-%d", r.tokenSeq)
+			view := assistant.TargetView{Kind: kind, TokenID: tokenID, Rows: r.rows}
+			read.Target = &view
+			da, _ := access.(*DescendantPaneAccess)
+			r.records[tokenID] = targetRecord{
+				Access: da, View: view, Chain: r.chain, AccessEpoch: r.accessEpoch, SessionID: sessionID,
+			}
+		}
 	}
-	r.mintCalls = append(r.mintCalls, *want)
-	avail := r.available
-	if r.flipAfterMints > 0 && len(r.mintCalls) > r.flipAfterMints {
-		avail = r.flippedAvailable
-	}
-	if avail == "" || *want != avail {
-		return read, nil
-	}
-	r.tokenSeq++
-	tokenID := fmt.Sprintf("tok-%d", r.tokenSeq)
-	view := assistant.TargetView{Kind: avail, TokenID: tokenID, Rows: r.rows}
-	read.Target = &view
-	da, _ := access.(*DescendantPaneAccess)
-	r.records[tokenID] = targetRecord{Access: da, View: view}
+	r.mu.Unlock()
+	r.afterRead(n)
 	return read, nil
+}
+
+// afterRead runs onRead, when a test set one, OUTSIDE the reader's lock —
+// see onRead's own doc for why that matters.
+func (r *fakeMsgReader) afterRead(n int) {
+	r.mu.Lock()
+	hook := r.onRead
+	r.mu.Unlock()
+	if hook != nil {
+		hook(n)
+	}
 }
 
 // fakeMsgKeys is the PaneKeys (session_keys.go) delivery spends targets
@@ -414,9 +554,9 @@ func TestTextInTheBoxRefusesThePaste(t *testing.T) {
 	}
 }
 
-// TestAMenuAppearingBeforeThePasteRefusesTooWhenNow: the input box cannot be
-// identified at all (available == "", modelling a menu up) — for when=="now"
-// this is a terminal refusal, exactly as "text in the box" is.
+// TestAMenuAppearingBeforeThePasteRefusesTooWhenNow: a menu is up by the
+// time the paste would happen — for when=="now" this is a terminal refusal,
+// exactly as "text in the box" is.
 func TestAMenuAppearingBeforeThePasteRefusesTooWhenNow(t *testing.T) {
 	hub, access, sessionID := newMessagesTestAccess(t, "menu-before")
 	reader := newFakeMsgReader("")
@@ -426,10 +566,11 @@ func TestAMenuAppearingBeforeThePasteRefusesTooWhenNow(t *testing.T) {
 	// The caller's own session.read minted this tokenId while the box was
 	// still identifiable; the menu covers it only AFTER that read returns —
 	// so Send's own tokenId gate is satisfied, and the refusal below comes
-	// from pasteReady's fresh mint (design §8.2 step 1) finding no target of
-	// the wanted kind any more, exactly as "someone is typing" does.
+	// from pasteReady's readiness probe (design §8.2 step 1) reading a frame
+	// whose own chrome says a menu is up, exactly as "someone is typing"
+	// refuses on the box's own text.
 	token := mintInputTarget(t, reader, access, sessionID)
-	reader.setAvailable("")
+	menuUp(t, reader)
 
 	view, err := pm.Send(context.Background(), access, sessionID, "hello", "now", "id-1", token)
 	if err != nil {
@@ -464,6 +605,182 @@ func TestPasteReadyOnARealIdleFrame(t *testing.T) {
 
 	if !pm.pasteReady(context.Background(), access, sessionID) {
 		t.Fatal("pasteReady = false on a real idle Claude frame, want true")
+	}
+}
+
+// TestPasteReadyOnARealWorkingFrame: a pane whose agent is WORKING still has
+// a readable, empty input box — which is the whole reason a coordinator may
+// queue a message into a turn (design §8.2 step 1 binds the paste to the box,
+// never to the agent being idle), and claude.rule.json's own inputText
+// extractor says so by running in "working" as well as "free_text".
+//
+// It is the pairing AGENTS.md's testing rule 3 asks for, against the test
+// below: the readiness probe must refuse a menu and must NOT refuse work.
+func TestPasteReadyOnARealWorkingFrame(t *testing.T) {
+	hub, access, sessionID := newMessagesTestAccess(t, "real-working")
+	reader := newFakeMsgReader("")
+	frame := happyReplayCapture(t, "claude-working", 17000)
+	reader.frame = frame
+	state := messagesTestRules(t).Classify("claude", frame)
+	reader.setClassification(state)
+	keys := &fakeMsgKeys{}
+	pm := newTestPaneMessages(t, hub, reader, keys)
+
+	if !pm.pasteReady(context.Background(), access, sessionID) {
+		t.Fatalf("pasteReady = false on a real working Claude frame (classification %q), want true — a message queued during a turn must still be deliverable", state)
+	}
+}
+
+// TestPasteReadyOnARealMenuFrame: on a real permission menu the probe refuses
+// — and refuses by READING, not by minting. Before nocx-xn63t.4.1 it decided
+// this by asking the helper to mint a target and treating "nothing of that
+// kind minted" as "a menu is up", which is one held token-book slot per poll
+// (spec §6.2: maxLiveTokens, never evicted) for an answer the frame's own
+// chrome already carries.
+func TestPasteReadyOnARealMenuFrame(t *testing.T) {
+	hub, access, sessionID := newMessagesTestAccess(t, "real-menu")
+	reader := newFakeMsgReader("")
+	keys := &fakeMsgKeys{}
+	pm := newTestPaneMessages(t, hub, reader, keys)
+	menuUp(t, reader)
+
+	// The premise, stated where it can fail on its own: on this frame the
+	// shipped rule reads no input box at all — the same fact that makes the
+	// classifier call it a menu.
+	if text, ok := messagesTestRules(t).Observe("claude", reader.frame).InputText(); ok {
+		t.Fatalf("claude-permission@49s answers InputText = (%q, true), want ok=false — no box is on screen", text)
+	}
+
+	if pm.pasteReady(context.Background(), access, sessionID) {
+		t.Fatal("pasteReady = true with a menu up, want false")
+	}
+	if got := reader.mintedKinds(); len(got) != 0 {
+		t.Fatalf("the readiness probe minted %v; a probe holds no token-book capacity it does not spend (nocx-xn63t.4.1)", got)
+	}
+}
+
+// ── the queued message behind a menu (nocx-xn63t.4.1) ───────────────────────
+
+// TestAPendingMessageBehindAMenuLeavesThePanesTargetsForTheCaller is
+// nocx-xn63t.4.1's own acceptance test. The owner's coordinator queued a task
+// for a worker that had stopped on Claude Code's folder-trust menu, and could
+// then read the pane with no target but never WITH one: every targeted
+// session.read answered `capacity`, so it could not press the answer, and the
+// worker stayed stuck.
+//
+// The cause was this delivery loop. A "free" message behind a menu re-checks
+// the box every messagePollInterval, and each check MINTED a one-shot target
+// it never spent; the helper's token book holds maxLiveTokens slots and
+// releases them only after expiry plus five minutes (spec §6.2), so the book
+// filled in seconds and the one caller who could take the menu down was the
+// one being refused.
+//
+// The book here is three slots rather than the production 256: the property
+// ("a probe that never spends holds no slot") is the same at three as at 256,
+// and 256 would mean thousands of real polls. The polls are waited on as an
+// observable state change — the reader's own read count — never a duration.
+func TestAPendingMessageBehindAMenuLeavesThePanesTargetsForTheCaller(t *testing.T) {
+	// A helper that answers an Enter as executed: the test spends the menu
+	// target through the REAL paneKeys a coordinator answers menus with, so
+	// "and it succeeds" means the write path, not a fake's call log.
+	hub, access, chain, sessionID := newTestPaneAccess(t, "menu-starve", &fixedResultHelper{
+		result: proto.IntentResult{State: "executed", BytesWritten: 1},
+	})
+	reader := newFakeMsgReader("")
+	menuUp(t, reader)
+	reader.chain = chain
+	reader.accessEpoch = 1
+	reader.bookCapacity = 3
+	keys := happyKeys(reader, "hello")
+	pm := newTestPaneMessages(t, hub, reader, keys)
+
+	view, err := pm.Send(context.Background(), access, sessionID, "hello", "free", "id-1", "")
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if view.Phase != assistant.PhaseQueued {
+		t.Fatalf("immediate phase = %q, want queued (the menu is up, so delivery waits)", view.Phase)
+	}
+	waitForCondition(t, "the queued message to poll the pane while the menu is up", func() bool {
+		return reader.readCount() >= 8
+	})
+
+	// The defect, in two assertions: the book — three slots, standing in for
+	// the helper's maxLiveTokens, never evicted (spec §6.2) — is exactly what
+	// those polls spent, on tokens the delivery will never spend.
+	if live, refusals := reader.bookState(); live != 0 || refusals != 0 {
+		t.Fatalf("waiting behind the menu left %d live token-book slots and %d capacity refusals; want 0 and 0 — the polls filled the book the caller's own answer needs", live, refusals)
+	}
+	if got := reader.mintedKinds(); len(got) != 0 {
+		t.Fatalf("the delivery minted %v while waiting behind the menu, want nothing: a probe that never spends must not hold the book (nocx-xn63t.4.1)", got)
+	}
+
+	// And what the owner could not do: mint a MENU target and spend it. The
+	// answer to the menu is the only thing that ever takes it down.
+	reader.setAvailable(sessionruntime.TargetMenu)
+	token := mintTarget(t, reader, access, sessionID, sessionruntime.TargetMenu)
+	if token == "" {
+		t.Fatal("the pane minted no menu target while a message was queued behind the menu — this is the deadlock the bead reports")
+	}
+	enter := assistant.KeyName("Enter")
+	result, err := newPaneKeys(reader, hub).Send(context.Background(), access, assistant.KeysRequest{
+		SessionID: sessionID, TokenID: token, Key: &enter,
+	})
+	if err != nil {
+		t.Fatalf("spend the menu target: %v", err)
+	}
+	if result.State != "executed" {
+		t.Fatalf("spend result = %+v, want executed (the coordinator's answer reached the pane)", result)
+	}
+}
+
+// TestTheDeliveryProbesMintOnlyWhatTheDeliverySpends is the same bead's
+// criterion 2, stated as a count: the readiness probe and every echo poll
+// mint nothing, and a delivered message mints exactly the two targets it
+// actually spends — one for the paste, one for the Enter — however many times
+// it had to look at the pane meanwhile.
+func TestTheDeliveryProbesMintOnlyWhatTheDeliverySpends(t *testing.T) {
+	hub, access, sessionID := newMessagesTestAccess(t, "probe-mints")
+	reader := newFakeMsgReader("")
+	keys := &fakeMsgKeys{
+		pasteResult: assistant.KeysResult{State: "executed", BytesWritten: 2},
+		enterResult: assistant.KeysResult{State: "executed"},
+	}
+	// The echo arrives on the THIRD read the delivery makes, so waitForEcho's
+	// probe polls with the box still empty at least twice — the polls whose
+	// minting was the leak. The hook runs with the reader's lock released.
+	reader.onRead = func(n int) {
+		if n >= 3 {
+			reader.setBox("hi")
+		}
+	}
+	keys.onSend = func(req assistant.KeysRequest) {
+		if req.Key != nil {
+			reader.setBox("") // Enter clears the box: submission confirmed
+		}
+	}
+	pm := newTestPaneMessages(t, hub, reader, keys)
+
+	if _, err := pm.Send(context.Background(), access, sessionID, "hi", "free", "id-1", ""); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	waitForCondition(t, "the free message to reach submitted", func() bool {
+		for _, m := range pm.Pending(sessionID) {
+			if m.ID == "id-1" {
+				return m.Phase == assistant.PhaseSubmitted
+			}
+		}
+		return false
+	})
+
+	// The premise: the delivery really did look at the pane more often than
+	// it spent a target, or this test would pass on a delivery that never
+	// polled at all.
+	if reads := reader.readCount(); reads < 4 {
+		t.Fatalf("the delivery read the pane %d times, want at least 4 (a readiness read, the paste, and two echo polls)", reads)
+	}
+	if got := reader.mintedKinds(); len(got) != 2 {
+		t.Fatalf("the delivery minted %d targets (%v), want exactly 2 — the paste and the Enter", len(got), got)
 	}
 }
 
@@ -569,13 +886,16 @@ func TestAMenuBetweenPasteAndEnterRefusesTheEnter(t *testing.T) {
 	}
 	pm := newTestPaneMessages(t, hub, reader, keys)
 
-	// Mint order: this test's own session.read (#1) — a "now" send needs
-	// its tokenId — then, inside the delivery, pasteReady (#2), pasteStep
-	// (#3), waitForEcho's first (successful) read (#4), enterStep (#5) —
-	// the menu appears starting at #5, after the echo was already
-	// confirmed.
+	// Mint order — only the steps that SPEND a target mint one at all
+	// (nocx-xn63t.4.1: the readiness and echo probes read the pane instead):
+	// this test's own session.read (#1), a "now" send needs its tokenId;
+	// then, inside the delivery, pasteStep (#2) and enterStep (#3). The menu
+	// appears starting at #3, i.e. after the echo has already been
+	// confirmed and before the Enter mint — the race this test names. It is
+	// still keyed on the mint count, so the count moved with the probes and
+	// the scenario did not.
 	token := mintInputTarget(t, reader, access, sessionID)
-	reader.flipAfterMints = 4
+	reader.flipAfterMints = 2
 	reader.flippedAvailable = ""
 
 	view, err := pm.Send(context.Background(), access, sessionID, "hello", "now", "id-1", token)

@@ -790,6 +790,51 @@ func TestHeldStop_TheCompletionFactCarriesTheSettlement(t *testing.T) {
 	_ = attempt
 }
 
+// TestHeldStop_ASessionThatIsGoneSettlesWithoutANotice pins the ONE branch of
+// the held delivery that is deliberately silent, because a review of 0d01bfc6
+// read it as a missed notice.
+//
+// It is not missed: capability.SessionOperations.ForSession refuses only when
+// the registry has no such session, and notification resolves that session's
+// CURRENT subscriber — which a session that is not in the registry does not
+// have. A notice here would put nothing on any wire. What the branch must do is
+// settle the obligation rather than leave it behind, and that is what this
+// asserts, together with the silence that made it look wrong.
+func TestHeldStop_ASessionThatIsGoneSettlesWithoutANotice(t *testing.T) {
+	stand := newHeldStopStand(t)
+	stand.establish(t)
+	stand.submit(t, 5, "sleep 30")
+	attempt := lifecycle.AttemptID(stand.appAttemptID)
+	if got := stand.stop(t, 6); got != string(foregroundHeld) {
+		t.Fatalf("a Stop before the start answered %q, want %q", got, foregroundHeld)
+	}
+	if !stand.ws.heldStopArmed(attempt) {
+		t.Fatal("the Stop was not held")
+	}
+
+	// The session goes before anything could deliver for it. The registry is
+	// the authority ForSession consults, so this is exactly the case.
+	if err := stand.ws.registry.Close(session.ID(stand.sid)); err != nil {
+		t.Fatalf("registry.Close: %v", err)
+	}
+	stand.ws.deliverHeldStop(t.Context(), session.ID(stand.sid), attempt)
+
+	if stand.ws.heldStopArmed(attempt) {
+		t.Fatal("a session-gone Stop left its hold behind; one hold, one settlement")
+	}
+	if got := stand.ws.signalDeliveryFor(lifecyclepub.Fact{
+		Attempt: &lifecyclepub.Attempt{ID: stand.appAttemptID, State: lifecyclepub.AttemptCompleted},
+	}); got != signalDeliveryUndelivered {
+		t.Fatalf("the record settled as %q, want %q", got, signalDeliveryUndelivered)
+	}
+	// And the silence is the correct outcome, not an oversight: there is no
+	// subscriber to have been told.
+	time.Sleep(100 * time.Millisecond)
+	if n := stand.notices(); n != 0 {
+		t.Fatalf("undelivered notices = %d for a session that no longer exists", n)
+	}
+}
+
 // ── 2. the discard ────────────────────────────────────────────────────────
 
 // TestSessionSignal_AHeldStopIsDiscardedWhenTheAttemptNeverStarts: the line

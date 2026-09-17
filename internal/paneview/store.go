@@ -42,7 +42,7 @@ var (
 // question, Screen is the read.
 //
 // Both are synchronous and neither takes a context, which is deliberate: the
-// callers are a 120ms sweeper and a write gate that is already holding a
+// callers are a one-second sweeper and a write gate that is already holding a
 // decision, and neither has a lifetime to thread. An implementation that
 // reaches another process therefore bounds its own call, the way
 // internal/helper/client's signal seam does — a REQUEST bound, not a policy.

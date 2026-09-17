@@ -240,7 +240,13 @@ func newGroupTwoCallersRecord() (*workers.Registrar, *workerTwoCallersCloser) {
 // newGroupTwoCallersRecordInSession is the same record, with every participant
 // it registers running in one named session — what a caller from that pane
 // must resolve to in order to be a participant rather than a coordinator.
-func newGroupTwoCallersRecordInSession(sessionID string) (*workers.Registrar, *workerTwoCallersCloser) {
+//
+// opts are the caller's own Registrar options, applied after the two this stand
+// needs. A test about a PRODUCT VALUE (the settle window, nocx-luqz9.2) states
+// it here rather than moving this package's clock: the record reads time.Now,
+// and an observation is a fact on the second reading of a state — which is
+// exactly what a zero window means.
+func newGroupTwoCallersRecordInSession(sessionID string, opts ...workers.Option) (*workers.Registrar, *workerTwoCallersCloser) {
 	spawner := &workerTwoCallersSpawner{session: sessionID}
 	closer := &workerTwoCallersCloser{}
 	record := workers.NewRegistrar(
@@ -248,8 +254,10 @@ func newGroupTwoCallersRecordInSession(sessionID string) (*workers.Registrar, *w
 		spawner,
 		workerTwoCallersEnrolments{spawner: spawner},
 		workerTwoCallersSupervisor{},
-		workers.WithCloser(closer),
-		workers.WithEnrolmentDeadline(5*time.Second),
+		append([]workers.Option{
+			workers.WithCloser(closer),
+			workers.WithEnrolmentDeadline(5 * time.Second),
+		}, opts...)...,
 	)
 	closer.record = record
 	return record, closer
@@ -309,7 +317,7 @@ func inProcessInvocation(sid session.ID, method, params string) assistant.ToolIn
 	return assistant.ToolInvocation{
 		Context:    context.Background(),
 		RunContext: agenttools.RunContext{RunID: "run-in-process", Session: string(sid)},
-		Grant:      callerGrant(sid, content.EnvironmentIDFor(content.EnvLocal, "")),
+		Grant:      callerGrant(sid, content.EnvironmentIDFor(content.EnvLocal, ""), workerTestWorkspace),
 		Method:     method,
 		RawParams:  []byte(params),
 	}
@@ -748,22 +756,78 @@ func TestGroupWorkerIsOfferedNoCoordinatorCall(t *testing.T) {
 	}
 }
 
-// TestWorkerCoordinatorIsOfferedNoParticipantCall is its mirror, and the pair is
-// what makes "disjoint by construction" checkable rather than asserted: if a
-// later grant change made one set reach the other, exactly one of these two
-// tests goes red.
-func TestWorkerCoordinatorIsOfferedNoParticipantCall(t *testing.T) {
-	reg, _, grid := prepareGroupCaller(t)
+// TestWorkerCoordinatorReadsItsOwnMailboxAndNotAWorkers is the mirror, and it
+// parts company with the test above at one call — deliberately, since
+// nocx-luqz9.2.
+//
+// workers.inbox USED to be reachable only from a participant, and the pair of
+// tests asserted the two offer sets were disjoint by construction. That is no
+// longer true of this one call and the change is the point of the task: a
+// coordinator reads the state changes nocx saw of its workers out of the SAME
+// mailbox a worker reads its coordinator's mail from — one box, one cursor, one
+// order — so the call is offered to both.
+//
+// What must stay true, and is what this asserts instead, is that the box is
+// still the HOLDER'S OWN. A coordinator's read returns its own box; a worker's
+// read returns its own; and a worker asking for its coordinator's observations
+// is asking for somebody else's box, which the capability cannot express at all
+// (A9) — asserted from the participant's side below, where the participant's
+// grant has no session and is therefore never offered the coordinator's calls.
+func TestWorkerCoordinatorReadsItsOwnMailboxAndNotAWorkers(t *testing.T) {
+	reg, sess, grid := prepareGroupCaller(t)
 	record, _ := newGroupTwoCallersRecord()
 	socket := publishGroupEndpoint(t, reg, grid, record, newSharedToolDispatcher(t, record))
 
 	response := callExternally(t, socket, "workers.inbox", `{}`)
-	if response.Error == nil {
-		t.Fatalf("a coordinator read a participant's mailbox: %s", response.Result)
+	if response.Error != nil {
+		t.Fatalf("a coordinator was refused its own mailbox: %+v", response.Error)
 	}
-	if response.Error.Code != workerRPCDomainError {
-		t.Fatalf("workers.inbox answered %d %q, want the domain refusal %d",
-			response.Error.Code, response.Error.Message, workerRPCDomainError)
+	var read struct {
+		Messages *[]struct {
+			From    string `json:"from"`
+			Message string `json:"message"`
+		} `json:"messages"`
+		Cursor int64 `json:"cursor"`
+	}
+	if err := json.Unmarshal(response.Result, &read); err != nil {
+		t.Fatalf("decode inbox result %s: %v", response.Result, err)
+	}
+	if read.Messages == nil {
+		t.Fatalf("the answer carries no messages key: %s", response.Result)
+	}
+	if len(*read.Messages) != 0 {
+		t.Fatalf("an empty mailbox answered %+v, want nothing — a coordinator reads its own box "+
+			"and nobody has written to it", *read.Messages)
+	}
+
+	// The cursor is the box's OWN position, and it is derived from the admitted
+	// session rather than from anything the call carried: a read advances the
+	// reader's mark, which is the whole of "reading is not taking" and the
+	// reason two readers of one box do not steal from each other.
+	second := callExternally(t, socket, "workers.inbox", `{}`)
+	var again struct {
+		Cursor int64 `json:"cursor"`
+	}
+	if err := json.Unmarshal(second.Result, &again); err != nil {
+		t.Fatalf("decode second inbox result %s: %v", second.Result, err)
+	}
+	if again.Cursor != read.Cursor {
+		t.Fatalf("an empty read moved the cursor from %d to %d, want it unmoved",
+			read.Cursor, again.Cursor)
+	}
+	// And the box it read is the session's, which is what makes a restarted
+	// coordinator the same reader (D3).
+	if string(sess.ID()) == "" {
+		t.Fatal("the admitted session has no id, so this test named no box at all")
+	}
+
+	// The other direction: a WORKER is still offered no coordinator call, and
+	// workers.inbox is not one of those — it is offered to the worker as its own
+	// box, which the test above already exercises.
+	worker := prepareGroupWorkerSetup(t)
+	refused := callExternally(t, worker.socket, "workers.holdings", `{}`)
+	if refused.Error == nil || refused.Error.Code != workerRPCDomainError {
+		t.Fatalf("a worker performed workers.holdings: %+v", refused)
 	}
 }
 
@@ -811,8 +875,13 @@ func TestGroupCatalogueUsesDisjointAuthorizerGrants(t *testing.T) {
 		t.Fatalf("coordinator tools.catalogue: %+v", coordinatorResponse.Error)
 	}
 	coordinatorTools := catalogueToolNames(t, coordinatorResponse.Result)
-	if _, ok := coordinatorTools["workers.inbox"]; ok {
-		t.Fatalf("coordinator catalogue contains workers.inbox: %s", coordinatorResponse.Result)
+	// workers.inbox IS offered to a coordinator since nocx-luqz9.2 — the call
+	// now serves both holders, and its own test above reads a coordinator's box
+	// through it. What the check below is for is unchanged: the catalogue a
+	// coordinator is shown must be exactly the set the dispatcher will accept,
+	// so a call offered here and refused at Dispatch is the defect.
+	if _, ok := coordinatorTools["workers.inbox"]; !ok {
+		t.Fatalf("coordinator catalogue lacks workers.inbox: %s", coordinatorResponse.Result)
 	}
 	for _, name := range []string{"workers.spawn", "workers.say", "workers.wait", "workers.holdings", "workers.close"} {
 		if _, ok := coordinatorTools[name]; !ok {

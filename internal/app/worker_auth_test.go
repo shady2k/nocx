@@ -277,7 +277,7 @@ func TestWorkerCallerGrantDerivesEnvironmentFromSession(t *testing.T) {
 		host:    "build.example.com",
 	}
 	environmentID := workerEnvironmentForSession(remote)
-	grant := callerGrant(remote.ID(), environmentID)
+	grant := callerGrant(remote.ID(), environmentID, workerTestWorkspace)
 	want := content.EnvironmentIDFor(content.EnvSSH, remote.Host())
 	var environments []content.GrantScope
 	for _, scope := range grant.Scopes {
@@ -516,7 +516,7 @@ func TestToolDispatcherRefusesSpawnOutsideCoordinatorEnvironment(t *testing.T) {
 		Context:    context.Background(),
 		Method:     "workers.spawn",
 		RunContext: agenttools.RunContext{Session: "sess-coordinator"},
-		Grant:      callerGrant(session.ID("sess-coordinator"), askedEnvironment),
+		Grant:      callerGrant(session.ID("sess-coordinator"), askedEnvironment, workerTestWorkspace),
 		RawParams:  []byte(`{"command":"claude","task":"read it"}`),
 	})
 	if err == nil {

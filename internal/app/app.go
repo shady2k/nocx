@@ -2002,6 +2002,13 @@ func New(opts ...Option) (*App, error) {
 	paneTyping := newPaneTypist(logger, paneViews, paneDrivers, paneCalibration, paneWatch, sess)
 	tpOpts = append(tpOpts, transport.WithPaneScreens(paneViews),
 		transport.WithPaneObserver(paneWatch), transport.WithAgentRules(paneDrivers),
+		// How often the watcher above is swept (nocx-luqz9.2). Stated rather
+		// than left to the zero value: a second is both the coalescing this
+		// sweep was always doing and, since worker observations run off the
+		// same sweep, the cadence a settled state is noticed at (design §4.4).
+		// A value the composition root does not state would be a ticker built
+		// with zero, which panics.
+		transport.WithPaneObserverSweep(transport.DefaultPaneObserverSweep),
 		transport.WithAgentRuleStore(ruleStore),
 		transport.WithAgentCalibration(paneCalibration),
 		transport.WithAgentTypist(paneTyping),
@@ -2293,7 +2300,45 @@ func New(opts ...Option) (*App, error) {
 		}),
 		workers.WithBound(workerParticipantBound),
 		workers.WithEnrolmentDeadline(workerEnrolmentDeadline),
+		// How long a worker's pane must hold a state before it is a fact its
+		// coordinator is told about (nocx-luqz9.2, design §4.4). Stated rather
+		// than left to the zero value for the reason the sweep interval below
+		// is: it is a product value with two ends, and the bead that gives it a
+		// settings owner edits this line.
+		workers.WithSettleWindow(workers.DefaultSettleWindow),
 	)
+	// What nocx SEES, joined to what it records (nocx-luqz9.2, ADR-0070
+	// decision 2). Built here because this is the only place both halves exist:
+	// the watcher knows what a pane was classified as, the record knows what a
+	// worker is, and workerEnrol turns a session into a participant for both a
+	// report and a close already.
+	//
+	// THE STATE MAPPING IS IN THIS PACKAGE and not in either of the two ends.
+	// internal/agentdriver's states are about screens and know nothing about
+	// workers; internal/workers' states are this product's own words
+	// (CONTEXT.md's Idle, Blocked, Exited) and that package reads no screens.
+	// Which driver state means which of those two is a fact about the pair, and
+	// its owner is the layer that holds the pair.
+	workerObs := &WorkerObservation{
+		enrolments: workerEnrol,
+		observe: func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, s workers.ObservedState) error {
+			return workerRecord.Observe(ctx, id, l, s)
+		},
+		liveness: workerEnrol.livenessOf,
+		log:      logger,
+	}
+	// And the SECOND reader of the same sweep (nocx-luqz9.2): every reading of
+	// every watched pane, change or not, which is what a settled state is
+	// measured against. The wire keeps its change-only rule; feeding this reader
+	// from the emitter would hand it a pane's state once and never again. A pane
+	// that belongs to no worker resolves to no participant inside the bridge —
+	// the ordinary case, since a person's own enrolled agent is not one.
+	//
+	// Bound here rather than beside SetEmitter above because the bridge is built
+	// by this block, and the ordering is safe for the same reason the emitter's
+	// is: the sweep only runs once the server is Started, which happens after
+	// app.New returns.
+	paneWatch.OnReading(workerObs.ObserveSession)
 	toolDispatcher, toolDispatcherErr := assistant.NewToolDispatcher(
 		agentToolRegistry, workerRecord, content.EnvironmentIDFor(content.EnvLocal, ""),
 	)

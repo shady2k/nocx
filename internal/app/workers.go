@@ -303,12 +303,12 @@ type paneReadiness interface {
 // for a pane to become typable.
 //
 // It is not a business number, and no test in this repository depends on it:
-// the watcher itself is fed by a 120ms coalescer
-// (internal/transport/ws_paneobserve.go's paneObserverSweep), so asking more
-// often than that buys nothing, and this is comfortably under it so the wait
-// notices a transition within one or two sweeps rather than missing a whole
-// one. A test drives the watcher's state directly and asserts on the change,
-// never on this duration.
+// the watcher itself is fed by the coalescer at
+// internal/transport.DefaultPaneObserverSweep, so asking more often than that
+// buys nothing, and this is comfortably under it so the wait notices a
+// transition within the tick it happens on rather than missing a whole one. A
+// test drives the watcher's state directly and asserts on the change, never on
+// this duration.
 const deliveryPoll = 40 * time.Millisecond
 
 // paneWaitState is what awaitFreeText has learned about a pane's own
@@ -1602,4 +1602,131 @@ func (e *workerEscalation) Escalate(ctx context.Context, f workers.Fact) {
 			Session: f.CoordinatorSession,
 		},
 	})
+}
+
+// ── what nocx SEES (nocx-luqz9.2) ──────────────────────────────────────────
+
+// WorkerObservation is the composition root's bridge between the pane
+// classification and the record (ADR-0070 decision 2).
+//
+// # Why it lives here and what it owns
+//
+// Two things it joins are each owned somewhere else and this file is the only
+// place both exist: the WATCHER knows what a pane was classified as and knows
+// nothing about workers; the RECORD knows what a worker is and reads no screens.
+// The mapping between them — `free_text` means idle, a menu or an error means
+// blocked, and everything else is a state that is not news — is the whole of
+// what this type is, and it is deliberately NOT in internal/agentdriver (whose
+// states are about screens and not about workers) and not in internal/workers
+// (which must never own a driver's vocabulary: its states are its own words,
+// CONTEXT.md's).
+//
+// THE EXIT IS NOT HERE. A pane's agent withdrawing or a process ending is a fact
+// about a PROCESS, and it already reaches the record through the supervisor
+// (workerSup.exited below). One event, one source — the alternative is one
+// process becoming two facts by two routes, which is the second-owner defect
+// AGENTS.md's "two surfaces may never own the same input" names.
+type WorkerObservation struct {
+	// enrolments is what turns a session into a participant: an observation
+	// arrives named by a session's pane, and the record is keyed by participant.
+	// It is the same map a report and a close already resolve through.
+	enrolments *workerEnrolments
+	// observe is the record's admission of one reading. Nil is the absence case
+	// every seam in this file treats the same way: a stand that never wired a
+	// record cannot observe into one, and says so rather than panicking.
+	observe func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, state workers.ObservedState) error
+	// liveness is the incarnation a fact must match to be admitted, read from
+	// the same rendezvous the report path reads it from.
+	liveness func(id workers.ParticipantID) (workers.Liveness, bool)
+	log      log.Logger
+}
+
+// ObserveSession admits one classification of one session's pane.
+//
+// It is called from the watcher's second reader (Watcher.OnReading, bound at the
+// composition root), so it sees EVERY reading the sweep makes — including the
+// ones about panes that belong to no worker, which is the ordinary case: a
+// person's own agent is enrolled too. Those are resolved to no participant and
+// dropped, which is what "most enrolments are not participants" already means
+// everywhere else in this file.
+//
+// The pane id is the session id, and that is not a coincidence to be relied on
+// lightly: paneobserve watches panes by the id its enrolment named, the enroller
+// names them by session (paneenrol.go's Watch(sid, agent)), and
+// workerEnrolments is keyed by the same. A pane whose session nobody enrolled as
+// a participant resolves to nothing here, which is the whole of the filter.
+func (w *WorkerObservation) ObserveSession(o paneobserve.Observation) {
+	if w.observe == nil || w.enrolments == nil {
+		return
+	}
+	participant, isParticipant := w.enrolments.participantFor(session.ID(o.PaneID))
+	if !isParticipant {
+		return
+	}
+	observed, ok := observedStateFor(o.State)
+	if !ok {
+		// A state this mapping does not know becomes no fact at all. It is not
+		// an error and it is not silent in the code: the mapping is total over
+		// the driver's closed set, and this branch is what keeps a state added
+		// to that set from being read as one of ours by accident.
+		w.log.Debug("worker observation: a pane state maps to no observed fact",
+			"participant", string(participant), "session_id", o.PaneID, "state", string(o.State))
+		return
+	}
+	live, known := w.liveness(participant)
+	if !known {
+		// Enrolled but with no recorded incarnation is a state the ordering
+		// makes unreachable (armFor runs before any byte moves), and a fact
+		// admitted without one would be compared against the record and refused
+		// for the wrong reason.
+		w.log.Debug("worker observation: the participant has no recorded incarnation yet",
+			"participant", string(participant), "session_id", o.PaneID)
+		return
+	}
+	if err := w.observe(context.Background(), participant, live, observed); err != nil {
+		// NOT swallowed and not fatal: a refused reading is the record saying
+		// this is not its process, and a mailbox failure leaves the state held,
+		// so the next sweep retries it. The line is what makes the first kind
+		// visible at all — the sweep has no return value to carry it.
+		w.log.Debug("worker observation: the record refused a reading",
+			"participant", string(participant), "session_id", o.PaneID,
+			"state", string(observed), "error", err)
+	}
+}
+
+// observedStateFor maps one of internal/agentdriver's states onto what the
+// coordinator's vocabulary calls it (design §4.2).
+//
+// The mapping is here, in the one place that already knows both vocabularies,
+// and it is total over the driver's closed set. `ok` is about PLACING A FACT and
+// not about whether the record hears the reading: working and unknown are handed
+// on as workers.ObservedWorking, and the record places no message for it (its
+// own Recorded answers false). Two things follow, and both are wanted:
+//
+//   - Working is not a coordinator's business. A message saying "still working"
+//     once per window is noise, and the contract's enum has no word for it.
+//   - The record still SEES the working reading, which it must. A pane that was
+//     idle, worked, and settles idle again is idle news TWICE — design §4.3's
+//     own sentence — and the machine can only tell those two apart if the
+//     intervening turn reaches it and resets the hold. A mapping that dropped
+//     the reading entirely would suppress the second idle.
+//
+// StateExited is the one state that is NOT here, and that is not a mapping
+// decision: it is a fact about a PROCESS, and the door for it is the record's
+// own exit admission, which has already placed it by the time a driver could
+// answer exited.
+func observedStateFor(state agentdriver.State) (workers.ObservedState, bool) {
+	switch state {
+	case agentdriver.StateFreeText:
+		return workers.ObservedIdle, true
+	case agentdriver.StatePermissionChoice, agentdriver.StateModalChoice, agentdriver.StateError:
+		return workers.ObservedBlocked, true
+	case agentdriver.StateWorking, agentdriver.StateUnknown:
+		return workers.ObservedWorking, true
+	default:
+		// Nothing else is in the driver's closed set today; a state added to it
+		// later fails CLOSED — no fact at all rather than a folded-in
+		// neighbour — which is the direction a misread has to fail in.
+		return "", false
+	}
 }

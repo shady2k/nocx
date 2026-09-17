@@ -104,10 +104,21 @@ type sessionOpenerSeam interface {
 // renderer writes from a verified OSC 7 (content.Layout.SetPaneCwd). Reading
 // it here is asking that owner; deriving one would be a second answer to a
 // question already answered (AD-8).
+//
+// TabForPane and CreateTabAfter close the same loop for the SEAT (nocx-tdiqs).
+// A participant's tab belongs immediately after the tab that started it, and
+// both halves of that sentence are the chain's rather than this file's: which
+// tab holds the coordinator's pane is the pane's own row, and what "immediately
+// after" means for a strip is content.CreateTabAfter's — it renumbers the
+// workspace 0..n-1 exactly as ReorderTabs does. A position computed HERE would
+// be the second owner AGENTS.md's "look for the existing answer" rule is about,
+// and it is the one that produced the defect this bead was filed from: a tab
+// minted with no position at all sorts ahead of every tab a person has.
 type paneMinter interface {
-	CreateTab(ctx context.Context, tab content.Tab, firstPane content.Pane) (content.Created[content.NewTab], error)
+	CreateTabAfter(ctx context.Context, tab content.Tab, firstPane content.Pane, after string) (content.Created[content.NewTab], error)
 	DeleteTab(ctx context.Context, id string, next content.Replacement) error
 	PaneCwd(ctx context.Context, paneID string) (string, error)
+	TabForPane(ctx context.Context, paneID string) (string, error)
 }
 
 // sessionCloser ends a session by id. The registry's own EndSession, named
@@ -610,15 +621,19 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	if err != nil {
 		return nil, fmt.Errorf("worker spawn: minting a pane id: %w", err)
 	}
-	// WHERE THE PARTICIPANT STANDS, resolved ONCE and used twice (nocx-ty5ks):
-	// the pane's row records it, so a restore reopens the tab where it was,
-	// and the open below starts the program there. Two writes of one answer,
-	// never two answers — reading it a second time at the open could differ
-	// from what the row says, and the row is what a person sees afterwards.
-	cwd := s.coordinatorCwd(ctx, req.CoordinatorSession, lg)
-	madeTab, tabErr := s.layout.CreateTab(ctx,
+	coordPane := s.coordinatorPane(req.CoordinatorSession, lg)
+	// WHERE THE PARTICIPANT STANDS, resolved ONCE and used three times
+	// (nocx-ty5ks, nocx-tdiqs): the pane's row records its directory, so a
+	// restore reopens the tab where it was and the open below starts the
+	// program there; and the TAB that pane is in is the seat the
+	// participant's own tab belongs after. Every one of those is a fact of
+	// the coordinator's ONE layout row, so it is looked up once and asked
+	// its questions — a second walk could answer about a different row.
+	cwd := s.coordinatorCwd(ctx, coordPane, lg)
+	madeTab, tabErr := s.layout.CreateTabAfter(ctx,
 		content.Tab{ID: tabID.String(), WorkspaceID: s.workspace, Layout: content.LayoutRow},
 		content.Pane{ID: paneID.String(), TabID: tabID.String(), Cwd: cwd, Kind: content.PaneLocal, SizeShare: 1},
+		s.coordinatorTab(ctx, coordPane, lg),
 	)
 	if tabErr != nil {
 		return nil, fmt.Errorf("worker spawn: minting the participant's tab: %w", tabErr)
@@ -749,6 +764,37 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	return spawned, nil
 }
 
+// coordinatorPane answers which pane the coordinator's session is running in,
+// or "" when any rung of that walk is absent.
+//
+// IT IS THE ONE WALK, ASKED TWICE (nocx-ty5ks, nocx-tdiqs). The directory the
+// participant's pane opens in and the tab the participant's tab is seated
+// after are both columns of this one layout row, so resolving the row once
+// and asking it is what keeps the two answers about the same pane — a second
+// session → pane walk could answer about a different row if the coordinator's
+// session were replaced between them.
+//
+// Nothing here is a refusal: a coordinator nobody can resolve leaves both
+// questions unanswered, and each answers its own absence in the way its own
+// caller can use — see coordinatorCwd and coordinatorTab.
+func (s *workerSpawner) coordinatorPane(coordinator string, lg log.Logger) string {
+	if coordinator == "" || s.sessions == nil {
+		return ""
+	}
+	sess, err := s.sessions.Get(session.ID(coordinator))
+	if err != nil {
+		lg.Debug("worker spawn: the coordinator's session is not held here, so its pane is unknown",
+			"coordinator_session", coordinator, "error", err)
+		return ""
+	}
+	paneID := sess.PaneID()
+	if paneID == "" {
+		lg.Debug("worker spawn: the coordinator's session belongs to no pane, so neither its directory nor its tab is known",
+			"coordinator_session", coordinator)
+	}
+	return paneID
+}
+
 // coordinatorCwd is the directory a participant's pane opens in: the one the
 // coordinator's own pane is standing in (nocx-ty5ks).
 //
@@ -766,36 +812,54 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 // and inventing one — the session's own opening directory, the process's,
 // $PWD — would be the second owner AGENTS.md's "look for the existing answer"
 // rule is about.
-func (s *workerSpawner) coordinatorCwd(ctx context.Context, coordinator string, lg log.Logger) string {
-	if coordinator == "" || s.sessions == nil || s.layout == nil {
-		return ""
-	}
-	sess, err := s.sessions.Get(session.ID(coordinator))
-	if err != nil {
-		lg.Debug("worker spawn: the coordinator's session is not held here, so its directory is unknown",
-			"coordinator_session", coordinator, "error", err)
-		return ""
-	}
-	paneID := sess.PaneID()
-	if paneID == "" {
-		lg.Debug("worker spawn: the coordinator's session belongs to no pane, so its directory is unknown",
-			"coordinator_session", coordinator)
+func (s *workerSpawner) coordinatorCwd(ctx context.Context, paneID string, lg log.Logger) string {
+	if paneID == "" || s.layout == nil {
 		return ""
 	}
 	cwd, err := s.layout.PaneCwd(ctx, paneID)
 	if err != nil {
 		lg.Debug("worker spawn: the coordinator's pane has no recorded directory",
-			"coordinator_session", coordinator, "pane_id", paneID, "error", err)
+			"pane_id", paneID, "error", err)
 		return ""
 	}
 	if cwd == "" {
-		lg.Debug("worker spawn: the coordinator's pane has never reported a directory",
-			"coordinator_session", coordinator, "pane_id", paneID)
+		lg.Debug("worker spawn: the coordinator's pane has never reported a directory", "pane_id", paneID)
 		return ""
 	}
-	lg.Debug("worker spawn: the participant opens where its coordinator is",
-		"coordinator_session", coordinator, "pane_id", paneID, "cwd", cwd)
+	lg.Debug("worker spawn: the participant opens where its coordinator is", "pane_id", paneID, "cwd", cwd)
 	return cwd
+}
+
+// coordinatorTab answers which tab the coordinator's session is running in —
+// the tab a participant's own tab is placed immediately after (nocx-tdiqs).
+//
+// "" IS AN ABSENCE, NOT A POSITION, and the store reads it as exactly that:
+// the participant's tab goes last. Every rung of this walk can be missing —
+// no session named, a session that belongs to no pane, a pane whose tab has
+// left the window — and none of them is worth refusing a spawn over, on the
+// same reasoning coordinatorCwd gives for a directory nobody recorded: a
+// participant at the end of the strip is one a person can see and move, and
+// one that never spawned cannot be.
+//
+// IT DOES NOT DERIVE A WORKSPACE. A coordinator's tab in ANOTHER workspace
+// names no seat on the strip this participant's tab is going into, and the
+// store's answer for that case is "last", which is what comes back. Where a
+// participant's tab is minted is the composition root's answer, stated there
+// and deliberately not re-decided in a spawn (app.go: the default workspace,
+// "until a coordinator names its own").
+func (s *workerSpawner) coordinatorTab(ctx context.Context, paneID string, lg log.Logger) string {
+	if paneID == "" || s.layout == nil {
+		return ""
+	}
+	after, err := s.layout.TabForPane(ctx, paneID)
+	if err != nil {
+		lg.Debug("worker spawn: the coordinator's pane is in no tab on the window",
+			"pane_id", paneID, "error", err)
+		return ""
+	}
+	lg.Debug("worker spawn: the participant's tab belongs after its coordinator's",
+		"pane_id", paneID, "after_tab", after)
+	return after
 }
 
 // deliverTask waits for paneID to become typable and reports what it found —

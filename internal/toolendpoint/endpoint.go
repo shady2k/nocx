@@ -22,6 +22,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/coordinator"
+	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	nocxlog "github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
 	"github.com/shady2k/nocx/internal/workers"
@@ -995,6 +996,30 @@ func rpcErrorFor(err error) (code int, message, reason string) {
 		// dial reaches the same authorizer.
 		return rpcPeerRefused, "worker caller refused",
 			"nocx decided to admit this caller and could not record the admission, so nothing was granted and no call was made. This is a fault in how this pane's tools are wired, not in what you sent; reconnecting will fail the same way, so tell the person their pane is not orchestrated."
+	case errors.Is(err, helperclient.ErrTargetCapacity):
+		// THE PANE'S OWN BOOK IS FULL, AND IT IS THE CALLER'S OWN DOING
+		// (nocx-xn63t.4.1). A mint refused because the session already holds
+		// maxLiveTokens live targets; by spec nothing is evicted to make
+		// room, so a slot returns only once a token has expired AND the
+		// retention after it has passed. The failure this sentence was
+		// written for is a coordinator that could not answer a menu at all:
+		// it read the pane with no target and every targeted read answered
+		// `capacity`, so the one call that would have taken the menu down was
+		// the one being refused. Named rather than left to the default arm,
+		// whose sentence would call it a backend fault and tell the caller to
+		// stop — while "wait, then ask again" is exactly what works here.
+		return rpcDomainError, "worker request refused",
+			"nocx could not take a target on that pane because the pane already holds as many live targets as it is allowed, so nothing was read and nothing was typed. A target is released only after it expires and spends about five minutes terminal — about six minutes after it was minted — so waiting and calling again is the way through. Reading that pane WITHOUT a target still works meanwhile, so watch it that way and do not ask for a target in a loop."
+	case errors.Is(err, helperclient.ErrSnapshotGone):
+		// THE SCREEN MOVED UNDER THE MINT. session.read mints from the same
+		// snapshot it classified (design §6.1) and retries once from a fresh
+		// one; this is that retry having failed too, which means the pane is
+		// repainting faster than it can be read. Nothing was typed and
+		// nothing is broken, so asking again — not giving up — is the
+		// instruction, and the caller should not read it as "the pane is
+		// gone".
+		return rpcDomainError, "worker request refused",
+			"the pane redrew before nocx could take a target on the screen it had just read, even after reading it again, so no target was minted and nothing was typed. Nothing here failed and the pane is still there; call again, and expect the same read to succeed once that pane stops repainting so fast."
 	case errors.Is(err, context.Canceled):
 		// THE CALLER STOPPED WAITING; NOTHING FAILED INSIDE NOCX. This is
 		// what a dispatch reports when its own context ends before it

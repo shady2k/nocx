@@ -10,6 +10,7 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
 )
@@ -33,6 +34,63 @@ func unsupportedIfUnknownOp(err error) error {
 		return ErrIntentUnsupported
 	}
 	return err
+}
+
+// The two target-mint refusals a caller can act on (nocx-xn63t.4.1, spec
+// §6.1, §6.2). They are sentinels rather than wire codes because the code is
+// the HELPER's vocabulary and what crosses into the coordinator is a fact
+// about the caller's own request: one is "wait, the book is full", the other
+// is "take a fresh snapshot". A caller that cannot tell those apart either
+// retries the wrong one or stops asking.
+var (
+	// ErrTargetCapacity is a mint refused because the session's token book
+	// already holds maxLiveTokens live slots — and by spec nothing is ever
+	// evicted to make room, so a slot comes back only once a token has
+	// expired AND the retention after it has passed (about six minutes).
+	// Retrying immediately is the one thing that cannot help.
+	ErrTargetCapacity = errors.New("helper: the session's target book is full")
+	// ErrSnapshotGone is a mint refused because the retained snapshot it
+	// would have been minted from had already been evicted: no target can
+	// describe the frame the caller classified any more. A fresh read takes
+	// a fresh snapshot, so asking again is the way through.
+	ErrSnapshotGone = errors.New("helper: the snapshot a target would name is gone")
+)
+
+// ClassifyTargetRefusal names a target-mint refusal's wire code with its
+// sentinel, and passes every other error through untouched — including a
+// refusal whose code this build does not know, which stays the opaque
+// *RefusalError it arrived as.
+//
+// It is exported and called at the CROSSING rather than applied inside
+// Client.Target, because the crossing is where the coordinator owns the fact:
+// internal/app's session.read receives its helper through its own narrow seam
+// (paneHelpers), and a refusal reaching it may have come from the real client,
+// from the local helper's bridge, or from a test double that never spoke to
+// Client.Target at all. Classifying here, once, on whatever that seam handed
+// back, is what makes errors.Is work for every one of them — and it keeps
+// internal/app free of the wire's spellings.
+//
+// The helpers' own spellings live in proto (ErrCodeCapacity,
+// ErrCodeSnapshotGone) and the helper writes them in
+// internal/helper/session.Service.Refusal; a test in this package asserts the
+// two agree by asking the real service, so a rename on either side fails a
+// build rather than silently costing a caller its sentence.
+func ClassifyTargetRefusal(err error) error {
+	if err == nil {
+		return nil
+	}
+	var refusal *RefusalError
+	if !errors.As(err, &refusal) {
+		return err
+	}
+	switch refusal.Code {
+	case proto.ErrCodeCapacity:
+		return fmt.Errorf("%w: %w", ErrTargetCapacity, err)
+	case proto.ErrCodeSnapshotGone:
+		return fmt.Errorf("%w: %w", ErrSnapshotGone, err)
+	default:
+		return err
+	}
 }
 
 // Snapshot asks a session's runtime for a consistent read of its screen: the

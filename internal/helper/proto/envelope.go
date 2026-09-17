@@ -99,6 +99,24 @@ const (
 	// `unknown_op` means the generation is older than the caller, and this
 	// generation is not.
 	ErrCodeNoSSHClient = "no_ssh_client"
+
+	// The target-mint refusals (nocx-6q1uh.6, spec §6.1, §6.2). They are
+	// transport-level codes rather than an IntentResult.refusal, because a
+	// mint that refuses mints nothing a caller could poll session.intent.status
+	// for — there is no token yet to name one by. They are here rather than
+	// spelled at both ends because the backend client switches on them
+	// (internal/helper/client's own classifier), and a set both ends switch on
+	// is a wire contract.
+	//
+	// ErrCodeCapacity: the session's token book is full — maxLiveTokens live
+	// slots, and by spec nothing is ever evicted to make room. The caller's
+	// next step is to wait for a slot to be released, never to retry in a
+	// loop.
+	ErrCodeCapacity = "capacity"
+	// ErrCodeSnapshotGone: the retained snapshot a target would have been
+	// minted from has already been evicted, so no target describes the frame
+	// the caller classified. A fresh read takes a fresh snapshot.
+	ErrCodeSnapshotGone = "snapshot_gone"
 )
 
 // Refusal is one named refusal as a Go error, so a refusal survives the round

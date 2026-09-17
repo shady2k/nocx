@@ -428,6 +428,12 @@ func (s *layoutStub) CreateTab(_ context.Context, tab Tab, firstPane Pane) (Crea
 	return Created[NewTab]{}, ErrNotImplemented
 }
 
+func (s *layoutStub) CreateTabAfter(_ context.Context, tab Tab, firstPane Pane, after string) (Created[NewTab], error) {
+	s.log.Info("content stub: LayoutRepository.CreateTabAfter",
+		"id", tab.ID, "workspace", tab.WorkspaceID, "first_pane", firstPane.ID, "after", after)
+	return Created[NewTab]{}, ErrNotImplemented
+}
+
 func (s *layoutStub) Tabs(_ context.Context, workspaceID string) ([]Tab, error) {
 	s.log.Info("content stub: LayoutRepository.Tabs", "workspace", workspaceID)
 	return nil, ErrNotImplemented
@@ -485,6 +491,11 @@ func (s *layoutStub) MovePane(_ context.Context, paneID, tabID string) (Pane, er
 
 func (s *layoutStub) PaneCwd(_ context.Context, paneID string) (string, error) {
 	s.log.Info("content stub: LayoutRepository.PaneCwd", "pane", paneID)
+	return "", ErrNotImplemented
+}
+
+func (s *layoutStub) TabForPane(_ context.Context, paneID string) (string, error) {
+	s.log.Info("content stub: LayoutRepository.TabForPane", "pane", paneID)
 	return "", ErrNotImplemented
 }
 

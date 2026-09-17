@@ -19,6 +19,7 @@ import (
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/paneview"
 	"github.com/shady2k/nocx/internal/sessionruntime"
 	"github.com/shady2k/nocx/internal/workers"
 )
@@ -50,6 +51,24 @@ const optionPollInterval = 20 * time.Millisecond
 type paneKeysReader interface {
 	assistant.PaneReader
 	Record(tokenID string) (targetRecord, bool)
+}
+
+// menuReader is the optional half a paneKeysReader may implement — *paneReader
+// does (session_targets.go's Menu) — to answer the agent rule's own reading of
+// a MENU off a frame it already holds, WITHOUT minting anything.
+//
+// The option loop's settle wait (awaitSelectionMove, design §6.4 step 4) is a
+// probe: it asks whether the selection moved, and never spends what it reads.
+// Before nocx-xn63t.4.1 it asked by minting a target per poll, which is a
+// token-book slot held for the whole wait (spec §6.2: maxLiveTokens, never
+// evicted) — up to optionSettle's worth of polls per move step, none of them
+// spent, so one menu answer could exhaust the book the answer itself needs.
+//
+// A reader that does not implement this cannot answer that wait, and the loop
+// refuses rather than minting to find out: guessing there would be the leak
+// this seam exists to remove.
+type menuReader interface {
+	Menu(sessionID string, f paneview.Frame) (agentdriver.Menu, bool)
 }
 
 // paneKeys is assistant.PaneKeys' one production implementation.
@@ -304,7 +323,7 @@ func (k *paneKeys) sendOption(ctx context.Context, da *DescendantPaneAccess, rec
 			return moveResult, nil
 		}
 
-		if !k.awaitSelectionMove(ctx, da, sessionID, &menuKind, origMenu, before) {
+		if !k.awaitSelectionMove(ctx, da, sessionID, origMenu, before) {
 			return refused("stale_target"), nil
 		}
 	}
@@ -316,20 +335,35 @@ func (k *paneKeys) sendOption(ctx context.Context, da *DescendantPaneAccess, rec
 // A selection that did not move, moved by more than one, or moved back to a
 // row already seen this call is refused by the caller (sendOption) via a
 // false return, never accepted as "close enough".
-func (k *paneKeys) awaitSelectionMove(ctx context.Context, da *DescendantPaneAccess, sessionID string, kind *sessionruntime.TargetKind, orig agentdriver.Menu, before int) bool {
+//
+// It reads and never mints (nocx-xn63t.4.1): "did the selection move" is a
+// question about the screen, answered by the same agent rule the read path
+// already classifies with (menuReader), and a target minted to ask it is a
+// token-book slot held for the whole wait — up to optionSettle's worth of
+// polls per move step, none of them spent. That is the same defect the message
+// delivery's probes had, in the one call a coordinator uses to ANSWER the menu
+// those probes were starving the book for.
+func (k *paneKeys) awaitSelectionMove(ctx context.Context, da *DescendantPaneAccess, sessionID string, orig agentdriver.Menu, before int) bool {
+	menus, ok := k.reader.(menuReader)
+	if !ok {
+		// No menu reading, no way to ask this without minting. Refused rather
+		// than minted: see menuReader's own doc.
+		return false
+	}
 	deadline := time.Now().Add(optionSettle)
 	for time.Now().Before(deadline) {
-		read, err := k.reader.Read(ctx, da, sessionID, kind, nil)
-		if err == nil && read.Target != nil && read.Target.Kind == sessionruntime.TargetMenu && read.Target.Menu != nil {
-			cur := *read.Target.Menu
-			if cur.Question == orig.Question && sameOptions(cur.Options, orig.Options) {
-				if cur.Selected == before+1 || cur.Selected == before-1 {
-					return true
-				}
-				if cur.Selected != before {
-					// Moved by more than one, or to somewhere this call did
-					// not ask for — never accepted as progress.
-					return false
+		read, err := k.reader.Read(ctx, da, sessionID, nil, nil)
+		if err == nil {
+			if cur, found := menus.Menu(sessionID, read.Frame); found {
+				if cur.Question == orig.Question && sameOptions(cur.Options, orig.Options) {
+					if cur.Selected == before+1 || cur.Selected == before-1 {
+						return true
+					}
+					if cur.Selected != before {
+						// Moved by more than one, or to somewhere this call did
+						// not ask for — never accepted as progress.
+						return false
+					}
 				}
 			}
 		}

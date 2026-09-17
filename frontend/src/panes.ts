@@ -1012,6 +1012,22 @@ export class PaneManager {
         attached: fact.attached,
       })
       this.layout.applyRemoteTab(fact.tab, fact.firstPane)
+      // AND THEN ASK FOR THE STRIP, because the participant's tab did not
+      // simply appear at the end of it (nocx-tdiqs). workers.spawn places the
+      // tab IMMEDIATELY AFTER the coordinator's, and a placement in the
+      // middle of a strip MOVES EVERY TAB AFTER IT one seat right: the
+      // notification carries the one row that was minted, and the neighbours'
+      // new positions are the backend's to state. So the row above is folded
+      // in — the tab is on screen in the same turn rather than a round trip
+      // later — and the order is then READ rather than derived, exactly as it
+      // is after every other write that can move a neighbour. Deriving the
+      // shift here instead would be a second owner of the strip's order, and
+      // the two would disagree the first time the backend's rule changed.
+      //
+      // A FAILED READ IS NOT A FAILED TAB: readLayout reports it (its own
+      // toast, its own layoutAvailable) and the window keeps the tab it
+      // already drew, one seat to the right of where it belongs.
+      void this.readLayout()
     })
 
     window.addEventListener('keydown', this.onKeydown, true)

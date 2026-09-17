@@ -674,6 +674,11 @@ type agentAwareReader interface {
 // target minted from the box alone already catches a menu appearing), the
 // wider TargetWorking otherwise — the safe default for an agent nobody has
 // measured this property for yet.
+//
+// It is asked only by the steps that SPEND a target (pasteStep, enterStep):
+// the readiness and echo probes read the pane instead, because a target
+// minted to ask "may I write" is a token-book slot held for a question the
+// frame answers itself (nocx-xn63t.4.1).
 func (m *paneMessages) deliveryTargetKind(sessionID string) sessionruntime.TargetKind {
 	aware, ok := m.reader.(agentAwareReader)
 	if !ok || m.rules == nil {
@@ -732,28 +737,51 @@ func (m *paneMessages) inputText(sessionID string, f paneview.Frame) (string, bo
 	return m.rules.Observe(agent, f).InputText()
 }
 
-// pasteReady mints a fresh target of deliveryTargetKind's own answer and
-// reports whether the paste precondition holds (design §8.2 step 1: "the
-// input box empty"). False either because the box currently holds someone
-// else's text, or because the box could not be identified at all right now
-// — for an agent whose menu displaces its input box (nocx-6q1uh.10), that
-// IS "a menu is up". Both reasons are treated identically by every caller
-// (when=="now" refuses either way; when=="free" retries either way), so
-// this reports only the one bool a caller acts on.
+// pasteReady reports whether the paste precondition holds (design §8.2 step
+// 1: "the input box empty") — from a READ, never a mint.
 //
-// The target mint is still spent for its own sake — it is what makes "a
-// menu is up" refuse (a target of a kind other than want, or none at all) —
-// and "empty" is answered by the RULE's own inputText reading of the same
-// frame (nocx-6q1uh.18), never by trimming the wider span the target itself
-// covers.
+// It used to answer this by minting a fresh target of deliveryTargetKind's
+// own kind and treating "nothing of that kind minted" as "a menu is up". That
+// is a token-book slot per call for an answer the frame already carries, and
+// the book is the one thing a delivery must not spend on looking: the helper
+// holds maxLiveTokens slots and by spec §6.2 never evicts, so a "free" message
+// waiting behind a menu filled it at one slot per messagePollInterval and the
+// only caller who could ever take that menu down — a TARGETED session.read —
+// was refused `capacity` for minutes (nocx-xn63t.4.1). A target is what a
+// WRITE spends; deciding whether to write at all needs none.
+//
+// Both halves of the precondition are read where they are already owned.
+// "A menu is up" is the classification (agentdriver's closed set: a menu
+// moment is permission_choice or modal_choice), and "the box is free" is the
+// same agent rule's own reading of the box (inputText, nocx-6q1uh.18), which
+// answers ok=false on every frame a menu has displaced the box — claude's
+// measured behaviour (nocx-6q1uh.10) and, for any agent nobody has measured,
+// the fail-closed direction. Both reasons refuse identically (when=="now"
+// refuses either way; when=="free" retries either way), so this reports the
+// one bool a caller acts on.
+//
+// It deliberately does NOT check that a target could still be minted: pasteStep
+// re-reads and refuses if the box moved out from under it, and asking twice
+// would be the second answer to one question.
 func (m *paneMessages) pasteReady(ctx context.Context, da *DescendantPaneAccess, sessionID string) bool {
-	want := m.deliveryTargetKind(sessionID)
-	read, err := m.reader.Read(ctx, da, sessionID, &want, nil)
-	if err != nil || read.Target == nil || read.Target.Kind != want {
+	read, err := m.reader.Read(ctx, da, sessionID, nil, nil)
+	if err != nil {
+		return false
+	}
+	if menuIsUp(read.Classification) {
 		return false
 	}
 	text, ok := m.inputText(sessionID, read.Frame)
 	return ok && text == ""
+}
+
+// menuIsUp answers whether a classification names a menu the agent is waiting
+// for a human to answer. Typing into one ANSWERS IT, which is the one thing a
+// message delivery must never do, so every refusal arm of design §8.2 step 1
+// fails closed on this — the same reason agentdriver treats StateUnknown as
+// busy everywhere.
+func menuIsUp(state agentdriver.State) bool {
+	return state == agentdriver.StatePermissionChoice || state == agentdriver.StateModalChoice
 }
 
 // pasteResult carries what commitPasteOrEnter needs without exposing
@@ -800,12 +828,17 @@ func (m *paneMessages) enterStep(ctx context.Context, da *DescendantPaneAccess, 
 // (a single-line paste) or Claude's own bracket echo form for a multi-line
 // paste ("[Pasted text #N +M lines]") — matched loosely, on the "+M lines]"
 // suffix alone, since #N is a counter this side of the call cannot predict.
+//
+// It READS and never mints: an echo is confirmed off the frame a snapshot
+// carries, and §8.2's step 2 says snapshot for exactly that reason. Minting
+// here held one token-book slot per poll — up to echoWait's worth per
+// delivery, on tokens this step spends nothing — which is the same defect
+// pasteReady had (nocx-xn63t.4.1).
 func (m *paneMessages) waitForEcho(ctx context.Context, da *DescendantPaneAccess, sessionID, text string) (echoed bool, boxNow string) {
 	deadline := time.Now().Add(m.echoWait)
-	want := m.deliveryTargetKind(sessionID)
 	for {
-		read, err := m.reader.Read(ctx, da, sessionID, &want, nil)
-		if err == nil && read.Target != nil && read.Target.Kind == want {
+		read, err := m.reader.Read(ctx, da, sessionID, nil, nil)
+		if err == nil {
 			if box, ok := m.inputText(sessionID, read.Frame); ok {
 				boxNow = box
 				if boxContainsEcho(box, text) {

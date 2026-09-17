@@ -588,6 +588,32 @@ func ensureDefaultWorkspace(ctx context.Context, db execer) error {
 // exactly one implementation of them. What stays here is the resolver,
 // because only the store can say whether a tab row exists.
 func (s *sqliteContent) CreateTab(ctx context.Context, tab Tab, firstPane Pane) (Created[NewTab], error) {
+	return s.createTab(ctx, tab, firstPane, nil)
+}
+
+// CreateTabAfter is CreateTab plus a placement: the new tab is seated
+// immediately after `after` (or last, if that names no open tab of this
+// workspace) instead of wherever the request put it. See the interface's doc
+// for why the seat is the store's to decide.
+func (s *sqliteContent) CreateTabAfter(ctx context.Context, tab Tab, firstPane Pane, after string) (Created[NewTab], error) {
+	// The request's position is not the seat, so it is not part of the ask:
+	// zeroing it here is what makes two retries that differ only there the
+	// same request in createTab's digest, which is the honest reading of a
+	// field this method never honours.
+	tab.Position = 0
+	return s.createTab(ctx, tab, firstPane, &after)
+}
+
+// createTab is the one tab-and-first-pane write. seatAfter nil is CreateTab's
+// behaviour — the caller's position is written verbatim — and non-nil is
+// CreateTabAfter's: the strip is renumbered around the new tab.
+//
+// TWO ENTRY POINTS, ONE TRANSACTION AND ONE WRITE. The lineage admission,
+// the replay, the default-workspace mint and the pane insert are not things
+// a second implementation could be trusted to keep in step, and a placement
+// that ran as a SECOND transaction would leave a tab at a stale seat every
+// time the renumber failed.
+func (s *sqliteContent) createTab(ctx context.Context, tab Tab, firstPane Pane, seatAfter *string) (Created[NewTab], error) {
 	if strings.TrimSpace(firstPane.ID) == "" {
 		return Created[NewTab]{}, ErrNoFirstPane
 	}
@@ -631,10 +657,33 @@ func (s *sqliteContent) CreateTab(ctx context.Context, tab Tab, firstPane Pane) 
 			if err := admitAndInsertTab(ctx, tx, tab, digest); err != nil {
 				return err
 			}
+			// SEATED BEFORE ITS PANE LANDS, so that the two writes this
+			// position is worth asserting over are in the order a failure can
+			// fall between them (see CreateTabAfter's own test, where a
+			// refused pane proves the renumbering rolled back with it). What
+			// makes that true is the TRANSACTION, not the order; the order is
+			// what makes the proof.
+			if seatAfter != nil {
+				if err := seatTabAfter(ctx, tx, tab.WorkspaceID, tab.ID, *seatAfter); err != nil {
+					return err
+				}
+			}
 			if err := insertPane(ctx, tx, firstPane, ""); err != nil {
 				return err
 			}
-			out = Created[NewTab]{Object: NewTab{Tab: tab, FirstPane: firstPane}}
+			made := NewTab{Tab: tab, FirstPane: firstPane}
+			if seatAfter != nil {
+				// Read the tab BACK rather than answering with the request:
+				// the seat is the row's, and a caller folding the request's
+				// number into a strip would be drawing a tab the store does
+				// not have.
+				stored, err := tabByID(ctx, tx, tab.ID)
+				if err != nil {
+					return err
+				}
+				made.Tab = stored.Tab
+			}
+			out = Created[NewTab]{Object: made}
 			return nil
 		})
 	})
@@ -642,6 +691,63 @@ func (s *sqliteContent) CreateTab(ctx context.Context, tab Tab, firstPane Pane) 
 		return Created[NewTab]{}, err
 	}
 	return out, nil
+}
+
+// seatTabAfter renumbers one workspace's open tabs so that id sits
+// immediately after after, keeping every other tab in the order it already
+// had.
+//
+// THE STRIP IS RENUMBERED AND NOT MERELY SHIFTED: the result is the same
+// dense 0..n-1 ReorderTabs writes, because "a workspace's strip is 0..n-1 in
+// drawing order" is one invariant and this is not the place to grow a second
+// form of it. The order it inserts into is read INSIDE the caller's
+// transaction, so the strip it seats a tab in is the strip it writes.
+//
+// An empty after, an id nobody knows, and a tab of another workspace all seat
+// the new tab LAST: none of them names a seat on THIS strip, and the one
+// answer that must never come back is "wherever the request said", which for
+// a backend-minted tab is zero and therefore left of every tab a person has.
+func seatTabAfter(ctx context.Context, tx *sql.Tx, workspaceID, id, after string) error {
+	held, err := idsOf(ctx, tx,
+		// The same window-set rule the reorder's membership check states: a
+		// closed tab is not a member of the strip being numbered.
+		`SELECT id FROM tabs WHERE workspace_id = ? AND closed_at IS NULL ORDER BY position, id`,
+		workspaceID)
+	if err != nil {
+		return err
+	}
+	// id is already in `held` — it was inserted in this transaction — and it
+	// has to come out before the seat is counted, or a tab whose own row
+	// sorts before the anchor would be seated one place off.
+	rest := make([]string, 0, len(held))
+	for _, tabID := range held {
+		if tabID != id {
+			rest = append(rest, tabID)
+		}
+	}
+	seat := len(rest)
+	for i, tabID := range rest {
+		if tabID == after {
+			seat = i + 1
+			break
+		}
+	}
+	ordered := append(rest[:seat:seat], append([]string{id}, rest[seat:]...)...)
+	return writeTabPositions(ctx, tx, ordered)
+}
+
+// writeTabPositions writes one strip's order: the i-th id gets position i.
+// ONE implementation, because two writers of tabs.position that disagreed
+// about what a strip's numbering means would disagree about where every tab
+// after the first moved one is drawn.
+func writeTabPositions(ctx context.Context, tx *sql.Tx, ids []string) error {
+	for position, id := range ids {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE tabs SET position = ? WHERE id = ?`, position, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // admitAndInsertTab is the tab's write, lineage admission included. It takes
@@ -1146,11 +1252,8 @@ func (s *sqliteContent) ReorderTabs(ctx context.Context, workspaceID string, ids
 			if !isPermutation(ids, members) {
 				return ErrNotAPermutation
 			}
-			for position, id := range ids {
-				if _, err := tx.ExecContext(ctx,
-					`UPDATE tabs SET position = ? WHERE id = ?`, position, id); err != nil {
-					return err
-				}
+			if err := writeTabPositions(ctx, tx, ids); err != nil {
+				return err
 			}
 			out = make([]Tab, 0, len(ids))
 			for _, id := range ids {
@@ -1213,6 +1316,29 @@ func (s *sqliteContent) WorkspaceForPane(ctx context.Context, paneID string) (st
 		return "", fmt.Errorf("%w: %s", ErrNoSuchPane, paneID)
 	}
 	return workspaceID, err
+}
+
+// TabForPane is the rung between PaneCwd and WorkspaceForPane: the tab a pane
+// is in, read from the pane's own row (a pane has one edge, and this is it).
+//
+// It joins tabs exactly as WorkspaceForPane does and for the same reason: the
+// window's chain is BOTH rungs, so a pane whose tab has left the window is not
+// a pane anything may be placed relative to, and the answer is ErrNoSuchPane
+// rather than the id of a tab nobody is looking at.
+func (s *sqliteContent) TabForPane(ctx context.Context, paneID string) (string, error) {
+	if s.closed.Load() {
+		return "", ErrClosed
+	}
+	var tabID string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT p.tab_id FROM panes p JOIN tabs t ON t.id = p.tab_id
+		  WHERE p.id = ? AND p.closed_at IS NULL AND t.closed_at IS NULL`,
+		paneID,
+	).Scan(&tabID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("%w: %s", ErrNoSuchPane, paneID)
+	}
+	return tabID, err
 }
 
 // ── row readers ──────────────────────────────────────────────────────────

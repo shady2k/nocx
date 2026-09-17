@@ -90,7 +90,7 @@ func (f *failableSupervisor) Attach(ctx context.Context, p workers.Participant) 
 }
 
 // recordingTabs is the paneMinter double every test stand in this file wires
-// in: whatever else it does, it must record every CreateTab and DeleteTab
+// in: whatever else it does, it must record every tab-minting and DeleteTab
 // call so a test can assert the one created tab was the one deleted.
 // fakeAxisTabs (worker_spawn_axis_test.go) is the ordinary one; ctxSpyTabs
 // below additionally answers the question fakeAxisTabs cannot, because it
@@ -112,12 +112,16 @@ type ctxSpyTabs struct {
 	deleteCtxDone []bool
 }
 
-func (f *ctxSpyTabs) CreateTab(_ context.Context, tab content.Tab, _ content.Pane) (content.Created[content.NewTab], error) {
+func (f *ctxSpyTabs) CreateTabAfter(_ context.Context, tab content.Tab, _ content.Pane, _ string) (content.Created[content.NewTab], error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.created = append(f.created, tab.ID)
 	return content.Created[content.NewTab]{}, nil
 }
+
+// TabForPane is the seam's fourth method and nothing here is about it: the
+// sessions these tests name carry no pane id, so the spawner never asks.
+func (f *ctxSpyTabs) TabForPane(context.Context, string) (string, error) { return "", nil }
 
 func (f *ctxSpyTabs) DeleteTab(ctx context.Context, id string, _ content.Replacement) error {
 	f.mu.Lock()
@@ -360,9 +364,9 @@ func TestKillIsIdempotent(t *testing.T) {
 		}
 	})
 	tabs := &fakeAxisTabs{}
-	if _, err := tabs.CreateTab(context.Background(),
-		content.Tab{ID: "tab-idem"}, content.Pane{ID: "pane-idem"}); err != nil {
-		t.Fatalf("CreateTab: %v", err)
+	if _, err := tabs.CreateTabAfter(context.Background(),
+		content.Tab{ID: "tab-idem"}, content.Pane{ID: "pane-idem"}, ""); err != nil {
+		t.Fatalf("CreateTabAfter: %v", err)
 	}
 	sess, err := reg.Open(context.Background(), session.Config{
 		Kind: session.KindLocal, Cols: 80, Rows: 24, PaneID: "pane-idem",

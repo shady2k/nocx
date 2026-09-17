@@ -12800,6 +12800,92 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
+  /** A browser-shaped scroller over a jsdom element: `scrollTop` is clamped
+   *  on both read and write the way a real one is, `scrollHeight` follows the
+   *  text the mutation actually appends, and `clientHeight` is ours to
+   *  collapse — which is what a nested absolute surface measured mid-layout
+   *  hands the code (nocx-yfpxl). */
+  function stubScroller(
+    el: HTMLElement,
+    viewport: number,
+  ): { collapse: () => void; restore: () => void } {
+    let clientHeight = viewport
+    let stored = 0
+    const scrollHeight = (): number => 400 + (el.textContent?.length ?? 0)
+    const max = (): number => Math.max(0, scrollHeight() - clientHeight)
+    Object.defineProperty(el, 'clientHeight', { configurable: true, get: () => clientHeight })
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, get: scrollHeight })
+    Object.defineProperty(el, 'scrollTop', {
+      configurable: true,
+      get: () => Math.min(stored, max()),
+      set: (value: number) => {
+        stored = Math.max(0, Math.min(value, max()))
+      },
+    })
+    // Where the open path leaves it: appending the turn ends with
+    // `answers.scrollTop = answers.scrollHeight`, so the list starts at its
+    // tail and every move from here belongs to the code under test.
+    el.scrollTop = el.scrollHeight
+    return {
+      collapse: () => {
+        clientHeight = 0
+      },
+      restore: () => {
+        clientHeight = viewport
+      },
+    }
+  }
+
+  it('keeps following its tail when the list measures zero mid-mutation (nocx-yfpxl)', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      }
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summon(content)
+      await submitQuestion(content, client, 'what is on screen?')
+      const pane = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
+      const list = pane.querySelector<HTMLElement>('.nocx-summon-answers')
+      expect(list).not.toBeNull()
+      const scroller = stubScroller(list!, 120)
+      const delta = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runDelta',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(delta).toBeDefined()
+
+      // The person is following: the first chunk leaves the list at its tail.
+      delta!({ runId: 42, entryId: 'entry-42', text: `${'a'.repeat(200)}\n` })
+      expect(list!.scrollTop + list!.clientHeight).toBeGreaterThanOrEqual(list!.scrollHeight - 2)
+
+      // The freeze/thaw transition measures the nested surface mid-layout, so
+      // the list reports a zero viewport for the length of one mutation. That
+      // is not the person scrolling away, and the follow must survive it.
+      scroller.collapse()
+      delta!({ runId: 42, entryId: 'entry-42', text: `${'b'.repeat(400)}\n` })
+
+      // Thawed: the list can be measured again, and the tail is where the
+      // person left it.
+      scroller.restore()
+      expect(list!.scrollTop + list!.clientHeight).toBeGreaterThanOrEqual(list!.scrollHeight - 2)
+    } finally {
+      teardown()
+    }
+  })
+
   it('returns the same composer for ordered follow-ups and seats each answer once', async () => {
     const client = makeClient()
     let nextRunId = 0

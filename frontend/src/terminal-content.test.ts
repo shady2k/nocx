@@ -13762,6 +13762,15 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       seated!.deliver(230)
 
       expect(area.scrollTop + area.clientHeight).toBeGreaterThanOrEqual(area.scrollHeight - 2)
+
+      // AND IT LETS GO. The command is still running and the answer may still
+      // be streaming; a hold that outlived the seat would be a second owner of
+      // the scroll position, and the reader who scrolls up to reread would be
+      // dragged back on every chunk.
+      scrollHeight = 1200
+      area.scrollTop = 0
+      seated!.deliver(400)
+      expect(area.scrollTop).toBe(0)
     } finally {
       teardown()
       vi.unstubAllGlobals()

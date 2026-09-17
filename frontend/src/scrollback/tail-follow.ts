@@ -31,7 +31,7 @@ function isMeasurable(el: TailGeometry): boolean {
 /** Whether the scroll position is at the live end. The two-pixel slack absorbs
  *  fractional layout; an unmeasurable scroller is never at its tail, because
  *  the question was not answered. */
-function isAtTail(el: TailGeometry): boolean {
+export function isAtTail(el: TailGeometry): boolean {
   return isMeasurable(el) && el.scrollTop + el.clientHeight >= el.scrollHeight - 2
 }
 

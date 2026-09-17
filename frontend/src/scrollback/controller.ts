@@ -16,7 +16,7 @@ import { publishCellMetric, publishRowPitch } from './cell-metric'
 import type { ExecutionAttempt } from '../lifecycle/state'
 import type { AgentDump } from '../generated/agent.dump'
 import { windowPet } from '../pets/window-pet'
-import { TailFollow } from './tail-follow'
+import { isAtTail, TailFollow } from './tail-follow'
 export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
 
 /** How long the pane takes to settle after a block opens or freezes. Short
@@ -824,6 +824,15 @@ export class ScrollbackController {
    *  a layout change. */
   private _followIntent(): boolean {
     return this._tail.intent(this.scrollbackArea)
+  }
+
+  /** At the live end, WITH an end to be at. A scroller whose content fits has
+   *  nothing to scroll and is therefore trivially "at its end" — which is
+   *  exactly the state a seated answer passes through before its box grows,
+   *  so it is no proof that the seat has landed (nocx-yfpxl). */
+  tailReached(): boolean {
+    const { clientHeight, scrollHeight } = this.scrollbackArea
+    return scrollHeight > clientHeight && isAtTail(this.scrollbackArea)
   }
 
   /** Move to the live end BECAUSE THE CALLER KNOWS the person is reading it,

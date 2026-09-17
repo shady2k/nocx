@@ -6666,9 +6666,14 @@ export class TerminalContent extends BasePaneContent {
       // the box the node has at the moment observation starts, which for a
       // just-reparented node can still be the pre-growth one. So HOLD the tail
       // through the growth instead of scrolling once more — every delivery that
-      // reports a new height re-issues the scroll, and the first one that
-      // repeats a height is the growth having stopped, which is an observable
-      // and not a duration.
+      // reports a new height re-issues the scroll, and it lets go the moment
+      // the scroller has actually reached its end — or when a delivery repeats
+      // a height, which is the growth having stopped for content that never
+      // overflowed at all. Both are observables rather than durations, and
+      // both are needed: letting go on the end alone would let go immediately,
+      // since a scroller with nothing to scroll is already at it, and holding
+      // on past the end would make this a second owner of the scroll position
+      // for the whole of a long streamed answer.
       if (settle && typeof ResizeObserver !== 'undefined') {
         let seatedHeight = -1
         const observer = new ResizeObserver((entries) => {
@@ -6676,7 +6681,7 @@ export class TerminalContent extends BasePaneContent {
           const grew = height !== seatedHeight
           seatedHeight = height
           followSeatedTail()
-          if (!grew) observer.disconnect()
+          if (!grew || settle.tailReached()) observer.disconnect()
         })
         observer.observe(tail)
       }

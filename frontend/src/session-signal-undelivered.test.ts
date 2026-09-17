@@ -61,7 +61,6 @@ describe('session.signalUndelivered at the boundary (nocx-zas0d)', () => {
       'attempt-closed',
       'write-refused',
       'write-failed',
-      'write-unconfirmed',
       'lane-refused',
       'unsupported',
     ]
@@ -73,12 +72,7 @@ describe('session.signalUndelivered at the boundary (nocx-zas0d)', () => {
     // The command having ENDED is not a failure to shout about; a byte that
     // never got written while the command may still be running is.
     expect(undeliveredNotice(fact('attempt-closed'))!.level).toBe('info')
-    for (const reason of [
-      'write-refused',
-      'write-failed',
-      'write-unconfirmed',
-      'lane-refused',
-    ] as const) {
+    for (const reason of ['write-refused', 'write-failed', 'lane-refused'] as const) {
       expect(undeliveredNotice(fact(reason))!.level).toBe('warning')
     }
     // And the warning says what to do about it, because the retry is the

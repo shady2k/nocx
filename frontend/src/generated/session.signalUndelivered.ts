@@ -26,13 +26,7 @@ export interface SessionSignalUndelivered {
    */
   attempt: string
   /**
-   * Why the byte never reached the command, from a closed set — the renderer branches on it, and a word this build does not know must be a type error there rather than a wrong sentence. attempt-closed: the attempt left `open` before the byte could be written, because the command ended (or, for an attempt that never started at all, because the line never ran); the check that decides this runs at the WRITE, not when the Stop was accepted, which is what keeps an interrupt out of the prompt and out of whatever command came next. write-refused: the session's input path refused the byte — the queue was full, or the session was inside its bootstrap quarantine, where a keystroke is refused rather than buffered, or it was already closed. write-failed: the terminal itself did not take it. write-unconfirmed: the channel never answered within the cooperative grace the escalation ladder waits — a link that is gone with no reset to say so; nothing is claimed either way, and the byte lands only if its addressee is still there when it does. lane-refused: the delivery never reached the terminal at all. unsupported: this session's channel cannot be signalled from here, which is the same word session.signal answers with on the request path.
+   * Why the byte never reached the command, from a closed set — the renderer branches on it, and a word this build does not know must be a type error there rather than a wrong sentence. attempt-closed: the attempt left `open` before the byte could be written, because the command ended (or, for an attempt that never started at all, because the line never ran); the check that decides this runs at the WRITE, not when the Stop was accepted, which is what keeps an interrupt out of the prompt and out of whatever command came next. write-refused: the session's input path refused the byte — the queue was full, or the session was inside its bootstrap quarantine, where a keystroke is refused rather than buffered, or it was already closed. write-failed: the terminal itself did not take it. lane-refused: the delivery never reached the terminal at all. unsupported: this session's channel cannot be signalled from here, which is the same word session.signal answers with on the request path.
    */
-  reason:
-    | 'attempt-closed'
-    | 'write-refused'
-    | 'write-failed'
-    | 'write-unconfirmed'
-    | 'lane-refused'
-    | 'unsupported'
+  reason: 'attempt-closed' | 'write-refused' | 'write-failed' | 'lane-refused' | 'unsupported'
 }

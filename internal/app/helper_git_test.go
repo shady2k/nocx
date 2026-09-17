@@ -588,6 +588,21 @@ func (s *fakeRemoteSession) EnqueueWrite([]byte) bool  { return false }
 func (s *fakeRemoteSession) WriteInputIf(context.Context, []byte, func() bool) (bool, error) {
 	return false, nil
 }
+
+// EnqueueInputIf is the same "queued and answered" shape for the async caller:
+// this double has no queue to validate against.
+func (s *fakeRemoteSession) EnqueueInputIf(p []byte, holds func() bool, settle func(written bool, err error)) bool {
+	if holds != nil && !holds() {
+		if settle != nil {
+			settle(false, nil)
+		}
+		return true
+	}
+	if settle != nil {
+		settle(true, nil)
+	}
+	return true
+}
 func (s *fakeRemoteSession) EffectiveSize() session.Size { return session.DefaultSize() }
 
 func (s *fakeRemoteSession) Resize(context.Context, session.Size) error {

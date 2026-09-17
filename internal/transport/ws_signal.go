@@ -153,6 +153,15 @@ type sessionProtectedForeground struct {
 	// leaves this nil; a HELD Stop has no request left to answer, and this is
 	// how that half is said (nocx-zas0d, review finding 2 of 1e899f6a).
 	reportUndelivered func(reason string)
+	// interruptAsync, when set, is the WHOLE of Interrupt for a caller that
+	// must not wait for the channel: it queues the byte with its condition and
+	// returns as soon as the queue has it, leaving the verdict to the settle
+	// callback it passed. Only the held delivery sets it, and it is not an
+	// optimisation — it is the fix for a timeout that could not settle a write
+	// (nocx-zas0d, review of 6830b43d, blocker 1): a caller that stops waiting
+	// knows nothing about the byte it abandoned, and telling the person it did
+	// not land invites a retry that lands a SECOND interrupt.
+	interruptAsync func(attempt lifecycle.AttemptID) interruptResult
 	// mayHold says whether THIS caller's Stop may be held for an attempt the
 	// shell has not started (nocx-zas0d). It is true for the request path —
 	// session.signal, which answers a person's gesture and owes them the
@@ -306,7 +315,7 @@ func (p sessionProtectedForeground) StopTarget() (foregroundTarget, bool) {
 	if !ok || target.Started {
 		return target, ok
 	}
-	p.s.armHeldStopLocked(target.Attempt, p.sid)
+	p.s.armHeldStopAndStateLocked(target.Attempt, p.sid)
 	return target, true
 }
 
@@ -327,8 +336,11 @@ func (p sessionProtectedForeground) StopTarget() (foregroundTarget, bool) {
 // has to travel that far.
 //
 // The wait for that answer is bounded by the request's own context and by the
-// cooperative grace the ladder waits: a channel that never answers must not
-// park a delivery, and an answer that never came is reported as not written.
+// cooperative grace the ladder waits — for a REQUEST, which owes an answer and
+// whose outcome word ("unreconciled, the command may still be running") is
+// honest about a write it could not confirm. A CALLER THAT REPORTS UNDELIVERED
+// MUST NOT USE IT: see interruptAsync, and session.EnqueueInputIf for the shape
+// it uses instead.
 //
 // WHAT THAT DOES NOT CLAIM: the check and the write are not atomic with the
 // kernel's attempt state. No lock spans the terminal's writer and the
@@ -339,7 +351,23 @@ func (p sessionProtectedForeground) StopTarget() (foregroundTarget, bool) {
 // so a command line typed after it reaches the terminal after it (and a later
 // attempt cannot start before this one has left `open`, which is the state the
 // check refuses).
+//
+// AND WHAT THE RESIDUAL BYTE CAN REACH IS THE PROMPT, NOT A PARSER (review of
+// 6830b43d, item D). The condition can only pass while the attempt is open AND
+// the shell has authenticated its start, so the line it belongs to has been
+// parsed and a program is running: there is no line for bash to resume at the
+// index readline had reached, which is the suffix hazard this whole mechanism
+// exists for. If the attempt ends between the answer and the syscall, the byte
+// arrives at a prompt the shell has ALREADY returned to, and FIFO guarantees no
+// later input precedes it — so the worst it can do is what a keyboard Ctrl+C
+// typed at that instant does: discard whatever sits in readline's buffer,
+// including a half-typed line the person owns. That is a real, bounded cost,
+// the same one the same gesture has from the keyboard, and it is not a reason
+// for machinery that cannot exist: no lock spans the writer and the kernel.
 func (p sessionProtectedForeground) Interrupt(attempt lifecycle.AttemptID) interruptResult {
+	if p.interruptAsync != nil {
+		return p.interruptAsync(attempt)
+	}
 	grace := p.s.effectiveRunLease().SignalGrace
 	if grace <= 0 {
 		grace = defaultRunSignalGrace
@@ -356,7 +384,9 @@ func (p sessionProtectedForeground) Interrupt(attempt lifecycle.AttemptID) inter
 		p.undelivered(undeliveredAttemptClosed)
 		return interruptDiscarded
 	case errors.Is(err, context.DeadlineExceeded):
-		p.undelivered(undeliveredWriteUnconfirmed)
+		// The request path may time out; it must not call that undelivered
+		// (the byte is still queued). Its outcome word carries the
+		// uncertainty to the person instead.
 		return interruptRefused
 	case errors.Is(err, session.ErrInputRefused), errors.Is(err, session.ErrSessionClosed):
 		p.undelivered(undeliveredWriteRefused)
@@ -516,6 +546,15 @@ func (s *WSServer) signalSpecs() []methodSpec {
 // .schema.json). Each names what happened, never what to do about it: the
 // sentence is the surface's, and a reason the surface does not know is a type
 // error there rather than a wrong sentence here.
+//
+// write-unconfirmed is deliberately NOT in the set. It used to be, for a write
+// whose caller gave up waiting — and that was wrong twice over (nocx-zas0d,
+// review of 6830b43d, blocker 1): a timeout says "I stopped waiting", never
+// "nothing was written", so reporting it as undelivered told the person a stop
+// had failed while its byte was still queued, and the retry it invited was a
+// SECOND interrupt. The only caller that reports undelivered now settles when
+// the writer settles (session.EnqueueInputIf), so every reason here is a verdict
+// the writer actually gave.
 const (
 	// undeliveredAttemptClosed: the attempt left `open` before the byte could
 	// be written — the command ended, or never started at all. Nothing landed
@@ -527,11 +566,6 @@ const (
 	undeliveredWriteRefused = "write-refused"
 	// undeliveredWriteFailed: the terminal itself did not take the byte.
 	undeliveredWriteFailed = "write-failed"
-	// undeliveredWriteUnconfirmed: the channel never answered within the
-	// cooperative grace — a link that is gone with no reset to say so. Nothing
-	// is claimed either way: the byte is still queued, and its condition is
-	// re-asked at the write, so it lands only if its addressee is still there.
-	undeliveredWriteUnconfirmed = "write-unconfirmed"
 	// undeliveredLaneRefused: the delivery never reached the terminal — the
 	// signal lane refused the task, or the session's identity gate did.
 	undeliveredLaneRefused = "lane-refused"
@@ -540,44 +574,128 @@ const (
 	undeliveredUnsupported = "unsupported"
 )
 
+// The closed set of values a Stop's settlement carries on the wire, where the
+// renderer reads it from the LIFECYCLE FACT rather than from a notification
+// (nocx-zas0d, review of 6830b43d, major 2): the outcome has to be state, so a
+// dropped frame or a reconnect cannot leave a block claiming a stop that never
+// happened. Only these two are ever published, and an accepted Stop whose write
+// is still unsettled is published as undelivered ON A CLOSURE — see
+// signalDeliveryFor, where that is argued.
+const (
+	signalDeliveryDelivered   = "delivered"
+	signalDeliveryUndelivered = "undelivered"
+)
+
+// stopState is one accepted Stop's record: what it has come to, and a channel
+// closed the moment that became knowable. The channel is what lets the fact
+// path wait for a verdict instead of racing it.
+type stopState struct {
+	sid     session.ID
+	state   string // signalDeliveryDelivered / signalDeliveryUndelivered / "" while unsettled
+	settled chan struct{}
+}
+
 // holdStopUndelivered is the ONE place a Stop that will not reach its command is
-// said out loud. It is the product-visible half of the obligation (AGENTS.md:
-// a soft degrade must be visible in the product, not only in a log):
+// recorded and said out loud. It is the product-visible half of the obligation
+// (AGENTS.md: a soft degrade must be visible in the product, not only in a log):
 //
-//   - the renderer is told, over the control plane, so it can drop the mark it
-//     took on the `held` answer and say what happened (nocx-zas0d, review
-//     findings 2 and 4 of 1e899f6a);
-//   - the obligation is put BACK, unless its addressee has gone for good,
-//     because a byte the queue refused is not a byte that was delivered.
+//   - the settlement is RECORDED, so the renderer derives the outcome from
+//     state the lifecycle fact carries and replays, not from a notification a
+//     dropped frame can lose (review major 2);
+//   - the renderer is also told, which is what gives the person a sentence to
+//     read and what clears the mark on a block that is still live;
+//   - the obligation is REMOVED, never re-armed (review major 1).
 //
-// There is deliberately no retry loop behind it. What the person is told is
-// that the stop did not land and that pressing Stop again reaches a started
-// attempt by the ordinary path — which is the retry, performed by the only
-// party that knows whether the command is still wanted stopped.
+// THAT LAST POINT IS A FIX, not a simplification. Re-arming a failed delivery
+// left a hold that nobody would ever discharge attached to an attempt that had
+// already started — and when the person pressed Stop again and that retry
+// succeeded, the attempt's closure claimed the stale hold and emitted a second
+// undelivered notice, which cleared the successful retry's mark and rendered
+// its 130 as the program's own failure. One hold, one settlement.
 func (s *WSServer) holdStopUndelivered(sid session.ID, attempt lifecycle.AttemptID, reason string) {
-	switch reason {
-	case undeliveredAttemptClosed, undeliveredUnsupported:
-		// TERMINAL: the attempt is gone, or this channel can never be
-		// signalled. There is nothing left to hold a Stop for, so the
-		// obligation is dropped rather than kept as a stale promise.
-		_, _ = s.claimHeldStop(attempt)
-	default:
-		// NOT terminal: nothing was written, and the addressee may still be
-		// there. The obligation goes back — a byte the queue refused is not a
-		// byte that was delivered.
-		s.reArmHeldStop(attempt, sid)
+	// The obligation goes first and unconditionally: a hold nobody will
+	// discharge must not survive, whatever the record says.
+	_, _ = s.claimHeldStop(attempt)
+	// The record is what prevents a SECOND report of one Stop. It is armed
+	// with the hold, so in production there is always one to consult; a caller
+	// that never had a Stop accepted has no record and nothing to duplicate.
+	if s.stopStateKnown(attempt) && !s.recordStopSettled(attempt, signalDeliveryUndelivered) {
+		return
 	}
 	s.log.Warn("foreground signal: the held Stop did not reach the command",
 		"session_id", string(sid), "attempt", string(attempt), "reason", reason)
 	s.notifySignalUndelivered(sid, attempt, reason)
 }
 
-// reArmHeldStop puts an undischarged obligation back. Idempotent with the arm
-// that was claimed: the same attempt, the same session.
-func (s *WSServer) reArmHeldStop(attempt lifecycle.AttemptID, sid session.ID) {
-	s.heldMu.Lock()
-	defer s.heldMu.Unlock()
-	s.armHeldStopLocked(attempt, sid)
+// stopStateKnown reports whether this attempt has a Stop record at all.
+func (s *WSServer) stopStateKnown(attempt lifecycle.AttemptID) bool {
+	s.stopStateMu.Lock()
+	defer s.stopStateMu.Unlock()
+	_, ok := s.stopStates[attempt]
+	return ok
+}
+
+// recordStopWritten records a Stop the terminal actually took. It is the other
+// half of the state the renderer reads, and the reason a stop that landed is
+// never reported as anything else.
+func (s *WSServer) recordStopWritten(sid session.ID, attempt lifecycle.AttemptID) {
+	if !s.recordStopSettled(attempt, signalDeliveryDelivered) {
+		return
+	}
+	s.log.Info("foreground signal: the held Stop reached the command",
+		"session_id", string(sid), "attempt", string(attempt))
+}
+
+// recordStopSettled moves one attempt's record to its terminal value, wakes
+// anyone waiting on it, and reports whether THIS call is the one that did it.
+//
+// THE RETURN VALUE IS THE WHOLE IDEMPOTENCE (nocx-zas0d, review of 6830b43d,
+// major 1). One Stop has one settlement, and several parties can race to report
+// it: the writer's verdict, the closure of the attempt, a lane refusal. The one
+// that moves the state is the one that may speak, so a later arrival finds the
+// record already terminal and says nothing — the difference between a person
+// being told once and being told about a stop that was already accounted for.
+// Monotone too: the first verdict wins, because a second would be about a byte
+// that no longer exists.
+func (s *WSServer) recordStopSettled(attempt lifecycle.AttemptID, state string) bool {
+	s.stopStateMu.Lock()
+	defer s.stopStateMu.Unlock()
+	rec, ok := s.stopStates[attempt]
+	if !ok || rec.state != "" {
+		return false
+	}
+	rec.state = state
+	close(rec.settled)
+	return true
+}
+
+// armStopStateLocked records that a Stop has been ACCEPTED for this attempt,
+// and creates the channel that closes when its write is settled. It is armed in
+// the same critical section as the hold itself (StopTarget), so the state and
+// the obligation cannot disagree about which attempts have one. The caller
+// holds heldMu.
+func (s *WSServer) armStopStateLocked(attempt lifecycle.AttemptID, sid session.ID) {
+	s.stopStateMu.Lock()
+	defer s.stopStateMu.Unlock()
+	if s.stopStates == nil {
+		s.stopStates = make(map[lifecycle.AttemptID]*stopState)
+	}
+	if _, ok := s.stopStates[attempt]; ok {
+		return
+	}
+	s.stopStates[attempt] = &stopState{sid: sid, settled: make(chan struct{})}
+}
+
+// dropStopStatesFor forgets one session's Stop records. Like the holds, they
+// cannot outlive the session that owns them.
+func (s *WSServer) dropStopStatesFor(sid session.ID) {
+	s.stopStateMu.Lock()
+	defer s.stopStateMu.Unlock()
+	for attempt, rec := range s.stopStates {
+		if rec.sid == sid {
+			delete(s.stopStates, attempt)
+		}
+	}
 }
 
 // notifySignalUndelivered tells the session's current subscriber that a Stop it
@@ -615,16 +733,31 @@ type signalUndeliveredParams struct {
 	Reason    string `json:"reason"`
 }
 
-// armHeldStopLocked records an accepted Stop for attempt. The caller holds
-// heldMu — StopTarget requires the record to be one step with the read that
-// decided it.
-func (s *WSServer) armHeldStopLocked(attempt lifecycle.AttemptID, sid session.ID) {
+// armHeldStopAndStateLocked records an accepted Stop for attempt — the
+// obligation and the record of what becomes of it, in ONE step. They are armed
+// together because they answer two halves of one question ("who will write this"
+// and "what happened to it"), and a test or a caller that armed only the first
+// would find the settlement silently refusing to speak: the transition is what
+// gates the notice. The caller holds heldMu, because StopTarget requires the arm
+// to be one step with the read that decided it.
+func (s *WSServer) armHeldStopAndStateLocked(attempt lifecycle.AttemptID, sid session.ID) {
 	if s.heldStops == nil {
 		s.heldStops = make(map[lifecycle.AttemptID]session.ID)
 	}
 	// Idempotent by construction: a second Stop while one is held is the SAME
 	// obligation, not a second interrupt, and it is stored under the same key.
 	s.heldStops[attempt] = sid
+	s.armStopStateLocked(attempt, sid)
+}
+
+// heldStopsOwner reports which session's Stop is waiting for this attempt,
+// without taking it: a caller that must not claim the hold before deciding
+// whether to settle it (PublishAttemptClosed) needs the owner, not the take.
+func (s *WSServer) heldStopsOwner(attempt lifecycle.AttemptID) (session.ID, bool) {
+	s.heldMu.Lock()
+	defer s.heldMu.Unlock()
+	sid, ok := s.heldStops[attempt]
+	return sid, ok
 }
 
 // heldStopArmed reports whether a hold is waiting for this attempt, WITHOUT
@@ -691,8 +824,12 @@ func (s *WSServer) PublishAttemptStarted(attempt lifecycle.AttemptID) {
 // person is told — a Stop that quietly evaporates because the command ended (or
 // never started) is the failure the whole notice exists for.
 func (s *WSServer) PublishAttemptClosed(attempt lifecycle.AttemptID) {
-	sid, ok := s.claimHeldStop(attempt)
+	sid, ok := s.heldStopsOwner(attempt)
 	if !ok {
+		// No Stop was ever accepted for this attempt: nothing to settle and
+		// nothing to say. (A Stop that WAS accepted is settled by
+		// holdStopUndelivered below, which wins the settlement or stays
+		// silent — claiming here first would tell the person twice.)
 		return
 	}
 	s.holdStopUndelivered(sid, attempt, undeliveredAttemptClosed)
@@ -733,13 +870,22 @@ func (s *WSServer) submitHeldStop(attempt lifecycle.AttemptID) {
 // runs, against the EXACT attempt the Stop was accepted for, so nothing is
 // written if that attempt has closed in the meantime — a byte into whatever
 // holds the terminal next is precisely what a Stop must never do.
+//
+// THE BYTE PATH DOES NOT WAIT FOR THE CHANNEL AND CANNOT TIME OUT ON IT (review
+// of 6830b43d, blocker 1). It queues the byte with its condition and lets the
+// writer settle it (session.EnqueueInputIf): the only verdicts it can be given
+// are the true ones, and a byte that is still in the queue when the writer gets
+// to it is decided by its condition rather than by a caller who stopped looking.
 func (s *WSServer) deliverHeldStop(ctx context.Context, sid session.ID, attempt lifecycle.AttemptID) {
 	op, err := s.signalOps.ForSession(sid)
 	if err != nil {
 		s.log.Info("foreground signal: the held Stop is discarded — the session is gone",
 			"session_id", string(sid), "attempt", string(attempt), "error", err)
+		_, _ = s.claimHeldStop(attempt)
+		s.recordStopSettled(attempt, signalDeliveryUndelivered)
 		return
 	}
+	bytePathUsed := false
 	err = op.Run(ctx, func(runCtx context.Context, svc capability.SessionService) error {
 		sess, gerr := svc.Get(sid)
 		if gerr != nil {
@@ -755,21 +901,76 @@ func (s *WSServer) deliverHeldStop(ctx context.Context, sid session.ID, attempt 
 		fb := sessionProtectedForeground{
 			ctx: runCtx, s: s, sid: sid, sess: sess,
 			exactAttempt: func() (lifecycle.AttemptID, bool) { return attempt, true },
-			reportUndelivered: func(reason string) {
-				s.holdStopUndelivered(sid, attempt, reason)
+			interruptAsync: func(attempt lifecycle.AttemptID) interruptResult {
+				bytePathUsed = true
+				if !sess.EnqueueInputIf([]byte{0x03},
+					func() bool { return s.attemptIsOpenAndStarted(attempt) },
+					func(written bool, werr error) {
+						if written {
+							s.recordStopWritten(sid, attempt)
+							return
+						}
+						s.holdStopUndelivered(sid, attempt, undeliveredReasonFor(werr))
+					}) {
+					// The queue refused it: nothing was queued, so no verdict
+					// is coming and this settles it now.
+					s.holdStopUndelivered(sid, attempt, undeliveredWriteRefused)
+					return interruptRefused
+				}
+				return interruptQueued
 			},
 		}
 		outcome := stopForeground(s.log, sid, sg, s.effectiveRunLease().SignalGrace, fb)
-		s.log.Info("foreground signal: the held Stop was delivered",
-			"session_id", string(sid), "attempt", string(attempt), "outcome", string(outcome))
+		if !bytePathUsed {
+			// The mechanism was the process-group ladder — no byte was queued,
+			// so this call's own outcome IS the verdict. (The byte path settles
+			// itself, from the writer's verdict or from its own refusal: doing
+			// it here as well reported the same Stop twice.)
+			if outcome == foregroundDelivered {
+				s.log.Info("foreground signal: the held Stop reached the execution's process group",
+					"session_id", string(sid), "attempt", string(attempt))
+				s.recordStopSettled(attempt, signalDeliveryDelivered)
+				return nil
+			}
+			s.holdStopUndelivered(sid, attempt, undeliveredReasonForOutcome(outcome))
+		}
 		return nil
 	})
 	if err != nil {
 		// The lane or the session gate refused the delivery before the
-		// terminal was reached: nothing was written, so the obligation goes
-		// back and the person is told.
+		// terminal was reached: nothing was written, so the obligation is
+		// settled once, terminally (review major 1).
 		s.log.Warn("foreground signal: the held Stop could not run on the signal lane",
 			"session_id", string(sid), "attempt", string(attempt), "error", err)
 		s.holdStopUndelivered(sid, attempt, undeliveredLaneRefused)
+	}
+}
+
+// undeliveredReasonFor names what the WRITER said, in the closed vocabulary the
+// renderer is given. err == nil means the condition went false at the write: the
+// addressee had gone, which is not a failure of the write.
+func undeliveredReasonFor(err error) string {
+	switch {
+	case err == nil:
+		return undeliveredAttemptClosed
+	case errors.Is(err, session.ErrInputRefused), errors.Is(err, session.ErrSessionClosed):
+		return undeliveredWriteRefused
+	default:
+		return undeliveredWriteFailed
+	}
+}
+
+// undeliveredReasonForOutcome is the same for a delivery that never queued a
+// byte: the ladder's answer, in the same vocabulary.
+func undeliveredReasonForOutcome(outcome foregroundOutcome) string {
+	switch outcome {
+	case foregroundNothingRunning:
+		return undeliveredAttemptClosed
+	case foregroundUnsupported:
+		return undeliveredUnsupported
+	case foregroundDelivered:
+		return "" // the caller handles this case itself
+	default:
+		return undeliveredWriteFailed
 	}
 }

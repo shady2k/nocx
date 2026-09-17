@@ -262,6 +262,44 @@ func (s *heldStopStand) stop(t *testing.T, id int) string {
 	return env.Result.Outcome
 }
 
+// notices counts the undelivered notices this stand has seen, without waiting:
+// a test that asserts none arrived needs a count, not a wait.
+func (s *heldStopStand) notices() int {
+	return s.tap.noticeCount()
+}
+
+// awaitLifecycleFact waits for the next lifecycle.changed notification and
+// returns its params, schema-validated off the real socket.
+func (s *heldStopStand) awaitLifecycleFact(t *testing.T) lifecycleChangedParams {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case msg, ok := <-s.tap.msgs:
+			if !ok {
+				t.Fatalf("socket closed before lifecycle.changed arrived%s", socketClosedWhy)
+			}
+			var n struct {
+				Method string          `json:"method"`
+				Params json.RawMessage `json:"params"`
+			}
+			if json.Unmarshal(msg, &n) != nil || n.Method != "lifecycle.changed" {
+				continue
+			}
+			validateJSON(t, loadSchema(t, "lifecycle.changed.schema.json"), n.Params,
+				"lifecycle.changed, over the wire")
+			var params lifecycleChangedParams
+			if err := json.Unmarshal(n.Params, &params); err != nil {
+				t.Fatalf("lifecycle.changed params: %v", err)
+			}
+			return params
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	t.Fatal("no lifecycle.changed arrived")
+	return lifecycleChangedParams{}
+}
+
 // awaitUndelivered waits for the session.signalUndelivered notification on the
 // socket and returns its params. The notice IS the observation these tests need
 // for a refused or discarded byte: it is minted only after the write's own
@@ -468,10 +506,12 @@ func TestInterrupt_Window_AQueuedByteIsDiscardedWhenItsAttemptClosesFirst(t *tes
 	if n := stand.recorder.interrupts(); n != 0 {
 		t.Fatalf("an interrupt reached a pty after its attempt had gone: %d", n)
 	}
-	// And the person is told, through the transport's own settlement path.
-	params := stand.awaitUndelivered(t)
-	if params.Reason != undeliveredAttemptClosed || params.Attempt != stand.appAttemptID {
-		t.Fatalf("notice = %+v, want reason=%q attempt=%q", params, undeliveredAttemptClosed, stand.appAttemptID)
+	// This call is the WRITE's half, and that is all it is: the notice belongs
+	// to a Stop the product ACCEPTED, and this test issues its own interrupt
+	// without arming one (the settlement tests cover the rest: a notice is
+	// spoken by whoever wins the settlement, and nothing armed one here).
+	if n := stand.notices(); n != 0 {
+		t.Fatalf("undelivered notices = %d; nothing accepted this Stop", n)
 	}
 }
 
@@ -533,10 +573,11 @@ func TestHeldStop_AWriteTheQueueRefusedIsToldToThePerson(t *testing.T) {
 	if params.Attempt != stand.appAttemptID {
 		t.Fatalf("session.signalUndelivered named attempt %q, want %q", params.Attempt, stand.appAttemptID)
 	}
-	// A refusal writes nothing, so the obligation is put back rather than
-	// eaten: it is the person's next Stop that discharges or discards it.
-	if _, ok := stand.ws.claimHeldStop(attempt); !ok {
-		t.Fatal("a refused write dropped the held Stop instead of keeping it")
+	// A refusal writes nothing, and the hold is still REMOVED rather than
+	// re-armed (review major 1): a hold nobody will discharge, attached to an
+	// attempt that has already started, is what corrupted a later retry.
+	if stand.ws.heldStopArmed(attempt) {
+		t.Fatal("a refused write kept the held Stop; one hold has one settlement")
 	}
 	stand.recorder.releaseWrites()
 }
@@ -545,16 +586,17 @@ func TestHeldStop_AWriteTheQueueRefusedIsToldToThePerson(t *testing.T) {
 // for every reason the renderer can be given: the notice goes out with that
 // reason, and the obligation is kept unless its addressee has gone for good.
 func TestHeldStop_UndeliveredReasonsAreToldAndRetained(t *testing.T) {
+	// NOTHING is retained, on any reason (review major 1): the obligation is
+	// settled once and removed. Re-arming is what let a stale hold be claimed
+	// by a later attempt's closure and clear a successful retry's mark.
 	for _, tc := range []struct {
-		reason   string
-		retained bool
+		reason string
 	}{
-		{reason: undeliveredAttemptClosed, retained: false},
-		{reason: undeliveredUnsupported, retained: false},
-		{reason: undeliveredWriteRefused, retained: true},
-		{reason: undeliveredWriteFailed, retained: true},
-		{reason: undeliveredWriteUnconfirmed, retained: true},
-		{reason: undeliveredLaneRefused, retained: true},
+		{reason: undeliveredAttemptClosed},
+		{reason: undeliveredUnsupported},
+		{reason: undeliveredWriteRefused},
+		{reason: undeliveredWriteFailed},
+		{reason: undeliveredLaneRefused},
 	} {
 		t.Run(tc.reason, func(t *testing.T) {
 			stand := newHeldStopStand(t)
@@ -572,11 +614,180 @@ func TestHeldStop_UndeliveredReasonsAreToldAndRetained(t *testing.T) {
 				t.Fatalf("notice = %+v, want reason=%q attempt=%q signal=%q",
 					params, tc.reason, stand.appAttemptID, signalStop)
 			}
-			if _, ok := stand.ws.claimHeldStop(attempt); ok != tc.retained {
-				t.Fatalf("obligation retained = %v, want %v for reason %q", ok, tc.retained, tc.reason)
+			if stand.ws.heldStopArmed(attempt) {
+				t.Fatalf("the obligation survived reason %q; one hold has one settlement", tc.reason)
 			}
 		})
 	}
+}
+
+// ── the write's verdict is waited for, never timed out (review of 6830b43d) ──
+
+// TestHeldStop_AStalledWriterStillSettlesExactlyOnce is blocker 1 of the review
+// of 6830b43d. A held Stop's byte used to be written under a bounded wait: a
+// stalled channel expired it, the delivery was reported undelivered, and the
+// person was told to press Stop again — while the byte was STILL QUEUED behind
+// the stall, able to land afterwards and to land again on the retry.
+//
+// The window is built, not raced for: the pty parks its writes, so the byte
+// genuinely waits; the release happens after the stall is proven. What is
+// asserted is the whole point — exactly one of {the byte is written, undelivered
+// is told}, never both — and that the person's retry is a NEW gesture with its
+// own single byte, not a second landing of the first.
+func TestHeldStop_AStalledWriterStillSettlesExactlyOnce(t *testing.T) {
+	// A grace far shorter than the stall below: the point is that it does not
+	// matter, because nothing on this path times a write out any more.
+	stand := newHeldStopStandWithGrace(t, 50*time.Millisecond)
+	stand.establish(t)
+	stand.submit(t, 5, "sleep 30")
+	attempt := lifecycle.AttemptID(stand.appAttemptID)
+	if got := stand.stop(t, 6); got != string(foregroundHeld) {
+		t.Fatalf("a Stop before the start answered %q, want %q", got, foregroundHeld)
+	}
+
+	stand.recorder.holdWrites()
+	stand.ingest(t, lifecycleStartEvt(new(stand.shellIDFor(1)), "sleep 30"))
+	// The byte is queued behind the parked write and stays there, well past
+	// the grace the delivery is given.
+	select {
+	case <-stand.recorder.writesEntered():
+	case <-time.After(20 * time.Second):
+		t.Fatal("the interrupt never reached the write")
+	}
+	time.Sleep(4 * heldStopGrace) // far past the delivery's grace: a timeout would have fired by now
+
+	// The stall ends. The writer's verdict is the only settlement there is.
+	stand.recorder.releaseWrites()
+	waittest.WaitForDetail(t, "the stalled byte to be written",
+		func() string {
+			return fmt.Sprintf("interrupts=%d notices=%d", stand.recorder.interrupts(), stand.notices())
+		},
+		func() bool { return stand.recorder.interrupts() == 1 })
+
+	// EXACTLY ONE of the two, never both: the byte landed, so nothing may have
+	// been reported undelivered.
+	if n := stand.notices(); n != 0 {
+		t.Fatalf("undelivered notices = %d after the byte landed; a stall must not be reported as a failed write", n)
+	}
+	if got := stand.ws.signalDeliveryFor(lifecyclepub.Fact{
+		Attempt: &lifecyclepub.Attempt{ID: stand.appAttemptID, State: lifecyclepub.AttemptOpen},
+	}); got != signalDeliveryDelivered {
+		t.Fatalf("the attempt's signalDelivery = %q, want %q", got, signalDeliveryDelivered)
+	}
+
+	// And the person's retry is a SEPARATE gesture: one more Stop while the
+	// command still runs, one more byte, no replay of the first one's queue
+	// position.
+	before := stand.recorder.interrupts()
+	if got := stand.stop(t, 7); got == string(foregroundHeld) {
+		t.Fatal("a Stop after the start was held; the retry must take the ordinary path")
+	}
+	waittest.WaitForDetail(t, "the retry's byte to reach the pty",
+		func() string { return fmt.Sprintf("interrupts=%d (want %d)", stand.recorder.interrupts(), before+1) },
+		func() bool { return stand.recorder.interrupts() == before+1 })
+	stand.ingest(t, lifecycleCompleteEvt(attempt, 130, lifecycleFence(0x0E)))
+}
+
+// TestHeldStop_AFailedDeliveryIsTerminalForItsHold is review major 1 of the
+// review of 6830b43d. Re-arming a failed delivery attached a hold nobody would
+// ever discharge to an attempt that had already started; when the person then
+// pressed Stop and that retry succeeded, the attempt's closure claimed the
+// stale hold and emitted a SECOND undelivered notice — clearing the successful
+// retry's mark and rendering its 130 as the program's own failure.
+//
+// The sequence is the review's, run in order: held, started, delivery fails,
+// the person retries through the ordinary path, the attempt closes.
+func TestHeldStop_AFailedDeliveryIsTerminalForItsHold(t *testing.T) {
+	stand := newHeldStopStand(t)
+	stand.establish(t)
+	stand.submit(t, 5, "sleep 30")
+	attempt := lifecycle.AttemptID(stand.appAttemptID)
+	if got := stand.stop(t, 6); got != string(foregroundHeld) {
+		t.Fatalf("a Stop before the start answered %q, want %q", got, foregroundHeld)
+	}
+
+	// The delivery fails: the queue is full behind a parked write, so the byte
+	// cannot be queued at all.
+	stand.recorder.holdWrites()
+	submitCommand(t, stand.conn, stand.sid, "sleep 30")
+	select {
+	case <-stand.recorder.writesEntered():
+	case <-time.After(20 * time.Second):
+		t.Fatal("the command's own bytes never reached the write")
+	}
+	sess, err := stand.ws.registry.Get(session.ID(stand.sid))
+	if err != nil {
+		t.Fatalf("registry.Get: %v", err)
+	}
+	for {
+		if !sess.EnqueueWrite([]byte("filler")) {
+			break
+		}
+	}
+	stand.ingest(t, lifecycleStartEvt(new(stand.shellIDFor(1)), "sleep 30"))
+	params := stand.awaitUndelivered(t)
+	if params.Reason != undeliveredWriteRefused {
+		t.Fatalf("notice reason = %q, want %q", params.Reason, undeliveredWriteRefused)
+	}
+
+	// The hold is GONE. Nothing re-armed it, so nothing can settle it twice.
+	if stand.ws.heldStopArmed(attempt) {
+		t.Fatal("a failed delivery re-armed its hold; one hold must have one settlement")
+	}
+	stand.recorder.releaseWrites()
+
+	// The person retries through the ordinary path, and it succeeds.
+	if got := stand.stop(t, 7); got == string(foregroundHeld) {
+		t.Fatalf("the retry answered %q; a started attempt is signalled by the ordinary path", got)
+	}
+	// The attempt then closes: that closure must NOT be reported as a second
+	// undelivered Stop for the hold that was already settled.
+	stand.ingest(t, lifecycleCompleteEvt(attempt, 130, lifecycleFence(0x0F)))
+	time.Sleep(200 * time.Millisecond)
+	if n := stand.notices(); n != 1 {
+		t.Fatalf("undelivered notices = %d, want exactly 1 (the failed delivery, not the retry)", n)
+	}
+}
+
+// TestHeldStop_TheCompletionFactCarriesTheSettlement is review major 2: the
+// outcome must be STATE the lifecycle fact carries, so a dropped notification
+// or a reconnect cannot leave the renderer claiming a stop that never happened.
+func TestHeldStop_TheCompletionFactCarriesTheSettlement(t *testing.T) {
+	stand := newHeldStopStand(t)
+	stand.establish(t)
+	stand.submit(t, 5, "sleep 30")
+	attempt := lifecycle.AttemptID(stand.appAttemptID)
+	if got := stand.stop(t, 6); got != string(foregroundHeld) {
+		t.Fatalf("a Stop before the start answered %q, want %q", got, foregroundHeld)
+	}
+
+	// A held byte whose addressee goes before the write: the settlement is
+	// undelivered, and that has to reach the fact the renderer settles from —
+	// with no notification involved at all.
+	stand.recorder.holdWrites()
+	submitCommand(t, stand.conn, stand.sid, "sleep 30")
+	select {
+	case <-stand.recorder.writesEntered():
+	case <-time.After(20 * time.Second):
+		t.Fatal("the command's own bytes never reached the write")
+	}
+	stand.ingest(t, lifecycleStartEvt(new(stand.shellIDFor(1)), "sleep 30"))
+	// The command ends while the byte is still queued behind the parked write:
+	// the completion is the fact a renderer settles from, and it must say what
+	// became of the Stop (nocx-zas0d, review of 6830b43d, major 2).
+	stand.ingest(t, lifecycleCompleteEvt(attempt, 130, lifecycleFence(0x10)))
+	stand.recorder.releaseWrites()
+
+	// The next fact for the lane is what a renderer would settle on. It must
+	// carry the settlement, validated against the contract off the real socket.
+	fact := stand.awaitLifecycleFact(t)
+	if fact.SignalDelivery != signalDeliveryUndelivered {
+		t.Fatalf("the lifecycle fact's signalDelivery = %q, want %q", fact.SignalDelivery, signalDeliveryUndelivered)
+	}
+	if fact.Attempt == nil || fact.Attempt.ID != stand.appAttemptID {
+		t.Fatalf("the fact names %+v, want attempt %q", fact.Attempt, stand.appAttemptID)
+	}
+	_ = attempt
 }
 
 // ── 2. the discard ────────────────────────────────────────────────────────
@@ -623,13 +834,13 @@ func TestHeldStop_AnAttemptThatLeavesOpenDropsTheHold(t *testing.T) {
 	// only way the obligation is ever recorded: the read that decided it and
 	// the record must not be separable.
 	ws.heldMu.Lock()
-	ws.armHeldStopLocked(attempt, session.ID("sid-held"))
+	ws.armHeldStopAndStateLocked(attempt, session.ID("sid-held"))
 	ws.heldMu.Unlock()
 	if _, ok := ws.claimHeldStop(attempt); !ok {
 		t.Fatal("the hold was not recorded")
 	}
 	ws.heldMu.Lock()
-	ws.armHeldStopLocked(attempt, session.ID("sid-held"))
+	ws.armHeldStopAndStateLocked(attempt, session.ID("sid-held"))
 	ws.heldMu.Unlock()
 	ws.PublishAttemptClosed(attempt)
 	if _, ok := ws.claimHeldStop(attempt); ok {

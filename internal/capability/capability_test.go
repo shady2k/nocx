@@ -517,6 +517,21 @@ func (f *fakeSession) WriteInputIf(_ context.Context, p []byte, holds func() boo
 	}
 	return true, nil
 }
+
+// EnqueueInputIf is the same "queued and answered" shape for the async caller:
+// this double has no queue to validate against.
+func (f *fakeSession) EnqueueInputIf(p []byte, holds func() bool, settle func(written bool, err error)) bool {
+	if holds != nil && !holds() {
+		if settle != nil {
+			settle(false, nil)
+		}
+		return true
+	}
+	if settle != nil {
+		settle(true, nil)
+	}
+	return true
+}
 func (f *fakeSession) EffectiveSize() session.Size { return session.DefaultSize() }
 
 func (f *fakeSession) Resize(context.Context, session.Size) error {

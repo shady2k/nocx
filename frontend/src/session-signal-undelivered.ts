@@ -72,7 +72,6 @@ export function undeliveredNotice(
       }
     case 'write-refused':
     case 'write-failed':
-    case 'write-unconfirmed':
     case 'lane-refused':
       return {
         level: 'warning',

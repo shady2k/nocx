@@ -17,6 +17,7 @@ package transport
 // broker timeout, which is the gap this bead closes.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -59,6 +60,18 @@ import (
 type socketTap struct {
 	data chan Frame
 	msgs chan json.RawMessage
+	// notices counts the session.signalUndelivered notifications the socket
+	// has carried. A test that asserts NONE arrived cannot wait for a message
+	// that is not coming, so the tap counts what it forwards (nocx-zas0d).
+	noticesMu sync.Mutex
+	notices   int
+}
+
+// noticeCount is how many undelivered-Stop notices this socket has seen.
+func (t *socketTap) noticeCount() int {
+	t.noticesMu.Lock()
+	defer t.noticesMu.Unlock()
+	return t.notices
 }
 
 func newSocketTap(conn *websocket.Conn) *socketTap {
@@ -79,6 +92,11 @@ func newSocketTap(conn *websocket.Conn) *socketTap {
 					t.data <- f
 				}
 				continue
+			}
+			if bytes.Contains(payload, []byte(`"session.signalUndelivered"`)) {
+				t.noticesMu.Lock()
+				t.notices++
+				t.noticesMu.Unlock()
 			}
 			t.msgs <- payload
 		}

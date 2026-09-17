@@ -173,6 +173,12 @@ const (
 	// queue refused it, the session is closed, the channel failed, or the
 	// channel never answered within the cooperative grace.
 	interruptRefused
+	// interruptQueued: the byte is ON the queue and its verdict will arrive
+	// through the caller's settle callback, not through this call. It is the
+	// only honest answer for a caller that must not wait — "I have handed it
+	// over" — and the policy treats it as the held case, because that is what
+	// it is: accepted, not yet delivered.
+	interruptQueued
 )
 
 // foregroundReach is what one SignalForeground call actually established,
@@ -349,6 +355,11 @@ func stopByTerminalInterrupt(lg log.Logger, sid session.ID, conv protectedForegr
 		lg.Warn("foreground signal: the session refused the terminal interrupt",
 			"session_id", string(sid), "attempt", string(attempt))
 		return foregroundUnreconciled
+	case interruptQueued:
+		// The byte is queued and the caller's own settlement owns the verdict
+		// from here: there is nothing to wait for on this lane, and waiting
+		// would be the timeout this shape exists to avoid.
+		return foregroundHeld
 	}
 	if conv.Ended(attempt, grace) {
 		return foregroundDelivered

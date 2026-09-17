@@ -317,6 +317,11 @@ type Session interface {
 	// like any other refusal. Callers that must not wait at all — the
 	// transport readLoop — keep using EnqueueWrite.
 	//
+	//
+	// A CALLER THAT MUST NOT WAIT *AND* MUST NOT GUESS should use
+	// EnqueueInputIf instead: expiring here leaves the payload QUEUED, and its
+	// verdict may still arrive later.
+	//
 	// WHAT THIS DOES AND DOES NOT GUARANTEE, exactly. What it guarantees, and
 	// all it guarantees:
 	//
@@ -344,6 +349,26 @@ type Session interface {
 	// into an idle line is discarded by the line editor) rather than assumed
 	// impossible here.
 	WriteInputIf(ctx context.Context, p []byte, holds func() bool) (bool, error)
+	// EnqueueInputIf is WriteInputIf for a caller that must not wait for the
+	// channel AT ALL and must not guess either: the payload is queued (with
+	// the same in-place, write-time condition and the same FIFO place), and
+	// settle is called ON THE WRITING GOROUTINE, exactly once, with the
+	// verdict — written, or not written and why.
+	//
+	// IT EXISTS BECAUSE A TIMEOUT CANNOT SETTLE A WRITE (nocx-zas0d, review
+	// of 6830b43d, blocker 1). WriteInputIf's expiry says "I stopped waiting",
+	// which is not "nothing was written": the payload is still queued and may
+	// land afterwards. A caller that answers a person on that basis would say
+	// "the stop did not reach the command, press again" about a byte that is
+	// still coming, and the retry it invites is a SECOND interrupt. Here
+	// there is no expiry: the caller is told when the writer knows, and the
+	// only verdicts it can be given are the true ones.
+	//
+	// False means the queue itself refused the payload and nothing was
+	// queued — settle is NOT called, because a refused payload has no verdict
+	// to wait for. settle may be nil only if the caller does not want the
+	// verdict, which is what EnqueueWrite is for.
+	EnqueueInputIf(p []byte, holds func() bool, settle func(written bool, err error)) bool
 	// EffectiveSize is the geometry this session's channel is running at —
 	// the backend's own conclusion, never the client's claim (nocx-eidfb.1).
 	// It is never the zero Size: a session with no client attached holds
@@ -1173,8 +1198,13 @@ type writeJob struct {
 	p   []byte
 	res chan writeResult
 	// holds is the condition the payload was queued under, asked at the WRITE
-	// (WriteInputIf). nil means unconditional — every EnqueueWrite.
+	// (WriteInputIf / EnqueueInputIf). nil means unconditional — every
+	// EnqueueWrite.
 	holds func() bool
+	// settle receives the verdict on the writing goroutine, exactly once —
+	// EnqueueInputIf's caller, which must not wait for it. nil for every
+	// caller that waits on res or does not want the answer at all.
+	settle func(written bool, err error)
 }
 
 type writeResult struct {
@@ -1315,6 +1345,43 @@ func (s *realSession) WriteInputIf(ctx context.Context, p []byte, holds func() b
 	}
 }
 
+// finishWrite hands one job's verdict to whichever caller asked for it.
+func finishWrite(job writeJob, written bool, err error) {
+	switch {
+	case job.res != nil:
+		n := 0
+		if written {
+			n = len(job.p)
+		}
+		job.res <- writeResult{n: n, err: err}
+	case job.settle != nil:
+		job.settle(written, err)
+	}
+}
+
+// EnqueueInputIf is WriteInputIf without the wait: queue the payload with its
+// condition, and let the writing goroutine settle it. See the interface.
+func (s *realSession) EnqueueInputIf(p []byte, holds func() bool, settle func(written bool, err error)) bool {
+	select {
+	case <-s.writeDone:
+		return false
+	default:
+	}
+	if s.inputRefused() {
+		return false
+	}
+	select {
+	case s.writeCh <- writeJob{p: p, holds: holds, settle: settle}:
+		return true
+	case <-s.writeDone:
+		return false
+	case <-s.ch.Done():
+		return false
+	default:
+		return false
+	}
+}
+
 // startWriteLoop runs the single goroutine that drains writeCh in FIFO
 // order. It exits on writeDone, which Close closes, so it never leaks and
 // never observes a closed writeCh.
@@ -1329,14 +1396,19 @@ func (s *realSession) startWriteLoop() {
 					// The condition the payload was queued under no longer
 					// holds AT THE MOMENT OF THE WRITE. It is discarded rather
 					// than written into whatever holds the terminal now, and
-					// the waiting caller is told (n = 0, no error: not an
+					// the caller is told (written false, no error: not an
 					// error, an outcome).
-					if job.res != nil {
-						job.res <- writeResult{}
-					}
+					finishWrite(job, false, nil)
 					continue
 				}
 				n, err := s.ch.Write(job.p)
+				if job.settle != nil {
+					// The caller that must not wait is told HERE, on this
+					// goroutine: this is the only place a queued payload's
+					// verdict exists.
+					job.settle(n == len(job.p), err)
+					continue
+				}
 				// res == nil is the TRANSPORT's path — every byte the user
 				// types arrives here, and nobody is waiting for the result.
 				// So an error here had exactly one reader and it was

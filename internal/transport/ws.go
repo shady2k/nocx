@@ -798,6 +798,18 @@ type WSServer struct {
 	// twice is one obligation, and an attempt that never starts takes its
 	// hold with it when the publisher reports it closed.
 	heldStops map[lifecycle.AttemptID]session.ID
+	// stopStateMu guards stopStates, the transport's record of what each
+	// accepted Stop came to (nocx-zas0d, review of 6830b43d, major 2). It is
+	// separate from heldMu because the two answer different questions — one is
+	// "who is going to write this", the other "what happened" — and because the
+	// fact path reads this one while holding neither.
+	stopStateMu sync.Mutex
+	// stopStates is one accepted Stop's settlement per attempt. It is what
+	// makes the outcome STATE rather than an event: the lifecycle fact carries
+	// it, so a dropped frame or a reconnect cannot leave a block claiming a
+	// stop that never happened. Bounded by the session — only Stops accepted in
+	// the submit window ever appear, and they go when the session does.
+	stopStates map[lifecycle.AttemptID]*stopState
 	// signalSub and signalOps are the execution lane session.signal runs on
 	// (buildControlPlane), shared with the one other thing that is a signal:
 	// a held Stop being delivered when its attempt starts. One lane, so the
@@ -3816,6 +3828,8 @@ func (s *WSServer) closeSession(sid session.ID, sess session.Session) {
 	// (ws_sessionpolicy.go).
 	s.sessionPolicy.Drop(sid)
 	s.unregisterLifecycleLanes(sid)
+	// The Stop records go with the session, like the holds they describe.
+	s.dropStopStatesFor(sid)
 	// A held Stop belongs to an attempt, and an attempt belongs to a session:
 	// when the session ends there is nothing left for the obligation to be
 	// about, and it must not outlive the registry entry that named it

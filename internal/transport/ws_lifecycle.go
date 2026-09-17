@@ -127,6 +127,16 @@ type lifecycleChangedParams struct {
 	SessionID    string `json:"sessionId"`
 	InstanceID   string `json:"instanceId"`
 	SessionEpoch uint64 `json:"sessionEpoch"`
+	// SignalDelivery is what a Stop ACCEPTED for this fact's attempt came to —
+	// "delivered" or "undelivered", absent when no Stop was ever accepted for
+	// it (nocx-zas0d, review of 6830b43d, major 2). It rides the fact rather
+	// than a notification because the renderer must derive "the person stopped
+	// this" from state it can replay: a notification a dropped frame can lose
+	// would leave a command that ran to its own nonzero end painted as one the
+	// person stopped. The transport adds it at the wire boundary because the
+	// signal is the transport's to know and the kernel's projection is not
+	// where it lives.
+	SignalDelivery string `json:"signalDelivery,omitempty"`
 	lifecyclepub.Fact
 }
 
@@ -162,6 +172,76 @@ func (s *WSServer) unregisterLifecycleLanes(sid session.ID) {
 			delete(s.lifecycleLanes, lane)
 		}
 	}
+}
+
+// signalDeliveryFor is what the lifecycle fact publishes about this attempt's
+// Stop, if it has one: "delivered" once the terminal took the byte,
+// "undelivered" once that can no longer happen, and nothing at all while the
+// outcome is still open.
+//
+// THE CLOSURE CASE IS THE INTERESTING ONE. A held Stop's verdict comes from the
+// writer, and for the undelivered case that verdict necessarily arrives AFTER
+// the attempt closed (a byte is discarded precisely because its addressee
+// left), so a fact reporting the closure cannot wait for the record to say
+// "undelivered": it can decide it, because an accepted Stop whose attempt has
+// left `open` can never be written — the condition it waits for is that attempt
+// being open and started.
+//
+// The other direction is why the wait below exists: a byte the shell acted on
+// HAS been written, and the shell's completion is a round trip behind that
+// write returning, so waiting (bounded by the cooperative grace) on the
+// settlement channel turns a race into an ordering. If the wait expires the
+// fact is published without a verdict and the record's own value is read again
+// — never a claim in either direction that the transport cannot support.
+func (s *WSServer) signalDeliveryFor(f lifecyclepub.Fact) string {
+	if f.Attempt == nil {
+		return ""
+	}
+	attempt := lifecycle.AttemptID(f.Attempt.ID)
+	s.stopStateMu.Lock()
+	rec, ok := s.stopStates[attempt]
+	if !ok {
+		s.stopStateMu.Unlock()
+		return ""
+	}
+	// Every read of the record's fields is under the mutex: the settlement is
+	// written by the writing goroutine and read here, on the fact path, and a
+	// bare field read would be a data race rather than a snapshot.
+	state := rec.state
+	settled := rec.settled
+	s.stopStateMu.Unlock()
+	if state != "" {
+		return state // settled: the writer said so, and it is final
+	}
+	if f.Attempt.State == lifecyclepub.AttemptOpen {
+		// STILL RUNNING: nothing is decided, so nothing is published. A guess
+		// here — in either direction — would be the statement this field
+		// exists to stop making.
+		return ""
+	}
+	// THE ATTEMPT HAS CLOSED, AND THAT DECIDES IT. This is a derivation, not a
+	// guess about a write in flight: the condition the byte waits for at the
+	// write is that this attempt is open AND started, so a byte not yet written
+	// can never be written now, and a byte already written settled its record
+	// before the shell could have reported the completion (the write is a
+	// syscall, the completion a round trip through the shell). The wait below
+	// covers that window rather than assuming it: whoever settled first wins,
+	// and if nothing has settled by the bound the derivation stands.
+	bound := s.effectiveRunLease().SignalGrace
+	if bound <= 0 {
+		bound = defaultRunSignalGrace
+	}
+	select {
+	case <-settled:
+	case <-time.After(bound):
+	}
+	s.stopStateMu.Lock()
+	state = rec.state
+	s.stopStateMu.Unlock()
+	if state != "" {
+		return state
+	}
+	return signalDeliveryUndelivered
 }
 
 // PublishLifecycleProjection updates server-owned projections without
@@ -281,10 +361,11 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 	// domain epoch the Fact itself carries, which is the lifecycle
 	// kernel's per-domain counter.
 	params := lifecycleChangedParams{
-		SessionID:    string(sid),
-		InstanceID:   string(sess.Identity().InstanceID),
-		SessionEpoch: sess.Identity().Epoch,
-		Fact:         f,
+		SessionID:      string(sid),
+		InstanceID:     string(sess.Identity().InstanceID),
+		SessionEpoch:   sess.Identity().Epoch,
+		SignalDelivery: s.signalDeliveryFor(f),
+		Fact:           f,
 	}
 	if err := wconn.TryNotify("lifecycle.changed", mustMarshal(params)); err != nil {
 		s.log.Debug("write lifecycle.changed", "session", string(sid), "lane", f.Lane, "error", err)
@@ -370,6 +451,15 @@ func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) {
 		end.Status = content.EntryFailure
 		if f.Attempt.ExitCode != nil && *f.Attempt.ExitCode == 0 {
 			end.Status = content.EntrySuccess
+		}
+		// A command the person stopped records the store's own word for that
+		// judgement, so a block RESTORED from this entry is not read back as
+		// the program's own failure — the durable half of the settlement the
+		// lifecycle fact carries live (nocx-zas0d, review of 6830b43d, major
+		// 2: the outcome has to be state a replay can reach, not only an event
+		// a dropped frame can lose).
+		if s.signalDeliveryFor(f) == signalDeliveryDelivered {
+			end.TerminationReason = content.TermUserKilled
 		}
 		if f.Attempt.CompletedAt != nil {
 			end.EndedAt = f.Attempt.CompletedAt.UnixMilli()

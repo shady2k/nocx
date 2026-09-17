@@ -11693,6 +11693,130 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     }
   })
 
+  it('the backend’s settlement decides "Stopped", with no notification at all', async () => {
+    const client = makeClient()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      const handler = lifecycleHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('sleep 30')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-state-19',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'sleep 30',
+        },
+      })
+      const rec = scrollbackFor(content).blockManager.runningBlock!
+      sessionOf(content).signal.mockResolvedValue({ signal: 'stop', outcome: 'held' })
+      itemNamed(runningBlockMenu(content), 'stop')!.click()
+      await vi.waitFor(() => expect(rec.stopRequested).toBe(true))
+
+      // NO session.signalUndelivered IS EVER DELIVERED — a dropped frame, or a
+      // reconnect that replayed the fact instead. The completion fact carries
+      // the backend's own settlement, and THAT is what the block settles by
+      // (nocx-zas0d, review of 6830b43d, major 2): an outcome that only a
+      // notification could carry would leave this command painted as one the
+      // person stopped.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        signalDelivery: 'undelivered',
+        attempt: {
+          id: 'att-state-19',
+          state: 'completed',
+          exitCode: 130,
+          completedAt: '2026-09-15T00:00:00Z',
+          fence: '3'.repeat(64),
+        },
+      })
+      expect(rec.status).toBe('failure')
+
+      await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
+      expect(rec.el.dataset.outcome).toBe('failure')
+    } finally {
+      restore()
+      teardown()
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    }
+  })
+
+  it('and a delivered stop settles as stopped from that same state', async () => {
+    const client = makeClient()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      const handler = lifecycleHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('sleep 30')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-state-20',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'sleep 30',
+        },
+      })
+      const rec = scrollbackFor(content).blockManager.runningBlock!
+      sessionOf(content).signal.mockResolvedValue({ signal: 'stop', outcome: 'held' })
+      itemNamed(runningBlockMenu(content), 'stop')!.click()
+      await vi.waitFor(() => expect(rec.stopRequested).toBe(true))
+
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        signalDelivery: 'delivered',
+        attempt: {
+          id: 'att-state-20',
+          state: 'completed',
+          exitCode: 130,
+          completedAt: '2026-09-15T00:00:00Z',
+          fence: '4'.repeat(64),
+        },
+      })
+      expect(rec.status).toBe('cancelled')
+
+      await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
+      expect(rec.el.dataset.outcome).toBe('cancelled')
+    } finally {
+      restore()
+      teardown()
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    }
+  })
+
   it('a program that exits 130 on its own, with no stop request, still reads as failure', async () => {
     const client = makeClient()
     const { view, ed, content, teardown } = await mountTerminal(

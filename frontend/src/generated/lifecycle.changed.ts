@@ -26,6 +26,10 @@ export interface LifecycleChanged {
    */
   sessionEpoch: number
   /**
+   * What a Stop ACCEPTED for this fact's attempt came to, absent when no Stop was ever accepted for it (nocx-zas0d). It exists because a held Stop's outcome has to be STATE and not only an event: session.signal answers `held` for a gesture that arrives before the shell's start, and the settlement that follows can be lost with a dropped frame — leaving a block claiming a stop that never happened, which is how a command that ran to its own nonzero end gets painted as one the person stopped. Published exactly twice in an attempt's life at most: `delivered` once the terminal took the interrupt byte, and `undelivered` once that can no longer happen. An accepted Stop whose write is still unsettled is published as `undelivered` ON A FACT THAT REPORTS THE ATTEMPT CLOSING — the condition the byte waits for is that attempt being open and started, so once it has left `open` the byte can never be written — and is omitted entirely while the attempt is still open, because nothing is decided yet and a false `undelivered` would be worse than silence. The renderer derives 'Stopped' from this, never from the notification alone.
+   */
+  signalDelivery?: 'delivered' | 'undelivered'
+  /**
    * The input-routing lane the fact is about. The backend resolves it to sessionId; the renderer then attaches it only to that session's state machine.
    */
   lane: string

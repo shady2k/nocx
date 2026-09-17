@@ -944,9 +944,13 @@ func TestAReadoptedAlreadyExitedSessionReleasesItsHelperWindow(t *testing.T) {
 	if len(rec.applied) != 1 || rec.applied[0].Verdict != content.VerdictLive {
 		t.Fatalf("verdict = %+v, want live: the helper still holds this session", rec.applied)
 	}
-	if _, err := second.sess.Get(session.ID(binding.SessionID)); err != nil {
-		t.Fatalf("the finished session was not taken back: %v", err)
-	}
+	// No registry lookup here, deliberately. The adopted session's stream is
+	// already complete, so the attachment this pass starts can drain it and
+	// run EndSession before the next line executes — asserting the session
+	// is still registered raced the very release this test exists for
+	// (nocx-xn63t.6.16). The window reaching zero below is the proof it was
+	// taken back: nothing but that attachment's EndSession releases a helper
+	// window no client is attached to, which is closer 2's whole point.
 
 	// The wait is on observable state — the helper's own aggregate budget —
 	// polled with a bound: draining runs on the coordinator's own read-pump

@@ -94,3 +94,19 @@ func (s *Service) TestWriteInFlight(id proto.HostSessionID) bool {
 	}
 	return hs.owner.writeInFlight()
 }
+
+// TestCompletedFence reports how many items id's owner has resolved so far
+// (owner.go's completedFence — the same counter inputFence publishes to a
+// production caller). TestAWriterBlockedOnAZeroWindowIsDetachedAndTheSession
+// Closes reads a fence taken before a chunked write starts and polls this
+// against a fence taken after: once the delta reaches the number of chunks
+// arithmetic guarantees the far side's untouched window can hold, whichever
+// chunk the writer holds next is proven stuck, without ever asking how long
+// anything took.
+func (s *Service) TestCompletedFence(id proto.HostSessionID) (uint64, error) {
+	hs, ferr := s.find(id)
+	if ferr != nil {
+		return 0, ferr
+	}
+	return hs.owner.completedFence.Load(), nil
+}

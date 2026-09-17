@@ -129,45 +129,52 @@ func TestAWriterBlockedOnAZeroWindowIsDetachedAndTheSessionCloses(t *testing.T) 
 	// on the CLIENT'S OWN write goroutine (this owner's writer), never on
 	// this test's own goroutine, hence sent from one.
 	stuck := make([]byte, 4<<20)
+	fenceBefore, ferr := stand.sessions.TestCompletedFence(stuckID)
+	if ferr != nil {
+		t.Fatalf("fence before the write: %v", ferr)
+	}
 	go func() { _, _ = stuckAttached.Write(stuck) }()
 
-	// TestForceStop must not fire before the write above is the one truly
-	// stuck: submit's own admission check (owner.go) refuses a NEW write
-	// the instant stop's closingSignal closes, and closingSignal closes
-	// before this goroutine's first byte has even been framed — every
-	// time, in practice, since a `go` statement only schedules its
-	// goroutine rather than running it ahead of the caller's next line. A
-	// forced stop that wins that race finds nothing in o.inFlight, and
-	// performDetach — correctly, by its own contract — reports no detach
-	// for a write that was never dispatched.
-	//
 	// AttachedSession.Write (68c50b62) cuts the 4 MiB into consecutive
-	// ≤1 MiB session frames, and the first two land well inside the far
-	// side's 2 MiB grant: each becomes briefly in flight (writeStart) and
-	// resolves at once, long before it could ever be mistaken for stuck. So
-	// TestWriteInFlight going true is not by itself proof of the one this
-	// test wants — only a write still in flight after it had every chance
-	// to finish quickly is: the fixture's own zero-window design (§5.7
-	// above) means the genuinely stuck chunk never lets go on its own, so
-	// confirming "still true" a moment later can never itself be a race —
-	// a false "still true" would require an ordinary local write to keep
-	// running for 25ms, on data an order of magnitude smaller than what a
-	// single loopback syscall moves without blocking.
+	// session frames of chunkSize bytes — proto.MaxFrameBytes less that
+	// method's own frame header, the exact arithmetic it uses, not a second
+	// guess at it (AGENTS.md, "look for the existing answer"). The far
+	// side's untouched initial grant (channelWindowSize, 2 MiB, comment
+	// above) holds fitChunks of those whole, by floor division's own
+	// guarantee that fitChunks*chunkSize <= window < (fitChunks+1)*chunkSize
+	// — so the window left after fitChunks chunks have resolved is strictly
+	// less than a whole chunk, and this fixture never grants more of it.
+	// Once the fence has advanced by fitChunks since the write began AND a
+	// chunk is in flight, that chunk cannot be one of the fitChunks that
+	// already fit — it is the next one in line, arithmetically too big for
+	// what is left, and it stays stuck forever rather than merely a while.
+	//
+	// This replaces a duration-based "confirm it is still stuck a moment
+	// later", which AGENTS.md rules out ("a test may not depend on timing")
+	// and which measured flaky here: 42 of 50 runs under
+	// `-race -count=50` on this machine, because a fast chunk merely SLOW
+	// to complete under load looks identical, for 25ms, to one that will
+	// never complete at all. Fence accounting tells the two apart by
+	// arithmetic instead of by elapsed time.
+	const chunkSize = proto.MaxFrameBytes - proto.SessionFrameHeaderLen
+	const sshChannelWindowSize = 2 * 1024 * 1024 // golang.org/x/crypto/ssh's channelWindowSize (64 * 32768 channelMaxPacket)
+	const fitChunks = sshChannelWindowSize / chunkSize
+
 	inFlightDeadline := time.After(5 * time.Second)
 	for {
 		select {
 		case <-inFlightDeadline:
-			t.Fatal("the write never reached the owner's writer: nothing to force-stop against")
+			t.Fatal("the doomed chunk never reached the owner's writer: nothing to force-stop against")
 		default:
 		}
-		if !stand.sessions.TestWriteInFlight(stuckID) {
-			time.Sleep(2 * time.Millisecond)
-			continue
+		fence, ferr := stand.sessions.TestCompletedFence(stuckID)
+		if ferr != nil {
+			t.Fatalf("fence poll: %v", ferr)
 		}
-		time.Sleep(25 * time.Millisecond)
-		if stand.sessions.TestWriteInFlight(stuckID) {
-			break // still in flight a moment later: this is the stuck chunk.
+		if fence-fenceBefore >= fitChunks && stand.sessions.TestWriteInFlight(stuckID) {
+			break // arithmetically the doomed chunk: see the derivation above.
 		}
+		time.Sleep(2 * time.Millisecond)
 	}
 
 	tailLost, writerDetached, err := stand.sessions.TestForceStop(stuckID, time.Now().Add(5*time.Second))

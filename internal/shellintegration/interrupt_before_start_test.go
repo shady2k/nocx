@@ -16,17 +16,27 @@ import (
 // TestInterruptRightAfterEnterNeverStartsWithoutASecondPromptReady races
 // \x03 against a just-submitted, fully-typed command line — unlike
 // TestBashInterruptAnnouncesNoPhantomCommand, which interrupts a PARTIAL
-// line before Enter is ever pressed. It asserts the thing that decided
-// kernel.go's invariant: this reliably produces a prompt_ready with NO
-// start ever following it, for MANY iterations in a row, until — matching
-// applyPromptReady's own closing rule — a SECOND prompt_ready arrives.
+// line before Enter is ever pressed. It asserts, for every iteration
+// (never one chosen outcome — the race can land either way, and a test
+// that demanded a specific side is itself timing-dependent): the kernel's
+// own `start` count agrees with whether the command actually ran, and the
+// shell always reaches a fresh prompt afterward (the attempt always ends,
+// one way or the other — never a permanent wedge).
 //
-// Measured empirically before this test existed: 40/40 iterations of this
-// exact race reproduced "no start, ever" on the first prompt_ready alone.
-// That ruled out the kernel's earlier fix (leave a primed-but-unstarted
-// attempt open forever, waiting for a start that might never come) — it
-// would have left the lane stuck the same way the original bug did, just
-// triggered by a bare terminal Ctrl-C instead of a rejected envelope.
+// THE ORACLE FOR "did it actually run" IS NOT "is the marker text in the
+// pty output" (nocx-xn63t.6.1, CI run 35171283722, ci-backend
+// with-secret-service): a terminal ECHOES the bytes it is handed as they
+// are typed, whether or not the line is ever executed, so `echo RACEMARKi`
+// leaves "RACEMARKi" in the output even on an iteration the shell
+// discarded outright — that run's own accepted list was hello,
+// prompt_ready, prompt_ready, with NO start ever, which is the reachable
+// case working exactly as designed; the failure was the test's, not the
+// product's. The oracle instead has to be a value the LINE AS TYPED does
+// not contain and only bash's own evaluation produces: arithmetic
+// expansion. The typed line carries the literal text `$((1+1))`, which a
+// terminal echoes back unevaluated; only an actual execution turns it into
+// `2`, so the output contains the marker's EVALUATED form if and only if
+// the command really ran.
 func TestInterruptRightAfterEnterNeverStartsWithoutASecondPromptReady(t *testing.T) {
 	s := startChannelShell(t, "bash", "nocx.bash", bashScript)
 	defer s.close()
@@ -34,12 +44,13 @@ func TestInterruptRightAfterEnterNeverStartsWithoutASecondPromptReady(t *testing
 	const iterations = 20
 	neverStarted := 0
 	for i := 0; i < iterations; i++ {
-		marker := fmt.Sprintf("RACEMARK%03d", i)
+		typedMarker := fmt.Sprintf("RACE$((1+1))MARK%03d", i) // echoed verbatim, never run
+		ranMarker := fmt.Sprintf("RACE2MARK%03d", i)          // present only if bash evaluated it
 		startsBefore := s.kernel.count("start")
 		promptBefore := s.kernel.count("prompt_ready")
 		outBefore := len(s.output())
 
-		if _, err := s.ptmx.Write([]byte("echo " + marker + "\n")); err != nil {
+		if _, err := s.ptmx.Write([]byte("echo " + typedMarker + "\n")); err != nil {
 			t.Fatalf("iter %d: write command: %v", i, err)
 		}
 		// No synchronization here on purpose — this IS the race: the
@@ -82,13 +93,18 @@ func TestInterruptRightAfterEnterNeverStartsWithoutASecondPromptReady(t *testing
 		}
 
 		startsAfter := s.kernel.count("start")
-		markerSeen := strings.Contains(s.output()[outBefore:], marker)
+		ranForReal := strings.Contains(s.output()[outBefore:], ranMarker)
 		started := startsAfter > startsBefore
-		t.Logf("iter %02d: started=%v marker_in_output=%v", i, started, markerSeen)
+		t.Logf("iter %02d: started=%v ran_for_real=%v", i, started, ranForReal)
 
-		if started != markerSeen {
-			t.Fatalf("iter %d: kernel's start (%v) and the pty's own output (%v) disagree about whether %q ran — accepted=%v",
-				i, started, markerSeen, marker, s.kernel.events())
+		// THE INVARIANT, true for either side of the race: the kernel's own
+		// record of whether a command started must agree with whether bash
+		// actually evaluated it — never "it always starts" or "it never
+		// starts", either of which would make this test as timing-dependent
+		// as the race it is watching.
+		if started != ranForReal {
+			t.Fatalf("iter %d: kernel's start (%v) and bash's own evaluation (%v) disagree about whether %q ran — accepted=%v output_tail=%q",
+				i, started, ranForReal, typedMarker, s.kernel.events(), s.output()[outBefore:])
 		}
 		if !started {
 			neverStarted++
@@ -104,9 +120,15 @@ func TestInterruptRightAfterEnterNeverStartsWithoutASecondPromptReady(t *testing
 		time.Sleep(50 * time.Millisecond)
 	}
 
+	// Informational only, deliberately not asserted: WHICH side of the race
+	// each iteration lands on is exactly the timing this test must not
+	// depend on — a fixed expectation here ("must reproduce N times") would
+	// make the test as environment-sensitive as the race it watches. The
+	// invariant above (checked every iteration, unconditionally) is the
+	// whole test; this line is for a human reading -v output. Measured
+	// directly on this machine: 40/40, then 20/20, iterations produced no
+	// start — evidence the race is reachable here, not a floor this test
+	// enforces elsewhere.
 	t.Logf("SUMMARY: %d/%d iterations produced a prompt_ready with no start for that command",
 		neverStarted, iterations)
-	if neverStarted == 0 {
-		t.Fatalf("the race never reproduced in %d iterations — either it genuinely is not reachable here (re-check the invariant this guards), or this harness stopped racing it; neverStarted must be > 0 for the assertion below to mean anything", iterations)
-	}
 }

@@ -179,6 +179,12 @@ type PooledConn struct {
 	// ArmKeepalive, cache hit or miss, and the connection's own Once decides
 	// whose settings win (nocx-y6fh7 item 6).
 	arm func(interval time.Duration, countMax int, observe LivenessObserver)
+	// newSession is newSession on the pooledSSHConn this handle borrows: the
+	// session-open act with the far side's release of the previous session
+	// awaited first. Nil for a connection dialed outside the pool (DialAuth),
+	// which is exclusive to its one caller and holds no second caller's
+	// session history — see PooledConn.NewSession.
+	newSession func() (*gossh.Session, error)
 }
 
 // ArmKeepalive starts this connection's prober if nothing has already,
@@ -236,6 +242,34 @@ func (p *PooledConn) Fingerprint() string {
 
 // Client is the underlying connection.
 func (p *PooledConn) Client() *gossh.Client { return p.client }
+
+// NewSession opens a session channel on this connection, re-asking once when
+// the far side refuses the request because it is still holding the session this
+// connection carried a moment ago.
+//
+// It is the ONLY place this repository opens a session on a connection more
+// than one caller can reach, because the far side's rule is a property of the
+// connection rather than of the caller: a host bounds the sessions it grants
+// one connection (OpenSSH's MaxSessions, a subsystem included), it releases a
+// session the client has just closed only on a later pass of its own event
+// loop, and the next request in the same wake-up is refused — which reaches a
+// person as `connect failed (open failed)`. A pool that hands out one
+// connection to several callers therefore owns the sequencing, and newSession's
+// own comment carries the measurements and why a re-ask gated on the refusal,
+// rather than a wait before every session, is what closes it without taxing the
+// ordinary case.
+//
+// A connection dialed OUTSIDE the pool (DialAuth) is exclusive to its one
+// caller, so it opens its session directly and keeps that behaviour.
+func (p *PooledConn) NewSession() (*gossh.Session, error) {
+	if p == nil || p.client == nil {
+		return nil, errors.New("ssh: pooled connection: no client")
+	}
+	if p.newSession != nil {
+		return p.newSession()
+	}
+	return p.client.NewSession()
+}
 
 // Close releases this reference. The connection stays open for every other
 // reference; it closes when the last one goes. Idempotent.
@@ -546,5 +580,8 @@ func (rc *RealClient) borrowPooled(handle *poolHandle) (*PooledConn, error) {
 			return ""
 		},
 		arm: client.armKeepalive,
+		// The session-open act, so every caller that opens one goes through
+		// the connection's own record of what it has already carried.
+		newSession: client.newSession,
 	}, nil
 }

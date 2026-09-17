@@ -176,7 +176,7 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 		}
 	}
 
-	ch, err := rc.openShell(ctx, acq.client, acq.resolved, acq.cfg, publishTarget{host: host, opts: opts}, func() { rc.dial.pool.Release(acq.handle) }, lc, acq.pconn.fingerprint)
+	ch, err := rc.openShell(ctx, acq.pconn, acq.resolved, acq.cfg, publishTarget{host: host, opts: opts}, func() { rc.dial.pool.Release(acq.handle) }, lc, acq.pconn.fingerprint)
 	if err != nil {
 		// Failed to open the shell — release our reference so the
 		// connection can close if we were the only tab. Without this the
@@ -440,8 +440,8 @@ func (rc *RealClient) publishBundle(ctx context.Context, pub publishTarget, reso
 // not been sent, the frames have not started, nothing has been minted. What
 // happens between these two statements is one round trip for a channel and its
 // pty, and the publish runs beside the loader on a connection of its own.
-func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, pub publishTarget, releaseRef func(), lc *lifecycleHandle, hostKeyFingerprint string) (*RealChannel, error) {
-	sess, err := rc.openSessionWithPTY(gclient, resolved, cfg)
+func (rc *RealClient) openShell(ctx context.Context, pconn *pooledSSHConn, resolved *resolvedConfig, cfg *ConnectConfig, pub publishTarget, releaseRef func(), lc *lifecycleHandle, hostKeyFingerprint string) (*RealChannel, error) {
+	sess, err := rc.openSessionWithPTY(pconn, resolved, cfg)
 	if err != nil {
 		lc.close()
 		return nil, err
@@ -473,7 +473,7 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 			// OBSERVED rather than assumed — a shell on the same channel,
 			// and a replacement session channel on the same connection if
 			// that channel is gone. Neither costs a second authentication.
-			recovered, rerr := rc.recoverFromRefusedExec(gclient, resolved, cfg, session, startErr)
+			recovered, rerr := rc.recoverFromRefusedExec(pconn, resolved, cfg, session, startErr)
 			if rerr != nil {
 				lc.close()
 				_ = session.Close()
@@ -649,8 +649,20 @@ type ptySession struct {
 // exec request leaves the CONNECTION intact, and a replacement channel on it
 // reaches a prompt at the cost of a second session and no second
 // authentication.
-func (rc *RealClient) openSessionWithPTY(gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig) (ptySession, error) {
-	session, err := gclient.NewSession()
+//
+// # The session is opened through the CONNECTION, not through its client
+//
+// pconn.newSession rather than gclient.NewSession, and the difference is not
+// cosmetic: this connection is shared (AD-4), so the channel it is about to ask
+// for may not be the first one it has carried, and a far side that bounds the
+// sessions it grants one connection refuses the second when the first has not
+// been released yet (nocx-xn63t.4.10 — measured on the live-sshd fixture, and
+// the reason the ordering this function's caller relies on was bought in the
+// first place). internal/ssh's pool owns that rule for every session this
+// repository opens on a pooled connection, so no caller may spell it a second
+// time and get it wrong.
+func (rc *RealClient) openSessionWithPTY(pconn *pooledSSHConn, resolved *resolvedConfig, cfg *ConnectConfig) (ptySession, error) {
+	session, err := pconn.newSession()
 	if err != nil {
 		return ptySession{}, fmt.Errorf("new session: %w", err)
 	}
@@ -707,7 +719,7 @@ func (rc *RealClient) openSessionWithPTY(gclient *gossh.Client, resolved *resolv
 // second through; asking the channel whether it still works answers the same
 // question at the seam an implementer actually holds, and it never reads an
 // error's text.
-func (rc *RealClient) recoverFromRefusedExec(gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, refused *gossh.Session, startErr error) (ptySession, error) {
+func (rc *RealClient) recoverFromRefusedExec(pconn *pooledSSHConn, resolved *resolvedConfig, cfg *ConnectConfig, refused *gossh.Session, startErr error) (ptySession, error) {
 	rc.log.Warn("ssh: the server refused the exec request; recovering to a native prompt without a second authentication",
 		"host", resolved.hostName, "error", startErr)
 
@@ -728,7 +740,7 @@ func (rc *RealClient) recoverFromRefusedExec(gclient *gossh.Client, resolved *re
 	// of the recovery — never a new connection, never a second
 	// authentication.
 	_ = refused.Close()
-	replacement, err := rc.openSessionWithPTY(gclient, resolved, cfg)
+	replacement, err := rc.openSessionWithPTY(pconn, resolved, cfg)
 	if err != nil {
 		return ptySession{}, fmt.Errorf("shell start: %s: the exec request was refused and no replacement session channel could be opened on the same connection: %w",
 			ReasonExecRefused, err)

@@ -168,10 +168,44 @@ type fixture struct {
 	// channel that dies rather than one that exits.
 	noExit         bool
 	refuseSessions bool
+	// refuseNext is how many of the NEXT session channel opens this host turns
+	// away before serving them again: the release race, produced on demand and
+	// with no timing in it (see refuseNextSessionOpens).
+	refuseNext int
+	// events is what this host OBSERVED, in the order it observed it: one
+	// entry per session request that reached a channel ("exec", "subsystem:…")
+	// and per global request ("global:<type>"). It is one log rather than
+	// three lists because the question a caller asks of it — nocx-xn63t.4.10 —
+	// is an ORDER: whether the request that makes the far side release its
+	// previous session arrived between one session and the next.
+	events []string
 	// dials counts how many connections this host accepted. The probes run on a
 	// POOLED connection, so the number is what says whether a lease kept one or
 	// whether every probe paid for its own handshake.
 	dials int
+}
+
+// observed is every event this host saw, in order.
+func (f *fixture) observed() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.events...)
+}
+
+// note records one event for observed.
+func (f *fixture) note(event string) {
+	f.mu.Lock()
+	f.noteLocked(event)
+	f.mu.Unlock()
+}
+
+// noteLocked is note for a caller that already holds f.mu. It exists because an
+// event and the list it belongs beside must be appended under ONE acquisition:
+// a record that unlocks between the two lets a global request land in the gap,
+// and the order this fixture's log exists to witness is then not the order it
+// reports.
+func (f *fixture) noteLocked(event string) {
+	f.events = append(f.events, event)
 }
 
 // connections is how many times this host was dialed.
@@ -199,10 +233,25 @@ func (f *fixture) setExecHandler(h func(cmd string) (stdout, stderr string, exit
 }
 
 // setSessionRefusal makes this host serve no session channel, which is how
-// OpenSSH answers at MaxSessions 1 with the user's own shell holding it.
+// OpenSSH answers at MaxSessions 1 with the user's own shell holding it. It
+// refuses with `resource shortage`, the spelling internal/helper/sshsvc's own
+// classifier maps to the session-refused refusal.
 func (f *fixture) setSessionRefusal(refuse bool) {
 	f.mu.Lock()
 	f.refuseSessions = refuse
+	f.mu.Unlock()
+}
+
+// refuseNextSessionOpens makes this host refuse the next n session channel
+// opens and then serve them again, with the spelling OpenSSH was MEASURED to
+// use when it is still holding a session the client has just closed:
+// `connect failed (open failed)` — reason ConnectionFailed, which is also what
+// it sends for a session somebody else genuinely holds (nocx-xn63t.4.10, the
+// probe recorded in that bead). It is the release race, produced on demand and
+// with no timing in it.
+func (f *fixture) refuseNextSessionOpens(n int) {
+	f.mu.Lock()
+	f.refuseNext = n
 	f.mu.Unlock()
 }
 
@@ -306,9 +355,25 @@ func (f *fixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 	go f.serveGlobalRequests(sconn, reqs)
 	for newChan := range chans {
 		f.mu.Lock()
-		refuse := f.refuseSessions
+		refuse, releaseRace := f.refuseSessions, false
+		if !refuse && f.refuseNext > 0 {
+			f.refuseNext--
+			refuse, releaseRace = true, true
+		}
 		f.mu.Unlock()
 		if refuse {
+			f.note("session-refused")
+			// Two spellings, both measured on a real sshd: the release race,
+			// which OpenSSH answers `connect failed (open failed)` (reason
+			// ConnectionFailed), and the policy case of a session the host
+			// will not grant — `resource shortage`, the spelling
+			// probeops.go's classifier already maps to its own refusal. A
+			// client sees a refused session either way, which is what makes
+			// the re-ask the right answer for both.
+			if releaseRace {
+				_ = newChan.Reject(gossh.ConnectionFailed, "open failed")
+				continue
+			}
 			_ = newChan.Reject(gossh.ResourceShortage, "too many sessions")
 			continue
 		}
@@ -335,6 +400,7 @@ func (f *fixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 // gossh's Unmarshal cannot set an external struct's unexported fields.
 func (f *fixture) serveGlobalRequests(sconn *gossh.ServerConn, reqs <-chan *gossh.Request) {
 	for req := range reqs {
+		f.note("global:" + req.Type)
 		switch req.Type {
 		case "tcpip-forward":
 			f.handleForward(sconn, req)
@@ -558,6 +624,7 @@ func (f *fixture) serveChannel(ch gossh.Channel, reqs <-chan *gossh.Request) {
 		// would refuse every lane with "not a subsystem" — which is how this
 		// branch was written the first time.
 		if req.Type == "exec" {
+			f.note("exec")
 			f.serveExec(ch, req)
 			return
 		}
@@ -584,8 +651,14 @@ func (f *fixture) serveChannel(ch gossh.Channel, reqs <-chan *gossh.Request) {
 		// of 300 repetitions under load, with the open already answered and an
 		// empty list beside it. Written first, the reply carries the record
 		// with it: whoever saw the answer saw the append.
+		//
+		// Both records go under ONE acquisition of the mutex, because the
+		// event log is what witnesses the ORDER of what this host observed
+		// (session_release_test.go) and a global request landing between the
+		// two appends would be recorded in a gap that does not exist.
 		f.mu.Lock()
 		f.subsystems = append(f.subsystems, payload.Name)
+		f.noteLocked("subsystem:" + payload.Name)
 		f.mu.Unlock()
 		if req.WantReply {
 			_ = req.Reply(true, nil)

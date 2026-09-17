@@ -860,6 +860,81 @@ func TestPromptReadyOverOpenAttemptRejected(t *testing.T) {
 	}
 }
 
+// TestPromptReadyOverUnstartedAttemptIsAcceptedAndAttemptSurvives reproduces
+// the reversed envelope order from CI runs 35143163428 / 35163055392
+// (nocx-xn63t.6.1): hello, submit, prompt_ready, start, in that order — the
+// shell's PROMPT_COMMAND emits prompt_ready a few milliseconds before its
+// own DEBUG trap emits `start` for the very command SubmitAttempt just
+// opened.
+//
+// Before the fix this hit ErrPromptOverAttempt (the exact string both CI
+// runs logged), rejecting the envelope outright.
+//
+// The fix: prompt_ready over an open-but-not-started attempt is accepted,
+// not rejected, but it is NOT treated as that attempt's closing event
+// either — an earlier version of this fix closed it (AttemptUnknown) and
+// that broke a different thing: the next start no longer had an open
+// attempt to attach to, so it minted a brand-new shell-originated attempt
+// with no SubmitID, and the renderer's row — bound to the ORIGINAL
+// submitted attempt's id — never saw the real command's completion. The
+// container e2e run kept failing on exactly that seam, differently.
+// Reproduced here: the attempt must still exist, unchanged, after the
+// stray prompt_ready, and the real start that follows must attach to that
+// SAME attempt (Origin, Command and SubmitID intact) rather than mint a
+// new, uncorrelated one.
+func TestPromptReadyOverUnstartedAttemptIsAcceptedAndAttemptSurvives(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	h := establish(t, k, "T", p, "L", nil)
+
+	att, err := k.SubmitAttempt(h.Domain, "sleep 30", "/", "local", "submit-1")
+	if err != nil {
+		t.Fatalf("SubmitAttempt: %v", err)
+	}
+	if att.Started {
+		t.Fatalf("a submitted attempt must not start itself")
+	}
+
+	// The shell's own end-of-cycle marker races ahead of the DEBUG trap
+	// that is about to send `start` for the very command just submitted.
+	mustIngest(t, k, "T", env("L", h, 2, promptReadyEvt()))
+
+	stillOpen, ok := k.Attempt(att.ID)
+	if !ok {
+		t.Fatalf("the submitted attempt must still exist")
+	}
+	if stillOpen.State != AttemptOpen || stillOpen.Started {
+		t.Fatalf("a stray prompt_ready must not touch the pending attempt, got %+v", stillOpen)
+	}
+	st := mustState(t, k, "L")
+	if st.Lifecycle != LifecycleRunning {
+		t.Fatalf("lane must stay Running — SubmitAttempt already promised a start is coming, got %v", st.Lifecycle)
+	}
+
+	// The genuine, slightly-later start for the same command must attach to
+	// THIS attempt, preserving the id the renderer's row is keyed on.
+	mustIngest(t, k, "T", env("L", h, 3, startEvt(nil, "sleep 30")))
+	started, ok := k.Attempt(att.ID)
+	if !ok || !started.Started {
+		t.Fatalf("the real start must attach to the submitted attempt, got %+v ok=%v", started, ok)
+	}
+	if started.Origin != OriginApp || started.Command != "sleep 30" || started.SubmitID != "submit-1" {
+		t.Fatalf("the attempt's app-owned identity must survive the race, got %+v", started)
+	}
+	if open, ok := k.OpenAttempt(h.Domain); !ok || open.ID != att.ID {
+		t.Fatalf("there must be exactly one open attempt, and it is the submitted one, got %+v ok=%v", open, ok)
+	}
+
+	// Completion still closes it normally, same as any other run.
+	mustIngest(t, k, "T", env("L", h, 4, completeEvt(att.ID, 130, fence(0x01))))
+	mustIngest(t, k, "T", env("L", h, 5, promptReadyEvt()))
+	done, _ := k.Attempt(att.ID)
+	if done.State != AttemptCompleted || done.ExitCode == nil || *done.ExitCode != 130 {
+		t.Fatalf("the attempt must complete normally afterward, got %+v", done)
+	}
+}
+
 func TestCompleteValidation(t *testing.T) {
 	k, _, _ := newTestKernel()
 	p := &fakePort{}

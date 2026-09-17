@@ -716,7 +716,45 @@ func (k *Kernel) applyPromptReady(d *Domain, ls *laneState, env Envelope) ([]Out
 		return nil, err
 	}
 	if open := k.openAttemptFor(d.ID); open != nil {
-		return nil, ErrPromptOverAttempt
+		if open.Started {
+			return nil, ErrPromptOverAttempt // a program is running; the shell is lying about its prompt
+		}
+		// Open but never Started: SubmitAttempt opened this before the bytes
+		// that could start it were even written (decision 5), and this
+		// prompt_ready is racing ahead of the shell's own start for the SAME
+		// command — the DEBUG trap that sends `start` fires a handful of
+		// milliseconds after PROMPT_COMMAND's own prompt_ready in the
+		// observed traces (nocx-xn63t.6.1: CI runs 35143163428 and
+		// 35163055392, ~7-10ms apart both before and after this fix),
+		// consistent with a foreground SIGINT landing between the shell's
+		// read of the line and the trap firing for it — never with the
+		// command being abandoned: nothing on the signal path writes a byte
+		// or a kill(2) into this pty while the attempt is open-but-not-
+		// started (ws_signal.go's protectedForeground.Attempt() refuses
+		// exactly that case, and TIOCGPGRP still names the shell's own
+		// group), so there is nothing to flush the queued command out of
+		// the tty and every observed instance is followed by a genuine
+		// start for the same text.
+		//
+		// So this prompt_ready is accepted, not rejected — REJECTING it is
+		// the defect (ErrPromptOverAttempt, the exact string both runs
+		// logged) — but it is also not this attempt's closing event: it is
+		// a stale marker for a cycle that has not produced its start yet.
+		// The attempt is left exactly as SubmitAttempt made it (open,
+		// unstarted, its command/SubmitID/id untouched) and the lane's
+		// lifecycle is left where SubmitAttempt already put it (Running):
+		// the imminent start from applyStart's `open != nil && !open.Started`
+		// arm then attaches to THIS SAME attempt, preserving the SubmitID
+		// and ledger binding the renderer's row is keyed on. Closing the
+		// attempt here instead (an earlier version of this fix did, marking
+		// it AttemptUnknown) made the domain's own bookkeeping consistent
+		// but broke exactly that binding: the next start no longer had an
+		// open attempt to attach to, so it minted a brand-new
+		// shell-originated one with no SubmitID, and the row the renderer
+		// was watching never received the real command's completion —
+		// caught by e2e/terminal-screen-register-mockup-pass.spec.ts:110
+		// still failing, differently, against the fix that closed it.
+		return nil, nil
 	}
 	k.setLifecycle(ls, LifecyclePromptReady, d.ID, "")
 	return nil, nil

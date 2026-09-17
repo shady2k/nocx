@@ -450,3 +450,55 @@ func TestTheSettleWindowIsTheOneTheRecordWasBuiltWith(t *testing.T) {
 		t.Fatalf("the named window produced %d messages, want 1", len(got))
 	}
 }
+
+// A report and a state are different facts, and neither suppresses the other
+// (design §4.3): a worker that says `done` and then settles idle has done two
+// things, and a coordinator is told both, in the order they happened.
+//
+// The case this guards is not hypothetical — an interactive worker's whole
+// shape is "finish the turn, speak, sit at the prompt" — and a design that had
+// the report mark the worker as already-reported would make the idle invisible
+// at exactly the moment the coordinator is waiting for it.
+func TestAReportDoesNotSuppressTheIdleThatFollowsIt(t *testing.T) {
+	const window = 3 * time.Second
+	s := newObservedStand(t, window)
+	p := mustRegister(t, s.harness)
+
+	// The worker was working, then reported, then settled idle.
+	s.mustReading(t, p, ObservedWorking)
+	if _, err := s.reg.Declared(s.ctx, p.ID, p.Liveness,
+		Declaration{OK: true, Summary: "read AGENTS.md", At: s.clock.now()}); err != nil {
+		t.Fatalf("declare: %v", err)
+	}
+	// A report is not a fact about the record's observed state, and the pane is
+	// still WORKING as far as anything here has been told.
+	s.mustReading(t, p, ObservedWorking)
+	s.mustReading(t, p, ObservedIdle)
+	s.clock.advance(window)
+	s.mustReading(t, p, ObservedIdle)
+
+	got := s.mailbox(t)
+	if len(got) != 1 {
+		t.Fatalf("the coordinator has %d messages, want exactly the one idle observation: %+v", len(got), got)
+	}
+	if got[0].Observed == nil || got[0].Observed.State != ObservedIdle {
+		t.Fatalf("the message is not the idle observation: %+v", got[0])
+	}
+	if got[0].Observed.Worker != p.ID {
+		t.Fatalf("the observation names %q, want the worker that settled", got[0].Observed.Worker)
+	}
+	// And the record still holds the declaration: the two facts travel
+	// separately and neither is the other's precondition.
+	after, ok := s.store.read(t, p.ID)
+	if !ok {
+		t.Fatalf("the participant vanished")
+	}
+	if after.Declared == nil || !after.Declared.OK {
+		t.Fatalf("the declaration did not reach the record: %+v", after)
+	}
+	// It is NOT terminal: the agent said it finished and its process is still
+	// there, so it may be given more work (reduce's own reading).
+	if after.State.Terminal() {
+		t.Fatalf("a declaration with no exit terminalized the record: %q", after.State)
+	}
+}

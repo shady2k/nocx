@@ -155,6 +155,82 @@ type tabAnnouncer interface {
 	AnnounceWorkerTab(tab content.Tab, pane content.Pane, sess session.Session)
 }
 
+// tabClosedAnnouncer is the closer's narrow view of the same push
+// (nocx-xn63t.4.6): tell every connected client a participant's tab has left
+// the window. It is a second interface rather than a method on tabAnnouncer
+// for the reason every seam in this file is two: the spawner has no business
+// taking a tab away and the closer has none putting one in, and a single
+// wider seam would let either reach the other's half by accident. Nil is the
+// same absence tabAnnouncer's own doc describes — production always wires the
+// real one.
+type tabClosedAnnouncer interface {
+	AnnounceWorkerTabClosed(tabID string)
+}
+
+// tabRemover is the closer's narrow view of the layout chain (AD-8): take one
+// tab out of the window. DeleteTab is paneMinter's method too, and that is
+// deliberate rather than a duplicate — the create half of paneMinter
+// (CreateTabAfter, PaneCwd, TabForPane) is a spawn's vocabulary and none of it
+// means anything to a close, so the closer is given the one verb it uses.
+// Nil is the absence case: a closer nobody wired a chain into cannot take a
+// tab out of one, and says so in its own log rather than panicking.
+type tabRemover interface {
+	DeleteTab(ctx context.Context, id string, next content.Replacement) error
+}
+
+// workerTabs is WHICH TAB each participant's pane was minted in — the one
+// pairing nothing else in this process holds.
+//
+// WHY IT EXISTS AT ALL (nocx-xn63t.4.6). A close has to name the tab it is
+// taking out of the window, and after the participant ends there is no walk
+// left to take to it: the session is the only thing that ever led from a
+// participant to its pane (session → pane → tab, the walk Spawn performs
+// through coordinatorPane), and a worker's session is REMOVED from the
+// registry the moment it exits (WSServer.monitorExit calls EndSession, and a
+// finished worker — the case the close is for — is exactly a session that is
+// already gone). The pane row carries no participant and the tab row carries
+// no session, so the pairing is minted where both halves meet and nowhere
+// else: workers.go's Spawn.
+//
+// IT IS WRITTEN ONCE BY THE SPAWNER AND READ BY THE CLOSER, and the closer
+// forgets it only once the tab is actually out of the window — the same
+// discipline the enrolments rendezvous beside it follows: one writer, one
+// reader, and the entry's lifetime the lifetime of the thing it names.
+type workerTabs struct {
+	mu   sync.Mutex
+	seat map[workers.ParticipantID]string
+}
+
+func newWorkerTabs() *workerTabs {
+	return &workerTabs{seat: make(map[workers.ParticipantID]string)}
+}
+
+// record remembers which tab a participant's pane was minted in.
+func (t *workerTabs) record(p workers.ParticipantID, tabID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.seat[p] = tabID
+}
+
+// forget drops the record of a participant whose tab is already gone — the
+// undo of a spawn, which deleted the tab it had just minted.
+func (t *workerTabs) forget(p workers.ParticipantID) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.seat, p)
+}
+
+// lookup answers which tab is this participant's, WITHOUT forgetting it. The
+// close that asks has not yet taken the row out of the window, and a record
+// dropped before the write it names had been attempted would leave a tab
+// nothing in this backend could name on the retry a failed close invites.
+func (t *workerTabs) lookup(p workers.ParticipantID) (string, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	tabID, ok := t.seat[p]
+	return tabID, ok
+}
+
 // participantGeometry is the size a participant's pane opens at.
 //
 // It is a constant and not a setting because nobody is looking at this pane
@@ -204,7 +280,14 @@ type workerSpawner struct {
 	// committed to succeeding (nocx-ui8q6.3). Nil is the absence case
 	// tabAnnouncer's own doc names.
 	announce tabAnnouncer
-	log      log.Logger
+	// tabs is the record of WHICH TAB each participant's pane was minted in,
+	// written here because this is where both halves of that pairing exist
+	// (nocx-xn63t.4.6). The same record is read by the closer — one owner of
+	// the pairing, two ends. Nil is the absence case workerTabs' own doc
+	// describes: a spawner nobody wired a record into mints tabs a close
+	// cannot find, which is what every stand that never closes a worker means.
+	tabs *workerTabs
+	log  log.Logger
 }
 
 // paneReadiness is the spawner's narrow view of the pane-observation watcher
@@ -411,6 +494,13 @@ type spawnedParticipant struct {
 	// itself was given — one owner of "undo a spawn's tab" rather than two,
 	// which is why compensateSpawn below no longer calls DeleteTab itself.
 	layout paneMinter
+	// participant is WHO the tab and session were minted for, and tabs is the
+	// record Spawn put the tab in. Kill is the undo of a spawn, and a record
+	// that outlived its own undo would go on naming a tab that is already out
+	// of the window — one stale entry per compensated spawn, waiting for a
+	// close that will never come.
+	participant workers.ParticipantID
+	tabs        *workerTabs
 	// delivery is what became of the task (nocx-f545a.3), set by Spawn and
 	// read once by the registration through workers.TaskDeliverer.
 	delivery workers.TaskDelivery
@@ -490,9 +580,16 @@ func (s spawnedParticipant) Kill(ctx context.Context) error {
 		// did.
 	}
 	if s.tabID != "" && s.layout != nil {
-		if delErr := s.layout.DeleteTab(ctx, s.tabID, killReplacement()); delErr != nil {
+		if delErr := s.layout.DeleteTab(ctx, s.tabID, closeReplacement()); delErr != nil {
 			errs = append(errs, fmt.Errorf("delete tab: %w", delErr))
 		}
+	}
+	// AND THE RECORD OF WHERE THAT TAB WAS, unconditionally: whatever became
+	// of the delete above, this backend no longer holds a tab for this
+	// participant — a spawn being undone is one nothing will ever close, so an
+	// entry left behind here is one the closer could only ever read twice.
+	if s.tabs != nil {
+		s.tabs.forget(s.participant)
 	}
 	return errors.Join(errs...)
 }
@@ -521,20 +618,27 @@ func killContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(parent), killTimeout)
 }
 
-// killReplacement mints the identity content.Replacement wants in hand for
-// the case where the tab Kill is deleting turns out to be the last one left
-// in the whole window.
+// closeReplacement mints the identity content.Replacement wants in hand for
+// the case where a tab THIS BACKEND is closing turns out to be the last one
+// left in the whole window.
+//
+// Two callers, one answer: Kill's undo of a spawn, and a coordinator's
+// workers.close taking the participant's tab out of the window
+// (nocx-xn63t.4.6). Both are backend-initiated closes of a tab the person did
+// not ask to close, and neither has a renderer's replacement id to hand —
+// which is the only reason this exists rather than the caller minting its
+// own, the way every tabs.close on the wire does.
 //
 // content.Replacement's own doc names the pattern: "a caller that always
 // passes one is not asking for a tab it will not get" — mintReplacementIfEmpty
 // consults it ONLY when the delete would otherwise leave the window with no
-// tab anywhere, and ignores it on every other close. Kill cannot know in
-// advance which this is: the ordinary case is that it is not (the coordinator
-// that spawned this participant is running in a tab of its own, which the
-// delete leaves standing), but a compensation that assumed so and skipped the
-// replacement would fail with content's own ErrNoReplacement on the rare
-// window where it is wrong — and a failed DeleteTab here is not a warning
-// like the rest of Kill's failures are permitted to be: for the early
+// tab anywhere, and ignores it on every other close. Neither caller can know
+// in advance which this is: the ordinary case is that it is not (the
+// coordinator that spawned this participant is running in a tab of its own,
+// which the delete leaves standing), but a compensation that assumed so and
+// skipped the replacement would fail with content's own ErrNoReplacement on
+// the rare window where it is wrong — and a failed DeleteTab here is not a
+// warning like the rest of Kill's failures are permitted to be: for the early
 // failures compensateSpawn covers it is logged and swallowed, but for the
 // late ones Registrar.compensate reaches through Kill it is joined into the
 // registration's own error and the record is left NON-TERMINAL, exactly the
@@ -547,11 +651,11 @@ func killContext(parent context.Context) (context.Context, context.CancelFunc) {
 // case arise in a test.
 //
 // Minting can fail for the same reason Spawn's own minting can — an
-// exhausted or broken randomness source — and Kill must still make its best
-// effort rather than abandoning the whole undo over it: an empty Replacement
-// on that double failure costs nothing unless this tab really is the last
-// one AND minting failed, which is the same rare case squared.
-func killReplacement() content.Replacement {
+// exhausted or broken randomness source — and a caller must still make its
+// best effort rather than abandoning the whole close over it: an empty
+// Replacement on that double failure costs nothing unless this tab really is
+// the last one AND minting failed, which is the same rare case squared.
+func closeReplacement() content.Replacement {
 	tabID, tabErr := uuid.NewV7()
 	paneID, paneErr := uuid.NewV7()
 	if tabErr != nil || paneErr != nil {
@@ -638,6 +742,15 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	if tabErr != nil {
 		return nil, fmt.Errorf("worker spawn: minting the participant's tab: %w", tabErr)
 	}
+	// WHERE THE TAB IS, RECORDED THE MOMENT IT EXISTS (nocx-xn63t.4.6). The
+	// row is now in the window, so the pairing the close will need is now a
+	// fact — and every failure path from here on compensates through Kill,
+	// which forgets it again. Recording it later would leave the window
+	// between those two moments: a tab this backend cannot name, in the one
+	// interval where it is the most likely to be looked at.
+	if s.tabs != nil {
+		s.tabs.record(req.Participant, tabID.String())
+	}
 	lg.Debug("worker spawn: the participant's tab exists",
 		"tab_id", tabID.String(), "pane_id", paneID.String(), "workspace", s.workspace)
 
@@ -666,6 +779,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		"cols", participantCols, "rows", participantRows)
 	spawned := spawnedParticipant{
 		tabID: tabID.String(), sess: opened.Session, sessions: s.sessions, layout: s.layout,
+		participant: req.Participant, tabs: s.tabs,
 	}
 
 	// THE GATE. Nothing is written into the session's queue — and so the
@@ -943,7 +1057,10 @@ func (s *workerSpawner) compensateSpawn(ctx context.Context, participant workers
 		s.log.Warn("worker spawn: could not withdraw a failed spawn's enrolment",
 			"participant", string(participant), "error", err)
 	}
-	sp := spawnedParticipant{tabID: tabID, sess: sess, sessions: s.sessions, layout: s.layout}
+	sp := spawnedParticipant{
+		tabID: tabID, sess: sess, sessions: s.sessions, layout: s.layout,
+		participant: participant, tabs: s.tabs,
+	}
 	if err := sp.Kill(ctx); err != nil {
 		s.log.Warn("worker spawn: could not fully compensate a failed spawn",
 			"tab_id", tabID, "error", err)
@@ -1248,36 +1365,100 @@ func (r *workerReporter) Report(lane lifecycle.LaneID, ok bool, summary string) 
 	return nil
 }
 
-// workerCloser ends a participant by closing its session.
+// workerCloser ends a participant by closing its session, and gives back the
+// place it occupied.
 //
 // It is the composition root's because what a participant's process IS is a
-// session, and only this layer holds the registry. It writes nothing and
-// reports no verdict: closing the session produces a real process exit, which
-// the supervisor already watches and the record already reduces — so a close
-// adds no second author of a participant's state.
+// session, and only this layer holds the registry. Closing the session
+// produces a real process exit, which the supervisor already watches and the
+// record already reduces — so a close adds no second author of a
+// participant's state. The participant's PLACE is this layer's for the same
+// reason: a tab is a place in the window, the window is the app's, and only
+// the app holds the pairing between a participant and the seat its pane was
+// minted in (workerTabs).
 type workerCloser struct {
 	sessions sessionCloser
+	// layout takes the participant's tab out of the window. Nil is the
+	// absence case tabRemover's own doc names.
+	layout tabRemover
+	// tabs is the record Spawn wrote and this takes from: which tab is this
+	// participant's. Nil is the same absence.
+	tabs *workerTabs
+	// announce tells every connected renderer the tab has left, exactly as
+	// the spawn side's own announcer tells them one appeared. Nil is the
+	// absence case tabClosedAnnouncer's docs name.
+	announce tabClosedAnnouncer
 	log      log.Logger
 }
 
-func (c *workerCloser) Close(_ context.Context, p workers.Participant) error {
+func (c *workerCloser) Close(ctx context.Context, p workers.Participant) error {
 	sid := session.ID(p.Liveness.SessionID)
 	// Asked FIRST, because the registry's Close reports a missing session as
 	// an ordinary error and a session that is already gone is not a failure
 	// to end one: the supervisor has already reported that exit or is about
 	// to, and the record needs nothing from here. There is no sentinel to
 	// match on, and matching on the sentence would be worse than asking.
+	//
+	// A SESSION THAT IS GONE DOES NOT END THE CLOSE (nocx-xn63t.4.6): a
+	// finished worker — the ordinary case a coordinator closes — is exactly a
+	// session that has already left the registry (WSServer.monitorExit ends
+	// it when the process exits), and the participant's PLACE is still in the
+	// window. So this is a branch and no longer a return.
 	if _, err := c.sessions.Get(sid); err != nil {
 		c.log.Info("worker close: the participant's session was already gone",
 			"participant", string(p.ID), "session_id", string(sid))
-		return nil
-	}
-	// EndSession, not Close (nocx-isjh4): the same reasoning as Kill's —
-	// nobody will ever hold this participant's pane again.
-	if err := c.sessions.EndSession(sid); err != nil {
+	} else if err := c.sessions.EndSession(sid); err != nil {
+		// EndSession, not Close (nocx-isjh4): the same reasoning as Kill's —
+		// nobody will ever hold this participant's pane again.
 		return fmt.Errorf("worker close: %w", err)
 	}
-	c.log.Info("worker participant closed", "participant", string(p.ID), "session_id", string(sid))
+
+	// THE TAB, AFTER THE SESSION AND NEVER BEFORE IT (nocx-xn63t.4.6). The
+	// order is the whole of "a close must not race the participant's own end":
+	// ending the session is what produces the process exit the supervisor
+	// reports and the record reduces, so by this line everything about the
+	// participant's ending is either committed or has already returned above —
+	// and that refusal is why a failed session close leaves the tab standing
+	// rather than producing a second, quieter half-close.
+	//
+	// ABSENCE IS NOT A REFUSAL, as everywhere else in this file: a closer
+	// nobody wired a record or a chain into cannot take out a tab it cannot
+	// name, and says so rather than panicking on a seam a stand never needed.
+	if c.tabs == nil || c.layout == nil {
+		c.log.Debug("worker close: this backend holds no tab for the participant",
+			"participant", string(p.ID))
+		return nil
+	}
+	tabID, known := c.tabs.lookup(p.ID)
+	if !known {
+		// The person closed it themselves — their own Cmd-W is the same
+		// content.DeleteTab this would have called — or the spawn that minted
+		// it was compensated before it ever registered. Neither is a failure:
+		// the coordinator asked for a state that already holds.
+		c.log.Info("worker close: the participant's tab was already out of the window",
+			"participant", string(p.ID))
+		return nil
+	}
+	if err := c.layout.DeleteTab(ctx, tabID, closeReplacement()); err != nil {
+		// WHAT IS TRUE ON DISK when this returns, said in the error rather than
+		// left for the coordinator to discover: the participant's session is
+		// ENDED and its tab is STILL IN THE WINDOW — a tab with nothing behind
+		// it, which is the state the close exists to remove, so reporting
+		// success here would be the one lie this path must not tell. The record
+		// of which tab is whose is LEFT IN PLACE for exactly that reason: the
+		// retry a reported failure invites runs this same method again and
+		// completes the half that failed, instead of finding nothing to close
+		// and answering success over a tab that is still on the strip.
+		return fmt.Errorf(
+			"worker close: the participant's session is ended and its tab %q is still in the window: %w",
+			tabID, err)
+	}
+	c.tabs.forget(p.ID)
+	if c.announce != nil {
+		c.announce.AnnounceWorkerTabClosed(tabID)
+	}
+	c.log.Info("worker participant closed",
+		"participant", string(p.ID), "session_id", string(sid), "tab_id", tabID)
 	return nil
 }
 

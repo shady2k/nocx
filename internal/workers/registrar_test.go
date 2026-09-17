@@ -418,6 +418,16 @@ func (m *memStore) read(t *testing.T, id ParticipantID) (Participant, bool) {
 	return p, ok
 }
 
+// mailbox is what one box HOLDS, read without handing anything to anybody. A
+// test about "exactly one message was committed" must not fetch: a fetch
+// advances a cursor, and the arrangement would then be a second thing moving.
+func (m *memStore) mailbox(t *testing.T, box ReaderID) []Message {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]Message(nil), m.mail[box]...)
+}
+
 type fakeSpawned struct {
 	live   Liveness
 	killed *bool
@@ -573,8 +583,10 @@ func newHarness(t *testing.T) *harness { return newHarnessBound(t, 2) }
 
 // newHarnessBound is newHarness with the participant bound named, so a
 // fan-out test can hold more than one worker at a time without every other
-// test's bound moving with it.
-func newHarnessBound(t *testing.T, bound int) *harness {
+// test's bound moving with it. opts are applied to the Registrar AFTER the
+// harness's own wiring, so a test that is about one product value states that
+// value instead of asserting the default.
+func newHarnessBound(t *testing.T, bound int, opts ...Option) *harness {
 	t.Helper()
 	h := &harness{
 		store:  newMemStore(),
@@ -593,9 +605,11 @@ func newHarnessBound(t *testing.T, bound int) *harness {
 	// exported surface does not have to grow for them.
 	backstop.alarms = h.alarms
 	h.reg = NewRegistrar(h.store, h.spawn, h.enrol, h.sup,
-		WithBackstop(backstop),
-		WithBound(bound),
-		WithEnrolmentDeadline(50*time.Millisecond),
+		append([]Option{
+			WithBackstop(backstop),
+			WithBound(bound),
+			WithEnrolmentDeadline(50 * time.Millisecond),
+		}, opts...)...,
 	)
 	h.reg.newID = func() ParticipantID {
 		return ParticipantID(fmt.Sprintf("p-%d", h.store.count("commitprepared")+1))

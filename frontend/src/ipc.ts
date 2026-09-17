@@ -19,6 +19,7 @@ import { isDriverState, isPaneProgress, readPaneChildren } from './pane-observat
 import type { SessionSignal } from './generated/session.signal'
 import type { SecretsPaneClosed } from './generated/secrets.paneClosed'
 import type { WorkersTabCreated } from './generated/workers.tabCreated'
+import type { WorkersTabClosed } from './generated/workers.tabClosed'
 
 /** The open ack's wire shape (contracts/open.schema.json): the server
  *  assigns the session id (AD-7), and the resolved destination mode rides the
@@ -529,6 +530,12 @@ export class WSClient {
   // addressed to one session.
   private workerTabCreatedHandlers = new Set<(fact: WorkersTabCreated) => void>()
 
+  // workers.tabClosed subscribers (nocx-xn63t.4.6): a participant's tab has
+  // LEFT the shared layout chain, closed by workers.close. The created set's
+  // own shape for the created fact's own reason — a broadcast, and the window
+  // drawing the strip is not the caller that asked for the close.
+  private workerTabClosedHandlers = new Set<(fact: WorkersTabClosed) => void>()
+
   constructor(private readonly dispatcherImpl: Dispatcher) {
     // Wire binary frame handling and session reattach on every connect/reconnect.
     this.dispatcher.onConnect(() => {
@@ -813,6 +820,24 @@ export class WSClient {
       if (known !== null && raw.instanceId !== known) return
       const fact = raw as unknown as WorkersTabCreated
       for (const h of this.workerTabCreatedHandlers) h(fact)
+    })
+
+    // A participant's tab has LEFT the window (nocx-xn63t.4.6), closed by
+    // workers.close. The subscription, the audience and the staleness check
+    // are the created fact's own, read the other way: a broadcast rather than
+    // an answer to one session, and `_currentInstanceId` rather than a
+    // SessionState because this client may well have no session for the tab
+    // — a worker's session is one it never opened. An instanceId that
+    // disagrees with any session already held names a fact queued before a
+    // reconnect this client has since completed, and folding THAT in would
+    // take a tab out of a strip the backend behind this socket still holds.
+    this.dispatcher.subscribe('workers.tabClosed', (params: unknown) => {
+      if (!params || typeof params !== 'object') return
+      const raw = params as Record<string, unknown>
+      const known = this._currentInstanceId()
+      if (known !== null && raw.instanceId !== known) return
+      const fact = raw as unknown as WorkersTabClosed
+      for (const h of this.workerTabClosedHandlers) h(fact)
     })
 
     // The backend dropped input for a session: its write queue is full,
@@ -1302,6 +1327,15 @@ export class WSClient {
   onWorkerTabCreated(cb: (fact: WorkersTabCreated) => void): () => void {
     this.workerTabCreatedHandlers.add(cb)
     return () => this.workerTabCreatedHandlers.delete(cb)
+  }
+
+  /** Registers a callback for a worker participant's tab having LEFT the
+   *  layout chain (nocx-xn63t.4.6), closed on the backend by workers.close.
+   *  Returns an unsubscribe, exactly as the created fact's own registration
+   *  does — the two are one vocabulary about one tab, read at its two ends. */
+  onWorkerTabClosed(cb: (fact: WorkersTabClosed) => void): () => void {
+    this.workerTabClosedHandlers.add(cb)
+    return () => this.workerTabClosedHandlers.delete(cb)
   }
 
   // --- data plane ---------------------------------------------------------

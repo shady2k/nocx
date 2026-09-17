@@ -1,0 +1,24 @@
+/**
+ * GENERATED FILE — do not edit.
+ *
+ * Source: contracts/workers.tabClosed.schema.json
+ * Regenerate: cd frontend && npm run contracts
+ *
+ * Editing this file is editing the wrong end of the contract. If the renderer
+ * needs a field the wire does not carry, the schema is what has to change, and
+ * then the Go transport has to satisfy it.
+ */
+
+/**
+ * Params of the workers.tabClosed JSON-RPC notification (nocx-xn63t.4.6): a worker participant's tab has LEFT the layout chain, taken out of the window by workers.close. It is workers.tabCreated read the other way, for the same reason: workers.spawn mints a tab the renderer never asked for, workers.close removes one no request of the renderer's removed, and a connected window that is not told goes on drawing a tab whose pane has nothing behind it — the tab the owner was left looking at on 2026-09-17, with a disconnected-plug mark and 'The connection is gone' over it, until the window was reloaded. Broadcast to every connected client, exactly as workers.tabCreated is: the fact is about the shared layout chain rather than about one session's state, and a worker's own session has no subscriber that could be resolved as an audience (internal/transport/ws_worker_tabs.go's own reasoning, which this notification inherits rather than restates).
+ */
+export interface WorkersTabClosed {
+  /**
+   * The tab workers.close took out of the window, by the id workers.tabCreated announced. A renderer removes the tab row and the panes whose tabId is this one — panes are not enumerated here because the layout chain already says which panes a tab holds (a pane row names its tab), and a second list of them would be a second answer to that question, stale the first time a split arrived between the two.
+   */
+  tabId: string
+  /**
+   * The backend instance that closed the tab (AD-7, nocx-3oupk) — the same field workers.tabCreated and sessions.live carry, and the same check for the same reason: a connection speaks to exactly one instance for its whole life, so a renderer compares this against the instanceId of any session it already holds from this connection and drops the notification on a mismatch. That mismatch names a fact queued before a reconnect the renderer has since completed, and applying it would take a tab out of a strip the backend that is now behind this socket still holds.
+   */
+  instanceId: string
+}

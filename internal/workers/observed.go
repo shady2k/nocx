@@ -158,10 +158,26 @@ const observedSender ReaderID = "nocx"
 // exempts the state an exit alone leaves behind, because a late declaration
 // still refines it — reduce). Two admissions of one exit, one fact, one message.
 type settling struct {
-	state  ObservedState
-	since  time.Time
-	placed bool
-	told   bool
+	state ObservedState
+	since time.Time
+	// placed is "a fact for THIS HOLD has been written", and inFlight is "a
+	// writer holds the right to write it and has not finished".
+	//
+	// BOTH, and the pair is the whole of the rule: the decision to place a fact
+	// happens under this machine's lock and the write happens after it is
+	// released, so `placed` alone leaves a window a second reader can walk into
+	// and place the same fact twice. Reserving under the same lock closes it,
+	// and releasing on every failure is what keeps the reservation from
+	// suppressing a fact that was never written.
+	placed   bool
+	inFlight bool
+	// told is the exit's own, and it is separate from placed because the exit
+	// has no window: it is a fact the first time it is seen, and the RECORD
+	// legitimately admits the same exit more than once (admit's terminal guard
+	// exempts the state an exit alone leaves behind, because a late declaration
+	// still refines it — reduce). Two admissions of one exit, one fact, one
+	// message.
+	told bool
 }
 
 // observedFacts is the settle machine: what each worker was last read as, and
@@ -222,22 +238,30 @@ func (r *Registrar) Observe(ctx context.Context, id ParticipantID, l Liveness, s
 	}
 
 	now := r.now()
-	if !r.observations.held(id, state, now) {
-		return nil
-	}
 	if state == ObservedWorking {
 		// The machine has seen it and nothing crosses: working is the absence
-		// of news.
+		// of news. It is fed to the machine FIRST so the hold is reset — a pane
+		// that worked between two idles is idle news twice.
+		r.observations.held(id, state, now)
 		return nil
 	}
+	if !r.observations.claim(id, state, now) {
+		return nil
+	}
+	// From here a claim is HELD, and every way out must release it or settle
+	// it: a claim abandoned by a bare return would suppress this fact for as
+	// long as the hold lasts, which is a silent loss of the only evidence the
+	// coordinator would get.
 	coordinator, err := r.coordinatorOf(ctx, cur.Group)
 	if err != nil {
+		r.observations.release(id)
 		return err
 	}
 	if err := r.placeObservation(ctx, cur, coordinator, Observed{Worker: id, State: state, At: now}); err != nil {
+		r.observations.release(id)
 		return err
 	}
-	r.observations.markPlaced(id)
+	r.observations.settle(id)
 	return nil
 }
 
@@ -256,22 +280,31 @@ func (r *Registrar) Observe(ctx context.Context, id ParticipantID, l Liveness, s
 //
 // A mailbox that refuses the row is REPORTED and not returned: the record's own
 // fact has already landed, and turning a recorded exit into a failed one would
-// be the wrong half to lose. The loss is logged at Error, because no further
-// reading of a gone process will ever come.
+// be the wrong half to lose. The loss is logged at Error.
+//
+// The claim is RELEASED on a failure rather than held, which is the one place
+// the exit differs from a reading and it is not a detail: the record admits the
+// same exit again (that is why told exists), so a second call really can retry,
+// and a claim kept across a failed write would make the first transient routing
+// failure the permanent loss of the only notice that a worker died.
 func (r *Registrar) observeExit(ctx context.Context, p Participant) {
-	if !r.observations.firstExit(p.ID) {
+	if !r.observations.claimExit(p.ID) {
 		return
 	}
 	coordinator, err := r.coordinatorOf(ctx, p.Group)
 	if err != nil {
+		r.observations.release(p.ID)
 		r.logExitLoss(ctx, p.ID, err)
 		return
 	}
 	if err := r.placeObservation(ctx, p, coordinator, Observed{
 		Worker: p.ID, State: ObservedExited, At: r.now(),
 	}); err != nil {
+		r.observations.release(p.ID)
 		r.logExitLoss(ctx, p.ID, err)
+		return
 	}
+	r.observations.settleExit(p.ID)
 }
 
 // logExitLoss says out loud that a fact about a process reached nobody.
@@ -329,11 +362,29 @@ func (r *Registrar) placeObservation(ctx context.Context, p Participant, coordin
 // held advances the machine for one reading and reports whether the state has
 // now held for the window.
 //
+// It is the reading that DOES NOT place a fact — ObservedWorking — and it exists
+// separately from claim so that a working pane still resets the hold. A pane that
+// was idle, worked, and settles idle again is idle news TWICE (design §4.3), and
+// only the intervening turn reaching the machine lets it tell those two apart.
+//
 // The window is measured from the time the state was FIRST read, and a state is
 // never a fact from a single reading — even with a zero window it takes a second
 // reading of the same state, which is what "held" means and what keeps a
 // zero-window caller a user of this rule rather than an exception to it.
 func (f *observedFacts) held(id ParticipantID, state ObservedState, now time.Time) bool {
+	return f.claim(id, state, now)
+}
+
+// claim reserves the right to place one fact for this worker, and reports
+// whether the caller got it.
+//
+// THE RESERVATION IS THE POINT. The decision is taken under this lock and the
+// write happens after it is released, so a reader answered "yes" and then
+// overtaken by a second reader would place the same fact twice — and the two
+// would agree in every test that drove one writer. Setting inFlight here, and
+// clearing it in settle or release, makes the window one only the holder can be
+// in.
+func (f *observedFacts) claim(id ParticipantID, state ObservedState, now time.Time) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	held, ok := f.workers[id]
@@ -341,43 +392,65 @@ func (f *observedFacts) held(id ParticipantID, state ObservedState, now time.Tim
 		f.workers[id] = &settling{state: state, since: now}
 		return false
 	}
-	if held.placed || now.Sub(held.since) < f.window {
+	if held.placed || held.inFlight || now.Sub(held.since) < f.window {
 		return false
 	}
+	held.inFlight = true
 	return true
 }
 
-// markPlaced closes the current hold, so the next reading of the same state is
-// not a second fact. The caller has already passed held, so the entry exists.
-func (f *observedFacts) markPlaced(id ParticipantID) {
+// release gives back a claim whose write did not happen, so the next reading may
+// place the fact. Every failure path out of a claimed write calls this: a claim
+// kept across a failure suppresses the fact for the rest of the hold, and for a
+// lookup that failed once that is a silent loss.
+func (f *observedFacts) release(id ParticipantID) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if held, ok := f.workers[id]; ok {
+		held.inFlight = false
+	}
+}
+
+// settle records that the claimed fact was written, so the same hold is not
+// placed twice and the next reading of this state is not news.
+func (f *observedFacts) settle(id ParticipantID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if held, ok := f.workers[id]; ok {
+		held.inFlight = false
 		held.placed = true
 	}
 }
 
-// firstExit reports whether this participant's exit has not been told yet, and
-// records that it now has been.
+// claimExit reserves the exit's one message, which has no window: it is a fact
+// the first time it is seen.
 //
-// Called BEFORE the mailbox write so two concurrent reports of one exit cannot
-// both place a row. The consequence of a write that then fails is that the fact
-// is recorded as told without a row — the honest outcome for a process that is
-// gone: there is no next reading of it to retry with, and the alternative is a
-// coordinator told twice about one exit every time a coordinator's mailbox
-// refuses a row.
-func (f *observedFacts) firstExit(id ParticipantID) bool {
+// The claim and the release are what keep the two admissions of one exit (see
+// settling.told) from becoming two messages while leaving a failed write
+// retryable by the next one.
+func (f *observedFacts) claimExit(id ParticipantID) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	held, ok := f.workers[id]
 	if !ok {
-		f.workers[id] = &settling{state: ObservedExited, told: true}
+		f.workers[id] = &settling{state: ObservedExited, inFlight: true}
 		return true
 	}
-	if held.told {
+	if held.told || held.inFlight {
 		return false
 	}
 	held.state = ObservedExited
-	held.told = true
+	held.inFlight = true
 	return true
+}
+
+// settleExit records that the exit's one message was written. It is the caller's
+// success path; claimExit's holder calls release instead on any failure.
+func (f *observedFacts) settleExit(id ParticipantID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if held, ok := f.workers[id]; ok {
+		held.inFlight = false
+		held.told = true
+	}
 }

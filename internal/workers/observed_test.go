@@ -502,3 +502,120 @@ func TestAReportDoesNotSuppressTheIdleThatFollowsIt(t *testing.T) {
 		t.Fatalf("a declaration with no exit terminalized the record: %q", after.State)
 	}
 }
+
+// One settled state is one fact, even when two readings of it are in flight at
+// once.
+//
+// The window is the one between the decision to place a fact and the write that
+// places it, and it is real rather than theoretical: `held` answers under the
+// machine's lock and the write happens after the lock is released, so a second
+// reader arriving in between would be told the same thing and place a second
+// row. Production drives both readers from one sweep goroutine today, which is
+// exactly the kind of "true because of who calls it" that stops being true
+// silently — a second sweep, a second caller, and a coordinator is told twice
+// about one worker going idle.
+//
+// The second reading is started from INSIDE the first one's write (memStore's
+// duringCommit), so the interleaving is produced rather than hoped for: racing
+// two goroutines at this window is what the resolve/revoke trials failed to do
+// 50 runs in a row (nocx-xn63t.4.7).
+func TestTwoReadingsInFlightAtOncePlaceOneFact(t *testing.T) {
+	s := newObservedStand(t, 0)
+	p := mustRegister(t, s.harness)
+
+	// The hold is opened, so the next reading of the same state is a fact.
+	s.mustReading(t, p, ObservedIdle)
+
+	nested := 0
+	s.store.duringCommit = func() {
+		nested++
+		// The second reader arrives between the first one's claim and its
+		// write — the exact window.
+		if err := s.reg.Observe(s.ctx, p.ID, p.Liveness, ObservedIdle); err != nil {
+			t.Errorf("the second reading was refused: %v", err)
+		}
+	}
+	s.mustReading(t, p, ObservedIdle)
+
+	if nested != 1 {
+		t.Fatalf("the second reading never ran inside the window, so this test asserted nothing")
+	}
+	if got := s.mailbox(t); len(got) != 1 {
+		t.Fatalf("one settled state produced %d facts, want exactly 1: %+v", len(got), got)
+	}
+}
+
+// And a claim that fails is RELEASED rather than lost: the caller reads a
+// routing failure and the next reading of the same held state still lands.
+// A claim held across a failure would suppress the fact forever, which for a
+// lookup that failed once is a silent loss of the only evidence the coordinator
+// would get.
+func TestAFailedRoutingLeavesTheFactClaimableAndNotLost(t *testing.T) {
+	s := newObservedStand(t, 0)
+	p := mustRegister(t, s.harness)
+
+	// The first reading opens the hold, then the group's coordinator becomes
+	// unreadable for exactly the write that would have placed the fact.
+	s.mustReading(t, p, ObservedIdle)
+	s.store.setFault("coordinatorsession", 1)
+
+	err := s.reading(t, p, ObservedIdle)
+	if err == nil {
+		t.Fatalf("a routing failure was reported as a placed fact")
+	}
+	if !errors.Is(err, errInjected) {
+		t.Fatalf("the failure is not named: %v", err)
+	}
+	if got := s.mailbox(t); len(got) != 0 {
+		t.Fatalf("a failed routing placed a fact anyway: %+v", got)
+	}
+
+	// The retry is the next reading, and the fact is not lost.
+	s.mustReading(t, p, ObservedIdle)
+	got := s.mailbox(t)
+	if len(got) != 1 {
+		t.Fatalf("after a failed routing the coordinator has %d facts, want the one: %+v", len(got), got)
+	}
+	if got[0].Observed == nil || got[0].Observed.State != ObservedIdle {
+		t.Fatalf("the retry placed the wrong fact: %+v", got[0])
+	}
+}
+
+// And the exit's reservation is tested the same way, because the sequential case
+// above does NOT exercise it: two `Exited` calls one after the other are caught
+// by `told`, and the in-flight check is what catches two in OVERLAP.
+//
+// Both really can overlap, which is why the check exists rather than being
+// defensive: the supervisor reports the exit it watched, and the agent's own
+// withdrawal reports the one it caused, and nothing orders the two goroutines.
+func TestTwoConcurrentExitReportsPlaceOneFact(t *testing.T) {
+	s := newObservedStand(t, 0)
+	p := mustRegister(t, s.harness)
+
+	nested := 0
+	s.store.duringCommit = func() {
+		nested++
+		// The second report arrives between the first one's claim and its
+		// write. The record admits it — an exit with no declaration is the
+		// state admit's terminal guard exempts, precisely so a late
+		// declaration can still refine it — so what stops a second message
+		// here is only the observation's own reservation.
+		if _, err := s.reg.Exited(s.ctx, p.ID, p.Liveness, Exit{Cause: "exited", Code: 0, At: s.clock.now()}); err != nil {
+			t.Logf("the second exit report was refused by the record (%v); the count below is what matters", err)
+		}
+	}
+	if err := s.exit(t, p); err != nil {
+		t.Fatalf("exit: %v", err)
+	}
+
+	if nested != 1 {
+		t.Fatalf("the second report never ran inside the window, so this test asserted nothing")
+	}
+	got := s.mailbox(t)
+	if len(got) != 1 {
+		t.Fatalf("one exit produced %d facts, want exactly 1: %+v", len(got), got)
+	}
+	if got[0].Observed == nil || got[0].Observed.State != ObservedExited {
+		t.Fatalf("the fact is not the exit: %+v", got[0])
+	}
+}

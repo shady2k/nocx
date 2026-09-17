@@ -595,6 +595,47 @@ jobs:
         working-directory: .
         run: node e2e/check-coverage.mjs
 
+  # ci-backlog — the backlog is still a queue, not a dump.
+  #
+  # The one gate here that reads no code. It applies the rules in
+  # .githooks/backlog-gate/check.mjs — vendored verbatim from the
+  # shady2k-skills plugin, project-blind by construction — to .beads/issues.jsonl
+  # through this repository's own adapter. `block-new`, so what fails is what
+  # this branch introduced; everything already wrong is printed and fails
+  # nothing, which is the only setting that stays worth passing on a backlog
+  # with history.
+  #
+  # It is here and not only in pre-commit because the local hook is one
+  # `--no-verify` away and several agent worktrees commit into this repository
+  # every day. Node and a full history are the whole toolchain: no npm install,
+  # no container, seconds.
+  ci-backlog:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The baseline is another revision of the tracked export, so the
+          # history it lives in has to be here. A shallow clone has no
+          # merge-base and the gate would call every old violation new.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: The backlog is still a queue
+        run: |
+          set -eu
+          gate=.githooks/backlog-gate
+          base=$(git merge-base "origin/${{ github.base_ref || 'main' }}" HEAD)
+          echo "baseline: $base"
+          node "$gate/adapter.mjs" --at "$base" > "$RUNNER_TEMP/backlog-baseline.json"
+          node "$gate/adapter.mjs" |
+            node "$gate/check.mjs" \
+              --config "$gate/config.json" \
+              --baseline "$RUNNER_TEMP/backlog-baseline.json" -
+
   # e2e — the suite, in the same container a developer runs it in.
   #
   # ONE command: `e2e/run-in-container.sh`. Inside it, `npx playwright test`; the

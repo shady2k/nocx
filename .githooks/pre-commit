@@ -305,6 +305,57 @@ else
     ok "check-site — skipped (no site/ changes staged)"
 fi
 
+# --- 7. the backlog gate ----------------------------------------------------
+# A backlog stops being a queue quietly. On 2026-09-17 this one held 933 open
+# issues, 773 of which reported ready, over 665 independent roots — which is
+# not a queue but a dump, and the grooming that fixed it invented its rules on
+# the spot. Those rules are .githooks/backlog-gate/check.mjs, vendored verbatim
+# from the shady2k-skills plugin and knowing nothing of this project; what this
+# project is lives in config.json and adapter.mjs beside it.
+#
+# It is `block-new`: only a violation THIS commit introduces is red, and the
+# debt already there is printed every time and fails nothing. That needs a
+# baseline, which is what the tracked export at HEAD is for — and it is why the
+# gate reads the export through git rather than the beads database, which from
+# a worktree is the main checkout's and would answer about another branch.
+#
+# Staged against HEAD, never the working tree: `br` rewrites the export on
+# almost every command, so a working-tree read would judge backlog writes the
+# commit is not making.
+RUN_BACKLOG=1
+if [ -n "$CHANGED" ]; then
+    RUN_BACKLOG=0
+    case "$CHANGED" in
+        *.beads/issues.jsonl*|*.githooks/backlog-gate/*) RUN_BACKLOG=1 ;;
+    esac
+fi
+
+backlog_gate() {
+    _gate=.githooks/backlog-gate
+    _baseline=$(mktemp)
+    if ! node "$_gate/adapter.mjs" --at HEAD >"$_baseline"; then
+        rm -f "$_baseline"
+        printf 'the backlog at HEAD could not be read, so there is nothing to compare against\n'
+        return 1
+    fi
+    # Exit 1 is red and exit 2 is misuse — a gate that cannot run is red, not
+    # green, so both reach host_gate as a failure.
+    if node "$_gate/adapter.mjs" --at :0 |
+        node "$_gate/check.mjs" --config "$_gate/config.json" --baseline "$_baseline" -; then
+        _rc=0
+    else
+        _rc=$?
+    fi
+    rm -f "$_baseline"
+    return $_rc
+}
+
+if [ "$RUN_BACKLOG" = 1 ]; then
+    host_gate "backlog gate" backlog_gate
+else
+    ok "backlog gate — skipped (the backlog export is not staged)"
+fi
+
 printf "\nAll static checks passed.\n"
 
 # What "all checks passed" does NOT mean. This hook is STATIC: it reads the

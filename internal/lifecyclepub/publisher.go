@@ -804,6 +804,15 @@ func (p *Publisher) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) erro
 	forceStartedProjection := p.shouldPublishStartedAttempt(env)
 	outs, err := p.kernel.Ingest(t, env)
 	if err != nil {
+		// A REFUSED frame can still have mutated the kernel, and one case
+		// always does: the desync budget is checked AHEAD of the transition
+		// (kernel.go's ingestLocked), so an expired episode revokes the domain
+		// — closing its open attempts — and only then is this frame refused
+		// for arriving at a desynchronized domain. Reporting transitions on
+		// the success path alone left those closures unsaid and a Stop held for
+		// one of them behind, until unrelated session teardown (nocx-zas0d,
+		// review finding 5 of 1e899f6a).
+		p.transitionsBelow(before)
 		p.publishLane(env.Lane)
 		return err
 	}

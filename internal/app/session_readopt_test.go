@@ -917,6 +917,10 @@ func TestASessionThatEndedWhileNocxWasAwayCarriesTheHostsExitStatus(t *testing.T
 // reader reaches it (driven by the REAL pumpToRing this WSServer starts),
 // Done fires and monitorExit runs EndSession through the ordinary path —
 // the same closer a shell exiting under a live coordinator already used.
+//
+// So the assertion is the helper's window, and only the helper's window:
+// swapping this WSServer for a stubAdopter leaves it at its full 4194304
+// bytes, because nothing ever reads the stream (measured, nocx-xn63t.6.16).
 func TestAReadoptedAlreadyExitedSessionReleasesItsHelperWindow(t *testing.T) {
 	const exitCode = 7
 	spawner := &scriptedSpawner{}
@@ -944,14 +948,17 @@ func TestAReadoptedAlreadyExitedSessionReleasesItsHelperWindow(t *testing.T) {
 	if len(rec.applied) != 1 || rec.applied[0].Verdict != content.VerdictLive {
 		t.Fatalf("verdict = %+v, want live: the helper still holds this session", rec.applied)
 	}
-	// No registry lookup here, deliberately. The adopted session's stream is
-	// already complete, so the attachment this pass starts can drain it and
-	// run EndSession before the next line executes — asserting the session
-	// is still registered raced the very release this test exists for
-	// (nocx-xn63t.6.16). The window reaching zero below is the proof it was
-	// taken back: nothing but that attachment's EndSession releases a helper
-	// window no client is attached to, which is closer 2's whole point.
 
+	// Nothing asserts the session is registered in second.sess, deliberately:
+	// that registration is transient BY THE MECHANISM THIS TEST EXERCISES. The
+	// real pumpToRing this WSServer starts drains a stream that is already
+	// complete, so monitorExit can reach EndSession before any such assertion
+	// runs — 4 of 12 concurrent -race runs of this binary died on it, "session
+	// not found", their debug records reading "helper session adopted" then
+	// "session closed". Re-adoption is instead proven by what it leaves behind:
+	// only an attachment that really read this stream to its end releases the
+	// helper's budget.
+	//
 	// The wait is on observable state — the helper's own aggregate budget —
 	// polled with a bound: draining runs on the coordinator's own read-pump
 	// goroutine and has no other signal this test can watch.

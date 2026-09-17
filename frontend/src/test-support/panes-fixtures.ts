@@ -661,6 +661,13 @@ export function integrationHandler(client: ClientFake): (params: unknown) => voi
   return notificationHandler(client, 'session.integrationChanged')
 }
 
+/** The session.signalUndelivered handler: the fact that a Stop the pane was
+ *  told was held will not reach its command (nocx-zas0d). Tests describe the
+ *  fact body; the framing is this helper's. */
+export function signalUndeliveredHandler(client: ClientFake): (params: unknown) => void {
+  return notificationHandler(client, 'session.signalUndelivered')
+}
+
 /** The lifecycle.changed handler with the wire's server-authoritative session
  *  address. Tests describe the fact body; this helper supplies the exact
  *  transport envelope that routes it to the mounted tab. */

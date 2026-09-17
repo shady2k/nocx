@@ -9,8 +9,11 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"testing"
@@ -734,20 +737,24 @@ func TestAProgramThatFloodsAndDoesNotReadKeepsItsPaneAlive(t *testing.T) {
 	// The shell floods in the background from the first line, asks DSR
 	// immediately (the runtime answers it into the shell's OWN stdin
 	// without anybody reading it yet), and only blocks on reading once the
-	// flood has run for a while — the busy-loop below is the script's own
-	// device for staying off stdin for a while, not this test's wait
-	// mechanism; every assertion below waits on an observable window write.
-	const script = `
+	// test lets it stop. The flood ends when the TEST creates a stop file,
+	// after it has seen the frames it watches for — never when a counted
+	// busy-loop in the shell happens to finish. The loop used to be
+	// `while [ $i -lt 300000 ]`, whose wall time is the runner's speed: on a
+	// fast ubuntu runner (CI run 35234462129, ci-linux with-secret-service)
+	// the flood was over after 3 of 20 frames and the watchdog read a
+	// finished program as a stalled pane.
+	stop := filepath.Join(t.TempDir(), "stop-flooding")
+	script := fmt.Sprintf(`
 stty -icanon -echo min 1 time 0
 yes "flood-nocx-6q1uh" 2>/dev/null &
 FLOODPID=$!
 printf '\033[6n'
-i=0
-while [ $i -lt 300000 ]; do i=$((i+1)); done
+while [ ! -e '%s' ]; do :; done
 kill "$FLOODPID" 2>/dev/null
 answer=$(dd bs=1 count=6 2>/dev/null | od -An -tx1 | tr -d ' \n')
-printf 'REPLY:%s\n' "$answer"
-`
+printf 'REPLY:%%s\n' "$answer"
+`, stop)
 	lp, err := pty.NewLocal(log.NewSlogAdapter(nil), pty.Config{
 		Command: "/bin/sh",
 		Args:    []string{"-c", script},
@@ -786,9 +793,11 @@ printf 'REPLY:%s\n' "$answer"
 	// only that frames kept arriving while it sat unread — which the loop
 	// above already demonstrated.
 
-	// Eventually the shell stops flooding and reads: the window closes when
-	// its output ends, which is the observable end of the script — its own
-	// busy-loop is what decides when, not this test.
+	// Now let the shell stop flooding and read: the window closes when its
+	// output ends, which is the observable end of the script.
+	if err := os.WriteFile(stop, nil, 0o600); err != nil {
+		t.Fatalf("tell the script to stop flooding: %v", err)
+	}
 	select {
 	case <-lp.Done():
 	case <-time.After(30 * time.Second):

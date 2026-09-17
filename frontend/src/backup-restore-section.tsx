@@ -14,6 +14,7 @@ import { readBackupText, MAX_BACKUP_BYTES, downloadText } from './backup-file'
 import { Button, FileInput, Radio, MarkerList, PageSection } from './ui'
 import { showToast } from './ui/toast'
 import { showConfirm } from './ui/dialog'
+import { isSaturationRefusal } from './dispatcher'
 
 interface Props {
   profileClient: ProfileClient
@@ -27,6 +28,10 @@ interface State {
   strategy: RestoreStrategy
   preview: RestorePreview | null
   fileInputResetKey: number
+  /** The last preview was refused because the control plane was busy. */
+  previewRefused: boolean
+  /** Bumped when the person asks for a refused preview again. */
+  previewAttempt: number
 }
 
 const PLAINTEXT_WARNING = `The backup file is plaintext JSON. All settings values, hostnames, connection names, inline usernames, and auth modes are stored without encryption. Credential secrets (passwords, key passphrases) are never included, but the connection metadata may still be sensitive.`
@@ -68,6 +73,8 @@ export function BackupRestoreSection(props: Props) {
     strategy: 'merge',
     preview: null,
     fileInputResetKey: 0,
+    previewRefused: false,
+    previewAttempt: 0,
   })
 
   let previewGen = 0
@@ -134,10 +141,10 @@ export function BackupRestoreSection(props: Props) {
     const gen = ++fileGen
     previewGen++
     if (!file) {
-      setState({ contents: null, preview: null, previewing: false })
+      setState({ contents: null, preview: null, previewing: false, previewRefused: false })
       return
     }
-    setState({ previewing: true, preview: null })
+    setState({ previewing: true, preview: null, previewRefused: false })
     try {
       const text = await readBackupText(file)
       if (gen !== fileGen) return
@@ -154,10 +161,10 @@ export function BackupRestoreSection(props: Props) {
 
   createEffect(
     on(
-      () => [state.strategy, state.contents] as const,
+      () => [state.strategy, state.contents, state.previewAttempt] as const,
       async ([strat, contents]) => {
         if (!contents) return
-        setState({ previewing: true, preview: null })
+        setState({ previewing: true, preview: null, previewRefused: false })
         previewGen++
         const gen = previewGen
         try {
@@ -166,6 +173,16 @@ export function BackupRestoreSection(props: Props) {
           setState({ preview: result })
         } catch (err) {
           if (gen !== previewGen) return
+          // A busy control plane is not the backup's fault and not final: the
+          // file is still chosen and nothing is wrong with it. Choosing the
+          // same file again fires no change event, so without a way to ask
+          // again the section is a dead end (nocx-9ox05). The dispatcher has
+          // already said the plane was busy; a second toast blaming the
+          // backup would be wrong.
+          if (isSaturationRefusal(err)) {
+            setState({ preview: null, previewRefused: true })
+            return
+          }
           setState({ preview: null })
           showToast({
             message: `Could not preview the backup: ${restorePreviewSentence(err)}`,
@@ -306,6 +323,18 @@ export function BackupRestoreSection(props: Props) {
 
         <Show when={state.previewing}>
           <p class="backup-restore__status">Generating preview…</p>
+        </Show>
+
+        <Show when={state.contents && state.previewRefused && !state.previewing}>
+          <p class="backup-restore__status">
+            The preview was refused because the terminal was busy.
+          </p>
+          <Button
+            disabled={busy()}
+            onClick={() => setState('previewAttempt', state.previewAttempt + 1)}
+          >
+            Preview again
+          </Button>
         </Show>
 
         <Show when={preview()}>

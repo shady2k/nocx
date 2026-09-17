@@ -92,6 +92,11 @@ type ledgerEntryWire struct {
 	// reconciled". That distinction is what vault.status's missing
 	// defaultProvider cost a release to learn.
 	Unreconciled *string `json:"unreconciled"`
+	// TerminationReason is the latest execution's own verdict on how it
+	// ended, null while none has — the one fact that tells a command the
+	// person stopped from a program that failed on its own, which status
+	// cannot (both are "failure"). A restore draws its block from this row.
+	TerminationReason *string `json:"terminationReason"`
 }
 
 // ledgerQueryResponse is the page plus the three facts that keep it honest.
@@ -568,6 +573,11 @@ func ledgerEntryWireOf(row content.LedgerEntrySummary) (ledgerEntryWire, error) 
 		cause := string(*row.Unreconciled)
 		unreconciled = &cause
 	}
+	var termination *string
+	if row.TerminationReason != nil {
+		reason := string(*row.TerminationReason)
+		termination = &reason
+	}
 	return ledgerEntryWire{
 		ID: row.ID, Seq: row.IngestSeq, EnvID: row.EnvironmentID, Host: host,
 		Cwd: row.Cwd, Kind: string(row.Kind), Source: string(row.Source), Intent: row.Intent,
@@ -575,7 +585,7 @@ func ledgerEntryWireOf(row content.LedgerEntrySummary) (ledgerEntryWire, error) 
 		SubmittedAt: row.SubmittedAt, StartedAt: row.StartedAt, EndedAt: row.EndedAt,
 		DurationMs: row.DurationMs, ExitCode: exit,
 		MaskedCount: masking.MaskedCount, MaskedKinds: kinds, Redactions: reds,
-		Unreconciled: unreconciled,
+		Unreconciled: unreconciled, TerminationReason: termination,
 	}, nil
 }
 

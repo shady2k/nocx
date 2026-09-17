@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -51,10 +50,19 @@ type LocalPty struct {
 	readyFd int
 	wakeR   int
 	wakeW   int
-	// wakeClosed is set just before wakeW is closed (Close, holding mu), so a
-	// WakeReadiness racing a concurrent Close does not write to a descriptor
-	// number the kernel may already have reused for something else.
-	wakeClosed atomic.Bool
+	// readyMu guards the lifetime of those three descriptors (nocx-mrfe5).
+	// readyClosed is Close's latch: once set, WaitReadable answers
+	// os.ErrClosed rather than polling again. readyWaiters counts the
+	// WaitReadable calls between their check of that latch and their return,
+	// and the descriptors are closed only when it is zero — by Close if no
+	// wait is in flight, otherwise by the last wait on its way out — so a
+	// poll(2) never runs on a descriptor that has been closed, or on a number
+	// the kernel has already handed to something else. readyFdsClosed is what
+	// WakeReadiness checks before it writes.
+	readyMu        sync.Mutex
+	readyClosed    bool
+	readyWaiters   int
+	readyFdsClosed bool
 }
 
 // localeVars are checked in POSIX precedence order; any one of them present
@@ -88,6 +96,26 @@ var launcherSessionVars = []string{
 	"CLAUDE_EFFORT=",
 	"NO_COLOR=",
 	"TERM=",
+	// NOCX_TOOL_SOCKET is the same class and the sharpest case of it: it
+	// names ONE coordinator's agent tool endpoint, and a pane belongs to
+	// whichever coordinator opened it. nocx is developed from inside nocx,
+	// and a helper daemon is started by whichever coordinator got there
+	// first while the generation's endpoint socket serves them all (D12) —
+	// so without this line every pane inherited one coordinator's endpoint
+	// and an agent in it reached a backend that never asked for that pane
+	// (nocx-e7khb, seen on macOS CI as a pane printing the daemon's start
+	// value instead of its own).
+	//
+	// The value a pane may have is rendered into its LAUNCH from the
+	// request that opened it (shellintegration.LaunchOptions'
+	// AgentToolSocketPath), which is the one owner of the variable; this
+	// list only guarantees there is nothing underneath for that launch to
+	// have to overwrite. A pane whose launch renders none therefore has
+	// none, which is what the spawn contract already says it has. The
+	// spelling is pinned to shellintegration.ToolSocketEnvVar by
+	// TestScrubLauncherSession rather than by an import, so the low-level
+	// terminal package keeps depending on nothing above it.
+	"NOCX_TOOL_SOCKET=",
 }
 
 func scrubLauncherSession(env []string) []string {
@@ -412,18 +440,40 @@ func (lp *LocalPty) RawReadUntilAgain(buf []byte, deliver func([]byte)) (eof boo
 // SyscallConn().Read's deadline mechanism, so it has to be delivered this
 // way. Readable on wakeR is drained and, only if ctx is already done,
 // reported as ctx's own error; otherwise it is a spurious wake (WakeReadiness
-// called with no real cancellation behind it, or Close doing the same on its
-// way out) and this returns nil — harmless, because the owner's next
-// RawReadUntilAgain simply finds nothing and answers EAGAIN at once.
+// called with no real cancellation behind it) and this returns nil —
+// harmless, because the owner's next RawReadUntilAgain simply finds nothing
+// and answers EAGAIN at once.
+//
+// # After Close, os.ErrClosed — never a nil (nocx-mrfe5)
+//
+// Close used to wake a parked wait with that same spurious nil and then
+// close readyFd and the wake pipe. A caller doing what the helper's
+// readiness loop does — look again after a nil — re-entered poll(2) on
+// descriptors that were closed, or already reused by some other open. On
+// Linux a closed one answers POLLNVAL at once, so the loop spun; on Darwin,
+// whose poll(2) is implemented over kqueue, closing a descriptor drops its
+// registration, so a wait that had entered the call before the close was
+// woken by nothing at all — the program ignoring the hangup, the wake byte
+// already consumed — and a helper Service.Close waited on it for ten
+// minutes. So Close now sets readyClosed and wakes, the woken wait answers
+// os.ErrClosed, and the descriptors are closed only once no wait is inside
+// the poll (readyMu's field doc).
 func (lp *LocalPty) WaitReadable(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if !lp.enterReadiness() {
+		return os.ErrClosed
+	}
+	defer lp.leaveReadiness()
 	fds := []unix.PollFd{
 		{Fd: int32(lp.readyFd), Events: unix.POLLIN}, //nolint:gosec // an fd is never near int32's range
 		{Fd: int32(lp.wakeR), Events: unix.POLLIN},   //nolint:gosec // an fd is never near int32's range
 	}
 	for {
+		if lp.readinessClosed() {
+			return os.ErrClosed
+		}
 		fds[0].Revents, fds[1].Revents = 0, 0
 		_, err := unix.Poll(fds, -1)
 		if err != nil {
@@ -433,6 +483,11 @@ func (lp *LocalPty) WaitReadable(ctx context.Context) error {
 			return err
 		}
 		if fds[1].Revents != 0 {
+			// Close's byte is left in the pipe, not drained: the pipe stays
+			// readable, so every wait still inside this loop sees it too.
+			if lp.readinessClosed() {
+				return os.ErrClosed
+			}
 			lp.drainWake()
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
@@ -450,6 +505,59 @@ func (lp *LocalPty) WaitReadable(ctx context.Context) error {
 		// timeout, but poll(2) permits a spurious return, so loop rather
 		// than assume.
 	}
+}
+
+// enterReadiness admits one WaitReadable, or refuses it once Close has
+// begun. An admitted wait holds the readiness descriptors open until
+// leaveReadiness.
+func (lp *LocalPty) enterReadiness() bool {
+	lp.readyMu.Lock()
+	defer lp.readyMu.Unlock()
+	if lp.readyClosed {
+		return false
+	}
+	lp.readyWaiters++
+	return true
+}
+
+// leaveReadiness releases what enterReadiness admitted, closing the
+// readiness descriptors if Close ran while this wait was inside the poll.
+func (lp *LocalPty) leaveReadiness() {
+	lp.readyMu.Lock()
+	defer lp.readyMu.Unlock()
+	lp.readyWaiters--
+	lp.closeReadinessFdsLocked()
+}
+
+func (lp *LocalPty) readinessClosed() bool {
+	lp.readyMu.Lock()
+	defer lp.readyMu.Unlock()
+	return lp.readyClosed
+}
+
+// closeReadinessFdsLocked closes readyFd and the wake pipe once Close has
+// asked for it and no wait is left inside the poll. The caller holds readyMu.
+func (lp *LocalPty) closeReadinessFdsLocked() {
+	if !lp.readyClosed || lp.readyWaiters > 0 || lp.readyFdsClosed {
+		return
+	}
+	lp.readyFdsClosed = true
+	_ = unix.Close(lp.readyFd)
+	_ = unix.Close(lp.wakeR)
+	_ = unix.Close(lp.wakeW)
+}
+
+// closeReadiness is Close's half of the readiness machinery: latch, wake
+// whatever wait is parked, and close the descriptors now if nothing is.
+func (lp *LocalPty) closeReadiness() {
+	lp.readyMu.Lock()
+	defer lp.readyMu.Unlock()
+	if lp.readyClosed {
+		return
+	}
+	lp.readyClosed = true
+	lp.writeWakeLocked()
+	lp.closeReadinessFdsLocked()
 }
 
 // drainWake empties the wake pipe after a readable report on it, so the next
@@ -473,13 +581,19 @@ func (lp *LocalPty) drainWake() {
 // calls it too, before closing the fds this method's write would otherwise
 // find already gone.
 //
-// Always safe to call, including after Close: wakeClosed is checked first,
-// and any write that still races a concurrent close is left to fail with
-// EBADF and be ignored — there is nothing further to wake once the fds are
-// gone. A full pipe (EAGAIN) means a wake is already pending and is treated
-// the same way: nothing further to do.
+// Always safe to call, including after Close: the write happens under
+// readyMu and only while the wake pipe is still open, so it can never land on
+// a descriptor number the kernel has reused. A full pipe (EAGAIN) means a
+// wake is already pending: nothing further to do.
 func (lp *LocalPty) WakeReadiness() {
-	if lp.wakeClosed.Load() {
+	lp.readyMu.Lock()
+	defer lp.readyMu.Unlock()
+	lp.writeWakeLocked()
+}
+
+// writeWakeLocked writes WakeReadiness's byte. The caller holds readyMu.
+func (lp *LocalPty) writeWakeLocked() {
+	if lp.readyFdsClosed {
 		return
 	}
 	for {
@@ -607,18 +721,13 @@ func (lp *LocalPty) Close() error {
 	// wants to write on the way out still has somewhere to write.
 	_ = lp.hangupProcessGroup()
 
-	// Wake a WaitReadable parked in the kernel's poll(2) BEFORE the fds it is
-	// polling go away (nocx-6q1uh.18): a closed descriptor still reported by
-	// a poll already in flight is not a hazard poll(2) itself minds
-	// (POLLNVAL is a defined outcome), but there is no reason to race it when
-	// asking politely first costs nothing. wakeClosed goes true only after
-	// the wake fds are actually closed, so this call still finds them open.
-	lp.WakeReadiness()
+	// The master first, then the readiness machinery (nocx-mrfe5): a wait
+	// that closeReadiness wakes answers os.ErrClosed, and anything its caller
+	// then asks of the master finds it already closed, never a last EAGAIN.
+	// readyFd is a dup, so the open file description outlives this close
+	// until a wait still inside its poll has left it.
 	err := lp.file.Close()
-	lp.wakeClosed.Store(true)
-	_ = unix.Close(lp.readyFd)
-	_ = unix.Close(lp.wakeR)
-	_ = unix.Close(lp.wakeW)
+	lp.closeReadiness()
 	return err
 }
 

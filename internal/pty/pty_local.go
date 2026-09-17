@@ -96,6 +96,26 @@ var launcherSessionVars = []string{
 	"CLAUDE_EFFORT=",
 	"NO_COLOR=",
 	"TERM=",
+	// NOCX_TOOL_SOCKET is the same class and the sharpest case of it: it
+	// names ONE coordinator's agent tool endpoint, and a pane belongs to
+	// whichever coordinator opened it. nocx is developed from inside nocx,
+	// and a helper daemon is started by whichever coordinator got there
+	// first while the generation's endpoint socket serves them all (D12) —
+	// so without this line every pane inherited one coordinator's endpoint
+	// and an agent in it reached a backend that never asked for that pane
+	// (nocx-e7khb, seen on macOS CI as a pane printing the daemon's start
+	// value instead of its own).
+	//
+	// The value a pane may have is rendered into its LAUNCH from the
+	// request that opened it (shellintegration.LaunchOptions'
+	// AgentToolSocketPath), which is the one owner of the variable; this
+	// list only guarantees there is nothing underneath for that launch to
+	// have to overwrite. A pane whose launch renders none therefore has
+	// none, which is what the spawn contract already says it has. The
+	// spelling is pinned to shellintegration.ToolSocketEnvVar by
+	// TestScrubLauncherSession rather than by an import, so the low-level
+	// terminal package keeps depending on nothing above it.
+	"NOCX_TOOL_SOCKET=",
 }
 
 func scrubLauncherSession(env []string) []string {

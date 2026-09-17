@@ -563,7 +563,17 @@ func startNestedBashParent(t *testing.T, k *nestedKernel, binName, fakeBody stri
 // disturbing every other caller of the ordinary starter.
 func startNestedBashParentTMPDIR(t *testing.T, k *nestedKernel, binName, fakeBody, tmpdir string) *channelShell {
 	t.Helper()
-	bash := requireShell(t, "bash")
+	return startNestedBashParentBinTMPDIR(t, requireShell(t, "bash"), k, binName, fakeBody, tmpdir)
+}
+
+// startNestedBashParentBinTMPDIR is startNestedBashParentTMPDIR with the bash
+// BINARY named explicitly too, so a test can drive the real script through
+// macOS's frozen 3.2 (requireBash32) rather than whatever "bash" resolves to
+// on this machine — the CI Linux runner's own PATH puts a 5.x first, so
+// requireShell("bash") alone can never reach the version the ci-mac job
+// actually runs (nocx-xn63t.6.1).
+func startNestedBashParentBinTMPDIR(t *testing.T, bash string, k *nestedKernel, binName, fakeBody, tmpdir string) *channelShell {
+	t.Helper()
 
 	kernelFile, shellFile := lifecycleSocketpair(t)
 	k.shellFile = shellFile
@@ -588,9 +598,9 @@ func startNestedBashParentTMPDIR(t *testing.T, k *nestedKernel, binName, fakeBod
 		t.Fatalf("write fake %s: %v", binName, werr)
 	}
 
-	// #nosec G204 — bash is the requireShell-resolved path, not input; an
-	// interactive shell with an inherited descriptor is the only way to
-	// exercise the local transport shape.
+	// #nosec G204 — bash is requireShell- or requireBash32-resolved, never
+	// input; an interactive shell with an inherited descriptor is the only
+	// way to exercise the local transport shape.
 	cmd := exec.Command(bash, "-i")
 	cmd.ExtraFiles = []*os.File{shellFile} // becomes fd 3
 	cmd.Env = append(
@@ -616,6 +626,16 @@ func startNestedBashParentTMPDIR(t *testing.T, k *nestedKernel, binName, fakeBod
 	t.Cleanup(func() { _ = ptmx.Close(); _ = cmd.Process.Kill() })
 	s.waitForHandshake()
 	return s
+}
+
+// startNestedBash32Parent is a nestedParentStarter over macOS's frozen bash
+// 3.2 — requireBash32, never "bash" — so a test that must run against the
+// SAME bash the ci-mac job runs can ask for it explicitly rather than
+// whatever "bash" resolves to on this machine (nocx-xn63t.6.1: the Linux CI
+// runner's own PATH answers a 5.x first).
+func startNestedBash32Parent(t *testing.T, k *nestedKernel, binName, fakeBody string) *channelShell {
+	t.Helper()
+	return startNestedBashParentBinTMPDIR(t, requireBash32(t), k, binName, fakeBody, t.TempDir())
 }
 
 // driveNestedHappyInterval drives and asserts the §9 happy interval end to

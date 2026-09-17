@@ -39,6 +39,22 @@ func TestZshAnAgentCanDeclareWhatItsWorkProduced(t *testing.T) {
 	anAgentCanDeclareWhatItsWorkProduced(t, startNestedZshParent)
 }
 
+// The bash-3.2 twin (nocx-xn63t.6.1). ci-mac run 35167781001 printed the
+// worker pane's own transcript for TestExternalClaudeDrivesAWorkerEndToEnd:
+// __nocx_agent_report_open succeeded (no "nocx: no report drop" line, which
+// nocx-xn63t.6.1's own fix would have printed had mktemp failed), the fake
+// claude ran, and it STILL saw NOCX_AGENT_REPORT empty — a shell error
+// naming no path at all. The pane's HOME was /Users/runner, so its shell is
+// macOS's frozen /bin/bash 3.2, never on the ci-mac job's PATH as anything
+// newer. Every other test in this file drives "bash" — whatever this
+// machine's PATH answers, a 5.x here — so none of them could have caught a
+// defect specific to 3.2's own handling of
+// `VAR="$x" command "$agent" "$@"` inside a function. This one asks the
+// exact same question against requireBash32 instead.
+func TestBash32AnAgentCanDeclareWhatItsWorkProduced(t *testing.T) {
+	anAgentCanDeclareWhatItsWorkProduced(t, startNestedBash32Parent)
+}
+
 func anAgentCanDeclareWhatItsWorkProduced(t *testing.T, start nestedParentStarter) {
 	t.Helper()
 	k := newNestedKernel(t)

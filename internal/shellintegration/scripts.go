@@ -244,7 +244,18 @@ var (
 // Ctrl+C cancels the launch (nocx-cyhfw). Every installed copy must be
 // rewritten: a shell still sourcing 49 reads a pending answer as a refusal and
 // starts the agent before the person has answered.
-const version = "52"
+// 53: the agent's report drop reaches it through `env VAR=val CMD`, not a
+// temporary `VAR=val command CMD` assignment (nocx-xn63t.6.1). Bash 3.2 —
+// macOS's /bin/bash — drops that assignment before the traced command execs
+// when this file's own DEBUG-trap preexec hook is installed: confirmed with
+// `set -x` against the real 3.2 fixture, where the assignment and the exec
+// appeared as two separate traced steps and the agent's own report drop
+// stayed empty. Also names why an empty drop went unexplained at all: a
+// failed `mktemp` for it used to be silent, unlike its sibling stage
+// refusal. Every installed copy must be rewritten: a shell still sourcing
+// 52 hands its agent no report path at all on 3.2, so no worker on macOS
+// could ever declare what it produced.
+const version = "53"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

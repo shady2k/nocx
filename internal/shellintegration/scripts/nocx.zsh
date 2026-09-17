@@ -795,11 +795,19 @@ __nocx_agent_run() {
     # the same door — a non-exported variable is not inherited anyway — and it
     # is kept because the cost is one builtin.
     unset __nocx_agent_token 2>/dev/null || true
+    # `env VAR=val CMD` rather than `VAR=val command CMD` (nocx-xn63t.6.1):
+    # kept in step with nocx.bash's own fix, whose doc comment on this same
+    # line has the bash-3.2 evidence — a DEBUG-trap interaction that drops a
+    # temporary assignment before the traced command execs. zsh's precmd/
+    # preexec hooks are not bash's DEBUG trap, so nothing here proves the
+    # SAME defect exists in this shell; the two scripts are one protocol,
+    # and env bypasses the same-named shell function either way, so there is
+    # no reason to keep the form that has already misbehaved in the other.
     if (( __staged )); then
-        NOCX_AGENT_REPORT="$__nocx_agent_report_path" command "$__agent" "$@" \
+        command env "NOCX_AGENT_REPORT=$__nocx_agent_report_path" "$__agent" "$@" \
             --mcp-config "$__nocx_agent_launch_dir/mcp.json"
     else
-        NOCX_AGENT_REPORT="$__nocx_agent_report_path" command "$__agent" "$@"
+        command env "NOCX_AGENT_REPORT=$__nocx_agent_report_path" "$__agent" "$@"
     fi
     __rc=$?
     __nocx_agent_report_send "$__rid"

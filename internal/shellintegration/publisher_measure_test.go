@@ -169,13 +169,22 @@ import (
 // publish bytes like any other. The CALL count is untouched at 63, because what
 // changed is the size of two files and not the work the publish does.
 //
+// AND THEY MOVED AGAIN when the report drop learned to name why it could not
+// open, and the agent's launch line stopped using a temporary `VAR=val
+// command` assignment bash 3.2 drops before the traced exec (nocx-xn63t.6.1):
+// the worst path writes 89636 bytes, up from 89060. Both scripts grew (the
+// reason variable and its printed line, the env-based launch and its doc
+// comment); the CALL count is unchanged at 63, the same shape every prior
+// growth here took — more bytes in the same two files the bundle already
+// publishes raw, not new filesystem operations.
+//
 // REPORT-p3-measure.md, which the failure messages below tell you to update
 // alongside these constants, HAS NEVER EXISTED in this repository — checked
 // across every ref. Whoever restores it, or removes the instruction, owns
 // nocx-uxuwu.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 89060
+	measuredMaxPublishBytes = 89636
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

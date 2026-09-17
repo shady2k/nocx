@@ -1065,11 +1065,27 @@ __nocx_agent_run() {
     # the same door — a non-exported variable is not inherited anyway — and it
     # is kept because the cost is one builtin.
     unset __nocx_agent_token 2>/dev/null || true
+    # `env VAR=val CMD ...`, not `VAR=val command CMD ...` (nocx-xn63t.6.1).
+    # Both bypass the same-named shell FUNCTION this file just defined
+    # (claude() calls __nocx_agent_run, so a bare `claude` here would
+    # recurse) — env execs a real binary off PATH, which can never resolve
+    # to a function in THIS shell, same as command's own guarantee. They are
+    # not equivalent on bash 3.2: a `VAR=val cmd` TEMPORARY assignment is a
+    # shell grammar construct, and 3.2's DEBUG trap — which this file's own
+    # __nocx_preexec_wrapper installs for shell integration — fires between
+    # the assignment and the traced command in a way that drops it before
+    # exec. Confirmed with `set -x` through the real bash-3.2 fixture: the
+    # trace showed the assignment and `command claude` as two separate
+    # traced steps with the wrapper's own trace in between, and the agent's
+    # own `echo "DROP=$NOCX_AGENT_REPORT"` printed nothing — empty, not
+    # unset, so the assignment happened and was lost before the child saw
+    # it. `env` has no such assignment step for the trap to land inside:
+    # the whole line is one traced command, on 3.2 and 5 alike.
     if (( __staged )); then
-        NOCX_AGENT_REPORT="$__nocx_agent_report_path" command "$__agent" "$@" \
+        command env "NOCX_AGENT_REPORT=$__nocx_agent_report_path" "$__agent" "$@" \
             --mcp-config "$__nocx_agent_launch_dir/mcp.json"
     else
-        NOCX_AGENT_REPORT="$__nocx_agent_report_path" command "$__agent" "$@"
+        command env "NOCX_AGENT_REPORT=$__nocx_agent_report_path" "$__agent" "$@"
     fi
     __rc=$?
     # The declaration goes BEFORE the withdraw, inside the interval the

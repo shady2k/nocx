@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
@@ -33,9 +34,13 @@ type fakeWorkerRecord struct {
 	sent       []workers.Message
 	unread     []workers.Message
 	fetchedBy  []workers.ReaderID
-	acked      []int64
-	closed     []workers.ParticipantID
-	closeErr   error
+	// inboxBox is the MAILBOX the last inbox read was handed, which the reader
+	// list cannot answer: a read names its box and its reader separately, and
+	// the whole question here is which box the capability produced.
+	inboxBox workers.ReaderID
+	acked    []int64
+	closed   []workers.ParticipantID
+	closeErr error
 	// waitedFor records the worker a wait was opened on, and waitHeld is what
 	// it answers with — a double that returned HeldBy's rows would hide a
 	// carrier that never waited at all.
@@ -80,6 +85,7 @@ func (f *fakeWorkerRecord) Say(_ context.Context, id workers.ID, from, to worker
 // fetched under the wrong name would look identical in the result.
 func (f *fakeWorkerRecord) Inbox(_ context.Context, mailbox, reader workers.ReaderID, _ int) (workers.Fetch, error) {
 	f.fetchedBy = append(f.fetchedBy, reader)
+	f.inboxBox = mailbox
 	msgs := f.mail[mailbox]
 	if f.mail != nil {
 		// Handing over is what advances a cursor, and this double stands in
@@ -379,6 +385,44 @@ func TestWorkerToolsRefuseAnotherCapability(t *testing.T) {
 	}
 }
 
+// workers.inbox is the one call whose capability is not a single type
+// (nocx-luqz9.2): the two holders read their OWN box, and which box that is
+// comes from what the run is. Both are therefore accepted, and a capability
+// that owns no mailbox at all is refused rather than answered an empty one.
+func TestWorkerInboxAcceptsBothHoldersAndRefusesAnythingElse(t *testing.T) {
+	rec := &fakeWorkerRecord{}
+	seams := workerSeams(rec)
+
+	// A worker: the box is its own participant id.
+	participant := agenttools.NewWorkerParticipant("p-1")
+	if _, err := executeWorkerInbox(context.Background(), participant,
+		json.RawMessage(`{}`), seams); err != nil {
+		t.Fatalf("a worker's own inbox was refused: %v", err)
+	}
+	if rec.inboxBox != "p-1" {
+		t.Fatalf("the worker read box %q, want its own participant id p-1", rec.inboxBox)
+	}
+
+	// A coordinator: the box is its session, which is what makes a restarted
+	// coordinator the same reader.
+	coordinator := agenttools.NewWorkerCoordinator("sess-coordinator", session.Identity{}, nil)
+	if _, err := executeWorkerInbox(context.Background(), coordinator,
+		json.RawMessage(`{}`), seams); err != nil {
+		t.Fatalf("a coordinator's own inbox was refused: %v", err)
+	}
+	if rec.inboxBox != "sess-coordinator" {
+		t.Fatalf("the coordinator read box %q, want its own session", rec.inboxBox)
+	}
+
+	// And something that owns no mailbox is refused by name rather than handed
+	// an empty one, which is the difference between "nobody wrote to you" and
+	// "you have no box".
+	if _, err := executeWorkerInbox(context.Background(), agenttools.NewSessionReader(nil, nil, nil),
+		json.RawMessage(`{}`), seams); err == nil {
+		t.Fatal("inbox ran on a session reader, which owns no mailbox")
+	}
+}
+
 // The wake says "call workers.holdings", so holdings has to distinguish the
 // worker it was about from the ones that have not moved.
 //
@@ -481,6 +525,138 @@ func TestWorkerHoldingsResultConformsToItsContract(t *testing.T) {
 	}
 	if !strings.Contains(raw, `"mail"`) || !strings.Contains(raw, `"undeliveredMail"`) {
 		t.Fatalf("the result carries no mail, so the schema check proved nothing about it: %s", raw)
+	}
+}
+
+// workers.holdings and workers.wait read the SAME mailbox workers.inbox does —
+// one box, one cursor, one order — so an observation can be in the page they
+// fetch. It must arrive as an OBSERVATION there and never as a message: the
+// text list is what a coordinator reads as "somebody wrote this to me", and an
+// observed row rendered there would be an empty message from a sender named
+// after nocx, which is worse than nothing. And the cursor advance, which is what
+// asking does, would then have hidden the row from the next workers.inbox.
+func TestHoldingsCarriesObservationsAsObservationsAndNotAsEmptyMail(t *testing.T) {
+	rec := &fakeWorkerRecord{
+		held: []workers.Participant{{ID: "p-1", Group: "worker-1", State: workers.StateLive, Task: "settle"}},
+		mail: map[workers.ReaderID][]workers.Message{
+			"sess-coordinator": {
+				{Sender: "p-1", Body: "the file moved"},
+				{
+					Sender: "nocx",
+					Observed: &workers.Observed{
+						Worker: "p-1", State: workers.ObservedIdle,
+						At: time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC),
+					},
+				},
+			},
+		},
+	}
+	raw, err := executeWorkerHoldings(context.Background(),
+		testCoordinator("sess-coordinator"), nil, workerSeams(rec))
+	if err != nil {
+		t.Fatalf("workers.holdings: %v", err)
+	}
+	var got workerHoldingsResult
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Mail) != 1 || got.Mail[0].Message != "the file moved" {
+		t.Fatalf("holdings mail = %+v, want only the message somebody wrote", got.Mail)
+	}
+	if len(got.Observations) != 1 {
+		t.Fatalf("holdings observations = %+v, want the one about p-1", got.Observations)
+	}
+	if got.Observations[0].Worker != "p-1" || got.Observations[0].State != string(workers.ObservedIdle) {
+		t.Fatalf("observation = %+v, want p-1 idle", got.Observations[0])
+	}
+
+	// An empty message never reaches the model, which is the failure this
+	// guards: `"message":""` reads as somebody having written nothing.
+	if strings.Contains(raw, `"message":""`) {
+		t.Fatalf("an observation was rendered as empty text: %s", raw)
+	}
+}
+
+// The same for workers.inbox, whose result grew a second list in nocx-luqz9.2:
+// the observations nocx saw, beside the mail somebody wrote.
+//
+// It validates the REAL executor's output against the schema's own result
+// definition, and it drives BOTH row shapes through one mailbox — a text message
+// and an observation — because a case with an empty observations list would
+// validate the field's presence and none of its items, which is the exact hole
+// the vault.status failure this directory was written from left open.
+func TestWorkerInboxResultConformsToItsContract(t *testing.T) {
+	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	rec := &fakeWorkerRecord{
+		mail: map[workers.ReaderID][]workers.Message{
+			"sess-coordinator": {
+				{Sender: "p-1", Body: "the file moved"},
+				{
+					Sender: "nocx",
+					Observed: &workers.Observed{
+						Worker: "p-1", State: workers.ObservedBlocked, At: at,
+					},
+				},
+			},
+		},
+	}
+	raw, err := executeWorkerInbox(context.Background(),
+		testCoordinator("sess-coordinator"), json.RawMessage(`{}`), workerSeams(rec))
+	if err != nil {
+		t.Fatalf("workers.inbox: %v", err)
+	}
+
+	c := jsonschema.NewCompiler()
+	//nolint:gosec // a literal path to a contract in the tree
+	f, err := os.Open("../../contracts/tools/workers.inbox.schema.json")
+	if err != nil {
+		t.Fatalf("open schema: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	doc, err := jsonschema.UnmarshalJSON(f)
+	if err != nil {
+		t.Fatalf("parse schema: %v", err)
+	}
+	const id = "https://nocx.local/contracts/tools/workers.inbox.schema.json"
+	if addErr := c.AddResource(id, doc); addErr != nil {
+		t.Fatalf("add resource: %v", addErr)
+	}
+	schema, err := c.Compile(id + "#/$defs/result")
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	var payload any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if err := schema.Validate(payload); err != nil {
+		t.Fatalf("workers.inbox result does not satisfy its contract: %v\npayload was:\n%s", err, raw)
+	}
+	if !strings.Contains(raw, `"the file moved"`) {
+		t.Fatalf("the result carries no message, so the schema check proved nothing about them: %s", raw)
+	}
+	if !strings.Contains(raw, `"blocked"`) || !strings.Contains(raw, `"observations"`) {
+		t.Fatalf("the result carries no observation, so the schema check proved nothing about them: %s", raw)
+	}
+	// And no screen content rode with it: the observation is three fields and
+	// the shape has nowhere to put a fourth. ADR-0070 decision 3.
+	var decoded struct {
+		Observations []map[string]any `json:"observations"`
+	}
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		t.Fatalf("unmarshal observations: %v", err)
+	}
+	if len(decoded.Observations) != 1 {
+		t.Fatalf("observations = %+v, want the one", decoded.Observations)
+	}
+	for _, key := range []string{"worker", "state", "at"} {
+		if _, ok := decoded.Observations[0][key]; !ok {
+			t.Fatalf("an observation lacks %q: %+v", key, decoded.Observations[0])
+		}
+	}
+	if len(decoded.Observations[0]) != 3 {
+		t.Fatalf("an observation carries %d fields, want exactly worker, state and at: %+v",
+			len(decoded.Observations[0]), decoded.Observations[0])
 	}
 }
 

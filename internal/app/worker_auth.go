@@ -535,7 +535,7 @@ func (a *toolAuthorizer) Admit(peer toolendpoint.Peer, publish func(session stri
 				Session:   string(admitted),
 				Workspace: a.workspace,
 			},
-			Grant: callerGrant(admitted, workerEnvironmentForSession(admittedSession)),
+			Grant: callerGrant(admitted, workerEnvironmentForSession(admittedSession), a.workspace),
 		}
 	}
 	// Both branches: the admitted session's OWN incarnation (design §7.1's
@@ -584,12 +584,18 @@ func (a *toolAuthorizer) participantOf(sid session.ID) (workers.Participant, err
 // is refused, so it cannot close anything, its own siblings included.
 //
 // It names a WORKSPACE scope and no session and no environment. That is what
-// makes the two offer sets disjoint by construction (A11, and see
-// agenttools.resourceParticipantWorkspace): the coordinator's four calls all
-// declare session or environment kinds, which this grant does not carry, and
-// workers.inbox declares the workspace kind, which no other grant in the tree
-// mints. Neither caller is ever OFFERED the other's calls, so nothing has to
-// refuse them.
+// keeps the coordinator's four calls away from a worker (A11, and see
+// agenttools.resourceParticipantWorkspace): all of them declare session or
+// environment kinds, which this grant does not carry, so a worker is never
+// OFFERED them.
+//
+// THE WORKSPACE SCOPE IS NO LONGER UNIQUE TO IT (nocx-luqz9.2): a COORDINATOR's
+// grant carries one too, because workers.inbox now serves both callers and that
+// is the kind its declaration names. The separation is therefore no longer "only
+// a worker has this scope" but the two things it always also rested on: a
+// worker's grant has no session scope, so the coordinator's calls stay off it,
+// and an ordinary run's fence carries no workspace scope at all, so inbox stays
+// off a run that is neither.
 func participantGrant(workspace string) content.Grant {
 	permit := content.EffectRow{Decision: content.DecisionPermit}
 	refuse := content.EffectRow{Decision: content.DecisionRefuse}
@@ -617,7 +623,16 @@ func workerEnvironmentForSession(sess session.Session) string {
 	return content.EnvironmentIDFor(environmentKind, sess.Host())
 }
 
-func callerGrant(sid session.ID, environmentID string) content.Grant {
+// callerGrant is what an admitted session that is NOT a worker gets: the
+// coordinator's authority over its own workers, and the workspace sub-scope that
+// offers it workers.inbox (nocx-luqz9.2).
+//
+// The workspace is passed in rather than derived because the composition root is
+// what knows which workspace a session's panes live in (toolAuthorizer.workspace,
+// the same value the participant's grant is built from) — and the two must be the
+// same string, since the participant's declaration resolves its resource from the
+// run's own workspace and this grant has to cover what that resolves to.
+func callerGrant(sid session.ID, environmentID, workspace string) content.Grant {
 	permit := content.EffectRow{Decision: content.DecisionPermit}
 	refuse := content.EffectRow{Decision: content.DecisionRefuse}
 	return content.EffectPolicy{
@@ -631,6 +646,19 @@ func callerGrant(sid session.ID, environmentID string) content.Grant {
 	}.AsGrant([]content.GrantScope{
 		{Kind: content.ResourceSession, ID: string(sid)},
 		{Kind: content.ResourceEnvironment, ID: environmentID},
+		// The workspace scope, for workers.inbox (nocx-luqz9.2): a coordinator
+		// reads the observations its workers' panes produced from the SAME
+		// mailbox a worker reads its coordinator's mail from, and that
+		// declaration names the workspace kind (A11's sub-scope naming, which
+		// resourceParticipantWorkspace resolves from the run's own workspace).
+		//
+		// WHAT IT DOES NOT DO, said here because the kind is now on both grants
+		// and the sentence above this function used to claim otherwise: it
+		// confers no authority over a workspace, because the only declaration
+		// naming that kind is a read of the caller's OWN mailbox. And it is what
+		// still keeps inbox off an ORDINARY run, whose fence (the kernel's
+		// per-run mint in internal/transport) names no workspace at all.
+		{Kind: content.ResourceWorkspace, ID: agenttools.ParticipantWorkspaceScopeID(workspace)},
 	})
 }
 

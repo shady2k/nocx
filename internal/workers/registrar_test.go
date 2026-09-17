@@ -39,6 +39,16 @@ type memStore struct {
 	// taking its wake-up channel and selecting on it, which is the one
 	// ordering that cannot be produced by racing two goroutines and hoping.
 	duringHeldBy func()
+	// duringCommit runs once, at the top of the first Commit, BEFORE that
+	// Commit takes any lock. It is how a test puts a second writer exactly
+	// inside the window between one observation's claim and its write — the
+	// window that cannot be produced by racing two goroutines and hoping, and
+	// the one an observation that does not RESERVE its claim would let a
+	// second reader walk into. It fires before the lock deliberately: the
+	// nested call this starts writes through this same store, and firing
+	// inside the critical section would deadlock the test rather than detect
+	// the race.
+	duringCommit func()
 	// duringResolve is that same instrument for the ordering this package's
 	// Resolve-against-Revoke trials did not get from racing two goroutines at
 	// all: measured 2026-09-17, 50 runs of that trial under load on the
@@ -267,6 +277,11 @@ func (m *memStore) Participant(_ context.Context, id ParticipantID) (Participant
 }
 
 func (m *memStore) Commit(_ context.Context, msg Message) (Message, error) {
+	if m.duringCommit != nil {
+		fire := m.duringCommit
+		m.duringCommit = nil
+		fire()
+	}
 	if err := m.hit("commit"); err != nil {
 		return Message{}, err
 	}
@@ -416,6 +431,16 @@ func (m *memStore) read(t *testing.T, id ParticipantID) (Participant, bool) {
 	defer m.mu.Unlock()
 	p, ok := m.parts[id]
 	return p, ok
+}
+
+// mailbox is what one box HOLDS, read without handing anything to anybody. A
+// test about "exactly one message was committed" must not fetch: a fetch
+// advances a cursor, and the arrangement would then be a second thing moving.
+func (m *memStore) mailbox(t *testing.T, box ReaderID) []Message {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]Message(nil), m.mail[box]...)
 }
 
 type fakeSpawned struct {
@@ -573,8 +598,10 @@ func newHarness(t *testing.T) *harness { return newHarnessBound(t, 2) }
 
 // newHarnessBound is newHarness with the participant bound named, so a
 // fan-out test can hold more than one worker at a time without every other
-// test's bound moving with it.
-func newHarnessBound(t *testing.T, bound int) *harness {
+// test's bound moving with it. opts are applied to the Registrar AFTER the
+// harness's own wiring, so a test that is about one product value states that
+// value instead of asserting the default.
+func newHarnessBound(t *testing.T, bound int, opts ...Option) *harness {
 	t.Helper()
 	h := &harness{
 		store:  newMemStore(),
@@ -593,9 +620,11 @@ func newHarnessBound(t *testing.T, bound int) *harness {
 	// exported surface does not have to grow for them.
 	backstop.alarms = h.alarms
 	h.reg = NewRegistrar(h.store, h.spawn, h.enrol, h.sup,
-		WithBackstop(backstop),
-		WithBound(bound),
-		WithEnrolmentDeadline(50*time.Millisecond),
+		append([]Option{
+			WithBackstop(backstop),
+			WithBound(bound),
+			WithEnrolmentDeadline(50 * time.Millisecond),
+		}, opts...)...,
 	)
 	h.reg.newID = func() ParticipantID {
 		return ParticipantID(fmt.Sprintf("p-%d", h.store.count("commitprepared")+1))

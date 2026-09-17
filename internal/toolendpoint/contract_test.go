@@ -73,8 +73,28 @@ func (contractWorkerRecord) Say(context.Context, workers.ID, workers.ReaderID, w
 	return workers.Message{ID: "message-1", Seq: 1}, nil
 }
 
+// Inbox answers with BOTH shapes a mailbox holds (nocx-luqz9.2): a message
+// somebody wrote and an observation nocx made. The conformance case below is
+// the only place this endpoint's answer to workers.inbox is validated against
+// its contract, and a stub that returned an empty page would exercise neither
+// list's item schema — which is exactly the hole the vault.status failure this
+// whole directory was written from left open.
 func (contractWorkerRecord) Inbox(context.Context, workers.ReaderID, workers.ReaderID, int) (workers.Fetch, error) {
-	return workers.Fetch{Messages: []workers.Message{}, Cursor: workers.Cursor{}}, nil
+	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	return workers.Fetch{
+		Messages: []workers.Message{
+			{ID: "message-1", Seq: 1, Sender: workers.ReaderID("sess-coordinator"), Body: "the wire is a party"},
+			{
+				ID: "message-2", Seq: 2, Sender: workers.ReaderID("nocx"),
+				Observed: &workers.Observed{
+					Worker: workers.ParticipantID("worker-1"),
+					State:  workers.ObservedIdle,
+					At:     at,
+				},
+			},
+		},
+		Cursor: workers.Cursor{Fetched: 2},
+	}, nil
 }
 
 func (contractWorkerRecord) Undelivered(context.Context, workers.ID) ([]workers.Message, error) {
@@ -115,9 +135,21 @@ func contractGrant() content.Grant {
 		Scopes: []content.GrantScope{
 			{Kind: content.ResourceSession, ID: "session-1"},
 			{Kind: content.ResourceEnvironment, ID: content.EnvironmentIDFor(content.EnvLocal, "")},
+			// The workspace sub-scope a coordinator's grant carries since
+			// nocx-luqz9.2: it is what offers workers.inbox, whose declaration
+			// names that kind (A11) and whose narrow resolves its resource from
+			// the run's own workspace. Without it the case below would be
+			// refused by the reachability gate before it ever reached a socket.
+			{Kind: content.ResourceWorkspace, ID: agenttools.ParticipantWorkspaceScopeID(contractWorkspace)},
 		},
 	}
 }
+
+// contractWorkspace is the workspace every grant here names, and the one the
+// invocation's RunContext carries: the two MUST be the same string, because
+// workers.inbox's resolver reads the run context while the grant is what has to
+// cover the resource that resolver returns.
+const contractWorkspace = "workspace:default"
 
 func workerResultSchema(t *testing.T, method string) *jsonschema.Schema {
 	t.Helper()
@@ -181,6 +213,10 @@ func TestGroupEndpoint_OverTheWireConformsToContract(t *testing.T) {
 		RunContext: agenttools.RunContext{
 			RunID:   "run-1",
 			Session: "session-1",
+			// The workspace the grant above covers, for workers.inbox: its
+			// resolver names the resource from HERE, and the grant has to
+			// contain what it names.
+			Workspace: contractWorkspace,
 			// PaneAccess/SessionReads (nocx-6q1uh.8, design §7.1): `any`
 			// stand-ins for internal/app's real DescendantPaneAccess and
 			// PaneReader, exactly the shape RunContext carries them in —
@@ -214,6 +250,10 @@ func TestGroupEndpoint_OverTheWireConformsToContract(t *testing.T) {
 		{method: "workers.say", params: `{"worker":"worker-1","message":"the wire is a party"}`, result: "workers.say"},
 		{method: "workers.wait", params: `{}`, result: "workers.wait"},
 		{method: "workers.close", params: `{"worker":"worker-1"}`, result: "workers.close"},
+		// nocx-luqz9.2: the coordinator's OWN mailbox, over the same socket —
+		// the shape of answer the worker above receives, and the one the
+		// observations a worker's pane produces arrive in.
+		{method: "workers.inbox", params: `{}`, result: "workers.inbox"},
 		// A descendant's pane, read through the helper-backed path this
 		// task adds (nocx-6q1uh.8): sessionId differs from the admitted
 		// session, so this exercises PaneReader over the real endpoint,

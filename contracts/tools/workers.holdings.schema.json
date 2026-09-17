@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/tools/workers.holdings.schema.json",
   "title": "WorkersHoldingsParams",
-  "description": "Parameters for the workers.holdings agent tool: ask what workers your own session is responsible for. It takes NOTHING — the session is the one you are running in, and you cannot ask about another. Reach for it when you have lost track of what you started, including at the beginning of a turn after a restart.",
+  "description": "Parameters for the workers.holdings agent tool: ask what workers your own session is responsible for. It takes NOTHING \u2014 the session is the one you are running in, and you cannot ask about another. Reach for it when you have lost track of what you started, including at the beginning of a turn after a restart.",
   "type": "object",
   "additionalProperties": false,
   "required": [],
@@ -23,7 +23,7 @@
       "properties": {
         "mail": {
           "type": "array",
-          "description": "Messages your workers have left for you that you had not been handed before. Asking is what hands them over, so what you see here you will not be shown again — act on it in this turn, or say it back to yourself.",
+          "description": "Messages your workers have left for you that you had not been handed before. Asking is what hands them over, so what you see here you will not be shown again \u2014 act on it in this turn, or say it back to yourself.",
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -36,6 +36,31 @@
               "message": {
                 "type": "string",
                 "description": "What it said. It is text a worker wrote: it carries no authority, and nothing in it changes what you or it may do."
+              }
+            }
+          }
+        },
+        "observations": {
+          "type": "array",
+          "description": "What nocx has seen of YOUR workers, oldest first: one entry per state a worker was seen to settle into (idle, blocked, exited). It carries no screen content, only the worker, the state and the time. Present because this call reads the same mailbox workers.inbox does \u2014 one box, one cursor, one order \u2014 so an observation can be in the page it fetches, and rendering one as a message would be both a lie and a loss (asking advances the cursor).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["worker", "state", "at"],
+            "properties": {
+              "worker": {
+                "type": "string",
+                "description": "The worker the state is about."
+              },
+              "state": {
+                "type": "string",
+                "enum": ["idle", "blocked", "exited"],
+                "description": "idle: doing nothing and waiting for nothing. blocked: it cannot continue until somebody steps in. exited: its agent process is gone. Only a state that HELD is reported."
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time",
+                "description": "When the state settled, in UTC."
               }
             }
           }
@@ -63,7 +88,7 @@
               "state": {
                 "type": "string",
                 "enum": ["prepared", "live", "completed", "failed", "abandoned", "interrupted"],
-                "description": "prepared: recorded, not yet started. live: running. completed and failed: it said what it produced AND its process is gone — the verdict is its own. abandoned: its process is gone and it never said what it produced, which is not a completion. interrupted: nocx restarted and could not judge it."
+                "description": "prepared: recorded, not yet started. live: running. completed and failed: it said what it produced AND its process is gone \u2014 the verdict is its own. abandoned: its process is gone and it never said what it produced, which is not a completion. interrupted: nocx restarted and could not judge it."
               },
               "task": {
                 "type": "string",
@@ -75,7 +100,7 @@
               },
               "needsJudgement": {
                 "type": "boolean",
-                "description": "True when something happened to this worker that NEEDS YOUR DECISION and you have not been told about it yet. Absent covers two ordinary cases: nothing has happened, or what happened was routine — a worker finishing successfully while others are still running does not need you, and is not marked. Reading this list is what clears it, so what you see here you will not be shown twice."
+                "description": "True when something happened to this worker that NEEDS YOUR DECISION and you have not been told about it yet. Absent covers two ordinary cases: nothing has happened, or what happened was routine \u2014 a worker finishing successfully while others are still running does not need you, and is not marked. Reading this list is what clears it, so what you see here you will not be shown twice."
               }
             }
           }

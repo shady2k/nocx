@@ -81,8 +81,22 @@ const MaxMessageBytes = 16 << 10
 // context window.
 const MaxFetch = 50
 
-// Message is one thing that was said, and it is content: nothing derives
-// authority from a body, and no state anywhere is decided by one.
+// Message is one thing that was said, or one thing that was SEEN.
+//
+// Text is the ordinary case: Body carries it and nothing derives authority from
+// it. An OBSERVATION is the other case (nocx-luqz9.2, ADR-0070 decision 2) —
+// nocx saw one of the coordinator's workers settle into idle, blocked or exited
+// — and it rides here rather than in a second store because it is the same act:
+// one mailbox per reader, one cursor, one order. A coordinator reading its
+// mailbox sees what its workers said and what they were seen to be in the order
+// both happened, and it does not need to know that two producers wrote them.
+//
+// Exactly one of Body and Observed is ever set. The type admits both and the
+// writers never produce both: a row carrying neither is refused by Say's own
+// emptiness check, and observe.go's placeObservation is the only writer of the
+// other. This paragraph is the whole of the invariant, and the reader that
+// renders a mailbox (internal/assistant's workerMailResult) is what would show a
+// violation first.
 type Message struct {
 	ID    MessageID
 	Group ID
@@ -90,12 +104,16 @@ type Message struct {
 	Recipient ReaderID
 	// Sender is who wrote it. Stamped by the backend from the authenticated
 	// caller, never carried in the call: a sender a caller could name is a
-	// sender a caller could forge.
+	// sender a caller could forge. An observation's sender is the record itself
+	// (observedSender), which is neither a coordinator nor a participant.
 	Sender ReaderID
 	// Seq is the message's position in ITS MAILBOX, monotonic and dense
 	// enough to compare. It is what a cursor points at.
-	Seq         int64
-	Body        string
+	Seq  int64
+	Body string
+	// Observed is the untrusted-free half of a row: a settled state of one
+	// worker, carrying no screen content at all. Nil for text mail.
+	Observed    *Observed
 	CommittedAt time.Time
 }
 

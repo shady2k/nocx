@@ -83,12 +83,30 @@ type workerParticipantResult struct {
 }
 
 // workerMailResult is one message the coordinator is handed. It carries the
-// sender and the body and nothing else: a message is CONTENT, and a shape
-// with an id or a cursor in it would invite the model to think it had
-// something to acknowledge, which is a mark the backend advanced for it.
+// sender and the body and nothing else: a message is CONTENT, and a shape with
+// an id or a cursor in it would invite the model to think it had something to
+// acknowledge, which is a mark the backend advanced for it.
 type workerMailResult struct {
 	From    string `json:"from"`
 	Message string `json:"message"`
+}
+
+// workerObservationResult is one state a coordinator's worker was SEEN to be in
+// (nocx-luqz9.2; ADR-0070 decision 2).
+//
+// THREE FIELDS AND NO FOURTH, and that is the contract rather than a shape
+// somebody chose: an observation carries no screen content, ever. The reason is
+// in ADR-0070 and in internal/workers' own wakeText — text read off a worker's
+// screen, handed to a coordinator as something to act on, is prompt injection
+// performed by nocx itself. What a coordinator gets is the worker, the state and
+// when it settled, and it decides what that means.
+type workerObservationResult struct {
+	Worker string `json:"worker"`
+	State  string `json:"state"`
+	// At is when the state settled, in UTC RFC 3339 — the same encoding every
+	// other timestamp on this surface uses (internal/transport's
+	// RFC3339Nano/RFC3339 sites), so a caller never has two parsers.
+	At string `json:"at"`
 }
 
 type workerHoldingsResult struct {
@@ -98,6 +116,16 @@ type workerHoldingsResult struct {
 	// what was said to it in the same breath, because those are one question
 	// — "what has happened since I last looked".
 	Mail []workerMailResult `json:"mail,omitempty"`
+	// Observations is the second kind of row the same mailbox holds
+	// (nocx-luqz9.2): the settled states nocx saw of this coordinator's own
+	// workers. Two lists and not one, for workers.inbox's reason — an
+	// observation has no text and a message has no state, so one field would
+	// have to mean two things — and named here rather than left out for a
+	// sharper reason: this call READS the mailbox, which advances the cursor,
+	// so an observation rendered as an empty message would be both a lie to
+	// the coordinator and invisible to the workers.inbox it might have reached
+	// instead.
+	Observations []workerObservationResult `json:"observations,omitempty"`
 	// Cursor is where this reader has been read up to. It travels with the
 	// mail because §7.2 requires the reader to acknowledge a position
 	// TOGETHER WITH the effects it commits from that response: a reader
@@ -168,6 +196,17 @@ type workerSpawnResult struct {
 	WaitingOn string `json:"waitingOn,omitempty"`
 }
 
+// workerCoordinatorFrom is the ONE assertion of a concrete worker capability,
+// and nocx-luqz9.2 is why there is only one. Every call that names an AUTHORITY
+// — spawn, say, close, holdings, wait — is a coordinator's alone, so there is
+// one type to assert. The participant assertion this stood beside is deleted
+// with its last caller rather than kept for symmetry: A8's two types are still
+// two, and what vanished is a second assertion of a capability nothing but
+// workers.inbox ever narrowed to.
+//
+// workers.inbox is the exception and asserts NEITHER concrete type, because its
+// two holders do the same thing — read their own mailbox — and which box that is
+// follows from the run rather than from a role. See workerMailboxFrom.
 func workerCoordinatorFrom(cap agenttools.Capability, tool string) (*agenttools.WorkerCoordinator, error) {
 	c, ok := cap.(*agenttools.WorkerCoordinator)
 	if !ok {
@@ -182,46 +221,75 @@ func workerCoordinatorFrom(cap agenttools.Capability, tool string) (*agenttools.
 	return c, nil
 }
 
-// workerParticipantFrom is the other half of the type switch A8 asks for. It
-// exists beside workerCoordinatorFrom rather than inside it because the two
-// capabilities are two types: a function that accepted either and returned a
-// role would be the boolean the design rejected, one refactor from being read
-// wrong.
-func workerParticipantFrom(cap agenttools.Capability, tool string) (*agenttools.WorkerParticipant, error) {
-	p, ok := cap.(*agenttools.WorkerParticipant)
-	if !ok {
-		return nil, fmt.Errorf("%s: capability is %T, not *agenttools.WorkerParticipant", tool, cap)
+// splitMailbox renders one page of a mailbox into the two lists everything that
+// reads a mailbox hands back (nocx-luqz9.2).
+//
+// ONE RENDERER AND NOT ONE PER CALLER, because there are three readers of the
+// same box — workers.inbox, workers.holdings and workers.wait — and a second
+// copy of "what does a row become" is a second answer that agrees everywhere
+// until an observation lands in the copy somebody forgot. The kind is decided by
+// the row itself (Message.Observed is nil for text), so a caller cannot choose
+// wrongly and cannot forget: it has nothing to choose.
+//
+// Both lists are non-nil for an empty page, so a reader of the JSON always sees
+// the keys and "nothing new" is an empty array rather than an absent field. The
+// time is UTC RFC 3339, the encoding every other timestamp on this surface uses.
+func splitMailbox(messages []workers.Message) ([]workerMailResult, []workerObservationResult) {
+	text := make([]workerMailResult, 0, len(messages))
+	observed := make([]workerObservationResult, 0, len(messages))
+	for _, m := range messages {
+		if m.Observed == nil {
+			text = append(text, workerMailResult{From: string(m.Sender), Message: m.Body})
+			continue
+		}
+		observed = append(observed, workerObservationResult{
+			Worker: string(m.Observed.Worker),
+			State:  string(m.Observed.State),
+			At:     m.Observed.At.UTC().Format(time.RFC3339),
+		})
 	}
-	if p.Mailbox() == "" {
-		// A participant with no mailbox is a caller the authorizer did not
-		// establish as a worker. Answering it an empty inbox would be
-		// indistinguishable from a worker whose coordinator has said nothing.
-		return nil, fmt.Errorf("%s: this run is not a worker participant", tool)
-	}
-	return p, nil
+	return text, observed
 }
 
 type workerInboxParams struct {
 	Acknowledge int64 `json:"acknowledge"`
 }
 
+// workerInboxResult is what one mailbox read answers, and it carries BOTH kinds
+// of mail because one mailbox carries both: text a coordinator left, and states
+// nocx saw (nocx-luqz9.2).
+//
+// They are two lists and never one, and the reason is the contract rather than
+// taste: an observation has no text and a message has no state, so a merged
+// shape would need one field to mean two things and the renderer would have to
+// guess. Two lists also let "no observations" be an honest empty array rather
+// than a missing key a reader has to tell from an absent feature.
 type workerInboxResult struct {
 	Messages []workerMailResult `json:"messages"`
-	Cursor   int64              `json:"cursor"`
-	More     bool               `json:"more"`
+	// Observations is the settled states of this coordinator's own workers, in
+	// the order they settled. Empty for a worker, whose mailbox is written by
+	// its coordinator's words alone.
+	Observations []workerObservationResult `json:"observations"`
+	Cursor       int64                     `json:"cursor"`
+	More         bool                      `json:"more"`
 }
 
-// executeWorkerInbox hands a worker the mail its coordinator left it.
+// executeWorkerInbox hands a caller the mail in its own mailbox — the mail a
+// coordinator left a worker, and, for a coordinator, the state changes nocx saw
+// of its workers (nocx-luqz9.2, design §4.5).
 //
-// This is the reader workers.say was always writing for. Until it existed the
-// coordinator could commit a message into a mailbox nothing could open — a
-// writer with no reader, which is a soft degrade visible nowhere (nocx-rowqt.9).
+// It names no mailbox. The box is the capability's own identity — a
+// participant's id, or the session a coordinator is — so a caller has no way to
+// EXPRESS another mailbox: A9's rule, and the reason this is a property of the
+// type rather than of a check.
 //
-// It names no mailbox. The box is the participant's own id, taken from the
-// capability, so a worker has no way to EXPRESS another worker's mail — A9's
-// rule, and the reason this is a property of the type rather than of a check.
+// The two callers share this ONE function rather than getting one each, because
+// they are doing one thing: reading their own box. What the box IS differs and
+// that is the capability's whole contribution; everything after it — acknowledge
+// first, then fetch, then render — is identical, and a second copy would be a
+// second answer to "what does a read hand over".
 func executeWorkerInbox(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
-	participant, err := workerParticipantFrom(cap, "workers.inbox")
+	mailbox, err := workerMailboxFrom(cap, "workers.inbox")
 	if err != nil {
 		return "", err
 	}
@@ -234,11 +302,11 @@ func executeWorkerInbox(ctx context.Context, cap agenttools.Capability, args jso
 			return "", fmt.Errorf("workers.inbox: %w", argErr)
 		}
 	}
-	box := workers.ReaderID(participant.Mailbox())
-	// Acknowledge BEFORE fetching, for the coordinator's reason: the mark
-	// being sent back is about the PREVIOUS answer, and doing it after would
-	// let this call's own page slide under an acknowledgement of mail the
-	// worker has not seen yet.
+	box := workers.ReaderID(mailbox.Mailbox())
+	// Acknowledge BEFORE fetching, for the coordinator's reason: the mark being
+	// sent back is about the PREVIOUS answer, and doing it after would let this
+	// call's own page slide under an acknowledgement of mail the caller has not
+	// seen yet.
 	if p.Acknowledge > 0 {
 		if ackErr := seams.workerStore.Acknowledge(ctx, box, box, p.Acknowledge); ackErr != nil {
 			return "", fmt.Errorf("workers.inbox: acknowledge: %w", ackErr)
@@ -248,15 +316,43 @@ func executeWorkerInbox(ctx context.Context, cap agenttools.Capability, args jso
 	if err != nil {
 		return "", fmt.Errorf("workers.inbox: %w", err)
 	}
-	out := workerInboxResult{Messages: []workerMailResult{}, Cursor: fetched.Cursor.Fetched, More: fetched.More}
-	for _, m := range fetched.Messages {
-		out.Messages = append(out.Messages, workerMailResult{From: string(m.Sender), Message: m.Body})
+	messages, observations := splitMailbox(fetched.Messages)
+	out := workerInboxResult{
+		Messages:     messages,
+		Observations: observations,
+		Cursor:       fetched.Cursor.Fetched,
+		More:         fetched.More,
 	}
 	raw, err := json.Marshal(out)
 	if err != nil {
 		return "", fmt.Errorf("workers.inbox: result: %w", err)
 	}
 	return string(raw), nil
+}
+
+// workerMailboxFrom is the one thing workers.inbox needs from the capability it
+// was narrowed to: which box is this holder's own.
+//
+// It asserts agenttools.Mailbox and not either concrete type, and that is a
+// deliberate asymmetry with workerCoordinatorFrom/workerParticipantFrom above:
+// those two exist where the two AUTHORITIES differ — spawning, closing, holdings
+// — and this call is the one act where they do not. The narrow has already
+// proved which holder this is (a run context with no participant identity cannot
+// narrow to a participant, and one with no session cannot narrow to a
+// coordinator); re-deciding it here with a second type switch would be the
+// second owner of a question already answered.
+func workerMailboxFrom(cap agenttools.Capability, tool string) (agenttools.Mailbox, error) {
+	m, ok := cap.(agenttools.Mailbox)
+	if !ok {
+		return nil, fmt.Errorf("%s: capability is %T, which owns no mailbox", tool, cap)
+	}
+	if m.Mailbox() == "" {
+		// An empty mailbox belongs to nobody, and answering it an empty inbox
+		// would be indistinguishable from a holder whose mail nobody has
+		// written.
+		return nil, fmt.Errorf("%s: this run owns no mailbox", tool)
+	}
+	return m, nil
 }
 
 // executeWorkerHoldings answers D3: a coordinator asks what its SESSION holds
@@ -383,9 +479,9 @@ func workerAnswer(
 	if err != nil {
 		return "", fmt.Errorf("%s: mail: %w", tool, err)
 	}
-	for _, m := range fetched.Messages {
-		out.Mail = append(out.Mail, workerMailResult{From: string(m.Sender), Message: m.Body})
-	}
+	messages, observations := splitMailbox(fetched.Messages)
+	out.Mail = messages
+	out.Observations = observations
 	out.Cursor = fetched.Cursor.Fetched
 	// And what the coordinator itself has said that nobody took. A worker
 	// that never looks is a worker that never got the instruction, and this

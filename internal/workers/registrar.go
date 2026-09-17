@@ -92,6 +92,15 @@ type Registrar struct {
 	// is the same stance the supervisor takes with an unwired destination.
 	attention *Backstop
 
+	// observations is the settle machine for the facts nocx SEES
+	// (nocx-luqz9.2): what each worker was last read as, since when, and what
+	// has already been placed in a coordinator's mailbox. It is never nil —
+	// NewRegistrar builds one with DefaultSettleWindow, and WithSettleWindow
+	// replaces it — because a nil machine would make Observe panic on a
+	// registrar a test built by hand, which is a failure mode with no
+	// diagnostic in it.
+	observations *observedFacts
+
 	// log is what the six steps of Register say they are doing. It is never
 	// nil, and a Registrar built without one writes to slog's default rather
 	// than to nothing: the failure that bought this field (nocx-4l2a5.4) was
@@ -127,6 +136,16 @@ func WithEnrolmentDeadline(d time.Duration) Option {
 	return func(r *Registrar) { r.deadline = d }
 }
 
+// WithSettleWindow sets how long a worker's pane must hold a state before it
+// becomes a fact (nocx-luqz9.2, design §4.4). The number is injected for the
+// same reason the deadline above is: it is a product value with two ends, and
+// the composition root is where the product's real values live. Zero means "the
+// second reading is the fact", which is what a caller that cannot move this
+// package's clock asks for; the product passes DefaultSettleWindow.
+func WithSettleWindow(d time.Duration) Option {
+	return func(r *Registrar) { r.observations = newObservedFacts(d) }
+}
+
 // WithCloser wires the seam that ends a participant. Without it Close
 // refuses and says so, rather than reporting a worker ended that is still
 // running.
@@ -154,15 +173,16 @@ func WithBackstop(b *Backstop) Option { return func(r *Registrar) { r.attention 
 // NewRegistrar wires the record to its four seams.
 func NewRegistrar(s Store, sp Spawner, e Enrolments, sup Supervisor, opts ...Option) *Registrar {
 	r := &Registrar{
-		store:    s,
-		spawn:    sp,
-		enrol:    e,
-		sup:      sup,
-		bound:    defaultBound,
-		deadline: defaultEnrolmentDeadline,
-		newID:    newParticipantID,
-		now:      time.Now,
-		log:      log.NewSlogAdapter(nil),
+		store:        s,
+		spawn:        sp,
+		enrol:        e,
+		sup:          sup,
+		bound:        defaultBound,
+		deadline:     defaultEnrolmentDeadline,
+		newID:        newParticipantID,
+		now:          time.Now,
+		log:          log.NewSlogAdapter(nil),
+		observations: newObservedFacts(DefaultSettleWindow),
 		attention: NewBackstop(
 			log.NewSlogAdapter(nil),
 			// No routes. Every fact is still recorded and every missing
@@ -433,10 +453,22 @@ func (r *Registrar) Declared(ctx context.Context, id ParticipantID, l Liveness, 
 }
 
 // Exited admits the process fact and reduces.
+//
+// It also places the OBSERVED exit (nocx-luqz9.2), and the ordering is the point
+// rather than an incidental: the record is told first, so the fact a coordinator
+// is handed is about a process this backend has already established was its own.
+// A record that refused the exit (a stale incarnation, an already-terminal
+// participant) places nothing — the observation rests on the admission, never
+// beside it.
 func (r *Registrar) Exited(ctx context.Context, id ParticipantID, l Liveness, e Exit) (Participant, error) {
-	return r.admit(ctx, id, l, FactExited, func(ctx context.Context) (Participant, error) {
+	p, err := r.admit(ctx, id, l, FactExited, func(ctx context.Context) (Participant, error) {
 		return r.store.RecordExit(ctx, id, e)
 	})
+	if err != nil {
+		return p, err
+	}
+	r.observeExit(ctx, p)
+	return p, nil
 }
 
 // admit is the incarnation guard and the reduction, in that order.

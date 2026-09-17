@@ -1,6 +1,6 @@
 .PHONY: all init build build-server dev dev-web lint format test clean hooks ci ci-full \
         ci-backend ci-linux ci-mac ci-os-split ci-local-ssh-split ci-frontend ci-e2e \
-        helpers helper-local \
+        helpers helper-local helpers-this-machine \
         require-local-helper \
         print-os-pkgs print-portable-pkgs print-local-ssh-pkgs \
         print-os-local-ssh-pkgs print-portable-local-ssh-pkgs \
@@ -116,6 +116,11 @@ endif
 # e2e/run-in-container.sh straight after a bare checkout. A prerequisite here
 # bought the make target artifacts CI would not have had, and two SSH git
 # specs that could only ever pass locally (nocx-eoijp).
+#
+# AND IT DOES NOT NEED ALL FOUR OF THEM (nocx-trkgm). The stand calls
+# `helpers-this-machine` below, which is this target with HELPER_TARGETS
+# narrowed to the one platform a run can ask for; this list stays the release's
+# four, unchanged.
 HELPER_TARGETS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 HELPER_ARTIFACT_DIR := internal/helper/deploy/artifacts/bin
 
@@ -304,6 +309,31 @@ helper-local: vt-archives
 require-local-helper: helper-local
 	@NOCX_REQUIRE_LOCAL_ARTIFACTS="$(HELPER_LOCAL_TARGETS)" \
 	  $(GO) test ./internal/helper/deploy/artifacts -count=1
+
+# WHAT A RUN ON THIS MACHINE NEEDS FROM THE DEPLOYABLE SET (nocx-trkgm).
+#
+# `helpers` builds the four platforms this product SHIPS for. A run needs ONE,
+# and it is this machine's — because the platform is what the far host answers,
+# not what we guess: deploy.Probe reads `uname -s -m` over the connection
+# (internal/helper/deploy/platform.go) and every SSH target the e2e suite
+# reaches is cmd/e2e-sshd on loopback, so the artifact a run asks for is the
+# container's own platform, the same one `helper-local` builds.
+#
+# The four-target matrix cost 3 minutes of the e2e job's setup in CI (measured
+# 2026-09-17, run 35205572891: 09:54:14 → 09:57:18 for the helper artifacts,
+# the local helper and nocx-server together, against a cold Go cache). Three of
+# those four compiles could not be asked for by any spec in the suite. The
+# darwin pair keeps its exerciser — the release's own helpers job builds all
+# four on ubuntu-latest (release.yml), which is where the committed .tbd stubs
+# are exercised — and it is deliberately not this target's business.
+#
+# THE PLATFORM IS NOT WRITTEN DOWN HERE. HELPER_LOCAL_PLATFORM is the one
+# statement of "which machine this is", and a target-specific variable is how
+# the deployable list is narrowed for this target and its prerequisites without
+# moving HELPER_TARGETS for `helpers` itself — the same override the release
+# passes on the command line for HELPER_LOCAL_TARGETS.
+helpers-this-machine: HELPER_TARGETS := $(HELPER_LOCAL_PLATFORM)
+helpers-this-machine: helpers require-local-helper
 
 all: lint test build
 

@@ -305,13 +305,23 @@ export async function startStand(): Promise<StandManifest> {
   // could never render. The suite needs them, so the suite builds them
   // (nocx-eoijp).
   //
-  // `make helpers`, not a second copy of the build matrix: HELPER_TARGETS, the
-  // per-target Zig compiler and the pinned libghostty-vt archives have one
-  // owner, and it is the Makefile. Since nocx-ygxjv.10 that target also fetches
-  // the archives from the release the manifest names and verifies them against
-  // it — so this line needs the image to carry the pinned Zig and the fetch to
-  // be able to reach that release, and it links a statically built helper on
-  // Linux rather than a purely Go one.
+  // ONE `make` TARGET, not a second copy of the build matrix: which platforms
+  // to build, the per-target Zig compiler and the pinned libghostty-vt
+  // archives have one owner, and it is the Makefile. Since nocx-ygxjv.10 the
+  // target it calls also fetches the archives from the release the manifest
+  // names and verifies them against it — so this line needs the image to carry
+  // the pinned Zig and the fetch to be able to reach that release, and it links
+  // a statically built helper on Linux rather than a purely Go one.
+  //
+  // AND IT IS `helpers-this-machine`, NOT `helpers` (nocx-trkgm). A run asks
+  // for the artifact of ONE platform, and it is this host's: the platform is
+  // what the FAR host answers, deploy.Probe reads `uname -s -m` over the
+  // connection (internal/helper/deploy/platform.go), and every SSH target this
+  // suite reaches is cmd/e2e-sshd on loopback. `helpers` builds the four
+  // platforms the product SHIPS for, and in CI that matrix was 3 minutes of the
+  // job's setup for three artifacts no spec could ask for (measured 2026-09-17,
+  // run 35205572891: 09:54:14 → 09:57:18 for the artifacts, the local helper
+  // and nocx-server together, against a cold Go cache).
   //
   // require-local-helper IS THE SECOND DIRECTORY, and it is the stand's because
   // a stand without it is a stand where no pane opens: the local install
@@ -319,8 +329,8 @@ export async function startStand(): Promise<StandManifest> {
   // spec in this suite drives a terminal. It builds this host's variant and
   // then asserts the embed really carries it, which a bare `make helper-local`
   // does not — the failure it catches is an artifact written where //go:embed
-  // does not read it.
-  execFileSync('make', ['helpers', 'require-local-helper'], {
+  // does not read it. That target runs both halves, both for this host.
+  execFileSync('make', ['helpers-this-machine'], {
     cwd: repoRoot,
     stdio: 'inherit',
   })

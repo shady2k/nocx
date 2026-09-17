@@ -62,11 +62,11 @@ ENV GOTOOLCHAIN=local
 # installs dash on macOS and zsh on ubuntu.
 #
 # make, because the stand builds the remote helper's artifacts by calling
-# `make helpers` on its way up (e2e/stand.ts) rather than keeping a second
-# copy of that build matrix. Without it the suite dies in globalSetup — and
-# since nocx-ygxjv.10 that target also fetches the pinned libghostty-vt
-# archives and cross-compiles every helper target with Zig, which is why Zig
-# is installed below and `xz-utils` is here.
+# `make helpers-this-machine` on its way up (e2e/stand.ts) rather than keeping a
+# second copy of that build matrix. Without it the suite dies in globalSetup —
+# and since nocx-ygxjv.10 that target also fetches the pinned libghostty-vt
+# archives and compiles the helper through Zig's cc, which is why Zig is
+# installed below and `xz-utils` is here.
 #
 # gnome-keyring and dbus, because one spec is ABOUT a machine that has a
 # working OS keystore — that a vault set up there is asked for a passphrase
@@ -80,10 +80,16 @@ RUN apt-get update -qq \
        bash dash make zsh openssh-client gnome-keyring dbus dbus-x11 xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# THE PINNED ZIG, because the stand runs the FULL `make helpers` matrix
-# (e2e/stand.ts) and every one of its four targets is cross-compiled with Zig —
-# the two darwin ones from this Linux image, using the committed .tbd stubs.
-# `make helpers` fails without it.
+# THE PINNED ZIG, because the stand builds the helper artifacts with
+# `make helpers-this-machine` on its way up (e2e/stand.ts) and that target
+# compiles through Zig's cc: it is what gives the Linux helper a statically
+# linked musl libc, and `vtfetch cc` refuses any Zig but the pinned version.
+# The target fails without it.
+#
+# The darwin targets are NOT built here (nocx-trkgm). Those are the ones
+# cross-compiled from Linux against the committed .tbd stubs, the stand builds
+# this host's platform alone, and their exerciser is the release workflow's own
+# helpers job rather than this image.
 #
 # The VERSION is the one third_party/libghostty-vt/MANIFEST.json pins, and it
 # is repeated here rather than read from there because this build's context is

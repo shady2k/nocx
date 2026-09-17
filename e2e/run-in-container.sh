@@ -15,6 +15,14 @@
 #                                                  # fails, to see the failure-context block
 #                                                  # (nocx-n14oo.11); skipped otherwise
 #
+#   NOCX_E2E_IMAGE=<tag>          run that image instead of building one (ci.yml
+#                                 builds it; a tag that is not in the image store
+#                                 is refused rather than built)
+#   NOCX_E2E_CACHE_ROOT=<dir>     mount the npm and Go caches from that host
+#                                 directory instead of from named volumes — the
+#                                 runner's case, where a volume dies with the job
+#                                 (ci.yml restores and saves the directory)
+#
 # The backend's log is inside the disposable home, at
 # .e2e/home/.local/share/nocx-dev/nocx.log. Read it BEFORE the Playwright
 # output when a spec fails on a timeout: it named a fixture defect in one line
@@ -25,15 +33,40 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-image="nocx-e2e:local"
 
-echo "=== building $image (cached after the first run) ==="
-docker build -q -f "$repo_root/e2e/Dockerfile" -t "$image" "$repo_root/e2e" >/dev/null
+# WHO BUILDS THE IMAGE.
+#
+# By default this script does, exactly as it always has: one `docker build`
+# whose own layer cache makes the second run fast, which is the whole story on
+# a developer's machine. A runner is not that machine — it starts with no image
+# and the same build measured 22 minutes there on 2026-09-17 (run 35205572891,
+# 09:31:32 → 09:53:50; 9–16 minutes in the run before it). So ci.yml builds the
+# image with buildx's Actions-layer cache and hands the result in:
+#
+#   NOCX_E2E_IMAGE   the tag to RUN, built by somebody else. Set, this script
+#                    builds nothing — and REFUSES rather than falling back to a
+#                    build when the tag is not in the image store, because a
+#                    run against a silently different image is worse than one
+#                    that does not start.
+#
+# Unset, everything below is what it always was, tag and message included.
+image="${NOCX_E2E_IMAGE:-nocx-e2e:local}"
+if [ -n "${NOCX_E2E_IMAGE:-}" ]; then
+    if ! docker image inspect "$image" >/dev/null 2>&1; then
+        echo "NOCX_E2E_IMAGE=$image is not in this machine's image store." >&2
+        echo "Build it (unset NOCX_E2E_IMAGE) or point the variable at a tag that exists." >&2
+        exit 1
+    fi
+    echo "=== using $image (provided by NOCX_E2E_IMAGE, not built here) ==="
+else
+    echo "=== building $image (cached after the first run) ==="
+    docker build -q -f "$repo_root/e2e/Dockerfile" -t "$image" "$repo_root/e2e" >/dev/null
+fi
 
-# node_modules and the Go build cache live in named volumes rather than in the
-# bind mount: the host's are macOS/arm64 artefacts and the container is Linux,
-# so sharing them produces "cannot execute binary file" at best and a silently
-# wrong build at worst.
+# node_modules and the Go build cache live outside the bind mount: the host's
+# are macOS/arm64 artefacts and the container is Linux, so sharing them
+# produces "cannot execute binary file" at best and a silently wrong build at
+# worst.
 #
 # BOTH node_modules trees, not just the root one. The entry script runs `npm ci`
 # in frontend/ too, and with that directory bind-mounted the container's Linux
@@ -57,26 +90,65 @@ NODE_VOL="nocx-e2e-node-${WORKTREE_KEY}"
 FENODE_VOL="nocx-e2e-fenode-${WORKTREE_KEY}"
 docker volume create "$NODE_VOL" >/dev/null
 docker volume create "$FENODE_VOL" >/dev/null
-docker volume create nocx-e2e-gocache >/dev/null
-# AND THE NPM CACHE, for exactly the reason the Go module cache below has one,
-# and missing for exactly as long: with no /root/.npm every run re-fetches the
-# whole dependency tree from the registry, so a slow or IPv6-only route turns
-# `npm ci` into ETIMEDOUT and the suite dies before a spec starts. Measured
-# 2026-08-30: five consecutive runs exited 146 there. Shared rather than keyed
-# by worktree — unlike node_modules, a cache entry is content-addressed, so two
-# branches on two lockfiles cannot write different bytes under one key
-# (nocx-7jt3u).
-docker volume create nocx-e2e-npmcache >/dev/null
-# AND THE MODULE CACHE, which was missing and made every run need the network.
-# globalSetup builds cmd/nocx-server before a single spec runs, so with no
-# /root/go/pkg/mod the build re-downloads the whole module graph each time and
-# the suite dies in globalSetup when DNS blinks — three times on 2026-08-18,
-# each one indistinguishable at a glance from a real failure:
-#   proxy.golang.org ... server misbehaving
-#   Error: Command failed: go build -o /work/.e2e/nocx-server ./cmd/nocx-server
-# Content-addressed like the build cache, so it is shared across worktrees on
-# purpose (nocx-x6z3 keyed the install trees, not the caches).
-docker volume create nocx-e2e-gomod >/dev/null
+
+# AND THE THREE CACHES, WHICH A RUNNER CANNOT KEEP IN A VOLUME (nocx-trkgm).
+#
+# Locally they are named volumes, shared across worktrees on purpose for the
+# reason the paragraph above gives: a cache entry is content-addressed, so two
+# branches on two lockfiles cannot write different bytes under one key. Each of
+# the three holds a measured failure:
+#
+#   npm         with no /root/.npm every run re-fetches the whole dependency
+#               tree from the registry, so a slow or IPv6-only route turns
+#               `npm ci` into ETIMEDOUT and the suite dies before a spec starts
+#               (measured 2026-08-30: five consecutive runs exited 146 there;
+#               nocx-7jt3u).
+#   go-build    the helper artifacts and nocx-server are compiled by the stand
+#               on every run, so with no build cache every one of those
+#               compilations happens against nothing.
+#   go-mod      globalSetup builds cmd/nocx-server before a single spec runs, so
+#               with no /root/go/pkg/mod the build re-downloads the whole module
+#               graph each time and the suite dies in globalSetup when DNS
+#               blinks — three times on 2026-08-18, each one indistinguishable
+#               at a glance from a real failure:
+#                 proxy.golang.org ... server misbehaving
+#                 Error: Command failed: go build -o /work/.e2e/nocx-server ./cmd/nocx-server
+#
+# A VOLUME CANNOT OUTLIVE THE RUNNER, and that is what makes the local answer
+# the wrong one in CI rather than merely a different one: every job gets a fresh
+# machine, so all three volumes are created EMPTY in every job and thrown away
+# with it. NOCX_E2E_CACHE_ROOT is a directory on the HOST that the job restored
+# from the Actions cache (ci.yml) and saves back afterwards, and setting it is
+# what switches these three mounts. The two node_modules volumes above do not
+# switch: their contents are the product of one lockfile, and `npm ci` rebuilds
+# them in 24 s — measured, against 22 minutes of image build in the same job.
+#
+# Only these three mounts change. The two node_modules volumes above, the bind
+# mount of the repo itself and the .e2e/ home are untouched, so the run a
+# developer gets and the run CI gets differ in where three caches are kept and
+# in nothing else.
+cache_root="${NOCX_E2E_CACHE_ROOT:-}"
+if [ -n "$cache_root" ]; then
+    # Made here, as this user, rather than left to docker: without it the
+    # daemon would create a missing bind SOURCE itself, as root, before a byte
+    # was written. With it the top of the tree is the runner's, and only what
+    # the container writes inside is root-owned — which is what the Actions
+    # cache reads back, as a non-root user, and can: measured after a full run
+    # on 2026-09-17, 12558 files and 0 of them unreadable, mode 0755/0644 by the
+    # container's umask 022. Nothing chowns them back, and the runner never has
+    # to remove them — runner.temp dies with the VM.
+    mkdir -p "$cache_root/npm" "$cache_root/go-build" "$cache_root/go-mod"
+    NPM_CACHE="$cache_root/npm:/root/.npm"
+    GO_CACHE="$cache_root/go-build:/root/.cache/go-build"
+    GO_MOD="$cache_root/go-mod:/root/go/pkg/mod"
+else
+    docker volume create nocx-e2e-npmcache >/dev/null
+    docker volume create nocx-e2e-gocache >/dev/null
+    docker volume create nocx-e2e-gomod >/dev/null
+    NPM_CACHE="nocx-e2e-npmcache:/root/.npm"
+    GO_CACHE="nocx-e2e-gocache:/root/.cache/go-build"
+    GO_MOD="nocx-e2e-gomod:/root/go/pkg/mod"
+fi
 
 # -t only when there is a terminal to attach: the same script runs from a
 # scripted context, where docker refuses "the input device is not a TTY".
@@ -178,9 +250,9 @@ exec docker run --rm -i ${tty_flag[@]+"${tty_flag[@]}"} \
   -v "$repo_root:/work" \
   -v "$NODE_VOL":/work/node_modules \
   -v "$FENODE_VOL":/work/frontend/node_modules \
-  -v nocx-e2e-npmcache:/root/.npm \
-  -v nocx-e2e-gocache:/root/.cache/go-build \
-  -v nocx-e2e-gomod:/root/go/pkg/mod \
+  -v "$NPM_CACHE" \
+  -v "$GO_CACHE" \
+  -v "$GO_MOD" \
   -e PW_PROJECTS="${PW_PROJECTS:-}" \
   -e PW_WORKERS="${PW_WORKERS:-}" \
   -e NOCX_LOG_LEVEL="${NOCX_LOG_LEVEL:-}" \

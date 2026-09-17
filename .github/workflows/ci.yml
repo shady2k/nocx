@@ -658,15 +658,104 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Nothing else. No setup-go, no setup-node, no `playwright install`: every
-      # one of those would provision a second copy of something the image
-      # already pins, and the copy is where drift starts. A runner that needs
-      # provisioning for this job is a sign the image stopped being the whole
-      # answer.
+      # buildx, because --cache-from/--cache-to are buildx's: the default
+      # `docker` driver takes the flags and does nothing with them.
+      - uses: docker/setup-buildx-action@v4
+
+      # THE IMAGE IS REBUILT IN EVERY JOB, and "cached after the first run" was
+      # only ever true on a developer's machine. Measured, run 35205572891 on
+      # 2026-09-17: `docker build -f e2e/Dockerfile` took 09:31:32 → 09:53:50,
+      # 22 minutes, and 9–16 minutes in the run before it. A runner starts with
+      # no image, and the docker volumes this script used to create empty
+      # (nocx-e2e-gocache/-gomod/-npmcache) are per-runner too, so nothing the
+      # job had built existed at its next start.
+      #
+      # So the layers go in the Actions cache, keyed by the Dockerfile itself:
+      # the context is e2e/, the Dockerfile copies nothing from it, and layer
+      # digests are content-addressed — an edited Dockerfile is a cache miss on
+      # the line that changed, which is the honest version of "key it on the
+      # Dockerfile and its context".
+      #
+      # mode=min (the default) is the whole cache here: the Dockerfile has one
+      # FROM, so the layers of the final image ARE the build's steps, and
+      # mode=max would only add back the files a later layer deletes. The export
+      # is ~1.1 GB — `docker image inspect nocx-e2e:local` reports that as the
+      # content size.
+      #
+      # BOTH MATRIX LEGS USE ONE SCOPE, deliberately. They build the same
+      # Dockerfile from the same context, so the layers they write are identical
+      # bytes under the same content-addressed keys, and an export that finds an
+      # entry already there is a hit rather than an error. A scope per project
+      # would double the storage to avoid a race whose outcome is the same bytes
+      # either way.
+      #
+      # `load: true` puts the result in this runner's image store under the tag
+      # the run step is told to use, so the script runs the image this step
+      # built rather than building its own copy.
+      - name: Build the e2e image
+        uses: docker/build-push-action@v7
+        with:
+          context: e2e
+          file: e2e/Dockerfile
+          tags: nocx-e2e:local
+          load: true
+          cache-from: type=gha,scope=nocx-e2e
+          cache-to: type=gha,scope=nocx-e2e
+
+      # THE CACHES ARE CONTENTS, NOT PROVISIONING, and that distinction is what
+      # keeps the comment below the run step true. Nothing here installs a Go
+      # toolchain or a node: what crosses into the job is what the image's own
+      # tools produced inside it — the module cache, the build cache, npm's
+      # tarball cache — mounted where a developer gets a named volume
+      # (e2e/run-in-container.sh maps $NOCX_E2E_CACHE_ROOT's subdirectories and
+      # creates nocx-e2e-* volumes only when it is unset).
+      #
+      # What it buys, from the same run: 09:54:14 → 09:57:18 spent building the
+      # helper artifacts and nocx-server against an empty /root/go/pkg/mod and
+      # an empty build cache, with `go: downloading …` in the log, and npm ci
+      # re-fetched the whole tree from the registry on every job.
+      #
+      # restore-keys, on all three: they are content-addressed and append-only,
+      # so the entries under an older lockfile are either exactly what this run
+      # needs or harmless extra bytes. An exact key match restores and skips the
+      # save, because an Actions cache entry is immutable.
+      - name: Cache the Go module cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/nocx-e2e-cache/go-mod
+          key: nocx-e2e-go-mod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: nocx-e2e-go-mod-${{ runner.os }}-
+
+      - name: Cache the Go build cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/nocx-e2e-cache/go-build
+          key: nocx-e2e-go-build-${{ runner.os }}-${{ hashFiles('go.sum', 'go.mod') }}
+          restore-keys: nocx-e2e-go-build-${{ runner.os }}-
+
+      - name: Cache the npm cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/nocx-e2e-cache/npm
+          key: nocx-e2e-npm-${{ runner.os }}-${{ hashFiles('package-lock.json', 'frontend/package-lock.json') }}
+          restore-keys: nocx-e2e-npm-${{ runner.os }}-
+
+      # Provisioning is still nothing, and caching is not provisioning: the Go
+      # toolchain, both browsers and the three shells are the image's, and every
+      # step above moves bytes between jobs rather than installing anything. No
+      # setup-go, no setup-node, no `playwright install` — each of those would
+      # put a second copy of something the image pins, and the copy is where
+      # drift starts. A runner that needs provisioning for this job is a sign
+      # the image stopped being the whole answer.
+      #
+      # The image is the one built above, and the caches are on the host; the
+      # container reaches both through the two variables here.
       - name: e2e (container)
         run: e2e/run-in-container.sh
         env:
           PW_PROJECTS: ${{ matrix.project }}
+          NOCX_E2E_IMAGE: nocx-e2e:local
+          NOCX_E2E_CACHE_ROOT: ${{ runner.temp }}/nocx-e2e-cache
 
       # Named per project: two jobs uploading one name is a collision, and
       # the trace you want is the one from the browser that failed.

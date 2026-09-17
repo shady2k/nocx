@@ -814,9 +814,9 @@ func TestOneWaitReturnsWhenTheFirstOfThreeSettlesAndACloseEndsTheRest(t *testing
 		}
 	}
 
-	// Now close the other two. The close ends the session and writes no
-	// state; what terminalizes them is the exit that follows, by the same
-	// path any exit takes.
+	// Now close the other two. The close ends the session and takes the
+	// participant's tab out of the window (nocx-xn63t.4.6); what terminalizes
+	// them is the exit that follows, by the same path any exit takes.
 	for _, p := range participants[1:] {
 		if err := w.record.Close(ctx, string(w.coordinator), p.ID); err != nil {
 			t.Fatalf("close %s: %v", p.ID, err)

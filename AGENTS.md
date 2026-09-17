@@ -862,6 +862,16 @@ on `main`.
 **Merging a pull request always requires explicit approval** — in that session, for that PR.
 Authority to commit and push is not authority to merge.
 
+**The index of a checkout is shared, so stage and commit in one breath.** Several
+sessions work in this checkout at once, and `git add` writes one index that all of
+them commit from. Measured 2026-09-18: files staged here at 00:20 were carried into
+`64c00eb6` at 00:25 by another session, under a message about an unrelated bead —
+six files of a gate, pushed to `main` describing an ssh fix. Nothing was lost and
+nothing is recoverable either, because rewriting a pushed commit costs more than the
+wrong message does. So stage the paths you are about to commit and commit them
+immediately; never leave work staged while you write a commit message, run a gate or
+think. A worktree is the way to hold a change open — that is what they are for.
+
 **Run the gate CI runs, not a subset of it.** `make ci-full` is every CI job, each in the
 environment its job runs in — and these are the whole of `ci.yml`:
 

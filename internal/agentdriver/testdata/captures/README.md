@@ -336,7 +336,7 @@ rows an older Claude's wrap happened to fill, and `nocx-xn63t.4.5` is the defect
 behind exactly that. A coordinator pasted a one-paragraph task, the box drew it over three
 rows, `session.message` read only the first two (the rule's `inputText` extractor was capped
 at two rows down from the box's top rule) and stopped at phase `partial` with Enter never
-pressed. At 120×40 this capture's paste draws FOUR content rows — `336` bytes, one paragraph,
+pressed. At 120×40 this capture's paste draws FOUR content rows — `368` bytes, one paragraph,
 no newline anywhere in it — which is one row more than the cap that produced the defect.
 
 **The paste is a BRACKETED paste** (`ESC[200~` … `ESC[201~`, carried through the script's

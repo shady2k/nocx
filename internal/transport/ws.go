@@ -804,11 +804,12 @@ type WSServer struct {
 	// "who is going to write this", the other "what happened" — and because the
 	// fact path reads this one while holding neither.
 	stopStateMu sync.Mutex
-	// stopStates is one accepted Stop's settlement per attempt. It is what
-	// makes the outcome STATE rather than an event: the lifecycle fact carries
-	// it, so a dropped frame or a reconnect cannot leave a block claiming a
-	// stop that never happened. Bounded by the session — only Stops accepted in
-	// the submit window ever appear, and they go when the session does.
+	// stopStates is each stopped attempt's delivery record: what the Stops a
+	// person made for it came to (ws_signal.go's stopState). It is what makes
+	// the outcome STATE rather than an event: the lifecycle fact carries it,
+	// so a dropped frame cannot leave a block claiming a stop that never
+	// happened. One record per attempt a person pressed Stop on, dropped with
+	// the session however it ends (closeSession and monitorExit).
 	stopStates map[lifecycle.AttemptID]*stopState
 	// signalSub and signalOps are the execution lane session.signal runs on
 	// (buildControlPlane), shared with the one other thing that is a signal:

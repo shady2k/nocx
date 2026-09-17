@@ -25,12 +25,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
@@ -121,6 +125,13 @@ func (f *ptyWriteRecorder) interrupts() int {
 	return bytes.Count(f.bytes, []byte{0x03})
 }
 
+// count counts one byte string across everything written to this stand's ptys.
+func (f *ptyWriteRecorder) count(sub string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return bytes.Count(f.bytes, []byte(sub))
+}
+
 type recordedPTY struct {
 	pty.Pty
 	recorder *ptyWriteRecorder
@@ -141,6 +152,39 @@ func (p *recordedPTY) Write(b []byte) (int, error) {
 	return p.Pty.Write(b)
 }
 
+// The recorder must not hide the pty's process-group seam: the session reaches
+// it by asserting on the channel (session.ForegroundJob), and an embedded
+// pty.Pty interface does not carry those methods — so without these every Stop
+// on this stand looked like "no foreground group" and could never take the
+// ladder.
+func (p *recordedPTY) ForegroundJob() (int, error) {
+	fg, ok := p.Pty.(interface{ ForegroundJob() (int, error) })
+	if !ok {
+		return 0, pty.ErrNoForeground
+	}
+	return fg.ForegroundJob()
+}
+
+func (p *recordedPTY) SignalProcessGroup(pgid int, sig syscall.Signal) error {
+	sg, ok := p.Pty.(interface {
+		SignalProcessGroup(pgid int, sig syscall.Signal) error
+	})
+	if !ok {
+		return pty.ErrNoForeground
+	}
+	return sg.SignalProcessGroup(pgid, sig)
+}
+
+func (p *recordedPTY) SignalForeground(sig syscall.Signal) error {
+	sg, ok := p.Pty.(interface {
+		SignalForeground(sig syscall.Signal) error
+	})
+	if !ok {
+		return pty.ErrNoForeground
+	}
+	return sg.SignalForeground(sig)
+}
+
 // ── the stand ─────────────────────────────────────────────────────────────
 
 // heldStopStand is the nocx-7l4ex.10 protected-group stand (REAL local shells,
@@ -155,6 +199,9 @@ type heldStopStand struct {
 	ws       *WSServer
 	pub      *lifecyclepub.Publisher
 	recorder *ptyWriteRecorder
+	// db is the content store, when the stand was built with one: what a
+	// restore reads a finished block back from (newHeldStopStandWithStore).
+	db content.ContentDB
 
 	sid    string
 	lane   lifecycle.LaneID
@@ -175,12 +222,38 @@ func newHeldStopStand(t *testing.T) *heldStopStand {
 // case here needs to outlast a held write gate.
 func newHeldStopStandWithGrace(t *testing.T, grace time.Duration) *heldStopStand {
 	t.Helper()
+	return newHeldStopStandWith(t, grace, nil)
+}
+
+// heldStopPane is the pane the store-backed stand's session belongs to: the
+// ledger's rows are anchored to a pane, and a restore reads them back by it.
+const heldStopPane = "01930000-0000-7000-8000-0000000000b1"
+
+// newHeldStopStandWithStore is the stand with a real content store behind it,
+// for the cases that ask what the LEDGER says about a stopped command — the
+// carrier a restored block is drawn from.
+func newHeldStopStandWithStore(t *testing.T) *heldStopStand {
+	t.Helper()
+	db := newLedgerStore(t)
+	if _, err := db.Layout().CreateWorkspace(context.Background(),
+		content.Workspace{ID: "ws-held-stop", Name: "held-stop"},
+		content.Tab{ID: "tab-held-stop", WorkspaceID: "ws-held-stop", Position: 0, Layout: content.LayoutRow},
+		content.Pane{ID: heldStopPane, TabID: "tab-held-stop", Cwd: "/tmp", Kind: content.PaneLocal, SizeShare: 1}); err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	return newHeldStopStandWith(t, heldStopGrace, db)
+}
+
+func newHeldStopStandWith(t *testing.T, grace time.Duration, db content.ContentDB) *heldStopStand {
+	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	factory := &ptyWriteRecorder{log: logger}
 	pub := lifecyclepub.New(lifecycle.New(lifecycle.Options{}))
-	ws := NewWSServer(logger, session.New(logger, factory),
-		WithLifecyclePublisher(pub),
-		WithRunLease(RunLeaseConfig{SignalGrace: grace}))
+	opts := []WSServerOption{WithLifecyclePublisher(pub), WithRunLease(RunLeaseConfig{SignalGrace: grace})}
+	if db != nil {
+		opts = append(opts, WithContentDB(db))
+	}
+	ws := NewWSServer(logger, session.New(logger, factory), opts...)
 	pub.SetEmitter(ws)
 	// Owner: the test process; closing event: the Stop at the end of the test.
 	ctx := context.Background()
@@ -193,19 +266,33 @@ func newHeldStopStandWithGrace(t *testing.T, grace time.Duration) *heldStopStand
 	}
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
-	return &heldStopStand{conn: conn, tap: newSocketTap(conn), ws: ws, pub: pub, recorder: factory}
+	return &heldStopStand{conn: conn, tap: newSocketTap(conn), ws: ws, pub: pub, recorder: factory, db: db}
 }
 
 // establish opens a real session, takes job control off and brings a domain
 // live on one lane.
 func (s *heldStopStand) establish(t *testing.T) {
 	t.Helper()
-	s.sid = openSessionTapped(t, s.conn, s.tap)
+	s.establishWith(t, false)
+}
+
+// establishWith is establish, with job control left ON when asked — the
+// ordinary interactive topology, where a command gets its own process group
+// and a Stop goes down the ladder rather than through the terminal's byte.
+func (s *heldStopStand) establishWith(t *testing.T, jobControl bool) {
+	t.Helper()
+	if s.db != nil {
+		s.sid = openSessionTappedInPane(t, s.conn, s.tap, heldStopPane)
+	} else {
+		s.sid = openSessionTapped(t, s.conn, s.tap)
+	}
 	// Asked of the product, never slept for: a `set +m` that had not taken
 	// effect yet would let the shell give the command its own group, and every
 	// case below would silently test the ordinary ladder instead.
-	submitCommand(t, s.conn, s.sid, "set +m; printf %s%s JOBCONTROL -OFF")
-	tapDataFor(t, s.tap, s.sid, "JOBCONTROL-OFF", 20*time.Second)
+	if !jobControl {
+		submitCommand(t, s.conn, s.sid, "set +m; printf %s%s JOBCONTROL -OFF")
+		tapDataFor(t, s.tap, s.sid, "JOBCONTROL-OFF", 20*time.Second)
+	}
 
 	s.lane = lifecycle.LaneID("lane-held-stop")
 	s.ws.RegisterLifecycleLane(s.lane, session.ID(s.sid))
@@ -268,38 +355,6 @@ func (s *heldStopStand) notices() int {
 	return s.tap.noticeCount()
 }
 
-// awaitLifecycleFact waits for the next lifecycle.changed notification and
-// returns its params, schema-validated off the real socket.
-func (s *heldStopStand) awaitLifecycleFact(t *testing.T) lifecycleChangedParams {
-	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		select {
-		case msg, ok := <-s.tap.msgs:
-			if !ok {
-				t.Fatalf("socket closed before lifecycle.changed arrived%s", socketClosedWhy)
-			}
-			var n struct {
-				Method string          `json:"method"`
-				Params json.RawMessage `json:"params"`
-			}
-			if json.Unmarshal(msg, &n) != nil || n.Method != "lifecycle.changed" {
-				continue
-			}
-			validateJSON(t, loadSchema(t, "lifecycle.changed.schema.json"), n.Params,
-				"lifecycle.changed, over the wire")
-			var params lifecycleChangedParams
-			if err := json.Unmarshal(n.Params, &params); err != nil {
-				t.Fatalf("lifecycle.changed params: %v", err)
-			}
-			return params
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
-	t.Fatal("no lifecycle.changed arrived")
-	return lifecycleChangedParams{}
-}
-
 // awaitUndelivered waits for the session.signalUndelivered notification on the
 // socket and returns its params. The notice IS the observation these tests need
 // for a refused or discarded byte: it is minted only after the write's own
@@ -336,6 +391,116 @@ func (s *heldStopStand) awaitUndelivered(t *testing.T) signalUndeliveredParams {
 	}
 	t.Fatal("no session.signalUndelivered arrived")
 	return signalUndeliveredParams{}
+}
+
+// openSessionTappedInPane is openSessionTapped for a session anchored to a pane,
+// which is what makes the ledger write its rows for the pane a restore reads.
+func openSessionTappedInPane(t *testing.T, conn *websocket.Conn, tap *socketTap, paneID string) string {
+	t.Helper()
+	raw := tapCall(t, conn, tap, 1, "open", map[string]any{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0, "paneId": paneID,
+	})
+	var env struct {
+		Result struct {
+			SessionID string `json:"sessionId"`
+		} `json:"result"`
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal open: %v", err)
+	}
+	if env.Error != nil || env.Result.SessionID == "" {
+		t.Fatalf("open: %+v (sessionId %q)", env.Error, env.Result.SessionID)
+	}
+	return env.Result.SessionID
+}
+
+// awaitMessages reads the socket until every predicate has matched a message,
+// and returns the first match of each, in the predicates' order. It exists
+// because the tap has ONE reader: a fact and a response that race each other
+// onto the wire cannot be awaited one after the other without the first wait
+// discarding the second message.
+func (s *heldStopStand) awaitMessages(t *testing.T, what string, preds ...func(json.RawMessage) bool) []json.RawMessage {
+	t.Helper()
+	got := make([]json.RawMessage, len(preds))
+	left := len(preds)
+	deadline := time.Now().Add(20 * time.Second)
+	for left > 0 && time.Now().Before(deadline) {
+		select {
+		case msg, ok := <-s.tap.msgs:
+			if !ok {
+				t.Fatalf("socket closed before %s%s", what, socketClosedWhy)
+			}
+			for i, pred := range preds {
+				if got[i] == nil && pred(msg) {
+					got[i] = msg
+					left--
+					break
+				}
+			}
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	if left > 0 {
+		t.Fatalf("timed out waiting for %s", what)
+	}
+	return got
+}
+
+// factAbout matches a lifecycle.changed notification about attempt in state,
+// validated against the contract off the real socket.
+func (s *heldStopStand) factAbout(t *testing.T, attempt string, state string) func(json.RawMessage) bool {
+	return func(msg json.RawMessage) bool {
+		var n struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if json.Unmarshal(msg, &n) != nil || n.Method != "lifecycle.changed" {
+			return false
+		}
+		var params lifecycleChangedParams
+		if json.Unmarshal(n.Params, &params) != nil || params.Attempt == nil ||
+			params.Attempt.ID != attempt || params.Attempt.State != state {
+			return false
+		}
+		validateJSON(t, loadSchema(t, "lifecycle.changed.schema.json"), n.Params,
+			"lifecycle.changed, over the wire")
+		return true
+	}
+}
+
+// responseTo matches the JSON-RPC response carrying id.
+func responseTo(id int) func(json.RawMessage) bool {
+	want := fmt.Sprintf("%d", id)
+	return func(msg json.RawMessage) bool {
+		var env struct {
+			ID *json.RawMessage `json:"id"`
+		}
+		return json.Unmarshal(msg, &env) == nil && env.ID != nil && string(*env.ID) == want
+	}
+}
+
+// factParams decodes a lifecycle.changed notification's params.
+func factParams(t *testing.T, msg json.RawMessage) lifecycleChangedParams {
+	t.Helper()
+	var n struct {
+		Params lifecycleChangedParams `json:"params"`
+	}
+	if err := json.Unmarshal(msg, &n); err != nil {
+		t.Fatalf("lifecycle.changed: %v", err)
+	}
+	return n.Params
+}
+
+// stopRecord reads the attempt's delivery record as the fact path does.
+func (s *heldStopStand) stopRecord(attempt lifecycle.AttemptID) (delivered, undelivered bool, inflight int) {
+	s.ws.stopStateMu.Lock()
+	defer s.ws.stopStateMu.Unlock()
+	rec, ok := s.ws.stopStates[attempt]
+	if !ok {
+		return false, false, 0
+	}
+	return rec.delivered, rec.undelivered, rec.inflight
 }
 
 // shellIDFor mints the id the real integration names in its start envelope
@@ -440,7 +605,7 @@ func TestSessionSignal_StopInThePrimedIntervalIsHeld(t *testing.T) {
 // finding 1 of the review of 1e899f6a, driven through the transport's own
 // interrupt path: the byte the held delivery writes goes through exactly this
 // call, with exactly this condition asked at the write
-// (internal/session.WriteInputIf), and the pty is what records whether it
+// (internal/session.EnqueueInputIf), and the pty is what records whether it
 // arrived.
 //
 // The window is BUILT, not raced for. The pty parks its writes, so the queue
@@ -480,9 +645,6 @@ func TestInterrupt_Window_AQueuedByteIsDiscardedWhenItsAttemptClosesFirst(t *tes
 		sid:          session.ID(stand.sid),
 		sess:         sess,
 		exactAttempt: func() (lifecycle.AttemptID, bool) { return attempt, true },
-		reportUndelivered: func(reason string) {
-			stand.ws.holdStopUndelivered(session.ID(stand.sid), attempt, reason)
-		},
 	}
 	got := make(chan interruptResult, 1)
 	go func() { got <- fb.Interrupt(attempt) }()
@@ -607,7 +769,7 @@ func TestHeldStop_UndeliveredReasonsAreToldAndRetained(t *testing.T) {
 				t.Fatalf("a Stop before the start answered %q, want %q", got, foregroundHeld)
 			}
 
-			stand.ws.holdStopUndelivered(session.ID(stand.sid), attempt, tc.reason)
+			stand.ws.discardHeldStop(attempt, tc.reason)
 
 			params := stand.awaitUndelivered(t)
 			if params.Reason != tc.reason || params.Attempt != stand.appAttemptID || params.Signal != signalStop {
@@ -634,6 +796,13 @@ func TestHeldStop_UndeliveredReasonsAreToldAndRetained(t *testing.T) {
 // asserted is the whole point — exactly one of {the byte is written, undelivered
 // is told}, never both — and that the person's retry is a NEW gesture with its
 // own single byte, not a second landing of the first.
+//
+// IT SYNCHRONISES ON THE SETTLEMENT ITSELF (review 3 item 1). It used to wait
+// for the recorder to see the byte, which happens BEFORE the pty write returns
+// and before the writer hands its verdict back — so under -race the record was
+// read before anything had settled it, and the test was red one run in five.
+// The record's own inflight count reaching zero is the writer's verdict having
+// arrived, and nothing earlier is.
 func TestHeldStop_AStalledWriterStillSettlesExactlyOnce(t *testing.T) {
 	// A grace far shorter than the stall below: the point is that it does not
 	// matter, because nothing on this path times a write out any more.
@@ -654,51 +823,66 @@ func TestHeldStop_AStalledWriterStillSettlesExactlyOnce(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		t.Fatal("the interrupt never reached the write")
 	}
-	time.Sleep(4 * heldStopGrace) // far past the delivery's grace: a timeout would have fired by now
+	// A NEGATIVE bound, not a synchronisation point: a delivery that still
+	// timed its write out would have settled the record by now.
+	time.Sleep(4 * heldStopGrace)
+	if delivered, undelivered, inflight := stand.stopRecord(attempt); delivered || undelivered || inflight != 1 {
+		t.Fatalf("the record settled while its byte was still queued: delivered=%v undelivered=%v inflight=%d",
+			delivered, undelivered, inflight)
+	}
 
 	// The stall ends. The writer's verdict is the only settlement there is.
 	stand.recorder.releaseWrites()
-	waittest.WaitForDetail(t, "the stalled byte to be written",
+	waittest.WaitForDetail(t, "the writer's verdict on the stalled byte",
 		func() string {
-			return fmt.Sprintf("interrupts=%d notices=%d", stand.recorder.interrupts(), stand.notices())
+			d, u, n := stand.stopRecord(attempt)
+			return fmt.Sprintf("delivered=%v undelivered=%v inflight=%d", d, u, n)
 		},
-		func() bool { return stand.recorder.interrupts() == 1 })
+		func() bool { _, _, inflight := stand.stopRecord(attempt); return inflight == 0 })
 
 	// EXACTLY ONE of the two, never both: the byte landed, so nothing may have
 	// been reported undelivered.
+	delivered, undelivered, _ := stand.stopRecord(attempt)
+	if !delivered || undelivered {
+		t.Fatalf("settled delivered=%v undelivered=%v, want the byte delivered and nothing else", delivered, undelivered)
+	}
+	if n := stand.recorder.interrupts(); n != 1 {
+		t.Fatalf("interrupts = %d, want exactly the one held byte", n)
+	}
 	if n := stand.notices(); n != 0 {
 		t.Fatalf("undelivered notices = %d after the byte landed; a stall must not be reported as a failed write", n)
-	}
-	if got := stand.ws.signalDeliveryFor(lifecyclepub.Fact{
-		Attempt: &lifecyclepub.Attempt{ID: stand.appAttemptID, State: lifecyclepub.AttemptOpen},
-	}); got != signalDeliveryDelivered {
-		t.Fatalf("the attempt's signalDelivery = %q, want %q", got, signalDeliveryDelivered)
 	}
 
 	// And the person's retry is a SEPARATE gesture: one more Stop while the
 	// command still runs, one more byte, no replay of the first one's queue
 	// position.
-	before := stand.recorder.interrupts()
 	if got := stand.stop(t, 7); got == string(foregroundHeld) {
 		t.Fatal("a Stop after the start was held; the retry must take the ordinary path")
 	}
-	waittest.WaitForDetail(t, "the retry's byte to reach the pty",
-		func() string { return fmt.Sprintf("interrupts=%d (want %d)", stand.recorder.interrupts(), before+1) },
-		func() bool { return stand.recorder.interrupts() == before+1 })
+	if n := stand.recorder.interrupts(); n != 2 {
+		t.Fatalf("interrupts after the retry = %d, want 2", n)
+	}
 	stand.ingest(t, lifecycleCompleteEvt(attempt, 130, lifecycleFence(0x0E)))
 }
 
-// TestHeldStop_AFailedDeliveryIsTerminalForItsHold is review major 1 of the
-// review of 6830b43d. Re-arming a failed delivery attached a hold nobody would
-// ever discharge to an attempt that had already started; when the person then
-// pressed Stop and that retry succeeded, the attempt's closure claimed the
-// stale hold and emitted a SECOND undelivered notice — clearing the successful
-// retry's mark and rendering its 130 as the program's own failure.
+// TestHeldStop_ARetryThatLandsIsWhatTheAttemptSays is review 3 items 2 and 4,
+// run as the sequence the review describes and read where a person and the
+// store read it: the lifecycle fact the block freezes from, and the ledger row a
+// restore draws.
 //
-// The sequence is the review's, run in order: held, started, delivery fails,
-// the person retries through the ordinary path, the attempt closes.
-func TestHeldStop_AFailedDeliveryIsTerminalForItsHold(t *testing.T) {
-	stand := newHeldStopStand(t)
+// Held, started, the delivery FAILS (the queue refuses the byte), the person
+// presses Stop again, that retry LANDS, the command closes. The attempt's
+// outcome is the retry's: a delivered interrupt from any path outranks an
+// earlier failure, so the completion fact says delivered and the ledger says
+// user-killed. It used to be first-wins, and the failed hold's undelivered
+// painted the person's successful Stop as the program's own failure.
+//
+// And in between, item 4: the failure reaches the still-open block as STATE —
+// the lane's fact is re-emitted carrying it — not only as the notice a full
+// outbound queue drops. That fact is asserted on its own, without reading the
+// notice at all.
+func TestHeldStop_ARetryThatLandsIsWhatTheAttemptSays(t *testing.T) {
+	stand := newHeldStopStandWithStore(t)
 	stand.establish(t)
 	stand.submit(t, 5, "sleep 30")
 	attempt := lifecycle.AttemptID(stand.appAttemptID)
@@ -719,33 +903,72 @@ func TestHeldStop_AFailedDeliveryIsTerminalForItsHold(t *testing.T) {
 	if err != nil {
 		t.Fatalf("registry.Get: %v", err)
 	}
-	for {
-		if !sess.EnqueueWrite([]byte("filler")) {
-			break
-		}
+	fillers := 0
+	for sess.EnqueueWrite([]byte("filler")) {
+		fillers++
 	}
 	stand.ingest(t, lifecycleStartEvt(new(stand.shellIDFor(1)), "sleep 30"))
-	params := stand.awaitUndelivered(t)
-	if params.Reason != undeliveredWriteRefused {
-		t.Fatalf("notice reason = %q, want %q", params.Reason, undeliveredWriteRefused)
-	}
 
-	// The hold is GONE. Nothing re-armed it, so nothing can settle it twice.
+	// Item 4: the open attempt's fact carries the failure.
+	open := factParams(t, stand.awaitMessages(t, "the open attempt's fact to carry the failed hold",
+		func(msg json.RawMessage) bool {
+			if !stand.factAbout(t, stand.appAttemptID, lifecyclepub.AttemptOpen)(msg) {
+				return false
+			}
+			return factParams(t, msg).SignalDelivery == signalDeliveryUndelivered
+		})[0])
+	if open.Attempt.State != lifecyclepub.AttemptOpen {
+		t.Fatalf("the failure was carried on a %q fact, want the open attempt's", open.Attempt.State)
+	}
 	if stand.ws.heldStopArmed(attempt) {
 		t.Fatal("a failed delivery re-armed its hold; one hold must have one settlement")
 	}
-	stand.recorder.releaseWrites()
 
-	// The person retries through the ordinary path, and it succeeds.
-	if got := stand.stop(t, 7); got == string(foregroundHeld) {
-		t.Fatalf("the retry answered %q; a started attempt is signalled by the ordinary path", got)
-	}
-	// The attempt then closes: that closure must NOT be reported as a second
-	// undelivered Stop for the hold that was already settled.
+	// The queue drains, and the person retries through the ordinary path. The
+	// request is sent without waiting for its own answer: it waits for the
+	// attempt to close, which the completion below is.
+	stand.recorder.releaseWrites()
+	// The retry waits for the queue to have room: sent into a queue still full
+	// of filler, it would be refused like the hold was, and that is not the
+	// sequence under test. The filler reaching the pty is the room.
+	waittest.WaitForDetail(t, "the filler to drain out of the write queue",
+		func() string {
+			return fmt.Sprintf("filler written=%d (want %d)", stand.recorder.count("filler"), fillers)
+		},
+		func() bool { return stand.recorder.count("filler") == fillers })
+	sendControl(t, stand.conn, "session.signal", map[string]any{"sessionId": stand.sid, "signal": "stop"}, 7)
+	waittest.WaitForDetail(t, "the retry's interrupt to reach the pty",
+		func() string { return fmt.Sprintf("interrupts=%d (want 1)", stand.recorder.interrupts()) },
+		func() bool { return stand.recorder.interrupts() == 1 })
 	stand.ingest(t, lifecycleCompleteEvt(attempt, 130, lifecycleFence(0x0F)))
-	time.Sleep(200 * time.Millisecond)
+
+	msgs := stand.awaitMessages(t, "the completion fact and the retry's answer",
+		stand.factAbout(t, stand.appAttemptID, lifecyclepub.AttemptCompleted), responseTo(7))
+	if got := factParams(t, msgs[0]).SignalDelivery; got != signalDeliveryDelivered {
+		t.Fatalf("the completion fact's signalDelivery = %q, want %q: the retry landed", got, signalDeliveryDelivered)
+	}
+	var env struct {
+		Result signalWireResult `json:"result"`
+	}
+	if err := json.Unmarshal(msgs[1], &env); err != nil {
+		t.Fatalf("unmarshal session.signal: %v", err)
+	}
+	if env.Result.Outcome != string(foregroundDelivered) {
+		t.Fatalf("the retry answered %q, want %q", env.Result.Outcome, foregroundDelivered)
+	}
+
+	// The ledger row a restore draws says the person stopped it.
+	row := mustEntry(t, stand.db, stand.appAttemptID)
+	if row.Phase != content.PhaseClosed || len(row.Executions) == 0 {
+		t.Fatalf("ledger row = phase %q with %d executions, want a closed row", row.Phase, len(row.Executions))
+	}
+	last := row.Executions[len(row.Executions)-1]
+	if last.TerminationReason == nil || *last.TerminationReason != content.TermUserKilled {
+		t.Fatalf("ledger termination reason = %v, want %q", last.TerminationReason, content.TermUserKilled)
+	}
+	// One notice: the failed hold's. The retry and the closure say nothing.
 	if n := stand.notices(); n != 1 {
-		t.Fatalf("undelivered notices = %d, want exactly 1 (the failed delivery, not the retry)", n)
+		t.Fatalf("undelivered notices = %d, want exactly 1 (the failed delivery)", n)
 	}
 }
 
@@ -778,16 +1001,19 @@ func TestHeldStop_TheCompletionFactCarriesTheSettlement(t *testing.T) {
 	stand.ingest(t, lifecycleCompleteEvt(attempt, 130, lifecycleFence(0x10)))
 	stand.recorder.releaseWrites()
 
-	// The next fact for the lane is what a renderer would settle on. It must
-	// carry the settlement, validated against the contract off the real socket.
-	fact := stand.awaitLifecycleFact(t)
+	// The COMPLETION fact is what a renderer settles on — not whichever fact
+	// happens to be next on the socket: the start published one of its own,
+	// and reading "the next one" read that one whenever it had not been
+	// drained yet. It must carry the settlement, validated against the
+	// contract off the real socket.
+	fact := factParams(t, stand.awaitMessages(t, "the completion fact",
+		stand.factAbout(t, stand.appAttemptID, lifecyclepub.AttemptCompleted))[0])
 	if fact.SignalDelivery != signalDeliveryUndelivered {
 		t.Fatalf("the lifecycle fact's signalDelivery = %q, want %q", fact.SignalDelivery, signalDeliveryUndelivered)
 	}
-	if fact.Attempt == nil || fact.Attempt.ID != stand.appAttemptID {
-		t.Fatalf("the fact names %+v, want attempt %q", fact.Attempt, stand.appAttemptID)
+	if delivered, _, _ := stand.stopRecord(attempt); delivered {
+		t.Fatal("the byte discarded at the write was recorded as delivered")
 	}
-	_ = attempt
 }
 
 // TestHeldStop_ASessionThatIsGoneSettlesWithoutANotice pins the ONE branch of
@@ -817,11 +1043,14 @@ func TestHeldStop_ASessionThatIsGoneSettlesWithoutANotice(t *testing.T) {
 	if err := stand.ws.registry.Close(session.ID(stand.sid)); err != nil {
 		t.Fatalf("registry.Close: %v", err)
 	}
-	stand.ws.deliverHeldStop(t.Context(), session.ID(stand.sid), attempt)
-
-	if stand.ws.heldStopArmed(attempt) {
-		t.Fatal("a session-gone Stop left its hold behind; one hold, one settlement")
+	// The delivery runs as the lane task runs it: the claim first, and the
+	// delivery settles what it claimed.
+	sid, ok := stand.ws.claimHeldStop(attempt)
+	if !ok || sid != session.ID(stand.sid) {
+		t.Fatalf("claimHeldStop = (%q, %v), want the stand's session", sid, ok)
 	}
+	stand.ws.deliverHeldStop(t.Context(), sid, attempt)
+
 	if got := stand.ws.signalDeliveryFor(lifecyclepub.Fact{
 		Attempt: &lifecyclepub.Attempt{ID: stand.appAttemptID, State: lifecyclepub.AttemptCompleted},
 	}); got != signalDeliveryUndelivered {
@@ -1388,4 +1617,57 @@ func TestHeldStop_AShellThatExitsTakesItsStopRecordsWithIt(t *testing.T) {
 			return fmt.Sprintf("held=%v record=%v", s.ws.heldStopArmed(attempt), s.ws.stopStateKnown(attempt))
 		},
 		func() bool { return !s.ws.heldStopArmed(attempt) && !s.ws.stopStateKnown(attempt) })
+}
+
+// TestHeldStop_ALadderStopIsTheAttemptsOutcomeToo: a Stop over a command in its
+// OWN process group goes down the ladder, not through the byte — and that is the
+// common interactive case. Its delivery is the attempt's record as much as a
+// byte's is, or a retry that took the ladder after a held byte failed would be
+// outranked by the failure (review 3 item 2), and the completion fact would
+// paint the stopped command as the program's own failure.
+func TestHeldStop_ALadderStopIsTheAttemptsOutcomeToo(t *testing.T) {
+	stand := newHeldStopStand(t)
+	stand.establishWith(t, true)
+	// tail -f, for the reason TestSessionSignal_InterruptReachesTheRunningCommand
+	// gives: its marker cannot reach the data plane before the process the
+	// signal is for exists and is the foreground group's only member.
+	marker := filepath.Join(t.TempDir(), "ladder-ready")
+	if err := os.WriteFile(marker, []byte("LADDER-READY\n"), 0o600); err != nil {
+		t.Fatalf("write the readiness marker: %v", err)
+	}
+	command := "tail -f '" + marker + "'"
+	stand.submit(t, 5, command)
+	attempt := lifecycle.AttemptID(stand.appAttemptID)
+	submitCommand(t, stand.conn, stand.sid, command)
+	stand.ingest(t, lifecycleStartEvt(new(stand.shellIDFor(1)), command))
+	tapDataFor(t, stand.tap, stand.sid, "LADDER-READY", 20*time.Second)
+
+	sendControl(t, stand.conn, "session.signal", map[string]any{"sessionId": stand.sid, "signal": "stop"}, 7)
+	// The rung is recorded when it is SENT: observed on the record itself,
+	// before the shell's completion is reported at all.
+	waittest.WaitForDetail(t, "the ladder's first rung to be recorded against the attempt",
+		func() string {
+			d, u, n := stand.stopRecord(attempt)
+			return fmt.Sprintf("delivered=%v undelivered=%v inflight=%d", d, u, n)
+		},
+		func() bool { delivered, _, _ := stand.stopRecord(attempt); return delivered })
+	if n := stand.recorder.interrupts(); n != 0 {
+		t.Fatalf("a ladder Stop wrote %d terminal interrupts; the group is signalled directly", n)
+	}
+	stand.ingest(t, lifecycleCompleteEvt(attempt, 130, lifecycleFence(0x11)))
+
+	msgs := stand.awaitMessages(t, "the completion fact and the Stop's answer",
+		stand.factAbout(t, stand.appAttemptID, lifecyclepub.AttemptCompleted), responseTo(7))
+	if got := factParams(t, msgs[0]).SignalDelivery; got != signalDeliveryDelivered {
+		t.Fatalf("the completion fact's signalDelivery = %q, want %q", got, signalDeliveryDelivered)
+	}
+	var env struct {
+		Result signalWireResult `json:"result"`
+	}
+	if err := json.Unmarshal(msgs[1], &env); err != nil {
+		t.Fatalf("unmarshal session.signal: %v", err)
+	}
+	if env.Result.Outcome != string(foregroundDelivered) {
+		t.Fatalf("the ladder Stop answered %q, want %q", env.Result.Outcome, foregroundDelivered)
+	}
 }

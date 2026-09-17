@@ -138,7 +138,7 @@ type protectedForeground interface {
 	// ordinary input path for THAT attempt, and reports what happened to it.
 	// The implementation checks the attempt at the WRITE, not at this call:
 	// the byte waits in a queue, and by the time it is written its addressee
-	// may have gone (see internal/session.WriteInputIf).
+	// may have gone (see internal/session.EnqueueInputIf).
 	Interrupt(attempt lifecycle.AttemptID) interruptResult
 	// Ended reports whether that exact attempt has left `open`, waiting at
 	// most the cooperative bound. It observes the backend's own lifecycle

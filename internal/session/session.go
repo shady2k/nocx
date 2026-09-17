@@ -295,9 +295,13 @@ type Session interface {
 	// full the frame is dropped. Returns false if the session is
 	// closed or the queue is full.
 	EnqueueWrite(p []byte) bool
-	// WriteInputIf writes p on the SAME user-input path EnqueueWrite uses —
-	// the same queue, the same quarantine — and asks holds IMMEDIATELY
-	// BEFORE the channel write, discarding p when the answer is false.
+	// EnqueueInputIf queues p on the SAME user-input path EnqueueWrite uses —
+	// the same queue, the same quarantine — and asks holds IMMEDIATELY BEFORE
+	// the channel write, discarding p when the answer is false. settle is
+	// called ON THE WRITING GOROUTINE, exactly once, with the verdict: written
+	// (the channel took the bytes), discarded (holds went false at the write,
+	// so nothing was written — false with a nil error), or failed (the
+	// channel's own write returned an error). The caller never waits here.
 	//
 	// IT EXISTS BECAUSE THE QUEUE OUTLIVES THE CALLER'S KNOWLEDGE (nocx-zas0d,
 	// review finding 1 of 1e899f6a). A caller that has just checked that its
@@ -307,20 +311,16 @@ type Session interface {
 	// a check that runs AT the write can close that, and it has to run on the
 	// one goroutine that writes.
 	//
-	// Three outcomes, and the caller is told which: written (the channel took
-	// the bytes), discarded (holds went false at the write, so nothing was
-	// written — false with a nil error), or refused (an error: the queue would
-	// not take it, the session is closed, or the channel's own write failed).
-	// It waits until one of those is known, BOUNDED BY ctx — a channel that
-	// never answers (a dead link with no RST, the case this queue exists for)
-	// must not park the caller forever, so an expiry is reported as an error
-	// like any other refusal. Callers that must not wait at all — the
-	// transport readLoop — keep using EnqueueWrite.
+	// AND THE VERDICT IS HANDED BACK, NEVER WAITED OUT (review of 6830b43d,
+	// blocker 1). A caller that stops waiting knows "I stopped waiting", which
+	// is not "nothing was written": the payload is still queued and may land
+	// afterwards. So there is no expiry on this verb at all — a caller that
+	// must answer somebody in bounded time waits on its own settle callback,
+	// and whatever it answers, the callback still reports the truth later.
 	//
-	//
-	// A CALLER THAT MUST NOT WAIT *AND* MUST NOT GUESS should use
-	// EnqueueInputIf instead: expiring here leaves the payload QUEUED, and its
-	// verdict may still arrive later.
+	// False means the queue itself refused the payload — full, closed, or
+	// inside the bootstrap quarantine — and nothing was queued: settle is NOT
+	// called, because a refused payload has no verdict to wait for.
 	//
 	// WHAT THIS DOES AND DOES NOT GUARANTEE, exactly. What it guarantees, and
 	// all it guarantees:
@@ -347,27 +347,9 @@ type Session interface {
 	// person's own keystroke has, and it is the reason a byte that arrives
 	// after its command ended must be harmless on the far side (an interrupt
 	// into an idle line is discarded by the line editor) rather than assumed
-	// impossible here.
-	WriteInputIf(ctx context.Context, p []byte, holds func() bool) (bool, error)
-	// EnqueueInputIf is WriteInputIf for a caller that must not wait for the
-	// channel AT ALL and must not guess either: the payload is queued (with
-	// the same in-place, write-time condition and the same FIFO place), and
-	// settle is called ON THE WRITING GOROUTINE, exactly once, with the
-	// verdict — written, or not written and why.
-	//
-	// IT EXISTS BECAUSE A TIMEOUT CANNOT SETTLE A WRITE (nocx-zas0d, review
-	// of 6830b43d, blocker 1). WriteInputIf's expiry says "I stopped waiting",
-	// which is not "nothing was written": the payload is still queued and may
-	// land afterwards. A caller that answers a person on that basis would say
-	// "the stop did not reach the command, press again" about a byte that is
-	// still coming, and the retry it invites is a SECOND interrupt. Here
-	// there is no expiry: the caller is told when the writer knows, and the
-	// only verdicts it can be given are the true ones.
-	//
-	// False means the queue itself refused the payload and nothing was
-	// queued — settle is NOT called, because a refused payload has no verdict
-	// to wait for. settle may be nil only if the caller does not want the
-	// verdict, which is what EnqueueWrite is for.
+	// impossible here. A session that closes with the payload still queued
+	// settles nothing: the caller's own view of the session's end is the
+	// answer there.
 	EnqueueInputIf(p []byte, holds func() bool, settle func(written bool, err error)) bool
 	// EffectiveSize is the geometry this session's channel is running at —
 	// the backend's own conclusion, never the client's claim (nocx-eidfb.1).
@@ -1198,7 +1180,7 @@ type writeJob struct {
 	p   []byte
 	res chan writeResult
 	// holds is the condition the payload was queued under, asked at the WRITE
-	// (WriteInputIf / EnqueueInputIf). nil means unconditional — every
+	// (EnqueueInputIf). nil means unconditional — every
 	// EnqueueWrite.
 	holds func() bool
 	// settle receives the verdict on the writing goroutine, exactly once —
@@ -1302,65 +1284,8 @@ func (s *realSession) EnqueueWrite(p []byte) bool {
 	}
 }
 
-// WriteInputIf is EnqueueWrite's conditional, answered sibling: the payload
-// goes on the same queue, and the condition is asked by writeLoop immediately
-// before the channel write. See the interface for why the check cannot live on
-// the caller's side.
-func (s *realSession) WriteInputIf(ctx context.Context, p []byte, holds func() bool) (bool, error) {
-	res := make(chan writeResult, 1)
-	select {
-	case <-s.writeDone:
-		return false, ErrSessionClosed
-	default:
-	}
-	// The same quarantine EnqueueWrite honours, refused rather than buffered
-	// (design §5.3): a byte held across the bootstrap window is a byte the
-	// user did not knowingly send.
-	if s.inputRefused() {
-		return false, ErrInputRefused
-	}
-	// NOT a wait for room: a stalled writeLoop is exactly the case this queue
-	// exists to survive (nocx-o2le), so a full queue is a refusal here too.
-	select {
-	case s.writeCh <- writeJob{p: p, res: res, holds: holds}:
-	case <-s.writeDone:
-		return false, ErrSessionClosed
-	case <-s.ch.Done():
-		return false, ErrSessionClosed
-	default:
-		return false, ErrInputRefused
-	}
-	select {
-	case r := <-res:
-		return r.n == len(p), r.err
-	case <-ctx.Done():
-		// The channel never answered. Nothing is claimed either way: the job
-		// is still queued and its condition is re-asked at the write, so the
-		// byte lands only if its addressee is still there when it does.
-		return false, ctx.Err()
-	case <-s.writeDone:
-		return false, ErrSessionClosed
-	case <-s.ch.Done():
-		return false, ErrSessionClosed
-	}
-}
-
-// finishWrite hands one job's verdict to whichever caller asked for it.
-func finishWrite(job writeJob, written bool, err error) {
-	switch {
-	case job.res != nil:
-		n := 0
-		if written {
-			n = len(job.p)
-		}
-		job.res <- writeResult{n: n, err: err}
-	case job.settle != nil:
-		job.settle(written, err)
-	}
-}
-
-// EnqueueInputIf is WriteInputIf without the wait: queue the payload with its
-// condition, and let the writing goroutine settle it. See the interface.
+// EnqueueInputIf queues the payload with its condition, and lets the writing
+// goroutine settle it. See the interface.
 func (s *realSession) EnqueueInputIf(p []byte, holds func() bool, settle func(written bool, err error)) bool {
 	select {
 	case <-s.writeDone:
@@ -1398,7 +1323,9 @@ func (s *realSession) startWriteLoop() {
 					// than written into whatever holds the terminal now, and
 					// the caller is told (written false, no error: not an
 					// error, an outcome).
-					finishWrite(job, false, nil)
+					if job.settle != nil {
+						job.settle(false, nil)
+					}
 					continue
 				}
 				n, err := s.ch.Write(job.p)

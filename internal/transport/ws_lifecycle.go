@@ -127,9 +127,9 @@ type lifecycleChangedParams struct {
 	SessionID    string `json:"sessionId"`
 	InstanceID   string `json:"instanceId"`
 	SessionEpoch uint64 `json:"sessionEpoch"`
-	// SignalDelivery is what a Stop ACCEPTED for this fact's attempt came to —
-	// "delivered" or "undelivered", absent when no Stop was ever accepted for
-	// it (nocx-zas0d, review of 6830b43d, major 2). It rides the fact rather
+	// SignalDelivery is what the Stops made for this fact's attempt came to —
+	// "delivered" or "undelivered", absent when there were none or a delivery
+	// is still on its way (nocx-zas0d; signalDeliveryFor decides it). It rides the fact rather
 	// than a notification because the renderer must derive "the person stopped
 	// this" from state it can replay: a notification a dropped frame can lose
 	// would leave a command that ran to its own nonzero end painted as one the
@@ -175,24 +175,22 @@ func (s *WSServer) unregisterLifecycleLanes(sid session.ID) {
 }
 
 // signalDeliveryFor is what the lifecycle fact publishes about this attempt's
-// Stop, if it has one: "delivered" once the terminal took the byte,
-// "undelivered" once that can no longer happen, and nothing at all while the
-// outcome is still open.
+// Stops, if it has any: "delivered" once an interrupt reached the command,
+// "undelivered" once none did and none can, and nothing at all while that is
+// still being decided (stopState.whileOpen).
 //
-// THE CLOSURE CASE IS THE INTERESTING ONE. A held Stop's verdict comes from the
-// writer, and for the undelivered case that verdict necessarily arrives AFTER
-// the attempt closed (a byte is discarded precisely because its addressee
-// left), so a fact reporting the closure cannot wait for the record to say
-// "undelivered": it can decide it, because an accepted Stop whose attempt has
-// left `open` can never be written — the condition it waits for is that attempt
-// being open and started.
-//
-// The other direction is why the wait below exists: a byte the shell acted on
-// HAS been written, and the shell's completion is a round trip behind that
-// write returning, so waiting (bounded by the cooperative grace) on the
-// settlement channel turns a race into an ordering. If the wait expires the
-// fact is published without a verdict and the record's own value is read again
-// — never a claim in either direction that the transport cannot support.
+// THE CLOSURE CASE IS THE INTERESTING ONE, and it is decided rather than
+// guessed. Every delivery path writes its byte or sends its signal only while
+// the attempt is open (the byte's condition is "open and started"), so once
+// the attempt has left `open`, a Stop that has not landed never will — except
+// one ALREADY on its way: a byte the writer took before the closure, whose
+// verdict the writer has not handed back yet, or a signal whose rung has not
+// returned. The shell's report of the completion is a round trip behind that
+// write, so the record counts deliveries in flight and this WAITS for them to
+// settle, bounded by the cooperative grace, instead of racing them. A delivery
+// that lands wins at once; if the bound expires with one still out, the answer
+// is undelivered — the residual one-syscall window the write-time condition
+// admits, and the direction that never paints a stop that did not happen.
 func (s *WSServer) signalDeliveryFor(f lifecyclepub.Fact) string {
 	if f.Attempt == nil {
 		return ""
@@ -204,44 +202,40 @@ func (s *WSServer) signalDeliveryFor(f lifecyclepub.Fact) string {
 		s.stopStateMu.Unlock()
 		return ""
 	}
-	// Every read of the record's fields is under the mutex: the settlement is
-	// written by the writing goroutine and read here, on the fact path, and a
-	// bare field read would be a data race rather than a snapshot.
-	state := rec.state
-	settled := rec.settled
-	s.stopStateMu.Unlock()
-	if state != "" {
-		return state // settled: the writer said so, and it is final
-	}
 	if f.Attempt.State == lifecyclepub.AttemptOpen {
-		// STILL RUNNING: nothing is decided, so nothing is published. A guess
-		// here — in either direction — would be the statement this field
-		// exists to stop making.
-		return ""
+		v := rec.whileOpen()
+		s.stopStateMu.Unlock()
+		return v
 	}
-	// THE ATTEMPT HAS CLOSED, AND THAT DECIDES IT. This is a derivation, not a
-	// guess about a write in flight: the condition the byte waits for at the
-	// write is that this attempt is open AND started, so a byte not yet written
-	// can never be written now, and a byte already written settled its record
-	// before the shell could have reported the completion (the write is a
-	// syscall, the completion a round trip through the shell). The wait below
-	// covers that window rather than assuming it: whoever settled first wins,
-	// and if nothing has settled by the bound the derivation stands.
+	s.stopStateMu.Unlock()
 	bound := s.effectiveRunLease().SignalGrace
 	if bound <= 0 {
 		bound = defaultRunSignalGrace
 	}
-	select {
-	case <-settled:
-	case <-time.After(bound):
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+	for {
+		s.stopStateMu.Lock()
+		delivered, settled, changed := rec.delivered, rec.inflight == 0 || rec.dropped, rec.changed
+		s.stopStateMu.Unlock()
+		switch {
+		case delivered:
+			return signalDeliveryDelivered
+		case settled:
+			return signalDeliveryUndelivered
+		}
+		select {
+		case <-changed:
+		case <-timer.C:
+			s.stopStateMu.Lock()
+			delivered = rec.delivered
+			s.stopStateMu.Unlock()
+			if delivered {
+				return signalDeliveryDelivered
+			}
+			return signalDeliveryUndelivered
+		}
 	}
-	s.stopStateMu.Lock()
-	state = rec.state
-	s.stopStateMu.Unlock()
-	if state != "" {
-		return state
-	}
-	return signalDeliveryUndelivered
 }
 
 // PublishLifecycleProjection updates server-owned projections without

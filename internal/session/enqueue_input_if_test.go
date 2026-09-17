@@ -2,7 +2,6 @@ package session
 
 import (
 	"context"
-	"errors"
 	"io"
 	"strconv"
 	"strings"
@@ -68,7 +67,29 @@ func (c *gatedChannel) Done() <-chan struct{}                             { retu
 func (c *gatedChannel) Resize(_ context.Context, _, _, _, _ uint16) error { return nil }
 func (c *gatedChannel) ShellIntegrationReason() ssh.RefusalReason         { return ssh.ReasonNone }
 
-// TestWriteInputIf_DiscardsWhenTheconditionGoneAtTheWrite is finding 1 of the
+// enqueueAndWait queues p with its condition and waits for the writer's
+// verdict. queued=false is the queue's own refusal, with no verdict to wait
+// for. The wait is the TEST's: the verb itself never waits.
+func enqueueAndWait(t *testing.T, sess Session, p []byte, holds func() bool) (queued, written bool, err error) {
+	t.Helper()
+	type verdict struct {
+		written bool
+		err     error
+	}
+	got := make(chan verdict, 1)
+	if !sess.EnqueueInputIf(p, holds, func(w bool, e error) { got <- verdict{written: w, err: e} }) {
+		return false, false, nil
+	}
+	select {
+	case v := <-got:
+		return true, v.written, v.err
+	case <-time.After(5 * time.Second):
+		t.Fatal("EnqueueInputIf never settled")
+		return true, false, nil
+	}
+}
+
+// TestEnqueueInputIf_DiscardsWhenTheConditionGoneAtTheWrite is finding 1 of the
 // review of 1e899f6a, and it is the whole reason this verb exists: a caller
 // that resolved an attempt and enqueued a byte has NOT serialized that byte
 // against the attempt's closure, and the queue may hold it long enough for the
@@ -78,7 +99,7 @@ func (c *gatedChannel) ShellIntegrationReason() ssh.RefusalReason         { retu
 // The window is built, not raced for: the channel parks inside its first write,
 // so the second item sits in the queue while the test decides what happened to
 // its addressee.
-func TestWriteInputIf_DiscardsWhenTheConditionGoneAtTheWrite(t *testing.T) {
+func TestEnqueueInputIf_DiscardsWhenTheConditionGoneAtTheWrite(t *testing.T) {
 	ch := newGatedChannel()
 	reg, sess := openWith(t, ch)
 	defer func() { _ = reg.Close(sess.ID()) }()
@@ -104,14 +125,13 @@ func TestWriteInputIf_DiscardsWhenTheConditionGoneAtTheWrite(t *testing.T) {
 		err     error
 	}
 	got := make(chan outcome, 1)
-	go func() {
-		written, err := sess.WriteInputIf(context.Background(), []byte{0x03}, func() bool {
-			holdsMu.Lock()
-			defer holdsMu.Unlock()
-			return holds
-		})
-		got <- outcome{written: written, err: err}
-	}()
+	if !sess.EnqueueInputIf([]byte{0x03}, func() bool {
+		holdsMu.Lock()
+		defer holdsMu.Unlock()
+		return holds
+	}, func(written bool, err error) { got <- outcome{written: written, err: err} }) {
+		t.Fatal("the queue refused the conditioned byte with room to spare")
+	}
 
 	// Its addressee leaves BEFORE the write. Nothing about the caller's
 	// earlier resolution can see this; only the write-time check can.
@@ -123,13 +143,13 @@ func TestWriteInputIf_DiscardsWhenTheConditionGoneAtTheWrite(t *testing.T) {
 	select {
 	case out := <-got:
 		if out.err != nil {
-			t.Fatalf("WriteInputIf: %v", out.err)
+			t.Fatalf("EnqueueInputIf settled with %v", out.err)
 		}
 		if out.written {
 			t.Fatal("the byte was reported written after its addressee had gone")
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("WriteInputIf never answered")
+		t.Fatal("EnqueueInputIf never settled")
 	}
 	if ch.wrote("\x03") {
 		t.Fatal("an interrupt was written into a terminal whose command had gone")
@@ -138,15 +158,15 @@ func TestWriteInputIf_DiscardsWhenTheConditionGoneAtTheWrite(t *testing.T) {
 
 // The paired positive: while the condition holds, the byte is written and the
 // caller is told it was.
-func TestWriteInputIf_WritesWhileTheConditionHolds(t *testing.T) {
+func TestEnqueueInputIf_WritesWhileTheConditionHolds(t *testing.T) {
 	ch := newGatedChannel()
 	ch.release()
 	reg, sess := openWith(t, ch)
 	defer func() { _ = reg.Close(sess.ID()) }()
 
-	written, err := sess.WriteInputIf(context.Background(), []byte{0x03}, func() bool { return true })
-	if err != nil {
-		t.Fatalf("WriteInputIf: %v", err)
+	queued, written, err := enqueueAndWait(t, sess, []byte{0x03}, func() bool { return true })
+	if !queued || err != nil {
+		t.Fatalf("EnqueueInputIf: queued=%v err=%v", queued, err)
 	}
 	if !written {
 		t.Fatal("the byte was not reported written with the condition holding")
@@ -159,9 +179,10 @@ func TestWriteInputIf_WritesWhileTheConditionHolds(t *testing.T) {
 // And a refusal is told apart from a discarded byte: the same verb, with the
 // queue genuinely full — the writer is PROVED parked inside its first write
 // before the rest of the queue is filled, so nothing can drain while the count
-// below is taken — answers an error rather than "discarded". The two outcomes
-// mean different things to the caller that must report them.
-func TestWriteInputIf_RefusesARefusedQueue(t *testing.T) {
+// below is taken — answers "not queued" and never settles, rather than
+// settling "discarded". The two outcomes mean different things to the caller
+// that must report them.
+func TestEnqueueInputIf_RefusesARefusedQueue(t *testing.T) {
 	ch := newGatedChannel()
 	reg, sess := openWith(t, ch)
 	defer func() { _ = reg.Close(sess.ID()) }()
@@ -188,16 +209,9 @@ func TestWriteInputIf_RefusesARefusedQueue(t *testing.T) {
 		}
 	}
 
-	// A bounded context, so a setup that was not actually full FAILS on the
-	// assertion below instead of waiting for a write the gate is holding.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	written, err := sess.WriteInputIf(ctx, []byte{0x03}, func() bool { return true })
-	if written {
-		t.Fatal("a refused byte was reported written")
-	}
-	if !errors.Is(err, ErrInputRefused) {
-		t.Fatalf("a full queue answered %v, want ErrInputRefused", err)
+	settled := make(chan struct{}, 1)
+	if sess.EnqueueInputIf([]byte{0x03}, func() bool { return true }, func(bool, error) { settled <- struct{}{} }) {
+		t.Fatal("a full queue accepted the conditioned byte")
 	}
 
 	// Release, and wait for the drain to have reached the LAST accepted
@@ -211,9 +225,18 @@ func TestWriteInputIf_RefusesARefusedQueue(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+	// Drained, and the refused byte never settled: nothing was queued for it.
+	select {
+	case <-settled:
+		t.Fatal("a refused byte was settled; a refusal has no verdict")
+	default:
+	}
+	if ch.wrote("\x03") {
+		t.Fatal("a refused byte reached the channel")
+	}
 }
 
-// TestWriteInputIf_KeepsItsPlaceInTheQueue pins the ordering guarantee, and it
+// TestEnqueueInputIf_KeepsItsPlaceInTheQueue pins the ordering guarantee, and it
 // is constructed so that nothing about the ordering is raced for: the condition
 // below runs INSIDE the drain, immediately before the write, and enqueues the
 // "later input" there — so the marker enters the queue after the conditioned
@@ -223,7 +246,7 @@ func TestWriteInputIf_RefusesARefusedQueue(t *testing.T) {
 // line typed after an interrupt must reach the terminal after it, never instead
 // of it, and a discarded interrupt must not take the place of anything behind
 // it — or the queue would lose input the person typed.
-func TestWriteInputIf_KeepsItsPlaceInTheQueue(t *testing.T) {
+func TestEnqueueInputIf_KeepsItsPlaceInTheQueue(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		holds     bool
@@ -245,7 +268,7 @@ func TestWriteInputIf_KeepsItsPlaceInTheQueue(t *testing.T) {
 			reg, sess := openWith(t, ch)
 			defer func() { _ = reg.Close(sess.ID()) }()
 
-			written, err := sess.WriteInputIf(context.Background(), []byte("CONDITIONED"), func() bool {
+			queued, written, err := enqueueAndWait(t, sess, []byte("CONDITIONED"), func() bool {
 				// Enqueued at the one moment that is provably after this item
 				// has left the queue and before its verdict.
 				if !sess.EnqueueWrite([]byte("MARK-AFTER")) {
@@ -253,8 +276,8 @@ func TestWriteInputIf_KeepsItsPlaceInTheQueue(t *testing.T) {
 				}
 				return tc.holds
 			})
-			if err != nil {
-				t.Fatalf("WriteInputIf: %v", err)
+			if !queued || err != nil {
+				t.Fatalf("EnqueueInputIf: queued=%v err=%v", queued, err)
 			}
 			if written != tc.holds {
 				t.Fatalf("written = %v, want %v", written, tc.holds)

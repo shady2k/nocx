@@ -585,12 +585,8 @@ func (s *fakeRemoteSession) CredentialID() string {
 func (s *fakeRemoteSession) Write([]byte) (int, error) { return 0, nil }
 func (s *fakeRemoteSession) EnqueueWrite([]byte) bool  { return false }
 
-func (s *fakeRemoteSession) WriteInputIf(context.Context, []byte, func() bool) (bool, error) {
-	return false, nil
-}
-
-// EnqueueInputIf is the same "queued and answered" shape for the async caller:
-// this double has no queue to validate against.
+// EnqueueInputIf answers "queued" and settles at once: this double has no
+// queue to validate against.
 func (s *fakeRemoteSession) EnqueueInputIf(p []byte, holds func() bool, settle func(written bool, err error)) bool {
 	if holds != nil && !holds() {
 		if settle != nil {

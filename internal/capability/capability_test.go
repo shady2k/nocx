@@ -509,17 +509,8 @@ func (f *fakeSession) CredentialID() string      { return "" }
 func (f *fakeSession) Write([]byte) (int, error) { return 0, nil }
 func (f *fakeSession) EnqueueWrite([]byte) bool  { return true }
 
-// WriteInputIf is the same "accepted" answer: this double has no queue to
-// validate against, and nothing in these tests asks it to discard.
-func (f *fakeSession) WriteInputIf(_ context.Context, p []byte, holds func() bool) (bool, error) {
-	if holds != nil && !holds() {
-		return false, nil
-	}
-	return true, nil
-}
-
-// EnqueueInputIf is the same "queued and answered" shape for the async caller:
-// this double has no queue to validate against.
+// EnqueueInputIf answers "queued" and settles at once: this double has no
+// queue to validate against.
 func (f *fakeSession) EnqueueInputIf(p []byte, holds func() bool, settle func(written bool, err error)) bool {
 	if holds != nil && !holds() {
 		if settle != nil {

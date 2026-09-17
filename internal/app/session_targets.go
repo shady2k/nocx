@@ -246,6 +246,27 @@ func (p *paneReader) Record(tokenID string) (targetRecord, bool) {
 	return rec, ok
 }
 
+// Menu answers the agent rule's own reading of a MENU on f (design §6.3), for
+// a caller that must ask "is this menu still the one I saw, and where is its
+// selection" WITHOUT minting a target to find out (session_keys.go's
+// awaitSelectionMove, nocx-xn63t.4.1).
+//
+// It is the same evaluation Read already makes — Registry.Observe over the
+// frame, agent looked up once through AgentFor — lifted to its own method
+// rather than a second evaluation beside it, the way paneMessages.inputText
+// lifts the box reading. ok is false for the same reasons InputText's is: no
+// rule for this agent, nothing enrolled, or a frame whose rule found no menu.
+func (p *paneReader) Menu(sessionID string, f paneview.Frame) (agentdriver.Menu, bool) {
+	if p.rules == nil {
+		return agentdriver.Menu{}, false
+	}
+	agent := p.AgentFor(sessionID)
+	if agent == "" {
+		return agentdriver.Menu{}, false
+	}
+	return p.rules.Observe(agent, f).Menu()
+}
+
 // chooseTargetRows picks the rows a mint should name for want, from the
 // same observation session.read just classified the frame with (design
 // §6.3): menu is the question through the last option; input is the input

@@ -828,8 +828,13 @@ func TestHeldStop_ASessionThatIsGoneSettlesWithoutANotice(t *testing.T) {
 		t.Fatalf("the record settled as %q, want %q", got, signalDeliveryUndelivered)
 	}
 	// And the silence is the correct outcome, not an oversight: there is no
-	// subscriber to have been told.
-	time.Sleep(100 * time.Millisecond)
+	// subscriber to have been told. It is read straight off the socket with NO
+	// window at all, because the settlement on this path is synchronous — the
+	// delivery above has already returned, and nothing it could have told
+	// anybody is still in flight (AGENTS.md: wait on an observable, never on a
+	// duration). What keeps it from being vacuous is the neighbouring case: the
+	// same stand, the same notice path, and a refusal that is NOT the session's
+	// end does reach the person (TestHeldStop_AWriteTheQueueRefusedIsToldToThePerson).
 	if n := stand.notices(); n != 0 {
 		t.Fatalf("undelivered notices = %d for a session that no longer exists", n)
 	}

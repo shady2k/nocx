@@ -418,11 +418,7 @@ func predRegion(f paneview.Frame, anchors bound, p Pred) *ExplainRowSpan {
 	if p.Kind != "regionAny" || p.MaxRows <= 0 {
 		return nil
 	}
-	row, ok := anchors[p.Anchor]
-	if !ok {
-		return nil
-	}
-	return spanOf(f, p.RegionSpec, row)
+	return spanOf(f, anchors, p.RegionSpec)
 }
 
 // readExtractors reports each extractor twice over: the span it was permitted
@@ -451,22 +447,40 @@ func (d documentDriver) readExtractors(f paneview.Frame, anchors bound, state St
 	out := make([]ExtractorReading, 0, len(d.extractors))
 	for _, e := range d.extractors {
 		r := ExtractorReading{Name: e.spec.Name, Anchor: e.spec.Anchor, Rows: yield[e.spec.Name]}
-		if row, ok := anchors[e.spec.Anchor]; ok {
-			r.Region = spanOf(f, e.spec.RegionSpec, row)
-		}
+		r.Region = spanOf(f, anchors, e.spec.RegionSpec)
 		out = append(out, r)
 	}
 	return out
 }
 
-// spanOf clamps a region to the frame. The region walks maxRows rows away
-// from its anchor, starting one row off it, and the frame's own edge is the
-// other bound — the same two bounds region.eachRow enforces, read rather than
-// re-decided.
-func spanOf(f paneview.Frame, r RegionSpec, anchor int) *ExplainRowSpan {
+// spanOf answers the rows a region was permitted to read, clamped to the
+// frame: the rows between the anchor and whichever bound the document named.
+// A region bounded by a row count walks that many rows off its anchor, one row
+// away from it; one that closes at a SECOND anchor (RegionSpec.To) walks from
+// the anchor to that row. Both are the same two bounds region.eachRow enforces
+// (capture resolves the second one into the count the walk itself reads), read
+// here rather than re-decided, so the view cannot draw a span the reading did
+// not use.
+//
+// nil when the anchor — or, for a between-anchors span, the closing anchor —
+// did not bind, or when the bound leaves no row at all: in both cases there is
+// no span, and drawing one anyway would put a highlight on rows nothing looked
+// at.
+func spanOf(f paneview.Frame, anchors bound, r RegionSpec) *ExplainRowSpan {
+	anchor, ok := anchors[r.Anchor]
+	if !ok {
+		return nil
+	}
 	first, last := anchor+1, anchor+r.MaxRows
 	if r.Up {
 		first, last = anchor-r.MaxRows, anchor-1
+	}
+	if r.To != "" {
+		to, ok := anchors[r.To]
+		if !ok {
+			return nil
+		}
+		first, last = anchor+1, to
 	}
 	if first < 0 {
 		first = 0

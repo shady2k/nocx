@@ -237,22 +237,41 @@ package agentdriver
 // The fix is a second, narrower reading of the same chrome: "inputText"
 // reads only the rows the box's own PROMPT marker introduces — anchored one
 // row above it (topRule, so the walk's own down-direction start lands
-// exactly on "prompt" without re-deriving the offset) and capped at two rows
-// down. Two, not one, because a typed line that visually wraps at the pane's
-// own width is real and already in the corpus:
-// claude-2.1.266-subagent-finished at 38s draws "❯ Use the Agent tool to
-// launch the Explore subagent ... in this" over "  folder. Do not wait for
-// it." as two rows of ONE message, and claude-permission-60 (the 60-column
-// geometry) does the same. The cap stops at two rather than reading further
-// because the box's OWN minimum height is three rows (topRule, one prompt
-// row, bottomRule) — so from topRule, two rows down reaches at most
-// bottomRule itself in the common one-row case, never the mode line past it.
-// Widening the cap without also protecting against that is not free: the
-// mode line's own hint text opens with the same two-space indent a wrapped
-// continuation line does ("  ⏸ manual mode on ...", "  esc to interrupt"),
-// so a cap sized to also cover a three-row box would need to tell that text
-// apart from something the box's own repaint had actually drawn, which nothing
-// in the corpus asks for yet.
+// exactly on "prompt" without re-deriving the offset) and closed by the box's
+// own SECOND rule row (bottomRule), exactly as Document.InputBox itself is. A
+// typed line that visually wraps at the pane's own width is real and already
+// in the corpus: claude-2.1.266-subagent-finished at 38s draws "❯ Use the
+// Agent tool to launch the Explore subagent ... in this" over "  folder. Do
+// not wait for it." as two rows of ONE message, and claude-permission-60 (the
+// 60-column geometry) does the same.
+//
+// # The bound is the box's own height, not a row count (nocx-xn63t.4.5)
+//
+// It used to be a cap of two rows, sized when two was the tallest wrap any
+// capture held. Claude's box GROWS with what is typed into it — a
+// one-paragraph paste draws four content rows at 120 columns
+// (claude-2.1.272-wrapped-echo) — so the reading was a PREFIX of the pasted
+// text, no comparison could confirm it, and session.message's own echo step
+// stopped at phase "partial" with the box's first two rows in boxContents and
+// Enter never pressed. A row count cannot be widened to fix that: the row
+// below the box's bottom rule is the mode line, whose hint text opens with
+// the same two-space indent a wrapped continuation row does ("  ⏸ manual mode
+// on ...", "  esc to interrupt"), so any cap large enough for the tallest box
+// reads chrome the box never drew. Closing the region at bottomRule is the
+// same bound InputBox already uses and is a fact about the box rather than a
+// guess about its height.
+//
+// # The rows are rejoined with the space Claude's wrap consumed
+//
+// A wrapped box's rows are ONE line, not several: Claude paints them word by
+// word at computed columns and steps to the next row without writing the
+// space it broke at — this capture's own paint bytes go
+// "\x1b[113Gthan\r\x1b[2C\x1b[1Bone", so no space exists anywhere between
+// "than" and "one". What the reading returns therefore has to put that one
+// character back ("join": "space"), or it answers a text nobody typed and
+// confirms nothing — the newline it used to join with was a line break the
+// person never pressed. The wrap indent itself is still stripped rather than
+// restored: it is chrome Claude draws, not text anybody typed.
 //
 // The pattern itself is what "excluding rule rows" means in practice: it
 // matches only "❯" optionally followed by ONE cell and content, or two

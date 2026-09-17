@@ -79,19 +79,25 @@ func TestInputTextReadsWhatWasTyped(t *testing.T) {
 			// Two content rows: a typed line long enough to wrap at the
 			// pane's own width. The continuation row's own two-cell indent
 			// (ordinary spaces, not the marker's NO-BREAK SPACE) is what the
-			// second half of the pattern strips.
+			// second half of the pattern strips, and the break's own space is
+			// what the rule's "space" join puts back — the text here IS the
+			// script's own line (lmstudio-subagent-finished.script), so a
+			// reading that answered anything else would be a reading of a
+			// text nobody typed. It answered "this\nfolder" until
+			// nocx-xn63t.4.5.
 			name:    "wrapped across two rows",
 			capture: "claude-2.1.266-subagent-finished",
 			atMs:    38000,
-			want:    "Use the Agent tool to launch the Explore subagent with run_in_background true, asking it to list the files in this\nfolder. Do not wait for it.",
+			want:    "Use the Agent tool to launch the Explore subagent with run_in_background true, asking it to list the files in this folder. Do not wait for it.",
 		},
 		{
 			// The same wrap at a narrower geometry (60 columns), so the join
-			// is asserted on more than one recording.
+			// is asserted on more than one recording — and its own script line
+			// (permission.script) is what it has to come back as.
 			name:    "wrapped at 60 columns",
 			capture: "claude-permission-60",
 			atMs:    13000,
-			want:    "Create a file named note.txt whose only content is the\nword hi",
+			want:    "Create a file named note.txt whose only content is the word hi",
 		},
 	}
 	for _, c := range cases {
@@ -109,6 +115,60 @@ func TestInputTextReadsWhatWasTyped(t *testing.T) {
 				t.Errorf("%s@%dms: InputText = %q, want %q", c.capture, c.atMs, text, c.want)
 			}
 		})
+	}
+}
+
+// wrappedEchoPasted is the one-paragraph task
+// testdata/captures/scripts/session-message-wrapped-echo.script attaches to
+// Claude's stdin as a BRACKETED PASTE (ESC[200~ … ESC[201~) — the exact bytes
+// session.message's own paste step sends, since the runtime encodes a text
+// atom with ghostty's paste encoder and Claude enables bracketed paste. It is
+// the text the box under test has in it, and the text a reading of that box
+// has to come back with.
+const wrappedEchoPasted = "Please read internal/app/pane_messages.go and then explain, in a short paragraph, how a queued message longer than one row of the input box is pasted, how its echo is confirmed on the frame, and how the Enter key is finally sent by the coordinator that owns the queue. Finish by naming the file and the function where that confirmation happens. Do not change any file."
+
+// wrappedEchoCapture is the recording of that paste, taken 2026-09-17 against
+// Claude Code 2.1.272 on this machine through
+// .claude/skills/nocx-detection-verify/record.sh (dead API endpoint — the
+// paste starts no turn, so nothing here depends on a model answering). It is
+// committed for this bead because no capture in the corpus had a box taller
+// than the two rows an older Claude's wrap filled.
+const wrappedEchoCapture = "claude-2.1.272-wrapped-echo"
+
+// TestInputTextReadsASingleParagraphAcrossEveryWrappedRow is the reading
+// session.message confirms its own paste on, on the shape the owner hit
+// (nocx-xn63t.4.5): one paragraph pasted into the box, drawn over FOUR
+// content rows because the box's own height grows with what is in it.
+//
+// The extractor this exercises used to read two rows down from the box's top
+// rule — a cap sized when two rows was the tallest wrap in the corpus — so
+// rows three and four were never read at all and the reading was a PREFIX of
+// the pasted text. Nothing downstream could ever match it, which is why the
+// delivery stopped at phase "partial" with the first two rows in boxContents
+// and Enter was never pressed. The rows are read to the box's own closing
+// rule now, and rejoined as Claude drew them: its wrap consumes the
+// word-separating space at each row break (the paint bytes for this very
+// frame go "\x1b[113Gthan\r\x1b[2C\x1b[1Bone" — no space is written anywhere
+// between "than" and "one"), so a reading that merely dropped the wrap indent
+// would answer "…longer thanone row…" and confirm nothing either.
+func TestInputTextReadsASingleParagraphAcrossEveryWrappedRow(t *testing.T) {
+	f := replay(t, wrappedEchoCapture, 50000)
+	o := registry(t).Observe("claude", f)
+	if o.State != agentdriver.StateFreeText {
+		t.Fatalf("%s@50s: state = %q, want free_text (the box under test must be the live one)", wrappedEchoCapture, o.State)
+	}
+	// The premise, checked so this test cannot quietly stop covering the
+	// shape it exists for: three or more content rows between the box's two
+	// rules, which is one more than the cap the reading used to carry.
+	if content := o.InputBox.Last - o.InputBox.First - 1; content < 3 {
+		t.Fatalf("%s@50s: the box holds %d content rows (%+v), want 3 or more — this frame no longer exercises a wrap past the old cap", wrappedEchoCapture, content, o.InputBox)
+	}
+	text, ok := o.InputText()
+	if !ok {
+		t.Fatalf("%s@50s: InputText ok=false, want true — the rule reads this box", wrappedEchoCapture)
+	}
+	if text != wrappedEchoPasted {
+		t.Errorf("%s@50s: InputText = %q,\nwant the text that was pasted       %q", wrappedEchoCapture, text, wrappedEchoPasted)
 	}
 }
 

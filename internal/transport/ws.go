@@ -312,6 +312,12 @@ type WSServer struct {
 	// paneObserver classifies an enrolled pane's grid and reports the
 	// changes (nocx-szb40.3). Nil when unwired, like paneGrid above.
 	paneObserver paneObserver
+	// paneObserverSweep is how often the watcher above is swept. It is a field
+	// rather than a constant so the composition root can state it (the setting
+	// nocx-luqz9.2 makes it is where the number will be edited) and a harness can
+	// honestly exercise the loop: nothing else in this package reads it — a test
+	// drives Sweep directly — so the default is what production gets.
+	paneObserverSweep time.Duration
 	// paneAdmissions is the end of the ADMISSION INTERVAL a session's
 	// enrolment opened (ADR-0058, nocx-9mn6z). Nil when unwired: a session's
 	// end then closes the watch and the frame and leaves any admitted tool
@@ -1628,6 +1634,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		controlDrainTimeout:        defaultControlDrainTimeout,
 		gitBindings:                make(map[string]*gitBinding),
 		gitBySession:               make(map[session.ID]map[string]struct{}),
+		paneObserverSweep:          DefaultPaneObserverSweep,
 	}
 	// The mint's emitter is this server: a drop is told to the renderer
 	// over this socket. Constructed here so there is exactly one store per
@@ -1820,7 +1827,7 @@ func (s *WSServer) Start(ctx context.Context) error {
 	// caller's context. A ticker whose only end is the context passed to
 	// Start outlives the server whenever that context does — which in this
 	// package's own tests is the background one, so three of them went on
-	// firing every 120ms for the rest of the run. In a package whose 30s
+	// firing on every tick for the rest of the run. In a package whose 30s
 	// timeouts already move between test names under constrained scheduling
 	// (nocx-2h08), a leaked periodic goroutine is not a tidiness question.
 	if s.paneObserver != nil {

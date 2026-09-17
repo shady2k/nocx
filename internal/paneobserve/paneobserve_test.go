@@ -726,3 +726,159 @@ func TestAnExitedPaneIsStillListed(t *testing.T) {
 		t.Fatalf("Watching() = %+v after Exited; want p1/claude", got)
 	}
 }
+
+// ── the second reader: every reading, not only the news (nocx-luqz9.2) ──────
+
+// readingRecorder is a sink fed by the sweep itself rather than by the wire.
+type readingRecorder struct {
+	mu   sync.Mutex
+	seen []paneobserve.Observation
+}
+
+func (r *readingRecorder) note(o paneobserve.Observation) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.seen = append(r.seen, o)
+}
+
+func (r *readingRecorder) drain() []paneobserve.Observation {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := r.seen
+	r.seen = nil
+	return out
+}
+
+// THE PROPERTY THE WORKER RECORD NEEDS, and the one the wire must NOT have:
+// "settled" is a statement about two readings of one state, so a reader that is
+// handed only CHANGES would be told a pane is idle exactly once and could never
+// conclude that it HAD held it. So the sweep feeds this sink on every tick, for
+// every watched pane, whether or not the answer changed — while the emitter
+// above keeps its change-only rule untouched, which the pair of assertions here
+// is what proves.
+func TestEverySweepFeedsTheReadingSinkEvenWhenNothingChanged(t *testing.T) {
+	w, grid, rec := newFixture(t)
+	readings := &readingRecorder{}
+	w.OnReading(readings.note)
+	if err := grid.Watch("p1", 40, 14); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	defer grid.Withdraw("p1")
+	w.Watch("p1", "claude")
+	grid.Feed("p1", []byte(idleScreen(40)))
+
+	for i := range 3 {
+		w.Sweep()
+		if got := readings.drain(); len(got) != 1 || got[0].State != agentdriver.StateFreeText {
+			t.Fatalf("sweep %d fed the sink %+v, want one free_text reading", i, got)
+		}
+	}
+	// The emitter, by contrast, said it once and then stopped: the two readers
+	// of one sweep differ in exactly this.
+	if got := rec.drain(); len(got) != 1 {
+		t.Fatalf("the wire received %d observations, want the one change", len(got))
+	}
+}
+
+// The reading is fed AFTER the pane's record is updated, so what a reader is
+// handed is the same answer Snapshot would give — and it carries the same pane
+// identity the wire's observation does.
+func TestAReadingCarriesThePaneAndAgentAndMatchesTheSnapshot(t *testing.T) {
+	w, grid, _ := newFixture(t)
+	readings := &readingRecorder{}
+	w.OnReading(readings.note)
+	if err := grid.Watch("p1", 40, 14); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	defer grid.Withdraw("p1")
+	w.Watch("p1", "claude")
+	grid.Feed("p1", []byte(workingScreen(40)))
+	w.Sweep()
+
+	got := readings.drain()
+	if len(got) != 1 {
+		t.Fatalf("readings = %+v, want one", got)
+	}
+	if got[0].PaneID != "p1" || got[0].Agent != "claude" {
+		t.Fatalf("reading = %+v, want p1/claude", got[0])
+	}
+	snap, ok := w.Snapshot("p1")
+	if !ok {
+		t.Fatal("Snapshot answered nothing for a pane that was just swept")
+	}
+	if got[0].State != snap.State || got[0].Progress != snap.Progress {
+		t.Fatalf("reading %+v disagrees with the snapshot %+v", got[0], snap)
+	}
+}
+
+// A pane nobody watches and a pane whose frame cannot be read feed nothing: the
+// sink is the sweep's own reading, and a pane the sweep skipped was not read.
+func TestAPaneThatWasNotReadFeedsNothingToTheSink(t *testing.T) {
+	w, grid, _ := newFixture(t)
+	readings := &readingRecorder{}
+	w.OnReading(readings.note)
+	// Enrolled in the grid, never watched by this watcher.
+	if err := grid.Watch("p-unwatched", 40, 14); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	defer grid.Withdraw("p-unwatched")
+	w.Sweep()
+	if got := readings.drain(); len(got) != 0 {
+		t.Fatalf("an unwatched pane fed the sink: %+v", got)
+	}
+
+	// Watched, but its screen is gone — the ordinary race. Sweep reads nothing
+	// and says nothing.
+	if err := grid.Watch("p2", 40, 14); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	w.Watch("p2", "claude")
+	grid.Withdraw("p2")
+	w.Sweep()
+	if got := readings.drain(); len(got) != 0 {
+		t.Fatalf("a pane whose frame could not be read fed the sink: %+v", got)
+	}
+}
+
+// An exited pane is not re-read — its classification would be of the shell —
+// so it feeds nothing either. The exit is a fact about a process and reaches
+// the record by its own door.
+func TestAnExitedPaneFeedsNothingToTheSink(t *testing.T) {
+	w, grid, _ := newFixture(t)
+	readings := &readingRecorder{}
+	w.OnReading(readings.note)
+	if err := grid.Watch("p1", 40, 14); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	defer grid.Withdraw("p1")
+	w.Watch("p1", "claude")
+	grid.Feed("p1", []byte(idleScreen(40)))
+	w.Sweep()
+	readings.drain()
+
+	w.Exited("p1")
+	w.Sweep()
+	if got := readings.drain(); len(got) != 0 {
+		t.Fatalf("an exited pane fed the sink: %+v", got)
+	}
+}
+
+// A sink set AFTER a sweep is fed from the next one: like SetEmitter it is
+// bound post-construction, and a pane's state is retained rather than consumed.
+func TestAReadingSinkBoundLaterIsFedFromTheNextSweep(t *testing.T) {
+	w, grid, _ := newFixture(t)
+	if err := grid.Watch("p1", 40, 14); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	defer grid.Withdraw("p1")
+	w.Watch("p1", "claude")
+	grid.Feed("p1", []byte(idleScreen(40)))
+	w.Sweep()
+
+	readings := &readingRecorder{}
+	w.OnReading(readings.note)
+	w.Sweep()
+	if got := readings.drain(); len(got) != 1 {
+		t.Fatalf("a late sink received %+v, want the next sweep's reading", got)
+	}
+}

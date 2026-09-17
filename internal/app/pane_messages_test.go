@@ -128,17 +128,11 @@ type fakeMsgReader struct {
 	liveSlots        int
 	capacityRefusals int
 
-	// flipAfterMints, when > 0, switches which kind is available starting
-	// from the mint call AFTER this many have been recorded — modelling a
-	// menu appearing partway through a delivery (e.g. between the echo
-	// check and the Enter mint) keyed on call count, never on a real wait.
-	flipAfterMints   int
-	flippedAvailable sessionruntime.TargetKind
-
 	// onRead, when non-nil, runs after the nth Read (1-based) with r's own
-	// lock RELEASED — so a hook may call setBox/setClassification without
-	// deadlocking. That is how a test makes the pane repaint after a read
-	// (an echo arriving late) rather than on a timer.
+	// lock RELEASED — so a hook may call setBox/setClassification/menuUp
+	// without deadlocking. That is how a test makes the pane repaint (an echo
+	// arriving late) or draw a menu at a chosen moment in a delivery, rather
+	// than on a timer or on a count of the targets somebody minted.
 	onRead func(n int)
 }
 
@@ -275,10 +269,6 @@ func (r *fakeMsgReader) Read(_ context.Context, access any, sessionID string, wa
 	read := assistant.PaneRead{Frame: r.frame, Classification: r.classification}
 	if want != nil {
 		r.mintCalls = append(r.mintCalls, *want)
-		offered := r.available
-		if r.flipAfterMints > 0 && len(r.mintCalls) > r.flipAfterMints {
-			offered = r.flippedAvailable
-		}
 		// A read asking for a kind this frame does not offer does NOT fail:
 		// the read path falls back to a target over the whole screen
 		// (session_targets.go's chooseTargetRows), which the helper mints and
@@ -287,7 +277,7 @@ func (r *fakeMsgReader) Read(_ context.Context, access any, sessionID string, wa
 		// such mint per messagePollInterval is exactly how the book the owner
 		// hit filled (nocx-xn63t.4.1) — so the fake models it rather than
 		// answering "nothing minted".
-		kind := offered
+		kind := r.available
 		if kind == "" || *want != kind {
 			kind = sessionruntime.TargetRegion
 		}
@@ -886,17 +876,25 @@ func TestAMenuBetweenPasteAndEnterRefusesTheEnter(t *testing.T) {
 	}
 	pm := newTestPaneMessages(t, hub, reader, keys)
 
-	// Mint order — only the steps that SPEND a target mint one at all
-	// (nocx-xn63t.4.1: the readiness and echo probes read the pane instead):
-	// this test's own session.read (#1), a "now" send needs its tokenId;
-	// then, inside the delivery, pasteStep (#2) and enterStep (#3). The menu
-	// appears starting at #3, i.e. after the echo has already been
-	// confirmed and before the Enter mint — the race this test names. It is
-	// still keyed on the mint count, so the count moved with the probes and
-	// the scenario did not.
+	// The pane draws the menu AFTER the read that confirmed the echo — the
+	// race design §8.2 names, timed by the pane rather than by a count of the
+	// targets this delivery happened to mint. It used to be keyed on
+	// flipAfterMints, which is a number the probes moved the moment they
+	// stopped minting (nocx-xn63t.4.1): a test that has to be retimed by a fix
+	// is a test measuring the wrong event, and this one has to hold with the
+	// probes minting and without them.
+	//
+	// Read order is the same either way: the caller's own session.read (#1 —
+	// a "now" send needs its tokenId), the readiness read (#2), the paste
+	// read (#3), the echo read (#4). The menu appears once the echo has been
+	// confirmed and before the Enter is minted, so the delivery must reach
+	// partial with no Enter — under the old probes and under the new ones.
+	reader.onRead = func(n int) {
+		if n == 4 {
+			menuUp(t, reader)
+		}
+	}
 	token := mintInputTarget(t, reader, access, sessionID)
-	reader.flipAfterMints = 2
-	reader.flippedAvailable = ""
 
 	view, err := pm.Send(context.Background(), access, sessionID, "hello", "now", "id-1", token)
 	if err != nil {

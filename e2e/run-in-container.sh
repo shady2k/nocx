@@ -5,7 +5,8 @@
 # app.New's startup probe to write to, and no real $HOME of yours to reach.
 # See e2e/Dockerfile for why that matters.
 #
-#   e2e/run-in-container.sh                       # whole suite, both browsers
+#   e2e/run-in-container.sh                       # whole suite, both browsers,
+#                                                 # one container run each
 #   e2e/run-in-container.sh e2e/sidebar.spec.ts   # one spec
 #   PW_PROJECTS=chromium e2e/run-in-container.sh  # one browser
 #   NOCX_E2E_CPUS=0 e2e/run-in-container.sh       # uncapped, while iterating
@@ -244,21 +245,77 @@ if [ -f "$repo_root/.git" ]; then
   [ -n "$git_common" ] && git_flag=(-v "$git_common:$git_common:ro")
 fi
 
-exec docker run --rm -i ${tty_flag[@]+"${tty_flag[@]}"} \
-  ${cpu_flag[@]+"${cpu_flag[@]}"} \
-  ${git_flag[@]+"${git_flag[@]}"} \
-  -v "$repo_root:/work" \
-  -v "$NODE_VOL":/work/node_modules \
-  -v "$FENODE_VOL":/work/frontend/node_modules \
-  -v "$NPM_CACHE" \
-  -v "$GO_CACHE" \
-  -v "$GO_MOD" \
-  -e PW_PROJECTS="${PW_PROJECTS:-}" \
-  -e PW_WORKERS="${PW_WORKERS:-}" \
-  -e NOCX_LOG_LEVEL="${NOCX_LOG_LEVEL:-}" \
-  -e NOCX_PROVE_FAILURE_CONTEXT="${NOCX_PROVE_FAILURE_CONTEXT:-}" \
-  -e NOCX_E2E_HOST_UID="$(id -u)" \
-  -e NOCX_E2E_HOST_GID="$(id -g)" \
-  -w /work \
-  "$image" \
-  bash -euo pipefail /work/e2e/container-entry.sh "$@"
+# ONE CONTAINER PER BROWSER, which is what ci-e2e does and what this script
+# did not.
+#
+# The stand is one nocx-server, one vite and one disposable home per RUN, and
+# playwright.config.ts pins `workers: 1` — so a single run carrying both
+# projects walks the whole suite in chromium and then walks it again in webkit
+# against the state the first walk left behind. `stand.ts` wipes `.e2e/home`
+# when it starts, so a second RUN is clean; a second PROJECT inside one run is
+# not.
+#
+# Measured 2026-08-31 (nocx-6wgcw), same image and machine, `main` at ac06a437:
+# mixed 460 passed / 12 failed, webkit alone 234 passed / 1 failed, and every
+# one of those twelve green when run by itself. That is the gap AGENTS.md
+# warns about — "its failure set is not CI's" — and it was this script's doing
+# rather than a fact about container WebKit.
+#
+# PW_PROJECTS still selects a subset, and with one project named there is
+# exactly one run, so nothing about the single-browser path changes.
+projects_to_run=()
+if [ -n "${PW_PROJECTS:-}" ]; then
+  IFS=',' read -r -a projects_to_run <<< "$PW_PROJECTS"
+else
+  projects_to_run=(chromium webkit)
+fi
+
+run_one() {
+  docker run --rm -i ${tty_flag[@]+"${tty_flag[@]}"} \
+    ${cpu_flag[@]+"${cpu_flag[@]}"} \
+    ${git_flag[@]+"${git_flag[@]}"} \
+    -v "$repo_root:/work" \
+    -v "$NODE_VOL":/work/node_modules \
+    -v "$FENODE_VOL":/work/frontend/node_modules \
+    -v "$NPM_CACHE" \
+    -v "$GO_CACHE" \
+    -v "$GO_MOD" \
+    -e PW_PROJECTS="$1" \
+    -e PW_WORKERS="${PW_WORKERS:-}" \
+    -e NOCX_LOG_LEVEL="${NOCX_LOG_LEVEL:-}" \
+    -e NOCX_PROVE_FAILURE_CONTEXT="${NOCX_PROVE_FAILURE_CONTEXT:-}" \
+    -e NOCX_E2E_HOST_UID="$(id -u)" \
+    -e NOCX_E2E_HOST_GID="$(id -g)" \
+    -w /work \
+    "$image" \
+    bash -euo pipefail /work/e2e/container-entry.sh "${@:2}"
+}
+
+# `fail-fast: false`, as ci-e2e has it: one browser's failure must not hide
+# what the other would have said. The exit status is the first failure's, so a
+# red run is still red.
+#
+# Two spellings below are deliberate, both of them the trap this file already
+# records above `cpu_flag`: `$?` is read in the `else` branch, where it is
+# still run_one's status and not the `!` that would have inverted it; and the
+# status is updated with a full `if` rather than a `[ … ] && …`, whose false
+# test as the last command of a clause exits the script under `set -e`.
+status=0
+for project in "${projects_to_run[@]}"; do
+  project="${project// /}"
+  if [ -z "$project" ]; then
+    continue
+  fi
+  if [ "${#projects_to_run[@]}" -gt 1 ]; then
+    printf '\n=== %s ===\n' "$project" >&2
+  fi
+  if run_one "$project" "$@"; then
+    :
+  else
+    rc=$?
+    if [ "$status" -eq 0 ]; then
+      status=$rc
+    fi
+  fi
+done
+exit "$status"

@@ -388,6 +388,21 @@ func (m *paneMessages) Send(ctx context.Context, access any, sessionID, text, wh
 	}
 	q.order = append(q.order, pm)
 	q.byKey[key] = pm
+	// The phase THIS CALL left the message in, read before the queue's own
+	// mutex is released. design §8.1 — and session.message's own tool
+	// schema — promise a "free" send `queued` immediately: the state the
+	// call produced, never a snapshot of a delivery loop that may already
+	// have run. It is exact by construction only here: every path that can
+	// advance this record — runQueue selecting a head, Cancel naming it —
+	// must first take q.mu, so inside this critical section there is nothing
+	// to race with. Read after the unlock instead, and a runQueue already
+	// running for this pane (or the one started below) can have claimed
+	// `pasting` before the answer is built, handing the caller a phase its
+	// own call never produced (nocx-xn63t.4.9).
+	var enqueued assistant.MessageView
+	if when == "free" {
+		enqueued = pm.view()
+	}
 	q.mu.Unlock()
 
 	if when == "now" {
@@ -410,11 +425,11 @@ func (m *paneMessages) Send(ctx context.Context, access any, sessionID, text, wh
 		}
 		return pm.view(), nil
 	}
-	// "free": returns queued immediately; delivery happens in the
-	// background, one at a time, whenever this pane's queue is not already
-	// running a delivery.
+	// "free": answers the phase this call left the message in — queued —
+	// immediately; delivery happens in the background, one at a time,
+	// whenever this pane's queue is not already running a delivery.
 	go m.runQueue(sessionID, q)
-	return pm.view(), nil
+	return enqueued, nil
 }
 
 // EnqueueTask is namespace "nocx"'s one message: the owed task a spawn

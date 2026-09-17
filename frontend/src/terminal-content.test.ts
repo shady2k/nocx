@@ -11817,6 +11817,78 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     }
   })
 
+  it('a retry that lands after a held stop failed is drawn as Stopped (nocx-zas0d, review 3)', async () => {
+    const client = makeClient()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      const handler = lifecycleHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('sleep 30')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      const open = {
+        id: 'att-retry-21',
+        state: 'open' as const,
+        origin: 'app' as const,
+        submitId: submitToken(client),
+        command: 'sleep 30',
+      }
+      handler({ lane: 'lane-1', lifecycle: 'running', domain: 'd1', epoch: 1, attempt: open })
+      const rec = scrollbackFor(content).blockManager.runningBlock!
+      sessionOf(content).signal.mockResolvedValue({ signal: 'stop', outcome: 'held' })
+      itemNamed(runningBlockMenu(content), 'stop')!.click()
+      await vi.waitFor(() => expect(rec.stopRequested).toBe(true))
+
+      // The held Stop FAILED, and the notice was dropped: what reaches the pane
+      // is the open attempt's fact, re-published with its record (item 4).
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        signalDelivery: 'undelivered',
+        attempt: open,
+      })
+
+      // The person presses Stop again, and this time it lands.
+      sessionOf(content).signal.mockResolvedValue({ signal: 'stop', outcome: 'delivered' })
+      itemNamed(runningBlockMenu(content), 'stop')!.click()
+      await vi.waitFor(() => expect(sessionOf(content).signal).toHaveBeenCalledTimes(2))
+
+      // The completion carries the attempt's LATEST outcome, and the block
+      // says the person stopped it (item 2) — not the earlier failure.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        signalDelivery: 'delivered',
+        attempt: {
+          id: 'att-retry-21',
+          state: 'completed',
+          exitCode: 130,
+          completedAt: '2026-09-15T00:00:00Z',
+          fence: '6'.repeat(64),
+        },
+      })
+      expect(rec.status).toBe('cancelled')
+      await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
+      expect(rec.el.dataset.outcome).toBe('cancelled')
+      expect(rec.el.textContent).toContain('Stopped')
+    } finally {
+      restore()
+      teardown()
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    }
+  })
+
   it('a program that exits 130 on its own, with no stop request, still reads as failure', async () => {
     const client = makeClient()
     const { view, ed, content, teardown } = await mountTerminal(

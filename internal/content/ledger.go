@@ -1440,6 +1440,15 @@ type LedgerEntrySummary struct {
 	// attempts and not about the entry: the next start has its own answer and
 	// must not inherit this one's.
 	Unreconciled *UnreconciledCause
+	// TerminationReason is the entry's LATEST execution's own verdict on how
+	// it ended, nil while none has one (not started, still running, or not an
+	// execution at all). It is on the summary because Status cannot say it:
+	// a command the person stopped and a program that failed on its own are
+	// both EntryFailure, and the restore draws a block from this row — so
+	// without the reason a stopped command came back as the program's own
+	// failure (nocx-zas0d, review 3 item 3). The store does not interpret it;
+	// the renderer owns what each reason looks like.
+	TerminationReason *TerminationReason
 }
 
 // Summary is the timeline row of a recall-shaped entry — a projection, never
@@ -1456,7 +1465,19 @@ func (e LedgerEntry) Summary() LedgerEntrySummary {
 		Payload:      e.Payload,
 		SessionID:    e.SessionID,
 		Unreconciled: e.Unreconciled,
+		// The same "latest execution" the page statement reads, so a detail
+		// read and a page row cannot disagree about how the entry ended.
+		TerminationReason: latestTermination(e.Executions),
 	}
+}
+
+// latestTermination is the termination reason of the last execution, in the
+// order the store returns them (by id), or nil.
+func latestTermination(executions []Execution) *TerminationReason {
+	if len(executions) == 0 {
+		return nil
+	}
+	return executions[len(executions)-1].TerminationReason
 }
 
 // MaxLedgerPageLimit is the ceiling on one page of recall. An unbounded

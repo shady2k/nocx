@@ -1671,3 +1671,70 @@ func TestHeldStop_ALadderStopIsTheAttemptsOutcomeToo(t *testing.T) {
 		t.Fatalf("the ladder Stop answered %q, want %q", env.Result.Outcome, foregroundDelivered)
 	}
 }
+
+// TestHeldStop_AReattachedPaneReadsTheStopFromTheLedger is review 3 item 3.
+// The live carrier of a Stop's outcome is the lifecycle fact, and a reattach
+// replays only the lane's CURRENT projection — which, once the shell is back at
+// a prompt, names no attempt at all. So a command stopped while its pane was
+// away can only be read back from what a restore draws: the ledger row. That is
+// the carrier this asserts, end to end over the wire, in the order the review
+// names: the Stop lands, the pane detaches, the command completes and the shell
+// returns to its prompt while nobody is watching, and a fresh connection
+// reattaches and reads the pane's rows.
+func TestHeldStop_AReattachedPaneReadsTheStopFromTheLedger(t *testing.T) {
+	stand := newHeldStopStandWithStore(t)
+	stand.establish(t)
+	stand.submit(t, 5, "sleep 30")
+	attempt := lifecycle.AttemptID(stand.appAttemptID)
+	if got := stand.stop(t, 6); got != string(foregroundHeld) {
+		t.Fatalf("a Stop before the start answered %q, want %q", got, foregroundHeld)
+	}
+	submitCommand(t, stand.conn, stand.sid, "sleep 30")
+	stand.ingest(t, lifecycleStartEvt(new(stand.shellIDFor(1)), "sleep 30"))
+	waittest.WaitForDetail(t, "the held Stop's byte to be settled as delivered",
+		func() string {
+			d, u, n := stand.stopRecord(attempt)
+			return fmt.Sprintf("delivered=%v undelivered=%v inflight=%d", d, u, n)
+		},
+		func() bool { delivered, _, inflight := stand.stopRecord(attempt); return delivered && inflight == 0 })
+
+	// Detach, as a network drop would. The command's completion and the
+	// prompt after it happen while the pane is away.
+	stand.ws.getRx(session.ID(stand.sid)).setSubscriber(nil, nil)
+	stand.ingest(t, lifecycleCompleteEvt(attempt, 130, lifecycleFence(0x12)))
+	stand.ingest(t, lifecyclePromptEvt())
+
+	// A fresh connection reattaches and reads what a restore reads.
+	connB := connectWS(t, stand.ws)
+	t.Cleanup(func() { _ = connB.Close() })
+	tapB := newSocketTap(connB)
+	at := tapCall(t, connB, tapB, 2, "attach", map[string]any{"sessionId": stand.sid, "offset": 0})
+	var atEnv struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(at, &atEnv); err != nil || atEnv.Error != nil {
+		t.Fatalf("attach: %v %+v", err, atEnv.Error)
+	}
+	raw := tapCall(t, connB, tapB, 3, "ledger.query",
+		map[string]any{"scope": "everywhere", "paneId": heldStopPane, "limit": 50})
+	result := resultOf(t, raw)
+	validateJSON(t, loadSchema(t, "ledger.query.schema.json"), result, "ledger.query, over the wire")
+	var page ledgerQueryResponse
+	if err := json.Unmarshal(result, &page); err != nil {
+		t.Fatalf("ledger.query result: %v", err)
+	}
+	for _, row := range page.Entries {
+		if row.ID != stand.appAttemptID {
+			continue
+		}
+		if row.Status != string(content.EntryFailure) || row.ExitCode == nil || *row.ExitCode != 130 {
+			t.Fatalf("the stopped command's row = status %q exit %v, want failure/130", row.Status, row.ExitCode)
+		}
+		if row.TerminationReason == nil || *row.TerminationReason != string(content.TermUserKilled) {
+			t.Fatalf("the stopped command's terminationReason = %v, want %q — without it a restore draws the program's own failure",
+				row.TerminationReason, content.TermUserKilled)
+		}
+		return
+	}
+	t.Fatalf("ledger.query for the pane has no row for the stopped attempt %q: %+v", stand.appAttemptID, page.Entries)
+}

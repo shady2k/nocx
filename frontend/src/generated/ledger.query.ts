@@ -114,6 +114,23 @@ export interface Entry {
    */
   exitCode: number | null
   /**
+   * How the entry's LATEST execution ended, in the store's own closed vocabulary, or null when no execution has ended (not started, still running, or no execution at all). It exists because `status` cannot say it: a command the person stopped and a program that failed on its own are both `failure`, and a restore draws a block from this row — so without it a stopped command came back as the program's own failure (nocx-zas0d). `user-killed` is the person's stop. The renderer owns what each reason looks like; the store does not interpret it.
+   */
+  terminationReason:
+    | null
+    | (
+        | 'completed'
+        | 'failed'
+        | 'timeout'
+        | 'transport-gone'
+        | 'user-killed'
+        | 'agent-declined'
+        | 'interrupted'
+        | 'inactivity'
+        | 'output-budget'
+        | 'answer-revoked'
+      )
+  /**
    * How many secret-shaped regions were redacted from intent before this row was written. Read back off the row's receipt, never re-derived by running the detector over the stored text — which is already masked. 0 means nothing was masked.
    */
   maskedCount: number

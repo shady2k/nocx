@@ -1,6 +1,20 @@
 package transport
 
-import "time"
+import (
+	"time"
+
+	"github.com/shady2k/nocx/internal/lifecycle"
+)
+
+// stopStateKnown reports whether this attempt has a Stop record at all. A
+// test seam for the same reason as the two below: production never asks it
+// (the deadcode ratchet, CI run 35241257576).
+func (s *WSServer) stopStateKnown(attempt lifecycle.AttemptID) bool {
+	s.stopStateMu.Lock()
+	defer s.stopStateMu.Unlock()
+	_, ok := s.stopStates[attempt]
+	return ok
+}
 
 // The two transfer timeouts are TEST SEAMS, and this file is where the
 // dead-code ratchet says a test seam lives: "a `_test.go` file, which

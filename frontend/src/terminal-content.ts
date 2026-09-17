@@ -52,6 +52,8 @@ import { unresolvedRedactionField } from './unresolved-redactions'
 import { PromptVaultController } from './prompt-vault'
 import { VaultClient } from './vault-client'
 import { showToast, type ToastLevel } from './ui/toast'
+import { subscribeSignalUndelivered, undeliveredNotice } from './session-signal-undelivered'
+import type { SessionSignalUndelivered } from './generated/session.signalUndelivered'
 import type { SessionIntegrationChanged } from './generated/session.integrationChanged'
 import type { SessionToolSurfaceChanged } from './generated/session.toolSurfaceChanged'
 import type { DriverState, PaneChild } from './pane-observation'
@@ -1246,6 +1248,11 @@ export class TerminalContent extends BasePaneContent {
   private _awaitsIntegration = false
   /** The subscription to that status, dropped on dispose. */
   private _integrationUnsub: (() => void) | null = null
+  /** The held-Stop settlement subscription (nocx-zas0d). It exists because
+   *  `held` is an ACCEPTANCE the request cannot follow up on: whatever happens
+   *  to the byte afterwards is said by session.signalUndelivered or not at
+   *  all. */
+  private _signalUndeliveredUnsub: (() => void) | null = null
   /** The launch-owned worker tool-surface result, independent of shell integration. */
   private _toolSurface: SessionToolSurfaceChanged | null = null
   private _toolSurfaceUnsub: (() => void) | null = null
@@ -4114,6 +4121,8 @@ export class TerminalContent extends BasePaneContent {
       this._lifecycleUnsub = null
       this._integrationUnsub?.()
       this._integrationUnsub = null
+      this._signalUndeliveredUnsub?.()
+      this._signalUndeliveredUnsub = null
       this._toolSurfaceUnsub?.()
       this._toolSurfaceUnsub = null
       this._dropToolSurfaceNotice()
@@ -4368,6 +4377,15 @@ export class TerminalContent extends BasePaneContent {
     // conventional with a reason, or → lost). Subscribed before anything
     // else touches the session so the first status — which the server
     // sends immediately after the ack — cannot arrive unheard.
+    // The held Stop's settlement is a SUBSCRIPTION for the same reason the
+    // integration axis is: it is an event that may never come (a Stop that
+    // lands says nothing) and the renderer has to be listening before it can.
+    // Subscribed beside the integration axis, before anything else touches the
+    // session, so a notice cannot be raised into a pane that is not listening.
+    this._signalUndeliveredUnsub = subscribeSignalUndelivered(this.client.dispatcher, (fact) => {
+      if (fact.sessionId !== session.sessionId) return
+      this._applySignalUndelivered(fact)
+    })
     this._integrationUnsub = subscribeIntegrationChanged(this.client.dispatcher, (fact) => {
       if (fact.sessionId !== session.sessionId) return
       this._applyIntegration(fact)
@@ -5440,6 +5458,24 @@ export class TerminalContent extends BasePaneContent {
    *  all, so neither surface has anything to draw: absence is how
    *  "conventional by design" is expressed, and there is nothing here that
    *  needs to special-case it. */
+  /** The Stop this pane was told was held will not reach its command
+   *  (nocx-zas0d, review findings 2 and 4 of 1e899f6a).
+   *
+   *  BOTH HALVES MATTER. The mark this pane took on the acceptance comes off,
+   *  so a command that runs to its own nonzero end is the program's own failure
+   *  again rather than a stop that never happened — and the person is told,
+   *  because a product that answers `held` and then says nothing is claiming a
+   *  stop is on its way when none is. The mark is dropped on the block the
+   *  notice NAMES (its attempt), never on whatever holds the running slot now:
+   *  a notice about a command that has been replaced must not relabel the
+   *  command that replaced it. */
+  private _applySignalUndelivered(fact: SessionSignalUndelivered): void {
+    const block = this.scrollback?.blockManager.blockForAttempt(fact.attempt) ?? null
+    if (block) block.stopRequested = false
+    const notice = undeliveredNotice(fact)
+    if (notice) showToast(notice)
+  }
+
   private _applyIntegration(fact: SessionIntegrationChanged): void {
     if (this._disposed) return
     // The session has exited (clean or lost): the tab is closing or marked
@@ -7279,6 +7315,8 @@ export class TerminalContent extends BasePaneContent {
     this._lifecycleUnsub = null
     this._integrationUnsub?.()
     this._integrationUnsub = null
+    this._signalUndeliveredUnsub?.()
+    this._signalUndeliveredUnsub = null
     this._toolSurfaceUnsub?.()
     this._toolSurfaceUnsub = null
     this._toolSurfaceNoticeDispose?.()

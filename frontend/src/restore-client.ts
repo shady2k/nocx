@@ -34,7 +34,7 @@ export interface RestorableBlock {
    *  saying where it ran even when the pane is local again — which is what
    *  makes an inline ssh honest without any code of its own (design §7). */
   host: string
-  status: 'success' | 'failure' | 'entered' | 'unknown' | 'unreconciled'
+  status: 'success' | 'failure' | 'cancelled' | 'entered' | 'unknown' | 'unreconciled'
   /** WHY nobody could say whether this block's session still exists, or null
    *  when the question was settled (nocx-k6p18.5). Carried in the wire's own
    *  closed vocabulary — the sentence is chosen in unreconciled-notice.ts,
@@ -83,13 +83,18 @@ function authorFromSource(source: 'user' | 'assistant'): 'shell' | 'agent' {
 function frozenStatus(
   status: string,
   unreconciled: UnreconciledCause | null,
+  terminationReason: string | null,
 ): RestorableBlock['status'] {
   if (unreconciled !== null) return 'unreconciled'
   switch (status) {
     case 'success':
       return 'success'
     case 'failure':
-      return 'failure'
+      // A failure the PERSON caused is a stop, and a live block draws it as
+      // `cancelled` — status alone cannot say so, since a stopped command and
+      // a program that failed on its own are both `failure`. The latest
+      // execution's own reason is the store's word for it (nocx-zas0d).
+      return terminationReason === 'user-killed' ? 'cancelled' : 'failure'
     case 'interrupted':
       return 'unknown'
     default:
@@ -125,7 +130,7 @@ export async function blocksForPane(client: WSClient, paneId: string): Promise<R
       command: e.intent,
       cwd: e.cwd,
       host: e.host ?? '',
-      status: frozenStatus(e.status, e.unreconciled ?? null),
+      status: frozenStatus(e.status, e.unreconciled ?? null, e.terminationReason ?? null),
       unreconciled: e.unreconciled ?? null,
       durationMs: e.durationMs,
       exitCode: e.exitCode,

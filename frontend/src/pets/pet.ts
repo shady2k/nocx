@@ -121,6 +121,23 @@ export interface Pet {
    * than something the animal chose. Only these are protected from being cut
    * short: an ordinary occupation may be interrupted freely. */
   readonly reacting: boolean
+  /** The answer the animal actually GAVE to the last finished command, and
+   * null before the first one.
+   *
+   * A reaction is a blink — a once drawing about a second long — so the fact
+   * that the pet answered at all is unobservable a moment later, and the only
+   * durable trace was the mood, which is coarser than the answer (`meow` and
+   * `stretch` are both `pleased`). This is the record of the answer itself,
+   * and it outlives the drawing that delivered it. */
+  readonly answered: Activity | null
+  /** An answer the animal owes but could not give, because it was in the air
+   * when the verdict arrived.
+   *
+   * A falling pet is not interrupted, so without this the answer to a command
+   * that finishes mid-fall is simply lost — and a fall is exactly what the
+   * animal is doing in the seconds after it arrives, which is when the first
+   * command of a session finishes. It is paid the moment the feet are down. */
+  readonly owed: Activity | null
   /** Whose command is running right now, or null when nothing is.
    *
    * Not a fourth axis and not a mood: it does not colour the animal, it
@@ -244,6 +261,8 @@ export function newPet(x: number, y: number): Pet {
     landingTarget: null,
     vy: 0,
     reacting: false,
+    answered: null,
+    owed: null,
     attending: null,
   }
 }
@@ -469,7 +488,8 @@ function landDuration(impactSpeed: number, maxFall: number): number {
  * A command finished. The pet stops what it was doing and reacts.
  *
  * A falling pet is NOT interrupted: it has no say in the matter, and a cat
- * that grooms itself mid-air is the kind of detail that reads as a bug.
+ * that grooms itself mid-air is the kind of detail that reads as a bug. The
+ * answer is not dropped, though — it is owed, and given on landing.
  */
 export function react(
   pet: Pet,
@@ -479,17 +499,23 @@ export function react(
   tuning: PetTuning = DEFAULT_TUNING,
 ): Pet {
   const mood = MOOD_OF[outcome]
+  const activity = REACTION_OF[author][outcome]
   // Whatever it was watching is over, whether or not it may react.
   const done = { ...pet, attending: null, attendingFor: 0, vigilStage: 0 }
   if (pet.locomotion === 'fall') {
-    return { ...done, mood, moodHold: tuning.moodHold }
+    return { ...done, mood, moodHold: tuning.moodHold, owed: activity }
   }
-  const activity = REACTION_OF[author][outcome]
+  return { ...give(done, activity, timing, tuning), mood, moodHold: tuning.moodHold }
+}
+
+/** Give the answer: the one place a reaction becomes the current behaviour.
+ *
+ * Shared by `react` and by the debt an airborne pet pays on landing, so the
+ * two cannot drift into answering the same verdict differently. */
+function give(pet: Pet, activity: Activity, timing: PetTiming, tuning: PetTuning): Pet {
   return {
-    ...done,
+    ...pet,
     locomotion: 'idle',
-    mood,
-    moodHold: tuning.moodHold,
     activity,
     // Once reactions finish when their drawing finishes; loop and transition
     // reactions keep the caller's reaction cadence instead.
@@ -499,6 +525,8 @@ export function react(
       'reaction',
     ),
     reacting: true,
+    answered: activity,
+    owed: null,
     // This event has already replaced the activity before `step` runs, so
     // `step` cannot infer the external restart from locomotion/activity.
     clip: EMPTY_CLIP,
@@ -1004,6 +1032,11 @@ export function step(
     if (phased.phase !== 'none') return phased
     next = phased
   }
+  // An answer owed from mid-air is given the moment the feet are down and the
+  // landing has played out. Paid here rather than inside `fall` so the debt
+  // survives a landing that runs straight into a turn or a get-up: the pet is
+  // grounded and out of every transition exactly once, and this is that point.
+  if (next.owed !== null) next = give(next, next.owed, env.timing, tuning)
   let dir = next.dir
   let vx = next.vx
   let hold: number = next.hold

@@ -634,7 +634,11 @@ export interface BlockRecord {
    *  byte until the shell has begun the command: the completion that stop
    *  causes is SIGINT's 130, and reverting here would paint it as the
    *  program's own failure. Read once, by `freezeFromAttempt`, to turn a
-   *  nonzero exit into `cancelled` instead of `failure`. */
+   *  nonzero exit into `cancelled` instead of `failure` — and OUTRANKED there
+   *  by the attempt's own `signalDelivery` whenever the backend has one, which
+   *  is what makes this mark a fallback for the request path's synchronous
+   *  `delivered` rather than the last word (nocx-zas0d, review of 6830b43d,
+   *  major 2). */
   stopRequested: boolean
   /** Run once, after the VISUAL freeze has replaced `el`.
    *
@@ -2738,10 +2742,25 @@ export class BlockManager {
     // A nonzero exit is a failure UNLESS this block was sent a stop request
     // through nocx (nocx-9bpeq.19): the backend's own completion fact never
     // says why the process died — SIGINT's 130 and the escalation ladder's
-    // own 143/137 read exactly like a program's own failure otherwise —
-    // so `stopRequested` (set by terminal-content.ts's `signalActiveCommand`
-    // at the moment of the gesture) is the one fact that tells them apart.
-    const status = code === 0 ? 'success' : rec.stopRequested ? 'cancelled' : 'failure'
+    // own 143/137 read exactly like a program's own failure otherwise.
+    //
+    // THE BACKEND'S OWN SETTLEMENT OUTRANKS THE PANE'S GESTURE (nocx-zas0d,
+    // review of 6830b43d, major 2). `stopRequested` is the pane's evidence that
+    // a person asked and the backend ACCEPTED — and for a Stop that arrived
+    // before the shell's start, acceptance is not delivery. The attempt's
+    // `signalDelivery` is the backend saying what actually happened, carried on
+    // the lifecycle fact so it survives a dropped frame and a reconnect: a
+    // notification a reconnect could lose must not be the only thing keeping a
+    // command that ran to its own end from being painted as one the person
+    // stopped. Absent (no Stop was ever accepted for this attempt) is the case
+    // where the pane's own mark is the whole evidence.
+    const stopped =
+      attempt.signalDelivery === 'delivered'
+        ? true
+        : attempt.signalDelivery === 'undelivered'
+          ? false
+          : rec.stopRequested
+    const status = code === 0 ? 'success' : stopped ? 'cancelled' : 'failure'
 
     if (this._pendingFence !== null) {
       // Another completion wants the slot while one is pending. The pty

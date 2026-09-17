@@ -52,6 +52,7 @@
         "endedAt",
         "durationMs",
         "exitCode",
+        "terminationReason",
         "maskedCount",
         "maskedKinds",
         "redactions",
@@ -136,6 +137,26 @@
         "exitCode": {
           "description": "The shell arm's exit status, or null when the entry produced none \u2014 still running, interrupted, or not a shell entry at all. Null is not zero.",
           "type": ["integer", "null"]
+        },
+        "terminationReason": {
+          "description": "How the entry's LATEST execution ended, in the store's own closed vocabulary, or null when no execution has ended (not started, still running, or no execution at all). It exists because `status` cannot say it: a command the person stopped and a program that failed on its own are both `failure`, and a restore draws a block from this row — so without it a stopped command came back as the program's own failure (nocx-zas0d). `user-killed` is the person's stop. The renderer owns what each reason looks like; the store does not interpret it.",
+          "oneOf": [
+            { "type": "null" },
+            {
+              "enum": [
+                "completed",
+                "failed",
+                "timeout",
+                "transport-gone",
+                "user-killed",
+                "agent-declined",
+                "interrupted",
+                "inactivity",
+                "output-budget",
+                "answer-revoked"
+              ]
+            }
+          ]
         },
         "maskedCount": {
           "description": "How many secret-shaped regions were redacted from intent before this row was written. Read back off the row's receipt, never re-derived by running the detector over the stored text \u2014 which is already masked. 0 means nothing was masked.",

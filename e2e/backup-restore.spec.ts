@@ -1,4 +1,38 @@
+import type { Page } from '@playwright/test'
 import { appReadyForInput, test, expect, settingsReady } from './harness'
+
+const placementNav = '.ui-grouped-nav__item[data-item="Interface"] button'
+const placementSelect = '.ui-settings-row[data-key="tab.placement"] select'
+const placementMarker = '.ui-settings-row[data-key="tab.placement"] .ui-settings-modified-dot'
+
+/**
+ * Puts tab.placement at `value` and returns only once the BACKEND has accepted
+ * the write (nocx-9ox05). The select shows the new value the instant it is
+ * chosen; the write behind it holds the config gate until it commits, and
+ * backup.create, backup.preview and backup.restore all wait on that gate for
+ * at most a second. On a slow CI disk the write outlasted that wait, the
+ * preview came back "Control plane busy", and the spec was reading a state
+ * the product had not reached. The row's modified marker is set from the
+ * accepted outcome, after the response, so it is the observable the next
+ * step depends on: present for vertical, absent for the default horizontal.
+ *
+ * A write of the value already held is skipped rather than issued, because
+ * the marker could not tell that write landing from it not having landed —
+ * and the shared stand may well start where this spec left it.
+ */
+async function setPlacement(page: Page, value: 'vertical' | 'horizontal'): Promise<void> {
+  await page.locator(placementNav).click()
+  await expect(page.locator(placementSelect)).toBeVisible({ timeout: 5000 })
+  if ((await page.locator(placementSelect).inputValue()) !== value) {
+    await page.selectOption(placementSelect, value)
+  }
+  await expect(page.locator(placementSelect)).toHaveValue(value)
+  if (value === 'vertical') {
+    await expect(page.locator(placementMarker)).toHaveAttribute('data-modified', 'true')
+  } else {
+    await expect(page.locator(placementMarker)).not.toHaveAttribute('data-modified')
+  }
+}
 
 /**
  * The backup surface must move non-empty user state through the real renderer
@@ -18,12 +52,7 @@ test.describe('Backup & Restore', () => {
     await settingsReady(page)
 
     // Change a reachable persisted setting so restore has an observable effect.
-    const placementNav = '.ui-grouped-nav__item[data-item="Interface"] button'
-    const placementSelect = '.ui-settings-row[data-key="tab.placement"] select'
-    await page.locator(placementNav).click()
-    await expect(page.locator(placementSelect)).toBeVisible({ timeout: 5000 })
-    await page.selectOption(placementSelect, 'vertical')
-    await expect(page.locator(placementSelect)).toHaveValue('vertical')
+    await setPlacement(page, 'vertical')
 
     // Navigate to Backup & Restore and create a backup.
     await page.locator('.ui-grouped-nav__item[data-item="backup"] button').click()
@@ -36,10 +65,7 @@ test.describe('Backup & Restore', () => {
     await download.saveAs(backupPath)
 
     // Mutate the setting after creation so restore must move it back.
-    await page.locator(placementNav).click()
-    await expect(page.locator(placementSelect)).toBeVisible({ timeout: 5000 })
-    await page.selectOption(placementSelect, 'horizontal')
-    await expect(page.locator(placementSelect)).toHaveValue('horizontal')
+    await setPlacement(page, 'horizontal')
 
     // Go back to Backup & Restore, load the backup file and preview.
     await page.locator('.ui-grouped-nav__item[data-item="backup"] button').click()

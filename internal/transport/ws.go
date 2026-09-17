@@ -798,6 +798,19 @@ type WSServer struct {
 	// twice is one obligation, and an attempt that never starts takes its
 	// hold with it when the publisher reports it closed.
 	heldStops map[lifecycle.AttemptID]session.ID
+	// stopStateMu guards stopStates, the transport's record of what each
+	// accepted Stop came to (nocx-zas0d, review of 6830b43d, major 2). It is
+	// separate from heldMu because the two answer different questions — one is
+	// "who is going to write this", the other "what happened" — and because the
+	// fact path reads this one while holding neither.
+	stopStateMu sync.Mutex
+	// stopStates is each stopped attempt's delivery record: what the Stops a
+	// person made for it came to (ws_signal.go's stopState). It is what makes
+	// the outcome STATE rather than an event: the lifecycle fact carries it,
+	// so a dropped frame cannot leave a block claiming a stop that never
+	// happened. One record per attempt a person pressed Stop on, dropped with
+	// the session however it ends (closeSession and monitorExit).
+	stopStates map[lifecycle.AttemptID]*stopState
 	// signalSub and signalOps are the execution lane session.signal runs on
 	// (buildControlPlane), shared with the one other thing that is a signal:
 	// a held Stop being delivered when its attempt starts. One lane, so the
@@ -3584,6 +3597,12 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	// went on resolving that lane to a session nobody can reach.
 	s.cancelRecovery(sess.ID())
 	s.unregisterLifecycleLanes(sess.ID())
+	// The Stop records and the holds are the session's too (nocx-zas0d), and
+	// they carried the same defect: dropped only by closeSession, so every
+	// stopped command of a shell that exited on its own stayed in memory for
+	// the life of the process.
+	s.dropStopStatesFor(sess.ID())
+	s.dropHeldStopsFor(sess.ID())
 	s.unregisterIntegration(sess.ID())
 
 	// Port discovery (nocx-wzc4.2): if this was the last session on its
@@ -3816,6 +3835,8 @@ func (s *WSServer) closeSession(sid session.ID, sess session.Session) {
 	// (ws_sessionpolicy.go).
 	s.sessionPolicy.Drop(sid)
 	s.unregisterLifecycleLanes(sid)
+	// The Stop records go with the session, like the holds they describe.
+	s.dropStopStatesFor(sid)
 	// A held Stop belongs to an attempt, and an attempt belongs to a session:
 	// when the session ends there is nothing left for the obligation to be
 	// about, and it must not outlive the registry entry that named it

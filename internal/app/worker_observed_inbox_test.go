@@ -25,6 +25,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/paneobserve"
+	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/workers"
 )
 
@@ -349,6 +350,94 @@ func TestAWorkingWorkerIsNeverToldToItsCoordinator(t *testing.T) {
 	if len(*after.Observations) != 1 || (*after.Observations)[0].State != string(workers.ObservedIdle) {
 		t.Fatalf("the idle after the working turn was not reported: %+v", *after.Observations)
 	}
+}
+
+// And the bridge RESOLVES a pane that is somebody's worker: the pane id it is
+// handed becomes the participant the record is keyed by, and the liveness it
+// passes is the one the enrolment recorded, which is what admit's incarnation
+// guard will compare.
+//
+// This is the link the negative case above cannot cover, and it is the one an
+// implementation could plausibly get wrong without any other test noticing: the
+// id the watcher reports is a PANE (paneenrol.go opens the observation with the
+// session's own id), while the record is keyed by PARTICIPANT, and the only
+// place those two meet is workerEnrolments.
+func TestTheBridgeResolvesAPaneToItsParticipantAndIncarnation(t *testing.T) {
+	const (
+		pane        = "sess-the-worker"
+		participant = workers.ParticipantID("p-bridge")
+		lane        = "lane-1"
+	)
+	logger := log.NewSlogAdapter(nil)
+	reg, _, _ := openWorkerAuthSession(t)
+	enrol := newWorkerEnrolments(logger, reg)
+	// Arranged the way production arranges it: the enrolment act is what fixes
+	// pane → participant, and bySess is the map that outlives it (byPane is a
+	// rendezvous consumed at that same act).
+	enrol.bySess[session.ID(pane)] = participant
+	live := workers.Liveness{
+		BackendInstance: "backend-A", SessionID: pane, Lane: lane, Epoch: 3, Attempt: 1,
+	}
+	enrol.arrived[participant] = live
+
+	type admitted struct {
+		id    workers.ParticipantID
+		live  workers.Liveness
+		state workers.ObservedState
+	}
+	var got []admitted
+	obs := &WorkerObservation{
+		enrolments: enrol,
+		observe: func(_ context.Context, id workers.ParticipantID, l workers.Liveness, st workers.ObservedState) error {
+			got = append(got, admitted{id, l, st})
+			return nil
+		},
+		liveness: enrol.livenessOf,
+		log:      logger,
+	}
+
+	obs.ObserveSession(paneobserve.Observation{PaneID: pane, Agent: "claude", State: agentdriver.StateFreeText})
+	obs.ObserveSession(paneobserve.Observation{PaneID: pane, Agent: "claude", State: agentdriver.StateWorking})
+	obs.ObserveSession(paneobserve.Observation{PaneID: pane, Agent: "claude", State: agentdriver.StateModalChoice})
+
+	if len(got) != 3 {
+		t.Fatalf("the record received %d readings, want 3: %+v", len(got), got)
+	}
+	for i, want := range []workers.ObservedState{workers.ObservedIdle, workers.ObservedWorking, workers.ObservedBlocked} {
+		if got[i].id != participant {
+			t.Fatalf("reading %d named participant %q, want the enrolled %q", i, got[i].id, participant)
+		}
+		if got[i].live != live {
+			t.Fatalf("reading %d carried liveness %+v, want the enrolled %+v — admit compares this against the record",
+				i, got[i].live, live)
+		}
+		if got[i].state != want {
+			t.Fatalf("reading %d mapped %q, want %q", i, got[i].state, want)
+		}
+	}
+}
+
+// A participant the enrolment never recorded has no incarnation to admit a fact
+// against, and the bridge drops the reading rather than inventing one: a fact
+// carrying zero liveness would be compared against the record and refused for
+// the wrong reason, which reads as the record's fault rather than this gap's.
+func TestTheBridgeDropsAReadingWithNoRecordedIncarnation(t *testing.T) {
+	const pane = "sess-enrolled-but-no-incarnation"
+	logger := log.NewSlogAdapter(nil)
+	reg, _, _ := openWorkerAuthSession(t)
+	enrol := newWorkerEnrolments(logger, reg)
+	enrol.bySess[session.ID(pane)] = "p-half-enrolled"
+
+	obs := &WorkerObservation{
+		enrolments: enrol,
+		observe: func(context.Context, workers.ParticipantID, workers.Liveness, workers.ObservedState) error {
+			t.Fatal("a reading with no recorded incarnation reached the record")
+			return nil
+		},
+		liveness: enrol.livenessOf,
+		log:      logger,
+	}
+	obs.ObserveSession(paneobserve.Observation{PaneID: pane, Agent: "claude", State: agentdriver.StateFreeText})
 }
 
 // And the bridge drops a classification about a pane that is nobody's worker —

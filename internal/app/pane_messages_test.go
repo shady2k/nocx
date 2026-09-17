@@ -205,11 +205,20 @@ func realMenuFrame(t *testing.T) (paneview.Frame, agentdriver.State) {
 func menuUp(t *testing.T, reader *fakeMsgReader) {
 	t.Helper()
 	frame, state := realMenuFrame(t)
-	reader.mu.Lock()
-	defer reader.mu.Unlock()
-	reader.frame = frame
-	reader.classification = state
-	reader.available = ""
+	reader.setFrame(frame, state, "")
+}
+
+// setFrame puts the reader on a whole new frame at once — the frame, the
+// state the shipped rule classifies it as, and the kind it honestly offers.
+// A frame replayed from the corpus is always set this way rather than field
+// by field, so no test can leave a reader holding a real screen beside a
+// classification or an availability nothing measured.
+func (r *fakeMsgReader) setFrame(frame paneview.Frame, state agentdriver.State, available sessionruntime.TargetKind) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.frame = frame
+	r.classification = state
+	r.available = available
 }
 
 func (r *fakeMsgReader) setBox(text string) {
@@ -825,6 +834,173 @@ func TestAFreeMessageIsDeliveredWhenTheAgentIsFree(t *testing.T) {
 		}
 		return false
 	})
+}
+
+// wrappedEchoCapture is the corpus's recording of a one-paragraph task
+// bracketed-pasted into a real Claude Code 2.1.272 input box, left
+// unsubmitted, drawn over FOUR content rows (internal/agentdriver's
+// testdata/captures, recorded for nocx-xn63t.4.5). wrappedEchoIdleMs and
+// wrappedEchoPastedMs are the two moments this file reads off it: the query
+// box before the paste, and the box the paste filled.
+const (
+	wrappedEchoCapture  = "claude-2.1.272-wrapped-echo"
+	wrappedEchoIdleMs   = 30000
+	wrappedEchoPastedMs = 50000
+)
+
+// wrappedEchoText is what that capture's box holds, byte for byte — the
+// script's own paste payload (session-message-wrapped-echo.script) and the
+// text internal/agentdriver's input_text_test.go asserts the same frame's
+// reading against. It is duplicated here rather than imported because the
+// point of both assertions is that they compare a reading against SOMETHING
+// ELSE; a shared helper that produced the text would make each of them a
+// check of the reading against itself.
+const wrappedEchoText = "Please read internal/app/pane_messages.go and then explain, in a short paragraph, how a queued message longer than one row of the input box is pasted, how its echo is confirmed on the frame, and how the Enter key is finally sent by the coordinator that owns the queue. Finish by naming the file and the function where that confirmation happens. Do not change any file."
+
+// TestAQueuedMessageLongerThanOneBoxRowIsPastedEchoedAndEntered is
+// nocx-xn63t.4.5's acceptance on the shape the owner hit: a when=="free"
+// message that is longer than one row of the box is pasted, its echo is
+// confirmed AND Enter is sent, so the record reaches the delivered phase
+// (submitted) instead of stopping at partial.
+//
+// Every frame here is the corpus's own, replayed — not a box this test drew.
+// The delivery's own steps run against them in the order a real pane would:
+// the idle box the readiness probe reads (30s), the box the paste fills
+// (50s), and the idle box again once Enter has cleared it. What was broken
+// is exactly what this sequence measures: the rule's reading of the pasted
+// frame was the first TWO of its four rows, so boxContainsEcho could never
+// be true for a one-paragraph paste, deliverOne committed partial and no
+// Enter was ever spent.
+func TestAQueuedMessageLongerThanOneBoxRowIsPastedEchoedAndEntered(t *testing.T) {
+	// The premise, checked here so no assertion below rests on a frame that
+	// stopped being the shape this test is about: the recorded box reads
+	// back as exactly the pasted text, and it is taller than one row.
+	pasted := happyReplayCapture(t, wrappedEchoCapture, wrappedEchoPastedMs)
+	obs := messagesTestRules(t).Observe("claude", pasted)
+	if text, ok := obs.InputText(); !ok || text != wrappedEchoText {
+		t.Fatalf("%s@%dms reads back as (%q, ok=%v), want the pasted text — this test's premise is that the recording holds it",
+			wrappedEchoCapture, wrappedEchoPastedMs, text, ok)
+	}
+	if rows := obs.InputBox.Last - obs.InputBox.First - 1; rows < 3 {
+		t.Fatalf("%s@%dms draws %d content rows, want 3 or more: the recorded box is no longer longer than one row",
+			wrappedEchoCapture, wrappedEchoPastedMs, rows)
+	}
+	idle := happyReplayCapture(t, wrappedEchoCapture, wrappedEchoIdleMs)
+
+	hub, access, sessionID := newMessagesTestAccess(t, "wrapped-echo")
+	reader := newFakeMsgReader("")
+	reader.setFrame(idle, agentdriver.StateFreeText, sessionruntime.TargetInput)
+	keys := &fakeMsgKeys{
+		pasteResult: assistant.KeysResult{State: "executed", BytesWritten: len(wrappedEchoText)},
+		enterResult: assistant.KeysResult{State: "executed"},
+	}
+	// A real pane repaints on the paste and on the Enter: the box the paste
+	// filled, then the idle box Enter clears. Nothing here runs on a timer.
+	keys.onSend = func(req assistant.KeysRequest) {
+		if req.Text != nil {
+			reader.setFrame(pasted, agentdriver.StateFreeText, sessionruntime.TargetInput)
+			return
+		}
+		if req.Key != nil {
+			reader.setFrame(idle, agentdriver.StateFreeText, sessionruntime.TargetInput)
+		}
+	}
+	pm := newTestPaneMessages(t, hub, reader, keys)
+
+	view, err := pm.Send(context.Background(), access, sessionID, wrappedEchoText, "free", "id-wrapped", "")
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if view.Phase != assistant.PhaseQueued {
+		t.Fatalf("immediate phase = %q, want queued (delivery is asynchronous for \"free\")", view.Phase)
+	}
+
+	var delivered assistant.MessageView
+	waitForCondition(t, "the wrapped message to reach submitted", func() bool {
+		for _, m := range pm.Pending(sessionID) {
+			if m.ID == "id-wrapped" {
+				delivered = m
+				return m.Phase == assistant.PhaseSubmitted
+			}
+		}
+		return false
+	})
+	if keys.callCount() != 2 {
+		t.Fatalf("PaneKeys.Send was reached %d times, want 2 — one text atom and one Enter, and no re-paste of a message already in the box", keys.callCount())
+	}
+	if keys.calls[0].Text == nil || *keys.calls[0].Text != wrappedEchoText {
+		t.Fatalf("the step PaneKeys was handed was %+v, want the whole pasted text as a text atom", keys.calls[0])
+	}
+	if keys.enterCalls() != 1 {
+		t.Fatalf("Enter was sent %d times, want exactly 1 — the phase above says the echo was confirmed, and a confirmed echo is what the Enter step follows (a phase that reached submitted with no Enter would be the record lying about its own delivery)", keys.enterCalls())
+	}
+	if delivered.BytesWritten != len(wrappedEchoText) {
+		t.Errorf("record says %d bytes were written, want the %d the paste actually carried", delivered.BytesWritten, len(wrappedEchoText))
+	}
+}
+
+// TestAMessageTheBoxDoesNotShowIsNotEntered is the pair that keeps the fix
+// honest, and it is the same two recorded frames: the box holds the
+// recording's own paragraph while the message the caller queued is a
+// different sentence — someone else's typing, or this delivery's own text
+// never having landed. No echo is confirmed, Enter is never sent, and the
+// record stays partial rather than claiming a delivery that did not happen.
+//
+// The boxContents the record carries is asserted too, and it is the whole
+// reason this pair is worth writing on a real frame: it is the FOUR-row
+// reading. A comparison that had been loosened instead of the reading fixed
+// would confirm the wrong text here, and a reading that still stopped at two
+// rows would report a different box than the one on screen.
+func TestAMessageTheBoxDoesNotShowIsNotEntered(t *testing.T) {
+	const queued = "Run the whole suite and report which tests fail."
+	pasted := happyReplayCapture(t, wrappedEchoCapture, wrappedEchoPastedMs)
+	idle := happyReplayCapture(t, wrappedEchoCapture, wrappedEchoIdleMs)
+
+	hub, access, sessionID := newMessagesTestAccess(t, "wrapped-no-echo")
+	reader := newFakeMsgReader("")
+	reader.setFrame(idle, agentdriver.StateFreeText, sessionruntime.TargetInput)
+	keys := &fakeMsgKeys{
+		pasteResult: assistant.KeysResult{State: "executed", BytesWritten: len(queued)},
+		enterResult: assistant.KeysResult{State: "executed"},
+	}
+	keys.onSend = func(req assistant.KeysRequest) {
+		if req.Text != nil {
+			// The paste landed, and what the box shows is not what was
+			// queued — a real screen's own text, replayed.
+			reader.setFrame(pasted, agentdriver.StateFreeText, sessionruntime.TargetInput)
+		}
+	}
+	pm := newTestPaneMessages(t, hub, reader, keys)
+	// The echo is confirmed off a frame the pane already drew, so this test
+	// settles "not this text" in milliseconds rather than sleeping out the
+	// production bound (defaultEchoWait's own doc: the field exists so this
+	// fact does not cost a production-sized wait).
+	pm.echoWait = 5 * time.Millisecond
+
+	view, err := pm.Send(context.Background(), access, sessionID, queued, "free", "id-other", "")
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if view.Phase != assistant.PhaseQueued {
+		t.Fatalf("immediate phase = %q, want queued", view.Phase)
+	}
+
+	var undelivered assistant.MessageView
+	waitForCondition(t, "the message to settle as partial", func() bool {
+		for _, m := range pm.Pending(sessionID) {
+			if m.ID == "id-other" {
+				undelivered = m
+				return m.Phase == assistant.PhasePartial
+			}
+		}
+		return false
+	})
+	if keys.enterCalls() != 0 {
+		t.Fatalf("Enter was sent %d times, want 0 — the box never showed this message", keys.enterCalls())
+	}
+	if undelivered.BoxContents != wrappedEchoText {
+		t.Errorf("the partial record reports boxContents %q,\nwant the box's whole reading %q", undelivered.BoxContents, wrappedEchoText)
+	}
 }
 
 // TestAnEchoThatNeverAppearsLeavesPartialAndNoEnter: the paste is written,

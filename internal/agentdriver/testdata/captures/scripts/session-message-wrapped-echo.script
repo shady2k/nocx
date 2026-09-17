@@ -1,0 +1,12 @@
+# A single-paragraph task, bracketed-pasted, wider than one row of the input
+# box — the shape session.message's `when:"free"` paste produces, left
+# unsubmitted so the box can be read as it stands.
+#
+# Onboarding first (theme, security notes, folder trust), exactly as the
+# lmstudio-* scripts do; then the paste, with no Enter at any point after it.
+14000 \r
+6000 \r
+7000 \x1b[B
+1500 \r
+9000 \x1b[200~Please read internal/app/pane_messages.go and then explain, in a short paragraph, how a queued message longer than one row of the input box is pasted, how its echo is confirmed on the frame, and how the Enter key is finally sent by the coordinator that owns the queue. Finish by naming the file and the function where that confirmation happens. Do not change any file.\x1b[201~
+25000

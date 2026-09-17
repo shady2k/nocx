@@ -205,12 +205,19 @@ type RegionSpec struct {
 	// exists to bound.
 	ToEdge bool `json:"toEdge,omitempty"`
 	// To names a SECOND anchor that closes this region, inclusive of both
-	// ends, instead of a row count or the frame's edge. It exists for
-	// Document.InputBox alone: the input box is closed by its own second rule
-	// row (claude's "bottomRule"), and that row's position cannot be a row
-	// count because the box grows with a multi-line paste. validate refuses
-	// it anywhere but a document-level region (a predicate or an extractor
-	// still has only the engine's two bounds).
+	// ends, instead of a row count or the frame's edge. It exists for the
+	// input box — Document.InputBox, and the extractor that reads what is
+	// TYPED in it (claude.rule.json's "inputText", nocx-xn63t.4.5) — because
+	// that box's height is a multi-line paste rather than a number, and a
+	// row count sized for the tallest paste anybody had recorded is exactly
+	// how three wrapped rows came to be read as two: the reading was a
+	// prefix of the pasted text, no comparison could confirm it, and a
+	// queued message stopped at phase "partial" with Enter never pressed.
+	// The closing anchor is the box's own bottom rule, which the same
+	// anchors already bind, so the reach stays the engine's rather than a
+	// document's guess. validate refuses it anywhere but a document-level
+	// region or an Extractor (a predicate still has only the engine's two
+	// bounds).
 	To string `json:"to,omitempty"`
 	// FromCol renders every row this region visits starting at a COLUMN
 	// rather than column 0. The only value validate accepts is "cursor",
@@ -305,7 +312,56 @@ type Extractor struct {
 	// state's own extractors are allowed to have read anything.
 	States []State `json:"states,omitempty"`
 
+	// Join says how the rows this extractor matched are rejoined into one
+	// string, and it describes the AGENT's own rendering rather than
+	// anything this engine chose: "newline" (the default, and what the
+	// projection did before this field existed) is a box that draws each row
+	// as a line of its own, and "space" is a box whose extra rows are ONE
+	// line the agent's own width WRAPPED, where every row break consumed the
+	// word-separating space it broke at.
+	//
+	// It exists because the wrapped case cannot be read off the frame
+	// honestly any other way. Claude's renderer paints a wrapped input box
+	// word by word at computed columns and moves to the next row without
+	// writing the space it broke at — measured on the corpus's own
+	// claude-2.1.272-wrapped-echo, where the paint goes
+	// "…\x1b[113Gthan\r\x1b[2C\x1b[1Bone…": no space exists anywhere between
+	// "than" and "one" — so a reading that strips the wrap indent and joins
+	// with nothing answers a text nobody typed, and one that joins with a
+	// newline answers a text with line breaks nobody pressed. What each row
+	// IS cannot tell the two apart either: a continuation row opens with the
+	// same two-cell indent claude's mode line does, and the terminal's own
+	// wrap flags are both false because these rows are REPAINTED rather than
+	// wrapped by the terminal.
+	//
+	// The cost of the declaration is that a break mid-word (a token longer
+	// than the box) is read with a space the agent never drew. That is a
+	// reading the caller's comparison refuses rather than a wrong text it
+	// accepts, which is the same direction every other absent reading here
+	// fails in.
+	Join string `json:"join,omitempty"`
+
 	RegionSpec
+}
+
+// The two join forms a rule may declare, and the separator each one rejoins
+// rows with. They are a closed set for the same reason a state is: a document
+// composes, and a separator a document could spell itself would be a second
+// definition of "what the agent did between these rows".
+const (
+	// JoinNewline is the engine's own default: the rows are separate lines.
+	JoinNewline = "newline"
+	// JoinSpace is one logical line the agent's width wrapped, where each
+	// break consumed a space.
+	JoinSpace = "space"
+)
+
+// separator answers the string rows read by this extractor are rejoined with.
+func (e Extractor) separator() string {
+	if e.Join == JoinSpace {
+		return " "
+	}
+	return "\n"
 }
 
 // runsIn answers whether this extractor is permitted to read a frame the
@@ -556,17 +612,41 @@ func (d documentDriver) extract(f paneview.Frame, anchors bound, state State) []
 		if !e.spec.runsIn(state) {
 			continue
 		}
-		row, ok := anchors[e.spec.Anchor]
-		if !ok {
-			continue
-		}
-		rows := e.spec.at(f, row).capture(f, e.re)
+		rows := d.capture(f, anchors, e)
 		if len(rows) == 0 {
 			continue
 		}
-		out = append(out, Extra{Name: e.spec.Name, Rows: rows})
+		out = append(out, Extra{Name: e.spec.Name, Rows: rows, Separator: e.spec.separator()})
 	}
 	return out
+}
+
+// capture reads one extractor's rows, over the region its own anchors permit
+// — the ONE place a document's region is turned into rows, so the reading and
+// the view of what was permitted (readExtractors) cannot disagree about where
+// an extractor looked.
+//
+// The region is the anchor's own walk whenever the document names a row count
+// or the frame's edge, and the span BETWEEN two anchors when it names a
+// closing one (RegionSpec.To). The second form is not a second walk: it is the
+// same walk with a reach the engine computed from the two rows it bound —
+// which is what keeps the bound the engine's rather than something a document
+// picked, exactly as betweenAnchors does for Document.InputBox itself.
+func (d documentDriver) capture(f paneview.Frame, anchors bound, e compiledExtractor) []map[string]string {
+	row, ok := anchors[e.spec.Anchor]
+	if !ok {
+		return nil
+	}
+	spec := e.spec.RegionSpec
+	if spec.To != "" {
+		to, ok := anchors[spec.To]
+		if !ok || to <= row {
+			return nil
+		}
+		spec.To = ""
+		spec.MaxRows = to - row
+	}
+	return spec.at(f, row).capture(f, e.re)
 }
 
 func allHold(f paneview.Frame, anchors bound, preds []Pred) bool {
@@ -801,8 +881,26 @@ func (d Document) validate() error {
 		if len(e.SkipStatusGlyphs) > 0 && !e.Up {
 			return fmt.Errorf("agentdriver: extractor %q steps over a status stack without reading up; a status stack is only ever between an anchor and the agent's output ABOVE it", e.Name)
 		}
+		if e.Join != "" && e.Join != JoinNewline && e.Join != JoinSpace {
+			return fmt.Errorf("agentdriver: extractor %q joins its rows with %q; the engine knows %q and %q", e.Name, e.Join, JoinNewline, JoinSpace)
+		}
 		if e.To != "" {
-			return fmt.Errorf("agentdriver: extractor %q closes a region at a second anchor %q; that reach is for the input box alone", e.Name, e.To)
+			// A between-anchors span, the same shape and for the same
+			// reason Document.InputBox carries it: the box a rule reads the
+			// typed text out of is closed by its own second rule row, and
+			// its height is what was pasted rather than a number a document
+			// may pick. It reads DOWN — the anchor it starts from is the
+			// box's own top — and the fields a count- or edge-bounded region
+			// uses are refused beside it, exactly as validateInputBox
+			// refuses them, because two bounds on one region is how they
+			// come to disagree.
+			if !seen[e.To] {
+				return fmt.Errorf("agentdriver: extractor %q closes at %q, which no anchor binds", e.Name, e.To)
+			}
+			if e.MaxRows != 0 || e.ToEdge || e.Up || e.FromCol != "" {
+				return fmt.Errorf("agentdriver: extractor %q names a row count, an edge, an upward direction or a column origin beside its closing anchor %q; a between-anchors span has one bound", e.Name, e.To)
+			}
+			continue
 		}
 		if e.FromCol != "" && e.FromCol != "cursor" {
 			return fmt.Errorf("agentdriver: extractor %q reads from column %q; the engine only knows \"cursor\"", e.Name, e.FromCol)

@@ -46,6 +46,7 @@ import {
   makeSession,
   anchoredPane,
   integrationHandler,
+  signalUndeliveredHandler,
   lifecycleHandler,
   type ClipboardFake,
   type ClientFake,
@@ -11536,6 +11537,155 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         rec.el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])')
           ?.textContent,
       ).toBe('Stopped')
+    } finally {
+      restore()
+      teardown()
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    }
+  })
+
+  it('a stop the backend could not deliver is NOT a stop: the block is the shell’s own again', async () => {
+    const client = makeClient()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      const handler = lifecycleHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('sleep 30')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-undelivered-19',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'sleep 30',
+        },
+      })
+      const rec = scrollbackFor(content).blockManager.runningBlock!
+      sessionOf(content).signal.mockResolvedValue({ signal: 'stop', outcome: 'held' })
+      vi.mocked(showToast).mockClear()
+      itemNamed(runningBlockMenu(content), 'stop')!.click()
+      await vi.waitFor(() => expect(showToast).toHaveBeenCalled())
+      expect(rec.stopRequested).toBe(true)
+
+      // The obligation ends without a write: the attempt is gone before the
+      // byte could be put in (nocx-zas0d, review finding 2). The acceptance is
+      // therefore NOT evidence of a stop, and the pane must stop treating it as
+      // one — this is the reviewer's case: a nonzero completion arriving after
+      // a stop that never landed.
+      signalUndeliveredHandler(client)({
+        sessionId: sessionOf(content).sessionId,
+        signal: 'stop',
+        attempt: 'att-undelivered-19',
+        reason: 'attempt-closed',
+      })
+      expect(rec.stopRequested).toBe(false)
+
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-undelivered-19',
+          state: 'completed',
+          exitCode: 130,
+          completedAt: '2026-09-15T00:00:00Z',
+          fence: '5'.repeat(64),
+        },
+      })
+      expect(rec.status).toBe('failure')
+
+      await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
+      expect(rec.el.dataset.outcome).toBe('failure')
+      expect(
+        rec.el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])')
+          ?.textContent,
+      ).toBe('Exit 130')
+    } finally {
+      restore()
+      teardown()
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    }
+  })
+
+  it('a refused delivery says so, and names only the attempt it belongs to', async () => {
+    const client = makeClient()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      const handler = lifecycleHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('sleep 30')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-refused-19',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'sleep 30',
+        },
+      })
+      const rec = scrollbackFor(content).blockManager.runningBlock!
+      sessionOf(content).signal.mockResolvedValue({ signal: 'stop', outcome: 'held' })
+      vi.mocked(showToast).mockClear()
+      itemNamed(runningBlockMenu(content), 'stop')!.click()
+      await vi.waitFor(() => expect(showToast).toHaveBeenCalled())
+      vi.mocked(showToast).mockClear()
+
+      // The MARK is attempt-scoped: a notice about ANOTHER attempt must not
+      // touch this block's, because a command that replaced it is not the one
+      // the person stopped. The MESSAGE is not — a stop addressed to this
+      // session that did not land is the person's own gesture whatever the
+      // block it named has become, and hiding it would be the silence the
+      // whole notice exists to end.
+      signalUndeliveredHandler(client)({
+        sessionId: sessionOf(content).sessionId,
+        signal: 'stop',
+        attempt: 'att-someone-else',
+        reason: 'write-refused',
+      })
+      expect(rec.stopRequested).toBe(true)
+      expect(showToast).toHaveBeenCalledTimes(1)
+
+      // The block's own notice: the mark comes off and the person is told the
+      // command may still be running, with what to do about it.
+      signalUndeliveredHandler(client)({
+        sessionId: sessionOf(content).sessionId,
+        signal: 'stop',
+        attempt: 'att-refused-19',
+        reason: 'write-refused',
+      })
+      expect(rec.stopRequested).toBe(false)
+      const calls = vi.mocked(showToast).mock.calls
+      const toast = calls[calls.length - 1]?.[0]
+      expect(toast).toMatchObject({ level: 'warning' })
+      expect(toast?.message).toContain('could not deliver the stop')
+      expect(toast?.message).toContain('press Stop again')
     } finally {
       restore()
       teardown()

@@ -248,10 +248,12 @@ func (f *fakeForegroundSession) SignalProcessGroup(_ int, sig syscall.Signal) er
 // fakeProtected is the lifecycle half of the fallback, so the policy can be
 // driven through every branch without a pty or a shell.
 type fakeProtected struct {
-	attempt   lifecycle.AttemptID
-	pending   bool // the attempt is open and NOT started yet
-	holdable  bool // this caller's Stop may arm a hold for it (mayHold)
-	accept    bool // does the input queue take the byte
+	attempt  lifecycle.AttemptID
+	pending  bool // the attempt is open and NOT started yet
+	holdable bool // this caller's Stop may arm a hold for it (mayHold)
+	accept   bool // does the input queue take the byte
+	// interrupt forces a specific write outcome; the zero value writes.
+	interrupt interruptResult
 	ends      bool // does the exact attempt leave open within the bound
 	writes    int
 	asked     int
@@ -286,12 +288,16 @@ func (f *fakeProtected) StopTarget() (foregroundTarget, bool) {
 	return foregroundTarget{Attempt: f.attempt}, true
 }
 
-func (f *fakeProtected) Interrupt(lifecycle.AttemptID) bool {
+func (f *fakeProtected) Interrupt(lifecycle.AttemptID) interruptResult {
+	switch f.interrupt {
+	case interruptDiscarded, interruptRefused:
+		return f.interrupt
+	}
 	if !f.accept {
-		return false
+		return interruptRefused
 	}
 	f.writes++
-	return true
+	return interruptWritten
 }
 
 func (f *fakeProtected) Ended(a lifecycle.AttemptID, _ time.Duration) bool {

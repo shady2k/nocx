@@ -56,6 +56,47 @@ type ptyWriteRecorder struct {
 	log   log.Logger
 	mu    sync.Mutex
 	bytes []byte
+	// gate parks every pty write until the test releases it, and entered
+	// announces each write that has begun. A test that needs a byte to WAIT —
+	// in the session's write queue, behind whatever is being written — holds
+	// the gate rather than racing for that window.
+	gate    chan struct{}
+	entered chan struct{}
+}
+
+// holdWrites parks every write from now on, and reports what is already
+// written. release lets them through.
+func (f *ptyWriteRecorder) holdWrites() {
+	f.mu.Lock()
+	if f.gate == nil {
+		f.gate = make(chan struct{})
+	}
+	if f.entered == nil {
+		f.entered = make(chan struct{}, 256)
+	}
+	f.mu.Unlock()
+}
+
+func (f *ptyWriteRecorder) releaseWrites() {
+	f.mu.Lock()
+	gate := f.gate
+	f.gate = nil
+	f.mu.Unlock()
+	if gate != nil {
+		close(gate)
+	}
+}
+
+func (f *ptyWriteRecorder) writesEntered() <-chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.entered
+}
+
+func (f *ptyWriteRecorder) gateSnapshot() (chan struct{}, chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.gate, f.entered
 }
 
 func (f *ptyWriteRecorder) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
@@ -86,6 +127,16 @@ type recordedPTY struct {
 }
 
 func (p *recordedPTY) Write(b []byte) (int, error) {
+	gate, entered := p.recorder.gateSnapshot()
+	if entered != nil {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+	}
+	if gate != nil {
+		<-gate
+	}
 	p.recorder.record(b)
 	return p.Pty.Write(b)
 }
@@ -109,16 +160,27 @@ type heldStopStand struct {
 	lane   lifecycle.LaneID
 	handle lifecycle.DomainHandle
 	seq    uint64
+	// appAttemptID is the attempt the last submit opened: the one a Stop in
+	// the window is held for, and the one a notice must name.
+	appAttemptID string
 }
 
 func newHeldStopStand(t *testing.T) *heldStopStand {
+	t.Helper()
+	return newHeldStopStandWithGrace(t, heldStopGrace)
+}
+
+// newHeldStopStandWithGrace is the same stand with the cooperative grace the
+// caller asks for — the bounded wait a delivery gives the channel, which one
+// case here needs to outlast a held write gate.
+func newHeldStopStandWithGrace(t *testing.T, grace time.Duration) *heldStopStand {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	factory := &ptyWriteRecorder{log: logger}
 	pub := lifecyclepub.New(lifecycle.New(lifecycle.Options{}))
 	ws := NewWSServer(logger, session.New(logger, factory),
 		WithLifecyclePublisher(pub),
-		WithRunLease(RunLeaseConfig{SignalGrace: heldStopGrace}))
+		WithRunLease(RunLeaseConfig{SignalGrace: grace}))
 	pub.SetEmitter(ws)
 	// Owner: the test process; closing event: the Stop at the end of the test.
 	ctx := context.Background()
@@ -177,6 +239,7 @@ func (s *heldStopStand) submit(t *testing.T, id int, command string) lifecycleSu
 	if res.ID == "" {
 		t.Fatal("lifecycle.submitAttempt opened no attempt")
 	}
+	s.appAttemptID = res.ID
 	return res
 }
 
@@ -197,6 +260,34 @@ func (s *heldStopStand) stop(t *testing.T, id int) string {
 		t.Fatalf("session.signal: %+v", env.Error)
 	}
 	return env.Result.Outcome
+}
+
+// awaitUndelivered waits for the session.signalUndelivered notification on the
+// socket and returns its params. The notice IS the observation these tests need
+// for a refused or discarded byte: it is minted only after the write's own
+// answer, so waiting for it proves the byte has been decided on.
+func (s *heldStopStand) awaitUndelivered(t *testing.T) signalUndeliveredParams {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case msg, ok := <-s.tap.msgs:
+			if !ok {
+				t.Fatalf("socket closed before session.signalUndelivered arrived%s", socketClosedWhy)
+			}
+			var n struct {
+				Method string                  `json:"method"`
+				Params signalUndeliveredParams `json:"params"`
+			}
+			if json.Unmarshal(msg, &n) != nil || n.Method != "session.signalUndelivered" {
+				continue
+			}
+			return n.Params
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	t.Fatal("no session.signalUndelivered arrived")
+	return signalUndeliveredParams{}
 }
 
 // shellIDFor mints the id the real integration names in its start envelope
@@ -264,6 +355,218 @@ func TestSessionSignal_StopBeforeTheStartIsHeldUntilItStarts(t *testing.T) {
 	// answers a later line, which it cannot do while a foreground job holds it.
 	submitCommand(t, s.conn, s.sid, "printf %s%s HELD -STOPPED")
 	tapDataFor(t, s.tap, s.sid, "HELD-STOPPED", 20*time.Second)
+}
+
+// TestSessionSignal_StopInThePrimedIntervalIsHeld is finding 3 of the review
+// of 1e899f6a. The first early prompt_ready — PROMPT_COMMAND racing the DEBUG
+// trap, the race nocx-xn63t.6.1 measured at 7-10 ms and the e2e's own trace
+// shows at 22 — PRIMES the open attempt: the kernel keeps it (its start may
+// still arrive) and the lane stops projecting it. A Stop landing in that
+// interval must still find the attempt: the projection is not the authority on
+// what is open, the domain's open attempts are.
+func TestSessionSignal_StopInThePrimedIntervalIsHeld(t *testing.T) {
+	s := newHeldStopStand(t)
+	s.establish(t)
+	s.submit(t, 5, "sleep 30")
+	submitCommand(t, s.conn, s.sid, "sleep 30")
+
+	// The early prompt_ready, over the open unstarted attempt.
+	s.ingest(t, lifecyclePromptEvt())
+
+	got := s.stop(t, 6)
+	if got != string(foregroundHeld) {
+		t.Fatalf("a Stop in the primed interval answered %q, want %q", got, foregroundHeld)
+	}
+	if n := s.recorder.interrupts(); n != 0 {
+		t.Fatalf("interrupts written before the start = %d, want 0", n)
+	}
+
+	// The start the DEBUG trap sends, and then the one byte.
+	s.ingest(t, lifecycleStartEvt(new(s.shellIDFor(1)), "sleep 30"))
+	waittest.WaitForDetail(t, "the held Stop's interrupt to reach the pty",
+		func() string { return fmt.Sprintf("interrupts=%d (want 1)", s.recorder.interrupts()) },
+		func() bool { return s.recorder.interrupts() == 1 })
+}
+
+// TestInterrupt_Window_AQueuedByteIsDiscardedWhenItsAttemptClosesFirst is
+// finding 1 of the review of 1e899f6a, driven through the transport's own
+// interrupt path: the byte the held delivery writes goes through exactly this
+// call, with exactly this condition asked at the write
+// (internal/session.WriteInputIf), and the pty is what records whether it
+// arrived.
+//
+// The window is BUILT, not raced for. The pty parks its writes, so the queue
+// cannot drain; the interrupt is issued while a write is in flight, so the byte
+// waits behind it; the attempt closes while it waits; and only then does the
+// queue move. Nothing about that ordering is inferred from a sleep.
+func TestInterrupt_Window_AQueuedByteIsDiscardedWhenItsAttemptClosesFirst(t *testing.T) {
+	stand := newHeldStopStandWithGrace(t, 30*time.Second)
+	stand.establish(t)
+	stand.submit(t, 5, "sleep 30")
+	attempt := lifecycle.AttemptID(stand.appAttemptID)
+
+	// A write already in flight, so the byte below has nowhere to go yet.
+	stand.recorder.holdWrites()
+	submitCommand(t, stand.conn, stand.sid, "sleep 30")
+	select {
+	case <-stand.recorder.writesEntered():
+	case <-time.After(20 * time.Second):
+		t.Fatal("the command's own bytes never reached the write")
+	}
+
+	sess, err := stand.ws.registry.Get(session.ID(stand.sid))
+	if err != nil {
+		t.Fatalf("registry.Get: %v", err)
+	}
+	// The shell authenticates the start, so the attempt is a legitimate
+	// addressee for an interrupt...
+	stand.ingest(t, lifecycleStartEvt(new(stand.shellIDFor(1)), "sleep 30"))
+	if !stand.ws.attemptIsOpenAndStarted(attempt) {
+		t.Fatal("the condition the interrupt is written under is false at the start of the window")
+	}
+
+	// ...and the interrupt is issued, exactly as the held delivery issues it.
+	fb := sessionProtectedForeground{
+		ctx:          t.Context(),
+		s:            stand.ws,
+		sid:          session.ID(stand.sid),
+		sess:         sess,
+		exactAttempt: func() (lifecycle.AttemptID, bool) { return attempt, true },
+		reportUndelivered: func(reason string) {
+			stand.ws.holdStopUndelivered(session.ID(stand.sid), attempt, reason)
+		},
+	}
+	got := make(chan interruptResult, 1)
+	go func() { got <- fb.Interrupt(attempt) }()
+
+	// The attempt goes while the byte waits in the queue, and then the queue
+	// moves.
+	stand.ingest(t, lifecycleCompleteEvt(attempt, 130, lifecycleFence(0x0D)))
+	if stand.ws.attemptIsOpenAndStarted(attempt) {
+		t.Fatal("the completion did not close the attempt")
+	}
+	stand.recorder.releaseWrites()
+
+	select {
+	case result := <-got:
+		if result != interruptDiscarded {
+			t.Fatalf("interrupt result = %v, want interruptDiscarded", result)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("Interrupt never answered")
+	}
+	if n := stand.recorder.interrupts(); n != 0 {
+		t.Fatalf("an interrupt reached a pty after its attempt had gone: %d", n)
+	}
+	// And the person is told, through the transport's own settlement path.
+	params := stand.awaitUndelivered(t)
+	if params.Reason != undeliveredAttemptClosed || params.Attempt != stand.appAttemptID {
+		t.Fatalf("notice = %+v, want reason=%q attempt=%q", params, undeliveredAttemptClosed, stand.appAttemptID)
+	}
+}
+
+// TestHeldStop_AWriteTheQueueRefusedIsToldToThePerson is finding 2 of the
+// review of 1e899f6a for the refusal path: the person was told the Stop was
+// held, so a byte the queue will not take must be said out loud — with the
+// reason — and the obligation must survive it, because nothing was written.
+//
+// Deterministic by construction: the pty parks a write, the queue is filled to
+// its depth, and the delivery's byte is what tips it over.
+func TestHeldStop_AWriteTheQueueRefusedIsToldToThePerson(t *testing.T) {
+	stand := newHeldStopStandWithGrace(t, 30*time.Second)
+	stand.establish(t)
+	stand.submit(t, 5, "sleep 30")
+	attempt := lifecycle.AttemptID(stand.appAttemptID)
+
+	stand.recorder.holdWrites()
+	submitCommand(t, stand.conn, stand.sid, "sleep 30")
+	select {
+	case <-stand.recorder.writesEntered():
+	case <-time.After(20 * time.Second):
+		t.Fatal("the command's own bytes never reached the write")
+	}
+	sess, err := stand.ws.registry.Get(session.ID(stand.sid))
+	if err != nil {
+		t.Fatalf("registry.Get: %v", err)
+	}
+	// The queue is full behind the parked write. Depth is the session's own
+	// business, so the test fills until the session itself says no — the
+	// refusal is the observable, and the bound is the primitive's own order of
+	// magnitude rather than a guess.
+	filled := 0
+	for {
+		if !sess.EnqueueWrite([]byte("filler")) {
+			break
+		}
+		filled++
+		if filled > 4096 {
+			t.Fatal("the write queue never filled")
+		}
+	}
+	if filled == 0 {
+		t.Fatal("the write queue refused its first filler")
+	}
+	// The interrupt has to go somewhere, and every permit is taken — but the
+	// filler sits BEHIND the parked write, so the count is what it is: one
+	// permit at least is what the byte below needs.
+	_ = filled
+
+	if got := stand.stop(t, 6); got != string(foregroundHeld) {
+		t.Fatalf("a Stop before the start answered %q, want %q", got, foregroundHeld)
+	}
+	stand.ingest(t, lifecycleStartEvt(new(stand.shellIDFor(1)), "sleep 30"))
+
+	params := stand.awaitUndelivered(t)
+	if params.Reason != undeliveredWriteRefused {
+		t.Fatalf("session.signalUndelivered reason = %q, want %q", params.Reason, undeliveredWriteRefused)
+	}
+	if params.Attempt != stand.appAttemptID {
+		t.Fatalf("session.signalUndelivered named attempt %q, want %q", params.Attempt, stand.appAttemptID)
+	}
+	// A refusal writes nothing, so the obligation is put back rather than
+	// eaten: it is the person's next Stop that discharges or discards it.
+	if _, ok := stand.ws.claimHeldStop(attempt); !ok {
+		t.Fatal("a refused write dropped the held Stop instead of keeping it")
+	}
+	stand.recorder.releaseWrites()
+}
+
+// TestHeldStop_UndeliveredReasonsAreToldAndRetained is the settlement itself,
+// for every reason the renderer can be given: the notice goes out with that
+// reason, and the obligation is kept unless its addressee has gone for good.
+func TestHeldStop_UndeliveredReasonsAreToldAndRetained(t *testing.T) {
+	for _, tc := range []struct {
+		reason   string
+		retained bool
+	}{
+		{reason: undeliveredAttemptClosed, retained: false},
+		{reason: undeliveredUnsupported, retained: false},
+		{reason: undeliveredWriteRefused, retained: true},
+		{reason: undeliveredWriteFailed, retained: true},
+		{reason: undeliveredWriteUnconfirmed, retained: true},
+		{reason: undeliveredLaneRefused, retained: true},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			stand := newHeldStopStand(t)
+			stand.establish(t)
+			stand.submit(t, 5, "sleep 30")
+			attempt := lifecycle.AttemptID(stand.appAttemptID)
+			if got := stand.stop(t, 6); got != string(foregroundHeld) {
+				t.Fatalf("a Stop before the start answered %q, want %q", got, foregroundHeld)
+			}
+
+			stand.ws.holdStopUndelivered(session.ID(stand.sid), attempt, tc.reason)
+
+			params := stand.awaitUndelivered(t)
+			if params.Reason != tc.reason || params.Attempt != stand.appAttemptID || params.Signal != signalStop {
+				t.Fatalf("notice = %+v, want reason=%q attempt=%q signal=%q",
+					params, tc.reason, stand.appAttemptID, signalStop)
+			}
+			if _, ok := stand.ws.claimHeldStop(attempt); ok != tc.retained {
+				t.Fatalf("obligation retained = %v, want %v for reason %q", ok, tc.retained, tc.reason)
+			}
+		})
+	}
 }
 
 // ── 2. the discard ────────────────────────────────────────────────────────
@@ -355,6 +658,9 @@ type armedLoopStand struct {
 	lane   lifecycle.LaneID
 	handle lifecycle.DomainHandle
 	seq    uint64
+	// nextID numbers the JSON-RPC calls this stand makes; the wire ids are the
+	// test's to choose and every response is matched by id.
+	nextID int
 }
 
 func newArmedLoopStand(t *testing.T) *armedLoopStand {
@@ -376,15 +682,8 @@ func newArmedLoopStand(t *testing.T) *armedLoopStand {
 	t.Cleanup(func() { _ = conn.Close() })
 	s := &armedLoopStand{ws: ws, pub: pub, conn: conn, sid: session.ID(openSessionOnConn(t, ws, conn, 1))}
 	s.lane = lifecycle.LaneID("lane-armed-loop")
-	ws.RegisterLifecycleLane(s.lane, s.sid)
-	h, err := pub.RequestDomain(s.lane, nil, "T")
-	if err != nil {
-		t.Fatalf("RequestDomain: %v", err)
-	}
-	s.handle = h
-	s.seq = 1
-	mustLifecycleIngest(t, pub, "T", lifecycleEnv(s.lane, h, s.seq, lifecycleHelloEvt()))
-	ackEstablishmentFrom(t, pub, s.lane, h, conn)
+	first := s.openLane(t, s.lane)
+	s.handle, s.seq = first.handle, first.seq
 	return s
 }
 
@@ -392,6 +691,55 @@ func (s *armedLoopStand) ingest(t *testing.T, evt lifecycle.Event) {
 	t.Helper()
 	s.seq++
 	mustLifecycleIngest(t, s.pub, "T", lifecycleEnv(s.lane, s.handle, s.seq, evt))
+}
+
+// armedLane is one live lane of the light stand: its domain, and the envelope
+// sequence it is at. Tests that need more than one lane on a session keep one
+// per lane, because a lane carries its own domain and counter.
+type armedLane struct {
+	lane   lifecycle.LaneID
+	handle lifecycle.DomainHandle
+	seq    uint64
+}
+
+// openLane brings one more lane live on the same session, with its own domain.
+// Two lanes on one session is the ordinary shape these tests work in — the
+// resolver has always documented lane→session as many-to-one.
+func (s *armedLoopStand) openLane(t *testing.T, lane lifecycle.LaneID) armedLane {
+	t.Helper()
+	s.ws.RegisterLifecycleLane(lane, s.sid)
+	h, err := s.pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain(%s): %v", lane, err)
+	}
+	l := armedLane{lane: lane, handle: h, seq: 1}
+	mustLifecycleIngest(t, s.pub, "T", lifecycleEnv(lane, h, l.seq, lifecycleHelloEvt()))
+	ackEstablishmentFrom(t, s.pub, lane, h, s.conn)
+	return l
+}
+
+func (s *armedLoopStand) ingestOn(t *testing.T, l armedLane, evt lifecycle.Event) {
+	t.Helper()
+	l.seq++
+	mustLifecycleIngest(t, s.pub, "T", lifecycleEnv(l.lane, l.handle, l.seq, evt))
+}
+
+// submitOn opens one app attempt on that lane, as the renderer does.
+func (s *armedLoopStand) submitOn(t *testing.T, l armedLane, command string) lifecycle.AttemptID {
+	t.Helper()
+	s.nextID++
+	res := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, s.conn, "lifecycle.submitAttempt", map[string]string{
+		"domain": string(l.handle.Domain), "command": command, "cwd": "/tmp", "host": "", "source": "user",
+	}, s.nextID))
+	if res.ID == "" {
+		t.Fatal("lifecycle.submitAttempt opened no attempt")
+	}
+	return lifecycle.AttemptID(res.ID)
+}
+
+func (s *armedLoopStand) openLaneAndSubmit(t *testing.T, lane lifecycle.LaneID) lifecycle.AttemptID {
+	t.Helper()
+	return s.submitOn(t, s.openLane(t, lane), "sleep 30")
 }
 
 // arm opens an app attempt and arms the hold for it through the real read: the
@@ -433,6 +781,72 @@ func (a heldArm) assertHoldGone(t *testing.T, path string) {
 	t.Helper()
 	if _, ok := a.stand.ws.claimHeldStop(a.attempt); ok {
 		t.Fatalf("the held Stop survived %s", path)
+	}
+}
+
+// TestHeldStop_ARefusedFrameThatRevokesStillDropsTheHold is finding 5 of the
+// review of 1e899f6a: a desynchronized domain can expire its scan budget on an
+// ingest that is then REFUSED, and the revoke that closed the open attempt
+// happens before the refusal. Reporting transitions only on the success path
+// left the obligation (and the renderer's mark) behind.
+//
+// The clock is the test's, so the expiry is exact rather than waited for: the
+// episode opens with a small garbage report under every budget, the scan
+// window elapses on the fake clock, and the next authenticated frame is the one
+// whose budget check revokes the domain.
+func TestHeldStop_ARefusedFrameThatRevokesStillDropsTheHold(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	now := time.Unix(1_700_000_000, 0)
+	kernel := lifecycle.New(lifecycle.Options{Now: func() time.Time { return now }})
+	pub := lifecyclepub.New(kernel)
+	ws := NewWSServer(logger, newRegWithStub(logger), WithLifecyclePublisher(pub))
+	pub.SetEmitter(ws)
+	// Owner: the test process; closing event: the Stop at the end of the test.
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	if err := pub.BindTransport("T", noopPort{}); err != nil {
+		t.Fatalf("BindTransport: %v", err)
+	}
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+	sid := session.ID(openSessionOnConn(t, ws, conn, 1))
+	const lane = lifecycle.LaneID("lane-revoked-frame")
+	ws.RegisterLifecycleLane(lane, sid)
+	h, err := pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
+	ackEstablishmentFrom(t, pub, lane, h, conn)
+
+	res := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, conn, "lifecycle.submitAttempt", map[string]string{
+		"domain": string(h.Domain), "command": "sleep 30", "cwd": "/tmp", "host": "", "source": "user",
+	}, 40))
+	attempt := lifecycle.AttemptID(res.ID)
+	fb := sessionProtectedForeground{ctx: t.Context(), s: ws, sid: sid, mayHold: true}
+	if _, ok := fb.StopTarget(); !ok {
+		t.Fatal("StopTarget did not name the open unstarted attempt")
+	}
+
+	// The episode opens, well inside every budget.
+	if err := pub.NotifyGap("T", h.Domain, 1, 1); err != nil {
+		t.Fatalf("NotifyGap: %v", err)
+	}
+	// The scan window elapses. The NEXT frame is refused for arriving at a
+	// desynchronized domain — and the budget check runs ahead of that refusal.
+	now = now.Add(24 * time.Hour)
+	if err := pub.Ingest("T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(nil, "sleep 30"))); err == nil {
+		t.Fatal("a frame into a revoked domain must be refused")
+	}
+
+	if current, ok := pub.Attempt(attempt); ok && current.State == lifecycle.AttemptOpen {
+		t.Fatal("the budget expiry did not close the attempt — this case would pass vacuously")
+	}
+	if _, ok := ws.claimHeldStop(attempt); ok {
+		t.Fatal("the held Stop survived a revocation on a refused frame")
 	}
 }
 
@@ -523,6 +937,63 @@ func TestHeldStop_EveryTerminalPathWithoutAStartDropsTheHold(t *testing.T) {
 			}
 			arm.assertDropped(t, tc.name)
 		})
+	}
+}
+
+// TestStopTarget_OneStartedAttemptWinsOverAPendingOne is finding 6 of the
+// review of 1e899f6a. The documented policy is "a started attempt wins", and
+// the first implementation returned on the first second-candidate it met, so
+// Go's map order — not the policy — decided whether a running command could be
+// addressed at all.
+func TestStopTarget_OneStartedAttemptWinsOverAPendingOne(t *testing.T) {
+	// TWO attempts on their way and one running: the policy says a started
+	// attempt wins, and the first implementation returned on the second
+	// candidate it met — so a running command was unaddressable whenever two
+	// submits were in flight anywhere in the session, for reasons Go's map
+	// order decided. The answer must not depend on that order, so it is asked
+	// many times (one ranged order each).
+	stand := newArmedLoopStand(t)
+	pendingA := stand.openLaneAndSubmit(t, lifecycle.LaneID("lane-pending-a"))
+	pendingB := stand.openLaneAndSubmit(t, lifecycle.LaneID("lane-pending-b"))
+	startedLane := stand.openLane(t, lifecycle.LaneID("lane-started"))
+	started := stand.submitOn(t, startedLane, "sleep 30")
+	stand.ingestOn(t, startedLane, lifecycleStartEvt(nil, "sleep 30"))
+
+	// The state the case is ABOUT, asserted rather than assumed: three open
+	// attempts, two of them unstarted and one started. A stand that failed to
+	// open one of them would make everything below vacuous.
+	for _, id := range []lifecycle.AttemptID{pendingA, pendingB} {
+		current, ok := stand.pub.Attempt(id)
+		if !ok || current.State != lifecycle.AttemptOpen || current.Started {
+			t.Fatalf("attempt %q is not an open unstarted attempt: %+v (ok=%v)", id, current, ok)
+		}
+	}
+	if current, ok := stand.pub.Attempt(started); !ok || current.State != lifecycle.AttemptOpen || !current.Started {
+		t.Fatalf("attempt %q is not an open started attempt: %+v (ok=%v)", started, current, ok)
+	}
+
+	fb := sessionProtectedForeground{ctx: t.Context(), s: stand.ws, sid: stand.sid, mayHold: true}
+	for i := 0; i < 40; i++ {
+		target, ok := fb.StopTarget()
+		if !ok {
+			t.Fatalf("resolution %d refused with one started and two pending attempts; the started one wins", i)
+		}
+		if !target.Started || target.Attempt != started {
+			t.Fatalf("resolution %d named (%q, started=%v), want the started attempt %q",
+				i, target.Attempt, target.Started, started)
+		}
+	}
+
+	// And the refuse case stays a refusal: two attempts on their way and
+	// nothing running, one obligation, no honest way to pick.
+	two := newArmedLoopStand(t)
+	two.openLaneAndSubmit(t, lifecycle.LaneID("lane-pending-a"))
+	two.openLaneAndSubmit(t, lifecycle.LaneID("lane-pending-b"))
+	fb2 := sessionProtectedForeground{ctx: t.Context(), s: two.ws, sid: two.sid, mayHold: true}
+	for i := 0; i < 40; i++ {
+		if target, ok := fb2.StopTarget(); ok {
+			t.Fatalf("resolution %d of two pending attempts returned %q; want a refusal", i, target.Attempt)
+		}
 	}
 }
 

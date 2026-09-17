@@ -46,6 +46,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -629,7 +630,7 @@ func startAgentHolding(t *testing.T, privates ...ed25519.PrivateKey) []gossh.Pub
 		}
 		public = append(public, signer.PublicKey())
 	}
-	sock := filepath.Join(t.TempDir(), "agent.sock")
+	sock := filepath.Join(storagetest.SocketDir(t), "agent.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -761,9 +762,9 @@ func disposableSSHDir(t *testing.T) string {
 	if home == "" {
 		t.Fatal("the fixture left no HOME, so a default key or a config would go somewhere unintended")
 	}
-	tmp, err := filepath.EvalSymlinks(os.TempDir())
+	tmp, err := filepath.EvalSymlinks(storagetest.DisposableRoot())
 	if err != nil {
-		t.Fatalf("resolve the temp dir: %v", err)
+		t.Fatalf("resolve the disposable root: %v", err)
 	}
 	real, err := filepath.EvalSymlinks(home)
 	if err != nil {

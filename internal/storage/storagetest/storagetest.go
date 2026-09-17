@@ -80,7 +80,7 @@ func Isolate(t *testing.T) string {
 func IsolateWithHome(t *testing.T) string {
 	t.Helper()
 	Isolate(t)
-	home, err := os.MkdirTemp(disposableRoot(), "nocx-home-")
+	home, err := os.MkdirTemp(DisposableRoot(), "nocx-home-")
 	if err != nil {
 		t.Fatalf("create the disposable home: %v", err)
 	}
@@ -103,13 +103,13 @@ func IsolateWithHome(t *testing.T) string {
 // shortened only the directory's own prefix — os.MkdirTemp("", "nocxbind"),
 // its siblings — which still resolves under TMPDIR and so still loses
 // whatever TMPDIR grows to next; it happened to leave enough room on this
-// runner and is exactly the fragility disposableRoot was chosen over for
+// runner and is exactly the fragility DisposableRoot was chosen over for
 // IsolateWithHome. This is the one answer, sharing that already-fixed root
 // instead of shortening a second, independent prefix under the same
 // vulnerable parent.
 func SocketDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp(disposableRoot(), "nocx-sock-")
+	dir, err := os.MkdirTemp(DisposableRoot(), "nocx-sock-")
 	if err != nil {
 		t.Fatalf("create a short socket directory: %v", err)
 	}
@@ -117,8 +117,9 @@ func SocketDir(t *testing.T) string {
 	return dir
 }
 
-// disposableRoot is where a disposable home is made, and the only root
-// removeUnderTempDir will delete under.
+// DisposableRoot is where a disposable home and a socket directory are made,
+// the only root removeUnderTempDir will delete under, and the answer a fixture
+// checks before writing into what it believes is a disposable home.
 //
 // On macOS it is /tmp, not os.TempDir(). TMPDIR there is
 // /var/folders/<two random components>/T/, 49 bytes before the home's own
@@ -130,7 +131,7 @@ func SocketDir(t *testing.T) string {
 // the test's was not. nocx-lvdj3 met the same limit for the coordinator's
 // socket and shortened a prefix; a prefix still leaves the home at the mercy
 // of the runner's TMPDIR, so the root is chosen instead.
-func disposableRoot() string {
+func DisposableRoot() string {
 	if runtime.GOOS == "darwin" {
 		return "/tmp"
 	}
@@ -138,7 +139,7 @@ func disposableRoot() string {
 }
 
 // removeUnderTempDir deletes a tree only after proving it is inside the
-// disposable root (disposableRoot), and fails the test loudly rather than deleting
+// disposable root (DisposableRoot), and fails the test loudly rather than deleting
 // anything else.
 //
 // The check is here because of what this helper is for: it hands a test a
@@ -154,7 +155,7 @@ func disposableRoot() string {
 // legitimate path on the platform this ships to first.
 func removeUnderTempDir(t *testing.T, dir string) {
 	t.Helper()
-	root, err := filepath.EvalSymlinks(disposableRoot())
+	root, err := filepath.EvalSymlinks(DisposableRoot())
 	if err != nil {
 		t.Errorf("resolve the temporary root, so %q was NOT removed: %v", dir, err)
 		return

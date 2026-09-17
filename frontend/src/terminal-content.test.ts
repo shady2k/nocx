@@ -11160,6 +11160,57 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     }
   })
 
+  // ── the window between the block and the kernel (2026-09-16) ─────────────
+  //
+  // The block manager draws the running block — and its Stop — the moment the
+  // submit is answered. The lifecycle kernel is told the attempt is open a
+  // beat LATER, over its own channel. Both doors to the stop handler used to
+  // ask the KERNEL first, so a click inside that window did nothing and said
+  // nothing: the person's gesture disappeared. Measured on the e2e stand
+  // (webkit, 2026-09-16): 5 failures in 66 runs of
+  // terminal-screen-register-mockup-pass.spec.ts's Stop test, each with the
+  // keydown, the keypress and the click all reaching the button and no
+  // message anywhere — and a second press 1.5s later cancelled the command,
+  // which is what a dropped gesture looks like and what a dead button does
+  // not.
+
+  it('a Stop pressed before the running fact lands still reaches session.signal', async () => {
+    const client = makeClient()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      const handler = lifecycleHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('sleep 30')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      expect(scrollbackFor(content).blockManager.runningBlock).not.toBeNull()
+
+      // Deliberately NO `lifecycle: 'running'` fact: the kernel still reads
+      // idle while the pane is drawing a running command, which is the window.
+      const stop = paneOf(content).querySelector<HTMLElement>(
+        '.cmd-block-running [data-block-control]',
+      )
+      expect(stop, 'the running block has no Stop control').not.toBeNull()
+      stop!.click()
+      expect(signalsSent(content)).toEqual(['stop'])
+
+      // The ⋮ menu is the second door to the same handler, and it is listed in
+      // that same window rather than hidden because the kernel had not caught
+      // up.
+      expect(itemNamed(runningBlockMenu(content), 'stop')).not.toBeUndefined()
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
   // ── a stopped command is cancelled, never failed (nocx-9bpeq.19) ─────────
   //
   // The backend's own completion fact (contracts/lifecycle.changed.

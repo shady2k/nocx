@@ -61,7 +61,8 @@ test("a finished block reads the pane's real branch, and the path is never absol
   )
   // nocx-9bpeq.16 wires the branch and home sources into the prompt line;
   // depends on nocx-9bpeq.12 (PromptContext exists) and nocx-9bpeq.13 (the
-  // sources themselves). Still landing — expect this red until it is in.
+  // sources themselves). Both landed: this test is green on the stand
+  // (measured 2026-09-16, in the container on both engines).
 
   await page
     .locator(INPUT)
@@ -109,7 +110,9 @@ test("a finished block reads the pane's real branch, and the path is never absol
 
 test('Stop is a visible, keyboard-reachable button on the running row', async ({ page }) => {
   // nocx-9bpeq.12: the running row's always-visible Stop button (spec §4).
-  // Still landing — expect this red until it is in.
+  // The control is live from the submit on — the block manager draws it before
+  // the lifecycle kernel is told the attempt is open — and a press inside that
+  // window has to go through rather than vanish (nocx-zas0d).
   test.setTimeout(60_000)
 
   await page.locator(INPUT).fill('sleep 30')

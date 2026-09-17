@@ -52,22 +52,55 @@ type fakeAxisTabs struct {
 	mu      sync.Mutex
 	created []string
 	deleted []string
+	// placements is the anchor every create named (nocx-tdiqs): the seat a
+	// participant's tab is asked for, which is the coordinator's own tab —
+	// the one fact about the placement the spawner decides rather than the
+	// store.
+	placements []string
+	// createErr refuses the create, so a test can say what a spawn does when
+	// the layout cannot mint the participant's tab.
+	createErr error
 	// cwds and cwdErr are the pane-directory half (nocx-ty5ks): what the
 	// layout answers for a pane, and the failure a pane nobody recorded a
 	// cwd for produces. asked records every id the spawner looked up, so a
 	// test can assert it looked up the coordinator's pane and no other.
-	cwds      map[string]string
-	cwdErr    error
-	asked     []string
+	cwds   map[string]string
+	cwdErr error
+	asked  []string
+	// tabOf is the pane → tab half (nocx-tdiqs): which tab holds the
+	// coordinator's pane, which is what the placement is anchored on.
+	tabOf     map[string]string
+	tabErr    error
+	tabAsked  []string
 	firstPane content.Pane
 }
 
-func (f *fakeAxisTabs) CreateTab(_ context.Context, tab content.Tab, firstPane content.Pane) (content.Created[content.NewTab], error) {
+func (f *fakeAxisTabs) CreateTabAfter(_ context.Context, tab content.Tab, firstPane content.Pane, after string) (content.Created[content.NewTab], error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.placements = append(f.placements, after)
+	if f.createErr != nil {
+		return content.Created[content.NewTab]{}, f.createErr
+	}
 	f.created = append(f.created, tab.ID)
 	f.firstPane = firstPane
 	return content.Created[content.NewTab]{}, nil
+}
+
+func (f *fakeAxisTabs) TabForPane(_ context.Context, paneID string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tabAsked = append(f.tabAsked, paneID)
+	if f.tabErr != nil {
+		return "", f.tabErr
+	}
+	return f.tabOf[paneID], nil
+}
+
+func (f *fakeAxisTabs) anchorsAsked() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.placements...)
 }
 
 func (f *fakeAxisTabs) DeleteTab(_ context.Context, id string, _ content.Replacement) error {

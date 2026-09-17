@@ -11,6 +11,7 @@ package agentdriver_test
 // chrome.
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/agentdriver"
@@ -258,6 +259,53 @@ func TestExplainReportsTheExtractorsYield(t *testing.T) {
 	}
 	if len(subs.Rows) == 0 {
 		t.Fatal("the subagents extractor is reported with no rows while the panel is on screen")
+	}
+}
+
+// TestExplainReportsTheBoxTheInputTextExtractorRead is the identity above,
+// for the one extractor whose region is now the box itself (nocx-xn63t.4.5):
+// the span reported to a person repairing the rule is the box's own rows, not
+// the two-row cap this extractor used to read through. It is asserted as a
+// relation rather than as two numbers — every row the extractor READ lies
+// inside the span it was shown, and the last of them is the box's own last
+// content row, immediately above where the reported span ends — because the
+// repair this view exists for is "the reading stopped early", and a view that
+// reported the old cap beside the new rows would send a person to widen the
+// wrong thing.
+func TestExplainReportsTheBoxTheInputTextExtractorRead(t *testing.T) {
+	f := replay(t, wrappedEchoCapture, 50_000)
+	e := registry(t).Explain("claude", f)
+	var box *agentdriver.ExtractorReading
+	for i := range e.Extractors {
+		if e.Extractors[i].Name == agentdriver.InputTextExtra {
+			box = &e.Extractors[i]
+		}
+	}
+	if box == nil {
+		t.Fatalf("no %s extractor in the explanation; got %v", agentdriver.InputTextExtra, e.Extractors)
+	}
+	if box.Region == nil {
+		t.Fatal("the inputText extractor reports no region while the box is on screen")
+	}
+	if len(box.Rows) != 4 {
+		t.Fatalf("%s@50s: the extractor read %d rows, want the box's four", wrappedEchoCapture, len(box.Rows))
+	}
+	last := 0
+	for _, row := range box.Rows {
+		at, err := strconv.Atoi(row["_row"])
+		if err != nil {
+			t.Fatalf("a read row carries no row index: %v", row)
+		}
+		if at < box.Region.From || at > box.Region.To {
+			t.Errorf("row %d was read but the reported region is %d..%d: a view that draws a span its own reading left is a repair pointed at the wrong rows",
+				at, box.Region.From, box.Region.To)
+		}
+		if at > last {
+			last = at
+		}
+	}
+	if want := box.Region.To - 1; last != want {
+		t.Errorf("the last row read is %d, want %d — the row above the reported span's own end, which is the box's bottom rule that the pattern excludes by not matching it", last, want)
 	}
 }
 

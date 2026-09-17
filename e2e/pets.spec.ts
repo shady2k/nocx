@@ -10,10 +10,11 @@ import { test, expect, promptReady, settingsReady } from './harness'
 // The layer is the WINDOW's, not a pane's: one animal, over the whole shell,
 // so switching tabs does not make it vanish and reappear.
 //
-// Assertions read `data-doing` / `data-mood` / `data-watching` on the layer
-// rather than the sprite's background image. The image pins the PACK — rename
-// a sheet, give a clip a second take, and every assertion breaks with nothing
-// wrong. The attributes name the behaviour, which is what the feature owes.
+// Assertions read `data-answer` / `data-doing` / `data-mood` / `data-watching`
+// on the layer, not the sprite's background image. The image pins the PACK —
+// rename a sheet, give a clip a second take, and every assertion breaks with
+// nothing wrong. The attributes name the behaviour, which is the feature's
+// own vocabulary, and it is what the feature owes.
 
 const LAYER = '.pet-layer'
 const SPRITE = '.pet-sprite'
@@ -64,22 +65,32 @@ test('a command that succeeds is answered, and one that fails is answered differ
   await page.goto('/')
   await promptReady(page)
 
+  // `data-answer`, not `data-doing`. The reaction is a blink — four frames of
+  // a once drawing — and one owed from mid-air is not given until the animal
+  // lands, so a poll on `data-doing` is sampling for something that may be
+  // over between two samples. It failed exactly that way in CI on webkit
+  // (PR #188): "Expected substring: meow / Received string: idle/groom", on a
+  // branch touching no pets code, while chromium passed the same commit. What
+  // the feature owes a person is that the command they ran was ANSWERED, and
+  // `data-answer` is the answer the pet gave, which does not expire with the
+  // drawing that delivered it.
   await run(page, 'echo hello')
   await expect
-    .poll(async () => (await page.locator(LAYER).getAttribute('data-doing')) ?? '', {
+    .poll(async () => (await page.locator(LAYER).getAttribute('data-answer')) ?? '', {
       timeout: 20_000,
     })
-    .toContain('meow')
+    .toBe('meow')
   await expect(page.locator(LAYER)).toHaveAttribute('data-mood', 'pleased')
 
   // `false` rather than `exit 3`: exiting is the SHELL leaving, which ends the
   // session and freezes no block at all.
   await run(page, 'false')
   await expect
-    .poll(async () => (await page.locator(LAYER).getAttribute('data-mood')) ?? '', {
+    .poll(async () => (await page.locator(LAYER).getAttribute('data-answer')) ?? '', {
       timeout: 20_000,
     })
-    .toBe('worried')
+    .toBe('scratch')
+  await expect(page.locator(LAYER)).toHaveAttribute('data-mood', 'worried')
 })
 
 test('while a command is running the pet settles down and watches it', async ({ page }) => {

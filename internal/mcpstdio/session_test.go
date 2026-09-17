@@ -414,6 +414,274 @@ func TestCancellingOneCallLeavesItsSiblingAlone(t *testing.T) {
 	}
 }
 
+// interruptConn is a socket whose write deadline behaves the way a real one
+// does — it fails the write it is in force for — and whose two moments are the
+// TEST's rather than the scheduler's.
+//
+// The window it exists to hold open is the one CI failed in (nocx-xn63t.6.14).
+// There, a cancelled caller's interrupt was armed before its write and fired
+// after it: the callback is asynchronous, and the goroutine that armed it need
+// only be descheduled between the write and the disarm that would have
+// withdrawn it, so the deadline it set was in force on the SHARED connection
+// with no write of its own left to interrupt. The next writer paid for it — a
+// sibling of the cancellation, whose whole frame was rejected with i/o timeout
+// and never reached the endpoint, and which then waited for a connection that
+// had never errored.
+//
+// Here the first frame is held INSIDE the write, so a cancellation can be made
+// to land while that write is in flight instead of being raced for; and the
+// CLEARING of the deadline is held too, which is the state CI reached by luck:
+// a deadline armed by a cancelled call and not yet withdrawn, with a sibling
+// wanting to write. An interrupt armed after the write had returned would have
+// been withdrawn by stop and nothing would be armed at all, which is why the
+// write is held rather than the cancellation delayed.
+type interruptConn struct {
+	mu sync.Mutex
+	// armed is a write deadline in the past, in force until it is cleared.
+	armed bool
+	// writes counts the frames this connection was asked to take.
+	writes int
+	// armedWrites counts frames a deadline SOMEONE ELSE armed refused. It is
+	// the defect as a number, and it must stay zero.
+	armedWrites int
+
+	// inFlight takes the first frame, which is then held until the interrupt
+	// arrives — the moment a cancellation can be made to land in.
+	inFlight chan []byte
+	// interrupt is closed when a deadline is set into the past.
+	interrupt chan struct{}
+	// clearing is signalled when a clear arrives, before it is let through.
+	clearing chan struct{}
+	// released lets that clear through.
+	released chan struct{}
+	// frames carries the frames that left, for the reader to answer.
+	frames chan []byte
+	closed chan struct{}
+
+	// arming and closing are once each, and they are TWO values: the arm closes
+	// the interrupt channel while the write is in flight, and a Close that
+	// could not close the connection afterwards would leave the reader parked
+	// in Read for the rest of the run.
+	armOnce   sync.Once
+	closeOnce sync.Once
+}
+
+func newInterruptConn() *interruptConn {
+	return &interruptConn{
+		inFlight:  make(chan []byte, 1),
+		interrupt: make(chan struct{}),
+		clearing:  make(chan struct{}, 1),
+		released:  make(chan struct{}),
+		frames:    make(chan []byte, 8),
+		closed:    make(chan struct{}),
+	}
+}
+
+func (c *interruptConn) Write(p []byte) (int, error) {
+	frame := append([]byte(nil), p...)
+
+	c.mu.Lock()
+	c.writes++
+	first := c.writes == 1
+	c.mu.Unlock()
+
+	if first {
+		// HELD UNTIL INTERRUPTED, so the caller's cancellation lands in the
+		// write rather than after it.
+		c.inFlight <- frame
+		<-c.interrupt
+		return 0, os.ErrDeadlineExceeded
+	}
+
+	c.mu.Lock()
+	armed := c.armed
+	if armed {
+		c.armedWrites++
+	}
+	c.mu.Unlock()
+	if armed {
+		return 0, os.ErrDeadlineExceeded
+	}
+	c.frames <- frame
+	return len(frame), nil
+}
+
+// Read answers the frame that left, the way the endpoint answers a request: on
+// the connection, with that request's own id.
+func (c *interruptConn) Read(p []byte) (int, error) {
+	select {
+	case frame := <-c.frames:
+		var request struct {
+			ID json.RawMessage `json:"id"`
+		}
+		if err := json.Unmarshal(frame, &request); err != nil {
+			return 0, err
+		}
+		answer, err := json.Marshal(rpcEnvelope{JSONRPC: "2.0", ID: request.ID, Result: json.RawMessage(`{"answered":true}`)})
+		if err != nil {
+			return 0, err
+		}
+		return copy(p, append(answer, '\n')), nil
+	case <-c.closed:
+		return 0, io.EOF
+	}
+}
+
+func (c *interruptConn) SetWriteDeadline(deadline time.Time) error {
+	if deadline.IsZero() {
+		// THE CLEAR IS HELD. This is the window: the cancelled caller has
+		// armed the connection's deadline and has not withdrawn it.
+		select {
+		case c.clearing <- struct{}{}:
+		default:
+		}
+		<-c.released
+		c.mu.Lock()
+		c.armed = false
+		c.mu.Unlock()
+		return nil
+	}
+	c.mu.Lock()
+	c.armed = true
+	c.mu.Unlock()
+	c.armOnce.Do(func() { close(c.interrupt) })
+	return nil
+}
+
+func (c *interruptConn) attemptsWhileArmed() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.armedWrites
+}
+
+// writeCalls is how many frames the connection was ASKED to take, refused or
+// not: a call whose caller cancelled it must not reach the write at all.
+func (c *interruptConn) writeCalls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.writes
+}
+
+func (c *interruptConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return nil
+}
+
+func (c *interruptConn) LocalAddr() net.Addr             { return stuckAddr{} }
+func (c *interruptConn) RemoteAddr() net.Addr            { return stuckAddr{} }
+func (c *interruptConn) SetDeadline(time.Time) error     { return nil }
+func (c *interruptConn) SetReadDeadline(time.Time) error { return nil }
+
+// A CALLER'S INTERRUPT IS ITS OWN WRITE'S AND NOBODY ELSE'S (nocx-xn63t.6.14).
+// The deadline an interrupt sets belongs to the CONNECTION while the intent
+// behind it belongs to one write, and one connection carries every call of the
+// session: so a cancellation that lands after its own frame is out must not
+// cost a sibling anything. Under the defect the sibling's frame was refused by
+// a deadline it had never set, never reached the endpoint, and left the caller
+// waiting for a connection that had never errored — the CI report, where a
+// tools/call after a cancellation was never answered.
+//
+// Every order here is a handoff, not a duration: the cancelled call is caught
+// inside its write, the deadline is caught before it is withdrawn, and the
+// sibling is given its chance by a scheduling point rather than by a wait.
+func TestACancelledCallsInterruptCannotFailASiblingsWrite(t *testing.T) {
+	conn := newInterruptConn()
+	link := newEndpointLink("shared.sock", fixedDialer{conn: conn}, "", discardLogger)
+	t.Cleanup(link.close)
+
+	// A SCHEDULING POINT, NOT A DURATION, and the same one this file already
+	// uses: a goroutine started just before a yield runs next, as far as it can
+	// go — to its blocking point — which is what puts the sibling's attempt
+	// inside the window rather than after it.
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	go func() { _, _, _ = link.call(cancelled, "alpha.first", json.RawMessage(`{}`)) }()
+	<-conn.inFlight // the cancelled call is inside its write
+	cancel()        // so its interrupt is armed while that write is still in flight
+	<-conn.interrupt
+	<-conn.clearing // the cancelled caller has reached its clear, and is held there
+
+	// THE SIBLING, with nothing to do with the cancellation, wants to write on
+	// the same connection while that deadline is in force.
+	type outcome struct {
+		result json.RawMessage
+		err    error
+	}
+	sibling := make(chan outcome, 1)
+	go func() {
+		result, _, err := link.call(context.Background(), "alpha.second", json.RawMessage(`{}`))
+		sibling <- outcome{result: result, err: err}
+	}()
+	runtime.Gosched()
+
+	// NOBODY ELSE'S WRITE MAY MEET A DEADLINE IT DID NOT ARM. Read as state:
+	// the sibling has run as far as it can — to the connection under the
+	// defect, to the write turn under the fix.
+	if got := conn.attemptsWhileArmed(); got != 0 {
+		t.Fatalf("a sibling's write was refused by the deadline a cancelled call armed on the shared connection: %d frame(s)", got)
+	}
+
+	close(conn.released)
+	select {
+	case got := <-sibling:
+		if got.err != nil {
+			t.Fatalf("the call beside a cancellation failed with %v: a cancellation is not its sibling's failure (nocx-tlaft)", got.err)
+		}
+		if string(got.result) != `{"answered":true}` {
+			t.Fatalf("the call beside a cancellation answered %s", got.result)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the call beside a cancellation never answered")
+	}
+}
+
+// A CALLER CANCELLED WHILE IT WAITS FOR THE TURN SENDS NOTHING. The turn is
+// what a write waits on, so it is a place a caller can be called off — and the
+// request it was waiting to write is one its caller no longer wants. The
+// connection would carry it into a mutation (the endpoint runs what it is
+// asked), and MCP carries no response for a cancelled request, so the write is
+// refused for the same reason the link refuses one that arrives cancelled
+// (nocx-xn63t.6.14).
+//
+// The turn is held BY THE TEST, so the call is queued on it by construction and
+// nothing here rests on which goroutine the scheduler runs: whenever the
+// cancellation lands, the send either sees it before it writes or it does not,
+// and the two are told apart by whether the connection was asked for the frame
+// at all.
+func TestACallCancelledWhileItWaitsForTheTurnSendsNothing(t *testing.T) {
+	raw := newInterruptConn()
+	conn := newEndpointConn(raw)
+	t.Cleanup(func() { conn.close() })
+
+	conn.writeTurn.Lock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := conn.send(ctx, 1, "alpha.second", json.RawMessage(`{}`))
+		done <- err
+	}()
+	cancel() // called off while it waits for the turn
+
+	// The turn comes free, and the connection's deadline is let go with it (no
+	// other caller is holding it in this test).
+	close(raw.released)
+	conn.writeTurn.Unlock()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("a call cancelled while it waited for the connection's turn returned %v, want the cancellation: the turn was taken and a write begun", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a call cancelled while it waited for the connection's turn never returned")
+	}
+	if got := raw.writeCalls(); got != 0 {
+		t.Fatalf("the connection was asked to take %d frame(s) from a call its caller had cancelled", got)
+	}
+}
+
 // THE ENDPOINT CLOSES AN IDLE CONNECTION, and that is ordinary: its read
 // deadline is eleven minutes wide while nothing is in flight, so a coordinator
 // that has been quiet finds its connection gone the next time it calls. That
@@ -519,6 +787,97 @@ func TestACallWhoseWriteFailsRedialsRatherThanLosingTheCall(t *testing.T) {
 	}
 	if got := dialer.count(); got != 2 {
 		t.Fatalf("dials = %d, want 2: the connection that failed the write and the one the retry made", got)
+	}
+}
+
+// shortWriteConn is a connection that takes all but the LAST BYTE of a frame and
+// reports no error at all, which a socket is allowed to do when its buffer
+// fills. It is the one write failure that says nothing about the connection's
+// life: nothing whole left this process, so the request cannot have run and a
+// retry is safe — and the socket has not errored, so the reader has nothing to
+// settle.
+type shortWriteConn struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (c *shortWriteConn) Write(p []byte) (int, error) { return len(p) - 1, nil }
+
+func (c *shortWriteConn) Read([]byte) (int, error) {
+	<-c.closed
+	return 0, io.EOF
+}
+
+func (c *shortWriteConn) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return nil
+}
+
+func (c *shortWriteConn) LocalAddr() net.Addr  { return stuckAddr{} }
+func (c *shortWriteConn) RemoteAddr() net.Addr { return stuckAddr{} }
+
+func (c *shortWriteConn) SetDeadline(time.Time) error     { return nil }
+func (c *shortWriteConn) SetReadDeadline(time.Time) error { return nil }
+func (c *shortWriteConn) SetWriteDeadline(time.Time) error {
+	return nil
+}
+
+// shortWriteDialer hands out one connection that cuts the first frame short,
+// then the real dial for every connection after it.
+type shortWriteDialer struct {
+	inner Dialer
+	mu    sync.Mutex
+	calls int
+}
+
+func (d *shortWriteDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	d.mu.Lock()
+	d.calls++
+	first := d.calls == 1
+	d.mu.Unlock()
+	if !first {
+		return d.inner.DialContext(ctx, network, address)
+	}
+	return &shortWriteConn{closed: make(chan struct{})}, nil
+}
+
+func (d *shortWriteDialer) count() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.calls
+}
+
+// A FRAME THE KERNEL CUT SHORT IS RETRIED, NOT WAITED ON. A write that
+// delivered nothing is evidence about the CONNECTION only when the socket is
+// what failed, and this one reported no error at all: the reader has nothing to
+// settle, so a caller waiting for the connection to settle waits until the
+// endpoint closes it for its own reasons — the never-answering call of
+// nocx-xn63t.6.14, one step away from where CI met it. Nothing whole left the
+// process, so the request cannot have run: it is dialled again, by the rule
+// that retries any frame that never arrived.
+//
+// The context is a bound on the failure, not on the work: with the retry the
+// call answers at once, and without it the caller must not be left parked for
+// the length of a test binary's alarm to say so.
+func TestAFrameCutShortIsRetriedRatherThanWaitedOn(t *testing.T) {
+	endpoint := startScriptedEndpoint(t, func(conn net.Conn, request rpcEnvelope) {
+		writeJSONLine(t, conn, rpcEnvelope{JSONRPC: "2.0", ID: request.ID, Result: json.RawMessage(`{"after":true}`)})
+	})
+	dialer := &shortWriteDialer{inner: &net.Dialer{}}
+	link := newEndpointLink(endpoint.socket(), dialer, "", discardLogger)
+	t.Cleanup(link.close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, upstream, err := link.call(ctx, "alpha.first", json.RawMessage(`{}`))
+	if err != nil || upstream != nil {
+		t.Fatalf("call after a frame the kernel cut short: result=%s upstream=%v err=%v dials=%d", result, upstream, err, dialer.count())
+	}
+	if string(result) != `{"after":true}` {
+		t.Fatalf("call result = %s", result)
+	}
+	if got := dialer.count(); got != 2 {
+		t.Fatalf("dials = %d, want 2: the connection that cut the frame short and the one the retry made", got)
 	}
 }
 

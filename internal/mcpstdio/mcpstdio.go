@@ -810,13 +810,23 @@ func (l *endpointLink) call(ctx context.Context, method string, params json.RawM
 			// hands, because it is what ended the connection, and waiting for
 			// the connection to settle is what makes both orders report the
 			// same answer rather than one of them reporting an endpoint that
-			// merely vanished. A write that delivered NOTHING is what makes the
-			// wait safe: the socket has already errored, so the reader is at
-			// its end. (The caller's own context is the way out of the one
-			// shape that would not settle — a peer that half-closes in
+			// merely vanished. (The caller's own context is the way out of the
+			// one shape that would not settle — a peer that half-closes in
 			// silence — and this endpoint never does that.)
+			//
+			// THE WAIT IS FOR A CONNECTION THAT IS ENDING, WHICH IS WHAT THE
+			// WRITE HAS TO HAVE REPORTED, and the failure this caller caused
+			// itself is not that (nocx-xn63t.6.14). A frame the kernel cut
+			// short reported NO error at all: the socket did not end, it simply
+			// would not take the whole frame, so the reader has nothing to
+			// settle and a caller waiting on it would park until the endpoint
+			// closed the connection of its own accord — a call that never
+			// answers, which is the very report this code exists under. Nothing
+			// whole left the process, so the request cannot have run: it is
+			// retried instead, by the same rule that retries any frame that
+			// never arrived.
 			if !arrived {
-				if !conn.gone() {
+				if !errors.Is(writeErr, io.ErrShortWrite) && !conn.gone() {
 					select {
 					case <-conn.closed:
 					case <-ctx.Done():
@@ -901,6 +911,34 @@ func (l *endpointLink) call(ctx context.Context, method string, params json.RawM
 // is whose — which is why the constant 1 had to go.
 type endpointConn struct {
 	conn net.Conn
+
+	// writeTurn is held for the whole of ONE interruptible write: the arming of
+	// its interruption, the write itself, and the clearing of the deadline that
+	// interruption sets.
+	//
+	// A WRITE DEADLINE IS A PROPERTY OF THE CONNECTION WHILE THE INTENT IS A
+	// PROPERTY OF THE WRITE, and two calls in flight on one connection make
+	// that mismatch a defect (nocx-xn63t.6.14). The interruption is armed
+	// before the write and fired asynchronously, so a caller whose write has
+	// ALREADY left — the callback is only started once the context is done, and
+	// the goroutine that armed it need only be descheduled between the write
+	// and the disarm that would have withdrawn it — sets this connection's
+	// deadline into the past with no write of its own left to interrupt. The
+	// next writer on the connection then pays: a sibling of the cancellation,
+	// whose whole frame is rejected with i/o timeout and never reaches the
+	// endpoint. It is not the endpoint that is wrong, the sibling delivered
+	// nothing, and the caller is left waiting for a connection that never
+	// errored — a call that does not answer, which is exactly how this was
+	// reported.
+	//
+	// So the deadline goes with the turn: it is set only while the write it
+	// belongs to holds this, and cleared before that write lets go. That is
+	// what makes "a caller's interrupt cannot fail another caller's write" true
+	// rather than likely. It is not the mutex the link refuses (see
+	// endpointLink): no REQUEST waits here, the answers stay demultiplexed by
+	// id exactly as before, and what is serialised is one write at a time —
+	// which is what a socket already does to the bytes on it.
+	writeTurn sync.Mutex
 
 	mu      sync.Mutex
 	pending map[int64]chan endpointAnswer
@@ -1125,8 +1163,28 @@ func (c *endpointConn) send(ctx context.Context, id int64, method string, params
 	}
 	frame := append(request, '\n')
 
+	// ONE WRITE AT A TIME, AND THE DEADLINE GOES WITH THE TURN. Everything from
+	// here to the clear below happens inside this turn, so no other writer on
+	// the connection can be undone by the interrupt this one arms
+	// (nocx-xn63t.6.14) — see writeTurn.
+	c.writeTurn.Lock()
+	defer c.writeTurn.Unlock()
+	// A CALLER CANCELLED WHILE IT WAITED FOR THE TURN WRITES NOTHING. The
+	// interrupt below belongs to a write this caller no longer wants: arming it
+	// would put the connection's deadline into the past for a write nobody is
+	// waiting for, and a request its caller called off must not reach the
+	// endpoint at all.
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	interrupted := make(chan struct{})
 	stop := context.AfterFunc(ctx, func() {
+		// NOT TAKING THE TURN IS THE POINT: this runs while the write it
+		// interrupts holds it, and it must not wait for the very write it
+		// exists to end. The holder waits for this function to return before it
+		// clears the deadline, so an armed deadline never outlives the turn
+		// that set it and no other writer can be writing on the connection
+		// while one is in force.
 		_ = c.conn.SetWriteDeadline(time.Now())
 		close(interrupted)
 	})

@@ -924,7 +924,23 @@ func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id Par
 	if p.State.Terminal() {
 		// Already finished. Not an error: a coordinator tidying up should
 		// not have to have raced the record to be allowed to.
-		return nil
+		//
+		// AND IT STILL REACHES THE CLOSER (nocx-xn63t.4.6). Ending the
+		// participant is the whole of what this method is for, and a
+		// participant that has already ended has one thing left to end: the
+		// PLACE it occupied, which is the tab its pane lives in and which
+		// nothing else in the process can name (internal/app's workerTabs,
+		// written by the spawn because a finished worker's session is already
+		// out of the registry by the time anybody closes it). Returning here
+		// is what left a finished worker's tab standing on the strip with
+		// nothing behind it — the defect this bead was filed from: the
+		// coordinator's workers.close answered ok and the tab stayed.
+		//
+		// The closer tolerates a participant whose process is already gone
+		// (internal/app's own workerCloser, which asks the registry before it
+		// ends anything) and treats a tab somebody already closed as success,
+		// so this remains the ordinary, non-error tidy-up it always was.
+		return r.closer.Close(ctx, p)
 	}
 	if err := r.closer.Close(ctx, p); err != nil {
 		return err

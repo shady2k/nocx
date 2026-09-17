@@ -18,6 +18,7 @@ import {
   MockWebSocket,
   type ClientFake,
   type RendererMock,
+  type SessionFake,
 } from './test-support/panes-fixtures'
 import { isUuidv7 } from './layout/uuid7'
 import { Dispatcher, RpcError } from './dispatcher'
@@ -28,6 +29,8 @@ import { PANE_WORK_FINISHED_SETTLE_MS } from './pane-work-finished'
 import { ClipboardGate } from './clipboard'
 import type { TerminalContent } from './terminal-content'
 import type { WorkersTabCreated } from './generated/workers.tabCreated'
+import type { WorkersTabClosed } from './generated/workers.tabClosed'
+import type { Exit } from './generated/exit'
 import type { Pane as LayoutPane, Tab as LayoutTab } from './generated/layout.read'
 import type { DriverState } from './pane-observation'
 import {
@@ -3593,6 +3596,191 @@ describe('a worker participant tab appears live (nocx-ui8q6.3)', () => {
 
       await vi.waitFor(() => expect(seen).toHaveLength(1))
       expect((seen[0] as { tab: { id: string } }).tab.id).toBe('worker-tab-fresh')
+    } finally {
+      realClient.close()
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
+// ── nocx-xn63t.4.6: closing a worker takes its tab off the strip ──────────
+//
+// WHAT THE OWNER SAW (2026-09-17, dev stand, build ab0534d9): a coordinator
+// called workers.close on a finished claude worker, the call answered ok, and
+// the worker's tab stayed in the strip — a disconnected-plug mark and
+// "The connection is gone — Reconnecting opens a NEW shell" over it — until
+// the window was reloaded. Stage 4 of the herdr replacement promises the
+// opposite.
+//
+// The backend half is internal/app's close path (its own tests assert the
+// content store and the frame). THIS FILE is the other half, and it is the
+// half the owner actually saw: the window that is drawing the strip is not
+// the caller, so the notification is the only thing that takes the row off
+// its screen — and a renderer that only folds the layout cache and stops
+// would leave the pane and its card standing.
+describe('a worker participant tab leaves when its worker is closed (nocx-xn63t.4.6)', () => {
+  /** The fact, typed from the GENERATED contract, so a payload the backend
+   *  could not send does not compile here (AGENTS.md testing rule 5). */
+  const closedFact = (tabId: string): WorkersTabClosed => ({
+    tabId,
+    instanceId: 'fedcba9876543210fedcba9876543210',
+  })
+
+  const createdFact = (
+    tab: LayoutTab,
+    firstPane: LayoutPane,
+    sessionId: string,
+  ): WorkersTabCreated => ({
+    tab,
+    firstPane,
+    sessionId,
+    instanceId: 'fedcba9876543210fedcba9876543210',
+    sessionEpoch: 1,
+    replayFrom: 0,
+    attached: false,
+  })
+
+  const stripPaneIDs = (bar: HTMLElement): (string | null)[] =>
+    [...bar.querySelectorAll('.nocx-tab')].map((tab) => tab.getAttribute('data-pane-id'))
+
+  /** The card a pane whose session was LOST carries — the exact thing the
+   *  owner was left looking at over the worker's tab. It is reachable here
+   *  because the pane's session is this fixture's own handle: firing its exit
+   *  is what the backend's own exit notification does.
+   *
+   *  `interrupted` and not `exited`: a LOSS is not a close (nocx-ictcq), so
+   *  the tab stays with its scrollback readable and a warning mark on it —
+   *  which is why the person had a tab left to look at rather than one that
+   *  had already gone. */
+  const fireLostSession = (session: SessionFake): void => {
+    const cb = session.onExit.mock.calls[0]?.[0] as ((exit: Exit) => void) | undefined
+    if (!cb) throw new Error('the pane never registered an exit handler for its session')
+    cb({
+      sessionId: session.sessionId,
+      instanceId: 'fedcba9876543210fedcba9876543210',
+      sessionEpoch: 1,
+      cause: 'interrupted',
+    })
+  }
+
+  it('takes the tab, its pane and the connection-gone card off the screen', async () => {
+    const client = makeClient()
+    const workerSession = makeSession()
+    client.reclaimSession.mockImplementation(() => Promise.resolve(workerSession))
+    const chain = makeLayoutStore()
+    const { bar, layout } = await mountPaneManager(client, undefined, undefined, undefined, chain)
+    const before = stripPaneIDs(bar).length
+
+    // THE BACKEND'S OWN ROW FIRST, exactly as the created fact's tests seed
+    // it: workers.spawn writes the tab before it announces it, so the read
+    // the fold triggers would rightly drop a tab the backend never held.
+    const made = await chain.backend.createTab({
+      id: 'worker-tab-close',
+      workspaceId: layout.defaultWorkspaceId(),
+      position: 1,
+      firstPane: {
+        id: 'worker-pane-close',
+        cwd: '/repo/worker',
+        kind: 'local',
+        endpoint: null,
+        sizeShare: 1,
+      },
+    })
+    client._fireWorkerTabCreated(
+      createdFact(made.tab, made.firstPane, '99123456789abcdef0011223344556699'),
+    )
+
+    await vi.waitFor(() => {
+      expect(stripPaneIDs(bar).length).toBe(before + 1)
+    })
+    await vi.waitFor(() => {
+      expect(workerSession.onExit.mock.calls.length).toBe(1)
+    })
+
+    // The worker's turn ends and its session is lost, which is the state the
+    // person was looking at: the tab stayed, with the card over its pane.
+    fireLostSession(workerSession)
+    await vi.waitFor(() => {
+      expect(document.querySelector('.nocx-reconnect-offer')).not.toBeNull()
+    })
+
+    // THE CLOSE ITSELF: workers.close wrote the tab out of the content store
+    // and told this window. The store write comes first because that is the
+    // order the backend performs it in, and because the read this fact
+    // triggers would rightly put back a tab the backend still held.
+    await chain.backend.closeTab(made.tab.id, {
+      tabId: 'tab-replacement',
+      paneId: 'pane-replacement',
+      cwd: '',
+    })
+    client._fireWorkerTabClosed(closedFact(made.tab.id))
+
+    // THE TAB IS OFF THE STRIP, WITHOUT A RELOAD: same document, same
+    // PaneManager, no openSession, no window.location — the row leaves because
+    // the window was TOLD, which is the whole of the criterion.
+    await vi.waitFor(() => {
+      expect(stripPaneIDs(bar)).toHaveLength(before)
+    })
+    expect(stripPaneIDs(bar)).not.toContain('worker-pane-close')
+    expect(layout.tabs().map((t) => t.id)).not.toContain(made.tab.id)
+    expect(layout.panes().map((p) => p.id)).not.toContain(made.firstPane.id)
+    // AND NO CARD SURVIVES IT: the offer lives inside the pane the tab held,
+    // and the pane is what the row leaving the cache takes with it.
+    expect(document.querySelector('.nocx-reconnect-offer')).toBeNull()
+  })
+
+  it('drops a fact naming a different backend instance than the one already known', async () => {
+    // The staleness rule the created fact carries, read the other way: a fact
+    // queued before a reconnect this client has since completed must not take
+    // a tab out of a strip the backend behind this socket still holds.
+    vi.stubGlobal('WebSocket', MockWebSocket)
+    MockWebSocket.last = null
+    const realClient = new WSClient(new Dispatcher(fixedEndpoint(9878)))
+    realClient.start()
+    await Promise.resolve()
+    const constructed: MockWebSocket | null = MockWebSocket.last
+    if (!constructed) throw new Error('no WebSocket was constructed')
+    const socket: MockWebSocket = constructed
+    socket.serverAccepts()
+
+    try {
+      const openPromise = realClient.openSession(80, 24)
+      const opened = await vi.waitFor(() => {
+        const req = socket.requests().find((r) => r.method === 'open')
+        if (!req || req.id === undefined) throw new Error('no open request yet')
+        return req
+      })
+      socket.deliverText({
+        jsonrpc: '2.0',
+        id: opened.id,
+        result: {
+          sessionId: '1123456789abcdef0011223344556677',
+          instanceId: 'fedcba9876543210fedcba9876543210',
+          sessionEpoch: 1,
+          cwd: FIXTURE_CWD,
+          desiredMode: 'script',
+          workspaceId: 'default',
+          parent: null,
+        },
+      })
+      await openPromise
+
+      const seen: WorkersTabClosed[] = []
+      realClient.onWorkerTabClosed((fact) => seen.push(fact))
+
+      socket.deliverText({
+        jsonrpc: '2.0',
+        method: 'workers.tabClosed',
+        params: { tabId: 'worker-tab-stale', instanceId: '00000000000000000000000000000000' },
+      })
+      socket.deliverText({
+        jsonrpc: '2.0',
+        method: 'workers.tabClosed',
+        params: closedFact('worker-tab-fresh'),
+      })
+
+      await vi.waitFor(() => expect(seen).toHaveLength(1))
+      expect(seen[0]?.tabId).toBe('worker-tab-fresh')
     } finally {
       realClient.close()
       vi.unstubAllGlobals()

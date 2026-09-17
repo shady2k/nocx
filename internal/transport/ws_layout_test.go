@@ -614,11 +614,35 @@ func TestNoContractDeclaresATabAddress(t *testing.T) {
 				continue
 			}
 			seen++
-			// The ONE permitted occurrence: the pane's own reference to the
+			// The ONE permitted SHAPE: the pane's own reference to the
 			// tab holding it, inside the pane object.
-			if e.Name() != "panes.create.schema.json" || !strings.Contains(where, "pane") {
-				t.Fatalf("%s declares a tabId at %s — the backend gains a tab ROW, never a tab ADDRESS (§4.4)", e.Name(), where)
+			if e.Name() == "panes.create.schema.json" && strings.Contains(where, "pane") {
+				continue
 			}
+			// AND THE ONE PERMITTED FACT (nocx-xn63t.4.6): workers.tabClosed
+			// names the tab that LEFT the window, so a connected window can
+			// take it off the strip when a coordinator's workers.close takes
+			// it out of the chain.
+			//
+			// IT IS NOT THE ADDRESS §4.4 FORBIDS, and the sentence the
+			// prohibition rests on says why: "every backend→renderer ADDRESS
+			// remains a sessionId the renderer resolves" is a rule about how a
+			// message is DELIVERED. This notification is addressed to nobody —
+			// it is the same broadcast workers.tabCreated already is (see
+			// ws_worker_tabs.go's own package comment: an event that is not
+			// about one pane's session has no sessionId to be addressed by at
+			// all) — and it names a row rather than a destination. The same
+			// kind of name already crosses this wire in both other
+			// directions: workers.tabCreated carries the whole tab row, whose
+			// `id` this scan does not see because it arrives through
+			// tabs.create's $defs.tab as a $ref, and tabs.close takes a tab's
+			// `id` on the way back. What is new here is only the WORD (tabId
+			// rather than id), and it is the word workers.tabCreated's own
+			// firstPane already uses for the same reference one rung down.
+			if e.Name() == "workers.tabClosed.schema.json" && where == "/tabId" {
+				continue
+			}
+			t.Fatalf("%s declares a tabId at %s — the backend gains a tab ROW, never a tab ADDRESS (§4.4)", e.Name(), where)
 		}
 	}
 	if seen == 0 {

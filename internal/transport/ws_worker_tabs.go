@@ -115,3 +115,63 @@ func (s *WSServer) AnnounceWorkerTab(tab content.Tab, pane content.Pane, sess se
 			"tab_id", tab.ID, "pane_id", pane.ID, "session_id", string(sess.ID()), "connections", len(conns))
 	}
 }
+
+// workerTabClosedParams is the params object of the workers.tabClosed
+// notification (contracts/workers.tabClosed.schema.json) — the reverse of
+// workerTabCreatedParams above, and deliberately not its mirror field for
+// field: what a window needs in order to TAKE A TAB OFF the strip is the id it
+// was announced under, and the rest of what tabCreated carried (the row, its
+// first pane, the session to attach to) is either the renderer's own cache by
+// now or, for a tab whose session is over, nothing at all.
+type workerTabClosedParams struct {
+	TabID      string `json:"tabId"`
+	InstanceID string `json:"instanceId"`
+}
+
+// AnnounceWorkerTabClosed tells every connected client that the participant's
+// tab has left the window — written by workers.close (internal/app/workers.go's
+// workerCloser), once the content store has committed the close and never
+// before it: a window told about a close that then failed would take a tab off
+// its strip while the row is still in the chain, which is the same class of
+// lie in the other direction.
+//
+// The instanceId is the SERVER's own (registry.InstanceID), not a session's:
+// the participant's session is very often already gone by the time its tab is
+// closed — a finished worker is exactly that case — so reading the identity
+// off a session the way AnnounceWorkerTab does would leave this notification
+// unable to name the backend it came from at the moment it matters most.
+func (s *WSServer) AnnounceWorkerTabClosed(tabID string) {
+	s.connsMu.Lock()
+	conns := make([]*wsConn, 0, len(s.conns))
+	for wc := range s.conns {
+		conns = append(conns, wc)
+	}
+	s.connsMu.Unlock()
+
+	// Both drop paths logged, for the reason the notification above gives:
+	// "nobody is connected" and "every queue refused it" are the two ways a
+	// broadcast delivers nothing, and a silent drop on either is exactly the
+	// class of defect that hid nocx-ndfqe.
+	if len(conns) == 0 {
+		s.log.Debug("workers.tabClosed dropped: no connections", "tab_id", tabID)
+		return
+	}
+
+	payload := mustMarshal(workerTabClosedParams{
+		TabID:      tabID,
+		InstanceID: string(s.registry.InstanceID()),
+	})
+
+	sent := 0
+	for _, wc := range conns {
+		if err := wc.TryNotify("workers.tabClosed", payload); err != nil {
+			s.log.Debug("write workers.tabClosed", "conn", wc.id, "tab_id", tabID, "error", err)
+			continue
+		}
+		sent++
+	}
+	if sent == 0 {
+		s.log.Debug("workers.tabClosed dropped: every connection refused it",
+			"tab_id", tabID, "connections", len(conns))
+	}
+}

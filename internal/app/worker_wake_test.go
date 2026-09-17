@@ -698,6 +698,7 @@ func TestThreeWorkersRunAndTheCoordinatorIsWokenOnceAtTheEnd(t *testing.T) {
 func finishWorker(t *testing.T, w *wakeStand, p workers.Participant) {
 	t.Helper()
 	ctx := context.Background()
+	before := w.record.Cost().Facts()
 	if _, err := w.record.Declared(ctx, p.ID, p.Liveness,
 		workers.Declaration{OK: true, Summary: "done", At: time.Now()}); err != nil {
 		t.Fatalf("declare %s: %v", p.ID, err)
@@ -705,9 +706,16 @@ func finishWorker(t *testing.T, w *wakeStand, p workers.Participant) {
 	if err := w.reg.Close(session.ID(p.Liveness.SessionID)); err != nil {
 		t.Fatalf("close %s: %v", p.ID, err)
 	}
-	waittest.WaitFor(t, "the worker's exit to reach the record", func() bool {
+	// The exit is observed by the supervisor on its own goroutine, and the
+	// Registrar's admit terminalizes the record BEFORE it routes the fact —
+	// so a stored StateCompleted is not yet a counted fact. Waiting on the
+	// state alone let the caller read Cost one fact short (CI run
+	// 35202278317, ci-mac: facts = 5). Both facts counted is the end of
+	// this worker's arrival.
+	waittest.WaitFor(t, "the worker's exit to reach the record and be routed", func() bool {
 		stored, err := w.workerStore.Participant(ctx, p.ID)
-		return err == nil && stored.State == workers.StateCompleted
+		return err == nil && stored.State == workers.StateCompleted &&
+			w.record.Cost().Facts() == before+2
 	})
 }
 

@@ -27,6 +27,8 @@ import { LOCAL_BACKEND_ID, Pane, PaneManager } from './panes'
 import { PANE_WORK_FINISHED_SETTLE_MS } from './pane-work-finished'
 import { ClipboardGate } from './clipboard'
 import type { TerminalContent } from './terminal-content'
+import type { WorkersTabCreated } from './generated/workers.tabCreated'
+import type { Pane as LayoutPane, Tab as LayoutTab } from './generated/layout.read'
 import type { DriverState } from './pane-observation'
 import {
   BasePaneContent,
@@ -3342,31 +3344,56 @@ describe('a restored pane and the session the backend still holds', () => {
 // the layout cache and the tab strip's DOM — never merely that a handler was
 // registered.
 describe('a worker participant tab appears live (nocx-ui8q6.3)', () => {
-  const workerFact = (tabId: string, paneId: string) => ({
-    tab: {
-      id: tabId,
-      workspaceId: 'workspace:default',
-      parentId: null,
-      name: null,
-      colour: null,
-      position: 1,
-      pinned: false,
-      layout: 'row' as const,
-      seenAt: null,
-    },
-    firstPane: {
-      id: paneId,
-      tabId,
-      cwd: '',
-      kind: 'local' as const,
-      endpoint: null,
-      sizeShare: 1,
-    },
+  /**
+   * The backend's OWN row for a participant, and the fact that announces it.
+   *
+   * THE ROW IS SEEDED INTO THE BACKEND FIRST because that is the only state
+   * the product can be in when this notification is sent: workers.spawn writes
+   * the tab before it announces it, and the read that follows the fold
+   * (nocx-tdiqs) would rightly drop a tab the backend had never heard of.
+   * A fixture that fired the fact alone would be describing a state the wire
+   * cannot produce.
+   *
+   * The fact is TYPED FROM THE GENERATED CONTRACT, so a payload the backend
+   * could not send does not compile here (AGENTS.md testing rule 5: the wire
+   * is a party to the contract, and a hand-written fixture shape is how a
+   * renderer's types and the backend's fields come apart).
+   */
+  const workerFact = (tab: LayoutTab, firstPane: LayoutPane): WorkersTabCreated => ({
+    tab,
+    firstPane,
     sessionId: '99123456789abcdef0011223344556699',
     instanceId: 'fedcba9876543210fedcba9876543210',
     sessionEpoch: 1,
     replayFrom: 0,
     attached: false,
+  })
+
+  const stripPaneIDs = (bar: HTMLElement): (string | null)[] =>
+    [...bar.querySelectorAll('.nocx-tab')].map((tab) => tab.getAttribute('data-pane-id'))
+
+  /** A participant's tab row, for the facts whose test is not about the row's
+   *  contents — the instance-identity check below reads the tab's id only. */
+  const participantTab = (id: string, over: Partial<LayoutTab> = {}): LayoutTab => ({
+    id,
+    workspaceId: 'workspace:default',
+    parentId: null,
+    name: null,
+    colour: null,
+    position: 1,
+    pinned: false,
+    layout: 'row',
+    seenAt: null,
+    ...over,
+  })
+
+  const participantPane = (id: string, tabId: string): LayoutPane => ({
+    id,
+    tabId,
+    cwd: '',
+    kind: 'local',
+    endpoint: null,
+    sizeShare: 1,
   })
 
   it('folds the tab into the layout cache and draws it in the strip', async () => {
@@ -3380,12 +3407,85 @@ describe('a worker participant tab appears live (nocx-ui8q6.3)', () => {
     )
     const before = bar.querySelectorAll('[role="tab"]').length
 
-    client._fireWorkerTabCreated(workerFact('worker-tab-1', 'worker-pane-1'))
+    const made = await chain.backend.createTab({
+      id: 'worker-tab-1',
+      workspaceId: layout.defaultWorkspaceId(),
+      position: before,
+      firstPane: { id: 'worker-pane-1', cwd: '', kind: 'local', endpoint: null, sizeShare: 1 },
+    })
+    client._fireWorkerTabCreated(workerFact(made.tab, made.firstPane))
+
     await vi.waitFor(() => {
       expect(layout.tabs().map((t) => t.id)).toContain('worker-tab-1')
     })
     await vi.waitFor(() => {
       expect(bar.querySelectorAll('[role="tab"]').length).toBe(before + 1)
+    })
+  })
+
+  // THE DEFECT THE OWNER SAW, watched in the strip (nocx-tdiqs): a
+  // coordinator in tab k spawns, and the participant's tab belongs
+  // IMMEDIATELY AFTER k — not at the head of the strip, which is where a tab
+  // minted with no position at all sorted.
+  //
+  // THE PLACEMENT MOVES ITS NEIGHBOURS, and that is what this test is for: the
+  // backend seats the participant at k+1 and shifts every tab after it one
+  // seat right, so the notification's one row cannot draw the strip on its
+  // own. A renderer that folded it and stopped — which is exactly what this
+  // code did before — draws the participant one seat too far right, next to
+  // the tab that moved out of its way.
+  it('draws the participant immediately after its coordinator, not one seat on', async () => {
+    const chain = makeLayoutStore()
+    const { client, bar, layout, manager } = await mountPaneManager(
+      makeClient(),
+      undefined,
+      undefined,
+      undefined,
+      chain,
+    )
+    // A second tab, so the placement has a neighbour to move: the tab the
+    // window opened on is the coordinator's, and this is the one after it.
+    manager.newPane()
+    await vi.waitFor(() => {
+      expect(bar.querySelectorAll('.nocx-tab').length).toBe(2)
+    })
+    const workspace = layout.defaultWorkspaceId()
+    const [coordinator, sibling] = layout.tabsOfWorkspace(workspace).map((t) => t.id)
+    const seatsBefore = stripPaneIDs(bar)
+
+    // THE BACKEND'S OWN WRITE, as workers.spawn performs it through
+    // content.CreateTabAfter: the participant's tab minted at seat 1, and the
+    // sibling renumbered to seat 2.
+    const made = await chain.backend.createTab({
+      id: 'worker-tab-1',
+      workspaceId: workspace,
+      position: 1,
+      firstPane: {
+        id: 'worker-pane-1',
+        cwd: '/repo/worker',
+        kind: 'local',
+        endpoint: null,
+        sizeShare: 1,
+      },
+    })
+    await chain.backend.reorderTabs(workspace, [coordinator, 'worker-tab-1', sibling])
+
+    client._fireWorkerTabCreated(workerFact(made.tab, made.firstPane))
+
+    await vi.waitFor(() => {
+      expect(layout.tabsOfWorkspace(workspace).map((t) => t.id)).toEqual([
+        coordinator,
+        'worker-tab-1',
+        sibling,
+      ])
+      // AND THE STRIP DRAWS IT: the coordinator is still first, the
+      // participant took seat 1, and the sibling moved right rather than
+      // staying where it was with the participant drawn beyond it.
+      const rows = stripPaneIDs(bar)
+      expect(rows).toHaveLength(3)
+      expect(rows[0]).toBe(seatsBefore[0])
+      expect(rows[1]).not.toBe(seatsBefore[1])
+      expect(rows[2]).toBe(seatsBefore[1])
     })
   })
 
@@ -3396,10 +3496,26 @@ describe('a worker participant tab appears live (nocx-ui8q6.3)', () => {
   // before the cache is what makes the renderer reclaim instead.
   it('reclaims the participant session already running, never opening a second one', async () => {
     const chain = makeLayoutStore()
-    const { client } = await mountPaneManager(makeClient(), undefined, undefined, undefined, chain)
+    const { client, layout } = await mountPaneManager(
+      makeClient(),
+      undefined,
+      undefined,
+      undefined,
+      chain,
+    )
     const openCallsBefore = client.openSession.mock.calls.length
 
-    const fact = workerFact('worker-tab-2', 'worker-pane-2')
+    // The backend's own row for the participant, seeded FIRST — that is the
+    // only state the product can be in when the notification is sent, and the
+    // read the notification now triggers would rightly drop a tab the backend
+    // does not hold.
+    const made = await chain.backend.createTab({
+      id: 'worker-tab-2',
+      workspaceId: layout.defaultWorkspaceId(),
+      position: 1,
+      firstPane: { id: 'worker-pane-2', cwd: '', kind: 'local', endpoint: null, sizeShare: 1 },
+    })
+    const fact = workerFact(made.tab, made.firstPane)
     client._fireWorkerTabCreated(fact)
 
     await vi.waitFor(() => {
@@ -3454,7 +3570,10 @@ describe('a worker participant tab appears live (nocx-ui8q6.3)', () => {
       const seen: unknown[] = []
       realClient.onWorkerTabCreated((fact) => seen.push(fact))
 
-      const staleFact = workerFact('worker-tab-stale', 'worker-pane-stale')
+      const staleFact = workerFact(
+        participantTab('worker-tab-stale'),
+        participantPane('worker-pane-stale', 'worker-tab-stale'),
+      )
       socket.deliverText({
         jsonrpc: '2.0',
         method: 'workers.tabCreated',
@@ -3462,7 +3581,10 @@ describe('a worker participant tab appears live (nocx-ui8q6.3)', () => {
       })
       // A real one, from the SAME instance, proves the subscription itself
       // works and that only the mismatched one was dropped.
-      const freshFact = workerFact('worker-tab-fresh', 'worker-pane-fresh')
+      const freshFact = workerFact(
+        participantTab('worker-tab-fresh'),
+        participantPane('worker-pane-fresh', 'worker-tab-fresh'),
+      )
       socket.deliverText({
         jsonrpc: '2.0',
         method: 'workers.tabCreated',

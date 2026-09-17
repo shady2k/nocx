@@ -281,6 +281,32 @@ describe('LayoutStore', () => {
     expect(client.calls.length).toBe(before)
   })
 
+  // THE READ THE NOTIFICATION TRIGGERS IS NOT ALONE ON THE WIRE (nocx-tdiqs).
+  // A worker's tab appearing asks for the strip, and that read can be in
+  // flight while an earlier one — a boot, a close, a second participant a
+  // moment later — is still outstanding. Answers arrive in the socket's
+  // order, so the STALE one can land last; folding it in would put a tab that
+  // has since appeared back out of the cache.
+  it('drops a read whose answer arrives after a later read was started', async () => {
+    const answers: Array<(result: LayoutReadResult) => void> = []
+    const client = fakeClient({ read: () => new Promise((resolve) => answers.push(resolve)) })
+    const store = new LayoutStore(client)
+
+    const first = store.load()
+    const second = store.load()
+    expect(answers).toHaveLength(2)
+
+    // The LATER read answers first with the newer chain...
+    answers[1](snapshot({ tabs: [tab('newer')], panes: [pane('pane-newer', 'newer')] }))
+    await second
+    // ...and the older one lands afterwards, describing a chain that no
+    // longer exists.
+    answers[0](snapshot({ tabs: [tab('older')], panes: [pane('pane-older', 'older')] }))
+    await first
+
+    expect(store.tabs().map((t) => t.id)).toEqual(['newer'])
+  })
+
   it('notifies its listeners when a remote tab is folded in, like every other mutation', async () => {
     const store = new LayoutStore(fakeClient())
     await store.load()

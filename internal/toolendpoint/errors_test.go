@@ -3,10 +3,12 @@ package toolendpoint
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/assistant"
+	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/workers"
 )
 
@@ -41,6 +43,15 @@ func TestEveryRefusalTellsTheCallerWhatToDoNext(t *testing.T) {
 		ErrNoLiveInterval,
 		ErrBearerRefused,
 		errUnpublishedAdmission,
+		// THE TARGET-MINT REFUSALS (nocx-xn63t.4.1). A full token book and a
+		// snapshot the pane redrew under are refusals of the CALLER's own
+		// request with a known next step — wait, and ask again — so they are
+		// named here rather than falling into the default arm, whose sentence
+		// calls them a backend fault and tells the agent to stop. An agent
+		// told to stop is exactly what left the owner's worker stuck: the
+		// answer it needed was on that pane's menu.
+		helperclient.ErrTargetCapacity,
+		helperclient.ErrSnapshotGone,
 		context.Canceled,
 		context.DeadlineExceeded,
 		errors.New("something nobody has classified"),
@@ -113,6 +124,44 @@ func TestCancellationIsAbandonmentNotAnInternalError(t *testing.T) {
 				t.Fatalf("message/reason = %q/%q, want both set", message, reason)
 			}
 		})
+	}
+}
+
+// A target-mint refusal is not an internal error (nocx-xn63t.4.1). The owner's
+// coordinator was refused every targeted session.read with a bare
+// `internal error`, whose sentence tells the agent to stop and carry on
+// without the tool — while the one thing that would have freed the pane was
+// the menu answer that needed a target. These assert the two refusals reach
+// the agent named, with the next step each one actually has, through the
+// pipeline the production error arrives by: the classifier at app's crossing,
+// then the wrapping session.read puts around it.
+func TestATargetRefusalNamesTheNextStepTheCallerHas(t *testing.T) {
+	throughRead := func(err error) error {
+		return fmt.Errorf("session.read: mint target: %w", helperclient.ClassifyTargetRefusal(err))
+	}
+
+	_, capacityMessage, capacity := rpcErrorFor(throughRead(&helperclient.RefusalError{Code: "capacity"}))
+	_, goneMessage, gone := rpcErrorFor(throughRead(&helperclient.RefusalError{Code: "snapshot_gone"}))
+
+	if capacity == gone {
+		t.Fatalf("the two mint refusals share one sentence: %q", capacity)
+	}
+	if strings.Contains(capacity, "inside nocx") || strings.Contains(gone, "inside nocx") {
+		t.Errorf("a mint refusal is still reported as a fault inside nocx: %q / %q", capacity, gone)
+	}
+	if !strings.Contains(capacity, "wait") {
+		t.Errorf("the capacity refusal does not say to wait for a slot: %q", capacity)
+	}
+	if !strings.Contains(strings.ToLower(capacity), "without a target") {
+		t.Errorf("the capacity refusal does not name the read that still works (the one the caller needs while it waits): %q", capacity)
+	}
+	if !strings.Contains(gone, "again") {
+		t.Errorf("the snapshot refusal does not say that asking again is the way through: %q", gone)
+	}
+	for _, message := range []string{capacityMessage, goneMessage} {
+		if strings.Contains(message, "capacity") || strings.Contains(message, "snapshot") {
+			t.Errorf("the wire message spells the helper's own code to the agent: %q", message)
+		}
 	}
 }
 

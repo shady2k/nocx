@@ -185,6 +185,14 @@ func (p *paneReader) Read(ctx context.Context, access any, sessionID string, wan
 			SnapshotID: snap.SnapshotID, Kind: string(kind), First: first, Last: last,
 		})
 		if mintErr != nil {
+			// The crossing, and the one place a helper refusal becomes a
+			// named coordinator-side error: everything above this line sees
+			// the wire's own opaque refusal, and everything below — the
+			// snapshot_gone retry here, and the agent-facing sentence
+			// rpcErrorFor writes for a `capacity` refusal (nocx-xn63t.4.1) —
+			// asks by sentinel. Classified on whatever the seam returned, so
+			// it holds for the real client and for a test double alike.
+			mintErr = helperclient.ClassifyTargetRefusal(mintErr)
 			if isSnapshotGone(mintErr) && attempt+1 < maxSnapshotRetries {
 				lastErr = mintErr
 				continue
@@ -327,8 +335,10 @@ func regionText(f paneview.Frame, first, last int) string {
 
 // isSnapshotGone reports whether err is the helper's own snapshot_gone
 // refusal (design §6.1) — the one mint failure a read retries, once, from a
-// fresh snapshot.
+// fresh snapshot. It asks by SENTINEL, which is what
+// helperclient.ClassifyTargetRefusal put on the error at the crossing above;
+// the wire's own spelling ("snapshot_gone") lives in proto and in the helper,
+// and this package decides nothing by reading it.
 func isSnapshotGone(err error) bool {
-	var refusal *helperclient.RefusalError
-	return errors.As(err, &refusal) && refusal.Code == "snapshot_gone"
+	return errors.Is(err, helperclient.ErrSnapshotGone)
 }

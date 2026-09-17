@@ -732,14 +732,6 @@ func (s *WSServer) republishOpenAttempt(attempt lifecycle.AttemptID) {
 	s.lifecyclePub.ReplayLane(current.Lane)
 }
 
-// stopStateKnown reports whether this attempt has a Stop record at all.
-func (s *WSServer) stopStateKnown(attempt lifecycle.AttemptID) bool {
-	s.stopStateMu.Lock()
-	defer s.stopStateMu.Unlock()
-	_, ok := s.stopStates[attempt]
-	return ok
-}
-
 // dropStopStatesFor forgets one session's Stop records. Like the holds, they
 // cannot outlive the session that owns them — and a fact still waiting on one
 // is woken, because nothing will settle it now.

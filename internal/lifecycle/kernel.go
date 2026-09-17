@@ -466,7 +466,16 @@ func (k *Kernel) SubmitAttempt(domain DomainID, command, cwd, host, submitID str
 		return ExecutionAttempt{}, ErrOversizeCommand
 	}
 	if open := k.openAttemptFor(d.ID); open != nil {
-		return ExecutionAttempt{}, ErrAttemptOpen
+		if !open.racedPromptReady {
+			return ExecutionAttempt{}, ErrAttemptOpen
+		}
+		// A fresh submit finding a PRIMED attempt still open is the other
+		// half of applyPromptReady's invariant: a second prompt_ready would
+		// have closed it, and a fresh submit instead is the same fact
+		// arriving a different way — the shell reached a ready prompt a
+		// second time with nothing ever attaching. Close it, then proceed
+		// exactly as if nothing had been open.
+		open.State = AttemptUnknown
 	}
 	aid, err := k.newAttemptID()
 	if err != nil {
@@ -711,6 +720,40 @@ func (k *Kernel) applyComplete(d *Domain, ls *laneState, env Envelope) ([]Outbou
 	return nil, nil
 }
 
+// applyPromptReady is the domain's answer to a race that has two genuinely
+// different causes producing the SAME wire shape — a prompt_ready arriving
+// over an attempt SubmitAttempt opened but nothing has Started yet — and
+// only one of the two may ever be assumed:
+//
+//  1. The DEBUG trap's start is a few milliseconds behind PROMPT_COMMAND's
+//     own prompt_ready for the very same command (nocx-xn63t.6.1: CI runs
+//     35143163428 and 35163055392, ~7-10ms apart). The start is still
+//     coming.
+//  2. An interrupt landed before the command ever reached the DEBUG trap —
+//     readline discarded the whole line — and no start is ever coming.
+//     Reproduced deliberately and reliably (not rarely: 40/40 iterations)
+//     by TestInterruptRightAfterEnterNeverStartsWithoutASecondPromptReady,
+//     which races \x03 against a just-submitted, fully-typed line through a
+//     real bash.
+//
+// The wire cannot tell these apart at the moment this prompt_ready arrives
+// — only the NEXT event can, which is why the attempt is not closed here on
+// the first one. THE INTERVAL, both ends: an open-and-unstarted attempt
+// becomes PRIMED the first time a prompt_ready arrives over it (case 1's
+// signature, taken on faith once), and a PRIMED attempt closes as
+// AttemptUnknown on the first of two events — a SECOND prompt_ready here,
+// or a fresh SubmitAttempt finding it still open — because either one means
+// the shell reached a full prompt cycle a second time with no start ever
+// attaching, which case 1 cannot produce and only case 2 can. A start
+// arriving before either of those still attaches, PRIMED or not —
+// applyStart's `open != nil && !open.Started` arm does not consult the
+// flag — which is what keeps the attempt's SubmitID/ledger binding alive
+// through case 1 rather than minting a disconnected replacement (an
+// earlier version of this fix closed the attempt on the FIRST prompt_ready
+// unconditionally; that made the kernel's own bookkeeping consistent but
+// broke exactly this binding, and a webkit container run against it still
+// failed e2e/terminal-screen-register-mockup-pass.spec.ts:110 — differently,
+// on a stalled row instead of a rejected envelope).
 func (k *Kernel) applyPromptReady(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {
 	if err := k.requireActive(d, ls); err != nil {
 		return nil, err
@@ -719,41 +762,21 @@ func (k *Kernel) applyPromptReady(d *Domain, ls *laneState, env Envelope) ([]Out
 		if open.Started {
 			return nil, ErrPromptOverAttempt // a program is running; the shell is lying about its prompt
 		}
-		// Open but never Started: SubmitAttempt opened this before the bytes
-		// that could start it were even written (decision 5), and this
-		// prompt_ready is racing ahead of the shell's own start for the SAME
-		// command — the DEBUG trap that sends `start` fires a handful of
-		// milliseconds after PROMPT_COMMAND's own prompt_ready in the
-		// observed traces (nocx-xn63t.6.1: CI runs 35143163428 and
-		// 35163055392, ~7-10ms apart both before and after this fix),
-		// consistent with a foreground SIGINT landing between the shell's
-		// read of the line and the trap firing for it — never with the
-		// command being abandoned: nothing on the signal path writes a byte
-		// or a kill(2) into this pty while the attempt is open-but-not-
-		// started (ws_signal.go's protectedForeground.Attempt() refuses
-		// exactly that case, and TIOCGPGRP still names the shell's own
-		// group), so there is nothing to flush the queued command out of
-		// the tty and every observed instance is followed by a genuine
-		// start for the same text.
-		//
-		// So this prompt_ready is accepted, not rejected — REJECTING it is
-		// the defect (ErrPromptOverAttempt, the exact string both runs
-		// logged) — but it is also not this attempt's closing event: it is
-		// a stale marker for a cycle that has not produced its start yet.
-		// The attempt is left exactly as SubmitAttempt made it (open,
-		// unstarted, its command/SubmitID/id untouched) and the lane's
-		// lifecycle is left where SubmitAttempt already put it (Running):
-		// the imminent start from applyStart's `open != nil && !open.Started`
-		// arm then attaches to THIS SAME attempt, preserving the SubmitID
-		// and ledger binding the renderer's row is keyed on. Closing the
-		// attempt here instead (an earlier version of this fix did, marking
-		// it AttemptUnknown) made the domain's own bookkeeping consistent
-		// but broke exactly that binding: the next start no longer had an
-		// open attempt to attach to, so it minted a brand-new
-		// shell-originated one with no SubmitID, and the row the renderer
-		// was watching never received the real command's completion —
-		// caught by e2e/terminal-screen-register-mockup-pass.spec.ts:110
-		// still failing, differently, against the fix that closed it.
+		if open.racedPromptReady {
+			// The second prompt_ready with no start between them: case 2.
+			// Close it the same way replayLifecycleFacts already closes an
+			// open attempt the shell's own snapshot does not claim
+			// (kernel.go ~1013): "open, but the shell is not running it".
+			open.State = AttemptUnknown
+			k.setLifecycle(ls, LifecyclePromptReady, d.ID, "")
+			return nil, nil
+		}
+		// First prompt_ready over it: prime it and report the lane's own
+		// honest state — the shell really is at a prompt right now,
+		// whichever case this turns out to be — but leave the attempt
+		// itself untouched so an imminent start still attaches to it.
+		open.racedPromptReady = true
+		k.setLifecycle(ls, LifecyclePromptReady, d.ID, "")
 		return nil, nil
 	}
 	k.setLifecycle(ls, LifecyclePromptReady, d.ID, "")

@@ -860,29 +860,30 @@ func TestPromptReadyOverOpenAttemptRejected(t *testing.T) {
 	}
 }
 
-// TestPromptReadyOverUnstartedAttemptIsAcceptedAndAttemptSurvives reproduces
-// the reversed envelope order from CI runs 35143163428 / 35163055392
-// (nocx-xn63t.6.1): hello, submit, prompt_ready, start, in that order — the
-// shell's PROMPT_COMMAND emits prompt_ready a few milliseconds before its
-// own DEBUG trap emits `start` for the very command SubmitAttempt just
-// opened.
+// The three tests below exercise applyPromptReady's PRIMED-attempt
+// invariant together (nocx-xn63t.6.1): an open-and-unstarted attempt primes
+// on its FIRST stray prompt_ready and closes (AttemptUnknown) on the next
+// event that is not the start it was waiting for — a second prompt_ready,
+// or a fresh submit finding it still open. A start arriving before either
+// of those still attaches, regardless of the flag.
 //
-// Before the fix this hit ErrPromptOverAttempt (the exact string both CI
-// runs logged), rejecting the envelope outright.
+// The interval matters because the wire cannot tell, at the moment ONE
+// prompt_ready arrives over an unstarted attempt, which of two causes
+// produced it: the DEBUG trap's start merely a few milliseconds behind
+// PROMPT_COMMAND's own prompt_ready for the same command (harmless, and the
+// original CI evidence — 35143163428 / 35163055392 both show a `start`
+// ~7-10ms after the rejected prompt_ready), or an interrupt that discarded
+// the line before it ever reached the DEBUG trap, in which case no start is
+// EVER coming. TestInterruptRightAfterEnterNeverStartsWithoutASecondPromptReady
+// (interrupt_race_investigation_test.go) proves the second cause is real —
+// not rare: 40/40 iterations of a real bash, interrupted immediately after
+// a fully-typed line, produced a prompt_ready with no start, ever, until a
+// SECOND prompt_ready (or a fresh submit) supplied the closing event these
+// three tests assert on.
 //
-// The fix: prompt_ready over an open-but-not-started attempt is accepted,
-// not rejected, but it is NOT treated as that attempt's closing event
-// either — an earlier version of this fix closed it (AttemptUnknown) and
-// that broke a different thing: the next start no longer had an open
-// attempt to attach to, so it minted a brand-new shell-originated attempt
-// with no SubmitID, and the renderer's row — bound to the ORIGINAL
-// submitted attempt's id — never saw the real command's completion. The
-// container e2e run kept failing on exactly that seam, differently.
-// Reproduced here: the attempt must still exist, unchanged, after the
-// stray prompt_ready, and the real start that follows must attach to that
-// SAME attempt (Origin, Command and SubmitID intact) rather than mint a
-// new, uncorrelated one.
-func TestPromptReadyOverUnstartedAttemptIsAcceptedAndAttemptSurvives(t *testing.T) {
+// TestPromptReadyOverUnstartedAttemptAttaches is case (a): hello, submit,
+// prompt_ready, start — the ordinary race, attaches.
+func TestPromptReadyOverUnstartedAttemptAttaches(t *testing.T) {
 	k, _, _ := newTestKernel()
 	p := &fakePort{}
 	_ = k.BindTransport("T", p)
@@ -897,7 +898,9 @@ func TestPromptReadyOverUnstartedAttemptIsAcceptedAndAttemptSurvives(t *testing.
 	}
 
 	// The shell's own end-of-cycle marker races ahead of the DEBUG trap
-	// that is about to send `start` for the very command just submitted.
+	// that is about to send `start` for the very command just submitted —
+	// before the fix this hit ErrPromptOverAttempt, the exact string both
+	// CI runs logged.
 	mustIngest(t, k, "T", env("L", h, 2, promptReadyEvt()))
 
 	stillOpen, ok := k.Attempt(att.ID)
@@ -907,13 +910,22 @@ func TestPromptReadyOverUnstartedAttemptIsAcceptedAndAttemptSurvives(t *testing.
 	if stillOpen.State != AttemptOpen || stillOpen.Started {
 		t.Fatalf("a stray prompt_ready must not touch the pending attempt, got %+v", stillOpen)
 	}
+	// The lane's own state is honest either way — the shell really is at a
+	// prompt right now — but the ATTEMPT is what preserves the binding, and
+	// that is what the rest of this test is about.
 	st := mustState(t, k, "L")
-	if st.Lifecycle != LifecycleRunning {
-		t.Fatalf("lane must stay Running — SubmitAttempt already promised a start is coming, got %v", st.Lifecycle)
+	if st.Lifecycle != LifecyclePromptReady {
+		t.Fatalf("lane must report the shell's own honest state, got %v", st.Lifecycle)
 	}
 
 	// The genuine, slightly-later start for the same command must attach to
-	// THIS attempt, preserving the id the renderer's row is keyed on.
+	// THIS attempt, preserving the id the renderer's row is keyed on — an
+	// earlier version of this fix closed the attempt on the first
+	// prompt_ready unconditionally, which made a start here mint a
+	// brand-new, uncorrelated attempt instead, and a webkit container run
+	// against that version failed
+	// e2e/terminal-screen-register-mockup-pass.spec.ts:110 on exactly that:
+	// a row bound to an attempt that never received the real completion.
 	mustIngest(t, k, "T", env("L", h, 3, startEvt(nil, "sleep 30")))
 	started, ok := k.Attempt(att.ID)
 	if !ok || !started.Started {
@@ -932,6 +944,88 @@ func TestPromptReadyOverUnstartedAttemptIsAcceptedAndAttemptSurvives(t *testing.
 	done, _ := k.Attempt(att.ID)
 	if done.State != AttemptCompleted || done.ExitCode == nil || *done.ExitCode != 130 {
 		t.Fatalf("the attempt must complete normally afterward, got %+v", done)
+	}
+}
+
+// TestPromptReadyOverUnstartedAttemptClosesOnSecondPromptReady is case (c):
+// hello, submit, prompt_ready, prompt_ready — no start ever arrives, and
+// the second prompt_ready is the closing event: the attempt goes Unknown
+// and a fresh submit is possible again (the lane is never stuck).
+func TestPromptReadyOverUnstartedAttemptClosesOnSecondPromptReady(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	h := establish(t, k, "T", p, "L", nil)
+
+	att, err := k.SubmitAttempt(h.Domain, "sleep 30", "/", "local", "submit-1")
+	if err != nil {
+		t.Fatalf("SubmitAttempt: %v", err)
+	}
+
+	mustIngest(t, k, "T", env("L", h, 2, promptReadyEvt())) // primes it
+	mustIngest(t, k, "T", env("L", h, 3, promptReadyEvt())) // no start came; closes it
+
+	closed, ok := k.Attempt(att.ID)
+	if !ok {
+		t.Fatalf("the submitted attempt must still exist, closed")
+	}
+	if closed.State != AttemptUnknown {
+		t.Fatalf("two prompt cycles with no start must close the attempt Unknown, got %v", closed.State)
+	}
+	if closed.ExitCode != nil {
+		t.Fatalf("an attempt that never ran must never carry an exit code, got %v", *closed.ExitCode)
+	}
+	if open, ok := k.OpenAttempt(h.Domain); ok {
+		t.Fatalf("no attempt may be open after the closing prompt_ready, got %+v", open)
+	}
+	st := mustState(t, k, "L")
+	if st.Lifecycle != LifecyclePromptReady {
+		t.Fatalf("lane must be PromptReady — the whole point is that it is not stuck, got %v", st.Lifecycle)
+	}
+
+	// The lane is not stuck: a fresh submit succeeds.
+	att2, err := k.SubmitAttempt(h.Domain, "echo again", "/", "local", "submit-2")
+	if err != nil {
+		t.Fatalf("SubmitAttempt after the closed attempt must succeed, got %v", err)
+	}
+	if att2.ID == att.ID {
+		t.Fatalf("the new attempt must not reuse the closed one's id")
+	}
+}
+
+// TestPromptReadyOverUnstartedAttemptClosesOnFreshSubmit is case (b): hello,
+// submit, prompt_ready, submit — the second submit is the closing event for
+// the first (no second prompt_ready needed), and opens its own attempt.
+func TestPromptReadyOverUnstartedAttemptClosesOnFreshSubmit(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	h := establish(t, k, "T", p, "L", nil)
+
+	att1, err := k.SubmitAttempt(h.Domain, "sleep 30", "/", "local", "submit-1")
+	if err != nil {
+		t.Fatalf("SubmitAttempt: %v", err)
+	}
+	mustIngest(t, k, "T", env("L", h, 2, promptReadyEvt())) // primes it
+
+	att2, err := k.SubmitAttempt(h.Domain, "echo again", "/", "local", "submit-2")
+	if err != nil {
+		t.Fatalf("a fresh submit over a primed, still-open attempt must succeed, got %v", err)
+	}
+	if att2.ID == att1.ID {
+		t.Fatalf("the new attempt must not reuse the primed one's id")
+	}
+
+	closed, ok := k.Attempt(att1.ID)
+	if !ok {
+		t.Fatalf("the first attempt must still exist, closed")
+	}
+	if closed.State != AttemptUnknown || closed.Started {
+		t.Fatalf("the first attempt must close Unknown, never Started, got %+v", closed)
+	}
+	open, ok := k.OpenAttempt(h.Domain)
+	if !ok || open.ID != att2.ID {
+		t.Fatalf("the second attempt must be the only open one, got %+v ok=%v", open, ok)
 	}
 }
 

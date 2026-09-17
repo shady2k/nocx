@@ -58,4 +58,23 @@ type ExecutionAttempt struct {
 	// app id and must never become the attempt's identity, never appear in a
 	// published fact, and never cross JSON-RPC (ADR-0024 constraint b).
 	shellID AttemptID
+	// racedPromptReady is true once ONE prompt_ready has arrived over this
+	// attempt while it was still open and not yet Started (nocx-xn63t.6.1).
+	// It marks the attempt PRIMED rather than closing it, because the
+	// ordinary case is harmless: PROMPT_COMMAND's prompt_ready and the DEBUG
+	// trap's start for the very same command can arrive a handful of
+	// milliseconds apart, in either order, and the imminent start must
+	// still attach here (applyStart's open-and-unstarted arm does not
+	// consult this flag) to preserve the attempt's SubmitID/ledger binding.
+	// A PRIMED attempt closes on the next event that is not that start —
+	// a second prompt_ready (applyPromptReady) or a fresh submit
+	// (SubmitAttempt) — because two prompt cycles with no start between
+	// them is no longer a race, it is the shell reporting, twice, that
+	// nothing is running: the interrupt landed before the command ever
+	// reached the DEBUG trap and readline discarded the whole line (proven
+	// reachable, every time, in
+	// TestInterruptRightAfterEnterNeverStartsWithoutASecondPromptReady).
+	// Deliberately unexported: it is bookkeeping for this one race, never a
+	// fact about the attempt itself, and never crosses JSON-RPC.
+	racedPromptReady bool
 }

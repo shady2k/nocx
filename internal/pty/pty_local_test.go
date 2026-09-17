@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/shellintegration"
 )
 
 func TestLocalPty_ImplementsInterface(t *testing.T) {
@@ -203,6 +204,11 @@ func TestScrubLauncherSession(t *testing.T) {
 		// PTY makes TUIs render black-and-white.
 		"TERM=dumb",
 		"NO_COLOR=1",
+		// The daemon's own agent tool endpoint. A pane belongs to the
+		// coordinator that opened it, and that coordinator names the endpoint
+		// on the spawn; whatever this process inherited names a different one
+		// (nocx-e7khb).
+		shellintegration.ToolSocketEnvVar + "=/run/nocx/daemon-start-tool.sock",
 		"HOME=/Users/someone",
 		// Not a session marker: stripping a credential would break the very
 		// tool this fix exists for.
@@ -211,7 +217,12 @@ func TestScrubLauncherSession(t *testing.T) {
 
 	got := scrubLauncherSession(env)
 
-	for _, unwanted := range []string{"CLAUDECODE=", "CLAUDE_CODE_CHILD_SESSION=", "CLAUDE_CODE_SESSION_ID=", "CLAUDE_PID=", "TERM=", "NO_COLOR="} {
+	// The tool socket is named through the CONSTANT and not a literal: the
+	// scrub list is written in literals because every other entry is another
+	// tool's spelling, and this one is ours. Naming it here is what stops the
+	// two drifting — a rename in shellintegration that missed the list would
+	// leave the scrub silently matching nothing, and this test red.
+	for _, unwanted := range []string{"CLAUDECODE=", "CLAUDE_CODE_CHILD_SESSION=", "CLAUDE_CODE_SESSION_ID=", "CLAUDE_PID=", "TERM=", "NO_COLOR=", shellintegration.ToolSocketEnvVar + "="} {
 		for _, kv := range got {
 			if strings.HasPrefix(kv, unwanted) {
 				t.Errorf("launcher session marker survived: %q", kv)

@@ -127,6 +127,7 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0067 | [A write into a descendant's pane is one step under a helper-minted target](0067-a-write-into-a-descendants-pane-is-one-step-under-a-helper-minted-target.md) | Accepted (2026-09-14; supersedes ADR-0064 §1 and ADR-0029)                |
 | 0068 | [The helper is decided by the connection, never by a feature](0068-the-helper-is-decided-by-the-connection-never-by-a-feature.md)                             | Accepted (connect-time answer superseded by ADR-0069)                     |
 | 0069 | [The connect-time ask chooses a method, and the connection keeps it](0069-the-connect-time-ask-chooses-a-method-and-the-connection-keeps-it.md)               | Accepted (2026-09-16; supersedes ADR-0068's connect-time answer)          |
+| 0070 | [A worker says, nocx sees, and only the coordinator judges](0070-a-worker-says-nocx-sees-the-coordinator-judges.md)                                           | Accepted (2026-09-17; supersedes the declaration of ADR-0024 decision 2)  |
 
 ## Adding one
 

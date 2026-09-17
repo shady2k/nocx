@@ -529,10 +529,17 @@ __nocx_agent_geometry() {
 # worker that could declare in bash and not in zsh would be a worker group whose
 # completions depended on the person's login shell.
 __nocx_agent_report_path=
+# See nocx.bash's own doc on __nocx_agent_report_reason (nocx-xn63t.6.1): a
+# failed drop used to be silent here too.
+__nocx_agent_report_reason=
 __nocx_agent_report_open() {
     __nocx_agent_report_path=
+    __nocx_agent_report_reason=
     local __p
-    __p="$(command mktemp "${TMPDIR:-/tmp}/nocx-agent-report.XXXXXX" 2>/dev/null)" || return 1
+    if ! __p="$(command mktemp "${TMPDIR:-/tmp}/nocx-agent-report.XXXXXX" 2>&1)"; then
+        __nocx_agent_report_reason="could not create a private report file${__p:+: $__p}"
+        return 1
+    fi
     __nocx_agent_report_path="$__p"
     return 0
 }
@@ -771,8 +778,11 @@ __nocx_agent_run() {
         builtin printf 'nocx: tool surface unavailable — %s\n' "$__stage_reason" >&2
     fi
     # Opened before the agent starts, and the declaration goes before the
-    # withdraw — inside the interval the enrolment opened.
-    __nocx_agent_report_open || true
+    # withdraw — inside the interval the enrolment opened. Said out loud on
+    # failure, the same as stage's own refusal (nocx-xn63t.6.1).
+    if ! __nocx_agent_report_open; then
+        builtin printf 'nocx: no report drop for this agent — %s\n' "$__nocx_agent_report_reason" >&2
+    fi
     # Claude's --mcp-config option is variadic: placing it before "$@" would
     # swallow a user's positional prompt as another config path. Keep it last.
     # If a future Claude subcommand rejects trailing flags, update this

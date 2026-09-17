@@ -763,10 +763,27 @@ __nocx_agent_geometry() {
 # the presence of what we positively recognise, exactly as the enrolment
 # answer's is.
 __nocx_agent_report_path=
+# __nocx_agent_report_reason names WHY the drop above ended up empty
+# (nocx-xn63t.6.1): __nocx_agent_stage already says why a refusal happened
+# ("nocx: tool surface unavailable — %s"), and this one used to say nothing
+# at all — the mktemp failure that leaves __nocx_agent_report_path empty was
+# swallowed by its own `2>/dev/null`, so an agent that then wrote to
+# "$NOCX_AGENT_REPORT" (an empty string) got a shell error naming no setting
+# ("line 3: : No such file or directory") and the person watching learned
+# nothing. Named here so __nocx_agent_run can print it the same way stage's
+# reason already is.
+__nocx_agent_report_reason=
 __nocx_agent_report_open() {
     __nocx_agent_report_path=
+    __nocx_agent_report_reason=
     local __p
-    __p="$(command mktemp "${TMPDIR:-/tmp}/nocx-agent-report.XXXXXX" 2>/dev/null)" || return 1
+    # ONE call, stderr merged into the same capture: on success mktemp
+    # writes nothing to stderr, so this is exactly the path; on failure
+    # $__p is empty and mktemp's own message is what run() reports below.
+    if ! __p="$(command mktemp "${TMPDIR:-/tmp}/nocx-agent-report.XXXXXX" 2>&1)"; then
+        __nocx_agent_report_reason="could not create a private report file${__p:+: $__p}"
+        return 1
+    fi
     __nocx_agent_report_path="$__p"
     return 0
 }
@@ -1029,8 +1046,13 @@ __nocx_agent_run() {
     # The drop is opened BEFORE the agent starts, or an agent that finished
     # quickly would have had nowhere to write. A drop that could not be opened
     # is not a refusal: the agent still runs, and the worker is simply one
-    # that cannot declare — which the record already has a name for.
-    __nocx_agent_report_open || true
+    # that cannot declare — which the record already has a name for. Said out
+    # loud, the same way stage's own refusal already is (nocx-xn63t.6.1):
+    # silence here used to mean the agent's own write to an empty
+    # "$NOCX_AGENT_REPORT" surfaced a shell error naming no setting at all.
+    if ! __nocx_agent_report_open; then
+        builtin printf 'nocx: no report drop for this agent — %s\n' "$__nocx_agent_report_reason" >&2
+    fi
     # Claude's --mcp-config option is variadic: placing it before "$@" would
     # swallow a user's positional prompt as another config path. Keep it last.
     # If a future Claude subcommand rejects trailing flags, update this

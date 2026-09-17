@@ -12,6 +12,7 @@ package shellintegration
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -193,6 +194,35 @@ func dropPathFrom(t *testing.T, s *channelShell) string {
 		t.Fatalf("the wrapper gave the agent no drop to write into")
 	}
 	return line
+}
+
+// A DROP THAT COULD NOT BE OPENED SAYS SO (nocx-xn63t.6.1). CI's ci-mac run
+// 35163055392 saw TestExternalClaudeDrivesAWorkerEndToEnd fail on darwin with
+// NOCX_AGENT_REPORT empty and no explanation anywhere: not in the backend's
+// structured facts, not in the pane — only a downstream shell error from the
+// fake agent's own redirect ("line 3: : No such file or directory") naming
+// no setting at all, because __nocx_agent_report_open discarded mktemp's
+// stderr and returned nothing on failure. Exactly why mktemp failed on that
+// runner is unconfirmed (no darwin machine here to reproduce it on), but the
+// silence itself needed no darwin behaviour to prove: ANY mktemp failure
+// was swallowed the same way on every platform. Naming a TMPDIR that does
+// not exist reproduces that same "nothing written, nothing said" shape on
+// Linux, which is what this drives — and, since the fix, asserts is said.
+func TestBashAWorkerIsToldWhenItsReportDropCannotBeOpened(t *testing.T) {
+	k := newNestedKernel(t)
+	brokenTMPDIR := filepath.Join(t.TempDir(), "does-not-exist")
+	s := startNestedBashParentTMPDIR(t, k, "claude", declaringAgent("ok", "did the thing"), brokenTMPDIR)
+	if _, err := s.ptmx.Write([]byte("claude\n")); err != nil {
+		t.Fatalf("type claude: %v", err)
+	}
+	waitForEvent(t, k, "agent_enrol")
+	waitForEvent(t, k, "agent_withdraw")
+	waitUntil(t, "the pane to say its report drop could not be opened", func() bool {
+		return strings.Contains(s.output(), "no report drop for this agent")
+	})
+	if hasEvent(k, "agent_report") {
+		t.Fatalf("a declaration was sent with nothing to have written it into: %v", k.events())
+	}
 }
 
 // waitUntil waits on an observable condition, never on a duration.

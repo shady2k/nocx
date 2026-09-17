@@ -553,6 +553,16 @@ func assertUnsupportedSudoRunsConventionally(t *testing.T, s *channelShell, k *n
 // completed.
 func startNestedBashParent(t *testing.T, k *nestedKernel, binName, fakeBody string) *channelShell {
 	t.Helper()
+	return startNestedBashParentTMPDIR(t, k, binName, fakeBody, t.TempDir())
+}
+
+// startNestedBashParentTMPDIR is startNestedBashParent with the shell's own
+// TMPDIR named explicitly, so a test can point it at a directory mktemp
+// cannot use (nocx-xn63t.6.1: a nonexistent one reproduces, on Linux, the
+// same "nothing written to the drop" shape CI saw only on darwin) without
+// disturbing every other caller of the ordinary starter.
+func startNestedBashParentTMPDIR(t *testing.T, k *nestedKernel, binName, fakeBody, tmpdir string) *channelShell {
+	t.Helper()
 	bash := requireShell(t, "bash")
 
 	kernelFile, shellFile := lifecycleSocketpair(t)
@@ -584,7 +594,7 @@ func startNestedBashParent(t *testing.T, k *nestedKernel, binName, fakeBody stri
 	cmd := exec.Command(bash, "-i")
 	cmd.ExtraFiles = []*os.File{shellFile} // becomes fd 3
 	cmd.Env = append(
-		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null", "PATH="+binDir+":"+os.Getenv("PATH")),
+		cleanEnv("HOME="+home, "TMPDIR="+tmpdir, "TERM=xterm", "HISTFILE=/dev/null", "PATH="+binDir+":"+os.Getenv("PATH")),
 		"NOCX_SHELL_INTEGRATION=1",
 		"NOCX_PROMPT_MODE=marker-only",
 		"NOCX_SESSION_ID=chansess",

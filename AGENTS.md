@@ -1037,14 +1037,16 @@ changed.
 
 ## Agent skills
 
-The `mattpocock/skills` engineering skills read their per-repo configuration from
-`docs/agents/`. Three files, and they are the skills' view of rules this file owns:
+The `mattpocock/skills` engineering skills and the `shady2k-skills` backlog set read
+their per-repo configuration from `docs/agents/`. Four files, and they are the skills'
+view of rules this file owns:
 
-| File                                                           | What it tells a skill                                                                                |
-| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| [`docs/agents/issue-tracker.md`](docs/agents/issue-tracker.md) | Issues live in **`br`**, not GitHub Issues and not markdown — the verbs, and the wayfinder mapping.  |
-| [`docs/agents/triage-labels.md`](docs/agents/triage-labels.md) | The five triage roles as `br` labels, orthogonal to the one mandatory area label.                    |
-| [`docs/agents/domain.md`](docs/agents/domain.md)               | Single-context: this file is the `CONTEXT.md`, and ADRs are in `docs/decisions/`, never `docs/adr/`. |
+| File                                                           | What it tells a skill                                                                                            |
+| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| [`docs/agents/issue-tracker.md`](docs/agents/issue-tracker.md) | Issues live in **`br`**, not GitHub Issues and not markdown — the verbs, and the wayfinder mapping.              |
+| [`docs/agents/triage-labels.md`](docs/agents/triage-labels.md) | The five triage roles as `br` labels, orthogonal to the one mandatory area label.                                |
+| [`docs/agents/domain.md`](docs/agents/domain.md)               | Single-context: this file is the `CONTEXT.md`, and ADRs are in `docs/decisions/`, never `docs/adr/`.             |
+| [`docs/agents/backlog.md`](docs/agents/backlog.md)             | The levels, the two lanes outside the flow, the `br` verb for each thing a skill asks for, and the backlog gate. |
 
 They restate; they do not decide. Where one disagrees with this file, this file wins and
 the `docs/agents/` copy is the bug.

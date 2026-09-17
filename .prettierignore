@@ -62,3 +62,11 @@ eslint-fixtures/
 # conflict. Same reasoning as .cass/playbook.yaml above: a tool's output, not
 # text somebody wrote here.
 .githooks/backlog-gate/check.mjs
+
+# Image-generation scratch: prompts and renders written by an agent session, in
+# a directory nothing in the repository reads and git does not track. Same class
+# as .internal/sdd/ and .repowise/ above — prettier walks the filesystem rather
+# than the index, so it found five unformatted files here and failed
+# `prettier --check .` for every commit in this checkout, on files no human
+# wrote (measured 2026-09-18).
+output/

@@ -103,6 +103,17 @@ function isSaturationData(data: unknown): data is Pick<ControlSaturated, 'reason
   )
 }
 
+/**
+ * True when `err` is a control request the backend refused because the
+ * control plane was saturated — transient by contract (`retryable`), so a
+ * surface may offer the person the same action again. The toast is the
+ * dispatcher's either way; this only lets a surface avoid a dead end, through
+ * the same discriminator the toast uses rather than a second reading of it.
+ */
+export function isSaturationRefusal(err: unknown): boolean {
+  return err instanceof RpcError && isSaturationData(err.data)
+}
+
 // Reconnect backoff: start at 250 ms, double each attempt, cap at 5 s.
 // Jitter of up to 50 % of the current backoff is added so a reload storm
 // from many clients does not synchronise onto the server.

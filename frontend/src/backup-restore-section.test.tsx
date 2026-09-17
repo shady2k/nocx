@@ -15,6 +15,7 @@ import { render, screen, fireEvent, waitFor, cleanup } from '@solidjs/testing-li
 import { BackupRestoreSection } from './backup-restore-section'
 import type { ProfileClient, BackupCreateResult, RestorePreview, RestoreResult } from './profiles'
 import { MAX_BACKUP_BYTES } from './backup-file'
+import { RpcError } from './dispatcher'
 
 const toasts: { message: string; level?: string }[] = []
 vi.mock('./ui/toast', () => ({
@@ -369,5 +370,45 @@ describe('restoring a backup', () => {
     })
     expect(document.querySelector('.backup-restore__error')).toBeNull()
     expect(spies.preview).toHaveBeenCalled()
+    // A document the backend refuses stays refused; asking again would
+    // advertise a remedy that cannot work.
+    expect(screen.queryByRole('button', { name: 'Preview again' })).toBeNull()
+  })
+
+  it('a preview refused because the control plane was busy can be asked for again', async () => {
+    // nocx-9ox05. The config gate is held by whatever wrote configuration
+    // last — a settings change on a slow disk held it past the one-second
+    // conflict wait, and backup.preview came back "Control plane busy". The
+    // file was still chosen and nothing was wrong with it, but the section
+    // offered no way forward: choosing the same file again fires no change
+    // event. The busy refusal is retryable by contract, so the person gets a
+    // control that asks for the preview again, and the dispatcher's own busy
+    // toast is not doubled by a second one claiming the backup is at fault.
+    const { client, spies } = mockClient({
+      preview: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new RpcError('Control plane busy', -32004, {
+            reason: 'control-saturated',
+            scope: 'config',
+            retryable: true,
+            retryAfterMs: 0,
+          }),
+        )
+        .mockResolvedValue(PREVIEW),
+    })
+    render(() => <BackupRestoreSection profileClient={client} />)
+    await chooseFile()
+
+    const again = await screen.findByRole('button', { name: 'Preview again' })
+    expect(toasts.filter((t) => t.message.includes('could not be previewed'))).toEqual([])
+    expect(screen.getByText('backup.json')).toBeTruthy()
+
+    fireEvent.click(again)
+
+    expect(await screen.findByRole('heading', { name: /Preview — merge/ })).toBeTruthy()
+    expect(spies.preview).toHaveBeenCalledTimes(2)
+    expect(spies.preview).toHaveBeenLastCalledWith(DOC, 'merge')
+    expect(screen.queryByRole('button', { name: 'Preview again' })).toBeNull()
   })
 })

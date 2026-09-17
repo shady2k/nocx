@@ -375,9 +375,14 @@ func (o *sessionOwner) run() {
 	go o.runWriter()
 
 	var readEvents chan readEvent
+	// readinessEnded carries the error the readiness goroutine stopped on.
+	// Buffered, so that goroutine's last send never waits on a run that has
+	// already returned.
+	var readinessEnded chan error
 	if rr, ok := o.proc.(rawReader); ok {
 		o.readableCh = make(chan struct{}, 1)
-		go o.runReadiness(rr, o.readableCh)
+		readinessEnded = make(chan error, 1)
+		go o.runReadiness(rr, o.readableCh, readinessEnded)
 	} else {
 		readEvents = make(chan readEvent, 1)
 		go o.runReaderGoroutine(readEvents)
@@ -447,6 +452,9 @@ func (o *sessionOwner) run() {
 			o.dispatchIncoming(it)
 		case <-o.readableCh:
 			o.drainLocal()
+		case err := <-readinessEnded:
+			readinessEnded = nil
+			o.readinessEnded(err)
 		case ev := <-readEvents:
 			o.handleReadEvent(ev)
 		case res := <-o.writeRes:
@@ -608,19 +616,37 @@ func (o *sessionOwner) drainLocal() {
 // Report-and-look-again, dropping a signal the owner has not yet caught up
 // to (a full readableCh) rather than pausing for anything: there is no
 // handshake left to wait for, so this goroutine's only job between calls is
-// to notice whether readCtx has ended. WaitReadable's own error on a real
-// PTY only ever means that — its poll(2) wait does not stop merely because
-// something else wanted the fd back — so any error here is this goroutine's
-// cue to return, not a case to route on.
-func (o *sessionOwner) runReadiness(rr rawReader, readableCh chan<- struct{}) {
+// to notice whether readCtx has ended. Any error from WaitReadable — readCtx
+// ending, or the PTY closed under it (os.ErrClosed) — is this goroutine's cue
+// to return, and it says so on ended rather than returning silently
+// (nocx-mrfe5): nothing will signal readableCh again, so an owner still
+// waiting for EOF must hear that from here or wait forever.
+func (o *sessionOwner) runReadiness(rr rawReader, readableCh chan<- struct{}, ended chan<- error) {
 	for {
 		if err := rr.WaitReadable(o.readCtx); err != nil {
+			ended <- err
 			return
 		}
 		select {
 		case readableCh <- struct{}{}:
 		default:
 		}
+	}
+}
+
+// readinessEnded is run's answer to the readiness goroutine returning. When
+// readCtx ended it, finishRead has already run and this finds eofSeen true.
+// Otherwise the PTY was closed under the wait (a stop's deadline forcing
+// proc.Close) or the wait failed, and no readiness signal will ever arrive
+// again — so whatever is still readable is drained now, and if that drain
+// did not itself report the end, the read side is ended here. Relying on the
+// drain alone is what hung a helper Service.Close for ten minutes
+// (nocx-mrfe5): the last drain could have answered EAGAIN just before the
+// master closed, and nothing was left to ask again.
+func (o *sessionOwner) readinessEnded(err error) {
+	o.drainLocal()
+	if !o.eofSeen {
+		o.finishRead(err)
 	}
 }
 

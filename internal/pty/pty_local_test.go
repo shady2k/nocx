@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -331,4 +332,74 @@ func TestWaitReadableReturnsWhenWokenWithoutHoldingTheDrainLock(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("WakeReadiness did not unpark a WaitReadable parked on a silent program")
 	}
+}
+
+// TestCloseEndsAReadinessWaitOnAProgramThatOutlivesTheHangup is the pty half
+// of nocx-mrfe5: a helper Service.Close that hung for ten minutes on macOS
+// with the readiness goroutine parked in WaitReadable's poll(2).
+//
+// Close used to wake a parked wait with a spurious nil and then close the
+// very fds the wait polls, so a caller doing what runReadiness does — look
+// again after a nil — re-entered poll(2) on descriptors that no longer
+// belonged to it. On Linux that answers POLLNVAL at once, forever: the loop
+// below spins and never learns the pty is gone. On Darwin, whose poll(2) is
+// built on kqueue, closing a polled descriptor drops its registration and a
+// wait that entered before the close is never woken by anything (inferred
+// from the CI dump; not reproducible here). Either way the caller is told
+// nothing, and it is the program ignoring SIGHUP that removes the other
+// thing that could have ended it: a slave that hangs up.
+//
+// The contract this asserts is platform-free: after Close, WaitReadable ends
+// with an error rather than a nil — whether it was parked when Close ran or
+// is called afterwards. The loop bound is a count of spurious returns, not a
+// duration; the timer is a failure watchdog only.
+func TestCloseEndsAReadinessWaitOnAProgramThatOutlivesTheHangup(t *testing.T) {
+	lp, err := NewLocal(log.NewSlogAdapter(nil), Config{
+		Command: "/bin/sh",
+		Args:    []string{"-c", "trap '' HUP; exec sleep 60"},
+		Cols:    80,
+		Rows:    24,
+	})
+	if err != nil {
+		t.Fatalf("NewLocal: %v", err)
+	}
+	pid := lp.Pid()
+	t.Cleanup(func() {
+		_ = lp.Close()
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+	})
+
+	const spuriousBudget = 1000
+	waitDone := make(chan error, 1)
+	go func() {
+		for range spuriousBudget {
+			if err := lp.WaitReadable(context.Background()); err != nil {
+				waitDone <- err
+				return
+			}
+		}
+		waitDone <- nil
+	}()
+
+	if err := lp.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	select {
+	case err := <-waitDone:
+		if err == nil {
+			t.Fatalf("WaitReadable answered nil %d times after Close and never an error: the caller is never told the pty is gone", spuriousBudget)
+		}
+		if !errors.Is(err, os.ErrClosed) {
+			t.Fatalf("WaitReadable after Close = %v, want os.ErrClosed", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a WaitReadable loop never returned after Close")
+	}
+
+	if err := lp.WaitReadable(context.Background()); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("WaitReadable called after Close = %v, want os.ErrClosed", err)
+	}
+	// And a wake after Close is still harmless.
+	lp.WakeReadiness()
 }

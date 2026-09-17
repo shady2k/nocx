@@ -303,6 +303,40 @@ describe('the lifecycle kernel (ADR-0024 §6)', () => {
     if (att) expect(att.exitCode).toBe(7)
   })
 
+  it('a Stop outcome is the LATEST the backend published, open or completed (nocx-zas0d)', () => {
+    // Review 3 items 2 and 4. The backend re-emits an open attempt's fact when
+    // its Stop record changes, so the block holds the settlement as state even
+    // when the notice was dropped — and a later Stop that LANDS outranks an
+    // earlier one that failed, so the completion's word is the one that counts.
+    const k = new LifecycleKernel()
+    k.applyFact(promptReady('d1', 1))
+    k.applyFact(running('d1', 1, { id: 'att-1' }))
+    expect(k.attempt('att-1')?.signalDelivery).toBeUndefined()
+
+    // The held Stop failed: the same open attempt, re-published with its record.
+    k.applyFact({ ...running('d1', 1, { id: 'att-1' }), signalDelivery: 'undelivered' })
+    expect(attemptOf(k.state)?.signalDelivery).toBe('undelivered')
+    expect(k.attempt('att-1')?.signalDelivery).toBe('undelivered')
+
+    // A fact that says nothing (a retry still on its way) does not erase it.
+    k.applyFact(running('d1', 1, { id: 'att-1' }))
+    expect(k.attempt('att-1')?.signalDelivery).toBe('undelivered')
+
+    // The retry landed: the completion says delivered, and that wins.
+    k.applyFact({
+      ...running('d1', 1, {
+        id: 'att-1',
+        state: 'completed',
+        exitCode: 130,
+        completedAt: 't',
+        fence: FENCE,
+      }),
+      signalDelivery: 'delivered',
+    })
+    expect(attemptOf(k.state)?.state).toBe('completed')
+    expect(attemptOf(k.state)?.signalDelivery).toBe('delivered')
+  })
+
   it('a prompt_ready over an open attempt is rejected; it lands after the completion', () => {
     const k = new LifecycleKernel()
     k.applyFact(promptReady('d1', 1))

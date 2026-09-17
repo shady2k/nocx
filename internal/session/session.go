@@ -79,6 +79,14 @@ func (i Identity) SameIncarnation(id ID, sess Session) bool {
 // write loop has stopped and nothing further will reach the channel.
 var ErrSessionClosed = errors.New("session is closed")
 
+// ErrInputRefused is the refusal of the USER's input path with nothing written:
+// the queue is full, or the session is inside its bootstrap quarantine, where a
+// keystroke is refused rather than buffered. It is distinct from the channel's
+// own write error, because the two mean different things to a caller that has
+// to say what happened (nocx-zas0d): one is "there was no room at this instant",
+// the other is "the terminal did not take it".
+var ErrInputRefused = errors.New("session input refused")
+
 // writeQueueDepth is how many data frames a session may have in flight
 // before the transport starts dropping them. It buys the write loop room
 // to fall behind a burst — a paste, a held key — without letting a channel
@@ -287,6 +295,62 @@ type Session interface {
 	// full the frame is dropped. Returns false if the session is
 	// closed or the queue is full.
 	EnqueueWrite(p []byte) bool
+	// EnqueueInputIf queues p on the SAME user-input path EnqueueWrite uses —
+	// the same queue, the same quarantine — and asks holds IMMEDIATELY BEFORE
+	// the channel write, discarding p when the answer is false. settle is
+	// called ON THE WRITING GOROUTINE, exactly once, with the verdict: written
+	// (the channel took the bytes), discarded (holds went false at the write,
+	// so nothing was written — false with a nil error), or failed (the
+	// channel's own write returned an error). The caller never waits here.
+	//
+	// IT EXISTS BECAUSE THE QUEUE OUTLIVES THE CALLER'S KNOWLEDGE (nocx-zas0d,
+	// review finding 1 of 1e899f6a). A caller that has just checked that its
+	// byte still has an addressee has checked nothing about the write: the
+	// item waits in the queue, and by the time writeLoop reaches it the
+	// command may be gone and the terminal may belong to something else. Only
+	// a check that runs AT the write can close that, and it has to run on the
+	// one goroutine that writes.
+	//
+	// AND THE VERDICT IS HANDED BACK, NEVER WAITED OUT (review of 6830b43d,
+	// blocker 1). A caller that stops waiting knows "I stopped waiting", which
+	// is not "nothing was written": the payload is still queued and may land
+	// afterwards. So there is no expiry on this verb at all — a caller that
+	// must answer somebody in bounded time waits on its own settle callback,
+	// and whatever it answers, the callback still reports the truth later.
+	//
+	// False means the queue itself refused the payload — full, closed, or
+	// inside the bootstrap quarantine — and nothing was queued: settle is NOT
+	// called, because a refused payload has no verdict to wait for.
+	//
+	// WHAT THIS DOES AND DOES NOT GUARANTEE, exactly. What it guarantees, and
+	// all it guarantees:
+	//
+	//   - ORDER. The payload keeps the position it was queued in, because it
+	//     is an item on the one queue writeLoop drains one job at a time. A
+	//     condition that goes false is decided IN PLACE — the payload is
+	//     discarded and the items behind it are written, in their own order,
+	//     exactly as they would have been — so nothing can be re-ordered
+	//     around it, and nothing queued after it can reach the channel first.
+	//     That matters because the queue carries the USER's input: a later
+	//     command line can only be written after this byte, never instead of
+	//     it or ahead of it.
+	//   - The condition is asked on the writing goroutine, immediately before
+	//     the channel write, so a payload whose addressee has gone is decided
+	//     against the state at the write rather than at the call.
+	//
+	// What it does NOT guarantee: atomicity between the condition and the
+	// write itself. The two live in different domains — this queue writes to a
+	// terminal, the condition reads whatever the caller cares about (for the
+	// transport, the lifecycle kernel's attempt) — and no lock spans both, so
+	// the addressee can still leave in the window between the answer and the
+	// syscall. That window is one write(2) wide; it is the same window a
+	// person's own keystroke has, and it is the reason a byte that arrives
+	// after its command ended must be harmless on the far side (an interrupt
+	// into an idle line is discarded by the line editor) rather than assumed
+	// impossible here. A session that closes with the payload still queued
+	// settles nothing: the caller's own view of the session's end is the
+	// answer there.
+	EnqueueInputIf(p []byte, holds func() bool, settle func(written bool, err error)) bool
 	// EffectiveSize is the geometry this session's channel is running at —
 	// the backend's own conclusion, never the client's claim (nocx-eidfb.1).
 	// It is never the zero Size: a session with no client attached holds
@@ -1115,6 +1179,14 @@ type realSession struct {
 type writeJob struct {
 	p   []byte
 	res chan writeResult
+	// holds is the condition the payload was queued under, asked at the WRITE
+	// (EnqueueInputIf). nil means unconditional — every
+	// EnqueueWrite.
+	holds func() bool
+	// settle receives the verdict on the writing goroutine, exactly once —
+	// EnqueueInputIf's caller, which must not wait for it. nil for every
+	// caller that waits on res or does not want the answer at all.
+	settle func(written bool, err error)
 }
 
 type writeResult struct {
@@ -1212,6 +1284,29 @@ func (s *realSession) EnqueueWrite(p []byte) bool {
 	}
 }
 
+// EnqueueInputIf queues the payload with its condition, and lets the writing
+// goroutine settle it. See the interface.
+func (s *realSession) EnqueueInputIf(p []byte, holds func() bool, settle func(written bool, err error)) bool {
+	select {
+	case <-s.writeDone:
+		return false
+	default:
+	}
+	if s.inputRefused() {
+		return false
+	}
+	select {
+	case s.writeCh <- writeJob{p: p, holds: holds, settle: settle}:
+		return true
+	case <-s.writeDone:
+		return false
+	case <-s.ch.Done():
+		return false
+	default:
+		return false
+	}
+}
+
 // startWriteLoop runs the single goroutine that drains writeCh in FIFO
 // order. It exits on writeDone, which Close closes, so it never leaks and
 // never observes a closed writeCh.
@@ -1222,7 +1317,25 @@ func (s *realSession) startWriteLoop() {
 			case <-s.writeDone:
 				return
 			case job := <-s.writeCh:
+				if job.holds != nil && !job.holds() {
+					// The condition the payload was queued under no longer
+					// holds AT THE MOMENT OF THE WRITE. It is discarded rather
+					// than written into whatever holds the terminal now, and
+					// the caller is told (written false, no error: not an
+					// error, an outcome).
+					if job.settle != nil {
+						job.settle(false, nil)
+					}
+					continue
+				}
 				n, err := s.ch.Write(job.p)
+				if job.settle != nil {
+					// The caller that must not wait is told HERE, on this
+					// goroutine: this is the only place a queued payload's
+					// verdict exists.
+					job.settle(n == len(job.p), err)
+					continue
+				}
 				// res == nil is the TRANSPORT's path — every byte the user
 				// types arrives here, and nobody is waiting for the result.
 				// So an error here had exactly one reader and it was

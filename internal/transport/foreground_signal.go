@@ -134,10 +134,12 @@ type protectedForeground interface {
 	// that holds no obligation to leave — the run lease — passes no answer for
 	// it and gets the started attempt or nothing, exactly as before.
 	StopTarget() (foregroundTarget, bool)
-	// Interrupt writes the terminal's own interrupt byte through the
-	// session's ordinary input path. False means the write was refused —
-	// the queue is full, closed, or quarantined — and nothing was sent.
-	Interrupt(attempt lifecycle.AttemptID) bool
+	// Interrupt puts the terminal's own interrupt byte on the session's
+	// ordinary input path for THAT attempt, and reports what happened to it.
+	// The implementation checks the attempt at the WRITE, not at this call:
+	// the byte waits in a queue, and by the time it is written its addressee
+	// may have gone (see internal/session.EnqueueInputIf).
+	Interrupt(attempt lifecycle.AttemptID) interruptResult
 	// Ended reports whether that exact attempt has left `open`, waiting at
 	// most the cooperative bound. It observes the backend's own lifecycle
 	// read model; it never reads the terminal.
@@ -153,6 +155,31 @@ type foregroundTarget struct {
 	// only safe moment to interrupt it is the authenticated start.
 	Started bool
 }
+
+// interruptResult is what the terminal interrupt actually did, and the three
+// answers are what the policy needs: the byte is in (wait for it), the byte was
+// discarded because its addressee had gone (there is nothing to stop any more),
+// or the byte was not written at all (the command may still be running, and
+// nocx cannot prove it was stopped).
+type interruptResult uint8
+
+const (
+	// interruptWritten: the channel took the byte.
+	interruptWritten interruptResult = iota
+	// interruptDiscarded: the addressee left `open` before the write reached
+	// it, so nothing was written. NOT a failure — a command that is gone.
+	interruptDiscarded
+	// interruptRefused: the byte was not written for any other reason — the
+	// queue refused it, the session is closed, the channel failed, or the
+	// channel never answered within the cooperative grace.
+	interruptRefused
+	// interruptQueued: the byte is ON the queue and its verdict will arrive
+	// through the caller's settle callback, not through this call. It is the
+	// only honest answer for a caller that must not wait — "I have handed it
+	// over" — and the policy treats it as the held case, because that is what
+	// it is: accepted, not yet delivered.
+	interruptQueued
+)
 
 // foregroundReach is what one SignalForeground call actually established,
 // which is four things and used to be collapsed into two (nocx-7l4ex.10).
@@ -201,7 +228,14 @@ func interruptForeground(lg log.Logger, sid session.ID, sess runLeaseSession, fb
 			// running. This is the refusal a person can act on.
 			return foregroundNothingRunning
 		}
-		if !fb.Interrupt(attempt) {
+		switch fb.Interrupt(attempt) {
+		case interruptDiscarded:
+			// The addressee went before the write: nothing was sent, and there
+			// is nothing left in front of the prompt.
+			lg.Info("foreground signal: the attempt was gone before the terminal interrupt was written",
+				"session_id", string(sid), "attempt", string(attempt))
+			return foregroundNothingRunning
+		case interruptRefused:
 			lg.Warn("foreground signal: the session refused the terminal interrupt",
 				"session_id", string(sid), "attempt", string(attempt))
 			return foregroundUnreconciled
@@ -307,10 +341,25 @@ func stopByTerminalInterrupt(lg log.Logger, sid session.ID, conv protectedForegr
 		return foregroundHeld
 	}
 	attempt := target.Attempt
-	if !conv.Interrupt(attempt) {
+	switch conv.Interrupt(attempt) {
+	case interruptDiscarded:
+		// The addressee left `open` between the read that named it and the
+		// write: nothing was put into the terminal, and the command it was
+		// about is gone. The prompt's answer is the honest one — and the
+		// whole reason the check runs at the write is that this is exactly
+		// the byte that must never land in whatever came next.
+		lg.Info("foreground signal: the attempt was gone before the terminal interrupt was written",
+			"session_id", string(sid), "attempt", string(attempt))
+		return foregroundNothingRunning
+	case interruptRefused:
 		lg.Warn("foreground signal: the session refused the terminal interrupt",
 			"session_id", string(sid), "attempt", string(attempt))
 		return foregroundUnreconciled
+	case interruptQueued:
+		// The byte is queued and the caller's own settlement owns the verdict
+		// from here: there is nothing to wait for on this lane, and waiting
+		// would be the timeout this shape exists to avoid.
+		return foregroundHeld
 	}
 	if conv.Ended(attempt, grace) {
 		return foregroundDelivered

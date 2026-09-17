@@ -466,7 +466,8 @@ func (s *sqliteContent) ownArtifactsFor(ctx context.Context, entryID string) ([]
 // cannot drift into two row shapes.
 const entryPageColumns = `e.id, e.ingest_seq, e.environment_id, e.cwd, e.kind, e.source, e.intent,
 	e.phase, e.status, e.submitted_at, e.started_at, e.ended_at, e.duration_ms, e.payload,
-	e.session_id, ` +
+	e.session_id,
+	(SELECT x.termination_reason FROM executions x WHERE x.entry_id = e.id ORDER BY x.id DESC LIMIT 1), ` +
 	environmentColumns
 
 // rowQuerier is the read seam both the pool and a transaction satisfy, so
@@ -503,6 +504,7 @@ func entryPage(ctx context.Context, q rowQuerier, cond string, args []any, limit
 			&e.ID, &e.IngestSeq, &e.EnvironmentID, &e.Cwd, &e.Kind, &e.Source,
 			&e.Intent, &e.Phase, &e.Status, &e.SubmittedAt,
 			&e.StartedAt, &e.EndedAt, &e.DurationMs, &e.Payload, &e.SessionID,
+			&e.TerminationReason,
 		}
 		if err := rows.Scan(append(dest, env.dest()...)...); err != nil {
 			return nil, err

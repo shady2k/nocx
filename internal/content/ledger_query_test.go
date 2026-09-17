@@ -249,6 +249,58 @@ func TestQueryEntriesRowsCarryTheirResolvedEnvironment(t *testing.T) {
 	}
 }
 
+// A stopped command and a program that failed on its own are both
+// EntryFailure: the status column cannot tell them apart, and a restore draws
+// a block from this row. So the row carries the latest execution's own
+// termination reason — the same on the page and on the detail read — and nil
+// for an entry no execution has closed (nocx-zas0d, review 3 item 3).
+func TestQueryEntriesRowsCarryTheirLatestTerminationReason(t *testing.T) {
+	_, led := newLedger(t)
+	envReady(t, led, "local")
+	ctx := context.Background()
+	exit := 130
+	submitAt(t, led, entryID(1), "local", "/repo", content.EntryShell, "sleep 30")
+	execID, err := led.StartExecution(ctx, content.StartExecution{EntryID: entryID(1)})
+	if err != nil {
+		t.Fatalf("StartExecution: %v", err)
+	}
+	payload := content.ShellPayloadJSON(&exit)
+	if err := led.FinishExecution(ctx, execID, content.FinishExecution{
+		EndedAt: time.Now().UnixMilli(), TerminationReason: content.TermUserKilled,
+		Status: content.EntryFailure, Payload: &payload,
+	}); err != nil {
+		t.Fatalf("FinishExecution: %v", err)
+	}
+	submitAt(t, led, entryID(2), "local", "/repo", content.EntryShell, "false")
+	closeEntry(t, led, entryID(2), content.EntryFailure, &exit)
+	submitAt(t, led, entryID(3), "local", "/repo", content.EntryShell, "make")
+
+	want := map[string]*content.TerminationReason{
+		entryID(1): new(content.TermUserKilled),
+		entryID(2): new(content.TermCompleted),
+		entryID(3): nil,
+	}
+	same := func(a, b *content.TerminationReason) bool {
+		return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
+	}
+	page := queryOK(t, led, content.LedgerQuery{Scope: content.ScopeEverywhere, Limit: 10})
+	if len(page.Entries) != 3 {
+		t.Fatalf("page holds %d rows, want 3", len(page.Entries))
+	}
+	for _, row := range page.Entries {
+		if !same(row.TerminationReason, want[row.ID]) {
+			t.Fatalf("page row %q terminationReason = %v, want %v", row.ID, row.TerminationReason, want[row.ID])
+		}
+		detail, err := led.Entry(ctx, row.ID)
+		if err != nil || detail == nil {
+			t.Fatalf("Entry(%q) = %v, %v", row.ID, detail, err)
+		}
+		if got := detail.Summary().TerminationReason; !same(got, want[row.ID]) {
+			t.Fatalf("detail row %q terminationReason = %v, want %v", row.ID, got, want[row.ID])
+		}
+	}
+}
+
 // kind is a closed enum mirroring the CHECK constraint, and it excludes.
 func TestQueryEntriesKindExcludesEveryOtherKind(t *testing.T) {
 	_, led := newLedger(t)

@@ -6898,7 +6898,7 @@ func TestLedgerGet_ContractRefusesACausedItMustRefuse(t *testing.T) {
 	entry := `{"id":"a","seq":1,"environmentId":"e","host":null,"cwd":"/","kind":"ask","source":"user",` +
 		`"intent":"x","phase":"closed","status":"success","submittedAt":1,"startedAt":null,` +
 		`"endedAt":null,"durationMs":null,"exitCode":null,"maskedCount":0,"maskedKinds":[],` +
-		`"redactions":[],"unreconciled":null}`
+		`"redactions":[],"unreconciled":null,"terminationReason":null}`
 	body := func(caused string) string {
 		return `{"entry":` + entry + `,"edges":[],"artifacts":[],"proseEvicted":false,"caused":` + caused + `}`
 	}
@@ -6986,7 +6986,7 @@ func TestLedgerQuery_ContractRefusesWhatItMustRefuse(t *testing.T) {
 		"an entry with no host key": `{"entries":[{"id":"a","seq":1,"environmentId":"e","cwd":"/","kind":"shell",` +
 			`"intent":"x","phase":"open","status":"pending","submittedAt":1,"startedAt":null,"endedAt":null,` +
 			`"durationMs":null,"exitCode":null,"maskedCount":0,"maskedKinds":[],"redactions":[],` +
-			`"unreconciled":null}],` +
+			`"unreconciled":null,"terminationReason":null}],` +
 			`"scope":"host","exhausted":true,"hasRows":true,"coverage":null}`,
 		// The third state is REQUIRED and nullable, for the reason `host` is
 		// (nocx-k6p18.5): a row that will not say whether anybody could be
@@ -6995,7 +6995,8 @@ func TestLedgerQuery_ContractRefusesWhatItMustRefuse(t *testing.T) {
 		"an entry that will not say whether it is reconciled": `{"entries":[{"id":"a","seq":1,` +
 			`"environmentId":"e","host":null,"cwd":"/","kind":"shell",` +
 			`"intent":"x","phase":"open","status":"pending","submittedAt":1,"startedAt":null,"endedAt":null,` +
-			`"durationMs":null,"exitCode":null,"maskedCount":0,"maskedKinds":[],"redactions":[]}],` +
+			`"durationMs":null,"exitCode":null,"maskedCount":0,"maskedKinds":[],"redactions":[],` +
+			`"terminationReason":null}],` +
 			`"scope":"host","exhausted":true,"hasRows":true,"coverage":null}`,
 		// And a cause nobody named: the vocabulary is closed so the renderer's
 		// sentence table can be exhaustive.
@@ -7003,7 +7004,22 @@ func TestLedgerQuery_ContractRefusesWhatItMustRefuse(t *testing.T) {
 			`"environmentId":"e","host":null,"cwd":"/","kind":"shell",` +
 			`"intent":"x","phase":"open","status":"pending","submittedAt":1,"startedAt":null,"endedAt":null,` +
 			`"durationMs":null,"exitCode":null,"maskedCount":0,"maskedKinds":[],"redactions":[],` +
-			`"unreconciled":"probablyGone"}],` +
+			`"unreconciled":"probablyGone","terminationReason":null}],` +
+			`"scope":"host","exhausted":true,"hasRows":true,"coverage":null}`,
+		// How the entry ended is REQUIRED and nullable too (nocx-zas0d): a
+		// row that will not say is one a restore draws as the program's own
+		// failure when the person stopped it.
+		"an entry that will not say how it ended": `{"entries":[{"id":"a","seq":1,` +
+			`"environmentId":"e","host":null,"cwd":"/","kind":"shell",` +
+			`"intent":"x","phase":"closed","status":"failure","submittedAt":1,"startedAt":null,"endedAt":1,` +
+			`"durationMs":null,"exitCode":130,"maskedCount":0,"maskedKinds":[],"redactions":[],` +
+			`"unreconciled":null}],` +
+			`"scope":"host","exhausted":true,"hasRows":true,"coverage":null}`,
+		"a termination reason nobody named": `{"entries":[{"id":"a","seq":1,` +
+			`"environmentId":"e","host":null,"cwd":"/","kind":"shell",` +
+			`"intent":"x","phase":"closed","status":"failure","submittedAt":1,"startedAt":null,"endedAt":1,` +
+			`"durationMs":null,"exitCode":130,"maskedCount":0,"maskedKinds":[],"redactions":[],` +
+			`"unreconciled":null,"terminationReason":"stopped"}],` +
 			`"scope":"host","exhausted":true,"hasRows":true,"coverage":null}`,
 	}
 	for name, raw := range bad {

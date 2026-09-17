@@ -75,6 +75,18 @@ export interface ExecutionAttempt {
    *  with no authenticated event behind it does nothing at all. Present
    *  exactly when state is completed. */
   readonly fence?: string
+  /** What the Stops made for this attempt came to, when the backend has one
+   *  to report (nocx-zas0d). `delivered` means an interrupt reached the
+   *  command, by any path, and it outranks any earlier failure; `undelivered`
+   *  means a Stop failed and none landed. The LATEST published value wins.
+   *  Absent when no Stop was made for this attempt — the ordinary case, and
+   *  the one where the pane's own gesture is all the evidence there is.
+   *
+   *  IT RIDES THE FACT AND NOT A NOTIFICATION because it has to survive a
+   *  dropped frame and a reconnect: a block that painted a command "Stopped"
+   *  on the strength of a lost notice is a lie the person cannot see through
+   *  (nocx-zas0d, review of 6830b43d, major 2). */
+  readonly signalDelivery?: 'delivered' | 'undelivered'
 }
 
 const authorityBrand = Symbol('authority')
@@ -103,6 +115,14 @@ export type LifecycleState =
       readonly domain: IntegrationDomain
       readonly [authorityBrand]: true
     }
+
+// deliveryOf reads the Stop settlement off a fact, and only the two values the
+// contract declares: a word this build does not know is treated as absent
+// rather than carried into a decision about what the person did.
+function deliveryOf(fact: LifecycleFact): 'delivered' | 'undelivered' | undefined {
+  const d = fact.signalDelivery
+  return d === 'delivered' || d === 'undelivered' ? d : undefined
+}
 
 function isAttemptFact(a: LifecycleFact['attempt']): a is NonNullable<LifecycleFact['attempt']> {
   return (
@@ -366,7 +386,7 @@ export class LifecycleKernel {
       if (a.state === 'completed') {
         if (existing.state !== 'open') return null // exit status is set exactly once
         if (!completeAttempt(existing, cur.domain)) return null
-        const done = this.completedRecord(existing, a)
+        const done = this.completedRecord(existing, a, fact)
         if (done === null) return null
         this._attempts.set(done.id, done)
         return { kind: 'running', domain: cur.domain, attempt: done, [authorityBrand]: true }
@@ -378,7 +398,15 @@ export class LifecycleKernel {
         return { kind: 'running', domain: cur.domain, attempt: abandoned, [authorityBrand]: true }
       }
       if (existing.state !== 'open') return null // a terminal attempt cannot resume
-      return this._state // open while open: the same fact again
+      // Open while open: the same fact again — unless it carries a Stop
+      // settlement the record does not have yet. The backend re-publishes an
+      // open attempt exactly for that (nocx-zas0d, review 3 item 4), and it is
+      // the only field of an open attempt that may change.
+      const delivery = deliveryOf(fact)
+      if (delivery === undefined || delivery === existing.signalDelivery) return this._state
+      const settled = { ...existing, signalDelivery: delivery }
+      this._attempts.set(settled.id, settled)
+      return { kind: 'running', domain: cur.domain, attempt: settled, [authorityBrand]: true }
     }
 
     // From a non-running state: a start at the ready prompt, an activation
@@ -398,10 +426,11 @@ export class LifecycleKernel {
       if (attempt.domain.id !== domain.id) return null
       if (a.state === 'open') {
         if (attempt.state !== 'open') return null
+        attempt = { ...attempt, signalDelivery: deliveryOf(fact) ?? attempt.signalDelivery }
       } else {
         if (attempt.state !== 'open') return null // terminal attempts cannot change state twice
         if (a.state === 'completed') {
-          const done = this.completedRecord(attempt, a)
+          const done = this.completedRecord(attempt, a, fact)
           if (done === null) return null
           attempt = done
         } else {
@@ -484,6 +513,7 @@ export class LifecycleKernel {
         exitCode: a.exitCode,
         completedAt: a.completedAt,
         fence: a.fence,
+        signalDelivery: deliveryOf(fact),
       }
     }
     if (a.exitCode !== undefined || a.fence !== undefined) return null // present exactly when completed
@@ -495,12 +525,14 @@ export class LifecycleKernel {
       origin: a.origin,
       submitId: a.submitId,
       startedAt: a.startedAt,
+      signalDelivery: deliveryOf(fact),
     }
   }
 
   private completedRecord(
     attempt: ExecutionAttempt,
     a: NonNullable<LifecycleFact['attempt']>,
+    fact: LifecycleFact,
   ): ExecutionAttempt | null {
     if (typeof a.exitCode !== 'number' || typeof a.fence !== 'string' || a.fence === '') return null
     return {
@@ -509,6 +541,11 @@ export class LifecycleKernel {
       exitCode: a.exitCode,
       completedAt: a.completedAt,
       fence: a.fence,
+      // The completion's own word wins over what the open attempt carried: a
+      // Stop that LANDED after an earlier one failed is the attempt's outcome
+      // (nocx-zas0d, review 3 item 2), and the backend only ever publishes
+      // the latest.
+      signalDelivery: deliveryOf(fact) ?? attempt.signalDelivery,
     }
   }
 

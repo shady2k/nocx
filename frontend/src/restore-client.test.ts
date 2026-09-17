@@ -213,6 +213,7 @@ describe('restore-client — the pane read', () => {
     // the wire, because absent and null are different bytes (the contract
     // requires it for that reason).
     unreconciled: null,
+    terminationReason: null,
     ...over,
   })
   it("carries the entry's source, so a command the assistant ran keeps its badge", async () => {
@@ -277,6 +278,24 @@ describe('restore-client — the pane read', () => {
     const [block] = await blocksForPane(client, 'pane-1')
     expect(block.status).toBe('success')
     expect(block.unreconciled).toBeNull()
+  })
+
+  it('a command the person STOPPED comes back as Stopped, not as its own failure (nocx-zas0d)', async () => {
+    // `status` cannot tell them apart: a stopped command and a program that
+    // failed on its own are both `failure`. The latest execution's own
+    // termination reason can, and the block is drawn from it — so a pane
+    // reopened after a Stop reads the same as the pane that pressed it.
+    const client = fakeQuery([
+      entry({ id: 'stopped', status: 'failure', exitCode: 130, terminationReason: 'user-killed' }),
+      entry({ id: 'failed', status: 'failure', exitCode: 130, terminationReason: 'completed' }),
+      entry({ id: 'fine', status: 'success', exitCode: 0, terminationReason: 'completed' }),
+    ])
+    const blocks = await blocksForPane(client, 'pane-1')
+    expect(blocks.map((b) => [b.entryId, b.status])).toEqual([
+      ['fine', 'success'],
+      ['failed', 'failure'],
+      ['stopped', 'cancelled'],
+    ])
   })
 
   it('an action is not a block and never becomes one', async () => {

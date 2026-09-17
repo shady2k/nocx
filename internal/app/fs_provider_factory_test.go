@@ -47,14 +47,29 @@ func (s factorySession) WorkspaceID() workspace.ID { return workspace.Default }
 // blocks.
 func (s factorySession) OpenedAt() time.Time { return time.Time{} }
 
-func (s factorySession) Kind() session.Kind              { return s.kind }
-func (s factorySession) PaneID() string                  { return "" }
-func (s factorySession) Host() string                    { return s.host }
-func (s factorySession) Cwd() string                     { return "/" }
-func (s factorySession) ProfileID() string               { return "" }
-func (s factorySession) CredentialID() string            { return "" }
-func (s factorySession) Write([]byte) (int, error)       { return 0, nil }
-func (s factorySession) EnqueueWrite([]byte) bool        { return true }
+func (s factorySession) Kind() session.Kind        { return s.kind }
+func (s factorySession) PaneID() string            { return "" }
+func (s factorySession) Host() string              { return s.host }
+func (s factorySession) Cwd() string               { return "/" }
+func (s factorySession) ProfileID() string         { return "" }
+func (s factorySession) CredentialID() string      { return "" }
+func (s factorySession) Write([]byte) (int, error) { return 0, nil }
+func (s factorySession) EnqueueWrite([]byte) bool  { return true }
+
+// EnqueueInputIf answers "queued" and settles at once: this double has no
+// queue to validate against.
+func (s factorySession) EnqueueInputIf(p []byte, holds func() bool, settle func(written bool, err error)) bool {
+	if holds != nil && !holds() {
+		if settle != nil {
+			settle(false, nil)
+		}
+		return true
+	}
+	if settle != nil {
+		settle(true, nil)
+	}
+	return true
+}
 func (s factorySession) Close() error                    { return nil }
 func (s factorySession) Done() <-chan struct{}           { return make(chan struct{}) }
 func (s factorySession) SSHOptions() []ssh.ConnectOption { return s.opts }

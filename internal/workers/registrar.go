@@ -887,11 +887,17 @@ func answerable(held []Participant, owed int) bool {
 // suspends send-input and leaves close alone, and DelegationState.Permits
 // already says so; this is where that stops being theoretical.
 //
-// It writes NO state. Ending the session produces a process exit, and that
-// exit reaches the record by the ordinary path and reduces the participant the
-// way any exit does. A close that also terminalized would be a second author
-// of a participant's state, and the two would disagree the first time a
-// worker declared between the kill and the write.
+// It writes no state IN THE RECORD. Ending the session produces a process
+// exit, and that exit reaches the record by the ordinary path and reduces the
+// participant the way any exit does. A close that also terminalized would be a
+// second author of a participant's state, and the two would disagree the first
+// time a worker declared between the kill and the write.
+//
+// WHAT IT DOES WRITE IS THE PARTICIPANT'S PLACE (nocx-xn63t.4.6): the tab its
+// pane was minted in leaves the window, because "closing a worker closes its
+// tab" is what a close is FOR. That is the closer's own half — a tab is a row
+// of the layout chain and not a participant fact, so it is not the second
+// author this method refuses to be.
 func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id ParticipantID) error {
 	if r.closer == nil {
 		return errors.New("worker: this backend cannot end a participant")

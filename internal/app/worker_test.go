@@ -193,10 +193,12 @@ func newWorkerStand(t *testing.T, opts ...workers.Option) *workerStand {
 			// deliberately withholds it; the number bounds the withheld case
 			// and decides nothing about the others.
 			workers.WithEnrolmentDeadline(2 * time.Second),
-			// The product's closer, over the real registry: a close here has
-			// to end a real session and let the exit reach the record by the
-			// ordinary path, which is the only thing that makes "close
-			// writes no state" checkable.
+			// The product's closer, over the real registry and the real
+			// layout: a close here has to end a real session, take the
+			// participant's tab out of the window, and let the exit reach the
+			// record by the ordinary path — which is what makes "close writes
+			// no state in the RECORD" checkable (nocx-xn63t.4.6 added the
+			// tab half; the record is still not this closer's to write).
 			workers.WithCloser(&workerCloser{
 				sessions: reg, layout: db.Layout(), tabs: tabs, announce: tp, log: logger,
 			}),

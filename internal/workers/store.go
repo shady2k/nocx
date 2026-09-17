@@ -218,10 +218,13 @@ type Enrolments interface {
 	Withdraw(ctx context.Context, p ParticipantID) error
 }
 
-// Closer ends a participant's process. It is the far end of Close, and it is
-// deliberately narrow: what it is handed is a participant the record has
-// already decided may be ended, and what it does is end the session behind it.
-// It writes no state and reports no verdict — the exit it causes arrives by
+// Closer ends a participant's process, and gives back the place it occupied.
+// It is the far end of Close, and it is deliberately narrow: what it is handed
+// is a participant the record has already decided may be ended, and what it
+// does is end the session behind it and take its tab out of the window — the
+// second half being what "closing a worker closes its tab" means for a
+// participant whose process is already gone (nocx-xn63t.4.6). It writes no
+// state IN THE RECORD and reports no verdict — the exit it causes arrives by
 // the ordinary path.
 type Closer interface {
 	Close(ctx context.Context, p Participant) error

@@ -48,8 +48,11 @@ type WorkerRecord interface {
 	// Wait blocks until this session has something to be told, then answers
 	// what HeldBy answers. It dispatches, exactly as HeldBy does.
 	Wait(ctx context.Context, coordinatorSession string, id workers.ID) ([]workers.Participant, error)
-	// Close ends a participant. It writes no state: the exit it causes
-	// reaches the record by the ordinary path.
+	// Close ends a participant. It writes no state in the record: the exit it
+	// causes reaches the record by the ordinary path. What it also gives back
+	// is the participant's place — its tab leaves the window
+	// (nocx-xn63t.4.6), which is the layout chain's row rather than the
+	// record's.
 	Close(ctx context.Context, coordinatorSession string, id workers.ParticipantID) error
 	// Undispatched is what the record still owes judgement on. It is read
 	// BEFORE HeldBy, because HeldBy is the fetch that clears it (D8): asking

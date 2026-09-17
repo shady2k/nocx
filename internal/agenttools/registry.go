@@ -983,33 +983,47 @@ var declarations = []Declaration{
 	},
 	{
 		Name:        "workers.inbox",
-		Description: "Read the mail your coordinator has left you. It takes no arguments beyond the position you are confirming: the mailbox is yours, and there is no way to name another. Reach for it when you start a turn and when you have finished a piece of work — mail waits, it does not interrupt, so what you were told is only told to you when you look.",
+		Description: "Read your own mailbox: the mail your coordinator left you, and — when you are a coordinator — the state changes nocx has seen your workers settle into. It takes no arguments beyond the position you are confirming: the mailbox is yours, and there is no way to name another. Reach for it when you start a turn, when you have finished a piece of work, and whenever nocx tells you that you have new messages. Mail waits, it does not interrupt, so what was said or seen is only told to you when you look.",
 		// OBSERVE, and for workers.say's reason read from the other end. Taking a
 		// message out of your own mailbox exercises no authority over anything
 		// but your own reading position: it starts nothing, ends nothing, and
-		// names nothing outside the participant the run already is.
+		// names nothing outside the participant (or the session) the run
+		// already is.
 		Effect: []content.Effect{content.EffectObserve},
-		// A COORDINATOR wrote it, which is an agent, so it is untrusted for
-		// exactly the reason the coordinator's own view of a worker is.
+		// A COORDINATOR wrote the text, and nocx wrote the observations, so the
+		// result is untrusted for exactly the reason the coordinator's own view
+		// of a worker is: an agent's words, and a screen reading an agent's own
+		// screen may have produced.
 		OutputTrust:  OutputTrustUntrusted,
 		ResultBound:  ResultBound{MaxBytes: 16 << 10, Truncation: TruncationDropTail},
 		Deadline:     10 * time.Second,
 		Cancellation: CancellationReturnError,
-		// A PARTICIPANT, addressed as a sub-scope of ResourceWorkspace per
-		// A11 — see resourceParticipantWorkspace for why that is the kind and
-		// why it is the workspace rather than the pane. It is also what keeps
-		// this declaration off every coordinator's offer: nothing else mints a
-		// workspace scope, so only the grant the endpoint authorizer builds
-		// for a worker reaches this tool at all.
+		// A PARTICIPANT, addressed as a sub-scope of ResourceWorkspace per A11 —
+		// see resourceParticipantWorkspace for why that is the kind and why it
+		// is the workspace rather than the pane.
+		//
+		// SINCE nocx-luqz9.2 THIS IS ALSO WHAT OFFERS THE CALL TO A COORDINATOR,
+		// and the coordinator's grant was given the same scope for it (see
+		// internal/app's callerGrant). The kind is doing two jobs now, and the
+		// sentence that used to say the opposite is worth keeping the shape of:
+		// what keeps this call off an ORDINARY RUN is that no ordinary run's
+		// fence carries a workspace scope — the kernel's per-run mint
+		// (internal/transport's runGrantFor) names session, path, content,
+		// destination and environment and no workspace — so a run that is
+		// neither somebody's worker nor somebody's coordinator is never offered
+		// it, and nothing has to refuse it.
 		ResourceKinds:    []content.ResourceKind{content.ResourceWorkspace},
 		ResolveResources: resourceParticipantWorkspace,
 		Executes:         InGo,
 		Params:           "workers.inbox.schema.json",
-		// The OTHER capability. This is the only declaration that narrows to a
-		// participant, and it is what makes A8's two types load-bearing rather
-		// than decorative: a coordinator's run has no participant identity, so
-		// this narrow refuses it.
-		Narrow: narrowWorkerParticipant,
+		// The OTHER capability, and now the other one TOO. This is still the
+		// only declaration that narrows to a participant — which is what makes
+		// A8's two types load-bearing rather than decorative, since a
+		// coordinator's run has no participant identity and a worker's grant
+		// reaches neither the session kinds nor the environment — but the narrow
+		// chooses between the two on the run's own identity, because reading your
+		// own mailbox is one act with two holders.
+		Narrow: narrowWorkerMailbox,
 	},
 	{
 		Name:        "workers.close",

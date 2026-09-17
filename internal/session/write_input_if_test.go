@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -210,4 +211,73 @@ func TestWriteInputIf_RefusesARefusedQueue(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+// TestWriteInputIf_KeepsItsPlaceInTheQueue pins the ordering guarantee, and it
+// is constructed so that nothing about the ordering is raced for: the condition
+// below runs INSIDE the drain, immediately before the write, and enqueues the
+// "later input" there — so the marker enters the queue after the conditioned
+// byte has been dequeued, and FIFO makes the recorded order the assertion.
+//
+// The property matters because this queue carries the USER's input: a command
+// line typed after an interrupt must reach the terminal after it, never instead
+// of it, and a discarded interrupt must not take the place of anything behind
+// it — or the queue would lose input the person typed.
+func TestWriteInputIf_KeepsItsPlaceInTheQueue(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		holds     bool
+		wantBytes []string
+	}{
+		{
+			name:      "a written byte is written before the input queued behind it",
+			holds:     true,
+			wantBytes: []string{"MARK-AFTER"},
+		},
+		{
+			name:      "a discarded byte is dropped in place and the input behind it still lands",
+			holds:     false,
+			wantBytes: []string{"MARK-AFTER"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := newRecordingChannel()
+			reg, sess := openWith(t, ch)
+			defer func() { _ = reg.Close(sess.ID()) }()
+
+			written, err := sess.WriteInputIf(context.Background(), []byte("CONDITIONED"), func() bool {
+				// Enqueued at the one moment that is provably after this item
+				// has left the queue and before its verdict.
+				if !sess.EnqueueWrite([]byte("MARK-AFTER")) {
+					t.Error("the marker was refused with a queue that had room")
+				}
+				return tc.holds
+			})
+			if err != nil {
+				t.Fatalf("WriteInputIf: %v", err)
+			}
+			if written != tc.holds {
+				t.Fatalf("written = %v, want %v", written, tc.holds)
+			}
+			waitForFrames(t, ch, 1+boolToInt(tc.holds))
+
+			ch.mu.Lock()
+			order := append([]string(nil), ch.got...)
+			ch.mu.Unlock()
+			want := append([]string(nil), tc.wantBytes...)
+			if tc.holds {
+				want = append([]string{"CONDITIONED"}, want...)
+			}
+			if strings.Join(order, "|") != strings.Join(want, "|") {
+				t.Fatalf("the channel saw %v, want %v", order, want)
+			}
+		})
+	}
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

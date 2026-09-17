@@ -316,6 +316,33 @@ type Session interface {
 	// must not park the caller forever, so an expiry is reported as an error
 	// like any other refusal. Callers that must not wait at all — the
 	// transport readLoop — keep using EnqueueWrite.
+	//
+	// WHAT THIS DOES AND DOES NOT GUARANTEE, exactly. What it guarantees, and
+	// all it guarantees:
+	//
+	//   - ORDER. The payload keeps the position it was queued in, because it
+	//     is an item on the one queue writeLoop drains one job at a time. A
+	//     condition that goes false is decided IN PLACE — the payload is
+	//     discarded and the items behind it are written, in their own order,
+	//     exactly as they would have been — so nothing can be re-ordered
+	//     around it, and nothing queued after it can reach the channel first.
+	//     That matters because the queue carries the USER's input: a later
+	//     command line can only be written after this byte, never instead of
+	//     it or ahead of it.
+	//   - The condition is asked on the writing goroutine, immediately before
+	//     the channel write, so a payload whose addressee has gone is decided
+	//     against the state at the write rather than at the call.
+	//
+	// What it does NOT guarantee: atomicity between the condition and the
+	// write itself. The two live in different domains — this queue writes to a
+	// terminal, the condition reads whatever the caller cares about (for the
+	// transport, the lifecycle kernel's attempt) — and no lock spans both, so
+	// the addressee can still leave in the window between the answer and the
+	// syscall. That window is one write(2) wide; it is the same window a
+	// person's own keystroke has, and it is the reason a byte that arrives
+	// after its command ended must be harmless on the far side (an interrupt
+	// into an idle line is discarded by the line editor) rather than assumed
+	// impossible here.
 	WriteInputIf(ctx context.Context, p []byte, holds func() bool) (bool, error)
 	// EffectiveSize is the geometry this session's channel is running at —
 	// the backend's own conclusion, never the client's claim (nocx-eidfb.1).

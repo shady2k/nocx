@@ -276,13 +276,23 @@ func (s *heldStopStand) awaitUndelivered(t *testing.T) signalUndeliveredParams {
 				t.Fatalf("socket closed before session.signalUndelivered arrived%s", socketClosedWhy)
 			}
 			var n struct {
-				Method string                  `json:"method"`
-				Params signalUndeliveredParams `json:"params"`
+				Method string          `json:"method"`
+				Params json.RawMessage `json:"params"`
 			}
 			if json.Unmarshal(msg, &n) != nil || n.Method != "session.signalUndelivered" {
 				continue
 			}
-			return n.Params
+			// AGENTS.md testing rule 5: the shape is declared in contracts/
+			// and validated against the REAL frame off the real socket — a
+			// payload this test built itself would only prove the schema is
+			// satisfiable.
+			validateJSON(t, loadSchema(t, "session.signalUndelivered.schema.json"), n.Params,
+				"session.signalUndelivered, over the wire")
+			var params signalUndeliveredParams
+			if err := json.Unmarshal(n.Params, &params); err != nil {
+				t.Fatalf("session.signalUndelivered params: %v", err)
+			}
+			return params
 		case <-time.After(100 * time.Millisecond):
 		}
 	}

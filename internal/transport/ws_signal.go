@@ -329,6 +329,16 @@ func (p sessionProtectedForeground) StopTarget() (foregroundTarget, bool) {
 // The wait for that answer is bounded by the request's own context and by the
 // cooperative grace the ladder waits: a channel that never answers must not
 // park a delivery, and an answer that never came is reported as not written.
+//
+// WHAT THAT DOES NOT CLAIM: the check and the write are not atomic with the
+// kernel's attempt state. No lock spans the terminal's writer and the
+// lifecycle kernel, so the attempt can still leave `open` between the answer
+// and the syscall — a window one write(2) wide. What the ordering DOES give is
+// that this byte cannot overtake, or be overtaken by, anything else on this
+// session's input path: it keeps its place in the one queue writeLoop drains,
+// so a command line typed after it reaches the terminal after it (and a later
+// attempt cannot start before this one has left `open`, which is the state the
+// check refuses).
 func (p sessionProtectedForeground) Interrupt(attempt lifecycle.AttemptID) interruptResult {
 	grace := p.s.effectiveRunLease().SignalGrace
 	if grace <= 0 {

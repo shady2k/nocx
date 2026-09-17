@@ -98,7 +98,15 @@ type workerStand struct {
 	lanes     *sessionRegistry
 	report    *workerReporter
 	record    *workers.Registrar
-	mu        sync.Mutex
+	// The pieces record was built from, kept so a test can build a SECOND
+	// record over the same seams with one of them swapped — the shape a test
+	// needs to make a single half of a close fail while everything else is
+	// the product's (nocx-xn63t.4.6).
+	spawner *workerSpawner
+	sup     *workerSupervisor
+	tabs    *workerTabs
+	log     log.Logger
+	mu      sync.Mutex
 }
 
 func newWorkerStand(t *testing.T, opts ...workers.Option) *workerStand {
@@ -164,23 +172,36 @@ func newWorkerStand(t *testing.T, opts ...workers.Option) *workerStand {
 		now: func() time.Time { return time.UnixMilli(1_700_000_000_000).UTC() },
 	}
 	sup := &workerSupervisor{sessions: reg, log: logger}
+	tabs := newWorkerTabs()
+	spawner := &workerSpawner{
+		layout: db.Layout(), opener: tp, sessions: reg,
+		enrolments: enrol, workspace: string(workspace.Default),
+		// announce is the product's own push to a connected renderer
+		// (nocx-ui8q6.3), and its tab-close counterpart below is the same
+		// server: a stand that wired a recording double instead would prove
+		// nothing about the frame a window actually reads.
+		announce: tp,
+		tabs:     tabs,
+		log:      logger,
+	}
 	record := workers.NewRegistrar(
 		workerStore,
-		&workerSpawner{
-			layout: db.Layout(), opener: tp, sessions: reg,
-			enrolments: enrol, workspace: string(workspace.Default), log: logger,
-		},
+		spawner,
 		enrol, sup,
 		append([]workers.Option{
 			// Short, because every test here supplies the enrolment itself or
 			// deliberately withholds it; the number bounds the withheld case
 			// and decides nothing about the others.
 			workers.WithEnrolmentDeadline(2 * time.Second),
-			// The product's closer, over the real registry: a close here has
-			// to end a real session and let the exit reach the record by the
-			// ordinary path, which is the only thing that makes "close
-			// writes no state" checkable.
-			workers.WithCloser(&workerCloser{sessions: reg, log: logger}),
+			// The product's closer, over the real registry and the real
+			// layout: a close here has to end a real session, take the
+			// participant's tab out of the window, and let the exit reach the
+			// record by the ordinary path — which is what makes "close writes
+			// no state in the RECORD" checkable (nocx-xn63t.4.6 added the
+			// tab half; the record is still not this closer's to write).
+			workers.WithCloser(&workerCloser{
+				sessions: reg, layout: db.Layout(), tabs: tabs, announce: tp, log: logger,
+			}),
 		}, opts...)...,
 	)
 	report.declare = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, d workers.Declaration) error {
@@ -196,6 +217,7 @@ func newWorkerStand(t *testing.T, opts ...workers.Option) *workerStand {
 	*stand = workerStand{
 		db: db, workerStore: workerStore, dir: dir, ptys: ptys, tp: tp, reg: reg,
 		enrol: enrol, lanes: lanes, report: report, record: record,
+		spawner: spawner, sup: sup, tabs: tabs, log: logger,
 	}
 	stand.ensureWorker(t, "worker-1", "sess-coordinator")
 	return stand

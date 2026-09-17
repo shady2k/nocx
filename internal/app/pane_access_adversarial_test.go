@@ -24,13 +24,18 @@ package app
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/shady2k/nocx/internal/assistant"
+	helperclient "github.com/shady2k/nocx/internal/helper/client"
+	helperhost "github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	helpersession "github.com/shady2k/nocx/internal/helper/session"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/sessionruntime"
 	"github.com/shady2k/nocx/internal/workers"
@@ -510,5 +515,515 @@ func TestSixteenConcurrentResolvesCompleteWhileOneRevokeBlocksOnItsHelperForever
 	}
 	if got := atomic.LoadInt32(&completed); got != n {
 		t.Fatalf("completed = %d, want %d", got, n)
+	}
+}
+
+// ── item 1b: a revocation that COMPLETED while the intent was still held ──
+
+// nocx-6q1uh.19. Item 1 above exercises the interval on the far side of the
+// helper's receipt — the intent is already admitted and on its way to the
+// writer, and access.go leaves it to finish. This section exercises the
+// interval BEFORE the receipt, which is the one §7.2's epoch is for and the
+// one nothing covered: the coordinator's authority check has passed, the
+// intent is parked between that check and the session.intent call, the
+// revocation runs all the way to its acknowledgement, and only THEN is the
+// intent sent — carrying the epoch its own check observed. The helper must
+// refuse it at receipt (access_revoked) with zero bytes reaching the program.
+//
+// The epoch enforcement under test is tokenGate
+// (internal/helper/session/tokens.go) and it runs inside the real owner, so
+// the stand below is a real internal/helper/session Service on a real host
+// peer reached through a real helperclient — the recipe
+// session_close_releases_helper_budget_test.go already uses for a
+// helper-hosted session — rather than a fake that would only be agreeing with
+// its own author about what the gate says. The ONE injected seam is a carrier
+// that parks Intent before it ever reaches the helper: the "test hook"
+// holding the intent is a channel and never a sleep, and nothing in it decides
+// anything about epochs.
+
+// heldIntentProcess is the program this stand's session writes to: it keeps
+// its pipe open, produces nothing, and records every byte the owner's write
+// path hands it — which is what "zero bytes" is read off, rather than a
+// returned field.
+//
+// It answers rawReader (WaitReadable/RawReadUntilAgain, owner.go) the way a
+// local PTY does, and that is load-bearing rather than incidental:
+// hasReadBarrier (owner_ssh.go) is what decides whether an intent may commit
+// at all, so a process without it would refuse EVERY intent in this section
+// no_read_barrier and these tests would then be measuring the wrong gate.
+//
+// Its read side mirrors a real PTY's shape rather than simplifying it: a
+// readiness EDGE the owner waits on, and a drain that reports EOF once the
+// process is gone. A fixture whose WaitReadable returned an error instead of
+// waking the drain would leave the owner's own eofSeen false forever, and
+// Service.Close — which waits for the owner goroutine to exit — would never
+// return (measured: a 10-minute package timeout from a test that had already
+// recorded its own failure).
+type heldIntentProcess struct {
+	mu     sync.Mutex
+	writes [][]byte
+	ready  chan struct{}
+	ended  chan struct{}
+	closed sync.Once
+	pid    int
+}
+
+func newHeldIntentProcess(pid int) *heldIntentProcess {
+	return &heldIntentProcess{ready: make(chan struct{}, 1), ended: make(chan struct{}), pid: pid}
+}
+
+func (p *heldIntentProcess) Read([]byte) (int, error) { <-p.ended; return 0, io.EOF }
+
+func (p *heldIntentProcess) Write(b []byte) (int, error) {
+	p.mu.Lock()
+	p.writes = append(p.writes, append([]byte(nil), b...))
+	p.mu.Unlock()
+	return len(b), nil
+}
+
+func (p *heldIntentProcess) Close() error {
+	p.closed.Do(func() {
+		close(p.ended)
+		p.wake() // the drain that reports EOF: a real PTY's fd becomes readable
+	})
+	return nil
+}
+
+// wake raises the readiness edge without blocking on a drain that has not
+// arrived yet (the shape runReadiness itself relies on).
+func (p *heldIntentProcess) wake() {
+	select {
+	case p.ready <- struct{}{}:
+	default:
+	}
+}
+
+// WaitReadable parks until there is something to drain or the read is
+// cancelled. It consumes nothing: the owner's own drain (drainLocal) reads.
+func (p *heldIntentProcess) WaitReadable(ctx context.Context) error {
+	select {
+	case <-p.ready:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// RawReadUntilAgain delivers nothing and answers EOF exactly once the
+// process has ended — rawReaderFakeProcess's own contract, which is what
+// makes the owner's eofSeen true and lets it exit.
+func (p *heldIntentProcess) RawReadUntilAgain([]byte, func([]byte)) (bool, error) {
+	select {
+	case <-p.ended:
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func (p *heldIntentProcess) Resize(context.Context, uint16, uint16, uint16, uint16) error {
+	return nil
+}
+func (p *heldIntentProcess) Done() <-chan struct{}                { return p.ended }
+func (p *heldIntentProcess) WaitErr() (error, bool)               { return nil, false }
+func (p *heldIntentProcess) Pid() int                             { return p.pid }
+func (p *heldIntentProcess) Shell() string                        { return "/bin/held-intent" }
+func (p *heldIntentProcess) ForegroundProcessGroup() (int, error) { return p.pid, nil }
+
+// written is every payload the write path handed this program, in order.
+func (p *heldIntentProcess) written() [][]byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([][]byte(nil), p.writes...)
+}
+
+// heldIntentSpawner is the helper's Spawner with nothing behind it: what these
+// tests ask is what the helper's own gate decides, so what a shell would print
+// is not part of them — the same substitution session_readopt_test.go's
+// scriptedSpawner makes, and for the same reason.
+type heldIntentSpawner struct {
+	mu    sync.Mutex
+	procs []*heldIntentProcess
+}
+
+func (s *heldIntentSpawner) Spawn(helpersession.SpawnRequest) (helpersession.Process, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := newHeldIntentProcess(5000 + len(s.procs))
+	s.procs = append(s.procs, p)
+	return p, nil
+}
+
+// only is the program this helper started, which every stand here expects to
+// be exactly one.
+func (s *heldIntentSpawner) only(t *testing.T) *heldIntentProcess {
+	t.Helper()
+	s.mu.Lock()
+	procs := append([]*heldIntentProcess(nil), s.procs...)
+	s.mu.Unlock()
+	if len(procs) != 1 {
+		t.Fatalf("%d programs were started, want exactly 1", len(procs))
+	}
+	return procs[0]
+}
+
+// heldIntentCarrier is the per-session paneHelpers handle this section's hub
+// resolves: the app's own helperPaneClient (panescreen.go) — the adapter the
+// production lookup returns for a session it already located — with ONE
+// injected seam. Intent parks at the boundary between the coordinator's own
+// checks and the RPC's arrival at the helper, which is exactly the interval
+// §7.2's access epoch is for; AccessBump, Snapshot, Target and IntentStatus
+// pass straight through, so the revocation this section drives is the real
+// one and no gate is re-implemented here.
+type heldIntentCarrier struct {
+	inner helperPaneClient
+
+	// hold parks Intent until release is closed. It is set once, before the
+	// call under test starts.
+	hold    bool
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+
+	mu      sync.Mutex
+	intents []proto.IntentParams
+}
+
+func (h *heldIntentCarrier) Intent(ctx context.Context, sessionID string, p proto.IntentParams) (proto.IntentResult, error) {
+	h.mu.Lock()
+	h.intents = append(h.intents, p)
+	h.mu.Unlock()
+	if h.hold {
+		h.once.Do(func() { close(h.entered) })
+		select {
+		case <-h.release:
+		case <-ctx.Done():
+			return proto.IntentResult{}, ctx.Err()
+		}
+	}
+	return h.inner.Intent(ctx, sessionID, p)
+}
+
+// sent is every intent handed to this seam, in order — read BEFORE the held
+// one is released, which is what makes "the intent carries the epoch its own
+// check observed" an observation rather than a claim about what the
+// coordinator meant to send. Its LENGTH is asserted too: one call to
+// session.keys spends its target at most once (spec §6.2), and a second
+// intent reaching the helper would be that promise broken.
+func (h *heldIntentCarrier) sent(t *testing.T) []proto.IntentParams {
+	t.Helper()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.intents) == 0 {
+		t.Fatal("no intent reached the helper seam")
+	}
+	return append([]proto.IntentParams(nil), h.intents...)
+}
+
+func (h *heldIntentCarrier) AccessBump(ctx context.Context, sessionID string, above uint64) (uint64, error) {
+	return h.inner.AccessBump(ctx, sessionID, above)
+}
+
+func (h *heldIntentCarrier) Snapshot(ctx context.Context, sessionID string) (proto.SnapshotResult, error) {
+	return h.inner.Snapshot(ctx, sessionID)
+}
+
+func (h *heldIntentCarrier) Target(ctx context.Context, sessionID string, p proto.TargetParams) (proto.TargetResult, error) {
+	return h.inner.Target(ctx, sessionID, p)
+}
+
+func (h *heldIntentCarrier) IntentStatus(ctx context.Context, sessionID, tokenID string) (proto.IntentStatusResult, error) {
+	return h.inner.IntentStatus(ctx, sessionID, tokenID)
+}
+
+var _ paneHelpers = (*heldIntentCarrier)(nil)
+
+// heldIntentStand is one real helper, one of its sessions, and the
+// coordinator-side path session.keys spends that session's targets through.
+type heldIntentStand struct {
+	client  *helperclient.Client
+	spawner *heldIntentSpawner
+	carrier *heldIntentCarrier
+
+	keys *paneKeys
+	hub  *paneAccessHub
+	// access is the capability the adapter would have bound before dispatch
+	// (design §7.1) — resolved through the same Registrar session.keys'
+	// own re-check uses.
+	access *DescendantPaneAccess
+
+	// sessionID is what the coordinator names this session by (its own
+	// vocabulary, exactly as rec.SessionID carries it); the carrier is the
+	// half that maps it to the helper that holds the pane and to that
+	// helper's own HostSessionID, which is what paneScreen.owner does in
+	// production.
+	sessionID string
+	hostID    helperclient.HostSessionID
+	tokenID   string
+	// epoch is the access epoch the snapshot this target was minted from
+	// reported, i.e. the one the coordinator's own check observed.
+	epoch uint64
+}
+
+// newHeldIntentStand builds the stand: a real helper session service on a real
+// host peer, a real helperclient over a socketpair, a spawned session, and a
+// target minted from that session's own first snapshot.
+func newHeldIntentStand(t *testing.T) *heldIntentStand {
+	t.Helper()
+	ctx := context.Background()
+	logger := discardLogger(t)
+	const generation = "6q1uh19heldrev00000000000000000"
+
+	spawner := &heldIntentSpawner{}
+	svc := helpersession.New(helpersession.Options{
+		Generation: proto.GenerationID(generation),
+		Spawner:    spawner,
+		Log:        logger,
+	})
+	serverConn, clientConn := net.Pipe()
+	peer := helperhost.New(serverConn, serverConn, generation, "instance-a", logger)
+	peer.Register(svc)
+	release := svc.Bind(peer)
+	served := make(chan error, 1)
+	go func() { served <- peer.Serve(ctx) }()
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		// Bounded, because Service.Close waits for the owner goroutine to see
+		// EOF (hostSession.stop / owner.stop): a fixture that fails to produce
+		// one hangs here rather than failing, and this harness's own first
+		// draft did exactly that — a test that had already recorded its
+		// failure cost the PACKAGE its 10-minute timeout instead of five
+		// seconds. The bound is a safety net against a genuine hang, never a
+		// correctness assertion (watchdogBound's own note).
+		closed := make(chan struct{})
+		go func() {
+			release()
+			svc.Close()
+			close(closed)
+		}()
+		select {
+		case <-closed:
+		case <-time.After(watchdogBound):
+			t.Error("the helper service never finished closing — an owner goroutine is still running")
+		}
+		select {
+		case err := <-served:
+			if err != nil {
+				t.Errorf("helper host: %v", err)
+			}
+		case <-time.After(watchdogBound):
+			t.Error("the helper host never returned after the service closed")
+		}
+	})
+
+	c, err := helperclient.Dial(ctx, helperclient.Config{
+		Exec:        helperclient.NewSocketConn(clientConn),
+		ExpectHash:  generation,
+		SentinelTTL: time.Second,
+		Log:         logger,
+	})
+	if err != nil {
+		t.Fatalf("helperclient.Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	entry, err := c.Spawn(ctx, proto.SpawnParams{Cwd: "/", Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("spawn on the helper: %v", err)
+	}
+	hostID := entry.HostSessionID
+
+	// The read path's own two calls, in the order paneReader.Read makes them
+	// (session_targets.go): a consistent snapshot, then a target minted
+	// against THAT snapshot id and no other.
+	snap, err := c.Snapshot(ctx, hostID)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	target, err := c.Target(ctx, proto.TargetParams{
+		Session:    proto.HostSessionID{Generation: proto.GenerationID(hostID.Generation), Session: hostID.Session},
+		SnapshotID: snap.SnapshotID,
+		Kind:       string(sessionruntime.TargetInput),
+		First:      0,
+		Last:       0,
+	})
+	if err != nil {
+		t.Fatalf("target: %v", err)
+	}
+
+	carrier := &heldIntentCarrier{
+		inner:   helperPaneClient{client: c, id: hostID},
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	registrar, _ := newGroupTwoCallersRecord()
+	w, err := registrar.Register(ctx, workers.RegisterRequest{
+		CoordinatorSession: "sess-D", Role: workers.RoleWorker,
+		Task: "t", Command: "agent", Environment: "env-local",
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	sessionID := string(w.Participant.ID)
+
+	lookup := &fakeLookup{helpers: map[string]paneHelpers{sessionID: carrier}}
+	// The production clock, not a fake: the commitBy this coordinator promises
+	// is expressed in internal/monoclock's own units and the helper beside it
+	// reads the SAME clock (owner.go's nowMono), which is §7.2's premise for a
+	// local helper — a fake started at zero would put every intent in this
+	// stand past its deadline before it was ever sent.
+	hub := newPaneAccessHub(registrar, lookup, systemMonoClock{})
+	hub.setEpoch(sessionID, snap.AccessEpoch)
+	access := hub.Bind("sess-D", session.Identity{InstanceID: "backend-A", Epoch: 1}, EndpointAuthority{AdmissionEpoch: 1})
+	reach, err := access.Resolve(ctx, sessionID, workers.EffectSendInput)
+	if err != nil {
+		t.Fatalf("resolve before revocation: %v", err)
+	}
+	// The record paneReader.Read keeps for a mint (session_targets.go): the
+	// capability, the chain that proved reach, the epoch the SNAPSHOT carried,
+	// and the mint's own token.
+	reader := &fakeKeysReader{records: map[string]targetRecord{
+		target.TokenID: {
+			Access: access, SessionID: sessionID, Chain: reach.Chain, AccessEpoch: snap.AccessEpoch,
+			View: assistant.TargetView{Token: target.Token, TokenID: target.TokenID, Kind: sessionruntime.TargetInput},
+		},
+	}}
+	return &heldIntentStand{
+		client: c, spawner: spawner, carrier: carrier,
+		keys: newPaneKeys(reader, hub), hub: hub, access: access,
+		sessionID: sessionID, hostID: hostID, tokenID: target.TokenID, epoch: snap.AccessEpoch,
+	}
+}
+
+// keyOutcome is one session.keys call's answer, carried off its own goroutine
+// so the test can run a revocation while the call is parked.
+type keyOutcome struct {
+	res assistant.KeysResult
+	err error
+}
+
+// send starts one session.keys write on its own goroutine.
+func (s *heldIntentStand) send(text string) <-chan keyOutcome {
+	done := make(chan keyOutcome, 1)
+	payload := text
+	go func() {
+		res, err := s.keys.Send(context.Background(), s.access, assistant.KeysRequest{
+			SessionID: s.sessionID, TokenID: s.tokenID, Text: &payload,
+		})
+		done <- keyOutcome{res, err}
+	}()
+	return done
+}
+
+func (s *heldIntentStand) await(t *testing.T, done <-chan keyOutcome) keyOutcome {
+	t.Helper()
+	select {
+	case out := <-done:
+		return out
+	case <-time.After(watchdogBound):
+		t.Fatal("session.keys never returned")
+		return keyOutcome{}
+	}
+}
+
+// TestAnIntentHeldBeforeItsHelperCallIsRefusedByACompletedRevocation is spec
+// §7.2's "revocation between authority check and commit" as an assertion: the
+// intent passes its own authority check, is held before session.intent, the
+// revocation runs to confirmation, and only then does the helper receive it —
+// carrying the epoch its check observed, which the completed revocation has
+// already superseded. The helper refuses it AT RECEIPT, and not one byte
+// reaches the program.
+func TestAnIntentHeldBeforeItsHelperCallIsRefusedByACompletedRevocation(t *testing.T) {
+	stand := newHeldIntentStand(t)
+	stand.carrier.hold = true
+
+	done := stand.send("x")
+	select {
+	case <-stand.carrier.entered:
+	case <-time.After(watchdogBound):
+		t.Fatal("session.keys never reached the helper seam — its authority check did not pass, or admission was already closed")
+	}
+	// Parked BEFORE session.intent: nothing has reached the helper yet, and
+	// what is about to be sent is the epoch its own check read out of the
+	// target record, never a fresher one.
+	if sent := stand.carrier.sent(t); len(sent) != 1 || sent[0].AccessEpoch != stand.epoch {
+		t.Fatalf("intents at the seam = %+v, want exactly one carrying AccessEpoch=%d (the epoch its own check observed)", sent, stand.epoch)
+	}
+
+	// The revocation, run to its acknowledgement with the intent still held:
+	// there is nothing queued on the helper for its sweep to find — the intent
+	// has not even arrived — so the ack is immediate and waits on nothing.
+	if res := stand.hub.revoke(context.Background(), []string{stand.sessionID}); res[stand.sessionID] != "ack" {
+		t.Fatalf("revoke result = %v, want ack (nothing was queued behind an intent that had not arrived)", res)
+	}
+	if got := stand.hub.aboveFor(stand.sessionID); got != stand.epoch+1 {
+		t.Fatalf("epoch in force after the ack = %d, want %d", got, stand.epoch+1)
+	}
+
+	// Only now is the intent sent — on the epoch its check observed.
+	close(stand.carrier.release)
+	out := stand.await(t, done)
+	if out.err != nil {
+		t.Fatalf("Send: %v", out.err)
+	}
+	if out.res.State != "refused" || out.res.Refusal == nil || out.res.Refusal.Cause != "access_revoked" {
+		t.Fatalf("Send result = %+v, want refused/access_revoked", out.res)
+	}
+	if out.res.BytesWritten != 0 {
+		t.Fatalf("BytesWritten = %d, want 0", out.res.BytesWritten)
+	}
+	// Zero bytes on the pane's write path, read off the writer itself.
+	if got := stand.spawner.only(t).written(); len(got) != 0 {
+		t.Fatalf("the program was written to despite the refusal: %q", got)
+	}
+
+	// And the refusal happened IN THE HELPER, at receipt: its own record of
+	// the token carries the terminal outcome. A refusal decided coordinator-
+	// side (admitting, StillHolds) leaves the token unknown here, so this is
+	// what separates "the receipt gate refused it" from "the coordinator never
+	// asked". State is the RECORDED spelling (hostSession.intentStatus
+	// answers r.State), and RegionOmitted is what marks the answer as coming
+	// from that record rather than from a fresh attempt re-reading a screen.
+	status, err := stand.client.IntentStatus(context.Background(), stand.hostID, stand.tokenID)
+	if err != nil {
+		t.Fatalf("intent status: %v", err)
+	}
+	if status.State != "refused" || status.Result == nil || status.Result.State != "refused" ||
+		status.Result.Refusal == nil || status.Result.Refusal.Cause != "access_revoked" ||
+		!status.Result.Refusal.RegionOmitted {
+		t.Fatalf("the helper's own record of the token = %+v, want the terminal refused/access_revoked it decided at receipt", status)
+	}
+}
+
+// TestAnIntentAlreadyReceivedByTheHelperExecutesAndALaterRevocationAcksAnyway
+// is the pair the schedule above is measured against, over the same real
+// helper: the identical call whose intent is NOT held reaches the helper while
+// its epoch is still current, so the same gate lets it through and the write
+// lands. The revocation that follows finds nothing queued — the intent already
+// executed — and acks. Together the two are one schedule with one ordering
+// changed, which is what makes the epoch, and not the token or the session,
+// the whole of the difference between refused and executed.
+func TestAnIntentAlreadyReceivedByTheHelperExecutesAndALaterRevocationAcksAnyway(t *testing.T) {
+	stand := newHeldIntentStand(t)
+
+	out := stand.await(t, stand.send("x"))
+	if out.err != nil {
+		t.Fatalf("Send: %v", out.err)
+	}
+	if out.res.State != "executed" || out.res.BytesWritten != 1 {
+		t.Fatalf("Send result = %+v, want executed with 1 byte", out.res)
+	}
+	if got := stand.carrier.sent(t); len(got) != 1 || got[0].AccessEpoch != stand.epoch {
+		t.Fatalf("intents at the seam = %+v, want exactly one carrying AccessEpoch=%d (the epoch its check observed)", got, stand.epoch)
+	}
+	if got := stand.spawner.only(t).written(); len(got) != 1 || string(got[0]) != "x" {
+		t.Fatalf("the program was written %q, want exactly one write of the intent's own payload", got)
+	}
+
+	if res := stand.hub.revoke(context.Background(), []string{stand.sessionID}); res[stand.sessionID] != "ack" {
+		t.Fatalf("revoke result = %v, want ack (the intent it would have swept had already executed)", res)
+	}
+	if got := stand.spawner.only(t).written(); len(got) != 1 {
+		t.Fatalf("the revocation itself wrote to the program: %q", got)
 	}
 }

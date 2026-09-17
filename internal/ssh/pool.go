@@ -145,6 +145,126 @@ func (c *pooledSSHConn) SendRequest(name string, wantReply bool, payload []byte)
 // a transport that cannot be probed is the honest answer.
 var errNoGlobalRequests = errors.New("ssh: transport carries no global requests")
 
+// sessionReleaseBudget bounds the round trip awaitSessionRelease spends. It is
+// a BACKSTOP for a peer that answers nothing, never a wait: the barrier's
+// verdict is the far side's own reply, and the budget only decides how long
+// silence may park a session open that would otherwise park inside
+// gossh.Client.NewSession, which takes neither a context nor a deadline.
+const sessionReleaseBudget = 10 * time.Second
+
+// newSession opens a session channel on this connection, re-asking ONCE when
+// the far side refuses the request.
+//
+// THE DEFECT THIS EXISTS FOR (nocx-xn63t.4.10). A far side bounds the sessions
+// it grants one connection at a time — OpenSSH's MaxSessions, and a subsystem
+// (sftp) counts as one — and its release of a session the client has just
+// CLOSED is not complete when the next request arrives. The second request is
+// then refused, and what a caller is told is `connect failed (open failed)`;
+// on the live-sshd fixture at MaxSessions 1 with the previous session closed
+// immediately before, that was 59 refusals in 60 rounds, and 3 grants in 10 at
+// a zero delay against 10 of 10 once 1 ms had passed. The shell-integration
+// bundle publish asks ONE pooled connection for two sessions by design (a probe
+// for the account's home, then an sftp channel — AD-4, one authentication for
+// one machine), so at MaxSessions 1 the sftp open was the one refused and the
+// session never integrated.
+//
+// WHY A RETRY AND NOT A WAIT BEFORE EVERY SESSION. A far side's DEFAULT is ten
+// sessions on one connection (OpenSSH's own `maxsessions 10`, read back with
+// `sshd -T` in CI's image and on the host), and nocx holds one or two at a time
+// — a pane's shell, a lane, a probe, an sftp channel. So the refusal is the
+// exceptional path, and a barrier paid before every session after the first
+// would tax every pane on a WAN host forever to serve a host that allows one.
+// Paying nothing while nothing is refused is the whole reason this shape was
+// chosen over the pre-emptive one, which measured 30 of 30 green here and is
+// recorded in this bead's history.
+//
+// WHY THE RETRY IS NOT A RETRY ON TIMING (AGENTS.md forbids one). It is gated
+// on an observable refusal, and the wait between the two attempts is an ANSWER
+// from the far side (awaitSessionRelease) rather than a duration: the server
+// cannot read the second request before it has finished the pass that wrote the
+// reply, and the session the client just closed was released by then. A bare
+// retry with nothing in between was measured at 59 of 59 here as well, because
+// the refusal's own reply happens to order the release too — that is a property
+// of this server's loop order, and not one to depend on when an answer costs
+// the same and states the ordering outright.
+//
+// A REFUSAL THAT IS NOT THE RELEASE RACE IS REPORTED UNCHANGED, after exactly
+// one re-ask: a host that will never grant the session (policy, a restricted
+// shell) or one whose session is genuinely held by somebody else answers the
+// same way as the release race (measured: both are `connect failed (open
+// failed)`, reason code `ConnectionFailed`, so the client cannot tell them
+// apart), and the caller sees that second refusal — the same class it would
+// have seen from a single attempt.
+func (c *pooledSSHConn) newSession() (*gossh.Session, error) {
+	gclient, ok := c.client.(*gossh.Client)
+	if !ok {
+		// A pool whose dial factory was overridden with a fake (tests): the
+		// fake has no session channels to open, and saying so is better than
+		// reporting a nil-pointer panic from the type assertion above.
+		return nil, fmt.Errorf("ssh: pooled connection: %T carries no session channels", c.client)
+	}
+	sess, err := gclient.NewSession()
+	if err == nil {
+		return sess, nil
+	}
+	if !sessionRefused(err) {
+		return nil, err
+	}
+	if rerr := c.awaitSessionRelease(gclient); rerr != nil {
+		return nil, rerr
+	}
+	return gclient.NewSession()
+}
+
+// sessionRefused reports whether the far side refused the session channel
+// itself, which is the only class worth re-asking: the channel never opened, so
+// nothing about the connection has changed and the next attempt is the same
+// request made again.
+//
+// EVERY REASON counts, not one of them, and that is measured rather than
+// cautious: OpenSSH answers the release race and a session genuinely held by
+// somebody else identically (reason `connect failed`, message "open failed"),
+// while its own source names further reasons for the same decision — so a host
+// that spells a MaxSessions refusal `resource shortage` or `administratively
+// prohibited` must still get the one re-ask. Anything else — a subsystem the
+// host will not start, a transport that died — is not this class and is
+// reported as it is.
+func sessionRefused(err error) bool {
+	var openErr *gossh.OpenChannelError
+	return errors.As(err, &openErr)
+}
+
+// awaitSessionRelease waits for the far side to have answered one request on
+// this connection, which is what makes its release of the session a caller just
+// closed an ordered fact rather than a race — the wait between the two attempts
+// newSession makes (see it for the measurement and why this rather than a
+// delay).
+func (c *pooledSSHConn) awaitSessionRelease(gclient *gossh.Client) error {
+	// ANY answer counts, including the SSH_MSG_REQUEST_FAILURE an OpenSSH
+	// server sends for a request type it does not implement: the verdict is
+	// that the server ANSWERED, which is a completed pass of its loop, not the
+	// payload it carried.
+	finished, err := sendProbe(gclient, sessionReleaseBudget)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, errProbeSilent) {
+		return err
+	}
+	// A peer that answered NOTHING inside the budget is not one to ask for a
+	// session: gossh.Client.NewSession takes no context and no deadline, so the
+	// request would park with nothing left to end it. The answer is the one the
+	// keepalive prober already gives this state, for the same measured reason —
+	// closing the transport is the only thing that unparks the call — and the
+	// wait that follows is bounded by that close rather than by the budget
+	// (sendProbe's own comment: the probe stays parked until the connection
+	// goes away, and a caller that returns without closing leaks the goroutine
+	// instead).
+	_ = c.Close()
+	<-finished
+	return fmt.Errorf("ssh: the far side did not answer before the session was re-asked: %w", err)
+}
+
 // armKeepalive starts this connection's prober at most once, with whichever
 // caller's (interval, countMax, observe) reaches here first — see
 // keepaliveArmOnce's own comment for why "first" is a caller that actually

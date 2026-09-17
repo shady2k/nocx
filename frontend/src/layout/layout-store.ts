@@ -230,6 +230,31 @@ export class LayoutStore {
   }
 
   /**
+   * Fold a tab the BACKEND closed out of the cache (nocx-xn63t.4.6):
+   * workers.close took a participant's tab out of the window, arriving on
+   * workers.tabClosed rather than as this window's own tabs.close answer.
+   *
+   * Same merge applyRemoteTab performs, the other way round — filter the rows
+   * out, notify — because the cache does not care which call learned of a row
+   * leaving, only that it no longer holds it. The tab's PANES go with it and
+   * are found by their own column: a pane row names its tab, so a second list
+   * of them on the wire would be a second answer to "which panes does this tab
+   * hold", stale the first time a split arrived between the two.
+   *
+   * A tab this window never held is not an error and not a no-op: the filter
+   * finds nothing and the notification is simply satisfied — the cache and the
+   * backend already agree, which is the state every fold aims at.
+   */
+  applyRemoteTabClosed(tabId: string): void {
+    this.state = {
+      ...this.state,
+      tabs: this.state.tabs.filter((t) => t.id !== tabId),
+      panes: this.state.panes.filter((p) => p.tabId !== tabId),
+    }
+    this.changed()
+  }
+
+  /**
    * Create a workspace around a new pane — three ids, one call.
    *
    * CREATION IS ALWAYS CREATION-WITH-CONTENT (§4.1). "New workspace" mints

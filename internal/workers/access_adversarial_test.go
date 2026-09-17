@@ -21,6 +21,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // ── item 5: neighbours, plain shells, and a chain broken in the middle ─────
@@ -84,11 +85,23 @@ func TestNeighboursPlainShellsAndABrokenChainAreAllUnreachable(t *testing.T) {
 // is checked here strictly after Revoke has returned, for both a chain
 // resolved deterministically before the race and one resolved concurrently
 // with it, over 500 iterations (design §7.2).
+//
+// WHICH SIDE OF THE RACE A TRIAL PRODUCES IS PINNED, NOT HOPED FOR. Raced as
+// two goroutines started back to back, this trial was not reliable evidence of
+// anything: under the load this brief names it produced the revoke-first
+// ordering on every trial, the racing resolve was answered from the revoked
+// subtree every time, and the half of this test that asserts a chain resolved
+// DURING the race goes stale asserted nothing — measured 2026-09-17, 50 runs of
+// the trial under load on the unmodified branch, 50 failures, every one of them
+// at the count this test used to carry and none of them at the invariant
+// (nocx-xn63t.4.7). resolveAgainstRevoke below starts the revoke only once the
+// resolve is inside its critical section, so the resolve is the side that
+// commits first on every trial; the check immediately after it is where a trial
+// that did not get that ordering says so, rather than asserting nothing.
 func TestAChainAGrandchildsIntentAlreadyHeldGoesStaleTheInstantRevokeReturns(t *testing.T) {
 	const iterations = 500
 	ctx := context.Background()
-	checkedRacing := 0
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		h := newHarnessBound(t, 1000)
 		top := fmt.Sprintf("sess-C-%d", i)
 		w1Session := fmt.Sprintf("sess-w1-%d", i)
@@ -104,39 +117,73 @@ func TestAChainAGrandchildsIntentAlreadyHeldGoesStaleTheInstantRevokeReturns(t *
 			t.Fatalf("iteration %d: resolve before the race: %v", i, err)
 		}
 
-		var raceErr error
-		var raceChain Chain
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			reach, err := h.reg.Resolve(ctx, top, w2Session, EffectObserve)
-			raceErr = err
-			raceChain = reach.Chain
-		}()
-		go func() {
-			defer wg.Done()
-			if _, err := h.reg.Revoke(ctx, w1.ID, "racing intent"); err != nil {
-				t.Errorf("iteration %d: revoke: %v", i, err)
-			}
-		}()
-		wg.Wait()
+		raceChain, raceErr := resolveAgainstRevoke(t, h, top, w2Session, w1.ID)
 
 		if h.reg.StillHolds(ctx, before.Chain) {
 			t.Fatalf("iteration %d: a chain resolved strictly before the race still holds once Revoke returned", i)
 		}
-		if raceErr == nil {
-			checkedRacing++
-			if h.reg.StillHolds(ctx, raceChain) {
-				t.Fatalf("iteration %d: a chain resolved DURING the race still holds once Revoke returned", i)
-			}
-		} else if !errors.Is(raceErr, ErrNotReachable) {
-			t.Fatalf("iteration %d: racing resolve error = %v, want nil or ErrNotReachable", i, raceErr)
+		if raceErr != nil {
+			// The premise, not a claim about the product: the pin is what
+			// makes the racing resolve the side that commits first, and a
+			// trial that did not get that ordering has nothing to assert and
+			// says so here (nocx-xn63t.4.7's failure was this condition,
+			// counted rather than named).
+			t.Fatalf("iteration %d: the racing resolve was pinned to commit before the revoke and answered %v — this trial asserted nothing", i, raceErr)
+		}
+		if h.reg.StillHolds(ctx, raceChain) {
+			t.Fatalf("iteration %d: a chain resolved DURING the race still holds once Revoke returned", i)
 		}
 	}
-	if checkedRacing == 0 {
-		t.Fatal("no trial ever had the racing resolve succeed before the revoke committed — the racing half asserted nothing")
+}
+
+// resolveAgainstRevoke runs one trial of "a chain resolved while a revocation
+// of its grandparent is in flight", with the resolution pinned to commit
+// first, and answers what that resolve saw.
+//
+// The pin is memStore.duringResolve, which runs once inside the store call
+// resolveLocked makes while the Registrar holds storeMu across it. The revoke
+// is started from there, so it cannot take that mutex before the resolve has
+// read its chain, and the resolve is released only after the revoke is
+// contending for it — which keeps the two genuinely overlapped rather than
+// merely ordered, and is the one ordering this trial could not previously
+// produce. §7.2's mutex is what makes it legal: the revoke cannot move the
+// generations out from under the read it is waiting on.
+func resolveAgainstRevoke(t *testing.T, h *harness, controller, session string, root ParticipantID) (Chain, error) {
+	t.Helper()
+	ctx := context.Background()
+	resolveInLock := make(chan struct{})
+	release := make(chan struct{})
+	h.store.duringResolve = func() {
+		close(resolveInLock)
+		<-release
 	}
+
+	var (
+		reach  Reach
+		resErr error
+		revErr error
+		wg     sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		reach, resErr = h.reg.Resolve(ctx, controller, session, EffectObserve)
+	}()
+	select {
+	case <-resolveInLock:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the racing resolve never reached its critical section — the ordering this trial pins was not produced")
+	}
+	go func() {
+		defer wg.Done()
+		_, revErr = h.reg.Revoke(ctx, root, "racing intent")
+	}()
+	close(release)
+	wg.Wait()
+	if revErr != nil {
+		t.Fatalf("revoke: %v", revErr)
+	}
+	return reach.Chain, resErr
 }
 
 // ── item 3: a grandchild spawn racing the grandparent's revocation ────────

@@ -343,7 +343,7 @@ func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SS
 // answered, because closing it while the request is in flight would turn a
 // refusal into a transport error.
 func openSubsystemStream(pool *ssh.PooledConn, subsystem string) (*subsystemEnd, error) {
-	sess, err := pool.Client().NewSession()
+	sess, err := pool.NewSession()
 	if err != nil {
 		return nil, err
 	}

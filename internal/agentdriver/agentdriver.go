@@ -183,6 +183,14 @@ type RowSpan struct{ First, Last int }
 type Extra struct {
 	Name string
 	Rows []map[string]string
+	// Separator is what those rows are rejoined with into one string, as the
+	// extractor declared it (Extractor.Join): a newline for a box that draws
+	// each row as its own line, a space for one whose rows are a single line
+	// the agent's own width wrapped. It is carried on the yield rather than
+	// looked up later because a projection given an Observation has no
+	// document to consult, and reading the same rows with two different joins
+	// is how one box comes to have two texts.
+	Separator string
 }
 
 // Driver classifies one agent's screen. One implementation per agent (AD-8).
@@ -457,9 +465,17 @@ const InputTextExtra = "inputText"
 const inputTextLine = "line"
 
 // InputText projects the observation's inputText extractor into what is
-// actually typed in the agent's own input box, joined across the content
-// rows the rule read (top to bottom, in the order it read them) with the
-// prompt marker and any wrap indent already stripped.
+// actually typed in the agent's own input box, joined across the content rows
+// the rule read (top to bottom, in the order it read them) with the prompt
+// marker and any wrap indent already stripped.
+//
+// The rows are joined with the separator the RULE declared for them
+// (Extra.Separator, from Extractor.Join) rather than with a newline: a box
+// whose extra rows are one line its own width wrapped has no newline in it at
+// all, and a reading that inserted one could never equal what was typed —
+// which is the whole of why session.message's echo check never confirmed a
+// paste taller than one row (nocx-xn63t.4.5, claude.rule.json's own inputText
+// extractor, whose "space" join is measured off a real wrapped box).
 //
 // ok is false when this agent's rule carries no such extractor, or the
 // extractor's own anchor did not bind on this exact frame — which is every
@@ -480,7 +496,7 @@ func (o Observation) InputText() (text string, ok bool) {
 		for _, row := range e.Rows {
 			lines = append(lines, row[inputTextLine])
 		}
-		return strings.Join(lines, "\n"), true
+		return strings.Join(lines, e.Separator), true
 	}
 	return "", false
 }

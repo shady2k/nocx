@@ -292,7 +292,7 @@ func (s *Service) runProbeOn(ctx context.Context, lease *probeLease, command str
 			Message: fmt.Sprintf("the probe command is %d bytes, over the %d-byte bound", len(command), remoteprobe.MaxCommandLen),
 		}
 	}
-	sess, err := lease.pool.Client().NewSession()
+	sess, err := lease.pool.NewSession()
 	if err != nil {
 		return proto.ProbeExecResult{}, classifySessionOpenError(err)
 	}

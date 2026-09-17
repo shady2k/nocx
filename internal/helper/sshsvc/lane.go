@@ -208,7 +208,7 @@ func (s *Service) openLane(ctx context.Context, p proto.LaneParams) (proto.OpenC
 // it, with no pty-req: a pty applies line discipline and would corrupt the
 // frame protocol the bridge carries (D19).
 func (s *Service) startLane(pool *ssh.PooledConn, host string, command string) (*laneEnd, error) {
-	sess, err := pool.Client().NewSession()
+	sess, err := pool.NewSession()
 	if err != nil {
 		return nil, err
 	}

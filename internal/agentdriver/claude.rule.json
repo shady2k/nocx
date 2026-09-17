@@ -281,7 +281,8 @@
     {
       "name": "inputText",
       "anchor": "topRule",
-      "maxRows": 2,
+      "to": "bottomRule",
+      "join": "space",
       "states": ["free_text", "working"],
       "pattern": "^(?:❯(?:\\x{00A0}(?P<line>.*))?|  (?P<line>\\S.*))$"
     },

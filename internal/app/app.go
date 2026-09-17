@@ -2230,6 +2230,14 @@ func New(opts ...Option) (*App, error) {
 		&workerWaker{typist: paneTyping, log: logger},
 		&workerEscalation{raise: notifyIngress, log: logger},
 		workers.WithFactDeadline(workerFactDeadline))
+	// WHICH TAB EACH PARTICIPANT'S PANE WAS MINTED IN (nocx-xn63t.4.6). One
+	// value, two ends: the spawner writes the pairing where both halves of it
+	// exist, and the closer reads it back when a coordinator's workers.close
+	// takes the participant's tab out of the window. A participant's session
+	// is removed from the registry the moment it exits, so this is the only
+	// thing left that can name a finished worker's tab — see workerTabs' own
+	// doc in workers.go for why nothing else in the process holds it.
+	workerSeats := newWorkerTabs()
 	workerRecord := workers.NewRegistrar(
 		workers.NewMemoryStore(),
 		&workerSpawner{
@@ -2259,6 +2267,7 @@ func New(opts ...Option) (*App, error) {
 			// exists, over the same connection registry integration and
 			// opener already reach through.
 			announce: tp,
+			tabs:     workerSeats,
 			log:      logger,
 		},
 		workerEnrol,
@@ -2268,7 +2277,20 @@ func New(opts ...Option) (*App, error) {
 		// The seam a coordinator's workers.close reaches. Unwired it refuses,
 		// which is the right answer: reporting a worker ended that is still
 		// running is the one thing a close must never do.
-		workers.WithCloser(&workerCloser{sessions: sess, log: logger}),
+		workers.WithCloser(&workerCloser{
+			sessions: sess,
+			// The same layout chain the spawner mints the tab through, and
+			// the same seats record — one owner of "which tab is this
+			// participant's", read from the close's rather than the spawn's
+			// end.
+			layout: contentDB.Layout(), tabs: workerSeats,
+			// tp a third time (nocx-xn63t.4.6): the notification that a
+			// participant's tab has LEFT the window rides the same broadcast
+			// its appearance did, so every connected window's strip follows
+			// without a reload.
+			announce: tp,
+			log:      logger,
+		}),
 		workers.WithBound(workerParticipantBound),
 		workers.WithEnrolmentDeadline(workerEnrolmentDeadline),
 	)

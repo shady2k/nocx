@@ -887,11 +887,17 @@ func answerable(held []Participant, owed int) bool {
 // suspends send-input and leaves close alone, and DelegationState.Permits
 // already says so; this is where that stops being theoretical.
 //
-// It writes NO state. Ending the session produces a process exit, and that
-// exit reaches the record by the ordinary path and reduces the participant the
-// way any exit does. A close that also terminalized would be a second author
-// of a participant's state, and the two would disagree the first time a
-// worker declared between the kill and the write.
+// It writes no state IN THE RECORD. Ending the session produces a process
+// exit, and that exit reaches the record by the ordinary path and reduces the
+// participant the way any exit does. A close that also terminalized would be a
+// second author of a participant's state, and the two would disagree the first
+// time a worker declared between the kill and the write.
+//
+// WHAT IT DOES WRITE IS THE PARTICIPANT'S PLACE (nocx-xn63t.4.6): the tab its
+// pane was minted in leaves the window, because "closing a worker closes its
+// tab" is what a close is FOR. That is the closer's own half — a tab is a row
+// of the layout chain and not a participant fact, so it is not the second
+// author this method refuses to be.
 func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id ParticipantID) error {
 	if r.closer == nil {
 		return errors.New("worker: this backend cannot end a participant")
@@ -924,7 +930,23 @@ func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id Par
 	if p.State.Terminal() {
 		// Already finished. Not an error: a coordinator tidying up should
 		// not have to have raced the record to be allowed to.
-		return nil
+		//
+		// AND IT STILL REACHES THE CLOSER (nocx-xn63t.4.6). Ending the
+		// participant is the whole of what this method is for, and a
+		// participant that has already ended has one thing left to end: the
+		// PLACE it occupied, which is the tab its pane lives in and which
+		// nothing else in the process can name (internal/app's workerTabs,
+		// written by the spawn because a finished worker's session is already
+		// out of the registry by the time anybody closes it). Returning here
+		// is what left a finished worker's tab standing on the strip with
+		// nothing behind it — the defect this bead was filed from: the
+		// coordinator's workers.close answered ok and the tab stayed.
+		//
+		// The closer tolerates a participant whose process is already gone
+		// (internal/app's own workerCloser, which asks the registry before it
+		// ends anything) and treats a tab somebody already closed as success,
+		// so this remains the ordinary, non-error tidy-up it always was.
+		return r.closer.Close(ctx, p)
 	}
 	if err := r.closer.Close(ctx, p); err != nil {
 		return err

@@ -326,6 +326,17 @@ func TestAHumanTakeoverDoesNotStopACoordinatorClosingItsOwnWorker(t *testing.T) 
 
 // Closing something already finished is not an error: a coordinator tidying
 // up should not have to have raced the record to be allowed to.
+//
+// AND IT STILL REACHES THE CLOSER (nocx-xn63t.4.6), which is the half this
+// test used to assert the opposite of. For a participant that has already
+// ended, the thing left to end is the PLACE it occupied, and the closer is the
+// only seam that can give that back: in production it is internal/app's
+// workerCloser, which asks the registry before ending a session (so a process
+// that is already gone is not a failure) and whose second half is the tab
+// write. A close that returned here without calling it is exactly what left a
+// finished worker's tab standing on the strip with nothing behind it — the
+// defect the bead was filed from: the coordinator's workers.close answered ok
+// and the tab stayed.
 func TestClosingAFinishedWorkerIsNotAnError(t *testing.T) {
 	ctx := context.Background()
 	h := newHarnessBound(t, 5)
@@ -336,8 +347,9 @@ func TestClosingAFinishedWorkerIsNotAnError(t *testing.T) {
 	if err := h.reg.Close(ctx, coordSession, p.ID); err != nil {
 		t.Fatalf("close of a finished worker: %v", err)
 	}
-	if got := closer.seen(); len(got) != 0 {
-		t.Fatalf("a finished worker was ended again: %v", got)
+	if got := closer.seen(); len(got) != 1 || got[0] != p.ID {
+		t.Fatalf("the closer saw %v, want exactly [%s]: a finished worker's place is released by the closer or by nobody",
+			got, p.ID)
 	}
 }
 

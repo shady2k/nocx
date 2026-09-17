@@ -217,7 +217,7 @@ func (s *Service) OpenShell(ctx context.Context, spec ShellSpec) (*ShellChannel,
 		return nil, err
 	}
 
-	sess, err := pool.Client().NewSession()
+	sess, err := pool.NewSession()
 	if err != nil {
 		_ = pool.Close()
 		return nil, classifyChannelError(err)

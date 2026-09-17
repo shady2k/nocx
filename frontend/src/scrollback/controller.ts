@@ -239,7 +239,7 @@ export class ScrollbackController {
     if (typeof IntersectionObserver === 'undefined') return
     this._followObserver = new IntersectionObserver(
       (entries) => {
-        for (const e of entries) this._tail.report(e.isIntersecting)
+        for (const e of entries) this._tail.observe(this.scrollbackArea, e.isIntersecting)
       },
       { root: this.scrollbackArea, threshold: 0 },
     )
@@ -824,6 +824,17 @@ export class ScrollbackController {
    *  a layout change. */
   private _followIntent(): boolean {
     return this._tail.intent(this.scrollbackArea)
+  }
+
+  /** Move to the live end BECAUSE THE CALLER KNOWS the person is reading it,
+   *  the way `restorePast` does. The follow sentinel is not consulted: it has
+   *  been behind an overlay that owned the pane, and the content it watches
+   *  has just grown by everything that was reparented into it — the two
+   *  conditions under which its answer is stale rather than wrong (nocx-yfpxl).
+   */
+  scrollToTail(): void {
+    this._tail.follow()
+    this._scrollToBottom()
   }
 
   /** Scroll to the bottom, unless the user has scrolled away from the live

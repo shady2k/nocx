@@ -13590,6 +13590,68 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
+  // nocx-yfpxl. The e2e's own assertion is about the OUTER scroller: after
+  // the thaw it polls `.scrollback-area` for atBottom and for the seated
+  // answer's tail being inside it, and on WebKit both were false for the
+  // whole five-second window while `seated` was true. So the answer took its
+  // seat below the fold and nothing ever moved the pane to it.
+  it('seats the answer at the live end even when the outer sentinel went stale (nocx-yfpxl)', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask')
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      if (method === 'agent.cancel')
+        return Promise.resolve({ runId: 42, state: 'cancelled', cancelled: true })
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'what is on screen?')
+      await vi.waitFor(() => expect(answer.dataset.entryId).toBe('entry-42'))
+      const delta = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runDelta',
+      )?.[1] as ((params: unknown) => void) | undefined
+      delta!({ runId: 42, entryId: 'entry-42', text: 'a long streamed answer' })
+
+      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+      const area = scrollback.scrollbackArea
+      // jsdom lays nothing out: name a viewport and a transcript taller than
+      // it, which is the state the assertion is made in.
+      Object.defineProperty(area, 'clientHeight', { configurable: true, value: 600 })
+      Object.defineProperty(area, 'scrollHeight', { configurable: true, value: 4000 })
+      const scrollTo = vi.fn()
+      Object.defineProperty(area, 'scrollTo', { configurable: true, value: scrollTo })
+      // The outer follow sentinel reports the reader away from the live end
+      // while the overlay owns the pane. They scrolled nothing — their eyes
+      // are on the answer list, and that list is at its own tail.
+      ;(
+        scrollback as unknown as {
+          _tail: { observe: (el: Element, following: boolean) => void }
+        }
+      )._tail.observe(area, false)
+
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+
+      expect(answer.parentElement).toBe(scrollback.scrollbackInner)
+      expect(scrollTo).toHaveBeenCalledWith({ top: 4000, behavior: 'instant' })
+    } finally {
+      teardown()
+    }
+  })
+
   // nocx-hp8p2.8. The live region is where a RUNNING command's output is —
   // the block holds only its header until the freeze — so an answer seated
   // after the block element alone reads as spliced into the middle of `top`.

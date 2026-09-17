@@ -6534,7 +6534,12 @@ export class TerminalContent extends BasePaneContent {
 
   /** Keep the current answer tail visible only while the person was already
    * following it. The stack's nested answer list is the actual scroller; the
-   * outer scrollback cannot move content inside this absolute surface. */
+   * outer scrollback cannot move content inside this absolute surface.
+   *
+   * "Was already following it" is _summonTail's to answer, not this method's:
+   * a nested absolute surface can be measured mid-layout, and a fresh
+   * derivation reads its own zero viewport as the reader having walked away
+   * (nocx-yfpxl). */
   private _mutateSummonAnswers(mutation: () => void): void {
     const list = this._summonAnswerList
     if (list === null) {
@@ -6620,6 +6625,17 @@ export class TerminalContent extends BasePaneContent {
     const settle = this.scrollback
     const owned = this._summonedAnswers
     const tail = owned[owned.length - 1].el
+    // WHICH SCROLLER THE PERSON WAS ACTUALLY READING. While the summon owned
+    // the pane, their answers were in the overlay list and the outer
+    // scrollback was frozen behind it — so the outer follow sentinel is the
+    // wrong witness here, and on WebKit it has reported the reader away from
+    // a live end nobody left (nocx-yfpxl). If they were following the answers,
+    // the seated tail is what they are still reading.
+    const readingAnswerTail = this._summonTail.following
+    const followSeatedTail = (): void => {
+      if (readingAnswerTail) settle?.scrollToTail()
+      else settle?.scrollToBottomIfFollowing()
+    }
     // WHAT THE ANSWER SITS AFTER is the command's whole presence, not its
     // element: while the command still runs its output is in the live
     // region, which BlockManager keeps immediately after the block
@@ -6637,14 +6653,14 @@ export class TerminalContent extends BasePaneContent {
       // Reparenting extends the scrollback after the command-end settle has
       // already positioned the command. Follow the new answer tail as well,
       // or a long streamed answer remains below the fold.
-      settle?.scrollToBottomIfFollowing()
+      followSeatedTail()
       // WebKit can apply the class/style change after this task's scroll
       // height read. Its initial ResizeObserver delivery is the first
       // observable point at which the final answer owns its seated box.
       if (settle && typeof ResizeObserver !== 'undefined') {
         const observer = new ResizeObserver(() => {
           observer.disconnect()
-          settle.scrollToBottomIfFollowing()
+          followSeatedTail()
         })
         observer.observe(tail)
       }

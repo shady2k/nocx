@@ -54,11 +54,17 @@ export class TailFollow {
     return this._following
   }
 
-  /** An authoritative observation from a watcher that owns the question — the
-   *  scrollback's follow sentinel. It may clear the intent; a measurement
-   *  taken during a mutation may not. */
-  report(following: boolean): void {
-    this._following = following
+  /** A delivery from the watcher that owns the question — the scrollback's
+   *  follow sentinel, an IntersectionObserver over the scroller.
+   *
+   *  A NEGATIVE delivery counts only for a scroller that can be measured. An
+   *  IntersectionObserver whose root has no area reports EVERY target as
+   *  non-intersecting, whoever the reader is and wherever they were, and the
+   *  intent has no way back: the sentinel only intersects again once somebody
+   *  scrolls, and the scroll is what the intent was going to authorise. */
+  observe(el: TailGeometry, following: boolean): void {
+    if (following) this._following = true
+    else if (isMeasurable(el)) this._following = false
   }
 
   /** A deliberate move to the live end: it follows from here. */

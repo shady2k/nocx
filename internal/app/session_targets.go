@@ -185,6 +185,14 @@ func (p *paneReader) Read(ctx context.Context, access any, sessionID string, wan
 			SnapshotID: snap.SnapshotID, Kind: string(kind), First: first, Last: last,
 		})
 		if mintErr != nil {
+			// The crossing, and the one place a helper refusal becomes a
+			// named coordinator-side error: everything above this line sees
+			// the wire's own opaque refusal, and everything below — the
+			// snapshot_gone retry here, and the agent-facing sentence
+			// rpcErrorFor writes for a `capacity` refusal (nocx-xn63t.4.1) —
+			// asks by sentinel. Classified on whatever the seam returned, so
+			// it holds for the real client and for a test double alike.
+			mintErr = helperclient.ClassifyTargetRefusal(mintErr)
 			if isSnapshotGone(mintErr) && attempt+1 < maxSnapshotRetries {
 				lastErr = mintErr
 				continue
@@ -244,6 +252,27 @@ func (p *paneReader) Record(tokenID string) (targetRecord, bool) {
 	defer p.mu.Unlock()
 	rec, ok := p.records[tokenID]
 	return rec, ok
+}
+
+// Menu answers the agent rule's own reading of a MENU on f (design §6.3), for
+// a caller that must ask "is this menu still the one I saw, and where is its
+// selection" WITHOUT minting a target to find out (session_keys.go's
+// awaitSelectionMove, nocx-xn63t.4.1).
+//
+// It is the same evaluation Read already makes — Registry.Observe over the
+// frame, agent looked up once through AgentFor — lifted to its own method
+// rather than a second evaluation beside it, the way paneMessages.inputText
+// lifts the box reading. ok is false for the same reasons InputText's is: no
+// rule for this agent, nothing enrolled, or a frame whose rule found no menu.
+func (p *paneReader) Menu(sessionID string, f paneview.Frame) (agentdriver.Menu, bool) {
+	if p.rules == nil {
+		return agentdriver.Menu{}, false
+	}
+	agent := p.AgentFor(sessionID)
+	if agent == "" {
+		return agentdriver.Menu{}, false
+	}
+	return p.rules.Observe(agent, f).Menu()
 }
 
 // chooseTargetRows picks the rows a mint should name for want, from the
@@ -306,8 +335,10 @@ func regionText(f paneview.Frame, first, last int) string {
 
 // isSnapshotGone reports whether err is the helper's own snapshot_gone
 // refusal (design §6.1) — the one mint failure a read retries, once, from a
-// fresh snapshot.
+// fresh snapshot. It asks by SENTINEL, which is what
+// helperclient.ClassifyTargetRefusal put on the error at the crossing above;
+// the wire's own spelling ("snapshot_gone") lives in proto and in the helper,
+// and this package decides nothing by reading it.
 func isSnapshotGone(err error) bool {
-	var refusal *helperclient.RefusalError
-	return errors.As(err, &refusal) && refusal.Code == "snapshot_gone"
+	return errors.Is(err, helperclient.ErrSnapshotGone)
 }

@@ -191,9 +191,13 @@ func newBufferLogger(lvl slog.Level) (*log.SlogAdapter, *bytes.Buffer) {
 // the sharpest version of that).
 type hangingTabs struct{}
 
-func (hangingTabs) CreateTab(_ context.Context, _ content.Tab, _ content.Pane) (content.Created[content.NewTab], error) {
+func (hangingTabs) CreateTabAfter(_ context.Context, _ content.Tab, _ content.Pane, _ string) (content.Created[content.NewTab], error) {
 	return content.Created[content.NewTab]{}, nil
 }
+
+// TabForPane answers nothing, which is the anchorless case: no tab is named,
+// so the participant's tab goes last and no second method can hang.
+func (hangingTabs) TabForPane(context.Context, string) (string, error) { return "", nil }
 
 func (hangingTabs) DeleteTab(ctx context.Context, _ string, _ content.Replacement) error {
 	<-ctx.Done()

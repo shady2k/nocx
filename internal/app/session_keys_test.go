@@ -20,6 +20,7 @@ import (
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/paneview"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/sessionruntime"
 	"github.com/shady2k/nocx/internal/workers"
@@ -345,12 +346,22 @@ type scriptedMenu struct {
 // the loop begins. This drives session_keys.go's REAL sendOption/
 // awaitSelectionMove — the script is the only thing under test control, not
 // a reimplementation of the loop.
+//
+// A read that asks for NO target (want == nil) is the settle wait's probe
+// (nocx-xn63t.4.1) and answers the same scripted frame with no Target at all —
+// which is what a real read does and what makes `mints` below a count of the
+// targets the loop SPENT rather than of the times it looked.
 type scriptedMenuReader struct {
 	entryToken  string
 	entryRecord targetRecord
 	script      []scriptedMenu
 	idx         int
 	seq         int
+
+	reads  int
+	mints  int
+	last   agentdriver.Menu
+	lastOK bool
 }
 
 func (r *scriptedMenuReader) Record(tokenID string) (targetRecord, bool) {
@@ -360,17 +371,31 @@ func (r *scriptedMenuReader) Record(tokenID string) (targetRecord, bool) {
 	return targetRecord{}, false
 }
 
-func (r *scriptedMenuReader) Read(_ context.Context, _ any, _ string, _ *sessionruntime.TargetKind, _ *sessionruntime.RowRange) (assistant.PaneRead, error) {
+func (r *scriptedMenuReader) Read(_ context.Context, _ any, _ string, want *sessionruntime.TargetKind, _ *sessionruntime.RowRange) (assistant.PaneRead, error) {
 	m := r.script[r.idx]
 	if r.idx < len(r.script)-1 {
 		r.idx++
 	}
 	r.seq++
-	tokenID := "iter-tok"
+	r.reads++
 	menu := agentdriver.Menu{Question: m.question, Options: append([]string(nil), m.options...), Selected: m.selected}
+	r.last, r.lastOK = menu, true
+	if want == nil {
+		return assistant.PaneRead{}, nil
+	}
+	r.mints++
+	tokenID := "iter-tok"
 	return assistant.PaneRead{Target: &assistant.TargetView{
 		Token: tokenID + "-signed", TokenID: tokenID, Kind: sessionruntime.TargetMenu, Menu: &menu,
 	}}, nil
+}
+
+// Menu is the seam the settle wait reads a menu through without minting
+// (session_keys.go's menuReader): the frame it is handed is ignored, because
+// this fake's "frame" is the script entry its last Read served — the same
+// reading a real rule would take off a real frame.
+func (r *scriptedMenuReader) Menu(string, paneview.Frame) (agentdriver.Menu, bool) {
+	return r.last, r.lastOK
 }
 
 // acceptingHelper answers every Intent executed — the option loop's own
@@ -440,6 +465,19 @@ func TestAnOptionIsChosenOnAMenuThatRepaintsLate(t *testing.T) {
 	}
 	if res.Steps != 3 {
 		t.Fatalf("Steps = %d, want 3 (two moves + one confirm, distance 0->2)", res.Steps)
+	}
+
+	// The settle wait is a PROBE, and this is the count that says so
+	// (nocx-xn63t.4.1): the loop read the pane once per script entry (7) and
+	// minted exactly one target per STEP it took (3 — each of them the token
+	// it then spent). Minting per poll instead was up to optionSettle's worth
+	// of held token-book slots per move step (spec §6.2: maxLiveTokens, never
+	// evicted), on the very call a coordinator uses to answer the menu.
+	if reader.mints != res.Steps {
+		t.Fatalf("the option loop minted %d targets for %d steps; want one per step, and none for the settle polls", reader.mints, res.Steps)
+	}
+	if reader.reads <= reader.mints {
+		t.Fatalf("the loop read the pane %d times and minted %d; this test needs polls that mint nothing to be meaningful", reader.reads, reader.mints)
 	}
 }
 

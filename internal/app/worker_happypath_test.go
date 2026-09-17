@@ -818,14 +818,31 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 
 	store := workers.NewMemoryStore()
 	sup := &workerSupervisor{sessions: reg, log: logger}
-	spawner := &workerSpawner{layout: db.Layout(), opener: tp, sessions: reg, enrolments: enrol, workspace: string(workspace.Default), log: logger}
+	// seats is WHICH TAB each participant's pane was minted in
+	// (nocx-xn63t.4.6), wired into the spawner and the closer exactly as
+	// app.go wires it — this stand is where the external-coordinator journey
+	// runs, and that journey is where "closing a worker closes its tab" is
+	// measured end to end.
+	seats := newWorkerTabs()
+	spawner := &workerSpawner{
+		layout: db.Layout(), opener: tp, sessions: reg, enrolments: enrol,
+		workspace: string(workspace.Default),
+		// The product's own push (nocx-ui8q6.3) and its tab-close counterpart
+		// (nocx-xn63t.4.6): this stand talks to the server in-process and no
+		// window is connected to it, so both answer their "nobody is
+		// connected" branch and log the drop — the same thing production does
+		// with no renderer attached.
+		announce: tp, tabs: seats, log: logger,
+	}
 	if cfg.realTyping {
 		spawner.readiness = realWatch
 	}
 	recordOpts := []workers.Option{
 		workers.WithEnrolmentDeadline(cfg.deadline),
 		workers.WithLogger(logger),
-		workers.WithCloser(&workerCloser{sessions: reg, log: logger}),
+		workers.WithCloser(&workerCloser{
+			sessions: reg, layout: db.Layout(), tabs: seats, announce: tp, log: logger,
+		}),
 	}
 	record := workers.NewRegistrar(store, spawner, enrol, sup, recordOpts...)
 	if cfg.realTyping {
@@ -988,6 +1005,18 @@ func TestExternalClaudeDrivesAWorkerEndToEnd(t *testing.T) {
 		t.Logf("using external worker command %q", command)
 	}
 	stand := newHappyStand(t)
+	// A TAB OF THE PERSON'S OWN, minted before anything is spawned. Without
+	// it the worker's tab is the ONLY tab in the window, and the close would
+	// then be answered by content's own replacement — a tab minted so that the
+	// application is never left with none — which would make "the tab is gone"
+	// indistinguishable from "a different tab is there". A person with one tab
+	// open is the ordinary case for a coordinator anyway.
+	if _, err := stand.db.Layout().CreateTab(context.Background(),
+		content.Tab{ID: happyPersonTab, WorkspaceID: workerTestWorkspace, Layout: content.LayoutRow},
+		content.Pane{ID: happyPersonPane, TabID: happyPersonTab, Kind: content.PaneLocal, SizeShare: 1},
+	); err != nil {
+		t.Fatalf("the person's own tab: %v", err)
+	}
 	// Nothing before nocx-xn63t.6.1 printed what the worker's OWN pane saw —
 	// runHappyExternalCoordinator already surfaces the external coordinator
 	// process's stdout/stderr on failure, but a report that never arrived
@@ -1044,7 +1073,46 @@ func TestExternalClaudeDrivesAWorkerEndToEnd(t *testing.T) {
 	if watches != 1 || len(paneIDs) != 1 || paneIDs[0] == "" {
 		t.Fatalf("pane observation = watches %d, exits %d, pane ids %v; want one watch for a real pane", watches, exits, paneIDs)
 	}
+
+	// AND THE WORKER'S TAB IS GONE (nocx-xn63t.4.6) — stage 4's own promise to
+	// the owner, measured here because this is the journey where the whole path
+	// is real: the external coordinator's workers.close is what took it out,
+	// and what is read is the CONTENT STORE a restart reads back rather than a
+	// fact either side asserted about itself.
+	//
+	// THE PERSON'S TAB IS STILL THERE AND ALONE, which is the pair of facts
+	// that makes this an assertion rather than a count: the window holds the
+	// one tab it held before the spawn, at seat 0, and nothing else. A close
+	// that left the worker's tab behind fails the first half; a close that
+	// took the strip with it — or that the store answered with a replacement
+	// tab — fails the second.
+	tabs, err := stand.db.Layout().Tabs(context.Background(), workerTestWorkspace)
+	if err != nil {
+		t.Fatalf("the strip after the close: %v", err)
+	}
+	if len(tabs) != 1 || tabs[0].ID != happyPersonTab {
+		t.Fatalf("the strip after the close = %+v, want exactly the person's own tab %q: workers.close left the worker's tab standing",
+			tabs, happyPersonTab)
+	}
+	if tabs[0].Position != 0 {
+		t.Fatalf("the person's tab sits at position %d, want 0 — the strip is not dense after the close", tabs[0].Position)
+	}
+	snap, err := stand.db.Layout().Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("layout snapshot after the close: %v", err)
+	}
+	if len(snap.Panes) != 1 || snap.Panes[0].ID != happyPersonPane {
+		t.Fatalf("the window's panes after the close = %+v, want exactly the person's own pane %q — the worker's pane is still in the chain",
+			snap.Panes, happyPersonPane)
+	}
 }
+
+// The two rows the journey's own tab is made of, named rather than minted so
+// that "the worker's tab is gone" can be read as "this one is what is left".
+const (
+	happyPersonTab  = "tab-the-person-had-open"
+	happyPersonPane = "pane-the-person-had-open"
+)
 
 // execCommandContext is kept local so the external process is visibly the
 // test binary re-executed, not an assistant/model subprocess or herdr.

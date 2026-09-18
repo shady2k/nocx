@@ -2,6 +2,7 @@ package local
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -53,6 +54,122 @@ func TestDiffIgnoresExternalDiffDriver(t *testing.T) {
 	}
 	if !strings.Contains(d.Text, "@@") || !strings.Contains(d.Text, "+changed") {
 		t.Fatalf("not a unified diff: %q", d.Text)
+	}
+}
+
+// TestWorktreeStateIgnoresStatusShowUntrackedFiles: status.showUntrackedFiles
+// is an ordinary user setting, and its DEFAULT effect is to make `git status`
+// print nothing about an untracked file. A worktree holding only such a file
+// would then look clean — and "looks clean" is the answer RemoveWorktree acts
+// on, so a setting the user chose for their shell would decide whether a
+// worker's uncommitted work survives.
+//
+// Measured on git 2.55, and asserted here before the operation is: with the
+// setting at "no" a plain `git status --porcelain` prints NOTHING while the
+// file sits in the worktree. The explicit --untracked-files=all that
+// StatusArgs carries is what overrides it, and this is the test that says so —
+// remove the flag and the second half of this test fails by removing the
+// worktree, not by a mismatch.
+func TestWorktreeStateIgnoresStatusShowUntrackedFiles(t *testing.T) {
+	dir, home := worktreeRepo(t)
+	if err := commandIn(dir, "config", "status.showUntrackedFiles", "no").Run(); err != nil {
+		t.Fatal(err)
+	}
+	repo := openRepo(t, gitEnv(t), dir)
+	ctx := context.Background()
+	path := filepath.Join(home, "worker-1")
+	if _, err := repo.AddWorktree(ctx, "worker-1", "master", path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "untracked.txt"), []byte("work"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The hostile half: the setting really does hide the file from the plain
+	// invocation.
+	if out := gitOut(t, path, "status", "--porcelain"); out != "" {
+		t.Fatalf("the fixture is not hostile: plain `git status --porcelain` reported %q", out)
+	}
+
+	list, err := repo.Worktrees(ctx, "master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt, ok := worktreeAt(list, path)
+	if !ok {
+		t.Fatalf("no entry for %s in %+v", path, list)
+	}
+	if !wt.Uncommitted {
+		t.Fatalf("entry = %+v, want Uncommitted — the setting must not hide a worktree's work from this seam", wt)
+	}
+
+	var uncommitted *git.ErrWorktreeUncommitted
+	if err := repo.RemoveWorktree(ctx, path); !errors.As(err, &uncommitted) {
+		t.Fatalf("RemoveWorktree err = %v, want *git.ErrWorktreeUncommitted", err)
+	}
+	if _, err := os.Stat(filepath.Join(path, "untracked.txt")); err != nil {
+		t.Fatalf("the untracked file is gone: %v", err)
+	}
+}
+
+// TestWorktreeReadsRunNoConfiguredDiffProgram: diff.external makes plain
+// `git diff` return a program's output instead of a diff, which is why the
+// panel's diff carries --no-ext-diff. The worktree operations make no diff
+// invocation at all — the state read deliberately takes no line counts — and
+// this is the check that they stay that way: a later change that enriched a
+// worktree's state with counts would run this program, and the marker it
+// leaves is the failure.
+//
+// The boundary is stated as measured: a repository CAN make one program run
+// during AddWorktree, git's own post-checkout hook, because `worktree add`
+// checks the base out. That is git's semantics and this project's standing
+// decision (hooks always run — CommitArgs carries the same rule), so nothing
+// here suppresses it. What a configuration may not do is change the ANSWER,
+// and that is what the two cases in this file are about.
+func TestWorktreeReadsRunNoConfiguredDiffProgram(t *testing.T) {
+	dir, home := worktreeRepo(t)
+	marker := filepath.Join(t.TempDir(), "diff-external-ran")
+	script := filepath.Join(t.TempDir(), "extdiff.sh")
+	if err := writeFile(script, "#!/bin/sh\ntouch "+marker+"\necho 'not a diff'\n", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := exec.Command(realGitPath(t), "config", "diff.external", script) // #nosec G204 — realGitPath is LookPath-resolved; script is the test's own t.TempDir() path
+	cfg.Dir = dir
+	cfg.Env = gitEnv(t)
+	if out, err := cfg.CombinedOutput(); err != nil {
+		t.Fatalf("git config diff.external: %v: %s", err, out)
+	}
+
+	repo := openRepo(t, gitEnv(t), dir)
+	ctx := context.Background()
+	path := filepath.Join(home, "worker-1")
+	if _, err := repo.AddWorktree(ctx, "worker-1", "master", path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "tracked.txt"), []byte("edit"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Worktrees(ctx, "master"); err != nil {
+		t.Fatal(err)
+	}
+	// The dirty state read is the one that would take line counts if anything
+	// did, so the removal is driven against it and refused before the worktree
+	// is cleaned and removed for real.
+	if err := repo.RemoveWorktree(ctx, path); err == nil {
+		t.Fatal("the edited worktree was removed; this case needs it dirty to exercise the state read")
+	}
+	if err := os.WriteFile(filepath.Join(path, "tracked.txt"), []byte("v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.RemoveWorktree(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.DeleteWorktreeBranch(ctx, "worker-1", "master"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a configured diff.external program ran during the worktree operations")
 	}
 }
 

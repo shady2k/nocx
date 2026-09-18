@@ -91,8 +91,120 @@ type Repo interface {
 	// upstream and a remote that no longer exists all answer ErrNoRemote —
 	// the ordinary "nothing to open" case, never an error.
 	RemoteURL(ctx context.Context) (string, error)
+
+	// AddWorktree places a LINKED worktree of this repository at path, on
+	// branch, and answers whether THIS call created the branch — the fact
+	// the caller's compensation turns on (brief nocx-xn63t.1.1). A branch
+	// that does not exist is created at base, so base is a commit the
+	// repository can resolve or the call refuses with ErrBaseUnresolved. A
+	// branch that exists and is checked out nowhere is checked out AS IT IS
+	// — base is then not applied, and Created says so. A branch checked out
+	// in another worktree refuses with ErrBranchCheckedOut, and a path that
+	// is occupied refuses with ErrWorktreePathNotEmpty.
+	//
+	// These are operations on the REPOSITORY, not on the checkout this Repo
+	// is bound to: `git worktree add` acts on the shared repository whatever
+	// working tree it is run from, and this Repo already holds the identity
+	// it needs (OpenOutcome.Toplevel) plus the environment every invocation
+	// runs under. That is why they are here and not on RepoFactory, whose
+	// whole job is resolution before a Repo exists.
+	AddWorktree(ctx context.Context, branch, base, path string) (WorktreeAdded, error)
+
+	// Worktrees lists every working tree of this repository — the main
+	// checkout and each linked worktree — with the state the caller decides
+	// on: its branch (or that it is detached), whether it holds uncommitted
+	// work, and how many commits it is ahead of base (brief nocx-xn63t.1.1).
+	// The main checkout is the first entry and carries Main; the order is
+	// otherwise git's own.
+	//
+	// A worktree whose state could not be read is reported as such —
+	// WorktreeUnreadable with a reason — and never as clean: "could not
+	// read" and "clean" are the two answers this call must not confuse,
+	// because one of them lets a caller delete a worker's work.
+	Worktrees(ctx context.Context, base string) ([]Worktree, error)
+
+	// RemoveWorktree removes a clean linked worktree and leaves its branch.
+	// A worktree holding uncommitted work — a tracked change or an untracked
+	// file; ignored files do not count — refuses with ErrWorktreeUncommitted,
+	// the main checkout with ErrMainWorktree, a path that is not a worktree
+	// of this repository with ErrNotAWorktree, and one whose state could not
+	// be read with ErrWorktreeUnreadable. There is no force and no argument
+	// that adds one.
+	RemoveWorktree(ctx context.Context, path string) error
+
+	// DeleteWorktreeBranch deletes a branch that has NO commits beyond base
+	// — the narrow half of AddWorktree's compensation, which is the only
+	// caller it is for (brief nocx-xn63t.1.1). A branch with commits base
+	// does not reach refuses with ErrBranchHasCommits, one checked out in a
+	// worktree with ErrBranchCheckedOut, and an unresolvable base with
+	// ErrBaseUnresolved. A branch that is not there is not an error: it is
+	// the state the caller was asking for, and a compensation that ran twice
+	// is not a defect.
+	//
+	// It is deliberately not a general branch delete, and no caller may use
+	// it as one: everything a person can lose in a branch — the commits it
+	// holds that nothing else reaches — is exactly what the precondition
+	// refuses.
+	DeleteWorktreeBranch(ctx context.Context, branch, base string) error
+
 	Close() error
 }
+
+// WorktreeAdded is AddWorktree's answer. Nothing else about the call is new:
+// the caller supplied the path and the branch.
+type WorktreeAdded struct {
+	// Created is true when the branch did not exist and this call created it
+	// at base. It is the whole reason this result exists — a compensation
+	// deletes the branch IT created and must not delete one it merely found,
+	// and a branch it found is a branch somebody else's commits may be on.
+	Created bool
+}
+
+// Worktree is one working tree of a repository: the main checkout, or a
+// linked worktree beside it (brief nocx-xn63t.1.1). Two linked worktrees of
+// one repository are different working trees, which is why Toplevel and
+// GitDir are the binding's identity too (spec §5.1).
+type Worktree struct {
+	Path     string // the worktree's path, as git reports it
+	Branch   string // the branch NAME checked out here; "" when detached
+	Detached bool   // HEAD is not on a branch
+	Main     bool   // the repository's main checkout, not a linked worktree
+
+	// State says whether this worktree's working state could be read at all.
+	// When it is WorktreeUnreadable, Uncommitted and Ahead carry NO meaning:
+	// neither was read, and zero values here are the absence of an answer
+	// rather than an answer of zero.
+	State WorktreeState
+	// Reason is why the state could not be read; "" when State is readable.
+	Reason string
+
+	// Uncommitted is true when the worktree holds a tracked change or an
+	// untracked file. Ignored files do not count — they are the case a
+	// worktree is allowed to carry, and treating them as work would make a
+	// worker's build output refuse its own removal.
+	Uncommitted bool
+	// Ahead is how many commits this worktree's HEAD has that base does not
+	// reach: git's own count over base..HEAD.
+	Ahead int
+}
+
+// WorktreeState is whether one worktree's working state could be read, the
+// same kind of one-discriminator answer Completeness is, and for the same
+// reason: a caller switching on a boolean would have to be right about which
+// of the two answers "false" means. It does not.
+type WorktreeState string
+
+const (
+	// WorktreeReadable — Uncommitted and Ahead were read; they mean what
+	// they say.
+	WorktreeReadable WorktreeState = "readable"
+	// WorktreeUnreadable — the state could be read neither completely nor
+	// at all: an invocation failed (a directory that is gone, a repository
+	// git refuses to read) or a bounded read was stopped at the work
+	// ceiling. Reason names which. Nothing here may be reported as clean,
+	// and RemoveWorktree refuses it by the same name.
+	WorktreeUnreadable WorktreeState = "unreadable"
+)
 
 // RepoFactory opens one. Resolution — is git here, is it new enough, and is
 // this directory inside a repository — happens BEFORE a Repo can exist, so it

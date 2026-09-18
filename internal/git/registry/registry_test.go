@@ -80,6 +80,24 @@ func (s *stubRepo) RemoteURL(ctx context.Context) (string, error) {
 	return "git@github.com:shady2k/nocx.git", nil
 }
 
+// The worktree operations are on the seam (brief nocx-xn63t.1.1) but not on
+// the Handle this package guards, which is the transport's route — so the
+// stub answers them with the same "not stubbed" shape, and a handle call that
+// ever reached them would say so rather than look like a working feature.
+func (s *stubRepo) AddWorktree(ctx context.Context, branch, base, path string) (git.WorktreeAdded, error) {
+	return git.WorktreeAdded{}, nil
+}
+
+func (s *stubRepo) Worktrees(ctx context.Context, base string) ([]git.Worktree, error) {
+	return []git.Worktree{}, nil
+}
+
+func (s *stubRepo) RemoveWorktree(ctx context.Context, path string) error { return nil }
+
+func (s *stubRepo) DeleteWorktreeBranch(ctx context.Context, branch, base string) error {
+	return nil
+}
+
 func (s *stubRepo) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

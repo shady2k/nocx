@@ -3,14 +3,17 @@
 // read methods are one Call each (plan Task 7). The wire shapes are
 // hostsvc's — one owner of the git service's contract (AD-8) — and the
 // results cross as the domain types of internal/git, verbatim. The ops the
-// helper does not serve yet (diff, log, the mutations — nocx-w3i1) answer
-// an honest error rather than pretending.
+// helper does not serve — the linked-worktree operations (brief
+// nocx-xn63t.1.1), which are local-only in this stage because the
+// coordinator creates the worktree on its OWN machine — answer an honest
+// error rather than pretending.
 package helper
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/hostsvc"
@@ -189,6 +192,40 @@ func (r *repo) RemoteURL(ctx context.Context) (string, error) {
 		return "", classifyRefusal(err)
 	}
 	return url, nil
+}
+
+// ── the operations the helper does not serve (brief nocx-xn63t.1.1) ─────
+//
+// The linked-worktree operations are local-only in this stage: the
+// coordinator creates the worktree of ITS repository, on its own machine,
+// and nothing of that crosses to a far host. There is no hostsvc op, no
+// contracts/helper schema and no proto version bump for them, so this
+// implementation cannot carry them — and says so by name instead of making a
+// wire call the service would answer as an unknown op (proto.ErrCodeUnknownOp
+// "no such op"), which would reach the caller as a protocol failure rather
+// than as a fact about this machine.
+//
+// They are on the Repo because the interface requires them (a helper Repo is
+// a git.Repo like any other), and they are stated once, here, so the day the
+// helper gains the operation there is one place to delete.
+func unserved(op string) error {
+	return fmt.Errorf("git: the remote helper does not serve %s yet", op)
+}
+
+func (r *repo) AddWorktree(_ context.Context, _, _, _ string) (git.WorktreeAdded, error) {
+	return git.WorktreeAdded{}, unserved("worktree.add")
+}
+
+func (r *repo) Worktrees(_ context.Context, _ string) ([]git.Worktree, error) {
+	return nil, unserved("worktree.list")
+}
+
+func (r *repo) RemoveWorktree(_ context.Context, _ string) error {
+	return unserved("worktree.remove")
+}
+
+func (r *repo) DeleteWorktreeBranch(_ context.Context, _, _ string) error {
+	return unserved("worktree.deleteBranch")
 }
 
 // Close holds no exclusive resource of its own: the binding it named lives

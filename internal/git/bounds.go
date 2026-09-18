@@ -63,3 +63,28 @@ const MaxLogBytes = 1 << 20
 // — a stuck filesystem, a network share — so the child cannot be held open
 // silently (spec §9.1).
 const MaxLogWallClock = 30 * time.Second
+
+// MaxWorktreeListBytes is the byte bound on the worktree listing — one
+// `git worktree list --porcelain` read that answers every worktree's path,
+// HEAD and branch (brief nocx-xn63t.1.1). A record is around 150 bytes and a
+// repository's worktrees are few, so 1 MiB is far above any real answer while
+// still bounding a listing something has gone wrong with.
+//
+// A listing that reaches the bound is REFUSED rather than reported: unlike a
+// status list, whose prefix is a useful answer about a repository too large to
+// traverse, a prefix of the worktree list is a list that silently omits the
+// very worktree the caller is asking about — the one it means to remove.
+const MaxWorktreeListBytes = 1 << 20
+
+// MaxWorktreeAnswerBytes bounds a worktree operation's short scalar reads —
+// one oid from rev-parse, one integer from rev-list --count. A git that
+// answered more than this is not answering the question, and the read is
+// refused rather than parsed.
+const MaxWorktreeAnswerBytes = 4 << 10
+
+// MaxWorktreeWallClock is the wall-clock bound on each invocation a worktree
+// operation makes. The byte bounds bound what is read; this bounds a read
+// that produces no output — a path on a stuck filesystem, a worktree
+// directory on a network share — so no child is held open silently. It is the
+// same 30 s the status and log traversals take (spec §9.1).
+const MaxWorktreeWallClock = 30 * time.Second

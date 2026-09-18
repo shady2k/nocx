@@ -144,6 +144,26 @@ func (r *stubGitRepo) RemoteURL(_ context.Context) (string, error) {
 	return r.remoteURL, r.remoteErr
 }
 
+// The worktree operations are on the seam (brief nocx-xn63t.1.1) and have no
+// transport method yet, so this stub answers them the way it answers every
+// other call it does not script: an explicit error, so a handler that
+// reached one surfaces as a failure instead of a silent success.
+func (r *stubGitRepo) AddWorktree(_ context.Context, _, _, _ string) (git.WorktreeAdded, error) {
+	return git.WorktreeAdded{}, errors.New("stubGitRepo: AddWorktree not scripted")
+}
+
+func (r *stubGitRepo) Worktrees(_ context.Context, _ string) ([]git.Worktree, error) {
+	return nil, errors.New("stubGitRepo: Worktrees not scripted")
+}
+
+func (r *stubGitRepo) RemoveWorktree(_ context.Context, _ string) error {
+	return errors.New("stubGitRepo: RemoveWorktree not scripted")
+}
+
+func (r *stubGitRepo) DeleteWorktreeBranch(_ context.Context, _, _ string) error {
+	return errors.New("stubGitRepo: DeleteWorktreeBranch not scripted")
+}
+
 // Close is nil-receiver-safe on purpose: the Register-failure leak test
 // drives Register's typed-nil refusal through the wire, and the handler's
 // close-on-register-failure path must be able to call Close on it.

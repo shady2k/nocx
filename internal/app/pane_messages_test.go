@@ -584,8 +584,8 @@ func TestTextInTheBoxRefusesThePaste(t *testing.T) {
 
 	// A session.read minted before the text was typed still names a live
 	// input target — minting never inspects box content, only the target
-	// kind — so the refusal below comes from pasteReady's own fresh mint
-	// reading the box's current (non-empty) text, not from this gate.
+	// kind — so the refusal below comes from pasteReady's own fresh read of
+	// the box's current (non-empty) text, not from this gate.
 	token := mintInputTarget(t, reader, access, sessionID)
 	view, err := pm.Send(context.Background(), access, sessionID, "hello", "now", "id-1", token)
 	if err != nil {
@@ -1316,16 +1316,54 @@ func TestAMenuBetweenPasteAndEnterRefusesTheEnter(t *testing.T) {
 
 func TestCancelBeforeClaimReturnsCancelled(t *testing.T) {
 	hub, access, sessionID := newMessagesTestAccess(t, "cancel-before")
-	reader := newFakeMsgReader("")
-	reader.setAvailable("") // the delivery never gets past "queued" on its own
+	// The box already holds someone else's typing: design §8.2 step 1 refuses
+	// the paste ("someone is typing"), and for when=="free" that refusal is a
+	// WAIT rather than an ending (deliverOne), so the record is still
+	// `queued` — unclaimed — whenever the cancel arrives.
+	//
+	// This fixture said the same thing with reader.setAvailable("") until
+	// nocx-xn63t.4.15, and that lever had stopped reaching the product the
+	// moment pasteReady stopped minting and started reading the frame
+	// (nocx-xn63t.4.1). Availability is what a MINT answers; readiness is the
+	// box's own text, and boxFrame("") is an ordinary readable empty Claude
+	// box — so pasteReady answered TRUE, the delivery claimed its paste,
+	// pasteStep's own mint came back a whole-screen region target (the kind
+	// chooseTargetRows falls back to when the frame offers no input rows) and
+	// deliverOne committed `refused`, terminally, before the cancel below was
+	// even built. Cancel then answered {too_late, refused}: the phase of a
+	// paste that never should have been claimed.
+	reader := newFakeMsgReader("someone is typing")
 	keys := happyKeys(reader, "hi")
 	pm := newTestPaneMessages(t, hub, reader, keys)
 
-	// "free" so Send returns before delivery is attempted; the precondition
-	// failure (no identifiable box) keeps runQueue retrying rather than
-	// terminating, so the record stays "queued" until cancelled.
+	// The premise, checked before anything is asserted of the product: this
+	// fixture's frame really is one a "free" delivery waits on. A fixture
+	// that stops describing that reds here, rather than letting the
+	// assertions below pass for the wrong reason.
+	if pm.pasteReady(context.Background(), access, sessionID) {
+		t.Fatal(`pasteReady = true on a box that already holds text: this fixture no longer describes a pane a "free" delivery waits for`)
+	}
+
+	// "free" so Send returns before delivery is attempted.
 	if _, err := pm.Send(context.Background(), access, sessionID, "hi", "free", "id-1", ""); err != nil {
 		t.Fatalf("send: %v", err)
+	}
+
+	// The delivery really ran, and really waited rather than claimed: an
+	// observable state change — the reader's own read count — never a
+	// duration. Without this the cancel below would pass against a delivery
+	// that had not started at all.
+	waitForCondition(t, "the queued delivery to re-check the pane", func() bool {
+		return reader.readCount() >= 4
+	})
+	phase := assistant.MessagePhase("")
+	for _, m := range pm.Pending(sessionID) {
+		if m.ID == "id-1" {
+			phase = m.Phase
+		}
+	}
+	if phase != assistant.PhaseQueued {
+		t.Fatalf("phase = %q while the box holds someone else's typing, want queued (design §8.1: a when=free message waits for the pane)", phase)
 	}
 
 	result, err := pm.Cancel(context.Background(), access, sessionID, "id-1")
@@ -1334,6 +1372,13 @@ func TestCancelBeforeClaimReturnsCancelled(t *testing.T) {
 	}
 	if result.Result != "cancelled" || result.Phase != assistant.PhaseCancelled {
 		t.Fatalf("cancel result = %+v, want {cancelled, cancelled}", result)
+	}
+	// Nothing was written, and that is the same fact the answer above reports
+	// (design §8.6: "a cancel never reports cancelled for a message whose
+	// paste can still be written") — stated where it can be seen, on the
+	// write path itself.
+	if keys.callCount() != 0 {
+		t.Fatalf("PaneKeys.Send was reached %d times for a message cancelled while queued, want 0", keys.callCount())
 	}
 
 	// A retry after a lost response gets the same answer (idempotent).

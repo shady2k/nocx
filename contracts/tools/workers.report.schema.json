@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/workers.report.schema.json",
+  "title": "WorkersReportParams",
+  "description": "Parameters for the workers.report agent tool: tell the coordinator that started you, in your own words, that you have finished, that you need an answer, or that you have reached a milestone. It is a claim and not a verdict — nocx records no success and no failure, and your coordinator decides what your words mean. The call does not wait: a question is answered by your coordinator's next message to you, so ask and end your turn rather than holding it open. You can only report from your own worker session, and only to the coordinator that started it; neither is something you name here. A report arriving after your worker has already ended is refused rather than delivered \u2014 the coordinator has that worker's exit, which nocx reports for itself, and there is nothing left to send.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "text"],
+  "properties": {
+    "kind": {
+      "type": "string",
+      "enum": ["done", "question", "progress"],
+      "description": "What you are reporting. `done` — the task you were given is finished, or you have stopped, and `text` says what came of it either way (say that it failed when it failed: there is no failure field, and this text is where the difference lives). Your coordinator's turn is started for this one. `question` — you cannot continue without an answer, so ask in `text` and end your turn; the answer arrives as your coordinator's next message, and the ask does not block. `progress` — a milestone you have reached, in `text`; it is a checkpoint and NOT a completion report, it never wakes your coordinator, and it is read at its next call. Send several as you go: they are appended, never overwritten."
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384,
+      "description": "What you are saying, in your own words. It is read by your coordinator and by nobody else, it is never typed into any pane, and nothing in it changes what you or anybody else may do — it is a message, not an instruction to nocx."
+    },
+    "estimate": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "For `progress` only. Your own approximate percentage of the work, if you want to give one — it is understood to be a guess that may sit at the same number for a long time, and it is never presented as a measurement. Leave it out when you have no honest number; a checkpoint with no estimate is worth as much as one with a made-up one."
+    },
+    "artifact": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "description": "For `progress` only. Something your coordinator can check against what nocx already holds — a commit, a path, a test run, the command you just ran. Optional, and a checkpoint that names something checkable is worth more than one that does not, so give one when the milestone produced something."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "kind": { "const": "progress" } }
+      },
+      "else": {
+        "properties": { "estimate": false, "artifact": false }
+      }
+    }
+  ],
+  "$defs": {
+    "result": {
+      "title": "WorkersReportResult",
+      "description": "What the record now holds. Committed is not read: the report is in your coordinator's mailbox, and whether it has looked is a separate fact you cannot see from here. Nothing is expected of you in return — carry on with the task, or, for a question, end your turn and wait.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "seq"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The report's id."
+        },
+        "seq": {
+          "type": "integer",
+          "description": "Its position in your coordinator's mailbox. Positions only ever increase, so a later report of yours has a larger one."
+        }
+      }
+    }
+  }
+}

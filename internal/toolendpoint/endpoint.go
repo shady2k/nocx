@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/coordinator"
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
@@ -909,6 +910,20 @@ func rpcErrorFor(err error) (code int, message, reason string) {
 		// no longer active.
 		return rpcDomainError, "worker request refused",
 			"that participant is yours, but its delegation is no longer active, so it can no longer be acted on. Call workers.holdings to see its state; a participant that has ended needs nothing further from you."
+	case errors.Is(err, workers.ErrReportAfterEnd):
+		// A REPORT FROM A WORKER THAT HAD ALREADY ENDED (nocx-luqz9.4; mesh
+		// design §6 rule 3, §9 assertion 4). Placed ABOVE the ErrTerminal arm
+		// because the record wraps both: the fact is the same ("this
+		// participant is over") and the caller's situation is not, so the
+		// classification has to take the more specific one.
+		//
+		// The sentence ErrTerminal would have given — "there is nothing on its
+		// screen to answer" — names the wrong object for this caller and sends
+		// it to look at a pane. What is true is that the worker has ended, the
+		// coordinator already has that fact, and there is nothing to retry:
+		// the call is over because the process is.
+		return rpcDomainError, "worker request refused",
+			"this worker had already ended when your report arrived, so it was not recorded and your coordinator was not told — what it has instead is the worker's exit, which nocx reports for itself. Nothing you send now will change that, and there is nothing to retry: this session is over. If your coordinator asks you for something, it will reach you as a new worker."
 	case errors.Is(err, workers.ErrTerminal):
 		// ENDED (nocx-f545a.4): a fact arrived about a participant already
 		// over, refused for being over rather than tidied up after. Mapped
@@ -1020,6 +1035,43 @@ func rpcErrorFor(err error) (code int, message, reason string) {
 		// gone".
 		return rpcDomainError, "worker request refused",
 			"the pane redrew before nocx could take a target on the screen it had just read, even after reading it again, so no target was minted and nothing was typed. Nothing here failed and the pane is still there; call again, and expect the same read to succeed once that pane stops repainting so fast."
+	case errors.Is(err, agenttools.ErrNoParticipant):
+		// A WORKER'S OWN CALL, MADE BY SOMEBODY WHO IS NOT A WORKER
+		// (nocx-luqz9.4). workers.report is the one tool whose holder must BE a
+		// participant, and the refusal happens at the constructor: the run
+		// context carries the identity, so there is no field for the caller to
+		// correct and no second attempt that could succeed.
+		//
+		// ITS OWN SENTENCE, and it has to be: the default arm would call this an
+		// internal error and tell the agent to stop — but nothing failed, and
+		// what the caller should do is the calls it DOES have. Said as a
+		// statement about the RUN rather than about the arguments, because that
+		// is where the fact lives and it is the same sentence whichever tool
+		// narrows to a participant.
+		return rpcDomainError, "worker request refused",
+			"this call belongs to a WORKER reporting to the coordinator that started it, and this session is not a worker's, so nothing was recorded and nothing changed. Nothing you can send will change that. If you are the coordinator, your workers' reports reach you instead: call workers.inbox and read them; if you wanted to tell your own coordinator something, this is not the process that can."
+	case errors.Is(err, workers.ErrNoCoordinator):
+		// A WORKER NOTHING COORDINATES. Its report has no mailbox to reach, and
+		// the record — not the caller — is what says so. Named rather than left
+		// to the default arm for the reason the sentence above is named: the
+		// honest fact is about the record, and an agent told "a fault inside
+		// nocx, do not repeat it" would carry on without ever being told that
+		// its report reached nobody.
+		return rpcDomainError, "worker request refused",
+			"this worker has no coordinator recorded, so there is no mailbox your report could be written to and none of it was. Nothing you send will change that; tell the person this worker was started without a coordinator, because that is a fault in how it was started rather than in what you asked for."
+	case errors.Is(err, workers.ErrReportNotRecorded):
+		// THE WRITE FAILED. The row is not in the box, so the report did not
+		// happen — and, unlike the two arms above, saying it again is the
+		// ordinary path rather than a repeat of something already refused.
+		return rpcDomainError, "worker request refused",
+			"nocx could not write your report into your coordinator's mailbox, so it was not recorded and your coordinator has not been told. Nothing about what you sent was refused; say it again, and if it keeps failing tell the person your reports are not arriving."
+	case errors.Is(err, workers.ErrNotAReport):
+		// A SHAPE A WORKER'S TOOL COULD NOT PRODUCE. The params schema refuses
+		// every one of these first, so this arm is what a caller sees only if
+		// the two ever disagree — which is exactly the drift worth naming out
+		// loud rather than reporting as a fault inside nocx.
+		return rpcInvalidParams, "invalid params",
+			"this report is not one a worker's tool can send — the kind must be done, question or progress, and estimate and artifact belong to a progress checkpoint only. Correct it and call again; the tool's schema in tools.catalogue says what each one accepts."
 	case errors.Is(err, context.Canceled):
 		// THE CALLER STOPPED WAITING; NOTHING FAILED INSIDE NOCX. This is
 		// what a dispatch reports when its own context ends before it

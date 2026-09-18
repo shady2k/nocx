@@ -179,44 +179,10 @@ type Mailboxes interface {
 	Since(ctx context.Context, mailbox ReaderID, after int64, limit int) ([]Message, error)
 }
 
-// MessageKind is what a row of a mailbox IS, as far as the wake is concerned.
-//
-// It exists so that "does this wake the coordinator" is answered in ONE place:
-// the kinds a worker's tool can report are not built yet (nocx-luqz9.4), and
-// when the first of them lands it is a value here and a case in kindOf — never
-// a second route into the wake.
-type MessageKind string
-
-const (
-	// KindObservation is a settled state nocx saw: idle, blocked or exited.
-	KindObservation MessageKind = "observation"
-	// KindReport is a worker's own words about itself: a completion or a
-	// question. Both wake, and neither is built yet.
-	KindReport MessageKind = "report"
-	// KindProgress is a checkpoint. It never wakes (design P4, §5.1): a
-	// report of "still going" is exactly the traffic the batch mechanism
-	// exists to keep out of a coordinator's turn.
-	KindProgress MessageKind = "progress"
-)
-
-// Wakes reports whether mail of this kind starts the coordinator's turn.
-func (k MessageKind) Wakes() bool { return k != KindProgress }
-
-// kindOf reads one message's kind off the row itself rather than off a field a
-// producer could set wrongly: an observation is a row carrying a state, and
-// everything else is somebody's words. Progress does not exist yet, so no row
-// is one today — the value is here because the wake's rule is written in terms
-// of kinds and not in terms of the two rows that happen to exist, and because
-// the kind that must NOT wake has to have a name before it has a producer.
-func kindOf(m Message) MessageKind {
-	if m.Observed != nil {
-		return KindObservation
-	}
-	if m.Kind == KindProgress {
-		return KindProgress
-	}
-	return KindReport
-}
+// MessageKind and the four values a row can BE live in kinds.go (nocx-luqz9.4),
+// because the vocabulary belongs to the mailbox rather than to the one reader
+// whose behaviour depends on it: the writers stamp it, this file only asks
+// whether it wakes.
 
 // DefaultRetryPause is how long nocx waits before typing the same thing again
 // (design §5.4), and DefaultAttempts is how many lines a batch gets before the

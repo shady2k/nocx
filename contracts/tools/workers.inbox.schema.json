@@ -27,11 +27,31 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["from", "message"],
+            "required": ["from", "message", "at"],
             "properties": {
               "from": {
                 "type": "string",
                 "description": "Who wrote it."
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time",
+                "description": "When nocx committed this to your mailbox, in UTC. Present on every message, ordinary mail and a report alike, so it is what a coordinator compares a worker's words against the states nocx saw beside them \u2014 two readings of one clock."
+              },
+              "kind": {
+                "type": "string",
+                "enum": ["done", "question", "progress"],
+                "description": "Present when this is a WORKER's REPORT rather than a message somebody left you, and it says which kind it is: `done`, `question`, or `progress` (a checkpoint, which never wakes you and is not a completion report). Absent on ordinary mail, which is a message and not a claim about anybody's work. Read it before you act: it is the difference between a worker that has finished and one that is stuck waiting for you, and reading a checkpoint as a completion is the mistake it exists to prevent."
+              },
+              "estimate": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Present on a `progress` checkpoint that gave one: the worker's OWN approximate percentage, and nothing more. It is a claim that may sit at the same number for a long time and is never a measurement; it arrives unmeasured and is not to be quoted as though it were."
+              },
+              "artifact": {
+                "type": "string",
+                "description": "Present on a `progress` checkpoint that named one: a commit, a path or a test run the worker says its milestone produced. It is a claim too, and it is the one part you can corroborate against what nocx already holds."
               },
               "message": {
                 "type": "string",

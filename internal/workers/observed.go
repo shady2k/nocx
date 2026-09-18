@@ -331,7 +331,15 @@ func (r *Registrar) coordinatorOf(ctx context.Context, group ID) (ReaderID, erro
 		return "", fmt.Errorf("worker: worker %q: %w", group, err)
 	}
 	if coordinator == "" {
-		return "", fmt.Errorf("worker: nobody coordinates worker %q: %w", group, ErrNoSuchParticipant)
+		// A NAMED FACT (nocx-luqz9.4). It used to answer ErrNoSuchParticipant,
+		// which is a statement about a row; what is actually true is that
+		// this worker has NO COORDINATOR, so there is no mailbox its mail
+		// belongs in and nothing that could be written or read. A report
+		// reaches the endpoint with this error, and the difference between
+		// "the row is gone" and "nobody is above this worker" is the
+		// difference between a fault and an inconsistency to tell a person
+		// about.
+		return "", fmt.Errorf("worker: nobody coordinates worker %q: %w", group, ErrNoCoordinator)
 	}
 	return ReaderID(coordinator), nil
 }

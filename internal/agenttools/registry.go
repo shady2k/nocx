@@ -1026,6 +1026,49 @@ var declarations = []Declaration{
 		Narrow: narrowWorkerMailbox,
 	},
 	{
+		Name:        "workers.report",
+		Description: "Tell the coordinator that started you, in your own words, that you have finished, that you need an answer, or that you have reached a milestone. Call it with `done` when the task is finished — or when you have stopped and it is not, which is what the text is for; nocx records no success and no failure and your coordinator judges what your words mean. Call it with `question` when you cannot continue without an answer: ask, then END YOUR TURN, because the call does not wait and the answer arrives as your coordinator's next message. Call it with `progress` at milestones, as often as you have them. This is your own worker session's call and nothing else's; you cannot report as anybody else or to anybody else, and neither is something you name. It stops working when your session ends: a report arriving after that is refused, because the coordinator already has your exit.",
+		// OBSERVE, for workers.say's reason read from the other end. Leaving a
+		// report in a mailbox reaches nobody's keyboard, cannot answer a modal,
+		// and must go on working while a person is helping the coordinator past
+		// a prompt. What it needs is membership in the worker it reports about,
+		// which every worker has over itself.
+		Effect: []content.Effect{content.EffectObserve},
+		// THE WORKER'S OWN WORDS, so untrusted for the strongest reason on this
+		// surface: they are a claim by an agent about work nobody has checked,
+		// and they may themselves have been written from content that agent was
+		// fed. The frame is what says so to the coordinator reading them.
+		OutputTrust:  OutputTrustUntrusted,
+		ResultBound:  ResultBound{MaxBytes: 2 << 10, Truncation: TruncationDropTail},
+		Deadline:     10 * time.Second,
+		Cancellation: CancellationReturnError,
+		// A PARTICIPANT, addressed as a sub-scope of ResourceWorkspace, for
+		// workers.inbox's reason and by the same resolver (A11) — see
+		// resourceParticipantWorkspace for why that is the kind.
+		//
+		// ONE HONEST LIMIT, and it is the existing design's rather than this
+		// row's: the workspace kind is on BOTH grants (a coordinator carries one
+		// for workers.inbox since nocx-luqz9.2), so a coordinator is OFFERED
+		// this call and refused by Narrow below. The offer set cannot separate
+		// the two runs by kind — there is no kind a participant's grant carries
+		// and a coordinator's does not — and pretending otherwise would need a
+		// second spelling of the participant scope, which is what A11's single
+		// resolver exists to prevent. What closes the gap for the caller is the
+		// refusal itself: narrowWorkerParticipant's ErrNoParticipant, mapped by
+		// the endpoint to a sentence that names a worker's own session and sends
+		// the reader to the calls it does have (rpcErrorFor).
+		ResourceKinds:    []content.ResourceKind{content.ResourceWorkspace},
+		ResolveResources: resourceParticipantWorkspace,
+		Executes:         InGo,
+		Params:           "workers.report.schema.json",
+		// THE PARTICIPANT CONSTRUCTOR, the same one workers.inbox reaches when
+		// the run IS a worker. It is the narrow that makes "a worker's tool"
+		// structural rather than a check in an executor: a coordinator's run
+		// context has no participant identity, so no grant it could be given
+		// produces a capability for this call.
+		Narrow: narrowWorkerParticipant,
+	},
+	{
 		Name:        "workers.close",
 		Description: "End one of your workers. It stops the worker's process, so whatever it had not finished is not finished; reach for it when the work is done or is no longer wanted, never as a retry. You can only close workers your own session started.",
 		// MUTATE-DESTRUCTIVE, and it is not session.wait's `stop`. That one

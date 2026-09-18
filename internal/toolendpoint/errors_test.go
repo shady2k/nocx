@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/workers"
@@ -52,6 +53,16 @@ func TestEveryRefusalTellsTheCallerWhatToDoNext(t *testing.T) {
 		// answer it needed was on that pane's menu.
 		helperclient.ErrTargetCapacity,
 		helperclient.ErrSnapshotGone,
+		// THE REPORT'S FOUR (nocx-luqz9.4). Each is a different fact with a
+		// different next step — not a worker at all, a worker nothing
+		// coordinates, a write that failed, and a shape the tool could not
+		// have sent — and a caller that cannot tell them apart retries the one
+		// that cannot work or gives up on the one that can.
+		agenttools.ErrNoParticipant,
+		workers.ErrNoCoordinator,
+		workers.ErrReportNotRecorded,
+		workers.ErrNotAReport,
+		workers.ErrReportAfterEnd,
 		context.Canceled,
 		context.DeadlineExceeded,
 		errors.New("something nobody has classified"),
@@ -178,5 +189,37 @@ func TestTheUnclassifiedErrorSaysNotToRepeatTheCall(t *testing.T) {
 	}
 	if !strings.Contains(reason, "Do not repeat") {
 		t.Errorf("the reason does not stop a retry: %q", reason)
+	}
+}
+
+// THE TWO "IT HAS ENDED" REFUSALS DO NOT SHARE A SENTENCE (nocx-luqz9.4),
+// and that is the split the file above exists for. A fact about a PANE sends the
+// reader to workers.holdings to look at a screen; a REPORT that arrived after the
+// end has no next step in it at all. Handing the second the first's sentence
+// would name an object the caller never mentioned — its own report — as a screen
+// to go and read.
+func TestAnEndedPaneAndAnEndedReportDoNotShareASentence(t *testing.T) {
+	_, _, pane := rpcErrorFor(workers.ErrTerminal)
+	// The record wraps BOTH sentinels on the report path, which is what makes
+	// the arm order load-bearing rather than incidental.
+	_, _, report := rpcErrorFor(fmt.Errorf("worker: participant %q is exited: %w: %w",
+		"p-1", workers.ErrTerminal, workers.ErrReportAfterEnd))
+
+	if pane == report {
+		t.Fatalf("an ended pane and an ended report answer with one sentence: %q", pane)
+	}
+	if strings.Contains(report, "screen") {
+		t.Errorf("the ended-report refusal names a pane the caller never wrote to: %q", report)
+	}
+	if !strings.Contains(report, "report") {
+		t.Errorf("the ended-report refusal does not name what was refused: %q", report)
+	}
+	// It must also not read as a retry: the session is over, so a caller told to
+	// try again would spend a turn doing the one thing that cannot work.
+	if strings.Contains(report, "again") && !strings.Contains(report, "nothing to retry") {
+		t.Errorf("the ended-report refusal invites a retry: %q", report)
+	}
+	if !strings.Contains(pane, "workers.holdings") {
+		t.Errorf("the ended-pane refusal lost its next step: %q", pane)
 	}
 }

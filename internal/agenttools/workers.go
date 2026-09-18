@@ -165,9 +165,18 @@ func (p *WorkerParticipant) Mailbox() string {
 	return p.participant
 }
 
-// errNoParticipant is what a narrow returns for a run the authorizer did not
+// ErrNoParticipant is what a narrow returns for a run the authorizer did not
 // establish as a worker's.
-var errNoParticipant = errors.New("agenttools: this run is not a worker participant")
+//
+// IT IS EXPORTED, and the reason is the tool that made it reachable
+// (nocx-luqz9.4): workers.report is a WORKER's call and nothing else's, so a
+// coordinator — or an ordinary run — that reaches it is refused HERE, at the
+// constructor, and the endpoint has to turn that refusal into a sentence the
+// agent can act on. An unexported sentinel would have left it in the default
+// arm, whose sentence calls an unclassified failure a fault inside nocx and
+// tells the model to stop — which is wrong twice over: nothing failed, and
+// what the caller should do is use the calls it does have.
+var ErrNoParticipant = errors.New("agenttools: this run is not a worker participant")
 
 // narrowWorkerParticipant builds the participant capability from the run's own
 // identity. The id comes from the run context and never from the call's
@@ -178,9 +187,17 @@ var errNoParticipant = errors.New("agenttools: this run is not a worker particip
 // A run with no participant is REFUSED here rather than narrowed to an empty
 // capability. An empty participant names mailbox "", which belongs to nobody,
 // and a mailbox belonging to nobody must not be reachable at all.
+//
+// TWO CALLERS, ONE REFUSAL. workers.report is this narrow's alone — a worker
+// reporting to its coordinator, which no other run identity has any business
+// doing — and workers.inbox reaches it through narrowWorkerMailbox when the run
+// IS a participant. Both therefore refuse a coordinator with this one sentinel,
+// which is correct: the fact is the same fact ("this run is not a worker"), and
+// a second sentinel saying it again would be a second name for one thing, with
+// the endpoint then owing two sentences that must stay distinct.
 func narrowWorkerParticipant(_ content.Grant, _ []ResourceRef, runCtx RunContext) (Capability, error) {
 	if runCtx.Participant == "" {
-		return nil, errNoParticipant
+		return nil, ErrNoParticipant
 	}
 	return NewWorkerParticipant(runCtx.Participant), nil
 }
@@ -244,6 +261,15 @@ func narrowWorkers(grant content.Grant, _ []ResourceRef, runCtx RunContext) (Cap
 	return NewWorkerCoordinator(runCtx.Session, runCtx.ControllerIdentity, scopes), nil
 }
 
+// errNoWorkspace is what resourceParticipantWorkspace answers for a run whose
+// context names no workspace: there is no sub-scope to resolve, and returning an
+// empty one would be a scope covering nothing at a call that needs to cover
+// something. It is a DIFFERENT fact from ErrNoParticipant — a run can be a
+// participant and still have no workspace here — and the two are separate names
+// for the reason this package keeps every refusal separate: a reader that cannot
+// tell them apart looks in the wrong place.
+var errNoWorkspace = errors.New("agenttools: this run names no workspace")
+
 // resourceParticipantWorkspace names the resource a participant's call is
 // about, as A11 of the authority model decided it: a participant is addressed
 // as a SUB-SCOPE OF ResourceWorkspace, not as a ninth ResourceKind. The kind
@@ -264,9 +290,12 @@ func narrowWorkers(grant content.Grant, _ []ResourceRef, runCtx RunContext) (Cap
 // is session, path, content, destination and environment — so no coordinator
 // is ever offered a participant's call, and the participant's own grant names
 // no session or environment, so it is offered none of the coordinator's four.
+//
+// It answers errNoWorkspace for a run whose context names no workspace, which
+// is the fact above the reason it is a refusal rather than an empty scope.
 func resourceParticipantWorkspace(_ map[string]any, runCtx RunContext) ([]ResourceRef, error) {
 	if runCtx.Workspace == "" {
-		return nil, errNoParticipant
+		return nil, errNoWorkspace
 	}
 	return []ResourceRef{{
 		Kind: content.ResourceWorkspace,

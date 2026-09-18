@@ -36,6 +36,13 @@ type WorkerRecord interface {
 	// passed in and never taken from the arguments: a sender a model could
 	// name is a sender a model could forge.
 	Say(ctx context.Context, id workers.ID, from, to workers.ReaderID, body string) (workers.Message, error)
+	// Report commits one worker's report — its kind and its own words — into
+	// the mailbox of the coordinator that holds it (nocx-luqz9.4). The
+	// recipient is not an argument and there is nowhere to put one: the box is
+	// read off the reporting participant's own record, which is what makes
+	// "a worker cannot write to somebody else's coordinator" a property of the
+	// shape rather than of a check.
+	Report(ctx context.Context, id workers.ParticipantID, rep workers.Report) (workers.Message, error)
 	// Inbox hands this reader its next page and advances its own cursor.
 	Inbox(ctx context.Context, mailbox, reader workers.ReaderID, limit int) (workers.Fetch, error)
 	// Undelivered is what this worker's mailboxes hold that their recipients
@@ -83,12 +90,41 @@ type workerParticipantResult struct {
 }
 
 // workerMailResult is one message the coordinator is handed. It carries the
-// sender and the body and nothing else: a message is CONTENT, and a shape with
-// an id or a cursor in it would invite the model to think it had something to
+// sender, the body and WHEN it was committed — plus the three fields a worker's
+// REPORT adds (nocx-luqz9.4), because a report is a claim of a named kind rather
+// than ordinary mail and the difference decides what the coordinator does next.
+//
+// THE TIME IS REQUIRED and not optional, which is the design rather than a
+// convenience: a row is committed by the record's own clock (`Say`, `Report`),
+// and a coordinator comparing what a worker said against what it was seen to be
+// doing has to compare two readings of one clock. The observations list beside
+// this one has carried its `at` since nocx-luqz9.2 for exactly that reason, and
+// a report whose time existed on the row but reached nobody would be the
+// recorded-and-unreadable value this surface exists to refuse.
+//
+// There is still no id or cursor in it: a message is CONTENT, and a shape with
+// a position in it would invite the model to think it had something to
 // acknowledge, which is a mark the backend advanced for it.
 type workerMailResult struct {
 	From    string `json:"from"`
 	Message string `json:"message"`
+	// At is when the record committed the row, in UTC RFC 3339 — the same
+	// encoding every other timestamp on this surface uses, so a caller never has
+	// two parsers.
+	At string `json:"at"`
+	// Kind is set only when this row IS a worker's report (workers.report), and
+	// it is the difference the coordinator acts on: `done` and `question` woke
+	// it, `progress` did not. Empty for a message somebody left the holder,
+	// which is text and not a claim about anybody's work.
+	Kind string `json:"kind,omitempty"`
+	// Estimate and Artifact ride a `progress` checkpoint only, and each is a
+	// claim too: the estimate is the worker's own approximation, unmeasured and
+	// allowed to sit still, and the artifact is the one part the coordinator can
+	// check against what nocx already owns. Both are omitted when the worker
+	// gave neither — a report is worth as much without them (mesh design P2, P3
+	// make both optional on purpose).
+	Estimate *int   `json:"estimate,omitempty"`
+	Artifact string `json:"artifact,omitempty"`
 }
 
 // workerObservationResult is one state a coordinator's worker was SEEN to be in
@@ -179,6 +215,30 @@ type workerSayResult struct {
 	Seq int64  `json:"seq"`
 }
 
+// workerReportParams is what a worker's report carries (nocx-luqz9.4). The
+// spelling of P2 and P3 is the mesh design's own vocabulary, read literally and
+// on purpose: §6 calls them "an optional approximate estimate, an optional
+// artifact reference", and a name invented here would be a second word for a
+// thing the design already named.
+type workerReportParams struct {
+	Kind string `json:"kind"`
+	Text string `json:"text"`
+	// Estimate is a POINTER because the field is optional in a way an int
+	// cannot express: zero is a report — "I estimate nothing is done yet" — and
+	// the absence of a number is a different report. A value type would make
+	// them the same row.
+	Estimate *int   `json:"estimate,omitempty"`
+	Artifact string `json:"artifact,omitempty"`
+}
+
+// workerReportResult is what a report answers. Two fields and no verdict: what
+// became of the report is the coordinator's to decide, and whether it has read
+// the row is a fact this call cannot see.
+type workerReportResult struct {
+	ID  string `json:"id"`
+	Seq int64  `json:"seq"`
+}
+
 type workerSpawnParams struct {
 	Command string `json:"command"`
 	Task    string `json:"task"`
@@ -239,7 +299,19 @@ func splitMailbox(messages []workers.Message) ([]workerMailResult, []workerObser
 	observed := make([]workerObservationResult, 0, len(messages))
 	for _, m := range messages {
 		if m.Observed == nil {
-			text = append(text, workerMailResult{From: string(m.Sender), Message: m.Body})
+			// The kind is carried through as the row holds it, and an EMPTY one
+			// stays empty: ordinary mail from a coordinator has no kind, and a
+			// renderer that defaulted it to a report would be inventing a claim
+			// nobody made. Whether a report wakes was decided by the record's
+			// wake — this is what the coordinator is told it was.
+			//
+			// The time is the record's own stamp on the row and is rendered for
+			// every message, in the encoding the observations beside it use.
+			text = append(text, workerMailResult{
+				From: string(m.Sender), Message: m.Body,
+				At:   m.CommittedAt.UTC().Format(time.RFC3339),
+				Kind: string(m.Kind), Estimate: m.Estimate, Artifact: m.Artifact,
+			})
 			continue
 		}
 		observed = append(observed, workerObservationResult{
@@ -586,6 +658,78 @@ func executeWorkerSay(ctx context.Context, cap agenttools.Capability, args json.
 		return "", fmt.Errorf("workers.say: result: %w", err)
 	}
 	return string(raw), nil
+}
+
+// executeWorkerReport commits a worker's report into its coordinator's mailbox
+// (nocx-luqz9.4; design §4.2, §5.1; ADR-0070 decision 1).
+//
+// IT NAMES NO RECIPIENT AND IT WAITS FOR NOTHING. The first is A9's rule: the
+// box is derived from the reporting participant's own record, so a worker has no
+// way to EXPRESS another mailbox — not its coordinator's sibling, not another
+// worker's, not its own. The second is ADR-0070's "why not a blocking ask": a
+// question is a report that says it needs an answer, and the answer arrives as
+// the worker's next message, so there is no timeout, no held call and no state
+// to resume. Both are properties of this function's shape rather than rules it
+// enforces.
+//
+// The KIND is passed through and never re-derived from the text. A verdict read
+// out of prose is the second derivation this whole surface exists to avoid, and
+// the record validates it (checkReport) because a row carrying a kind its
+// contract does not allow would fail the next READER's schema, not this one's.
+func executeWorkerReport(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	participant, err := workerParticipantFrom(cap, "workers.report")
+	if err != nil {
+		return "", err
+	}
+	if seams.workerStore == nil {
+		return "", errors.New("workers.report: this backend keeps no worker record")
+	}
+	var p workerReportParams
+	if argErr := json.Unmarshal(args, &p); argErr != nil {
+		return "", fmt.Errorf("workers.report: %w", argErr)
+	}
+	m, err := seams.workerStore.Report(ctx, workers.ParticipantID(participant.Participant()), workers.Report{
+		Kind:     workers.MessageKind(p.Kind),
+		Text:     p.Text,
+		Estimate: p.Estimate,
+		Artifact: p.Artifact,
+	})
+	if err != nil {
+		return "", fmt.Errorf("workers.report: %w", err)
+	}
+	raw, err := json.Marshal(workerReportResult{ID: string(m.ID), Seq: m.Seq})
+	if err != nil {
+		return "", fmt.Errorf("workers.report: result: %w", err)
+	}
+	return string(raw), nil
+}
+
+// workerParticipantFrom is the ONE assertion of a worker's own capability, at
+// the one call that is a worker's alone (nocx-luqz9.4).
+//
+// It is workers.inbox's asymmetry read the other way round. That call asserts
+// NEITHER concrete type, because its two holders do one thing; this call is the
+// reverse — reporting is a worker's act and nobody else's — so the type switch
+// is what proves the distinction exhaustive, exactly as it does for the five an
+// authority call.
+//
+// A coordinator never reaches the branch this refuses. Its run context carries
+// no participant identity, so narrowWorkerParticipant refused the call before
+// any executor ran; what this assertion catches is the one thing the narrow
+// cannot: a declaration whose Narrow and whose executor disagree about which
+// capability the call takes.
+func workerParticipantFrom(cap agenttools.Capability, tool string) (*agenttools.WorkerParticipant, error) {
+	p, ok := cap.(*agenttools.WorkerParticipant)
+	if !ok {
+		return nil, fmt.Errorf("%s: capability is %T, not a worker's own", tool, cap)
+	}
+	if p.Participant() == "" {
+		// An empty participant names a mailbox belonging to nobody, which must
+		// not be written to. The narrow refuses this already; the check is here
+		// so the failure is a refusal rather than a row addressed to "".
+		return nil, fmt.Errorf("%s: this run is not a worker participant", tool)
+	}
+	return p, nil
 }
 
 // executeWorkerSpawn starts one worker and returns only when it is LIVE.

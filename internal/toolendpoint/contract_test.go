@@ -73,6 +73,14 @@ func (contractWorkerRecord) Say(context.Context, workers.ID, workers.ReaderID, w
 	return workers.Message{ID: "message-1", Seq: 1}, nil
 }
 
+// Report answers with the committed row the executor renders, kind and all
+// (nocx-luqz9.4). It is here rather than in the socket test's own double
+// because this type is the one the endpoint's whole contract suite uses, and a
+// seam it cannot satisfy would make every case in this file fail to build.
+func (contractWorkerRecord) Report(context.Context, workers.ParticipantID, workers.Report) (workers.Message, error) {
+	return workers.Message{ID: "message-1", Seq: 1, Kind: workers.KindDone}, nil
+}
+
 // Inbox answers with BOTH shapes a mailbox holds (nocx-luqz9.2): a message
 // somebody wrote and an observation nocx made. The conformance case below is
 // the only place this endpoint's answer to workers.inbox is validated against
@@ -83,7 +91,7 @@ func (contractWorkerRecord) Inbox(context.Context, workers.ReaderID, workers.Rea
 	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	return workers.Fetch{
 		Messages: []workers.Message{
-			{ID: "message-1", Seq: 1, Sender: workers.ReaderID("sess-coordinator"), Body: "the wire is a party"},
+			{ID: "message-1", Seq: 1, Sender: workers.ReaderID("sess-coordinator"), Body: "the wire is a party", CommittedAt: at},
 			{
 				ID: "message-2", Seq: 2, Sender: workers.ReaderID("nocx"),
 				Observed: &workers.Observed{

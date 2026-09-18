@@ -83,6 +83,7 @@ var executors = map[string]func(ctx context.Context, cap agenttools.Capability, 
 	"workers.wait":     executeWorkerWait,
 	"workers.close":    executeWorkerClose,
 	"workers.inbox":    executeWorkerInbox,
+	"workers.report":   executeWorkerReport,
 }
 
 // SkillSource is the assistant's seam onto the skill library. The index is

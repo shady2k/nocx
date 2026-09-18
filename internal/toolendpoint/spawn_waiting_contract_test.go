@@ -27,7 +27,7 @@ type waitingWorkerRecord struct{ contractWorkerRecord }
 
 func (waitingWorkerRecord) Register(ctx context.Context, req workers.RegisterRequest) (workers.Registration, error) {
 	reg, err := contractWorkerRecord{}.Register(ctx, req)
-	reg.Delivery = workers.TaskDelivery{WaitingOn: "permission_choice"}
+	reg.Delivery = workers.TaskDelivery{WaitingOn: "permission_choice", BriefingQueued: true}
 	return reg, err
 }
 

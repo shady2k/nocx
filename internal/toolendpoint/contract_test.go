@@ -61,7 +61,11 @@ func (contractWorkerRecord) Register(_ context.Context, req workers.RegisterRequ
 			State: workers.StateLive,
 			Task:  req.Task,
 		},
-		Delivery: workers.TaskDelivery{Typed: true},
+		// The briefing reached the queue — what the real Registrar reports for
+		// a spawn whose pane was free (nocx-luqz9.5). Typed stays false, which
+		// is also what production answers: the task is typed later by the
+		// queue, never synchronously by the spawn.
+		Delivery: workers.TaskDelivery{BriefingQueued: true},
 	}, nil
 }
 

@@ -254,6 +254,22 @@ type workerSpawnResult struct {
 	// than being handed an error for a pane nocx read perfectly.
 	TaskTyped bool   `json:"taskTyped"`
 	WaitingOn string `json:"waitingOn,omitempty"`
+	// BriefingQueued is the OTHER half of the answer, and the one that decides
+	// what the rest of it means (nocx-luqz9.5, design §6): whether nocx handed
+	// this worker its briefing — the rules it reports under, and then the task
+	// — to the queue that delivers it.
+	//
+	// FALSE IS NOT A SMALLER TRUE. The two messages are one call, so a false
+	// here means the worker has been told NOTHING and nothing further will be
+	// delivered: it is running, it will never report, and the coordinator's
+	// only move is workers.close and another spawn. That is why it is a field
+	// and not a log line — a live worker nobody was told about is exactly the
+	// silent degrade AGENTS.md refuses to ship.
+	//
+	// It comes straight from the registration (workers.TaskDelivery), which is
+	// the only party that knows whether the queue took the briefing: no
+	// derivation, no second opinion about the same fact.
+	BriefingQueued bool `json:"briefingQueued"`
 }
 
 // workerCoordinatorFrom is the ONE assertion of a concrete worker capability,
@@ -784,10 +800,11 @@ func executeWorkerSpawn(ctx context.Context, cap agenttools.Capability, args jso
 		return "", fmt.Errorf("workers.spawn: %w", err)
 	}
 	raw, err := json.Marshal(workerSpawnResult{
-		ID:        string(participant.ID),
-		State:     string(participant.State),
-		TaskTyped: participant.Delivery.Typed,
-		WaitingOn: participant.Delivery.WaitingOn,
+		ID:             string(participant.ID),
+		State:          string(participant.State),
+		TaskTyped:      participant.Delivery.Typed,
+		WaitingOn:      participant.Delivery.WaitingOn,
+		BriefingQueued: participant.Delivery.BriefingQueued,
 	})
 	if err != nil {
 		return "", fmt.Errorf("workers.spawn: result: %w", err)

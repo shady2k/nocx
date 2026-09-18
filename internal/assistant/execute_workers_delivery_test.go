@@ -55,3 +55,28 @@ func TestATypedTaskSaysSoAndNamesNoWait(t *testing.T) {
 		t.Fatalf("a typed task named a wait: %v", got)
 	}
 }
+
+// Criterion (nocx-luqz9.5, acceptance 4): a worker whose briefing never
+// reached the queue is reported as such, and the report is a FIELD rather than
+// a log line — the worker is live, it will never report, and a coordinator
+// told only that its task "was not typed" would go on waiting for a turn that
+// cannot come.
+func TestAWorkerNocxCouldNotBriefSaysSo(t *testing.T) {
+	got := spawnResultWith(t, workers.TaskDelivery{})
+	if got["state"] != "live" {
+		t.Fatalf("state = %v, want live: nocx started the process it was asked to start", got["state"])
+	}
+	if got["briefingQueued"] != false {
+		t.Fatalf("briefingQueued = %v, want false when nothing reached the queue", got["briefingQueued"])
+	}
+}
+
+// And a worker that WAS briefed says that too, in the same field — which is
+// what makes the false above readable rather than ambiguous: without it, a
+// false would be indistinguishable from a field nobody set.
+func TestAWorkerThatWasBriefedSaysSo(t *testing.T) {
+	got := spawnResultWith(t, workers.TaskDelivery{BriefingQueued: true})
+	if got["briefingQueued"] != true {
+		t.Fatalf("briefingQueued = %v, want true", got["briefingQueued"])
+	}
+}

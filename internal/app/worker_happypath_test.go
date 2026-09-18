@@ -515,22 +515,18 @@ type happyTaskQueue struct {
 	log       log.Logger
 }
 
-// EnqueueBriefing types the briefing's two halves in the order it was handed
-// them (nocx-luqz9.5). It types them SEQUENTIALLY and not concurrently: the
-// order the worker is told things in is the whole point of a briefing, and two
-// goroutines racing to a pane would leave that to the scheduler. The second
-// wait is a fresh one because the agent is working on the rules by then, so
-// what this waits for is the turn the rules started, not the same scan twice.
+// EnqueueBriefing types the briefing's one message (nocx-xn63t.4.16). It types
+// ONE text and not the two halves separately: the rules and the task travel
+// joined, rules first, which is what tells the worker both what it is and what
+// to do without leaving the rules alone as a turn of their own.
 func (q *happyTaskQueue) EnqueueBriefing(_ context.Context, _ string, participant workers.Participant, briefing workers.Briefing) error {
 	go func() {
 		paneID := participant.Liveness.SessionID
-		for _, text := range []string{briefing.Preamble, briefing.Task} {
-			state, err := awaitFreeText(context.Background(), q.readiness, paneID, q.log, "worker spawn (happy stand)")
-			if err != nil || state != agentdriver.StateFreeText {
-				return
-			}
-			q.typist.Submit(context.Background(), paneID, text)
+		state, err := awaitFreeText(context.Background(), q.readiness, paneID, q.log, "worker spawn (happy stand)")
+		if err != nil || state != agentdriver.StateFreeText {
+			return
 		}
+		q.typist.Submit(context.Background(), paneID, briefing.Text())
 	}()
 	return nil
 }
@@ -847,9 +843,9 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 		// helper runtime behind its panes at all (that is Task 14's own
 		// happypath, which extends this same newHappyStand for exactly that
 		// reason). happyTaskQueue reaches the SAME real typing gate
-		// (paneTyping) this stand already wires for readiness, so
+		// this stand already wires for readiness, so
 		// TestACoordinatorSpawnsAWorkerAndTypesItsTask's own assertion — the
-		// task lands in the pane as a bracketed paste and a submit key —
+		// briefing lands in the pane as a bracketed paste and a submit key —
 		// still exercises a real gate rather than a double that only
 		// records a call.
 		record.SetTaskQueue(&happyTaskQueue{readiness: realWatch, typist: paneTyping, log: logger})

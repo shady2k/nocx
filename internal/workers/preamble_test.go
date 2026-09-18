@@ -141,3 +141,36 @@ func TestThePreambleIsAPasteableMessageOnOneLine(t *testing.T) {
 		t.Fatalf("the preamble ends in whitespace, which pastes as a trailing blank: %q", text)
 	}
 }
+
+// Criterion (nocx-xn63t.4.16): the rules and the task leave here as ONE
+// message, the rules first.
+//
+// It is asserted on the TEXT and not on the separator, because what the worker
+// and the delivery both depend on is the ORDER and the SHAPE: the rules open
+// the message and the task follows them, and for a task with no newline in it
+// the message is one line — the paste shape the preamble's own doc is measured
+// on, and the reason the separator between the two is a word rather than a
+// break. A worker handed the rules alone is the defect this bead was filed
+// from: it finds no task in its message, and asks its coordinator for work
+// already queued behind the question.
+func TestABriefingIsOneMessageWithTheRulesFirst(t *testing.T) {
+	const task = "count the frames in the capture and report"
+	b := Briefing{Preamble: Preamble(preambleCoordinator), Task: task}
+	text := b.Text()
+
+	if text == b.Preamble {
+		t.Fatal("the briefing is its own rules alone: a worker handed this finds no task in it")
+	}
+	rest, ok := strings.CutPrefix(text, b.Preamble)
+	if !ok {
+		t.Fatalf("the briefing does not open with its own rules:\n%q", text)
+	}
+	if !strings.Contains(rest, task) {
+		t.Fatalf("the briefing does not carry the task after the rules:\n%q", text)
+	}
+	for _, forbidden := range []string{"\x00", "\r", "\n"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("the briefing carries %q, which sends it down the multi-line paste's echo path:\n%q", forbidden, text)
+		}
+	}
+}

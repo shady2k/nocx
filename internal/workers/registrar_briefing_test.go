@@ -1,15 +1,16 @@
 package workers
 
-// The briefing a registration hands its worker (nocx-luqz9.5; design §6).
+// The briefing a registration hands its worker (nocx-luqz9.5; design §6; one
+// message since nocx-xn63t.4.16).
 //
-// ONE CALL, TWO MESSAGES, AND THE ORDER IS THE QUEUE'S. A registration with a
-// task hands the composition root's queue a Briefing — the rules first, the
-// task second — in one call rather than two, because two calls would make the
+// ONE CALL, ONE MESSAGE, AND THE ORDER IS THE TEXT'S. A registration with a
+// task hands the composition root's queue a Briefing — the rules and the task,
+// as one text — in one call rather than two, because two calls would make the
 // order an accident of which goroutine reached the queue first, and a worker
 // that gets a task before its rules has no way to report on it.
 //
-// What this package can assert stops at the seam: the queue's own delivery
-// order, its gate, and its refusal paths are internal/app.paneMessages' suite
+// What this package can assert stops at the seam: the queue's own delivery and
+// its refusal paths are internal/app.paneMessages' suite
 // (internal/app/pane_messages_briefing_test.go), exactly as the task's delivery
 // mechanics already were before this bead.
 
@@ -89,6 +90,18 @@ func TestRegisterEnqueuesTheBriefingExactlyOnceAfterTheParticipantIsLive(t *test
 	if !strings.Contains(call.briefing.Preamble, coordSession) {
 		t.Fatalf("the briefing does not name the coordinator a worker must report to:\n%s", call.briefing.Preamble)
 	}
+	// AND THE ONE MESSAGE THE QUEUE IS HANDED CARRIES BOTH, rules first: the
+	// registration hands over a Briefing and never a joined string of its own,
+	// so there is exactly one place that decides how the two are spelled
+	// together (Briefing.Text, and its own test beside this file).
+	text := call.briefing.Text()
+	rest, found := strings.CutPrefix(text, call.briefing.Preamble)
+	if !found {
+		t.Fatalf("the briefing's message does not open with the rules it carries:\n%s", text)
+	}
+	if !strings.Contains(rest, task) {
+		t.Fatalf("the briefing's message does not carry the task after the rules:\n%s", text)
+	}
 	if len(queue.sawLive) != 1 || !queue.sawLive[0] {
 		t.Fatalf("EnqueueBriefing ran before the participant was marked live (sawLive=%v)", queue.sawLive)
 	}
@@ -126,14 +139,14 @@ func TestRegisterWithNoTaskQueueWiredStillSucceeds(t *testing.T) {
 }
 
 // Criterion (nocx-luqz9.5, acceptance 4): A WORKER THAT CANNOT BE TOLD ITS
-// RULES IS REPORTED, AND ITS TASK IS NOT QUEUED.
+// RULES IS REPORTED, AND NOTHING IS QUEUED.
 //
-// The two halves are one fact. A queue that could not take the briefing took
-// NEITHER half of it — the rules and the task are one call — so a registration
-// that only logged this would leave a coordinator believing its worker was
-// working while the worker had been told nothing at all. The registration
-// therefore SAYS SO, in the delivery it hands back, which is the same place the
-// task's own non-delivery is already answered.
+// The rules and the task are ONE fact: a queue that could not take the briefing
+// took neither half of it — they are one message and one call — so a
+// registration that only logged this would leave a coordinator believing its
+// worker was working while the worker had been told nothing at all. The
+// registration therefore SAYS SO, in the delivery it hands back, which is the
+// same place the task's own non-delivery is already answered.
 //
 // THE PARTICIPANT IS STILL LIVE, and that is deliberate rather than an
 // oversight: the delivery fact is nocx's own failure to queue, not a screen
@@ -161,14 +174,15 @@ func TestARegistrationWhoseBriefingCouldNotBeQueuedSaysSoAndQueuesNoTask(t *test
 	if reg.Delivery.Typed {
 		t.Fatalf("delivery = %+v, want no task typed when nothing was queued", reg.Delivery)
 	}
-	// ONE ATTEMPT, AND IT CARRIED BOTH HALVES. A registration that retried the
-	// task alone after the briefing refused would be the defect this criterion
+	// ONE ATTEMPT, AND IT CARRIED THE WHOLE BRIEFING. A registration that
+	// retried the task alone after the briefing refused — or that handed the
+	// queue the task without the rules — would be the defect this criterion
 	// names outright: the worker gets its work and never learns how to report.
 	if len(queue.calls) != 1 {
 		t.Fatalf("EnqueueBriefing calls = %d, want exactly 1: %+v", len(queue.calls), queue.calls)
 	}
-	if queue.calls[0].briefing.Task == "" {
-		t.Fatalf("the refused call carried no task: %+v", queue.calls[0])
+	if queue.calls[0].briefing.Task == "" || strings.TrimSpace(queue.calls[0].briefing.Text()) == "" {
+		t.Fatalf("the refused call carried nothing to type: %+v", queue.calls[0])
 	}
 }
 

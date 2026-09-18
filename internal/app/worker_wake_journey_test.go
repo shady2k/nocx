@@ -620,7 +620,8 @@ func TestACoordinatorHearsItsWorkersThroughTheRealHelper(t *testing.T) {
 	coordinator := stand.coordinatorSession()
 
 	// ── 1. A coordinator spawns a worker, and the worker's pane is given the
-	// briefing and then the task, both submitted. ──────────────────────────
+	// briefing — ONE message carrying the rules and then the task — submitted
+	// once. ────────────────────────────────────────────────────────────────
 	//
 	// The coordinator's own pane is idle from the start and NOTHING has been
 	// delivered to it yet: no reading of its pane has been admitted, which is
@@ -643,10 +644,12 @@ func TestACoordinatorHearsItsWorkersThroughTheRealHelper(t *testing.T) {
 	w1Session := stand.liveSession(t, w1)
 	briefing := workers.Preamble(coordinator)
 
-	// Both halves submitted — production's own verdict on its own delivery,
+	// One message, submitted — production's own verdict on its own delivery,
 	// read the way a coordinator reads it (a session.read of its descendant).
+	// ONE pending row is the shape the bead is about: two of them would be the
+	// two-turn delivery a worker answered with "I received no task".
 	w1Read := s14ReadResult{}
-	waittest.WaitForDetail(t, "the worker's pane to be given the briefing and then the task", func() string {
+	waittest.WaitForDetail(t, "the worker's pane to be given the briefing and the task as one message", func() string {
 		read := stand.readWorker(t, coordinator, w1Session)
 		pending := make([]string, 0, len(read.Pending))
 		for _, p := range read.Pending {
@@ -656,12 +659,12 @@ func TestACoordinatorHearsItsWorkersThroughTheRealHelper(t *testing.T) {
 			w1Session, read.Classification, pending, stand.paneTyped(t, w1Session))
 	}, func() bool {
 		w1Read = stand.readWorker(t, coordinator, w1Session)
-		return s14PendingPhase(w1Read, briefingPreambleID) == "submitted" &&
-			s14PendingPhase(w1Read, briefingTaskID) == "submitted"
+		return len(w1Read.Pending) == 1 && s14PendingPhase(w1Read, briefingID) == "submitted"
 	})
 
-	// And the ORDER, from the pane's own byte stream: the briefing was typed
-	// before the task, and the program in the pane saw both.
+	// And the ORDER, from the pane's own byte stream: the rules reached the
+	// program in the pane before the task did — one paste, and this is what is
+	// inside it.
 	w1Typed := stand.paneTyped(t, w1Session)
 	briefAt, taskAt := strings.Index(w1Typed, briefing), strings.Index(w1Typed, task)
 	if briefAt < 0 {
@@ -670,6 +673,9 @@ func TestACoordinatorHearsItsWorkersThroughTheRealHelper(t *testing.T) {
 	if taskAt < briefAt {
 		t.Fatalf("the worker's pane was given the task BEFORE the briefing (briefing at %d, task at %d):\n%q",
 			briefAt, taskAt, w1Typed)
+	}
+	if typed := strings.Count(w1Typed, task); typed != 1 {
+		t.Fatalf("the pane was given the task %d times, want the one briefing that carries it:\n%q", typed, w1Typed)
 	}
 
 	// ── 2. The worker starts its turn, reports `done` in its own words, and

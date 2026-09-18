@@ -2416,14 +2416,14 @@ func New(opts ...Option) (*App, error) {
 	descendantPaneReader.SetMessages(descendantPaneMessages)
 	toolAuthorizer.BindSessionMessages(descendantPaneMessages)
 	// The briefing, re-homed (design §9 Task 11 for the task, §6 for the
-	// rules; nocx-luqz9.5): a spawn that meets a question no longer marks a
-	// debt for a later answer call to pay — it enqueues TWO "when=free"
-	// messages through this SAME queue, namespace "nocx", ids "preamble" and
-	// "task", and any answer that frees the prompt (a coordinator's
-	// session.keys, or a person pressing Enter) lets the queue deliver them
-	// in that order. The task is delivered only once its rules reached the
-	// pane (pane_messages.go's runQueue), so a worker is never handed work it
-	// has not been told how to report on.
+	// rules; nocx-luqz9.5, one message since nocx-xn63t.4.16): a spawn that
+	// meets a question no longer marks a debt for a later answer call to pay —
+	// it enqueues ONE "when=free" message through this SAME queue, namespace
+	// "nocx", id "briefing", whose text carries the rules and then the task
+	// (workers.Briefing.Text). Any answer that frees the prompt (a
+	// coordinator's session.keys, or a person pressing Enter) lets the queue
+	// deliver it, and the worker is told where it stands and what to do by one
+	// paste and one Enter — never the rules alone as a turn of their own.
 	// Two-phase, for the cycle workerRecord.SetTaskQueue's own doc names:
 	// descendantPaneMessages needs accessHub, and accessHub needs
 	// workerRecord's own address to resolve a chain through.

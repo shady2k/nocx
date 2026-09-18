@@ -101,6 +101,19 @@ type Registrar struct {
 	// diagnostic in it.
 	observations *observedFacts
 
+	// coordReadings is the same machine for a COORDINATOR's own pane
+	// (nocx-luqz9.3). It is a second instance rather than the first one shared,
+	// because the two are keyed by different things — a participant id and a
+	// session — and one key space holding both would let a coincidence in two
+	// ids suppress a reading about something else entirely.
+	coordReadings *observedFacts
+
+	// wake is the line typed at an idle coordinator when it has unread mail
+	// (nocx-luqz9.3, design §5). It is never nil: an unwired one still counts,
+	// still decides, and says at Error that it has nothing to type with, which
+	// is the same stance this package takes with every other seam.
+	wake *Wake
+
 	// log is what the six steps of Register say they are doing. It is never
 	// nil, and a Registrar built without one writes to slog's default rather
 	// than to nothing: the failure that bought this field (nocx-4l2a5.4) was
@@ -120,6 +133,10 @@ func WithBound(n int) Option { return func(r *Registrar) { r.bound = n } }
 
 // WithLogger gives the record the composition root's logger, so its steps land
 // in the same file as everything else that serves the same call.
+// THE WAKE IS NOT REACHED BY IT, because the wake needs nothing stored: its
+// lines go through log.From(ctx) at the moment they are written, so they carry
+// the trace of the reading that caused them rather than the trace of whatever
+// request happened to construct the record.
 func WithLogger(lg log.Logger) Option {
 	return func(r *Registrar) {
 		if lg != nil {
@@ -142,9 +159,22 @@ func WithEnrolmentDeadline(d time.Duration) Option {
 // the composition root is where the product's real values live. Zero means "the
 // second reading is the fact", which is what a caller that cannot move this
 // package's clock asks for; the product passes DefaultSettleWindow.
+// IT SETS BOTH MACHINES, because there is one window: a coordinator's own
+// reading settles by the same rule and over the same interval, and a second
+// option for the second machine would be a second number for one design
+// decision (nocx-luqz9.3, design §5.5).
 func WithSettleWindow(d time.Duration) Option {
-	return func(r *Registrar) { r.observations = newObservedFacts(d) }
+	return func(r *Registrar) {
+		r.observations = newObservedFacts(d)
+		r.coordReadings = newObservedFacts(d)
+	}
 }
+
+// WithWake replaces the wake the record types at an idle coordinator with
+// unread mail (nocx-luqz9.3). The composition root supplies one wired to the
+// pane typist and to the notification pipeline; the default is wired to
+// neither and says so at Error at the moment it is needed.
+func WithWake(w *Wake) Option { return func(r *Registrar) { r.wake = w } }
 
 // WithCloser wires the seam that ends a participant. Without it Close
 // refuses and says so, rather than reporting a worker ended that is still
@@ -153,7 +183,7 @@ func WithCloser(c Closer) Option { return func(r *Registrar) { r.closer = c } }
 
 // SetTaskQueue wires the seam that enqueues a participant's task once
 // registration succeeds. It is a post-construction setter and not an Option
-// like WithCloser/WithBackstop, because the composition root's own concrete
+// like WithCloser, because the composition root's own concrete
 // TaskQueue (internal/app.paneMessages) needs THIS Registrar's address to
 // resolve a chain through — a cycle between two things the root owns, the
 // same shape internal/app's own SetMessages/SetWorkerRecord seams already
@@ -165,31 +195,32 @@ func WithCloser(c Closer) Option { return func(r *Registrar) { r.closer = c } }
 // treats.
 func (r *Registrar) SetTaskQueue(q TaskQueue) { r.queue = q }
 
-// WithBackstop replaces the undispatched fact set. The composition root
-// supplies one wired to the pane typist and to the notification pipeline; the
-// default is wired to neither and says so.
-func WithBackstop(b *Backstop) Option { return func(r *Registrar) { r.attention = b } }
-
 // NewRegistrar wires the record to its four seams.
 func NewRegistrar(s Store, sp Spawner, e Enrolments, sup Supervisor, opts ...Option) *Registrar {
 	r := &Registrar{
-		store:        s,
-		spawn:        sp,
-		enrol:        e,
-		sup:          sup,
-		bound:        defaultBound,
-		deadline:     defaultEnrolmentDeadline,
-		newID:        newParticipantID,
-		now:          time.Now,
-		log:          log.NewSlogAdapter(nil),
-		observations: newObservedFacts(DefaultSettleWindow),
-		attention: NewBackstop(
-			log.NewSlogAdapter(nil),
-			// No routes. Every fact is still recorded and every missing
-			// route names itself in the log, because a fact dropped for
-			// want of wiring is how a feature that does not exist survives
-			// a release.
-			nil, nil),
+		store:         s,
+		spawn:         sp,
+		enrol:         e,
+		sup:           sup,
+		bound:         defaultBound,
+		deadline:      defaultEnrolmentDeadline,
+		newID:         newParticipantID,
+		now:           time.Now,
+		log:           log.NewSlogAdapter(nil),
+		observations:  newObservedFacts(DefaultSettleWindow),
+		coordReadings: newObservedFacts(DefaultSettleWindow),
+		// The fact set, minted here so route can always record into one: a nil
+		// set would make an admission panic on a registrar built by hand, which
+		// is a failure mode with no diagnostic in it.
+		attention: NewBackstop(log.NewSlogAdapter(nil)),
+		wake: NewWake(
+			// No pane to type into and nobody to tell, and the STORE as the
+			// mailbox: the count is real, so a backend that wired no typist
+			// still logs the right number when it says it cannot wake
+			// anyone. Every missing route names itself, because a wake
+			// dropped for want of wiring is how a feature that does not
+			// exist survives a release.
+			nil, nil, s),
 	}
 	for _, o := range opts {
 		o(r)
@@ -796,6 +827,20 @@ func (r *Registrar) Inbox(ctx context.Context, mailbox, reader ReaderID, limit i
 		return Fetch{}, fmt.Errorf("worker: advance cursor: %w", err)
 	}
 	out.Cursor = cur
+	// THE READ IS THE ONLY THING THAT CLEARS A WAKE (nocx-luqz9.3, design
+	// §5.3). It is reported AFTER the cursor moved, so the wake's own view of
+	// "what is unread" is never ahead of the record's: a batch cleared before
+	// the position it was cleared through existed could type at a coordinator
+	// about mail it had already been handed.
+	//
+	// ONLY THE RECIPIENT'S OWN READ COUNTS, which is mailbox.go's own rule read
+	// at the wake: a message is delivered when the participant it was addressed
+	// to has taken it, and a second reader looking into somebody's box delivers
+	// nothing — least of all the wake, which would stop typing at a coordinator
+	// because an observer had read its mail.
+	if reader == mailbox {
+		r.wake.Read(mailbox, cur.Fetched)
+	}
 	return out, nil
 }
 

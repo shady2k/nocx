@@ -335,8 +335,8 @@ func TestCatalogueDefaultsAreExactlyTodaysTable(t *testing.T) {
 		// Both channels, for session.ended's reason — it fires a handful of
 		// times a worker and the only moment it matters is the one where
 		// nobody is looking at the tab.
-		"workerUndispatched/" + notify.ChannelBanner: true,
-		"workerUndispatched/" + notify.ChannelToast:  true,
+		"coordinatorStalled/" + notify.ChannelBanner: true,
+		"coordinatorStalled/" + notify.ChannelToast:  true,
 	}
 	got := map[string]bool{}
 	for _, p := range notify.DefaultCatalogue().Pairs() {

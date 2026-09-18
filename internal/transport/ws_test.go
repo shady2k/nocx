@@ -48,12 +48,35 @@ func wsURL(ws *WSServer) string {
 	return "ws://" + ws.listener.Addr().String() + "/session"
 }
 
+// connectWS dials the server and does not return until the server has
+// REGISTERED the connection.
+//
+// THE SECOND HALF IS NOT OPTIONAL (nocx-luqz9.3, measured). The upgrade is
+// completed by the server's own handler, and registerConn runs on that
+// handler's goroutine AFTER it — while the client's Dial returns the moment it
+// has the upgrade response. So a test that dialled and then asked the server to
+// broadcast was racing the accept: the broadcast walks the registered set, and
+// a connection still in flight is not in it, so the frame was never sent and
+// the test waited out its whole window for it. Measured under -race on the
+// unmodified tree at 24445ea1: 10 runs of TestWorkerTab under stress timed out
+// on the read, and the same test passed alone, which is the signature of a
+// readiness race rather than of a broken broadcast.
+//
+// IT WAITS ON A SEQUENCE AND NOT ON A COUNT, which is the correction the first
+// version of this needed. A test that closes one connection and dials another
+// leaves the LIVE count where it was — one out, one in — so "more than before"
+// times out on a server that did everything right, and it did: eight tests in
+// this package failed that way before this was a sequence.
+//
+// Nothing here waits on a duration: a wait that slept would be asserting that
+// this machine is fast enough, which is the shape of test this package refuses.
 func connectWS(t *testing.T, ws *WSServer) *websocket.Conn {
 	t.Helper()
 	u, err := url.Parse(wsURL(ws))
 	if err != nil {
 		t.Fatalf("parse url: %v", err)
 	}
+	before := ws.registrations()
 	// Present the per-launch token so the auth gate passes.
 	d := websocket.Dialer{Subprotocols: []string{tokenProtocol(ws.Token())}}
 	conn, _, err := d.Dial(u.String(), nil)
@@ -63,7 +86,20 @@ func connectWS(t *testing.T, ws *WSServer) *websocket.Conn {
 	// The inbox is keyed by the connection and outlives no test that dialled
 	// one (ws_inbox_test.go).
 	t.Cleanup(func() { forgetInbox(conn) })
+	waittest.WaitFor(t, "the server to register the connection it just accepted", func() bool {
+		return ws.registrations() > before
+	})
 	return conn
+}
+
+// registrations is how many connections this server has registered in its
+// lifetime. It is the state connectWS waits on, and it is read through the lock
+// registerConn writes under, so the wait and the registration cannot be looking
+// at different facts.
+func (s *WSServer) registrations() uint64 {
+	s.connsMu.Lock()
+	defer s.connsMu.Unlock()
+	return s.connsRegistered
 }
 
 // openSessionOnConn opens a local session over a connection and returns its

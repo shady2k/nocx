@@ -754,9 +754,20 @@ type WSServer struct {
 	tunnelMu     sync.Mutex
 	tunnels      map[string]*tunnel.Tunnel
 	ownerTunnels map[*wsConn]map[string]struct{}
-	// connsMu protects conns. One entry per active WebSocket connection.
+	// connsMu protects conns and connsRegistered. One entry per active
+	// WebSocket connection.
 	connsMu sync.Mutex
 	conns   map[*wsConn]struct{}
+	// connsRegistered counts connections this server has EVER registered, and
+	// it exists for the tests that must wait for one (nocx-luqz9.3). A COUNT
+	// of live connections cannot be that wait: a test that closes one
+	// connection and dials another sees the same number before and after, so a
+	// wait on "more than before" would time out on a server that behaved
+	// perfectly — measured, and the reason this is a sequence rather than a
+	// length. Nothing in the product reads it; it exists so a test can state
+	// "the server has accepted and registered my connection" as an observable
+	// rather than by sleeping.
+	connsRegistered uint64
 
 	// presence is told how many clients are attached whenever that changes
 	// (client_presence.go). nil when nobody asked; the vault is what asks,
@@ -4095,6 +4106,7 @@ func mustMarshal(v any) json.RawMessage {
 func (s *WSServer) registerConn(wc *wsConn) {
 	s.connsMu.Lock()
 	s.conns[wc] = struct{}{}
+	s.connsRegistered++
 	s.connsMu.Unlock()
 	// A client is here again. Whatever is suspended waiting for somebody to
 	// show a dialog to can now be shown one (D9).

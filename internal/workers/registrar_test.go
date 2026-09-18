@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 )
 
@@ -559,12 +558,19 @@ type harness struct {
 	enrol *fakeEnrolments
 	sup   *fakeSupervisor
 	reg   *Registrar
-	// The backstop is wired in every harness rather than left to default,
-	// so a test that is not about the fact set neither types anywhere nor
-	// leaves a five-minute alarm behind it.
+	// THE WAKE IS WIRED IN EVERY HARNESS rather than left to the default, and
+	// for the same reason the backstop used to be: a test that is not about the
+	// wake must neither type into a pane nor leave an alarm behind it. The
+	// doubles are here because every claim this file's neighbours make about
+	// the wake is about what it TYPED and what it TOLD, and a real typist would
+	// put those two facts in a pane nothing can read back.
 	wake   *fakeWaker
 	human  *fakeEscalation
 	alarms *fakeAlarms
+	// wakeState is the Wake itself, so a test can admit readings of a
+	// coordinator's own pane (ObserveCoordinator) and let the record's settle
+	// machine see them.
+	wakeState *Wake
 }
 
 const (
@@ -612,16 +618,17 @@ func newHarnessBound(t *testing.T, bound int, opts ...Option) *harness {
 		human:  &fakeEscalation{},
 		alarms: newFakeAlarms(),
 	}
-	backstop := NewBackstop(log.NewSlogAdapter(nil), h.wake, h.human,
-		WithFactDeadline(90*time.Second))
+	wake := NewWake(h.wake, h.human, h.store,
+		WithRetryPause(90*time.Second), WithAttemptLimit(3))
 	// The alarm is replaced by ASSIGNMENT rather than by an option: only the
-	// deadline is a product value, so only the deadline earns an exported
-	// option. These tests are in-package, which is the whole reason the
+	// pause and the limit are product values, so only those earn exported
+	// options. These tests are in-package, which is the whole reason the
 	// exported surface does not have to grow for them.
-	backstop.alarms = h.alarms
+	wake.alarms = h.alarms
+	h.wakeState = wake
 	h.reg = NewRegistrar(h.store, h.spawn, h.enrol, h.sup,
 		append([]Option{
-			WithBackstop(backstop),
+			WithWake(wake),
 			WithBound(bound),
 			WithEnrolmentDeadline(50 * time.Millisecond),
 		}, opts...)...,

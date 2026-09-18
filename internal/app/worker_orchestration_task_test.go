@@ -202,30 +202,51 @@ func TestACoordinatorSpawnsAWorkerAndTypesItsTask(t *testing.T) {
 	// happyRealPTYFactory) — this stand has no second, faked channel an
 	// enrolment could have gone over instead.
 
-	// #4: the coordinator's task, typed into the pane through
+	// #4: the coordinator's briefing, typed into the pane through
 	// internal/agenttyping's real gate — a bracketed paste and a separate
 	// submit key, each re-checked against a live frame immediately before
-	// the write (agenttyping's own documented guarantee).
+	// the write (agenttyping's own documented guarantee). ONE paste, and it
+	// is the BRIEFING's text rather than the task alone (nocx-xn63t.4.16):
+	// the rules and the task leave the record joined, so the pane receives
+	// both in the one submission a worker reads as its whole instruction.
 	// The paste and the submit key are two separate writes (agenttyping's own
 	// package doc: "the submission is two writes, and never one"), so the
 	// pane's input queue can hold the first without the second having
 	// arrived yet — waiting on the paste alone would be exactly the
 	// timing-dependent check AGENTS.md's testing rules forbid. Wait for
 	// both.
-	pasted := "\x1b[200~" + task + "\x1b[201~"
+	briefingOpen, briefingClose := "\x1b[200~", "\x1b[201~"
+	// The rules are rebuilt here from the SAME source the registration uses
+	// (workers.Preamble over this stand's coordinator session) and the task is
+	// this test's own constant, so what the assertions below compare is the
+	// pane's bytes against the two texts a worker is owed — never the pane's
+	// bytes against themselves, which a briefing that had lost one of its two
+	// halves would pass.
+	rules := workers.Preamble(string(stand.coord.ID()))
 	var typed []byte
-	waittest.WaitForTimeout(t, "the coordinator's task and its submit key to be typed into the participant's pane", 10*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "the coordinator's briefing and its submit key to be typed into the participant's pane", 10*time.Second, func() bool {
 		b, readErr := os.ReadFile(typedFile) //nolint:gosec // typedFile is this test's own tempdir path
 		if readErr != nil {
 			return false
 		}
 		typed = b
-		return strings.Contains(string(b), pasted) && strings.Contains(string(b), "\r")
+		text := string(b)
+		return strings.Contains(text, briefingOpen) && strings.Contains(text, briefingClose) &&
+			strings.Contains(text, task) && strings.Contains(text, "\r")
 	})
-	if !strings.Contains(string(typed), pasted) {
-		t.Fatalf("typed bytes = %q, want the task framed as a bracketed paste", typed)
+	text := string(typed)
+	start, end := strings.Index(text, briefingOpen), strings.Index(text, briefingClose)
+	if start < 0 || end < start {
+		t.Fatalf("typed bytes = %q, want the briefing framed as a bracketed paste", typed)
 	}
-	if !strings.Contains(string(typed), "\r") {
+	body := text[start+len(briefingOpen) : end]
+	if !strings.HasPrefix(body, rules) {
+		t.Fatalf("the paste does not open with the rules a worker is handed:\n%q", body)
+	}
+	if !strings.HasSuffix(body, task) {
+		t.Fatalf("the paste does not carry the task after the rules:\n%q", body)
+	}
+	if !strings.Contains(text, "\r") {
 		t.Fatalf("typed bytes = %q, want the submit key sent after the paste", typed)
 	}
 }

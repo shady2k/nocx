@@ -5,10 +5,21 @@ package workers
 //
 // # One text, and why it lives HERE rather than in the composition root
 //
-// A spawn now hands a worker two messages, in this order: these rules, and the
-// task. They are one BRIEFING — the task is unreadable without the rules, and a
-// worker that got the task alone has no way to say anything about it — so the
-// text belongs to whoever owns what a worker is, and that is this package:
+// A spawn hands a worker ONE message: these rules, and then the task, in one
+// paste and one submission. They are one BRIEFING — the task is unreadable
+// without the rules, and a worker that got the task alone has no way to say
+// anything about it — so the text belongs to whoever owns what a worker is,
+// and that is this package:
+//
+// ONE MESSAGE, AND THAT IS A MEASUREMENT RATHER THAN A STYLE (nocx-xn63t.4.16).
+// The queue used to take the two halves as two messages and submit each as its
+// own turn, which reads to an agent as a complete instruction: measured
+// 2026-09-18 in the owner's own live run, a worker read the rules alone, found
+// no task in them, found its inbox empty, and asked its coordinator for work
+// that was queued behind the question — a turn lost, and an answer to that
+// question would have delivered the task twice. One message has no such turn
+// in it: the agent is handed the rules and the work together, and both are
+// submitted by the same Enter.
 //
 //   - The KINDS it names are this package's vocabulary (`KindDone`,
 //     `KindQuestion`, `KindProgress`, and `reportKinds` which says which of
@@ -64,18 +75,22 @@ import (
 	"strings"
 )
 
-// Briefing is what a worker is told, in the order it is told: the rules it
-// reports under, and then the work.
+// Briefing is what a worker is told: the rules it reports under, and then the
+// work, as ONE message (Text).
 //
 // THE TWO TRAVEL TOGETHER, which is why this is one value and not two
 // parameters. A registration hands its queue both, and the queue refuses half a
 // briefing outright (Validate): the alternative is a worker whose task reached
 // it while its rules did not, which is a worker that cannot say anything about
-// the work it was given — the defect this bead's fourth criterion names.
+// the work it was given.
 //
-// It is also what makes the ORDER the queue's rather than a race: one call
-// enqueues both messages in one locked append, so their arrival order is the
-// order they were written in and not which of two goroutines got there first.
+// Keeping the two APART here and joining them in Text() is what makes the order
+// a property of the value rather than of the queue: the rules come first
+// because Text writes them first, not because two messages were appended in
+// one locked section and the delivery loop respected their arrival order. The
+// queue's own pairing machinery — a task that waited for its rules to land, and
+// the two ids it was keyed by — had nothing left to guard once there was one
+// message, and was deleted with it (nocx-xn63t.4.16).
 type Briefing struct {
 	// Preamble is the rules: who the coordinator is, the calls this worker
 	// has, and how to report through them. It is Preamble(...), built by the
@@ -85,13 +100,45 @@ type Briefing struct {
 	Task string
 }
 
+// briefingTaskLead separates the rules from the work inside a briefing's one
+// message.
+//
+// IT IS A WORD AND NOT A NEWLINE, and that is the same measurement the Preamble
+// itself is built to (this file's own doc, and Preamble's below): the delivery
+// confirms what it pasted by reading the agent's input box back, and the shape
+// that reading is measured on is a paste with no newline in it — one paragraph
+// the box wraps over several rows and the rule's own extractor joins back with
+// single spaces. A newline here would send every briefing in the fleet down the
+// agent's `[Pasted text #N +M lines]` placeholder path for no gain, and the
+// word is what tells the worker where the rules stop and its own work starts.
+const briefingTaskLead = " Your task: "
+
+// Text is the one message a worker is handed: the rules, and then the task.
+//
+// It is a method rather than a field so the join has ONE owner: every caller
+// that hands a briefing to a queue hands it this text, and none of them can
+// decide for itself how the two halves are spelled together.
+//
+// A blank half is refused by Validate, which every production path calls before
+// this one — see its own doc for why the check did not die with the queue's gate
+// that used to catch the same defect one layer down.
+func (b Briefing) Text() string {
+	return b.Preamble + briefingTaskLead + b.Task
+}
+
 // Validate refuses half a briefing.
 //
 // It is a value-level check rather than two separate parameters for the reason
 // the record refuses a report with no kind: the callers here are an
 // in-process seam, a test and a composition root, and a shape nothing checks is
-// one a later edit can leave half-built. See the type's own doc for the defect
-// it prevents.
+// one a later edit can leave half-built.
+//
+// IT IS NOW THE ONLY THING THAT REFUSES ONE. The queue used to catch the same
+// defect one layer down, by holding a task back until its rules had landed
+// (pane_messages.go's runQueue); with the two halves in one message there is no
+// such moment to catch it at, so a caller that skipped this would type a
+// briefing whose text leads with "Your task:" and nothing before it. That is
+// why the check stays rather than being deleted with the gate it duplicated.
 func (b Briefing) Validate() error {
 	switch {
 	case strings.TrimSpace(b.Preamble) == "" && strings.TrimSpace(b.Task) == "":

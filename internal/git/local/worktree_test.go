@@ -479,6 +479,39 @@ func TestRemoveWorktreeRefusesPathsItMayNotRemove(t *testing.T) {
 	}
 }
 
+// TestRemoveWorktreeLeavesALockedWorktreeToGit: `git worktree lock` is a
+// person's deliberate marker on a worktree, and the parser above consumes the
+// listing's `locked` line without acting on it — because the decision belongs
+// to git, whose refusal names the remedy ("use 'remove -f -f' to override or
+// unlock first"). This pins that: the seam does not invent a force, and it
+// does not swallow git's account of why it will not.
+func TestRemoveWorktreeLeavesALockedWorktreeToGit(t *testing.T) {
+	dir, home := worktreeRepo(t)
+	repo := openRepo(t, gitEnv(t), dir)
+	ctx := context.Background()
+	path := filepath.Join(home, "worker-1")
+	if _, err := repo.AddWorktree(ctx, "worker-1", "master", path); err != nil {
+		t.Fatal(err)
+	}
+	if err := commandIn(dir, "worktree", "lock", path).Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	err := repo.RemoveWorktree(ctx, path)
+	if err == nil {
+		t.Fatal("a locked worktree was removed")
+	}
+	if !strings.Contains(err.Error(), "locked") {
+		t.Errorf("err = %v, want git's own account of the lock", err)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Errorf("the locked worktree is gone: %v", statErr)
+	}
+	if !strings.Contains(worktreeListing(t, dir), "worktree "+path) {
+		t.Error("the locked worktree is no longer listed")
+	}
+}
+
 // TestRemoveWorktreeRefusesAStateItCannotRead: the one refusal that is not
 // about the worktree being dirty but about nobody being able to say — a
 // worktree whose directory is gone refuses rather than being treated as

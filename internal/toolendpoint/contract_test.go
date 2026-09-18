@@ -91,7 +91,7 @@ func (contractWorkerRecord) Inbox(context.Context, workers.ReaderID, workers.Rea
 	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	return workers.Fetch{
 		Messages: []workers.Message{
-			{ID: "message-1", Seq: 1, Sender: workers.ReaderID("sess-coordinator"), Body: "the wire is a party"},
+			{ID: "message-1", Seq: 1, Sender: workers.ReaderID("sess-coordinator"), Body: "the wire is a party", CommittedAt: at},
 			{
 				ID: "message-2", Seq: 2, Sender: workers.ReaderID("nocx"),
 				Observed: &workers.Observed{

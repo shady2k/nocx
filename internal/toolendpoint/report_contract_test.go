@@ -15,6 +15,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	tools "github.com/shady2k/nocx/contracts/tools"
 	"github.com/shady2k/nocx/internal/agenttools"
@@ -34,6 +35,10 @@ func (reportContractRecord) Report(_ context.Context, id workers.ParticipantID, 
 		ID: workers.MessageID("message-1"), Group: workers.ID(id),
 		Sender: workers.ReaderID(id), Seq: 7,
 		Kind: rep.Kind, Body: rep.Text,
+		// The record's own stamp, which every writer in the package sets: a row
+		// with no time would still satisfy the schema as a zero instant, and this
+		// fixture exists to send what production sends.
+		CommittedAt: time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC),
 	}, nil
 }
 

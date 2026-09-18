@@ -618,7 +618,7 @@ func TestWorkerInboxResultConformsToItsContract(t *testing.T) {
 	rec := &fakeWorkerRecord{
 		mail: map[workers.ReaderID][]workers.Message{
 			"sess-coordinator": {
-				{Sender: "p-1", Body: "the file moved"},
+				{Sender: "p-1", Body: "the file moved", CommittedAt: at},
 				{
 					Sender: "nocx",
 					Observed: &workers.Observed{
@@ -632,7 +632,7 @@ func TestWorkerInboxResultConformsToItsContract(t *testing.T) {
 				// properties' absence and none of their presence, which is the
 				// same hole the two rows above exist to close.
 				{
-					Sender: "p-1", Body: "half the store is migrated",
+					Sender: "p-1", Body: "half the store is migrated", CommittedAt: at,
 					Kind: workers.KindProgress, Estimate: &estimate, Artifact: "commit 4f2a1c9",
 				},
 			},
@@ -690,13 +690,33 @@ func TestWorkerInboxResultConformsToItsContract(t *testing.T) {
 		t.Fatalf("the page carries %d kinds, want exactly the one report's — ordinary mail "+
 			"is a message and not a claim: %s", got, raw)
 	}
+	// AND EVERY MESSAGE CARRIES ITS TIME, ordinary mail included, because the
+	// contract requires it: a coordinator comparing a worker's words against the
+	// states beside them needs both rows dated by the one clock. Decoded rather
+	// than counted, because a substring count would also be satisfied by the
+	// observation's own `at` — which is the mistake this is here to catch.
+	//
 	// And no screen content rode with it: the observation is three fields and
 	// the shape has nowhere to put a fourth. ADR-0070 decision 3.
 	var decoded struct {
+		Messages     []map[string]any `json:"messages"`
 		Observations []map[string]any `json:"observations"`
 	}
 	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
-		t.Fatalf("unmarshal observations: %v", err)
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if len(decoded.Messages) != 2 {
+		t.Fatalf("messages = %+v, want the two above", decoded.Messages)
+	}
+	for i, message := range decoded.Messages {
+		got, ok := message["at"]
+		if !ok {
+			t.Fatalf("message %d carries no time, which its contract requires: %+v", i, message)
+		}
+		if got != at.UTC().Format(time.RFC3339) {
+			t.Fatalf("message %d is dated %v, want the record's own commit time %q",
+				i, got, at.UTC().Format(time.RFC3339))
+		}
 	}
 	if len(decoded.Observations) != 1 {
 		t.Fatalf("observations = %+v, want the one", decoded.Observations)

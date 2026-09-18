@@ -33,11 +33,16 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["from", "message"],
+            "required": ["from", "message", "at"],
             "properties": {
               "from": {
                 "type": "string",
                 "description": "The worker that wrote it."
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time",
+                "description": "When nocx committed this to your mailbox, in UTC. Present on every message, ordinary mail and a report alike, so it is what a coordinator compares a worker's words against the states nocx saw beside them \u2014 two readings of one clock."
               },
               "kind": {
                 "type": "string",

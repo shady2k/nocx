@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/workers"
 )
@@ -37,6 +38,7 @@ import (
 type reportedMail struct {
 	From     string `json:"from"`
 	Message  string `json:"message"`
+	At       string `json:"at"`
 	Kind     string `json:"kind"`
 	Estimate *int   `json:"estimate"`
 	Artifact string `json:"artifact"`
@@ -157,6 +159,16 @@ func TestAWorkersReportReachesItsCoordinatorsMailboxOverTheSocket(t *testing.T) 
 	if got.Estimate != nil || got.Artifact != "" {
 		t.Fatalf("a done report arrived with checkpoint extras: %+v", got)
 	}
+	// AND IT IS DATED, by the record's own clock. The time is what a coordinator
+	// compares a worker's words against the states beside them with, and the
+	// observation that follows this very report is dated by the same one — so a
+	// message that arrived without it would be an undated claim in a dated list.
+	if got.At == "" {
+		t.Fatalf("the report arrived with no time: %+v", got)
+	}
+	if _, err := time.Parse(time.RFC3339, got.At); err != nil {
+		t.Fatalf("the report's time %q is not the encoding this surface uses: %v", got.At, err)
+	}
 }
 
 // The three kinds travel as themselves and in the order they were made, and a
@@ -197,6 +209,22 @@ func TestACheckpointsExtrasReachTheCoordinatorOverTheSocket(t *testing.T) {
 	}
 	if question.Estimate != nil || question.Artifact != "" {
 		t.Fatalf("the question carried checkpoint extras: %+v", question)
+	}
+	// The two times RUN WITH THE ORDER, which is the whole reason they are on the
+	// wire: a coordinator reading them against the observations beside them is
+	// reading one clock, and a page whose dates fell backwards would make "what
+	// happened first" unanswerable.
+	first, err := time.Parse(time.RFC3339, checkpoint.At)
+	if err != nil {
+		t.Fatalf("the checkpoint's time %q: %v", checkpoint.At, err)
+	}
+	second, err := time.Parse(time.RFC3339, question.At)
+	if err != nil {
+		t.Fatalf("the question's time %q: %v", question.At, err)
+	}
+	if second.Before(first) {
+		t.Fatalf("the question is dated %s and the checkpoint before it %s, so the page's times "+
+			"run backwards", question.At, checkpoint.At)
 	}
 }
 

@@ -90,10 +90,17 @@ type workerParticipantResult struct {
 }
 
 // workerMailResult is one message the coordinator is handed. It carries the
-// sender and the body and nothing else — EXCEPT the three fields a worker's
-// REPORT adds (nocx-luqz9.4), because a report is a claim of a named kind
-// rather than ordinary mail and the difference decides what the coordinator
-// does next.
+// sender, the body and WHEN it was committed — plus the three fields a worker's
+// REPORT adds (nocx-luqz9.4), because a report is a claim of a named kind rather
+// than ordinary mail and the difference decides what the coordinator does next.
+//
+// THE TIME IS REQUIRED and not optional, which is the design rather than a
+// convenience: a row is committed by the record's own clock (`Say`, `Report`),
+// and a coordinator comparing what a worker said against what it was seen to be
+// doing has to compare two readings of one clock. The observations list beside
+// this one has carried its `at` since nocx-luqz9.2 for exactly that reason, and
+// a report whose time existed on the row but reached nobody would be the
+// recorded-and-unreadable value this surface exists to refuse.
 //
 // There is still no id or cursor in it: a message is CONTENT, and a shape with
 // a position in it would invite the model to think it had something to
@@ -101,6 +108,10 @@ type workerParticipantResult struct {
 type workerMailResult struct {
 	From    string `json:"from"`
 	Message string `json:"message"`
+	// At is when the record committed the row, in UTC RFC 3339 — the same
+	// encoding every other timestamp on this surface uses, so a caller never has
+	// two parsers.
+	At string `json:"at"`
 	// Kind is set only when this row IS a worker's report (workers.report), and
 	// it is the difference the coordinator acts on: `done` and `question` woke
 	// it, `progress` did not. Empty for a message somebody left the holder,
@@ -293,8 +304,12 @@ func splitMailbox(messages []workers.Message) ([]workerMailResult, []workerObser
 			// renderer that defaulted it to a report would be inventing a claim
 			// nobody made. Whether a report wakes was decided by the record's
 			// wake — this is what the coordinator is told it was.
+			//
+			// The time is the record's own stamp on the row and is rendered for
+			// every message, in the encoding the observations beside it use.
 			text = append(text, workerMailResult{
 				From: string(m.Sender), Message: m.Body,
+				At:   m.CommittedAt.UTC().Format(time.RFC3339),
 				Kind: string(m.Kind), Estimate: m.Estimate, Artifact: m.Artifact,
 			})
 			continue

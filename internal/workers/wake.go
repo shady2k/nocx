@@ -98,8 +98,16 @@ type Waker interface {
 // deliberately not "sent": the only outcome that sets it is a submission the
 // pane accepted, and every other shape — a modal on screen, a pane nocx is
 // not watching, a queue that refused — is a refusal carrying its reason.
+//
+// THERE IS DELIBERATELY NO `Attempted` FIELD, and it used to be here. The
+// per-fact Waker consumed one — a Fact carried the outcome of its wake, so
+// "was it even tried" was a fact about the record and was asserted as one. The
+// wake that replaced it (nocx-luqz9.3) counts only what reached somebody: a
+// call either DELIVERED, or it did not and said why here. That the call
+// happened is not something any caller acts on, so a field for it would be a
+// value written and never read — which is the shape of dead state a compiler
+// and a linter both eventually refuse, and the reason this comment exists.
 type WakeOutcome struct {
-	Attempted bool
 	Delivered bool
 	Reason    string
 }
@@ -366,6 +374,11 @@ func (w *Wake) Coordinator(ctx context.Context, mailbox ReaderID, state Observed
 		// No timer runs while it is blocked: a line typed at a menu answers
 		// it, which is the one thing the typing gate will not do.
 		w.stopLocked(b)
+		// THE EPISODE IS CLAIMED UNDER THIS LOCK AND GIVEN BACK IF THE NOTICE
+		// DOES NOT GO OUT. Claiming here is what stops two settled readings
+		// arriving together from both raising it; giving it back on failure is
+		// reach's own rule, applied to this mark — the claim is not a record
+		// that somebody was told, it is a reservation to tell them once.
 		first := liveWorkers > 0 && !b.blockedNotified
 		if first {
 			b.blockedNotified = true
@@ -376,7 +389,7 @@ func (w *Wake) Coordinator(ctx context.Context, mailbox ReaderID, state Observed
 		}
 		w.mu.Unlock()
 		if first {
-			w.tell(ctx, notice)
+			w.reach(ctx, mailbox, notice)
 		}
 		return
 	case ObservedIdle:
@@ -543,7 +556,6 @@ func (w *Wake) typeNow(ctx context.Context, mailbox ReaderID, gen int) {
 	w.mu.Unlock()
 
 	out := w.waker.Wake(ctx, string(mailbox), wakeText(n))
-	out.Attempted = true
 
 	w.mu.Lock()
 	cur, ok := w.byMailbox[mailbox]
@@ -637,12 +649,25 @@ func (w *Wake) fire(ctx context.Context, mailbox ReaderID) {
 
 // reach tells the human, and keeps what happened to the attempt.
 //
-// A NOTICE THAT FAILED IS NOT MARKED AS MADE. The batch is unchanged either
-// way — only a read clears one — but a notice the pipeline REFUSED has reached
-// nobody, and leaving it recorded as delivered would make the one path whose
-// whole purpose is to be the last resort give up silently the first time it was
-// refused. So the failure clears the mark and the next pause tries again, which
-// is a retry bounded by the same pause that bounds every other retry here.
+// A NOTICE THAT FAILED IS NOT MARKED AS MADE, for either kind, and that is the
+// one rule this method exists to hold: a failure clears whichever mark the
+// notice would have set, so the situation it reports is RETRIED rather than
+// given up on while the record has it down as handled. What "retried" means
+// differs by kind, and both answers are decided here, beside both marks, so a
+// reader sees them in one place:
+//
+//   - an UNREAD batch is retried at the PAUSE, because the coordinator's own
+//     turn is what clears that situation and a pause is the only thing about
+//     it that has changed by then;
+//   - a BLOCKED coordinator is retried by its next SETTLED READING, because
+//     "blocked while holding live workers" is still true a moment later, and
+//     the reading is what says so.
+//
+// Neither is a timer invented for the failure. The pause already bounds every
+// retry of a batch, and a reading reaches this file only once the state has
+// HELD, so the blocked retry is bounded by the settle window — at most one
+// attempt per window, and the episode ends the instant the coordinator stops
+// being blocked.
 //
 // WHAT IT CANNOT KNOW IS DELIVERY, and it does not pretend to. The pipeline in
 // front of the escalation seam is asynchronous past its debounce window
@@ -662,23 +687,34 @@ func (w *Wake) reach(ctx context.Context, mailbox ReaderID, n Notice) {
 	if !ok {
 		return
 	}
-	// The batch is re-checked rather than assumed: a read that landed while the
-	// notice was being raised has ended it, and marking or clearing anything
-	// now would be about a situation that is over.
-	if b.state != ObservedIdle || b.lines < w.attempts {
-		return
+	switch n.Kind {
+	case NoticeBlocked:
+		// Re-checked rather than assumed: a coordinator that stopped being
+		// blocked while the notice was in flight has already had this mark
+		// cleared by the reading which saw that, and touching it now would be
+		// about a situation that is over.
+		if b.state != ObservedBlocked {
+			return
+		}
+		b.blockedNotified = err == nil
+	case NoticeUnread:
+		// Re-checked for the same reason: a read that landed while the notice
+		// was being raised has ended the batch.
+		if b.state != ObservedIdle || b.lines < w.attempts {
+			return
+		}
+		if err == nil {
+			b.notified = true
+			return
+		}
+		// REFUSED, so the batch is still owed and the next pause tries again.
+		// The timer is armed HERE because nothing else is going to: fire stopped
+		// the one that brought us here, and a mark left unarmed would be a
+		// notice that gave up silently on its first refusal. armLocked is
+		// idempotent, so this cannot produce a second timer for one pause.
+		b.notified = false
+		w.armLocked(b, ctx, mailbox)
 	}
-	if err == nil {
-		b.notified = true
-		return
-	}
-	// REFUSED, so the batch is still owed and the next pause tries again. The
-	// timer is armed HERE because nothing else is going to: fire stopped the one
-	// that brought us here, and a mark left unarmed would be a notice that gave
-	// up silently on its first refusal. armLocked is idempotent, so this cannot
-	// produce a second timer for one pause.
-	b.notified = false
-	w.armLocked(b, ctx, mailbox)
 }
 
 // tell submits one notice and reports whether the pipeline took it.

@@ -218,6 +218,17 @@ func (s *wakeStand) says(t *testing.T, state ObservedState) {
 	s.harness.reg.ObserveCoordinator(s.ctx, coordSession, state)
 }
 
+// reading delivers EXACTLY ONE settled reading of the coordinator's own pane,
+// which says() cannot: says crosses the window before each of its two calls, so
+// one says is one or two attempts depending on whether the state was already
+// held. A test counting what a FAILING notice cost needs one reading to be one
+// attempt, so it drives the record directly.
+func (s *wakeStand) reading(t *testing.T, state ObservedState) {
+	t.Helper()
+	s.settle()
+	s.harness.reg.ObserveCoordinator(s.ctx, coordSession, state)
+}
+
 // settles puts one worker's pane into a state that holds, which is what places
 // a message in the coordinator's mailbox and what the wake is told about.
 func (s *wakeStand) settles(t *testing.T, p Participant, state ObservedState) {
@@ -581,6 +592,68 @@ func TestABlockedCoordinatorWithLiveWorkersIsTheHumansAndOneWithNoneIsNot(t *tes
 	s.says(t, ObservedBlocked)
 	if got := len(s.notices()); got != 1 {
 		t.Fatalf("the person was told %d times for one blocked episode, want 1", got)
+	}
+}
+
+// A BLOCKED NOTICE THAT FAILS IS RETRIED, AND ONE THAT SUCCEEDS IS NOT REPEATED.
+//
+// This is the same rule reach holds for an unread batch, applied to this mark:
+// a notice the pipeline refused has reached nobody, so the claim is given back
+// and the next settled reading tries again. Without that, a blocked coordinator
+// holding live workers would be recorded as reported while the person had never
+// heard of it — the failure living in a log and nowhere else, which is the
+// silent loss this whole mechanism exists to prevent.
+//
+// The retry is bounded by the reading and not by a timer of its own, and the
+// episode is still ONE notice once it succeeds: the second half of the test is
+// what says the retry is a recovery from failure rather than a repeat.
+func TestABlockedNoticeThatFailsIsRetriedAndOneThatSucceedsIsNotRepeated(t *testing.T) {
+	ctx, _ := logtest.New(t)
+	s := newWakeStandCtx(t, ctx, 3*time.Second, 3, WithLogger(log.From(ctx)))
+	s.harness.human.refuse = fmt.Errorf("the pipeline is shutting down")
+
+	// A live worker, so a blocked coordinator is the situation the notice is
+	// about: nothing is being coordinated.
+	if s.worker.State != StateLive {
+		t.Fatalf("the stand's worker is %q, want live", s.worker.State)
+	}
+	s.says(t, ObservedIdle)
+	s.says(t, ObservedBlocked)
+	if got := len(s.notices()); got != 1 {
+		t.Fatalf("notices = %d, want the one attempt", got)
+	}
+
+	// The failure is said out loud with the reason, which is where a person
+	// diagnosing "nocx never told me" looks. The LEVEL is asserted and not just
+	// the text: a line this important that had sunk to Debug would be invisible
+	// in a shipped build where the level is not Debug.
+	if !logtest.WaitFor(ctx, 5*time.Second, func(r logtest.Record) bool {
+		return r.Level == slog.LevelError &&
+			strings.Contains(r.Message, "the human was not told that coordination has stopped")
+	}) {
+		t.Fatalf("a refused blocked notice was not reported at Error")
+	}
+
+	// Still blocked, still holding its worker — so the next settled reading is
+	// the retry, and the situation was not marked as handled.
+	s.reading(t, ObservedBlocked)
+	if got := len(s.notices()); got != 2 {
+		t.Fatalf("notices after one further settled reading = %d, want the retry", got)
+	}
+
+	// Now the pipeline takes it. THIS attempt is the one that counts, and the
+	// episode is then over: a blocked coordinator that stays blocked is ONE
+	// notice, not one per sweep.
+	s.harness.human.mu.Lock()
+	s.harness.human.refuse = nil
+	s.harness.human.mu.Unlock()
+	s.reading(t, ObservedBlocked)
+	if got := len(s.notices()); got != 3 {
+		t.Fatalf("notices after the pipeline recovered = %d, want 3", got)
+	}
+	s.reading(t, ObservedBlocked)
+	if got := len(s.notices()); got != 3 {
+		t.Fatalf("a blocked episode that was reported was reported again: %d notices", got)
 	}
 }
 

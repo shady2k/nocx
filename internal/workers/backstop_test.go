@@ -15,6 +15,8 @@ package workers
 import (
 	"context"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/session"
 )
 
 // ── the stand ─────────────────────────────────────────────────────────────
@@ -37,8 +39,8 @@ func testFact() Fact {
 		Participant:        "p-1",
 		Group:              testGroup,
 		CoordinatorSession: coordSession,
-		Kind:               FactDeclared,
-		State:              StateLive,
+		Kind:               FactExited,
+		State:              StateExited,
 		Task:               "read AGENTS.md and report",
 	}
 }
@@ -79,37 +81,8 @@ func TestDispatchLeavesNothingUndispatched(t *testing.T) {
 
 // ── what enters, and what a fetch closes ──────────────────────────────────
 
-// A declaration is a fact that needs judgement, and it is one WHILE the
-// participant is still running. That is the whole reason a declaration alone
-// does not terminalize: the agent said it finished, the coordinator must decide
-// whether to give it more work, and nothing else is going to ask.
-func TestADeclarationEntersTheSet(t *testing.T) {
-	ctx := context.Background()
-	h := newHarness(t)
-	p := mustRegister(t, h)
-
-	if _, err := h.reg.Declared(ctx, p.ID, testLiveness(),
-		Declaration{OK: true, Summary: "read it"}); err != nil {
-		t.Fatalf("declare: %v", err)
-	}
-
-	open := h.reg.Undispatched()
-	if len(open) != 1 {
-		t.Fatalf("undispatched = %d, want 1", len(open))
-	}
-	if open[0].Kind != FactDeclared || open[0].Participant != p.ID {
-		t.Fatalf("undispatched fact = %+v", open[0])
-	}
-	// The coordinator is carried ON the fact rather than looked up later: by
-	// the time anybody acts on it the worker may hold nothing non-terminal, and
-	// the answer would be gone exactly when it is needed.
-	if open[0].CoordinatorSession != coordSession {
-		t.Fatalf("the fact names coordinator %q, want %q", open[0].CoordinatorSession, coordSession)
-	}
-}
-
-// An exit is the other fact, and its state is the record's reduction rather
-// than the carrier's opinion of it.
+// The end of a worker needs judgement when it is the last one, and its state
+// is the record's reduction rather than the carrier's opinion of it.
 func TestAnExitEntersTheSetCarryingTheStateTheRecordReducedTo(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
@@ -122,8 +95,14 @@ func TestAnExitEntersTheSetCarryingTheStateTheRecordReducedTo(t *testing.T) {
 	if len(open) != 1 || open[0].Kind != FactExited {
 		t.Fatalf("undispatched = %+v, want one exit fact", open)
 	}
-	if open[0].State != StateAbandoned {
-		t.Fatalf("the fact says %q; the record reduced to abandoned", open[0].State)
+	if open[0].State != StateExited {
+		t.Fatalf("the fact says %q; the record reduced to %q", open[0].State, StateExited)
+	}
+	// The coordinator is carried ON the fact rather than looked up later: by
+	// the time anybody acts on it the worker may hold nothing non-terminal, and
+	// the answer would be gone exactly when it is needed.
+	if open[0].CoordinatorSession != coordSession {
+		t.Fatalf("the fact names coordinator %q, want %q", open[0].CoordinatorSession, coordSession)
 	}
 }
 
@@ -135,8 +114,8 @@ func TestAskingWhatTheSessionHoldsDispatchesTheFacts(t *testing.T) {
 	h := newHarness(t)
 	p := mustRegister(t, h)
 
-	if _, err := h.reg.Declared(ctx, p.ID, testLiveness(), Declaration{OK: true}); err != nil {
-		t.Fatalf("declare: %v", err)
+	if _, err := h.reg.Exited(ctx, p.ID, testLiveness(), Exit{Cause: string(session.ExitExited)}); err != nil {
+		t.Fatalf("exit: %v", err)
 	}
 	if got := len(h.reg.Undispatched()); got != 1 {
 		t.Fatalf("undispatched before the fetch = %d, want 1", got)
@@ -162,7 +141,7 @@ func TestARefusedAdmissionEntersNothing(t *testing.T) {
 		p := mustRegister(t, h)
 		stale := testLiveness()
 		stale.Attempt = 2
-		if _, err := h.reg.Declared(ctx, p.ID, stale, Declaration{OK: true}); err == nil {
+		if _, err := h.reg.Exited(ctx, p.ID, stale, Exit{Cause: "exited"}); err == nil {
 			t.Fatalf("stale evidence was admitted")
 		}
 		if got := len(h.reg.Undispatched()); got != 0 {
@@ -176,7 +155,7 @@ func TestARefusedAdmissionEntersNothing(t *testing.T) {
 		if err := h.store.Terminalize(ctx, p.ID, StateInterrupted); err != nil {
 			t.Fatalf("terminalize: %v", err)
 		}
-		if _, err := h.reg.Declared(ctx, p.ID, testLiveness(), Declaration{OK: true}); err == nil {
+		if _, err := h.reg.Exited(ctx, p.ID, testLiveness(), Exit{Cause: "exited"}); err == nil {
 			t.Fatalf("a fact was admitted against an interrupted record")
 		}
 		if got := len(h.reg.Undispatched()); got != 0 {
@@ -200,27 +179,6 @@ func TestTheSameFactTwiceIsOneFact(t *testing.T) {
 	}
 	if got := h.b.Stats().Judgement; got != 1 {
 		t.Fatalf("judgement = %d, want one fact counted once", got)
-	}
-}
-
-// The two facts about ONE participant are two things to judge, and one fetch
-// answers both.
-func TestTheTwoFactsAboutOneParticipantAreTwoFactsAndOneFetchClosesBoth(t *testing.T) {
-	h := newBackstopHarness(t)
-	declared := testFact()
-	exited := testFact()
-	exited.Kind = FactExited
-	exited.State = StateCompleted
-
-	h.b.Entered(context.Background(), declared)
-	h.b.Entered(context.Background(), exited)
-	if got := len(h.b.Open()); got != 2 {
-		t.Fatalf("open facts = %d, want 2", got)
-	}
-
-	h.b.Dispatched("p-1")
-	if got := len(h.b.Open()); got != 0 {
-		t.Fatalf("open facts after one fetch = %d, want 0", got)
 	}
 }
 
@@ -264,8 +222,8 @@ func TestAFactWhoseCoordinatorCannotBeLookedUpIsStillRecorded(t *testing.T) {
 	p := mustRegister(t, h)
 
 	h.store.setFault("coordinatorsession", 1)
-	if _, err := h.reg.Declared(ctx, p.ID, testLiveness(), Declaration{OK: true}); err != nil {
-		t.Fatalf("declare: %v", err)
+	if _, err := h.reg.Exited(ctx, p.ID, testLiveness(), Exit{Cause: "exited"}); err != nil {
+		t.Fatalf("exit: %v", err)
 	}
 
 	open := h.reg.Undispatched()

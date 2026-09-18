@@ -452,3 +452,16 @@ func agentWrapperSaysSoWhenLifecycleChannelIsAbsent(t *testing.T, shell, scriptN
 	// falsifiable withdrawal assertion lives in the refused-enrolment test,
 	// which supplies a kernel that records protocol frames.
 }
+
+// waitUntil waits on an observable condition, never on a duration.
+func waitUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}

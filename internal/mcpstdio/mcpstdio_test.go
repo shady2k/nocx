@@ -182,7 +182,7 @@ func TestSourceContainsNoDomainVocabulary(t *testing.T) {
 			t.Fatal(err)
 		}
 		text := string(data)
-		for _, forbidden := range []string{"workers.spawn", "workers.say", "workers.wait", "workers.holdings", "workers.close", "worker"} {
+		for _, forbidden := range []string{"workers.spawn", "workers.say", "workers.holdings", "workers.close", "worker"} {
 			if strings.Contains(strings.ToLower(text), forbidden) {
 				t.Errorf("%s contains forbidden domain vocabulary %q", entry.Name(), forbidden)
 			}

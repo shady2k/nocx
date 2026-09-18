@@ -107,16 +107,12 @@
               },
               "state": {
                 "type": "string",
-                "enum": ["prepared", "live", "completed", "failed", "abandoned", "interrupted"],
-                "description": "prepared: recorded, not yet started. live: running. completed and failed: it said what it produced AND its process is gone \u2014 the verdict is its own. abandoned: its process is gone and it never said what it produced, which is not a completion. interrupted: nocx restarted and could not judge it."
+                "enum": ["prepared", "live", "exited", "closed", "interrupted"],
+                "description": "Where the worker is in its life, and nothing about how its work went: nocx records no success and no failure, and the verdict is yours to draw from what the worker told you and what you watched. prepared: recorded, not yet started. live: running. exited: its process is gone, whether it finished, gave up or was killed. closed: YOU ended it. interrupted: nocx compensated a registration that failed, so the worker never came up."
               },
               "task": {
                 "type": "string",
                 "description": "What this worker was given to do, as you gave it."
-              },
-              "summary": {
-                "type": "string",
-                "description": "What the worker said it produced, when it said anything. Absent while it has not reported."
               },
               "needsJudgement": {
                 "type": "boolean",

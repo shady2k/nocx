@@ -537,8 +537,11 @@ func TestGroupExternalCallerMutationIsTheInProcessCallersRow(t *testing.T) {
 	if afterClose.Error != nil {
 		t.Fatalf("external workers.holdings after close: %+v", afterClose.Error)
 	}
-	if state := workerParticipantState(t, string(afterClose.Result), spawnResult.ID); state != "abandoned" {
-		t.Fatalf("external view of %q is state %q, want the terminal state the in-process close caused",
+	// `closed`, and not merely terminal: the state the external caller reads is
+	// the in-process caller's own act, which is the one thing the exit that
+	// close caused cannot say (ADR-0070 decision 3, design §4.1).
+	if state := workerParticipantState(t, string(afterClose.Result), spawnResult.ID); state != "closed" {
+		t.Fatalf("external view of %q is state %q, want the state the in-process close wrote",
 			spawnResult.ID, state)
 	}
 }
@@ -889,7 +892,7 @@ func TestGroupCatalogueUsesDisjointAuthorizerGrants(t *testing.T) {
 	if _, ok := workerTools["workers.inbox"]; !ok {
 		t.Fatalf("worker catalogue lacks workers.inbox: %s", workerResponse.Result)
 	}
-	for _, name := range []string{"workers.spawn", "workers.say", "workers.wait", "workers.holdings", "workers.close"} {
+	for _, name := range []string{"workers.spawn", "workers.say", "workers.holdings", "workers.close"} {
 		if _, ok := workerTools[name]; ok {
 			t.Fatalf("worker catalogue contains coordinator call %q: %s", name, workerResponse.Result)
 		}
@@ -911,7 +914,7 @@ func TestGroupCatalogueUsesDisjointAuthorizerGrants(t *testing.T) {
 	if _, ok := coordinatorTools["workers.inbox"]; !ok {
 		t.Fatalf("coordinator catalogue lacks workers.inbox: %s", coordinatorResponse.Result)
 	}
-	for _, name := range []string{"workers.spawn", "workers.say", "workers.wait", "workers.holdings", "workers.close"} {
+	for _, name := range []string{"workers.spawn", "workers.say", "workers.holdings", "workers.close"} {
 		if _, ok := coordinatorTools[name]; !ok {
 			t.Fatalf("coordinator catalogue lacks %q: %s", name, coordinatorResponse.Result)
 		}

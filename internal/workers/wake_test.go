@@ -26,6 +26,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/log/logtest"
+	"github.com/shady2k/nocx/internal/session"
 )
 
 // ── the doubles ───────────────────────────────────────────────────────────
@@ -912,9 +913,9 @@ func TestAFactAloneArmsNoTimerAndCallsNobody(t *testing.T) {
 	s := newWakeStand(t, 3*time.Second, 3)
 	p := s.worker
 
-	if _, err := s.harness.reg.Declared(s.ctx, p.ID, p.Liveness,
-		Declaration{OK: true, Summary: "done"}); err != nil {
-		t.Fatalf("declare: %v", err)
+	if _, err := s.harness.reg.Exited(s.ctx, p.ID, p.Liveness,
+		Exit{Cause: string(session.ExitInterrupted)}); err != nil {
+		t.Fatalf("exit: %v", err)
 	}
 	if got := len(s.harness.reg.Undispatched()); got != 1 {
 		t.Fatalf("undispatched = %d, want the fact recorded", got)
@@ -922,8 +923,8 @@ func TestAFactAloneArmsNoTimerAndCallsNobody(t *testing.T) {
 	if got := s.harness.alarms.running(); got != 0 {
 		t.Fatalf("a fact armed %d timers; nothing here times a fact", got)
 	}
-	// The wake did not run either, and could not: a worker's declaration puts
-	// nothing in the coordinator's MAILBOX — an observation does — so there is
+	// The wake did not run either, and could not: a process exit puts nothing in
+	// the coordinator's MAILBOX on its own — an observation does — so there is
 	// no batch and nothing to type.
 	if got := s.attempts(); len(got) != 0 {
 		t.Fatalf("a fact alone produced a line: %+v", got)

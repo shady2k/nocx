@@ -211,7 +211,7 @@ func TestAnExplicitCloseClosesTheAdmittedToolConnection(t *testing.T) {
 }
 
 // holdingAppDispatcher answers every call but one at once, and holds
-// workers.wait until its CONTEXT ends — so a close that never reached the
+// workers.spawn until its CONTEXT ends — so a close that never reached the
 // request is a hold that never ends, which is what makes "the call in flight was
 // cancelled" observable from outside rather than inferred from the socket.
 type holdingAppDispatcher struct {
@@ -225,7 +225,7 @@ func newHoldingAppDispatcher() *holdingAppDispatcher {
 }
 
 func (d *holdingAppDispatcher) Dispatch(inv assistant.ToolInvocation) (string, error) {
-	if inv.Method != "workers.wait" {
+	if inv.Method != "workers.spawn" {
 		return `{"held":[]}`, nil
 	}
 	d.once.Do(func() {
@@ -246,7 +246,7 @@ func TestASessionsEndCancelsTheCallInFlightOnItsAdmittedConnection(t *testing.T)
 	dispatch := newHoldingAppDispatcher()
 	stand := newSessionEndStand(t, dispatch)
 
-	if _, err := io.WriteString(stand.conn, `{"jsonrpc":"2.0","id":"held","method":"workers.wait","params":{}}`+"\n"); err != nil {
+	if _, err := io.WriteString(stand.conn, `{"jsonrpc":"2.0","id":"held","method":"workers.spawn","params":{"command":"claude","task":"hold this call"}}`+"\n"); err != nil {
 		t.Fatalf("write the call that stays in flight: %v", err)
 	}
 	select {

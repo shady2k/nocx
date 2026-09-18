@@ -226,7 +226,7 @@ func launcherStandIn(t *testing.T, w *wakeStand, stop <-chan struct{}) *sync.Wai
 // Nothing in this test calls the registrar. Every participant that exists
 // exists because the engine executed a tool call the provider proposed, and
 // every one that ends ends the same way.
-func TestAModelSpawnsThreeWorkersWaitsOnTheWorkersAndClosesThem(t *testing.T) {
+func TestAModelSpawnsThreeWorkersReadsItsHoldingsAndClosesThem(t *testing.T) {
 	ctx := context.Background()
 	w := newWakeStand(t)
 
@@ -234,8 +234,8 @@ func TestAModelSpawnsThreeWorkersWaitsOnTheWorkersAndClosesThem(t *testing.T) {
 		{tool: "workers.spawn", args: `{"command":"claude","task":"read AGENTS.md"}`},
 		{tool: "workers.spawn", args: `{"command":"claude","task":"read the architecture"}`},
 		{tool: "workers.spawn", args: `{"command":"claude","task":"read the vision"}`},
-		// One wait, on the worker and not on a worker.
-		{tool: "workers.wait", args: `{"seconds":20}`},
+		// One read, and it is the whole of how a coordinator is told what it
+		// holds: there is no call that waits on a worker any more (ADR-0070).
 		{tool: "workers.holdings", args: `{}`},
 	}}
 	// Then it closes what it was told is still running, BY THE IDS IT WAS
@@ -272,9 +272,10 @@ func TestAModelSpawnsThreeWorkersWaitsOnTheWorkersAndClosesThem(t *testing.T) {
 	env := content.EnvironmentIDFor(content.EnvLocal, "")
 	grant := autonomousWorkerGrant(string(w.coordinator), env)
 
-	// A worker settles while the model is waiting. It is not the test making
-	// a call the model should have made: the coordinator does not end its
-	// own workers here, the WORK does, which is the case the wait exists for.
+	// One worker's process ends while the model is between calls. It is not
+	// the test making a call the model should have made: the coordinator does
+	// not end its own workers here, the WORK does — which is the case a read
+	// of the record is for.
 	go func() {
 		waittest.WaitFor(t, "the first worker to be live", func() bool {
 			held, herr := w.workerStore.HeldBy(ctx, string(w.coordinator))
@@ -323,12 +324,11 @@ func TestAModelSpawnsThreeWorkersWaitsOnTheWorkersAndClosesThem(t *testing.T) {
 	}
 
 	// WHAT THE MODEL WAS TOLD, off the real results rather than off a struct
-	// this test built. Five calls, five results.
+	// this test built. Four scripted calls, then one close for each worker
+	// that was still running when the model looked.
 	results := provider.toolResults(t)
-	// Five scripted calls, then one close for each worker that was still
-	// running when the model looked.
-	if len(results) != 7 {
-		t.Fatalf("the model was handed %d tool results, want 7 (three spawns, a wait, holdings, two closes)", len(results))
+	if len(results) != 6 {
+		t.Fatalf("the model was handed %d tool results, want 6 (three spawns, holdings, two closes)", len(results))
 	}
 	// Each spawn told it a worker id it can address later, and told it the
 	// worker is LIVE — which is the enrolment having arrived, never that the
@@ -338,29 +338,29 @@ func TestAModelSpawnsThreeWorkersWaitsOnTheWorkersAndClosesThem(t *testing.T) {
 			t.Fatalf("spawn %d did not tell the model the worker is live: %s", i+1, r)
 		}
 	}
-	// The wait answered with what the session holds, and it names the worker
-	// that settled while the model was waiting.
-	waitAnswer := results[3]
-	if !strings.Contains(waitAnswer, "participants") {
-		t.Fatalf("the wait answered without participants: %s", waitAnswer)
+	// Holdings answered with what the session holds, and it names both the
+	// worker whose process ended while the model was between calls and the
+	// two that are still running — and nothing about how the work went,
+	// because nocx records no outcome (ADR-0070 decision 3).
+	holdingsAnswer := results[3]
+	if !strings.Contains(holdingsAnswer, "participants") {
+		t.Fatalf("holdings answered without participants: %s", holdingsAnswer)
 	}
-	if !strings.Contains(waitAnswer, `"state":"abandoned"`) &&
-		!strings.Contains(waitAnswer, `"state":"completed"`) {
-		t.Fatalf("the wait returned before anything settled: %s", waitAnswer)
+	if !strings.Contains(holdingsAnswer, `"state":"exited"`) {
+		t.Fatalf("holdings did not report the worker that ended while the model was between calls: %s", holdingsAnswer)
 	}
-	if !strings.Contains(waitAnswer, `"state":"live"`) {
-		t.Fatalf("the wait reported nothing still running, so it did not return on the FIRST: %s", waitAnswer)
+	if !strings.Contains(holdingsAnswer, `"state":"live"`) {
+		t.Fatalf("holdings reported nothing still running: %s", holdingsAnswer)
 	}
-	// And holdings answered afterwards with the same three.
-	if strings.Count(results[4], `"task"`) != 3 {
-		t.Fatalf("holdings did not report all three workers: %s", results[4])
+	if got := strings.Count(holdingsAnswer, `"task"`); got != 3 {
+		t.Fatalf("holdings reported %d workers, want all three: %s", got, holdingsAnswer)
 	}
 
 	// EVERY WORKER IS ENDED, and the two the model closed ended because it
 	// closed them: it read their ids out of the answer it was given and
-	// addressed them. The record reaches a terminal state through the exit
-	// path, so nothing here wrote one.
-	for _, r := range results[5:] {
+	// addressed them. The state the record keeps for one of them is the
+	// coordinator's own act (`closed`), not merely the exit it caused.
+	for _, r := range results[4:] {
 		if !strings.Contains(r, `"ended":true`) {
 			t.Fatalf("a close did not report the worker ended: %s", r)
 		}

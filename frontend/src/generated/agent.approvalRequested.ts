@@ -54,7 +54,6 @@ export interface AgentApprovalRequested {
     | 'workers.holdings'
     | 'workers.spawn'
     | 'workers.say'
-    | 'workers.wait'
     | 'workers.inbox'
     | 'workers.report'
     | 'workers.close'

@@ -46,29 +46,29 @@ import (
 )
 
 const (
-	happyExternalEnv    = "NOCX_TEST_WORKER_HAPPY_EXTERNAL"
-	happyCommandEnv     = "NOCX_TEST_WORKER_HAPPY_COMMAND"
-	happyWaitSecondsEnv = "NOCX_TEST_WORKER_HAPPY_WAIT_SECONDS"
-	happyMutationEnv    = "NOCX_TEST_WORKER_HAPPY_MUTATION"
-	happyExpectedReport = "read AGENTS.md and reported from an external worker\n"
+	happyExternalEnv = "NOCX_TEST_WORKER_HAPPY_EXTERNAL"
+	happyCommandEnv  = "NOCX_TEST_WORKER_HAPPY_COMMAND"
 )
-
-// The skip-report mutation models a worker that never declares what it
-// produced; wrong-summary models a declaration for the wrong work. Either
-// regression must make the external cycle fail instead of claiming completion.
 
 // TestWorkerHappyExternalCoordinator is a REAL second process. It is the
 // external coordinator for TestExternalClaudeDrivesAWorkerEndToEnd, not
-// nocx's assistant engine. The four calls are deliberately direct JSON-RPC
-// worker calls: spawn a real pane, wait for the declaration, read its summary,
-// and close the participant.
+// nocx's assistant engine. The three calls are deliberately direct JSON-RPC
+// worker calls: spawn a real pane, read what the session holds, and close the
+// participant.
+//
+// THE WAIT AND THE DECLARATION LEFT THIS CYCLE with ADR-0070: an interactive
+// worker never exits, so a wait on its exit held to its deadline, and the
+// verdict a wrapper used to send is not a fact nocx records. What a
+// coordinator has instead is its MAILBOX — the worker's own report and the
+// states nocx saw — which is worker_report_test.go's and
+// worker_observed_inbox_test.go's subject.
 func TestWorkerHappyExternalCoordinator(t *testing.T) {
 	socket := os.Getenv(happyExternalEnv)
 	if socket == "" {
 		t.Skip("not the external coordinator")
 	}
 
-	methods := []string{"workers.spawn", "workers.wait", "workers.holdings", "workers.close"}
+	methods := []string{"workers.spawn", "workers.holdings", "workers.close"}
 	client, err := openHappyExternalClient(socket)
 	if err != nil {
 		t.Fatalf("connect external coordinator: %v", err)
@@ -98,25 +98,13 @@ func TestWorkerHappyExternalCoordinator(t *testing.T) {
 		t.Fatalf("spawn result = %s, want a live participant id", spawn.Result)
 	}
 
-	waitSeconds := os.Getenv(happyWaitSecondsEnv)
-	if waitSeconds == "" {
-		waitSeconds = "10"
-	}
-	wait := client.Call("workers.wait", `{"seconds":`+waitSeconds+`}`)
-	if wait.Error != nil {
-		t.Fatalf("workers.wait: %+v", wait.Error)
-	}
-	var waited happyWorkerHoldingsResult
-	mustDecodeHappyResult(t, wait.Result, &waited)
-	assertHappyDeclaration(t, waited, spawned.ID)
-
 	holdings := client.Call("workers.holdings", `{}`)
 	if holdings.Error != nil {
 		t.Fatalf("workers.holdings: %+v", holdings.Error)
 	}
 	var readback happyWorkerHoldingsResult
 	mustDecodeHappyResult(t, holdings.Result, &readback)
-	assertHappyDeclaration(t, readback, spawned.ID)
+	assertHappyWorker(t, readback, spawned.ID, string(workers.StateLive))
 
 	closed := client.Call("workers.close", `{"worker":"`+spawned.ID+`"}`)
 	if closed.Error != nil {
@@ -134,10 +122,9 @@ func TestWorkerHappyExternalCoordinator(t *testing.T) {
 	payload, err := json.Marshal(struct {
 		Methods  []string        `json:"methods"`
 		Spawn    json.RawMessage `json:"spawn"`
-		Wait     json.RawMessage `json:"wait"`
 		Holdings json.RawMessage `json:"holdings"`
 		Close    json.RawMessage `json:"close"`
-	}{methods, spawn.Result, wait.Result, holdings.Result, closed.Result})
+	}{methods, spawn.Result, holdings.Result, closed.Result})
 	if err != nil {
 		t.Fatalf("marshal external cycle: %v", err)
 	}
@@ -201,21 +188,21 @@ func (c *happyExternalClient) Call(method, params string) happyRPCResponse {
 
 type happyWorkerHoldingsResult struct {
 	Participants []struct {
-		ID      string `json:"id"`
-		State   string `json:"state"`
-		Summary string `json:"summary"`
+		ID    string `json:"id"`
+		State string `json:"state"`
+		Task  string `json:"task"`
 	} `json:"participants"`
 }
 
-func assertHappyDeclaration(t *testing.T, got happyWorkerHoldingsResult, id string) {
+func assertHappyWorker(t *testing.T, got happyWorkerHoldingsResult, id, wantState string) {
 	t.Helper()
 	for _, participant := range got.Participants {
 		if participant.ID == id {
-			if participant.State != string(workers.StateLive) {
-				t.Fatalf("worker %q state = %q, want live while its pane is open", id, participant.State)
+			if participant.State != wantState {
+				t.Fatalf("worker %q state = %q, want %q", id, participant.State, wantState)
 			}
-			if participant.Summary != happyExpectedReport {
-				t.Fatalf("worker %q summary = %q, want %q", id, participant.Summary, happyExpectedReport)
+			if participant.Task == "" {
+				t.Fatalf("worker %q is listed with no task", id)
 			}
 			return
 		}
@@ -778,11 +765,9 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 		t.Fatalf("pane enroller: %v", err)
 	}
 	paneEnrol = enrol.hookInto(paneEnrol)
-	report := &workerReporter{lanes: lanes, enrol: enrol, log: logger, now: time.Now}
 	kernel := lifecycle.New(lifecycle.Options{})
 	pub := lifecyclepub.New(kernel,
 		lifecyclepub.WithAgentEnroller(paneEnrol),
-		lifecyclepub.WithAgentReporter(report),
 	)
 	pub.SetEmitter(happyLifecycleEmitter{})
 	factory.kernel = pub
@@ -868,10 +853,6 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 		// still exercises a real gate rather than a double that only
 		// records a call.
 		record.SetTaskQueue(&happyTaskQueue{readiness: realWatch, typist: paneTyping, log: logger})
-	}
-	report.declare = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, d workers.Declaration) error {
-		_, declareErr := record.Declared(ctx, id, l, d)
-		return declareErr
 	}
 	sup.exited = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, e workers.Exit) {
 		_, _ = record.Exited(ctx, id, l, e)
@@ -967,15 +948,14 @@ func runHappyExternalCoordinator(t *testing.T, socket string) map[string]json.Ra
 		var result struct {
 			Methods  []string        `json:"methods"`
 			Spawn    json.RawMessage `json:"spawn"`
-			Wait     json.RawMessage `json:"wait"`
 			Holdings json.RawMessage `json:"holdings"`
 			Close    json.RawMessage `json:"close"`
 		}
 		if json.Unmarshal([]byte(line), &result) == nil {
-			if len(result.Methods) != 4 {
-				t.Fatalf("external cycle methods = %v, want four direct workers.* calls", result.Methods)
+			if len(result.Methods) != 3 {
+				t.Fatalf("external cycle methods = %v, want three direct workers.* calls", result.Methods)
 			}
-			return map[string]json.RawMessage{"spawn": result.Spawn, "wait": result.Wait, "holdings": result.Holdings, "close": result.Close}
+			return map[string]json.RawMessage{"spawn": result.Spawn, "holdings": result.Holdings, "close": result.Close}
 		}
 	}
 	t.Fatalf("external coordinator produced no cycle result: %s", out)
@@ -997,15 +977,7 @@ func TestExternalClaudeDrivesAWorkerEndToEnd(t *testing.T) {
 	if command == "" {
 		fakeDir := t.TempDir()
 		fakeClaude := filepath.Join(fakeDir, "claude")
-		mutation := os.Getenv(happyMutationEnv)
 		script := "#!/bin/sh\nprintf 'FAKE-CLAUDE-RAN\\n'\n"
-		if mutation != "skip-report" {
-			summary := happyExpectedReport
-			if mutation == "wrong-summary" {
-				summary = "a different result"
-			}
-			script += "printf 'ok\\n%s' '" + summary + "' > \"$NOCX_AGENT_REPORT\"\n"
-		}
 		if err := os.WriteFile(fakeClaude, []byte(script), 0o700); err != nil { //nolint:gosec // the test launcher must be executable
 			t.Fatalf("write fake claude: %v", err)
 		}
@@ -1049,12 +1021,9 @@ func TestExternalClaudeDrivesAWorkerEndToEnd(t *testing.T) {
 		t.Fatalf("external spawn = %s, want a live worker", cycle["spawn"])
 	}
 
-	var waited happyWorkerHoldingsResult
-	mustDecodeHappyResult(t, cycle["wait"], &waited)
-	assertHappyDeclaration(t, waited, spawned.ID)
 	var readback happyWorkerHoldingsResult
 	mustDecodeHappyResult(t, cycle["holdings"], &readback)
-	assertHappyDeclaration(t, readback, spawned.ID)
+	assertHappyWorker(t, readback, spawned.ID, string(workers.StateLive))
 
 	var closed struct {
 		ID    string `json:"id"`
@@ -1065,15 +1034,15 @@ func TestExternalClaudeDrivesAWorkerEndToEnd(t *testing.T) {
 		t.Fatalf("external close = %s, want ended worker %q", cycle["close"], spawned.ID)
 	}
 	var stored workers.Participant
-	waittest.WaitFor(t, "worker declaration and close to reach the record", func() bool {
+	waittest.WaitFor(t, "the close to reach the record", func() bool {
 		var err error
 		stored, err = stand.store.Participant(context.Background(), workers.ParticipantID(spawned.ID))
-		return err == nil && stored.State == workers.StateCompleted
+		return err == nil && stored.State == workers.StateClosed
 	})
-	if stored.Group != workers.ID(stand.coord.ID()) || stored.Declared == nil || stored.Declared.Summary != happyExpectedReport {
-		t.Fatalf("stored worker = %+v, want coordinator %q and declaration %q", stored, stand.coord.ID(), happyExpectedReport)
+	if stored.Group != workers.ID(stand.coord.ID()) {
+		t.Fatalf("stored worker = %+v, want coordinator %q", stored, stand.coord.ID())
 	}
-	t.Logf("worker record: id=%s group=%s state=%s session=%s summary=%q", stored.ID, stored.Group, stored.State, stored.Liveness.SessionID, stored.Declared.Summary)
+	t.Logf("worker record: id=%s group=%s state=%s session=%s", stored.ID, stored.Group, stored.State, stored.Liveness.SessionID)
 	if stored.Liveness.SessionID == "" {
 		t.Fatalf("stored worker has no worker session: %+v", stored)
 	}
@@ -1160,11 +1129,10 @@ func TestManualRealClaudeCoordinator(t *testing.T) {
 		t.Fatal(err)
 	}
 	prompt := `Act as the coordinator. Use only the nocx workers tools and perform this exact cycle:
-1. Call workers.spawn exactly once with command ` + "`claude -p 'Read AGENTS.md. Then write exactly two lines to \\\"$NOCX_AGENT_REPORT\\\": first ok, second read AGENTS.md and reported from an external worker.'`" + ` and task ` + "`read AGENTS.md and report`" + `.
-2. Call workers.wait with seconds 60.
-3. Call workers.holdings and inspect the declaration.
-4. Call workers.close for the worker id returned by workers.spawn.
-Do not use Bash or any other tool. After the cycle, answer with the exact ordered tool names and the complete JSON results from all four calls.`
+1. Call workers.spawn exactly once with command ` + "`claude -p 'Read AGENTS.md.'`" + ` and task ` + "`read AGENTS.md and report`" + `.
+2. Call workers.holdings and read what your session holds.
+3. Call workers.close for the worker id returned by workers.spawn.
+Do not use Bash or any other tool. After the cycle, answer with the exact ordered tool names and the complete JSON results from all three calls.`
 	cmd := exec.Command("claude", "--print", "--no-session-persistence", "--dangerously-skip-permissions", "--strict-mcp-config", "--mcp-config", configPath, "--output-format", "stream-json", "--verbose", "-p", prompt) //nolint:gosec // manual test intentionally launches the installed Claude CLI
 	cmd.Dir = repoRoot
 	cmd.Env = append(os.Environ(), "NO_COLOR=1")
@@ -1180,10 +1148,10 @@ Do not use Bash or any other tool. After the cycle, answer with the exact ordere
 	waittest.WaitFor(t, "manual worker record to settle", func() bool {
 		var err error
 		held, err = stand.store.HeldBy(context.Background(), string(stand.coord.ID()))
-		return err == nil && len(held) == 1 && held[0].State == workers.StateCompleted && held[0].Declared != nil
+		return err == nil && len(held) == 1 && held[0].State == workers.StateClosed
 	})
-	if len(held) != 1 || held[0].Group != workers.ID(stand.coord.ID()) || held[0].Liveness.SessionID == "" || held[0].Declared.Summary != happyExpectedReport {
-		t.Fatalf("manual worker record = %+v, want one completed external worker for coordinator %q with declaration %q", held, stand.coord.ID(), happyExpectedReport)
+	if len(held) != 1 || held[0].Group != workers.ID(stand.coord.ID()) || held[0].Liveness.SessionID == "" {
+		t.Fatalf("manual worker record = %+v, want one closed external worker for coordinator %q", held, stand.coord.ID())
 	}
-	t.Logf("manual worker record: id=%s group=%s state=%s session=%s summary=%q", held[0].ID, held[0].Group, held[0].State, held[0].Liveness.SessionID, held[0].Declared.Summary)
+	t.Logf("manual worker record: id=%s group=%s state=%s session=%s", held[0].ID, held[0].Group, held[0].State, held[0].Liveness.SessionID)
 }

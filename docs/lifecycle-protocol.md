@@ -107,11 +107,12 @@ child — and it is a separate question with a separate answer.
 | `agent_enrolled`     | kernel → shell  | `request`, `agent`, `enrolled`, `pending`, `reason`                      | The verdict, a wait on a question, or that question closing. §15.4.                |
 | `agent_withdraw`     | shell → kernel  | `request`                                                                | The agent has returned; the interval closes. §15.                                  |
 | `agent_withdrawn`    | kernel → shell  | `request`                                                                | The close is acknowledged. §15.                                                    |
-| `agent_report`       | shell → kernel  | `request`, `ok`, `summary`                                               | A wave participant says what its own work produced, from the drop. §16.            |
-| `agent_reported`     | kernel → shell  | `request`, `recorded`, `reason`                                          | The declaration was written to the wave record, or why not. §16.                   |
 
-`accept`, `refresh_request`, `domain_grant`, `agent_enrolled`,
-`agent_withdrawn` and `agent_reported` are kernel-originated; ingesting them from a shell is a
+**Two kinds have left this protocol**: `agent_report` and `agent_reported`, the
+declaration and its answer. §16 is superseded; read that section's own notice.
+
+`accept`, `refresh_request`, `domain_grant`, `agent_enrolled` and
+`agent_withdrawn` are kernel-originated; ingesting them from a shell is a
 protocol violation. Everything else is shell-originated.
 
 ## 4. Authentication
@@ -201,8 +202,8 @@ never be acknowledged and therefore could never establish. ADR-0062 removed
 the wait; step 4 above is what replaced it, and step 5's kernel-side gate is
 unchanged by the removal — read ADR-0062 before touching either.
 
-`accept`, `refresh_request`, `domain_grant`, `agent_enrolled`,
-`agent_withdrawn` and `agent_reported` are kernel-originated; ingesting them from a shell is a
+`accept`, `refresh_request`, `domain_grant`, `agent_enrolled` and
+`agent_withdrawn` are kernel-originated; ingesting them from a shell is a
 protocol violation. Everything else is shell-originated. **Three outbound kinds, one boundary:** the transport port
 carries exactly three kinds of envelope — `accept`, `refresh_request` and
 `domain_grant`, the replies the shell must see. `domain_established` (and
@@ -720,90 +721,37 @@ grid answers what is on the screen and where the cursor is, and nothing else; th
 decisions the amendment permits from one — may nocx type here, what does the indicator show
 — are made by callers reading a frame, never by the grid and never here.
 
-## 16. The participant's declaration: the second of the two facts
+## 16. The participant's declaration — SUPERSEDED, and the mechanism is gone
 
-- **Implements:** `D9` of the orchestration mechanism design — only process exit and the
-  participant's own declaration may decide a wave participant's state.
-- **Bead:** `nocx-dkawo.7`.
-
-A wave participant produces two facts at the end of its work, and they are independent:
-what it **declared** it produced, and its **process exit**. The exit is the backend's own,
-because nocx owns the PTY. This pair is the declaration.
-
-### 16.0 Where a declaration comes from: the drop
-
-The declaration must come from the **agent**, and the agent cannot send one itself. The
-lifecycle capability is deliberately not exported (§3, and the 2026-08-15 design's `D13`:
-no bearer material in the environment), so a child process has nothing to authenticate a
-frame with. What it can do is leave the verdict where the shell will look, and the shell —
-which holds the capability — sends it.
-
-The agent wrapper opens a **drop** before starting the agent and passes its path in
-`NOCX_AGENT_REPORT`. A path is not bearer material: it names a rendezvous and confers
-nothing, `mktemp` gives it an unguessable name and mode 0600, and anything in the agent's
-own process tree can therefore declare — which is exactly the principal the 2026-08-15
-design's `D14` already enrols and states in the approval ("allow this agent **and commands
-it launches**").
-
-The format is for a shell to parse and for an agent to write:
-
-```
-ok                        <- or `fail`, on the first line, exactly
-what the agent produced   <- everything after it, free text
-```
-
-Anything else — an empty file, a half-written one, a file some other program left behind —
-is **not** a declaration and nothing is sent, so the participant stays undeclared and the
-record calls it `abandoned`. Consent is the presence of what the wrapper positively
-recognises, exactly as the enrolment answer's is (§15.3).
-
-The wrapper sends the declaration **inside** the interval the enrolment opened and before
-`agent_withdraw`: a verdict sent after the withdraw would report about a pane nocx had
-already stopped watching. It removes the drop afterwards. A declaration answered with
-`recorded:false` is printed in the pane, for `D4`'s reason — an agent that reported into
-nowhere must not think it was heard.
-
-**Nothing tells an agent to write one.** That is persuasion, not mechanism (§5 of the
-orchestration design), and it is why `wave.spawn`'s tool description tells a coordinator to
-put the instruction in its worker's task. An agent that never writes a drop is an ordinary
-worker that gets terminalized as `abandoned`, which is the fail-closed direction.
-
-### 16.1 Why it rides this channel, and why it is not `agent_withdraw`
-
-It rides this channel for §15.1's reason unchanged: a second socket would be a second
-authenticator for one trust decision, and a binary launched by the shell inherits the
-descriptor without inheriting the domain.
-
-It is **not** the withdraw of §15.2, and that distinction is the whole reason the pair
-exists. A withdraw says "the agent I bracketed has returned", which is the interval's
-other end and carries no verdict at all. A report says what the work **came to**. Reading
-a withdraw as a success would invent the one fact the participant did not send, in the
-fail-open direction — and a wave whose completions are inferred is the self-matching
-sentinel the orchestration design exists to kill.
-
-### 16.2 A declaration does not terminalize anything on its own
-
-`ok` is the participant's own verdict and there is no third value. A participant that
-cannot say whether it succeeded says nothing at all, and the record then reads its exit as
-an **abandonment** — which is the honest answer and the fail-closed one.
-
-A declaration with no exit leaves the participant **live**: the agent that says it finished
-is still running and may be given more work. Only the conjunction of a declaration and a
-process exit reaches a completion. The record reduces from the fact SET rather than the
-arrival order, so an exit observed before the declaration reads as abandoned and is refined
-by the declaration that follows — the second half of a conjunction arriving late, not a
-resurrection.
-
-`summary` is free text FROM the participant. It is content, never a commitment, and nothing
-derives authority from it. The kernel bounds it at 4096 bytes: a summary is a sentence a
-coordinator reads between turns, not a transcript, and the artifact a worker produced
-belongs in the files it wrote. The declaration's TIME is the backend's, because there is no
-clock shared with a participant and one it supplied would be a value it could pick.
-
-### 16.3 The verdict is fail-closed, for §15.3's reason
-
-`recorded` is absent unless the declaration was actually written. A seam that is not wired,
-a payload that is missing, a record that refused: every one of them leaves it false, and
-the answer carries a `reason` the participant can print in its own pane. A pane that is not
-part of a wave is told so plainly — that is the ordinary case, since a person's own agent
-may well be integrated and enrolled and belong to no wave at all.
+> **SUPERSEDED 2026-09-18 by
+> [ADR-0070](decisions/0070-a-worker-says-nocx-sees-the-coordinator-judges.md),
+> recorded with the removal of `nocx-luqz9.6`.** Every mechanism this section
+> described has been DELETED: the `agent_report` / `agent_reported` event pair and
+> their kernel and codec arms, the drop (`NOCX_AGENT_REPORT`, a `mktemp` file the
+> wrapper named to the agent and read after it exited), the declaration record and
+> the outcome states it fed, and `workers.wait` — the tool whose whole purpose was
+> to block on the verdict this section produced.
+>
+> **Why it stopped holding.** The design assumed an agent that exits when it is
+> done. `workers.spawn` starts an interactive one, which ends its turn and waits —
+> so the declaration never arrived while the worker lived, `workers.wait` held to
+> its deadline (`nocx-9f1d4`), and the only party that could end the worker was the
+> coordinator blocked in the wait.
+>
+> **What replaced it is on two other documents, and this section is not one of
+> them.** A worker says what it has to say through the MCP tool `workers.report`
+> (`{ kind, text }`, kinds `done` / `question` / `progress`), which travels on the
+> tool endpoint under the pane's bearer — so it works from a remote host and needs
+> no file. What a worker's SCREEN shows reaches its coordinator as an observation
+> the pane observer produces, after it has held for a settle window, and carries no
+> screen content. Both arrive in the coordinator's mailbox, which `workers.inbox`
+> and `workers.holdings` read and the WAKE types one pointer line about
+> (`internal/workers/wake.go`). **nocx records no outcome at all**: the record's
+> states are `prepared`, `live`, `exited`, `closed` and `interrupted`, and the
+> coordinator — which holds the words and saw the pane — judges what they mean.
+>
+> **The channel's role is untouched.** What §16 shared with §15 remains true of
+> §15: the per-epoch capability on the authenticated channel is still how a pane
+> proves which shell it is, and enrolment (`agent_enrol` / `agent_withdraw`) still
+> brackets the interval a grid may live in. Read §15; do not read this as history
+> of it.

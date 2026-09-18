@@ -220,18 +220,15 @@ func TestClosingAParticipantRevokesWhatItControls(t *testing.T) {
 	}
 }
 
-// A participant reaching a terminal state through the ordinary declare/exit
-// path (admit) has its delegation revoked too — the "participant
-// terminalized" trigger, distinct from an explicit Close.
+// A participant reaching a terminal state through the ordinary exit path
+// (admit) has its delegation revoked too — the "participant terminalized"
+// trigger, distinct from an explicit Close.
 func TestATerminalizedParticipantsDelegationIsRevoked(t *testing.T) {
 	h := newHarnessBound(t, 10)
 	ctx := context.Background()
 	w1 := registerUnder(t, h, "sess-C", "sess-w1")
 	live := Liveness{BackendInstance: "backend-A", SessionID: "sess-w1", Epoch: 1, Lane: "lane-1", Attempt: 1}
 
-	if _, err := h.reg.Declared(ctx, w1.ID, live, Declaration{OK: true}); err != nil {
-		t.Fatalf("declared: %v", err)
-	}
 	if _, err := h.reg.Resolve(ctx, "sess-C", "sess-w1", EffectObserve); err != nil {
 		t.Fatalf("resolve before the process fact lands: %v", err)
 	}

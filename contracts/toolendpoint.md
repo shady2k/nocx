@@ -8,7 +8,6 @@ contracts are the existing unified tool documents under [`tools/`](tools/):
 | `workers.spawn`    | [`workers.spawn.schema.json`](tools/workers.spawn.schema.json)       |
 | `workers.say`      | [`workers.say.schema.json`](tools/workers.say.schema.json)           |
 | `workers.report`   | [`workers.report.schema.json`](tools/workers.report.schema.json)     |
-| `workers.wait`     | [`workers.wait.schema.json`](tools/workers.wait.schema.json)         |
 | `workers.holdings` | [`workers.holdings.schema.json`](tools/workers.holdings.schema.json) |
 | `workers.close`    | [`workers.close.schema.json`](tools/workers.close.schema.json)       |
 | `workers.inbox`    | [`workers.inbox.schema.json`](tools/workers.inbox.schema.json)       |

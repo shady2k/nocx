@@ -45,15 +45,23 @@ type Store interface {
 	// returned.
 	MarkLive(ctx context.Context, id ParticipantID, l Liveness) error
 
-	// Terminalize writes a terminal state. A compensation that itself fails
-	// leaves the record non-terminal and is retried; a terminal state is
-	// never written for something that was not established.
+	// Terminalize writes a terminal state over a non-terminal one. A
+	// compensation that itself fails leaves the record non-terminal and is
+	// retried; a terminal state is never written for something that was not
+	// established.
 	Terminalize(ctx context.Context, id ParticipantID, s State) error
 
-	// RecordDeclaration stores the participant's own terminal fact and
-	// returns the participant as it then stands, so the caller reduces from
-	// stored state rather than from what it believed was stored.
-	RecordDeclaration(ctx context.Context, id ParticipantID, d Declaration) (Participant, error)
+	// Closed records that the participant was ended by its COORDINATOR, and it
+	// is the only write that may replace an exit.
+	//
+	// It runs after the closer returned, so the supervisor may already have
+	// reported the exit this close caused — ending the session is what
+	// produces it, and the two run on different goroutines with no order
+	// between them. The record's answer to "why did this worker end" is the
+	// coordinator's act, and the exit is its consequence, so closed wins that
+	// race whichever way it falls. It is REFUSED over any other terminal
+	// state: nocx's own compensation is not a coordinator's decision.
+	Closed(ctx context.Context, id ParticipantID) error
 
 	// RecordExit stores the process fact and returns the participant as it
 	// then stands.

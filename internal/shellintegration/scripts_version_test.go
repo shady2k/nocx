@@ -213,6 +213,16 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// execs once this file's own DEBUG-trap preexec hook is installed
 		// (nocx-xn63t.6.1).
 		"53": "393c7948e13e860668b39d9337fc47648d6c38914d2a39625b7a9ae219bd97f7",
+		// 54: the declaration drop is gone (ADR-0070, design §7). The
+		// wrapper no longer opens a mktemp rendezvous, no longer names it in
+		// NOCX_AGENT_REPORT, and no longer sends the `agent_report` frame —
+		// nocx records no outcome, a worker reports through workers.report,
+		// and what its pane shows reaches its coordinator as an observation.
+		// Both shells shrank, and the launch line went back to
+		// `command "$agent"`, which is also what its sibling branches
+		// already use. A shell still sourcing 53 sends a frame kind the
+		// backend no longer knows.
+		"54": "9137cedf810cb053042eabc6d7b6ed299e78d4fe4d4d37c0c85865e8698c5cb0",
 	}
 
 	h := sha256.New()

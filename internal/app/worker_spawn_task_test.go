@@ -224,7 +224,7 @@ func (hangingTabs) PaneCwd(context.Context, string) (string, error) { return "",
 // TestAFreeMessageIsDeliveredWhenTheAgentIsFree (the queue delivers it).
 func TestASpawnWhosePaneBecomesFreeTextReportsNoDeliveryOfItsOwn(t *testing.T) {
 	stand := newTaskDeliveryStand(t)
-	const task = "please write to NOCX_AGENT_REPORT when you are done"
+	const task = "please leave a summary of what you read when you are done"
 
 	type outcome struct {
 		sp  workers.Spawned

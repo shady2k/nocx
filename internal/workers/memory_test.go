@@ -63,9 +63,9 @@ func TestAParticipantIsReadBackAsItWasWritten(t *testing.T) {
 	}
 }
 
-// A caller holds a COPY. The two terminal facts are pointers, and a record
-// that handed out the pointer it stores would let any reader rewrite a fact
-// only the two admitted sources may write.
+// A caller holds a COPY. The one terminal fact is a pointer, and a record that
+// handed out the pointer it stores would let any reader rewrite a fact only the
+// admitted source may write.
 func TestAReaderCannotRewriteTheRecordThroughWhatItWasHanded(t *testing.T) {
 	ctx := context.Background()
 	s := newSeededStore(t)
@@ -73,80 +73,23 @@ func TestAReaderCannotRewriteTheRecordThroughWhatItWasHanded(t *testing.T) {
 	if err := s.CommitPrepared(ctx, p); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	if _, err := s.RecordDeclaration(ctx, p.ID, Declaration{OK: true, Summary: "read it"}); err != nil {
-		t.Fatalf("declare: %v", err)
+	if _, err := s.RecordExit(ctx, p.ID, Exit{Cause: "exited", Code: 0}); err != nil {
+		t.Fatalf("exit: %v", err)
 	}
 
 	handed, err := s.Participant(ctx, p.ID)
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
-	handed.Declared.OK = false
-	handed.Declared.Summary = "rewritten from outside"
+	handed.Exited.Cause = "rewritten from outside"
 
 	got, err := s.Participant(ctx, p.ID)
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
-	if !got.Declared.OK || got.Declared.Summary != "read it" {
-		t.Fatalf("declaration = %+v: a reader rewrote a fact it was only handed", *got.Declared)
+	if got.Exited.Cause != "exited" {
+		t.Fatalf("exit = %+v: a reader rewrote a fact it was only handed", *got.Exited)
 	}
-}
-
-// The two terminal facts are two independent facts and are held
-// independently, because a declaration with no exit is an ordinary state and
-// so is the reverse.
-func TestTheTwoTerminalFactsAreHeldIndependently(t *testing.T) {
-	ctx := context.Background()
-	at := time.UnixMilli(1_700_000_100_000).UTC()
-
-	t.Run("a declaration alone", func(t *testing.T) {
-		s := newSeededStore(t)
-		p := newParticipant("p-decl")
-		if err := s.CommitPrepared(ctx, p); err != nil {
-			t.Fatalf("commit: %v", err)
-		}
-		if _, err := s.RecordDeclaration(ctx, p.ID, Declaration{OK: true, Summary: "read it", At: at}); err != nil {
-			t.Fatalf("declare: %v", err)
-		}
-		got, err := s.Participant(ctx, p.ID)
-		if err != nil {
-			t.Fatalf("read back: %v", err)
-		}
-		if got.Declared == nil {
-			t.Fatalf("declaration lost")
-		}
-		if !got.Declared.OK || got.Declared.Summary != "read it" || !got.Declared.At.Equal(at) {
-			t.Fatalf("declaration = %+v", *got.Declared)
-		}
-		if got.Exited != nil {
-			t.Fatalf("an exit was invented: %+v", *got.Exited)
-		}
-	})
-
-	t.Run("an exit alone", func(t *testing.T) {
-		s := newSeededStore(t)
-		p := newParticipant("p-exit")
-		if err := s.CommitPrepared(ctx, p); err != nil {
-			t.Fatalf("commit: %v", err)
-		}
-		if _, err := s.RecordExit(ctx, p.ID, Exit{Cause: "signalled", Code: 9, At: at}); err != nil {
-			t.Fatalf("exit: %v", err)
-		}
-		got, err := s.Participant(ctx, p.ID)
-		if err != nil {
-			t.Fatalf("read back: %v", err)
-		}
-		if got.Exited == nil {
-			t.Fatalf("exit lost")
-		}
-		if got.Exited.Cause != "signalled" || got.Exited.Code != 9 || !got.Exited.At.Equal(at) {
-			t.Fatalf("exit = %+v", *got.Exited)
-		}
-		if got.Declared != nil {
-			t.Fatalf("a declaration was invented: %+v", *got.Declared)
-		}
-	})
 }
 
 // A terminal record is never re-terminalized, so a compensation that runs
@@ -158,7 +101,7 @@ func TestTerminalizeDoesNotOverwriteAnEstablishedTerminalState(t *testing.T) {
 	if err := s.CommitPrepared(ctx, p); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	if err := s.Terminalize(ctx, p.ID, StateCompleted); err != nil {
+	if err := s.Terminalize(ctx, p.ID, StateExited); err != nil {
 		t.Fatalf("terminalize: %v", err)
 	}
 	if err := s.Terminalize(ctx, p.ID, StateInterrupted); err != nil {
@@ -168,7 +111,7 @@ func TestTerminalizeDoesNotOverwriteAnEstablishedTerminalState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
-	if got.State != StateCompleted {
+	if got.State != StateExited {
 		t.Fatalf("state = %q: a second terminalize overwrote an established one", got.State)
 	}
 }
@@ -285,8 +228,8 @@ func TestOnlyOpenParticipantsAreListed(t *testing.T) {
 	}{
 		{"p-prepared", StatePrepared},
 		{"p-live", StateLive},
-		{"p-done", StateCompleted},
-		{"p-gone", StateAbandoned},
+		{"p-done", StateExited},
+		{"p-gone", StateClosed},
 	} {
 		if err := s.CommitPrepared(ctx, newParticipant(tc.id)); err != nil {
 			t.Fatalf("commit %q: %v", tc.id, err)
@@ -296,7 +239,7 @@ func TestOnlyOpenParticipantsAreListed(t *testing.T) {
 			if err := s.MarkLive(ctx, tc.id, testLiveness()); err != nil {
 				t.Fatalf("mark live %q: %v", tc.id, err)
 			}
-		case StateCompleted, StateAbandoned:
+		case StateExited, StateClosed:
 			if err := s.Terminalize(ctx, tc.id, tc.state); err != nil {
 				t.Fatalf("terminalize %q: %v", tc.id, err)
 			}
@@ -589,8 +532,8 @@ func TestTheRecordIsSafeUnderConcurrentUse(t *testing.T) {
 			if err := s.MarkLive(ctx, id, testLiveness()); err != nil {
 				t.Errorf("mark live %q: %v", id, err)
 			}
-			if _, err := s.RecordDeclaration(ctx, id, Declaration{OK: true, Summary: "done"}); err != nil {
-				t.Errorf("declare %q: %v", id, err)
+			if _, err := s.RecordExit(ctx, id, Exit{Cause: "exited"}); err != nil {
+				t.Errorf("exit %q: %v", id, err)
 			}
 			if _, err := s.Commit(ctx, Message{Group: testGroup, Recipient: "p-0", Sender: ReaderID(id), Body: "hello"}); err != nil {
 				t.Errorf("commit a message from %q: %v", id, err)

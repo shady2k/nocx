@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/session"
 )
 
 // fanout registers n workers and returns them.
@@ -40,82 +42,66 @@ func fanout(t *testing.T, h *harness, n int) []Participant {
 	return out
 }
 
-// finish declares success and exits, which is what an ordinary worker does.
+// finish ends a worker the way an ordinary one ends: its shell exits, which is
+// the only fact the record has left to route.
 func finish(t *testing.T, h *harness, p Participant) {
 	t.Helper()
-	ctx := context.Background()
-	if _, err := h.reg.Declared(ctx, p.ID, testLiveness(), Declaration{OK: true, Summary: "done"}); err != nil {
-		t.Fatalf("declare %s: %v", p.ID, err)
-	}
-	if _, err := h.reg.Exited(ctx, p.ID, testLiveness(), Exit{Cause: "exited"}); err != nil {
+	if _, err := h.reg.Exited(context.Background(), p.ID, testLiveness(), Exit{Cause: string(session.ExitExited)}); err != nil {
 		t.Fatalf("exit %s: %v", p.ID, err)
 	}
 }
 
 // ── the table ─────────────────────────────────────────────────────────────
 
-// THE TABLE. A routine completion is recorded and needs nobody; the end of the
-// worker needs judgement.
+// THE TABLE, over the one fact that is left. An ordinary end is recorded and
+// needs nobody while others still run; the END OF THE WORKER needs judgement.
 //
-// The two halves are one rule read at two moments. A worker finishing with two
-// still running tells the coordinator nothing it did not expect, and spending
-// its turn on "yes, one of three is done" is the poll this mechanism exists to
-// replace. The LAST one finishing is the worker arriving, which is the moment
-// the coordinator exists for — and it is the fact the record OWES judgement
-// on, which is what a coordinator is told when it looks.
+// The two halves are one rule read at two moments. A worker whose shell exited
+// with two still running tells the coordinator nothing it did not expect, and
+// spending its turn on "yes, one of three is gone" is the poll this mechanism
+// exists to replace. The LAST one ending is the worker arriving, which is the
+// moment the coordinator exists for — and it is the fact the record OWES
+// judgement on, which is what a coordinator is told when it looks.
 func TestThreeWorkersRunAndOnlyTheEndOfTheGroupNeedsJudgement(t *testing.T) {
 	h := newHarnessBound(t, 5)
 	workers := fanout(t, h, 3)
 
 	finish(t, h, workers[0])
 	if got := len(h.reg.Undispatched()); got != 0 {
-		t.Fatalf("undispatched after a routine completion = %d, want 0", got)
+		t.Fatalf("undispatched after a routine end = %d, want 0", got)
 	}
-	if got := h.reg.Cost().Routine; got != 2 {
-		t.Fatalf("routine = %d, want the two facts nobody had anything to decide about", got)
+	if got := h.reg.Cost().Routine; got != 1 {
+		t.Fatalf("routine = %d, want the one fact nobody had anything to decide about", got)
 	}
 
 	finish(t, h, workers[1])
 	if got := len(h.reg.Undispatched()); got != 0 {
-		t.Fatalf("undispatched after two of three finished = %d, want 0", got)
+		t.Fatalf("undispatched after two of three ended = %d, want 0", got)
 	}
 
 	finish(t, h, workers[2])
 	if got := len(h.reg.Undispatched()); got == 0 {
-		t.Fatalf("the worker finished and the record owes nobody judgement")
+		t.Fatalf("the worker ended and the record owes nobody judgement")
 	}
 }
 
-// A worker that did NOT succeed needs judgement whatever else is running.
-// Holding a crash until the worker finishes would report it after the work that
-// depended on it, which is the one ordering that cannot be undone.
-func TestAWorkerThatDidNotSucceedNeedsJudgementWhileOthersRun(t *testing.T) {
-	ctx := context.Background()
+// An end nocx cannot call ordinary — the shell did not exit, the backend LOST
+// it — needs judgement whatever else is running. There is no verdict left in
+// the record (ADR-0070 decision 3), so the cause is the discriminator: a loss
+// is the case nobody expected, and holding it until the rest of the worker
+// stopped would report it after the work that depended on it.
+func TestALostWorkerNeedsJudgementWhileOthersRun(t *testing.T) {
+	h := newHarnessBound(t, 5)
+	workers := fanout(t, h, 3)
 
-	t.Run("it says it failed", func(t *testing.T) {
-		h := newHarnessBound(t, 5)
-		workers := fanout(t, h, 3)
-		if _, err := h.reg.Declared(ctx, workers[0].ID, testLiveness(),
-			Declaration{OK: false, Summary: "could not build"}); err != nil {
-			t.Fatalf("declare: %v", err)
-		}
-		if got := len(h.reg.Undispatched()); got != 1 {
-			t.Fatalf("undispatched = %d, want 1 for a worker that reported failure", got)
-		}
-	})
-
-	t.Run("it is gone and never said anything", func(t *testing.T) {
-		h := newHarnessBound(t, 5)
-		workers := fanout(t, h, 3)
-		if _, err := h.reg.Exited(ctx, workers[0].ID, testLiveness(),
-			Exit{Cause: "signalled"}); err != nil {
-			t.Fatalf("exit: %v", err)
-		}
-		open := h.reg.Undispatched()
-		if len(open) != 1 || open[0].State != StateAbandoned {
-			t.Fatalf("undispatched = %+v, want the abandoned worker", open)
-		}
-	})
+	if _, err := h.reg.Exited(context.Background(), workers[0].ID, testLiveness(),
+		Exit{Cause: string(session.ExitInterrupted)}); err != nil {
+		t.Fatalf("exit: %v", err)
+	}
+	open := h.reg.Undispatched()
+	if len(open) != 1 || open[0].State != StateExited {
+		t.Fatalf("undispatched = %+v, want the worker nocx lost", open)
+	}
 }
 
 // A read that failed is not evidence the worker is finished, and it is not
@@ -123,16 +109,12 @@ func TestAWorkerThatDidNotSucceedNeedsJudgementWhileOthersRun(t *testing.T) {
 // coordinator did not need costs it one look, and a fact it never learns about
 // costs it the workers.
 func TestAStoreThatCannotSayWhatElseIsRunningNeedsJudgement(t *testing.T) {
-	ctx := context.Background()
 	h := newHarnessBound(t, 5)
 	workers := fanout(t, h, 3)
 
 	h.store.setFault("nonterminal", 1)
 	h.store.resetCounts()
-	if _, err := h.reg.Declared(ctx, workers[0].ID, testLiveness(),
-		Declaration{OK: true, Summary: "done"}); err != nil {
-		t.Fatalf("declare: %v", err)
-	}
+	finish(t, h, workers[0])
 	if got := len(h.reg.Undispatched()); got != 1 {
 		t.Fatalf("undispatched = %d, want 1: a table that cannot read the worker must not decide routine", got)
 	}
@@ -148,9 +130,9 @@ func TestOneFetchClosesEveryFactTheSessionOwed(t *testing.T) {
 	workers := fanout(t, h, 3)
 
 	for _, w := range workers {
-		if _, err := h.reg.Declared(ctx, w.ID, testLiveness(),
-			Declaration{OK: false, Summary: "no"}); err != nil {
-			t.Fatalf("declare %s: %v", w.ID, err)
+		if _, err := h.reg.Exited(ctx, w.ID, testLiveness(),
+			Exit{Cause: string(session.ExitInterrupted)}); err != nil {
+			t.Fatalf("exit %s: %v", w.ID, err)
 		}
 	}
 	if got := len(h.reg.Undispatched()); got != 3 {
@@ -165,8 +147,13 @@ func TestOneFetchClosesEveryFactTheSessionOwed(t *testing.T) {
 	}
 
 	// And the next fact is a new situation rather than a suppressed one: the
-	// fetch cleared the worker, so what comes after it is owed again.
-	if _, err := h.reg.Exited(ctx, workers[0].ID, testLiveness(), Exit{Cause: "exited"}); err != nil {
+	// fetch cleared the participants it was told about, so the worker that ends
+	// afterwards is owed again. It is a FOURTH one, because a participant
+	// produces its exit once — the fetch is what cleared the three, and asking
+	// the same one to end twice would be a fact about an already-terminal
+	// record.
+	workers = append(workers, mustRegister(t, h))
+	if _, err := h.reg.Exited(ctx, workers[3].ID, testLiveness(), Exit{Cause: "exited"}); err != nil {
 		t.Fatalf("exit: %v", err)
 	}
 	if got := len(h.reg.Undispatched()); got != 1 {
@@ -188,21 +175,21 @@ func TestTheRecordCountsWhatTheMechanismCost(t *testing.T) {
 	h := newHarnessBound(t, 5)
 	workers := fanout(t, h, 3)
 
-	finish(t, h, workers[0]) // declared + exited, both routine
+	finish(t, h, workers[0]) // an ordinary end, routine
 	finish(t, h, workers[1]) // routine again
-	if _, err := h.reg.Declared(ctx, workers[2].ID, testLiveness(),
-		Declaration{OK: false}); err != nil {
-		t.Fatalf("declare: %v", err)
+	if _, err := h.reg.Exited(ctx, workers[2].ID, testLiveness(),
+		Exit{Cause: string(session.ExitInterrupted)}); err != nil {
+		t.Fatalf("exit: %v", err)
 	}
 
 	s := h.reg.Cost()
-	if s.Routine != 4 {
-		t.Fatalf("routine = %d, want the four facts nobody had to decide about", s.Routine)
+	if s.Routine != 2 {
+		t.Fatalf("routine = %d, want the two facts nobody had to decide about", s.Routine)
 	}
 	if s.Judgement != 1 {
 		t.Fatalf("judgement = %d, want 1", s.Judgement)
 	}
-	if s.Facts() != 5 {
+	if s.Facts() != 3 {
 		t.Fatalf("facts = %d, want every fact in the denominator", s.Facts())
 	}
 

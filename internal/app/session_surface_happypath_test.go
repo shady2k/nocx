@@ -442,11 +442,9 @@ func newS14Stand(t *testing.T) *s14Stand {
 		t.Fatalf("pane enroller: %v", err)
 	}
 	paneEnrol = enrol.hookInto(paneEnrol)
-	report := &workerReporter{lanes: lanes, enrol: enrol, log: logger, now: time.Now}
 	kernel := lifecycle.New(lifecycle.Options{})
 	pub := lifecyclepub.New(kernel,
 		lifecyclepub.WithAgentEnroller(paneEnrol),
-		lifecyclepub.WithAgentReporter(report),
 	)
 	pub.SetEmitter(happyLifecycleEmitter{})
 	factory.kernel = pub
@@ -486,10 +484,6 @@ func newS14Stand(t *testing.T) *s14Stand {
 		workers.WithLogger(logger),
 		workers.WithCloser(&workerCloser{sessions: reg, log: logger}),
 	)
-	report.declare = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, d workers.Declaration) error {
-		_, declareErr := record.Declared(ctx, id, l, d)
-		return declareErr
-	}
 	sup.exited = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, e workers.Exit) {
 		_, _ = record.Exited(ctx, id, l, e)
 	}

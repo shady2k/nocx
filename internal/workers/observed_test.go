@@ -456,8 +456,8 @@ func TestTheSettleWindowIsTheOneTheRecordWasBuiltWith(t *testing.T) {
 // things, and a coordinator is told both, in the order they happened.
 //
 // The case this guards is not hypothetical — an interactive worker's whole
-// shape is "finish the turn, speak, sit at the prompt" — and a design that had
-// the report mark the worker as already-reported would make the idle invisible
+// shape is "finish the turn, speak, sit at the prompt" — and a design in which
+// a report marked the worker as already-reported would make the idle invisible
 // at exactly the moment the coordinator is waiting for it.
 func TestAReportDoesNotSuppressTheIdleThatFollowsIt(t *testing.T) {
 	const window = 3 * time.Second
@@ -466,9 +466,8 @@ func TestAReportDoesNotSuppressTheIdleThatFollowsIt(t *testing.T) {
 
 	// The worker was working, then reported, then settled idle.
 	s.mustReading(t, p, ObservedWorking)
-	if _, err := s.reg.Declared(s.ctx, p.ID, p.Liveness,
-		Declaration{OK: true, Summary: "read AGENTS.md", At: s.clock.now()}); err != nil {
-		t.Fatalf("declare: %v", err)
+	if _, err := s.reg.Report(s.ctx, p.ID, Report{Kind: KindDone, Text: "read AGENTS.md"}); err != nil {
+		t.Fatalf("report: %v", err)
 	}
 	// A report is not a fact about the record's observed state, and the pane is
 	// still WORKING as far as anything here has been told.
@@ -478,28 +477,27 @@ func TestAReportDoesNotSuppressTheIdleThatFollowsIt(t *testing.T) {
 	s.mustReading(t, p, ObservedIdle)
 
 	got := s.mailbox(t)
-	if len(got) != 1 {
-		t.Fatalf("the coordinator has %d messages, want exactly the one idle observation: %+v", len(got), got)
+	if len(got) != 2 {
+		t.Fatalf("the coordinator has %d messages, want the report and the idle that followed it: %+v", len(got), got)
 	}
-	if got[0].Observed == nil || got[0].Observed.State != ObservedIdle {
-		t.Fatalf("the message is not the idle observation: %+v", got[0])
+	if got[0].Kind != KindDone || got[0].Body != "read AGENTS.md" {
+		t.Fatalf("the first message is not the worker's own report: %+v", got[0])
 	}
-	if got[0].Observed.Worker != p.ID {
-		t.Fatalf("the observation names %q, want the worker that settled", got[0].Observed.Worker)
+	if got[1].Observed == nil || got[1].Observed.State != ObservedIdle {
+		t.Fatalf("the second message is not the idle observation: %+v", got[1])
 	}
-	// And the record still holds the declaration: the two facts travel
-	// separately and neither is the other's precondition.
+	if got[1].Observed.Worker != p.ID {
+		t.Fatalf("the observation names %q, want the worker that settled", got[1].Observed.Worker)
+	}
+	// And neither moved the record: a report is a claim and a settled state is
+	// an observation, and ADR-0070 decision 3 leaves the record its process
+	// fact alone. Nothing here has told it the process is gone.
 	after, ok := s.store.read(t, p.ID)
 	if !ok {
 		t.Fatalf("the participant vanished")
 	}
-	if after.Declared == nil || !after.Declared.OK {
-		t.Fatalf("the declaration did not reach the record: %+v", after)
-	}
-	// It is NOT terminal: the agent said it finished and its process is still
-	// there, so it may be given more work (reduce's own reading).
 	if after.State.Terminal() {
-		t.Fatalf("a declaration with no exit terminalized the record: %q", after.State)
+		t.Fatalf("a report or an observation terminalized the record: %q", after.State)
 	}
 }
 

@@ -342,9 +342,6 @@ func TestAReportIsNotARecordFact(t *testing.T) {
 	if after.State != before.State {
 		t.Fatalf("three reports moved the record from %q to %q", before.State, after.State)
 	}
-	if after.Declared != nil || before.Declared != nil {
-		t.Fatalf("a report wrote a declaration: before %+v, after %+v", before.Declared, after.Declared)
-	}
 	if after.Exited != nil || before.Exited != nil {
 		t.Fatalf("a report wrote an exit: before %+v, after %+v", before.Exited, after.Exited)
 	}

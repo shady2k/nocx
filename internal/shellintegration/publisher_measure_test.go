@@ -178,13 +178,23 @@ import (
 // growth here took — more bytes in the same two files the bundle already
 // publishes raw, not new filesystem operations.
 //
+// AND THEY SHRANK when the declaration drop left the two shells (ADR-0070,
+// design §7): the worst path writes 85826 bytes, down from 89636. This is the
+// second downward move this ratchet records, and unlike the first it lands on
+// the commit that caused it. What left is a whole mechanism — the mktemp
+// rendezvous, the reader that parsed the agent's own file, the `agent_report`
+// frame and its answer, and the environment variable the launch carried — and
+// it left both scripts because a worker that could report in bash and not in
+// zsh is not a mechanism. The CALL count is unchanged at 63: fewer bytes in the
+// same two files the bundle publishes raw, not less work.
+//
 // REPORT-p3-measure.md, which the failure messages below tell you to update
 // alongside these constants, HAS NEVER EXISTED in this repository — checked
 // across every ref. Whoever restores it, or removes the instruction, owns
 // nocx-uxuwu.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 89636
+	measuredMaxPublishBytes = 85826
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

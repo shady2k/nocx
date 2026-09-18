@@ -79,12 +79,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/shady2k/nocx/internal/log/logtest"
 
 	"github.com/shady2k/nocx/internal/agentdriver"
+	"github.com/shady2k/nocx/internal/agenttyping"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
 	coordsock "github.com/shady2k/nocx/internal/coordinator"
@@ -92,6 +94,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/paneobserve"
 	"github.com/shady2k/nocx/internal/paneview"
 	"github.com/shady2k/nocx/internal/peerpin"
@@ -198,6 +201,57 @@ func (s *s14ExemptScreen) Screen(paneID string) (paneview.Frame, error) {
 	return s.Source.Screen(paneID)
 }
 
+// s14RealConfig is everything a caller asks of the stand beyond the
+// composition session_surface_realhelper_test.go's own check needs.
+type s14RealConfig struct {
+	// cockpit turns the stand into the one the coordinator journey
+	// (nocx-luqz9.7) runs on, and it changes TWO things that are the same
+	// fact about who calls the endpoint.
+	//
+	// Its coordinator is a REAL helper-hosted pane running the mock agent, so
+	// the screen it is typed at, the emulator that decides whether typing is
+	// safe, and the process that receives the wake line are all real — and the
+	// mailbox is that pane's own session.
+	//
+	// And there is NO ADMISSION-ROOT SESSION: every call in this mode is made
+	// by an agent inside a pane (the mock, over the shipped MCP bridge), never
+	// by the test process. That is not tidiness. An admission root is a
+	// session whose recorded pid is an ancestor of the CALLER, and this test
+	// process is the parent of the helper daemon and so of every shell the
+	// daemon forks — so a caller inside a pane would sit in TWO sessions'
+	// process trees at once, and worker_auth.go refuses an ambiguous peer on
+	// purpose ("a peer matching two live enrolled roots has no unambiguous
+	// session authority"). Measured, not reasoned: the first run of this
+	// journey had the worker's own report refused with "not in a pane nocx has
+	// enrolled" for exactly that reason.
+	cockpit bool
+	// retryPause and attempts are the wake's two injected numbers (design
+	// §5.4). They are the injected clock: no assertion in the journey waits
+	// for a duration, and these decide only how soon the pause is available
+	// to be observed.
+	retryPause time.Duration
+	attempts   int
+}
+
+type s14RealOption func(*s14RealConfig)
+
+// withCockpit turns the stand into the one nocx-luqz9.7's check runs on. The
+// two numbers are deliberately small: they compress the product's own two
+// minutes into something a test can reach, and nothing asserts on them.
+func withCockpit() s14RealOption {
+	return func(c *s14RealConfig) {
+		c.cockpit = true
+		c.retryPause = 2 * time.Second
+		c.attempts = s14JourneyAttempts
+	}
+}
+
+// s14JourneyAttempts is how many lines one batch gets before the human is
+// told: two, which is the smallest number that shows BOTH halves the design
+// names — a retry at the pause, and the notice once the pause after the last
+// line has gone unanswered.
+const s14JourneyAttempts = 2
+
 type s14RealStand struct {
 	reg      *session.Reg
 	tp       *transport.WSServer
@@ -207,23 +261,49 @@ type s14RealStand struct {
 	local    *localHelperOpener
 	stateDir string
 	coord    session.Session
+	// db is the real content store: the layout chain the spawner mints a
+	// worker's tab in is the same one the close takes it out of, and a journey
+	// that asserts the tab left the window reads it here.
+	db content.ContentDB
+	// binary is the installed helper this stand's daemon runs from, which is
+	// also the path an agent's MCP bridge is started with.
+	binary string
+	// root is the admission-root session's channel, nil in the cockpit mode
+	// (that mode adopts no such session — see s14RealConfig.cockpit).
+	root *s14PinChannel
+	// seams is what the journey reads and drives: the production observation
+	// bridge the sweep feeds, the wake whose decisions are under test, the
+	// escalation the human would be reached through, and the tab record.
+	observe *WorkerObservation
+	wake    *workers.Wake
+	raiser  *s14Raiser
+	seats   *workerTabs
+	rules   *agentdriver.Registry
+	views   *paneview.Store
+	watch   *paneobserve.Watcher
+	typist  *agenttyping.Typist
 }
 
 // newS14RealStand builds the stand over a REAL local helper daemon. Callers
-// MUST set S14_CAPTURES_DIR, S14_STATE_DIR and PATH (s14RealSetEnv) before
-// calling this: the coordinator's own pane, opened at the end of this
-// function, is what lazily starts the daemon (helper_local.go's own doc:
+// MUST set S14_CAPTURES_DIR, S14_STATE_DIR and PATH before calling this — the
+// mock agent reads the first two and is found on the third: the coordinator's
+// own pane, opened a few lines below, is what lazily starts the daemon
+// (helper_local.go's own doc:
 // "it installs and it does not START anything... a daemon is begun by the
 // first caller that reaches for the endpoint"), and the daemon's own process
 // environment — inherited by every shell it forks, this stand's coordinator
 // pane and every worker alike — is fixed at THAT moment, not at whatever
 // later moment a worker happens to spawn.
-func newS14RealStand(t *testing.T, mockDir, stateDir string) *s14RealStand {
+func newS14RealStand(t *testing.T, mockDir, stateDir string, opts ...s14RealOption) *s14RealStand {
 	t.Helper()
 	ctx := context.Background()
 	slogger := logtest.Slog(t)
 	logger := log.NewSlogAdapter(slogger)
 
+	cfg := s14RealConfig{}
+	for _, o := range opts {
+		o(&cfg)
+	}
 	// The helper binary is built BEFORE $HOME moves, for the same GOPATH
 	// reason local_pane_test.go's own realHelperArtifacts states.
 	src := realHelperArtifacts(t)
@@ -279,17 +359,26 @@ func newS14RealStand(t *testing.T, mockDir, stateDir string) *s14RealStand {
 	// (they are, for session.read/session.keys via `screen` below) but
 	// paneobserve and WithPaneScreens were wired to the fake anyway.
 	screen := newPaneScreen(slogger, reg, local, nil)
-	// s14AdmissionRootSessionID (below) is exempted: it is a synthetic
-	// session, adopted directly over an s14PinChannel rather than opened
-	// through the real local helper (see its own comment, further down, on
-	// why it must not be), so paneScreen.owner can never find a real
-	// generation holding it. It still has to be "watched" — worker_auth.go's
-	// admission check reads enrolments.Watched(sid) for every admitted
-	// peer, this stand's own root included — so the real source is wrapped
-	// rather than used bare, exempting the one id that will never be real.
-	paneViews := paneview.NewStore(logger, &s14ExemptScreen{
-		Source: screen, exempt: s14AdmissionRootSessionID,
-	})
+	// THE STORE'S SOURCE, and the two modes differ here for one reason.
+	//
+	// The COCKPIT journey opens a real helper-hosted pane for its coordinator
+	// and exempts nothing: the real source answers for every session this
+	// stand opens, which is what makes the coordinator's screen a real one.
+	//
+	// The other check ADOPTS a synthetic session as its admission root (see
+	// s14PinChannel's own doc — the process that dials the endpoint is this
+	// test, which is in no pane), and that session has no runtime the real
+	// source could ever find an owner for. It still has to be "watched" —
+	// worker_auth.go's admission check reads enrolments.Watched for every
+	// admitted peer, that stand's own root included — so the real source is
+	// wrapped for it and the one synthetic id is answered with an empty frame,
+	// which is the honest reading of a session nothing draws into.
+	paneViews := paneview.NewStore(logger, screen)
+	if !cfg.cockpit {
+		paneViews = paneview.NewStore(logger, &s14ExemptScreen{
+			Source: screen, exempt: s14AdmissionRootSessionID,
+		})
+	}
 
 	enrol := newWorkerEnrolments(logger, reg)
 
@@ -352,25 +441,145 @@ func newS14RealStand(t *testing.T, mockDir, stateDir string) *s14RealStand {
 	}()
 	t.Cleanup(func() { cancelSweep(); <-sweepDone })
 
+	// Opening the coordinator's own pane is what lazily starts the real
+	// daemon (see this function's own doc) — a real shell, on the real
+	// helper, exactly as local_pane_test.go's own tests already prove for a
+	// local pane in general.
+	//
+	// THE COCKPIT OPENS IT AT THE PARTICIPANT GEOMETRY and puts the mock in
+	// it, because in that mode this pane is a coordinator: the frames a pane
+	// is classified from are 120x40 everywhere else in this stand
+	// (participantCols/Rows), and a pane of another size would wrap them
+	// differently and be classified as something else.
+	spec := transport.OpenSpec{Cols: 80, Rows: 24}
+	if cfg.cockpit {
+		spec.Cols, spec.Rows = participantCols, participantRows
+	}
+	coordOpened, err := tp.OpenSession(ctx, spec)
+	if err != nil {
+		t.Fatalf("open coordinator session: %v", err)
+	}
+	coord := coordOpened.Session
+	if watchErr := paneViews.Enrol(string(coord.ID())); watchErr != nil {
+		t.Fatalf("enrol coordinator pane: %v", watchErr)
+	}
+	if cfg.cockpit {
+		// `command claude` and not `claude`: the shell integration wraps that
+		// one name in a function that enrols the agent for orchestration, and
+		// this pane must NOT be in the observation sweep's set (the readings
+		// this journey asserts on are attributed one at a time — see
+		// s14RealStand.readCoordinator). The wrapper is what would put it
+		// there, and `command` is how a shell says "the program, not the
+		// function".
+		if !coord.EnqueueWrite([]byte("command claude\n")) {
+			t.Fatalf("the coordinator's pane refused its own first line")
+		}
+		waittest.WaitFor(t, "the coordinator's pane to come up showing the mock's idle screen", func() bool {
+			f, ferr := paneViews.Frame(string(coord.ID()))
+			return ferr == nil && paneDrivers.Classify(wakeAgent, f) == agentdriver.StateFreeText
+		})
+	}
+
 	store := workers.NewMemoryStore()
 	sup := &workerSupervisor{sessions: reg, log: logger}
+	// seats is app.go's own tab record (`workerSeats` there, `newWorkerTabs`
+	// here): the participant→tab pairing the spawner writes and the closer
+	// takes from, which is what makes a close able to end a worker AND take
+	// its tab out of the window (nocx-xn63t.4.6).
+	seats := newWorkerTabs()
 	spawner := &workerSpawner{
 		layout: db.Layout(), opener: tp, sessions: reg, enrolments: enrol,
 		workspace: string(workspace.Default), log: logger,
 		readiness: realWatch,
+		// announce and tabs are the product's own, exactly as app.go wires
+		// them: without them a spawn mints a tab nothing records and a close
+		// has nothing to take out of the window.
+		announce: tp, tabs: seats,
 	}
-	record := workers.NewRegistrar(store, spawner, enrol, sup,
+	// The wake and its two injected numbers. A stand that is not running the
+	// coordinator journey gets the record's own default (an unmounted wake:
+	// nothing to type with and nobody to tell), which is the same absence the
+	// record's constructor installs.
+	raiser := &s14Raiser{}
+	wakeOpts := []workers.WakeOption{}
+	// typing is the shipped Typist the wake's waker submits through, and nil
+	// for a stand with no coordinator — the same absence the product's own
+	// waker reports when a backend has no way to type into a pane.
+	var typing *agenttyping.Typist
+	recordOpts := []workers.Option{
 		// A real daemon spawn (install verification, a real fork, the real
 		// shell-integration handshake over a real lifecycle channel) is
 		// slower than newHappyStand's in-process fork; this bound is
 		// generous rather than tight on purpose (never the thing this test
 		// asserts on — waittest.WaitFor below is what actually waits).
-		workers.WithEnrolmentDeadline(30*time.Second),
+		workers.WithEnrolmentDeadline(30 * time.Second),
 		workers.WithLogger(logger),
-		workers.WithCloser(&workerCloser{sessions: reg, log: logger}),
-	)
+		workers.WithCloser(&workerCloser{sessions: reg, layout: db.Layout(), tabs: seats, announce: tp, log: logger}),
+	}
+	if cfg.cockpit {
+		// THE COORDINATOR'S OWN TYPING SEAM. It is the shipped primitive
+		// built from the shipped pieces — the same frames, the same rule, the
+		// same calibration verdict that permits typing
+		// (agentcalib.Verdict.MayType, unwritable outside its own package, so
+		// a stand that wanted to skip the calibration would be faking the
+		// gate it exists to exercise), and the same input queue every
+		// keystroke travels. The one substitution is the enrolment seam:
+		// paneTypist's own `paneAgents{watch}` answers from the sweep's watch
+		// list, and the coordinator's pane is deliberately not in it (see the
+		// note on OnReading above), so this answers for that one pane id and
+		// delegates every other pane to the shipped implementation. What it
+		// answers is not a shortcut: the coordinator's pane really is enrolled
+		// under the claude rule, and the frame a decision is taken on is read
+		// from the real emulator through the real store.
+		typing = agenttyping.New(logger, paneViews, paneDrivers, verifiedClaude(t),
+			s14CoordinatorAgents{base: paneAgents{watch: realWatch}, coord: string(coord.ID()), agent: wakeAgent},
+			paneInput{registry: reg})
+		wakeOpts = append(wakeOpts,
+			workers.WithRetryPause(cfg.retryPause),
+			workers.WithAttemptLimit(cfg.attempts))
+		recordOpts = append(recordOpts,
+			// ZERO, and a configuration rather than a mistake (see
+			// worker_wake_test.go's own note): it means "the second reading
+			// of a state is a settled one", which is what a stand at this
+			// level needs, because it cannot move the record's clock. The
+			// journey's settle-window probe is written against exactly that
+			// rule — the FIRST reading admits nothing.
+			workers.WithSettleWindow(0))
+	}
+	wake := workers.NewWake(&workerWaker{typist: typing, log: logger}, &workerEscalation{raise: raiser}, store, wakeOpts...)
+	recordOpts = append(recordOpts, workers.WithWake(wake))
+	record := workers.NewRegistrar(store, spawner, enrol, sup, recordOpts...)
 	sup.exited = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, e workers.Exit) {
 		_, _ = record.Exited(ctx, id, l, e)
+	}
+
+	// THE OBSERVATION BRIDGE, as app.go binds it (nocx-luqz9.2): the sweep's
+	// second reader maps a pane's classification onto the record's own
+	// vocabulary and hands it on, and the coordinator's own pane goes to
+	// ObserveCoordinator. It is wired only for the coordinator journey: the
+	// other check asserts the session surface, and a bridge nothing there
+	// reads would be wiring for a test that does not exist.
+	var obs *WorkerObservation
+	if cfg.cockpit {
+		obs = &WorkerObservation{
+			enrolments: enrol,
+			observe: func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, s workers.ObservedState) error {
+				return record.Observe(ctx, id, l, s)
+			},
+			coordinate: func(sessionID string, s workers.ObservedState) {
+				record.ObserveCoordinator(context.Background(), sessionID, s)
+			},
+			liveness: enrol.livenessOf,
+			log:      logger,
+		}
+		// The WORKER panes' readings arrive from the real sweep, over the
+		// real helper's own emulator — that is the half of this journey that
+		// only the real stand can prove. The coordinator's own pane is NOT in
+		// the watcher's set (see the stand's own note where it is enrolled),
+		// because the settle rule is what the journey asserts and a reading
+		// on a 20 ms ticker cannot be attributed to the first or the second
+		// one.
+		realWatch.OnReading(obs.ObserveSession)
 	}
 
 	// The session surface's own production wiring (design §7, §8, Task 8-10)
@@ -425,19 +634,9 @@ func newS14RealStand(t *testing.T, mockDir, stateDir string) *s14RealStand {
 		t.Fatalf("start endpoint: %v", startErr)
 	}
 
-	// Opening the coordinator's own pane is what lazily starts the real
-	// daemon (see this function's own doc) — a real shell, on the real
-	// helper, exactly as local_pane_test.go's own tests already prove for a
-	// local pane in general.
-	coordOpened, err := tp.OpenSession(ctx, transport.OpenSpec{Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("open coordinator session: %v", err)
-	}
-	coord := coordOpened.Session
-	if watchErr := paneViews.Enrol(string(coord.ID())); watchErr != nil {
-		t.Fatalf("enrol coordinator pane: %v", watchErr)
-	}
-
+	// THE ADMISSION ROOT, which the cockpit does not open at all (see
+	// s14RealConfig.cockpit for the measured reason).
+	//
 	// admittedPeer (worker_auth.go) pins peer.PID against a session's OWN
 	// recorded root, and coord.ID() already has one: helper_local.go's own
 	// RecordOwnedProcessPID call recorded the real forked shell's pid the
@@ -459,16 +658,20 @@ func newS14RealStand(t *testing.T, mockDir, stateDir string) *s14RealStand {
 	// records a pid at all; this stand has no fake factory to lean on
 	// (composed with a nil one, on purpose — see this function's own doc),
 	// so it mints this one session for exactly that purpose instead.
-	pinCh := &s14PinChannel{done: make(chan struct{})}
-	pinSess, err := reg.Adopt(ctx, session.Config{Cols: 80, Rows: 24}, session.ID(s14AdmissionRootSessionID), pinCh)
-	if err != nil {
-		t.Fatalf("adopt admission-root session: %v", err)
-	}
-	if recordErr := reg.RecordOwnedProcessPID(pinSess.ID(), os.Getpid()); recordErr != nil {
-		t.Fatalf("record admission root: %v", recordErr)
-	}
-	if watchErr := paneViews.Enrol(string(pinSess.ID())); watchErr != nil {
-		t.Fatalf("enrol admission-root pane: %v", watchErr)
+	var pinCh *s14PinChannel
+	var pinSess session.Session
+	if !cfg.cockpit {
+		pinCh = &s14PinChannel{done: make(chan struct{})}
+		pinSess, err = reg.Adopt(ctx, session.Config{Cols: 80, Rows: 24}, session.ID(s14AdmissionRootSessionID), pinCh)
+		if err != nil {
+			t.Fatalf("adopt admission-root session: %v", err)
+		}
+		if recordErr := reg.RecordOwnedProcessPID(pinSess.ID(), os.Getpid()); recordErr != nil {
+			t.Fatalf("record admission root: %v", recordErr)
+		}
+		if watchErr := paneViews.Enrol(string(pinSess.ID())); watchErr != nil {
+			t.Fatalf("enrol admission-root pane: %v", watchErr)
+		}
 	}
 
 	t.Cleanup(func() {
@@ -481,14 +684,66 @@ func newS14RealStand(t *testing.T, mockDir, stateDir string) *s14RealStand {
 			return err == nil && len(open) == 0
 		})
 		paneViews.Withdraw(string(coord.ID()))
-		paneViews.Withdraw(string(pinSess.ID()))
+		if pinSess != nil {
+			paneViews.Withdraw(string(pinSess.ID()))
+		}
 		_ = tp.Stop(context.Background())
 	})
 
 	return &s14RealStand{
 		reg: reg, tp: tp, store: store, record: record,
 		endpoint: endpoint, local: local, stateDir: stateDir, coord: coord,
+		db: db, binary: binary, root: pinCh,
+		observe: obs, wake: wake, raiser: raiser, seats: seats,
+		rules: paneDrivers, views: paneViews, watch: realWatch, typist: typing,
 	}
+}
+
+// s14Raiser is the far end of the escalation for this stand: the notify seam
+// and not the whole pipeline. What an escalation may REACH is internal/notify's
+// and is asserted there, against a routing table this stand does not own (the
+// same substitution worker_wake_test.go's own recordingRaiser makes, and for
+// the same reason).
+//
+// IT IS LOCKED, unlike that one, because the notice this journey waits for is
+// raised from the wake's OWN ALARM goroutine — the pause elapsing on the
+// product's clock, not a call the test makes — so an append here and a read
+// there really are two goroutines racing.
+type s14Raiser struct {
+	mu     sync.Mutex
+	events []notify.Event
+}
+
+func (r *s14Raiser) Raise(_ context.Context, ev notify.Event) notify.Outcome {
+	r.mu.Lock()
+	r.events = append(r.events, ev)
+	r.mu.Unlock()
+	return notify.Outcome{Event: ev}
+}
+
+// raised is every notice so far, in order.
+func (r *s14Raiser) raised() []notify.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]notify.Event(nil), r.events...)
+}
+
+// s14CoordinatorAgents is paneTypist's own enrolment seam with one answer
+// added: the coordinator's pane, which is not in the sweep's watch set (see
+// the stand's note on OnReading) and would otherwise be answered "not
+// watched" — and a pane nocx is not watching receives nothing at all, which
+// is the typing gate's own rule rather than a gap here.
+type s14CoordinatorAgents struct {
+	base  paneAgents
+	coord string
+	agent string
+}
+
+func (a s14CoordinatorAgents) AgentOn(paneID string) (string, bool) {
+	if paneID == a.coord {
+		return a.agent, true
+	}
+	return a.base.AgentOn(paneID)
 }
 
 // ── driving the mock: a phase change is a file write plus a wait on the REAL

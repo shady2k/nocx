@@ -270,6 +270,18 @@ type batch struct {
 	// ends, because a backstop that repeats is an alarm clock.
 	notified        bool
 	blockedNotified bool
+	// blockedRetry is that the blocked notice's LAST attempt was refused and a
+	// retry is waiting for the pause. It is separate from blockedNotified, and
+	// the pair is the whole episode rule: blockedNotified is "this episode has
+	// been claimed, so no reading may raise it again", and blockedRetry is
+	// "the claim has not been honoured yet, so something must try again".
+	//
+	// THE DISTINCTION IS NOT DECORATION. Without it the retry would hang off
+	// the READING, and a blocked coordinator is read once a second
+	// (transport.DefaultPaneObserverSweep) — so a pipeline that refused would
+	// be hammered sixty times a minute for as long as the block lasted. The
+	// pause is the same injected number that paces every other retry here.
+	blockedRetry bool
 	// armed is whether a retry is scheduled, and cancel is how it is
 	// stopped. Both, because the cancel function is nil-able in a way a bool
 	// is not: "no timer runs" is asserted, and a nil field is not an answer
@@ -371,9 +383,15 @@ func (w *Wake) Coordinator(ctx context.Context, mailbox ReaderID, state Observed
 	b.live = liveWorkers
 	switch state {
 	case ObservedBlocked:
-		// No timer runs while it is blocked: a line typed at a menu answers
-		// it, which is the one thing the typing gate will not do.
-		w.stopLocked(b)
+		// A blocked coordinator is never TYPED AT — a line typed at a menu
+		// answers it, which is the one thing the typing gate will not do — so
+		// an unread batch's retry is stopped here. The one exception is a
+		// blocked notice already waiting for its pause: that timer IS this
+		// episode's retry, and cancelling it would leave the episode claimed
+		// with nobody ever told, which is the silent loss reach exists for.
+		if !b.blockedRetry {
+			w.stopLocked(b)
+		}
 		// THE EPISODE IS CLAIMED UNDER THIS LOCK AND GIVEN BACK IF THE NOTICE
 		// DOES NOT GO OUT. Claiming here is what stops two settled readings
 		// arriving together from both raising it; giving it back on failure is
@@ -394,12 +412,23 @@ func (w *Wake) Coordinator(ctx context.Context, mailbox ReaderID, state Observed
 		return
 	case ObservedIdle:
 		// A fresh episode: whatever was blocked before has ended, so the
-		// next one is news again.
+		// next one is news again — and a retry still waiting for its pause is
+		// moot, because the situation it was about is over.
+		//
+		// The timer is NOT cancelled here and does not need to be: there is one
+		// per batch, `fire` consumes `blockedRetry` before it consults the idle
+		// gate, and so a retry armed for a blocked episode that has since ended
+		// falls through to the batch's own rules and does exactly what the batch
+		// owes. Cancelling it would be a second place that decides when this
+		// timer should live, and the scenarios where that mattered did not
+		// survive being tested.
 		b.blockedNotified = false
+		b.blockedRetry = false
 	default:
 		// Working, or a state this file does not judge. Nothing is typed and
 		// no timer runs.
 		b.blockedNotified = false
+		b.blockedRetry = false
 		w.stopLocked(b)
 		w.mu.Unlock()
 		return
@@ -621,6 +650,24 @@ func (w *Wake) fire(ctx context.Context, mailbox ReaderID) {
 		return
 	}
 	w.stopLocked(b)
+	// A BLOCKED NOTICE WAITING FOR ITS PAUSE COMES FIRST, and the order is
+	// load-bearing: the idle gate below would return for a blocked
+	// coordinator, which would consume this retry and tell nobody. It is the
+	// only thing that arms a timer while the coordinator is not idle.
+	if b.blockedRetry {
+		b.blockedRetry = false
+		if b.state != ObservedBlocked || b.live == 0 {
+			w.mu.Unlock()
+			return
+		}
+		notice := Notice{
+			Mailbox: mailbox, Kind: NoticeBlocked,
+			LiveWorkers: b.live, Lines: b.lines,
+		}
+		w.mu.Unlock()
+		w.reach(ctx, mailbox, notice)
+		return
+	}
 	if b.state != ObservedIdle || b.notified || b.inFlight {
 		w.mu.Unlock()
 		return
@@ -659,14 +706,15 @@ func (w *Wake) fire(ctx context.Context, mailbox ReaderID) {
 //   - an UNREAD batch is retried at the PAUSE, because the coordinator's own
 //     turn is what clears that situation and a pause is the only thing about
 //     it that has changed by then;
-//   - a BLOCKED coordinator is retried by its next SETTLED READING, because
-//     "blocked while holding live workers" is still true a moment later, and
-//     the reading is what says so.
+//   - a BLOCKED coordinator is retried at the PAUSE as well, and that is the
+//     cadence for both: at most one attempt per pause, from one timer per
+//     batch. Hanging the blocked retry off the next READING was the first
+//     version of this and it was wrong — the coordinator is read once a
+//     second, so a refusing pipeline would have been hit sixty times a minute
+//     for as long as the block lasted.
 //
-// Neither is a timer invented for the failure. The pause already bounds every
-// retry of a batch, and a reading reaches this file only once the state has
-// HELD, so the blocked retry is bounded by the settle window — at most one
-// attempt per window, and the episode ends the instant the coordinator stops
+// Neither is a timer invented for the failure: the pause already bounds every
+// retry of a batch, and the episode ends the instant the coordinator stops
 // being blocked.
 //
 // WHAT IT CANNOT KNOW IS DELIVERY, and it does not pretend to. The pipeline in
@@ -690,13 +738,32 @@ func (w *Wake) reach(ctx context.Context, mailbox ReaderID, n Notice) {
 	switch n.Kind {
 	case NoticeBlocked:
 		// Re-checked rather than assumed: a coordinator that stopped being
-		// blocked while the notice was in flight has already had this mark
-		// cleared by the reading which saw that, and touching it now would be
+		// blocked while the notice was in flight has already had this episode
+		// closed by the reading which saw that, and touching it now would be
 		// about a situation that is over.
-		if b.state != ObservedBlocked {
+		if b.state != ObservedBlocked || b.live == 0 {
+			b.blockedRetry = false
 			return
 		}
-		b.blockedNotified = err == nil
+		if err == nil {
+			b.blockedRetry = false
+			return
+		}
+		// REFUSED, and the retry waits for the PAUSE. It is NOT hung off the
+		// next reading: a blocked coordinator is read once a second, so a
+		// retry driven by the reading would hit the pipeline that just refused
+		// sixty times a minute for as long as the block lasted. The pause is
+		// the same injected number that paces every other retry in this file,
+		// and it is armed on the one timer this batch owns.
+		//
+		// There is no attempt limit after which this gives up, and that is a
+		// decision rather than an omission: the notice IS the last resort, so
+		// there is nobody further to escalate to and the only alternative to
+		// retrying is silence. Every failure is logged at Error with its
+		// reason, and the episode ends when the coordinator stops being blocked
+		// or an attempt is taken.
+		b.blockedRetry = true
+		w.armLocked(b, ctx, mailbox)
 	case NoticeUnread:
 		// Re-checked for the same reason: a read that landed while the notice
 		// was being raised has ended the batch.
@@ -780,7 +847,13 @@ func (w *Wake) unread(ctx context.Context, mailbox ReaderID) (int, error) {
 // running would type twice for one pause, and the whole point of the pause is
 // that the coordinator's turn gets its chance to be taken.
 func (w *Wake) armLocked(b *batch, ctx context.Context, mailbox ReaderID) {
-	if b.armed || b.notified || b.inFlight {
+	// `armed` is the one-timer rule and `inFlight` is "a type will arm this
+	// itself when it lands". `notified` is deliberately NOT consulted: it is
+	// the UNREAD mark, and a blocked notice whose retry this is may well be
+	// raised while an unread notice has already been sent — refusing to arm on
+	// that mark would drop the blocked retry and tell nobody. Every caller
+	// tests the mark that concerns it, in the branch that decides to arm.
+	if b.armed || b.inFlight {
 		return
 	}
 	if w.alarms == nil {

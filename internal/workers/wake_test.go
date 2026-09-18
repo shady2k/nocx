@@ -595,19 +595,20 @@ func TestABlockedCoordinatorWithLiveWorkersIsTheHumansAndOneWithNoneIsNot(t *tes
 	}
 }
 
-// A BLOCKED NOTICE THAT FAILS IS RETRIED, AND ONE THAT SUCCEEDS IS NOT REPEATED.
+// A BLOCKED NOTICE THAT FAILS IS RETRIED AT THE PAUSE, AND ONE THAT SUCCEEDS IS
+// NOT REPEATED.
 //
-// This is the same rule reach holds for an unread batch, applied to this mark:
-// a notice the pipeline refused has reached nobody, so the claim is given back
-// and the next settled reading tries again. Without that, a blocked coordinator
-// holding live workers would be recorded as reported while the person had never
-// heard of it — the failure living in a log and nowhere else, which is the
-// silent loss this whole mechanism exists to prevent.
+// This is reach's rule for a blocked coordinator: a notice the pipeline refused
+// has reached nobody, so the episode stays claimed and a retry is armed — and
+// the retry waits for the PAUSE rather than arriving on the next reading,
+// because a blocked coordinator is read once a second and a retry hung off the
+// reading would hit the pipeline that just refused sixty times a minute for as
+// long as the block lasted.
 //
-// The retry is bounded by the reading and not by a timer of its own, and the
-// episode is still ONE notice once it succeeds: the second half of the test is
-// what says the retry is a recovery from failure rather than a repeat.
-func TestABlockedNoticeThatFailsIsRetriedAndOneThatSucceedsIsNotRepeated(t *testing.T) {
+// The middle third of this test is what says so: readings arrive, and the count
+// does NOT move. Without the pause bound they would each raise a notice, which
+// is the shape of the defect the first version of this had.
+func TestABlockedNoticeThatFailsIsRetriedAtThePause(t *testing.T) {
 	ctx, _ := logtest.New(t)
 	s := newWakeStandCtx(t, ctx, 3*time.Second, 3, WithLogger(log.From(ctx)))
 	s.harness.human.refuse = fmt.Errorf("the pipeline is shutting down")
@@ -633,27 +634,125 @@ func TestABlockedNoticeThatFailsIsRetriedAndOneThatSucceedsIsNotRepeated(t *test
 	}) {
 		t.Fatalf("a refused blocked notice was not reported at Error")
 	}
-
-	// Still blocked, still holding its worker — so the next settled reading is
-	// the retry, and the situation was not marked as handled.
-	s.reading(t, ObservedBlocked)
-	if got := len(s.notices()); got != 2 {
-		t.Fatalf("notices after one further settled reading = %d, want the retry", got)
+	// And the retry is a TIMER, not the next reading.
+	if got := s.harness.alarms.running(); got != 1 {
+		t.Fatalf("a refused blocked notice left %d retries armed, want 1", got)
 	}
 
-	// Now the pipeline takes it. THIS attempt is the one that counts, and the
-	// episode is then over: a blocked coordinator that stays blocked is ONE
-	// notice, not one per sweep.
+	// READINGS DO NOT RE-RAISE: the coordinator stays blocked and holding its
+	// worker, and every further settled reading finds the episode already
+	// claimed and its retry on the clock.
+	for i := 0; i < 5; i++ {
+		s.reading(t, ObservedBlocked)
+	}
+	if got := len(s.notices()); got != 1 {
+		t.Fatalf("a blocked episode was raised once per reading: %d notices after 5 readings", got)
+	}
+
+	// The pause is what retries it.
+	s.harness.alarms.fireAll()
+	if got := len(s.notices()); got != 2 {
+		t.Fatalf("notices after the pause = %d, want the retry", got)
+	}
+	// Still refusing, so the next pause is armed in its turn — bounded, one
+	// attempt per pause, for as long as the coordinator stays blocked.
+	if got := s.harness.alarms.running(); got != 1 {
+		t.Fatalf("the second refusal armed %d retries, want 1", got)
+	}
+
+	// Now the pipeline takes it. The episode is over when it succeeds: a
+	// blocked coordinator that stays blocked is ONE notice, not one per pause.
 	s.harness.human.mu.Lock()
 	s.harness.human.refuse = nil
 	s.harness.human.mu.Unlock()
-	s.reading(t, ObservedBlocked)
+	s.harness.alarms.fireAll()
 	if got := len(s.notices()); got != 3 {
 		t.Fatalf("notices after the pipeline recovered = %d, want 3", got)
 	}
+	s.harness.alarms.fireAll()
 	s.reading(t, ObservedBlocked)
 	if got := len(s.notices()); got != 3 {
-		t.Fatalf("a blocked episode that was reported was reported again: %d notices", got)
+		t.Fatalf("an episode that was reported was raised again: %d notices", got)
+	}
+}
+
+// AND A COORDINATOR THAT STOPS BEING BLOCKED ENDS THE EPISODE, retry included:
+// the situation the pending notice was about is over, so the armed timer fires
+// into nothing and tells nobody.
+//
+// The test stops at that assertion deliberately. A coordinator that is cleared
+// and then blocks AGAIN is a NEW episode and is legitimately raised again —
+// that is one notice per episode, which is the rule, not a leak — so re-blocking
+// here would be measuring the second rule instead of this one.
+func TestACoordinatorThatStopsBeingBlockedEndsTheEpisodeAndItsRetry(t *testing.T) {
+	ctx, _ := logtest.New(t)
+	s := newWakeStandCtx(t, ctx, 3*time.Second, 3, WithLogger(log.From(ctx)))
+	s.harness.human.refuse = fmt.Errorf("the pipeline is shutting down")
+
+	s.says(t, ObservedIdle)
+	s.says(t, ObservedBlocked)
+	if got := len(s.notices()); got != 1 {
+		t.Fatalf("notices = %d, want the one refused attempt", got)
+	}
+	if got := s.harness.alarms.running(); got != 1 {
+		t.Fatalf("retries armed = %d, want 1", got)
+	}
+
+	// The person clears the menu the coordinator was stuck on, and the pipeline
+	// recovers — so if the stale timer still raised anything, it would be TAKEN
+	// and the count would move.
+	s.harness.human.mu.Lock()
+	s.harness.human.refuse = nil
+	s.harness.human.mu.Unlock()
+	// says and not reading: a state CHANGE is not a settled reading, so one
+	// reading only records that this pane is no longer blocked — the episode
+	// ends on the reading that finds that state HELD, which is the same two-step
+	// every other fact here takes.
+	s.says(t, ObservedIdle)
+
+	s.harness.alarms.fireAll()
+	if got := len(s.notices()); got != 1 {
+		t.Fatalf("a retry outlived the episode it was about: %d notices", got)
+	}
+}
+
+// THE TWO NOTICES DO NOT SHARE A GUARD. A batch whose unread notice was
+// DELIVERED has its mark set, and a blocked coordinator can then need a notice
+// of its own — including a pause retry if the pipeline refuses it. The timer
+// belongs to the batch, so an arming rule that consulted the UNREAD mark would
+// drop the blocked retry and tell nobody, which is the same silent loss
+// reach exists to prevent.
+func TestABlockedRetryIsArmedEvenWhenTheUnreadNoticeWasDelivered(t *testing.T) {
+	ctx, _ := logtest.New(t)
+	s := newWakeStandCtx(t, ctx, 3*time.Second, 3, WithLogger(log.From(ctx)))
+
+	// An unread batch spends its whole budget and its notice is DELIVERED, so
+	// the unread mark is set when the blocked episode begins.
+	s.says(t, ObservedIdle)
+	s.settles(t, s.worker, ObservedIdle)
+	for i := 0; i < 3; i++ {
+		s.harness.alarms.fireAll()
+	}
+	if got := len(s.notices()); got != 1 {
+		t.Fatalf("notices after the unread budget = %d, want 1", got)
+	}
+
+	// The coordinator is now blocked and holding a live worker, and the
+	// pipeline refuses this notice.
+	s.harness.human.refuse = fmt.Errorf("the pipeline is shutting down")
+	s.says(t, ObservedWorking)
+	s.says(t, ObservedBlocked)
+	if got := len(s.notices()); got != 2 {
+		t.Fatalf("notices after the blocked attempt = %d, want 2", got)
+	}
+	if got := s.harness.alarms.running(); got != 1 {
+		t.Fatalf("the blocked retry is not on the clock: %d timers armed, want 1", got)
+	}
+
+	// And the pause is what retries it.
+	s.harness.alarms.fireAll()
+	if got := len(s.notices()); got != 3 {
+		t.Fatalf("notices after the pause = %d, want the blocked retry", got)
 	}
 }
 

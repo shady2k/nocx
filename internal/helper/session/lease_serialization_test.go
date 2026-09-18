@@ -150,16 +150,29 @@ func TestTheOwnersReadPathNeverTouchesTheSessionMutex(t *testing.T) {
 		close(releaseRead)
 		t.Fatal("the owner could not reach proc.Read while hs.mu was held")
 	}
-	closed := hs.win.changed()
+	// WAIT FOR THE CLOSE, NOT FOR A CHANGE. The comment above names two things
+	// the owner must reach without hs.mu — ingest the byte, then close the
+	// window — and changed() is woken by signal(), which the ingest fires too.
+	// Taking the first change and then reading isClosed() therefore asserts
+	// the second event at the moment the first one happened, and CI run
+	// 35282730084 caught exactly that (nocx-oc6ik). Re-arming the wait keeps
+	// the test's real subject: it still fails, by running out of context,
+	// if the owner cannot get there while hs.mu is held.
 	close(releaseRead)
-	select {
-	case <-closed:
-	case <-t.Context().Done():
-		hs.mu.Unlock()
-		t.Fatal("the owner's read did not reach the window after proc.Read returned EOF")
+	for {
+		// ARM BEFORE CHECKING. gate.signal closes the current channel and
+		// installs a fresh one, so a close that lands between the check and
+		// the arm would be waited for on a channel nobody will ever close.
+		ch := hs.win.changed()
+		if hs.win.isClosed() {
+			break
+		}
+		select {
+		case <-ch:
+		case <-t.Context().Done():
+			hs.mu.Unlock()
+			t.Fatal("the owner's read did not close the window after proc.Read returned EOF")
+		}
 	}
 	hs.mu.Unlock()
-	if !hs.win.isClosed() {
-		t.Fatal("the window is not closed after the read side reached EOF")
-	}
 }

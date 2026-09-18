@@ -140,6 +140,7 @@ import {
 } from './restore-client'
 import { restoredBlock, restoredTurn } from './scrollback/restored-block'
 import { toolCallTitle } from './scrollback/tool-call-title'
+import { TailFollow } from './scrollback/tail-follow'
 import { fromITheme } from './scrollback/serializer'
 import { getCurrentTheme } from './renderers/theme-adapter'
 import { log, logDecision, isDecisionTracing } from './log'
@@ -840,6 +841,12 @@ export class TerminalContent extends BasePaneContent {
    *  active; neither surface is rebuilt. */
   private _summonStack: HTMLElement | null = null
   private _summonAnswerList: HTMLElement | null = null
+  /** Whether the answer list is following its tail — the same owner the outer
+   *  scrollback uses (`scrollback/tail-follow.ts`). The memory is the point:
+   *  this list is a nested absolute surface and can be measured mid-layout,
+   *  and a derivation taken fresh on every mutation loses the person's intent
+   *  permanently on one zero reading (nocx-yfpxl). */
+  private _summonTail = new TailFollow()
   /** The seam's solid root, disposed with the stack that carries it. */
   private _summonSeamDispose: (() => void) | null = null
   /** Keeps the frozen screen's box off the assistant's rows: the stack is an
@@ -2585,7 +2592,7 @@ export class TerminalContent extends BasePaneContent {
               this._summonedAnswers.push({ el: handle.el, terminal: false, running })
               // A deliberate follow-up moves the answer scroller to its new
               // current turn; subsequent content grows in that visible seat.
-              surface.answers.scrollTop = surface.answers.scrollHeight
+              this._summonTail.toTail(surface.answers)
             }
           }
           this.scrollback?.scrollToBottom()
@@ -6334,6 +6341,7 @@ export class TerminalContent extends BasePaneContent {
     pane.appendChild(stack)
     this._summonStack = stack
     this._summonAnswerList = answers
+    this._summonTail = new TailFollow()
     // Every source of a height change reaches the frozen screen through one
     // observer rather than through each caller remembering: the seam's drag,
     // the composer growing with a long question, an answer arriving, a pane
@@ -6526,12 +6534,19 @@ export class TerminalContent extends BasePaneContent {
 
   /** Keep the current answer tail visible only while the person was already
    * following it. The stack's nested answer list is the actual scroller; the
-   * outer scrollback cannot move content inside this absolute surface. */
+   * outer scrollback cannot move content inside this absolute surface.
+   *
+   * "Was already following it" is _summonTail's to answer, not this method's:
+   * a nested absolute surface can be measured mid-layout, and a fresh
+   * derivation reads its own zero viewport as the reader having walked away
+   * (nocx-yfpxl). */
   private _mutateSummonAnswers(mutation: () => void): void {
     const list = this._summonAnswerList
-    const following = list !== null && list.scrollTop + list.clientHeight >= list.scrollHeight - 2
-    mutation()
-    if (list !== null && following) list.scrollTop = list.scrollHeight
+    if (list === null) {
+      mutation()
+      return
+    }
+    this._summonTail.mutateFollowingTail(list, mutation)
   }
 
   private _terminalizeSummonedAnswer(answer: HTMLElement): void {
@@ -6610,6 +6625,17 @@ export class TerminalContent extends BasePaneContent {
     const settle = this.scrollback
     const owned = this._summonedAnswers
     const tail = owned[owned.length - 1].el
+    // WHICH SCROLLER THE PERSON WAS ACTUALLY READING. While the summon owned
+    // the pane, their answers were in the overlay list and the outer
+    // scrollback was frozen behind it — so the outer follow sentinel is the
+    // wrong witness here, and on WebKit it has reported the reader away from
+    // a live end nobody left (nocx-yfpxl). If they were following the answers,
+    // the seated tail is what they are still reading.
+    const readingAnswerTail = this._summonTail.following
+    const followSeatedTail = (): void => {
+      if (readingAnswerTail) settle?.scrollToTail()
+      else settle?.scrollToBottomIfFollowing()
+    }
     // WHAT THE ANSWER SITS AFTER is the command's whole presence, not its
     // element: while the command still runs its output is in the live
     // region, which BlockManager keeps immediately after the block
@@ -6627,14 +6653,35 @@ export class TerminalContent extends BasePaneContent {
       // Reparenting extends the scrollback after the command-end settle has
       // already positioned the command. Follow the new answer tail as well,
       // or a long streamed answer remains below the fold.
-      settle?.scrollToBottomIfFollowing()
+      followSeatedTail()
       // WebKit can apply the class/style change after this task's scroll
-      // height read. Its initial ResizeObserver delivery is the first
-      // observable point at which the final answer owns its seated box.
+      // height read, so the scroll above can be issued against a scrollHeight
+      // that has not grown yet — it then lands short and stays there, which is
+      // the measured shape of this failure (nocx-nleo1: the follow sentinel
+      // intersecting while atBottom was false, with 57px of overflow at
+      // scrollTop 0, and three different scroller states across identical
+      // runs).
+      //
+      // The FIRST ResizeObserver delivery is not the answer either: it carries
+      // the box the node has at the moment observation starts, which for a
+      // just-reparented node can still be the pre-growth one. So HOLD the tail
+      // through the growth instead of scrolling once more — every delivery that
+      // reports a new height re-issues the scroll, and it lets go the moment
+      // the scroller has actually reached its end — or when a delivery repeats
+      // a height, which is the growth having stopped for content that never
+      // overflowed at all. Both are observables rather than durations, and
+      // both are needed: letting go on the end alone would let go immediately,
+      // since a scroller with nothing to scroll is already at it, and holding
+      // on past the end would make this a second owner of the scroll position
+      // for the whole of a long streamed answer.
       if (settle && typeof ResizeObserver !== 'undefined') {
-        const observer = new ResizeObserver(() => {
-          observer.disconnect()
-          settle.scrollToBottomIfFollowing()
+        let seatedHeight = -1
+        const observer = new ResizeObserver((entries) => {
+          const height = entries[entries.length - 1]?.contentRect.height ?? seatedHeight
+          const grew = height !== seatedHeight
+          seatedHeight = height
+          followSeatedTail()
+          if (!grew || settle.tailReached()) observer.disconnect()
         })
         observer.observe(tail)
       }

@@ -16,6 +16,7 @@ import { publishCellMetric, publishRowPitch } from './cell-metric'
 import type { ExecutionAttempt } from '../lifecycle/state'
 import type { AgentDump } from '../generated/agent.dump'
 import { windowPet } from '../pets/window-pet'
+import { isAtTail, TailFollow } from './tail-follow'
 export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
 
 /** How long the pane takes to settle after a block opens or freezes. Short
@@ -97,8 +98,10 @@ export class ScrollbackController {
    * evidence, leave only at a command boundary.
    */
   private _filledPane = false
-  /** True while the end of the live output is visible. */
-  private _following = true
+  /** True while the end of the live output is visible. The intent lives in
+   *  `tail-follow.ts`, which owns the same concept for the summoned answer
+   *  list — one predicate, one memory, two scrollers. */
+  private readonly _tail = new TailFollow()
   /** The glide in flight per element, so a change landing mid-settle
    *  retargets rather than snapping — see `_glide`. */
   private readonly _settleAnimations = new Map<Element, Animation>()
@@ -236,7 +239,7 @@ export class ScrollbackController {
     if (typeof IntersectionObserver === 'undefined') return
     this._followObserver = new IntersectionObserver(
       (entries) => {
-        for (const e of entries) this._following = e.isIntersecting
+        for (const e of entries) this._tail.observe(this.scrollbackArea, e.isIntersecting)
       },
       { root: this.scrollbackArea, threshold: 0 },
     )
@@ -427,7 +430,7 @@ export class ScrollbackController {
     // reading. The comparison below is the whole guard.
     if (this.xtermLiveContainer.style.height !== box) {
       this.xtermLiveContainer.style.height = box
-      if (this._following) this._scrollToBottom()
+      if (this._tail.following) this._scrollToBottom()
     }
     const inner = `${content}px`
     if (this.xtermLiveViewport.style.height !== inner) {
@@ -771,7 +774,7 @@ export class ScrollbackController {
    */
   private _scrollToLastBlockEnd(target: HTMLElement): void {
     requestAnimationFrame(() => {
-      if (!this._following) return
+      if (!this._tail.following) return
       const last = target
       if (!last || !this.scrollbackInner.contains(last)) return
       // ONLY FOR A BLOCK THAT DOES NOT FIT. A block that fits is already
@@ -815,23 +818,39 @@ export class ScrollbackController {
     }
   }
 
-  /** Whether the scroll position is at the live end even if the observer
-   *  briefly lost its target during a layout change. */
-  private _isAtBottom(): boolean {
-    const { scrollTop, clientHeight, scrollHeight } = this.scrollbackArea
-    return clientHeight > 0 && scrollHeight > 0 && scrollTop + clientHeight >= scrollHeight - 2
+  /** Preserve follow intent across a synchronous DOM mutation. The geometry
+   *  answer comes from `isAtTail`, which refuses to answer from a scroller
+   *  that has no layout box — the observer can briefly lose its target during
+   *  a layout change. */
+  private _followIntent(): boolean {
+    return this._tail.intent(this.scrollbackArea)
   }
 
-  /** Preserve follow intent across a synchronous DOM mutation. */
-  private _followIntent(): boolean {
-    return this._following || this._isAtBottom()
+  /** At the live end, WITH an end to be at. A scroller whose content fits has
+   *  nothing to scroll and is therefore trivially "at its end" — which is
+   *  exactly the state a seated answer passes through before its box grows,
+   *  so it is no proof that the seat has landed (nocx-yfpxl). */
+  tailReached(): boolean {
+    const { clientHeight, scrollHeight } = this.scrollbackArea
+    return scrollHeight > clientHeight && isAtTail(this.scrollbackArea)
+  }
+
+  /** Move to the live end BECAUSE THE CALLER KNOWS the person is reading it,
+   *  the way `restorePast` does. The follow sentinel is not consulted: it has
+   *  been behind an overlay that owned the pane, and the content it watches
+   *  has just grown by everything that was reparented into it — the two
+   *  conditions under which its answer is stale rather than wrong (nocx-yfpxl).
+   */
+  scrollToTail(): void {
+    this._tail.follow()
+    this._scrollToBottom()
   }
 
   /** Scroll to the bottom, unless the user has scrolled away from the live
    *  end. */
   scrollToBottom(): void {
     if (!this._followIntent()) return
-    this._following = true
+    this._tail.follow()
     this._scrollToBottom()
   }
 
@@ -927,7 +946,7 @@ export class ScrollbackController {
    * already decided not to play back.
    */
   scrollToBottomIfFollowing(): void {
-    if (this._following) this._scrollToBottom()
+    if (this._tail.following) this._scrollToBottom()
   }
 
   private _glide(mutate: () => void, followIntent = this._followIntent()): void {
@@ -954,7 +973,7 @@ export class ScrollbackController {
     if (!followIntent) return
     // The observer can report the old sentinel position after this mutation
     // has grown the scroller. The decision belongs to the pre-mutation state.
-    this._following = true
+    this._tail.follow()
     this._scrollToBottom()
     if (!this._motionAllowed()) return
     const dy = before - this.scrollbackInner.getBoundingClientRect().top

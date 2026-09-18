@@ -138,20 +138,26 @@ func (s *MemoryStore) Terminalize(_ context.Context, id ParticipantID, st State)
 	return nil
 }
 
-// RecordDeclaration stores the participant's own terminal fact and returns
-// the participant as it then stands, so the caller reduces from stored state
-// rather than from what it believed was stored.
-func (s *MemoryStore) RecordDeclaration(_ context.Context, id ParticipantID, d Declaration) (Participant, error) {
+// Closed records that the participant was ended by its coordinator, and it is
+// the only write that may replace an exit — the supervisor reports the exit the
+// close caused on its own goroutine, so the two arrive in either order and both
+// have to read `closed` (Store.Closed).
+func (s *MemoryStore) Closed(_ context.Context, id ParticipantID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p, ok := s.parts[id]
 	if !ok {
-		return Participant{}, fmt.Errorf("worker: record declaration %q: %w", id, ErrNoSuchParticipant)
+		return fmt.Errorf("worker: closed %q: %w", id, ErrNoSuchParticipant)
 	}
-	stored := d
-	p.Declared = &stored
+	switch p.State {
+	case StateClosed, StateInterrupted:
+		// Already said, or ended by nocx's own compensation rather than by a
+		// coordinator. Neither is this write's to change.
+		return nil
+	}
+	p.State = StateClosed
 	s.parts[id] = p
-	return copyParticipant(p), nil
+	return nil
 }
 
 // RecordExit stores the process fact and returns the participant as it then
@@ -320,13 +326,9 @@ func (s *MemoryStore) selectParticipants(keep func(Participant) bool) []Particip
 	return out
 }
 
-// copyParticipant deep-copies the two terminal facts, which are the only
-// pointers a participant carries.
+// copyParticipant deep-copies the one terminal fact, which is the only pointer
+// a participant carries.
 func copyParticipant(p Participant) Participant {
-	if p.Declared != nil {
-		d := *p.Declared
-		p.Declared = &d
-	}
 	if p.Exited != nil {
 		e := *p.Exited
 		p.Exited = &e

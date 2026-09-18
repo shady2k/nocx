@@ -277,7 +277,7 @@ func TestACoordinatorsCatalogueOffersItsOwnInbox(t *testing.T) {
 	}
 	// And the coordinator keeps every call it had: the new one is an addition
 	// rather than a replacement.
-	for _, name := range []string{"workers.spawn", "workers.say", "workers.wait", "workers.holdings", "workers.close"} {
+	for _, name := range []string{"workers.spawn", "workers.say", "workers.holdings", "workers.close"} {
 		if _, ok := tools[name]; !ok {
 			t.Fatalf("coordinator catalogue lost %q: %s", name, response.Result)
 		}

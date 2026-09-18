@@ -22,7 +22,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/shady2k/nocx/internal/agentcalib"
 	"github.com/shady2k/nocx/internal/agentcapture"
@@ -750,10 +749,12 @@ func TestFactsAloneReachNobody(t *testing.T) {
 	// The coordinator is idle and settled, so the wake is armed and willing.
 	w.reads(t, agentdriver.StateFreeText)
 
-	// Two facts that need judgement, which is what the old mechanism escalated.
-	if _, err := w.record.Declared(ctx, p.ID, p.Liveness,
-		workers.Declaration{OK: false, Summary: "could not build"}); err != nil {
-		t.Fatalf("declare: %v", err)
+	// The fact that needs judgement now: an end nocx cannot call ordinary —
+	// the shell was lost rather than exited — which is what the old mechanism
+	// escalated out of band.
+	if _, err := w.record.Exited(ctx, p.ID, p.Liveness,
+		workers.Exit{Cause: string(session.ExitInterrupted)}); err != nil {
+		t.Fatalf("exit: %v", err)
 	}
 	if got := len(w.record.Undispatched()); got != 1 {
 		t.Fatalf("undispatched = %d, want the fact recorded", got)
@@ -761,8 +762,12 @@ func TestFactsAloneReachNobody(t *testing.T) {
 	if got := len(w.raiser.events); got != 0 {
 		t.Fatalf("a fact alone reached the human: %+v", got)
 	}
-	if got := w.coordPTY.read(); got != "" {
-		t.Fatalf("a fact alone produced a line: %q", got)
+	// WHAT IS TYPED, IF ANYTHING, IS THE WAKE'S OWN POINTER LINE — the count of
+	// the coordinator's unread mail and nothing else. That is the mechanism
+	// that replaced the deadline, and the distinction this test exists for is
+	// that no worker's words and no notice about a person are in it.
+	if got := w.coordPTY.read(); got != "" && !strings.Contains(got, "workers.inbox") {
+		t.Fatalf("a fact produced a line that is not the wake's pointer: %q", got)
 	}
 }
 
@@ -795,14 +800,11 @@ func TestAGroupWhoseCoordinatorPaneIsNotWatchedIsNotTyped(t *testing.T) {
 	}
 }
 
-// ── the epic's sentence, still true ───────────────────────────────────────
+// ── ending, at the composition level ──────────────────────────────────────
 
-// ONE WAIT Returns when the first of three settles, and a close ends the rest.
-//
-// workers.wait is removed in nocx-luqz9.6 and is untouched here; this asserts
-// only that the arrival plumbing the wake added did not disturb it, because the
-// same read that clears a wake is the read a wait answers with.
-func TestOneWaitReturnsWhenTheFirstOfThreeSettlesAndACloseEndsTheRest(t *testing.T) {
+// A coordinator ends every worker it names, through the real record, the real
+// closer and the real layout chain — and the record says WHY each one ended.
+func TestACloseEndsEveryWorkerTheCoordinatorNames(t *testing.T) {
 	ctx := context.Background()
 	w := newWakeStand(t)
 	w.driveTo(t, 11000, agentdriver.StateFreeText)
@@ -813,79 +815,15 @@ func TestOneWaitReturnsWhenTheFirstOfThreeSettlesAndACloseEndsTheRest(t *testing
 		w.register(t, "read the vision"),
 	}
 
-	waited := make(chan []workers.Participant, 1)
-	go func() {
-		held, err := w.record.Wait(ctx, string(w.coordinator), w.workerID)
-		if err != nil {
-			t.Errorf("wait: %v", err)
-		}
-		waited <- held
-	}()
-
-	finishWorker(t, w, participants[0])
-
-	var held []workers.Participant
-	select {
-	case held = <-waited:
-	case <-time.After(15 * time.Second):
-		t.Fatal("the wait never returned, so the first settling reached nobody")
-	}
-	var settled, live int
-	for _, p := range held {
-		if p.State.Terminal() {
-			settled++
-		} else {
-			live++
-		}
-	}
-	if settled != 1 || live != 2 {
-		t.Fatalf("the wait returned %d settled and %d live, want 1 and 2", settled, live)
-	}
-
-	for _, p := range participants[1:] {
+	for _, p := range participants {
 		if err := w.record.Close(ctx, string(w.coordinator), p.ID); err != nil {
 			t.Fatalf("close %s: %v", p.ID, err)
 		}
-	}
-	for _, p := range participants[1:] {
-		waittest.WaitFor(t, "the closed worker's exit to reach the record", func() bool {
+		waittest.WaitFor(t, "the closed worker's end to reach the record", func() bool {
 			stored, err := w.workerStore.Participant(ctx, p.ID)
-			return err == nil && stored.State.Terminal()
+			return err == nil && stored.State == workers.StateClosed
 		})
-		stored, err := w.workerStore.Participant(ctx, p.ID)
-		if err != nil {
-			t.Fatalf("read back: %v", err)
-		}
-		// ABANDONED and not completed: the worker was ended and never said
-		// what it produced, which is exactly what the record should say about a
-		// worker somebody stopped.
-		if stored.State != workers.StateAbandoned {
-			t.Fatalf("a closed worker is %q, want abandoned", stored.State)
-		}
 	}
-}
-
-// finishWorker declares success and closes the worker's real session, which
-// is the two facts arriving the way the product produces them.
-func finishWorker(t *testing.T, w *wakeStand, p workers.Participant) {
-	t.Helper()
-	ctx := context.Background()
-	before := w.record.Cost().Facts()
-	if _, err := w.record.Declared(ctx, p.ID, p.Liveness,
-		workers.Declaration{OK: true, Summary: "done", At: time.Now()}); err != nil {
-		t.Fatalf("declare %s: %v", p.ID, err)
-	}
-	if err := w.reg.Close(session.ID(p.Liveness.SessionID)); err != nil {
-		t.Fatalf("close %s: %v", p.ID, err)
-	}
-	// The exit is observed by the supervisor on its own goroutine, and the
-	// Registrar's admit terminalizes the record BEFORE it routes the fact — so
-	// a stored StateCompleted is not yet a counted fact.
-	waittest.WaitFor(t, "the worker's exit to reach the record and be routed", func() bool {
-		stored, err := w.workerStore.Participant(ctx, p.ID)
-		return err == nil && stored.State == workers.StateCompleted &&
-			w.record.Cost().Facts() == before+2
-	})
 }
 
 // A coordinator cannot close somebody else's worker, and the refusal comes

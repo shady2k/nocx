@@ -8,12 +8,12 @@ package app
 // because the composition root is the one place the layout chain, the session
 // opener, the lifecycle enroller and the session registry meet.
 //
-// THE TWO FACTS AND NOTHING ELSE. What decides a participant's state here is
-// its process exit and its own declaration, exactly as D9 says. The grid is in
-// this same file's neighbourhood and is never consulted: it decides whether
-// nocx may type into a pane and what the indicator shows, and a worker state
-// derived from a screen is the self-matching sentinel this design exists to
-// kill.
+// THE FACT AND NOTHING ELSE. What decides a participant's state here is its
+// process exit — and, for one the coordinator ended, the close that caused it
+// (ADR-0070 decision 3). The grid is in this same file's neighbourhood and is
+// never consulted: it decides whether nocx may type into a pane and what the
+// indicator shows, and a worker state derived from a screen is the
+// self-matching sentinel this design exists to kill.
 
 import (
 	"context"
@@ -28,7 +28,6 @@ import (
 	"github.com/shady2k/nocx/internal/agenttyping"
 	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/paneobserve"
@@ -1310,59 +1309,6 @@ func (s *workerSupervisor) report(ctx context.Context, p workers.Participant, e 
 func (e *workerEnrolments) hookInto(p *paneEnroller) *paneEnroller {
 	p.onEnrol = func(sessionID, lane string) { e.enrolled(session.ID(sessionID), lane) }
 	return p
-}
-
-// workerReporter records what a participant says its own work produced.
-//
-// It is the second of the two facts, and it arrives on the authenticated
-// lifecycle channel rather than being read off a screen. The lane is what the
-// kernel authenticated; everything else is derived from it here, because the
-// composition root is the only place that holds all three maps — lane to
-// session, session to participant, participant to record.
-//
-// A report from a pane that is not a participant is REFUSED and says why. It
-// is not an error in the product: a person's own agent may well be integrated
-// and enrolled, and telling it plainly that there is no worker record to declare
-// into is better than accepting a declaration into nowhere.
-type workerReporter struct {
-	lanes   *sessionRegistry
-	enrol   *workerEnrolments
-	declare func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, d workers.Declaration) error
-	now     func() time.Time
-	log     log.Logger
-}
-
-func (r *workerReporter) Report(lane lifecycle.LaneID, ok bool, summary string) error {
-	sid, found := r.lanes.lookup(lane)
-	if !found || sid == "" {
-		return errors.New("nocx does not know which pane this shell is")
-	}
-	participant, isParticipant := r.enrol.participantFor(session.ID(sid))
-	if !isParticipant {
-		return errors.New("this pane is not part of a worker, so there is nothing to report to")
-	}
-	live, known := r.enrol.livenessOf(participant)
-	if !known {
-		// Enrolled but with no recorded incarnation is a state the ordering
-		// makes unreachable — expect runs before the enrolment can arrive —
-		// so saying so is better than inventing a liveness that would then
-		// be compared against the record and refused for the wrong reason.
-		return errors.New("this participant has no recorded incarnation yet")
-	}
-	if r.declare == nil {
-		return errors.New("this backend is not wired to record what an agent produced")
-	}
-	// The time is the BACKEND's. There is no clock shared with a participant,
-	// and one it supplied would be a value it could pick.
-	if err := r.declare(context.Background(), participant, live,
-		workers.Declaration{OK: ok, Summary: summary, At: r.now()}); err != nil {
-		r.log.Warn("worker: a participant's declaration was not recorded",
-			"participant", string(participant), "error", err)
-		return errors.New("nocx could not record what you reported")
-	}
-	r.log.Info("worker participant reported",
-		"participant", string(participant), "ok", ok)
-	return nil
 }
 
 // workerCloser ends a participant by closing its session, and gives back the

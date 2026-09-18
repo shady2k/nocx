@@ -1580,12 +1580,6 @@ func New(opts ...Option) (*App, error) {
 	// opened a far pane's tool socket ends it on the same event that retires the
 	// pane's bearer, so one interval has one closing edge.
 	agentApprovalService.farToolSockets = helperReg
-	// The declaration's carrier, built beside the rendezvous and wired into
-	// the same publisher: a participant says what its work produced over the
-	// authenticated channel it is already enrolled on (ADR-0024 decision 2).
-	// Its destination is bound after the record exists, for the same reason
-	// the supervisor's is.
-	workerReport := &workerReporter{lanes: childSessions, enrol: workerEnrol, now: time.Now, log: logger}
 	// One driver per agent (AD-8), validated once, here. NewRegistry fails
 	// only on a wiring mistake — a driver that cannot name its agent, or two
 	// for one agent — and a wiring mistake belongs to process start rather
@@ -1673,10 +1667,7 @@ func New(opts ...Option) (*App, error) {
 		// bundle asks over this same authenticated channel, and this is what
 		// an unwired enroller refuses: the fail-closed half of D4, and the
 		// opposite of the grant builder above it.
-		lifecyclepub.WithAgentEnroller(workerEnrol.hookInto(paneEnrol)),
-		// The second fact's carrier. Unwired it refuses every report and says
-		// so, which is the same fail-closed stance as the enroller above.
-		lifecyclepub.WithAgentReporter(workerReport))
+		lifecyclepub.WithAgentEnroller(workerEnrol.hookInto(paneEnrol)))
 	// The pty factory drives the channel against the PUBLISHER, not the raw
 	// kernel: every mutation an adapter causes must reach the renderer as a
 	// published fact, and the publisher is the only thing that projects them.
@@ -2452,7 +2443,22 @@ func New(opts ...Option) (*App, error) {
 	})
 	workerSup.exited = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, e workers.Exit) {
 		if _, err := workerRecord.Exited(ctx, id, l, e); err != nil {
-			logger.Warn("worker: a participant's exit was not recorded",
+			// AN EXIT AGAINST A RECORD THAT IS ALREADY TERMINAL IS THE CLOSE'S
+			// OWN CONSEQUENCE, not an anomaly: ending a session is what
+			// produces the exit, the supervisor reports it on its own
+			// goroutine, and the coordinator's close has already written the
+			// state that says why (Store.Closed). Warning about it would put a
+			// line in the log of every ordinary close.
+			if errors.Is(err, workers.ErrTerminal) {
+				log.From(ctx).Debug("worker: a participant's exit was refused as already accounted for",
+					"participant", string(id), "error", err)
+				return
+			}
+			// log.From(ctx) and not this closure's captured logger, for the
+			// reason the ratchet exists: the supervisor carries the context of
+			// whatever observed the exit, so the line lands in the trace of the
+			// call it belongs to rather than beside it.
+			log.From(ctx).Warn("worker: a participant's exit was not recorded",
 				"participant", string(id), "error", err)
 		}
 	}
@@ -2460,10 +2466,6 @@ func New(opts ...Option) (*App, error) {
 	// (nocx-dkawo.8). Bound post-construction for the same reason the emitter
 	// is: the server is built above, and the record needs it.
 	tp.SetWorkerRecord(workerRecord)
-	workerReport.declare = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, d workers.Declaration) error {
-		_, err := workerRecord.Declared(ctx, id, l, d)
-		return err
-	}
 	// THIS MACHINE IS ONE OF THE GENERATIONS ASKED (nocx-ie23r.2), and it is
 	// also where a session that is still there is TAKEN BACK (nocx-ie23r.5).
 	// The route is the local opener itself, which already owns every fact of

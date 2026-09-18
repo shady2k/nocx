@@ -117,10 +117,6 @@ func (contractWorkerRecord) Acknowledge(context.Context, workers.ReaderID, worke
 	return nil
 }
 
-func (contractWorkerRecord) Wait(context.Context, string, workers.ID) ([]workers.Participant, error) {
-	return contractWorkerParticipants(), nil
-}
-
 func (contractWorkerRecord) Close(context.Context, string, workers.ParticipantID) error {
 	return nil
 }
@@ -260,7 +256,6 @@ func TestGroupEndpoint_OverTheWireConformsToContract(t *testing.T) {
 		{method: "workers.holdings", params: `{}`, result: "workers.holdings"},
 		{method: "workers.spawn", params: `{"command":"claude","task":"verify the wire"}`, result: "workers.spawn"},
 		{method: "workers.say", params: `{"worker":"worker-1","message":"the wire is a party"}`, result: "workers.say"},
-		{method: "workers.wait", params: `{}`, result: "workers.wait"},
 		{method: "workers.close", params: `{"worker":"worker-1"}`, result: "workers.close"},
 		// nocx-luqz9.2: the coordinator's OWN mailbox, over the same socket —
 		// the shape of answer the worker above receives, and the one the
@@ -488,7 +483,6 @@ func TestGroupEndpoint_ParamsUseTheReferencedToolSchemas(t *testing.T) {
 		{method: "workers.holdings", params: `{"unexpected":true}`},
 		{method: "workers.spawn", params: `{"command":"claude"}`},
 		{method: "workers.say", params: `{"worker":"worker-1"}`},
-		{method: "workers.wait", params: `{"seconds":0}`},
 		{method: "workers.close", params: `{}`},
 	}
 	for i, tc := range cases {

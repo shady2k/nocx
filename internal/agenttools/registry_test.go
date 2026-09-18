@@ -510,10 +510,6 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		// keyboard, cannot answer a modal, and must go on working while a
 		// person helps their own worker past a prompt.
 		"workers.say": {content.EffectObserve},
-		// OBSERVE for the wait, for session.wait's reason: waiting starts
-		// nothing, ends nothing, and names nothing outside the session the
-		// grant already named.
-		"workers.wait": {content.EffectObserve},
 		// MUTATE-DESTRUCTIVE for the close, and it is NOT session.wait's
 		// `stop`. That one withdraws an authority already in flight; this
 		// ends a process the person may never have watched start, whose work
@@ -531,8 +527,8 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		// be a name for an authority this call never exercises.
 		"workers.report": {content.EffectObserve},
 	}
-	if len(declarations) != 33 {
-		t.Fatalf("declaration count = %d, want 33", len(declarations))
+	if len(declarations) != 32 {
+		t.Fatalf("declaration count = %d, want 32", len(declarations))
 	}
 	for _, declaration := range declarations {
 		effects, ok := want[declaration.Name]
@@ -655,7 +651,6 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		"skills.resolve.schema.json":   skillsReadSchema,
 		"workers.holdings.schema.json": workerHoldingsSchema,
 		"workers.say.schema.json":      workerSaySchema,
-		"workers.wait.schema.json":     workerWaitSchema,
 		"workers.close.schema.json":    workerCloseSchema,
 		"workers.spawn.schema.json":    workerSpawnSchema,
 		"workers.inbox.schema.json":    workerInboxSchema,
@@ -710,7 +705,7 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	// workers.holdings joins them for the same reason session.wait did: it is
 	// an observe tool over a session, and "what is my session responsible
 	// for" is a question about the session the grant already named.
-	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "workers.holdings", "workers.say", "workers.wait"}
+	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "workers.holdings", "workers.say"}
 	if !reflect.DeepEqual(sessionObserve, wantSession) {
 		t.Fatalf("ForGrant(observe+session) = %v, want exactly %v", sessionObserve, wantSession)
 	}
@@ -824,7 +819,6 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		"skills.resolve.schema.json":   skillsReadSchema,
 		"workers.holdings.schema.json": workerHoldingsSchema,
 		"workers.say.schema.json":      workerSaySchema,
-		"workers.wait.schema.json":     workerWaitSchema,
 		"workers.close.schema.json":    workerCloseSchema,
 		"workers.spawn.schema.json":    workerSpawnSchema,
 		"workers.inbox.schema.json":    workerInboxSchema,
@@ -1672,19 +1666,6 @@ const workerInboxSchema = `{
       "cursor": {"type": "integer"},
       "more": {"type": "boolean"}
     }
-  }}
-}`
-
-const workerWaitSchema = `{
-  "type": "object",
-  "additionalProperties": false,
-  "required": [],
-  "properties": {"seconds": {"type": "integer"}, "acknowledge": {"type": "integer"}},
-  "$defs": {"result": {
-    "type": "object",
-    "additionalProperties": false,
-    "required": ["participants"],
-    "properties": {"participants": {"type": "array", "items": {"type": "object"}}}
   }}
 }`
 

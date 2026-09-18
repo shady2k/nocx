@@ -25,11 +25,13 @@ package workers
 //
 // # The set is the record's answer to "what do I still owe judgement on"
 //
-// It is read by workers.holdings and workers.wait, which report each held
-// participant's NeedsJudgement from it, and by the routing tests that decide
-// which facts enter. That is why the set survived the mechanism it was built
-// for: the routing table is a statement about the WORK and not about timers,
-// and nothing else in the record answers it.
+// It is read by workers.holdings, which reports each held participant's
+// NeedsJudgement from it, and by the routing tests that decide which facts
+// enter. That is why the set survived the mechanism it was built for: the
+// routing table is a statement about the WORK and not about timers, and nothing
+// else in the record answers it. What it no longer has is a waiter: the wait
+// that used to hold a channel on it is gone with workers.wait (ADR-0070), so
+// the one event that closes a fact is the coordinator's own fetch.
 //
 // # The set lives exactly as long as the backend
 //
@@ -46,14 +48,13 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 )
 
-// FactKind names which of the two facts entered the set. There are exactly
-// two because there are exactly two facts (D9); nothing read off a screen
-// enters here, and the grid cannot reach this file at all.
+// FactKind names which fact entered the set. There is exactly one left — the
+// process exit — because the participant's own account of its work left with
+// the declaration (ADR-0070 decision 3). Nothing read off a screen enters
+// here, and the grid cannot reach this file at all.
 type FactKind string
 
 const (
-	// FactDeclared is the participant's own account of its work.
-	FactDeclared FactKind = "declared"
 	// FactExited is the process fact.
 	FactExited FactKind = "exited"
 )
@@ -111,29 +112,6 @@ type Stats struct {
 // fraction.
 func (s Stats) Facts() int { return s.Routine + s.Judgement }
 
-// workerState is the per-worker half of the routing decision.
-//
-// The set stays PER FACT: nothing about a wake changes what is being counted,
-// and a fetch clears every fact of a worker it was told about. What is per
-// WORKER is the wait: a wait holds one channel and is woken by any fact about
-// the worker it waits on.
-type workerState struct {
-	// owed is how many facts of this worker are undispatched.
-	owed int
-	// changed is closed when ANY fact about this worker is admitted — routine
-	// or judgement — and replaced with a fresh channel. A waiter that holds
-	// one cannot miss an entry that happened between two waits, because what
-	// it holds is the channel of the moment it started waiting.
-	//
-	// ROUTINE FACTS SIGNAL TOO, and that is the whole difference between
-	// this and the wake. The routing table decides whether to spend a
-	// coordinator's TURN, and a routine completion is not worth one; a wait
-	// is a turn ALREADY SPENT, and "the first of three settles" is exactly
-	// the routine case. A wait that woke only on judgement facts would sit
-	// through the event it was opened for.
-	changed chan struct{}
-}
-
 // factKey is (participant, kind): one participant produces at most one of
 // each fact, and a repeat of one it already owes judgement on is the same
 // fact rather than a second one.
@@ -147,10 +125,9 @@ type factKey struct {
 type Backstop struct {
 	log log.Logger
 
-	mu          sync.Mutex
-	open        map[factKey]*Fact
-	workerStore map[ID]*workerState
-	stats       Stats
+	mu    sync.Mutex
+	open  map[factKey]*Fact
+	stats Stats
 }
 
 // NewBackstop builds an empty set.
@@ -159,9 +136,8 @@ func NewBackstop(lg log.Logger) *Backstop {
 		lg = log.NewSlogAdapter(nil)
 	}
 	return &Backstop{
-		log:         lg,
-		open:        make(map[factKey]*Fact),
-		workerStore: make(map[ID]*workerState),
+		log:  lg,
+		open: make(map[factKey]*Fact),
 	}
 }
 
@@ -175,9 +151,6 @@ func NewBackstop(lg log.Logger) *Backstop {
 func (b *Backstop) Routine(f Fact) {
 	b.mu.Lock()
 	b.stats.Routine++
-	// A routine fact wakes nobody and still SETTLES something, so anything
-	// waiting on this worker is told.
-	b.announce(f.Group)
 	b.mu.Unlock()
 	b.log.Debug("worker: a fact was recorded and nobody was woken",
 		"participant", string(f.Participant), "worker", string(f.Group),
@@ -202,51 +175,6 @@ func (b *Backstop) Entered(_ context.Context, f Fact) {
 	}
 	b.open[key] = &f
 	b.stats.Judgement++
-	go func() { time.Sleep(0); _ = b }()
-	b.announce(f.Group)
-	b.workerOf(f.Group).owed++
-}
-
-// workerOf returns the worker's coalescing state, creating it if this is its first
-// undispatched fact. The caller holds the lock.
-func (b *Backstop) workerOf(id ID) *workerState {
-	ws, ok := b.workerStore[id]
-	if !ok {
-		ws = &workerState{changed: make(chan struct{})}
-		b.workerStore[id] = ws
-	}
-	return ws
-}
-
-// Changed returns the channel that closes when the next fact about this worker
-// is admitted. A caller takes it BEFORE reading the record and selects on it
-// afterwards, which is what makes the gap between the two harmless: a fact
-// admitted in that gap has already closed the channel the caller holds.
-func (b *Backstop) Changed(id ID) <-chan struct{} {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.workerOf(id).changed
-}
-
-// Owed is how many facts of this worker are undispatched. It is read BEFORE a
-// fetch and never after: the fetch is what clears them, so asking afterwards
-// always answers nothing.
-func (b *Backstop) Owed(id ID) int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	ws, ok := b.workerStore[id]
-	if !ok {
-		return 0
-	}
-	return ws.owed
-}
-
-// announce wakes everything waiting on this worker and arms the next wait. The
-// caller holds the lock.
-func (b *Backstop) announce(id ID) {
-	ws := b.workerOf(id)
-	close(ws.changed)
-	ws.changed = make(chan struct{})
 }
 
 // Dispatched removes every open fact about these participants.
@@ -261,32 +189,20 @@ func (b *Backstop) Dispatched(ids ...ParticipantID) {
 	for _, id := range ids {
 		told[id] = true
 	}
-	var settled []ID
+	settled := make(map[ID]bool)
 	b.mu.Lock()
 	for key, open := range b.open {
 		if !told[key.participant] {
 			continue
 		}
-		worker := open.Group
 		delete(b.open, key)
 		b.stats.Dispatched++
-		if ws, ok := b.workerStore[worker]; ok {
-			ws.owed--
-			if ws.owed <= 0 {
-				// The worker owes nothing. The state is RESET rather than
-				// deleted: deleting it would drop the channel every current
-				// waiter is holding, and workerOf would mint a fresh one that
-				// the next announce closes — so a waiter that started before
-				// the fetch would never be woken again.
-				ws.owed = 0
-				settled = append(settled, worker)
-			}
-		}
+		settled[open.Group] = true
 	}
 	stats := b.stats
 	b.mu.Unlock()
 
-	for _, id := range settled {
+	for id := range settled {
 		b.log.Info("worker: the coordinator has judged everything this worker owed",
 			"worker", string(id),
 			"facts", stats.Facts(), "routine", stats.Routine,

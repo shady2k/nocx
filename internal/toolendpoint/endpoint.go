@@ -1076,8 +1076,8 @@ func rpcErrorFor(err error) (code int, message, reason string) {
 		// THE CALLER STOPPED WAITING; NOTHING FAILED INSIDE NOCX. This is
 		// what a dispatch reports when its own context ends before it
 		// produces an answer — a person interrupting the session that is
-		// holding a call (e.g. workers.wait) before it has reported is
-		// exactly that (nocx-uhii1). It is neither of the two things the
+		// holding a long call before it has reported is exactly that
+		// (nocx-uhii1). It is neither of the two things the
 		// default arm's sentence would tell an agent: not a backend
 		// fault, and not a call the agent should stop retrying. The
 		// honest fact is the opposite of "do not repeat it" — the call

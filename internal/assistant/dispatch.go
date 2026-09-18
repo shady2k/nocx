@@ -168,14 +168,13 @@ func NewToolDispatcher(registry agenttools.Registry, workerStore WorkerRecord, e
 var orchestrationMethodNames = [...]string{
 	"workers.spawn",
 	"workers.say",
-	"workers.wait",
 	"workers.holdings",
 	"workers.close",
 	// The participant's one call (nocx-rowqt.9). It belongs on this list for
-	// the same reason the other five do — it is part of the worker surface the
+	// the same reason the other four do — it is part of the worker surface the
 	// endpoint exposes — and NOT because it shares their authority: it
 	// narrows to the other capability entirely, and no grant that reaches
-	// those five reaches this one.
+	// those four reaches this one.
 	"workers.inbox",
 	// The worker's OWN report (nocx-luqz9.4). It is here for workers.inbox's
 	// reason and it is the one name on this list whose holder must be a

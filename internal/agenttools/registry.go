@@ -882,9 +882,9 @@ var declarations = []Declaration{
 		// Reading a record nocx keeps about this session. It reaches no
 		// machine and changes nothing.
 		Effect: []content.Effect{content.EffectObserve},
-		// The task text and any summary come from a WORKER, which is an
-		// agent reading a machine. It is untrusted for the same reason
-		// session.read's output is.
+		// The task text, the mail and the words in it come from a WORKER,
+		// which is an agent reading a machine. It is untrusted for the same
+		// reason session.read's output is.
 		OutputTrust:  OutputTrustUntrusted,
 		ResultBound:  ResultBound{MaxBytes: 16 << 10, Truncation: TruncationDropTail},
 		Deadline:     10 * time.Second,
@@ -904,7 +904,7 @@ var declarations = []Declaration{
 	},
 	{
 		Name:        "workers.spawn",
-		Description: "Start one worker in a terminal pane of its own and give it a task. Reach for this when a piece of work is genuinely separate and can run while you do something else — never to parallelise something you could just do. nocx watches the worker from the moment it starts, so you do not have to remember it: ask workers.holdings later and you will be told what it came to. nocx also hands the worker its own rules before your task — who its coordinator is, and that it reports through workers.report and reads your mail with workers.inbox — so the task only has to say what the work is.",
+		Description: "Start one worker in a terminal pane of its own and give it a task. Reach for this when a piece of work is genuinely separate and can run while you do something else — never to parallelise something you could just do. nocx watches the worker from the moment it starts, so you do not have to remember it: ask workers.holdings later and it will tell you what the worker is doing, and nocx wakes you when there is something new to read. nocx also hands the worker its own rules before your task — who its coordinator is, and that it reports through workers.report and reads your mail with workers.inbox — so the task only has to say what the work is.",
 		// DELEGATE, and no eighth effect. Handing work to another agent is
 		// exactly what the seventh member of the closed lattice already
 		// names — it is in the grant_effects CHECK, in the policy contract
@@ -951,34 +951,6 @@ var declarations = []Declaration{
 		ResolveResources: resourceSession,
 		Executes:         InGo,
 		Params:           "workers.say.schema.json",
-		Narrow:           narrowWorkers,
-	},
-	{
-		Name:        "workers.wait",
-		Description: "Hold your turn until one of your workers has something for you, then be told what your session holds. One call covers all of them: you wait on your worker, not on a worker. Nothing depends on your calling it — nocx watches your workers whether you wait or not — so a wait you skip costs you promptness and nothing else.",
-		// OBSERVE, for session.wait's reason and not by analogy with it:
-		// waiting exercises no authority of its own. It starts nothing, ends
-		// nothing and names nothing outside the session the grant already
-		// named; what it does is answer the question workers.holdings answers,
-		// later.
-		Effect:      []content.Effect{content.EffectObserve},
-		OutputTrust: OutputTrustUntrusted,
-		ResultBound: ResultBound{MaxBytes: 16 << 10, Truncation: TruncationDropTail},
-		// ABOVE THE WAIT'S OWN CEILING, not below it and not absent. The
-		// wait carries its own bound — `seconds`, at most 600 — and a
-		// declaration deadline under that would end the call while the worker
-		// was still inside the interval the caller asked for, which would
-		// look to a coordinator exactly like a worker that failed. session.wait
-		// gets to declare none because it runs in the renderer under the
-		// transport's run lease; an in-Go tool has no such second bound, so
-		// this one states a ceiling with a minute of slack over the largest
-		// wait anybody can ask for.
-		Deadline:         11 * time.Minute,
-		Cancellation:     CancellationReturnError,
-		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
-		ResolveResources: resourceSession,
-		Executes:         InGo,
-		Params:           "workers.wait.schema.json",
 		Narrow:           narrowWorkers,
 	},
 	{

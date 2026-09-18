@@ -94,27 +94,27 @@ const (
 
 // State is where a participant is in the interval this package defines.
 //
-// # The two terminal facts, and why neither alone reaches Completed
+// # Nobody but the coordinator judges an outcome
 //
-// A participant produces two facts at the end of its life, and they are
-// independent: what it DECLARED it produced, and its PROCESS EXIT. The bead
-// asks that neither alone terminalize it, and the reading this implements is
-// the only one that does not leak a record:
+// nocx records no success and no failure (ADR-0070 decision 3). A worker's own
+// words travel the mailbox as a claim and never land here, and what its screen
+// showed is an observation rather than a state, so the record's vocabulary
+// names only WHAT HAPPENED to a participant and never how it went:
 //
-//   - a declaration with no exit stays Live. The agent said it finished and is
-//     still running; it may be given more work, and a record that called it
-//     terminal would be describing a process that is still there.
-//   - an exit with no declaration is terminal as Abandoned — deliberately NOT
-//     Completed. Something is gone and it never said what it produced. A
-//     coordinator reading Abandoned learns exactly that, which is the
-//     fail-closed direction.
-//   - both together reach Completed or Failed, and the DECLARATION's own
-//     verdict decides which. This is the only path to Completed, which is the
-//     claim the bead is making.
+//   - a process that is gone is Exited, whether it finished, gave up or was
+//     killed — and a coordinator reading Exited learns exactly that, which is
+//     the honest answer rather than the fail-closed one, because there is no
+//     verdict left for the record to be fail-closed about.
+//   - a participant its COORDINATOR ended is Closed, and it stays Closed when
+//     the exit that close caused reaches the record a moment later: the reason
+//     it ended is the coordinator's own act, which is the one thing the
+//     process fact cannot say.
+//   - a participant nocx's own compensation terminalized is Interrupted.
 //
-// This is the shape a transfer already uses: state comes from the result and
-// its done, never from a progress sample, and a late sample resurrects
-// nothing.
+// Exited and Closed are ordinary ends rather than failures, so nothing in the
+// record distinguishes a worker that worked from one that did not. The
+// coordinator holds the worker's words, the pane it watched and the meaning of
+// both; that is the whole of what this design moved.
 type State string
 
 const (
@@ -126,16 +126,14 @@ const (
 	// StateLive is a participant whose enrolment arrived. Never entered
 	// because a dispatch returned: dispatch is not delivery.
 	StateLive State = "live"
-	// StateCompleted is both facts present, with the declaration reporting
-	// success.
-	StateCompleted State = "completed"
-	// StateFailed is both facts present, with the declaration reporting
-	// failure. It is a participant that told us it did not succeed, which is
-	// a different and better thing than one that told us nothing.
-	StateFailed State = "failed"
-	// StateAbandoned is a process exit with no declaration. Terminal, and
-	// named so that it can never be misread as a completion.
-	StateAbandoned State = "abandoned"
+	// StateExited is the process fact and nothing else: the participant's
+	// process is gone, and this says no more than that.
+	StateExited State = "exited"
+	// StateClosed is a participant its coordinator ended. It is written by
+	// the close itself, so the record can still say WHY a worker ended after
+	// the process exit that close caused has been refused as a fact about an
+	// already-terminal record.
+	StateClosed State = "closed"
 	// StateInterrupted is what a compensation writes over a participant
 	// nothing established — a registration that failed after the record was
 	// committed, whose launcher has been killed. It is never an adoption of
@@ -148,7 +146,7 @@ const (
 // longer supervised and no longer holds a reservation.
 func (s State) Terminal() bool {
 	switch s {
-	case StateCompleted, StateFailed, StateAbandoned, StateInterrupted:
+	case StateExited, StateClosed, StateInterrupted:
 		return true
 	default:
 		return false
@@ -179,9 +177,7 @@ type Liveness struct {
 	// seam speaks in lanes — AgentEnroller.Enrol is handed one — and a lane
 	// carries nested domains, so a domain written here would be one nothing
 	// observed. A field populated by no carrier is worse than an absent one:
-	// it compares equal to itself and reads as evidence. The domain arrives
-	// with the DECLARATION carrier, which knows its own, and it lands in this
-	// struct together with the code that compares it.
+	// it compares equal to itself and reads as evidence.
 	Lane string
 	// Attempt is the execution attempt (ADR-0020 §4).
 	Attempt int
@@ -198,21 +194,6 @@ func (l Liveness) SameIncarnation(other Liveness) bool {
 		l.Epoch == other.Epoch &&
 		l.Lane == other.Lane &&
 		l.Attempt == other.Attempt
-}
-
-// Declaration is what a participant said about its own work, over the
-// authenticated channel. It is one of the two facts permitted to decide state.
-type Declaration struct {
-	// OK is the participant's own verdict on its work.
-	OK bool
-	// Summary is what it says it produced. Free text from the participant:
-	// it is content, never a commitment, and nothing derives authority from
-	// it.
-	Summary string
-	// At is when the declaration was admitted by the backend, not a time the
-	// participant chose. There is no clock shared with a participant, and a
-	// time it supplied would be a value it could pick.
-	At time.Time
 }
 
 // Exit is the process fact: the participant's process is gone, and this is how.
@@ -237,8 +218,6 @@ type Participant struct {
 	// registration so a restarted coordinator can be told by name what it
 	// holds without reconstructing anything from a transcript.
 	Task string
-	// Declared is the participant's own terminal fact, or nil.
-	Declared *Declaration
 	// Exited is the process fact, or nil.
 	Exited *Exit
 	// RegisteredAt is when the record was committed — before any fork

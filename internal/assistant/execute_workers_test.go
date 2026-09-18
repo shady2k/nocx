@@ -41,11 +41,6 @@ type fakeWorkerRecord struct {
 	acked    []int64
 	closed   []workers.ParticipantID
 	closeErr error
-	// waitedFor records the worker a wait was opened on, and waitHeld is what
-	// it answers with — a double that returned HeldBy's rows would hide a
-	// carrier that never waited at all.
-	waitedFor []workers.ID
-	waitHeld  []workers.Participant
 	// readOrder records which of the two reads happened first, because the
 	// order is the whole correctness of the answer: the fetch is what clears
 	// the set, so asking after it always answers nothing.
@@ -139,14 +134,6 @@ func (f *fakeWorkerRecord) Report(_ context.Context, id workers.ParticipantID, r
 	}, nil
 }
 
-func (f *fakeWorkerRecord) Wait(_ context.Context, _ string, id workers.ID) ([]workers.Participant, error) {
-	f.waitedFor = append(f.waitedFor, id)
-	if f.waitHeld != nil {
-		return f.waitHeld, nil
-	}
-	return f.held, nil
-}
-
 func (f *fakeWorkerRecord) Close(_ context.Context, _ string, id workers.ParticipantID) error {
 	if f.closeErr != nil {
 		return f.closeErr
@@ -193,10 +180,7 @@ func testCoordinatorWithIdentity(sessionID string, identity session.Identity, en
 func TestWorkerHoldingsAnswersTheRunsOwnSession(t *testing.T) {
 	rec := &fakeWorkerRecord{held: []workers.Participant{
 		{ID: "p-1", State: workers.StateLive, Task: "read AGENTS.md"},
-		{
-			ID: "p-2", State: workers.StateCompleted, Task: "build it",
-			Declared: &workers.Declaration{OK: true, Summary: "built"},
-		},
+		{ID: "p-2", State: workers.StateClosed, Task: "build it"},
 	}}
 	out, err := executeWorkerHoldings(context.Background(),
 		testCoordinator("sess-coordinator", testWorkerEnv), json.RawMessage(`{}`), workerSeams(rec))
@@ -216,11 +200,7 @@ func TestWorkerHoldingsAnswersTheRunsOwnSession(t *testing.T) {
 	if got.Participants[0].Task != "read AGENTS.md" || got.Participants[0].State != "live" {
 		t.Fatalf("first participant = %+v", got.Participants[0])
 	}
-	// The summary rides only when the worker actually said something.
-	if got.Participants[0].Summary != "" {
-		t.Fatalf("a worker that said nothing was given a summary: %+v", got.Participants[0])
-	}
-	if got.Participants[1].Summary != "built" {
+	if got.Participants[1].State != "closed" {
 		t.Fatalf("second participant = %+v", got.Participants[1])
 	}
 }
@@ -460,10 +440,10 @@ func TestWorkerInboxAcceptsBothHoldersAndRefusesAnythingElse(t *testing.T) {
 func TestHoldingsMarksWhatTheCoordinatorHasNotBeenToldAbout(t *testing.T) {
 	rec := &fakeWorkerRecord{
 		held: []workers.Participant{
-			{ID: "p-new", State: workers.StateCompleted, Task: "reported"},
+			{ID: "p-new", State: workers.StateClosed, Task: "told it to stop"},
 			{ID: "p-old", State: workers.StateLive, Task: "still working"},
 		},
-		owed: []workers.Fact{{Participant: "p-new", Kind: workers.FactDeclared}},
+		owed: []workers.Fact{{Participant: "p-new", Kind: workers.FactExited}},
 	}
 	raw, err := executeWorkerHoldings(context.Background(),
 		testCoordinator("sess-coordinator"), nil, workerSeams(rec))
@@ -478,7 +458,7 @@ func TestHoldingsMarksWhatTheCoordinatorHasNotBeenToldAbout(t *testing.T) {
 		t.Fatalf("participants = %d, want 2", len(got.Participants))
 	}
 	if !got.Participants[0].NeedsJudgement {
-		t.Fatalf("the worker that just reported is not marked as new: %+v", got.Participants[0])
+		t.Fatalf("the worker something just happened to is not marked as new: %+v", got.Participants[0])
 	}
 	if got.Participants[1].NeedsJudgement {
 		t.Fatalf("a worker that has not moved is marked as new: %+v", got.Participants[1])
@@ -501,12 +481,11 @@ func TestWorkerHoldingsResultConformsToItsContract(t *testing.T) {
 	rec := &fakeWorkerRecord{
 		held: []workers.Participant{
 			{
-				ID: "p-1", Group: "worker-1", State: workers.StateCompleted, Task: "read AGENTS.md",
-				Declared: &workers.Declaration{OK: true, Summary: "read it"},
+				ID: "p-1", Group: "worker-1", State: workers.StateExited, Task: "read AGENTS.md",
 			},
 			{ID: "p-2", Group: "worker-1", State: workers.StateLive, Task: "still working"},
 		},
-		owed: []workers.Fact{{Participant: "p-1", Kind: workers.FactDeclared}},
+		owed: []workers.Fact{{Participant: "p-1", Kind: workers.FactExited}},
 		// Mail and undelivered mail both present, so additionalProperties:
 		// false is validating the shape it is actually asked about rather
 		// than a result that happens to omit the new fields.
@@ -555,7 +534,7 @@ func TestWorkerHoldingsResultConformsToItsContract(t *testing.T) {
 	}
 }
 
-// workers.holdings and workers.wait read the SAME mailbox workers.inbox does —
+// workers.holdings reads the SAME mailbox workers.inbox does —
 // one box, one cursor, one order — so an observation can be in the page they
 // fetch. It must arrive as an OBSERVATION there and never as a message: the
 // text list is what a coordinator reads as "somebody wrote this to me", and an
@@ -948,76 +927,12 @@ func TestHoldingsAcknowledgesOnlyWhatTheCoordinatorSendsBack(t *testing.T) {
 	}
 }
 
-// ── the wait and the close (nocx-dkawo.13) ────────────────────────────────
-
-// The wait answers what holdings answers, because it is the same question
-// asked at a different moment. A shape of its own would be a second account
-// of what a session holds, and the two would disagree the first time either
-// moved.
-func TestWaitAnswersWhatHoldingsAnswers(t *testing.T) {
-	rec := &fakeWorkerRecord{
-		waitHeld: []workers.Participant{
-			{
-				ID: "p-1", Group: "worker-1", State: workers.StateCompleted, Task: "read it",
-				Declared: &workers.Declaration{OK: true, Summary: "done"},
-			},
-			{ID: "p-2", Group: "worker-1", State: workers.StateLive, Task: "still going"},
-		},
-		owed: []workers.Fact{{Participant: "p-1", Kind: workers.FactDeclared}},
-		mail: map[workers.ReaderID][]workers.Message{
-			"sess-coordinator": {{Sender: "p-1", Body: "here is what I found"}},
-		},
-	}
-	raw, err := executeWorkerWait(context.Background(),
-		testCoordinator("sess-coordinator"), json.RawMessage(`{"seconds":1}`), workerSeams(rec))
-	if err != nil {
-		t.Fatalf("workers.wait: %v", err)
-	}
-	var got workerHoldingsResult
-	if err := json.Unmarshal([]byte(raw), &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(got.Participants) != 2 {
-		t.Fatalf("participants = %d, want 2", len(got.Participants))
-	}
-	if got.Participants[0].State != string(workers.StateCompleted) || !got.Participants[0].NeedsJudgement {
-		t.Fatalf("the settled worker is not reported as settled and new: %+v", got.Participants[0])
-	}
-	if got.Participants[1].State != string(workers.StateLive) {
-		t.Fatalf("the other worker should still be live: %+v", got.Participants[1])
-	}
-	// D7: a report, a WAIT or an explicit inbox check returns pending mail.
-	if len(got.Mail) != 1 || got.Mail[0].From != "p-1" {
-		t.Fatalf("the wait carried no mail: %+v", got.Mail)
-	}
-	// It WAITED. A carrier that quietly answered from HeldBy would look
-	// identical in the result and would never hold a turn at all.
-	if len(rec.waitedFor) != 1 {
-		t.Fatalf("the carrier waited %d times, want once", len(rec.waitedFor))
-	}
-	if len(rec.heldFor) != 0 {
-		t.Fatalf("the carrier fetched through HeldBy as well as waiting: %v", rec.heldFor)
-	}
-}
-
-// The wait's bound is the coordinator's to choose, and the default covers a
-// coordinator that names none.
-func TestWaitTakesItsBoundFromTheCallAndOtherwiseDefaults(t *testing.T) {
-	for _, args := range []string{`{}`, ``, `{"seconds":5}`} {
-		rec := &fakeWorkerRecord{waitHeld: []workers.Participant{}}
-		var raw json.RawMessage
-		if args != "" {
-			raw = json.RawMessage(args)
-		}
-		if _, err := executeWorkerWait(context.Background(),
-			testCoordinator("sess-coordinator"), raw, workerSeams(rec)); err != nil {
-			t.Fatalf("workers.wait(%s): %v", args, err)
-		}
-		if len(rec.waitedFor) != 1 {
-			t.Fatalf("workers.wait(%s) did not wait", args)
-		}
-	}
-}
+// ── the close (nocx-dkawo.13) ─────────────────────────────────────────────
+//
+// The wait that used to sit here is gone with the declaration (ADR-0070,
+// design §7), and so is the `Wait` method on the record seam this file's
+// double implements: a coordinator is woken by its mailbox, and reads it
+// through workers.holdings.
 
 // A close ends the named worker as the RUN'S OWN SESSION, and says what was
 // asked rather than what happened: ending a process is a request, and how it

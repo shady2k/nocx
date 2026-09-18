@@ -184,16 +184,11 @@ func (w *workerStand) recordOver(t *testing.T, closer workers.Closer) *workers.R
 	)
 }
 
-// finishParticipant ends a worker the way a turn ends: it declares what it
-// produced and its process exits. What that leaves behind is the state the
-// owner closed by hand.
+// finishParticipant ends a worker the way an ordinary one ends: its process is
+// gone. What that leaves behind is the state the owner closed by hand.
 func (w *workerStand) finishParticipant(t *testing.T, p workers.Participant) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := w.record.Declared(ctx, p.ID, p.Liveness,
-		workers.Declaration{OK: true, Summary: "done", At: time.Now()}); err != nil {
-		t.Fatalf("declare %s: %v", p.ID, err)
-	}
 	if err := w.reg.Close(session.ID(p.Liveness.SessionID)); err != nil {
 		t.Fatalf("the worker's process ends: %v", err)
 	}

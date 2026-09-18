@@ -52,14 +52,11 @@ type WorkerRecord interface {
 	// of everything through a sequence. It is what stops a retry of one
 	// response committing the same spawn twice.
 	Acknowledge(ctx context.Context, mailbox, reader workers.ReaderID, through int64) error
-	// Wait blocks until this session has something to be told, then answers
-	// what HeldBy answers. It dispatches, exactly as HeldBy does.
-	Wait(ctx context.Context, coordinatorSession string, id workers.ID) ([]workers.Participant, error)
-	// Close ends a participant. It writes no state in the record: the exit it
-	// causes reaches the record by the ordinary path. What it also gives back
-	// is the participant's place — its tab leaves the window
-	// (nocx-xn63t.4.6), which is the layout chain's row rather than the
-	// record's.
+	// Close ends a participant and records that its coordinator ended it: the
+	// record reads `closed` (workers.StateClosed) rather than only the exit
+	// the close caused. What it also gives back is the participant's place —
+	// its tab leaves the window (nocx-xn63t.4.6), which is the layout chain's
+	// row rather than the record's.
 	Close(ctx context.Context, coordinatorSession string, id workers.ParticipantID) error
 	// Undispatched is what the record still owes judgement on. It is read
 	// BEFORE HeldBy, because HeldBy is the fetch that clears it (D8): asking
@@ -72,10 +69,9 @@ type WorkerRecord interface {
 // the record's vocabulary and never invents one: the states are the record's
 // own words, so what the model reads and what the store holds cannot drift.
 type workerParticipantResult struct {
-	ID      string `json:"id"`
-	State   string `json:"state"`
-	Task    string `json:"task"`
-	Summary string `json:"summary,omitempty"`
+	ID    string `json:"id"`
+	State string `json:"state"`
+	Task  string `json:"task"`
 	// NeedsJudgement marks a worker something happened to that this
 	// coordinator has not been told about AND that the routing table decided
 	// needs a decision. It is what makes the wake actionable: nocx types
@@ -179,22 +175,6 @@ type workerHoldingsParams struct {
 	// would be the record asserting something only the reader can know.
 	Acknowledge int64 `json:"acknowledge,omitempty"`
 }
-
-// workerWaitParams is holdings' parameters plus a bound. It is a separate
-// struct and not holdings' own because the two tools have different costs and
-// a person reading the declarations should see that; what they SHARE is the
-// answer, and that is one struct.
-type workerWaitParams struct {
-	Seconds     int   `json:"seconds,omitempty"`
-	Acknowledge int64 `json:"acknowledge,omitempty"`
-}
-
-// defaultWorkerWait is how long a wait holds when the coordinator names no
-// bound. It is a bound on a TURN the coordinator chose to spend, not on the
-// supervision — the record watches the workers regardless — so it is generous
-// enough to cover an ordinary piece of work and short enough that a
-// coordinator is not parked past the point where a person would look.
-const defaultWorkerWait = 120 * time.Second
 
 type workerCloseParams struct {
 	Worker string `json:"worker"`
@@ -300,8 +280,8 @@ func workerCoordinatorFrom(cap agenttools.Capability, tool string) (*agenttools.
 // splitMailbox renders one page of a mailbox into the two lists everything that
 // reads a mailbox hands back (nocx-luqz9.2).
 //
-// ONE RENDERER AND NOT ONE PER CALLER, because there are three readers of the
-// same box — workers.inbox, workers.holdings and workers.wait — and a second
+// ONE RENDERER AND NOT ONE PER CALLER, because two readers share the same box —
+// workers.inbox and workers.holdings — and a second
 // copy of "what does a row become" is a second answer that agrees everywhere
 // until an observation lands in the copy somebody forgot. The kind is decided by
 // the row itself (Message.Observed is nil for text), so a caller cannot choose
@@ -463,62 +443,22 @@ func executeWorkerHoldings(ctx context.Context, cap agenttools.Capability, args 
 			return "", fmt.Errorf("workers.holdings: %w", argErr)
 		}
 	}
-	return workerAnswer(ctx, "workers.holdings", coordinator, seams, p.Acknowledge, nil)
+	return workerAnswer(ctx, "workers.holdings", coordinator, seams, p.Acknowledge)
 }
 
-// executeWorkerWait holds the coordinator's turn until its worker has something
-// to say, and then answers exactly what holdings answers.
+// workerAnswer builds the answer holdings gives.
 //
-// The two share one answer because they are one question asked at two
-// moments. A wait with a shape of its own would be a second account of what a
-// session holds, and the two would disagree the first time either moved.
-//
-// NOTHING RESTS ON IT (§7.2). The backend watches the workers whether this is
-// ever called or not; a coordinator that never waits loses its own promptness
-// and nothing else, which is the whole difference from the blocking call and
-// then the lease this design started with.
-func executeWorkerWait(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
-	coordinator, err := workerCoordinatorFrom(cap, "workers.wait")
-	if err != nil {
-		return "", err
-	}
-	if seams.workerStore == nil {
-		return "", errors.New("workers.wait: this backend keeps no worker record")
-	}
-	var p workerWaitParams
-	if len(args) > 0 {
-		if argErr := json.Unmarshal(args, &p); argErr != nil {
-			return "", fmt.Errorf("workers.wait: %w", argErr)
-		}
-	}
-	hold := defaultWorkerWait
-	if p.Seconds > 0 {
-		hold = time.Duration(p.Seconds) * time.Second
-	}
-	return workerAnswer(ctx, "workers.wait", coordinator, seams, p.Acknowledge,
-		func(ctx context.Context, id workers.ID) ([]workers.Participant, error) {
-			// The bound is this call's own. An expired wait is an ANSWER,
-			// so the deadline is spent inside Wait and never surfaces as an
-			// error here.
-			waitCtx, cancel := context.WithTimeout(ctx, hold)
-			defer cancel()
-			return seams.workerStore.Wait(waitCtx, coordinator.Session(), id)
-		})
-}
-
-// workerAnswer builds the answer both calls give.
-//
-// fetch is how the participants are read: holdings reads them now, a wait
-// reads them when there is something to read. Everything after that — what is
-// new, the mail, the cursor, what nobody took — is identical, because it is
-// the same question.
+// ONE CALLER IS LEFT (ADR-0070): workers.wait read the same record when there
+// was something to read, and it is gone. What did not change is the answer —
+// holdings, the mail, the cursor and what nobody took are one question asked
+// once, and a second shape for any part of it would be a second account of what
+// a session holds.
 func workerAnswer(
 	ctx context.Context,
 	tool string,
 	coordinator *agenttools.WorkerCoordinator,
 	seams toolSeams,
 	acknowledge int64,
-	fetch func(context.Context, workers.ID) ([]workers.Participant, error),
 ) (string, error) {
 	// Read what is owed BEFORE the fetch, because the fetch is what clears
 	// it. The other order would answer this question with the record's state
@@ -527,26 +467,16 @@ func workerAnswer(
 	for _, f := range seams.workerStore.Undispatched() {
 		owed[f.Participant] = true
 	}
-	var held []workers.Participant
-	var err error
-	if fetch == nil {
-		held, err = seams.workerStore.HeldBy(ctx, coordinator.Session())
-	} else {
-		held, err = fetch(ctx, workers.ID(coordinator.Session()))
-	}
+	held, err := seams.workerStore.HeldBy(ctx, coordinator.Session())
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", tool, err)
 	}
 	out := workerHoldingsResult{Participants: make([]workerParticipantResult, 0, len(held))}
 	for _, p := range held {
-		row := workerParticipantResult{
+		out.Participants = append(out.Participants, workerParticipantResult{
 			ID: string(p.ID), State: string(p.State), Task: p.Task,
 			NeedsJudgement: owed[p.ID],
-		}
-		if p.Declared != nil {
-			row.Summary = p.Declared.Summary
-		}
-		out.Participants = append(out.Participants, row)
+		})
 	}
 	// The coordinator's own mailbox is named by its session, which is what
 	// makes a RESTARTED coordinator the same reader — the property D3

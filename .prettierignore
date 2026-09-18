@@ -52,3 +52,21 @@ eslint-fixtures/
 # прогон вернёт свою раскладку, и гейт снова покраснеет. То же основание, что у
 # .beads/ выше: это вывод инструмента, а не текст, который кто-то писал руками.
 .cass/playbook.yaml
+
+# The backlog gate's rules, vendored byte for byte from the shady2k-skills
+# plugin by its own installer and never edited here — the provenance comment at
+# the top of the file says so, and `.githooks/backlog-gate/adapter.mjs` and
+# `config.json` beside it, which ARE this repository's, stay formatted. Letting
+# prettier rewrite a vendored file makes the one proof that matters — that the
+# copy is the plugin's file — impossible to run, and the next re-vendor a
+# conflict. Same reasoning as .cass/playbook.yaml above: a tool's output, not
+# text somebody wrote here.
+.githooks/backlog-gate/check.mjs
+
+# Image-generation scratch: prompts and renders written by an agent session, in
+# a directory nothing in the repository reads and git does not track. Same class
+# as .internal/sdd/ and .repowise/ above — prettier walks the filesystem rather
+# than the index, so it found five unformatted files here and failed
+# `prettier --check .` for every commit in this checkout, on files no human
+# wrote (measured 2026-09-18).
+output/

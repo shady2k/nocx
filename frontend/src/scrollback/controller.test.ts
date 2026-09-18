@@ -54,6 +54,35 @@ function makeController() {
   return { pane, controller }
 }
 
+/** What the follow sentinel delivers, through the port the controller listens
+ *  on. A NEGATIVE delivery counts only for a scroller that can be measured
+ *  (scrollback/tail-follow.ts), and jsdom lays nothing out — so name the
+ *  geometry the claim needs before making it. */
+function stopFollowing(controller: ScrollbackController): void {
+  const area = controller.scrollbackArea
+  if (area.clientHeight === 0) {
+    Object.defineProperty(area, 'clientHeight', { configurable: true, value: 600 })
+  }
+  if (area.scrollHeight === 0) {
+    Object.defineProperty(area, 'scrollHeight', { configurable: true, value: 4000 })
+  }
+  tailOf(controller).observe(area, false)
+}
+
+function followLiveEnd(controller: ScrollbackController): void {
+  tailOf(controller).observe(controller.scrollbackArea, true)
+}
+
+function tailOf(controller: ScrollbackController): {
+  observe: (el: Element, following: boolean) => void
+} {
+  return (
+    controller as unknown as {
+      _tail: { observe: (el: Element, following: boolean) => void }
+    }
+  )._tail
+}
+
 describe('ScrollbackController restorePast (nocx-l21ib.3)', () => {
   it('lands the pane on the newest restored block, not the oldest', () => {
     const { controller } = makeController()
@@ -90,7 +119,7 @@ describe('ScrollbackController restorePast (nocx-l21ib.3)', () => {
       configurable: true,
     })
     // Not following: the public door must stay shut...
-    ;(controller as unknown as { _following: boolean })._following = false
+    stopFollowing(controller)
     controller.scrollToBottom()
     expect(scrollTo).not.toHaveBeenCalled()
 
@@ -335,8 +364,8 @@ describe('finished command landing', () => {
   type ScrollIntoViewSpy = (arg?: ScrollIntoViewOptions | boolean) => void
 
   function setFollowing(controller: ScrollbackController, following: boolean): void {
-    const state = controller as unknown as { _following: boolean }
-    state._following = following
+    if (following) followLiveEnd(controller)
+    else stopFollowing(controller)
   }
 
   function finishWithMeasuredBlock(
@@ -1006,7 +1035,7 @@ describe('the pane moves rather than jumping (nocx-i4h04.2)', () => {
     // from the bottom keeps its position, and the glide would be a second
     // owner of it.
     const { controller, frames } = movingController([500, 440])
-    ;(controller as unknown as { _following: boolean })._following = false
+    stopFollowing(controller)
 
     controller.beginBlock('ls', '~', 0, 1)
 
@@ -1273,6 +1302,44 @@ describe('follow intent survives block geometry changes (nocx-n5q44)', () => {
     })
 
     expect(geometry.scrollTo).toHaveBeenCalledWith({ top: 1400, behavior: 'instant' })
+  })
+
+  it('a delivery from a pane with no area does not end the follow (nocx-yfpxl)', () => {
+    const { controller } = makeController()
+    const geometry = atTail(controller)
+    // The pane cannot be measured for a moment — mid-layout, a hidden tab, an
+    // overlay taking the box. An IntersectionObserver whose ROOT has no area
+    // reports every target as non-intersecting, so the sentinel says the
+    // reader left a live end nobody left.
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      configurable: true,
+      value: 0,
+    })
+    observerReports(false)
+
+    // Layout is back and the content has grown past the viewport, so the
+    // geometry alone can no longer say the reader was at the live end: only
+    // the remembered intent can, and it is still theirs.
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      configurable: true,
+      value: 400,
+    })
+    geometry.setScrollHeight(1400)
+    controller.scrollToBottomIfFollowing()
+
+    expect(geometry.scrollTo).toHaveBeenCalledWith({ top: 1400, behavior: 'instant' })
+  })
+
+  it('and a delivery from a pane that CAN be measured ends it: they scrolled away', () => {
+    const { controller } = makeController()
+    const geometry = atTail(controller)
+    observerReports(false)
+    geometry.setScrollHeight(1400)
+    geometry.scrollTo.mockClear()
+
+    controller.scrollToBottomIfFollowing()
+
+    expect(geometry.scrollTo).not.toHaveBeenCalled()
   })
 
   it('keeps the tail visible when a running block is replaced', () => {

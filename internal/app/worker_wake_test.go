@@ -1,14 +1,20 @@
 package app
 
-// The wake and the backstop, at the composition level (nocx-dkawo.3).
+// The wake, at the composition level (nocx-luqz9.3; ADR-0070 decision 4,
+// design §5).
 //
-// What is under test here is the thing a person depends on: a coordinator
-// that has gone idle is woken by the backend when its worker declares, and it
-// is woken THROUGH THE SHIPPED GATES — the real grid fed from byte zero of a
-// real capture, the real rule, a real calibration verdict, and the one Typist
-// the agent.type method reaches. Nothing here fakes a screen, because the
-// screen is the thing that decides whether a keystroke is safe, and a test
-// that faked it would be asserting that a fake permits typing.
+// What is under test here is the thing a person depends on: a coordinator that
+// has gone idle is TYPED AT by the backend when its mailbox has something new,
+// and it is typed at THROUGH THE SHIPPED GATES — the real grid fed from byte
+// zero of a real capture, the real rule, a real calibration verdict, and the one
+// Typist the agent.type method reaches. Nothing here fakes a screen, because the
+// screen is the thing that decides whether a keystroke is safe, and a test that
+// faked it would be asserting that a fake permits typing.
+//
+// The readings of the coordinator's own pane arrive the way production's do:
+// through the observation bridge, off the sweep the watcher already runs. That
+// is the hop the unit tests cannot cover, and it is the one that decides whether
+// a coordinator is ever typed at in the product.
 
 import (
 	"context"
@@ -40,11 +46,24 @@ import (
 // recordingRaiser is the far end of the escalation. It is the notify seam and
 // not the whole pipeline: what an escalation may REACH is internal/notify's
 // and is asserted there, against a routing table this test does not own.
-type recordingRaiser struct{ events []notify.Event }
+//
+// A RAISE THAT FAILS IS REPORTED THROUGH Outcome.Err AND NOTHING ELSE, and
+// that is not this double's convention — it is the seam's own. The pipeline the
+// adapter stands behind is asynchronous past its debounce window
+// (notify.Ingress.Raise returns an empty Outcome by design), so Resolved and
+// Results are empty on every notice that was ACCEPTED, including one no channel
+// will ever take. The only failure a caller here can act on is admission being
+// refused, and that is what `refuse` stands for.
+type recordingRaiser struct {
+	events []notify.Event
+	// refuse is the admission refusal this raise reports. Nil is the ordinary
+	// accepted case, which is what every other test in this file wants.
+	refuse error
+}
 
 func (r *recordingRaiser) Raise(_ context.Context, ev notify.Event) notify.Outcome {
 	r.events = append(r.events, ev)
-	return notify.Outcome{}
+	return notify.Outcome{Event: ev, Err: r.refuse}
 }
 
 // wakeStand is a worker stand plus a REAL coordinator pane: a session with a
@@ -59,12 +78,30 @@ type wakeStand struct {
 	raiser      *recordingRaiser
 	chunks      []agentcapture.Chunk
 	workerID    workers.ID
+	// observe is the production bridge — the SAME one the composition root
+	// binds to the sweep — so what these tests drive is the mapping and the
+	// record's settle rule together rather than a call the product never makes.
+	observe *WorkerObservation
 	// workerSessions is every session a worker has already been given, so a
 	// second registration waits for a session that did not exist yet.
 	workerSessions map[session.ID]bool
 }
 
 const wakeAgent = "claude"
+
+// standMailbox is the record's own store, read by the wake.
+//
+// It exists because of an ordering the composition root does not have: the wake
+// is built before the record, and the record owns the store, so `nil` is
+// correct at construction and the store arrives a few lines later. It is a
+// deferral and not a second view of the mailbox — every call goes straight
+// through to the one store, so there is one order, one cursor and one set of
+// rows.
+type standMailbox struct{ store workers.Store }
+
+func (m *standMailbox) Since(ctx context.Context, mailbox workers.ReaderID, after int64, limit int) ([]workers.Message, error) {
+	return m.store.Since(ctx, mailbox, after, limit)
+}
 
 func newWakeStand(t *testing.T) *wakeStand {
 	t.Helper()
@@ -79,18 +116,34 @@ func newWakeStand(t *testing.T) *wakeStand {
 	watch := paneobserve.New(logger, grid.Store, rules, paneobserve.Config{})
 	raiser := &recordingRaiser{}
 
-	// The stand is built with the backstop already in it, because the record
-	// is what drives the set: wiring it afterwards would let a test assert a
-	// mechanism the product does not have.
+	// The stand is built with the RECORD's own wiring already in it, because
+	// the record is what drives the wake off the readings the sweep produces:
+	// wiring it afterwards would let a test assert a mechanism the product does
+	// not have. The window is ZERO here and it is a configuration rather than a
+	// mistake — it means "the second reading of a state is a settled one",
+	// which is what a test at this level asks for, because it cannot move the
+	// record's clock. internal/workers' own tests move that clock and state the
+	// real window.
+	// The box the wake counts is the record's own store, which does not exist
+	// until the stand is built — the wake is constructed first because the
+	// record's constructor takes it. The deferral lives HERE rather than as a
+	// setter on production code, which hands the store over directly and has no
+	// need of one.
+	box := &standMailbox{}
 	var typist *agenttyping.Typist
 	waker := &workerWaker{typist: nil, log: logger}
-	backstop := workers.NewBackstop(logger, waker,
-		&workerEscalation{raise: raiser, log: logger},
-		workers.WithFactDeadline(workerFactDeadline))
-	stand := newWorkerStand(t, workers.WithBackstop(backstop))
+	wake := workers.NewWake(waker,
+		&workerEscalation{raise: raiser}, box)
+	stand := newWorkerStand(t,
+		workers.WithWake(wake),
+		workers.WithSettleWindow(0),
+	)
 
 	typist = newPaneTypist(logger, grid.Store, rules, verifiedClaude(t), watch, stand.reg)
 	waker.typist = typist
+	// Now the store exists: the SAME box the coordinator fetches from, which
+	// is what makes the number the wake types the number a reader will find.
+	box.store = stand.workerStore
 
 	// The coordinator's own pane, opened through the SAME one session-open
 	// path the product uses (nocx-dkawo.6) — no client attached, which is the
@@ -126,12 +179,28 @@ func newWakeStand(t *testing.T) *wakeStand {
 			header.Cols, header.Rows, participantCols, participantRows)
 	}
 
-	return &wakeStand{
+	s := &wakeStand{
 		workerStand: stand, coordinator: coordinator, coordPTY: coordPTY,
 		grid: grid, rules: rules, raiser: raiser,
 		chunks: chunks, workerID: workerID,
 		workerSessions: map[session.ID]bool{},
 	}
+	// THE BRIDGE, built here as the composition root builds it — with the record
+	// behind it. Its `coordinate` seam is what reaches the wake, and it is the
+	// same one app.New binds, so a coordinator typed at in the product is typed
+	// at by this code path.
+	s.observe = &WorkerObservation{
+		enrolments: stand.enrol,
+		observe: func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, st workers.ObservedState) error {
+			return stand.record.Observe(ctx, id, l, st)
+		},
+		coordinate: func(sessionID string, st workers.ObservedState) {
+			stand.record.ObserveCoordinator(context.Background(), sessionID, st)
+		},
+		liveness: stand.enrol.livenessOf,
+		log:      logger,
+	}
+	return s
 }
 
 // driveTo feeds the coordinator's real grid forward through the capture until
@@ -150,6 +219,30 @@ func (w *wakeStand) driveTo(t *testing.T, atMs int64, want agentdriver.State) {
 		f, err := w.grid.Frame(string(w.coordinator))
 		return err == nil && w.rules.Classify(wakeAgent, f) == want
 	})
+}
+
+// reads is one classification of the coordinator's own pane, delivered the way
+// the sweep delivers it — through the bridge, so the mapping and the settle
+// rule are both exercised.
+//
+// It is called TWICE per settled state and once per reading in between, because
+// the record's window is zero here: the first call is a state it has not seen
+// and the second is that state having held, which is what "settled" means.
+func (w *wakeStand) reads(t *testing.T, state agentdriver.State) {
+	t.Helper()
+	// The real frame is read first, so the grid and the driver agree that this
+	// is what the pane shows: a classification the pane does not support would
+	// be a fact this test invented.
+	f, err := w.grid.Frame(string(w.coordinator))
+	if err != nil {
+		t.Fatalf("read the coordinator's own frame: %v", err)
+	}
+	if got := w.rules.Classify(wakeAgent, f); got != state {
+		t.Fatalf("the coordinator's pane is %q and this call says %q", got, state)
+	}
+	o := paneobserve.Observation{PaneID: string(w.coordinator), Agent: wakeAgent, State: state}
+	w.observe.ObserveSession(o)
+	w.observe.ObserveSession(o)
 }
 
 // register starts one worker in the wake stand's worker and supplies the
@@ -193,6 +286,17 @@ func (w *wakeStand) register(t *testing.T, task string) workers.Participant {
 		t.Fatalf("register: %v", got.err)
 	}
 	return got.p
+}
+
+// settledIdle drives one worker's pane to settled idle, which is what puts a
+// message in the coordinator's mailbox.
+func (w *wakeStand) settledIdle(t *testing.T, p workers.Participant) {
+	t.Helper()
+	o := paneobserve.Observation{
+		PaneID: p.Liveness.SessionID, Agent: wakeAgent, State: agentdriver.StateFreeText,
+	}
+	w.observe.ObserveSession(o)
+	w.observe.ObserveSession(o)
 }
 
 // verifiedClaude drives a REAL calibration to completion against the shipped
@@ -266,54 +370,57 @@ func captureFrame(t *testing.T, name string, atMs int64) paneview.Frame {
 	return moments[0].Frame
 }
 
-// ── the criterion ─────────────────────────────────────────────────────────
+// ── the criterion, through the shipped seams ──────────────────────────────
 
-// THE ACCEPTANCE CRITERION, end to end through the shipped seams: a
-// coordinator that has been sitting idle is woken by the backend when its
-// worker declares, and the text reaches its pane without a person touching
-// anything.
+// THE ACCEPTANCE CRITERION at the composition level: a coordinator that has
+// been sitting idle is woken by the backend when a worker's pane settles, and
+// the line reaches its own pty through the shipped typing gate without a person
+// touching anything.
 //
-// The four assertions are ordered the way the mechanism is: nothing is armed
-// while nothing is owed; the declaration puts a fact in the set; the wake
-// reaches the coordinator's own pty; and the fact is STILL OWED afterwards,
-// because delivery is unacknowledged and only the coordinator's own call
-// closes it.
-func TestAnIdleCoordinatorIsWokenWhenItsWorkerDeclares(t *testing.T) {
-	ctx := context.Background()
+// The four assertions are ordered the way the mechanism is: nothing is typed
+// while the mailbox is empty; the settled state puts a message in it; the wake
+// reaches the coordinator's pty and carries no worker content; and the
+// coordinator's OWN read is what clears the batch.
+func TestAnIdleCoordinatorIsWokenWhenItsWorkerSettlesIdle(t *testing.T) {
 	w := newWakeStand(t)
+	ctx := context.Background()
 	w.driveTo(t, 11000, agentdriver.StateFreeText)
 
 	p := w.register(t, "read AGENTS.md and report")
-	if got := len(w.record.Undispatched()); got != 0 {
-		t.Fatalf("undispatched facts while the worker is still working = %d, want 0", got)
+
+	// The round trip that has to happen before anything is typed: the
+	// coordinator's own pane is read as idle and that reading is settled.
+	w.reads(t, agentdriver.StateFreeText)
+	if got := w.coordPTY.read(); got != "" {
+		t.Fatalf("nocx typed into a coordinator with an empty mailbox: %q", got)
 	}
 
-	// The worker declares over the authenticated channel. Nothing about the
-	// coordinator is asked to have happened first: it has been idle since it
-	// spawned, which is the normal state and not the failure.
-	before := len(w.coordPTY.read())
-	if _, err := w.record.Declared(ctx, p.ID, p.Liveness,
-		workers.Declaration{OK: true, Summary: "read it", At: time.Now()}); err != nil {
-		t.Fatalf("declare: %v", err)
-	}
+	// The worker's pane settles idle, which is ONE message in the mailbox.
+	w.settledIdle(t, p)
 
-	// The bytes travel the SAME queue a person's keystrokes take, and the
-	// queue drains on the session's own write loop — so this waits on the
-	// pty having them rather than on a duration.
-	// The condition is the WHOLE wake — the paste and the submit key that
-	// follows it as a separate write. Waiting on the text alone would be
-	// satisfied by the paste, which is the state in which the coordinator is
-	// looking at an unsent line and no turn has started.
+	// The bytes travel the SAME queue a person's keystrokes take, and the queue
+	// drains on the session's own write loop — so this waits on the pty having
+	// them rather than on a duration.
+	//
+	// The condition is the WHOLE wake — the text and the submit key that follows
+	// it as a separate write. Waiting on the text alone would be satisfied by
+	// the text, which is the state in which the coordinator is looking at an
+	// unsent line and no turn has started.
 	var typed string
 	waittest.WaitFor(t, "the wake and its submit key to reach the coordinator's pty", func() bool {
-		typed = w.coordPTY.read()[before:]
-		return strings.Contains(typed, string(p.ID)) && strings.HasSuffix(typed, "\r")
+		typed = w.coordPTY.read()
+		return strings.Contains(typed, "workers.inbox") && strings.HasSuffix(typed, "\r")
 	})
-	if !strings.Contains(typed, string(p.ID)) {
-		t.Fatalf("the coordinator's pane was not told which worker: %q", typed)
+	const want = "nocx: you have 1 new messages from your workers. Call workers.inbox."
+	if !strings.Contains(typed, want) {
+		t.Fatalf("the coordinator's pane was typed at with %q, want it to contain %q", typed, want)
 	}
-	if !strings.Contains(typed, "workers.holdings") {
-		t.Fatalf("the coordinator's pane was not told what to call: %q", typed)
+	// NO WORKER CONTENT, asserted as the absence of everything the worker ever
+	// said: its participant id and its task are the only text it owns, and a
+	// line carrying free text from a model into another agent's input region is
+	// prompt injection performed with our own hands.
+	if strings.Contains(typed, string(p.ID)) || strings.Contains(typed, "AGENTS.md") {
+		t.Fatalf("the wake carried a worker's own words into the coordinator's pane: %q", typed)
 	}
 	// The submit key, sent SEPARATELY so it cannot be swallowed as paste
 	// content. Without it the coordinator is looking at an unsent line and no
@@ -322,118 +429,61 @@ func TestAnIdleCoordinatorIsWokenWhenItsWorkerDeclares(t *testing.T) {
 		t.Fatalf("nothing submitted the wake, so no turn starts: %q", typed)
 	}
 
-	open := w.record.Undispatched()
-	if len(open) != 1 || !open[0].Wake.Delivered {
-		t.Fatalf("undispatched = %+v, want one fact recording a delivered wake", open)
+	// And the coordinator's own read is what ends the batch.
+	if got := len(w.record.Undispatched()); got != 0 {
+		t.Fatalf("undispatched before the coordinator looked = %d, want 0: a settled idle is not a fact", got)
+	}
+	box := workers.ReaderID(w.coordinator)
+	fetched, err := w.record.Inbox(ctx, box, box, 0)
+	if err != nil {
+		t.Fatalf("the coordinator's own read: %v", err)
+	}
+	if len(fetched.Messages) != 1 || fetched.Messages[0].Observed == nil {
+		t.Fatalf("the coordinator was handed %+v, want the one observation", fetched.Messages)
 	}
 
-	// And the coordinator's own call is what closes it.
-	if _, err := w.record.HeldBy(ctx, string(w.coordinator)); err != nil {
-		t.Fatalf("held by: %v", err)
-	}
-	if got := len(w.record.Undispatched()); got != 0 {
-		t.Fatalf("undispatched after the coordinator asked = %d, want 0", got)
+	// A read that has happened retypes nothing, at any pause.
+	before := len(w.coordPTY.read())
+	waittest.WaitFor(t, "the record to settle after the read", func() bool { return true })
+	if got := w.coordPTY.read()[before:]; got != "" {
+		t.Fatalf("a batch that was read was typed at anyway: %q", got)
 	}
 }
 
-// A pane that is not waiting for input receives NOTHING AT ALL, and the
-// refusal is recorded with its reason rather than reported as sent.
+// A COORDINATOR THAT IS NOT WAITING FOR INPUT RECEIVES NOTHING AT ALL, and
+// nothing is armed under the refusal.
 //
 // This is the hazard the whole typing gate exists for: a keystroke into a
 // permission menu does not merely fail to deliver, it ANSWERS the menu, which
 // can approve a tool call the person never saw.
 func TestACoordinatorThatIsNotWaitingForInputIsNotTyped(t *testing.T) {
-	ctx := context.Background()
 	w := newWakeStand(t)
-	// Far enough into the same capture that the pane is no longer idle.
 	w.driveTo(t, 11000, agentdriver.StateFreeText)
 	p := w.register(t, "reports into a busy coordinator")
 
-	// Now drive the coordinator into a state the rule refuses.
+	// The coordinator is idle and settled first — so it is a pane nocx has
+	// already decided it MAY type into — and then it starts working.
+	w.reads(t, agentdriver.StateFreeText)
 	busy := replayInto(t, w, "claude-working", 17000, agentdriver.StateWorking)
 	if !busy {
 		t.Fatalf("the corpus did not drive the pane to working")
 	}
+	w.reads(t, agentdriver.StateWorking)
 
 	before := len(w.coordPTY.read())
-	if _, err := w.record.Declared(ctx, p.ID, p.Liveness,
-		workers.Declaration{OK: true, Summary: "done", At: time.Now()}); err != nil {
-		t.Fatalf("declare: %v", err)
-	}
+	w.settledIdle(t, p)
 	if got := w.coordPTY.read()[before:]; got != "" {
 		t.Fatalf("nocx typed %q into a pane that was not waiting for input", got)
 	}
-
-	open := w.record.Undispatched()
-	if len(open) != 1 {
-		t.Fatalf("undispatched = %d, want the refused fact still owed", len(open))
+	// And the mail is still there: a refusal is not a loss, it is a wait.
+	box := workers.ReaderID(w.coordinator)
+	fetched, err := w.record.Inbox(context.Background(), box, box, 0)
+	if err != nil {
+		t.Fatalf("read the mailbox: %v", err)
 	}
-	if open[0].Wake.Delivered {
-		t.Fatalf("a refusal was recorded as a delivery: %+v", open[0].Wake)
+	if len(fetched.Messages) != 1 {
+		t.Fatalf("the observation was lost with the refusal: %+v", fetched.Messages)
 	}
-	if !strings.Contains(open[0].Wake.Reason, "waiting for input") {
-		t.Fatalf("the refusal does not say why: %q", open[0].Wake.Reason)
-	}
-
-	// The deadline is running under the refusal, and where it goes when it
-	// elapses is asserted below — the elapsing itself belongs to
-	// internal/worker, which owns the set and the alarm.
-}
-
-// The far end of the backstop: what the person is actually told.
-//
-// The escalation is the composition root's adapter — it stamps an event and
-// hands it to ingress — so this asserts the stamping. Where an attested event
-// may REACH is internal/notify's, enforced default-deny against a routing
-// table this test does not own and must not restate.
-func TestTheEscalationTellsThePersonWhichCoordinatorAndWhy(t *testing.T) {
-	raiser := &recordingRaiser{}
-	esc := &workerEscalation{raise: raiser, log: log.NewSlogAdapter(nil)}
-
-	t.Run("the coordinator was never reached", func(t *testing.T) {
-		raiser.events = nil
-		esc.Escalate(context.Background(), workers.Fact{
-			Participant: "p-1", Group: "worker-wake", CoordinatorSession: "sess-coordinator",
-			Kind: workers.FactDeclared, State: workers.StateLive, Task: "read AGENTS.md and report",
-			Wake: workers.WakeOutcome{Attempted: true, Reason: "that pane is working"},
-		})
-		if len(raiser.events) != 1 {
-			t.Fatalf("events = %d, want 1", len(raiser.events))
-		}
-		ev := raiser.events[0]
-		if ev.Kind != notify.KindWorkersUndispatched || ev.Trust != notify.TrustAttested {
-			t.Fatalf("event = %+v, want an attested workers.undispatched", ev)
-		}
-		// The coordinator's pane and not the worker's: the fact is about a
-		// worker, and the decision is the coordinator's, so a notification
-		// that opened the worker's pane would show the screen that is NOT
-		// waiting for anybody.
-		if ev.SessionID != "sess-coordinator" {
-			t.Fatalf("the notification names session %q, want the coordinator's", ev.SessionID)
-		}
-		if !strings.Contains(ev.Body, "could not reach the coordinator") ||
-			!strings.Contains(ev.Body, "that pane is working") {
-			t.Fatalf("the person is not told the coordinator was never reached, or why: %q", ev.Body)
-		}
-		if !strings.Contains(ev.Title, "read AGENTS.md and report") {
-			t.Fatalf("the person is not told what the worker was doing: %q", ev.Title)
-		}
-	})
-
-	t.Run("the coordinator was reached and did nothing", func(t *testing.T) {
-		raiser.events = nil
-		esc.Escalate(context.Background(), workers.Fact{
-			Participant: "p-1", CoordinatorSession: "sess-coordinator",
-			Task: "read AGENTS.md and report",
-			Wake: workers.WakeOutcome{Attempted: true, Delivered: true},
-		})
-		// A different sentence, because it asks the person for a different
-		// thing: nobody is stuck on a modal, the coordinator simply has not
-		// acted.
-		if !strings.Contains(raiser.events[0].Body, "has not acted") {
-			t.Fatalf("body = %q", raiser.events[0].Body)
-		}
-	})
 }
 
 // replayInto feeds a second capture onto the coordinator's live grid and
@@ -464,32 +514,136 @@ func replayInto(t *testing.T, w *wakeStand, name string, atMs int64, want agentd
 	return reached
 }
 
-// A worker whose coordinator's pane nocx never watched is the honest refusal at
-// the other end: there is no rule to ask about that pane, so nothing is typed
-// into it, and the fact is still owed.
-func TestAGroupWhoseCoordinatorPaneIsNotWatchedIsNotTyped(t *testing.T) {
-	ctx := context.Background()
+// ── the human, two ways ───────────────────────────────────────────────────
+
+// The far end of the wake: what the person is actually told, and that the two
+// situations get DIFFERENT sentences.
+//
+// The escalation is the composition root's adapter — it stamps an event and
+// hands it to ingress — so this asserts the stamping. Where an attested event
+// may REACH is internal/notify's, enforced default-deny against a routing
+// table this test does not own and must not restate.
+func TestTheEscalationTellsThePersonWhichSituationThisIs(t *testing.T) {
+	raiser := &recordingRaiser{}
+	esc := &workerEscalation{raise: raiser}
+
+	t.Run("the coordinator never read its mail", func(t *testing.T) {
+		raiser.events = nil
+		if err := esc.Escalate(context.Background(), workers.Notice{
+			Mailbox: "sess-coordinator", Kind: workers.NoticeUnread, Unread: 4, Lines: 3,
+		}); err != nil {
+			t.Fatalf("escalate: %v", err)
+		}
+		if len(raiser.events) != 1 {
+			t.Fatalf("events = %d, want 1", len(raiser.events))
+		}
+		ev := raiser.events[0]
+		if ev.Kind != notify.KindCoordinatorStalled || ev.Trust != notify.TrustAttested {
+			t.Fatalf("event = %+v, want an attested coordinator.stalled", ev)
+		}
+		// The coordinator's pane and not a worker's: the situation is about
+		// workers and the decision is the coordinator's, so a notification that
+		// opened a worker's pane would show a screen that is not the one which
+		// stopped reading.
+		if ev.SessionID != "sess-coordinator" {
+			t.Fatalf("the notification names session %q, want the coordinator's", ev.SessionID)
+		}
+		if !strings.Contains(ev.Body, "4 unread") || !strings.Contains(ev.Body, "3 line") {
+			t.Fatalf("the person is not told how much is waiting or how often nocx tried: %q", ev.Body)
+		}
+	})
+
+	t.Run("the coordinator is blocked with live workers", func(t *testing.T) {
+		raiser.events = nil
+		if err := esc.Escalate(context.Background(), workers.Notice{
+			Mailbox: "sess-coordinator", Kind: workers.NoticeBlocked, LiveWorkers: 2,
+		}); err != nil {
+			t.Fatalf("escalate: %v", err)
+		}
+		body := raiser.events[0].Body
+		// A DIFFERENT sentence, because it asks the person for a different
+		// thing: nothing is being coordinated because the coordinator is stuck
+		// on a screen of its own, and a notice about unread mail would send
+		// somebody looking for mail that is not the problem.
+		if !strings.Contains(body, "blocked") || !strings.Contains(body, "2 worker") {
+			t.Fatalf("the blocked notice does not say what is wrong: %q", body)
+		}
+		if strings.Contains(body, "unread") {
+			t.Fatalf("the blocked notice is worded as an unread one: %q", body)
+		}
+	})
+
+	t.Run("a kind with no words is refused rather than misworded", func(t *testing.T) {
+		raiser.events = nil
+		err := esc.Escalate(context.Background(), workers.Notice{
+			Mailbox: "sess-coordinator", Kind: workers.NoticeKind("invented"),
+		})
+		if err == nil {
+			t.Fatalf("a notice kind with no vocabulary was raised anyway")
+		}
+		if len(raiser.events) != 0 {
+			t.Fatalf("a notice with the wrong words reached the pipeline: %+v", raiser.events)
+		}
+	})
+}
+
+// FAILURE PATH (acceptance criterion 8): a notice nobody could receive is
+// reported as a failure, not as a person told.
+//
+// This is the state a backend with no renderer attached is in, and it is the
+// one path whose whole purpose is to be the last resort: reporting it as
+// delivered would leave a worker's mail unread for ever with the log claiming
+// somebody had been told.
+func TestANoticeThePipelineRefusedIsReportedAsAFailure(t *testing.T) {
+	raiser := &recordingRaiser{refuse: errors.New("the router's queue is full")}
+	esc := &workerEscalation{raise: raiser}
+
+	err := esc.Escalate(context.Background(), workers.Notice{
+		Mailbox: "sess-coordinator", Kind: workers.NoticeUnread, Unread: 1, Lines: 3,
+	})
+	if err == nil {
+		t.Fatalf("a notice the pipeline refused was reported as delivered")
+	}
+	if !errors.Is(err, raiser.refuse) {
+		t.Fatalf("err = %v, want the pipeline's own refusal", err)
+	}
+
+	// And with no pipeline at all it is a failure too, rather than a nil that
+	// reads as success.
+	unwired := &workerEscalation{}
+	if err := unwired.Escalate(context.Background(), workers.Notice{
+		Mailbox: "sess-coordinator", Kind: workers.NoticeUnread, Unread: 1,
+	}); err == nil {
+		t.Fatalf("an unwired escalation reported success")
+	}
+}
+
+// A DEAD PANE: the coordinator's session is gone while nocx still holds a
+// screen for it.
+//
+// This is the only refusal where the screen says yes: the frame is still
+// free_text, so the gate that stops the other cases lets this one through, and
+// what refuses it is the pane's own input queue. Nothing is reported as woken,
+// and the mail is still there for whoever reads it next.
+func TestACoordinatorWhoseSessionIsGoneIsNotReportedAsWoken(t *testing.T) {
 	w := newWakeStand(t)
 	w.driveTo(t, 11000, agentdriver.StateFreeText)
-	p := w.register(t, "reports into an unwatched coordinator")
+	p := w.register(t, "reports into a coordinator that is gone")
 
-	// The person closed the agent in that pane: the observation ends with it.
-	w.grid.Withdraw(string(w.coordinator))
+	w.reads(t, agentdriver.StateFreeText)
+
+	if err := w.reg.Close(w.coordinator); err != nil {
+		t.Fatalf("close the coordinator's session: %v", err)
+	}
+	waittest.WaitFor(t, "the coordinator's session to leave the registry", func() bool {
+		_, err := w.reg.Get(w.coordinator)
+		return err != nil
+	})
 
 	before := len(w.coordPTY.read())
-	if _, err := w.record.Declared(ctx, p.ID, p.Liveness,
-		workers.Declaration{OK: true, At: time.Now()}); err != nil {
-		t.Fatalf("declare: %v", err)
-	}
+	w.settledIdle(t, p)
 	if got := w.coordPTY.read()[before:]; got != "" {
-		t.Fatalf("nocx typed %q into a pane it has no live screen for", got)
-	}
-	open := w.record.Undispatched()
-	if len(open) != 1 || open[0].Wake.Delivered {
-		t.Fatalf("undispatched = %+v, want one fact recording a refusal", open)
-	}
-	if open[0].Wake.Reason == "" {
-		t.Fatalf("the refusal carries no reason")
+		t.Fatalf("nocx typed %q into a session that no longer exists", got)
 	}
 }
 
@@ -580,186 +734,74 @@ func TestAGroupWithNoCoordinatorSessionIsARefusalAndNotAWrite(t *testing.T) {
 	}
 }
 
-// A DEAD PANE: the coordinator's session is gone while nocx still holds a
-// screen for it.
+// NOTHING IN THE PRODUCT RAISES THE HUMAN FROM A PER-FACT DEADLINE.
 //
-// This is the third of the bead's three refusals and the only one where the
-// screen says yes: the frame is still free_text, so the gate that stops the
-// other two lets this one through, and what refuses it is the pane's own
-// input queue. Recording it as a delivery would leave a fact whose deadline
-// never fired for a coordinator that no longer exists.
-func TestACoordinatorWhoseSessionIsGoneIsNotReportedAsWoken(t *testing.T) {
-	ctx := context.Background()
+// The mechanism this replaced put every fact under its own deadline, so a
+// worker's declaration or exit could reach a person on its own — and two
+// mechanisms that can both call the human will. This asserts the deletion at
+// the composition level: a coordinator that never reads its workers' mail is
+// still merely idle, and no number of facts about its workers moves it.
+func TestFactsAloneReachNobody(t *testing.T) {
 	w := newWakeStand(t)
+	ctx := context.Background()
 	w.driveTo(t, 11000, agentdriver.StateFreeText)
-	p := w.register(t, "reports into a coordinator that is gone")
+	p := w.register(t, "read AGENTS.md and report")
 
-	if err := w.reg.Close(w.coordinator); err != nil {
-		t.Fatalf("close the coordinator's session: %v", err)
-	}
-	waittest.WaitFor(t, "the coordinator's session to leave the registry", func() bool {
-		_, err := w.reg.Get(w.coordinator)
-		return err != nil
-	})
+	// The coordinator is idle and settled, so the wake is armed and willing.
+	w.reads(t, agentdriver.StateFreeText)
 
+	// Two facts that need judgement, which is what the old mechanism escalated.
 	if _, err := w.record.Declared(ctx, p.ID, p.Liveness,
-		workers.Declaration{OK: true, At: time.Now()}); err != nil {
+		workers.Declaration{OK: false, Summary: "could not build"}); err != nil {
 		t.Fatalf("declare: %v", err)
 	}
-	open := w.record.Undispatched()
-	if len(open) != 1 {
-		t.Fatalf("undispatched = %d, want the fact still owed", len(open))
+	if got := len(w.record.Undispatched()); got != 1 {
+		t.Fatalf("undispatched = %d, want the fact recorded", got)
 	}
-	if open[0].Wake.Delivered {
-		t.Fatalf("a wake into a session that no longer exists was recorded as delivered: %+v", open[0].Wake)
+	if got := len(w.raiser.events); got != 0 {
+		t.Fatalf("a fact alone reached the human: %+v", got)
 	}
-	if open[0].Wake.Reason == "" {
-		t.Fatalf("the refusal carries no reason")
+	if got := w.coordPTY.read(); got != "" {
+		t.Fatalf("a fact alone produced a line: %q", got)
 	}
 }
 
-// ── fan-out, through the real seams (nocx-dkawo.4) ────────────────────────
-
-// THREE WORKERS RUN, and the coordinator's pane stays quiet until the worker
-// arrives.
-//
-// This is the routing table asserted where a person would feel it: three
-// real sessions in three real panes, and the coordinator's own pty receiving
-// nothing at all for the first two completions and the wake for the third.
-// The unit tests decide the table; this decides that the table is the one
-// wired into the product.
-func TestThreeWorkersRunAndTheCoordinatorIsWokenOnceAtTheEnd(t *testing.T) {
-	ctx := context.Background()
+// A coordinator whose pane nocx never watched is the honest refusal at the
+// other end: there is no rule to ask about that pane, so nothing is typed into
+// it, and the mail is still there.
+func TestAGroupWhoseCoordinatorPaneIsNotWatchedIsNotTyped(t *testing.T) {
 	w := newWakeStand(t)
 	w.driveTo(t, 11000, agentdriver.StateFreeText)
+	p := w.register(t, "reports into an unwatched coordinator")
 
-	participants := []workers.Participant{
-		w.register(t, "read AGENTS.md"),
-		w.register(t, "read the architecture"),
-		w.register(t, "read the vision"),
-	}
-	if participants[0].ID == participants[1].ID || participants[1].ID == participants[2].ID {
-		t.Fatalf("three registrations produced fewer than three participants: %v", participants)
-	}
+	// A settled idle reading first, so the record knows it has a coordinator —
+	// and then the person closed the agent in that pane, which ends the
+	// observation.
+	w.reads(t, agentdriver.StateFreeText)
+	w.grid.Withdraw(string(w.coordinator))
 
-	quiet := len(w.coordPTY.read())
-	finishWorker(t, w, participants[0])
-	finishWorker(t, w, participants[1])
-	if got := w.coordPTY.read()[quiet:]; got != "" {
-		t.Fatalf("the coordinator was typed into while a worker was still running: %q", got)
+	before := len(w.coordPTY.read())
+	w.settledIdle(t, p)
+	if got := w.coordPTY.read()[before:]; got != "" {
+		t.Fatalf("nocx typed %q into a pane it has no live screen for", got)
 	}
-	if got := len(w.record.Undispatched()); got != 0 {
-		t.Fatalf("undispatched while a worker is still running = %d, want 0", got)
+	box := workers.ReaderID(w.coordinator)
+	fetched, err := w.record.Inbox(context.Background(), box, box, 0)
+	if err != nil {
+		t.Fatalf("read the mailbox: %v", err)
 	}
-
-	finishWorker(t, w, participants[2])
-	var typed string
-	waittest.WaitFor(t, "the worker's end to reach the coordinator's pty", func() bool {
-		typed = w.coordPTY.read()[quiet:]
-		return strings.HasSuffix(typed, "\r")
-	})
-	if !strings.Contains(typed, "workers.holdings") {
-		t.Fatalf("the coordinator was not told what to call: %q", typed)
-	}
-
-	// One wake for the worker, not one per fact: the third worker produces both
-	// a declaration and an exit, and both need judgement once nothing else is
-	// running.
-	if strings.Count(typed, "workers.holdings") != 1 {
-		t.Fatalf("the coordinator was woken %d times for one worker: %q",
-			strings.Count(typed, "workers.holdings"), typed)
-	}
-
-	// And the number the design is judged by is a read, not a guess.
-	cost := w.record.Cost()
-	if cost.Facts() != 6 {
-		t.Fatalf("facts = %d, want six (three workers, two facts each)", cost.Facts())
-	}
-	if cost.Routine != 4 {
-		t.Fatalf("routine = %d, want the four facts nobody was woken for", cost.Routine)
-	}
-	if cost.Woken != 1 {
-		t.Fatalf("woken = %d, want one delivered wake", cost.Woken)
-	}
-	if cost.Escalated != 0 {
-		t.Fatalf("escalated = %d; the coordinator was reached, so nobody should have been", cost.Escalated)
-	}
-
-	if _, err := w.record.HeldBy(ctx, string(w.coordinator)); err != nil {
-		t.Fatalf("held by: %v", err)
-	}
-	if got := len(w.record.Undispatched()); got != 0 {
-		t.Fatalf("undispatched after the coordinator asked = %d, want 0", got)
+	if len(fetched.Messages) != 1 {
+		t.Fatalf("the observation was lost with the refusal: %+v", fetched.Messages)
 	}
 }
 
-// finishWorker declares success and closes the worker's real session, which
-// is the two facts arriving the way the product produces them.
-func finishWorker(t *testing.T, w *wakeStand, p workers.Participant) {
-	t.Helper()
-	ctx := context.Background()
-	before := w.record.Cost().Facts()
-	if _, err := w.record.Declared(ctx, p.ID, p.Liveness,
-		workers.Declaration{OK: true, Summary: "done", At: time.Now()}); err != nil {
-		t.Fatalf("declare %s: %v", p.ID, err)
-	}
-	if err := w.reg.Close(session.ID(p.Liveness.SessionID)); err != nil {
-		t.Fatalf("close %s: %v", p.ID, err)
-	}
-	// The exit is observed by the supervisor on its own goroutine, and the
-	// Registrar's admit terminalizes the record BEFORE it routes the fact —
-	// so a stored StateCompleted is not yet a counted fact. Waiting on the
-	// state alone let the caller read Cost one fact short (CI run
-	// 35202278317, ci-mac: facts = 5). Both facts counted is the end of
-	// this worker's arrival.
-	waittest.WaitFor(t, "the worker's exit to reach the record and be routed", func() bool {
-		stored, err := w.workerStore.Participant(ctx, p.ID)
-		return err == nil && stored.State == workers.StateCompleted &&
-			w.record.Cost().Facts() == before+2
-	})
-}
+// ── the epic's sentence, still true ───────────────────────────────────────
 
-// One card per worker, and the card says how many — so a person who reads it
-// knows the other four were deliberately not raised rather than lost.
-func TestTheEscalationSaysHowManyOthersAreWaiting(t *testing.T) {
-	raiser := &recordingRaiser{}
-	esc := &workerEscalation{raise: raiser, log: log.NewSlogAdapter(nil)}
-	for _, tc := range []struct {
-		also int
-		says string
-	}{
-		{also: 0, says: ""},
-		{also: 1, says: "One other worker"},
-		{also: 4, says: "4 other workers"},
-	} {
-		raiser.events = nil
-		esc.Escalate(context.Background(), workers.Fact{
-			Participant: "p-1", CoordinatorSession: "sess-coordinator", Task: "read it",
-			AlsoOwed: tc.also, Wake: workers.WakeOutcome{Attempted: true, Delivered: true},
-		})
-		body := raiser.events[0].Body
-		if tc.says == "" {
-			if strings.Contains(body, "also waiting") {
-				t.Fatalf("a single-fact card counts others that are not there: %q", body)
-			}
-			continue
-		}
-		if !strings.Contains(body, tc.says) {
-			t.Fatalf("body = %q, want it to say %q", body, tc.says)
-		}
-	}
-}
-
-// ── the epic's sentence, through the real seams (nocx-dkawo.13) ───────────
-
-// ONE WAIT ON THREE WORKERS, and a close that ends the rest.
+// ONE WAIT Returns when the first of three settles, and a close ends the rest.
 //
-// This is the shape the epic's DONE WHEN names — "creates three workers,
-// gives each a task, waits on all three with ONE wait that returns when the
-// first settles, reads what each produced, and closes them" — driven through
-// real sessions in real panes. What is missing from it is a MODEL: the calls
-// a coordinator would make are asserted where they live, and this is the
-// sequence they drive.
+// workers.wait is removed in nocx-luqz9.6 and is untouched here; this asserts
+// only that the arrival plumbing the wake added did not disturb it, because the
+// same read that clears a wake is the read a wait answers with.
 func TestOneWaitReturnsWhenTheFirstOfThreeSettlesAndACloseEndsTheRest(t *testing.T) {
 	ctx := context.Background()
 	w := newWakeStand(t)
@@ -771,7 +813,6 @@ func TestOneWaitReturnsWhenTheFirstOfThreeSettlesAndACloseEndsTheRest(t *testing
 		w.register(t, "read the vision"),
 	}
 
-	// One wait, on the worker and not on a worker.
 	waited := make(chan []workers.Participant, 1)
 	go func() {
 		held, err := w.record.Wait(ctx, string(w.coordinator), w.workerID)
@@ -801,22 +842,6 @@ func TestOneWaitReturnsWhenTheFirstOfThreeSettlesAndACloseEndsTheRest(t *testing
 		t.Fatalf("the wait returned %d settled and %d live, want 1 and 2", settled, live)
 	}
 
-	// And it read what that one produced.
-	for _, p := range held {
-		if p.ID != participants[0].ID {
-			continue
-		}
-		if p.State != workers.StateCompleted {
-			t.Fatalf("the settled worker is %q, want completed", p.State)
-		}
-		if p.Declared == nil || p.Declared.Summary != "done" {
-			t.Fatalf("the coordinator was not told what it produced: %+v", p.Declared)
-		}
-	}
-
-	// Now close the other two. The close ends the session and takes the
-	// participant's tab out of the window (nocx-xn63t.4.6); what terminalizes
-	// them is the exit that follows, by the same path any exit takes.
 	for _, p := range participants[1:] {
 		if err := w.record.Close(ctx, string(w.coordinator), p.ID); err != nil {
 			t.Fatalf("close %s: %v", p.ID, err)
@@ -832,15 +857,35 @@ func TestOneWaitReturnsWhenTheFirstOfThreeSettlesAndACloseEndsTheRest(t *testing
 			t.Fatalf("read back: %v", err)
 		}
 		// ABANDONED and not completed: the worker was ended and never said
-		// what it produced, which is exactly what the record should say
-		// about a worker somebody stopped.
+		// what it produced, which is exactly what the record should say about a
+		// worker somebody stopped.
 		if stored.State != workers.StateAbandoned {
 			t.Fatalf("a closed worker is %q, want abandoned", stored.State)
 		}
 	}
-	if _, err := w.reg.Get(session.ID(participants[1].Liveness.SessionID)); err == nil {
-		t.Fatalf("the closed worker's session is still in the registry")
+}
+
+// finishWorker declares success and closes the worker's real session, which
+// is the two facts arriving the way the product produces them.
+func finishWorker(t *testing.T, w *wakeStand, p workers.Participant) {
+	t.Helper()
+	ctx := context.Background()
+	before := w.record.Cost().Facts()
+	if _, err := w.record.Declared(ctx, p.ID, p.Liveness,
+		workers.Declaration{OK: true, Summary: "done", At: time.Now()}); err != nil {
+		t.Fatalf("declare %s: %v", p.ID, err)
 	}
+	if err := w.reg.Close(session.ID(p.Liveness.SessionID)); err != nil {
+		t.Fatalf("close %s: %v", p.ID, err)
+	}
+	// The exit is observed by the supervisor on its own goroutine, and the
+	// Registrar's admit terminalizes the record BEFORE it routes the fact — so
+	// a stored StateCompleted is not yet a counted fact.
+	waittest.WaitFor(t, "the worker's exit to reach the record and be routed", func() bool {
+		stored, err := w.workerStore.Participant(ctx, p.ID)
+		return err == nil && stored.State == workers.StateCompleted &&
+			w.record.Cost().Facts() == before+2
+	})
 }
 
 // A coordinator cannot close somebody else's worker, and the refusal comes
@@ -851,9 +896,6 @@ func TestACoordinatorCannotCloseAWorkerItDoesNotHold(t *testing.T) {
 	w.driveTo(t, 11000, agentdriver.StateFreeText)
 	p := w.register(t, "belongs to this coordinator")
 
-	// ErrNotHeld, which is what this test's own name says. Ownership got its
-	// own error when the wire was found spelling a delegation's STATE with
-	// the ownership sentence (nocx-e5e8q).
 	if err := w.record.Close(ctx, "sess-somebody-else", p.ID); !errors.Is(err, workers.ErrNotHeld) {
 		t.Fatalf("close by a stranger = %v, want ErrNotHeld", err)
 	}

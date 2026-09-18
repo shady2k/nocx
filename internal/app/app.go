@@ -461,23 +461,28 @@ func WithLogFilePath(path string) Option {
 // before it had a control beside it.
 const notifyDebounceWindow = 8 * time.Second
 
-// workerFactDeadline is how long a worker's fact may sit undispatched before
-// the person is told (D2 of the 2026-08-24 orchestration mechanism design).
+// workerRetryPause is how long the wake waits before typing the same line at a
+// coordinator again, and workerWakeAttempts is how many lines one unread batch
+// gets before the person is told (design §5.4).
 //
-// It is a placeholder with both ends of the interval named, and deliberately
-// not a measured value: §10.8 says a number wrong in either direction breaks
-// the backstop — too short and a thinking coordinator is escalated past, too
-// long and the person learns late — and that it probably differs by fact
-// class, which needs the fan-out nocx-dkawo.4 brings to measure at all. Five
-// minutes is chosen to be longer than an agent turn and shorter than the
-// interval in which a person forgets they started a worker.
-const workerFactDeadline = 5 * time.Minute
+// Both are placeholders with the ends of their interval named, and deliberately
+// not measured values: §10.8 says a number wrong in either direction breaks the
+// pair — too short and a thinking coordinator is retyped over, too long and the
+// person learns late — and that it probably differs by how much the coordinator
+// is doing, which needs the fan-out nocx-dkawo.4 brings to measure at all. Two
+// minutes is longer than an agent turn and three lines is more than a
+// coordinator needs to notice one, so the whole budget is spent inside the
+// interval in which a person still remembers starting the effort.
+const (
+	workerRetryPause   = 2 * time.Minute
+	workerWakeAttempts = 3
+)
 
 // workerParticipantBound is how many non-terminal participants one worker may
 // hold, and workerEnrolmentDeadline is how long a registration waits for the
 // launcher's enrolment before it is terminalized.
 //
-// Both are named here for the reason the fact deadline is: they are the
+// Both are named here for the reason the wake's numbers are: they are the
 // product's numbers, and internal/worker names the interval rather than
 // choosing its length. The bound is deliberately small for one-worker workerStore
 // (D15) and is one of the nine open in §10.9; the enrolment deadline has to
@@ -2226,17 +2231,31 @@ func New(opts ...Option) (*App, error) {
 	// the ordinary shape for a cycle between two things the root owns — the
 	// same shape as the emitter and the liveness observer above.
 	workerSup := &workerSupervisor{sessions: sess, log: logger}
-	// The undispatched fact set and its two routes out (nocx-dkawo.3): the
-	// coordinator by a wake through the SAME typist agent.type reaches, the
-	// human by a deadline through the notification pipeline built above. The
-	// deadline's number is stated here because the composition root is where
-	// the product's real values live — and it is a placeholder with both ends
-	// named, not a measurement: §10.8 of the orchestration design puts that in
+	// THE RECORD'S OWN STORE, held here rather than minted inline because it is
+	// also the wake's mailbox (nocx-luqz9.3): the count the wake types is read
+	// from the box the coordinator will fetch from, so there is one store, one
+	// order and one cursor rather than a second view of the same rows.
+	workerStore := workers.NewMemoryStore()
+	// THE WAKE (nocx-luqz9.3, design §5): the line typed at an idle coordinator
+	// whose mailbox has something new, its bounded retries, and the human when
+	// the batch outlives them. It reaches the pane through the SAME typist
+	// agent.type reaches, and the human through the notification pipeline built
+	// above — the composition root is where both exist.
+	//
+	// THE NUMBERS ARE STATED HERE because the composition root is where the
+	// product's real values live, and BOTH ARE INJECTED so a test states an
+	// interval instead of waiting one out. They are placeholders with both ends
+	// named and not measurements: §10.8 of the orchestration design puts that in
 	// nocx-dkawo.4, where fan-out makes the escalated fraction measurable.
-	workerBackstop := workers.NewBackstop(logger,
+	workerWake := workers.NewWake(
 		&workerWaker{typist: paneTyping, log: logger},
-		&workerEscalation{raise: notifyIngress, log: logger},
-		workers.WithFactDeadline(workerFactDeadline))
+		&workerEscalation{raise: notifyIngress},
+		// The record's own store is the mailbox, so the count the wake types is
+		// read from the box the coordinator will fetch from — one store, one
+		// order, one cursor, rather than a second view of the same rows.
+		workerStore,
+		workers.WithRetryPause(workerRetryPause),
+		workers.WithAttemptLimit(workerWakeAttempts))
 	// WHICH TAB EACH PARTICIPANT'S PANE WAS MINTED IN (nocx-xn63t.4.6). One
 	// value, two ends: the spawner writes the pairing where both halves of it
 	// exist, and the closer reads it back when a coordinator's workers.close
@@ -2246,7 +2265,7 @@ func New(opts ...Option) (*App, error) {
 	// doc in workers.go for why nothing else in the process holds it.
 	workerSeats := newWorkerTabs()
 	workerRecord := workers.NewRegistrar(
-		workers.NewMemoryStore(),
+		workerStore,
 		&workerSpawner{
 			layout: contentDB.Layout(), opener: tp, sessions: sess,
 			// tp is also the shell-integration axis's one owner (AD-8): the
@@ -2280,7 +2299,7 @@ func New(opts ...Option) (*App, error) {
 		workerEnrol,
 		workerSup,
 		workers.WithLogger(logger),
-		workers.WithBackstop(workerBackstop),
+		workers.WithWake(workerWake),
 		// The seam a coordinator's workers.close reaches. Unwired it refuses,
 		// which is the right answer: reporting a worker ended that is still
 		// running is the one thing a close must never do.
@@ -2323,6 +2342,14 @@ func New(opts ...Option) (*App, error) {
 		enrolments: workerEnrol,
 		observe: func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, s workers.ObservedState) error {
 			return workerRecord.Observe(ctx, id, l, s)
+		},
+		// The same reading, read for a COORDINATOR (nocx-luqz9.3): a
+		// coordinator is not judged, it is typed into. The record decides
+		// whether this session holds workers at all — a session that holds none
+		// is somebody's own agent, which the record drops — so nothing here
+		// decides it a second time.
+		coordinate: func(sessionID string, s workers.ObservedState) {
+			workerRecord.ObserveCoordinator(context.Background(), sessionID, s)
 		},
 		liveness: workerEnrol.livenessOf,
 		log:      logger,

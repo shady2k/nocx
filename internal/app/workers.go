@@ -1534,15 +1534,18 @@ func (w *workerWaker) Wake(ctx context.Context, coordinatorSession, text string)
 	}
 }
 
-// workerEscalation tells the person about a fact nobody dispatched.
+// workerEscalation tells the person that coordination has stopped.
 //
 // It raises an ordinary notification and decides nothing about where it goes:
 // trust and routing are internal/notify's, enforced default-deny against a
 // table the person owns (§6.1, and where this design and Trust disagree,
 // Trust wins because Trust is enforced in code).
+// IT HOLDS NO LOGGER, for the reason the record's own doc gives: a line that
+// asks log.From(ctx) for its logger carries the module, request id, trace and
+// span of the reading that raised the notice, and cannot forget to. Every call
+// below is made with a context to give it.
 type workerEscalation struct {
 	raise workerNotifier
-	log   log.Logger
 }
 
 // workerNotifier is the escalation's narrow view of the notification pipeline
@@ -1556,52 +1559,81 @@ type workerNotifier interface {
 // Escalate stamps the event and hands it to ingress.
 //
 // The SessionID is the coordinator's, because that is the pane a person
-// clicking the notification wants to be taken to: the fact is about a worker
-// and the decision is the coordinator's, and a notification that opened the
-// worker's pane would be showing the screen that is NOT waiting for anybody.
+// clicking the notification wants to be taken to: the situation is about
+// workers and the decision is the coordinator's, and a notification that opened
+// a worker's pane would be showing the screen that is NOT the one which stopped
+// reading.
 //
-// The body says whether the coordinator was reached and why not, because
-// "your worker finished and nobody has looked at it" and "your worker
-// finished, we told the coordinator, and it has not acted in five minutes"
-// ask the person for different things.
-func (e *workerEscalation) Escalate(ctx context.Context, f workers.Fact) {
+// # Two situations, and the sentence says which
+//
+// An unread batch asks the person to go and look: the coordinator was told,
+// more than once, and did not read. A BLOCKED coordinator asks something else
+// entirely — nothing is being coordinated because the coordinator is stuck on a
+// menu or an error of its own — and a single sentence covering both would send
+// a person looking for mail that is not the problem.
+func (e *workerEscalation) Escalate(ctx context.Context, n workers.Notice) error {
 	if e.raise == nil {
-		e.log.Error("worker: a fact went undispatched and this backend has no notification pipeline",
-			"participant", string(f.Participant), "worker", string(f.Group))
-		return
+		log.From(ctx).Error("worker: coordination has stopped and this backend has no notification pipeline",
+			"session_id", string(n.Mailbox), "notice", string(n.Kind))
+		return errors.New("this backend has no notification pipeline")
 	}
-	body := "The coordinator was told and has not acted."
-	if !f.Wake.Delivered {
-		body = "nocx could not reach the coordinator: " + f.Wake.Reason
+	var title, body string
+	switch n.Kind {
+	case workers.NoticeUnread:
+		title = "A coordinator is not reading its workers' mail"
+		body = fmt.Sprintf(
+			"nocx wrote %d line(s) about %d unread message(s) and none of them was read. "+
+				"Nothing is being coordinated until somebody reads that mailbox.",
+			n.Lines, n.Unread)
+	case workers.NoticeBlocked:
+		title = "A coordinator is stuck, and its workers are not"
+		body = fmt.Sprintf(
+			"The coordinator is blocked on its own screen and holds %d worker(s). "+
+				"Nothing is being coordinated until somebody clears it.",
+			n.LiveWorkers)
+	default:
+		// A kind this adapter does not know is NOT silently raised as one of
+		// the two: a notice whose sentence is about the wrong situation is
+		// worse than one that never arrives, because it sends a person to the
+		// wrong pane. It is refused by name, which is also what a new
+		// NoticeKind will get until it is given words.
+		log.From(ctx).Error("worker: a notice this backend has no words for was not raised",
+			"session_id", string(n.Mailbox), "notice", string(n.Kind))
+		return fmt.Errorf("no notification vocabulary for notice kind %q", n.Kind)
 	}
-	// One card per worker, and the card says how many. Escalation coalesces
-	// (nocx-dkawo.4), so this is the whole situation rather than the first
-	// fact of it, and a person who reads "and 4 others" knows not to go
-	// looking for four more cards that were deliberately not raised.
-	if f.AlsoOwed == 1 {
-		body += " One other worker in this worker is also waiting."
-	} else if f.AlsoOwed > 1 {
-		body += fmt.Sprintf(" %d other workers in this worker are also waiting.", f.AlsoOwed)
-	}
-	title := fmt.Sprintf("A worker is waiting: %s", f.Task)
-	if f.Task == "" {
-		title = "A worker is waiting for its coordinator"
-	}
-	e.raise.Raise(ctx, notify.Event{
-		SessionID: f.CoordinatorSession,
+	// THE EVENT IS SUBMITTED, AND THE ERROR THIS SEAM CAN WITNESS IS THE ONLY
+	// ONE IT REPORTS.
+	//
+	// What it CANNOT witness is delivery: the pipeline in front of this is
+	// asynchronous past its debounce window (Ingress.Raise's own doc says so and
+	// returns an empty Outcome by design), so Resolved and Results are empty on
+	// every notice that was accepted — including the one nobody will receive,
+	// because no renderer is attached. Reading those fields here would report
+	// every real notice as undelivered, which is a false alarm at the one place
+	// that must not have one.
+	//
+	// A channel that fails is the pipeline's own surface: internal/notify's
+	// result handler logs it and records a feed row, and that is asserted where
+	// it lives. What this returns is the failure the CALLER can act on —
+	// admission refused (a limit exceeded), or the caller cancelled — which is
+	// what makes "the attempt is logged and the batch is unchanged" true at the
+	// wake: warn when the notice was taken, error when it was not.
+	out := e.raise.Raise(ctx, notify.Event{
+		SessionID: string(n.Mailbox),
 		Title:     title,
 		Body:      body,
-		Kind:      notify.KindWorkersUndispatched,
-		// Attested: this is nocx's own record reducing a process exit off a
-		// PTY it holds and a declaration over an authenticated channel.
-		// Nothing on a screen took part.
-		Trust: notify.TrustAttested,
-		Level: notify.LevelWarning,
+		Kind:      notify.KindCoordinatorStalled,
+		Trust:     notify.TrustAttested,
+		Level:     notify.LevelWarning,
 		Attribution: notify.Attribution{
 			Backend: commandnames.LocalRoute,
-			Session: f.CoordinatorSession,
+			Session: string(n.Mailbox),
 		},
 	})
+	if out.Err != nil {
+		return fmt.Errorf("the notification pipeline refused the notice: %w", out.Err)
+	}
+	return nil
 }
 
 // ── what nocx SEES (nocx-luqz9.2) ──────────────────────────────────────────
@@ -1638,7 +1670,17 @@ type WorkerObservation struct {
 	// liveness is the incarnation a fact must match to be admitted, read from
 	// the same rendezvous the report path reads it from.
 	liveness func(id workers.ParticipantID) (workers.Liveness, bool)
-	log      log.Logger
+	// coordinate admits a settled reading of a COORDINATOR's own pane
+	// (nocx-luqz9.3). It is a second destination rather than a second bridge
+	// because the two readings are one reading: same sweep, same state, same
+	// moment, and a second crossing would classify the same screen twice.
+	//
+	// The record decides whether the session is a coordinator's — it is the
+	// one that knows which sessions hold workers — so this seam says nothing
+	// about that, exactly as the worker half says nothing about which pane is a
+	// participant's.
+	coordinate func(sessionID string, state workers.ObservedState)
+	log        log.Logger
 }
 
 // ObserveSession admits one classification of one session's pane.
@@ -1660,9 +1702,6 @@ func (w *WorkerObservation) ObserveSession(o paneobserve.Observation) {
 		return
 	}
 	participant, isParticipant := w.enrolments.participantFor(session.ID(o.PaneID))
-	if !isParticipant {
-		return
-	}
 	observed, ok := observedStateFor(o.State)
 	if !ok {
 		// A state this mapping does not know becomes no fact at all. It is not
@@ -1671,6 +1710,22 @@ func (w *WorkerObservation) ObserveSession(o paneobserve.Observation) {
 		// to that set from being read as one of ours by accident.
 		w.log.Debug("worker observation: a pane state maps to no observed fact",
 			"participant", string(participant), "session_id", o.PaneID, "state", string(o.State))
+		return
+	}
+	// THE COORDINATOR'S OWN PANE, which is the same reading read for a
+	// different purpose (nocx-luqz9.3): a coordinator is not judged, it is
+	// typed into, and whether this session is one at all is the RECORD's
+	// question — a session holding no workers is somebody's own agent, and the
+	// record drops it. It is offered for every reading and for a pane that is
+	// also a worker's, because one session can be both.
+	//
+	// Before the participant filter below, and deliberately: the worker path
+	// RETURNS for a pane that is nobody's participant, and a coordinator's pane
+	// is exactly that — it holds workers rather than being one.
+	if w.coordinate != nil {
+		w.coordinate(o.PaneID, observed)
+	}
+	if !isParticipant {
 		return
 	}
 	live, known := w.liveness(participant)

@@ -92,6 +92,24 @@ func (c *WorkerCoordinator) MaySpawnInto(environment string) bool {
 	return ok
 }
 
+// Mailbox is the box a coordinator reads for its own mail, and it is the SAME
+// answer WorkerParticipant.Mailbox gives one for a worker: the holder's own.
+//
+// What differs is which identity "its own" is, and the difference is the
+// design's rather than an economy. A participant is named by its participant
+// id, which outlives every run it makes; a coordinator is named by its SESSION
+// (AD-7), which is what makes a coordinator that RESTARTED the same reader —
+// the property D3 already rests on for holdings and the wake.
+//
+// It is a method rather than a second field for the reason the participant's
+// is: the two cannot drift.
+func (c *WorkerCoordinator) Mailbox() string {
+	if c == nil {
+		return ""
+	}
+	return c.session
+}
+
 // Environments lists what the grant named, so a refusal can say what WAS
 // available rather than only what was not.
 func (c *WorkerCoordinator) Environments() []string {
@@ -147,9 +165,18 @@ func (p *WorkerParticipant) Mailbox() string {
 	return p.participant
 }
 
-// errNoParticipant is what a narrow returns for a run the authorizer did not
+// ErrNoParticipant is what a narrow returns for a run the authorizer did not
 // establish as a worker's.
-var errNoParticipant = errors.New("agenttools: this run is not a worker participant")
+//
+// IT IS EXPORTED, and the reason is the tool that made it reachable
+// (nocx-luqz9.4): workers.report is a WORKER's call and nothing else's, so a
+// coordinator — or an ordinary run — that reaches it is refused HERE, at the
+// constructor, and the endpoint has to turn that refusal into a sentence the
+// agent can act on. An unexported sentinel would have left it in the default
+// arm, whose sentence calls an unclassified failure a fault inside nocx and
+// tells the model to stop — which is wrong twice over: nothing failed, and
+// what the caller should do is use the calls it does have.
+var ErrNoParticipant = errors.New("agenttools: this run is not a worker participant")
 
 // narrowWorkerParticipant builds the participant capability from the run's own
 // identity. The id comes from the run context and never from the call's
@@ -160,11 +187,65 @@ var errNoParticipant = errors.New("agenttools: this run is not a worker particip
 // A run with no participant is REFUSED here rather than narrowed to an empty
 // capability. An empty participant names mailbox "", which belongs to nobody,
 // and a mailbox belonging to nobody must not be reachable at all.
+//
+// TWO CALLERS, ONE REFUSAL. workers.report is this narrow's alone — a worker
+// reporting to its coordinator, which no other run identity has any business
+// doing — and workers.inbox reaches it through narrowWorkerMailbox when the run
+// IS a participant. Both therefore refuse a coordinator with this one sentinel,
+// which is correct: the fact is the same fact ("this run is not a worker"), and
+// a second sentinel saying it again would be a second name for one thing, with
+// the endpoint then owing two sentences that must stay distinct.
 func narrowWorkerParticipant(_ content.Grant, _ []ResourceRef, runCtx RunContext) (Capability, error) {
 	if runCtx.Participant == "" {
-		return nil, errNoParticipant
+		return nil, ErrNoParticipant
 	}
 	return NewWorkerParticipant(runCtx.Participant), nil
+}
+
+// Mailbox is the one thing workers.inbox needs from the capability it was
+// narrowed to: which box is this holder's own.
+//
+// It is an interface with one method and it is NOT a third authority. Nothing
+// about what the holder MAY do is reachable through it — the two concrete types
+// keep their own powers, and the dispatcher's type switch still proves the
+// distinction exhaustive everywhere authority is exercised. What this exists for
+// is a call where the answer is genuinely the same act for both callers: "read
+// my own mailbox", where the only thing that differs is which identity "my own"
+// is.
+type Mailbox interface {
+	Mailbox() string
+}
+
+// errNoMailbox is what a narrow answers for a run that is neither a worker nor a
+// coordinator — a run whose mailbox nothing addresses and which must not be
+// handed one that belongs to nobody.
+var errNoMailbox = errors.New("agenttools: this run has no mailbox")
+
+// narrowWorkerMailbox builds the capability for workers.inbox, whichever of the
+// two callers is asking (nocx-luqz9.2, design §4.5).
+//
+// It is the ONE narrow that can return either type, and that is the shape of the
+// act rather than a relaxation of A8's two types: a coordinator reading the
+// observations its workers' panes produced reads the SAME mailbox a worker reads
+// for the mail its coordinator left it, with one cursor and one order. Which box
+// that is comes from what the run IS — a participant's own id, or the session a
+// coordinator is — and never from anything the call carries, which is A9's rule
+// and the reason a caller cannot name somebody else's mail.
+//
+// The participant half is delegated rather than restated, so "how a participant
+// capability is built from a run context" keeps one owner: narrowWorkerParticipant
+// is the same function the tool used before this task and the same one its own
+// tests exercise.
+func narrowWorkerMailbox(grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error) {
+	if runCtx.Participant != "" {
+		return narrowWorkerParticipant(grant, resources, runCtx)
+	}
+	if runCtx.Session == "" {
+		// Neither identity: a run that is not a worker and has no session is
+		// nothing's reader, and an empty mailbox belongs to nobody.
+		return nil, errNoMailbox
+	}
+	return narrowWorkers(grant, resources, runCtx)
 }
 
 // narrowWorkers builds the coordinator capability from the run's grant. Both worker
@@ -179,6 +260,15 @@ func narrowWorkers(grant content.Grant, _ []ResourceRef, runCtx RunContext) (Cap
 	}
 	return NewWorkerCoordinator(runCtx.Session, runCtx.ControllerIdentity, scopes), nil
 }
+
+// errNoWorkspace is what resourceParticipantWorkspace answers for a run whose
+// context names no workspace: there is no sub-scope to resolve, and returning an
+// empty one would be a scope covering nothing at a call that needs to cover
+// something. It is a DIFFERENT fact from ErrNoParticipant — a run can be a
+// participant and still have no workspace here — and the two are separate names
+// for the reason this package keeps every refusal separate: a reader that cannot
+// tell them apart looks in the wrong place.
+var errNoWorkspace = errors.New("agenttools: this run names no workspace")
 
 // resourceParticipantWorkspace names the resource a participant's call is
 // about, as A11 of the authority model decided it: a participant is addressed
@@ -200,9 +290,12 @@ func narrowWorkers(grant content.Grant, _ []ResourceRef, runCtx RunContext) (Cap
 // is session, path, content, destination and environment — so no coordinator
 // is ever offered a participant's call, and the participant's own grant names
 // no session or environment, so it is offered none of the coordinator's four.
+//
+// It answers errNoWorkspace for a run whose context names no workspace, which
+// is the fact above the reason it is a refusal rather than an empty scope.
 func resourceParticipantWorkspace(_ map[string]any, runCtx RunContext) ([]ResourceRef, error) {
 	if runCtx.Workspace == "" {
-		return nil, errNoParticipant
+		return nil, errNoWorkspace
 	}
 	return []ResourceRef{{
 		Kind: content.ResourceWorkspace,

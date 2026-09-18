@@ -128,8 +128,14 @@ trap cleanup EXIT INT TERM
 # (nocx-50w7p.7) — so the target both builds the host's variant and asserts the
 # embed carries it. A stand built without it compiles cleanly and opens
 # nothing.
+#
+# `helpers-this-machine` rather than `helpers` (nocx-cq0wa): it is both of the
+# above narrowed to the host platform, the one the stand's own helper runs on.
+# The release's four-platform matrix is a cross-compile per target that a look
+# at the UI does not need; `make helpers` builds it when a remote host of
+# another platform does.
 echo "=== building the helper artifacts ==="
-make -C "$repo_root" helpers require-local-helper
+make -C "$repo_root" helpers-this-machine
 
 # Built rather than `go run`: go run wraps the binary in a child process that
 # survives a kill of the parent, and an orphaned backend holds the WS port

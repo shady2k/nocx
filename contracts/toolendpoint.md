@@ -1,15 +1,19 @@
 # Tool endpoint contracts
 
-The local `tool.sock` endpoint exposes five JSON-RPC methods. Their wire
+The local `tool.sock` endpoint exposes these JSON-RPC methods. Their wire
 contracts are the existing unified tool documents under [`tools/`](tools/):
 
 | Method             | Contract document                                                    |
 | ------------------ | -------------------------------------------------------------------- |
 | `workers.spawn`    | [`workers.spawn.schema.json`](tools/workers.spawn.schema.json)       |
 | `workers.say`      | [`workers.say.schema.json`](tools/workers.say.schema.json)           |
-| `workers.wait`     | [`workers.wait.schema.json`](tools/workers.wait.schema.json)         |
+| `workers.report`   | [`workers.report.schema.json`](tools/workers.report.schema.json)     |
 | `workers.holdings` | [`workers.holdings.schema.json`](tools/workers.holdings.schema.json) |
 | `workers.close`    | [`workers.close.schema.json`](tools/workers.close.schema.json)       |
+| `workers.inbox`    | [`workers.inbox.schema.json`](tools/workers.inbox.schema.json)       |
+| `session.read`     | [`session.read.schema.json`](tools/session.read.schema.json)         |
+| `session.keys`     | [`session.keys.schema.json`](tools/session.keys.schema.json)         |
+| `session.message`  | [`session.message.schema.json`](tools/session.message.schema.json)   |
 
 Each document is the single declaration for that method's params and result:
 the top-level schema describes params, and `$defs.result` describes the JSON
@@ -28,12 +32,16 @@ the endpoint or re-declared for this socket.
 
 ## `tools.catalogue` — what this caller may call
 
-The five method documents above say what each call takes and returns. They do
-not say **which of them this caller is allowed to make**, and that is not a
+The method documents above say what each call takes and returns. They do not
+say **which of them this caller is allowed to make**, and that is not a
 constant: `Registry.ForGrant` narrows the offered set to the admitted grant, and
 the authorizer mints deliberately disjoint grants for a coordinator and for a
-worker (`internal/app/waveauth.go`). A caller that assumed the five would be
-telling its model about calls that do not exist for it.
+worker (`internal/app/worker_auth.go`). A caller that assumed the whole list
+would be telling its model about calls that do not exist for it. The two sets are
+NOT disjoint by name alone — `workers.report` is offered to both, because the
+kind that addresses a participant is on a coordinator's grant too — so a caller
+learns what it may really do from the refusal the call itself returns, not from
+the catalogue it was shown.
 
 `tools.catalogue` is that answer, and it is the endpoint's because the endpoint
 is where the grant is. **No caller may derive its own eligibility.**

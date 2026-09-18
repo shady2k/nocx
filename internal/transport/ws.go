@@ -312,6 +312,12 @@ type WSServer struct {
 	// paneObserver classifies an enrolled pane's grid and reports the
 	// changes (nocx-szb40.3). Nil when unwired, like paneGrid above.
 	paneObserver paneObserver
+	// paneObserverSweep is how often the watcher above is swept. It is a field
+	// rather than a constant so the composition root can state it (the setting
+	// nocx-luqz9.2 makes it is where the number will be edited) and a harness can
+	// honestly exercise the loop: nothing else in this package reads it — a test
+	// drives Sweep directly — so the default is what production gets.
+	paneObserverSweep time.Duration
 	// paneAdmissions is the end of the ADMISSION INTERVAL a session's
 	// enrolment opened (ADR-0058, nocx-9mn6z). Nil when unwired: a session's
 	// end then closes the watch and the frame and leaves any admitted tool
@@ -748,9 +754,20 @@ type WSServer struct {
 	tunnelMu     sync.Mutex
 	tunnels      map[string]*tunnel.Tunnel
 	ownerTunnels map[*wsConn]map[string]struct{}
-	// connsMu protects conns. One entry per active WebSocket connection.
+	// connsMu protects conns and connsRegistered. One entry per active
+	// WebSocket connection.
 	connsMu sync.Mutex
 	conns   map[*wsConn]struct{}
+	// connsRegistered counts connections this server has EVER registered, and
+	// it exists for the tests that must wait for one (nocx-luqz9.3). A COUNT
+	// of live connections cannot be that wait: a test that closes one
+	// connection and dials another sees the same number before and after, so a
+	// wait on "more than before" would time out on a server that behaved
+	// perfectly — measured, and the reason this is a sequence rather than a
+	// length. Nothing in the product reads it; it exists so a test can state
+	// "the server has accepted and registered my connection" as an observable
+	// rather than by sleeping.
+	connsRegistered uint64
 
 	// presence is told how many clients are attached whenever that changes
 	// (client_presence.go). nil when nobody asked; the vault is what asks,
@@ -1628,6 +1645,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		controlDrainTimeout:        defaultControlDrainTimeout,
 		gitBindings:                make(map[string]*gitBinding),
 		gitBySession:               make(map[session.ID]map[string]struct{}),
+		paneObserverSweep:          DefaultPaneObserverSweep,
 	}
 	// The mint's emitter is this server: a drop is told to the renderer
 	// over this socket. Constructed here so there is exactly one store per
@@ -1820,7 +1838,7 @@ func (s *WSServer) Start(ctx context.Context) error {
 	// caller's context. A ticker whose only end is the context passed to
 	// Start outlives the server whenever that context does — which in this
 	// package's own tests is the background one, so three of them went on
-	// firing every 120ms for the rest of the run. In a package whose 30s
+	// firing on every tick for the rest of the run. In a package whose 30s
 	// timeouts already move between test names under constrained scheduling
 	// (nocx-2h08), a leaked periodic goroutine is not a tidiness question.
 	if s.paneObserver != nil {
@@ -4088,6 +4106,7 @@ func mustMarshal(v any) json.RawMessage {
 func (s *WSServer) registerConn(wc *wsConn) {
 	s.connsMu.Lock()
 	s.conns[wc] = struct{}{}
+	s.connsRegistered++
 	s.connsMu.Unlock()
 	// A client is here again. Whatever is suspended waiting for somebody to
 	// show a dialog to can now be shown one (D9).

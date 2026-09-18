@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/tools/workers.inbox.schema.json",
   "title": "WorkersInboxParams",
-  "description": "Parameters for the workers.inbox agent tool: read the mail your coordinator has left you. It names no mailbox, because the only mailbox you can read is your own — who you are is decided by the session you are running in, not by anything you write here.",
+  "description": "Parameters for the workers.inbox agent tool: read your own mailbox — the mail your coordinator left you, and, when you are a coordinator, the state changes nocx has seen your workers settle into. It names no mailbox, because the only mailbox you can read is your own: who you are is decided by the session you are running in, not by anything you write here.",
   "type": "object",
   "additionalProperties": false,
   "required": [],
@@ -16,10 +16,10 @@
   "$defs": {
     "result": {
       "title": "WorkersInboxResult",
-      "description": "The mail you had not been handed before. Asking is what hands it over, so what you see here you will not be shown again — act on it in this turn, or say it back to yourself. An empty list is honest and ordinary: it means your coordinator has said nothing new.",
+      "description": "The mail you had not been handed before, in two lists because it is two kinds: what was SAID to you, and what nocx SAW. Asking is what hands it over, so what you see here you will not be shown again — act on it in this turn, or say it back to yourself. Empty lists are honest and ordinary: they mean nothing new has happened.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["messages", "cursor"],
+      "required": ["messages", "observations", "cursor"],
       "properties": {
         "messages": {
           "type": "array",
@@ -27,11 +27,31 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["from", "message"],
+            "required": ["from", "message", "at"],
             "properties": {
               "from": {
                 "type": "string",
                 "description": "Who wrote it."
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time",
+                "description": "When nocx committed this to your mailbox, in UTC. Present on every message, ordinary mail and a report alike, so it is what a coordinator compares a worker's words against the states nocx saw beside them \u2014 two readings of one clock."
+              },
+              "kind": {
+                "type": "string",
+                "enum": ["done", "question", "progress"],
+                "description": "Present when this is a WORKER's REPORT rather than a message somebody left you, and it says which kind it is: `done`, `question`, or `progress` (a checkpoint, which never wakes you and is not a completion report). Absent on ordinary mail, which is a message and not a claim about anybody's work. Read it before you act: it is the difference between a worker that has finished and one that is stuck waiting for you, and reading a checkpoint as a completion is the mistake it exists to prevent."
+              },
+              "estimate": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Present on a `progress` checkpoint that gave one: the worker's OWN approximate percentage, and nothing more. It is a claim that may sit at the same number for a long time and is never a measurement; it arrives unmeasured and is not to be quoted as though it were."
+              },
+              "artifact": {
+                "type": "string",
+                "description": "Present on a `progress` checkpoint that named one: a commit, a path or a test run the worker says its milestone produced. It is a claim too, and it is the one part you can corroborate against what nocx already holds."
               },
               "message": {
                 "type": "string",
@@ -40,9 +60,34 @@
             }
           }
         },
+        "observations": {
+          "type": "array",
+          "description": "What nocx has seen of YOUR workers, oldest first: one entry per state a worker was seen to settle into (idle, blocked, exited). It carries no screen content at all, only the worker, the state and the time — a misread is recoverable because it says what is visible and leaves the meaning to you, and nothing here is a verdict. Empty for a worker, whose mailbox its coordinator's words alone fill.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["worker", "state", "at"],
+            "properties": {
+              "worker": {
+                "type": "string",
+                "description": "The worker the state is about, by the id you name it in every other call."
+              },
+              "state": {
+                "type": "string",
+                "enum": ["idle", "blocked", "exited"],
+                "description": "idle: doing nothing and waiting for nothing, its input box free. blocked: it cannot continue until somebody steps in — a menu or a question on its screen, or its agent's own error. exited: its agent process is gone. Only a state that HELD is reported, so a flicker is never an entry."
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time",
+                "description": "When the state settled, in UTC."
+              }
+            }
+          }
+        },
         "cursor": {
           "type": "integer",
-          "description": "Where you have been read up to. Send it back as `acknowledge` on a later call once you have finished acting on the mail above."
+          "description": "Where you have been read up to, across both lists. Send it back as `acknowledge` on a later call once you have finished acting on what is above."
         },
         "more": {
           "type": "boolean",

@@ -882,9 +882,9 @@ var declarations = []Declaration{
 		// Reading a record nocx keeps about this session. It reaches no
 		// machine and changes nothing.
 		Effect: []content.Effect{content.EffectObserve},
-		// The task text and any summary come from a WORKER, which is an
-		// agent reading a machine. It is untrusted for the same reason
-		// session.read's output is.
+		// The task text, the mail and the words in it come from a WORKER,
+		// which is an agent reading a machine. It is untrusted for the same
+		// reason session.read's output is.
 		OutputTrust:  OutputTrustUntrusted,
 		ResultBound:  ResultBound{MaxBytes: 16 << 10, Truncation: TruncationDropTail},
 		Deadline:     10 * time.Second,
@@ -904,7 +904,7 @@ var declarations = []Declaration{
 	},
 	{
 		Name:        "workers.spawn",
-		Description: "Start one worker in a terminal pane of its own and give it a task. Reach for this when a piece of work is genuinely separate and can run while you do something else — never to parallelise something you could just do. nocx watches the worker from the moment it starts, so you do not have to remember it: ask workers.holdings later and you will be told what it came to. Put the reporting instruction in the task — see the task field — or all you will ever be told is that the worker ended.",
+		Description: "Start one worker in a terminal pane of its own and give it a task. Reach for this when a piece of work is genuinely separate and can run while you do something else — never to parallelise something you could just do. nocx watches the worker from the moment it starts, so you do not have to remember it: ask workers.holdings later and it will tell you what the worker is doing, and nocx wakes you when there is something new to read. nocx also hands the worker its own rules before your task — who its coordinator is, and that it reports through workers.report and reads your mail with workers.inbox — so the task only has to say what the work is.",
 		// DELEGATE, and no eighth effect. Handing work to another agent is
 		// exactly what the seventh member of the closed lattice already
 		// names — it is in the grant_effects CHECK, in the policy contract
@@ -954,61 +954,90 @@ var declarations = []Declaration{
 		Narrow:           narrowWorkers,
 	},
 	{
-		Name:        "workers.wait",
-		Description: "Hold your turn until one of your workers has something for you, then be told what your session holds. One call covers all of them: you wait on your worker, not on a worker. Nothing depends on your calling it — nocx watches your workers whether you wait or not — so a wait you skip costs you promptness and nothing else.",
-		// OBSERVE, for session.wait's reason and not by analogy with it:
-		// waiting exercises no authority of its own. It starts nothing, ends
-		// nothing and names nothing outside the session the grant already
-		// named; what it does is answer the question workers.holdings answers,
-		// later.
-		Effect:      []content.Effect{content.EffectObserve},
-		OutputTrust: OutputTrustUntrusted,
-		ResultBound: ResultBound{MaxBytes: 16 << 10, Truncation: TruncationDropTail},
-		// ABOVE THE WAIT'S OWN CEILING, not below it and not absent. The
-		// wait carries its own bound — `seconds`, at most 600 — and a
-		// declaration deadline under that would end the call while the worker
-		// was still inside the interval the caller asked for, which would
-		// look to a coordinator exactly like a worker that failed. session.wait
-		// gets to declare none because it runs in the renderer under the
-		// transport's run lease; an in-Go tool has no such second bound, so
-		// this one states a ceiling with a minute of slack over the largest
-		// wait anybody can ask for.
-		Deadline:         11 * time.Minute,
-		Cancellation:     CancellationReturnError,
-		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
-		ResolveResources: resourceSession,
-		Executes:         InGo,
-		Params:           "workers.wait.schema.json",
-		Narrow:           narrowWorkers,
-	},
-	{
 		Name:        "workers.inbox",
-		Description: "Read the mail your coordinator has left you. It takes no arguments beyond the position you are confirming: the mailbox is yours, and there is no way to name another. Reach for it when you start a turn and when you have finished a piece of work — mail waits, it does not interrupt, so what you were told is only told to you when you look.",
+		Description: "Read your own mailbox: the mail your coordinator left you, and — when you are a coordinator — the state changes nocx has seen your workers settle into. It takes no arguments beyond the position you are confirming: the mailbox is yours, and there is no way to name another. Reach for it when you start a turn, when you have finished a piece of work, and whenever nocx tells you that you have new messages. Mail waits, it does not interrupt, so what was said or seen is only told to you when you look.",
 		// OBSERVE, and for workers.say's reason read from the other end. Taking a
 		// message out of your own mailbox exercises no authority over anything
 		// but your own reading position: it starts nothing, ends nothing, and
-		// names nothing outside the participant the run already is.
+		// names nothing outside the participant (or the session) the run
+		// already is.
 		Effect: []content.Effect{content.EffectObserve},
-		// A COORDINATOR wrote it, which is an agent, so it is untrusted for
-		// exactly the reason the coordinator's own view of a worker is.
+		// A COORDINATOR wrote the text, and nocx wrote the observations, so the
+		// result is untrusted for exactly the reason the coordinator's own view
+		// of a worker is: an agent's words, and a screen reading an agent's own
+		// screen may have produced.
 		OutputTrust:  OutputTrustUntrusted,
 		ResultBound:  ResultBound{MaxBytes: 16 << 10, Truncation: TruncationDropTail},
 		Deadline:     10 * time.Second,
 		Cancellation: CancellationReturnError,
-		// A PARTICIPANT, addressed as a sub-scope of ResourceWorkspace per
-		// A11 — see resourceParticipantWorkspace for why that is the kind and
-		// why it is the workspace rather than the pane. It is also what keeps
-		// this declaration off every coordinator's offer: nothing else mints a
-		// workspace scope, so only the grant the endpoint authorizer builds
-		// for a worker reaches this tool at all.
+		// A PARTICIPANT, addressed as a sub-scope of ResourceWorkspace per A11 —
+		// see resourceParticipantWorkspace for why that is the kind and why it
+		// is the workspace rather than the pane.
+		//
+		// SINCE nocx-luqz9.2 THIS IS ALSO WHAT OFFERS THE CALL TO A COORDINATOR,
+		// and the coordinator's grant was given the same scope for it (see
+		// internal/app's callerGrant). The kind is doing two jobs now, and the
+		// sentence that used to say the opposite is worth keeping the shape of:
+		// what keeps this call off an ORDINARY RUN is that no ordinary run's
+		// fence carries a workspace scope — the kernel's per-run mint
+		// (internal/transport's runGrantFor) names session, path, content,
+		// destination and environment and no workspace — so a run that is
+		// neither somebody's worker nor somebody's coordinator is never offered
+		// it, and nothing has to refuse it.
 		ResourceKinds:    []content.ResourceKind{content.ResourceWorkspace},
 		ResolveResources: resourceParticipantWorkspace,
 		Executes:         InGo,
 		Params:           "workers.inbox.schema.json",
-		// The OTHER capability. This is the only declaration that narrows to a
-		// participant, and it is what makes A8's two types load-bearing rather
-		// than decorative: a coordinator's run has no participant identity, so
-		// this narrow refuses it.
+		// The OTHER capability, and now the other one TOO. This is still the
+		// only declaration that narrows to a participant — which is what makes
+		// A8's two types load-bearing rather than decorative, since a
+		// coordinator's run has no participant identity and a worker's grant
+		// reaches neither the session kinds nor the environment — but the narrow
+		// chooses between the two on the run's own identity, because reading your
+		// own mailbox is one act with two holders.
+		Narrow: narrowWorkerMailbox,
+	},
+	{
+		Name:        "workers.report",
+		Description: "Tell the coordinator that started you, in your own words, that you have finished, that you need an answer, or that you have reached a milestone. Call it with `done` when the task is finished — or when you have stopped and it is not, which is what the text is for; nocx records no success and no failure and your coordinator judges what your words mean. Call it with `question` when you cannot continue without an answer: ask, then END YOUR TURN, because the call does not wait and the answer arrives as your coordinator's next message. Call it with `progress` at milestones, as often as you have them. This is your own worker session's call and nothing else's; you cannot report as anybody else or to anybody else, and neither is something you name. It stops working when your session ends: a report arriving after that is refused, because the coordinator already has your exit.",
+		// OBSERVE, for workers.say's reason read from the other end. Leaving a
+		// report in a mailbox reaches nobody's keyboard, cannot answer a modal,
+		// and must go on working while a person is helping the coordinator past
+		// a prompt. What it needs is membership in the worker it reports about,
+		// which every worker has over itself.
+		Effect: []content.Effect{content.EffectObserve},
+		// THE WORKER'S OWN WORDS, so untrusted for the strongest reason on this
+		// surface: they are a claim by an agent about work nobody has checked,
+		// and they may themselves have been written from content that agent was
+		// fed. The frame is what says so to the coordinator reading them.
+		OutputTrust:  OutputTrustUntrusted,
+		ResultBound:  ResultBound{MaxBytes: 2 << 10, Truncation: TruncationDropTail},
+		Deadline:     10 * time.Second,
+		Cancellation: CancellationReturnError,
+		// A PARTICIPANT, addressed as a sub-scope of ResourceWorkspace, for
+		// workers.inbox's reason and by the same resolver (A11) — see
+		// resourceParticipantWorkspace for why that is the kind.
+		//
+		// ONE HONEST LIMIT, and it is the existing design's rather than this
+		// row's: the workspace kind is on BOTH grants (a coordinator carries one
+		// for workers.inbox since nocx-luqz9.2), so a coordinator is OFFERED
+		// this call and refused by Narrow below. The offer set cannot separate
+		// the two runs by kind — there is no kind a participant's grant carries
+		// and a coordinator's does not — and pretending otherwise would need a
+		// second spelling of the participant scope, which is what A11's single
+		// resolver exists to prevent. What closes the gap for the caller is the
+		// refusal itself: narrowWorkerParticipant's ErrNoParticipant, mapped by
+		// the endpoint to a sentence that names a worker's own session and sends
+		// the reader to the calls it does have (rpcErrorFor).
+		ResourceKinds:    []content.ResourceKind{content.ResourceWorkspace},
+		ResolveResources: resourceParticipantWorkspace,
+		Executes:         InGo,
+		Params:           "workers.report.schema.json",
+		// THE PARTICIPANT CONSTRUCTOR, the same one workers.inbox reaches when
+		// the run IS a worker. It is the narrow that makes "a worker's tool"
+		// structural rather than a check in an executor: a coordinator's run
+		// context has no participant identity, so no grant it could be given
+		// produces a capability for this call.
 		Narrow: narrowWorkerParticipant,
 	},
 	{

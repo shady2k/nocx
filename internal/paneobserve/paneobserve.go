@@ -218,8 +218,27 @@ type Config struct {
 	StallAfter time.Duration
 }
 
-// Emit hands an observation on. It is called from the sweep.
+// Emit hands an observation on. It is called from the sweep, and ONLY when the
+// answer changed — see OnReading for the reader that needs every reading.
 type Emit func(Observation)
+
+// OnReading is the SECOND reader of one sweep: it is handed every reading of
+// every watched pane, change or not (nocx-luqz9.2).
+//
+// # Why a second sink rather than a second sweep
+//
+// The wire carries changes, and that rule is this package's own design (see the
+// package doc): a renderer handed an observation per sweep could not tell a
+// repaint from a state change. The worker record's reader wants precisely the
+// opposite, because "settled" is a statement about two readings of ONE state —
+// a reader fed only changes would be told a pane is idle exactly once, ever, and
+// could never conclude that it had held it.
+//
+// So the sweep feeds both, and what they differ in is exactly this and nothing
+// else: one classification, one sweep, one cadence, because a second sweep for
+// the second reader would be a second answer to "what is on this pane". A reader
+// that is not wired costs the sweep one nil check.
+type OnReading func(Observation)
 
 // Screens is the seam onto a pane's screen (AD-8). One method, because the
 // observer may READ a frame and may not enrol, withdraw, classify or type: the
@@ -236,6 +255,10 @@ type Watcher struct {
 	screens Screens
 	drivers *agentdriver.Registry
 	emit    Emit
+	// reading is the second reader of one sweep: every reading of every watched
+	// pane, change or not (nocx-luqz9.2). See OnReading; the two are separate
+	// fields because they are separate readers with separate rules.
+	reading OnReading
 	// now is the clock this watcher reads, and stallAfter is the threshold it
 	// compares against. Both are fields rather than package-level state so
 	// that a test can state an interval instead of waiting for one.
@@ -314,6 +337,20 @@ func (w *Watcher) SetEmitter(emit Emit) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.emit = emit
+}
+
+// OnReading binds the second reader of the sweep (nocx-luqz9.2).
+//
+// It is separate from SetEmitter rather than a second argument to it because
+// the two are bound by different things at the composition root and either may
+// be absent: the emitter is the wire, and this is the worker record, which a
+// backend without workers does not have. Neither being set is the state a stand
+// with no destination is in, and the sweep's own guard treats "no emitter AND no
+// reader" as the case where there is nothing to classify FOR.
+func (w *Watcher) OnReading(reading OnReading) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.reading = reading
 }
 
 // Watch opens the observation for a pane: the pane
@@ -411,7 +448,11 @@ func (w *Watcher) Exited(paneID string) {
 func (w *Watcher) Sweep() {
 	w.mu.Lock()
 	emit := w.emit
-	if emit == nil {
+	reading := w.reading
+	if emit == nil && reading == nil {
+		// Nothing to classify FOR. A stand with neither destination is the
+		// state before the composition root binds either, and the sweep stays
+		// free of work rather than reading every pane into a void.
 		w.mu.Unlock()
 		return
 	}
@@ -444,16 +485,30 @@ func (w *Watcher) Sweep() {
 		}
 		o := w.drivers.Observe(j.agent, f)
 		progress, news := w.commit(j.paneID, o.State, o.Subagents(), o.Transcript(), now)
-		if !news {
-			continue
-		}
-		emit(Observation{
+		// The reading goes to the second reader BEFORE the news test, and the
+		// order is the whole point of it existing: "settled" is a statement
+		// about repeated readings of one state, and a reader behind the gate
+		// below would be handed a pane's state exactly once and could never
+		// make it. It is also why this cannot be a second sweep — one
+		// classification is made, and both readers are handed it.
+		//
+		// AFTER commit, so what this reader is handed agrees with what Snapshot
+		// answers for the same pane: the record is updated before either reader
+		// sees the reading.
+		observation := Observation{
 			PaneID:   j.paneID,
 			Agent:    j.agent,
 			State:    o.State,
 			Children: o.Subagents(),
 			Progress: progress,
-		})
+		}
+		if reading != nil {
+			reading(observation)
+		}
+		if !news || emit == nil {
+			continue
+		}
+		emit(observation)
 	}
 }
 

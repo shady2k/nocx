@@ -419,10 +419,59 @@ func TestATargetMintRetriesOnceOnSnapshotGoneThenGivesUp(t *testing.T) {
 	if err == nil {
 		t.Fatal("read succeeded despite every mint attempt refusing snapshot_gone")
 	}
+	// And the refusal crosses as a NAMED error, not as the opaque wire
+	// refusal it arrived as (nocx-xn63t.4.1): without this, everything above
+	// the crossing — the agent-facing sentence included — sees only
+	// `helper: snapshot_gone: ` and cannot say what to do about it.
+	if !errors.Is(err, helperclient.ErrSnapshotGone) {
+		t.Fatalf("Read error = %v, want it to carry helperclient.ErrSnapshotGone", err)
+	}
 	if helper.snapCalls != 2 {
 		t.Fatalf("Snapshot calls = %d, want exactly 2 (the retry, and no more)", helper.snapCalls)
 	}
 	if len(helper.targetCalls) != 2 {
 		t.Fatalf("Target calls = %d, want exactly 2 (the retry, and no more)", len(helper.targetCalls))
+	}
+}
+
+// A `capacity` mint refusal (nocx-xn63t.4.1) crosses the same crossing and is
+// named there — and is NOT retried, unlike snapshot_gone: the book releases a
+// slot only once a token has expired AND the retention after it passed (spec
+// §6.2), so a second mint a moment later is refused for the same reason, and
+// asking again would spend the caller's budget on a fact that cannot have
+// changed.
+func TestACapacityRefusalIsNamedAndNotRetried(t *testing.T) {
+	helper := &fakePaneReaderHelper{
+		snapshots: []proto.SnapshotResult{
+			{SnapshotID: 1, Frame: frameOf("a")},
+			{SnapshotID: 2, Frame: frameOf("b")},
+		},
+		// The wire's own spelling, spelled here rather than taken from proto:
+		// this is what a helper puts on the line (service.go's Refusal), and
+		// the classifier is what has to recognise it.
+		targetErr: &helperclient.RefusalError{Code: "capacity", Message: "session: capacity"},
+	}
+	sessionID, hub, access := testDescendant(t, helper)
+	agents := &fakePaneAgentSource{agents: map[string]string{sessionID: "claude"}}
+	driver := &fakeAgentDriverObserver{agent: "claude", observation: agentdriver.Observation{State: agentdriver.StateFreeText}}
+	registry, err := agentdriver.NewRegistry(driver)
+	if err != nil {
+		t.Fatalf("agent registry: %v", err)
+	}
+	reader := newPaneReader(hub, agents, registry)
+
+	region := sessionruntime.TargetRegion
+	_, err = reader.Read(context.Background(), access, sessionID, &region, nil)
+	if err == nil {
+		t.Fatal("read succeeded despite the mint being refused for capacity")
+	}
+	if !errors.Is(err, helperclient.ErrTargetCapacity) {
+		t.Fatalf("Read error = %v, want it to carry helperclient.ErrTargetCapacity", err)
+	}
+	if errors.Is(err, helperclient.ErrSnapshotGone) {
+		t.Fatalf("Read error = %v, want capacity only — the two refusals must not share a sentinel", err)
+	}
+	if helper.snapCalls != 1 || len(helper.targetCalls) != 1 {
+		t.Fatalf("Snapshot/Target calls = %d/%d, want 1/1: capacity is not a retryable refusal", helper.snapCalls, len(helper.targetCalls))
 	}
 }

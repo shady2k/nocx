@@ -46,15 +46,42 @@
 // Every byte actually read from stdin is appended to a second file verbatim,
 // so the test can assert on what production really wrote to a real PTY
 // (AGENTS.md: never on durations) rather than on a count this program kept
-// of its own.
+// of itself.
+//
+// # Calling tools, and the third side channel
+//
+// An agent's own act is a tool call, and a mock that could not make one could
+// not stand in for an agent at all — a worker's report (ADR-0070 decision 1)
+// is one, and so is everything a coordinator does. So a third file carries a
+// CALL ON CUE — `{"tool":"workers.report","args":{"kind":"done","text":"…"}}`
+// — and this program makes it the way a real agent makes it: it starts the MCP
+// bridge this repository ships (`<helper> mcp --socket <socket>`, exactly the
+// invocation the shell integration stages into the agent's mcp.json) as its
+// own CHILD, so the endpoint admits the call as the pane's own session by the
+// process tree it runs in, and the call travels over the ordinary endpoint
+// with the ordinary authorizer in front of it. Nothing here writes a mailbox
+// or a record: the call is a real one and its answer is written beside the cue.
+//
+// The two paths the bridge needs are non-secret and arrive in a fourth file
+// the stand writes ({"helper": …, "socket": …}) — a local caller presents no
+// bearer (ADR-0058), which is why there is no token anywhere in this program.
+//
+// The `exit` cue is the last one: a pane whose process ends. The stand spawns
+// that worker with `claude; exit`, so returning from run() ends the agent and
+// then the pane's own shell — and the record learns the exit the ordinary way,
+// through the supervisor watching the session.
 package main
 
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -91,6 +118,28 @@ var moments = map[phase]captureMoment{
 	phaseWorking: {"claude-working", 17000},
 }
 
+// exitCue is the one cue that is not a frame: a worker whose process ends.
+// It is a cue value rather than a fifth phase because it is not something a
+// pane SHOWS — it is the pane ceasing to exist.
+const exitCue = "exit"
+
+// mcpConfig is what the stand writes for the panes it spawns: the two
+// non-secret paths the shipped MCP bridge is started with. A local caller
+// presents no bearer (ADR-0058 — the endpoint admits it by the process tree),
+// so there is no token here and none anywhere in this program.
+type mcpConfig struct {
+	Helper string `json:"helper"`
+	Socket string `json:"socket"`
+}
+
+// callRequest is one call cue: which tool to call, and with what arguments.
+// The arguments are passed through verbatim, so a journey writes exactly what
+// the endpoint will see — including the ids it names.
+type callRequest struct {
+	Tool string          `json:"tool"`
+	Args json.RawMessage `json:"args,omitempty"`
+}
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "s14mock:", err)
@@ -125,14 +174,18 @@ func run() error {
 
 	cueDir := filepath.Join(stateDir, "cue")
 	logDir := filepath.Join(stateDir, "log")
-	if err := os.MkdirAll(cueDir, 0o750); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(logDir, 0o750); err != nil {
-		return err
+	callDir := filepath.Join(stateDir, "call")
+	callLogDir := filepath.Join(stateDir, "calllog")
+	for _, dir := range []string{cueDir, logDir, callDir, callLogDir} {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			return err
+		}
 	}
 	cueFile := filepath.Join(cueDir, sessionID)
 	logFile := filepath.Join(logDir, sessionID)
+	callFile := filepath.Join(callDir, sessionID)
+	callLogFile := filepath.Join(callLogDir, sessionID)
+	mcpConfigFile := filepath.Join(stateDir, "mcp.json")
 
 	m, err := newMock(capturesDir)
 	if err != nil {
@@ -144,6 +197,12 @@ func run() error {
 		return err
 	}
 	defer func() { _ = logHandle.Close() }()
+
+	callLog, err := os.OpenFile(callLogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) // #nosec G304 -- this test's own state directory
+	if err != nil {
+		return err
+	}
+	defer func() { _ = callLog.Close() }()
 
 	out := bufio.NewWriter(os.Stdout)
 	defer func() { _ = out.Flush() }()
@@ -173,11 +232,14 @@ func run() error {
 
 	cueTicker := time.NewTicker(15 * time.Millisecond)
 	defer cueTicker.Stop()
+	callTicker := time.NewTicker(15 * time.Millisecond)
+	defer callTicker.Stop()
 	var lastCue string
 	initialCue, cueErr := os.ReadFile(cueFile) // #nosec G304 -- this test's own state directory
 	if cueErr == nil {
 		lastCue = strings.TrimSpace(string(initialCue))
 	}
+	var lastCall string
 
 	var chunk []byte
 	flushTimer := time.NewTimer(time.Hour)
@@ -225,6 +287,15 @@ func run() error {
 			if cue == "" || cue == lastCue {
 				continue
 			}
+			if cue == exitCue {
+				// THE PANE'S OWN PROCESS ENDING. The stand spawns this
+				// worker's pane with `claude; exit`, so returning from here
+				// ends the shell too: the pty goes with it and the record
+				// learns the exit the ordinary way, through the supervisor
+				// watching the session.
+				flush()
+				return nil
+			}
 			lastCue = cue
 			m.setPhase(phase(cue))
 			if _, werr := out.Write(m.paintCurrent()); werr != nil {
@@ -232,6 +303,23 @@ func run() error {
 			}
 			if werr := out.Flush(); werr != nil {
 				return werr
+			}
+		case <-callTicker.C:
+			b, rerr := os.ReadFile(callFile) // #nosec G304 -- this test's own state directory
+			if rerr != nil {
+				continue
+			}
+			raw := strings.TrimSpace(string(b))
+			if raw == "" || raw == lastCall {
+				continue
+			}
+			lastCall = raw
+			outcome := m.callTool(raw, mcpConfigFile)
+			if _, werr := callLog.WriteString(outcome + "\n"); werr != nil {
+				return werr
+			}
+			if serr := callLog.Sync(); serr != nil {
+				return serr
 			}
 		}
 	}
@@ -300,12 +388,176 @@ func (m *mock) paintCurrent() []byte {
 	return m.paintLocked()
 }
 
+// paintLocked renders this pane's own current frame — its base capture, with
+// any pending echo shown in a box grown to hold it — as the bytes that
+// reproduce it. It is a full repaint (agentcapture.Paint erases first), so a
+// box that grew between two paints does not leave rows of the smaller one
+// behind.
 func (m *mock) paintLocked() []byte {
 	frame := m.base[m.cur]
 	if m.echo != "" {
-		frame = overlayInputBox(m.rules, frame, m.echo)
+		frame = grownInputBox(m.rules, frame, m.echo)
 	}
 	return agentcapture.Paint(frame)
+}
+
+// callTool makes one real tools/call on cue and answers one line saying what
+// came back: the tool result for the test to read, or the failure that stopped
+// it. Nothing is retried and nothing is judged here — a mock that silently
+// retried would hide exactly the failure a test is looking for, and this
+// program is the only agent in a worker's or a coordinator's pane, so every
+// call a journey needs is written here as a cue.
+func (m *mock) callTool(raw, configPath string) string {
+	var req callRequest
+	if err := json.Unmarshal([]byte(raw), &req); err != nil {
+		return fmt.Sprintf("CUE-MALFORMED %v", err)
+	}
+	if req.Tool == "" {
+		return "CUE-WITHOUT-TOOL"
+	}
+	cfgRaw, err := os.ReadFile(configPath) // #nosec G304 -- this test's own state directory
+	if err != nil {
+		return fmt.Sprintf("NO-MCP-CONFIG %v", err)
+	}
+	var cfg mcpConfig
+	if err := json.Unmarshal(cfgRaw, &cfg); err != nil {
+		return fmt.Sprintf("MCP-CONFIG-MALFORMED %v", err)
+	}
+	// tools/list is the one MCP method that is not a tools/call, and it is
+	// here because discovering which tools a pane's agent has IS a call an
+	// agent makes: the bridge answers it from the endpoint's own catalogue.
+	if req.Tool == "tools/list" {
+		resp, err := callMCPMethod(cfg, "tools/list", nil)
+		if err != nil {
+			return fmt.Sprintf("CALL-FAILED %v", err)
+		}
+		return resp
+	}
+	args := req.Args
+	if len(args) == 0 {
+		args = json.RawMessage(`{}`)
+	}
+	resp, err := callMCPMethod(cfg, "tools/call", map[string]any{"name": req.Tool, "arguments": args})
+	if err != nil {
+		return fmt.Sprintf("CALL-FAILED %v", err)
+	}
+	return resp
+}
+
+// callMCPMethod starts the shipped MCP bridge as this process's own child and
+// makes one request over it: `initialize` first, because the bridge negotiates
+// its protocol version from that request and the version decides the shape of
+// the result, then the request itself. One JSON object per line is the
+// bridge's whole framing (internal/mcpstdio).
+//
+// THE CHILD IS NECESSARY AND NOT CONVENIENCE. The endpoint admits a local
+// caller by the process tree it runs in, so a call made from THIS process —
+// a descendant of the pane's own shell — is a call made as the pane's session
+// and can name no other.
+//
+// The bridge's stderr is discarded rather than inherited: on a pty this
+// program's stderr is the pane, and a diagnostic line painted into the frame
+// the sweep classifies would be this mock corrupting its own screen. A
+// failure the caller must act on arrives as a JSON-RPC error on stdout, which
+// is the wire.
+func callMCPMethod(cfg mcpConfig, method string, params any) (string, error) {
+	if cfg.Helper == "" || cfg.Socket == "" {
+		return "", fmt.Errorf("the mcp config names no helper or socket: %+v", cfg)
+	}
+	cmd := exec.Command(cfg.Helper, "mcp", "--socket", cfg.Socket) // #nosec G204 -- this test's own config file
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return "", err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	defer func() {
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+	recordTree(cfg, cmd.Process.Pid)
+	lines := bufio.NewReader(stdout)
+	if err := writeMCPLine(stdin, map[string]any{
+		"jsonrpc": "2.0", "id": "m-init", "method": "initialize",
+		"params": map[string]any{"protocolVersion": "2025-11-25"},
+	}); err != nil {
+		return "", fmt.Errorf("initialize: %w", err)
+	}
+	if _, err := readMCPLine(lines); err != nil {
+		return "", fmt.Errorf("the bridge never answered initialize: %w", err)
+	}
+	request := map[string]any{"jsonrpc": "2.0", "id": "m-call", "method": method}
+	if params != nil {
+		request["params"] = params
+	}
+	if err := writeMCPLine(stdin, request); err != nil {
+		return "", fmt.Errorf("%s: %w", method, err)
+	}
+	line, err := readMCPLine(lines)
+	if err != nil {
+		return "", fmt.Errorf("the bridge never answered %s: %w", method, err)
+	}
+	return line, nil
+}
+
+// recordTree writes the connecting process's own ancestry where a diagnosis
+// can read it. It is diagnostic only: the endpoint admits a local caller by
+// walking this chain from the peer's pid to a pane's recorded root, so when a
+// report is refused with "not in a pane nocx has enrolled", which tree the
+// caller was actually in is the first and often only question.
+func recordTree(cfg mcpConfig, pid int) {
+	dir := os.Getenv("S14_STATE_DIR")
+	if dir == "" {
+		return
+	}
+	var b strings.Builder
+	for cur := pid; cur > 1; {
+		raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", cur)) // #nosec G304 -- our own process tree
+		if err != nil {
+			break
+		}
+		fields := strings.Fields(string(raw))
+		name, _ := os.ReadFile(fmt.Sprintf("/proc/%d/comm", cur)) // #nosec G304 -- our own process tree
+		fmt.Fprintf(&b, "%d:%s ", cur, strings.TrimSpace(string(name)))
+		if len(fields) < 4 {
+			break
+		}
+		next, err := strconv.Atoi(fields[3])
+		if err != nil || next == cur {
+			break
+		}
+		cur = next
+	}
+	out := filepath.Join(dir, "tree")
+	if err := os.MkdirAll(out, 0o750); err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(out, "bridge.txt"), []byte(b.String()), 0o600)
+}
+
+func writeMCPLine(w io.Writer, msg any) error {
+	raw, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(append(raw, '\n'))
+	return err
+}
+
+// readMCPLine reads one newline-delimited message, and refuses a line the
+// bridge did not terminate rather than guessing where it ended.
+func readMCPLine(r *bufio.Reader) (string, error) {
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(line, "\n"), nil
 }
 
 // handleChunk is one flushed run of stdin bytes — everything that arrived
@@ -354,7 +606,7 @@ func (m *mock) onEnter() []byte {
 
 // onText is design §8.2 step 2's echo: the pasted text lands in the input
 // box exactly where a real Claude's cursor sits, right after its prompt
-// marker (overlayInputBox's own doc). A menu never receives one in this
+// marker (grownInputBox's own doc). A menu never receives one in this
 // test's own flow (session.message only targets the input/working target
 // kinds — pane_messages.go's deliveryTargetKind), so it is accepted but
 // left unrendered rather than corrupting a menu frame nothing asked to
@@ -394,42 +646,117 @@ func containsEscape(chunk []byte) bool {
 	return false
 }
 
-// overlayInputBox returns a copy of frame whose input-box content row shows
-// text right after the agent's own prompt marker — session_surface_happypath_test.go's
-// own s14OverlayInputBox, reproduced here because that one lives in a
-// _test.go file in a different binary and cannot be imported. It touches
-// nothing a classifier reads: only the one row Document.InputBox names, so
-// the copy's classification is exactly frame's.
-func overlayInputBox(reg *agentdriver.Registry, frame paneview.Frame, text string) paneview.Frame {
+// promptMarker is the glyph Claude's input box opens a typed line with, and
+// boxIndent what its continuation rows are indented by. Both are read by the
+// shipped rule's own inputText extractor (claude.rule.json's pattern), which
+// is why they are spelled here rather than chosen.
+const (
+	promptMarker = "❯"
+	boxIndent    = "  "
+)
+
+// grownInputBox returns a copy of frame whose input box shows text, wrapped
+// over as many rows as it needs.
+//
+// A REAL CLAUDE'S BOX WRAPS A PASTE, and this program had to learn to, because
+// the captured frames hold a box with ONE content row: a text longer than the
+// pane is wide was truncated to it, and the delivery that types a worker's
+// briefing reads the box back to confirm what it pasted (pane_messages.go's
+// boxContainsEcho) — so a truncated echo is a briefing that never confirms and
+// a task refused afterwards for arriving before its own rules. The rule's
+// inputText extractor joins the box's content rows with a single space
+// (claude.rule.json's `join`, projected by agentdriver.Observation.InputText),
+// which is exactly what a box whose one line has WRAPPED reads back as — so
+// the wrap below breaks AT SPACES, and a break inside a word would insert a
+// character the worker never typed.
+//
+// The box grows UPWARD, the way Claude's does: its bottom rule stays on the
+// row it was on, the content rows are added above it, and the transcript above
+// scrolls by as many rows as the box grew.
+func grownInputBox(reg *agentdriver.Registry, frame paneview.Frame, text string) paneview.Frame {
 	obs := reg.Observe("claude", frame)
-	if obs.InputBox.Last < obs.InputBox.First {
+	top, bottom := obs.InputBox.First, obs.InputBox.Last
+	if bottom <= top || bottom >= len(frame.Lines) {
+		return frame
+	}
+	width := len(frame.Lines[top])
+	rows := wrapBox(text, width-len([]rune(promptMarker+"\u00A0")))
+	if len(rows) == 0 {
+		return frame
+	}
+	extra := len(rows) - 1
+	if extra >= top {
+		// No room to grow. A screen this small is not what this mock draws,
+		// and inventing a box that overwrites its own rules would be a frame
+		// no classifier could read — so the base frame is left alone and the
+		// echo is refused by the reader rather than faked here.
 		return frame
 	}
 	out := frame
 	out.Lines = append([][]paneview.Cell(nil), frame.Lines...)
-	for row := obs.InputBox.First; row <= obs.InputBox.Last && row < len(out.Lines); row++ {
-		src := out.Lines[row]
-		marker := -1
-		for i, c := range src {
-			if c.Text == "❯" {
-				marker = i
-				break
-			}
+	for i := 0; i+extra < top; i++ {
+		out.Lines[i] = frame.Lines[i+extra]
+	}
+	first := bottom - len(rows)
+	out.Lines[first-1] = frame.Lines[top] // the box's own top rule, glyphs and all
+	cursorRow, cursorCol := first, 0
+	for i, chunk := range rows {
+		prefix := boxIndent
+		if i == 0 {
+			prefix = promptMarker + "\u00A0"
 		}
-		if marker < 0 {
+		out.Lines[first+i] = rowCells(prefix+chunk, width)
+		cursorRow = first + i
+		cursorCol = len([]rune(prefix + chunk))
+	}
+	out.CursorY = cursorRow
+	out.CursorX = cursorCol
+	return out
+}
+
+// wrapBox breaks text into rows of at most width runes, at spaces: a break
+// consumes the space it fell on, so the reading that joins the rows back with
+// one space reconstructs the text exactly. A single word wider than the row is
+// broken rather than dropped — no text in this repository has one, and losing
+// it silently would be the worse answer.
+func wrapBox(text string, width int) []string {
+	if width < 1 || text == "" {
+		return nil
+	}
+	rest := []rune(text)
+	var rows []string
+	for len(rest) > 0 {
+		if len(rest) <= width {
+			rows = append(rows, string(rest))
+			break
+		}
+		cut := width
+		for cut > 0 && rest[cut] != ' ' {
+			cut--
+		}
+		if cut == 0 {
+			rows = append(rows, string(rest[:width]))
+			rest = rest[width:]
 			continue
 		}
-		dst := append([]paneview.Cell(nil), src...)
-		col := marker + 2 // right after "❯ "
-		for _, r := range text {
-			if col >= len(dst) {
-				break
-			}
-			dst[col] = paneview.Cell{Text: string(r), Width: 1}
-			col++
-		}
-		out.Lines[row] = dst
-		return out // exactly one row is the box's own content row
+		rows = append(rows, string(rest[:cut]))
+		rest = rest[cut+1:]
 	}
-	return out
+	return rows
+}
+
+// rowCells renders one row of text into a frame's own cell grid, blank after
+// the text, so a synthesized row is the same shape the emulator produces.
+func rowCells(text string, width int) []paneview.Cell {
+	row := make([]paneview.Cell, 0, width)
+	for _, r := range text {
+		if len(row) >= width {
+			break
+		}
+		row = append(row, paneview.Cell{Text: string(r), Width: 1})
+	}
+	for len(row) < width {
+		row = append(row, paneview.Cell{Text: " ", Width: 1})
+	}
+	return row
 }

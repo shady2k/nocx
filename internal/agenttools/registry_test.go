@@ -510,10 +510,6 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		// keyboard, cannot answer a modal, and must go on working while a
 		// person helps their own worker past a prompt.
 		"workers.say": {content.EffectObserve},
-		// OBSERVE for the wait, for session.wait's reason: waiting starts
-		// nothing, ends nothing, and names nothing outside the session the
-		// grant already named.
-		"workers.wait": {content.EffectObserve},
 		// MUTATE-DESTRUCTIVE for the close, and it is NOT session.wait's
 		// `stop`. That one withdraws an authority already in flight; this
 		// ends a process the person may never have watched start, whose work
@@ -523,6 +519,13 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		// a message out of your own mailbox exercises no authority over
 		// anything but your own reading position.
 		"workers.inbox": {content.EffectObserve},
+		// OBSERVE for a worker's own report (nocx-luqz9.4), and for
+		// workers.say's reason read from the other end: leaving a report in a
+		// mailbox reaches nobody's keyboard, answers no modal, and starts and
+		// ends nothing. What it needs is membership in the worker it reports
+		// about, which every worker has over itself — so a spawn effect would
+		// be a name for an authority this call never exercises.
+		"workers.report": {content.EffectObserve},
 	}
 	if len(declarations) != 32 {
 		t.Fatalf("declaration count = %d, want 32", len(declarations))
@@ -648,10 +651,10 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		"skills.resolve.schema.json":   skillsReadSchema,
 		"workers.holdings.schema.json": workerHoldingsSchema,
 		"workers.say.schema.json":      workerSaySchema,
-		"workers.wait.schema.json":     workerWaitSchema,
 		"workers.close.schema.json":    workerCloseSchema,
 		"workers.spawn.schema.json":    workerSpawnSchema,
 		"workers.inbox.schema.json":    workerInboxSchema,
+		"workers.report.schema.json":   workerReportSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -702,7 +705,7 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	// workers.holdings joins them for the same reason session.wait did: it is
 	// an observe tool over a session, and "what is my session responsible
 	// for" is a question about the session the grant already named.
-	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "workers.holdings", "workers.say", "workers.wait"}
+	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "workers.holdings", "workers.say"}
 	if !reflect.DeepEqual(sessionObserve, wantSession) {
 		t.Fatalf("ForGrant(observe+session) = %v, want exactly %v", sessionObserve, wantSession)
 	}
@@ -816,10 +819,10 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		"skills.resolve.schema.json":   skillsReadSchema,
 		"workers.holdings.schema.json": workerHoldingsSchema,
 		"workers.say.schema.json":      workerSaySchema,
-		"workers.wait.schema.json":     workerWaitSchema,
 		"workers.close.schema.json":    workerCloseSchema,
 		"workers.spawn.schema.json":    workerSpawnSchema,
 		"workers.inbox.schema.json":    workerInboxSchema,
+		"workers.report.schema.json":   workerReportSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -1666,19 +1669,6 @@ const workerInboxSchema = `{
   }}
 }`
 
-const workerWaitSchema = `{
-  "type": "object",
-  "additionalProperties": false,
-  "required": [],
-  "properties": {"seconds": {"type": "integer"}, "acknowledge": {"type": "integer"}},
-  "$defs": {"result": {
-    "type": "object",
-    "additionalProperties": false,
-    "required": ["participants"],
-    "properties": {"participants": {"type": "array", "items": {"type": "object"}}}
-  }}
-}`
-
 const workerCloseSchema = `{
   "type": "object",
   "additionalProperties": false,
@@ -1715,5 +1705,29 @@ const workerSpawnSchema = `{
     "additionalProperties": false,
     "required": ["id", "state"],
     "properties": {"id": {"type": "string"}, "state": {"type": "string"}}
+  }}
+}`
+
+// workerReportSchema is the shape this table's tests assemble for
+// workers.report. It is a fixture and not the contract — the real document is
+// contracts/tools/workers.report.schema.json, and internal/toolendpoint's
+// report_contract_test.go is what validates the shipped payload against it.
+// What these tests need from it is only that the declaration can assemble: a
+// params half and a $defs/result half.
+const workerReportSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "text"],
+  "properties": {
+    "kind": {"type": "string", "enum": ["done", "question", "progress"]},
+    "text": {"type": "string"},
+    "estimate": {"type": "integer"},
+    "artifact": {"type": "string"}
+  },
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["id", "seq"],
+    "properties": {"id": {"type": "string"}, "seq": {"type": "integer"}}
   }}
 }`

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -93,7 +94,7 @@ func agentStagesMCPConfigAndCleansLaunchDirectory(t *testing.T, start nestedPare
 	if err := json.Unmarshal([]byte(configText), &config); err != nil {
 		t.Fatalf("decode staged MCP config: %v; output=%q", err, out)
 	}
-	for _, forbidden := range []string{"NOCX_AGENT_REPORT", "NOCX_LIFECYCLE", `"env"`} {
+	for _, forbidden := range []string{"NOCX_AGENT_HELPER_PATH", "NOCX_LIFECYCLE", `"env"`} {
 		if strings.Contains(configText, forbidden) {
 			t.Fatalf("staged MCP config contains forbidden authority/environment %q: %s", forbidden, configText)
 		}
@@ -253,11 +254,60 @@ func TestStage1CarriesOnlyNonSecretAgentPaths(t *testing.T) {
 	if !strings.Contains(got, "NOCX_TOOL_SOCKET='/tmp/nocx-tool.sock'") {
 		t.Fatalf("stage-1 omitted the tool socket path: %s", got)
 	}
-	for _, forbidden := range []string{"NOCX_AGENT_REPORT", "NOCX_LIFECYCLE_CAPABILITY", opts.Capability} {
+	// THE ENVIRONMENT THE FRAME HANDS THE PANE, BY NAME AND NOT BY A LIST OF
+	// STRINGS THAT MUST NOT APPEAR. A forbidden-string list cannot fail for a
+	// variable nobody has thought of yet, and it goes on passing for one that
+	// has been renamed — so what is asserted is the EXACT SET the frame
+	// exports, which is the whole of what reaches the pane and its children.
+	//
+	// The five addressing variables are the frame's own (the loader and the
+	// integration scripts read them) and the two paths are the agent's. The
+	// DROP'S variable (NOCX_AGENT_REPORT) used to be checked here as a
+	// forbidden string and it is gone with the declaration (ADR-0070): a worker
+	// reports through workers.report, so no rendezvous file is named to the
+	// agent at all. The second assertion below is what says so, rather than a
+	// name nothing can any longer produce.
+	wantExported := []string{
+		"NOCX_CAP_FD", "NOCX_LIFECYCLE_LANE", "NOCX_LIFECYCLE_DOMAIN",
+		"NOCX_LIFECYCLE_EPOCH", "NOCX_LIFECYCLE_PORT", "NOCX_AGENT_HELPER_PATH",
+		"NOCX_TOOL_SOCKET", "NOCX_BOOTSTRAP",
+	}
+	exported := exportedNames(got)
+	if !reflect.DeepEqual(exported, wantExported) {
+		t.Fatalf("stage-1 exports %v, want exactly %v", exported, wantExported)
+	}
+	// NO NAME FOR A REPORT. A worker says what it has to say by calling an MCP
+	// tool, so a frame that named a file for the agent to write a verdict into
+	// would be the drop coming back — under whatever spelling.
+	for _, name := range exported {
+		if strings.Contains(name, "REPORT") {
+			t.Fatalf("stage-1 exports %q: the agent's declaration must be a tool call, not a rendezvous file", name)
+		}
+	}
+	// And no bearer material, which is the claim the frame's own doc makes.
+	// Checked against the VALUE and not only the name: a frame that exported
+	// the capability under some other name would still be a frame carrying it.
+	for _, forbidden := range []string{"NOCX_LIFECYCLE_CAPABILITY", opts.Capability} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("stage-1 carried forbidden authority %q", forbidden)
 		}
 	}
+}
+
+// exportedNames reads every `export NAME` line out of a rendered shell frame,
+// in order. It is how a test asserts WHICH variables a frame hands a child
+// without the test carrying a list that drifts from the frame.
+func exportedNames(frame string) []string {
+	var out []string
+	for _, line := range strings.Split(frame, "\n") {
+		// One line may name several variables (`export NOCX_CAP_FD
+		// NOCX_LIFECYCLE_LANE ...`), which is what the loader writes, so the
+		// line is split into words rather than read as one name.
+		if names, ok := strings.CutPrefix(strings.TrimRight(line, "\r"), "export "); ok {
+			out = append(out, strings.Fields(names)...)
+		}
+	}
+	return out
 }
 
 func TestBashAndZshAgentRestoreUserTrapByteForByte(t *testing.T) {

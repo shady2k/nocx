@@ -67,6 +67,9 @@ export interface OpenedWorkspace extends OpenedTab {
 
 export class LayoutStore {
   private state: LayoutReadResult = EMPTY
+  /** How many reads have been STARTED (nocx-tdiqs). The newest one's answer
+   *  is the one folded in; see load(). */
+  private reads = 0
   private readonly listeners = new Set<() => void>()
 
   constructor(private readonly client: LayoutClientLike) {}
@@ -145,9 +148,22 @@ export class LayoutStore {
 
   /** Read the whole chain and replace the cache with it. This is the call
    *  that makes a renderer reload cheap: the colours, the names, the order
-   *  and the pinning come back because they were never here. */
+   *  and the pinning come back because they were never here.
+   *
+   *  LAST READ WINS (nocx-tdiqs). Two reads can be in flight — this is called
+   *  from boot, from every close, from every restore AND from the notification
+   *  that a worker's tab appeared — and an answer's arrival order is the
+   *  socket's business rather than this method's. So each read takes a
+   *  SEQUENCE and an answer older than the newest request is dropped: the
+   *  newer read already describes the backend at a later moment, and folding
+   *  the older one in would put a tab that has since appeared back out of the
+   *  cache. A lock would be the wrong shape here — the newer request is the
+   *  one worth waiting for, so the older one is simply not consulted. */
   async load(): Promise<void> {
-    this.state = await this.client.read()
+    const mine = ++this.reads
+    const next = await this.client.read()
+    if (mine !== this.reads) return
+    this.state = next
     this.changed()
   }
 
@@ -209,6 +225,31 @@ export class LayoutStore {
       ...this.state,
       tabs: [...this.state.tabs.filter((t) => t.id !== tab.id), tab],
       panes: [...this.state.panes.filter((p) => p.id !== pane.id), pane],
+    }
+    this.changed()
+  }
+
+  /**
+   * Fold a tab the BACKEND closed out of the cache (nocx-xn63t.4.6):
+   * workers.close took a participant's tab out of the window, arriving on
+   * workers.tabClosed rather than as this window's own tabs.close answer.
+   *
+   * Same merge applyRemoteTab performs, the other way round — filter the rows
+   * out, notify — because the cache does not care which call learned of a row
+   * leaving, only that it no longer holds it. The tab's PANES go with it and
+   * are found by their own column: a pane row names its tab, so a second list
+   * of them on the wire would be a second answer to "which panes does this tab
+   * hold", stale the first time a split arrived between the two.
+   *
+   * A tab this window never held is not an error and not a no-op: the filter
+   * finds nothing and the notification is simply satisfied — the cache and the
+   * backend already agree, which is the state every fold aims at.
+   */
+  applyRemoteTabClosed(tabId: string): void {
+    this.state = {
+      ...this.state,
+      tabs: this.state.tabs.filter((t) => t.id !== tabId),
+      panes: this.state.panes.filter((p) => p.tabId !== tabId),
     }
     this.changed()
   }

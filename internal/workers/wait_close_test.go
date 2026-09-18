@@ -1,21 +1,27 @@
 package workers
 
-// The two calls the epic's DONE WHEN names and nothing provided
-// (nocx-dkawo.13): one wait that returns when the first of N settles, and a
-// close that ends a worker.
+// The close that ends a worker (nocx-dkawo.13).
+//
+// WHAT THIS FILE NO LONGER HOLDS is the wait. `workers.wait`, `Registrar.Wait`
+// and the channel the fact set used to hand out went with the declaration
+// (ADR-0070, design §7): an interactive worker never exits, so a wait on its
+// exit held to its deadline, and the coordinator that could have ended the
+// worker was the one blocked in the wait. The wake reads the MAILBOX now
+// (wake.go), and the fact set's one remaining event is the coordinator's own
+// fetch — asserted in backstop_test.go and routing_test.go.
 
 import (
 	"context"
 	"errors"
 	"sync"
 	"testing"
-	"time"
 )
 
-// fakeCloser records what it was asked to end. It does NOT terminalize
-// anything, because the product's closer does not either: ending a session
-// produces a process exit, and that exit reaches the record by the ordinary
-// path.
+// fakeCloser records what it was asked to end. It writes no state, because the
+// product's closer does not either: ending a session produces a process exit —
+// which reaches the record by the ordinary path — and the `closed` the
+// coordinator's own call writes is written by the REGISTRAR, after this
+// returned (Registrar.Close).
 type fakeCloser struct {
 	mu     sync.Mutex
 	closed []ParticipantID
@@ -47,179 +53,13 @@ func withCloser(t *testing.T, h *harness) *fakeCloser {
 	return c
 }
 
-// ── the wait ──────────────────────────────────────────────────────────────
-
-// THE CRITERION: three live workers, ONE wait, and it returns when the first
-// settles — with the other two still live.
-func TestOneWaitReturnsWhenTheFirstOfThreeSettles(t *testing.T) {
-	ctx := context.Background()
-	h := newHarnessBound(t, 5)
-	workers := fanout(t, h, 3)
-
-	done := make(chan []Participant, 1)
-	go func() {
-		held, err := h.reg.Wait(ctx, coordSession, testGroup)
-		if err != nil {
-			t.Errorf("wait: %v", err)
-		}
-		done <- held
-	}()
-
-	// Nothing has settled, so the wait is still holding. The first worker
-	// finishing is a ROUTINE fact — two others are still running, so it
-	// wakes nobody — and the wait must return on it anyway: a wait is a turn
-	// already spent, and this is the event it was opened for.
-	finish(t, h, workers[0])
-
-	select {
-	case held := <-done:
-		var terminal, live int
-		for _, p := range held {
-			if p.State.Terminal() {
-				terminal++
-			} else {
-				live++
-			}
-		}
-		if terminal != 1 || live != 2 {
-			t.Fatalf("the wait returned %d settled and %d live, want 1 and 2", terminal, live)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("the wait never returned, so the first settling reached nobody")
-	}
-	// And the coordinator was not woken for it: a routine completion is not
-	// worth a turn, and the wait is a turn the coordinator already had.
-	if got := len(h.wake.seen()); got != 0 {
-		t.Fatalf("wakes = %d, want 0 for a routine completion", got)
-	}
-}
-
-// A wait with nothing outstanding does not block: a session whose workers
-// have all settled, or which holds none at all, is answered at once. Blocking
-// there would hold a turn open for an event that cannot happen.
-func TestAWaitWithNothingToWaitForAnswersAtOnce(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("the session holds nothing", func(t *testing.T) {
-		h := newHarnessBound(t, 5)
-		held := mustWait(t, h, ctx)
-		if len(held) != 0 {
-			t.Fatalf("held = %v, want nothing", held)
-		}
-	})
-
-	t.Run("everything it holds has settled", func(t *testing.T) {
-		h := newHarnessBound(t, 5)
-		p := mustRegister(t, h)
-		finish(t, h, p)
-		held := mustWait(t, h, ctx)
-		if len(held) != 1 || !held[0].State.Terminal() {
-			t.Fatalf("held = %+v, want one settled participant", held)
-		}
-	})
-}
-
-// AN EXPIRED WAIT IS AN ANSWER AND NOT A FAILURE. The coordinator asked to be
-// told promptly and was not; what it holds is still true, and an error would
-// only make it read the same thing again to find out.
-func TestAWaitWhoseDeadlinePassesAnswersWithWhatIsStillTrue(t *testing.T) {
-	h := newHarnessBound(t, 5)
-	p := mustRegister(t, h)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	held, err := h.reg.Wait(ctx, coordSession, testGroup)
-	if err != nil {
-		t.Fatalf("an expired wait failed instead of answering: %v", err)
-	}
-	if len(held) != 1 || held[0].ID != p.ID || held[0].State.Terminal() {
-		t.Fatalf("held = %+v, want the still-live worker", held)
-	}
-}
-
-// A wait is a FETCH (D7: a report, a wait or an explicit inbox check returns
-// pending mail), so what it hands over is dispatched and a later holdings
-// does not owe it again.
-func TestAWaitDispatchesTheFactsItHandsOver(t *testing.T) {
-	ctx := context.Background()
-	h := newHarnessBound(t, 5)
-	p := mustRegister(t, h)
-
-	if _, err := h.reg.Declared(ctx, p.ID, testLiveness(), Declaration{OK: false}); err != nil {
-		t.Fatalf("declare: %v", err)
-	}
-	if got := len(h.reg.Undispatched()); got != 1 {
-		t.Fatalf("undispatched before the wait = %d, want 1", got)
-	}
-	if _, err := h.reg.Wait(ctx, coordSession, testGroup); err != nil {
-		t.Fatalf("wait: %v", err)
-	}
-	if got := len(h.reg.Undispatched()); got != 0 {
-		t.Fatalf("undispatched after the wait = %d, want 0", got)
-	}
-}
-
-// A FACT ADMITTED BETWEEN THE WAIT'S READ AND ITS SELECT MUST NOT BE MISSED.
-// The channel is taken FIRST, so an entry that raced the read has already
-// closed the one the waiter is holding.
-//
-// The window is a few instructions wide, so racing two goroutines and hoping
-// proves nothing: the fact lands before the read or after the select almost
-// every time, and a wait that took its channel too late would pass. The store
-// puts the fact exactly in the window instead, which makes the ordering the
-// test's rather than the scheduler's.
-func TestAWaitDoesNotMissAFactThatRacedItsRead(t *testing.T) {
-	ctx := context.Background()
-	h := newHarnessBound(t, 5)
-	workers := fanout(t, h, 2)
-
-	// Inside HeldBy, after the wait has taken its channel and before it can
-	// select on it.
-	h.store.duringHeldBy = func() {
-		if _, err := h.reg.Exited(ctx, workers[0].ID, testLiveness(), Exit{Cause: "exited"}); err != nil {
-			t.Errorf("exit: %v", err)
-		}
-	}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		if _, err := h.reg.Wait(ctx, coordSession, testGroup); err != nil {
-			t.Errorf("wait: %v", err)
-		}
-	}()
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the wait missed a fact admitted between its read and its select")
-	}
-}
-
-func mustWait(t *testing.T, h *harness, ctx context.Context) []Participant {
-	t.Helper()
-	done := make(chan []Participant, 1)
-	go func() {
-		held, err := h.reg.Wait(ctx, coordSession, testGroup)
-		if err != nil {
-			t.Errorf("wait: %v", err)
-		}
-		done <- held
-	}()
-	select {
-	case held := <-done:
-		return held
-	case <-time.After(5 * time.Second):
-		t.Fatal("the wait blocked with nothing to wait for")
-		return nil
-	}
-}
-
 // ── the close ─────────────────────────────────────────────────────────────
 
-// A close ends the worker and WRITES NO STATE. The exit that follows reaches
-// the record by the ordinary path, which is what keeps one author of a
-// participant's state.
-func TestAClosedWorkerIsEndedAndNotTerminalizedDirectly(t *testing.T) {
+// A close ends the worker and the record says WHY: the state is the
+// coordinator's own, and it is written only after the closer returned — a
+// close that failed ended nothing, and the assertion for that is in
+// registrar_test.go beside the rest of the state vocabulary.
+func TestAClosedWorkerReadsClosed(t *testing.T) {
 	ctx := context.Background()
 	h := newHarnessBound(t, 5)
 	closer := withCloser(t, h)
@@ -235,8 +75,11 @@ func TestAClosedWorkerIsEndedAndNotTerminalizedDirectly(t *testing.T) {
 	if !ok {
 		t.Fatalf("the record lost the participant")
 	}
-	if stored.State.Terminal() {
-		t.Fatalf("close wrote %q; the exit is what decides a participant's state", stored.State)
+	if stored.State != StateClosed {
+		t.Fatalf("state = %q, want %q", stored.State, StateClosed)
+	}
+	if !stored.State.Terminal() {
+		t.Fatalf("%q is not terminal, so the participant keeps holding a reservation", stored.State)
 	}
 }
 
@@ -326,6 +169,17 @@ func TestAHumanTakeoverDoesNotStopACoordinatorClosingItsOwnWorker(t *testing.T) 
 
 // Closing something already finished is not an error: a coordinator tidying
 // up should not have to have raced the record to be allowed to.
+//
+// AND IT STILL REACHES THE CLOSER (nocx-xn63t.4.6), which is the half this
+// test used to assert the opposite of. For a participant that has already
+// ended, the thing left to end is the PLACE it occupied, and the closer is the
+// only seam that can give that back: in production it is internal/app's
+// workerCloser, which asks the registry before ending a session (so a process
+// that is already gone is not a failure) and whose second half is the tab
+// write. A close that returned here without calling it is exactly what left a
+// finished worker's tab standing on the strip with nothing behind it — the
+// defect the bead was filed from: the coordinator's workers.close answered ok
+// and the tab stayed.
 func TestClosingAFinishedWorkerIsNotAnError(t *testing.T) {
 	ctx := context.Background()
 	h := newHarnessBound(t, 5)
@@ -336,8 +190,9 @@ func TestClosingAFinishedWorkerIsNotAnError(t *testing.T) {
 	if err := h.reg.Close(ctx, coordSession, p.ID); err != nil {
 		t.Fatalf("close of a finished worker: %v", err)
 	}
-	if got := closer.seen(); len(got) != 0 {
-		t.Fatalf("a finished worker was ended again: %v", got)
+	if got := closer.seen(); len(got) != 1 || got[0] != p.ID {
+		t.Fatalf("the closer saw %v, want exactly [%s]: a finished worker's place is released by the closer or by nobody",
+			got, p.ID)
 	}
 }
 

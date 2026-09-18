@@ -56,7 +56,7 @@ const defaultEchoWait = 3 * time.Second
 // ...; kernel -> the run id"). It is a distinct, small, comparable struct
 // rather than reusing Authority directly because MessageKey must be usable
 // as a map key across BOTH concrete Authority variants without either
-// caller importing the other's type, and because EnqueueTask's internal
+// caller importing the other's type, and because EnqueueBriefing's internal
 // namespace ("nocx", Task 11) has no caller-bound Authority at all — a third
 // kind, "internal", that a caller can never produce (Send/Cancel always
 // derive kind from access.Authority(), never from a parameter).
@@ -346,7 +346,7 @@ func (m *paneMessages) Send(ctx context.Context, access any, sessionID, text, wh
 	if err != nil {
 		return assistant.MessageView{}, err
 	}
-	// EnqueueTask's own doc (below) already found this once for namespace
+	// EnqueueBriefing's own doc (below) already found this once for namespace
 	// "nocx": sessionID here is whatever the caller named the pane by
 	// (workers.ParticipantID for an ordinary session.message call), and
 	// every step below — the queue, the delivery, the mint the pane reader
@@ -388,6 +388,21 @@ func (m *paneMessages) Send(ctx context.Context, access any, sessionID, text, wh
 	}
 	q.order = append(q.order, pm)
 	q.byKey[key] = pm
+	// The phase THIS CALL left the message in, read before the queue's own
+	// mutex is released. design §8.1 — and session.message's own tool
+	// schema — promise a "free" send `queued` immediately: the state the
+	// call produced, never a snapshot of a delivery loop that may already
+	// have run. It is exact by construction only here: every path that can
+	// advance this record — runQueue selecting a head, Cancel naming it —
+	// must first take q.mu, so inside this critical section there is nothing
+	// to race with. Read after the unlock instead, and a runQueue already
+	// running for this pane (or the one started below) can have claimed
+	// `pasting` before the answer is built, handing the caller a phase its
+	// own call never produced (nocx-xn63t.4.9).
+	var enqueued assistant.MessageView
+	if when == "free" {
+		enqueued = pm.view()
+	}
 	q.mu.Unlock()
 
 	if when == "now" {
@@ -410,17 +425,19 @@ func (m *paneMessages) Send(ctx context.Context, access any, sessionID, text, wh
 		}
 		return pm.view(), nil
 	}
-	// "free": returns queued immediately; delivery happens in the
-	// background, one at a time, whenever this pane's queue is not already
-	// running a delivery.
+	// "free": answers the phase this call left the message in — queued —
+	// immediately; delivery happens in the background, one at a time,
+	// whenever this pane's queue is not already running a delivery.
 	go m.runQueue(sessionID, q)
-	return pm.view(), nil
+	return enqueued, nil
 }
 
-// EnqueueTask is namespace "nocx"'s one message: the owed task a spawn
-// leaves for its worker once it meets a question (design §9, Task 11).
+// EnqueueBriefing is namespace "nocx"'s ONE message: the rules a worker is
+// handed, and then the task it is given, in one text and one submission
+// (nocx-xn63t.4.16; the rules are design §6 and the task is §9 Task 11's, whose
+// mechanism is unchanged).
 // coordinatorSession is the delegation chain's own root above participant —
-// the plan's own newPaneMessages/EnqueueTask sketch omitted it, but
+// the plan's own newPaneMessages sketch omitted it, but
 // Resolve's own contract refuses controller==sessionID (they can never be
 // the same session), so a real DescendantPaneAccess for delivering to
 // participant's pane needs the ACTUAL controller above it, exactly as the
@@ -434,9 +451,34 @@ func (m *paneMessages) Send(ctx context.Context, access any, sessionID, text, wh
 // only coincide in a test double whose fake Spawner happens to default one
 // from the other (worker_two_callers_test.go's workerTwoCallersSpawner).
 // Task 11's own caller (workers.go's Registrar.Register, via TaskQueue) is
-// what surfaced this: every real EnqueueTask call was resolving a session id
-// that names no participant at all.
-func (m *paneMessages) EnqueueTask(ctx context.Context, coordinatorSession string, participant workers.Participant, task string) error {
+// what surfaced this: every real call was resolving a session id that names
+// no participant at all.
+//
+// ONE MESSAGE, ONE ID, AND THAT IS WHY THE QUEUE GOT SIMPLER
+// (nocx-xn63t.4.16). The two halves used to be two messages — ids "preamble"
+// and "task", appended in one locked section — and the queue held the task
+// back until its rules had landed, because a worker handed work it was never
+// told how to report on can say nothing about that work. Both of those
+// mechanisms had exactly that one question to answer, and one text with the
+// rules first answers it by construction: the ordering is a property of the
+// text (workers.Briefing.Text) rather than of two messages' arrival order, and
+// the gate, the two ids and the re-keyed pairing lookup are deleted with them
+// rather than left standing beside a second mechanism.
+//
+// HALF A BRIEFING IS REFUSED (workers.Briefing.Validate), and it is now the
+// ONLY refusal of one: with the halves in one message there is no later moment
+// at which a missing rules half could be noticed, so the value-level check is
+// what keeps "a worker takes work it has no way to report on" unreachable
+// rather than merely unlikely.
+//
+// IDEMPOTENCY IS THE QUEUE'S, KEY BY KEY (design §8.4). The message carries id
+// "briefing" in namespace "nocx", so a repeat of the SAME briefing queues
+// nothing new and a repeat naming DIFFERENT text is refused rather than
+// silently re-writing what a worker was told.
+func (m *paneMessages) EnqueueBriefing(ctx context.Context, coordinatorSession string, participant workers.Participant, briefing workers.Briefing) error {
+	if err := briefing.Validate(); err != nil {
+		return err
+	}
 	if m.hub == nil || m.hub.registrar == nil {
 		return errNoPaneRuntime
 	}
@@ -444,38 +486,47 @@ func (m *paneMessages) EnqueueTask(ctx context.Context, coordinatorSession strin
 	if sessionID == "" {
 		return workers.ErrNotReachable
 	}
-	da := m.hub.Bind(coordinatorSession, session.Identity{}, KernelAuthority{RunID: "internal:owed-task"})
+	da := m.hub.Bind(coordinatorSession, session.Identity{}, KernelAuthority{RunID: "internal:nocx"})
 	reach, err := da.Resolve(ctx, sessionID, workers.EffectSendInput)
 	if err != nil {
 		return err
 	}
+
 	key := MessageKey{
 		Caller: "internal", Controller: coordinatorSession,
 		Participant: reach.Participant.ID, Liveness: reach.Participant.Liveness,
-		Namespace: "nocx", ID: "task",
+		Namespace: "nocx", ID: briefingID,
 	}
-	hash := PayloadHashV1(task, "free", "")
+	text := briefing.Text()
+	hash := PayloadHashV1(text, "free", "")
 
 	q := m.queueFor(sessionID)
 	q.mu.Lock()
+	defer q.mu.Unlock()
 	if existing, dup := q.byKey[key]; dup {
-		q.mu.Unlock()
 		if existing.payloadHash != hash {
-			return errors.New(`session.message: namespace "nocx" id "task" was already used with a different payload for this incarnation`)
+			return fmt.Errorf(`session.message: namespace "nocx" id %q was already used with a different payload for this incarnation`, briefingID)
 		}
+		// Same key, same hash -> the recorded state (design §8.4): a repeat of
+		// the same briefing is answered from the record, never re-delivered.
 		return nil
 	}
 	pm := &pendingMessage{
-		key: key, payloadHash: hash, text: task, when: "free",
+		key: key, payloadHash: hash, text: text, when: "free",
 		access: da, chain: reach.Chain, phase: assistant.PhaseQueued,
 	}
 	q.order = append(q.order, pm)
 	q.byKey[key] = pm
-	q.mu.Unlock()
-
 	go m.runQueue(sessionID, q)
 	return nil
 }
+
+// The one id a briefing's message carries. It is the queue's own naming for
+// namespace "nocx" (a caller's own messages are namespaced "caller" and can
+// never collide with it), and what it buys is idempotency — not pairing, which
+// is what a second id used to be for: with the rules and the task in one text
+// there is nothing left to pair.
+const briefingID = "briefing"
 
 // Cancel implements assistant.PaneMessages (design §8.6). It resolves id to
 // the caller's own MessageKey — the SAME derivation Send uses, so a cancel
@@ -512,9 +563,18 @@ func (m *paneMessages) Cancel(ctx context.Context, access any, sessionID, id str
 // runQueue is one pane's delivery loop for "free" messages: while the queue
 // is not already delivering and its head is still queued and not cancelled,
 // deliver it, one at a time, in arrival order (design §8.1). Started as a
-// goroutine from Send/EnqueueTask; a second start while one is already
+// goroutine from Send/EnqueueBriefing; a second start while one is already
 // running for this pane is a no-op (the delivering flag), so a burst of
 // enqueues never runs two deliveries on one pane concurrently.
+//
+// IT CARRIES NO BRIEFING RULE ANY MORE (nocx-xn63t.4.16). Until this bead a
+// task in namespace "nocx" was REFUSED here whenever the rules ahead of it had
+// not landed, because a worker handed work it was never told how to report on
+// can say nothing about that work. A briefing is one message now, with the
+// rules written first inside its own text, so there is no second message whose
+// outcome could gate a first and nothing left for this loop to decide: the
+// ordering is the value's (workers.Briefing.Text) and the refusal of half a
+// briefing is the value's too (workers.Briefing.Validate).
 func (m *paneMessages) runQueue(sessionID string, q *paneQueue) {
 	for {
 		q.mu.Lock()
@@ -524,6 +584,30 @@ func (m *paneMessages) runQueue(sessionID string, q *paneQueue) {
 		}
 		var head *pendingMessage
 		for _, pm := range q.order {
+			// THE QUEUE DELIVERS THE QUEUE'S OWN MESSAGES (nocx-xn63t.4.13).
+			// A when=="now" message is delivered by the call that enqueued
+			// it — design §8.1, "runs the delivery within the call" — and it
+			// sits in `order` only so the pane's readback and its
+			// idempotency key can see it. `when` is written once at
+			// construction and never again, so reading it here needs no
+			// lock; the phase below is the record's own and does.
+			//
+			// Without this skip, this scan starts a SECOND delivery of the
+			// same message whenever it runs while the call's own delivery is
+			// still in its readiness probe — a helper round trip, so a
+			// window wide enough to lose under load, measured 2026-09-18
+			// with both goroutines' stacks in one run (this one through
+			// runQueue, the other through Send). claim() does not stop it:
+			// it refuses a cancelled or terminal record, and `pasting` and
+			// `awaiting_echo` are neither — so both deliveries write the
+			// paste, then bump the generation under each other until every
+			// later commit is dropped and the record is left frozen in an
+			// in-flight phase (or reported partial on a delivery that did
+			// reach its echo). Two pastes of one message reach the pane,
+			// which is the one thing a delivery must never do twice.
+			if pm.when != "free" {
+				continue
+			}
 			if pm.currentPhase() == assistant.PhaseQueued && !pm.isCancelled() {
 				head = pm
 				break
@@ -674,6 +758,11 @@ type agentAwareReader interface {
 // target minted from the box alone already catches a menu appearing), the
 // wider TargetWorking otherwise — the safe default for an agent nobody has
 // measured this property for yet.
+//
+// It is asked only by the steps that SPEND a target (pasteStep, enterStep):
+// the readiness and echo probes read the pane instead, because a target
+// minted to ask "may I write" is a token-book slot held for a question the
+// frame answers itself (nocx-xn63t.4.1).
 func (m *paneMessages) deliveryTargetKind(sessionID string) sessionruntime.TargetKind {
 	aware, ok := m.reader.(agentAwareReader)
 	if !ok || m.rules == nil {
@@ -732,28 +821,51 @@ func (m *paneMessages) inputText(sessionID string, f paneview.Frame) (string, bo
 	return m.rules.Observe(agent, f).InputText()
 }
 
-// pasteReady mints a fresh target of deliveryTargetKind's own answer and
-// reports whether the paste precondition holds (design §8.2 step 1: "the
-// input box empty"). False either because the box currently holds someone
-// else's text, or because the box could not be identified at all right now
-// — for an agent whose menu displaces its input box (nocx-6q1uh.10), that
-// IS "a menu is up". Both reasons are treated identically by every caller
-// (when=="now" refuses either way; when=="free" retries either way), so
-// this reports only the one bool a caller acts on.
+// pasteReady reports whether the paste precondition holds (design §8.2 step
+// 1: "the input box empty") — from a READ, never a mint.
 //
-// The target mint is still spent for its own sake — it is what makes "a
-// menu is up" refuse (a target of a kind other than want, or none at all) —
-// and "empty" is answered by the RULE's own inputText reading of the same
-// frame (nocx-6q1uh.18), never by trimming the wider span the target itself
-// covers.
+// It used to answer this by minting a fresh target of deliveryTargetKind's
+// own kind and treating "nothing of that kind minted" as "a menu is up". That
+// is a token-book slot per call for an answer the frame already carries, and
+// the book is the one thing a delivery must not spend on looking: the helper
+// holds maxLiveTokens slots and by spec §6.2 never evicts, so a "free" message
+// waiting behind a menu filled it at one slot per messagePollInterval and the
+// only caller who could ever take that menu down — a TARGETED session.read —
+// was refused `capacity` for minutes (nocx-xn63t.4.1). A target is what a
+// WRITE spends; deciding whether to write at all needs none.
+//
+// Both halves of the precondition are read where they are already owned.
+// "A menu is up" is the classification (agentdriver's closed set: a menu
+// moment is permission_choice or modal_choice), and "the box is free" is the
+// same agent rule's own reading of the box (inputText, nocx-6q1uh.18), which
+// answers ok=false on every frame a menu has displaced the box — claude's
+// measured behaviour (nocx-6q1uh.10) and, for any agent nobody has measured,
+// the fail-closed direction. Both reasons refuse identically (when=="now"
+// refuses either way; when=="free" retries either way), so this reports the
+// one bool a caller acts on.
+//
+// It deliberately does NOT check that a target could still be minted: pasteStep
+// re-reads and refuses if the box moved out from under it, and asking twice
+// would be the second answer to one question.
 func (m *paneMessages) pasteReady(ctx context.Context, da *DescendantPaneAccess, sessionID string) bool {
-	want := m.deliveryTargetKind(sessionID)
-	read, err := m.reader.Read(ctx, da, sessionID, &want, nil)
-	if err != nil || read.Target == nil || read.Target.Kind != want {
+	read, err := m.reader.Read(ctx, da, sessionID, nil, nil)
+	if err != nil {
+		return false
+	}
+	if menuIsUp(read.Classification) {
 		return false
 	}
 	text, ok := m.inputText(sessionID, read.Frame)
 	return ok && text == ""
+}
+
+// menuIsUp answers whether a classification names a menu the agent is waiting
+// for a human to answer. Typing into one ANSWERS IT, which is the one thing a
+// message delivery must never do, so every refusal arm of design §8.2 step 1
+// fails closed on this — the same reason agentdriver treats StateUnknown as
+// busy everywhere.
+func menuIsUp(state agentdriver.State) bool {
+	return state == agentdriver.StatePermissionChoice || state == agentdriver.StateModalChoice
 }
 
 // pasteResult carries what commitPasteOrEnter needs without exposing
@@ -800,12 +912,17 @@ func (m *paneMessages) enterStep(ctx context.Context, da *DescendantPaneAccess, 
 // (a single-line paste) or Claude's own bracket echo form for a multi-line
 // paste ("[Pasted text #N +M lines]") — matched loosely, on the "+M lines]"
 // suffix alone, since #N is a counter this side of the call cannot predict.
+//
+// It READS and never mints: an echo is confirmed off the frame a snapshot
+// carries, and §8.2's step 2 says snapshot for exactly that reason. Minting
+// here held one token-book slot per poll — up to echoWait's worth per
+// delivery, on tokens this step spends nothing — which is the same defect
+// pasteReady had (nocx-xn63t.4.1).
 func (m *paneMessages) waitForEcho(ctx context.Context, da *DescendantPaneAccess, sessionID, text string) (echoed bool, boxNow string) {
 	deadline := time.Now().Add(m.echoWait)
-	want := m.deliveryTargetKind(sessionID)
 	for {
-		read, err := m.reader.Read(ctx, da, sessionID, &want, nil)
-		if err == nil && read.Target != nil && read.Target.Kind == want {
+		read, err := m.reader.Read(ctx, da, sessionID, nil, nil)
+		if err == nil {
 			if box, ok := m.inputText(sessionID, read.Frame); ok {
 				boxNow = box
 				if boxContainsEcho(box, text) {

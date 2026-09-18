@@ -395,8 +395,10 @@ build-release: helpers require-local-helper
 # work, this target is for exercising the real shell.
 #
 # Both artifact directories, host platform, gated: a dev binary that cannot
-# install its own helper is a dev loop where no terminal opens.
-dev: helpers require-local-helper
+# install its own helper is a dev loop where no terminal opens. The deployable
+# one for the host platform only (nocx-cq0wa) — `make helpers` builds the
+# release's four when a remote host of another platform needs one.
+dev: helpers-this-machine
 	$(FRONTEND_BUILD)
 	$(GO) run -tags "$(strip $(WAILS_PLATFORM_TAGS))" .
 

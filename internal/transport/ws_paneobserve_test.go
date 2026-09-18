@@ -451,7 +451,7 @@ func (c *countingObserver) count() int {
 //
 // Its first version ended only on the context passed to Start. That is not the
 // server's lifetime: in this package's own tests it is the background context,
-// so every server that wired an observer left a ticker firing every 120ms for
+// so every server that wired an observer left a ticker firing on every tick for
 // the remainder of the run. This package's 30-second timeouts already move
 // between test names under constrained scheduling (nocx-2h08), so a leaked
 // periodic goroutine here is not a tidiness question.

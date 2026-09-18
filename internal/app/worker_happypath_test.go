@@ -46,29 +46,29 @@ import (
 )
 
 const (
-	happyExternalEnv    = "NOCX_TEST_WORKER_HAPPY_EXTERNAL"
-	happyCommandEnv     = "NOCX_TEST_WORKER_HAPPY_COMMAND"
-	happyWaitSecondsEnv = "NOCX_TEST_WORKER_HAPPY_WAIT_SECONDS"
-	happyMutationEnv    = "NOCX_TEST_WORKER_HAPPY_MUTATION"
-	happyExpectedReport = "read AGENTS.md and reported from an external worker\n"
+	happyExternalEnv = "NOCX_TEST_WORKER_HAPPY_EXTERNAL"
+	happyCommandEnv  = "NOCX_TEST_WORKER_HAPPY_COMMAND"
 )
-
-// The skip-report mutation models a worker that never declares what it
-// produced; wrong-summary models a declaration for the wrong work. Either
-// regression must make the external cycle fail instead of claiming completion.
 
 // TestWorkerHappyExternalCoordinator is a REAL second process. It is the
 // external coordinator for TestExternalClaudeDrivesAWorkerEndToEnd, not
-// nocx's assistant engine. The four calls are deliberately direct JSON-RPC
-// worker calls: spawn a real pane, wait for the declaration, read its summary,
-// and close the participant.
+// nocx's assistant engine. The three calls are deliberately direct JSON-RPC
+// worker calls: spawn a real pane, read what the session holds, and close the
+// participant.
+//
+// THE WAIT AND THE DECLARATION LEFT THIS CYCLE with ADR-0070: an interactive
+// worker never exits, so a wait on its exit held to its deadline, and the
+// verdict a wrapper used to send is not a fact nocx records. What a
+// coordinator has instead is its MAILBOX — the worker's own report and the
+// states nocx saw — which is worker_report_test.go's and
+// worker_observed_inbox_test.go's subject.
 func TestWorkerHappyExternalCoordinator(t *testing.T) {
 	socket := os.Getenv(happyExternalEnv)
 	if socket == "" {
 		t.Skip("not the external coordinator")
 	}
 
-	methods := []string{"workers.spawn", "workers.wait", "workers.holdings", "workers.close"}
+	methods := []string{"workers.spawn", "workers.holdings", "workers.close"}
 	client, err := openHappyExternalClient(socket)
 	if err != nil {
 		t.Fatalf("connect external coordinator: %v", err)
@@ -98,25 +98,13 @@ func TestWorkerHappyExternalCoordinator(t *testing.T) {
 		t.Fatalf("spawn result = %s, want a live participant id", spawn.Result)
 	}
 
-	waitSeconds := os.Getenv(happyWaitSecondsEnv)
-	if waitSeconds == "" {
-		waitSeconds = "10"
-	}
-	wait := client.Call("workers.wait", `{"seconds":`+waitSeconds+`}`)
-	if wait.Error != nil {
-		t.Fatalf("workers.wait: %+v", wait.Error)
-	}
-	var waited happyWorkerHoldingsResult
-	mustDecodeHappyResult(t, wait.Result, &waited)
-	assertHappyDeclaration(t, waited, spawned.ID)
-
 	holdings := client.Call("workers.holdings", `{}`)
 	if holdings.Error != nil {
 		t.Fatalf("workers.holdings: %+v", holdings.Error)
 	}
 	var readback happyWorkerHoldingsResult
 	mustDecodeHappyResult(t, holdings.Result, &readback)
-	assertHappyDeclaration(t, readback, spawned.ID)
+	assertHappyWorker(t, readback, spawned.ID, string(workers.StateLive))
 
 	closed := client.Call("workers.close", `{"worker":"`+spawned.ID+`"}`)
 	if closed.Error != nil {
@@ -134,10 +122,9 @@ func TestWorkerHappyExternalCoordinator(t *testing.T) {
 	payload, err := json.Marshal(struct {
 		Methods  []string        `json:"methods"`
 		Spawn    json.RawMessage `json:"spawn"`
-		Wait     json.RawMessage `json:"wait"`
 		Holdings json.RawMessage `json:"holdings"`
 		Close    json.RawMessage `json:"close"`
-	}{methods, spawn.Result, wait.Result, holdings.Result, closed.Result})
+	}{methods, spawn.Result, holdings.Result, closed.Result})
 	if err != nil {
 		t.Fatalf("marshal external cycle: %v", err)
 	}
@@ -201,21 +188,21 @@ func (c *happyExternalClient) Call(method, params string) happyRPCResponse {
 
 type happyWorkerHoldingsResult struct {
 	Participants []struct {
-		ID      string `json:"id"`
-		State   string `json:"state"`
-		Summary string `json:"summary"`
+		ID    string `json:"id"`
+		State string `json:"state"`
+		Task  string `json:"task"`
 	} `json:"participants"`
 }
 
-func assertHappyDeclaration(t *testing.T, got happyWorkerHoldingsResult, id string) {
+func assertHappyWorker(t *testing.T, got happyWorkerHoldingsResult, id, wantState string) {
 	t.Helper()
 	for _, participant := range got.Participants {
 		if participant.ID == id {
-			if participant.State != string(workers.StateLive) {
-				t.Fatalf("worker %q state = %q, want live while its pane is open", id, participant.State)
+			if participant.State != wantState {
+				t.Fatalf("worker %q state = %q, want %q", id, participant.State, wantState)
 			}
-			if participant.Summary != happyExpectedReport {
-				t.Fatalf("worker %q summary = %q, want %q", id, participant.Summary, happyExpectedReport)
+			if participant.Task == "" {
+				t.Fatalf("worker %q is listed with no task", id)
 			}
 			return
 		}
@@ -518,23 +505,28 @@ type happyStand struct {
 // It is not the shipped internal/app.paneMessages: that one delivers through
 // a real helper's session.intent (design §8), and this stand runs no helper
 // at all (Task 14's own happypath extends this same newHappyStand with one).
-// What this stand's tests need from a TaskQueue is only "the task the
-// coordinator gave eventually reaches the pane once it is free", and
-// awaitFreeText plus the real Typist already answer that faithfully.
+// What this stand's tests need from a TaskQueue is only "the rules the
+// coordinator's worker reports under, and then the task it was given,
+// eventually reach the pane once it is free", and awaitFreeText plus the real
+// Typist already answer that faithfully.
 type happyTaskQueue struct {
 	readiness paneReadiness
 	typist    paneTypist
 	log       log.Logger
 }
 
-func (q *happyTaskQueue) EnqueueTask(_ context.Context, _ string, participant workers.Participant, task string) error {
+// EnqueueBriefing types the briefing's one message (nocx-xn63t.4.16). It types
+// ONE text and not the two halves separately: the rules and the task travel
+// joined, rules first, which is what tells the worker both what it is and what
+// to do without leaving the rules alone as a turn of their own.
+func (q *happyTaskQueue) EnqueueBriefing(_ context.Context, _ string, participant workers.Participant, briefing workers.Briefing) error {
 	go func() {
 		paneID := participant.Liveness.SessionID
 		state, err := awaitFreeText(context.Background(), q.readiness, paneID, q.log, "worker spawn (happy stand)")
 		if err != nil || state != agentdriver.StateFreeText {
 			return
 		}
-		q.typist.Submit(context.Background(), paneID, task)
+		q.typist.Submit(context.Background(), paneID, briefing.Text())
 	}()
 	return nil
 }
@@ -769,11 +761,9 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 		t.Fatalf("pane enroller: %v", err)
 	}
 	paneEnrol = enrol.hookInto(paneEnrol)
-	report := &workerReporter{lanes: lanes, enrol: enrol, log: logger, now: time.Now}
 	kernel := lifecycle.New(lifecycle.Options{})
 	pub := lifecyclepub.New(kernel,
 		lifecyclepub.WithAgentEnroller(paneEnrol),
-		lifecyclepub.WithAgentReporter(report),
 	)
 	pub.SetEmitter(happyLifecycleEmitter{})
 	factory.kernel = pub
@@ -818,14 +808,31 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 
 	store := workers.NewMemoryStore()
 	sup := &workerSupervisor{sessions: reg, log: logger}
-	spawner := &workerSpawner{layout: db.Layout(), opener: tp, sessions: reg, enrolments: enrol, workspace: string(workspace.Default), log: logger}
+	// seats is WHICH TAB each participant's pane was minted in
+	// (nocx-xn63t.4.6), wired into the spawner and the closer exactly as
+	// app.go wires it — this stand is where the external-coordinator journey
+	// runs, and that journey is where "closing a worker closes its tab" is
+	// measured end to end.
+	seats := newWorkerTabs()
+	spawner := &workerSpawner{
+		layout: db.Layout(), opener: tp, sessions: reg, enrolments: enrol,
+		workspace: string(workspace.Default),
+		// The product's own push (nocx-ui8q6.3) and its tab-close counterpart
+		// (nocx-xn63t.4.6): this stand talks to the server in-process and no
+		// window is connected to it, so both answer their "nobody is
+		// connected" branch and log the drop — the same thing production does
+		// with no renderer attached.
+		announce: tp, tabs: seats, log: logger,
+	}
 	if cfg.realTyping {
 		spawner.readiness = realWatch
 	}
 	recordOpts := []workers.Option{
 		workers.WithEnrolmentDeadline(cfg.deadline),
 		workers.WithLogger(logger),
-		workers.WithCloser(&workerCloser{sessions: reg, log: logger}),
+		workers.WithCloser(&workerCloser{
+			sessions: reg, layout: db.Layout(), tabs: seats, announce: tp, log: logger,
+		}),
 	}
 	record := workers.NewRegistrar(store, spawner, enrol, sup, recordOpts...)
 	if cfg.realTyping {
@@ -836,16 +843,12 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 		// helper runtime behind its panes at all (that is Task 14's own
 		// happypath, which extends this same newHappyStand for exactly that
 		// reason). happyTaskQueue reaches the SAME real typing gate
-		// (paneTyping) this stand already wires for readiness, so
+		// this stand already wires for readiness, so
 		// TestACoordinatorSpawnsAWorkerAndTypesItsTask's own assertion — the
-		// task lands in the pane as a bracketed paste and a submit key —
+		// briefing lands in the pane as a bracketed paste and a submit key —
 		// still exercises a real gate rather than a double that only
 		// records a call.
 		record.SetTaskQueue(&happyTaskQueue{readiness: realWatch, typist: paneTyping, log: logger})
-	}
-	report.declare = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, d workers.Declaration) error {
-		_, declareErr := record.Declared(ctx, id, l, d)
-		return declareErr
 	}
 	sup.exited = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, e workers.Exit) {
 		_, _ = record.Exited(ctx, id, l, e)
@@ -941,15 +944,14 @@ func runHappyExternalCoordinator(t *testing.T, socket string) map[string]json.Ra
 		var result struct {
 			Methods  []string        `json:"methods"`
 			Spawn    json.RawMessage `json:"spawn"`
-			Wait     json.RawMessage `json:"wait"`
 			Holdings json.RawMessage `json:"holdings"`
 			Close    json.RawMessage `json:"close"`
 		}
 		if json.Unmarshal([]byte(line), &result) == nil {
-			if len(result.Methods) != 4 {
-				t.Fatalf("external cycle methods = %v, want four direct workers.* calls", result.Methods)
+			if len(result.Methods) != 3 {
+				t.Fatalf("external cycle methods = %v, want three direct workers.* calls", result.Methods)
 			}
-			return map[string]json.RawMessage{"spawn": result.Spawn, "wait": result.Wait, "holdings": result.Holdings, "close": result.Close}
+			return map[string]json.RawMessage{"spawn": result.Spawn, "holdings": result.Holdings, "close": result.Close}
 		}
 	}
 	t.Fatalf("external coordinator produced no cycle result: %s", out)
@@ -971,15 +973,7 @@ func TestExternalClaudeDrivesAWorkerEndToEnd(t *testing.T) {
 	if command == "" {
 		fakeDir := t.TempDir()
 		fakeClaude := filepath.Join(fakeDir, "claude")
-		mutation := os.Getenv(happyMutationEnv)
 		script := "#!/bin/sh\nprintf 'FAKE-CLAUDE-RAN\\n'\n"
-		if mutation != "skip-report" {
-			summary := happyExpectedReport
-			if mutation == "wrong-summary" {
-				summary = "a different result"
-			}
-			script += "printf 'ok\\n%s' '" + summary + "' > \"$NOCX_AGENT_REPORT\"\n"
-		}
 		if err := os.WriteFile(fakeClaude, []byte(script), 0o700); err != nil { //nolint:gosec // the test launcher must be executable
 			t.Fatalf("write fake claude: %v", err)
 		}
@@ -988,6 +982,18 @@ func TestExternalClaudeDrivesAWorkerEndToEnd(t *testing.T) {
 		t.Logf("using external worker command %q", command)
 	}
 	stand := newHappyStand(t)
+	// A TAB OF THE PERSON'S OWN, minted before anything is spawned. Without
+	// it the worker's tab is the ONLY tab in the window, and the close would
+	// then be answered by content's own replacement — a tab minted so that the
+	// application is never left with none — which would make "the tab is gone"
+	// indistinguishable from "a different tab is there". A person with one tab
+	// open is the ordinary case for a coordinator anyway.
+	if _, err := stand.db.Layout().CreateTab(context.Background(),
+		content.Tab{ID: happyPersonTab, WorkspaceID: workerTestWorkspace, Layout: content.LayoutRow},
+		content.Pane{ID: happyPersonPane, TabID: happyPersonTab, Kind: content.PaneLocal, SizeShare: 1},
+	); err != nil {
+		t.Fatalf("the person's own tab: %v", err)
+	}
 	// Nothing before nocx-xn63t.6.1 printed what the worker's OWN pane saw —
 	// runHappyExternalCoordinator already surfaces the external coordinator
 	// process's stdout/stderr on failure, but a report that never arrived
@@ -1011,12 +1017,9 @@ func TestExternalClaudeDrivesAWorkerEndToEnd(t *testing.T) {
 		t.Fatalf("external spawn = %s, want a live worker", cycle["spawn"])
 	}
 
-	var waited happyWorkerHoldingsResult
-	mustDecodeHappyResult(t, cycle["wait"], &waited)
-	assertHappyDeclaration(t, waited, spawned.ID)
 	var readback happyWorkerHoldingsResult
 	mustDecodeHappyResult(t, cycle["holdings"], &readback)
-	assertHappyDeclaration(t, readback, spawned.ID)
+	assertHappyWorker(t, readback, spawned.ID, string(workers.StateLive))
 
 	var closed struct {
 		ID    string `json:"id"`
@@ -1027,15 +1030,15 @@ func TestExternalClaudeDrivesAWorkerEndToEnd(t *testing.T) {
 		t.Fatalf("external close = %s, want ended worker %q", cycle["close"], spawned.ID)
 	}
 	var stored workers.Participant
-	waittest.WaitFor(t, "worker declaration and close to reach the record", func() bool {
+	waittest.WaitFor(t, "the close to reach the record", func() bool {
 		var err error
 		stored, err = stand.store.Participant(context.Background(), workers.ParticipantID(spawned.ID))
-		return err == nil && stored.State == workers.StateCompleted
+		return err == nil && stored.State == workers.StateClosed
 	})
-	if stored.Group != workers.ID(stand.coord.ID()) || stored.Declared == nil || stored.Declared.Summary != happyExpectedReport {
-		t.Fatalf("stored worker = %+v, want coordinator %q and declaration %q", stored, stand.coord.ID(), happyExpectedReport)
+	if stored.Group != workers.ID(stand.coord.ID()) {
+		t.Fatalf("stored worker = %+v, want coordinator %q", stored, stand.coord.ID())
 	}
-	t.Logf("worker record: id=%s group=%s state=%s session=%s summary=%q", stored.ID, stored.Group, stored.State, stored.Liveness.SessionID, stored.Declared.Summary)
+	t.Logf("worker record: id=%s group=%s state=%s session=%s", stored.ID, stored.Group, stored.State, stored.Liveness.SessionID)
 	if stored.Liveness.SessionID == "" {
 		t.Fatalf("stored worker has no worker session: %+v", stored)
 	}
@@ -1044,7 +1047,46 @@ func TestExternalClaudeDrivesAWorkerEndToEnd(t *testing.T) {
 	if watches != 1 || len(paneIDs) != 1 || paneIDs[0] == "" {
 		t.Fatalf("pane observation = watches %d, exits %d, pane ids %v; want one watch for a real pane", watches, exits, paneIDs)
 	}
+
+	// AND THE WORKER'S TAB IS GONE (nocx-xn63t.4.6) — stage 4's own promise to
+	// the owner, measured here because this is the journey where the whole path
+	// is real: the external coordinator's workers.close is what took it out,
+	// and what is read is the CONTENT STORE a restart reads back rather than a
+	// fact either side asserted about itself.
+	//
+	// THE PERSON'S TAB IS STILL THERE AND ALONE, which is the pair of facts
+	// that makes this an assertion rather than a count: the window holds the
+	// one tab it held before the spawn, at seat 0, and nothing else. A close
+	// that left the worker's tab behind fails the first half; a close that
+	// took the strip with it — or that the store answered with a replacement
+	// tab — fails the second.
+	tabs, err := stand.db.Layout().Tabs(context.Background(), workerTestWorkspace)
+	if err != nil {
+		t.Fatalf("the strip after the close: %v", err)
+	}
+	if len(tabs) != 1 || tabs[0].ID != happyPersonTab {
+		t.Fatalf("the strip after the close = %+v, want exactly the person's own tab %q: workers.close left the worker's tab standing",
+			tabs, happyPersonTab)
+	}
+	if tabs[0].Position != 0 {
+		t.Fatalf("the person's tab sits at position %d, want 0 — the strip is not dense after the close", tabs[0].Position)
+	}
+	snap, err := stand.db.Layout().Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("layout snapshot after the close: %v", err)
+	}
+	if len(snap.Panes) != 1 || snap.Panes[0].ID != happyPersonPane {
+		t.Fatalf("the window's panes after the close = %+v, want exactly the person's own pane %q — the worker's pane is still in the chain",
+			snap.Panes, happyPersonPane)
+	}
 }
+
+// The two rows the journey's own tab is made of, named rather than minted so
+// that "the worker's tab is gone" can be read as "this one is what is left".
+const (
+	happyPersonTab  = "tab-the-person-had-open"
+	happyPersonPane = "pane-the-person-had-open"
+)
 
 // execCommandContext is kept local so the external process is visibly the
 // test binary re-executed, not an assistant/model subprocess or herdr.
@@ -1083,11 +1125,10 @@ func TestManualRealClaudeCoordinator(t *testing.T) {
 		t.Fatal(err)
 	}
 	prompt := `Act as the coordinator. Use only the nocx workers tools and perform this exact cycle:
-1. Call workers.spawn exactly once with command ` + "`claude -p 'Read AGENTS.md. Then write exactly two lines to \\\"$NOCX_AGENT_REPORT\\\": first ok, second read AGENTS.md and reported from an external worker.'`" + ` and task ` + "`read AGENTS.md and report`" + `.
-2. Call workers.wait with seconds 60.
-3. Call workers.holdings and inspect the declaration.
-4. Call workers.close for the worker id returned by workers.spawn.
-Do not use Bash or any other tool. After the cycle, answer with the exact ordered tool names and the complete JSON results from all four calls.`
+1. Call workers.spawn exactly once with command ` + "`claude -p 'Read AGENTS.md.'`" + ` and task ` + "`read AGENTS.md and report`" + `.
+2. Call workers.holdings and read what your session holds.
+3. Call workers.close for the worker id returned by workers.spawn.
+Do not use Bash or any other tool. After the cycle, answer with the exact ordered tool names and the complete JSON results from all three calls.`
 	cmd := exec.Command("claude", "--print", "--no-session-persistence", "--dangerously-skip-permissions", "--strict-mcp-config", "--mcp-config", configPath, "--output-format", "stream-json", "--verbose", "-p", prompt) //nolint:gosec // manual test intentionally launches the installed Claude CLI
 	cmd.Dir = repoRoot
 	cmd.Env = append(os.Environ(), "NO_COLOR=1")
@@ -1103,10 +1144,10 @@ Do not use Bash or any other tool. After the cycle, answer with the exact ordere
 	waittest.WaitFor(t, "manual worker record to settle", func() bool {
 		var err error
 		held, err = stand.store.HeldBy(context.Background(), string(stand.coord.ID()))
-		return err == nil && len(held) == 1 && held[0].State == workers.StateCompleted && held[0].Declared != nil
+		return err == nil && len(held) == 1 && held[0].State == workers.StateClosed
 	})
-	if len(held) != 1 || held[0].Group != workers.ID(stand.coord.ID()) || held[0].Liveness.SessionID == "" || held[0].Declared.Summary != happyExpectedReport {
-		t.Fatalf("manual worker record = %+v, want one completed external worker for coordinator %q with declaration %q", held, stand.coord.ID(), happyExpectedReport)
+	if len(held) != 1 || held[0].Group != workers.ID(stand.coord.ID()) || held[0].Liveness.SessionID == "" {
+		t.Fatalf("manual worker record = %+v, want one closed external worker for coordinator %q", held, stand.coord.ID())
 	}
-	t.Logf("manual worker record: id=%s group=%s state=%s session=%s summary=%q", held[0].ID, held[0].Group, held[0].State, held[0].Liveness.SessionID, held[0].Declared.Summary)
+	t.Logf("manual worker record: id=%s group=%s state=%s session=%s", held[0].ID, held[0].Group, held[0].State, held[0].Liveness.SessionID)
 }

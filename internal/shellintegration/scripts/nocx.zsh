@@ -472,7 +472,7 @@ __nocx_lc_read_agent_answer() {
             return 1
         fi
         case "$__nocx_lc_frame" in
-            *'"evt":"agent_enrolled"'*|*'"evt":"agent_withdrawn"'*|*'"evt":"agent_reported"'*) : ;;
+            *'"evt":"agent_enrolled"'*|*'"evt":"agent_withdrawn"'*) : ;;
             *'"evt":"refresh_request"'*) __nocx_lc_ans_refresh || true; continue ;;
             *) continue ;; # a stale frame (a late accept, an old grant): skip
         esac
@@ -522,53 +522,6 @@ __nocx_agent_geometry() {
     fi
     (( __nocx_agent_cols > 0 )) || __nocx_agent_cols=80
     (( __nocx_agent_rows > 0 )) || __nocx_agent_rows=24
-}
-
-# The declaration drop. See nocx.bash for the argument; the shape is the same
-# because the two scripts are two implementations of one protocol, and a
-# worker that could declare in bash and not in zsh would be a worker group whose
-# completions depended on the person's login shell.
-__nocx_agent_report_path=
-# See nocx.bash's own doc on __nocx_agent_report_reason (nocx-xn63t.6.1): a
-# failed drop used to be silent here too.
-__nocx_agent_report_reason=
-__nocx_agent_report_open() {
-    __nocx_agent_report_path=
-    __nocx_agent_report_reason=
-    local __p
-    if ! __p="$(command mktemp "${TMPDIR:-/tmp}/nocx-agent-report.XXXXXX" 2>&1)"; then
-        __nocx_agent_report_reason="could not create a private report file${__p:+: $__p}"
-        return 1
-    fi
-    __nocx_agent_report_path="$__p"
-    return 0
-}
-
-__nocx_agent_report_send() {
-    local __rid="$1" __line __verdict= __body= __first=1 __ok
-    [[ -n "$__nocx_agent_report_path" && -r "$__nocx_agent_report_path" ]] || return 0
-    while IFS= read -r __line || [[ -n "$__line" ]]; do
-        if (( __first )); then
-            __verdict="$__line"
-            __first=0
-            continue
-        fi
-        __body="$__body$__line"$'\n'
-    done < "$__nocx_agent_report_path"
-    case "$__verdict" in
-        ok) __ok=true ;;
-        fail) __ok=false ;;
-        *) return 0 ;;
-    esac
-    __body="${__body:0:4000}"
-    __nocx_lc_json_escape "$__body"
-    __nocx_lc_send agent_report ',"request":"'"$__rid"'","ok":'"$__ok"',"summary":"'"$__nocx_lc_json_escaped"'"' || return 0
-    __nocx_lc_read_agent_answer "$__rid" || return 0
-    case "$__nocx_lc_frame" in
-        *'"recorded":true'*) : ;;
-        *) builtin printf 'nocx: what you reported was not recorded%s\n' \
-               "${__nocx_agent_reason:+ — $__nocx_agent_reason}" >&2 ;;
-    esac
 }
 
 __nocx_agent_stage_reason=
@@ -777,12 +730,6 @@ __nocx_agent_run() {
         __stage_reason="$__nocx_agent_stage_reason"
         builtin printf 'nocx: tool surface unavailable — %s\n' "$__stage_reason" >&2
     fi
-    # Opened before the agent starts, and the declaration goes before the
-    # withdraw — inside the interval the enrolment opened. Said out loud on
-    # failure, the same as stage's own refusal (nocx-xn63t.6.1).
-    if ! __nocx_agent_report_open; then
-        builtin printf 'nocx: no report drop for this agent — %s\n' "$__nocx_agent_report_reason" >&2
-    fi
     # Claude's --mcp-config option is variadic: placing it before "$@" would
     # swallow a user's positional prompt as another config path. Keep it last.
     # If a future Claude subcommand rejects trailing flags, update this
@@ -795,26 +742,15 @@ __nocx_agent_run() {
     # the same door — a non-exported variable is not inherited anyway — and it
     # is kept because the cost is one builtin.
     unset __nocx_agent_token 2>/dev/null || true
-    # `env VAR=val CMD` rather than `VAR=val command CMD` (nocx-xn63t.6.1):
-    # kept in step with nocx.bash's own fix, whose doc comment on this same
-    # line has the bash-3.2 evidence — a DEBUG-trap interaction that drops a
-    # temporary assignment before the traced command execs. zsh's precmd/
-    # preexec hooks are not bash's DEBUG trap, so nothing here proves the
-    # SAME defect exists in this shell; the two scripts are one protocol,
-    # and env bypasses the same-named shell function either way, so there is
-    # no reason to keep the form that has already misbehaved in the other.
     if (( __staged )); then
-        command env "NOCX_AGENT_REPORT=$__nocx_agent_report_path" "$__agent" "$@" \
-            --mcp-config "$__nocx_agent_launch_dir/mcp.json"
+        command "$__agent" "$@" --mcp-config "$__nocx_agent_launch_dir/mcp.json"
     else
-        command env "NOCX_AGENT_REPORT=$__nocx_agent_report_path" "$__agent" "$@"
+        command "$__agent" "$@"
     fi
     __rc=$?
-    __nocx_agent_report_send "$__rid"
-    if [[ -n "$__nocx_agent_report_path" ]]; then
-        command rm -f -- "$__nocx_agent_report_path" 2>/dev/null
-        __nocx_agent_report_path=
-    fi
+    # The withdrawal closes the interval the enrolment opened, and it runs
+    # whatever the agent returned — a crash, an interrupt and a clean exit
+    # all close it.
     __nocx_lc_send agent_withdraw ',"request":"'"$__rid"'"' || true
     __nocx_lc_read_agent_answer "$__rid" || true
     if (( __staged )); then

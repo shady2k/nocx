@@ -379,6 +379,35 @@ type LayoutRepository interface {
 	// the tab itself, or that would join a chain longer than lineage.MaxDepth
 	// is refused and nothing is written.
 	CreateTab(ctx context.Context, tab Tab, firstPane Pane) (Created[NewTab], error)
+	// CreateTabAfter records that same tab-and-first-pane pair AND places it
+	// in its workspace's strip, immediately after the open tab `after` names
+	// (nocx-tdiqs). Everything CreateTab refuses is refused here in the same
+	// words and for the same reasons — the lineage admission, the replay of a
+	// retried id, the id conflict — and the placement is part of the SAME
+	// transaction, so a create that fails leaves no tab, no moved neighbour
+	// and no workspace with two tabs at one position.
+	//
+	// IT EXISTS BECAUSE A STRIP IS ORDERED AND A CREATE IS NOT A REORDER. The
+	// renderer's own tabs.create states a position, which is legitimate for a
+	// caller that is deciding where a tab goes; the backend minting a tab for
+	// a worker knows something a position cannot express — that the new tab
+	// belongs immediately after a particular existing one — and a position
+	// computed out here would be a second owner of what "immediately after"
+	// means the moment two tabs share a seat. So the seat is the store's:
+	// it reads the strip, seats the new tab after the anchor, and renumbers
+	// 0..n-1 exactly as ReorderTabs does, through the same writer.
+	//
+	// `after` IS AN OPEN TAB OF THE SAME WORKSPACE, or the new tab goes LAST.
+	// Empty is that case, and so is an id nobody knows and one that names a
+	// tab of another workspace: a strip is one workspace's, so a tab outside
+	// it names no seat on it, and refusing the create over that would fail a
+	// write over a fact that is not wrong — merely unattributable.
+	//
+	// THE REQUEST'S Position IS NOT THE SEAT. The placement decides that, and
+	// the field is therefore left out of the id-conflict digest as well: an
+	// ask retried with a different number there is the same ask, because the
+	// number was never honoured.
+	CreateTabAfter(ctx context.Context, tab Tab, firstPane Pane, after string) (Created[NewTab], error)
 	// Tabs returns one workspace's tabs in position order.
 	Tabs(ctx context.Context, workspaceID string) ([]Tab, error)
 	// RenameTab sets or CLEARS the name the user typed. nil is not "no
@@ -456,6 +485,18 @@ type LayoutRepository interface {
 	// different facts and a caller choosing a directory must be able to tell
 	// "nobody reported one" from "there is no such pane".
 	PaneCwd(ctx context.Context, paneID string) (string, error)
+	// TabForPane walks pane → tab: which tab currently holds this pane. It is
+	// the rung above PaneCwd's, read from the same row, and it exists for the
+	// same reason — a caller with a PANE and a question about its container
+	// asks the chain rather than walking it itself (nocx-tdiqs: a worker's
+	// tab is placed after its coordinator's, and the coordinator is known by
+	// its session's pane).
+	//
+	// It joins tabs the way WorkspaceForPane does, and for the same reason:
+	// the window's chain is both rungs, and a closed tab is not a container
+	// anything may be placed into. ErrNoSuchPane for an id no open pane
+	// carries, never "" — the same two facts PaneCwd keeps apart.
+	TabForPane(ctx context.Context, paneID string) (string, error)
 	// WorkspaceForPane walks pane → tab → workspace. This is what §4.5 means
 	// by workspaceId moving off the session: the backend owns the whole chain
 	// and RESOLVES the answer rather than being told it, so there is one

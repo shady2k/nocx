@@ -1,21 +1,27 @@
 package workers
 
-// The routing table and what coalesces (nocx-dkawo.4).
+// The routing table, and the number the design is judged by (nocx-dkawo.4,
+// kept by nocx-luqz9.3).
 //
 // The design calls this "the question that decides whether any of this is
-// useful": which facts are routine, which wake the coordinator, and which go
-// to the human. Get it wrong in one direction and the coordinator is woken
-// for every completion, which is the poll this mechanism replaced; get it
-// wrong in the other and the end of the worker reaches nobody.
+// useful": which facts are routine, which need judgement, and — where the
+// mechanism that used to answer it has been replaced — what the record still
+// reports about either. Get the table wrong in one direction and the
+// coordinator is told about every completion, which is the poll this mechanism
+// replaced; get it wrong in the other and the end of the worker reaches nobody.
 //
-// Every test here runs N workers through the REAL registrar, because the
-// table's whole input is what else the worker is holding, and a table asked
-// about one participant in isolation cannot be wrong in the way this one can.
+// WHAT THIS FILE NO LONGER ASSERTS is the per-fact wake and its deadline. Both
+// are deleted (design §5, wake_test.go): the wake is about a coordinator's
+// MAILBOX, and a fact about a worker is not a message in it. What survives is
+// the table itself and the counters, because they are statements about the WORK
+// and not about timers.
 
 import (
 	"context"
 	"fmt"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/session"
 )
 
 // fanout registers n workers and returns them.
@@ -36,352 +42,161 @@ func fanout(t *testing.T, h *harness, n int) []Participant {
 	return out
 }
 
-// finish declares success and exits, which is what an ordinary worker does.
+// finish ends a worker the way an ordinary one ends: its shell exits, which is
+// the only fact the record has left to route.
 func finish(t *testing.T, h *harness, p Participant) {
 	t.Helper()
-	ctx := context.Background()
-	if _, err := h.reg.Declared(ctx, p.ID, testLiveness(), Declaration{OK: true, Summary: "done"}); err != nil {
-		t.Fatalf("declare %s: %v", p.ID, err)
-	}
-	if _, err := h.reg.Exited(ctx, p.ID, testLiveness(), Exit{Cause: "exited"}); err != nil {
+	if _, err := h.reg.Exited(context.Background(), p.ID, testLiveness(), Exit{Cause: string(session.ExitExited)}); err != nil {
 		t.Fatalf("exit %s: %v", p.ID, err)
 	}
 }
 
 // ── the table ─────────────────────────────────────────────────────────────
 
-// THE CRITERION: three workers run, a routine completion wakes nobody, and
-// the end of the worker does.
+// THE TABLE, over the one fact that is left. An ordinary end is recorded and
+// needs nobody while others still run; the END OF THE WORKER needs judgement.
 //
-// The two halves are one rule read at two moments. A worker finishing with
-// two still running tells the coordinator nothing it did not expect, and
-// waking it would spend a turn on "yes, one of three is done". The LAST one
-// finishing is the worker arriving, which is the moment the coordinator exists
-// for.
-func TestThreeWorkersRunAndOnlyTheEndOfTheGroupWakesTheCoordinator(t *testing.T) {
+// The two halves are one rule read at two moments. A worker whose shell exited
+// with two still running tells the coordinator nothing it did not expect, and
+// spending its turn on "yes, one of three is gone" is the poll this mechanism
+// exists to replace. The LAST one ending is the worker arriving, which is the
+// moment the coordinator exists for — and it is the fact the record OWES
+// judgement on, which is what a coordinator is told when it looks.
+func TestThreeWorkersRunAndOnlyTheEndOfTheGroupNeedsJudgement(t *testing.T) {
 	h := newHarnessBound(t, 5)
 	workers := fanout(t, h, 3)
 
 	finish(t, h, workers[0])
-	if got := len(h.wake.seen()); got != 0 {
-		t.Fatalf("wakes after one of three finished = %d, want 0", got)
-	}
 	if got := len(h.reg.Undispatched()); got != 0 {
-		t.Fatalf("undispatched after a routine completion = %d, want 0", got)
+		t.Fatalf("undispatched after a routine end = %d, want 0", got)
 	}
-	if got := h.alarms.running(); got != 0 {
-		t.Fatalf("armed alarms after a routine completion = %d, want 0", got)
+	if got := h.reg.Cost().Routine; got != 1 {
+		t.Fatalf("routine = %d, want the one fact nobody had anything to decide about", got)
 	}
 
 	finish(t, h, workers[1])
-	if got := len(h.wake.seen()); got != 0 {
-		t.Fatalf("wakes after two of three finished = %d, want 0", got)
+	if got := len(h.reg.Undispatched()); got != 0 {
+		t.Fatalf("undispatched after two of three ended = %d, want 0", got)
 	}
 
 	finish(t, h, workers[2])
-	if got := len(h.wake.seen()); got == 0 {
-		t.Fatalf("the worker finished and the coordinator was never woken")
-	}
 	if got := len(h.reg.Undispatched()); got == 0 {
-		t.Fatalf("the worker finished and the record owes nobody judgement")
+		t.Fatalf("the worker ended and the record owes nobody judgement")
 	}
 }
 
-// A worker that did NOT succeed wakes the coordinator whatever else is
-// running. Holding a crash until the worker finishes would report it after the
-// work that depended on it, which is the one ordering that cannot be undone.
-func TestAWorkerThatDidNotSucceedWakesTheCoordinatorWhileOthersRun(t *testing.T) {
-	ctx := context.Background()
+// An end nocx cannot call ordinary — the shell did not exit, the backend LOST
+// it — needs judgement whatever else is running. There is no verdict left in
+// the record (ADR-0070 decision 3), so the cause is the discriminator: a loss
+// is the case nobody expected, and holding it until the rest of the worker
+// stopped would report it after the work that depended on it.
+func TestALostWorkerNeedsJudgementWhileOthersRun(t *testing.T) {
+	h := newHarnessBound(t, 5)
+	workers := fanout(t, h, 3)
 
-	t.Run("it says it failed", func(t *testing.T) {
-		h := newHarnessBound(t, 5)
-		workers := fanout(t, h, 3)
-		if _, err := h.reg.Declared(ctx, workers[0].ID, testLiveness(),
-			Declaration{OK: false, Summary: "could not build"}); err != nil {
-			t.Fatalf("declare: %v", err)
-		}
-		if got := len(h.wake.seen()); got != 1 {
-			t.Fatalf("wakes = %d, want 1 for a worker that reported failure", got)
-		}
-	})
-
-	t.Run("it is gone and never said anything", func(t *testing.T) {
-		h := newHarnessBound(t, 5)
-		workers := fanout(t, h, 3)
-		if _, err := h.reg.Exited(ctx, workers[0].ID, testLiveness(),
-			Exit{Cause: "signalled"}); err != nil {
-			t.Fatalf("exit: %v", err)
-		}
-		if got := len(h.wake.seen()); got != 1 {
-			t.Fatalf("wakes = %d, want 1 for an abandoned worker", got)
-		}
-		open := h.reg.Undispatched()
-		if len(open) != 1 || open[0].State != StateAbandoned {
-			t.Fatalf("undispatched = %+v, want the abandoned worker", open)
-		}
-	})
+	if _, err := h.reg.Exited(context.Background(), workers[0].ID, testLiveness(),
+		Exit{Cause: string(session.ExitInterrupted)}); err != nil {
+		t.Fatalf("exit: %v", err)
+	}
+	open := h.reg.Undispatched()
+	if len(open) != 1 || open[0].State != StateExited {
+		t.Fatalf("undispatched = %+v, want the worker nocx lost", open)
+	}
 }
 
 // A read that failed is not evidence the worker is finished, and it is not
 // evidence that it is not. Judgement is the fail-closed direction: a fact the
-// coordinator did not need costs it one turn, and a fact it never learns
-// about costs it the workers.
-func TestAStoreThatCannotSayWhatElseIsRunningWakesTheCoordinator(t *testing.T) {
-	ctx := context.Background()
+// coordinator did not need costs it one look, and a fact it never learns about
+// costs it the workers.
+func TestAStoreThatCannotSayWhatElseIsRunningNeedsJudgement(t *testing.T) {
 	h := newHarnessBound(t, 5)
 	workers := fanout(t, h, 3)
 
 	h.store.setFault("nonterminal", 1)
 	h.store.resetCounts()
-	if _, err := h.reg.Declared(ctx, workers[0].ID, testLiveness(),
-		Declaration{OK: true, Summary: "done"}); err != nil {
-		t.Fatalf("declare: %v", err)
-	}
-	if got := len(h.wake.seen()); got != 1 {
-		t.Fatalf("wakes = %d, want 1: a table that cannot read the worker must not decide routine", got)
+	finish(t, h, workers[0])
+	if got := len(h.reg.Undispatched()); got != 1 {
+		t.Fatalf("undispatched = %d, want 1: a table that cannot read the worker must not decide routine", got)
 	}
 }
 
-// ── coalescing ────────────────────────────────────────────────────────────
+// ── what one fetch closes ─────────────────────────────────────────────────
 
-// The wake costs the coordinator a turn, and one turn answers everything:
-// workers.holdings returns the whole session. A second wake before it has
-// fetched would spend a turn to say what the first turn was already going to
-// show.
-func TestSeveralJudgementFactsWakeTheCoordinatorOnce(t *testing.T) {
+// One look answers everything the session owes: the coordinator is handed its
+// whole holdings, so every fact about every one of them has reached it.
+func TestOneFetchClosesEveryFactTheSessionOwed(t *testing.T) {
 	ctx := context.Background()
 	h := newHarnessBound(t, 5)
 	workers := fanout(t, h, 3)
 
 	for _, w := range workers {
-		if _, err := h.reg.Declared(ctx, w.ID, testLiveness(),
-			Declaration{OK: false, Summary: "no"}); err != nil {
-			t.Fatalf("declare %s: %v", w.ID, err)
+		if _, err := h.reg.Exited(ctx, w.ID, testLiveness(),
+			Exit{Cause: string(session.ExitInterrupted)}); err != nil {
+			t.Fatalf("exit %s: %v", w.ID, err)
 		}
-	}
-	if got := len(h.wake.seen()); got != 1 {
-		t.Fatalf("wakes = %d, want 1 for three facts in one worker", got)
 	}
 	if got := len(h.reg.Undispatched()); got != 3 {
-		t.Fatalf("undispatched = %d, want all three still owed", got)
+		t.Fatalf("undispatched = %d, want all three owed", got)
 	}
 
-	// The fetch clears the worker, so the next fact is a new situation.
 	if _, err := h.reg.HeldBy(ctx, coordSession); err != nil {
 		t.Fatalf("held by: %v", err)
 	}
-	if _, err := h.reg.Exited(ctx, workers[0].ID, testLiveness(), Exit{Cause: "exited"}); err != nil {
+	if got := len(h.reg.Undispatched()); got != 0 {
+		t.Fatalf("undispatched after the coordinator looked = %d, want 0", got)
+	}
+
+	// And the next fact is a new situation rather than a suppressed one: the
+	// fetch cleared the participants it was told about, so the worker that ends
+	// afterwards is owed again. It is a FOURTH one, because a participant
+	// produces its exit once — the fetch is what cleared the three, and asking
+	// the same one to end twice would be a fact about an already-terminal
+	// record.
+	workers = append(workers, mustRegister(t, h))
+	if _, err := h.reg.Exited(ctx, workers[3].ID, testLiveness(), Exit{Cause: "exited"}); err != nil {
 		t.Fatalf("exit: %v", err)
 	}
-	if got := len(h.wake.seen()); got != 2 {
-		t.Fatalf("wakes after the coordinator fetched and a new fact arrived = %d, want 2", got)
-	}
-}
-
-// A REFUSED wake told the coordinator nothing, so it does not coalesce: the
-// next fact is a fresh chance to catch a pane that is waiting for input.
-// Treating a refusal as "already awake" would silence the worker for good the
-// first time the coordinator happened to be mid-turn.
-func TestARefusedWakeDoesNotSilenceTheNextFact(t *testing.T) {
-	ctx := context.Background()
-	h := newHarnessBound(t, 5)
-	h.wake.out = WakeOutcome{Reason: "that pane is working"}
-	workers := fanout(t, h, 3)
-
-	if _, err := h.reg.Declared(ctx, workers[0].ID, testLiveness(), Declaration{OK: false}); err != nil {
-		t.Fatalf("declare: %v", err)
-	}
-	if _, err := h.reg.Declared(ctx, workers[1].ID, testLiveness(), Declaration{OK: false}); err != nil {
-		t.Fatalf("declare: %v", err)
-	}
-	if got := len(h.wake.seen()); got != 2 {
-		t.Fatalf("wakes = %d, want a second attempt after the first was refused", got)
-	}
-}
-
-// FIVE FACTS ARRIVING WHILE THE COORDINATOR IS AWAY PRODUCE ONE ESCALATION.
-//
-// Five cards for one situation is how an attention surface becomes noise,
-// which is the failure the attention queue's own bead warns about in its
-// first paragraph. The card says how many, so coalescing loses nothing.
-func TestFiveFactsWhileTheCoordinatorIsAwayProduceOneEscalation(t *testing.T) {
-	ctx := context.Background()
-	h := newHarnessBound(t, 8)
-	h.wake.out = WakeOutcome{Reason: "nobody is there"}
-	workers := fanout(t, h, 5)
-
-	for _, w := range workers {
-		if _, err := h.reg.Declared(ctx, w.ID, testLiveness(), Declaration{OK: false}); err != nil {
-			t.Fatalf("declare %s: %v", w.ID, err)
-		}
-	}
-	h.alarms.fireAll()
-
-	told := h.human.seen()
-	if len(told) != 1 {
-		t.Fatalf("escalations = %d, want exactly 1 for one worker", len(told))
-	}
-	if told[0].AlsoOwed != 4 {
-		t.Fatalf("the card says %d others are owed, want 4", told[0].AlsoOwed)
-	}
-	// Every fact still reached the end of its own deadline: coalescing
-	// suppresses the CARD, never the accounting.
-	open := h.reg.Undispatched()
-	if len(open) != 5 {
-		t.Fatalf("undispatched = %d, want 5", len(open))
-	}
-	for _, f := range open {
-		if !f.Escalated {
-			t.Fatalf("fact %s never reached its deadline: %+v", f.Participant, f)
-		}
-	}
-}
-
-// And the suppression ends when the person's card does: once the coordinator
-// has fetched, the worker owes nothing, and the next fact raises a new card.
-func TestAFetchClearsTheGroupSoTheNextFactCanEscalateAgain(t *testing.T) {
-	ctx := context.Background()
-	h := newHarnessBound(t, 5)
-	h.wake.out = WakeOutcome{Reason: "nobody is there"}
-	workers := fanout(t, h, 3)
-
-	if _, err := h.reg.Declared(ctx, workers[0].ID, testLiveness(), Declaration{OK: false}); err != nil {
-		t.Fatalf("declare: %v", err)
-	}
-	h.alarms.fireAll()
-	if got := len(h.human.seen()); got != 1 {
-		t.Fatalf("escalations = %d, want 1", got)
-	}
-
-	if _, err := h.reg.HeldBy(ctx, coordSession); err != nil {
-		t.Fatalf("held by: %v", err)
-	}
-	if _, err := h.reg.Declared(ctx, workers[1].ID, testLiveness(), Declaration{OK: false}); err != nil {
-		t.Fatalf("declare: %v", err)
-	}
-	h.alarms.fireAll()
-	if got := len(h.human.seen()); got != 2 {
-		t.Fatalf("escalations after the coordinator had fetched = %d, want 2", got)
+	if got := len(h.reg.Undispatched()); got != 1 {
+		t.Fatalf("undispatched after a new fact = %d, want 1", got)
 	}
 }
 
 // ── the number the design is judged by ────────────────────────────────────
 
-// §12: what fraction of facts reaches the HUMAN rather than the coordinator.
-// If most escalate, the mechanism moved the work to a person and should say
-// so out loud instead of being described as orchestration.
+// §12: what fraction of facts needs JUDGEMENT rather than being routine. If
+// most need a person's coordination, the mechanism moved the work to somebody
+// and should say so out loud instead of being described as orchestration.
 //
-// The routine branch is counted for exactly this reason: a table whose
-// routine facts left no trace could report the fraction only over the facts
-// it already decided were interesting, which is the flattering denominator.
+// The routine branch is counted for exactly this reason: a table whose routine
+// facts left no trace could report the fraction only over the facts it already
+// decided were interesting, which is the flattering denominator.
 func TestTheRecordCountsWhatTheMechanismCost(t *testing.T) {
 	ctx := context.Background()
 	h := newHarnessBound(t, 5)
 	workers := fanout(t, h, 3)
 
-	finish(t, h, workers[0]) // declared + exited, both routine
+	finish(t, h, workers[0]) // an ordinary end, routine
 	finish(t, h, workers[1]) // routine again
-	if _, err := h.reg.Declared(ctx, workers[2].ID, testLiveness(),
-		Declaration{OK: false}); err != nil {
-		t.Fatalf("declare: %v", err)
+	if _, err := h.reg.Exited(ctx, workers[2].ID, testLiveness(),
+		Exit{Cause: string(session.ExitInterrupted)}); err != nil {
+		t.Fatalf("exit: %v", err)
 	}
 
 	s := h.reg.Cost()
-	if s.Routine != 4 {
-		t.Fatalf("routine = %d, want the four facts nobody was woken for", s.Routine)
+	if s.Routine != 2 {
+		t.Fatalf("routine = %d, want the two facts nobody had to decide about", s.Routine)
 	}
 	if s.Judgement != 1 {
 		t.Fatalf("judgement = %d, want 1", s.Judgement)
 	}
-	if s.Facts() != 5 {
+	if s.Facts() != 3 {
 		t.Fatalf("facts = %d, want every fact in the denominator", s.Facts())
 	}
-	if s.Woken != 1 {
-		t.Fatalf("woken = %d, want 1", s.Woken)
-	}
-	if s.Escalated != 0 {
-		t.Fatalf("escalated = %d before any deadline fired", s.Escalated)
-	}
 
-	h.alarms.fireAll()
-	if got := h.reg.Cost().Escalated; got != 1 {
-		t.Fatalf("escalated = %d, want 1", got)
-	}
 	if _, err := h.reg.HeldBy(ctx, coordSession); err != nil {
 		t.Fatalf("held by: %v", err)
 	}
 	if got := h.reg.Cost().Dispatched; got != 1 {
 		t.Fatalf("dispatched = %d, want 1", got)
-	}
-}
-
-// A wake DELIVERED is counted; a wake refused is not. The fraction is about
-// who was reached, and an attempt a pane refused reached nobody.
-func TestOnlyADeliveredWakeCounts(t *testing.T) {
-	ctx := context.Background()
-	h := newHarnessBound(t, 5)
-	h.wake.out = WakeOutcome{Reason: "that pane is working"}
-	workers := fanout(t, h, 3)
-
-	if _, err := h.reg.Declared(ctx, workers[0].ID, testLiveness(), Declaration{OK: false}); err != nil {
-		t.Fatalf("declare: %v", err)
-	}
-	if got := h.reg.Cost().Woken; got != 0 {
-		t.Fatalf("woken = %d, want 0 for a refused wake", got)
-	}
-	if got := h.reg.Cost().Judgement; got != 1 {
-		t.Fatalf("judgement = %d, want the fact counted anyway", got)
-	}
-}
-
-// Two numbers, not one. Five facts reaching a person in one card is five
-// facts that reached them AND one interruption; a design can be wrong in
-// either direction alone, so the record keeps both.
-func TestTheRecordCountsWhatReachedThePersonAndWhatItCostThem(t *testing.T) {
-	ctx := context.Background()
-	h := newHarnessBound(t, 8)
-	h.wake.out = WakeOutcome{Reason: "nobody is there"}
-	workers := fanout(t, h, 5)
-	for _, w := range workers {
-		if _, err := h.reg.Declared(ctx, w.ID, testLiveness(), Declaration{OK: false}); err != nil {
-			t.Fatalf("declare %s: %v", w.ID, err)
-		}
-	}
-	h.alarms.fireAll()
-
-	s := h.reg.Cost()
-	if s.Escalated != 5 {
-		t.Fatalf("escalated = %d, want all five facts counted as having reached the person", s.Escalated)
-	}
-	if s.Cards != 1 {
-		t.Fatalf("cards = %d, want the person interrupted once", s.Cards)
-	}
-}
-
-// A fact that was not woken about because the coordinator was already awake
-// says so. A blank outcome would read as "nothing happened", which is the one
-// thing that did not.
-func TestACoalescedFactRecordsWhyItWasNotWokenAbout(t *testing.T) {
-	ctx := context.Background()
-	h := newHarnessBound(t, 5)
-	workers := fanout(t, h, 3)
-
-	for _, w := range workers[:2] {
-		if _, err := h.reg.Declared(ctx, w.ID, testLiveness(), Declaration{OK: false}); err != nil {
-			t.Fatalf("declare %s: %v", w.ID, err)
-		}
-	}
-	var coalesced int
-	for _, f := range h.reg.Undispatched() {
-		if f.Wake.Delivered {
-			continue
-		}
-		coalesced++
-		if f.Wake.Reason == "" {
-			t.Fatalf("fact %s was silently not woken about: %+v", f.Participant, f.Wake)
-		}
-	}
-	if coalesced != 1 {
-		t.Fatalf("coalesced facts = %d, want 1", coalesced)
 	}
 }

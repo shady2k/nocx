@@ -314,11 +314,6 @@
     },
     {
       "file": "internal/app/app.go",
-      "line": 2358,
-      "text": "logger.Warn(\"worker: a participant's exit was not recorded\","
-    },
-    {
-      "file": "internal/app/app.go",
       "line": 1017,
       "text": "slogger.Info(\"the OS keystore is in play\","
     },

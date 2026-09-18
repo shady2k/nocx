@@ -80,8 +80,9 @@ type Registrar struct {
 	// root; this package knows only that a participant has one.
 	closer Closer
 
-	// queue enqueues a participant's task for delivery once registration
-	// succeeds (design §9, Task 11), replacing the owed-task debt the former
+	// queue enqueues a participant's BRIEFING for delivery once registration
+	// succeeds (design §9 Task 11 for the task, §6 for the rules it now
+	// travels with; nocx-luqz9.5), replacing the owed-task debt the former
 	// Screener/Answerer pair used to pay through the pane-screen and
 	// menu-answer tools that named them.
 	queue TaskQueue
@@ -91,6 +92,28 @@ type Registrar struct {
 	// fact and says at Error that it has nothing to reach anyone with, which
 	// is the same stance the supervisor takes with an unwired destination.
 	attention *Backstop
+
+	// observations is the settle machine for the facts nocx SEES
+	// (nocx-luqz9.2): what each worker was last read as, since when, and what
+	// has already been placed in a coordinator's mailbox. It is never nil —
+	// NewRegistrar builds one with DefaultSettleWindow, and WithSettleWindow
+	// replaces it — because a nil machine would make Observe panic on a
+	// registrar a test built by hand, which is a failure mode with no
+	// diagnostic in it.
+	observations *observedFacts
+
+	// coordReadings is the same machine for a COORDINATOR's own pane
+	// (nocx-luqz9.3). It is a second instance rather than the first one shared,
+	// because the two are keyed by different things — a participant id and a
+	// session — and one key space holding both would let a coincidence in two
+	// ids suppress a reading about something else entirely.
+	coordReadings *observedFacts
+
+	// wake is the line typed at an idle coordinator when it has unread mail
+	// (nocx-luqz9.3, design §5). It is never nil: an unwired one still counts,
+	// still decides, and says at Error that it has nothing to type with, which
+	// is the same stance this package takes with every other seam.
+	wake *Wake
 
 	// log is what the six steps of Register say they are doing. It is never
 	// nil, and a Registrar built without one writes to slog's default rather
@@ -111,6 +134,10 @@ func WithBound(n int) Option { return func(r *Registrar) { r.bound = n } }
 
 // WithLogger gives the record the composition root's logger, so its steps land
 // in the same file as everything else that serves the same call.
+// THE WAKE IS NOT REACHED BY IT, because the wake needs nothing stored: its
+// lines go through log.From(ctx) at the moment they are written, so they carry
+// the trace of the reading that caused them rather than the trace of whatever
+// request happened to construct the record.
 func WithLogger(lg log.Logger) Option {
 	return func(r *Registrar) {
 		if lg != nil {
@@ -127,6 +154,29 @@ func WithEnrolmentDeadline(d time.Duration) Option {
 	return func(r *Registrar) { r.deadline = d }
 }
 
+// WithSettleWindow sets how long a worker's pane must hold a state before it
+// becomes a fact (nocx-luqz9.2, design §4.4). The number is injected for the
+// same reason the deadline above is: it is a product value with two ends, and
+// the composition root is where the product's real values live. Zero means "the
+// second reading is the fact", which is what a caller that cannot move this
+// package's clock asks for; the product passes DefaultSettleWindow.
+// IT SETS BOTH MACHINES, because there is one window: a coordinator's own
+// reading settles by the same rule and over the same interval, and a second
+// option for the second machine would be a second number for one design
+// decision (nocx-luqz9.3, design §5.5).
+func WithSettleWindow(d time.Duration) Option {
+	return func(r *Registrar) {
+		r.observations = newObservedFacts(d)
+		r.coordReadings = newObservedFacts(d)
+	}
+}
+
+// WithWake replaces the wake the record types at an idle coordinator with
+// unread mail (nocx-luqz9.3). The composition root supplies one wired to the
+// pane typist and to the notification pipeline; the default is wired to
+// neither and says so at Error at the moment it is needed.
+func WithWake(w *Wake) Option { return func(r *Registrar) { r.wake = w } }
+
 // WithCloser wires the seam that ends a participant. Without it Close
 // refuses and says so, rather than reporting a worker ended that is still
 // running.
@@ -134,7 +184,7 @@ func WithCloser(c Closer) Option { return func(r *Registrar) { r.closer = c } }
 
 // SetTaskQueue wires the seam that enqueues a participant's task once
 // registration succeeds. It is a post-construction setter and not an Option
-// like WithCloser/WithBackstop, because the composition root's own concrete
+// like WithCloser, because the composition root's own concrete
 // TaskQueue (internal/app.paneMessages) needs THIS Registrar's address to
 // resolve a chain through — a cycle between two things the root owns, the
 // same shape internal/app's own SetMessages/SetWorkerRecord seams already
@@ -146,30 +196,32 @@ func WithCloser(c Closer) Option { return func(r *Registrar) { r.closer = c } }
 // treats.
 func (r *Registrar) SetTaskQueue(q TaskQueue) { r.queue = q }
 
-// WithBackstop replaces the undispatched fact set. The composition root
-// supplies one wired to the pane typist and to the notification pipeline; the
-// default is wired to neither and says so.
-func WithBackstop(b *Backstop) Option { return func(r *Registrar) { r.attention = b } }
-
 // NewRegistrar wires the record to its four seams.
 func NewRegistrar(s Store, sp Spawner, e Enrolments, sup Supervisor, opts ...Option) *Registrar {
 	r := &Registrar{
-		store:    s,
-		spawn:    sp,
-		enrol:    e,
-		sup:      sup,
-		bound:    defaultBound,
-		deadline: defaultEnrolmentDeadline,
-		newID:    newParticipantID,
-		now:      time.Now,
-		log:      log.NewSlogAdapter(nil),
-		attention: NewBackstop(
-			log.NewSlogAdapter(nil),
-			// No routes. Every fact is still recorded and every missing
-			// route names itself in the log, because a fact dropped for
-			// want of wiring is how a feature that does not exist survives
-			// a release.
-			nil, nil),
+		store:         s,
+		spawn:         sp,
+		enrol:         e,
+		sup:           sup,
+		bound:         defaultBound,
+		deadline:      defaultEnrolmentDeadline,
+		newID:         newParticipantID,
+		now:           time.Now,
+		log:           log.NewSlogAdapter(nil),
+		observations:  newObservedFacts(DefaultSettleWindow),
+		coordReadings: newObservedFacts(DefaultSettleWindow),
+		// The fact set, minted here so route can always record into one: a nil
+		// set would make an admission panic on a registrar built by hand, which
+		// is a failure mode with no diagnostic in it.
+		attention: NewBackstop(log.NewSlogAdapter(nil)),
+		wake: NewWake(
+			// No pane to type into and nobody to tell, and the STORE as the
+			// mailbox: the count is real, so a backend that wired no typist
+			// still logs the right number when it says it cannot wake
+			// anyone. Every missing route names itself, because a wake
+			// dropped for want of wiring is how a feature that does not
+			// exist survives a release.
+			nil, nil, s),
 	}
 	for _, o := range opts {
 		o(r)
@@ -363,21 +415,41 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Regist
 	if d, ok := spawned.(TaskDeliverer); ok {
 		reg.Delivery = d.TaskDelivery()
 	}
-	// THE TASK IS ENQUEUED HERE, AND ONLY HERE (design §9, Task 11) — never
-	// from within r.spawn.Spawn (step 3 above). TaskQueue.EnqueueTask
+	// THE BRIEFING IS ENQUEUED HERE, AND ONLY HERE (design §9 Task 11 for the
+	// task; §6 and nocx-luqz9.5 for the rules it now travels with) — never
+	// from within r.spawn.Spawn (step 3 above). TaskQueue.EnqueueBriefing
 	// resolves the participant from its own session id
 	// (internal/app.paneMessages' Resolve, ParticipantBySession), and that
 	// mapping exists only from MarkLive onward: calling it any earlier, from
 	// inside Spawn, would refuse every real spawn with ErrNotReachable. The
 	// participant is already live and returned to its caller regardless of
-	// what this call does, so a queue failure is logged and never turned
-	// into a registration failure — a live participant is not un-registered
-	// because nocx could not queue its first message, the same asymmetry
-	// TaskDelivery's own doc already draws for a screen reading.
+	// what this call does, so a refusal is never turned into a registration
+	// failure — a live participant is not un-registered because nocx could
+	// not queue its first message, the same asymmetry TaskDelivery's own doc
+	// already draws for a screen reading.
+	//
+	// IT IS NOT LOGGED AWAY EITHER (nocx-luqz9.5, acceptance 4). The briefing
+	// that could not be queued is one a worker will never see, so the
+	// coordinator is TOLD, in the delivery it reads off this same
+	// registration: a worker running with nothing to do and no way to say so
+	// is a soft degrade AGENTS.md refuses to let a log be the only witness
+	// of. Nothing is retried and nothing else is queued — half a briefing
+	// must not reach a worker — which is what the one call above already
+	// guarantees.
+	//
+	// A REGISTRATION WITH NO TASK IS NOT BRIEFED, and that is a decision
+	// rather than an omission: the rules exist so that a worker holding work
+	// can report on it, and typing them into a pane nobody asked to be told
+	// anything would be nocx starting a turn of its own (the same boundary
+	// agenttyping's gate defends). workers.spawn's own schema requires a
+	// task, so every worker a coordinator starts is briefed.
 	if req.Task != "" && r.queue != nil {
-		if err := r.queue.EnqueueTask(ctx, req.CoordinatorSession, p, req.Task); err != nil {
-			lg.Warn("worker: the participant's task could not be queued for delivery",
+		briefing := Briefing{Preamble: Preamble(req.CoordinatorSession), Task: req.Task}
+		if err := r.queue.EnqueueBriefing(ctx, req.CoordinatorSession, p, briefing); err != nil {
+			lg.Warn("worker: the participant's briefing could not be queued, so it has been told neither its rules nor its task",
 				"participant", string(p.ID), "error", err)
+		} else {
+			reg.Delivery.BriefingQueued = true
 		}
 	}
 	return reg, nil
@@ -425,18 +497,23 @@ func (r *Registrar) compensate(ctx context.Context, p Participant, spawned Spawn
 	return cause
 }
 
-// Declared admits the participant's own terminal fact and reduces.
-func (r *Registrar) Declared(ctx context.Context, id ParticipantID, l Liveness, d Declaration) (Participant, error) {
-	return r.admit(ctx, id, l, FactDeclared, func(ctx context.Context) (Participant, error) {
-		return r.store.RecordDeclaration(ctx, id, d)
-	})
-}
-
 // Exited admits the process fact and reduces.
+//
+// It also places the OBSERVED exit (nocx-luqz9.2), and the ordering is the point
+// rather than an incidental: the record is told first, so the fact a coordinator
+// is handed is about a process this backend has already established was its own.
+// A record that refused the exit (a stale incarnation, an already-terminal
+// participant) places nothing — the observation rests on the admission, never
+// beside it.
 func (r *Registrar) Exited(ctx context.Context, id ParticipantID, l Liveness, e Exit) (Participant, error) {
-	return r.admit(ctx, id, l, FactExited, func(ctx context.Context) (Participant, error) {
+	p, err := r.admit(ctx, id, l, FactExited, func(ctx context.Context) (Participant, error) {
 		return r.store.RecordExit(ctx, id, e)
 	})
+	if err != nil {
+		return p, err
+	}
+	r.observeExit(ctx, p)
+	return p, nil
 }
 
 // admit is the incarnation guard and the reduction, in that order.
@@ -453,13 +530,12 @@ func (r *Registrar) admit(ctx context.Context, id ParticipantID, l Liveness, kin
 	if !cur.Liveness.SameIncarnation(l) {
 		return cur, fmt.Errorf("worker: participant %q: %w", id, ErrStaleEvidence)
 	}
-	// A record that is already terminal takes no more facts, with exactly one
-	// exception: abandoned is the half-answered state, and the declaration
-	// that completes the conjunction may still arrive. Interrupted is not
-	// that — it was written by our own compensation or by the restart sweep,
-	// so a fact arriving against it is evidence about a process we already
-	// established is not ours to judge.
-	if cur.State.Terminal() && cur.State != StateAbandoned {
+	// A record that is already terminal takes no more facts. There is
+	// exactly one terminal fact left to arrive — the process exit — and a
+	// record that is already terminal has either had it or been ended by the
+	// coordinator, so a fact arriving against it is evidence about a process
+	// this record has already accounted for.
+	if cur.State.Terminal() {
 		return cur, fmt.Errorf("worker: participant %q is %s: %w", id, cur.State, ErrTerminal)
 	}
 	after, err := record(ctx)
@@ -490,32 +566,35 @@ func (r *Registrar) admit(ctx context.Context, id ParticipantID, l Liveness, kin
 	return after, nil
 }
 
-// route decides what the record does about an admitted fact, and it is the
-// design question §4 of the bead calls the one that decides whether any of
-// this is useful.
+// route decides what the record does about an admitted fact.
 //
-// # The table
+// # The table, over the one fact that is left
 //
-// A fact whose participant did not SUCCEED needs judgement, whatever else is
-// running: a worker that failed or died without saying anything is the
-// situation a coordinator exists to handle, and holding it until the worker is
-// finished would report a crash after the work that depended on it.
+// A participant produces one fact the record can hold — its process is gone —
+// and the fact says nothing about how the work went, because nocx no longer
+// records an outcome at all (ADR-0070 decision 3). What the fact DOES say is
+// whether the shell exited or the backend lost it, and that is the
+// discriminator this table reads:
 //
-// A fact whose participant succeeded needs judgement only when NOTHING ELSE
-// IS RUNNING. "A worker finished with two still running" is routine — the
-// coordinator is waiting on all of them and has nothing to decide yet — and
-// waking it costs a turn to be told what it already expects. When the last
-// one lands, the worker is finished and nobody has read it, and that is the
-// moment the coordinator is for.
+//   - an end nocx cannot call an ordinary one needs judgement whatever else is
+//     running. The participant was lost rather than finished, nothing will
+//     arrive after it, and holding that fact until the rest of the worker
+//     stopped would report it after the work that depended on it.
+//   - an authoritative exit needs judgement only when NOTHING ELSE IS RUNNING.
+//     "One of three workers ended" is routine — the coordinator is waiting on
+//     all of them and has nothing to decide yet — and waking it costs a turn
+//     to be told what it already expects. When the last one lands, the worker
+//     is finished and nobody has read it, and that is the moment the
+//     coordinator is for.
 //
 // # Why the worker's remaining work and not the fact alone
 //
 // The same fact means different things at different moments, and the record
 // is the only thing that knows which moment it is. A design that classified
-// facts in isolation would have to choose between waking on every completion
-// (which is the poll this whole mechanism replaced) and waking on none
-// (which loses the end of the worker). Nothing on a screen takes part in this:
-// what is read is the participant rows.
+// facts in isolation would have to choose between waking on every end (which
+// is the poll this whole mechanism replaced) and waking on none (which loses
+// the end of the worker). Nothing on a screen takes part in this: what is read
+// is the participant rows.
 func (r *Registrar) route(ctx context.Context, p Participant, kind FactKind) {
 	f := Fact{
 		Participant: p.ID,
@@ -548,12 +627,12 @@ func (r *Registrar) route(ctx context.Context, p Participant, kind FactKind) {
 // needsJudgement is the table itself, kept apart from the plumbing above so
 // that what it decides can be read in one screen.
 func (r *Registrar) needsJudgement(ctx context.Context, p Participant) bool {
-	if !succeeded(p) {
+	if needsAttention(p) {
 		return true
 	}
 	// "Is anything else still working?" — the participant this fact is about
-	// does not count, because a worker that just said it finished is not the
-	// reason its coordinator should wait.
+	// does not count, because a worker that just ended is not the reason its
+	// coordinator should wait.
 	open, err := r.store.NonTerminal(ctx, p.Group)
 	if err != nil {
 		// A read that failed is not evidence that the worker is finished, and
@@ -570,49 +649,31 @@ func (r *Registrar) needsJudgement(ctx context.Context, p Participant) bool {
 	return true
 }
 
-// succeeded reports whether the participant, as the record now stands, has
-// given nobody anything to worry about.
+// needsAttention reports whether the participant, as the record now stands,
+// ended in a way its coordinator has to be told about whatever else is running.
 //
-// A live participant that declared OK counts as succeeded: it said it
-// finished and it is still there, so whether the coordinator is needed
-// depends on the rest of the worker rather than on it. Abandoned, failed and
-// interrupted do not, and neither does a declaration that reported failure —
-// which is the closest thing the record has to a worker ASKING, until the
-// mailbox gives it a word of its own.
-func succeeded(p Participant) bool {
-	if p.Declared != nil && !p.Declared.OK {
-		return false
-	}
-	switch p.State {
-	case StateFailed, StateAbandoned, StateInterrupted:
-		return false
-	default:
-		return true
-	}
+// It is the one discriminator left in the process fact: an authoritative exit
+// against a LOSS (session.ExitCause). A participant that has not exited is
+// answered the same way a lost one is, which is the fail-closed direction — the
+// record cannot say it ended ordinarily when it has no evidence that it ended
+// at all.
+func needsAttention(p Participant) bool {
+	return p.Exited == nil || p.Exited.Cause != string(session.ExitExited)
 }
 
 // reduce derives the state from the FACT SET, never from the order the facts
-// arrived in. That is what makes the conjunction hold both ways round: an exit
-// observed before the declaration reads abandoned, and the declaration that
-// follows REFINES it to completed. That refinement is the second half of a
-// conjunction arriving late, not a resurrection — nothing about the process
-// becomes untrue, and no other transition out of a terminal state is possible
-// here because no other fact exists to make one.
+// arrived in and never from what the caller believed it was about to record.
+//
+// There is one fact left to reduce (ADR-0070 decision 3), so this maps it and
+// nothing more: a participant whose process is gone is Exited. The state a
+// coordinator's CLOSE writes (StateClosed) never reaches here — it is written
+// by the close itself, and the guard in admit refuses the exit that close
+// causes as a fact about an already-terminal record.
 func reduce(p Participant) State {
 	if p.Exited == nil {
-		// A declaration with no exit is not terminal. The agent said it
-		// finished and is still running; it may be given more work.
 		return p.State
 	}
-	if p.Declared == nil {
-		// Gone, and it never said what it produced. Terminal, and named so
-		// it can never be misread as a completion.
-		return StateAbandoned
-	}
-	if p.Declared.OK {
-		return StateCompleted
-	}
-	return StateFailed
+	return StateExited
 }
 
 // HeldBy answers D3: a restarted coordinator asks what its SESSION holds and
@@ -764,6 +825,20 @@ func (r *Registrar) Inbox(ctx context.Context, mailbox, reader ReaderID, limit i
 		return Fetch{}, fmt.Errorf("worker: advance cursor: %w", err)
 	}
 	out.Cursor = cur
+	// THE READ IS THE ONLY THING THAT CLEARS A WAKE (nocx-luqz9.3, design
+	// §5.3). It is reported AFTER the cursor moved, so the wake's own view of
+	// "what is unread" is never ahead of the record's: a batch cleared before
+	// the position it was cleared through existed could type at a coordinator
+	// about mail it had already been handed.
+	//
+	// ONLY THE RECIPIENT'S OWN READ COUNTS, which is mailbox.go's own rule read
+	// at the wake: a message is delivered when the participant it was addressed
+	// to has taken it, and a second reader looking into somebody's box delivers
+	// nothing — least of all the wake, which would stop typing at a coordinator
+	// because an observer had read its mail.
+	if reader == mailbox {
+		r.wake.Read(mailbox, cur.Fetched)
+	}
 	return out, nil
 }
 
@@ -800,82 +875,7 @@ func (r *Registrar) Undelivered(ctx context.Context, worker ID) ([]Message, erro
 	return r.store.Undelivered(ctx, worker)
 }
 
-// ── waiting, and ending (nocx-dkawo.13) ───────────────────────────────────
-
-// Wait blocks until something about this session's participants changes, then
-// answers exactly what HeldBy answers.
-//
-// It is a CONVENIENCE OVER THE RECORD and nothing rests on it (§7.2). The
-// backend watches the workers whether or not this is ever called; a
-// coordinator that never waits loses its own promptness and nothing else.
-// That is the whole difference from the blocking call and then the lease this
-// design started with, and it has to stay true — a wait anything depended on
-// would be the lease back under a friendlier name.
-//
-// It answers with HeldBy's own answer rather than a delta of its own. "Which
-// one settled" is read from the states, and a second shape for it would be a
-// second account of what a session holds.
-//
-// The channel is taken BEFORE the first read, so a fact admitted between the
-// read and the select has already closed the channel this is holding. Without
-// that order the wait would miss exactly the event it was opened for.
-func (r *Registrar) Wait(ctx context.Context, coordinatorSession string, worker ID) ([]Participant, error) {
-	if worker == "" {
-		worker = ID(coordinatorSession)
-	}
-	for {
-		changed := r.attention.Changed(worker)
-		// Owed is read BEFORE the fetch, because the fetch is what clears
-		// it: asking afterwards would always answer nothing, and the wait
-		// would sit through the one thing it exists to catch.
-		owed := r.attention.Owed(worker)
-		held, err := r.HeldBy(ctx, coordinatorSession)
-		if err != nil {
-			return nil, err
-		}
-		// Nothing to wait FOR is not a reason to wait: a session that holds
-		// nothing, one whose worker has settled, or one that already owes
-		// judgement is answered at once. Blocking on the last of those would
-		// be two mechanisms disagreeing about one moment — the routing table
-		// has already decided the coordinator is needed and woken it.
-		if answerable(held, owed) {
-			return held, nil
-		}
-		select {
-		case <-changed:
-			// Round again rather than answering from here: what closed the
-			// channel is one fact, and the caller asked what its session
-			// HOLDS, which is a read of the record and not of that fact.
-		case <-ctx.Done():
-			// An expired wait is an ANSWER and not a failure. The
-			// coordinator asked to be told promptly and was not; what it
-			// holds is still true, and returning it is more useful than an
-			// error it would have to translate back into the same read.
-			return held, nil
-		}
-	}
-}
-
-// answerable reports whether the wait has something to answer with.
-//
-// Three ways, and the third is the one that is easy to leave out. A session
-// that holds nothing has nothing to wait for. A participant that has SETTLED
-// is what the criterion names. And a fact that needs JUDGEMENT is a
-// coordinator that the routing table has already decided is needed — a worker
-// that reported failure and is still running is exactly that, and a wait that
-// sat through it while the wake fired would be two mechanisms disagreeing
-// about one moment.
-func answerable(held []Participant, owed int) bool {
-	if len(held) == 0 || owed > 0 {
-		return true
-	}
-	for _, p := range held {
-		if p.State.Terminal() {
-			return true
-		}
-	}
-	return false
-}
+// ── ending (nocx-dkawo.13) ────────────────────────────────────────────────
 
 // Close ends a participant, and it is the first operation that reads a
 // DELEGATION rather than membership.
@@ -887,11 +887,19 @@ func answerable(held []Participant, owed int) bool {
 // suspends send-input and leaves close alone, and DelegationState.Permits
 // already says so; this is where that stops being theoretical.
 //
-// It writes NO state. Ending the session produces a process exit, and that
-// exit reaches the record by the ordinary path and reduces the participant the
-// way any exit does. A close that also terminalized would be a second author
-// of a participant's state, and the two would disagree the first time a
-// worker declared between the kill and the write.
+// It writes ONE state IN THE RECORD, and it is the state that is the
+// coordinator's own (ADR-0070 decision 3): a participant this call ends reads
+// `closed`. The process exit the close causes reaches the record by the
+// ordinary path as well, and the two run on different goroutines with no order
+// between them — so the write below is the one that decides, whichever way the
+// race falls (Store.Closed). Before this the method wrote no state at all and
+// the exit was the record's only account of a close, which could say that a
+// worker was gone and never that its coordinator had ended it.
+//
+// WHAT IT ALSO WRITES IS THE PARTICIPANT'S PLACE (nocx-xn63t.4.6): the tab its
+// pane was minted in leaves the window, because "closing a worker closes its
+// tab" is what a close is FOR. That is the closer's own half — a tab is a row
+// of the layout chain and not a participant fact.
 func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id ParticipantID) error {
 	if r.closer == nil {
 		return errors.New("worker: this backend cannot end a participant")
@@ -924,10 +932,34 @@ func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id Par
 	if p.State.Terminal() {
 		// Already finished. Not an error: a coordinator tidying up should
 		// not have to have raced the record to be allowed to.
-		return nil
+		//
+		// AND IT STILL REACHES THE CLOSER (nocx-xn63t.4.6). Ending the
+		// participant is the whole of what this method is for, and a
+		// participant that has already ended has one thing left to end: the
+		// PLACE it occupied, which is the tab its pane lives in and which
+		// nothing else in the process can name (internal/app's workerTabs,
+		// written by the spawn because a finished worker's session is already
+		// out of the registry by the time anybody closes it). Returning here
+		// is what left a finished worker's tab standing on the strip with
+		// nothing behind it — the defect this bead was filed from: the
+		// coordinator's workers.close answered ok and the tab stayed.
+		//
+		// The closer tolerates a participant whose process is already gone
+		// (internal/app's own workerCloser, which asks the registry before it
+		// ends anything) and treats a tab somebody already closed as success,
+		// so this remains the ordinary, non-error tidy-up it always was.
+		return r.closer.Close(ctx, p)
 	}
 	if err := r.closer.Close(ctx, p); err != nil {
 		return err
+	}
+	// The state, and it is written only after the closer RETURNED: a close that
+	// failed ended nothing, and a record that said `closed` about a worker still
+	// running would be the one lie this path must not tell — the delegation it
+	// would also leave unrevoked would make the participant look ended to the
+	// next close and unreachable to its coordinator.
+	if err := r.store.Closed(ctx, id); err != nil {
+		return fmt.Errorf("worker: record the close of %q: %w", id, err)
 	}
 	// §7.2's "controller closed" trigger. This revokes the AUTHORITY the
 	// instant the coordinator acts, rather than waiting for the process

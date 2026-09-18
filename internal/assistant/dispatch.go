@@ -168,15 +168,22 @@ func NewToolDispatcher(registry agenttools.Registry, workerStore WorkerRecord, e
 var orchestrationMethodNames = [...]string{
 	"workers.spawn",
 	"workers.say",
-	"workers.wait",
 	"workers.holdings",
 	"workers.close",
 	// The participant's one call (nocx-rowqt.9). It belongs on this list for
-	// the same reason the other five do — it is part of the worker surface the
+	// the same reason the other four do — it is part of the worker surface the
 	// endpoint exposes — and NOT because it shares their authority: it
 	// narrows to the other capability entirely, and no grant that reaches
-	// those five reaches this one.
+	// those four reaches this one.
 	"workers.inbox",
+	// The worker's OWN report (nocx-luqz9.4). It is here for workers.inbox's
+	// reason and it is the one name on this list whose holder must be a
+	// PARTICIPANT: its narrow refuses every run that is not one, so the
+	// endpoint's dispatcher has to accept the name for the refusal to arrive —
+	// a name absent from this list answers ErrUnreachableMethod before any
+	// constructor runs, which would tell an ordinary agent its tool is not
+	// offered rather than telling a coordinator to read its mailbox instead.
+	"workers.report",
 	// The session surface (nocx-6q1uh, design §4.1): a descendant's pane,
 	// read, written to with one step under a target, or sent a message.
 	// Both callers reach these through DescendantPaneAccess; the endpoint's

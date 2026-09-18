@@ -107,7 +107,7 @@ func TestParticipantBySessionPrefersTheLiveIncarnation(t *testing.T) {
 			t.Fatalf("mark live %s: %v", seed.id, err)
 		}
 		if seed.dead {
-			if err := store.Terminalize(ctx, seed.id, StateAbandoned); err != nil {
+			if err := store.Terminalize(ctx, seed.id, StateExited); err != nil {
 				t.Fatalf("terminalize %s: %v", seed.id, err)
 			}
 		}

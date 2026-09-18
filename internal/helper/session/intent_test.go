@@ -336,6 +336,70 @@ func TestABumpAcknowledgesOnlyAfterOlderIntentsAreTerminal(t *testing.T) {
 	}
 }
 
+// TestAnIntentWhoseEpochASupersededBumpLeftBehindIsRefusedAtReceipt is the
+// OTHER half of the same §7.2 promise, and the half the test above cannot
+// reach: that one's victim is already queued when the bump lands, so
+// applyAccessBump's own sweep (access.go) is what refuses it. This one is
+// never queued at all. It arrives AFTER the bump has been raised AND
+// acknowledged — the schedule of a coordinator that passed its authority
+// check, was held before it ever called session.intent, and sent the intent
+// once the revocation had already completed — so there is nothing left in
+// o.pending for a sweep to find and tokenGate's own receipt-time epoch check
+// (tokens.go) is the only thing that can refuse it.
+//
+// Two facts make this the check under test rather than a gate ahead of it:
+// the session is built over rawReaderFakeProcess, which answers the
+// rawReader seam (owner_ssh.go's hasReadBarrier) so the read-barrier refusal
+// cannot be what answers, and the commitBy submitted is math.MaxInt64, so
+// neither the receipt nor the commit-point deadline can be either.
+func TestAnIntentWhoseEpochASupersededBumpLeftBehindIsRefusedAtReceipt(t *testing.T) {
+	proc := newRawReaderFakeProcess()
+	hs, control := newIntentTestSession(t, proc)
+
+	// Epoch 1 is what the intent's own authority check observed: the token
+	// is minted here, before the revocation, and carries that epoch — which
+	// is the whole of what a coordinator holding the intent keeps after.
+	tok := mintRegionToken(t, hs)
+	if tok.AccessEpoch != 1 {
+		t.Fatalf("a token minted on a fresh session carries AccessEpoch=%d, want 1", tok.AccessEpoch)
+	}
+
+	// The revocation runs to CONFIRMATION with nothing queued, so its sweep
+	// has nothing to find and it resolves on its own terms — which is
+	// exactly why the schedule below needs a check of its own.
+	bump := awaitResult(t, submitBump(t, hs, tok.AccessEpoch))
+	if bump.Epoch != 2 {
+		t.Fatalf("bump epoch = %d, want 2 — the epoch this intent arrives behind", bump.Epoch)
+	}
+	if got := hs.owner.currentAccessEpoch(); got != 2 {
+		t.Fatalf("session access epoch = %d after the bump, want 2", got)
+	}
+
+	// Only now does the held intent arrive, carrying the epoch its check
+	// observed (submitIntent builds canonicalIntent from tok.AccessEpoch).
+	res := awaitResult(t, submitIntent(t, hs, control, tok, "x", math.MaxInt64))
+	if res.State != sessionruntime.IntentStateRefused || !errors.Is(res.Err, errAccessRevoked) {
+		t.Fatalf("an intent arriving after the bump: got state=%v err=%v, want Refused/errAccessRevoked", res.State, res.Err)
+	}
+	if res.BytesWritten != 0 {
+		t.Fatalf("an access_revoked refusal reported %d bytes written, want 0", res.BytesWritten)
+	}
+	if got := proc.writtenPayloads(); len(got) != 0 {
+		t.Fatalf("an access_revoked refusal wrote to the program: %q", got)
+	}
+
+	// And it is RECORDED, not merely refused — the order tokenGate's own
+	// epoch check documents: a retry of the same token+intent answers the
+	// recorded result rather than a fresh chance to race the same check.
+	retry := awaitResult(t, submitIntent(t, hs, control, tok, "x", math.MaxInt64))
+	if retry.State != sessionruntime.IntentStateRefused || !errors.Is(retry.Err, errAccessRevoked) {
+		t.Fatalf("retry: got state=%v err=%v, want the recorded Refused/errAccessRevoked", retry.State, retry.Err)
+	}
+	if got := proc.writtenPayloads(); len(got) != 0 {
+		t.Fatalf("the retry wrote to the program: %q", got)
+	}
+}
+
 // TestARetryWhileTheFirstWriteIsBlockedGetsInProgress is spec §6.2's own
 // replay answer: tokenGate runs AT RECEIPT (tokens.go), never at an item's
 // turn in the write-ordering queue, so a second submission of the SAME

@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
@@ -33,18 +34,30 @@ type fakeWorkerRecord struct {
 	sent       []workers.Message
 	unread     []workers.Message
 	fetchedBy  []workers.ReaderID
-	acked      []int64
-	closed     []workers.ParticipantID
-	closeErr   error
-	// waitedFor records the worker a wait was opened on, and waitHeld is what
-	// it answers with — a double that returned HeldBy's rows would hide a
-	// carrier that never waited at all.
-	waitedFor []workers.ID
-	waitHeld  []workers.Participant
+	// inboxBox is the MAILBOX the last inbox read was handed, which the reader
+	// list cannot answer: a read names its box and its reader separately, and
+	// the whole question here is which box the capability produced.
+	inboxBox workers.ReaderID
+	acked    []int64
+	closed   []workers.ParticipantID
+	closeErr error
 	// readOrder records which of the two reads happened first, because the
 	// order is the whole correctness of the answer: the fetch is what clears
 	// the set, so asking after it always answers nothing.
 	readOrder []string
+	// reported is every report this double was asked to commit, and reportErr
+	// is what Report answers with when a case is about the failure path.
+	reported  []reportedCall
+	reportErr error
+}
+
+// reportedCall is one Report the double saw: which participant made it, and
+// what it said. The participant is recorded because the whole question at this
+// seam is WHOSE report it is — the id is backend-owned and must come from the
+// run context rather than from the call.
+type reportedCall struct {
+	id  workers.ParticipantID
+	rep workers.Report
 }
 
 func (f *fakeWorkerRecord) Register(_ context.Context, req workers.RegisterRequest) (workers.Registration, error) {
@@ -80,6 +93,7 @@ func (f *fakeWorkerRecord) Say(_ context.Context, id workers.ID, from, to worker
 // fetched under the wrong name would look identical in the result.
 func (f *fakeWorkerRecord) Inbox(_ context.Context, mailbox, reader workers.ReaderID, _ int) (workers.Fetch, error) {
 	f.fetchedBy = append(f.fetchedBy, reader)
+	f.inboxBox = mailbox
 	msgs := f.mail[mailbox]
 	if f.mail != nil {
 		// Handing over is what advances a cursor, and this double stands in
@@ -106,12 +120,18 @@ func (f *fakeWorkerRecord) Undelivered(context.Context, workers.ID) ([]workers.M
 	return f.unread, nil
 }
 
-func (f *fakeWorkerRecord) Wait(_ context.Context, _ string, id workers.ID) ([]workers.Participant, error) {
-	f.waitedFor = append(f.waitedFor, id)
-	if f.waitHeld != nil {
-		return f.waitHeld, nil
+// Report records the report it was handed and answers with a committed row, or
+// with reportErr when the case is about the failure path.
+func (f *fakeWorkerRecord) Report(_ context.Context, id workers.ParticipantID, rep workers.Report) (workers.Message, error) {
+	f.reported = append(f.reported, reportedCall{id: id, rep: rep})
+	if f.reportErr != nil {
+		return workers.Message{}, f.reportErr
 	}
-	return f.held, nil
+	return workers.Message{
+		ID:    workers.MessageID(fmt.Sprintf("m-%d", len(f.reported))),
+		Group: workers.ID(id), Sender: workers.ReaderID(id),
+		Seq: int64(len(f.reported)), Kind: rep.Kind, Body: rep.Text,
+	}, nil
 }
 
 func (f *fakeWorkerRecord) Close(_ context.Context, _ string, id workers.ParticipantID) error {
@@ -160,10 +180,7 @@ func testCoordinatorWithIdentity(sessionID string, identity session.Identity, en
 func TestWorkerHoldingsAnswersTheRunsOwnSession(t *testing.T) {
 	rec := &fakeWorkerRecord{held: []workers.Participant{
 		{ID: "p-1", State: workers.StateLive, Task: "read AGENTS.md"},
-		{
-			ID: "p-2", State: workers.StateCompleted, Task: "build it",
-			Declared: &workers.Declaration{OK: true, Summary: "built"},
-		},
+		{ID: "p-2", State: workers.StateClosed, Task: "build it"},
 	}}
 	out, err := executeWorkerHoldings(context.Background(),
 		testCoordinator("sess-coordinator", testWorkerEnv), json.RawMessage(`{}`), workerSeams(rec))
@@ -183,11 +200,7 @@ func TestWorkerHoldingsAnswersTheRunsOwnSession(t *testing.T) {
 	if got.Participants[0].Task != "read AGENTS.md" || got.Participants[0].State != "live" {
 		t.Fatalf("first participant = %+v", got.Participants[0])
 	}
-	// The summary rides only when the worker actually said something.
-	if got.Participants[0].Summary != "" {
-		t.Fatalf("a worker that said nothing was given a summary: %+v", got.Participants[0])
-	}
-	if got.Participants[1].Summary != "built" {
+	if got.Participants[1].State != "closed" {
 		t.Fatalf("second participant = %+v", got.Participants[1])
 	}
 }
@@ -379,6 +392,44 @@ func TestWorkerToolsRefuseAnotherCapability(t *testing.T) {
 	}
 }
 
+// workers.inbox is the one call whose capability is not a single type
+// (nocx-luqz9.2): the two holders read their OWN box, and which box that is
+// comes from what the run is. Both are therefore accepted, and a capability
+// that owns no mailbox at all is refused rather than answered an empty one.
+func TestWorkerInboxAcceptsBothHoldersAndRefusesAnythingElse(t *testing.T) {
+	rec := &fakeWorkerRecord{}
+	seams := workerSeams(rec)
+
+	// A worker: the box is its own participant id.
+	participant := agenttools.NewWorkerParticipant("p-1")
+	if _, err := executeWorkerInbox(context.Background(), participant,
+		json.RawMessage(`{}`), seams); err != nil {
+		t.Fatalf("a worker's own inbox was refused: %v", err)
+	}
+	if rec.inboxBox != "p-1" {
+		t.Fatalf("the worker read box %q, want its own participant id p-1", rec.inboxBox)
+	}
+
+	// A coordinator: the box is its session, which is what makes a restarted
+	// coordinator the same reader.
+	coordinator := agenttools.NewWorkerCoordinator("sess-coordinator", session.Identity{}, nil)
+	if _, err := executeWorkerInbox(context.Background(), coordinator,
+		json.RawMessage(`{}`), seams); err != nil {
+		t.Fatalf("a coordinator's own inbox was refused: %v", err)
+	}
+	if rec.inboxBox != "sess-coordinator" {
+		t.Fatalf("the coordinator read box %q, want its own session", rec.inboxBox)
+	}
+
+	// And something that owns no mailbox is refused by name rather than handed
+	// an empty one, which is the difference between "nobody wrote to you" and
+	// "you have no box".
+	if _, err := executeWorkerInbox(context.Background(), agenttools.NewSessionReader(nil, nil, nil),
+		json.RawMessage(`{}`), seams); err == nil {
+		t.Fatal("inbox ran on a session reader, which owns no mailbox")
+	}
+}
+
 // The wake says "call workers.holdings", so holdings has to distinguish the
 // worker it was about from the ones that have not moved.
 //
@@ -389,10 +440,10 @@ func TestWorkerToolsRefuseAnotherCapability(t *testing.T) {
 func TestHoldingsMarksWhatTheCoordinatorHasNotBeenToldAbout(t *testing.T) {
 	rec := &fakeWorkerRecord{
 		held: []workers.Participant{
-			{ID: "p-new", State: workers.StateCompleted, Task: "reported"},
+			{ID: "p-new", State: workers.StateClosed, Task: "told it to stop"},
 			{ID: "p-old", State: workers.StateLive, Task: "still working"},
 		},
-		owed: []workers.Fact{{Participant: "p-new", Kind: workers.FactDeclared}},
+		owed: []workers.Fact{{Participant: "p-new", Kind: workers.FactExited}},
 	}
 	raw, err := executeWorkerHoldings(context.Background(),
 		testCoordinator("sess-coordinator"), nil, workerSeams(rec))
@@ -407,7 +458,7 @@ func TestHoldingsMarksWhatTheCoordinatorHasNotBeenToldAbout(t *testing.T) {
 		t.Fatalf("participants = %d, want 2", len(got.Participants))
 	}
 	if !got.Participants[0].NeedsJudgement {
-		t.Fatalf("the worker that just reported is not marked as new: %+v", got.Participants[0])
+		t.Fatalf("the worker something just happened to is not marked as new: %+v", got.Participants[0])
 	}
 	if got.Participants[1].NeedsJudgement {
 		t.Fatalf("a worker that has not moved is marked as new: %+v", got.Participants[1])
@@ -430,12 +481,11 @@ func TestWorkerHoldingsResultConformsToItsContract(t *testing.T) {
 	rec := &fakeWorkerRecord{
 		held: []workers.Participant{
 			{
-				ID: "p-1", Group: "worker-1", State: workers.StateCompleted, Task: "read AGENTS.md",
-				Declared: &workers.Declaration{OK: true, Summary: "read it"},
+				ID: "p-1", Group: "worker-1", State: workers.StateExited, Task: "read AGENTS.md",
 			},
 			{ID: "p-2", Group: "worker-1", State: workers.StateLive, Task: "still working"},
 		},
-		owed: []workers.Fact{{Participant: "p-1", Kind: workers.FactDeclared}},
+		owed: []workers.Fact{{Participant: "p-1", Kind: workers.FactExited}},
 		// Mail and undelivered mail both present, so additionalProperties:
 		// false is validating the shape it is actually asked about rather
 		// than a result that happens to omit the new fields.
@@ -481,6 +531,183 @@ func TestWorkerHoldingsResultConformsToItsContract(t *testing.T) {
 	}
 	if !strings.Contains(raw, `"mail"`) || !strings.Contains(raw, `"undeliveredMail"`) {
 		t.Fatalf("the result carries no mail, so the schema check proved nothing about it: %s", raw)
+	}
+}
+
+// workers.holdings reads the SAME mailbox workers.inbox does —
+// one box, one cursor, one order — so an observation can be in the page they
+// fetch. It must arrive as an OBSERVATION there and never as a message: the
+// text list is what a coordinator reads as "somebody wrote this to me", and an
+// observed row rendered there would be an empty message from a sender named
+// after nocx, which is worse than nothing. And the cursor advance, which is what
+// asking does, would then have hidden the row from the next workers.inbox.
+func TestHoldingsCarriesObservationsAsObservationsAndNotAsEmptyMail(t *testing.T) {
+	rec := &fakeWorkerRecord{
+		held: []workers.Participant{{ID: "p-1", Group: "worker-1", State: workers.StateLive, Task: "settle"}},
+		mail: map[workers.ReaderID][]workers.Message{
+			"sess-coordinator": {
+				{Sender: "p-1", Body: "the file moved"},
+				{
+					Sender: "nocx",
+					Observed: &workers.Observed{
+						Worker: "p-1", State: workers.ObservedIdle,
+						At: time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC),
+					},
+				},
+			},
+		},
+	}
+	raw, err := executeWorkerHoldings(context.Background(),
+		testCoordinator("sess-coordinator"), nil, workerSeams(rec))
+	if err != nil {
+		t.Fatalf("workers.holdings: %v", err)
+	}
+	var got workerHoldingsResult
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Mail) != 1 || got.Mail[0].Message != "the file moved" {
+		t.Fatalf("holdings mail = %+v, want only the message somebody wrote", got.Mail)
+	}
+	if len(got.Observations) != 1 {
+		t.Fatalf("holdings observations = %+v, want the one about p-1", got.Observations)
+	}
+	if got.Observations[0].Worker != "p-1" || got.Observations[0].State != string(workers.ObservedIdle) {
+		t.Fatalf("observation = %+v, want p-1 idle", got.Observations[0])
+	}
+
+	// An empty message never reaches the model, which is the failure this
+	// guards: `"message":""` reads as somebody having written nothing.
+	if strings.Contains(raw, `"message":""`) {
+		t.Fatalf("an observation was rendered as empty text: %s", raw)
+	}
+}
+
+// The same for workers.inbox, whose result grew a second list in nocx-luqz9.2:
+// the observations nocx saw, beside the mail somebody wrote.
+//
+// It validates the REAL executor's output against the schema's own result
+// definition, and it drives BOTH row shapes through one mailbox — a text message
+// and an observation — because a case with an empty observations list would
+// validate the field's presence and none of its items, which is the exact hole
+// the vault.status failure this directory was written from left open.
+func TestWorkerInboxResultConformsToItsContract(t *testing.T) {
+	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	estimate := 40
+	rec := &fakeWorkerRecord{
+		mail: map[workers.ReaderID][]workers.Message{
+			"sess-coordinator": {
+				{Sender: "p-1", Body: "the file moved", CommittedAt: at},
+				{
+					Sender: "nocx",
+					Observed: &workers.Observed{
+						Worker: "p-1", State: workers.ObservedBlocked, At: at,
+					},
+				},
+				// AND A REPORT (nocx-luqz9.4), because a text row is now two
+				// shapes: ordinary mail, whose kind is absent, and a worker's
+				// report, whose kind and checkpoint extras ARE on the wire. A
+				// case that exercised only the first would validate the new
+				// properties' absence and none of their presence, which is the
+				// same hole the two rows above exist to close.
+				{
+					Sender: "p-1", Body: "half the store is migrated", CommittedAt: at,
+					Kind: workers.KindProgress, Estimate: &estimate, Artifact: "commit 4f2a1c9",
+				},
+			},
+		},
+	}
+	raw, err := executeWorkerInbox(context.Background(),
+		testCoordinator("sess-coordinator"), json.RawMessage(`{}`), workerSeams(rec))
+	if err != nil {
+		t.Fatalf("workers.inbox: %v", err)
+	}
+
+	c := jsonschema.NewCompiler()
+	//nolint:gosec // a literal path to a contract in the tree
+	f, err := os.Open("../../contracts/tools/workers.inbox.schema.json")
+	if err != nil {
+		t.Fatalf("open schema: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	doc, err := jsonschema.UnmarshalJSON(f)
+	if err != nil {
+		t.Fatalf("parse schema: %v", err)
+	}
+	const id = "https://nocx.local/contracts/tools/workers.inbox.schema.json"
+	if addErr := c.AddResource(id, doc); addErr != nil {
+		t.Fatalf("add resource: %v", addErr)
+	}
+	schema, err := c.Compile(id + "#/$defs/result")
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	var payload any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if err := schema.Validate(payload); err != nil {
+		t.Fatalf("workers.inbox result does not satisfy its contract: %v\npayload was:\n%s", err, raw)
+	}
+	if !strings.Contains(raw, `"the file moved"`) {
+		t.Fatalf("the result carries no message, so the schema check proved nothing about them: %s", raw)
+	}
+	if !strings.Contains(raw, `"blocked"`) || !strings.Contains(raw, `"observations"`) {
+		t.Fatalf("the result carries no observation, so the schema check proved nothing about them: %s", raw)
+	}
+	if !strings.Contains(raw, `"progress"`) || !strings.Contains(raw, `"artifact"`) {
+		t.Fatalf("the result carries no report, so the schema check proved nothing about the kind "+
+			"and the checkpoint extras: %s", raw)
+	}
+	// AND THE ORDINARY MESSAGE CARRIES NO KIND. `kind` is optional precisely so
+	// that a coordinator's own words are not a claim about anybody's work, and
+	// the two rows are in one page above — so a renderer that defaulted the
+	// field would put a report's label on a message nobody reported. Counted
+	// rather than merely present: the report above is the one row that may
+	// carry it.
+	if got := strings.Count(raw, `"kind"`); got != 1 {
+		t.Fatalf("the page carries %d kinds, want exactly the one report's — ordinary mail "+
+			"is a message and not a claim: %s", got, raw)
+	}
+	// AND EVERY MESSAGE CARRIES ITS TIME, ordinary mail included, because the
+	// contract requires it: a coordinator comparing a worker's words against the
+	// states beside them needs both rows dated by the one clock. Decoded rather
+	// than counted, because a substring count would also be satisfied by the
+	// observation's own `at` — which is the mistake this is here to catch.
+	//
+	// And no screen content rode with it: the observation is three fields and
+	// the shape has nowhere to put a fourth. ADR-0070 decision 3.
+	var decoded struct {
+		Messages     []map[string]any `json:"messages"`
+		Observations []map[string]any `json:"observations"`
+	}
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if len(decoded.Messages) != 2 {
+		t.Fatalf("messages = %+v, want the two above", decoded.Messages)
+	}
+	for i, message := range decoded.Messages {
+		got, ok := message["at"]
+		if !ok {
+			t.Fatalf("message %d carries no time, which its contract requires: %+v", i, message)
+		}
+		if got != at.UTC().Format(time.RFC3339) {
+			t.Fatalf("message %d is dated %v, want the record's own commit time %q",
+				i, got, at.UTC().Format(time.RFC3339))
+		}
+	}
+	if len(decoded.Observations) != 1 {
+		t.Fatalf("observations = %+v, want the one", decoded.Observations)
+	}
+	for _, key := range []string{"worker", "state", "at"} {
+		if _, ok := decoded.Observations[0][key]; !ok {
+			t.Fatalf("an observation lacks %q: %+v", key, decoded.Observations[0])
+		}
+	}
+	if len(decoded.Observations[0]) != 3 {
+		t.Fatalf("an observation carries %d fields, want exactly worker, state and at: %+v",
+			len(decoded.Observations[0]), decoded.Observations[0])
 	}
 }
 
@@ -700,76 +927,12 @@ func TestHoldingsAcknowledgesOnlyWhatTheCoordinatorSendsBack(t *testing.T) {
 	}
 }
 
-// ── the wait and the close (nocx-dkawo.13) ────────────────────────────────
-
-// The wait answers what holdings answers, because it is the same question
-// asked at a different moment. A shape of its own would be a second account
-// of what a session holds, and the two would disagree the first time either
-// moved.
-func TestWaitAnswersWhatHoldingsAnswers(t *testing.T) {
-	rec := &fakeWorkerRecord{
-		waitHeld: []workers.Participant{
-			{
-				ID: "p-1", Group: "worker-1", State: workers.StateCompleted, Task: "read it",
-				Declared: &workers.Declaration{OK: true, Summary: "done"},
-			},
-			{ID: "p-2", Group: "worker-1", State: workers.StateLive, Task: "still going"},
-		},
-		owed: []workers.Fact{{Participant: "p-1", Kind: workers.FactDeclared}},
-		mail: map[workers.ReaderID][]workers.Message{
-			"sess-coordinator": {{Sender: "p-1", Body: "here is what I found"}},
-		},
-	}
-	raw, err := executeWorkerWait(context.Background(),
-		testCoordinator("sess-coordinator"), json.RawMessage(`{"seconds":1}`), workerSeams(rec))
-	if err != nil {
-		t.Fatalf("workers.wait: %v", err)
-	}
-	var got workerHoldingsResult
-	if err := json.Unmarshal([]byte(raw), &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(got.Participants) != 2 {
-		t.Fatalf("participants = %d, want 2", len(got.Participants))
-	}
-	if got.Participants[0].State != string(workers.StateCompleted) || !got.Participants[0].NeedsJudgement {
-		t.Fatalf("the settled worker is not reported as settled and new: %+v", got.Participants[0])
-	}
-	if got.Participants[1].State != string(workers.StateLive) {
-		t.Fatalf("the other worker should still be live: %+v", got.Participants[1])
-	}
-	// D7: a report, a WAIT or an explicit inbox check returns pending mail.
-	if len(got.Mail) != 1 || got.Mail[0].From != "p-1" {
-		t.Fatalf("the wait carried no mail: %+v", got.Mail)
-	}
-	// It WAITED. A carrier that quietly answered from HeldBy would look
-	// identical in the result and would never hold a turn at all.
-	if len(rec.waitedFor) != 1 {
-		t.Fatalf("the carrier waited %d times, want once", len(rec.waitedFor))
-	}
-	if len(rec.heldFor) != 0 {
-		t.Fatalf("the carrier fetched through HeldBy as well as waiting: %v", rec.heldFor)
-	}
-}
-
-// The wait's bound is the coordinator's to choose, and the default covers a
-// coordinator that names none.
-func TestWaitTakesItsBoundFromTheCallAndOtherwiseDefaults(t *testing.T) {
-	for _, args := range []string{`{}`, ``, `{"seconds":5}`} {
-		rec := &fakeWorkerRecord{waitHeld: []workers.Participant{}}
-		var raw json.RawMessage
-		if args != "" {
-			raw = json.RawMessage(args)
-		}
-		if _, err := executeWorkerWait(context.Background(),
-			testCoordinator("sess-coordinator"), raw, workerSeams(rec)); err != nil {
-			t.Fatalf("workers.wait(%s): %v", args, err)
-		}
-		if len(rec.waitedFor) != 1 {
-			t.Fatalf("workers.wait(%s) did not wait", args)
-		}
-	}
-}
+// ── the close (nocx-dkawo.13) ─────────────────────────────────────────────
+//
+// The wait that used to sit here is gone with the declaration (ADR-0070,
+// design §7), and so is the `Wait` method on the record seam this file's
+// double implements: a coordinator is woken by its mailbox, and reads it
+// through workers.holdings.
 
 // A close ends the named worker as the RUN'S OWN SESSION, and says what was
 // asked rather than what happened: ending a process is a request, and how it

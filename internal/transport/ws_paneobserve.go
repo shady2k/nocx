@@ -20,24 +20,31 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 )
 
-// paneObserverSweep is how often the backend asks its watched panes what they
-// are now.
+// DefaultPaneObserverSweep is how often the backend asks its watched panes what
+// they are now, when the composition root names no other number.
 //
-// It is BOUNDED POLLING of the panes somebody is watching, and what used to
-// make it something cheaper is gone: the dirty mark came from the session's
-// read path, and the coordinator no longer reads a session's bytes for a screen
-// (ADR-0066). So every sweep reads every watched pane — one frame read each per
-// tick — and what bounds the cost is this interval, MaxWatched, and the fact
-// that a pane whose classification did not change sends nothing. A pane that
-// has settled still costs its read; that is the price of an observer that
-// cannot be told a pane moved.
+// # Why a second, and what changed
 //
-// What the interval buys is the coalescing it was written for: an agent that
-// repaints its token counter on every chunk produces one classification per
-// tick rather than one per chunk. Nothing waits on the number — a test drives
-// Sweep directly and asserts on the state change it produces, which is why no
-// test in this repository depends on it.
-const paneObserverSweep = 120 * time.Millisecond
+// It was 120 ms, chosen for the coalescing it does: an agent that repaints its
+// token counter on every chunk produces one classification per tick rather than
+// one per chunk, and a tick shorter than eight a second was as cheap as the
+// message it replaced. Since nocx-luqz9.2 the sweep has a second job and a
+// second reader — the classification of a WORKER's pane is a fact its
+// coordinator can act on — and a fact has to be SETTLED before it is one. A
+// reading eight times a second is eight readings of a state whose window is
+// three seconds; the classification itself cannot become news faster than the
+// window, so the extra ticks buy nothing a coordinator receives.
+//
+// What they still cost is unchanged and is the reason the interval is BOUNDED
+// POLLING rather than a subscription: every watched pane is one frame read per
+// tick, and what used to make the sweep cheaper is gone — the dirty mark came
+// from the session's read path, and the coordinator no longer reads a session's
+// bytes for a screen (ADR-0066). One read per watched pane per second, bounded
+// by MaxWatched, is the price of an observer that cannot be told a pane moved.
+//
+// Nothing waits on the number: production drives the ticker and a test drives
+// Sweep directly, and no test in this repository depends on this value.
+const DefaultPaneObserverSweep = time.Second
 
 // paneObserver is the transport's half of the seam (AD-8). Narrow on purpose:
 // the transport may close an observation when the session ends, may drive a
@@ -64,6 +71,22 @@ type paneObserver interface {
 // dependency of the byte path.
 func WithPaneObserver(o paneObserver) WSServerOption {
 	return func(s *WSServer) { s.paneObserver = o }
+}
+
+// WithPaneObserverSweep sets how often the watcher is swept (nocx-luqz9.2).
+//
+// The interval is a dependency rather than a constant because it is a product
+// value with two ends (see DefaultPaneObserverSweep), and this is the seam the
+// setting that will own it arrives through — the same shape internal/paneobserve
+// uses for the stall threshold. A non-positive interval leaves the default: a
+// ticker built with zero panics, and a wiring mistake must not take the byte
+// path down with it.
+func WithPaneObserverSweep(d time.Duration) WSServerOption {
+	return func(s *WSServer) {
+		if d > 0 {
+			s.paneObserverSweep = d
+		}
+	}
 }
 
 // observationChangedParams is the notification's DTO. Contracted, like every
@@ -115,7 +138,7 @@ func observationChildren(children []agentdriver.Subagent) []observationChildPara
 // runPaneObserverSweeps drives the coalescer for the life of the server.
 func (s *WSServer) runPaneObserverSweeps(ctx context.Context, done <-chan struct{}, exited chan<- struct{}) {
 	defer close(exited)
-	t := time.NewTicker(paneObserverSweep)
+	t := time.NewTicker(s.paneObserverSweep)
 	defer t.Stop()
 	for {
 		select {

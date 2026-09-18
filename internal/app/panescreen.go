@@ -25,7 +25,7 @@ import (
 // paneScreenTimeout bounds ONE frame read.
 //
 // It is a REQUEST bound and not a policy, exactly as the helper client's signal
-// seam states it: the callers are a 120ms observer sweep and a write gate that
+// seam states it: the callers are a one-second observer sweep and a write gate
 // is mid-decision, and neither has a lifetime to thread, so the call that
 // reaches another process bounds itself. Without it a helper that stopped
 // answering would park the sweep for as long as the socket lives, and every

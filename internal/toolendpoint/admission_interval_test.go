@@ -267,7 +267,7 @@ func TestARetiredIntervalCancelsTheCallInFlightOnItsConnection(t *testing.T) {
 	endpoint := startEndpoint(t, cfg)
 
 	conn := dialEndpoint(t, endpoint)
-	if _, err := io.WriteString(conn, `{"jsonrpc":"2.0","id":"held","method":"workers.wait","params":{}}`+"\n"); err != nil {
+	if _, err := io.WriteString(conn, `{"jsonrpc":"2.0","id":"held","method":"workers.spawn","params":{"command":"claude","task":"hold this call"}}`+"\n"); err != nil {
 		t.Fatalf("write the call that stays in flight: %v", err)
 	}
 	awaitAdmitted(t, endpoint, "session-1")

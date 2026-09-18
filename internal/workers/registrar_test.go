@@ -5,12 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 )
 
@@ -39,6 +37,27 @@ type memStore struct {
 	// taking its wake-up channel and selecting on it, which is the one
 	// ordering that cannot be produced by racing two goroutines and hoping.
 	duringHeldBy func()
+	// duringCommit runs once, at the top of the first Commit, BEFORE that
+	// Commit takes any lock. It is how a test puts a second writer exactly
+	// inside the window between one observation's claim and its write — the
+	// window that cannot be produced by racing two goroutines and hoping, and
+	// the one an observation that does not RESERVE its claim would let a
+	// second reader walk into. It fires before the lock deliberately: the
+	// nested call this starts writes through this same store, and firing
+	// inside the critical section would deadlock the test rather than detect
+	// the race.
+	duringCommit func()
+	// duringResolve is that same instrument for the ordering this package's
+	// Resolve-against-Revoke trials did not get from racing two goroutines at
+	// all: measured 2026-09-17, 50 runs of that trial under load on the
+	// unmodified branch produced the revoke-first ordering on every trial, so
+	// the resolve's half of the race was never observed (nocx-xn63t.4.7). It
+	// runs once, at the top of the first store call resolveLocked makes
+	// (ParticipantBySession), which access.go makes while holding storeMu —
+	// so a test that blocks here holds the resolve inside its critical
+	// section, and spends the block starting the revoke and leaving it
+	// contending for that mutex.
+	duringResolve func()
 }
 
 func newMemStore() *memStore {
@@ -171,20 +190,27 @@ func (m *memStore) Terminalize(_ context.Context, id ParticipantID, s State) err
 	return nil
 }
 
-func (m *memStore) RecordDeclaration(_ context.Context, id ParticipantID, d Declaration) (Participant, error) {
-	if err := m.hit("recorddecl"); err != nil {
-		return Participant{}, err
+// Closed mirrors MemoryStore.Closed, precedence rule included: the tests that
+// drive a close against a racing exit are about the record's semantics, and a
+// double that overwrote only a non-terminal state would answer them with its
+// own behaviour instead.
+func (m *memStore) Closed(_ context.Context, id ParticipantID) error {
+	if err := m.hit("closed"); err != nil {
+		return err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p, ok := m.parts[id]
 	if !ok {
-		return Participant{}, ErrNoSuchParticipant
+		return ErrNoSuchParticipant
 	}
-	cp := d
-	p.Declared = &cp
+	switch p.State {
+	case StateClosed, StateInterrupted:
+		return nil
+	}
+	p.State = StateClosed
 	m.parts[id] = p
-	return p, nil
+	return nil
 }
 
 func (m *memStore) RecordExit(_ context.Context, id ParticipantID, e Exit) (Participant, error) {
@@ -256,6 +282,11 @@ func (m *memStore) Participant(_ context.Context, id ParticipantID) (Participant
 }
 
 func (m *memStore) Commit(_ context.Context, msg Message) (Message, error) {
+	if m.duringCommit != nil {
+		fire := m.duringCommit
+		m.duringCommit = nil
+		fire()
+	}
 	if err := m.hit("commit"); err != nil {
 		return Message{}, err
 	}
@@ -356,6 +387,10 @@ func (m *memStore) ParticipantBySession(_ context.Context, sessionID string) (Pa
 	if err := m.hit("participantbysession"); err != nil {
 		return Participant{}, err
 	}
+	if f := m.duringResolve; f != nil {
+		m.duringResolve = nil
+		f()
+	}
 	if sessionID == "" {
 		return Participant{}, fmt.Errorf("no such session %q: %w", sessionID, ErrNoSuchParticipant)
 	}
@@ -401,6 +436,16 @@ func (m *memStore) read(t *testing.T, id ParticipantID) (Participant, bool) {
 	defer m.mu.Unlock()
 	p, ok := m.parts[id]
 	return p, ok
+}
+
+// mailbox is what one box HOLDS, read without handing anything to anybody. A
+// test about "exactly one message was committed" must not fetch: a fetch
+// advances a cursor, and the arrangement would then be a second thing moving.
+func (m *memStore) mailbox(t *testing.T, box ReaderID) []Message {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]Message(nil), m.mail[box]...)
 }
 
 type fakeSpawned struct {
@@ -519,12 +564,19 @@ type harness struct {
 	enrol *fakeEnrolments
 	sup   *fakeSupervisor
 	reg   *Registrar
-	// The backstop is wired in every harness rather than left to default,
-	// so a test that is not about the fact set neither types anywhere nor
-	// leaves a five-minute alarm behind it.
+	// THE WAKE IS WIRED IN EVERY HARNESS rather than left to the default, and
+	// for the same reason the backstop used to be: a test that is not about the
+	// wake must neither type into a pane nor leave an alarm behind it. The
+	// doubles are here because every claim this file's neighbours make about
+	// the wake is about what it TYPED and what it TOLD, and a real typist would
+	// put those two facts in a pane nothing can read back.
 	wake   *fakeWaker
 	human  *fakeEscalation
 	alarms *fakeAlarms
+	// wakeState is the Wake itself, so a test can admit readings of a
+	// coordinator's own pane (ObserveCoordinator) and let the record's settle
+	// machine see them.
+	wakeState *Wake
 }
 
 const (
@@ -558,8 +610,10 @@ func newHarness(t *testing.T) *harness { return newHarnessBound(t, 2) }
 
 // newHarnessBound is newHarness with the participant bound named, so a
 // fan-out test can hold more than one worker at a time without every other
-// test's bound moving with it.
-func newHarnessBound(t *testing.T, bound int) *harness {
+// test's bound moving with it. opts are applied to the Registrar AFTER the
+// harness's own wiring, so a test that is about one product value states that
+// value instead of asserting the default.
+func newHarnessBound(t *testing.T, bound int, opts ...Option) *harness {
 	t.Helper()
 	h := &harness{
 		store:  newMemStore(),
@@ -570,17 +624,20 @@ func newHarnessBound(t *testing.T, bound int) *harness {
 		human:  &fakeEscalation{},
 		alarms: newFakeAlarms(),
 	}
-	backstop := NewBackstop(log.NewSlogAdapter(nil), h.wake, h.human,
-		WithFactDeadline(90*time.Second))
+	wake := NewWake(h.wake, h.human, h.store,
+		WithRetryPause(90*time.Second), WithAttemptLimit(3))
 	// The alarm is replaced by ASSIGNMENT rather than by an option: only the
-	// deadline is a product value, so only the deadline earns an exported
-	// option. These tests are in-package, which is the whole reason the
+	// pause and the limit are product values, so only those earn exported
+	// options. These tests are in-package, which is the whole reason the
 	// exported surface does not have to grow for them.
-	backstop.alarms = h.alarms
+	wake.alarms = h.alarms
+	h.wakeState = wake
 	h.reg = NewRegistrar(h.store, h.spawn, h.enrol, h.sup,
-		WithBackstop(backstop),
-		WithBound(bound),
-		WithEnrolmentDeadline(50*time.Millisecond),
+		append([]Option{
+			WithWake(wake),
+			WithBound(bound),
+			WithEnrolmentDeadline(50 * time.Millisecond),
+		}, opts...)...,
 	)
 	h.reg.newID = func() ParticipantID {
 		return ParticipantID(fmt.Sprintf("p-%d", h.store.count("commitprepared")+1))
@@ -678,8 +735,9 @@ func TestAnEnrolmentThatNeverArrivesTerminalizesAndKills(t *testing.T) {
 	if !got.State.Terminal() {
 		t.Fatalf("state = %q, want terminal", got.State)
 	}
-	if got.State == StateCompleted {
-		t.Fatalf("a registration that never enrolled must never read completed")
+	if got.State != StateInterrupted {
+		t.Fatalf("state = %q, want %q: nocx's own compensation is the only thing that ended it",
+			got.State, StateInterrupted)
 	}
 	if !h.spawn.wasKilled() {
 		t.Fatalf("the launcher was left running")
@@ -714,28 +772,19 @@ func TestSupervisionAttachesAfterTheRecordIsLive(t *testing.T) {
 	}
 }
 
-// The two terminal facts are independent, and neither alone reaches completed.
-func TestNeitherFactAloneCompletes(t *testing.T) {
+// ONE PROCESS FACT, AND ONE STATE THAT IS THE COORDINATOR'S OWN.
+//
+// The record used to derive its state from a conjunction of two facts — the
+// declaration and the exit — and ADR-0070 removed the first of them: nocx
+// records no outcome, so what is left is what HAPPENED. These assertions are
+// the design's own vocabulary read literally (design §4.1): a process that is
+// gone reads `exited`, a participant its coordinator ended reads `closed`, and
+// neither says anything about how the work went.
+func TestTheRecordSaysWhatHappenedAndNeverHowItWent(t *testing.T) {
 	ctx := context.Background()
 	at := time.Unix(1_700_000_100, 0).UTC()
 
-	t.Run("a declaration with no exit stays live", func(t *testing.T) {
-		h := newHarness(t)
-		p, err := h.register(ctx)
-		if err != nil {
-			t.Fatalf("register: %v", err)
-		}
-		got, err := h.reg.Declared(ctx, p.ID, testLiveness(), Declaration{OK: true, Summary: "done", At: at})
-		if err != nil {
-			t.Fatalf("declare: %v", err)
-		}
-		if got.State != StateLive {
-			t.Fatalf("state = %q, want %q: the agent said it finished and is still running",
-				got.State, StateLive)
-		}
-	})
-
-	t.Run("an exit with no declaration is abandoned, never completed", func(t *testing.T) {
+	t.Run("an exit reads exited", func(t *testing.T) {
 		h := newHarness(t)
 		p, err := h.register(ctx)
 		if err != nil {
@@ -745,46 +794,65 @@ func TestNeitherFactAloneCompletes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("exit: %v", err)
 		}
-		if got.State != StateAbandoned {
-			t.Fatalf("state = %q, want %q", got.State, StateAbandoned)
+		if got.State != StateExited {
+			t.Fatalf("state = %q, want %q", got.State, StateExited)
 		}
 	})
 
-	t.Run("both together complete, and the declaration decides which", func(t *testing.T) {
-		for _, tc := range []struct {
-			name string
-			ok   bool
-			want State
-		}{
-			{"success", true, StateCompleted},
-			{"failure", false, StateFailed},
-		} {
-			t.Run(tc.name, func(t *testing.T) {
-				h := newHarness(t)
-				p, err := h.register(ctx)
-				if err != nil {
-					t.Fatalf("register: %v", err)
-				}
-				if _, decErr := h.reg.Declared(ctx, p.ID, testLiveness(), Declaration{OK: tc.ok, At: at}); decErr != nil {
-					t.Fatalf("declare: %v", decErr)
-				}
-				got, err := h.reg.Exited(ctx, p.ID, testLiveness(), Exit{Cause: "exited", At: at})
-				if err != nil {
-					t.Fatalf("exit: %v", err)
-				}
-				if got.State != tc.want {
-					t.Fatalf("state = %q, want %q", got.State, tc.want)
-				}
-			})
-		}
-	})
-
-	// The conjunction has to hold in either arrival order. An exit seen
-	// before the declaration is abandoned, and the declaration that follows
-	// REFINES it — that is the second half of a conjunction arriving late,
-	// not a resurrection: nothing about the process becomes untrue.
-	t.Run("an exit seen first is refined by the declaration that follows", func(t *testing.T) {
+	// The end nocx could not call an ordinary one reads the same, because
+	// there is no verdict left for the record to be fail-closed about: the
+	// loss is told to the coordinator by the ROUTING table (needsAttention),
+	// not by a state of its own.
+	t.Run("a loss reads exited too", func(t *testing.T) {
 		h := newHarness(t)
+		p, err := h.register(ctx)
+		if err != nil {
+			t.Fatalf("register: %v", err)
+		}
+		got, err := h.reg.Exited(ctx, p.ID, testLiveness(), Exit{Cause: string(session.ExitInterrupted), At: at})
+		if err != nil {
+			t.Fatalf("exit: %v", err)
+		}
+		if got.State != StateExited {
+			t.Fatalf("state = %q, want %q", got.State, StateExited)
+		}
+	})
+
+	// A close is the one state the record writes on somebody's behalf: the
+	// exit it causes cannot say that the coordinator is WHY the worker ended,
+	// and afterwards that exit is refused as a fact about an already-terminal
+	// record.
+	t.Run("a close reads closed and the exit it causes does not move it", func(t *testing.T) {
+		h := newHarness(t)
+		withCloser(t, h)
+		p, err := h.register(ctx)
+		if err != nil {
+			t.Fatalf("register: %v", err)
+		}
+		if closeErr := h.reg.Close(ctx, coordSession, p.ID); closeErr != nil {
+			t.Fatalf("close: %v", closeErr)
+		}
+		stored, ok := h.store.read(t, p.ID)
+		if !ok || stored.State != StateClosed {
+			t.Fatalf("state after the close = %q, want %q", stored.State, StateClosed)
+		}
+		if _, exitErr := h.reg.Exited(ctx, p.ID, testLiveness(), Exit{Cause: "exited", At: at}); !errors.Is(exitErr, ErrTerminal) {
+			t.Fatalf("the exit a close caused = %v, want ErrTerminal", exitErr)
+		}
+		stored, _ = h.store.read(t, p.ID)
+		if stored.State != StateClosed {
+			t.Fatalf("state = %q after the exit that close caused, want %q", stored.State, StateClosed)
+		}
+	})
+
+	// And a close that came too late changes nothing: the participant ended
+	// on its own, so its record keeps saying that. The coordinator's call is
+	// the ordinary tidy-up (it still reaches the closer, which is what
+	// releases the tab), and it is not a second author of a state that was
+	// already written by the end that actually happened.
+	t.Run("a close after the exit leaves it exited", func(t *testing.T) {
+		h := newHarness(t)
+		closer := withCloser(t, h)
 		p, err := h.register(ctx)
 		if err != nil {
 			t.Fatalf("register: %v", err)
@@ -792,12 +860,36 @@ func TestNeitherFactAloneCompletes(t *testing.T) {
 		if _, exitErr := h.reg.Exited(ctx, p.ID, testLiveness(), Exit{Cause: "exited", At: at}); exitErr != nil {
 			t.Fatalf("exit: %v", exitErr)
 		}
-		got, err := h.reg.Declared(ctx, p.ID, testLiveness(), Declaration{OK: true, At: at})
-		if err != nil {
-			t.Fatalf("declare: %v", err)
+		if closeErr := h.reg.Close(ctx, coordSession, p.ID); closeErr != nil {
+			t.Fatalf("close of a participant whose process is already gone: %v", closeErr)
 		}
-		if got.State != StateCompleted {
-			t.Fatalf("state = %q, want %q", got.State, StateCompleted)
+		if got := closer.seen(); len(got) != 1 || got[0] != p.ID {
+			t.Fatalf("the closer saw %v, want exactly [%s]: a finished worker's place is still released", got, p.ID)
+		}
+		stored, _ := h.store.read(t, p.ID)
+		if stored.State != StateExited {
+			t.Fatalf("state = %q, want %q: that worker ended on its own", stored.State, StateExited)
+		}
+	})
+
+	// A close that failed ended nothing, so it writes nothing: a record
+	// saying `closed` about a worker still running is the lie this path must
+	// not tell, and it would leave the participant unreachable to the retry
+	// the refusal invites.
+	t.Run("a close whose closer failed writes no state", func(t *testing.T) {
+		h := newHarness(t)
+		closer := withCloser(t, h)
+		p, err := h.register(ctx)
+		if err != nil {
+			t.Fatalf("register: %v", err)
+		}
+		closer.err = errInjected
+		if closeErr := h.reg.Close(ctx, coordSession, p.ID); !errors.Is(closeErr, errInjected) {
+			t.Fatalf("close = %v, want the closer's own failure", closeErr)
+		}
+		stored, _ := h.store.read(t, p.ID)
+		if stored.State != StateLive {
+			t.Fatalf("state = %q after a failed close, want %q", stored.State, StateLive)
 		}
 	})
 }
@@ -816,9 +908,6 @@ func TestEvidenceFromAnotherIncarnationIsRefused(t *testing.T) {
 	stale.Attempt = 0
 	if _, err := h.reg.Exited(ctx, p.ID, stale, Exit{Cause: "exited"}); !errors.Is(err, ErrStaleEvidence) {
 		t.Fatalf("stale exit err = %v, want ErrStaleEvidence", err)
-	}
-	if _, err := h.reg.Declared(ctx, p.ID, stale, Declaration{OK: true}); !errors.Is(err, ErrStaleEvidence) {
-		t.Fatalf("stale declaration err = %v, want ErrStaleEvidence", err)
 	}
 	got, _ := h.store.read(t, p.ID)
 	if got.State != StateLive {
@@ -1074,17 +1163,13 @@ func TestStateNamesDoNotDriftFromTheWire(t *testing.T) {
 	for state, want := range map[State]string{
 		StatePrepared:    "prepared",
 		StateLive:        "live",
-		StateCompleted:   "completed",
-		StateFailed:      "failed",
-		StateAbandoned:   "abandoned",
+		StateExited:      "exited",
+		StateClosed:      "closed",
 		StateInterrupted: "interrupted",
 	} {
 		if string(state) != want {
 			t.Fatalf("state %v = %q, want %q", state, string(state), want)
 		}
-	}
-	if strings.Contains(string(StateAbandoned), "complet") {
-		t.Fatalf("abandoned must never read as a completion")
 	}
 }
 

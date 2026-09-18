@@ -3,10 +3,13 @@ package toolendpoint
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
+	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/workers"
 )
 
@@ -41,6 +44,25 @@ func TestEveryRefusalTellsTheCallerWhatToDoNext(t *testing.T) {
 		ErrNoLiveInterval,
 		ErrBearerRefused,
 		errUnpublishedAdmission,
+		// THE TARGET-MINT REFUSALS (nocx-xn63t.4.1). A full token book and a
+		// snapshot the pane redrew under are refusals of the CALLER's own
+		// request with a known next step — wait, and ask again — so they are
+		// named here rather than falling into the default arm, whose sentence
+		// calls them a backend fault and tells the agent to stop. An agent
+		// told to stop is exactly what left the owner's worker stuck: the
+		// answer it needed was on that pane's menu.
+		helperclient.ErrTargetCapacity,
+		helperclient.ErrSnapshotGone,
+		// THE REPORT'S FOUR (nocx-luqz9.4). Each is a different fact with a
+		// different next step — not a worker at all, a worker nothing
+		// coordinates, a write that failed, and a shape the tool could not
+		// have sent — and a caller that cannot tell them apart retries the one
+		// that cannot work or gives up on the one that can.
+		agenttools.ErrNoParticipant,
+		workers.ErrNoCoordinator,
+		workers.ErrReportNotRecorded,
+		workers.ErrNotAReport,
+		workers.ErrReportAfterEnd,
 		context.Canceled,
 		context.DeadlineExceeded,
 		errors.New("something nobody has classified"),
@@ -116,6 +138,44 @@ func TestCancellationIsAbandonmentNotAnInternalError(t *testing.T) {
 	}
 }
 
+// A target-mint refusal is not an internal error (nocx-xn63t.4.1). The owner's
+// coordinator was refused every targeted session.read with a bare
+// `internal error`, whose sentence tells the agent to stop and carry on
+// without the tool — while the one thing that would have freed the pane was
+// the menu answer that needed a target. These assert the two refusals reach
+// the agent named, with the next step each one actually has, through the
+// pipeline the production error arrives by: the classifier at app's crossing,
+// then the wrapping session.read puts around it.
+func TestATargetRefusalNamesTheNextStepTheCallerHas(t *testing.T) {
+	throughRead := func(err error) error {
+		return fmt.Errorf("session.read: mint target: %w", helperclient.ClassifyTargetRefusal(err))
+	}
+
+	_, capacityMessage, capacity := rpcErrorFor(throughRead(&helperclient.RefusalError{Code: "capacity"}))
+	_, goneMessage, gone := rpcErrorFor(throughRead(&helperclient.RefusalError{Code: "snapshot_gone"}))
+
+	if capacity == gone {
+		t.Fatalf("the two mint refusals share one sentence: %q", capacity)
+	}
+	if strings.Contains(capacity, "inside nocx") || strings.Contains(gone, "inside nocx") {
+		t.Errorf("a mint refusal is still reported as a fault inside nocx: %q / %q", capacity, gone)
+	}
+	if !strings.Contains(capacity, "wait") {
+		t.Errorf("the capacity refusal does not say to wait for a slot: %q", capacity)
+	}
+	if !strings.Contains(strings.ToLower(capacity), "without a target") {
+		t.Errorf("the capacity refusal does not name the read that still works (the one the caller needs while it waits): %q", capacity)
+	}
+	if !strings.Contains(gone, "again") {
+		t.Errorf("the snapshot refusal does not say that asking again is the way through: %q", gone)
+	}
+	for _, message := range []string{capacityMessage, goneMessage} {
+		if strings.Contains(message, "capacity") || strings.Contains(message, "snapshot") {
+			t.Errorf("the wire message spells the helper's own code to the agent: %q", message)
+		}
+	}
+}
+
 // An unclassified error stays generic on the wire — an agent must not be told
 // a backend's internals — and it still must stop the agent retrying a call
 // that failed for a reason it cannot affect.
@@ -129,5 +189,37 @@ func TestTheUnclassifiedErrorSaysNotToRepeatTheCall(t *testing.T) {
 	}
 	if !strings.Contains(reason, "Do not repeat") {
 		t.Errorf("the reason does not stop a retry: %q", reason)
+	}
+}
+
+// THE TWO "IT HAS ENDED" REFUSALS DO NOT SHARE A SENTENCE (nocx-luqz9.4),
+// and that is the split the file above exists for. A fact about a PANE sends the
+// reader to workers.holdings to look at a screen; a REPORT that arrived after the
+// end has no next step in it at all. Handing the second the first's sentence
+// would name an object the caller never mentioned — its own report — as a screen
+// to go and read.
+func TestAnEndedPaneAndAnEndedReportDoNotShareASentence(t *testing.T) {
+	_, _, pane := rpcErrorFor(workers.ErrTerminal)
+	// The record wraps BOTH sentinels on the report path, which is what makes
+	// the arm order load-bearing rather than incidental.
+	_, _, report := rpcErrorFor(fmt.Errorf("worker: participant %q is exited: %w: %w",
+		"p-1", workers.ErrTerminal, workers.ErrReportAfterEnd))
+
+	if pane == report {
+		t.Fatalf("an ended pane and an ended report answer with one sentence: %q", pane)
+	}
+	if strings.Contains(report, "screen") {
+		t.Errorf("the ended-report refusal names a pane the caller never wrote to: %q", report)
+	}
+	if !strings.Contains(report, "report") {
+		t.Errorf("the ended-report refusal does not name what was refused: %q", report)
+	}
+	// It must also not read as a retry: the session is over, so a caller told to
+	// try again would spend a turn doing the one thing that cannot work.
+	if strings.Contains(report, "again") && !strings.Contains(report, "nothing to retry") {
+		t.Errorf("the ended-report refusal invites a retry: %q", report)
+	}
+	if !strings.Contains(pane, "workers.holdings") {
+		t.Errorf("the ended-pane refusal lost its next step: %q", pane)
 	}
 }

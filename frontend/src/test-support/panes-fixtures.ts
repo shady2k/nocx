@@ -40,6 +40,7 @@ import type { SessionEntry } from '../generated/sessions.inventory'
 import type { SessionObservationChanged } from '../generated/session.observationChanged'
 import type { DriverState } from '../pane-observation'
 import type { WorkersTabCreated } from '../generated/workers.tabCreated'
+import type { WorkersTabClosed } from '../generated/workers.tabClosed'
 import type { Open } from '../generated/open'
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -617,6 +618,13 @@ export interface ClientFake {
   /** Deliver that fact to every subscriber, the way workers.tabCreated does
    *  off the real socket. */
   _fireWorkerTabCreated: (fact: WorkersTabCreated) => void
+  /** A worker participant's tab has LEFT the window (nocx-xn63t.4.6), closed
+   *  on the backend by workers.close. The real method's own signature, so the
+   *  fixture cannot drift from what a surface is handed. */
+  onWorkerTabClosed: (cb: (fact: WorkersTabClosed) => void) => () => void
+  /** Deliver that fact to every subscriber, the way workers.tabClosed does
+   *  off the real socket. */
+  _fireWorkerTabClosed: (fact: WorkersTabClosed) => void
   readonly connected: boolean
   /** What the coordinator is still running, asked once before the chain is
    *  drawn (design D5). Answers an empty list by default, which is a cold
@@ -700,6 +708,7 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
   type DisplacedFact = { sessionId: string; instanceId: string; sessionEpoch: number }
   const displacedHandlers = new Set<(d: DisplacedFact) => void>()
   const workerTabCreatedHandlers = new Set<(fact: WorkersTabCreated) => void>()
+  const workerTabClosedHandlers = new Set<(fact: WorkersTabClosed) => void>()
   const newSession = (): SessionFake => {
     const s = makeSession()
     sessions.push(s)
@@ -748,6 +757,13 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     }),
     _fireWorkerTabCreated: (fact: WorkersTabCreated) => {
       for (const cb of [...workerTabCreatedHandlers]) cb(fact)
+    },
+    onWorkerTabClosed: (cb: (fact: WorkersTabClosed) => void) => {
+      workerTabClosedHandlers.add(cb)
+      return () => workerTabClosedHandlers.delete(cb)
+    },
+    _fireWorkerTabClosed: (fact: WorkersTabClosed) => {
+      for (const cb of [...workerTabClosedHandlers]) cb(fact)
     },
     dispatcher: {
       subscribe: vi.fn(() => () => undefined),

@@ -461,23 +461,28 @@ func WithLogFilePath(path string) Option {
 // before it had a control beside it.
 const notifyDebounceWindow = 8 * time.Second
 
-// workerFactDeadline is how long a worker's fact may sit undispatched before
-// the person is told (D2 of the 2026-08-24 orchestration mechanism design).
+// workerRetryPause is how long the wake waits before typing the same line at a
+// coordinator again, and workerWakeAttempts is how many lines one unread batch
+// gets before the person is told (design §5.4).
 //
-// It is a placeholder with both ends of the interval named, and deliberately
-// not a measured value: §10.8 says a number wrong in either direction breaks
-// the backstop — too short and a thinking coordinator is escalated past, too
-// long and the person learns late — and that it probably differs by fact
-// class, which needs the fan-out nocx-dkawo.4 brings to measure at all. Five
-// minutes is chosen to be longer than an agent turn and shorter than the
-// interval in which a person forgets they started a worker.
-const workerFactDeadline = 5 * time.Minute
+// Both are placeholders with the ends of their interval named, and deliberately
+// not measured values: §10.8 says a number wrong in either direction breaks the
+// pair — too short and a thinking coordinator is retyped over, too long and the
+// person learns late — and that it probably differs by how much the coordinator
+// is doing, which needs the fan-out nocx-dkawo.4 brings to measure at all. Two
+// minutes is longer than an agent turn and three lines is more than a
+// coordinator needs to notice one, so the whole budget is spent inside the
+// interval in which a person still remembers starting the effort.
+const (
+	workerRetryPause   = 2 * time.Minute
+	workerWakeAttempts = 3
+)
 
 // workerParticipantBound is how many non-terminal participants one worker may
 // hold, and workerEnrolmentDeadline is how long a registration waits for the
 // launcher's enrolment before it is terminalized.
 //
-// Both are named here for the reason the fact deadline is: they are the
+// Both are named here for the reason the wake's numbers are: they are the
 // product's numbers, and internal/worker names the interval rather than
 // choosing its length. The bound is deliberately small for one-worker workerStore
 // (D15) and is one of the nine open in §10.9; the enrolment deadline has to
@@ -1575,12 +1580,6 @@ func New(opts ...Option) (*App, error) {
 	// opened a far pane's tool socket ends it on the same event that retires the
 	// pane's bearer, so one interval has one closing edge.
 	agentApprovalService.farToolSockets = helperReg
-	// The declaration's carrier, built beside the rendezvous and wired into
-	// the same publisher: a participant says what its work produced over the
-	// authenticated channel it is already enrolled on (ADR-0024 decision 2).
-	// Its destination is bound after the record exists, for the same reason
-	// the supervisor's is.
-	workerReport := &workerReporter{lanes: childSessions, enrol: workerEnrol, now: time.Now, log: logger}
 	// One driver per agent (AD-8), validated once, here. NewRegistry fails
 	// only on a wiring mistake — a driver that cannot name its agent, or two
 	// for one agent — and a wiring mistake belongs to process start rather
@@ -1668,10 +1667,7 @@ func New(opts ...Option) (*App, error) {
 		// bundle asks over this same authenticated channel, and this is what
 		// an unwired enroller refuses: the fail-closed half of D4, and the
 		// opposite of the grant builder above it.
-		lifecyclepub.WithAgentEnroller(workerEnrol.hookInto(paneEnrol)),
-		// The second fact's carrier. Unwired it refuses every report and says
-		// so, which is the same fail-closed stance as the enroller above.
-		lifecyclepub.WithAgentReporter(workerReport))
+		lifecyclepub.WithAgentEnroller(workerEnrol.hookInto(paneEnrol)))
 	// The pty factory drives the channel against the PUBLISHER, not the raw
 	// kernel: every mutation an adapter causes must reach the renderer as a
 	// published fact, and the publisher is the only thing that projects them.
@@ -2002,6 +1998,13 @@ func New(opts ...Option) (*App, error) {
 	paneTyping := newPaneTypist(logger, paneViews, paneDrivers, paneCalibration, paneWatch, sess)
 	tpOpts = append(tpOpts, transport.WithPaneScreens(paneViews),
 		transport.WithPaneObserver(paneWatch), transport.WithAgentRules(paneDrivers),
+		// How often the watcher above is swept (nocx-luqz9.2). Stated rather
+		// than left to the zero value: a second is both the coalescing this
+		// sweep was always doing and, since worker observations run off the
+		// same sweep, the cadence a settled state is noticed at (design §4.4).
+		// A value the composition root does not state would be a ticker built
+		// with zero, which panics.
+		transport.WithPaneObserverSweep(transport.DefaultPaneObserverSweep),
 		transport.WithAgentRuleStore(ruleStore),
 		transport.WithAgentCalibration(paneCalibration),
 		transport.WithAgentTypist(paneTyping),
@@ -2219,19 +2222,41 @@ func New(opts ...Option) (*App, error) {
 	// the ordinary shape for a cycle between two things the root owns — the
 	// same shape as the emitter and the liveness observer above.
 	workerSup := &workerSupervisor{sessions: sess, log: logger}
-	// The undispatched fact set and its two routes out (nocx-dkawo.3): the
-	// coordinator by a wake through the SAME typist agent.type reaches, the
-	// human by a deadline through the notification pipeline built above. The
-	// deadline's number is stated here because the composition root is where
-	// the product's real values live — and it is a placeholder with both ends
-	// named, not a measurement: §10.8 of the orchestration design puts that in
+	// THE RECORD'S OWN STORE, held here rather than minted inline because it is
+	// also the wake's mailbox (nocx-luqz9.3): the count the wake types is read
+	// from the box the coordinator will fetch from, so there is one store, one
+	// order and one cursor rather than a second view of the same rows.
+	workerStore := workers.NewMemoryStore()
+	// THE WAKE (nocx-luqz9.3, design §5): the line typed at an idle coordinator
+	// whose mailbox has something new, its bounded retries, and the human when
+	// the batch outlives them. It reaches the pane through the SAME typist
+	// agent.type reaches, and the human through the notification pipeline built
+	// above — the composition root is where both exist.
+	//
+	// THE NUMBERS ARE STATED HERE because the composition root is where the
+	// product's real values live, and BOTH ARE INJECTED so a test states an
+	// interval instead of waiting one out. They are placeholders with both ends
+	// named and not measurements: §10.8 of the orchestration design puts that in
 	// nocx-dkawo.4, where fan-out makes the escalated fraction measurable.
-	workerBackstop := workers.NewBackstop(logger,
+	workerWake := workers.NewWake(
 		&workerWaker{typist: paneTyping, log: logger},
-		&workerEscalation{raise: notifyIngress, log: logger},
-		workers.WithFactDeadline(workerFactDeadline))
+		&workerEscalation{raise: notifyIngress},
+		// The record's own store is the mailbox, so the count the wake types is
+		// read from the box the coordinator will fetch from — one store, one
+		// order, one cursor, rather than a second view of the same rows.
+		workerStore,
+		workers.WithRetryPause(workerRetryPause),
+		workers.WithAttemptLimit(workerWakeAttempts))
+	// WHICH TAB EACH PARTICIPANT'S PANE WAS MINTED IN (nocx-xn63t.4.6). One
+	// value, two ends: the spawner writes the pairing where both halves of it
+	// exist, and the closer reads it back when a coordinator's workers.close
+	// takes the participant's tab out of the window. A participant's session
+	// is removed from the registry the moment it exits, so this is the only
+	// thing left that can name a finished worker's tab — see workerTabs' own
+	// doc in workers.go for why nothing else in the process holds it.
+	workerSeats := newWorkerTabs()
 	workerRecord := workers.NewRegistrar(
-		workers.NewMemoryStore(),
+		workerStore,
 		&workerSpawner{
 			layout: contentDB.Layout(), opener: tp, sessions: sess,
 			// tp is also the shell-integration axis's one owner (AD-8): the
@@ -2259,19 +2284,79 @@ func New(opts ...Option) (*App, error) {
 			// exists, over the same connection registry integration and
 			// opener already reach through.
 			announce: tp,
+			tabs:     workerSeats,
 			log:      logger,
 		},
 		workerEnrol,
 		workerSup,
 		workers.WithLogger(logger),
-		workers.WithBackstop(workerBackstop),
+		workers.WithWake(workerWake),
 		// The seam a coordinator's workers.close reaches. Unwired it refuses,
 		// which is the right answer: reporting a worker ended that is still
 		// running is the one thing a close must never do.
-		workers.WithCloser(&workerCloser{sessions: sess, log: logger}),
+		workers.WithCloser(&workerCloser{
+			sessions: sess,
+			// The same layout chain the spawner mints the tab through, and
+			// the same seats record — one owner of "which tab is this
+			// participant's", read from the close's rather than the spawn's
+			// end.
+			layout: contentDB.Layout(), tabs: workerSeats,
+			// tp a third time (nocx-xn63t.4.6): the notification that a
+			// participant's tab has LEFT the window rides the same broadcast
+			// its appearance did, so every connected window's strip follows
+			// without a reload.
+			announce: tp,
+			log:      logger,
+		}),
 		workers.WithBound(workerParticipantBound),
 		workers.WithEnrolmentDeadline(workerEnrolmentDeadline),
+		// How long a worker's pane must hold a state before it is a fact its
+		// coordinator is told about (nocx-luqz9.2, design §4.4). Stated rather
+		// than left to the zero value for the reason the sweep interval below
+		// is: it is a product value with two ends, and the bead that gives it a
+		// settings owner edits this line.
+		workers.WithSettleWindow(workers.DefaultSettleWindow),
 	)
+	// What nocx SEES, joined to what it records (nocx-luqz9.2, ADR-0070
+	// decision 2). Built here because this is the only place both halves exist:
+	// the watcher knows what a pane was classified as, the record knows what a
+	// worker is, and workerEnrol turns a session into a participant for both a
+	// report and a close already.
+	//
+	// THE STATE MAPPING IS IN THIS PACKAGE and not in either of the two ends.
+	// internal/agentdriver's states are about screens and know nothing about
+	// workers; internal/workers' states are this product's own words
+	// (CONTEXT.md's Idle, Blocked, Exited) and that package reads no screens.
+	// Which driver state means which of those two is a fact about the pair, and
+	// its owner is the layer that holds the pair.
+	workerObs := &WorkerObservation{
+		enrolments: workerEnrol,
+		observe: func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, s workers.ObservedState) error {
+			return workerRecord.Observe(ctx, id, l, s)
+		},
+		// The same reading, read for a COORDINATOR (nocx-luqz9.3): a
+		// coordinator is not judged, it is typed into. The record decides
+		// whether this session holds workers at all — a session that holds none
+		// is somebody's own agent, which the record drops — so nothing here
+		// decides it a second time.
+		coordinate: func(sessionID string, s workers.ObservedState) {
+			workerRecord.ObserveCoordinator(context.Background(), sessionID, s)
+		},
+		liveness: workerEnrol.livenessOf,
+		log:      logger,
+	}
+	// And the SECOND reader of the same sweep (nocx-luqz9.2): every reading of
+	// every watched pane, change or not, which is what a settled state is
+	// measured against. The wire keeps its change-only rule; feeding this reader
+	// from the emitter would hand it a pane's state once and never again. A pane
+	// that belongs to no worker resolves to no participant inside the bridge —
+	// the ordinary case, since a person's own enrolled agent is not one.
+	//
+	// Bound here rather than beside SetEmitter above because the bridge is built
+	// by this block, and the ordering is safe for the same reason the emitter's
+	// is: the sweep only runs once the server is Started, which happens after
+	// app.New returns.
+	paneWatch.OnReading(workerObs.ObserveSession)
 	toolDispatcher, toolDispatcherErr := assistant.NewToolDispatcher(
 		agentToolRegistry, workerRecord, content.EnvironmentIDFor(content.EnvLocal, ""),
 	)
@@ -2330,12 +2415,15 @@ func New(opts ...Option) (*App, error) {
 	descendantPaneMessages := newPaneMessages(descendantPaneKeys, descendantPaneReader, accessHub, paneDrivers, time.Now())
 	descendantPaneReader.SetMessages(descendantPaneMessages)
 	toolAuthorizer.BindSessionMessages(descendantPaneMessages)
-	// The owed task, re-homed (design §9, Task 11): a spawn that meets a
-	// question no longer marks a debt for a later answer call to pay — it
-	// enqueues a "when=free" message through this SAME queue, namespace
-	// "nocx", id "task", and any answer that frees the prompt (a
+	// The briefing, re-homed (design §9 Task 11 for the task, §6 for the
+	// rules; nocx-luqz9.5, one message since nocx-xn63t.4.16): a spawn that
+	// meets a question no longer marks a debt for a later answer call to pay —
+	// it enqueues ONE "when=free" message through this SAME queue, namespace
+	// "nocx", id "briefing", whose text carries the rules and then the task
+	// (workers.Briefing.Text). Any answer that frees the prompt (a
 	// coordinator's session.keys, or a person pressing Enter) lets the queue
-	// deliver it.
+	// deliver it, and the worker is told where it stands and what to do by one
+	// paste and one Enter — never the rules alone as a turn of their own.
 	// Two-phase, for the cycle workerRecord.SetTaskQueue's own doc names:
 	// descendantPaneMessages needs accessHub, and accessHub needs
 	// workerRecord's own address to resolve a chain through.
@@ -2355,7 +2443,22 @@ func New(opts ...Option) (*App, error) {
 	})
 	workerSup.exited = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, e workers.Exit) {
 		if _, err := workerRecord.Exited(ctx, id, l, e); err != nil {
-			logger.Warn("worker: a participant's exit was not recorded",
+			// AN EXIT AGAINST A RECORD THAT IS ALREADY TERMINAL IS THE CLOSE'S
+			// OWN CONSEQUENCE, not an anomaly: ending a session is what
+			// produces the exit, the supervisor reports it on its own
+			// goroutine, and the coordinator's close has already written the
+			// state that says why (Store.Closed). Warning about it would put a
+			// line in the log of every ordinary close.
+			if errors.Is(err, workers.ErrTerminal) {
+				log.From(ctx).Debug("worker: a participant's exit was refused as already accounted for",
+					"participant", string(id), "error", err)
+				return
+			}
+			// log.From(ctx) and not this closure's captured logger, for the
+			// reason the ratchet exists: the supervisor carries the context of
+			// whatever observed the exit, so the line lands in the trace of the
+			// call it belongs to rather than beside it.
+			log.From(ctx).Warn("worker: a participant's exit was not recorded",
 				"participant", string(id), "error", err)
 		}
 	}
@@ -2363,10 +2466,6 @@ func New(opts ...Option) (*App, error) {
 	// (nocx-dkawo.8). Bound post-construction for the same reason the emitter
 	// is: the server is built above, and the record needs it.
 	tp.SetWorkerRecord(workerRecord)
-	workerReport.declare = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, d workers.Declaration) error {
-		_, err := workerRecord.Declared(ctx, id, l, d)
-		return err
-	}
 	// THIS MACHINE IS ONE OF THE GENERATIONS ASKED (nocx-ie23r.2), and it is
 	// also where a session that is still there is TAKEN BACK (nocx-ie23r.5).
 	// The route is the local opener itself, which already owns every fact of

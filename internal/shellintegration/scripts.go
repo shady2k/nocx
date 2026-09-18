@@ -255,7 +255,16 @@ var (
 // refusal. Every installed copy must be rewritten: a shell still sourcing
 // 52 hands its agent no report path at all on 3.2, so no worker on macOS
 // could ever declare what it produced.
-const version = "53"
+// 54: the DECLARATION DROP is gone (ADR-0070, design §7). The wrapper used to
+// open a private mktemp file, hand its path to the agent as NOCX_AGENT_REPORT,
+// read the verdict the agent wrote there and send it as `agent_report` before
+// the withdraw. nocx now records no outcome at all: a worker says what it has
+// to say through the workers.report MCP tool, and what the pane shows reaches
+// its coordinator as an observation, so the drop and its frame kind left the
+// protocol together. Every installed copy must be rewritten, because a shell
+// still sourcing 53 sends a frame (`agent_report`) the backend no longer
+// knows, and spends the agent's launch on a rendezvous nobody reads.
+const version = "54"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

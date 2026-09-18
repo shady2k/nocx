@@ -417,6 +417,18 @@
       "atMs": 0,
       "state": "unknown",
       "note": "the screen before the TUI has drawn"
+    },
+    {
+      "capture": "claude-2.1.272-wrapped-echo",
+      "atMs": 30000,
+      "state": "free_text",
+      "note": "the idle input box on Claude Code 2.1.272, before the paste: the baseline the wrapped-box mark below is a repaint of (nocx-xn63t.4.5)"
+    },
+    {
+      "capture": "claude-2.1.272-wrapped-echo",
+      "atMs": 50000,
+      "state": "free_text",
+      "note": "a one-paragraph task bracketed-pasted into the box and left unsubmitted, drawn over FOUR content rows — the shape whose reading session.message confirms its own paste on (nocx-xn63t.4.5). No moment of its own in the inventory: it is not one of spec §6.4's five states, it is a free_text box that is TALL, and its rule-level expectation lives in input_text_test.go, where the reading itself is asserted rather than a label"
     }
   ]
 }

@@ -137,7 +137,6 @@ func TestToolDispatcher_ReachesEveryWorkerExecutor(t *testing.T) {
 		{name: "holdings", method: "workers.holdings", params: `{}`},
 		{name: "spawn", method: "workers.spawn", params: `{"command":"claude","task":"read it"}`},
 		{name: "say", method: "workers.say", params: `{"worker":"p-1","message":"start"}`},
-		{name: "wait", method: "workers.wait", params: `{"seconds":1}`},
 		{name: "close", method: "workers.close", params: `{"worker":"p-1"}`},
 	}
 	for _, tc := range cases {
@@ -159,10 +158,6 @@ func TestToolDispatcher_ReachesEveryWorkerExecutor(t *testing.T) {
 			case "workers.say":
 				if len(rec.sent) != 1 {
 					t.Fatalf("say executor was not reached: %+v", rec)
-				}
-			case "workers.wait":
-				if len(rec.waitedFor) != 1 {
-					t.Fatalf("wait executor was not reached: %+v", rec)
 				}
 			case "workers.close":
 				if len(rec.closed) != 1 {

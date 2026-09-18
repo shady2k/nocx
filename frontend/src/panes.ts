@@ -1012,6 +1012,47 @@ export class PaneManager {
         attached: fact.attached,
       })
       this.layout.applyRemoteTab(fact.tab, fact.firstPane)
+      // AND THEN ASK FOR THE STRIP, because the participant's tab did not
+      // simply appear at the end of it (nocx-tdiqs). workers.spawn places the
+      // tab IMMEDIATELY AFTER the coordinator's, and a placement in the
+      // middle of a strip MOVES EVERY TAB AFTER IT one seat right: the
+      // notification carries the one row that was minted, and the neighbours'
+      // new positions are the backend's to state. So the row above is folded
+      // in — the tab is on screen in the same turn rather than a round trip
+      // later — and the order is then READ rather than derived, exactly as it
+      // is after every other write that can move a neighbour. Deriving the
+      // shift here instead would be a second owner of the strip's order, and
+      // the two would disagree the first time the backend's rule changed.
+      //
+      // A FAILED READ IS NOT A FAILED TAB: readLayout reports it (its own
+      // toast, its own layoutAvailable) and the window keeps the tab it
+      // already drew, one seat to the right of where it belongs.
+      void this.readLayout()
+    })
+
+    // A worker participant's tab has LEFT the window (nocx-xn63t.4.6): a
+    // coordinator called workers.close, the backend ended the participant's
+    // session and took its tab out of the content store. This window is not
+    // the caller and has no answer of its own to wait on, so this
+    // notification is the only way it learns before its next layout.read —
+    // and a window that is NOT told goes on drawing the tab, with nothing
+    // behind its pane and the reconnect offer over it, which is the state the
+    // owner was left looking at on 2026-09-17 until the window was reloaded.
+    //
+    // THE LIVE ENTRY GOES FIRST, the created fact's own ordering rule read
+    // the other way: liveByPane is what adoptionFor consults, and an entry
+    // left behind for a pane whose tab is gone would let a later render
+    // reclaim a session the backend has already ended.
+    this.client.onWorkerTabClosed((fact) => {
+      for (const pane of this.layout.panesOf(fact.tabId)) this.liveByPane.delete(pane.id)
+      this.layout.applyRemoteTabClosed(fact.tabId)
+      // AND THEN ASK FOR THE STRIP, for the created fact's own reason: the
+      // close renumbers the tabs that stayed (positions are dense 0..n-1), so
+      // the order is READ rather than derived, exactly as it is after every
+      // other write that can move a neighbour. A failed read is not a failed
+      // close — readLayout reports it itself, and the tab is already off the
+      // strip by the line above.
+      void this.readLayout()
     })
 
     window.addEventListener('keydown', this.onKeydown, true)

@@ -34,7 +34,6 @@ var workerTools = []string{
 	"workers.holdings",
 	"workers.spawn",
 	"workers.say",
-	"workers.wait",
 	"workers.close",
 }
 
@@ -357,7 +356,7 @@ func (e *catalogueEndpoint) serve(conn net.Conn) {
 			raw := json.RawMessage(`{"id":"manual-worker","state":"live"}`)
 			e.calls <- mcpCall{method: request.Method, result: raw}
 			e.write(conn, request.ID, raw)
-		case "workers.holdings", "workers.say", "workers.wait", "workers.close":
+		case "workers.holdings", "workers.say", "workers.close":
 			raw := json.RawMessage(`{"held":[]}`)
 			e.calls <- mcpCall{method: request.Method, result: raw}
 			e.write(conn, request.ID, raw)

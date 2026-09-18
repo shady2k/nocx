@@ -50,6 +50,19 @@ type fakeWorkerRecord struct {
 	// order is the whole correctness of the answer: the fetch is what clears
 	// the set, so asking after it always answers nothing.
 	readOrder []string
+	// reported is every report this double was asked to commit, and reportErr
+	// is what Report answers with when a case is about the failure path.
+	reported  []reportedCall
+	reportErr error
+}
+
+// reportedCall is one Report the double saw: which participant made it, and
+// what it said. The participant is recorded because the whole question at this
+// seam is WHOSE report it is — the id is backend-owned and must come from the
+// run context rather than from the call.
+type reportedCall struct {
+	id  workers.ParticipantID
+	rep workers.Report
 }
 
 func (f *fakeWorkerRecord) Register(_ context.Context, req workers.RegisterRequest) (workers.Registration, error) {
@@ -110,6 +123,20 @@ func (f *fakeWorkerRecord) Inbox(_ context.Context, mailbox, reader workers.Read
 
 func (f *fakeWorkerRecord) Undelivered(context.Context, workers.ID) ([]workers.Message, error) {
 	return f.unread, nil
+}
+
+// Report records the report it was handed and answers with a committed row, or
+// with reportErr when the case is about the failure path.
+func (f *fakeWorkerRecord) Report(_ context.Context, id workers.ParticipantID, rep workers.Report) (workers.Message, error) {
+	f.reported = append(f.reported, reportedCall{id: id, rep: rep})
+	if f.reportErr != nil {
+		return workers.Message{}, f.reportErr
+	}
+	return workers.Message{
+		ID:    workers.MessageID(fmt.Sprintf("m-%d", len(f.reported))),
+		Group: workers.ID(id), Sender: workers.ReaderID(id),
+		Seq: int64(len(f.reported)), Kind: rep.Kind, Body: rep.Text,
+	}, nil
 }
 
 func (f *fakeWorkerRecord) Wait(_ context.Context, _ string, id workers.ID) ([]workers.Participant, error) {
@@ -587,6 +614,7 @@ func TestHoldingsCarriesObservationsAsObservationsAndNotAsEmptyMail(t *testing.T
 // the vault.status failure this directory was written from left open.
 func TestWorkerInboxResultConformsToItsContract(t *testing.T) {
 	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	estimate := 40
 	rec := &fakeWorkerRecord{
 		mail: map[workers.ReaderID][]workers.Message{
 			"sess-coordinator": {
@@ -596,6 +624,16 @@ func TestWorkerInboxResultConformsToItsContract(t *testing.T) {
 					Observed: &workers.Observed{
 						Worker: "p-1", State: workers.ObservedBlocked, At: at,
 					},
+				},
+				// AND A REPORT (nocx-luqz9.4), because a text row is now two
+				// shapes: ordinary mail, whose kind is absent, and a worker's
+				// report, whose kind and checkpoint extras ARE on the wire. A
+				// case that exercised only the first would validate the new
+				// properties' absence and none of their presence, which is the
+				// same hole the two rows above exist to close.
+				{
+					Sender: "p-1", Body: "half the store is migrated",
+					Kind: workers.KindProgress, Estimate: &estimate, Artifact: "commit 4f2a1c9",
 				},
 			},
 		},
@@ -637,6 +675,20 @@ func TestWorkerInboxResultConformsToItsContract(t *testing.T) {
 	}
 	if !strings.Contains(raw, `"blocked"`) || !strings.Contains(raw, `"observations"`) {
 		t.Fatalf("the result carries no observation, so the schema check proved nothing about them: %s", raw)
+	}
+	if !strings.Contains(raw, `"progress"`) || !strings.Contains(raw, `"artifact"`) {
+		t.Fatalf("the result carries no report, so the schema check proved nothing about the kind "+
+			"and the checkpoint extras: %s", raw)
+	}
+	// AND THE ORDINARY MESSAGE CARRIES NO KIND. `kind` is optional precisely so
+	// that a coordinator's own words are not a claim about anybody's work, and
+	// the two rows are in one page above — so a renderer that defaulted the
+	// field would put a report's label on a message nobody reported. Counted
+	// rather than merely present: the report above is the one row that may
+	// carry it.
+	if got := strings.Count(raw, `"kind"`); got != 1 {
+		t.Fatalf("the page carries %d kinds, want exactly the one report's — ordinary mail "+
+			"is a message and not a claim: %s", got, raw)
 	}
 	// And no screen content rode with it: the observation is three fields and
 	// the shape has nowhere to put a fourth. ADR-0070 decision 3.

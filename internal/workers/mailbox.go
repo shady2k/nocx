@@ -81,7 +81,7 @@ const MaxMessageBytes = 16 << 10
 // context window.
 const MaxFetch = 50
 
-// Message is one thing that was said, or one thing that was SEEN.
+// Message is one thing that was said, or one thing was SEEN.
 //
 // Text is the ordinary case: Body carries it and nothing derives authority from
 // it. An OBSERVATION is the other case (nocx-luqz9.2, ADR-0070 decision 2) —
@@ -93,9 +93,10 @@ const MaxFetch = 50
 //
 // Exactly one of Body and Observed is ever set. The type admits both and the
 // writers never produce both: a row carrying neither is refused by Say's own
-// emptiness check, and observe.go's placeObservation is the only writer of the
-// other. This paragraph is the whole of the invariant, and the reader that
-// renders a mailbox (internal/assistant's workerMailResult) is what would show a
+// emptiness check, placeObservation is the only writer of the other, and Report
+// is the third writer — the one that stamps a kind (nocx-luqz9.4). This
+// paragraph is the whole of the invariant, and the reader that renders a
+// mailbox (internal/assistant's workerMailResult) is what would show a
 // violation first.
 type Message struct {
 	ID    MessageID
@@ -113,17 +114,36 @@ type Message struct {
 	Body string
 	// Kind is what this row IS, for the one reader whose behaviour depends on
 	// it: the wake, which wakes for a report and never for a checkpoint
-	// (design §5.1, P4). It is empty for a row that carries Observed, whose
-	// kind is answered by the field itself, and empty for ordinary text mail,
-	// which is a report by being somebody's words about their work.
+	// (design §5.1, P4). kinds.go owns the vocabulary; this field only holds
+	// it.
 	//
 	// It is set by the WRITER and never read off the body, because a kind
 	// inferred from prose is a second derivation of a fact the producer
-	// already knows.
+	// already knows. It is EMPTY for the two rows no worker's tool wrote: an
+	// observation, whose kind is answered by the field below, and a
+	// coordinator's own message, which is text and not a report about
+	// anybody's work. An empty kind WAKES, which is the conservative
+	// direction — it cannot lose a report — and no admitted mailbox can hold
+	// one (a coordinator's words go to a participant's box, and only a
+	// coordinator's is ever counted).
 	Kind MessageKind
 	// Observed is the untrusted-free half of a row: a settled state of one
 	// worker, carrying no screen content at all. Nil for text mail.
-	Observed    *Observed
+	Observed *Observed
+	// Estimate and Artifact are what a CHECKPOINT adds to its text (mesh
+	// design P2, P3). Both are set only beside a KindProgress row: the tool's
+	// contract refuses them on a report of another kind and checkReport
+	// refuses them again here, so a row carrying one next to a `done` is a row
+	// no writer can produce.
+	//
+	// Estimate is a POINTER for the reason the field is optional at all: zero
+	// is a report — "I estimate nothing is done yet" — and an int would make
+	// that and silence the same row.
+	Estimate *int
+	// Artifact is free-form and unverified — a commit, a path, a test run. It
+	// is the one part of a checkpoint a coordinator can corroborate against
+	// what nocx already owns, which is why it is carried rather than counted.
+	Artifact    string
 	CommittedAt time.Time
 }
 

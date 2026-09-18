@@ -523,9 +523,16 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		// a message out of your own mailbox exercises no authority over
 		// anything but your own reading position.
 		"workers.inbox": {content.EffectObserve},
+		// OBSERVE for a worker's own report (nocx-luqz9.4), and for
+		// workers.say's reason read from the other end: leaving a report in a
+		// mailbox reaches nobody's keyboard, answers no modal, and starts and
+		// ends nothing. What it needs is membership in the worker it reports
+		// about, which every worker has over itself — so a spawn effect would
+		// be a name for an authority this call never exercises.
+		"workers.report": {content.EffectObserve},
 	}
-	if len(declarations) != 32 {
-		t.Fatalf("declaration count = %d, want 32", len(declarations))
+	if len(declarations) != 33 {
+		t.Fatalf("declaration count = %d, want 33", len(declarations))
 	}
 	for _, declaration := range declarations {
 		effects, ok := want[declaration.Name]
@@ -652,6 +659,7 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		"workers.close.schema.json":    workerCloseSchema,
 		"workers.spawn.schema.json":    workerSpawnSchema,
 		"workers.inbox.schema.json":    workerInboxSchema,
+		"workers.report.schema.json":   workerReportSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -820,6 +828,7 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		"workers.close.schema.json":    workerCloseSchema,
 		"workers.spawn.schema.json":    workerSpawnSchema,
 		"workers.inbox.schema.json":    workerInboxSchema,
+		"workers.report.schema.json":   workerReportSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -1715,5 +1724,29 @@ const workerSpawnSchema = `{
     "additionalProperties": false,
     "required": ["id", "state"],
     "properties": {"id": {"type": "string"}, "state": {"type": "string"}}
+  }}
+}`
+
+// workerReportSchema is the shape this table's tests assemble for
+// workers.report. It is a fixture and not the contract — the real document is
+// contracts/tools/workers.report.schema.json, and internal/toolendpoint's
+// report_contract_test.go is what validates the shipped payload against it.
+// What these tests need from it is only that the declaration can assemble: a
+// params half and a $defs/result half.
+const workerReportSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "text"],
+  "properties": {
+    "kind": {"type": "string", "enum": ["done", "question", "progress"]},
+    "text": {"type": "string"},
+    "estimate": {"type": "integer"},
+    "artifact": {"type": "string"}
+  },
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["id", "seq"],
+    "properties": {"id": {"type": "string"}, "seq": {"type": "integer"}}
   }}
 }`

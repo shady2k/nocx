@@ -309,17 +309,27 @@ func publishGroupEndpoint(t *testing.T, reg *session.Reg, grid workerAuthEnrolme
 }
 
 // inProcessInvocation is the shape the assistant's own tool path hands the
-// dispatcher: the run's session and the run's grant. It is built here rather
-// than driven through agent.ask because what is under test is the DISPATCHER
-// both callers share, and a model adapter between this test and it would only
-// obscure which caller moved the row.
+// dispatcher: the run's session, the run's workspace and the run's grant. It is
+// built here rather than driven through agent.ask because what is under test is
+// the DISPATCHER both callers share, and a model adapter between this test and
+// it would only obscure which caller moved the row.
+//
+// THE WORKSPACE IS PART OF THAT SHAPE and not a detail of one tool: the
+// composition root's Admit carries it on BOTH invocations (worker_auth.go), and
+// a resolver reads it from the RUN CONTEXT while the grant is what has to cover
+// what the resolver names. Without it, workers.inbox — whose declaration names
+// the workspace kind — fails one step earlier than the call it is exercising,
+// with "this run names no workspace" rather than with what the case is about
+// (nocx-luqz9.4 measured exactly that).
 func inProcessInvocation(sid session.ID, method, params string) assistant.ToolInvocation {
 	return assistant.ToolInvocation{
-		Context:    context.Background(),
-		RunContext: agenttools.RunContext{RunID: "run-in-process", Session: string(sid)},
-		Grant:      callerGrant(sid, content.EnvironmentIDFor(content.EnvLocal, ""), workerTestWorkspace),
-		Method:     method,
-		RawParams:  []byte(params),
+		Context: context.Background(),
+		RunContext: agenttools.RunContext{
+			RunID: "run-in-process", Session: string(sid), Workspace: workerTestWorkspace,
+		},
+		Grant:     callerGrant(sid, content.EnvironmentIDFor(content.EnvLocal, ""), workerTestWorkspace),
+		Method:    method,
+		RawParams: []byte(params),
 	}
 }
 
@@ -629,9 +639,26 @@ type workerWorkerSetup struct {
 	participant workers.ParticipantID
 	socket      string
 	dispatcher  assistant.ToolDispatcher
+	// record is the SAME Registrar the socket's dispatcher serves, handed out
+	// so a test can drive a fact the way the composition root's bridge does
+	// (Observe) or read what the record holds after a real caller's call
+	// (nocx-luqz9.4). It is not a second view of anything: the endpoint's
+	// dispatcher holds this exact value.
+	record *workers.Registrar
 }
 
+// prepareGroupWorkerSetup builds the stand with the record's default options.
+// prepareGroupWorkerSetupWith is the same stand with the caller's own record
+// options applied — the product values a particular test states rather than
+// asserts (the settle window, for one) — built here for
+// newGroupTwoCallersRecordInSession's reason: the record reads time.Now, and a
+// test that cannot move that clock has to say what a window of zero means.
 func prepareGroupWorkerSetup(t *testing.T) workerWorkerSetup {
+	t.Helper()
+	return prepareGroupWorkerSetupWith(t)
+}
+
+func prepareGroupWorkerSetupWith(t *testing.T, opts ...workers.Option) workerWorkerSetup {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	reg := session.New(logger, workerAuthPTYFactory{log: logger})
@@ -662,7 +689,7 @@ func prepareGroupWorkerSetup(t *testing.T) workerWorkerSetup {
 	// The participant's liveness carries the WORKER's session, which is what
 	// ParticipantBySession resolves and therefore what makes the caller from
 	// that pane a participant rather than a coordinator.
-	record, _ := newGroupTwoCallersRecordInSession(string(worker.ID()))
+	record, _ := newGroupTwoCallersRecordInSession(string(worker.ID()), opts...)
 	dispatcher := newSharedToolDispatcher(t, record)
 	p, err := record.Register(context.Background(), workers.RegisterRequest{
 		CoordinatorSession: string(coordinator.ID()),
@@ -684,6 +711,7 @@ func prepareGroupWorkerSetup(t *testing.T) workerWorkerSetup {
 		participant: p.ID,
 		socket:      publishGroupEndpoint(t, reg, grid, record, dispatcher),
 		dispatcher:  dispatcher,
+		record:      record,
 	}
 }
 
@@ -887,5 +915,20 @@ func TestGroupCatalogueUsesDisjointAuthorizerGrants(t *testing.T) {
 		if _, ok := coordinatorTools[name]; !ok {
 			t.Fatalf("coordinator catalogue lacks %q: %s", name, coordinatorResponse.Result)
 		}
+	}
+	// workers.report IS OFFERED TO A COORDINATOR, and that is a stated limit
+	// rather than an oversight (nocx-luqz9.4). The call is a worker's own, and
+	// the offer set cannot say so: a participant is addressed as a sub-scope of
+	// ResourceWorkspace (A11), a coordinator's grant carries that same kind for
+	// workers.inbox, and there is no kind a worker's grant has and a
+	// coordinator's lacks — so the narrow is what refuses it, with its own
+	// sentence, and this test pins that the OFFER is the honest one: catalogue
+	// and dispatch agree, which is the property the two checks above exist for.
+	// A catalogue that hid the call would make the refusal unreachable and the
+	// sentence unread; TestACoordinatorIsRefusedAWorkersOwnReportWithASentenceItCanActOn
+	// is the other half.
+	if _, ok := coordinatorTools["workers.report"]; !ok {
+		t.Fatalf("coordinator catalogue lacks workers.report, so the refusal it is owed can never be read: %s",
+			coordinatorResponse.Result)
 	}
 }

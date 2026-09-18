@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/workers"
@@ -52,6 +53,15 @@ func TestEveryRefusalTellsTheCallerWhatToDoNext(t *testing.T) {
 		// answer it needed was on that pane's menu.
 		helperclient.ErrTargetCapacity,
 		helperclient.ErrSnapshotGone,
+		// THE REPORT'S FOUR (nocx-luqz9.4). Each is a different fact with a
+		// different next step — not a worker at all, a worker nothing
+		// coordinates, a write that failed, and a shape the tool could not
+		// have sent — and a caller that cannot tell them apart retries the one
+		// that cannot work or gives up on the one that can.
+		agenttools.ErrNoParticipant,
+		workers.ErrNoCoordinator,
+		workers.ErrReportNotRecorded,
+		workers.ErrNotAReport,
 		context.Canceled,
 		context.DeadlineExceeded,
 		errors.New("something nobody has classified"),

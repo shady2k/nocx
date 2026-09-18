@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/tools/workers.report.schema.json",
   "title": "WorkersReportParams",
-  "description": "Parameters for the workers.report agent tool: tell the coordinator that started you, in your own words, that you have finished, that you need an answer, or that you have reached a milestone. It is a claim and not a verdict — nocx records no success and no failure, and your coordinator decides what your words mean. The call does not wait: a question is answered by your coordinator's next message to you, so ask and end your turn rather than holding it open. You can only report from your own worker session, and only to the coordinator that started it; neither is something you name here.",
+  "description": "Parameters for the workers.report agent tool: tell the coordinator that started you, in your own words, that you have finished, that you need an answer, or that you have reached a milestone. It is a claim and not a verdict — nocx records no success and no failure, and your coordinator decides what your words mean. The call does not wait: a question is answered by your coordinator's next message to you, so ask and end your turn rather than holding it open. You can only report from your own worker session, and only to the coordinator that started it; neither is something you name here. A report arriving after your worker has already ended is refused rather than delivered \u2014 the coordinator has that worker's exit, which nocx reports for itself, and there is nothing left to send.",
   "type": "object",
   "additionalProperties": false,
   "required": ["kind", "text"],

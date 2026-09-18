@@ -385,12 +385,30 @@ func TestAFailedMailboxWriteIsReportedAndTheNextReportWorks(t *testing.T) {
 
 	// The failure is not held: the next report is the ordinary path, which is
 	// what makes "say it again" the honest instruction for the arm above.
+	//
+	// NOTHING WAS RESERVED BY THE FAILED CALL, which is what this half asserts
+	// rather than assumes — Report has no settle machine and therefore no
+	// reservation to release, and a reader who knows placeObservation's claim
+	// will look for one. If a reservation HAD been left held, this second call
+	// would be refused or silently dropped instead of landing.
 	if _, err := h.reg.Report(ctx, p.ID, Report{Kind: KindDone, Text: "this one lands"}); err != nil {
 		t.Fatalf("the report after a failed one: %v", err)
 	}
 	got := h.store.mailbox(t, coordBox)
 	if len(got) != 1 || got[0].Body != "this one lands" {
 		t.Fatalf("the mailbox holds %+v, want the report that followed the failure", got)
+	}
+	if got[0].Seq != 1 || got[0].Kind != KindDone {
+		t.Fatalf("the recovered report is %+v, want it positioned and stamped like any other", got[0])
+	}
+	// And a THIRD call still works, so nothing accumulates: a reservation leaked
+	// once would show up here as a mailbox that stopped accepting reports.
+	if _, err := h.reg.Report(ctx, p.ID, Report{Kind: KindProgress, Text: "and this one too"}); err != nil {
+		t.Fatalf("the third report: %v", err)
+	}
+	got = h.store.mailbox(t, coordBox)
+	if len(got) != 2 || got[1].Body != "and this one too" || got[1].Seq != 2 {
+		t.Fatalf("the mailbox holds %+v, want both later reports in order", got)
 	}
 }
 
@@ -448,5 +466,179 @@ func TestAReportRefusesWhatAWorkersToolCouldNotSend(t *testing.T) {
 	}
 	if got := h.store.mailbox(t, coordBox); len(got) != 3 {
 		t.Fatalf("the mailbox holds %d rows, want the three legitimate reports", len(got))
+	}
+}
+
+// §6 rule 3 and §9 assertion 4 of the mesh design, at the record: a report
+// arriving for a participant that is already OVER is refused, and the record is
+// left byte-for-byte as it was.
+//
+// All three kinds are asserted, and that is the design read as what it is: the
+// rule is stated for a checkpoint because a checkpoint is what the mesh design's
+// estimate attaches to, but the fact that refuses it — a participant that has
+// ended is not a reporter — is about the participant and not about the kind. The
+// door is one door.
+//
+// THE REFUSAL IS ALSO WHAT THE OTHER WRITER INTO THIS MAILBOX ALREADY DOES:
+// placeObservation's Observe refuses a reading about a terminal participant with
+// ErrTerminal. One mailbox, one rule about whether a finished participant may put
+// a row in it.
+func TestAReportForAnEndedWorkerIsRefusedAndResurrectsNothing(t *testing.T) {
+	s := newWakeStand(t, 3*time.Second, 3)
+	// The worker ends through the ordinary path: the process fact is admitted by
+	// the record, and the state that follows is the record's own reduction —
+	// never written by this test.
+	if _, err := s.harness.reg.Exited(s.ctx, s.worker.ID, s.worker.Liveness, Exit{Cause: "exited"}); err != nil {
+		t.Fatalf("exit: %v", err)
+	}
+	ended, ok := s.harness.store.read(t, s.worker.ID)
+	if !ok {
+		t.Fatal("the worker left the record")
+	}
+	if !ended.State.Terminal() {
+		t.Fatalf("the record is %q after a process exit, want a terminal state", ended.State)
+	}
+	// The exit is placed in the mailbox, so what the refusals below leave behind
+	// can be told from what the exit put there.
+	before := len(s.mailed(t))
+
+	for _, kind := range []MessageKind{KindProgress, KindDone, KindQuestion} {
+		t.Run(string(kind), func(t *testing.T) {
+			_, err := s.harness.reg.Report(s.ctx, s.worker.ID, Report{
+				Kind: kind, Text: "the last thing I was going to say",
+			})
+			if !errors.Is(err, ErrReportAfterEnd) {
+				t.Fatalf("err = %v, want ErrReportAfterEnd", err)
+			}
+			// AND THE RECORD'S OWN FACT IS ON THE CHAIN TOO, because the endpoint
+			// classifies on the more specific one and everything else that maps
+			// ErrTerminal must still recognise it.
+			if !errors.Is(err, ErrTerminal) {
+				t.Fatalf("err = %v, want it to carry ErrTerminal as well", err)
+			}
+			if got := len(s.mailed(t)); got != before {
+				t.Fatalf("a refused report was committed anyway: %d rows, want %d", got, before)
+			}
+		})
+	}
+
+	// Nothing was resurrected: the state is what it was, and no row was written
+	// that could be mistaken for a record fact.
+	after, ok := s.harness.store.read(t, s.worker.ID)
+	if !ok {
+		t.Fatal("the worker left the record")
+	}
+	if after.State != ended.State {
+		t.Fatalf("a refused report moved the record from %q to %q", ended.State, after.State)
+	}
+	if lines := s.lines(); len(lines) != 0 {
+		t.Fatalf("a refused report woke the coordinator: %+v", lines)
+	}
+}
+
+// §6 rule 2, at the record: a report does not MINT a participant, so a report
+// for an id the record does not hold creates nothing. It is the same rule the
+// observation path keeps by looking up rather than creating, and the check is
+// that the mailbox stays empty even though the call was made.
+func TestAReportForAnUnknownParticipantMintsNothing(t *testing.T) {
+	h := newHarnessBound(t, 4)
+	ctx := context.Background()
+	mustRegister(t, h)
+
+	if _, err := h.reg.Report(ctx, ParticipantID("nobody-at-all"), Report{
+		Kind: KindProgress, Text: "a milestone for a worker that never existed",
+	}); !errors.Is(err, ErrNoSuchParticipant) {
+		t.Fatalf("err = %v, want ErrNoSuchParticipant", err)
+	}
+	if got := h.store.mailbox(t, coordBox); len(got) != 0 {
+		t.Fatalf("a report minted a participant and wrote %+v", got)
+	}
+	if _, ok := h.store.read(t, ParticipantID("nobody-at-all")); ok {
+		t.Fatal("a report created a participant row")
+	}
+}
+
+// A CHECKPOINT IS IN THE MAILBOX AND IN THE ORDER, AND OUT OF THE COUNT.
+//
+// Three things at once, and each is a different way to get the wake wrong:
+//
+//   - the count is of the WAKING kinds only, so two `done`s around a `progress`
+//     are "2 new messages" and not 3. A count that included the checkpoint would
+//     overstate what is waiting, and the number is the whole content of the line.
+//   - the checkpoint is still a ROW, in its own position, between the two
+//     reports — it must not be dropped from the mailbox on its way out of the
+//     count.
+//   - the cursor advances past it, because the fetch hands over a page of the
+//     MAILBOX rather than a page of the waking kinds. A cursor that stopped
+//     short of a checkpoint would hand it back on the next read forever.
+//
+// The line is asserted as an equality, so it also pins that the checkpoint did
+// not change its wording.
+// THE COORDINATOR IS WORKING WHILE THE THREE ARRIVE, and that is the shape that
+// makes the count observable rather than the shape a test would prefer. A batch
+// is announced when it is announced — once per batch, at its first waking row —
+// and mail landing after the line waits for the retry pause (design §5.3), so a
+// coordinator that was idle throughout is typed at with "1" and the question
+// "is the checkpoint counted" is never asked. A coordinator that was AWAY is the
+// case the number exists for ("a coordinator that has been away from a busy
+// worker"), and there the count is re-read at the moment of typing.
+func TestACheckpointIsInTheOrderAndNotInTheCount(t *testing.T) {
+	s := newWakeStand(t, 3*time.Second, 3)
+	s.says(t, ObservedWorking)
+
+	for _, rep := range []Report{
+		{Kind: KindDone, Text: "the first piece is finished"},
+		{Kind: KindProgress, Text: "starting the second piece"},
+		{Kind: KindDone, Text: "the second piece is finished"},
+	} {
+		if _, err := s.harness.reg.Report(s.ctx, s.worker.ID, rep); err != nil {
+			t.Fatalf("report %s: %v", rep.Kind, err)
+		}
+	}
+
+	// Nothing was typed while it was mid-turn, which is what makes the line
+	// below the one that reports the whole batch rather than its first row.
+	if got := s.lines(); len(got) != 0 {
+		t.Fatalf("nocx typed into a coordinator that was mid-turn: %+v", got)
+	}
+
+	mail := s.mailed(t)
+	if len(mail) != 3 {
+		t.Fatalf("the mailbox holds %d rows, want all three: %+v", len(mail), mail)
+	}
+	for i, want := range []MessageKind{KindDone, KindProgress, KindDone} {
+		if mail[i].Kind != want {
+			t.Fatalf("row %d is %q, want %q — the checkpoint must keep its place", i, mail[i].Kind, want)
+		}
+	}
+	if mail[1].Seq <= mail[0].Seq || mail[2].Seq <= mail[1].Seq {
+		t.Fatalf("positions %d, %d, %d are not strictly increasing", mail[0].Seq, mail[1].Seq, mail[2].Seq)
+	}
+
+	// And now it settles idle, which is when the line is finally owed.
+	s.says(t, ObservedIdle)
+
+	lines := s.lines()
+	if len(lines) != 1 {
+		t.Fatalf("the coordinator was typed at %d times, want exactly 1: %+v", len(lines), lines)
+	}
+	const want = "nocx: you have 2 new messages from your workers. Call workers.inbox."
+	if lines[0].text != want {
+		t.Fatalf("the wake line is\n  %q\nwant\n  %q\nthe checkpoint must be in the box and not in the count",
+			lines[0].text, want)
+	}
+
+	// The read hands over all three, in order, and the cursor lands past the
+	// LAST row — the checkpoint included, or it would come back forever.
+	read := s.read(t)
+	if len(read.Messages) != 3 {
+		t.Fatalf("the coordinator was handed %d rows, want the whole page", len(read.Messages))
+	}
+	if read.Cursor.Fetched != mail[2].Seq {
+		t.Fatalf("the cursor is at %d, want it past the last row at %d", read.Cursor.Fetched, mail[2].Seq)
+	}
+	again := s.read(t)
+	if len(again.Messages) != 0 {
+		t.Fatalf("a second read handed the page over again: %+v", again.Messages)
 	}
 }

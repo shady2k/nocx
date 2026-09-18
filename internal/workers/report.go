@@ -92,6 +92,19 @@ var (
 	// worker nothing addresses — the record's own inconsistency, not the
 	// worker's.
 	ErrNoCoordinator = errors.New("worker: nobody coordinates this worker")
+	// ErrReportAfterEnd means the participant was ALREADY OVER when the report
+	// arrived (§6 rule 3, §9 assertion 4 of the mesh design; and the same rule
+	// placeObservation's Observe applies to a reading).
+	//
+	// It is a second name for a state ErrTerminal already names, and it is not a
+	// duplicate: the two errors travel TOGETHER (Report wraps both) so the
+	// record states one fact and the endpoint can choose a sentence for the
+	// caller. That is the split the endpoint's own comments require wherever
+	// "what to do next" differs — a fact about a PANE sends the reader to
+	// workers.holdings to look at a screen, while a report that arrived after the
+	// end has no next step in it at all: the process is gone, the coordinator
+	// already has the exit, and the only thing left is to stop.
+	ErrReportAfterEnd = errors.New("worker: the report arrived after the participant had ended")
 )
 
 // Report commits one worker's report into its coordinator's mailbox.
@@ -110,22 +123,64 @@ var (
 // property of the shape rather than of a membership check that a later edit
 // could weaken.
 //
-// A report from a participant that has already ENDED is accepted, deliberately.
-// It moves nothing, so there is no state to resurrect, and the alternative —
-// losing the last thing a worker said to the call that raced its exit — trades
-// a fact for tidiness in the one direction that is never recoverable.
+// A report from a participant that has already ENDED is REFUSED, and this is
+// the design's rule rather than a preference (§6 rule 3, §9 assertion 4 of the
+// mesh design: "a checkpoint arriving for a terminal participant is refused and
+// does not resurrect it"). Three reasons, and each one alone would be enough.
+//
+// THE MESH DESIGN SAYS SO. It states the rule for a checkpoint and the reason
+// it gives is resurrection; here the rule is applied to all three kinds, because
+// a participant that is over is not a reporter at all — the door is one door and
+// the kind is not what closes it. What the design's provenance binding guards
+// (§9 assertion 5, "a checkpoint whose provenance names a previous epoch") is
+// unreachable by construction in this shape: a row is addressed by the
+// PARTICIPANT id, which is minted per participant and never reused, so a report
+// from a previous incarnation is a report from a different row that does not
+// exist.
+//
+// THE OTHER WRITER INTO THIS MAILBOX ALREADY REFUSES IT. placeObservation's
+// Observe refuses a reading about a terminal participant with ErrTerminal. One
+// mailbox has one rule about whether a finished participant may put a row in it,
+// and two writers disagreeing about that is precisely the second answer this
+// codebase refuses to keep.
+//
+// AND ACCEPTING IT WOULD BUY NOTHING, which is what the previous version of this
+// comment claimed and got wrong. It said the refusal would lose "the last thing
+// a worker said to the call that raced its exit" — but the product path already
+// refuses that call one layer up: the authorizer resolves a session to a
+// participant through ParticipantBySession, which excludes a row that is
+// terminal, so an ended worker's call is never admitted as a worker's at all and
+// its report never reaches here. What the old version therefore produced was not
+// a delivered last word but a different, WORSE refusal — an agent told its
+// session "is not a worker's, call workers.inbox" when the truth is that its
+// worker has ended. Refusing here is what puts the honest sentinel on the chain
+// (see ErrReportAfterEnd) and stops the record being the place a caller learns it
+// was never a worker.
 func (r *Registrar) Report(ctx context.Context, id ParticipantID, rep Report) (Message, error) {
 	if err := checkReport(rep); err != nil {
 		return Message{}, err
 	}
+	// WHERE it goes is looked up before anything is written, which is also what
+	// makes §6 rule 2 hold — "a checkpoint does not MINT a participant": an id
+	// the record does not hold is refused by this read rather than creating a
+	// row to attach a report to.
 	cur, err := r.store.Participant(ctx, id)
 	if err != nil {
 		return Message{}, fmt.Errorf("worker: report: %w", err)
 	}
-	// WHERE its mail goes is the record's answer and not the caller's, read at
-	// the moment of the report rather than remembered from registration — the
-	// same call the observation path makes, so one function owns "which box
-	// does this worker's mail belong in".
+	if cur.State.Terminal() {
+		// BOTH SENTINELS, deliberately: ErrTerminal is the record's fact ("this
+		// participant is over") and ErrReportAfterEnd is the caller's situation.
+		// The endpoint classifies on the second so the agent gets a sentence
+		// about a report rather than one about a pane — the split its own
+		// comments require wherever the reader's next step differs.
+		return Message{}, fmt.Errorf("worker: participant %q is %s: %w: %w",
+			id, cur.State, ErrTerminal, ErrReportAfterEnd)
+	}
+	// The box is the record's answer and not the caller's, read at the moment of
+	// the report rather than remembered from registration — the same call the
+	// observation path makes, so one function owns "which box does this worker's
+	// mail belong in".
 	coordinator, err := r.coordinatorOf(ctx, cur.Group)
 	if err != nil {
 		return Message{}, fmt.Errorf("worker: report from %q: %w", id, err)
@@ -137,10 +192,24 @@ func (r *Registrar) Report(ctx context.Context, id ParticipantID, rep Report) (M
 		CommittedAt: r.now(),
 	})
 	if err != nil {
-		// NOT LOST AND NOT CLAIMED. The row is not in the box, so the caller
-		// is told so rather than handed the row it would have had: a worker
-		// that believed a report it never made would correct a coordinator
-		// about a fact that does not exist.
+		// NOT LOST AND NOT CLAIMED, AND NOTHING IS HELD. The row is not in the
+		// box, so the caller is told so rather than handed the row it would have
+		// had: a worker that believed a report it never made would correct a
+		// coordinator about a fact that does not exist.
+		//
+		// NO RESERVATION IS RELEASED HERE, and the reason is that this path never
+		// takes one — said plainly because a reader who knows the observation
+		// path will look for the release and must not conclude it was forgotten.
+		// placeObservation needs its claim (`observedFacts.claim`) because a
+		// SETTLE MACHINE decides, under a lock, whether a hold has already been
+		// placed, and the write happens after that lock is released: the
+		// reservation is what stops a second sweep walking into that window and
+		// placing the same fact twice. A report has no such machine and no such
+		// window. It is one call per tool invocation, there is no remembered hold,
+		// and its retry is the CALLER's next call rather than a sweep that will
+		// re-read the same state a second later. So a failed write leaves the
+		// record exactly as it found it, and the next report starts from scratch
+		// — which is the property the criterion below asserts.
 		return Message{}, fmt.Errorf("%w: %w", ErrReportNotRecorded, err)
 	}
 	// The mail is in the box, so the coordinator may now be woken about it —

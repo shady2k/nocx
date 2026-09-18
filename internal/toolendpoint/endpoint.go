@@ -910,6 +910,20 @@ func rpcErrorFor(err error) (code int, message, reason string) {
 		// no longer active.
 		return rpcDomainError, "worker request refused",
 			"that participant is yours, but its delegation is no longer active, so it can no longer be acted on. Call workers.holdings to see its state; a participant that has ended needs nothing further from you."
+	case errors.Is(err, workers.ErrReportAfterEnd):
+		// A REPORT FROM A WORKER THAT HAD ALREADY ENDED (nocx-luqz9.4; mesh
+		// design §6 rule 3, §9 assertion 4). Placed ABOVE the ErrTerminal arm
+		// because the record wraps both: the fact is the same ("this
+		// participant is over") and the caller's situation is not, so the
+		// classification has to take the more specific one.
+		//
+		// The sentence ErrTerminal would have given — "there is nothing on its
+		// screen to answer" — names the wrong object for this caller and sends
+		// it to look at a pane. What is true is that the worker has ended, the
+		// coordinator already has that fact, and there is nothing to retry:
+		// the call is over because the process is.
+		return rpcDomainError, "worker request refused",
+			"this worker had already ended when your report arrived, so it was not recorded and your coordinator was not told — what it has instead is the worker's exit, which nocx reports for itself. Nothing you send now will change that, and there is nothing to retry: this session is over. If your coordinator asks you for something, it will reach you as a new worker."
 	case errors.Is(err, workers.ErrTerminal):
 		// ENDED (nocx-f545a.4): a fact arrived about a participant already
 		// over, refused for being over rather than tidied up after. Mapped

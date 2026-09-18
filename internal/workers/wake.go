@@ -415,18 +415,34 @@ func (w *Wake) Coordinator(ctx context.Context, mailbox ReaderID, state Observed
 		// next one is news again — and a retry still waiting for its pause is
 		// moot, because the situation it was about is over.
 		//
-		// The timer is NOT cancelled here and does not need to be: there is one
-		// per batch, `fire` consumes `blockedRetry` before it consults the idle
-		// gate, and so a retry armed for a blocked episode that has since ended
-		// falls through to the batch's own rules and does exactly what the batch
-		// owes. Cancelling it would be a second place that decides when this
-		// timer should live, and the scenarios where that mattered did not
-		// survive being tested.
+		// THE TIMER GOES WITH THE MARK, and it is load-bearing rather than
+		// tidiness: a timer armed for a notice belongs to that notice, so
+		// ending the episode releases it and `consider` decides afresh whether
+		// this idle coordinator owes a line.
+		//
+		// What it prevents is a LOST LINE, not a lost notice. There is one
+		// timer per batch, so without this the idle reading finds it armed,
+		// arms nothing and types nothing; the notice's timer then fires,
+		// consumes `blockedRetry`, sees an idle coordinator and returns — and
+		// the line the coordinator owes is never typed, with no timer left to
+		// type it. TestALineOwedAtIdleIsTypedAtOnceWhileABlockedRetryIsPending
+		// is that exact sequence.
+		if b.blockedRetry {
+			w.stopLocked(b)
+		}
 		b.blockedNotified = false
 		b.blockedRetry = false
 	default:
 		// Working, or a state this file does not judge. Nothing is typed and
 		// no timer runs.
+		//
+		// THIS ENDS A BLOCKED EPISODE, and the asymmetry with the mail path is
+		// the point rather than an oversight. A block is a claim that the
+		// coordinator cannot continue until somebody steps in; a reading that
+		// finds it WORKING says that stopped being true — the menu was
+		// answered, the agent resolved its own error — so the notice is moot
+		// and its retry goes with it. Mail arriving says nothing about the
+		// block at all, which is why consider keeps that timer instead.
 		b.blockedNotified = false
 		b.blockedRetry = false
 		w.stopLocked(b)
@@ -472,6 +488,11 @@ func (w *Wake) Read(mailbox ReaderID, through int64) {
 	b.lines = 0
 	b.notified = false
 	b.blockedNotified = false
+	// blockedRetry goes with the timer it describes: the mark means "a retry is
+	// waiting for the pause", and this method has just stopped the timer. It is
+	// left true here otherwise — a mark claiming a retry that is not on the
+	// clock, which a later `fire` or `consider` would read as one that is.
+	b.blockedRetry = false
 	b.inFlight = false
 	w.stopLocked(b)
 }
@@ -490,7 +511,15 @@ func (w *Wake) consider(ctx context.Context, mailbox ReaderID) {
 	w.mu.Lock()
 	b, ok := w.byMailbox[mailbox]
 	if !ok || b.state != ObservedIdle {
-		if ok {
+		// A BLOCKED NOTICE WAITING FOR ITS PAUSE KEEPS ITS TIMER. This path is
+		// reached by ARRIVING MAIL as well as by a reading, and a blocked
+		// coordinator can still receive mail — a worker reports, an
+		// observation lands — so stopping the batch's one timer here would
+		// cancel the notice's retry while leaving the episode claimed. The
+		// person would never be told and nothing would ever try again, which
+		// is the silent loss reach exists to prevent, reached from the other
+		// side. Nothing is typed while the coordinator is not idle either way.
+		if ok && !b.blockedRetry {
 			w.stopLocked(b)
 		}
 		w.mu.Unlock()

@@ -756,6 +756,149 @@ func TestABlockedRetryIsArmedEvenWhenTheUnreadNoticeWasDelivered(t *testing.T) {
 	}
 }
 
+// MAIL ARRIVING WHILE A BLOCKED NOTICE IS WAITING DOES NOT KILL THE NOTICE.
+//
+// A blocked coordinator can still receive mail — a worker reporting, an
+// observation landing — and that arrival runs the batch's own path. The blocked
+// notice's retry is on the batch's one timer, so a path that stops the timer
+// without clearing the mark leaves the episode claimed and the retry gone: the
+// person is never told, and nothing ever tries again. That is the same silent
+// loss reach exists to prevent, reached from the other side.
+func TestMailArrivingWhileABlockedRetryIsPendingDoesNotKillTheNotice(t *testing.T) {
+	ctx, _ := logtest.New(t)
+	s := newWakeStandCtx(t, ctx, 3*time.Second, 3, WithLogger(log.From(ctx)))
+
+	// A blocked coordinator holding a live worker, whose notice is refused —
+	// so a retry is armed and the episode is claimed.
+	s.harness.human.refuse = fmt.Errorf("the pipeline is shutting down")
+	s.says(t, ObservedIdle)
+	s.says(t, ObservedBlocked)
+	if got := len(s.notices()); got != 1 {
+		t.Fatalf("notices = %d, want the one refused attempt", got)
+	}
+	if got := s.harness.alarms.running(); got != 1 {
+		t.Fatalf("timers = %d, want the blocked notice's retry", got)
+	}
+
+	// Mail arrives while the coordinator is still blocked: a second worker
+	// settles idle, which is one more row in the batch's mailbox.
+	other := mustRegister(t, s.harness)
+	s.settles(t, other, ObservedIdle)
+
+	// The retry must still be on the clock, and the pause must still reach the
+	// person.
+	if got := s.harness.alarms.running(); got != 1 {
+		t.Fatalf("mail arriving while blocked left %d timers, want the blocked retry still armed", got)
+	}
+	s.harness.human.mu.Lock()
+	s.harness.human.refuse = nil
+	s.harness.human.mu.Unlock()
+	s.harness.alarms.fireAll()
+	var blocked int
+	for _, n := range s.notices() {
+		if n.Kind == NoticeBlocked {
+			blocked++
+		}
+	}
+	if blocked != 2 {
+		t.Fatalf("blocked notices = %d, want the attempt and its retry", blocked)
+	}
+}
+
+// A COORDINATOR THAT STARTS WORKING IS NOT BLOCKED, and that is why its
+// reading ends the episode rather than preserving the notice.
+//
+// This is the asymmetry with the mail path, asserted rather than argued from
+// the comment. CONTEXT.md's Blocked is "cannot continue until somebody steps
+// in" — a menu, a question, an agent error — so a reading that finds the
+// coordinator WORKING says that stopped being true. The episode is over and
+// nothing is lost, because a coordinator that blocks AGAIN is a new episode
+// and gets its own notice.
+func TestACoordinatorThatStartsWorkingEndsTheEpisodeAndReBlocksFresh(t *testing.T) {
+	ctx, _ := logtest.New(t)
+	s := newWakeStandCtx(t, ctx, 3*time.Second, 3, WithLogger(log.From(ctx)))
+	s.harness.human.refuse = fmt.Errorf("the pipeline is shutting down")
+
+	s.says(t, ObservedIdle)
+	s.says(t, ObservedBlocked)
+	if got := len(s.notices()); got != 1 {
+		t.Fatalf("notices = %d, want the one refused attempt", got)
+	}
+
+	// It gets on with its work, so it is not stuck and the retry is moot.
+	s.says(t, ObservedWorking)
+	if got := s.harness.alarms.running(); got != 0 {
+		t.Fatalf("a working coordinator left %d timers, want none: the block ended", got)
+	}
+	s.harness.alarms.fireAll()
+	if got := len(s.notices()); got != 1 {
+		t.Fatalf("a retry outlived the block it was about: %d notices", got)
+	}
+
+	// And a NEW block is a new episode: the person is told, which is what says
+	// the first notice was not lost.
+	s.harness.human.mu.Lock()
+	s.harness.human.refuse = nil
+	s.harness.human.mu.Unlock()
+	s.says(t, ObservedBlocked)
+	if got := len(s.notices()); got != 2 {
+		t.Fatalf("a coordinator that blocked again was not reported: %d notices", got)
+	}
+}
+
+// A LINE OWED AT IDLE IS TYPED AT ONCE, even when the batch's one timer was
+// armed for a BLOCKED NOTICE that is now moot.
+//
+// This is the shape the earlier version of this test got wrong, and the mistake
+// is worth naming: the refusal has to be in place BEFORE the mail lands, or the
+// type is delivered and the batch stops owing a line — and then nothing about
+// the timer is being tested at all. With the refusal first, a line is owed and
+// NO attempt has been spent (a refusal costs none), which is precisely the
+// state in which the batch's one timer can be held by something else.
+//
+// What the cancellation buys, concretely: without it the idle reading finds
+// `armed` true, arms nothing and types nothing; the notice's timer then fires,
+// consumes `blockedRetry`, sees an idle coordinator and RETURNS — so the line
+// the coordinator owes is never typed, and no timer remains to type it. The
+// episode did not lose a notice; the batch lost its line.
+func TestALineOwedAtIdleIsTypedAtOnceWhileABlockedRetryIsPending(t *testing.T) {
+	ctx, _ := logtest.New(t)
+	s := newWakeStandCtx(t, ctx, 3*time.Second, 3, WithLogger(log.From(ctx)))
+
+	// A line is owed and its type is REFUSED, so no attempt is spent. The
+	// refusal is armed BEFORE the mail so the refusal is what meets the type.
+	s.says(t, ObservedIdle)
+	s.harness.wake.out = WakeOutcome{Reason: "that pane is asking you something"}
+	s.settles(t, s.worker, ObservedIdle)
+	if got := len(s.lines()); got != 0 {
+		t.Fatalf("lines = %d, want none: the type was refused and costs no attempt", got)
+	}
+	// A refused type arms NOTHING — the retry it wants is the pane coming back,
+	// not a clock — so the batch has a line owed and no timer at all, which is
+	// the state the block is about to occupy.
+	if got := s.harness.alarms.running(); got != 0 {
+		t.Fatalf("timers = %d, want none after a refusal", got)
+	}
+
+	// The coordinator blocks and its notice is refused, so the batch's one
+	// timer — the only one it will have — belongs to the notice.
+	s.harness.human.refuse = fmt.Errorf("the pipeline is shutting down")
+	s.says(t, ObservedWorking)
+	s.says(t, ObservedBlocked)
+	if got := s.harness.alarms.running(); got != 1 {
+		t.Fatalf("timers = %d, want the blocked notice's retry", got)
+	}
+
+	// The person clears the menu and the pane will take a line again. The owed
+	// line must be typed NOW, not lost to a timer armed for a notice.
+	s.harness.wake.out = WakeOutcome{Delivered: true}
+	s.says(t, ObservedIdle)
+	if got := len(s.lines()); got != 1 {
+		t.Fatalf("the coordinator owed a line and has %d: a timer armed for a "+
+			"notice held the batch's clock and nothing typed the line", got)
+	}
+}
+
 // ── 7. nothing is raised from a per-fact deadline ─────────────────────────
 
 // A FACT ALONE ARMS NO TIMER AND CALLS NOBODY (nocx-luqz9.3's deletion, design

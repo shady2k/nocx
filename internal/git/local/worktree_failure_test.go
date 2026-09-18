@@ -358,6 +358,31 @@ func TestWorktreeInvocationArgv(t *testing.T) {
 	assertArgv("worktree", "remove", "--", wtPath)
 	assertArgv("--no-optional-locks", "rev-list", "--count", oid+".."+oid)
 	assertArgv("update-ref", "-d", "refs/heads/worker-1", oid)
+
+	// And the operations make no DIFF invocation at all — the claim the
+	// hostile_config_test.go case about a configured external diff program
+	// rests on, and one argv can prove and a passing config case cannot:
+	// measured on git 2.55, `diff --numstat` never invokes diff.external, so
+	// that case stays green even if the worktree state read grew the panel's
+	// line counts. This assertion is what fails when it does, because the
+	// counts are two `git diff` invocations per worktree (attachCounts).
+	for _, call := range calls {
+		if subcommand(call) == "diff" {
+			t.Errorf("a worktree read ran %v: the state read deliberately takes no line counts", call)
+		}
+	}
+}
+
+// subcommand is the git subcommand of a recorded invocation: the first
+// argument that is not a git-level option, which is where the fake's own
+// dispatch looks for it too.
+func subcommand(call []string) string {
+	for _, arg := range call {
+		if !strings.HasPrefix(arg, "--") {
+			return arg
+		}
+	}
+	return ""
 }
 
 // ── helpers ────────────────────────────────────────────────────────────

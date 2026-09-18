@@ -112,20 +112,27 @@ func TestWorktreeStateIgnoresStatusShowUntrackedFiles(t *testing.T) {
 	}
 }
 
-// TestWorktreeReadsRunNoConfiguredDiffProgram: diff.external makes plain
+// TestWorktreeReadsRunNoConfiguredDiffProgram: diff.external makes a plain
 // `git diff` return a program's output instead of a diff, which is why the
-// panel's diff carries --no-ext-diff. The worktree operations make no diff
-// invocation at all — the state read deliberately takes no line counts — and
-// this is the check that they stay that way: a later change that enriched a
-// worktree's state with counts would run this program, and the marker it
-// leaves is the failure.
+// panel's diff carries --no-ext-diff. This pins the same fact for the
+// worktree operations: on a repository where the configured program DOES run
+// (asserted first, so the operation's answer cannot be the same one by
+// accident), driving all four operations leaves its marker absent.
+//
+// What this case does NOT pin, stated because a probe measured it rather than
+// because it reads better: it stays green on a worktree read that grew the
+// panel's line counts, because `diff --numstat` never invokes diff.external
+// (measured on git 2.55). The invariant that the state read takes no counts
+// is asserted where it is observable instead — no `diff` invocation in the
+// recorded argv, in worktree_failure_test.go's TestWorktreeInvocationArgv,
+// which fails the moment a counts read is added.
 //
 // The boundary is stated as measured: a repository CAN make one program run
 // during AddWorktree, git's own post-checkout hook, because `worktree add`
 // checks the base out. That is git's semantics and this project's standing
 // decision (hooks always run — CommitArgs carries the same rule), so nothing
 // here suppresses it. What a configuration may not do is change the ANSWER,
-// and that is what the two cases in this file are about.
+// and that is what the other case in this file is about.
 func TestWorktreeReadsRunNoConfiguredDiffProgram(t *testing.T) {
 	dir, home := worktreeRepo(t)
 	marker := filepath.Join(t.TempDir(), "diff-external-ran")
@@ -149,6 +156,20 @@ func TestWorktreeReadsRunNoConfiguredDiffProgram(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(path, "tracked.txt"), []byte("edit"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
+	// The hostile half, BEFORE the operations that are the subject: in the
+	// worktree, where there is now something to diff, the program really is
+	// what a plain `git diff` produces its output with. Its marker is removed
+	// afterwards, so the assertion at the end is about those operations alone
+	// — and the worktree is left dirty on purpose, because a clean one would
+	// have nothing for a counts read to count either.
+	if out := gitOut(t, path, "diff"); !strings.Contains(out, "not a diff") {
+		t.Fatalf("the fixture is not hostile: a plain `git diff` returned %q", out)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+
 	if _, err := repo.Worktrees(ctx, "master"); err != nil {
 		t.Fatal(err)
 	}

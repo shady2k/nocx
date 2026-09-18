@@ -612,6 +612,30 @@ func (m *paneMessages) runQueue(sessionID string, q *paneQueue) {
 		}
 		var head *pendingMessage
 		for _, pm := range q.order {
+			// THE QUEUE DELIVERS THE QUEUE'S OWN MESSAGES (nocx-xn63t.4.13).
+			// A when=="now" message is delivered by the call that enqueued
+			// it — design §8.1, "runs the delivery within the call" — and it
+			// sits in `order` only so the pane's readback and its
+			// idempotency key can see it. `when` is written once at
+			// construction and never again, so reading it here needs no
+			// lock; the phase below is the record's own and does.
+			//
+			// Without this skip, this scan starts a SECOND delivery of the
+			// same message whenever it runs while the call's own delivery is
+			// still in its readiness probe — a helper round trip, so a
+			// window wide enough to lose under load, measured 2026-09-18
+			// with both goroutines' stacks in one run (this one through
+			// runQueue, the other through Send). claim() does not stop it:
+			// it refuses a cancelled or terminal record, and `pasting` and
+			// `awaiting_echo` are neither — so both deliveries write the
+			// paste, then bump the generation under each other until every
+			// later commit is dropped and the record is left frozen in an
+			// in-flight phase (or reported partial on a delivery that did
+			// reach its echo). Two pastes of one message reach the pane,
+			// which is the one thing a delivery must never do twice.
+			if pm.when != "free" {
+				continue
+			}
 			if pm.currentPhase() == assistant.PhaseQueued && !pm.isCancelled() {
 				head = pm
 				break

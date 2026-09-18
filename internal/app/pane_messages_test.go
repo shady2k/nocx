@@ -390,6 +390,21 @@ func (k *fakeMsgKeys) enterCalls() int {
 	return n
 }
 
+// textCalls counts the paste atoms this fake was handed that carried exactly
+// text — how a test says WHICH message reached the pane, and how many times,
+// when more than one delivery can be in flight at once.
+func (k *fakeMsgKeys) textCalls(text string) int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	n := 0
+	for _, c := range k.calls {
+		if c.Text != nil && *c.Text == text {
+			n++
+		}
+	}
+	return n
+}
+
 // happyKeys is a fakeMsgKeys scripted for the ordinary path: the paste
 // echoes into the box and Enter clears it (simulating submission), both
 // through onSend so no test waits on a real timer for either.
@@ -967,6 +982,188 @@ func TestAQueuedMessageLongerThanOneBoxRowIsPastedEchoedAndEntered(t *testing.T)
 	}
 	if delivered.BytesWritten != len(wrappedEchoText) {
 		t.Errorf("record says %d bytes were written, want the %d the paste actually carried", delivered.BytesWritten, len(wrappedEchoText))
+	}
+}
+
+// TestAWhenNowMessageIsDeliveredByItsOwnCallAndNotByTheQueue is
+// nocx-xn63t.4.13's own unit check, and it is about WHO delivers a
+// when=="now" message: design §8.1 says it "runs the delivery within the
+// call", so the pane's queue — the loop a when=="free" message starts, and
+// the one a spawn's own briefing keeps alive — is not a second owner of that
+// delivery.
+//
+// The message under test is the corpus's own wrapped paragraph, which is what
+// makes this a "box taller than one row" delivery: the frame the call's paste
+// fills draws FOUR content rows, and the phase reaching submitted is the
+// reading of all four (boxContainsEcho confirms no prefix of that text).
+//
+// The defect it exists for was measured on the real-helper test under load on
+// 2026-09-18 and reproduced there again while this test was written: Send's
+// own delivery is inside its readiness probe — one helper round trip, so a
+// window wide enough to lose under load — when the queue's scan arrives at
+// the message, which is still `queued` because nothing has claimed it yet.
+// The queue then started a SECOND delivery of it (both goroutines' stacks
+// captured in one run), claim() admitted a second `pasting` claim because only
+// a cancelled or terminal record is refused, and the two deliveries wrote the
+// paste, bumped the generation under each other and left the caller reading an
+// in-flight phase, `partial` after a confirmed echo, or `refused` — with two
+// pastes of one message in the pane.
+//
+// NOTHING HERE WAITS ON A DURATION. The queue's own delivery is held inside
+// its paste step (fakeMsgKeys.onSend) and the when=="now" call's delivery is
+// held inside its first readiness Read (fakeMsgReader.onRead), so both points
+// this test reasons about are states it puts the code into rather than
+// moments it hopes for; the finishing line is the queue's SECOND message
+// reaching submitted, which the queue can only do by having passed the
+// message under test's place in `order` — that is how this test knows the
+// queue has had its opportunity without timing anything.
+func TestAWhenNowMessageIsDeliveredByItsOwnCallAndNotByTheQueue(t *testing.T) {
+	// The premise, checked as the neighbouring tests check theirs: the
+	// recording this message is delivered into really is taller than one row.
+	pasted := happyReplayCapture(t, wrappedEchoCapture, wrappedEchoPastedMs)
+	idle := happyReplayCapture(t, wrappedEchoCapture, wrappedEchoIdleMs)
+	box := messagesTestRules(t).Observe("claude", pasted)
+	if rows := box.InputBox.Last - box.InputBox.First - 1; rows < 3 {
+		t.Fatalf("%s@%dms draws %d content rows, want 3 or more: this test's premise is a box taller than one row",
+			wrappedEchoCapture, wrappedEchoPastedMs, rows)
+	}
+
+	hub, access, sessionID := newMessagesTestAccess(t, "now-queue")
+	reader := newFakeMsgReader("")
+	reader.setFrame(idle, agentdriver.StateFreeText, sessionruntime.TargetInput)
+
+	// The three messages this test needs, each named once: the queue's own
+	// first delivery (what keeps its loop alive across the window), the
+	// message under test, and the queue's second delivery — the finishing
+	// line.
+	const (
+		queueFirstText  = "the message this pane's queue delivers first"
+		queueSecondText = "the message the queue delivers after it"
+	)
+
+	queueAtPaste := make(chan struct{})
+	releaseQueue := make(chan struct{})
+	nowAtProbe := make(chan struct{})
+	releaseNow := make(chan struct{})
+
+	keys := &fakeMsgKeys{
+		pasteResult: assistant.KeysResult{State: "executed", BytesWritten: len(wrappedEchoText)},
+		enterResult: assistant.KeysResult{State: "executed"},
+	}
+	// A real pane repaints on each paste and on each Enter. The queue's own
+	// first paste is also where this test holds the queue's delivery still —
+	// before its frame changes, so the pane stays the empty box the
+	// readiness probes below read.
+	keys.onSend = func(req assistant.KeysRequest) {
+		switch {
+		case req.Text != nil && *req.Text == queueFirstText:
+			close(queueAtPaste)
+			<-releaseQueue
+			reader.setFrame(boxFrame(queueFirstText), agentdriver.StateFreeText, sessionruntime.TargetInput)
+		case req.Text != nil && *req.Text == queueSecondText:
+			reader.setFrame(boxFrame(queueSecondText), agentdriver.StateFreeText, sessionruntime.TargetInput)
+		case req.Text != nil:
+			reader.setFrame(pasted, agentdriver.StateFreeText, sessionruntime.TargetInput)
+		default:
+			reader.setFrame(idle, agentdriver.StateFreeText, sessionruntime.TargetInput)
+		}
+	}
+	pm := newTestPaneMessages(t, hub, reader, keys)
+
+	token := mintInputTarget(t, reader, access, sessionID)
+
+	// The queue's own money in flight: a when=="free" message, which starts
+	// the delivery loop whose scan this test has to reach.
+	if view, err := pm.Send(context.Background(), access, sessionID, queueFirstText, "free", "id-first", ""); err != nil {
+		t.Fatalf("send the queue's first message: %v", err)
+	} else if view.Phase != assistant.PhaseQueued {
+		t.Fatalf("the queue's first message answered %q, want queued", view.Phase)
+	}
+	<-queueAtPaste
+
+	// The queue's delivery is held in its paste step now, so the next Read to
+	// arrive can only be the when=="now" call's own readiness probe. Parking
+	// THAT read is what makes the assertion below a statement about the queue
+	// rather than about the scheduler: the call's delivery sits exactly where
+	// the defect needs it, with no step claimed yet.
+	var parkOnce sync.Once
+	reader.onRead = func(int) {
+		parked := false
+		parkOnce.Do(func() { parked = true })
+		if parked {
+			close(nowAtProbe)
+			<-releaseNow
+		}
+	}
+
+	// The message under test, delivered within its own call.
+	type sendResult struct {
+		view assistant.MessageView
+		err  error
+	}
+	nowDone := make(chan sendResult, 1)
+	go func() {
+		view, err := pm.Send(context.Background(), access, sessionID, wrappedEchoText, "now", "id-now", token)
+		nowDone <- sendResult{view: view, err: err}
+	}()
+	<-nowAtProbe
+
+	// The finishing line, queued while the when=="now" call's delivery is
+	// exactly where the defect needs it: the queue reaches this message only
+	// after passing the message under test's place in `order`.
+	if view, err := pm.Send(context.Background(), access, sessionID, queueSecondText, "free", "id-second", ""); err != nil {
+		t.Fatalf("send the queue's second message: %v", err)
+	} else if view.Phase != assistant.PhaseQueued {
+		t.Fatalf("the queue's second message answered %q, want queued", view.Phase)
+	}
+
+	// Let the queue go on: it finishes its own first message and scans, which
+	// is where it used to pick the when=="now" message up as well.
+	close(releaseQueue)
+	waitForCondition(t, "the queue to deliver its second message", func() bool {
+		for _, m := range pm.Pending(sessionID) {
+			if m.ID == "id-second" {
+				return m.Phase == assistant.PhaseSubmitted
+			}
+		}
+		return false
+	})
+
+	// THE ASSERTION (nocx-xn63t.4.13). The queue has delivered both of its own
+	// messages, so it has walked past the when=="now" message's place in the
+	// queue — and that message's own call has not pasted it yet, because its
+	// delivery is parked in its readiness probe. The pane must therefore have
+	// received NOTHING for it. A paste here is the queue delivering a message
+	// it does not own, and on the old code it was followed by the call's own
+	// paste: one message, written into the pane twice.
+	if got := keys.textCalls(wrappedEchoText); got != 0 {
+		t.Fatalf("the pane received %d paste(s) of the when=now message while its own call was still in its readiness probe, want 0 — the delivery of a when=now message belongs to the call that enqueued it, and a second one pastes the same message twice", got)
+	}
+
+	// Now let the call finish its own delivery, and assert it is the one that
+	// wrote the message — once, through the box taller than one row, with the
+	// phase the caller is answered.
+	close(releaseNow)
+	waitForCondition(t, "the when=now message to reach submitted", func() bool {
+		for _, m := range pm.Pending(sessionID) {
+			if m.ID == "id-now" {
+				return m.Phase == assistant.PhaseSubmitted
+			}
+		}
+		return false
+	})
+	res := <-nowDone
+	if res.err != nil {
+		t.Fatalf("the when=now send: %v", res.err)
+	}
+	if res.view.Phase != assistant.PhaseSubmitted {
+		t.Fatalf("the when=now call answered %q, want %q — the phase its own delivery reached", res.view.Phase, assistant.PhaseSubmitted)
+	}
+	if got := keys.textCalls(wrappedEchoText); got != 1 {
+		t.Fatalf("the when=now message was pasted %d time(s), want exactly 1 — its own call, once", got)
+	}
+	if keys.enterCalls() != 3 {
+		t.Fatalf("Enter was sent %d times, want 3 — one per delivered message, and no second Enter for a message that was pasted twice", keys.enterCalls())
 	}
 }
 

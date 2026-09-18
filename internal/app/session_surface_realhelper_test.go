@@ -707,10 +707,17 @@ func TestACoordinatorReadsAnswersAndMessagesItsWorkerThroughTheRealHelper(t *tes
 		t.Fatalf("session.message when=now during a turn: %s", nowResp.failed)
 	}
 	var nowResult struct {
-		Phase string `json:"phase"`
+		Phase        string `json:"phase"`
+		BoxContents  string `json:"boxContents"`
+		BytesWritten int    `json:"bytesWritten"`
 	}
 	s14DecodeInto(t, nowResp.result, &nowResult)
 	if nowResult.Phase != "submitted" {
+		// The record's own reading of what the box held, and how much of the
+		// paste landed, are what tell a `partial` here apart from a `partial`
+		// whose echo WAS confirmed — the difference between a box the
+		// delivery could not read and a step after the echo that did not
+		// execute (nocx-xn63t.4.13's own two shapes).
 		t.Fatalf("session.message when=now during a turn = %+v, want submitted", nowResult)
 	}
 

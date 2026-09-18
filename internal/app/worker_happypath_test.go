@@ -518,23 +518,32 @@ type happyStand struct {
 // It is not the shipped internal/app.paneMessages: that one delivers through
 // a real helper's session.intent (design §8), and this stand runs no helper
 // at all (Task 14's own happypath extends this same newHappyStand with one).
-// What this stand's tests need from a TaskQueue is only "the task the
-// coordinator gave eventually reaches the pane once it is free", and
-// awaitFreeText plus the real Typist already answer that faithfully.
+// What this stand's tests need from a TaskQueue is only "the rules the
+// coordinator's worker reports under, and then the task it was given,
+// eventually reach the pane once it is free", and awaitFreeText plus the real
+// Typist already answer that faithfully.
 type happyTaskQueue struct {
 	readiness paneReadiness
 	typist    paneTypist
 	log       log.Logger
 }
 
-func (q *happyTaskQueue) EnqueueTask(_ context.Context, _ string, participant workers.Participant, task string) error {
+// EnqueueBriefing types the briefing's two halves in the order it was handed
+// them (nocx-luqz9.5). It types them SEQUENTIALLY and not concurrently: the
+// order the worker is told things in is the whole point of a briefing, and two
+// goroutines racing to a pane would leave that to the scheduler. The second
+// wait is a fresh one because the agent is working on the rules by then, so
+// what this waits for is the turn the rules started, not the same scan twice.
+func (q *happyTaskQueue) EnqueueBriefing(_ context.Context, _ string, participant workers.Participant, briefing workers.Briefing) error {
 	go func() {
 		paneID := participant.Liveness.SessionID
-		state, err := awaitFreeText(context.Background(), q.readiness, paneID, q.log, "worker spawn (happy stand)")
-		if err != nil || state != agentdriver.StateFreeText {
-			return
+		for _, text := range []string{briefing.Preamble, briefing.Task} {
+			state, err := awaitFreeText(context.Background(), q.readiness, paneID, q.log, "worker spawn (happy stand)")
+			if err != nil || state != agentdriver.StateFreeText {
+				return
+			}
+			q.typist.Submit(context.Background(), paneID, text)
 		}
-		q.typist.Submit(context.Background(), paneID, task)
 	}()
 	return nil
 }

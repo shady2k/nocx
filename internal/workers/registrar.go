@@ -80,8 +80,9 @@ type Registrar struct {
 	// root; this package knows only that a participant has one.
 	closer Closer
 
-	// queue enqueues a participant's task for delivery once registration
-	// succeeds (design §9, Task 11), replacing the owed-task debt the former
+	// queue enqueues a participant's BRIEFING for delivery once registration
+	// succeeds (design §9 Task 11 for the task, §6 for the rules it now
+	// travels with; nocx-luqz9.5), replacing the owed-task debt the former
 	// Screener/Answerer pair used to pay through the pane-screen and
 	// menu-answer tools that named them.
 	queue TaskQueue
@@ -414,21 +415,41 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Regist
 	if d, ok := spawned.(TaskDeliverer); ok {
 		reg.Delivery = d.TaskDelivery()
 	}
-	// THE TASK IS ENQUEUED HERE, AND ONLY HERE (design §9, Task 11) — never
-	// from within r.spawn.Spawn (step 3 above). TaskQueue.EnqueueTask
+	// THE BRIEFING IS ENQUEUED HERE, AND ONLY HERE (design §9 Task 11 for the
+	// task; §6 and nocx-luqz9.5 for the rules it now travels with) — never
+	// from within r.spawn.Spawn (step 3 above). TaskQueue.EnqueueBriefing
 	// resolves the participant from its own session id
 	// (internal/app.paneMessages' Resolve, ParticipantBySession), and that
 	// mapping exists only from MarkLive onward: calling it any earlier, from
 	// inside Spawn, would refuse every real spawn with ErrNotReachable. The
 	// participant is already live and returned to its caller regardless of
-	// what this call does, so a queue failure is logged and never turned
-	// into a registration failure — a live participant is not un-registered
-	// because nocx could not queue its first message, the same asymmetry
-	// TaskDelivery's own doc already draws for a screen reading.
+	// what this call does, so a refusal is never turned into a registration
+	// failure — a live participant is not un-registered because nocx could
+	// not queue its first message, the same asymmetry TaskDelivery's own doc
+	// already draws for a screen reading.
+	//
+	// IT IS NOT LOGGED AWAY EITHER (nocx-luqz9.5, acceptance 4). The briefing
+	// that could not be queued is one a worker will never see, so the
+	// coordinator is TOLD, in the delivery it reads off this same
+	// registration: a worker running with nothing to do and no way to say so
+	// is a soft degrade AGENTS.md refuses to let a log be the only witness
+	// of. Nothing is retried and nothing else is queued — half a briefing
+	// must not reach a worker — which is what the one call above already
+	// guarantees.
+	//
+	// A REGISTRATION WITH NO TASK IS NOT BRIEFED, and that is a decision
+	// rather than an omission: the rules exist so that a worker holding work
+	// can report on it, and typing them into a pane nobody asked to be told
+	// anything would be nocx starting a turn of its own (the same boundary
+	// agenttyping's gate defends). workers.spawn's own schema requires a
+	// task, so every worker a coordinator starts is briefed.
 	if req.Task != "" && r.queue != nil {
-		if err := r.queue.EnqueueTask(ctx, req.CoordinatorSession, p, req.Task); err != nil {
-			lg.Warn("worker: the participant's task could not be queued for delivery",
+		briefing := Briefing{Preamble: Preamble(req.CoordinatorSession), Task: req.Task}
+		if err := r.queue.EnqueueBriefing(ctx, req.CoordinatorSession, p, briefing); err != nil {
+			lg.Warn("worker: the participant's briefing could not be queued, so it has been told neither its rules nor its task",
 				"participant", string(p.ID), "error", err)
+		} else {
+			reg.Delivery.BriefingQueued = true
 		}
 	}
 	return reg, nil

@@ -56,7 +56,7 @@ const defaultEchoWait = 3 * time.Second
 // ...; kernel -> the run id"). It is a distinct, small, comparable struct
 // rather than reusing Authority directly because MessageKey must be usable
 // as a map key across BOTH concrete Authority variants without either
-// caller importing the other's type, and because EnqueueTask's internal
+// caller importing the other's type, and because EnqueueBriefing's internal
 // namespace ("nocx", Task 11) has no caller-bound Authority at all — a third
 // kind, "internal", that a caller can never produce (Send/Cancel always
 // derive kind from access.Authority(), never from a parameter).
@@ -346,7 +346,7 @@ func (m *paneMessages) Send(ctx context.Context, access any, sessionID, text, wh
 	if err != nil {
 		return assistant.MessageView{}, err
 	}
-	// EnqueueTask's own doc (below) already found this once for namespace
+	// EnqueueBriefing's own doc (below) already found this once for namespace
 	// "nocx": sessionID here is whatever the caller named the pane by
 	// (workers.ParticipantID for an ordinary session.message call), and
 	// every step below — the queue, the delivery, the mint the pane reader
@@ -432,10 +432,11 @@ func (m *paneMessages) Send(ctx context.Context, access any, sessionID, text, wh
 	return enqueued, nil
 }
 
-// EnqueueTask is namespace "nocx"'s one message: the owed task a spawn
-// leaves for its worker once it meets a question (design §9, Task 11).
+// EnqueueBriefing is namespace "nocx"'s two messages: the RULES a worker is
+// handed, and then the task it is given (nocx-luqz9.5, design §6; the task half
+// is design §9, Task 11's owed task, unchanged in mechanism).
 // coordinatorSession is the delegation chain's own root above participant —
-// the plan's own newPaneMessages/EnqueueTask sketch omitted it, but
+// the plan's own newPaneMessages/owed-task sketch omitted it, but
 // Resolve's own contract refuses controller==sessionID (they can never be
 // the same session), so a real DescendantPaneAccess for delivering to
 // participant's pane needs the ACTUAL controller above it, exactly as the
@@ -449,9 +450,29 @@ func (m *paneMessages) Send(ctx context.Context, access any, sessionID, text, wh
 // only coincide in a test double whose fake Spawner happens to default one
 // from the other (worker_two_callers_test.go's workerTwoCallersSpawner).
 // Task 11's own caller (workers.go's Registrar.Register, via TaskQueue) is
-// what surfaced this: every real EnqueueTask call was resolving a session id
+// what surfaced this: every real owed-task call was resolving a session id
 // that names no participant at all.
-func (m *paneMessages) EnqueueTask(ctx context.Context, coordinatorSession string, participant workers.Participant, task string) error {
+//
+// TWO MESSAGES, ONE LOCKED APPEND, AND THAT IS THE ORDERING (nocx-luqz9.5).
+// The rules go in first, so the pane's delivery — one message at a time, in
+// arrival order (design §8.1) — reaches them first; the task follows them
+// because it was appended after them, not because two goroutines were raced
+// and one won. Nothing here waits for the rules to be delivered: the queue's
+// own loop is what sequences the two, and a spawn that blocked on a paste
+// would hold the coordinator's call open for a screen's reaction.
+//
+// HALF A BRIEFING IS REFUSED (workers.Briefing.Validate). A caller cannot put
+// a task into a worker that has no rules, which is the state acceptance 4
+// names as the defect: the worker takes work it has no way to report on.
+//
+// IDEMPOTENCY IS THE QUEUE'S, KEY BY KEY (design §8.4). The two messages
+// carry ids "preamble" and "task" in namespace "nocx", so a repeat of the
+// SAME briefing queues nothing new and a repeat naming DIFFERENT text is
+// refused rather than silently re-writing what a worker was told.
+func (m *paneMessages) EnqueueBriefing(ctx context.Context, coordinatorSession string, participant workers.Participant, briefing workers.Briefing) error {
+	if err := briefing.Validate(); err != nil {
+		return err
+	}
 	if m.hub == nil || m.hub.registrar == nil {
 		return errNoPaneRuntime
 	}
@@ -464,32 +485,70 @@ func (m *paneMessages) EnqueueTask(ctx context.Context, coordinatorSession strin
 	if err != nil {
 		return err
 	}
-	key := MessageKey{
-		Caller: "internal", Controller: coordinatorSession,
-		Participant: reach.Participant.ID, Liveness: reach.Participant.Liveness,
-		Namespace: "nocx", ID: "task",
-	}
-	hash := PayloadHashV1(task, "free", "")
 
 	q := m.queueFor(sessionID)
 	q.mu.Lock()
-	if existing, dup := q.byKey[key]; dup {
-		q.mu.Unlock()
-		if existing.payloadHash != hash {
-			return errors.New(`session.message: namespace "nocx" id "task" was already used with a different payload for this incarnation`)
+	defer q.mu.Unlock()
+	// The whole briefing is planned before ANY of it is appended, so a
+	// refusal on the second message cannot leave the first queued behind it.
+	queued := make([]*pendingMessage, 0, 2)
+	for _, half := range []struct{ id, text string }{
+		{id: briefingPreambleID, text: briefing.Preamble},
+		{id: briefingTaskID, text: briefing.Task},
+	} {
+		key := MessageKey{
+			Caller: "internal", Controller: coordinatorSession,
+			Participant: reach.Participant.ID, Liveness: reach.Participant.Liveness,
+			Namespace: "nocx", ID: half.id,
 		}
+		hash := PayloadHashV1(half.text, "free", "")
+		if existing, dup := q.byKey[key]; dup {
+			if existing.payloadHash != hash {
+				return fmt.Errorf(`session.message: namespace "nocx" id %q was already used with a different payload for this incarnation`, half.id)
+			}
+			continue
+		}
+		queued = append(queued, &pendingMessage{
+			key: key, payloadHash: hash, text: half.text, when: "free",
+			access: da, chain: reach.Chain, phase: assistant.PhaseQueued,
+		})
+	}
+	if len(queued) == 0 {
 		return nil
 	}
-	pm := &pendingMessage{
-		key: key, payloadHash: hash, text: task, when: "free",
-		access: da, chain: reach.Chain, phase: assistant.PhaseQueued,
+	for _, pm := range queued {
+		q.order = append(q.order, pm)
+		q.byKey[pm.key] = pm
 	}
-	q.order = append(q.order, pm)
-	q.byKey[key] = pm
-	q.mu.Unlock()
-
 	go m.runQueue(sessionID, q)
 	return nil
+}
+
+// The two ids a briefing's messages carry. They are the queue's own naming for
+// namespace "nocx" (a caller's own messages are namespaced "caller" and can
+// never collide with these), and they are what pairs the two halves: the
+// gate below finds a task's rules by re-keying its own id.
+const (
+	briefingPreambleID = "preamble"
+	briefingTaskID     = "task"
+)
+
+// rulesLanded reports whether the rules of a briefing reached the pane.
+//
+// SUBMITTED is the confirmation; WRITTEN is the Enter having been executed with
+// the agent's own reaction not observed inside the delivery's own bound
+// (deliverOne's last commit). Both mean the same thing to the worker they were
+// written for: the text was pasted AND submitted, so the agent has read them.
+//
+// EVERYTHING ELSE IS A NO. `partial` is a paste whose echo was never confirmed
+// or an Enter that did not execute; `failed_partial`, `delivery_unknown`,
+// `indeterminate` and `refused` are the rest of the ways a write can fail; and
+// `queued`/`pasting`/`entering` are the states the task cannot be seen in
+// through — a task is only ever considered once the rules ahead of it have left
+// the queue. `cancelled` is the caller withdrawing them, which is a decision
+// that the worker is not to be told, and the task behind it must not be either.
+func rulesLanded(phase assistant.MessagePhase) bool {
+	return phase == assistant.PhaseSubmitted || phase == assistant.PhaseWritten
 }
 
 // Cancel implements assistant.PaneMessages (design §8.6). It resolves id to
@@ -527,9 +586,23 @@ func (m *paneMessages) Cancel(ctx context.Context, access any, sessionID, id str
 // runQueue is one pane's delivery loop for "free" messages: while the queue
 // is not already delivering and its head is still queued and not cancelled,
 // deliver it, one at a time, in arrival order (design §8.1). Started as a
-// goroutine from Send/EnqueueTask; a second start while one is already
+// goroutine from Send/EnqueueBriefing; a second start while one is already
 // running for this pane is a no-op (the delivering flag), so a burst of
 // enqueues never runs two deliveries on one pane concurrently.
+//
+// THE BRIEFING GATE IS HERE, ONCE, AND NOT IN THE DELIVERY (nocx-luqz9.5
+// acceptance 4). A task whose rules did not land is REFUSED — never typed —
+// because a worker handed work before it was told how to report on it has no
+// way to say anything about that work. The check belongs where the order is
+// known rather than inside deliverOne: deliverOne's whole job is "get this one
+// message onto the pane safely", and a message whose delivery depends on
+// ANOTHER message's outcome is a fact about the queue, which is this function.
+//
+// It cannot be reached with the rules still in flight: the task is behind them
+// in `order`, so it is only ever picked as head once they have left the queued
+// state. What the gate decides is which of their endings open the door
+// (rulesLanded): a submitted or written briefing does, and every other ending —
+// refused, partial, cancelled, still in flight on a retry — does not.
 func (m *paneMessages) runQueue(sessionID string, q *paneQueue) {
 	for {
 		q.mu.Lock()
@@ -548,6 +621,29 @@ func (m *paneMessages) runQueue(sessionID string, q *paneQueue) {
 			q.mu.Unlock()
 			return
 		}
+		if q.rulesDidNotLand(head) {
+			// THE TASK IS DROPPED RATHER THAN TYPED (nocx-luqz9.5, acceptance
+			// 4): a worker given work it was never told how to report on can
+			// say nothing about that work, and the coordinator is left with a
+			// worker that looks busy and reports never. Nothing is written to
+			// the pane, and the queue's own readback explains itself — the
+			// rules this task belongs to are sitting beside it with the phase
+			// that kept them off the screen. No reason string is recorded
+			// anywhere here, for the reason terminate's other caller (a
+			// revoked authority) records none either: the phase IS the record.
+			//
+			// THE COORDINATOR IS TOLD BY THE MECHANISM THE DESIGN ALREADY
+			// GIVES IT, and no second one is invented here: a worker that was
+			// never briefed stops working, so its pane settles idle or
+			// blocked, and that observation reaches the coordinator's mailbox
+			// and wakes it (design §5.1) the same way it would for a worker
+			// that simply finished. What is NOT done is a new mail kind for
+			// this — §4.2's vocabulary is closed at four kinds, and a fifth
+			// would be a decision taken in the delivery loop.
+			m.terminate(head, assistant.PhaseRefused, 0, "")
+			q.mu.Unlock()
+			continue
+		}
 		q.delivering = true
 		q.mu.Unlock()
 
@@ -557,6 +653,35 @@ func (m *paneMessages) runQueue(sessionID string, q *paneQueue) {
 		q.delivering = false
 		q.mu.Unlock()
 	}
+}
+
+// rulesDidNotLand answers whether the message about to be delivered is a task
+// whose RULES did not reach the pane.
+//
+// It is the rules half of a briefing, and nothing else blocks anything: a
+// caller's own message in namespace "caller" never waits on another message,
+// and a briefing's first half has nothing ahead of it.
+//
+// The pairing is the queue's own naming rather than a field on the message: a
+// task in namespace "nocx" is paired with the message of the same key whose id
+// is "preamble", which is exactly what one EnqueueBriefing call appended under
+// one lock. A task with no rules beside it — which one call cannot produce — is
+// a task with nothing to wait for.
+//
+// A task is only ever considered once the rules ahead of it have left the
+// queued state (runQueue picks the FIRST queued message, and the rules were
+// appended first), so rulesLanded's two openings and its several shut ones are
+// the whole answer — see its own doc for which ending is which.
+//
+// The caller holds q.mu.
+func (q *paneQueue) rulesDidNotLand(head *pendingMessage) bool {
+	if head.key.Namespace != "nocx" || head.key.ID != briefingTaskID {
+		return false
+	}
+	rulesKey := head.key
+	rulesKey.ID = briefingPreambleID
+	rules, ok := q.byKey[rulesKey]
+	return ok && !rulesLanded(rules.currentPhase())
 }
 
 // deliverOne runs design §8.2's whole sequence for one message: paste, wait

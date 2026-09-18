@@ -904,7 +904,7 @@ var declarations = []Declaration{
 	},
 	{
 		Name:        "workers.spawn",
-		Description: "Start one worker in a terminal pane of its own and give it a task. Reach for this when a piece of work is genuinely separate and can run while you do something else — never to parallelise something you could just do. nocx watches the worker from the moment it starts, so you do not have to remember it: ask workers.holdings later and you will be told what it came to. Put the reporting instruction in the task — see the task field — or all you will ever be told is that the worker ended.",
+		Description: "Start one worker in a terminal pane of its own and give it a task. Reach for this when a piece of work is genuinely separate and can run while you do something else — never to parallelise something you could just do. nocx watches the worker from the moment it starts, so you do not have to remember it: ask workers.holdings later and you will be told what it came to. nocx also hands the worker its own rules before your task — who its coordinator is, and that it reports through workers.report and reads your mail with workers.inbox — so the task only has to say what the work is.",
 		// DELEGATE, and no eighth effect. Handing work to another agent is
 		// exactly what the seventh member of the closed lattice already
 		// names — it is in the grant_effects CHECK, in the policy contract

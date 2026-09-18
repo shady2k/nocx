@@ -183,6 +183,13 @@ type Spawned interface {
 // the pane's screen, and AD-6 forbids a screen reading from assigning status
 // to a participant (ADR-0064 §4). So it travels with the registration that
 // produced it, is answered to the caller once, and is kept nowhere.
+//
+// TWO WRITERS, AND THEY ANSWER TWO DIFFERENT QUESTIONS (nocx-luqz9.5). Typed
+// and WaitingOn are the LAUNCHER's answer, read off the pane before a session
+// has anything queued for it; BriefingQueued is the REGISTRAR's, and it is a
+// fact about the queue rather than about the screen — whether the rules and the
+// task were ever handed to one. The fields are disjoint, they are set at the
+// two moments the two facts exist, and no call sets a field it did not observe.
 type TaskDelivery struct {
 	// Typed is true when the task was submitted into the participant's pane.
 	Typed bool
@@ -190,6 +197,24 @@ type TaskDelivery struct {
 	// question the participant's agent is asking of its own — and is empty
 	// whenever Typed is true, and when nothing was attempted at all.
 	WaitingOn string
+	// BriefingQueued is true when this participant's BRIEFING — the rules it
+	// reports under, and then its task — reached the message queue
+	// (nocx-luqz9.5, design §6), and false when nocx could not queue it at
+	// all.
+	//
+	// FALSE IS A WHOLE ANSWER, and the one a coordinator has to act on: the
+	// worker is live and has been told NOTHING — not its rules and not its
+	// task, because they are one briefing and one call — and nothing further
+	// will be delivered to it. The coordinator closes it and spawns another.
+	// The alternative shape, a warning in a log, is the soft degrade AGENTS.md
+	// refuses: a live worker that looks like a worker doing something.
+	//
+	// IT IS FALSE FOR A REGISTRATION THAT HAD NO TASK TOO, which is the same
+	// fact read from the other end: a registration with nothing to brief hands
+	// the queue nothing. workers.spawn's own schema requires a task, so a
+	// coordinator never receives this false for a worker that had something to
+	// be told.
+	BriefingQueued bool
 }
 
 // TaskDeliverer is the optional half of Spawned: a launcher that attempted to
@@ -230,31 +255,41 @@ type Closer interface {
 	Close(ctx context.Context, p Participant) error
 }
 
-// TaskQueue enqueues a participant's task for delivery once its pane is free
-// (design §9, Task 11). It replaces the owed-task debt and the dedicated
-// menu-answer path (Screener/Answerer/PaneScreen/PaneAnswer/TaskOutcome,
-// deleted with this bead): a spawn that meets a question no longer marks a
-// debt for a LATER answer call to pay — it enqueues a "when=free" message,
-// namespace "nocx", id "task", and the SAME queue every session.message
-// caller's own free message goes through delivers it whenever the pane frees
-// up, whether that is a coordinator's session.keys answer or a person
-// pressing Enter themselves.
+// TaskQueue hands a participant's BRIEFING — the rules it reports under, and
+// then its task — to the queue that delivers it once its pane is free (design
+// §9 Task 11 for the task, §6 for the rules, nocx-luqz9.5).
+//
+// ONE CALL AND NOT TWO. What a worker is told arrives in an ORDER — the rules
+// first, so that a worker holding a task already knows how to report on it —
+// and two calls would leave that order to whichever goroutine reached the queue
+// first. One call also makes the failure whole: a queue that cannot take the
+// briefing takes NEITHER half, so "the task was delivered and the rules were
+// not" is not a state a caller can put this seam into (Briefing.Validate, and
+// internal/app.paneMessages' own refusal of half a briefing).
 //
 // It is a seam for Closer's reason: the message queue, its authority checks
 // and the pane it writes into are all the composition root's
-// (internal/app.paneMessages), and this package knows only that a
-// registration may have a task to hand it.
+// (internal/app.paneMessages), and this package knows only that a registration
+// has something to hand it.
 //
 // Register calls this AFTER the delegation is committed and the participant
 // is marked live (step 5/6 below) — never from within Spawner.Spawn (step
-// 3), because EnqueueTask resolves the participant from its OWN session id
+// 3), because EnqueueBriefing resolves the participant from its OWN session id
 // (ParticipantBySession), and that mapping does not exist until MarkLive
 // writes the participant's Liveness. A queue nobody wired in (nil) is the
 // same absence case every other optional seam in this package's composition
 // treats: nothing is enqueued, which only matters to a caller that never
 // wired one in — production always does.
+//
+// A REFUSAL IS REPORTED, NOT LOGGED AWAY (nocx-luqz9.5, acceptance 4). The
+// caller turns a non-nil error into TaskDelivery.BriefingQueued = false, which
+// is how a coordinator learns that its worker is running and has been told
+// nothing. It does NOT un-register the participant: the refusal is nocx's own
+// failure to queue, not a reading of the pane, so ADR-0064 §4's asymmetry —
+// a fact about delivery may not decide whether a participant exists — stands
+// exactly as it did.
 type TaskQueue interface {
-	EnqueueTask(ctx context.Context, coordinatorSession string, participant Participant, task string) error
+	EnqueueBriefing(ctx context.Context, coordinatorSession string, participant Participant, briefing Briefing) error
 }
 
 // Supervisor is the watch that outlives the coordinator's turn. It is attached

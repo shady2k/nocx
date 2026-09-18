@@ -675,7 +675,7 @@ __nocx_lc_read_agent_answer() {
             return 1
         fi
         case "$__nocx_lc_frame" in
-            *'"evt":"agent_enrolled"'*|*'"evt":"agent_withdrawn"'*|*'"evt":"agent_reported"'*) : ;;
+            *'"evt":"agent_enrolled"'*|*'"evt":"agent_withdrawn"'*) : ;;
             *'"evt":"refresh_request"'*) __nocx_lc_ans_refresh || true; continue ;;
             *) continue ;; # a stale frame (a late accept, an old grant): skip
         esac
@@ -731,97 +731,6 @@ __nocx_agent_geometry() {
     fi
     (( __nocx_agent_cols > 0 )) || __nocx_agent_cols=80
     (( __nocx_agent_rows > 0 )) || __nocx_agent_rows=24
-}
-
-# THE DECLARATION DROP: how a worker says what its work produced.
-#
-# The declaration is one of the two facts that may decide a worker participant's
-# state (D9), and it must come from the AGENT rather than from the shell: a
-# declaration synthesised from the agent's exit status would collapse two
-# facts the design keeps independent and make "completed" mean nothing beyond
-# "exited 0" — the self-matching sentinel the whole orchestration design was
-# written against.
-#
-# But the agent cannot send one itself. The lifecycle capability is
-# deliberately NOT exported (see __nocx_cap above, and the 2026-08-15 design's
-# D13: no bearer material in the environment), so a child process has nothing
-# to authenticate a frame with. What it can do is leave the verdict somewhere
-# the shell will look, and the shell — which holds the capability — sends it.
-#
-# The path is an ordinary environment variable and that is not a weakening: a
-# path names a rendezvous, it confers nothing, and mktemp gives it an
-# unguessable name and mode 0600 so only this user can write it. Anything in
-# the agent's own process tree can therefore declare, which is exactly the
-# principal the 2026-08-15 design's D14 already enrols and says so in the
-# approval — "allow this agent AND COMMANDS IT LAUNCHES".
-#
-# THE FORMAT IS FOR A SHELL TO PARSE AND FOR AN AGENT TO WRITE. First line
-# `ok` or `fail`; everything after it is what the agent says it produced.
-# Anything else — an empty file, a half-written one, a file some other program
-# happened to leave — is NOT a declaration and nothing is sent, so the
-# participant stays undeclared and the record calls it abandoned. Consent is
-# the presence of what we positively recognise, exactly as the enrolment
-# answer's is.
-__nocx_agent_report_path=
-# __nocx_agent_report_reason names WHY the drop above ended up empty
-# (nocx-xn63t.6.1): __nocx_agent_stage already says why a refusal happened
-# ("nocx: tool surface unavailable — %s"), and this one used to say nothing
-# at all — the mktemp failure that leaves __nocx_agent_report_path empty was
-# swallowed by its own `2>/dev/null`, so an agent that then wrote to
-# "$NOCX_AGENT_REPORT" (an empty string) got a shell error naming no setting
-# ("line 3: : No such file or directory") and the person watching learned
-# nothing. Named here so __nocx_agent_run can print it the same way stage's
-# reason already is.
-__nocx_agent_report_reason=
-__nocx_agent_report_open() {
-    __nocx_agent_report_path=
-    __nocx_agent_report_reason=
-    local __p
-    # ONE call, stderr merged into the same capture: on success mktemp
-    # writes nothing to stderr, so this is exactly the path; on failure
-    # $__p is empty and mktemp's own message is what run() reports below.
-    if ! __p="$(command mktemp "${TMPDIR:-/tmp}/nocx-agent-report.XXXXXX" 2>&1)"; then
-        __nocx_agent_report_reason="could not create a private report file${__p:+: $__p}"
-        return 1
-    fi
-    __nocx_agent_report_path="$__p"
-    return 0
-}
-
-# Read the drop and send the declaration, if there is one. Returns without
-# sending anything when there is not, which is the ordinary case for an agent
-# that was never told about this.
-__nocx_agent_report_send() {
-    local __rid="$1" __line __verdict= __body= __first=1 __ok
-    [[ -n "$__nocx_agent_report_path" && -r "$__nocx_agent_report_path" ]] || return 0
-    while IFS= read -r __line || [[ -n "$__line" ]]; do
-        if (( __first )); then
-            __verdict="$__line"
-            __first=0
-            continue
-        fi
-        __body="$__body$__line"$'\n'
-    done < "$__nocx_agent_report_path"
-    case "$__verdict" in
-        ok) __ok=true ;;
-        fail) __ok=false ;;
-        *) return 0 ;;
-    esac
-    # Bounded here as well as by the kernel, so an agent that wrote a
-    # transcript into the drop costs one truncation rather than a frame the
-    # backend refuses whole. Keep in step with lifecycle.MaxReportSummaryBytes.
-    __body="${__body:0:4000}"
-    __nocx_lc_json_escape "$__body"
-    __nocx_lc_send agent_report ',"request":"'"$__rid"'","ok":'"$__ok"',"summary":"'"$__nocx_lc_json_escaped"'"' || return 0
-    __nocx_lc_read_agent_answer "$__rid" || return 0
-    # "No orchestration, and the pane says so" (D4) applies to a declaration
-    # that was not kept just as it applies to an enrolment that was refused:
-    # an agent that reported into nowhere must not think it was heard.
-    case "$__nocx_lc_frame" in
-        *'"recorded":true'*) : ;;
-        *) builtin printf 'nocx: what you reported was not recorded%s\n' \
-               "${__nocx_agent_reason:+ — $__nocx_agent_reason}" >&2 ;;
-    esac
 }
 
 __nocx_agent_stage_reason=
@@ -1043,16 +952,6 @@ __nocx_agent_run() {
         __stage_reason="$__nocx_agent_stage_reason"
         builtin printf 'nocx: tool surface unavailable — %s\n' "$__stage_reason" >&2
     fi
-    # The drop is opened BEFORE the agent starts, or an agent that finished
-    # quickly would have had nowhere to write. A drop that could not be opened
-    # is not a refusal: the agent still runs, and the worker is simply one
-    # that cannot declare — which the record already has a name for. Said out
-    # loud, the same way stage's own refusal already is (nocx-xn63t.6.1):
-    # silence here used to mean the agent's own write to an empty
-    # "$NOCX_AGENT_REPORT" surfaced a shell error naming no setting at all.
-    if ! __nocx_agent_report_open; then
-        builtin printf 'nocx: no report drop for this agent — %s\n' "$__nocx_agent_report_reason" >&2
-    fi
     # Claude's --mcp-config option is variadic: placing it before "$@" would
     # swallow a user's positional prompt as another config path. Keep it last.
     # If a future Claude subcommand rejects trailing flags, update this
@@ -1065,38 +964,12 @@ __nocx_agent_run() {
     # the same door — a non-exported variable is not inherited anyway — and it
     # is kept because the cost is one builtin.
     unset __nocx_agent_token 2>/dev/null || true
-    # `env VAR=val CMD ...`, not `VAR=val command CMD ...` (nocx-xn63t.6.1).
-    # Both bypass the same-named shell FUNCTION this file just defined
-    # (claude() calls __nocx_agent_run, so a bare `claude` here would
-    # recurse) — env execs a real binary off PATH, which can never resolve
-    # to a function in THIS shell, same as command's own guarantee. They are
-    # not equivalent on bash 3.2: a `VAR=val cmd` TEMPORARY assignment is a
-    # shell grammar construct, and 3.2's DEBUG trap — which this file's own
-    # __nocx_preexec_wrapper installs for shell integration — fires between
-    # the assignment and the traced command in a way that drops it before
-    # exec. Confirmed with `set -x` through the real bash-3.2 fixture: the
-    # trace showed the assignment and `command claude` as two separate
-    # traced steps with the wrapper's own trace in between, and the agent's
-    # own `echo "DROP=$NOCX_AGENT_REPORT"` printed nothing — empty, not
-    # unset, so the assignment happened and was lost before the child saw
-    # it. `env` has no such assignment step for the trap to land inside:
-    # the whole line is one traced command, on 3.2 and 5 alike.
     if (( __staged )); then
-        command env "NOCX_AGENT_REPORT=$__nocx_agent_report_path" "$__agent" "$@" \
-            --mcp-config "$__nocx_agent_launch_dir/mcp.json"
+        command "$__agent" "$@" --mcp-config "$__nocx_agent_launch_dir/mcp.json"
     else
-        command env "NOCX_AGENT_REPORT=$__nocx_agent_report_path" "$__agent" "$@"
+        command "$__agent" "$@"
     fi
     __rc=$?
-    # The declaration goes BEFORE the withdraw, inside the interval the
-    # enrolment opened. It is the participant's own fact and the withdraw is
-    # the interval's end; sending them the other way round would report a
-    # verdict about a pane nocx had already stopped watching.
-    __nocx_agent_report_send "$__rid"
-    if [[ -n "$__nocx_agent_report_path" ]]; then
-        command rm -f -- "$__nocx_agent_report_path" 2>/dev/null
-        __nocx_agent_report_path=
-    fi
     # The other end of the interval, and it runs whatever the agent returned —
     # a crash, an interrupt and a clean exit all close it. The answer is read
     # and discarded: nothing here can act on a failed withdrawal, and the

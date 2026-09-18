@@ -356,7 +356,88 @@ func (r *Registrar) placeObservation(ctx context.Context, p Participant, coordin
 	}); err != nil {
 		return fmt.Errorf("worker: observe %q: %w", p.ID, err)
 	}
+	// The mail is in the box, so the coordinator may now be woken about it —
+	// and only now. Telling the wake before the write would be this package
+	// announcing a row a reader cannot find.
+	r.wake.Arrived(ctx, coordinator)
 	return nil
+}
+
+// ObserveCoordinator admits one reading of a COORDINATOR's own pane, with the
+// number of live workers it holds read here rather than passed in.
+//
+// # Why the coordinator's state is judged here and not by whoever reads the pane
+//
+// The bridge in internal/app maps a driver state onto this package's
+// vocabulary; what a SETTLED state of a coordinator MEANS is this record's,
+// exactly as it is for a worker, and it is the same witness and the same window
+// (design §5.2, §4.4). So the reading takes the same two-step discipline: a
+// state becomes news when it has HELD, and a re-settled idle after a turn of
+// work is idle news again.
+//
+// The session is a coordinator's BY HAVING WORKERS, which is the same thing
+// that makes it addressable at all: a session the record holds no participant
+// for is somebody's own agent, and there is nothing to coordinate. A
+// coordinator that holds nothing is therefore dropped here, which is what its
+// own notice's condition asks anyway — a blocked coordinator with no live
+// workers is not a failure of coordination, because there is nothing to
+// coordinate.
+//
+// `live` counts non-terminal participants, because that is what "holds live
+// workers" means: a coordinator whose workers have all settled is not stuck,
+// it is finished.
+func (r *Registrar) ObserveCoordinator(ctx context.Context, sessionID string, state ObservedState) {
+	if sessionID == "" || !observedStates[state] {
+		// Exited included, and by the same rule Observe enforces: an exit is a
+		// fact about a process and has its own door, and a caller reaching
+		// here with it is looking for a second one.
+		return
+	}
+	live, err := r.coordinatorLive(ctx, sessionID)
+	if err != nil {
+		// A read that failed is not evidence there are no workers, and a
+		// coordinator the record cannot answer about is one nocx must not
+		// type into. Nothing is admitted and the line says why.
+		log.From(ctx).Debug("worker: a coordinator's own workers could not be counted",
+			"session_id", sessionID, "error", err)
+		return
+	}
+	if live == 0 {
+		return
+	}
+	id := ParticipantID(sessionID)
+	now := r.now()
+	// Every settled reading reaches the wake, and the wake is what decides
+	// whether there is anything to say. It is NOT the one-fact-per-hold rule
+	// the worker half follows, and the difference is deliberate: a worker's
+	// observation is news once per hold, while a coordinator's readings are the
+	// only thing that can retry a line the pane refused — a refusal leaves no
+	// timer behind, so the pane coming back is the observable, and it has to be
+	// let through. See observedFacts.settledFor.
+	if !r.coordReadings.settledFor(id, state, now) {
+		return
+	}
+	r.wake.Coordinator(ctx, ReaderID(sessionID), state, live)
+}
+
+// coordinatorLive is how many workers one session holds that are not finished.
+//
+// It reads the store DIRECTLY rather than through HeldBy, and that is not a
+// shortcut: HeldBy is the coordinator's own fetch, and a fetch DISPATCHES —
+// a sweep that called it would clear the very facts the wake is meant to
+// announce.
+func (r *Registrar) coordinatorLive(ctx context.Context, sessionID string) (int, error) {
+	held, err := r.store.HeldBy(ctx, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	live := 0
+	for _, p := range held {
+		if !p.State.Terminal() {
+			live++
+		}
+	}
+	return live, nil
 }
 
 // held advances the machine for one reading and reports whether the state has
@@ -373,6 +454,30 @@ func (r *Registrar) placeObservation(ctx context.Context, p Participant, coordin
 // zero-window caller a user of this rule rather than an exception to it.
 func (f *observedFacts) held(id ParticipantID, state ObservedState, now time.Time) bool {
 	return f.claim(id, state, now)
+}
+
+// settledFor answers whether this state has been continuously read for the
+// window, WITHOUT placing anything and without consuming the hold — so the same
+// reading may be asked about again on the next sweep and answered the same way.
+//
+// It exists for the coordinator's own pane (nocx-luqz9.3), and the difference
+// from claim is the whole reason it does. `claim` is "this hold has not been
+// reported yet", which is what a worker's observation needs: one fact per hold,
+// ever. A coordinator needs the opposite — EVERY settled idle reading must
+// reach the wake, because the wake is what decides whether there is anything to
+// say, and a reading that never arrives can never retry a line the pane
+// refused. A refusal leaves no timer behind (design §5.4), so the observable
+// that retries it is the pane coming back, and that reading has to be let
+// through. Nothing is placed here, so the two machines' rules stay distinct.
+func (f *observedFacts) settledFor(id ParticipantID, state ObservedState, now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	held, ok := f.workers[id]
+	if !ok || held.state != state {
+		f.workers[id] = &settling{state: state, since: now}
+		return false
+	}
+	return now.Sub(held.since) >= f.window
 }
 
 // claim reserves the right to place one fact for this worker, and reports

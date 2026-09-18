@@ -111,6 +111,16 @@ type Message struct {
 	// enough to compare. It is what a cursor points at.
 	Seq  int64
 	Body string
+	// Kind is what this row IS, for the one reader whose behaviour depends on
+	// it: the wake, which wakes for a report and never for a checkpoint
+	// (design §5.1, P4). It is empty for a row that carries Observed, whose
+	// kind is answered by the field itself, and empty for ordinary text mail,
+	// which is a report by being somebody's words about their work.
+	//
+	// It is set by the WRITER and never read off the body, because a kind
+	// inferred from prose is a second derivation of a fact the producer
+	// already knows.
+	Kind MessageKind
 	// Observed is the untrusted-free half of a row: a settled state of one
 	// worker, carrying no screen content at all. Nil for text mail.
 	Observed    *Observed

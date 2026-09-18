@@ -12,16 +12,17 @@ package app
 // and assert the other half too — a pane nocx cannot read still fails, and
 // now says in a value that it could not read it.
 //
-// workerSpawner itself no longer types anything (design §9, Task 11): the
+// workerSpawner itself no longer types anything (design §9, Task 11, and
+// design §6 for the rules that now travel with the task; nocx-luqz9.5): the
 // owed-task debt these tests used to exercise directly (mark/take/restore/
-// drop) is gone, replaced by a "when=free" session.message the message
-// queue delivers once the pane is free — internal/workers/registrar_task
-// queue_test.go covers "Register enqueues the task", and
-// internal/app/pane_messages_test.go covers the queue's own delivery
-// mechanics. What stays true here, and is what these tests assert, is that a
-// spawn meeting a question is not a failure: the participant goes live with
-// its tab and session standing, and nothing reaches the pane while the
-// question is up.
+// drop) is gone, replaced by the "when=free" session.messages the message
+// queue delivers once the pane is free — internal/workers/
+// registrar_briefing_test.go covers "Register enqueues the briefing", and
+// internal/app/pane_messages_briefing_test.go covers the queue's own
+// delivery order and gate. What stays true here, and is what these tests
+// assert, is that a spawn meeting a question is not a failure: the
+// participant goes live with its tab and session standing, and nothing
+// reaches the pane while the question is up.
 
 import (
 	"context"
@@ -204,4 +205,7 @@ func TestAPaneNeverObservedIsAnUnreadableRefusal(t *testing.T) {
 // same way any other caller's "when=free" message does when its target goes
 // away. That termination path is internal/app/pane_messages_test.go's own
 // coverage (TestRevocationAfterPasteLeavesPartialAndTakesNoFurtherStep and
-// the StillHolds checks beside it), not this package's.
+// the StillHolds checks beside it), and
+// pane_messages_briefing_test.go's own
+// TestABriefingForAParticipantThatIsGoneIsRefusedRatherThanDelivered states
+// it for the briefing, not this package's.

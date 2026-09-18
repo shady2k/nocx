@@ -11,6 +11,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -25,9 +26,9 @@ import (
 	"github.com/shady2k/nocx/internal/workers"
 )
 
-// boxFrameCols is boxFrame's own frame width — wide enough for every text
-// this file pastes into it, and irrelevant to a reader that never asserts a
-// column count.
+// boxFrameCols is the width this fake box DRAWS AT when the text it holds fits
+// — the same order as a real Claude pane's own 120 columns, narrowed so a
+// frame stays cheap to build.
 const boxFrameCols = 80
 
 // boxFrame builds a REAL Claude input box around text, not a bare one-row
@@ -41,6 +42,17 @@ const boxFrameCols = 80
 // every read, since messagesTestRules wires the REAL claude.rule.json and
 // this rule cannot find its own chrome in a frame that never drew any.
 //
+// THE FRAME IS AS WIDE AS THE TEXT IT HOLDS, and that is a fixture decision
+// rather than a claim about terminals: a box that truncated a paste at some
+// fixed column would answer waitForEcho with a PREFIX of what was pasted, so
+// a message the product delivers fine would stop at phase partial here and
+// every test in this file would be measuring the fake's own width. What a REAL
+// agent draws when a paste is longer than its box — the wrap, the space the
+// wrap consumes at each row break, and the reading that puts it back together
+// — is the corpus's own business and is asserted there, off real frames
+// (TestAQueuedMessageLongerThanOneBoxRowIsPastedEchoedAndEntered, and
+// internal/agentdriver's own input_text_test.go).
+//
 // Two blank rows precede the box for the same reason a real Claude screen
 // always has room above it: claude.rule.json's "meter" anchor sits one row
 // above the box's own top rule, and an anchor computed from an out-of-frame
@@ -48,25 +60,26 @@ const boxFrameCols = 80
 // synthetic frame into the "unknown" branch (anchorUnbound: meter) before
 // ever reaching free_text.
 func boxFrame(text string) paneview.Frame {
+	// "❯" then a NO-BREAK SPACE (U+00A0) — the exact two cells every real
+	// prompt row in the corpus opens with — then text, padded with ordinary
+	// spaces to the frame's own width.
+	promptRunes := []rune("❯\u00a0" + text)
+	cols := max(boxFrameCols, len(promptRunes)+1)
 	rule := func() []paneview.Cell {
-		cells := make([]paneview.Cell, boxFrameCols)
+		cells := make([]paneview.Cell, cols)
 		for x := range cells {
 			cells[x] = paneview.Cell{Text: "─", Width: 1}
 		}
 		return cells
 	}
 	blank := func() []paneview.Cell {
-		cells := make([]paneview.Cell, boxFrameCols)
+		cells := make([]paneview.Cell, cols)
 		for x := range cells {
 			cells[x] = paneview.Cell{Text: " ", Width: 1}
 		}
 		return cells
 	}
-	// "❯" then a NO-BREAK SPACE (U+00A0) — the exact two cells every real
-	// prompt row in the corpus opens with — then text, padded with ordinary
-	// spaces to the frame's own width.
-	promptRunes := []rune("❯\u00a0" + text)
-	promptRow := make([]paneview.Cell, boxFrameCols)
+	promptRow := make([]paneview.Cell, cols)
 	for x := range promptRow {
 		if x < len(promptRunes) {
 			promptRow[x] = paneview.Cell{Text: string(promptRunes[x]), Width: 1}
@@ -76,7 +89,7 @@ func boxFrame(text string) paneview.Frame {
 	}
 	const promptY = 3
 	return paneview.Frame{
-		Cols:    boxFrameCols,
+		Cols:    cols,
 		Rows:    5,
 		Lines:   [][]paneview.Cell{blank(), blank(), rule(), promptRow, rule()},
 		CursorX: len(promptRunes),
@@ -378,8 +391,16 @@ func (k *fakeMsgKeys) enterCalls() int {
 }
 
 // happyKeys is a fakeMsgKeys scripted for the ordinary path: the paste
-// echoes verbatim into the box and Enter clears it (simulating submission),
-// both through onSend so no test waits on a real timer for either.
+// echoes into the box and Enter clears it (simulating submission), both
+// through onSend so no test waits on a real timer for either.
+//
+// A MULTI-LINE PASTE ECHOES AS CLAUDE'S OWN PLACEHOLDER, never as the text:
+// the agent collapses it in the box to "[Pasted text #1 +N lines]", and that
+// placeholder is what the shipped echo check accepts for a text carrying
+// newlines (boxContainsEcho, measured at nocx-xn63t.4.5). A fake that drew the
+// text itself would let a multi-line paste pass a check the real pane fails —
+// which is the wrong direction for a fixture whose whole job is to be a pane
+// a caller can trust.
 func happyKeys(reader *fakeMsgReader, text string) *fakeMsgKeys {
 	k := &fakeMsgKeys{
 		pasteResult: assistant.KeysResult{State: "executed", BytesWritten: len(text)},
@@ -387,12 +408,22 @@ func happyKeys(reader *fakeMsgReader, text string) *fakeMsgKeys {
 	}
 	k.onSend = func(req assistant.KeysRequest) {
 		if req.Text != nil {
-			reader.setBox(*req.Text)
+			reader.setBox(pastedEcho(*req.Text))
 		} else if req.Key != nil {
 			reader.setBox("")
 		}
 	}
 	return k
+}
+
+// pastedEcho is what a real Claude input box shows once a paste has landed:
+// the text itself when it fits on one line, and its own placeholder naming the
+// extra lines when it does not.
+func pastedEcho(text string) string {
+	if extra := strings.Count(text, "\n"); extra > 0 {
+		return fmt.Sprintf("[Pasted text #1 +%d lines]", extra)
+	}
+	return text
 }
 
 // newMessagesTestAccess mints a DescendantPaneAccess over a fresh registrar

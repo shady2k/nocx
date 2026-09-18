@@ -400,26 +400,34 @@ func mustCatalogue() *Catalogue {
 				Trusts:      []Trust{TrustProgramRequest},
 			},
 			{
-				// The worker record's backstop (D2, nocx-dkawo.3). A worker
-				// declared or exited, the coordinator that must judge it was
-				// not reached inside the deadline, and the person is the
-				// only one left who can act.
+				// The wake's far end (nocx-luqz9.3, design §5.4). The
+				// coordinator was written to — more than once — and read
+				// nothing, or it is blocked on its own screen while it holds
+				// live workers. Either way nothing is being coordinated and
+				// the person is the only one left who can act.
 				//
 				// Attested, and the distinction is the whole design's: this
-				// is nocx's OWN record reducing two facts it owns — a
-				// process exit off a PTY it holds, and a declaration over an
-				// authenticated channel. Nothing on a screen took part, which
-				// is why it sits beside session.ended rather than beside
-				// pane.workFinished one row below.
+				// is nocx's OWN mailbox counted against its OWN cursor, and a
+				// state watched on a screen nocx holds the process for.
+				// Nothing a worker printed and nothing a program asked for
+				// took part, which is why it sits beside session.ended rather
+				// than beside pane.workFinished one row below.
 				//
 				// Both channels on by default, for the reason session.ended
-				// has them: it fires a handful of times a worker, and the only
-				// moment it matters is the one where the person is not
+				// has them: it fires a handful of times an effort, and the
+				// only moment it matters is the one where the person is not
 				// looking at the tab.
-				Kind: KindWorkersUndispatched, ID: "workerUndispatched",
-				Label: "A worker is waiting for judgement",
-				Description: "nocx's own worker record has a worker's result that its " +
-					"coordinator was not reached about.",
+				//
+				// It replaces workers.undispatched, whose producer was the
+				// per-fact deadline §5 deletes. KEEPING THE OLD NAME WAS NOT
+				// POSSIBLE honestly: "undispatched" named a fact nobody had
+				// judged, and this event is about a COORDINATOR that has
+				// stopped reading. Same surface, different fact.
+				Kind: KindCoordinatorStalled, ID: "coordinatorStalled",
+				Label: "A coordinator is not reading its workers",
+				Description: "nocx wrote to a coordinator about its workers' mail and " +
+					"the coordinator did not read it, or the coordinator is blocked " +
+					"on its own screen while its workers are live.",
 				Trusts:          []Trust{TrustAttested},
 				DefaultChannels: []string{ChannelBanner, ChannelToast},
 			},

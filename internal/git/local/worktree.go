@@ -310,8 +310,14 @@ func (r *Repo) countCommits(ctx context.Context, env []string, dir, from, to str
 // worktreeRecords reads the repository's worktree listing. It is the one
 // owner of that read: Add consults it before writing anything, Remove and
 // discardBranch before deleting anything, and Worktrees for the list itself.
+// The encoding follows the git that is running (worktreeNUL): the NUL form
+// where it exists, because it can represent every path, and the line form
+// below 2.36, because that is what git had.
 func (r *Repo) worktreeRecords(ctx context.Context, env []string) ([]spawn.WorktreeRecord, error) {
-	argv := spawn.WorktreeListArgs()
+	argv, parse := spawn.WorktreeListArgs(), spawn.ParseWorktreeList
+	if !r.worktreeNUL {
+		argv, parse = spawn.WorktreeListLinesArgs(), spawn.ParseWorktreeListLines
+	}
 	out, err := r.gitReadOut(ctx, env, r.toplevel, argv, git.MaxWorktreeListBytes)
 	if err != nil {
 		return nil, err
@@ -319,7 +325,7 @@ func (r *Repo) worktreeRecords(ctx context.Context, env []string) ([]spawn.Workt
 	if out.exit != 0 {
 		return nil, fmt.Errorf("git %s: exit %d: %s", strings.Join(argv, " "), out.exit, out.stderr)
 	}
-	records, err := spawn.ParseWorktreeList(out.out)
+	records, err := parse(out.out)
 	if err != nil {
 		return nil, err
 	}

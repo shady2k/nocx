@@ -12,20 +12,40 @@ import (
 // because it is git's output format and the client — which never runs git —
 // must not learn to read it.
 
-// WorktreeListArgs is the whole-worktree listing: git worktree list
-// --porcelain. One invocation answers path, HEAD, branch and detached for
-// every worktree of the repository, main checkout included, main first.
+// worktreeAttrName is the field that opens a record in both encodings.
+const worktreeAttrName = "worktree"
+
+// WorktreeListArgs is the whole-worktree listing in its PATH-SAFE form:
+// git worktree list --porcelain -z. One invocation answers path, HEAD,
+// branch and detached for every worktree of the repository, main checkout
+// included, main first.
 //
-// --porcelain is not a preference: the plain form pads paths to a column and
-// QUOTES a path containing an escape (measured on git 2.55: a worktree at
-// "/tmp/x/wt\nnl" prints as "/tmp/x/wt\nnl" with the backslash escaped),
-// which would make a parser learn git's C-style quoting to recover a path we
-// ought to have verbatim. The porcelain form prints the raw bytes.
+// -z is not a preference. Measured on git 2.55: without it the porcelain form
+// prints a path verbatim and UNQUOTED, so a path containing a newline arrives
+// as a record whose text can be read two ways, and one containing a blank
+// line or a line that begins like an attribute cannot be recovered at all.
+// With -z every field is NUL-terminated and a path is one field whatever
+// bytes it holds, which is the same reason the status and log reads use -z.
+//
+// IT NEEDS GIT 2.36, which is what added it (2.36.0 release notes: "git
+// worktree list --porcelain" did not c-quote pathnames and lock reasons with
+// unsafe bytes correctly, "which is worked around by introducing NUL
+// terminated output format with -z"). This package's floor is 2.25 (D8), so
+// the caller asks for this form only when the probed version has it —
+// local.worktreeListHasNUL — and asks for WorktreeListLinesArgs otherwise.
 //
 // --no-optional-locks is the reader discipline StatusArgs documents in full:
 // every read in this package takes no optional locks, so a reader can never
 // be the process that rewrites what an agent beside it is working on.
 func WorktreeListArgs() []string {
+	return []string{"--no-optional-locks", "worktree", "list", "--porcelain", "-z"}
+}
+
+// WorktreeListLinesArgs is the same listing for a git that predates the NUL
+// form (below 2.36, down to the 2.25 floor): git worktree list --porcelain,
+// newline-terminated. It is the one encoding git could offer those versions,
+// and ParseWorktreeListLines documents what it cannot represent.
+func WorktreeListLinesArgs() []string {
 	return []string{"--no-optional-locks", "worktree", "list", "--porcelain"}
 }
 
@@ -142,23 +162,63 @@ var worktreeAttributes = map[string]bool{
 	"prunable": true,
 }
 
-// ParseWorktreeList parses the whole output of WorktreeListArgs: records
-// separated by a blank line, each starting with "worktree <path>" and
-// followed by its attribute lines.
+// ParseWorktreeList parses the whole output of WorktreeListArgs: fields
+// NUL-terminated, each record opened by "worktree <path>" and closed by an
+// empty field, the attributes of a record between the two.
 //
-// The path is read as EVERYTHING up to the next attribute line, not as the
-// rest of its own line, and that is measured rather than defensive: git 2.55
-// prints the path verbatim, unquoted, so a worktree whose path contains a
-// newline renders as a "worktree <first line>" record with the rest of the
-// path on the following line(s) (measured: "/tmp/wt/nl" with a newline
-// between "wt" and "nl" comes back as exactly those two lines). A line that
-// is not a known attribute can therefore only be a path continuation, and
-// this is the one rule that recovers such a path instead of truncating it.
-//
-// The format has no -z form, so the ambiguity is git's and not ours: a path
-// containing a blank line, or a line that begins like an attribute, cannot be
-// recovered by any consumer. It is stated here rather than papered over.
+// The path is one field, verbatim, however many newlines, spaces or
+// attribute-looking words it contains: that is what -z buys, and the reason
+// this is the parser the seam uses on every git that offers the flag.
 func ParseWorktreeList(data []byte) ([]WorktreeRecord, error) {
+	var records []WorktreeRecord
+	var current *WorktreeRecord
+
+	flush := func() {
+		if current != nil {
+			records = append(records, *current)
+			current = nil
+		}
+	}
+
+	for _, field := range strings.Split(string(data), "\x00") {
+		switch {
+		case field == "":
+			// The empty field after the last attribute of a record — and the
+			// one the listing ends on: closing the record is what both mean.
+			flush()
+		case current == nil:
+			path, ok := strings.CutPrefix(field, worktreeAttrName+" ")
+			if !ok {
+				return nil, fmt.Errorf("git: malformed worktree listing: expected %q, got %q", "worktree <path>", field)
+			}
+			current = &WorktreeRecord{Path: path}
+		default:
+			applyWorktreeAttribute(current, field)
+		}
+	}
+	flush()
+	return records, nil
+}
+
+// ParseWorktreeListLines parses the output of WorktreeListLinesArgs — the
+// newline-terminated listing a git below 2.36 can answer. It is the ONLY
+// place in this package whose input cannot represent every path, and the
+// limitation is git's rather than this function's: the pre-2.36 porcelain
+// form prints a path verbatim, so a record's path and its attributes share a
+// line ending (2.36.0 release notes: paths and lock reasons "were not
+// c-quoted ... correctly", "worked around by introducing NUL terminated
+// output format with -z").
+//
+// What it does: a record starts at a "worktree <path>" line, and its path is
+// everything up to the next ATTRIBUTE line (HEAD, branch, detached, bare,
+// locked, prunable) — so a path containing a newline is recovered, which a
+// rule that read one line per field would truncate (measured on 2.55: a
+// worktree at "/tmp/wt/nl" with a newline between "wt" and "nl" comes back as
+// exactly those two lines). What it cannot: a path containing a blank line,
+// or a line that begins like an attribute, is read as a record boundary or as
+// an attribute. No consumer can do better with this encoding, and the caller
+// uses it only for a git that has no other.
+func ParseWorktreeListLines(data []byte) ([]WorktreeRecord, error) {
 	var records []WorktreeRecord
 	var current *WorktreeRecord
 
@@ -176,7 +236,7 @@ func ParseWorktreeList(data []byte) ([]WorktreeRecord, error) {
 			// with: closing the record is what they mean either way.
 			flush()
 		case current == nil:
-			path, ok := strings.CutPrefix(line, "worktree ")
+			path, ok := strings.CutPrefix(line, worktreeAttrName+" ")
 			if !ok {
 				return nil, fmt.Errorf("git: malformed worktree listing: expected %q, got %q", "worktree <path>", line)
 			}

@@ -3,10 +3,13 @@ package local
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/git/spawn"
 )
 
 // Criterion 6: for every git invocation these operations make, a test where
@@ -353,7 +356,7 @@ func TestWorktreeInvocationArgv(t *testing.T) {
 		}
 		t.Errorf("no invocation %q among %v", joined, calls)
 	}
-	assertArgv("--no-optional-locks", "worktree", "list", "--porcelain")
+	assertArgv("--no-optional-locks", "worktree", "list", "--porcelain", "-z")
 	assertArgv("worktree", "add", "-b", "worker-1", "--", wtPath, "master")
 	assertArgv("worktree", "remove", "--", wtPath)
 	assertArgv("--no-optional-locks", "rev-list", "--count", oid+".."+oid)
@@ -383,6 +386,166 @@ func subcommand(call []string) string {
 		}
 	}
 	return ""
+}
+
+// TestWorktreeListingEncodingFollowsTheGitVersion: -z is what makes a
+// worktree path unambiguous, and it arrived in git 2.36 while this package's
+// floor is 2.25 — so WHICH form is asked for is a fact about the git that is
+// running, decided once at open where the version is known. Both directions
+// are asserted on the argv, because on a repository whose paths are ordinary
+// the two encodings produce the same answer and only the argv tells them
+// apart. The fake answers each form the way git does, so the read is exercised
+// in both too.
+func TestWorktreeListingEncodingFollowsTheGitVersion(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		nul     bool
+	}{
+		{version: "2.55.0", nul: true},
+		{version: "2.36.0", nul: true}, // the version that added -z
+		{version: "2.35.3", nul: false},
+		{version: "2.25.0", nul: false}, // the floor itself
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			env, wtPath := withFakeWorktree(t, map[string]string{"FAKE_GIT_VERSION": tc.version})
+			repo := openRepo(t, env, t.TempDir())
+
+			list, err := repo.Worktrees(context.Background(), "master")
+			if err != nil {
+				t.Fatalf("Worktrees: %v", err)
+			}
+			if wt, ok := worktreeAt(list, wtPath); !ok || wt.Branch != "wt" {
+				t.Fatalf("the listing was not read in the encoding that was asked for: %+v", list)
+			}
+
+			var listing []string
+			for _, call := range fakeGitLog(t, env) {
+				if len(call) > 2 && call[1] == "worktree" && call[2] == "list" {
+					listing = call
+					break
+				}
+			}
+			if listing == nil {
+				t.Fatal("no worktree listing invocation was recorded")
+			}
+			if hasZ := slices.Contains(listing, "-z"); hasZ != tc.nul {
+				t.Errorf("listing argv = %v (contains -z: %v), want -z: %v for git %s", listing, hasZ, tc.nul, tc.version)
+			}
+		})
+	}
+}
+
+// TestWorktreeListHasNULIsTheVersionBoundary pins the decision itself, at the
+// version that introduced -z. The case above drives the same answer through a
+// repository; this one is here for the two edges a repository cannot show: the
+// version immediately below 2.36, and a version that cannot be read at all —
+// which the factory refuses before a Repo exists (belowFloor), so the helper's
+// conservative answer is what keeps this total if that ever changes.
+func TestWorktreeListHasNULIsTheVersionBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		want    bool
+	}{
+		{"git version 2.55.0", true},
+		{"2.36.0", true},
+		{"2.36", true},
+		{"2.35.3", false},
+		{"2.25.0", false},
+		{"1.9.0", false},
+		{"3.0.0", true},
+		{"not a version", false},
+		{"", false},
+	} {
+		if got := worktreeListHasNUL(tc.version); got != tc.want {
+			t.Errorf("worktreeListHasNUL(%q) = %v, want %v", tc.version, got, tc.want)
+		}
+	}
+}
+
+// TestWorktreeListingEncodingsAgreeOnRealGit reads one real repository BOTH
+// ways and requires the two encodings to describe it identically — record for
+// record, including a worktree whose PATH CONTAINS A NEWLINE, which is the
+// case the fallback encoding has to work around.
+//
+// This is the half of the fallback the fake cannot give: the fake answers a
+// fixture, and this answers real git. Which encoding the seam ASKS FOR is a
+// separate fact, asserted on argv in TestWorktreeListingEncodingFollowsTheGitVersion
+// (the fake records it), so the two tests together cover the version gate and
+// the fallback parser rather than one of them covering both vacuously.
+func TestWorktreeListingEncodingsAgreeOnRealGit(t *testing.T) {
+	dir, home := worktreeRepo(t)
+	repo := openRepo(t, gitEnv(t), dir)
+	ctx := context.Background()
+	linked := filepath.Join(home, "wt-linked")
+	detached := filepath.Join(home, "wt-detached")
+	newline := filepath.Join(home, "wt\nnl")
+	if _, err := repo.AddWorktree(ctx, "worker-1", "master", linked); err != nil {
+		t.Fatal(err)
+	}
+	if err := commandIn(dir, "worktree", "add", "--detach", detached, "master").Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := commandIn(dir, "worktree", "add", "-b", "nl", newline, "master").Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	nul := worktreeListingBytes(t, dir, spawn.WorktreeListArgs())
+	lines := worktreeListingBytes(t, dir, spawn.WorktreeListLinesArgs())
+	fromNUL, err := spawn.ParseWorktreeList(nul)
+	if err != nil {
+		t.Fatalf("the NUL listing: %v", err)
+	}
+	fromLines, err := spawn.ParseWorktreeListLines(lines)
+	if err != nil {
+		t.Fatalf("the line listing: %v", err)
+	}
+
+	if len(fromNUL) != 4 {
+		t.Fatalf("records = %d, want 4 (main, linked, detached, newline): %+v", len(fromNUL), fromNUL)
+	}
+	if len(fromLines) != len(fromNUL) {
+		t.Fatalf("the line encoding read %d records and the NUL encoding %d:\nnul:   %+v\nlines: %+v",
+			len(fromLines), len(fromNUL), fromNUL, fromLines)
+	}
+	for i := range fromNUL {
+		if fromLines[i] != fromNUL[i] {
+			t.Errorf("record %d differs between the encodings:\nnul:   %+v\nlines: %+v", i, fromNUL[i], fromLines[i])
+		}
+	}
+	if fromNUL[0].Path != dir || fromNUL[0].Branch != "master" {
+		t.Errorf("first record = %+v, want the main checkout on master", fromNUL[0])
+	}
+	var foundNewline bool
+	for _, rec := range fromNUL {
+		switch rec.Path {
+		case newline:
+			foundNewline = true
+			if rec.Branch != "nl" {
+				t.Errorf("the newline worktree = %+v, want branch nl", rec)
+			}
+		case detached:
+			if !rec.Detached || rec.Branch != "" {
+				t.Errorf("the detached worktree = %+v, want Detached with no branch", rec)
+			}
+		}
+	}
+	if !foundNewline {
+		t.Errorf("no record for %q in %+v — the path's newline was not preserved", newline, fromNUL)
+	}
+}
+
+// worktreeListingBytes runs one listing invocation against real git and returns
+// its stdout VERBATIM: the encodings differ in their terminators, so trimming
+// the bytes before parsing them would test neither.
+func worktreeListingBytes(t *testing.T, dir string, argv []string) []byte {
+	t.Helper()
+	cmd := commandIn(dir, argv...)
+	cmd.Env = gitEnv(t)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %v: %v", argv, err)
+	}
+	return out
 }
 
 // ── helpers ────────────────────────────────────────────────────────────

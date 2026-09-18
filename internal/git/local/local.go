@@ -41,7 +41,13 @@ type Repo struct {
 	resolver  *envCache // the shared resolution; nil with a pinned environment
 	toplevel  string    // the worktree this Repo is bound to; every invocation that is not about another worktree runs here
 	gitDir    string
-	ceilings  ceilings
+	// worktreeNUL says which encoding the worktree listing is read in: the
+	// NUL-terminated form git 2.36 added, or the line form every version from
+	// the 2.25 floor up can answer. Set once at open from the probed version
+	// (worktreeListHasNUL) — the operation PREFERS the path-safe form and
+	// does not require it.
+	worktreeNUL bool
+	ceilings    ceilings
 }
 
 type ceilings struct {

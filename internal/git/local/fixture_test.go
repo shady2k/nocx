@@ -328,8 +328,24 @@ case "$1" in
     # stderr) unless FAKE_WORKTREE says otherwise.
     case "$2" in
       list)
-        printf 'worktree %s\nHEAD 8f987d98fcd910d9aaa66d5769bda44bab3db702\nbranch refs/heads/main\n\n' "${FAKE_WORKTREE_MAIN:-/tmp/fake}"
-        printf 'worktree %s\nHEAD 8f987d98fcd910d9aaa66d5769bda44bab3db702\nbranch refs/heads/%s\n\n' "${FAKE_WORKTREE_PATH:-/tmp/fake/wt}" "${FAKE_WORKTREE_BRANCH:-wt}"
+        # Answered in the ENCODING THE INVOCATION ASKED FOR, as git does:
+        # with -z (2.36+) every field is NUL-terminated and a record closes on
+        # an empty field; without it, one field per line and a blank line
+        # between records. A fake that always answered one of the two would
+        # make the other path accidentally green — the encoding is what the
+        # seam's version gate decides, so the fake has to respect it.
+        main="${FAKE_WORKTREE_MAIN:-/tmp/fake}"
+        wt="${FAKE_WORKTREE_PATH:-/tmp/fake/wt}"
+        oid="8f987d98fcd910d9aaa66d5769bda44bab3db702"
+        br="${FAKE_WORKTREE_BRANCH:-wt}"
+        case "$*" in
+          *" -z"*)
+            printf 'worktree %s\0HEAD %s\0branch refs/heads/main\0\0' "$main" "$oid"
+            printf 'worktree %s\0HEAD %s\0branch refs/heads/%s\0\0' "$wt" "$oid" "$br" ;;
+          *)
+            printf 'worktree %s\nHEAD %s\nbranch refs/heads/main\n\n' "$main" "$oid"
+            printf 'worktree %s\nHEAD %s\nbranch refs/heads/%s\n\n' "$wt" "$oid" "$br" ;;
+        esac
         exit 0 ;;
       add|remove|lock|unlock)
         case "${FAKE_WORKTREE:-ok}" in

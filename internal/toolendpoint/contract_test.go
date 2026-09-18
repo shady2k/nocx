@@ -501,6 +501,97 @@ func TestGroupEndpoint_ParamsUseTheReferencedToolSchemas(t *testing.T) {
 	}
 }
 
+// A WITHDRAWN TOOL IS ABSENT FROM THE CATALOGUE AND REFUSED ON THE SOCKET —
+// the acceptance check for the removal itself (nocx-luqz9.6, design §7).
+//
+// BOTH HALVES MATTER AND THEY ARE DIFFERENT FAILURES. A catalogue still
+// advertising a call the dispatcher no longer has is the mismatch
+// nocx-6q1uh.16 exists to prevent, and the model would spend a turn discovering
+// it. A name that is merely gone from the registry but still accepted by the
+// endpoint would be worse: it would answer something.
+//
+// The name is spelled here rather than taken from a constant, deliberately: a
+// test that read the removed symbol from the code would stop compiling with it
+// and would prove nothing about the WIRE, which is what a model sees.
+func TestGroupEndpoint_AWithdrawnToolIsNeitherOfferedNorAnswered(t *testing.T) {
+	registry, err := agenttools.Assemble(tools.Schemas)
+	if err != nil {
+		t.Fatalf("assemble worker tools: %v", err)
+	}
+	dispatcher, err := assistant.NewToolDispatcher(
+		registry,
+		contractWorkerRecord{},
+		content.EnvironmentIDFor(content.EnvLocal, ""),
+	)
+	if err != nil {
+		t.Fatalf("new worker dispatcher: %v", err)
+	}
+	grant := contractGrant()
+	auth := &testAuthorizer{inv: assistant.ToolInvocation{
+		Context:    context.Background(),
+		RunContext: agenttools.RunContext{RunID: "run-1", Session: "session-1", Workspace: contractWorkspace},
+		Grant:      grant,
+	}}
+	endpoint := startEndpoint(t, Config{
+		Dir:      t.TempDir(),
+		Peers:    testPeers{uid: 1000, pid: 1234},
+		Owner:    testOwner{uid: 1000},
+		SelfUID:  1000,
+		Auth:     auth,
+		Dispatch: dispatcher,
+		Logger:   testLogger(),
+	})
+
+	conn := dialEndpoint(t, endpoint)
+	defer func() { _ = conn.Close() }()
+	// The catalogue a coordinator-shaped grant is offered, by name. The grant
+	// here is the one every case above uses, so this reads the FULL surface —
+	// a name missing from it is missing from the product's own offer.
+	if _, werr := io.WriteString(conn, `{"jsonrpc":"2.0","id":1,"method":"tools.catalogue","params":{"name":"workers.holdings"}}`+"\n"); werr != nil {
+		t.Fatalf("write catalogue request: %v", werr)
+	}
+	catalogue := readResponse(t, conn)
+	if catalogue.Error != nil {
+		t.Fatalf("catalogue response error = %+v", catalogue.Error)
+	}
+	var result struct {
+		Tools []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(catalogue.Result, &result); err != nil {
+		t.Fatalf("decode catalogue result: %v", err)
+	}
+	offered := make(map[string]bool, len(result.Tools))
+	for _, tool := range result.Tools {
+		offered[tool.Name] = true
+	}
+	if offered["workers.wait"] {
+		t.Fatalf("the catalogue still offers workers.wait, which no longer exists: %v", result.Tools)
+	}
+	// The neighbours are still offered, so "absent" is a statement about this
+	// one name rather than about an empty catalogue.
+	for _, name := range []string{"workers.spawn", "workers.holdings", "workers.close", "workers.inbox"} {
+		if !offered[name] {
+			t.Fatalf("the catalogue lost %q as well, so this proves nothing about the withdrawal: %v", name, result.Tools)
+		}
+	}
+
+	// AND A CALL TO IT IS REFUSED AS UNKNOWN. This is the socket half, driven
+	// over the same connection type the catalogue was read on.
+	if _, werr := io.WriteString(conn, `{"jsonrpc":"2.0","id":2,"method":"workers.wait","params":{}}`+"\n"); werr != nil {
+		t.Fatalf("write the withdrawn call: %v", werr)
+	}
+	answer := readResponse(t, conn)
+	if answer.Error == nil {
+		t.Fatalf("workers.wait was ANSWERED after its removal: %s", answer.Result)
+	}
+	if answer.Error.Code != rpcMethodNotFound {
+		t.Fatalf("workers.wait refusal code = %d (%s), want %d: a caller must be told the tool does not exist, not that it failed",
+			answer.Error.Code, answer.Error.Message, rpcMethodNotFound)
+	}
+}
+
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }

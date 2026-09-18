@@ -19,6 +19,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/agentdriver"
@@ -476,4 +477,73 @@ func participantRow(t *testing.T, s *coordinatorInboxStand, id workers.Participa
 func participantState(t *testing.T, s *coordinatorInboxStand, id workers.ParticipantID) string {
 	t.Helper()
 	return string(participantRow(t, s, id).State)
+}
+
+// ── the product's state vocabulary, over the socket ───────────────────────
+//
+// THE ACCEPTANCE CHECK FOR THE REMOVAL ITSELF (nocx-luqz9.6, ADR-0070
+// decision 3, design §4.1). A coordinator reads what it holds through the
+// shipped authorizer and the published socket, and the states it is told are
+// the record's own — never `completed`, `failed` or `abandoned`, because nocx
+// records no verdict at all.
+//
+// The two ends are one sequence and that is why they are one test: a worker
+// whose COORDINATOR closed it reads `closed`, one whose process merely exited
+// reads `exited`, and the difference is the one thing the process fact cannot
+// say. Reading them from different stands would let a stand's own fixture
+// answer for the product.
+func TestAWorkersEndReadsClosedOrExitedAndNeverAnOutcome(t *testing.T) {
+	ctx := context.Background()
+	s := prepareCoordinatorInbox(t)
+	ended := s.worker
+
+	// 1. A second worker, so the two ends below are read off two rows in the
+	//    same holdings answer rather than off two different moments.
+	closed, err := s.record.Register(ctx, workers.RegisterRequest{
+		CoordinatorSession: s.coordinator,
+		Role:               workers.RoleWorker,
+		Task:               "told to stop",
+		Command:            "claude",
+		Environment:        content.EnvironmentIDFor(content.EnvLocal, ""),
+	})
+	if err != nil {
+		t.Fatalf("register the second worker: %v", err)
+	}
+	if closed.State != workers.StateLive {
+		t.Fatalf("a spawned worker reads %q, want %q", closed.State, workers.StateLive)
+	}
+
+	// 2. One worker's process exits on its own.
+	row := participantRow(t, s, ended)
+	if _, err := s.record.Exited(ctx, row.ID, row.Liveness, workers.Exit{
+		Cause: string(session.ExitInterrupted), Code: 1,
+	}); err != nil {
+		t.Fatalf("exit: %v", err)
+	}
+
+	// 3. The coordinator ENDS the other one, through the record's own close.
+	if err := s.record.Close(ctx, s.coordinator, closed.ID); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// 4. And what a coordinator reads, over the socket it is admitted on.
+	holdings := callExternally(t, s.socket, "workers.holdings", `{}`)
+	if holdings.Error != nil {
+		t.Fatalf("workers.holdings: %+v", holdings.Error)
+	}
+	if got := workerParticipantState(t, string(holdings.Result), string(ended)); got != string(workers.StateExited) {
+		t.Fatalf("the worker whose process ended reads %q, want %q", got, workers.StateExited)
+	}
+	if got := workerParticipantState(t, string(holdings.Result), string(closed.ID)); got != string(workers.StateClosed) {
+		t.Fatalf("the worker its coordinator closed reads %q, want %q", got, workers.StateClosed)
+	}
+	// 5. THE NEGATIVE HALF, and it is the whole point: no row may report an
+	//    OUTCOME. Checked against the wire text rather than against the
+	//    decoded states, so a second state field or an outcome smuggled onto
+	//    another key is caught too.
+	for _, word := range []string{"completed", "failed", "abandoned"} {
+		if strings.Contains(string(holdings.Result), `"`+word+`"`) {
+			t.Fatalf("holdings reports %q, which nocx no longer records: %s", word, holdings.Result)
+		}
+	}
 }

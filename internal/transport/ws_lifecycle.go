@@ -363,7 +363,14 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 	}
 	if err := wconn.TryNotify("lifecycle.changed", mustMarshal(params)); err != nil {
 		s.log.Debug("write lifecycle.changed", "session", string(sid), "lane", f.Lane, "error", err)
+		return
 	}
+	// The delivered path is audible too. Every drop above says so, and this
+	// was the one branch that did not — so a renderer that never showed its
+	// editor left a log in which "sent and refused" and "never sent" read the
+	// same (nocx-n14oo.8's reasoning, for the other half).
+	s.log.Debug("lifecycle.changed sent", "session", string(sid), "lane", f.Lane,
+		"lifecycle", f.Lifecycle, "domain", f.Domain, "epoch", f.Epoch)
 }
 
 // syncLifecycleLedger projects authenticated attempt facts onto the same

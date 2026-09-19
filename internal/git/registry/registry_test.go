@@ -80,6 +80,26 @@ func (s *stubRepo) RemoteURL(ctx context.Context) (string, error) {
 	return "git@github.com:shady2k/nocx.git", nil
 }
 
+// The worktree operations are on the seam (brief nocx-xn63t.1.1) but not on
+// the Handle this package guards, which is the transport's route — so nothing
+// here can reach them, and an explicit error is what a future Handle method
+// would meet rather than a fabricated success from an unscripted stub.
+func (s *stubRepo) AddWorktree(ctx context.Context, branch, base, path string) (git.WorktreeAdded, error) {
+	return git.WorktreeAdded{}, errors.New("stubRepo: AddWorktree not scripted")
+}
+
+func (s *stubRepo) Worktrees(ctx context.Context, base string) ([]git.Worktree, error) {
+	return nil, errors.New("stubRepo: Worktrees not scripted")
+}
+
+func (s *stubRepo) RemoveWorktree(ctx context.Context, path string) error {
+	return errors.New("stubRepo: RemoveWorktree not scripted")
+}
+
+func (s *stubRepo) DeleteWorktreeBranch(ctx context.Context, branch, base string) error {
+	return errors.New("stubRepo: DeleteWorktreeBranch not scripted")
+}
+
 func (s *stubRepo) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

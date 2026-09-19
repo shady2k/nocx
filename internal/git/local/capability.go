@@ -108,6 +108,33 @@ const (
 	minGitMinor = 25
 )
 
+// worktreeNULMajor and worktreeNULMinor are the version that added the
+// NUL-terminated worktree listing: 2.36 (April 2022). Its release notes say
+// exactly why the form exists — `git worktree list --porcelain` "did not
+// c-quote pathnames and lock reasons with unsafe bytes correctly, which is
+// worked around by introducing NUL terminated output format with -z" — so a
+// worktree list read on 2.36 or later uses the form that is unambiguous for
+// every path, and one read below it uses the form git then had. The floor
+// stays 2.25: this is a form the operation PREFERS, not a version it
+// requires.
+const (
+	worktreeNULMajor = 2
+	worktreeNULMinor = 36
+)
+
+// worktreeListHasNUL reports whether this git's worktree listing can be asked
+// for the NUL-terminated form. An unparseable version answers false — asking
+// for a flag the git does not have would fail the whole operation — though
+// that answer is unreachable through Open, where belowFloor refuses such a
+// version before a Repo exists.
+func worktreeListHasNUL(version string) bool {
+	maj, min, ok := parseVersion(version)
+	if !ok {
+		return false
+	}
+	return maj > worktreeNULMajor || (maj == worktreeNULMajor && min >= worktreeNULMinor)
+}
+
 // belowFloor reports whether a `git --version` answer is below the floor.
 // An unparseable answer is treated as below the floor too — the outcome
 // carries the raw string so the panel can show what git actually said.

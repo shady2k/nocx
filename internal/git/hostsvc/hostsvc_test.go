@@ -203,6 +203,26 @@ func (r *stubRepo) HeadMessage(ctx context.Context) (git.HeadMessage, error) {
 func (r *stubRepo) RemoteURL(ctx context.Context) (string, error) {
 	return "", errors.New("stubRepo: RemoteURL not stubbed")
 }
+
+// The worktree operations are not part of this service (brief
+// nocx-xn63t.1.1): nothing in hostsvc calls them, so the stub answers the
+// same explicit error every other live-only method does.
+func (r *stubRepo) AddWorktree(ctx context.Context, branch, base, path string) (git.WorktreeAdded, error) {
+	return git.WorktreeAdded{}, errors.New("stubRepo: AddWorktree not stubbed")
+}
+
+func (r *stubRepo) Worktrees(ctx context.Context, base string) ([]git.Worktree, error) {
+	return nil, errors.New("stubRepo: Worktrees not stubbed")
+}
+
+func (r *stubRepo) RemoveWorktree(ctx context.Context, path string) error {
+	return errors.New("stubRepo: RemoveWorktree not stubbed")
+}
+
+func (r *stubRepo) DeleteWorktreeBranch(ctx context.Context, branch, base string) error {
+	return errors.New("stubRepo: DeleteWorktreeBranch not stubbed")
+}
+
 func (r *stubRepo) Close() error { return nil }
 
 // TestEnvStateMatchesLocal pins envState to exactly what a local-shaped repo

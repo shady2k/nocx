@@ -2,6 +2,7 @@ package local
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,6 +24,24 @@ import (
 //	FAKE_TOPLEVEL     the two-line rev-parse answer, line 1
 //	FAKE_GITDIR       line 2
 //	FAKE_HEAD         rev-parse --short HEAD answer; "FAIL" exits 128
+//	FAKE_OID          the oid rev-parse --verify prints (default a fixed 40-hex)
+//	FAKE_BRANCH_TIP   "fail" makes rev-parse --verify refs/heads/... exit 1
+//	                  (the branch does not exist); default "ok"
+//	FAKE_BASE_REV     "fail" makes rev-parse --verify <rev>^{commit} exit 1
+//	                  (the base does not name a commit); default "ok"
+//	FAKE_REVLIST      "fail" makes rev-list exit 128; default answers
+//	FAKE_REVLIST_COUNT the integer rev-list --count prints (default 0)
+//	FAKE_WORKTREE      "fail" makes worktree add/remove exit 128; default ok
+//	FAKE_WORKTREE_MAIN the main checkout the listing prints (default /tmp/fake)
+//	FAKE_WORKTREE_PATH the linked worktree the listing prints
+//	                  (default /tmp/fake/wt)
+//	FAKE_WORKTREE_BRANCH its branch name (default wt)
+//	FAKE_UPDATE_REF   "fail" makes update-ref exit 1, the CAS refusal
+//	FAKE_FAIL         one invocation to fail, matched on its first two
+//	                  arguments ("worktree list", "rev-list --count",
+//	                  "rev-parse --verify", "update-ref -d"), so a test can
+//	                  fail the invocation it is about while the ones before it
+//	                  succeed; exit 128
 //	FAKE_LOG          headMessage answer
 //	FAKE_DIFF         sleep | sleep_stubborn | fail
 //	FAKE_NUMSTAT      mode for `git diff --numstat`: fail | stream | otherwise
@@ -55,11 +74,54 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
+# FAKE_FAIL names ONE invocation to fail, matched as a PREFIX of the whole
+# argv tail: "worktree list", "worktree add", "rev-list --count",
+# "rev-parse --verify refs/heads/worker-1", "update-ref -d". It lets a test
+# drive the invocation it is about to failure while the ones before it
+# succeed, and it distinguishes two reads of the same command (the base and
+# the branch tip are both rev-parse --verify) — which the only reachable
+# alternative, failing the first invocation, cannot.
+if [ -n "${FAKE_FAIL:-}" ]; then
+  case "$*" in
+    "$FAKE_FAIL"*)
+      echo "fatal: fake git failed $FAKE_FAIL" >&2
+      exit 128 ;;
+  esac
+fi
 case "$1" in
   --version)
     echo "git version ${FAKE_GIT_VERSION:-2.55.0}"
     exit 0 ;;
   rev-parse)
+    if [ "$2" = "--verify" ]; then
+      # The worktree reads: one oid, or exit 1 for "I cannot resolve that" —
+      # the two answers VerifyCommitArgs and RefTipArgs are read by exit
+      # status. The branch and the base are separable so a test can have one
+      # exist and the other not, and the branch tip can CHANGE between reads
+      # ("absent_then_present"), which is the only way to reach the case where
+      # a failed add left a ref behind and that ref is then removed.
+      #
+      # The revision is the LAST argument: these invocations carry --quiet
+      # between it and --verify, and reading the wrong position is how this
+      # block silently answered "the branch exists" to every test.
+      ref="$3"
+      if [ "$3" = "--quiet" ]; then ref="$4"; fi
+      case "$ref" in
+        refs/heads/*)
+          case "${FAKE_BRANCH_TIP:-ok}" in
+            fail) exit 1 ;;
+            absent_then_present)
+              n=0
+              if [ -f "$FAKE_GIT_COUNT" ]; then n=$(cat "$FAKE_GIT_COUNT"); fi
+              n=$((n+1))
+              echo "$n" > "$FAKE_GIT_COUNT"
+              [ "$n" -eq 1 ] && exit 1 ;;
+          esac ;;
+        *'^{commit}') [ "${FAKE_BASE_REV:-ok}" = "fail" ] && exit 1 ;;
+      esac
+      echo "${FAKE_OID:-8f987d98fcd910d9aaa66d5769bda44bab3db702}"
+      exit 0
+    fi
     if [ "$2" = "--short" ]; then
       if [ "${FAKE_HEAD:-}" = "FAIL" ]; then
         echo "fatal: bad revision 'HEAD'" >&2
@@ -249,6 +311,58 @@ case "$1" in
       FAIL) echo "error: No such remote 'origin'" >&2; exit 128 ;;
       *) echo "${FAKE_REMOTE_URL:-git@github.com:shady2k/nocx.git}"; exit 0 ;;
     esac ;;
+  rev-list)
+    # The commit count the worktree reads take: one integer on stdout, or a
+    # refusal when git cannot resolve one of the two ends.
+    if [ "${FAKE_REVLIST:-ok}" = "fail" ]; then
+      echo "fatal: bad revision" >&2
+      exit 128
+    fi
+    echo "${FAKE_REVLIST_COUNT:-0}"
+    exit 0 ;;
+  worktree)
+    # The worktree listing and the two mutations. The listing is canned
+    # because the main checkout's path is the scratch directory the fake's
+    # caller chose, and the linked one is the path the test is about; the
+    # mutations answer git's own success (nothing on stdout, its progress on
+    # stderr) unless FAKE_WORKTREE says otherwise.
+    case "$2" in
+      list)
+        # Answered in the ENCODING THE INVOCATION ASKED FOR, as git does:
+        # with -z (2.36+) every field is NUL-terminated and a record closes on
+        # an empty field; without it, one field per line and a blank line
+        # between records. A fake that always answered one of the two would
+        # make the other path accidentally green — the encoding is what the
+        # seam's version gate decides, so the fake has to respect it.
+        main="${FAKE_WORKTREE_MAIN:-/tmp/fake}"
+        wt="${FAKE_WORKTREE_PATH:-/tmp/fake/wt}"
+        oid="8f987d98fcd910d9aaa66d5769bda44bab3db702"
+        br="${FAKE_WORKTREE_BRANCH:-wt}"
+        case "$*" in
+          *" -z"*)
+            printf 'worktree %s\0HEAD %s\0branch refs/heads/main\0\0' "$main" "$oid"
+            printf 'worktree %s\0HEAD %s\0branch refs/heads/%s\0\0' "$wt" "$oid" "$br" ;;
+          *)
+            printf 'worktree %s\nHEAD %s\nbranch refs/heads/main\n\n' "$main" "$oid"
+            printf 'worktree %s\nHEAD %s\nbranch refs/heads/%s\n\n' "$wt" "$oid" "$br" ;;
+        esac
+        exit 0 ;;
+      add|remove|lock|unlock)
+        case "${FAKE_WORKTREE:-ok}" in
+          fail) echo "fatal: '${FAKE_WORKTREE_PATH:-/tmp/fake/wt}' already exists" >&2; exit 128 ;;
+          *) echo "Preparing worktree" >&2; exit 0 ;;
+        esac ;;
+    esac
+    exit 0 ;;
+  update-ref)
+    # The guarded delete (DeleteRefArgs). A non-zero exit is the CAS refusal
+    # — the ref moved between the count and the delete — which the caller
+    # must report rather than swallow.
+    if [ "${FAKE_UPDATE_REF:-ok}" = "fail" ]; then
+      echo "error: cannot lock ref 'refs/heads/wt': is at 1111111111111111111111111111111111111111 but expected ${FAKE_OID:-8f987d98fcd910d9aaa66d5769bda44bab3db702}" >&2
+      exit 1
+    fi
+    exit 0 ;;
   *) exit 0 ;;
 esac
 `
@@ -412,6 +526,38 @@ func commandIn(dir string, args ...string) *exec.Cmd {
 	cmd := exec.Command(p, args...) // #nosec G204 — p is LookPath-resolved git; args are fixed test literals
 	cmd.Dir = dir
 	return cmd
+}
+
+// gitOut runs one real-git read in dir and returns its trimmed stdout,
+// failing the test when git refuses. It is the tests' oracle: "what does git
+// think" is asked of git, never of the code under test.
+func gitOut(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	out, err := gitTry(t, dir, args...)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	return out
+}
+
+// gitTry runs one real-git command in dir and returns its trimmed stdout
+// together with the failure, stderr included — for the cases where a non-zero
+// exit is the answer the test is asking for (rev-parse --verify) rather than
+// a broken fixture.
+func gitTry(t *testing.T, dir string, args ...string) (string, error) {
+	t.Helper()
+	cmd := commandIn(dir, args...)
+	cmd.Env = gitEnv(t)
+	out, err := cmd.Output()
+	if err == nil {
+		return strings.TrimSpace(string(out)), nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return strings.TrimSpace(string(out)), fmt.Errorf("git %s: exit %d: %s",
+			strings.Join(args, " "), exitErr.ExitCode(), strings.TrimSpace(string(exitErr.Stderr)))
+	}
+	return strings.TrimSpace(string(out)), err
 }
 
 func writeFile(path, content string, mode os.FileMode) error {

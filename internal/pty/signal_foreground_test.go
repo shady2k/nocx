@@ -169,8 +169,18 @@ func TestLocalPty_SignalForegroundReachesAChildNotOnlyTheShell(t *testing.T) {
 	// window is wide enough to hit. The inner shell writes $$ only once it is
 	// running as itself, with TERM at its default, and then execs the sleep
 	// under the same pid.
-	cmd := "sh -c 'trap \"echo reached > " + marker + ".part && mv " + marker + ".part " + marker + "; wait\" TERM; " +
-		"sh -c \"echo \\$\\$ > " + pidFile + ".part && mv " + pidFile + ".part " + pidFile + " && exec sleep 30\" & wait'\n"
+	//
+	// The command is a FILE, and the pty is handed only its name: quoting three
+	// shells deep on one typed line is a second thing to get right per
+	// platform, and the typed line is not what this test is about.
+	script := dir + "/run.sh"
+	body := "trap 'echo reached > " + marker + ".part && mv " + marker + ".part " + marker + "; wait' TERM\n" +
+		"sh -c 'echo $$ > " + pidFile + ".part && mv " + pidFile + ".part " + pidFile + " && exec sleep 30' &\n" +
+		"wait\n"
+	if err := os.WriteFile(script, []byte(body), 0o600); err != nil {
+		t.Fatalf("write the command's script: %v", err)
+	}
+	cmd := "sh " + script + "\n"
 	if _, err := lp.Write([]byte(cmd)); err != nil {
 		t.Fatalf("Write: %v", err)
 	}

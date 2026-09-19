@@ -605,7 +605,11 @@ jobs:
   # nothing, which is the only setting that stays worth passing on a backlog
   # with history.
   #
-  # It is here and not only in pre-commit because the local hook is one
+  # Its second step is the commit check, check-commits.mjs from the same
+  # plugin fed by commit-links.mjs: every commit the change introduces names a
+  # leaf task that exists. It has no strength setting and is never relaxed.
+  #
+  # It is here and not only in the local hooks because a hook is one
   # `--no-verify` away and several agent worktrees commit into this repository
   # every day. Node and a full history are the whole toolchain: no npm install,
   # no container, seconds.
@@ -653,10 +657,42 @@ jobs:
           fi
           echo "baseline: $base"
           node "$gate/adapter.mjs" --at "$base" > "$RUNNER_TEMP/backlog-baseline.json"
+          # The baseline is judged by the config of its own day, so a config
+          # change that creates violations (a lowered budget, a new milestone)
+          # shows up as new errors instead of passing as old debt.
+          baseline_config=""
+          if git show "$base:$gate/config.json" > "$RUNNER_TEMP/backlog-baseline-config.json" 2>/dev/null; then
+            baseline_config="--baseline-config $RUNNER_TEMP/backlog-baseline-config.json"
+          fi
+          # shellcheck disable=SC2086 # baseline_config is two words or none
           node "$gate/adapter.mjs" |
             node "$gate/check.mjs" \
               --config "$gate/config.json" \
-              --baseline "$RUNNER_TEMP/backlog-baseline.json" -
+              --baseline "$RUNNER_TEMP/backlog-baseline.json" $baseline_config -
+
+      - name: Every new commit names a task
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -eu
+          gate=.githooks/backlog-gate
+          # Every commit this change introduces, each checked on its own. On a
+          # pull request that is the merge base to the PR's head — not HEAD,
+          # which is GitHub's synthetic merge. On a push it is what the push
+          # added; a new branch has no "before", and then it is what the branch
+          # holds that main does not. An empty range is an error in the script,
+          # never a pass.
+          if [ -n "${BASE_REF:-}" ]; then
+            range="$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")..$HEAD_SHA"
+          elif [ -n "${BEFORE:-}" ] && git rev-parse -q --verify "$BEFORE^{commit}" >/dev/null; then
+            range="$BEFORE..$(git rev-parse HEAD)"
+          else
+            range="$(git merge-base origin/main HEAD)..$(git rev-parse HEAD)"
+          fi
+          echo "range: $range"
+          node "$gate/commit-links.mjs" --range "$range"
 
   # e2e — the suite, in the same container a developer runs it in.
   #

@@ -1,9 +1,4 @@
 #!/usr/bin/env node
-// VENDORED, NEVER EDITED. Copied byte for byte from the shady2k-skills plugin
-// (github.com/shady2k/skills, 0.2.0, skills/backlog/setup-shady2k-skills) by
-// its own installer. Delete these five lines and the rest is that file: the
-// rules are the same everywhere, and what this project is lives in config.json
-// and adapter.mjs beside it. To change a rule, change it there and re-vendor.
 /**
  * The backlog gate — the checks that keep a "ready" queue an answer rather
  * than a dump.
@@ -47,18 +42,26 @@
  *     that exist. An epic nobody filed, a stage with no issue, a criterion
  *     that holds but is unwritten: all invisible.
  *   - `epic-without-criterion` IS A TEXT SEARCH for a heading or a phrase. An
- *     epic stating its criterion in prose is reported; an epic with the
- *     heading and nothing under it is not. It reports a missing SIGNAL.
+ *     epic stating its criterion in prose is reported; an empty heading is
+ *     also reported. A few words are a signal, not a proof of a good criterion.
  *   - IT CANNOT FIND A DUPLICATE. That check belongs to whoever is about to
  *     file, because duplicates are rarely near-copies: a split-panes epic was
  *     filed twice because the searches were "split", "pane" and
  *     "panes" while the existing issue was titled "Drag one tab onto another
  *     and watch both at once".
+ *   - `stale-edge` MEASURES THE BLOCKER, NOT THE EDGE. Few trackers date an
+ *     edge, so the model carries none, and a brand-new dependency on an old
+ *     issue reads the same as an old one. It is a warning for that reason.
+ *   - A RENAMED ID IS A NEW ISSUE. `block-new` matches a violation by check,
+ *     issue id and the other party to it. A tracker that renumbers turns old
+ *     debt into new errors once, and nothing here can know better.
  *   - IT JUDGES NO SCOPE. Whether the current milestone is the right one, and
  *     whether a criterion is a good criterion, belong to the owner.
  */
 
-import { readdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -72,7 +75,7 @@ const CRITERION_MARKERS = [
   '## acceptance criteria',
 ];
 
-const LIVE = (s) => s === 'open' || s === 'active';
+const LIVE = (s) => ['open', 'active', 'submitted', 'implemented'].includes(s);
 
 // ---------------------------------------------------------------- model
 
@@ -111,9 +114,16 @@ const isIdea = (cfg, i) =>
   (i.labels || []).some((l) => cfg.ideaLabels.includes(l)) ||
   cfg.ideaTitlePrefixes.some((p) => (i.title || '').startsWith(p));
 
+// A marker alone is a heading somebody meant to fill in. It counts when words
+// follow it before the next heading.
 const hasCriterion = (i) => {
   const b = (i.body || '').toLowerCase();
-  return CRITERION_MARKERS.some((mk) => b.includes(mk));
+  return CRITERION_MARKERS.some((mk) => {
+    const at = b.indexOf(mk);
+    if (at < 0) return false;
+    const after = b.slice(at + mk.length).split(/\n\s*#/)[0];
+    return (after.match(/[\p{L}\p{N}]{2,}/gu) || []).length >= 3;
+  });
 };
 
 // ---------------------------------------------------------------- checks
@@ -146,15 +156,16 @@ const CHECKS = [
   {
     id: 'stale-edge',
     severity: 'warn',
-    why: 'A blocking edge records a collision — two things touching the same code — never "later", because nothing expires one. One epic held live work for 45 days while sharing no file with it.',
-    fix: 'Remove the edge, or move it onto the leaf that actually collides. If the blocker is real, it belongs in the slice.',
+    why: 'A dependency needs a required result or a conflict, not list order. Its age prompts a review but does not disprove a real prerequisite.',
+    fix: 'Verify the required result or conflict. Remove an obsolete edge, or move it onto the actual consuming and producing leaves.',
     run: (m, cfg, ctx) =>
       m.issues.flatMap((i) =>
         !LIVE(i.status)
           ? []
           : (i.blockedBy || []).flatMap((b) => {
               const blocker = m.by.get(b);
-              if (!blocker || !LIVE(blocker.status)) return [];
+              if (!blocker) return [{ id: i.id, ref: b, note: `blocked by ${b}, which does not exist` }];
+              if (!LIVE(blocker.status)) return [];
               const age = ctx.age(blocker);
               return age > cfg.staleDays ? [{ id: i.id, ref: b, note: `blocked by ${b}, untouched ${age}d` }] : [];
             }),
@@ -186,7 +197,7 @@ const CHECKS = [
         const ls = root.labels || [];
         if (ls.includes(cfg.currentMilestone)) return [];
         const other = ls.find((l) => cfg.milestoneLabels.includes(l));
-        return [{ id: i.id, note: `its root ${root.id} ${other ? `is ${other}` : 'carries no milestone'}, current is ${cfg.currentMilestone}` }];
+        return [{ id: i.id, ref: root.id, note: `its root ${root.id} ${other ? `is ${other}` : 'carries no milestone'}, current is ${cfg.currentMilestone}` }];
       }),
   },
   {
@@ -197,6 +208,9 @@ const CHECKS = [
     run: (m, cfg, ctx) =>
       m.issues.flatMap((i) => {
         if (i.status !== 'active') return [];
+        // `holder` is optional in the model. An adapter that emits it lets
+        // this say so outright instead of inferring it from age.
+        if (i.holder === null || i.holder === '') return [{ id: i.id, note: 'active, and nobody holds it' }];
         const tree = [i.id, ...subtree(m, i.id)].map((id) => m.by.get(id)).filter(Boolean);
         const freshest = Math.min(...tree.map(ctx.age));
         return freshest > cfg.holdDays ? [{ id: i.id, note: `nothing in its tree moved for ${freshest}d` }] : [];
@@ -204,7 +218,7 @@ const CHECKS = [
   },
   {
     id: 'epic-without-criterion',
-    severity: 'warn',
+    severity: 'error',
     why: 'An epic with no criterion that stops being false exactly once becomes an area of code wearing an epic\'s clothes, and absorbs every new bug in its area until it can never finish.',
     fix: 'Name in one sentence what somebody can do that they could not before, and what would falsify it.',
     run: (m) =>
@@ -214,7 +228,7 @@ const CHECKS = [
   },
   {
     id: 'label-vocabulary',
-    severity: 'warn',
+    severity: 'error',
     why: 'A vocabulary enforced only by prose drifts. One repository declared a closed list in its contract and held about seventy labels in the tree.',
     fix: 'Map it onto a declared label, or add it to the config deliberately.',
     run: (m, cfg) => {
@@ -237,7 +251,7 @@ const CHECKS = [
   },
   {
     id: 'area-label',
-    severity: 'warn',
+    severity: 'error',
     why: 'Exactly one area label, by the area that OWNS the behaviour. None makes it unfindable; two usually means it is two issues.',
     fix: 'Label by the area that owns the behaviour, not every area it touches. If two genuinely own it, file two.',
     run: (m, cfg) =>
@@ -253,19 +267,78 @@ const CHECKS = [
     id: 'finding-budget',
     severity: 'error',
     why: 'Bugs and debt found mid-milestone go to the front one at a time, each reasonable, and push the feature out by a fortnight nobody decided on. The charter declares how many the milestone absorbs.',
-    fix: 'Take it to the owner: it goes to the next milestone, deferred, or it displaces something that is named and deferred with it. Raising the budget is a charter change, made on purpose.',
+    fix: 'Defer the finding, or ask the owner to replace named planned work and explicitly adjust the finding budget in config and the charter decision. Deferring planned work alone does not change this count.',
     run: (m, cfg) => {
       if (cfg.findingBudget == null) return [];
       const marks = cfg.findingLabels || [];
       const spent = m.issues.filter((i) => {
         if (i.status === 'deferred' || !(i.labels || []).some((l) => marks.includes(l))) return false;
-        const root = m.by.get(rootOf(m, i.id)) || i;
-        return [...(i.labels || []), ...(root.labels || [])].includes(cfg.currentMilestone);
+        // Its OWN milestone label wins: a feature carried into the next
+        // milestone must not charge the findings it already closed to the new
+        // budget. Only a finding with no milestone of its own reads its root's.
+        const own = (i.labels || []).filter((l) => cfg.milestoneLabels.includes(l));
+        if (own.length) return own.includes(cfg.currentMilestone);
+        return ((m.by.get(rootOf(m, i.id)) || i).labels || []).includes(cfg.currentMilestone);
       });
-      return spent.length <= cfg.findingBudget
-        ? []
-        : spent.map((i) => ({ id: i.id, note: `one of ${spent.length} findings against a budget of ${cfg.findingBudget}` }));
+      // Only the overage is in violation, oldest findings first, so crossing
+      // the budget by one is one new error and not the whole list.
+      const order = (i) => `${i.createdAt || ''}|${i.id}`;
+      return spent
+        .sort((a, b) => (order(a) < order(b) ? -1 : 1))
+        .slice(cfg.findingBudget)
+        .map((i, n) => ({ id: i.id, note: `finding ${cfg.findingBudget + n + 1} of ${spent.length}, against a budget of ${cfg.findingBudget}` }));
     },
+  },
+  {
+    id: 'dependency-cycle',
+    severity: 'error',
+    why: 'Live tasks that transitively wait for themselves can never become ready, even when the parent tree is valid.',
+    fix: 'Correct the required-result or conflict edges; independent tasks and features must not be chained by list order.',
+    run: (m) => m.issues.filter((i) => LIVE(i.status)).flatMap((i) => {
+      const pending = [...(i.blockedBy || [])];
+      const seen = new Set();
+      while (pending.length) {
+        const id = pending.pop();
+        if (id === i.id) return [{ id: i.id, note: 'live dependencies lead back to this issue' }];
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const blocker = m.by.get(id);
+        if (blocker && LIVE(blocker.status)) pending.push(...(blocker.blockedBy || []));
+      }
+      return [];
+    }),
+  },
+  {
+    id: 'nonleaf-dependency',
+    severity: 'error',
+    why: 'Blocking entire containers hides the concrete prerequisite and serializes unrelated work.',
+    fix: 'Place the dependency on the actual consuming and producing leaves, with the result or conflict it represents.',
+    run: (m) => m.issues.filter((i) => LIVE(i.status)).flatMap((i) =>
+      (i.blockedBy || []).filter((id) => i.type === 'epic' || m.children.has(i.id) ||
+        m.by.get(id)?.type === 'epic' || m.children.has(id))
+        .map((id) => ({ id: i.id, ref: id, note: 'dependency uses a container rather than a leaf' }))),
+  },
+  {
+    id: 'submitted-without-evidence',
+    severity: 'error',
+    why: 'A worker result awaiting integration must remain recoverable without being offered for implementation again.',
+    fix: 'Record the submitted result revision/location and local-check evidence, or keep genuinely unfinished work open.',
+    run: (m) => m.issues.filter((i) => i.status === 'submitted' &&
+      (i.type === 'epic' || m.children.has(i.id) || m.by.get(i.parent)?.type !== 'epic' ||
+       typeof i.delivery?.revision !== 'string' || !i.delivery.revision.trim() ||
+       typeof i.delivery?.evidence !== 'string' || !i.delivery.evidence.trim()))
+      .map((i) => ({ id: i.id, note: 'submitted requires a leaf under a stage, result revision/location and local evidence' })),
+  },
+  {
+    id: 'implemented-without-evidence',
+    severity: 'error',
+    why: 'Implemented work is unavailable to acceptance or downstream tasks without an integrated revision and related-check evidence.',
+    fix: 'Record the integrated revision and local-check evidence under its stage, or reopen work that has not actually been integrated.',
+    run: (m) => m.issues.filter((i) => i.status === 'implemented' &&
+      (i.type === 'epic' || m.children.has(i.id) || m.by.get(i.parent)?.type !== 'epic' ||
+       typeof i.integration?.revision !== 'string' || !i.integration.revision.trim() ||
+       typeof i.integration?.evidence !== 'string' || !i.integration.evidence.trim()))
+      .map((i) => ({ id: i.id, note: 'implemented requires a leaf under a stage, integrated revision and related-check evidence' })),
   },
   {
     id: 'parent-cycle',
@@ -301,21 +374,87 @@ function bulkClusters(m, threshold) {
 
 // ---------------------------------------------------------------- run
 
+// The version of the set these rules shipped with. A project holds a COPY of
+// this file, and this is how anybody tells that the copy has fallen behind.
+const RULES_VERSION = '0.10.0';
+
 const STRENGTHS = ['block', 'block-new', 'report'];
+
+/** Thrown for anything that is the caller's mistake; main turns it into exit 2. */
+class Misuse extends Error {}
+
+const LIST_KEYS = ['areaLabels', 'milestoneLabels', 'roadmapLabels', 'triageLabels', 'ideaLabels', 'ideaTitlePrefixes', 'findingLabels'];
+const NUMBER_KEYS = { staleDays: 14, holdDays: 2, bulkCluster: 20 };
+
+/**
+ * A gate that cannot read its input is red, never green, and says why in one
+ * line. A missing list is an empty list; a missing threshold is its default;
+ * anything of the wrong type is refused rather than guessed at.
+ */
+function checkedConfig(raw, where) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Misuse(`${where}: the config is not a JSON object`);
+  const cfg = { ...raw };
+  for (const k of LIST_KEYS) {
+    if (cfg[k] == null) cfg[k] = [];
+    if (!Array.isArray(cfg[k]) || cfg[k].some((x) => typeof x !== 'string')) throw new Misuse(`${where}: ${k} must be a list of strings`);
+  }
+  for (const [k, dflt] of Object.entries(NUMBER_KEYS)) {
+    if (cfg[k] == null) cfg[k] = dflt;
+    if (!Number.isFinite(cfg[k]) || cfg[k] < 0) throw new Misuse(`${where}: ${k} must be a number, zero or more`);
+  }
+  if (cfg.findingBudget != null && !(Number.isInteger(cfg.findingBudget) && cfg.findingBudget >= 0))
+    throw new Misuse(`${where}: findingBudget must be a whole number or null`);
+  if (cfg.currentMilestone != null && !cfg.milestoneLabels.includes(cfg.currentMilestone))
+    throw new Misuse(`${where}: currentMilestone "${cfg.currentMilestone}" is not in milestoneLabels`);
+  return cfg;
+}
+
+function checkedBacklog(raw, where) {
+  if (!raw || !Array.isArray(raw.issues)) throw new Misuse(`${where}: not a normalized backlog (no "issues" list); see model.md`);
+  const seen = new Set();
+  for (const i of raw.issues) {
+    if (!i || typeof i.id !== 'string' || !i.id) throw new Misuse(`${where}: an issue has no id`);
+    if (seen.has(i.id)) throw new Misuse(`${where}: the id ${i.id} appears twice`);
+    seen.add(i.id);
+    if (!['open', 'active', 'submitted', 'implemented', 'deferred', 'closed'].includes(i.status)) throw new Misuse(`${where}: ${i.id} has the status "${i.status}"; see model.md`);
+    if (i.blockedBy != null && (!Array.isArray(i.blockedBy) || i.blockedBy.some((id) => typeof id !== 'string' || !id)))
+      throw new Misuse(`${where}: ${i.id} blockedBy must be a list of ids`);
+    // An unreadable date makes every age comparison false, which reads as "fresh".
+    if (LIVE(i.status) && !Number.isFinite(Date.parse(i.updatedAt))) throw new Misuse(`${where}: ${i.id} has no readable updatedAt`);
+  }
+  return raw;
+}
+
+function readJson(path, what) {
+  let text;
+  try {
+    text = !path || path === '-' ? readFileSync(0, 'utf8') : readFileSync(path, 'utf8');
+  } catch (e) {
+    throw new Misuse(`cannot read ${what} (${path || 'stdin'}): ${e.code || e.message}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Misuse(`${what} (${path || 'stdin'}) is not JSON${text.trim() ? '' : ': it is empty'}`);
+  }
+}
 
 /**
  * A bulk edit rewrites the timestamps it touches, so after one the backlog's
  * own ages describe the edit. `agesFrom` is a normalized backlog saved BEFORE
  * it: statuses, edges and labels are read from the current one, last-modified
- * from the old one wherever the issue already existed.
+ * from the old one only while its timestamp still matches the AFTER snapshot.
+ * Later work keeps its actual timestamp rather than being frozen in the past.
  */
-function withAgesFrom(backlog, agesFrom) {
+function withAgesFrom(backlog, agesFrom, agesThrough) {
   if (!agesFrom) return backlog;
   const old = new Map(agesFrom.issues.map((i) => [i.id, i.updatedAt]));
+  const after = new Map(agesThrough.issues.map((i) => [i.id, i.updatedAt]));
   return {
     ...backlog,
     source: `${backlog.source || '(unnamed)'}; ages from ${agesFrom.source || 'a snapshot'}`,
-    issues: backlog.issues.map((i) => (old.has(i.id) ? { ...i, updatedAt: old.get(i.id) } : i)),
+    issues: backlog.issues.map((i) => (old.has(i.id) && after.get(i.id) === i.updatedAt
+      ? { ...i, updatedAt: old.get(i.id) } : i)),
   };
 }
 
@@ -369,7 +508,7 @@ function judge(report, baseline, strength) {
 
 function render(report) {
   const lines = [
-    `gate (${report.strength}) — milestone ${report.milestone}, ${report.live} live of ${report.total}`,
+    `gate ${RULES_VERSION} (${report.strength}) — milestone ${report.milestone}, ${report.live} live of ${report.total}`,
     `source: ${report.source}`,
     '',
   ];
@@ -401,9 +540,10 @@ function render(report) {
  * own authoring a project name reached the rules, so the guard is code rather
  * than a promise. `projectWords` and `trackerWords` come from the PROJECT's
  * config — the skill cannot know them, which is the point — and neither may
- * appear in any file here: the rules, the fixtures, the model, SKILL.md. The
- * tracker is reached through the project's adapter and the project's own
- * tracker doc, never through anything that ships with the rules.
+ * appear in any file here: the rules, the fixtures, the model, the protocol,
+ * the seed, SKILL.md. The tracker is reached through the project's adapter and
+ * the project's own tracker doc, never through anything that ships with the
+ * rules.
  *
  * Without a project config there is nothing to look for and it says so.
  */
@@ -420,8 +560,8 @@ function portability(projectConfigPath) {
     console.log('SKIP  portability: the project config declares no projectWords or trackerWords');
     return 0;
   }
-  const files = ['check.mjs', 'model.md', 'SKILL.md', 'backlog.md', 'fixtures/config.json'];
-  for (const kind of ['bad', 'good'])
+  const files = ['check.mjs', 'check-commits.mjs', 'model.md', 'SKILL.md', 'integration.md', 'protocol.md', 'fixtures/config.json'];
+  for (const kind of ['bad', 'good', 'commits'])
     for (const n of readdirSync(join(HERE, 'fixtures', kind))) files.push(`fixtures/${kind}/${n}`);
   let failures = 0;
   for (const f of files) {
@@ -451,18 +591,28 @@ function runSelftest(cfg, projectConfigPath) {
     // also tripping `blocked-by-deferred`, because an idea belongs deferred.
     // Declaring the set is what keeps a rule from quietly widening — a check
     // that starts firing on a fixture it did not declare fails here.
-    const expected = (backlog.expect || [name.replace(/\.json$/, '')]).slice().sort();
+    const expected = (backlog.expect || [name.split('.')[0]]).slice().sort();
     const report = evaluate(backlog, cfg, null);
     const fired = report.results.filter((r) => r.violations.length).map((r) => r.id).sort();
-    const ok = fired.join(',') === expected.join(',');
-    say(ok, `bad/${name} → [${fired.join(', ') || 'nothing'}]${ok ? '' : `  expected [${expected.join(', ')}]`}`);
+    let ok = fired.join(',') === expected.join(',');
+    let detail = ok ? '' : `  expected [${expected.join(', ')}]`;
+    // Naming the check is not enough for a rule with several branches: a
+    // fixture may list the exact violations, as check|issue|ref, and then
+    // finding only some of them fails.
+    if (ok && backlog.expectViolations) {
+      const got = report.results.flatMap((r) => r.violations.map((v) => `${r.id}|${v.id}|${v.ref || ''}`)).sort();
+      const want = backlog.expectViolations.slice().sort();
+      ok = got.join(' ') === want.join(' ');
+      if (!ok) detail = `  violations [${got.join(' ')}]  expected [${want.join(' ')}]`;
+    }
+    say(ok, `bad/${name} → [${fired.join(', ') || 'nothing'}]${detail}`);
   }
   for (const name of readdirSync(join(dir, 'good')).sort()) {
     const report = evaluate(load('good', name), cfg, null);
     const fired = report.results.filter((r) => r.violations.length).map((r) => r.id);
     say(fired.length === 0, `good/${name} → [${fired.join(', ') || 'nothing'}]`);
   }
-  const covered = new Set(readdirSync(join(dir, 'bad')).map((n) => n.replace(/\.json$/, '')));
+  const covered = new Set(readdirSync(join(dir, 'bad')).map((n) => n.split('.')[0]));
   for (const c of CHECKS) if (!covered.has(c.id)) say(false, `no fixture for check ${c.id}`);
 
   // The three strengths, on one backlog that violates an error-severity rule.
@@ -489,34 +639,79 @@ function runSelftest(cfg, projectConfigPath) {
   // hold. Ages from the snapshot taken before it bring the violation back.
   const edited = { ...dirty, issues: dirty.issues.map((i) => ({ ...i, updatedAt: dirty.generatedAt })) };
   const fired = (b) => evaluate(b, cfg, ['stale-hold']).results[0].violations.length;
-  say(fired(edited) === 0 && fired(withAgesFrom(edited, dirty)) > 0, 'ages-from: a stale hold hidden by a bulk edit is seen again through the snapshot');
+  say(fired(edited) === 0 && fired(withAgesFrom(edited, dirty, edited)) > 0, 'ages-from: a stale hold hidden by a bulk edit is seen again through paired snapshots');
+  const resumed = { ...edited, issues: edited.issues.map((i) => ({ ...i, updatedAt: '2026-02-01T00:00:00Z' })) };
+  say(fired(withAgesFrom(resumed, dirty, edited)) === 0, 'ages-from: later real work retains its timestamp');
+  // The command line, run for real. A gate that cannot read its input must
+  // exit 2 and never 0, and none of these may pass by accident.
+  const tmp = mkdtempSync(join(tmpdir(), 'gate-selftest-'));
+  const put = (name, value) => {
+    const p = join(tmp, name);
+    writeFileSync(p, typeof value === 'string' ? value : JSON.stringify(value));
+    return p;
+  };
+  const run = (...argv) => spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...argv], { encoding: 'utf8' });
+  const fixtureCfg = join(dir, 'config.json');
+  const overBudget = join(dir, 'bad', 'finding-budget.json');
+  const stale = join(dir, 'bad', 'stale-hold.json');
+  for (const [what, want, argv] of [
+    ['an unknown --only', 2, ['--config', fixtureCfg, '--strength', 'block', '--only', 'no-such-check', stale]],
+    ['an empty backlog file', 2, ['--config', fixtureCfg, '--strength', 'block', put('empty.json', '')]],
+    ['a config that is not an object', 2, ['--config', put('cfg.json', '[]'), '--strength', 'block', stale]],
+    ['a live issue with an unreadable date', 2, ['--config', fixtureCfg, '--strength', 'block', put('nodate.json', { issues: [{ id: 'A', status: 'active', updatedAt: 'not-a-date' }] })]],
+    ['no strength chosen anywhere', 2, ['--config', fixtureCfg, stale]],
+    ['an unpaired age snapshot', 2, ['--config', fixtureCfg, '--strength', 'block', '--ages-from', stale, stale]],
+    ['a config with only a strength, on a violating backlog', 1, ['--config', put('min.json', { strength: 'block' }), stale]],
+  ]) {
+    const got = run(...argv).status;
+    say(got === want, `cli: ${what} → exit ${got}${got === want ? '' : `, expected ${want}`}`);
+  }
+  // Lowering the budget creates violations. Judged by today's config the
+  // baseline has them too and block-new is green; judged by its own it is not.
+  const roomy = put('roomy.json', { ...cfg, findingBudget: 9, strength: 'block-new' });
+  const tight = put('tight.json', { ...cfg, strength: 'block-new' });
+  const blind = run('--config', tight, '--baseline', overBudget, overBudget).status;
+  const sighted = run('--config', tight, '--baseline', overBudget, '--baseline-config', roomy, overBudget).status;
+  say(blind === 0 && sighted === 1, `cli: a lowered budget is old debt without --baseline-config (exit ${blind}) and a new error with it (exit ${sighted})`);
+
   console.log(failures ? `\n${failures} failure(s)` : '\nall fixtures pass');
   return failures ? 1 : 0;
 }
 
 function main() {
   const argv = process.argv.slice(2);
-  const args = { json: false, only: null, input: null, selftest: false, config: null, baseline: null, strength: null, agesFrom: null };
+  const args = { json: false, only: null, input: null, selftest: false, config: null, baseline: null, baselineConfig: null, strength: null, agesFrom: null, agesThrough: null };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--json') args.json = true;
     else if (argv[i] === '--only') args.only = argv[++i].split(',');
     else if (argv[i] === '--config') args.config = argv[++i];
     else if (argv[i] === '--baseline') args.baseline = argv[++i];
+    else if (argv[i] === '--baseline-config') args.baselineConfig = argv[++i];
     else if (argv[i] === '--strength') args.strength = argv[++i];
     else if (argv[i] === '--ages-from') args.agesFrom = argv[++i];
+    else if (argv[i] === '--ages-through') args.agesThrough = argv[++i];
     else if (argv[i] === '--selftest') args.selftest = true;
     else if (argv[i] === '--help' || argv[i] === '-h') args.help = true;
+    else if (argv[i] === '--version') args.version = true;
     else args.input = argv[i];
+  }
+  if (args.version) {
+    console.log(RULES_VERSION);
+    return 0;
   }
   if (args.help) {
     console.log(
-      'check.mjs --config <project config> [<normalized.json>|-] [--baseline <normalized.json>]\n' +
-        '          [--strength block|block-new|report] [--ages-from <normalized.json>]\n' +
+      'check.mjs --config <project config> [<normalized.json>|-]\n' +
+        '          [--baseline <normalized.json> [--baseline-config <config as it was then>]]\n' +
+        '          [--strength block|block-new|report] [--ages-from <before.json> --ages-through <after.json>]\n' +
         '          [--only <id,id>] [--json]\n' +
-        'check.mjs --selftest [--config <project config>]\n\n' +
+        'check.mjs --selftest [--config <project config>]\n' +
+        'check.mjs --version\n\n' +
         'Applies the backlog invariants to the normalized backlog on stdin or at <path>.\n' +
         'Strength comes from the config unless given; block-new needs --baseline.\n' +
-        '--ages-from reads last-modified from a snapshot saved before a bulk edit.\n' +
+        '--ages-from and --ages-through correct only timestamps still matching the bulk edit.\n' +
+        '--baseline-config judges the baseline by the rules of its own day, so a\n' +
+        'config change that creates violations shows up as new errors.\n' +
         'Exit 0 green, 1 red, 2 misuse.\n\n' +
         'Checks: ' + CHECKS.map((c) => c.id).join(', '),
     );
@@ -527,27 +722,41 @@ function main() {
   // which is the opposite of what it is for. The project's config is read for
   // one thing only — the words the skill may not contain.
   if (args.selftest)
-    return runSelftest(JSON.parse(readFileSync(join(HERE, 'fixtures', 'config.json'), 'utf8')), args.config);
+    return runSelftest(checkedConfig(readJson(join(HERE, 'fixtures', 'config.json'), 'the fixture config'), 'fixture config'), args.config);
 
-  const misuse = (why) => {
-    console.error(`check.mjs: ${why}`);
-    return 2;
-  };
-  if (!args.config) return misuse('--config <project config> is required; the rules carry no project of their own');
-  const cfg = JSON.parse(readFileSync(args.config, 'utf8'));
+  if (!args.config) throw new Misuse('--config <project config> is required; the rules carry no project of their own');
+  const cfg = checkedConfig(readJson(args.config, 'the config'), 'config');
   const strength = args.strength || cfg.strength;
   // No default. A strength nobody chose is a strength everybody has without
   // knowing it, and the quiet one of the three is indistinguishable from off.
-  if (!STRENGTHS.includes(strength)) return misuse(`strength must be one of ${STRENGTHS.join(', ')}; got ${strength ?? 'none'}`);
-  if (strength === 'block-new' && !args.baseline) return misuse('block-new needs --baseline: without one every violation is new');
+  if (!STRENGTHS.includes(strength)) throw new Misuse(`strength must be one of ${STRENGTHS.join(', ')}; got ${strength ?? 'none'}`);
+  if (strength === 'block-new' && !args.baseline) throw new Misuse('block-new needs --baseline: without one every violation is new');
+  // A typo here used to select no check at all and exit green.
+  const unknown = (args.only || []).filter((id) => !CHECKS.some((c) => c.id === id));
+  if (unknown.length || (args.only && !args.only.length))
+    throw new Misuse(`--only names no such check: ${unknown.join(', ') || '(nothing)'}. Checks: ${CHECKS.map((c) => c.id).join(', ')}`);
 
-  const read = (p) => JSON.parse(!p || p === '-' ? readFileSync(0, 'utf8') : readFileSync(p, 'utf8'));
-  const ages = args.agesFrom ? read(args.agesFrom) : null;
-  const report = evaluate(withAgesFrom(read(args.input), ages), cfg, args.only);
-  const baseline = args.baseline ? evaluate(withAgesFrom(read(args.baseline), ages), cfg, args.only, report.now) : null;
+  const ages = args.agesFrom ? checkedBacklog(readJson(args.agesFrom, 'the ages snapshot'), 'ages snapshot') : null;
+  if (Boolean(args.agesFrom) !== Boolean(args.agesThrough)) throw new Misuse('--ages-from and --ages-through must be supplied together');
+  const after = args.agesThrough ? checkedBacklog(readJson(args.agesThrough, 'the after snapshot'), 'after snapshot') : null;
+  const report = evaluate(withAgesFrom(checkedBacklog(readJson(args.input, 'the backlog'), 'backlog'), ages, after), cfg, args.only);
+  // The baseline is judged by the config of ITS day when one is given. With
+  // the current config, lowering a budget or renaming the milestone creates
+  // violations that look like old debt, and block-new waves them through.
+  const thenCfg = args.baselineConfig ? checkedConfig(readJson(args.baselineConfig, 'the baseline config'), 'baseline config') : cfg;
+  const baseline = args.baseline
+    ? evaluate(withAgesFrom(checkedBacklog(readJson(args.baseline, 'the baseline'), 'baseline'), ages, after), thenCfg, args.only, report.now)
+    : null;
   judge(report, baseline, strength);
   console.log(args.json ? JSON.stringify(report, null, 2) : render(report));
   return report.failed ? 1 : 0;
 }
 
-process.exit(main());
+try {
+  process.exitCode = main();
+} catch (e) {
+  // Anything unforeseen is misuse too: exit 1 means "the backlog is red", and
+  // a crash has established no such thing.
+  console.error(`check.mjs: ${e instanceof Misuse ? e.message : e.stack}`);
+  process.exitCode = 2;
+}

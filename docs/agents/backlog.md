@@ -1,153 +1,211 @@
-# Backlog: how work is tracked here
+# Backlog integration
 
-Written by `/setup-shady2k-skills` on 2026-09-18. The skills of the set read this
-file first and nothing else about the tracker. Edit it freely; re-run the
-installer only to change the tracker or the gate's strength.
+Maintained by `/shady2k-skills:setup-shady2k-skills`; last reconciled to the skill set
+0.10.0 on 2026-09-19 by its setup task, "The backlog gate runs on every commit here, with
+this project's vocabulary" (nocx-q8yjf.1). The protocol itself ships with the skills and is
+not restated here. This file holds the project's facts and the commands that were run and
+seen to work. Changing choices — strength, milestone, budgets, execution settings, and
+whether the last setup is verified — live only in the config.
 
-## The protocol
+AGENTS.md wins over this file wherever they disagree; the disagreement is then this file's
+bug.
 
-**Levels.** Each has one size and one author.
+## Project
 
-| level     | what it is                                                        | size             |
-| --------- | ----------------------------------------------------------------- | ---------------- |
-| Vision    | where this is going; a document, never an issue                   | rarely rewritten |
-| Milestone | a slice with a charter: what is in, what is out, a finding budget | what ships next  |
-| Feature   | a root issue holding one **outcome**                              | several stages   |
-| Stage     | an issue under a feature, with its own DONE WHEN                  | a few sessions   |
-| Task, bug | a leaf                                                            | one session      |
+- **Config:** [`.githooks/backlog-gate/config.json`](../../.githooks/backlog-gate/config.json).
+  Read `currentMilestone`, `findingBudget`, `execution` and `setupStatus` there, never here.
+- **Vision and roadmap:** [`docs/vision.md`](../vision.md); its §6 "Strategic roadmap" is the
+  roadmap. Status comes from the tracker (`scripts/feature-status.sh <feature>`), never from
+  either document.
+- **Milestone charters:** `docs/milestones/<milestone label>.md`. None is written yet;
+  `/shady2k-skills:to-milestone` writes the first.
+- **Current specifications:** none yet in the capability format. The nearest current-state
+  documents are [`docs/architecture.md`](../architecture.md) (binding invariants AD-1…AD-10)
+  and [`contracts/`](../../contracts/) (every JSON-RPC result shape, checked over the wire).
+  Neither is a behavioural spec by capability, and coverage is unknown outside them.
+- **Changes:** design specs in `.internal/specs/<date>-<topic>-design.md`; a small change
+  lives in its bead's body.
+- **Document resources:** the plugin's `templates/` and `documents.md`, by the plugin's
+  path; nothing is copied in until the document gate is installed.
+- **Workflow ownership:** `br` owns task status. `beads-superpowers` is kept for its process
+  skills only (AGENTS.md, "This file wins over a skill"). ADRs are the decision records.
+- **Architecture and explorations:** `docs/architecture.md`; explorations are not retained
+  as documents unless asked.
+- **Glossary and decisions:** AGENTS.md is the `CONTEXT.md`; decisions are ADRs in
+  [`docs/decisions/`](../decisions/), never edited once accepted.
+- **Acceptance records:** on the stage bead, as a comment: base and final revision, the
+  tasks included, the criterion, the full-check, mutation and review evidence, and what is
+  left pending.
+- **Features and stages:** `epic` (`br create -t epic`), and only that type: the gate looks
+  for a DONE WHEN on epics. Beads' `feature` type maps to `other` and is invisible to the
+  criterion check. A feature is a root epic; its stages are child epics (AGENTS.md, "A
+  feature is a root epic").
+- **Labels:** every live issue wears exactly one area label from AGENTS.md's list. Ideas
+  wear `idea`, findings `finding` plus the milestone label they were filed in.
 
-An **outcome** is what becomes possible or true, and who observes it: "a person
-creates a connection group", "a rollback is one command and one minute". Its
-DONE WHEN stops being false exactly once, and names the check that watches it.
+### Submitted and implemented
 
-**The horizon.** Only the current milestone is decomposed below features. The
-next one exists as feature titles; anything further is the vision's business.
-**Everything live belongs to the current milestone**: its root wears the
-milestone's label. Whatever does not is deferred.
+Beads has neither status, and AGENTS.md forbids a label that restates a field, so both are
+**comments with a fixed first word** on an issue that stays `in_progress`. That keeps it
+out of `br ready`. The adapter reads the latest such comment:
 
-**Ready** means a ready **leaf**: a task or a bug nobody holds and nothing
-blocks. Features and stages are finished, never taken.
+```text
+submitted: <revision> -- <local-check evidence>      # worker result, awaiting merge
+implemented: <revision> -- <related-check evidence>  # merged into the stage, awaiting acceptance
+reopened: <why>                                      # cancels the marker above it
+```
 
-**Two lanes outside the flow.**
+Writing one: `br comments add <id> "submitted: 1a2b3c4 -- go build ./... and go vet ./internal/x"`.
+When a worker submits, the coordinator takes the assignee (`br update <id> --actor <coordinator>
+--assignee <coordinator>`), so the result is held for merging and no worker holds it.
+Without both halves — a revision, `--`, then evidence — the gate reports
+`submitted-without-evidence` / `implemented-without-evidence`. Proved 2026-09-19 on a
+scratch tracker through claim → submitted → implemented → reopened → implemented → close.
 
-- **Ideas**: deferred, no parent, no edges, a review date. Never in the ready
-  queue, closed without regret.
-- **Findings**: bugs and debt found mid-milestone. The charter declares a budget
-  for them. A finding beyond the budget goes to the next milestone or displaces
-  something by the owner's explicit decision; it never goes silently to the
-  front.
+### Commit task links
 
-**Edges.** A blocking edge records a collision, two issues changing the same
-thing, and sits on the leaf that collides. Importance is priority; "later" is a
-milestone. Provenance is never a blocker.
+The convention is AGENTS.md's "Every commit names its bead". What is read: every `nocx-…`
+id inside parentheses in the **header paragraph**, meaning the lines up to the first blank
+line. A subject that wraps carries its ids onto its second line, and 5 of 593 commits in
+the week before 2026-09-19 did. Ids in the body are references and are not read. Each id
+must be an existing **leaf**, closed ones included. An epic, or anything with children, is
+refused. 76 of those 593 commits named a stage or an epic, almost all `chore(beads)`
+decompositions, and that work now gets its own task.
 
-**Status is true.** Active means somebody is holding it now. Stopping means
-releasing it in the same minute.
+- **Revert:** git keeps the reverted subject in quotes, ids included, so it links to the
+  same tasks.
+- **Merge:** a merge naming nothing is linked by the commits it brings in (between its
+  first parent and itself). Each of those is checked on its own too. GitHub's
+  "Merge pull request #N" passes this way, not as an exemption. A merge that brings in
+  nothing and names nothing fails.
+- **Before the rule:** commits committed before `commitLinksFrom` (config) are listed as
+  such and fail nothing. So are merges bringing in only such commits. The committer date is
+  the author's to set, so this is honesty, not enforcement.
 
-**Names, not identifiers.** Everything a person reads says "Title" (id), the id
-in parentheses and only where somebody must act on it. A title is a sentence
-the work can be understood from.
+### Cleanup recovery
 
-## This project
+The 2026-09-19 reconciliation released five epics held `in_progress` since 2026-09-15 with
+nothing in their trees moving. Each one's status went to `open`, its assignee stayed as
+owner, and it got a comment naming the rollback. The field-level journal is on the setup
+task:
 
-- **Vision:** [`docs/vision.md`](../vision.md)
-- **Milestone charters:** `docs/milestones/<milestone label>.md` — the directory
-  does not exist yet; `/to-milestone` writes the first one.
-- **Current milestone:** read `currentMilestone` from the gate config, never from here.
-- **Evidence that may be cited at close:** a commit, a test, a file or a symbol —
-  the same bar AGENTS.md sets, "evidence a stranger can check". "Duplicate" and
-  "done" are not reasons, and a file on `main` is not a feature in the product:
-  where the claim is that something works, the evidence is the check that
-  watched it work.
-- **Features and stages are created as:** `epic` (`br create -t epic`). The gate
-  looks for a DONE WHEN on that type only. Beads also has a `feature` type; it
-  maps to `other` and is invisible to the criterion check, so do not use it for
-  a stage.
-- **Labels:** every live issue, features and stages included, wears exactly one
-  area label from AGENTS.md's list. Ideas wear `idea`, findings wear `finding`.
-  `mvp` and `phase-1/2/3` are the roadmap axis this backlog predates the
-  milestones with; they are still in the vocabulary and are orthogonal to both.
+| epic                                                                             | before        | after  |
+| -------------------------------------------------------------------------------- | ------------- | ------ |
+| An agent nocx has never seen is described by the person who runs it (nocx-dhq4u) | `in_progress` | `open` |
+| A wave of workers runs inside nocx (nocx-dkawo)                                  | `in_progress` | `open` |
+| Two machines, one session, the same screen (nocx-eidfb)                          | `in_progress` | `open` |
+| Every local pane is the helper's (nocx-ie23r)                                    | `in_progress` | `open` |
+| The coordinator outlives its window (nocx-p2q1q)                                 | `in_progress` | `open` |
 
-## The gate
+Rollback of any one: `br update <id> --status in_progress`. It touches only the status and
+keeps every later change.
 
-- **Config:** `.githooks/backlog-gate/config.json`
-- **Adapter:** `.githooks/backlog-gate/adapter.mjs`
-- **Rules:** `.githooks/backlog-gate/check.mjs` — vendored byte for byte from
-  the shady2k-skills plugin and never edited here. Its `--selftest` lives with
-  the plugin, because the fixtures do:
-  `node <plugin>/skills/backlog/setup-shady2k-skills/check.mjs --selftest --config .githooks/backlog-gate/config.json`
-  is what proves the copy's rules, and `diff <(sed '2,6d' .githooks/backlog-gate/check.mjs) <plugin copy>` proves it is the copy.
-- **Strength:** `block-new`, chosen 2026-09-18. Only a violation this commit
-  introduces is red; the debt already there is printed every time and fails
-  nothing.
-- **Run it:**
+## Checks and execution
+
+- **Backlog adapter:** [`adapter.mjs`](../../.githooks/backlog-gate/adapter.mjs) reads the
+  tracked export, never the database. `--at <rev>` reads any revision (`:0` is the staged
+  copy), `--export <path>` reads any file, and with neither it reads the working tree. It
+  maps statuses, emits `holder` (assignee) and `createdAt`, drops tombstones, and reads the
+  markers above. Provenance edges are dropped; only `blocks` gates.
+- **Rules:** [`check.mjs`](../../.githooks/backlog-gate/check.mjs),
+  [`check-commits.mjs`](../../.githooks/backlog-gate/check-commits.mjs) and
+  [`check-docs.mjs`](../../.githooks/backlog-gate/check-docs.mjs) are byte-for-byte copies
+  of the shady2k-skills plugin's `skills/backlog/setup-shady2k-skills/` at 0.10.0, never
+  edited here. Proving it: `cmp` each against the plugin copy, `--version` prints `0.10.0`,
+  and the selftests run from the plugin directory because the fixtures live there:
+  `node check.mjs --selftest --config <repo>/.githooks/backlog-gate/config.json`,
+  `node check-commits.mjs --selftest`, `node check-docs.mjs --selftest`.
+- **Document gate: not installed yet.** Its task is "The document gate checks product
+  intent, feature readiness and acceptance evidence on every change here" (nocx-q8yjf.2).
+  Until it lands, document readiness is checked by reading, and every report says the
+  automatic check did not run. No document policy, baseline, receipts or synchronization
+  are wired, and nothing about documents is enforced by CI.
+- **Backlog gate**, `block-new`. The pre-commit hook (section 7) and CI both run it:
 
   ```bash
   G=.githooks/backlog-gate
   node $G/adapter.mjs --at HEAD > /tmp/backlog-baseline.json
+  git show HEAD:$G/config.json > /tmp/backlog-baseline-config.json
   node $G/adapter.mjs --at :0 |
-    node $G/check.mjs --config $G/config.json --baseline /tmp/backlog-baseline.json -
+    node $G/check.mjs --config $G/config.json --baseline /tmp/backlog-baseline.json \
+      --baseline-config /tmp/backlog-baseline-config.json -
   ```
 
-  `--at :0` is the STAGED export and `--at HEAD` the last committed one. Never
-  the working tree: `br` rewrites `.beads/issues.jsonl` on almost every command,
-  and several worktrees on this machine write the same database, so a
-  working-tree read judges backlog writes this commit is not making. The hook in
-  `.githooks/pre-commit` runs exactly the two lines above; CI's `ci-backlog` job
-  runs them against the merge base.
+  It compares the staged export against HEAD, never the working tree: `br` rewrites the
+  export on almost every command. The baseline is judged by its own day's config, so a
+  config change that creates violations is new. The hook runs only when the export or the
+  gate itself is staged.
 
-- **Every violation as JSON:** add `--json` to the `check.mjs` line.
-- **Ages from before a bulk edit:** add `--ages-from <snapshot>`. Snapshots so
-  far: the deferral of 2026-09-17T19:23Z, which rewrote 799 timestamps in one
-  minute — the export from before it is at commit `0f7f5c22`, so
+- **JSON report:** add `--json` to the `check.mjs` line.
+- **Commit-link check:** [`commit-links.mjs`](../../.githooks/backlog-gate/commit-links.mjs)
+  parses messages and calls `check-commits.mjs`. `--message <file>` checks a pending
+  message; tasks come from the export `br where` names, which is the database's own view,
+  so a bead created a minute ago resolves. `--range <base>..<head>` checks every commit the
+  range introduces, with tasks from the export at `<head>`. An empty range is exit 2, never
+  a pass.
+- **Local entry points:** `.githooks/pre-commit` (backlog), `.githooks/commit-msg` (links),
+  and `.githooks/pre-merge-commit`, which delegates to pre-commit. `make init` sets
+  `core.hooksPath .githooks`, and that is the whole installation in a fresh clone.
+- **CI:** `ci-backlog` in `.github/workflows/ci.yml`. The backlog baseline is the PR's merge
+  base, or the push's `before`, or else `HEAD^`. The commit range is merge base..PR head
+  (not GitHub's synthetic merge), or `before..HEAD` on a push, or `merge-base(origin/main)..HEAD`
+  for a new branch.
+- **Bulk-edit age correction:** the deferral of 2026-09-17T19:23Z rewrote 799 timestamps.
+  Its pair is `--ages-from <export at 6121375e> --ages-through <export at de4c58d5>`, the
+  last export before it and the first after. A second cluster, 97 issues at 19:32Z, has no
+  pair recorded; the gate prints it as a warning.
+- **Static checks:** `.githooks/pre-commit` (seconds).
+- **Related tests:** `go test -tags gtk3 ./<touched packages>`; `npx vitest run <touched
+files>` in `frontend/`. Who runs them: AGENTS.md, "Git authority" — see the open question
+  at the end.
+- **Full stage checks:** `make ci-full` on the merged tree, run by the coordinator once
+  before pushing to `main` (AGENTS.md, "Git authority").
+- **Mutation checks:** no mutation tool is installed for Go or TypeScript. The agreed
+  alternative is in the config (`execution.mutationFallback`): the coordinator plants 2–3
+  mutations by hand in the changed logic at stage acceptance and records which tests went
+  red. A skipped check is recorded as skipped, never as passed.
+- **Reviewer:** `codex` (another model), one round at stage acceptance. It is available
+  when `codex exec --skip-git-repo-check "<prompt>"` answers (checked 2026-09-19, codex-cli 0.154.0). The fallback is a
+  fresh Claude agent, disclosed as the same model.
+- **Parallel execution:** separate git worktrees, one per worker. The coordinator assigns
+  leaves one at a time, with at most `execution.maxWorkers` workers and disjoint file sets.
+  Generated files and lockfiles (`package-lock.json`, `go.sum`, `contracts/` generated
+  types) count as collisions. The stage's coordinator integrates.
 
-  ```bash
-  node $G/adapter.mjs --at 0f7f5c22 > /tmp/backlog-ages.json
-  ```
+## Tracker operations
 
-  is the snapshot. Measured 2026-09-18: it turns 7 stale edges into 9 and leaves
-  every other check where it was.
+`br` is a single binary over SQLite plus the tracked export. It never runs git, and it
+resolves the MAIN checkout's database even from a worktree. Its own docs: `br robot-docs
+guide`, `br <command> --help`.
 
-**The gate is clean** when its report says `new errors: 0`. That line means the
-same under every strength, which red and green do not: under `report` nothing
-is ever red, and under `block` old debt is always red. Every skill that writes
-to the backlog runs the gate **before** publishing, and a new error is fixed by
-its own `fix` line before anything leaves this machine.
+| operation                        | here                                                                                                                                                                                                                                                                    |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| create                           | `br create "<title>" -t epic\|task\|bug\|chore -l <area> -d "<body with DONE WHEN for an epic>" [--parent <id>] [-p 0-3]`                                                                                                                                               |
+| link / unlink                    | `br dep add <consumer leaf> <producer leaf>` (type `blocks`), with the reason and what releases it in a comment · `br dep remove …` · parent: `-t parent-child` · provenance: `-t discovered-from`, which gates nothing                                                 |
+| claim                            | `br update <id> --claim --actor <worker>`. `claim_exclusive` refuses it while another actor holds the bead                                                                                                                                                              |
+| release                          | `br update <id> --status open --assignee ""`: an unfinished hold only, in the minute it stops                                                                                                                                                                           |
+| submitted                        | `br comments add <id> "submitted: <rev> -- <evidence>"`, then the coordinator takes the assignee                                                                                                                                                                        |
+| implemented                      | coordinator only: `br comments add <id> "implemented: <merge rev> -- <related-check evidence>"`                                                                                                                                                                         |
+| reopen                           | `br comments add <id> "reopened: <why>"`, and recheck every issue blocked by it; a closed one: `br reopen <id>` first                                                                                                                                                   |
+| close                            | `br close <id> -r "<accepted at <rev>: evidence a stranger can check>"`, only after stage acceptance, or with an explicit duplicate/cancellation reason naming the survivor                                                                                             |
+| comment / edit                   | `br comments add <id> "…"` · `br update <id> --title … --description-file <f>` · move: `br dep remove <id> <old>` then `br dep add <id> <new> -t parent-child`                                                                                                          |
+| defer / undefer                  | `br defer <id> --until <date>` · `br undefer <id>`                                                                                                                                                                                                                      |
+| milestone / label                | `br label add <root> <milestone>` (read the value from config); `br label add\|remove <id> <label>`                                                                                                                                                                     |
+| ready                            | `br ready -t task -t bug` · in one stage: `br ready --epic <stage>`. br releases a dependant only when its prerequisite CLOSES, so an `implemented` prerequisite in the same stage is released by the coordinator by hand, in a checkout at or after its merge revision |
+| holds                            | `br list --status in_progress` (assignee on each row)                                                                                                                                                                                                                   |
+| pending integration / acceptance | `br search "submitted:"` / `br search "implemented:"`, then confirm the latest marker with `br comments <id>`                                                                                                                                                           |
+| children                         | `br dep list <id> --direction up -t parent-child` (every status, closed included) · counts: `br show <id> --json \| jq '.[0].rollup'`                                                                                                                                   |
+| search / show                    | `br search "<phrase>"` (title, body, comments) · `br list --label <area> --status all` · `br show <id>` · `br comments <id>`                                                                                                                                            |
+| publish                          | `br sync --flush-only`, copy or stage `.beads/issues.jsonl` in the checkout being committed, commit with a leaf id, push. **Never `br sync --merge` on a database that is merely ahead** (AGENTS.md)                                                                    |
 
-## Tracker verbs
+**Where the model and `br ready` differ.** Measured 2026-09-18 and still true: `br ready`
+also hides a leaf whose ANCESTOR is blocked or deferred, which the normalized model does
+not derive. Nothing `br ready` lists is missing from the model. The model keeps status and
+edges as stored; a queue is `br ready`'s job.
 
-How this project's tracker does each thing the skills ask for. `br` is a single
-binary over SQLite plus the tracked JSONL export, it never runs git, and it
-resolves the MAIN checkout's database even from a worktree — so these commands
-answer the same in every worktree, and only the last one publishes.
+## Open
 
-| verb      | how                                                                                                                                                                                                                                                                                                                                                  |
-| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| create    | `br create "<title>" -t epic\|task\|bug\|chore -l <area> -d "<body>" [--parent <id>] [-p 0-3]`                                                                                                                                                                                                                                                       |
-| link      | `br dep add <blocked> <blocker>` (type `blocks`, the default) · parent: `br dep add <child> <parent> -t parent-child` · provenance is `-t discovered-from` and the adapter drops it, so it gates nothing                                                                                                                                             |
-| claim     | `br update <id> --claim` — assignee and `in_progress` in one write. A claim is not a lock: two clones can claim the same bead, last write wins                                                                                                                                                                                                       |
-| release   | `br update <id> --status open`, in the same minute you stop holding it                                                                                                                                                                                                                                                                               |
-| close     | `br close <id> -r "<evidence a stranger can check>"`                                                                                                                                                                                                                                                                                                 |
-| comment   | `br comments add <id> "<text>"` (`br comments <id>` lists them)                                                                                                                                                                                                                                                                                      |
-| edit      | `br update <id> --title "…" -d "…"` · move: `br dep remove <id> <old parent>` then `br dep add <id> <new parent> -t parent-child`                                                                                                                                                                                                                    |
-| unlink    | `br dep remove <issue> <depends-on>`                                                                                                                                                                                                                                                                                                                 |
-| defer     | `br defer <id> [--until 2026-10-01]` — the review date is the `--until`; without one it is deferred indefinitely                                                                                                                                                                                                                                     |
-| undefer   | `br undefer <id>`                                                                                                                                                                                                                                                                                                                                    |
-| milestone | a label: `br label add <root id> v0-5`. Beads has no milestone field, and the gate reads the label on the issue's ROOT                                                                                                                                                                                                                               |
-| ready     | `br ready` · leaves only: `br ready -t task -t bug` · within one epic: `br ready --epic <id>`. It hides what a blocked or deferred ANCESTOR holds, which the normalized model does not — see below                                                                                                                                                   |
-| holds     | `br list --status in_progress` (the assignee is on each row)                                                                                                                                                                                                                                                                                         |
-| children  | `br show <id> --json \| jq '.[0].rollup'` — derived, so it cannot drift from the children the way a copied timestamp can                                                                                                                                                                                                                             |
-| label     | `br label add <id> <label>` · `br label remove <id> <label>` · `br label list-all` for the tree's whole vocabulary with counts                                                                                                                                                                                                                       |
-| search    | `br search "<phrase>"` (title, body, comments) · one area whole: `br list --label <area> --status all`                                                                                                                                                                                                                                               |
-| show      | `br show <id>` — body, labels, edges, comments                                                                                                                                                                                                                                                                                                       |
-| publish   | `br sync --flush-only && git add .beads/issues.jsonl && git commit && git push`. Nothing does this for you, and an unpublished bead does not exist for anybody else. **Never `br sync --merge` on a database that is merely ahead** — it tombstones every issue the JSONL has not seen; `--reconcile-additive` is the one that adds without deleting |
-
-**Where the adapter and `br ready` disagree, and why neither is wrong.**
-Measured 2026-09-18 on 3866 issues: `br ready` listed 29, the normalized model's
-open-and-unblocked-by-anything-live 44, and nothing `br` called ready was
-missing from the model — which is the test that no provenance edge is being read
-as a dependency. All 15 of the difference are `br` hiding a leaf its ANCESTOR
-blocks: 6 under a blocked parent, 8 parents with unclosed children, and
-`nocx-ms7v.4` under a deferred parent. The model keeps status and edges exactly
-as the tracker stores them and derives nothing, deliberately — the rules ask
-about issues, and a queue is `br ready`'s job.
+- **Who runs the related tests.** The owner's rule of 2026-09-14 is that workers write
+  tests and never run them; AGENTS.md "Git authority" says a worker runs the unit tests for
+  what it touched. The config records the owner's rule (`execution.workersRunTests: false`).
+  AGENTS.md wins until the owner decides which of the two to keep.

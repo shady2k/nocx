@@ -92,8 +92,12 @@ session close. An unpushed bead does not exist for anybody else, and the afterno
 is somebody else's. Batch your writes if you like (`br update` and `br close` take several
 ids), then commit at the end of the batch.
 
-**A claim is not a lock.** Two clones can claim the same bead; last write wins. The
-protocol shrinks the race, it does not close it.
+**A claim is refused while somebody else holds the bead** — `claim_exclusive` in the
+tracked `.beads/config.yaml`, under `br`'s write lock, measured 2026-09-19: a second
+actor's `--claim` answers `already assigned to <actor>`. It is only as good as the actor
+name, so a coordinator claims for a worker with `--actor <worker>`, and releasing a leaf
+clears its assignee (`--status open --assignee ""`) or nobody else can take it. Between
+two machines it is still last write wins: the lock is one database's.
 
 **There is no merge slot**, deliberately. What it was for still exists: two agents
 integrating at once resolve conflicts against a `main` moving underneath both, and each
@@ -955,7 +959,12 @@ Co-Authored-By: ...
 - **No bead for it?** Then there is no task — `br create` takes seconds. **Trivial?** It
   still had a reason, and it is the one nobody can explain in six months.
 
-Checked by eye at review. If that rots, file a `commit-msg` hook rather than dropping it.
+**Enforced since 2026-09-19** by `.githooks/commit-msg` and CI's `ci-backlog`, through
+`.githooks/backlog-gate/commit-links.mjs`: every id in parentheses in the header paragraph
+must be an existing **leaf** — a stage or an epic is refused, so a commit that decomposes a
+stage names a task for that work. A merge naming nothing is linked by what it brings in. In
+the week before, 76 of 593 commits named a container; details in
+[`docs/agents/backlog.md`](docs/agents/backlog.md).
 
 ## Engineering rules (non-negotiable)
 
@@ -1051,15 +1060,21 @@ The `mattpocock/skills` engineering skills and the `shady2k-skills` backlog set 
 their per-repo configuration from `docs/agents/`. Four files, and they are the skills'
 view of rules this file owns:
 
-| File                                                           | What it tells a skill                                                                                            |
-| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| [`docs/agents/issue-tracker.md`](docs/agents/issue-tracker.md) | Issues live in **`br`**, not GitHub Issues and not markdown — the verbs, and the wayfinder mapping.              |
-| [`docs/agents/triage-labels.md`](docs/agents/triage-labels.md) | The five triage roles as `br` labels, orthogonal to the one mandatory area label.                                |
-| [`docs/agents/domain.md`](docs/agents/domain.md)               | Single-context: this file is the `CONTEXT.md`, and ADRs are in `docs/decisions/`, never `docs/adr/`.             |
-| [`docs/agents/backlog.md`](docs/agents/backlog.md)             | The levels, the two lanes outside the flow, the `br` verb for each thing a skill asks for, and the backlog gate. |
+| File                                                           | What it tells a skill                                                                                                |
+| -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| [`docs/agents/issue-tracker.md`](docs/agents/issue-tracker.md) | Issues live in **`br`**, not GitHub Issues and not markdown — the verbs, and the wayfinder mapping.                  |
+| [`docs/agents/triage-labels.md`](docs/agents/triage-labels.md) | The five triage roles as `br` labels, orthogonal to the one mandatory area label.                                    |
+| [`docs/agents/domain.md`](docs/agents/domain.md)               | Single-context: this file is the `CONTEXT.md`, and ADRs are in `docs/decisions/`, never `docs/adr/`.                 |
+| [`docs/agents/backlog.md`](docs/agents/backlog.md)             | The backlog integration: the gate and its config, the commit-link check, execution settings and the `br` operations. |
 
 They restate; they do not decide. Where one disagrees with this file, this file wins and
 the `docs/agents/` copy is the bug.
+
+All retained work and commits belong to tracked tasks. File discoveries through
+`/shady2k-skills:to-backlog`; implement through `/shady2k-skills:take-task`; close only
+after stage acceptance through `/shady2k-skills:close-out`. Read Backlog integration in
+[`docs/agents/backlog.md`](docs/agents/backlog.md) before writes. After updating the skill
+set, run `/shady2k-skills:setup-shady2k-skills` to reverify this project.
 
 ## This file wins over a skill
 

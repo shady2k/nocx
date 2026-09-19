@@ -222,6 +222,17 @@ type workerReportResult struct {
 type workerSpawnParams struct {
 	Command string `json:"command"`
 	Task    string `json:"task"`
+	// Worktree is the ask for a fresh checkout the worker's pane will live
+	// in. The executor validates only what the schema cannot — a branch
+	// with no name — and carries the rest as asked: where the checkout is
+	// and what commit it starts from are the spawner's (the git seam's)
+	// answers, read back from the record, never decided here.
+	Worktree *workerSpawnWorktreeParams `json:"worktree,omitempty"`
+}
+
+type workerSpawnWorktreeParams struct {
+	Branch string `json:"branch"`
+	Base   string `json:"base,omitempty"`
 }
 
 type workerSpawnResult struct {
@@ -250,6 +261,18 @@ type workerSpawnResult struct {
 	// the only party that knows whether the queue took the briefing: no
 	// derivation, no second opinion about the same fact.
 	BriefingQueued bool `json:"briefingQueued"`
+	// Worktree is present only when the spawn actually created a checkout:
+	// where it is, the branch checked out in it, and the resolved commit it
+	// starts from. It comes from the record (workers.Participant.Worktree),
+	// which accepted the checkout at MarkLive — the executor copies, and
+	// does not re-derive, the one place that fact lives.
+	Worktree *workerSpawnWorktreeResult `json:"worktree,omitempty"`
+}
+
+type workerSpawnWorktreeResult struct {
+	Path   string `json:"path"`
+	Branch string `json:"branch"`
+	Base   string `json:"base"`
 }
 
 // workerCoordinatorFrom is the ONE assertion of a concrete worker capability,
@@ -704,6 +727,13 @@ func executeWorkerSpawn(ctx context.Context, cap agenttools.Capability, args jso
 	if p.Command == "" || p.Task == "" {
 		return "", errors.New("workers.spawn: a worker needs both a command to start it and a task to do")
 	}
+	// The worktree ask's own shape, repeated here for a caller that bypassed
+	// the schema it was shown. Everything else about a checkout — where it
+	// can go, whether the branch is free, what it starts from — is the git
+	// seam's refusal to answer, with its own names, far from here.
+	if p.Worktree != nil && p.Worktree.Branch == "" {
+		return "", errors.New("workers.spawn: a worktree needs the branch to check out in it")
+	}
 	// The environment is checked against the CAPABILITY, which holds only
 	// what the run's grant named. A spawn outside it is refused and the
 	// refusal names what was available; escalating instead is a property of a
@@ -713,7 +743,7 @@ func executeWorkerSpawn(ctx context.Context, cap agenttools.Capability, args jso
 		return "", fmt.Errorf("workers.spawn: this run may not start a worker in %q; it may start one in %v",
 			environment, coordinator.Environments())
 	}
-	participant, err := seams.workerStore.Register(ctx, workers.RegisterRequest{
+	req := workers.RegisterRequest{
 		CoordinatorSession: coordinator.Session(),
 		// The coordinator's OWN incarnation, never the spawned participant's
 		// liveness epoch: Delegation.ControllerIdentity is what a
@@ -725,17 +755,33 @@ func executeWorkerSpawn(ctx context.Context, cap agenttools.Capability, args jso
 		Command:             p.Command,
 		Environment:         environment,
 		CreatedByRunID:      seams.runID,
-	})
+	}
+	// The worktree ask travels AS ASKED: branch required, base optional.
+	// Resolving it — where the checkout goes, what commit it starts from —
+	// is the spawner's answer, and the result reads it back from the record
+	// below rather than from anything decided here.
+	if p.Worktree != nil {
+		req.Worktree = &workers.WorktreeAsk{Branch: p.Worktree.Branch, Base: p.Worktree.Base}
+	}
+	participant, err := seams.workerStore.Register(ctx, req)
 	if err != nil {
 		return "", fmt.Errorf("workers.spawn: %w", err)
 	}
-	raw, err := json.Marshal(workerSpawnResult{
+	result := workerSpawnResult{
 		ID:             string(participant.ID),
 		State:          string(participant.State),
 		TaskTyped:      participant.Delivery.Typed,
 		WaitingOn:      participant.Delivery.WaitingOn,
 		BriefingQueued: participant.Delivery.BriefingQueued,
-	})
+	}
+	if participant.Worktree.Path != "" {
+		result.Worktree = &workerSpawnWorktreeResult{
+			Path:   participant.Worktree.Path,
+			Branch: participant.Worktree.Branch,
+			Base:   participant.Worktree.Base,
+		}
+	}
+	raw, err := json.Marshal(result)
 	if err != nil {
 		return "", fmt.Errorf("workers.spawn: result: %w", err)
 	}

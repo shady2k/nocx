@@ -1699,7 +1699,19 @@ const workerSpawnSchema = `{
   "type": "object",
   "additionalProperties": false,
   "required": ["command", "task"],
-  "properties": {"command": {"type": "string"}, "task": {"type": "string"}},
+  "properties": {
+    "command": {"type": "string"},
+    "task": {"type": "string"},
+    "worktree": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["branch"],
+      "properties": {
+        "branch": {"type": "string"},
+        "base": {"type": "string"}
+      }
+    }
+  },
   "$defs": {"result": {
     "type": "object",
     "additionalProperties": false,

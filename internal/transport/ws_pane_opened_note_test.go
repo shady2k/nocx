@@ -102,6 +102,13 @@ func TestThePaneOpenedNoteRidesEverySuccessfulOpen(t *testing.T) {
 	if notes[1].spec.PaneID != pane {
 		t.Fatalf("renderer note = %+v, want the pane the open named", notes[1])
 	}
+	// And the spec carries what the caller actually knew: this harness wires
+	// no layout, so a renderer open's spec has no directory at all — the
+	// empty Cwd the receiver's own guard keys on. Asserting it pins the
+	// contract against a `cwd` field sneaking back onto the wire.
+	if notes[1].spec.Cwd != "" {
+		t.Fatalf("renderer note cwd = %q, want empty: the wire's open carries no directory", notes[1].spec.Cwd)
+	}
 }
 
 // Criterion: an unwired note is the ordinary shape — the open neither fails

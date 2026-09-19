@@ -22,6 +22,22 @@ The backlog lives in **beads** (`br`), not in prose.
 **Fresh clone:** install the tooling, then `make init`. The backlog comes with the clone —
 `.beads/issues.jsonl` is tracked — and `make init` only builds the SQLite from it.
 
+## Work goes through the skills
+
+All retained work and commits belong to tracked tasks. File discoveries through
+`/shady2k-skills:to-backlog`; implement through `/shady2k-skills:take-task`; close only
+after stage acceptance through `/shady2k-skills:close-out`. Read Backlog integration in
+[`docs/agents/backlog.md`](docs/agents/backlog.md) before writes. When a skill reports the
+installation is out of date, run `/shady2k-skills:setup-shady2k-skills`.
+
+**Filing is the skill, not the tracker command.** `to-backlog` picks the lane, sets the
+finding and milestone labels and counts the finding budget; a bare `br create` does none
+of that. Every `br` command later in this file is how the tracker works, not a licence to
+go around the skill that decides where the work belongs.
+
+This repository works through the shady2k-skills plugin. Without it, install it once:
+`/plugin marketplace add shady2k/skills`, then `/plugin install shady2k-skills@shady2k`.
+
 ## Language
 
 **Every document in this repository is written in English.** Code and its comments, this
@@ -961,7 +977,8 @@ Co-Authored-By: ...
   `beads`). Omit only when the change is genuinely repo-wide.
 - **`(<bead-id>)`** at the end of the subject; several when one commit closes several. Ids
   referenced but **not** closed go in the body.
-- **No bead for it?** Then there is no task — `br create` takes seconds. **Trivial?** It
+- **No bead for it?** Then there is no task — file one through `/shady2k-skills:to-backlog`
+  before the commit, not after it. **Trivial?** It
   still had a reason, and it is the one nobody can explain in six months.
 
 **Enforced since 2026-09-19** by `.githooks/commit-msg` and CI's `ci-backlog`, through
@@ -1074,15 +1091,6 @@ view of rules this file owns:
 
 They restate; they do not decide. Where one disagrees with this file, this file wins and
 the `docs/agents/` copy is the bug.
-
-All retained work and commits belong to tracked tasks. File discoveries through
-`/shady2k-skills:to-backlog`; implement through `/shady2k-skills:take-task`; close only
-after stage acceptance through `/shady2k-skills:close-out`. Read Backlog integration in
-[`docs/agents/backlog.md`](docs/agents/backlog.md) before writes. When a skill reports the
-installation is out of date, run `/shady2k-skills:setup-shady2k-skills`.
-
-This repository works through the shady2k-skills plugin. Without it, install it once:
-`/plugin marketplace add shady2k/skills`, then `/plugin install shady2k-skills@shady2k`.
 
 ## This file wins over a skill
 

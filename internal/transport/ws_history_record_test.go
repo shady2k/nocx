@@ -68,6 +68,8 @@ func (f *fakeRecordHistoryDB) Reconcile() content.SessionReconciler { return nil
 // the interface must still compile. Unused by these tests.
 func (f *fakeRecordHistoryDB) SkillChecks() content.SkillCheckRepository { return nil }
 
+func (f *fakeRecordHistoryDB) WorkerCheckouts() content.WorkerCheckoutRepository { return nil }
+
 // RecordCompleted mints the entry id the backend owns (the renderer sends
 // none) and keeps the row the way the store does: the intent, its resolved
 // environment, and the payload column carrying both sparse readers' keys.

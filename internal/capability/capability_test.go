@@ -602,6 +602,8 @@ func (f *fakeContentDB) Reconcile() content.SessionReconciler { return nil }
 // writes a skill check.
 func (f *fakeContentDB) SkillChecks() content.SkillCheckRepository { return nil }
 
+func (f *fakeContentDB) WorkerCheckouts() content.WorkerCheckoutRepository { return nil }
+
 // fakeReset is a capability.VaultReset recorder.
 type fakeReset struct {
 	mu      sync.Mutex

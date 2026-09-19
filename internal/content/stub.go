@@ -198,6 +198,55 @@ func (s *skillCheckStub) Delete(_ context.Context, name string) error {
 	return ErrNotImplemented
 }
 
+// workerCheckoutStub implements WorkerCheckoutRepository for the stub.
+type workerCheckoutStub struct {
+	log log.Logger
+}
+
+var _ WorkerCheckoutRepository = (*workerCheckoutStub)(nil)
+
+// Put answers ErrNotImplemented: a store that is not there records nothing,
+// and the spawn that asked keeps its checkout either way.
+func (s *workerCheckoutStub) Put(_ context.Context, co WorkerCheckout) error {
+	s.log.Info("content stub: WorkerCheckoutRepository.Put", "path", co.Path)
+	return ErrNotImplemented
+}
+
+// Touch is a no-op that says so, not an error: a pane opened in a directory
+// nobody recorded changes no row, which is the same answer the real store
+// gives for a path it does not carry.
+func (s *workerCheckoutStub) Touch(_ context.Context, path string, _ int64) error {
+	s.log.Info("content stub: WorkerCheckoutRepository.Touch", "path", path)
+	return nil
+}
+
+// List and All answer empty with a nil error: with no store there are no
+// rows, and "no annotation" is a true answer the reader joins against git's
+// own list either way.
+func (s *workerCheckoutStub) List(_ context.Context, repoKey string) ([]WorkerCheckout, error) {
+	s.log.Info("content stub: WorkerCheckoutRepository.List", "repo_key", repoKey)
+	return nil, nil
+}
+
+func (s *workerCheckoutStub) All(_ context.Context) ([]WorkerCheckout, error) {
+	s.log.Info("content stub: WorkerCheckoutRepository.All")
+	return nil, nil
+}
+
+// Delete is idempotent and silent: there is nothing to drop and nothing
+// dropped.
+func (s *workerCheckoutStub) Delete(_ context.Context, _ string, _ []string) error {
+	return nil
+}
+
+// WorkerCheckouts returns a stub worker-checkout repository. With no store
+// there are no rows, and a caller that asks is told the reads found nothing
+// rather than handed an error to interpret: the reader joins against git's
+// own list either way, and a missing annotation is not a missing checkout.
+func (s *Stub) WorkerCheckouts() WorkerCheckoutRepository {
+	return &workerCheckoutStub{log: s.log}
+}
+
 // Backup returns ErrNotImplemented: the stub has nothing to snapshot.
 func (s *Stub) Backup(_ context.Context, destPath string) error {
 	s.log.Info("content stub: Backup called (no-op)", "dest", destPath)

@@ -360,7 +360,7 @@ func TestAnUnreadablePaneInventoryJudgesNothing(t *testing.T) {
 		t.Fatalf("open the live pane's session: %v", err)
 	}
 	defer func() { _ = stand.reg.Close(live.ID()) }()
-	stand.tabs.paneCwdErr = errPaneCwdBroken
+	stand.tabs.paneCwdErrFor = map[string]error{"pane-live": errPaneCwdBroken}
 	newSweeper(stand, 30*24*time.Hour).RunOnce(context.Background())
 
 	if checkoutGone(t, checkout) {

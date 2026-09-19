@@ -185,7 +185,20 @@ type sessionOpener struct {
 	// It is a seam and not the whole machine because what this needs is one
 	// statement: this lane belongs to this session.
 	laneRegistrar lifecycleLaneRegistrar
+	// paneOpened is told about every pane THIS opener successfully opened,
+	// with the spec it was asked for — the one door both callers (a
+	// renderer's `open` and the backend's OpenSession) already share
+	// (nocx-xn63t.1.4). Nil is the ordinary shape for a server nobody wired
+	// a note into; the open neither fails nor slows for its absence.
+	paneOpened paneOpenedNote
 }
+
+// paneOpenedNote is what the open path tells the composition root about a
+// pane that now exists: what it was asked to open, and the session it
+// became. It is a note and not a callback — nothing here waits on it, reads
+// from it, or fails because of it; the receiver owns whatever the fact is
+// worth.
+type paneOpenedNote func(spec OpenSpec, sid session.ID)
 
 // lifecycleLaneRegistrar is the narrow view of "remember which session this
 // lane speaks for" (AD-8).
@@ -377,6 +390,12 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (OpenedSession,
 		if pid, known := lookup.OwnedProcessPID(); known {
 			ownedPID = pid
 		}
+	}
+	// The note rides SUCCESS and only success (nocx-xn63t.1.4): a pane nocx
+	// failed to open is not a pane nocx has open, and no receiver should hear
+	// that one does.
+	if o.paneOpened != nil {
+		o.paneOpened(spec, sess.ID())
 	}
 	return OpenedSession{
 		Session:         sess,

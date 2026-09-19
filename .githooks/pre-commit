@@ -338,15 +338,24 @@ backlog_gate() {
         printf 'the backlog at HEAD could not be read, so there is nothing to compare against\n'
         return 1
     fi
+    # The baseline is judged by the config it was committed with, so a staged
+    # config change that creates violations is new, not old debt. A HEAD that
+    # predates the gate has no config, and then there is nothing to judge it by
+    # but today's.
+    _baseline_config=$(mktemp)
+    set --
+    if git show "HEAD:$_gate/config.json" >"$_baseline_config" 2>/dev/null; then
+        set -- --baseline-config "$_baseline_config"
+    fi
     # Exit 1 is red and exit 2 is misuse — a gate that cannot run is red, not
     # green, so both reach host_gate as a failure.
     if node "$_gate/adapter.mjs" --at :0 |
-        node "$_gate/check.mjs" --config "$_gate/config.json" --baseline "$_baseline" -; then
+        node "$_gate/check.mjs" --config "$_gate/config.json" --baseline "$_baseline" "$@" -; then
         _rc=0
     else
         _rc=$?
     fi
-    rm -f "$_baseline"
+    rm -f "$_baseline" "$_baseline_config"
     return $_rc
 }
 

@@ -1,0 +1,27 @@
+#!/bin/sh
+# commit-msg — every commit names the leaf task it belongs to.
+#
+# AGENTS.md has asked for "(<bead-id>)" at the end of every subject since the
+# tracker came in, checked by eye. The check is now check-commits.mjs, vendored
+# from the shady2k-skills plugin and fed by commit-links.mjs, which reads the
+# message by this repository's convention and resolves the ids against the
+# tracker — closed tasks included, containers refused: a stage or an epic is
+# not a task, and 76 of 593 commits in the week before this hook named one.
+#
+# Merges are covered too: git runs this hook for a merge it commits, and a
+# merge that names nothing is linked by the commits it brings in. CI checks
+# every introduced commit again, because this is one --no-verify away.
+set -eu
+
+gate=.githooks/backlog-gate
+if [ ! -f "$gate/commit-links.mjs" ]; then
+    # A tree from before the commit check: this hook came from a shared
+    # hooksPath the checkout does not carry. Say so instead of passing quietly.
+    printf 'commit-msg: this tree has no %s/commit-links.mjs; commit links are not checked here\n' "$gate" >&2
+    exit 0
+fi
+if ! command -v node >/dev/null 2>&1; then
+    printf 'commit-msg: node is not on PATH, so the commit-link check cannot run\n' >&2
+    exit 1
+fi
+exec node "$gate/commit-links.mjs" --message "$1"

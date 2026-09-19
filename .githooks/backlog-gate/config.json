@@ -42,5 +42,22 @@
   "holdDays": 2,
   "bulkCluster": 20,
   "projectWords": ["nocx", "herdr"],
-  "trackerWords": ["beads", ".beads", "issues.jsonl"]
+  "trackerWords": ["beads", ".beads", "issues.jsonl"],
+  "commitLinksFrom": "2026-09-19T08:00:00Z",
+  "execution": {
+    "development": "tdd",
+    "maxWorkers": 3,
+    "workersRunTests": false,
+    "claims": "coordinator-assigns-serially; br claim_exclusive refuses a second actor",
+    "mutationBudgetMinutes": 10,
+    "mutationFallback": "no mutation tool: at stage acceptance the coordinator hand-plants 2-3 mutations in the changed logic and records whether a test went red; a survivor becomes a test or a question to the owner, never a pass",
+    "reviewPreference": "different-model",
+    "reviewer": "codex, one round, at stage acceptance",
+    "reviewFallback": "same-model independent reviewer (a fresh Claude agent), disclosed as the same model",
+    "reviewRequiredForAcceptance": true
+  },
+  "setupStatus": "pending",
+  "setupVersion": null,
+  "setupVerifiedAt": null,
+  "setupTask": "nocx-q8yjf.1"
 }

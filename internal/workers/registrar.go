@@ -249,6 +249,11 @@ type RegisterRequest struct {
 	// spawner untouched.
 	Command     string
 	Environment string
+	// Worktree is the checkout this spawn was asked to create, passed
+	// through to the spawner as asked. The record resolves nothing here:
+	// the spawner owns the git seam that answers where the checkout is and
+	// what commit its branch starts from.
+	Worktree *WorktreeAsk
 	// CreatedByRunID is provenance and nothing else. It records which run
 	// asked; it never decides whether an operation is allowed.
 	CreatedByRunID string
@@ -345,9 +350,22 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Regist
 		Task:               req.Task,
 		Command:            req.Command,
 		Environment:        req.Environment,
+		Worktree:           req.Worktree,
 	})
 	if spawnErr != nil {
 		return Registration{Participant: p}, r.compensate(ctx, p, nil, false, fmt.Errorf("worker: spawn: %w", spawnErr))
+	}
+	// THE CHECKOUT THE SPAWN MADE, if it made one. It is read here, before
+	// anything can fail, because it is what a later compensation has to
+	// remove: from this line until the record goes live, the checkout's
+	// existence belongs to the compensation that follows every failure, and
+	// a spawn whose launcher never enrols must leave neither the pane nor
+	// the checkout behind. WorktreeSource is optional beside TaskDeliverer
+	// for the same reason — a launcher that created nothing says nothing,
+	// which is the zero Worktree.
+	var made Worktree
+	if src, ok := spawned.(WorktreeSource); ok {
+		made = src.WorktreeLocation()
 	}
 
 	// Step 4. The bound closes the interval; it does not decide anything
@@ -398,11 +416,12 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Regist
 	}
 
 	// Step 6, and the order inside it is the point.
-	if err := r.store.MarkLive(ctx, p.ID, live); err != nil {
+	if err := r.store.MarkLive(ctx, p.ID, live, made); err != nil {
 		return Registration{Participant: p}, r.compensate(ctx, p, spawned, true, fmt.Errorf("worker: mark live: %w", err))
 	}
 	p.State = StateLive
 	p.Liveness = live
+	p.Worktree = made
 	if err := r.sup.Attach(ctx, p); err != nil {
 		return Registration{Participant: p}, r.compensate(ctx, p, spawned, true, fmt.Errorf("worker: attach supervision: %w", err))
 	}

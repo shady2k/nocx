@@ -31,7 +31,7 @@ func TestParticipantBySessionNamesTheWorkerRunningInIt(t *testing.T) {
 		t.Fatalf("commit prepared: %v", err)
 	}
 	live := Liveness{BackendInstance: "instance-1", SessionID: "worker-session", Epoch: 1}
-	if err := store.MarkLive(ctx, p.ID, live); err != nil {
+	if err := store.MarkLive(ctx, p.ID, live, Worktree{}); err != nil {
 		t.Fatalf("mark live: %v", err)
 	}
 
@@ -103,7 +103,7 @@ func TestParticipantBySessionPrefersTheLiveIncarnation(t *testing.T) {
 		}
 		if err := store.MarkLive(ctx, seed.id, Liveness{
 			BackendInstance: "instance-1", SessionID: "worker-session", Epoch: seed.epoch,
-		}); err != nil {
+		}, Worktree{}); err != nil {
 			t.Fatalf("mark live %s: %v", seed.id, err)
 		}
 		if seed.dead {

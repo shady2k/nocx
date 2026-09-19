@@ -61,7 +61,7 @@ func (f *failableStore) PutDelegation(ctx context.Context, d workers.Delegation)
 	return f.Store.PutDelegation(ctx, d)
 }
 
-func (f *failableStore) MarkLive(ctx context.Context, id workers.ParticipantID, l workers.Liveness) error {
+func (f *failableStore) MarkLive(ctx context.Context, id workers.ParticipantID, l workers.Liveness, wt workers.Worktree) error {
 	f.mu.Lock()
 	fail := f.failMarkLive
 	hook := f.beforeMarkLiveFailure
@@ -72,7 +72,7 @@ func (f *failableStore) MarkLive(ctx context.Context, id workers.ParticipantID, 
 		}
 		return errors.New("injected: the mark-live store refused this write")
 	}
-	return f.Store.MarkLive(ctx, id, l)
+	return f.Store.MarkLive(ctx, id, l, wt)
 }
 
 // failableSupervisor wraps a real workers.Supervisor and lets a test refuse

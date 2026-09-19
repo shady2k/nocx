@@ -159,7 +159,7 @@ func (m *memStore) CommitPrepared(_ context.Context, p Participant) error {
 	return nil
 }
 
-func (m *memStore) MarkLive(_ context.Context, id ParticipantID, l Liveness) error {
+func (m *memStore) MarkLive(_ context.Context, id ParticipantID, l Liveness, wt Worktree) error {
 	if err := m.hit("marklive"); err != nil {
 		return err
 	}
@@ -171,6 +171,7 @@ func (m *memStore) MarkLive(_ context.Context, id ParticipantID, l Liveness) err
 	}
 	p.State = StateLive
 	p.Liveness = l
+	p.Worktree = wt
 	m.parts[id] = p
 	return nil
 }
@@ -450,11 +451,18 @@ func (m *memStore) mailbox(t *testing.T, box ReaderID) []Message {
 
 type fakeSpawned struct {
 	live   Liveness
+	wt     Worktree
 	killed *bool
 	mu     *sync.Mutex
 }
 
 func (f fakeSpawned) Liveness() Liveness { return f.live }
+
+// WorktreeLocation makes every fakeSpawned a WorktreeSource, answering the
+// spawner's wt — zero for the tests that are not about worktrees, which is
+// exactly the "created nothing" answer.
+func (f fakeSpawned) WorktreeLocation() Worktree { return f.wt }
+
 func (f fakeSpawned) Kill(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -468,6 +476,8 @@ type fakeSpawner struct {
 	failOn int
 	killed bool
 	live   Liveness
+	// wt is what this spawner's Spawned answers as the checkout it made.
+	wt Worktree
 	// before is called with the request before the fork is reported, so a
 	// test can ask what the record already held at the moment of the fork.
 	before func(SpawnRequest)
@@ -485,7 +495,7 @@ func (f *fakeSpawner) Spawn(_ context.Context, req SpawnRequest) (Spawned, error
 	if f.failOn == n {
 		return nil, fmt.Errorf("spawn: %w", errInjected)
 	}
-	return fakeSpawned{live: f.live, killed: &f.killed, mu: &f.mu}, nil
+	return fakeSpawned{live: f.live, wt: f.wt, killed: &f.killed, mu: &f.mu}, nil
 }
 
 func (f *fakeSpawner) wasKilled() bool {

@@ -99,8 +99,9 @@ func (s *MemoryStore) CommitPrepared(_ context.Context, p Participant) error {
 // MarkLive moves a prepared participant to live, and only a prepared one: a
 // participant that is no longer prepared has been terminalized by a
 // compensation, and marking it live would resurrect a record something else
-// already closed.
-func (s *MemoryStore) MarkLive(_ context.Context, id ParticipantID, l Liveness) error {
+// already closed. wt is stamped with the state in the same write, so a live
+// record is never missing the checkout its pane stands in.
+func (s *MemoryStore) MarkLive(_ context.Context, id ParticipantID, l Liveness, wt Worktree) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p, ok := s.parts[id]
@@ -109,6 +110,7 @@ func (s *MemoryStore) MarkLive(_ context.Context, id ParticipantID, l Liveness) 
 	}
 	p.State = StateLive
 	p.Liveness = l
+	p.Worktree = wt
 	s.parts[id] = p
 	return nil
 }

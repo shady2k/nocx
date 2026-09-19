@@ -42,8 +42,12 @@ type Store interface {
 
 	// MarkLive moves a prepared participant to live. It is called only on the
 	// strength of an enrolment that arrived, never because a dispatch
-	// returned.
-	MarkLive(ctx context.Context, id ParticipantID, l Liveness) error
+	// returned. wt is the checkout the spawn made and the record now accepts:
+	// from here on, the participant's worktree is the record's fact and its
+	// undo is nobody's, because the compensation that would have removed it
+	// is discharged the moment this write lands. Zero wt is the ordinary
+	// spawn that shares its coordinator's checkout.
+	MarkLive(ctx context.Context, id ParticipantID, l Liveness, wt Worktree) error
 
 	// Terminalize writes a terminal state over a non-terminal one. A
 	// compensation that itself fails leaves the record non-terminal and is
@@ -171,6 +175,12 @@ type SpawnRequest struct {
 	// over the resource environment, permitted only into an environment the
 	// run's own fence already names — reaching further is scope expansion.
 	Environment string
+	// Worktree is the checkout this spawn was asked to create, or nil when
+	// the participant will share its coordinator's checkout. It is carried
+	// as asked — Branch required, Base optional — and never resolved here:
+	// resolving a base is a git-seam question, and the spawner owns that
+	// seam.
+	Worktree *WorktreeAsk
 }
 
 // Spawned is a launcher that has been forked. It is not yet a participant:
@@ -230,6 +240,15 @@ type TaskDelivery struct {
 // attempted nothing, which is the zero TaskDelivery.
 type TaskDeliverer interface {
 	TaskDelivery() TaskDelivery
+}
+
+// WorktreeSource is the other optional half of Spawned: a launcher that
+// created a checkout answers where it is — the resolved facts, never the ask.
+// A Spawned that does not implement it created nothing, which is the zero
+// Worktree. The record takes the answer at MarkLive, the moment it accepts
+// the checkout's continued existence.
+type WorktreeSource interface {
+	WorktreeLocation() Worktree
 }
 
 // Spawner creates the session and starts the launcher inside it.

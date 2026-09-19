@@ -207,6 +207,29 @@ type Exit struct {
 	At time.Time
 }
 
+// WorktreeAsk is a spawn's request for the checkout its pane will live in:
+// the branch it will hold and — optionally — the commit that branch starts
+// from. An empty Base means the coordinator checkout's HEAD commit, resolved
+// at spawn time by whoever owns the git seam; this package carries the ask
+// and never resolves it.
+type WorktreeAsk struct {
+	Branch string
+	Base   string
+}
+
+// Worktree is the checkout a participant's pane lives in, as the spawn
+// actually made it: where it is, the branch checked out in it, and the commit
+// the branch starts from. Base is the RESOLVED commit, never the bare
+// revision the ask may have named — a compensation that must delete a branch
+// "with no commits beyond base" cannot mean whatever HEAD has grown into by
+// the time it runs. Zero means the participant shares its coordinator's
+// checkout, which is every spawn that did not ask for one.
+type Worktree struct {
+	Path   string
+	Branch string
+	Base   string
+}
+
 // Participant is one node of a worker.
 type Participant struct {
 	ID       ParticipantID
@@ -223,6 +246,14 @@ type Participant struct {
 	// RegisteredAt is when the record was committed — before any fork
 	// attributable to it.
 	RegisteredAt time.Time
+	// Worktree is the checkout this participant's pane lives in, when its
+	// spawn made one: where it is, the branch checked out in it, and the
+	// commit that branch starts from. It is written by MarkLive, at the
+	// moment the participant goes live — the moment the record accepts a
+	// checkout whose existence until then belonged to the spawn's own
+	// compensation. Zero when the participant shares its coordinator's
+	// checkout.
+	Worktree Worktree
 }
 
 // Effect is one thing a delegation permits its holder to do to a participant.

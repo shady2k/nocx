@@ -1,11 +1,13 @@
 # Backlog integration
 
 Maintained by `/shady2k-skills:setup-shady2k-skills`; last reconciled to the skill set
-0.13.2 on 2026-09-19 by its setup task, "The backlog tooling here matches the current
-shady2k-skills and is proved from main" (nocx-q8yjf.3). The protocol itself ships with the skills and is
-not restated here. This file holds the project's facts and the commands that were run and
-seen to work. Changing choices — strength, milestone, budgets, execution settings, and
-whether the last setup is verified — live only in the config.
+0.18.0 on 2026-09-19 by its setup task, "The backlog tooling here matches shady2k-skills
+0.18.0 and is proved from main" (nocx-q8yjf.4). The protocol itself ships with the skills
+and is not restated here. This file holds the project's facts and the commands that were
+run and seen to work. Changing choices — strength, milestone, budgets, scope and execution
+settings — live only in the config. No installation state is recorded anywhere: the
+`--version` of the three installed checks on `main` is the repository's installation, and
+each person's plugin and hooks are their own.
 
 AGENTS.md wins over this file wherever they disagree; the disagreement is then this file's
 bug.
@@ -13,7 +15,11 @@ bug.
 ## Project
 
 - **Config:** [`.githooks/backlog-gate/config.json`](../../.githooks/backlog-gate/config.json).
-  Read `currentMilestone`, `findingBudget`, `execution` and `setupStatus` there, never here.
+  Read `currentMilestone`, `findingBudget`, `scope` and `execution` there, never here.
+- **Scope: team** (owner, 2026-09-19). The rules bind everyone who works here: `make init`
+  connects the hooks in every clone, CI's `ci-backlog` enforces them on every pull request,
+  and `.claude/settings.json` offers the plugin to anyone who trusts the folder in Claude
+  Code. AGENTS.md carries the install line for people who do not have it yet.
 - **Vision and roadmap:** [`docs/vision.md`](../vision.md); its §6 "Strategic roadmap" is the
   roadmap. Status comes from the tracker (`scripts/feature-status.sh <feature>`), never from
   either document.
@@ -110,8 +116,8 @@ keeps every later change.
 - **Rules:** [`check.mjs`](../../.githooks/backlog-gate/check.mjs),
   [`check-commits.mjs`](../../.githooks/backlog-gate/check-commits.mjs) and
   [`check-docs.mjs`](../../.githooks/backlog-gate/check-docs.mjs) are byte-for-byte copies
-  of the shady2k-skills plugin's `skills/backlog/setup-shady2k-skills/` at 0.13.2, never
-  edited here. Proving it: `cmp` each against the plugin copy, `--version` prints `0.13.2`,
+  of the shady2k-skills plugin's `skills/backlog/setup-shady2k-skills/` at 0.18.0, never
+  edited here. Proving it: `cmp` each against the plugin copy, `--version` prints `0.18.0`,
   and the selftests run from the plugin directory because the fixtures live there:
   `node check.mjs --selftest --config <repo>/.githooks/backlog-gate/config.json`,
   `node check-commits.mjs --selftest`, `node check-docs.mjs --selftest`.
@@ -195,25 +201,25 @@ files>` in `frontend/`. Who runs them: AGENTS.md, "Git authority" — see the op
 resolves the MAIN checkout's database even from a worktree. Its own docs: `br robot-docs
 guide`, `br <command> --help`.
 
-| operation                        | here                                                                                                                                                                                                                                                                    |
-| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| create                           | `br create "<title>" -t epic\|task\|bug\|chore -l <area> -d "<body with DONE WHEN for an epic>" [--parent <id>] [-p 0-3]`                                                                                                                                               |
-| link / unlink                    | `br dep add <consumer leaf> <producer leaf>` (type `blocks`), with the reason and what releases it in a comment · `br dep remove …` · parent: `-t parent-child` · provenance: `-t discovered-from`, which gates nothing                                                 |
-| claim                            | `br update <id> --claim --actor <worker>`. `claim_exclusive` refuses it while another actor holds the bead                                                                                                                                                              |
-| release                          | `br update <id> --status open --assignee ""`: an unfinished hold only, in the minute it stops                                                                                                                                                                           |
-| submitted                        | `br comments add <id> "submitted: <rev> -- <evidence>"`, then the coordinator takes the assignee                                                                                                                                                                        |
-| implemented                      | coordinator only: `br comments add <id> "implemented: <merge rev> -- <related-check evidence>"`                                                                                                                                                                         |
-| reopen                           | `br comments add <id> "reopened: <why>"`, and recheck every issue blocked by it; a closed one: `br reopen <id>` first                                                                                                                                                   |
-| close                            | `br close <id> -r "<accepted at <rev>: evidence a stranger can check>"`, only after stage acceptance, or with an explicit duplicate/cancellation reason naming the survivor                                                                                             |
-| comment / edit                   | `br comments add <id> "…"` · `br update <id> --title … --description-file <f>` · move: `br dep remove <id> <old>` then `br dep add <id> <new> -t parent-child`                                                                                                          |
-| defer / undefer                  | `br defer <id> --until <date>` · `br undefer <id>`                                                                                                                                                                                                                      |
-| milestone / label                | `br label add <root> <milestone>` (read the value from config); `br label add\|remove <id> <label>`                                                                                                                                                                     |
-| ready                            | `br ready -t task -t bug` · in one stage: `br ready --epic <stage>`. br releases a dependant only when its prerequisite CLOSES, so an `implemented` prerequisite in the same stage is released by the coordinator by hand, in a checkout at or after its merge revision |
-| holds                            | `br list --status in_progress` (assignee on each row)                                                                                                                                                                                                                   |
-| pending integration / acceptance | `br search "submitted:"` / `br search "implemented:"`, then confirm the latest marker with `br comments <id>`                                                                                                                                                           |
-| children                         | `br dep list <id> --direction up -t parent-child` (every status, closed included) · counts: `br show <id> --json \| jq '.[0].rollup'`                                                                                                                                   |
-| search / show                    | `br search "<phrase>"` (title, body, comments) · `br list --label <area> --status all` · `br show <id>` · `br comments <id>`                                                                                                                                            |
-| publish                          | `br sync --flush-only`, copy or stage `.beads/issues.jsonl` in the checkout being committed, commit with a leaf id, push. **Never `br sync --merge` on a database that is merely ahead** (AGENTS.md)                                                                    |
+| operation                        | here                                                                                                                                                                                                                                                                                                                                                                                      |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| create                           | `br create "<title>" -t epic\|task\|bug\|chore -l <area> -d "<body with DONE WHEN for an epic>" [--parent <id>] [-p 0-3]`                                                                                                                                                                                                                                                                 |
+| link / unlink                    | `br dep add <consumer leaf> <producer leaf>` (type `blocks`), with the reason and what releases it in a comment · `br dep remove …` · parent: `-t parent-child` · provenance: `-t discovered-from`, which gates nothing                                                                                                                                                                   |
+| claim                            | `br update <id> --claim --actor <agent>`, always with `--actor`: without it `br` records `$USER`, the person. The holder is the agent doing the work — `claude-coordinator`, `<harness>-worker-<n>` — and the person only for their own decisions, checks and approvals. Epics stay owned by the person (AGENTS.md). `claim_exclusive` refuses a claim while another actor holds the bead |
+| release                          | `br update <id> --status open --assignee ""`: an unfinished hold only, in the minute it stops                                                                                                                                                                                                                                                                                             |
+| submitted                        | `br comments add <id> "submitted: <rev> -- <evidence>"`, then the coordinator takes the assignee                                                                                                                                                                                                                                                                                          |
+| implemented                      | coordinator only: `br comments add <id> "implemented: <merge rev> -- <related-check evidence>"`                                                                                                                                                                                                                                                                                           |
+| reopen                           | `br comments add <id> "reopened: <why>"`, and recheck every issue blocked by it; a closed one: `br reopen <id>` first                                                                                                                                                                                                                                                                     |
+| close                            | `br close <id> -r "<accepted at <rev>: evidence a stranger can check>"`, only after stage acceptance, or with an explicit duplicate/cancellation reason naming the survivor                                                                                                                                                                                                               |
+| comment / edit                   | `br comments add <id> "…"` · `br update <id> --title … --description-file <f>` · move: `br dep remove <id> <old>` then `br dep add <id> <new> -t parent-child`                                                                                                                                                                                                                            |
+| defer / undefer                  | `br defer <id> --until <date>` · `br undefer <id>`                                                                                                                                                                                                                                                                                                                                        |
+| milestone / label                | `br label add <root> <milestone>` (read the value from config); `br label add\|remove <id> <label>`                                                                                                                                                                                                                                                                                       |
+| ready                            | `br ready -t task -t bug` · in one stage: `br ready --epic <stage>`. br releases a dependant only when its prerequisite CLOSES, so an `implemented` prerequisite in the same stage is released by the coordinator by hand, in a checkout at or after its merge revision                                                                                                                   |
+| holds                            | `br list --status in_progress` (assignee on each row)                                                                                                                                                                                                                                                                                                                                     |
+| pending integration / acceptance | `br search "submitted:"` / `br search "implemented:"`, then confirm the latest marker with `br comments <id>`                                                                                                                                                                                                                                                                             |
+| children                         | `br dep list <id> --direction up -t parent-child` (every status, closed included) · counts: `br show <id> --json \| jq '.[0].rollup'`                                                                                                                                                                                                                                                     |
+| search / show                    | `br search "<phrase>"` (title, body, comments) · `br list --label <area> --status all` · `br show <id>` · `br comments <id>`                                                                                                                                                                                                                                                              |
+| publish                          | `br sync --flush-only`, copy or stage `.beads/issues.jsonl` in the checkout being committed, commit with a leaf id, push. **Never `br sync --merge` on a database that is merely ahead** (AGENTS.md)                                                                                                                                                                                      |
 
 **Where the model and `br ready` differ.** Measured 2026-09-18 and still true: `br ready`
 also hides a leaf whose ANCESTOR is blocked or deferred, which the normalized model does

@@ -129,6 +129,19 @@
                 "type": "string",
                 "description": "The worker the spawn that created this checkout was starting, when nocx knows. Absent when the checkout is older than nocx's record."
               },
+              "expired": {
+                "type": "boolean",
+                "description": "True when nocx's sweep has found this checkout past the idle period (worktrees.idleDays, default 30 days) and COULD NOT remove it. It is still on disk exactly as it was, and holdReason says why. Absent for a checkout no sweep has judged."
+              },
+              "holdReason": {
+                "type": "string",
+                "enum": ["uncommitted", "held", "not-ours", "unresolved", "pane-open"],
+                "description": "Why an expired checkout is still here. uncommitted: it holds work no commit keeps — remove it yourself if you want it gone, nocx never will. held: a live worker holds it; close the worker first. pane-open: a pane of nocx is open in it. not-ours / unresolved: nocx could not establish the checkout as removable and claims nothing. Only present with expired."
+              },
+              "holdDetail": {
+                "type": "string",
+                "description": "What nocx found on disk when it judged, in the removal answer's own words. Only present with expired."
+              },
               "task": {
                 "type": "string",
                 "description": "What that worker was given to do, as its coordinator phrased it. Absent when nocx does not know."

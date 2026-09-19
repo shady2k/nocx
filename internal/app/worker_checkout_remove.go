@@ -112,29 +112,12 @@ func (c *workerCheckouts) RemoveCheckouts(ctx context.Context, coordinatorSessio
 	}
 	defer func() { _ = repo.Close() }()
 
-	// THE BASE, read the way the spawn and the holdings walk read it: this
-	// checkout's HEAD, as a hash — Worktrees counts ahead of it, which the
-	// removal does not need but the seam's listing asks for.
-	head, err := repo.Log(ctx, 1)
-	if err != nil || len(head.Entries) == 0 {
-		lg.Warn("worker checkouts: read the coordinator's HEAD for a removal", "error", err)
-		return refuseAll(workers.CheckoutRefusalUnresolved,
-			"the repository's HEAD could not be read, so nothing could be verified and nothing was removed")
+	ground, fail := readRemovalGround(ctx, lg, repo)
+	if fail != nil {
+		return refuseAll(fail.Refusal, fail.Detail)
 	}
-	base := head.Entries[0].Hash
-
-	trees, err := repo.Worktrees(ctx, base)
-	if err != nil {
-		lg.Warn("worker checkouts: list the repository's worktrees for a removal", "error", err)
-		return refuseAll(workers.CheckoutRefusalUnresolved,
-			"the repository's worktrees could not be listed, so nothing could be verified and nothing was removed")
-	}
-	if len(trees) == 0 || !trees[0].Main {
-		lg.Warn("worker checkouts: the repository reports no main checkout", "cwd", cwd)
-		return refuseAll(workers.CheckoutRefusalUnresolved,
-			"the repository reports no main checkout, which git never does; refusing rather than guessing")
-	}
-	repoKey := nocxCheckoutRepoKey(trees[0].Path)
+	repoKey := ground.repoKey
+	trees := ground.trees
 
 	held, err := c.held.HeldWorktrees(ctx)
 	if err != nil {
@@ -156,6 +139,72 @@ func (c *workerCheckouts) RemoveCheckouts(ctx context.Context, coordinatorSessio
 		}
 	}
 
+	removal = c.removeResolved(ctx, lg, repoKey, repo, heldPaths, treeByPath, treeByBranch, refs)
+	return removal
+}
+
+// removalGround is what every removal decision stands on: the repository's
+// key, its HEAD as the base the listing counts from, and the worktree
+// listing itself.
+type removalGround struct {
+	repoKey string
+	base    string
+	trees   []git.Worktree
+}
+
+// readRemovalGround reads HEAD and the worktree listing the removal asks
+// against, and derives the repository key. A read that fails answers the
+// refusal PROTOTYPE every caller copies into its own answer shape — the
+// tool's refuseAll rows, the sweep's per-checkout notes — so the mapping
+// from a failed read to a named refusal is spelled here, once.
+func readRemovalGround(ctx context.Context, lg log.Logger, repo git.Repo) (removalGround, *workers.RemovedCheckout) {
+	head, err := repo.Log(ctx, 1)
+	if err != nil || len(head.Entries) == 0 {
+		lg.Warn("worker checkouts: read the repository's HEAD", "error", err)
+		return removalGround{}, &workers.RemovedCheckout{
+			Refusal: workers.CheckoutRefusalUnresolved,
+			Detail:  "the repository's HEAD could not be read, so nothing could be verified and nothing was removed",
+		}
+	}
+	base := head.Entries[0].Hash
+	trees, err := repo.Worktrees(ctx, base)
+	if err != nil {
+		lg.Warn("worker checkouts: list the repository's worktrees", "error", err)
+		return removalGround{}, &workers.RemovedCheckout{
+			Refusal: workers.CheckoutRefusalUnresolved,
+			Detail:  "the repository's worktrees could not be listed, so nothing could be verified and nothing was removed",
+		}
+	}
+	if len(trees) == 0 || !trees[0].Main {
+		lg.Warn("worker checkouts: the repository reports no main checkout")
+		return removalGround{}, &workers.RemovedCheckout{
+			Refusal: workers.CheckoutRefusalUnresolved,
+			Detail:  "the repository reports no main checkout, which git never does; refusing rather than guessing",
+		}
+	}
+	return removalGround{
+		repoKey: nocxCheckoutRepoKey(trees[0].Path),
+		base:    base,
+		trees:   trees,
+	}, nil
+}
+
+// removeResolved asks the removal for each ref against a listing the caller
+// already read, and drops the removed rows from the durable record — THE
+// ROW GOES WITH THE CHECKOUT: the record must not go on naming a checkout
+// it no longer has. A failed drop leaves an invisible row, never a wrong
+// checkout — the same convenience the holdings read's drop-on-read provides.
+func (c *workerCheckouts) removeResolved(
+	ctx context.Context,
+	lg log.Logger,
+	repoKey string,
+	repo git.Repo,
+	heldPaths map[string]bool,
+	treeByPath map[string]git.Worktree,
+	treeByBranch map[string]git.Worktree,
+	refs []workers.CheckoutRef,
+) workers.CheckoutRemoval {
+	removal := workers.CheckoutRemoval{Items: make([]workers.RemovedCheckout, 0, len(refs))}
 	removed := make([]string, 0, len(refs))
 	for _, ref := range refs {
 		item := c.removeOne(ctx, lg, repo, heldPaths, treeByPath, treeByBranch, ref)
@@ -164,12 +213,6 @@ func (c *workerCheckouts) RemoveCheckouts(ctx context.Context, coordinatorSessio
 		}
 		removal.Items = append(removal.Items, item)
 	}
-
-	// THE ROW GOES WITH THE CHECKOUT: the durable record must not go on
-	// naming a checkout it no longer has. A failed drop leaves an
-	// invisible row, never a wrong checkout — the same convenience the
-	// holdings read's drop-on-read provides, and it will catch this one
-	// too if it ever lands.
 	if len(removed) > 0 {
 		if err := c.rows.Delete(ctx, repoKey, removed); err != nil {
 			lg.Warn("worker checkouts: drop the removed checkouts' rows", "error", err)

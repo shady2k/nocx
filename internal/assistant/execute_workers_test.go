@@ -521,6 +521,8 @@ func TestWorkerHoldingsResultConformsToItsContract(t *testing.T) {
 				Uncommitted: true, Ahead: 2, Readable: true,
 				LastUsed: time.Date(2026, 9, 18, 10, 0, 0, 0, time.UTC),
 				Name:     "worker-9", Task: "the one that finished",
+				Expired: true, HoldReason: "uncommitted",
+				HoldDetail: "the checkout holds work no commit keeps; nothing was removed",
 			}},
 			Complete: true,
 		},
@@ -572,6 +574,9 @@ func TestWorkerHoldingsResultConformsToItsContract(t *testing.T) {
 	}
 	if !strings.Contains(raw, `"leftoverCheckouts"`) || !strings.Contains(raw, `"checkoutsComplete":true`) {
 		t.Fatalf("the result carries no checkout answer, so the schema check proved nothing about it: %s", raw)
+	}
+	if !strings.Contains(raw, `"expired":true`) || !strings.Contains(raw, `"holdReason":"uncommitted"`) {
+		t.Fatalf("the result carries no sweep verdict, so the schema check proved nothing about it: %s", raw)
 	}
 }
 

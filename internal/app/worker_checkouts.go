@@ -32,6 +32,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shady2k/nocx/internal/content"
@@ -81,6 +82,14 @@ type workerCheckouts struct {
 	// wrote it; production leaves it alone, and a nil field is the same as
 	// time.Now.
 	now func() time.Time
+	// sweepMu guards sweepNotes: the sweep's last completed judgement, by
+	// checkout path. The sweep (worker_checkout_sweep.go) writes it
+	// wholesale at the end of a pass; the holdings answer reads it to say
+	// which checkout is expired and why it is still there. Nil is the state
+	// before the first sweep ran — no judgement has been made, and no row
+	// reads as expired.
+	sweepMu    sync.Mutex
+	sweepNotes map[string]checkoutSweepNote
 }
 
 func (c *workerCheckouts) clock() time.Time {
@@ -248,6 +257,11 @@ func (c *workerCheckouts) Leftovers(ctx context.Context, coordinatorSession stri
 		leftover.Name, leftover.Task = row.Name, row.Task
 		if row.LastUsedAt != 0 {
 			leftover.LastUsed = time.UnixMilli(row.LastUsedAt).UTC()
+		}
+		if note, ok := c.sweepNoteOf(tree.Path); ok {
+			leftover.Expired = true
+			leftover.HoldReason = note.Reason
+			leftover.HoldDetail = note.Detail
 		}
 		out = append(out, leftover)
 	}

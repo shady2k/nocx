@@ -139,6 +139,16 @@ type workerLeftoverCheckoutResult struct {
 	// knows; a checkout older than the record lists with neither.
 	Name string `json:"name,omitempty"`
 	Task string `json:"task,omitempty"`
+	// Expired, HoldReason and HoldDetail are the SWEEP's verdict on the
+	// checkout (nocx-xn63t.1.6): expired means a sweep found it past the
+	// idle period and could not remove it, HoldReason names why from a
+	// closed set — the removal refusals, or "pane-open" for a checkout a
+	// live pane of nocx stands in — and HoldDetail says what is true on
+	// disk. Absent entirely for a checkout no sweep has judged, which is
+	// every checkout before the first pass runs.
+	Expired    bool   `json:"expired,omitempty"`
+	HoldReason string `json:"holdReason,omitempty"`
+	HoldDetail string `json:"holdDetail,omitempty"`
 }
 
 // workerMailResult is one message the coordinator is handed. It carries the
@@ -481,6 +491,9 @@ func renderLeftoverCheckouts(rows []workers.LeftoverCheckout) []workerLeftoverCh
 			Path: r.Path, Branch: r.Branch,
 			Uncommitted: r.Uncommitted, Ahead: r.Ahead, Readable: r.Readable,
 			Name: r.Name, Task: r.Task,
+			Expired:    r.Expired,
+			HoldReason: r.HoldReason,
+			HoldDetail: r.HoldDetail,
 		}
 		if !r.LastUsed.IsZero() {
 			row.LastUsed = r.LastUsed.UTC().Format(time.RFC3339)

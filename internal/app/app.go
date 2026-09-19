@@ -133,6 +133,16 @@ type App struct {
 	// here, like gitFactory beside it, so the composition root's ownership
 	// is explicit and a wiring test can see what New built.
 	workerCheckouts *workerCheckouts
+	// checkoutSweeper removes the checkouts the record shows nobody has
+	// used past the idle period (nocx-xn63t.1.6). Held here, like the
+	// service it sweeps through, so the composition root's ownership is
+	// explicit: Start runs the first pass and the daily cadence, Shutdown
+	// stops the cadence.
+	checkoutSweeper *checkoutSweeper
+	// stopCheckoutSweep ends the sweep's cadence; nil until Start began it,
+	// and safe to call twice.
+	stopCheckoutSweep func()
+
 	// helperRegistry owns the live helper channels shared by git and the
 	// sessions inventory. Kept here so the composition root's ownership is
 	// explicit; the registry itself remains private to app.
@@ -2374,6 +2384,29 @@ func New(opts ...Option) (*App, error) {
 	// answer the registrar cannot give.
 	checkouts.held = workerRecord
 	assistantWorkerRecord := &workerRecordWithCheckouts{Registrar: workerRecord, checkouts: checkouts}
+
+	// THE SWEEP (nocx-xn63t.1.6): the same service, asked on a schedule
+	// instead of by a coordinator, under the same removal refusals. The
+	// period is read fresh on every pass — the registry stays the one owner
+	// of the number (the debounce window's rule), so a person's change in
+	// Settings governs the next sweep with no restart. An unreadable
+	// setting degrades to the DECLARED default and never to zero: zero
+	// means never, and a read failure must not quietly disable the cleanup
+	// the owner asked for by default.
+	checkoutSweeper := &checkoutSweeper{
+		checkouts: checkouts,
+		sessions:  sess,
+		period: func() time.Duration {
+			days, err := settingsRegistry.GetNumber(settings.WorktreeIdleDays)
+			if err != nil {
+				log.From(context.Background()).Warn("checkout sweep: the idle period is unreadable; falling back to the declared default",
+					"key", settings.WorktreeIdleDays.Key(), "error", err)
+				days = settings.WorktreeIdleDays.DefaultValue()
+			}
+			return time.Duration(days) * 24 * time.Hour
+		},
+	}
+
 	// What nocx SEES, joined to what it records (nocx-luqz9.2, ADR-0070
 	// decision 2). Built here because this is the only place both halves exist:
 	// the watcher knows what a pane was classified as, the record knows what a
@@ -2560,7 +2593,6 @@ func New(opts ...Option) (*App, error) {
 		toolSurfaceCloser:   toolSurface,
 		UploadSources:       tp.UploadSources(),
 		ShellIntegration:    shint,
-		Profiles:            profileStore,
 		Credentials:         v,
 		skills:              skills,
 		vaultCloser:         v,
@@ -2568,6 +2600,7 @@ func New(opts ...Option) (*App, error) {
 		discoverySched:      discoverySched,
 		gitFactory:          gitFactory,
 		workerCheckouts:     checkouts,
+		checkoutSweeper:     checkoutSweeper,
 		helperRegistry:      helperReg,
 		helperArtifacts:     localHelperArtifacts(o),
 		localHelper:         localOpener,
@@ -2962,13 +2995,23 @@ func (a *App) Start(ctx context.Context) error {
 	// cause on this list that a person clears in one gesture"
 	// (content/reconcile.go) — gets exactly that gesture a chance to answer.
 	// The id set is captured HERE, once, right after this pass returns —
-	// see retryReconciler's own comment for why it must be fixed rather than
-	// re-filtered by cause on every later poll. Every OTHER cause (an
+	// see retryReconciler's own comment for why it must be fixed rather
+	// than re-filtered by cause on every later poll. Every OTHER cause (an
 	// unreachable host, a timeout) is unchanged by a client attaching, so it
 	// is left for the pass above. See retryVaultSealedSessions for why the
 	// retry itself is a poll and not one suspended attempt.
 	if ids := vaultSealedSessionIDs(ctx, a.sessionReconciler, a.slogger); len(ids) > 0 {
 		go a.retryVaultSealedSessions(ctx, ids)
+	}
+
+	// THE CHECKOUT SWEEP's first pass and cadence (nocx-xn63t.1.6), after
+	// Transport.Start: the sweep removes through the one removal path — the
+	// same refusals a coordinator's explicit ask meets — so nothing it can
+	// honestly remove is lost by waiting a few lines, and the first pass is
+	// still the backend's own start, before a coordinator has had to ask
+	// for anything.
+	if a.checkoutSweeper != nil {
+		a.stopCheckoutSweep = a.checkoutSweeper.start(a.Logger)
 	}
 
 	return nil
@@ -3171,6 +3214,12 @@ func (a *App) Shutdown(ctx context.Context) {
 	// stopped, so no probe can outlive the process.
 	if a.discoverySched != nil {
 		_ = a.discoverySched.Close()
+	}
+	// The checkout sweep's cadence (nocx-xn63t.1.6) stops beside the other
+	// background owners: no daily pass may wake after the stores it reads
+	// are gone.
+	if a.stopCheckoutSweep != nil {
+		a.stopCheckoutSweep()
 	}
 	// The git environment resolution (nocx-6pz0) runs in the background
 	// from factory construction; cancel it so no resolution child can

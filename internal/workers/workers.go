@@ -247,6 +247,18 @@ type LeftoverCheckout struct {
 	LastUsed    time.Time
 	Name        string
 	Task        string
+	// Expired is the sweep's judgement (nocx-xn63t.1.6): true when a sweep
+	// found this checkout past the idle period and could not remove it.
+	// False — and HoldReason and HoldDetail empty — when no sweep has judged
+	// the checkout, which is the ordinary state before the first pass runs.
+	Expired bool
+	// HoldReason is WHY the expired checkout is still here, from the sweep's
+	// closed vocabulary: a removal refusal's name — uncommitted, held,
+	// not-ours, unresolved — or "pane-open", the sweep's own, for a checkout
+	// a live pane of nocx stands in. Empty unless Expired.
+	HoldReason string
+	// HoldDetail is what is true on disk, in the removal answer's own words.
+	HoldDetail string
 }
 
 // CheckoutSurvey is what a caller asking about a repository's leftover

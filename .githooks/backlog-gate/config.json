@@ -57,8 +57,8 @@
     "reviewFallback": "same-model independent reviewer (a fresh Claude agent), disclosed as the same model",
     "reviewRequiredForAcceptance": true
   },
-  "setupStatus": "pending",
-  "setupVersion": "0.10.0",
-  "setupVerifiedAt": "2026-09-19T08:40:30Z",
+  "setupStatus": "verified",
+  "setupVersion": "0.13.2",
+  "setupVerifiedAt": "2026-09-19T09:14:03Z",
   "setupTask": "nocx-q8yjf.3"
 }

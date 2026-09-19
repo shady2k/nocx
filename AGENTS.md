@@ -402,7 +402,8 @@ steps for you.
 1. **File beads for remaining work** — anything that needs follow-up, before you forget it.
 2. **Run the quality gates** if code changed. Which ones, and whose job they are, is under
    [Git authority](#git-authority): a worker runs the unit tests for what it touched, the
-   coordinator runs `make ci-full` on the merged tree.
+   coordinator runs `make ci-full` on the merged tree — unless nothing in it can touch
+   product code, which owes review and its own tooling's tests instead.
 3. **Update issue status** — close what is finished, and set anything you stopped holding
    back to `open` in the same minute. An unheld bead in `in_progress` is invisible to
    `br ready` and to every colleague looking for work.
@@ -896,7 +897,11 @@ image, packages, Go toolchain and command.
 the unit tests for the files it changed and stops there. It does not run `make ci-full`, the
 containerized jobs or the e2e suite — not as diligence, not "just to be sure". The
 coordinator runs all of them, **once, on the merged tree, before `git push` to `main`**,
-every time, including when every branch that went into it was green alone.
+every time, including when every branch that went into it was green alone. The one
+exception is a change that cannot touch product code — documents, `.beads/`, `.githooks/`,
+process tooling: it owes review and the tests of the tooling it changes, not the product
+suites. The owner's decision of 2026-09-19; a full run there buys nothing a diff with no
+product code in it could break.
 
 That is not a weakening: the failure that bought the rule was a push to `main`, and there it
 binds exactly as hard as before. What comes off is a cost it never bought. Branches that

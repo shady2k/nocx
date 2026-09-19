@@ -19,8 +19,18 @@
  *     by registerBackendForTest and printed in full: unlike the shared
  *     stand, one of these belongs to exactly one test for its whole life, so
  *     there is nothing to filter.
- *   - The browser's console messages and uncaught page errors.
+ *   - The browser's console messages and uncaught page errors — of the
+ *     fixture's page, and of every page a spec built itself and put on the
+ *     report with watchPageForTest.
  *   - The control-plane's own JSON-RPC frames — method, id and error ONLY.
+ *
+ * WHO PRINTS IT. The report is written by an AUTO fixture (harness.ts), once
+ * per test, whichever fixtures the test asked for. It used to be written by
+ * the `page` fixture, and a spec that never asked for `page` — every spec that
+ * builds its own client from `browser`, because it needs a fresh context per
+ * coordinator — printed nothing at all when it failed: not its console, and
+ * not even the backend it had registered here (remote-coordinator-reclaim,
+ * CI 2026-09-19, a hidden editor and no block to say why).
  *
  * What is deliberately NEVER printed: a frame's params or result (a
  * password, an API key, the text of a command someone typed — see
@@ -79,24 +89,44 @@ function bounded<T>(max: number): { push(item: T): void; items: T[]; dropped: nu
   }
 }
 
-export interface FailureDiagnostics {
-  /** Print the block if, and only if, info describes a test that just
-   *  failed. Safe to call unconditionally at teardown. */
-  report(info: TestInfo, traceId: string): Promise<void>
+/** What one watched page collected, and the one moment its accessibility
+ *  snapshot can still be taken. */
+export interface PageDiagnostics {
+  /** Read the page's accessibility tree NOW, while it is still open, and keep
+   *  it for the report. A fixture page is closed by the time the auto fixture
+   *  reports, so the `page` fixture calls this on its own way out; a closed
+   *  page keeps whatever was taken last. */
+  captureSnapshot(): Promise<void>
+  /** Whether a snapshot has been taken already. */
+  hasSnapshot(): boolean
+  /** This page's sections of the printed block. */
+  sections(label: string): string[]
 }
+
+interface WatchedPage {
+  label: string
+  page: Page
+  diagnostics: PageDiagnostics
+  /** The harness closes this page's context after reporting — true for a
+   *  page a spec built itself from `browser`, which no fixture owns. */
+  closeAfterReport: boolean
+}
+
+const pagesByTestId = new Map<string, WatchedPage[]>()
 
 /**
  * Start listening on `page` for everything this module can print, and
- * return the reporter to call at teardown.
+ * return what it collects.
  *
  * Listeners are attached immediately — before navigation — so nothing the
  * page does before its first assertion is missed. Collecting is unconditional
- * (a passing test costs a few event-listener calls); only `report` checks
- * whether anything should be PRINTED.
+ * (a passing test costs a few event-listener calls); only the report decides
+ * whether anything is PRINTED.
  */
-export function attachFailureDiagnostics(page: Page): FailureDiagnostics {
+export function attachFailureDiagnostics(page: Page): PageDiagnostics {
   const consoleLines = bounded<string>(MAX_CONSOLE_LINES)
   const frames = bounded<RedactedFrame>(MAX_FRAMES)
+  let snapshot: string | null = null
 
   page.on('console', (msg) => {
     consoleLines.push(`[console:${msg.type()}] ${msg.text()}`)
@@ -122,46 +152,123 @@ export function attachFailureDiagnostics(page: Page): FailureDiagnostics {
   })
 
   return {
-    async report(info, traceId) {
-      if (info.status === 'passed') return
-
-      const sections: string[] = [
-        '',
-        `FAILURE CONTEXT — ${info.titlePath.slice(1).join(' › ')} — ` +
-          `${info.status} (trace_id=${traceId || '(none)'})`,
-      ]
-
-      const sharedLines = traceId ? linesForTrace(standBackendLogTail(), traceId) : []
-      sections.push(linesSection('shared stand backend log, filtered by trace_id', sharedLines))
-
-      for (const backend of backendsByTestId.get(info.testId) ?? []) {
-        const lines = backend.logTail(40_000).split('\n')
-        sections.push(linesSection(`this test's own backend (${backend.logFile})`, lines))
+    async captureSnapshot() {
+      if (page.isClosed()) return
+      try {
+        snapshot = await page.locator('html').ariaSnapshot()
+      } catch (err) {
+        snapshot ??= `(snapshot unavailable: ${String(err)})`
       }
-
-      sections.push(
-        linesSection('browser console & page errors', consoleLines.items, consoleLines.dropped),
-      )
-      sections.push(
+    },
+    hasSnapshot() {
+      return snapshot !== null
+    },
+    sections(label) {
+      return [
         linesSection(
-          'control-plane frames (method, id, error only — never params, result or PTY bytes)',
+          `${label}: browser console & page errors`,
+          consoleLines.items,
+          consoleLines.dropped,
+        ),
+        linesSection(
+          `${label}: control-plane frames (method, id, error only — never params, result or PTY bytes)`,
           frames.items.map(formatFrame),
           frames.dropped,
         ),
-      )
-
-      let snapshot: string
-      try {
-        snapshot = page.isClosed()
-          ? '(page already closed; no snapshot)'
-          : await page.locator('html').ariaSnapshot()
-      } catch (err) {
-        snapshot = `(snapshot unavailable: ${String(err)})`
-      }
-      sections.push(`-- accessibility snapshot --\n${snapshot}`)
-
-      process.stderr.write(sections.join('\n') + '\n')
+        `-- ${label}: accessibility snapshot --\n${snapshot ?? '(the page closed before a snapshot was taken)'}`,
+      ]
     },
+  }
+}
+
+/**
+ * Put a page on the running test's failure report.
+ *
+ * The `page` fixture does this for the page it hands out. A spec that builds
+ * its OWN client from `browser` calls it for each one (harness.ts's
+ * `watchClient` does it with the running test's id).
+ *
+ * `closeAfterReport` hands the page's context to the harness: it is
+ * snapshotted and closed at teardown, AFTER the report is written, so the
+ * spec must not close it in its own `finally` — that runs first, and would
+ * leave nothing to read. A spec that closes it ON PURPOSE mid-test still may;
+ * the report then carries what the page said up to that moment.
+ */
+export function watchPageForTest(
+  testId: string,
+  page: Page,
+  label: string,
+  opts: { closeAfterReport: boolean; diagnostics?: PageDiagnostics },
+): PageDiagnostics {
+  const diagnostics = opts.diagnostics ?? attachFailureDiagnostics(page)
+  const list = pagesByTestId.get(testId) ?? []
+  list.push({ label, page, diagnostics, closeAfterReport: opts.closeAfterReport })
+  pagesByTestId.set(testId, list)
+  return diagnostics
+}
+
+/**
+ * Snapshot every page this test put on the report, now.
+ *
+ * For a spec whose `finally` changes what its pages show before the report
+ * is written — stopping the backend it brought paints the reconnect overlay
+ * over every client, and a snapshot of THAT describes the teardown rather
+ * than the failure. Such a spec calls this first thing in its `finally`.
+ */
+export async function captureSnapshotsForTest(testId: string): Promise<void> {
+  for (const watched of pagesByTestId.get(testId) ?? []) {
+    await watched.diagnostics.captureSnapshot()
+  }
+}
+
+/**
+ * Print the block if, and only if, `info` describes a test that did not end
+ * the way it was expected to — then release everything this test put on the
+ * report, closing the contexts the harness was handed. Called exactly once
+ * per test, from the harness's auto fixture.
+ *
+ * `expectedStatus`, not `'passed'`: a skipped test was expected to skip, and
+ * printing a FAILURE CONTEXT for it was noise in every CI log.
+ */
+export async function reportFailureContext(info: TestInfo, traceId: string): Promise<void> {
+  const pages = pagesByTestId.get(info.testId) ?? []
+  const backends = backendsByTestId.get(info.testId) ?? []
+  pagesByTestId.delete(info.testId)
+  backendsByTestId.delete(info.testId)
+  try {
+    if (info.status === info.expectedStatus) return
+
+    const sections: string[] = [
+      '',
+      `FAILURE CONTEXT — ${info.titlePath.slice(1).join(' › ')} — ` +
+        `${info.status} (trace_id=${traceId || '(none)'})`,
+    ]
+
+    const sharedLines = traceId ? linesForTrace(standBackendLogTail(), traceId) : []
+    sections.push(linesSection('shared stand backend log, filtered by trace_id', sharedLines))
+
+    for (const backend of backends) {
+      const lines = backend.logTail(40_000).split('\n')
+      sections.push(linesSection(`this test's own backend (${backend.logFile})`, lines))
+    }
+
+    for (const watched of pages) {
+      // A page still open with no snapshot yet is read now; one already
+      // snapshotted keeps it (captureSnapshotsForTest, the page fixture).
+      if (!watched.diagnostics.hasSnapshot()) await watched.diagnostics.captureSnapshot()
+      sections.push(...watched.diagnostics.sections(watched.label))
+    }
+    if (pages.length === 0) sections.push('-- no browser page was on this report --')
+
+    process.stderr.write(sections.join('\n') + '\n')
+  } finally {
+    for (const watched of pages) {
+      if (!watched.closeAfterReport) continue
+      await watched.page
+        .context()
+        .close()
+        .catch(() => undefined)
+    }
   }
 }
 

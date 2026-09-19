@@ -107,6 +107,8 @@ import {
   openControlPlane,
   promptReady,
   showSidebarView,
+  snapshotWatchedClients,
+  watchClient,
   type BackendEndpoint,
   type DisposableRoot,
   VaultBackend,
@@ -177,11 +179,17 @@ function paneForSession(page: Page, sessionId: string) {
   return page.locator(`.pane[data-session-id="${sessionId}"]`)
 }
 
-async function freshClient(browser: Browser, endpoint: BackendEndpoint): Promise<Page> {
+async function freshClient(
+  browser: Browser,
+  endpoint: BackendEndpoint,
+  label: string,
+): Promise<Page> {
   // baseURL explicitly: a context made by hand inherits nothing from the
   // config's `use`, so `goto('/')` would have no origin to resolve against.
   const context = await browser.newContext({ baseURL: BASE_URL })
   const page = await context.newPage()
+  // On the failure report from its first byte, and the harness's to close.
+  watchClient(page, label)
   await bindEndpoint(page, endpoint)
   await page.goto('/')
   return page
@@ -483,7 +491,7 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
     //
     // Through the product's own consent-and-SFTP path, so what the rest of
     // this test opens is a host a person could have set up.
-    first = await freshClient(browser, endpoint)
+    first = await freshClient(browser, endpoint, 'first client')
     await promptReady(first)
     const profileName = await installHelperThroughProduct(first, endpoint, fixture, remoteCwd)
 
@@ -647,7 +655,7 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
     // A genuinely new browser context on a genuinely new coordinator: an
     // empty renderer session map, and a token neither of them has seen. The
     // only route back to this pane is server-side live-session discovery.
-    returned = await freshClient(browser, endpoint)
+    returned = await freshClient(browser, endpoint, 'returned client')
     const returnedPane = paneForSession(returned, liveBefore.sessionId)
     await expect(returnedPane).toBeVisible({ timeout: 120_000 })
 
@@ -824,16 +832,10 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
         `gaps=${JSON.stringify(finalOutput.gaps)}`,
     )
   } finally {
-    if (returned)
-      await returned
-        .context()
-        .close()
-        .catch(() => undefined)
-    if (first)
-      await first
-        .context()
-        .close()
-        .catch(() => undefined)
+    // Before the backend stops and paints its reconnect overlay over what the
+    // failure left on screen. The clients themselves are the harness's to
+    // close (watchClient), AFTER it has printed the failure context.
+    await snapshotWatchedClients()
     backend.stop()
     fixture?.proc.kill('SIGKILL')
     rmSync(remoteRoot, { recursive: true, force: true })

@@ -34,6 +34,7 @@ import { VaultObserver } from './vault-observer'
 import { Dispatcher, RpcError } from './dispatcher'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
 import { HistoryStatusStore } from './history-status'
+import { CheckoutsStatusStore } from './checkouts-status'
 import { FootprintClient } from './footprint-client'
 import { EndpointClient } from './endpoints'
 import { PolicyClient } from './policy-client'
@@ -587,6 +588,11 @@ function main(): void {
   // terminal can report readiness.
   const historyStatusStore = new HistoryStatusStore(client)
   historyStatusStore.start()
+  // The checkout sweep's own mirror (nocx-xn63t.1.6): the Worktrees
+  // settings section reads it so a period that governs nothing is SEEN to
+  // govern nothing.
+  const checkoutsStatusStore = new CheckoutsStatusStore(client)
+  checkoutsStatusStore.start()
 
   const tm = new PaneManager(
     bar,
@@ -709,6 +715,7 @@ function main(): void {
         // name. This is the one place those two meet; deriving a name inside
         // the Settings page would be a second owner of what a pane is called.
         (sessionId: string) => tm.sessionDisplayName(sessionId),
+        checkoutsStatusStore,
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })

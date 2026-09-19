@@ -19,6 +19,7 @@ import type { SnippetsStore } from './snippets/snippets-store'
 import type { SkillsStore } from './skills-store'
 import type { EndpointClient } from './endpoints'
 import type { HistoryStatusStore } from './history-status'
+import type { CheckoutsStatusStore } from './checkouts-status'
 
 // ── Registered surface constants (B.7) ─────────────────────────────────
 
@@ -80,6 +81,10 @@ export class SettingsContent extends SolidPaneContent {
      *  where it is made. */
     private readonly typingClient?: import('./typing-client').TypingClient,
     private readonly paneName?: (sessionId: string) => string | null,
+    /** Whether the checkout sweep can run (nocx-xn63t.1.6). Passed through
+     *  to the Worktrees section, which otherwise offers a period that
+     *  governs nothing when the checkout record was never wired. */
+    private readonly checkoutsStatus?: CheckoutsStatusStore,
   ) {
     super()
   }
@@ -106,6 +111,7 @@ export class SettingsContent extends SolidPaneContent {
           snippetsStore: this.snippetsStore,
           skillsStore: this.skillsStore,
           historyStatus: this.historyStatus,
+          checkoutsStatus: this.checkoutsStatus,
           aboutClient: this.aboutClient,
           clipboard: this.clipboard,
           observer: this.observer,

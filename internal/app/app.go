@@ -1340,8 +1340,18 @@ func New(opts ...Option) (*App, error) {
 	// not only in a log" failure the answer owes its reader. Nil rows is
 	// what makes the survey say incomplete instead.
 	var checkoutRows content.WorkerCheckoutRepository
+	// THE SWEEP'S OWN STATUS (nocx-xn63t.1.6): the stub store is the one
+	// state in which the sweep can never run — no record, nothing judged,
+	// nothing removed — and a Settings screen that went on offering the
+	// period would be the silent degrade AGENTS.md condemns. Raised HERE,
+	// before the transport starts, the way the history status raises beside
+	// it; there is no clear, because a store never un-opens.
+	sweepStatus := transport.NewCheckoutSweepStatus()
 	if _, stubbed := contentDB.(*content.Stub); !stubbed {
 		checkoutRows = contentDB.WorkerCheckouts()
+	} else {
+		sweepStatus.RaiseUnavailable(transport.CheckoutSweepDegradeNoRecord,
+			"the content store is unavailable, so the checkout record cannot be read")
 	}
 	checkouts := &workerCheckouts{
 		repos:        gitFactory,
@@ -1423,6 +1433,9 @@ func New(opts ...Option) (*App, error) {
 		// nothing and says so, and history.status carries the consequence.
 		transport.WithSessionOutputRecorder(contentDB.SessionOutput()),
 		transport.WithHistoryStatus(historyStatus),
+		// checkouts.status (nocx-xn63t.1.6): whether the checkout sweep can
+		// run, raised above on the one path that decides it.
+		transport.WithCheckoutSweepStatus(sweepStatus),
 		transport.WithProber(&proberAdapter{helper: overHelper, client: sshClient}),
 		transport.WithProfileService(profileSvc),
 		transport.WithSnippets(snippetSvc),

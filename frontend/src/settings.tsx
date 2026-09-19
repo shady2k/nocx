@@ -108,6 +108,9 @@ import {
   type HistoryStatus,
   type HistoryStatusStore,
 } from './history-status'
+import { checkoutsUnavailableSentence } from './checkouts-status'
+import type { CheckoutsStatusStore } from './checkouts-status'
+import type { CheckoutsStatus } from './generated/checkouts.status'
 
 /** The generated settings page that explains the standing prompt. */
 const INSTRUCTIONS_SECTION = 'Instructions'
@@ -120,6 +123,9 @@ const INSTRUCTIONS_SECTION = 'Instructions'
 const HISTORY_SECTION = 'History'
 const PETS_SECTION = 'Pets'
 /** The section `skills.enabled` is declared in, which the Skills page owns. */
+/** The section `worktrees.idleDays` is declared in (internal/settings),
+ *  whose control the sweep's degrade contradicts. */
+const WORKTREES_SECTION = 'Worktrees'
 const SKILLS_SECTION = 'Skills'
 
 /** The clipboard an embedding without one hands the About page. It refuses
@@ -231,6 +237,10 @@ export interface SettingsComponentProps {
    *  exist survives a release. Absent in an embedding with no backend; the
    *  section then makes no claim either way. */
   historyStatus?: HistoryStatusStore
+  /** Whether the checkout sweep can run (nocx-xn63t.1.6). Absent in an
+   *  embedding with no backend; the section then makes no claim either
+   *  way. */
+  checkoutsStatus?: CheckoutsStatusStore
   /** Reads what build this is, for the About page (nocx-8bbp). Absent in an
    *  embedding with no backend; the page then says it could not read the
    *  build rather than drawing rows of nothing. */
@@ -307,6 +317,19 @@ export function SettingsComponent(props: SettingsComponentProps) {
    *  say. One owner for the words (history-status.ts) — the recall panel
    *  tells the same person the same thing a moment later. */
   const historyNotice = createMemo(() => historyUnavailableSentence(historyStatus()))
+  // The checkout sweep's degrade (nocx-xn63t.1.6), mirrored the same way
+  // the history one above is: the store is the mirror, the signal re-renders.
+  const [checkoutsStatus, setCheckoutsStatus] = createSignal<CheckoutsStatus | null>(null)
+  createEffect(() => {
+    const store = props.checkoutsStatus
+    if (store === undefined) {
+      setCheckoutsStatus(null)
+      return
+    }
+    setCheckoutsStatus(store.status())
+    return store.subscribe(setCheckoutsStatus)
+  })
+  const checkoutsNotice = createMemo(() => checkoutsUnavailableSentence(checkoutsStatus()))
   /** And the other thing the History section may have to say: what these
    *  switches do to a session whose window is closed. A separate memo because
    *  it is a separate fact, and for the sharper reason of the two — it is not
@@ -1768,6 +1791,18 @@ export function SettingsComponent(props: SettingsComponentProps) {
                         tone="warning"
                         title={historyNotice()!.title}
                         description={historyNotice()!.description}
+                      />
+                    </Show>
+                    {/* The checkout sweep's degrade (nocx-xn63t.1.6), above
+                        the control it contradicts: with the record unwired
+                        the period below governs nothing, and the person is
+                        entitled to see that. Same kit StatusCard, placed and
+                        never repainted. */}
+                    <Show when={section === WORKTREES_SECTION && checkoutsNotice() !== null}>
+                      <StatusCard
+                        tone="warning"
+                        title={checkoutsNotice()!.title}
+                        description={checkoutsNotice()!.description}
                       />
                     </Show>
                     {/* `neutral` and unlike the degrade above: nothing is

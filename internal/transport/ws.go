@@ -641,6 +641,11 @@ type WSServer struct {
 	// makes no claim and reports history as running — the composition root
 	// is what says otherwise (ws_history_status.go).
 	historyStatus *HistoryStatus
+	// checkoutSweepStatus is the sweep's own answer about whether it can
+	// run (nocx-xn63t.1.6), beside the history status for the same reason
+	// that one is a field: the composition root raises before Start, the
+	// transport answers for it after.
+	checkoutSweepStatus *CheckoutSweepStatus
 
 	// filesys is the binding registry backing the files.* control plane
 	// (fm-w8). When nil, those methods return -32601. The provider
@@ -1779,6 +1784,7 @@ func (s *WSServer) buildControlPlane() {
 	// mutex read of in-memory state and must stay answerable while the
 	// content domain is exactly what is broken.
 	specs = append(specs, s.historyStatusSpecs(s.lane)...)
+	specs = append(specs, s.checkoutsStatusSpecs(s.lane)...)
 	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, noteOp, snippetOp, s.skillLibrary, s.agentTools, s.credentialResolver(), s.assistantClient, s.askSub)...)
 	specs = append(specs, s.ledgerSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.layoutSpecs(contentSub, lane, gates.content)...)

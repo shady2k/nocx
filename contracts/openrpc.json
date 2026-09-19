@@ -10866,6 +10866,9 @@
       "$ref": "https://nocx.local/contracts/backup.saveToFile.schema.json"
     },
     {
+      "$ref": "https://nocx.local/contracts/checkouts.status.schema.json"
+    },
+    {
       "$ref": "https://nocx.local/contracts/connections.passwordRequest.schema.json"
     },
     {

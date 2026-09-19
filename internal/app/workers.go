@@ -810,7 +810,22 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		s.coordinatorTab(ctx, coordPane, lg),
 	)
 	if tabErr != nil {
-		s.compensateSpawn(ctx, req.Participant, tabID.String(), nil, undo)
+		// NOTHING TO COMPENSATE BUT THE CHECKOUT (nocx-xn63t.1.2): no tab
+		// was minted, so no DeleteTab — aiming a deletion at a tab that
+		// does not exist is exactly what the refused-placement test
+		// forbids; no session exists; and the enrolment rendezvous is
+		// armed only after a successful mint, so there is nothing to
+		// withdraw either. But a worktree ask whose plan already succeeded
+		// DID write something, and the interval gives its undo one
+		// legitimate end: no pane will ever open here, so the checkout is
+		// removed and its removal failure is a warning, the same
+		// asymmetry every failure Spawn catches itself is held to.
+		if undo != nil {
+			if wtErr := undo.run(ctx); wtErr != nil {
+				lg.Warn("worker spawn: could not remove the checkout after a refused tab mint",
+					"error", wtErr)
+			}
+		}
 		return nil, fmt.Errorf("worker spawn: minting the participant's tab: %w", tabErr)
 	}
 	// WHERE THE TAB IS, RECORDED THE MOMENT IT EXISTS (nocx-xn63t.4.6). The

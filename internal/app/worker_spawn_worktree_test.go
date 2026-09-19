@@ -321,6 +321,10 @@ func anAsk(branch string) *workers.WorktreeAsk {
 // base.
 func TestAWorktreeSpawnOpensThePaneInTheNewCheckout(t *testing.T) {
 	stand := newWorktreeStand(t, scriptedRepoWithMain("/repo", "head-hash-1", true))
+	// The double must behave like git at the one fact this test observes:
+	// a successful AddWorktree leaves the checkout ON DISK, so the pane row
+	// minted afterwards opens in something that exists.
+	stand.repo.makeDir = true
 	coord := stand.openWorktreeCoordinator(t, "pane-coord", "/repo", content.PaneLocal)
 
 	spawned, err := stand.spawner.Spawn(context.Background(), workers.SpawnRequest{

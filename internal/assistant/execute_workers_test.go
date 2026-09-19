@@ -1234,6 +1234,13 @@ func TestWorkerHoldings_OverTheWireConformsToContract(t *testing.T) {
 		survey: workers.CheckoutSurvey{
 			Leftovers: []workers.LeftoverCheckout{{
 				Path: "/wt/nocx-gone", Branch: "feat/gone", Readable: true,
+				// The sweep's verdict rides the REAL dispatcher's answer
+				// too, not only the DTO test's: expired with its named
+				// hold must be visible off the socket, or the schema check
+				// proved nothing about the field this task added.
+				Expired:    true,
+				HoldReason: "uncommitted",
+				HoldDetail: "the checkout holds work no commit keeps",
 			}},
 			Complete: true,
 		},
@@ -1285,5 +1292,8 @@ func TestWorkerHoldings_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if !strings.Contains(out, `"checkoutsComplete":true`) {
 		t.Fatalf("the off-the-wire answer carries no complete flag: %s", out)
+	}
+	if !strings.Contains(out, `"expired":true`) || !strings.Contains(out, `"holdReason":"uncommitted"`) {
+		t.Fatalf("the off-the-wire answer carries no sweep verdict: %s", out)
 	}
 }

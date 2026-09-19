@@ -588,11 +588,15 @@ func TestAWorktreeSpawnRefusesWhenAddWorktreeFails(t *testing.T) {
 // coordinator happens to be standing in.
 func TestAWorktreeSpawnFromALinkedWorktreeKeysOffTheMainCheckout(t *testing.T) {
 	repo := scriptedRepoWithMain("/main-repo", "head-hash-1", true)
-	// git lists the main checkout first even when this Repo is bound to a
-	// linked worktree — which is the whole reason the seam answers Main.
-	repo.trees = append([]git.Worktree{{
+	// The linked worktree the coordinator stands in FOLLOWS the main one:
+	// git lists the main checkout first whatever this Repo is bound to,
+	// which is the whole reason the seam answers Main from position. The
+	// previous draft of this fixture put the linked entry first, which real
+	// git never does, and the product rightly refused the key rather than
+	// guess from a listing that broke its contract.
+	repo.trees = append(repo.trees, git.Worktree{
 		Path: "/main-repo-linked", Branch: "feat/linked", State: git.WorktreeReadable,
-	}}, repo.trees...)
+	})
 	stand := newWorktreeStand(t, repo)
 	coord := stand.openWorktreeCoordinator(t, "pane-coord", "/main-repo-linked", content.PaneLocal)
 

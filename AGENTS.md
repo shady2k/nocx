@@ -1078,8 +1078,11 @@ the `docs/agents/` copy is the bug.
 All retained work and commits belong to tracked tasks. File discoveries through
 `/shady2k-skills:to-backlog`; implement through `/shady2k-skills:take-task`; close only
 after stage acceptance through `/shady2k-skills:close-out`. Read Backlog integration in
-[`docs/agents/backlog.md`](docs/agents/backlog.md) before writes. After updating the skill
-set, run `/shady2k-skills:setup-shady2k-skills` to reverify this project.
+[`docs/agents/backlog.md`](docs/agents/backlog.md) before writes. When a skill reports the
+installation is out of date, run `/shady2k-skills:setup-shady2k-skills`.
+
+This repository works through the shady2k-skills plugin. Without it, install it once:
+`/plugin marketplace add shady2k/skills`, then `/plugin install shady2k-skills@shady2k`.
 
 ## This file wins over a skill
 

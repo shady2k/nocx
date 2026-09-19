@@ -1,1 +1,10 @@
-{}
+{
+  "extraKnownMarketplaces": {
+    "shady2k": {
+      "source": { "source": "github", "repo": "shady2k/skills" }
+    }
+  },
+  "enabledPlugins": {
+    "shady2k-skills@shady2k": true
+  }
+}

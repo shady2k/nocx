@@ -170,6 +170,13 @@ var orchestrationMethodNames = [...]string{
 	"workers.say",
 	"workers.holdings",
 	"workers.close",
+	// The coordinator's explicit removal of a checkout a closed worker left
+	// (nocx-xn63t.1.5). It is on this list for the same reason the four above
+	// are — it is part of the worker surface the endpoint exposes — and the
+	// list is what makes the declaration reachable at all: without the name
+	// here the tool is declared, offered by the catalogue and refused by
+	// dispatch, which is exactly the gap session.read's comment below records.
+	"workers.removeCheckout",
 	// The participant's one call (nocx-rowqt.9). It belongs on this list for
 	// the same reason the other four do — it is part of the worker surface the
 	// endpoint exposes — and NOT because it shares their authority: it

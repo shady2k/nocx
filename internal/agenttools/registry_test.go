@@ -630,38 +630,39 @@ func TestForGrantOffersSkillsReadOnlyOnASkillGrant(t *testing.T) {
 
 func TestForGrant_ExactPermittedSet(t *testing.T) {
 	reg, err := Assemble(schemaFS(t, map[string]string{
-		"files.read.schema.json":       filesReadSchema,
-		"fetch.url.schema.json":        fetchURLSchema,
-		"git.status.schema.json":       gitStatusSchema,
-		"session.list.schema.json":     sessionListSchema,
-		"session.read.schema.json":     sessionReadSchema,
-		"session.keys.schema.json":     sessionKeysSchema,
-		"session.message.schema.json":  sessionMessageSchema,
-		"files.edit.schema.json":       filesEditSchema,
-		"files.create.schema.json":     filesCreateSchema,
-		"session.run.schema.json":      runSchema,
-		"session.wait.schema.json":     waitSchema,
-		"notes.search.schema.json":     contentToolSchema,
-		"notes.create.schema.json":     contentToolSchema,
-		"notes.update.schema.json":     contentToolSchema,
-		"notes.delete.schema.json":     contentToolSchema,
-		"snippets.list.schema.json":    contentToolSchema,
-		"snippets.create.schema.json":  contentToolSchema,
-		"snippets.update.schema.json":  contentToolSchema,
-		"snippets.delete.schema.json":  contentToolSchema,
-		"snippets.reorder.schema.json": contentToolSchema,
-		"skills.read.schema.json":      skillsReadSchema,
-		"skills.create.schema.json":    skillsReadSchema,
-		"skills.update.schema.json":    skillsReadSchema,
-		"skills.delete.schema.json":    skillsReadSchema,
-		"skills.install.schema.json":   skillsReadSchema,
-		"skills.resolve.schema.json":   skillsReadSchema,
-		"workers.holdings.schema.json": workerHoldingsSchema,
-		"workers.say.schema.json":      workerSaySchema,
-		"workers.close.schema.json":    workerCloseSchema,
-		"workers.spawn.schema.json":    workerSpawnSchema,
-		"workers.inbox.schema.json":    workerInboxSchema,
-		"workers.report.schema.json":   workerReportSchema,
+		"files.read.schema.json":             filesReadSchema,
+		"fetch.url.schema.json":              fetchURLSchema,
+		"git.status.schema.json":             gitStatusSchema,
+		"session.list.schema.json":           sessionListSchema,
+		"session.read.schema.json":           sessionReadSchema,
+		"session.keys.schema.json":           sessionKeysSchema,
+		"session.message.schema.json":        sessionMessageSchema,
+		"files.edit.schema.json":             filesEditSchema,
+		"files.create.schema.json":           filesCreateSchema,
+		"session.run.schema.json":            runSchema,
+		"session.wait.schema.json":           waitSchema,
+		"notes.search.schema.json":           contentToolSchema,
+		"notes.create.schema.json":           contentToolSchema,
+		"notes.update.schema.json":           contentToolSchema,
+		"notes.delete.schema.json":           contentToolSchema,
+		"snippets.list.schema.json":          contentToolSchema,
+		"snippets.create.schema.json":        contentToolSchema,
+		"snippets.update.schema.json":        contentToolSchema,
+		"snippets.delete.schema.json":        contentToolSchema,
+		"snippets.reorder.schema.json":       contentToolSchema,
+		"skills.read.schema.json":            skillsReadSchema,
+		"skills.create.schema.json":          skillsReadSchema,
+		"skills.update.schema.json":          skillsReadSchema,
+		"skills.delete.schema.json":          skillsReadSchema,
+		"skills.install.schema.json":         skillsReadSchema,
+		"skills.resolve.schema.json":         skillsReadSchema,
+		"workers.holdings.schema.json":       workerHoldingsSchema,
+		"workers.say.schema.json":            workerSaySchema,
+		"workers.close.schema.json":          workerCloseSchema,
+		"workers.spawn.schema.json":          workerSpawnSchema,
+		"workers.inbox.schema.json":          workerInboxSchema,
+		"workers.report.schema.json":         workerReportSchema,
+		"workers.removeCheckout.schema.json": workerRemoveCheckoutSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -727,7 +728,10 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	// ending a worker, or writing to one, is not something a run permitted
 	// only to look may do.
 	runGrant := grant([]content.Effect{content.EffectMutateDestructive}, content.ResourceSession)
-	wantDestructive := []string{"session.keys", "session.message", "session.run", "workers.close"}
+	// workers.removeCheckout joins them (nocx-xn63t.1.5): removing a checkout
+	// a closed worker left is destructive in the same sense ending a worker
+	// is, and it is declared that way.
+	wantDestructive := []string{"session.keys", "session.message", "session.run", "workers.close", "workers.removeCheckout"}
 	if got := toolNames(reg.ForGrant(runGrant)); !reflect.DeepEqual(got, wantDestructive) {
 		t.Fatalf("ForGrant(mutate-destructive+session) = %v, want exactly %v", got, wantDestructive)
 	}
@@ -798,38 +802,39 @@ func containsName(tools []Tool, name string) bool {
 // exactly the state the code is in today — so this asserts the content.
 func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 	reg, err := Assemble(schemaFS(t, map[string]string{
-		"fetch.url.schema.json":        fetchURLSchema,
-		"files.read.schema.json":       filesReadSchema,
-		"git.status.schema.json":       gitStatusSchema,
-		"session.list.schema.json":     sessionListSchema,
-		"session.read.schema.json":     sessionReadSchema,
-		"session.keys.schema.json":     sessionKeysSchema,
-		"session.message.schema.json":  sessionMessageSchema,
-		"files.edit.schema.json":       filesEditSchema,
-		"files.create.schema.json":     filesCreateSchema,
-		"session.run.schema.json":      runSchema,
-		"session.wait.schema.json":     waitSchema,
-		"notes.search.schema.json":     contentToolSchema,
-		"notes.create.schema.json":     contentToolSchema,
-		"notes.update.schema.json":     contentToolSchema,
-		"notes.delete.schema.json":     contentToolSchema,
-		"snippets.list.schema.json":    contentToolSchema,
-		"snippets.create.schema.json":  contentToolSchema,
-		"snippets.update.schema.json":  contentToolSchema,
-		"snippets.delete.schema.json":  contentToolSchema,
-		"snippets.reorder.schema.json": contentToolSchema,
-		"skills.read.schema.json":      skillsReadSchema,
-		"skills.create.schema.json":    skillsReadSchema,
-		"skills.update.schema.json":    skillsReadSchema,
-		"skills.delete.schema.json":    skillsReadSchema,
-		"skills.install.schema.json":   skillsReadSchema,
-		"skills.resolve.schema.json":   skillsReadSchema,
-		"workers.holdings.schema.json": workerHoldingsSchema,
-		"workers.say.schema.json":      workerSaySchema,
-		"workers.close.schema.json":    workerCloseSchema,
-		"workers.spawn.schema.json":    workerSpawnSchema,
-		"workers.inbox.schema.json":    workerInboxSchema,
-		"workers.report.schema.json":   workerReportSchema,
+		"fetch.url.schema.json":              fetchURLSchema,
+		"files.read.schema.json":             filesReadSchema,
+		"git.status.schema.json":             gitStatusSchema,
+		"session.list.schema.json":           sessionListSchema,
+		"session.read.schema.json":           sessionReadSchema,
+		"session.keys.schema.json":           sessionKeysSchema,
+		"session.message.schema.json":        sessionMessageSchema,
+		"files.edit.schema.json":             filesEditSchema,
+		"files.create.schema.json":           filesCreateSchema,
+		"session.run.schema.json":            runSchema,
+		"session.wait.schema.json":           waitSchema,
+		"notes.search.schema.json":           contentToolSchema,
+		"notes.create.schema.json":           contentToolSchema,
+		"notes.update.schema.json":           contentToolSchema,
+		"notes.delete.schema.json":           contentToolSchema,
+		"snippets.list.schema.json":          contentToolSchema,
+		"snippets.create.schema.json":        contentToolSchema,
+		"snippets.update.schema.json":        contentToolSchema,
+		"snippets.delete.schema.json":        contentToolSchema,
+		"snippets.reorder.schema.json":       contentToolSchema,
+		"skills.read.schema.json":            skillsReadSchema,
+		"skills.create.schema.json":          skillsReadSchema,
+		"skills.update.schema.json":          skillsReadSchema,
+		"skills.delete.schema.json":          skillsReadSchema,
+		"skills.install.schema.json":         skillsReadSchema,
+		"skills.resolve.schema.json":         skillsReadSchema,
+		"workers.holdings.schema.json":       workerHoldingsSchema,
+		"workers.say.schema.json":            workerSaySchema,
+		"workers.close.schema.json":          workerCloseSchema,
+		"workers.spawn.schema.json":          workerSpawnSchema,
+		"workers.inbox.schema.json":          workerInboxSchema,
+		"workers.report.schema.json":         workerReportSchema,
+		"workers.removeCheckout.schema.json": workerRemoveCheckoutSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -1748,5 +1753,22 @@ const workerReportSchema = `{
     "additionalProperties": false,
     "required": ["id", "seq"],
     "properties": {"id": {"type": "string"}, "seq": {"type": "integer"}}
+  }}
+}`
+
+// workerRemoveCheckoutSchema is the stand-in for the removal tool's params
+// (nocx-xn63t.1.5): the assembly fixtures need one file per declared tool,
+// and what they assert is that every declaration finds its schema — not what
+// the schema says, which contracts/ and the over-the-wire tests own.
+const workerRemoveCheckoutSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["checkouts"],
+  "properties": {"checkouts": {"type": "array", "items": {"type": "object"}}},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["removed"],
+    "properties": {"removed": {"type": "array", "items": {"type": "object"}}}
   }}
 }`

@@ -402,7 +402,8 @@ steps for you.
 1. **File beads for remaining work** — anything that needs follow-up, before you forget it.
 2. **Run the quality gates** if code changed. Which ones, and whose job they are, is under
    [Git authority](#git-authority): a worker runs the unit tests for what it touched, the
-   coordinator runs `make ci-full` on the merged tree.
+   coordinator runs `make ci-full` on the merged tree — unless nothing in it can touch
+   product code, which owes review and its own tooling's tests instead.
 3. **Update issue status** — close what is finished, and set anything you stopped holding
    back to `open` in the same minute. An unheld bead in `in_progress` is invisible to
    `br ready` and to every colleague looking for work.

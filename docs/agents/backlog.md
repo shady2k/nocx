@@ -175,7 +175,8 @@ keeps every later change.
 files>` in `frontend/`. Who runs them: AGENTS.md, "Git authority" — see the open question
   at the end.
 - **Full stage checks:** `make ci-full` on the merged tree, run by the coordinator once
-  before pushing to `main` (AGENTS.md, "Git authority").
+  before pushing to `main` (AGENTS.md, "Git authority"), except for a supporting change,
+  which owes review and its own tooling's tests (above).
 - **Mutation checks:** no mutation tool is installed for Go or TypeScript. The agreed
   alternative is in the config (`execution.mutationFallback`): the coordinator plants 2–3
   mutations by hand in the changed logic at stage acceptance and records which tests went

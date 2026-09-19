@@ -683,13 +683,22 @@ jobs:
           # which is GitHub's synthetic merge. On a push it is what the push
           # added; a new branch has no "before", and then it is what the branch
           # holds that main does not. An empty range is an error in the script,
-          # never a pass.
+          # never a pass — with one expected exception below.
           if [ -n "${BASE_REF:-}" ]; then
             range="$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")..$HEAD_SHA"
           elif [ -n "${BEFORE:-}" ] && git rev-parse -q --verify "$BEFORE^{commit}" >/dev/null; then
             range="$BEFORE..$(git rev-parse HEAD)"
           else
             range="$(git merge-base origin/main HEAD)..$(git rev-parse HEAD)"
+            # A release tag (release.yml calls this workflow on a `v*` push,
+            # whose "before" is all zeros) or a manual run on a commit main
+            # already holds introduces nothing: every commit on main arrived
+            # through a pull request this step checked. Say so and stop, or
+            # every release from main would fail here.
+            if [ "$(git rev-list --count "$range")" = 0 ]; then
+              echo "HEAD $(git rev-parse --short HEAD) is on main and introduces no commit; its commits were checked when they were introduced"
+              exit 0
+            fi
           fi
           echo "range: $range"
           node "$gate/commit-links.mjs" --range "$range"

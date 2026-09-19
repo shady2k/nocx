@@ -149,7 +149,12 @@ keeps every later change.
 - **CI:** `ci-backlog` in `.github/workflows/ci.yml`. The backlog baseline is the PR's merge
   base, or the push's `before`, or else `HEAD^`. The commit range is merge base..PR head
   (not GitHub's synthetic merge), or `before..HEAD` on a push, or `merge-base(origin/main)..HEAD`
-  for a new branch.
+  for a new branch. That last range is empty for a release tag or a manual run on a commit
+  main already holds; the step says so and passes, because those commits were checked in
+  their pull requests. An empty PR range is still an error.
+  **CI does not run on a push to `main`** (the triggers are PRs, `release/**`, dispatch and
+  release.yml's call). A direct push to `main` — the owner's, deliberately ungated — is
+  checked by the local hooks only.
 - **Bulk-edit age correction:** the deferral of 2026-09-17T19:23Z rewrote 799 timestamps.
   Its pair is `--ages-from <export at 6121375e> --ages-through <export at de4c58d5>`, the
   last export before it and the first after. A second cluster, 97 issues at 19:32Z, has no

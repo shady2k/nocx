@@ -168,12 +168,13 @@ func (f *scriptedGitFactory) opensSeen() []string {
 // CreateTabAfter records what os.Stat said about the pane's own directory
 // at the moment the row was minted — the layout's side of the interval.
 type worktreeTabs struct {
-	mu        sync.Mutex
-	cwdOf     map[string]string
-	panesOf   map[string][]content.Pane
-	tabOf     map[string]string
-	tabErr    error
-	createErr error
+	mu         sync.Mutex
+	cwdOf      map[string]string
+	panesOf    map[string][]content.Pane
+	tabOf      map[string]string
+	tabErr     error
+	createErr  error
+	paneCwdErr error
 
 	created    []string
 	deleted    []string
@@ -211,6 +212,9 @@ func (f *worktreeTabs) DeleteTab(_ context.Context, id string, _ content.Replace
 func (f *worktreeTabs) PaneCwd(_ context.Context, paneID string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.paneCwdErr != nil {
+		return "", f.paneCwdErr
+	}
 	return f.cwdOf[paneID], nil
 }
 

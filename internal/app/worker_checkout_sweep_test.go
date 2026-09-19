@@ -30,6 +30,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -42,6 +43,10 @@ import (
 	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/workers"
 )
+
+// errPaneCwdBroken is the pane-inventory read failure the unresolved-pass
+// test stands on.
+var errPaneCwdBroken = errors.New("pane cwd broken")
 
 var sweepNow = time.Date(2026, 11, 17, 8, 0, 0, 0, time.UTC)
 
@@ -300,6 +305,70 @@ func TestTheCheckoutSweepIsWiredAtTheCompositionRoot(t *testing.T) {
 	}
 	if a.checkoutSweeper.period() <= 0 {
 		t.Fatal("the default period is not positive")
+	}
+}
+
+// Criterion: the sweep's nil-field contract — a partially wired service is
+// the struct's honest absence, answered by removing nothing, never by a
+// panic and never by an inventory that happens to read as empty.
+func TestAPartiallyWiredSweepRemovesNothing(t *testing.T) {
+	repoDir, _ := initRealRepo(t)
+	stand := newCheckoutStand(t)
+	coordA := stand.openCoordinator(t, "pane-a", repoDir)
+	stand.spawnCheckoutWorker(t, coordA, "worker-1", "feat/one", "t")
+	checkout := expectedWorktreePath(stand.checkouts.worktreeRoot, repoDir, "feat/one")
+	key := nocxCheckoutRepoKey(repoDir)
+	ageCheckout(t, stand, key, checkout, sweepNow.Add(-31*24*time.Hour))
+
+	// No live-session inventory wired: a pane-held checkout cannot be told
+	// from an abandoned one, so nothing is judged.
+	broken := &workerCheckouts{
+		repos:        stand.checkouts.repos,
+		worktreeRoot: stand.checkouts.worktreeRoot,
+		rows:         stand.checkouts.rows,
+		held:         stand.record,
+		layout:       stand.tabs,
+	}
+	sweeper := &checkoutSweeper{
+		checkouts: broken,
+		period:    func() time.Duration { return 30 * 24 * time.Hour },
+		now:       func() time.Time { return sweepNow },
+	}
+	sweeper.RunOnce(context.Background())
+	if checkoutGone(t, checkout) {
+		t.Fatal("the sweep removed with the live-session inventory unwired")
+	}
+}
+
+// Criterion: a pane directory that cannot be READ is unresolved, not
+// "no panes" — the pass judges nothing and the checkout stays.
+func TestAnUnreadablePaneInventoryJudgesNothing(t *testing.T) {
+	repoDir, _ := initRealRepo(t)
+	stand := newCheckoutStand(t)
+	coordA := stand.openCoordinator(t, "pane-a", repoDir)
+	stand.spawnCheckoutWorker(t, coordA, "worker-1", "feat/one", "t")
+	checkout := expectedWorktreePath(stand.checkouts.worktreeRoot, repoDir, "feat/one")
+	key := nocxCheckoutRepoKey(repoDir)
+	ageCheckout(t, stand, key, checkout, sweepNow.Add(-31*24*time.Hour))
+
+	// A live pane whose recorded directory cannot be read this pass.
+	stand.tabs.cwdOf["pane-live"] = checkout
+	live, err := stand.reg.Open(context.Background(), session.Config{
+		Kind: session.KindLocal, Cols: 80, Rows: 24, PaneID: "pane-live", Cwd: checkout,
+	})
+	if err != nil {
+		t.Fatalf("open the live pane's session: %v", err)
+	}
+	defer func() { _ = stand.reg.Close(live.ID()) }()
+	stand.tabs.paneCwdErr = errPaneCwdBroken
+	newSweeper(stand, 30*24*time.Hour).RunOnce(context.Background())
+
+	if checkoutGone(t, checkout) {
+		t.Fatal("the sweep removed while the pane inventory was unreadable, which is unresolved, never safe")
+	}
+	survey := stand.checkouts.Leftovers(context.Background(), string(coordA))
+	if !survey.Complete || len(survey.Leftovers) != 1 || survey.Leftovers[0].Expired {
+		t.Fatalf("holdings = %+v; want the checkout unjudged, not marked expired", survey)
 	}
 }
 

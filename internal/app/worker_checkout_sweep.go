@@ -100,8 +100,14 @@ func (s *checkoutSweeper) clock() time.Time {
 func (s *checkoutSweeper) RunOnce(ctx context.Context) {
 	lg := log.From(ctx)
 	c := s.checkouts
-	if c == nil || c.rows == nil {
-		lg.Warn("checkout sweep: the durable record is not wired, so nothing can be judged or removed")
+	// THE MISSING INPUTS, the removal walk's own rule, applied to the whole
+	// pass: without the record, the record's held answer, the layout that
+	// owns a pane's directory, or the live-session inventory, held and
+	// abandoned — and pane-held and abandoned — cannot be told apart. The
+	// struct's nil fields are the honest absence this branch answers, never
+	// an inventory that happens to read as empty.
+	if c == nil || c.rows == nil || c.held == nil || c.layout == nil || s.sessions == nil {
+		lg.Warn("checkout sweep: a read the sweep needs is not wired, so nothing can be judged or removed")
 		return
 	}
 	if s.period == nil {
@@ -134,7 +140,15 @@ func (s *checkoutSweeper) RunOnce(ctx context.Context) {
 
 	now := s.clock()
 	cutoff := now.Add(-period).UnixMilli()
-	paneCwds := s.livePaneCwds(ctx, lg)
+	paneCwds, panesKnown := s.livePaneCwds(ctx, lg)
+	if !panesKnown {
+		// One pane whose directory cannot be read makes a pane-held
+		// checkout indistinguishable from an abandoned one, and that is the
+		// one mistake a sweep must never make. Nothing is judged this pass;
+		// the last completed pass's notes stand.
+		lg.Warn("checkout sweep: the live-pane inventory could not be read, so nothing is judged this pass")
+		return
+	}
 
 	notes := make(map[string]checkoutSweepNote)
 	judged := false
@@ -254,13 +268,11 @@ func (s *checkoutSweeper) start(logger log.Logger) (stop func()) {
 }
 
 // livePaneCwds is the sweep's pane inventory: the recorded directory of
-// every LIVE session's pane, cleaned. A session with no pane, a pane with
-// no recorded directory, and a read that fails all answer nothing — a pane
-// whose directory nobody knows cannot hold a checkout the sweep would name.
-func (s *checkoutSweeper) livePaneCwds(ctx context.Context, lg log.Logger) []string {
-	if s.sessions == nil || s.checkouts == nil || s.checkouts.layout == nil {
-		return nil
-	}
+// every LIVE session's pane, cleaned. A session with no pane and a pane
+// with no recorded directory answer nothing; a read that FAILS answers
+// not-ok — one unreadable pane makes pane-held indistinguishable from
+// abandoned, and unreadable is never an answer of safe.
+func (s *checkoutSweeper) livePaneCwds(ctx context.Context, lg log.Logger) ([]string, bool) {
 	var cwds []string
 	for _, sess := range s.sessions.List() {
 		paneID := sess.PaneID()
@@ -269,16 +281,16 @@ func (s *checkoutSweeper) livePaneCwds(ctx context.Context, lg log.Logger) []str
 		}
 		cwd, err := s.checkouts.layout.PaneCwd(ctx, paneID)
 		if err != nil {
-			lg.Debug("checkout sweep: a live pane's directory could not be read",
+			lg.Warn("checkout sweep: a live pane's directory could not be read",
 				"pane_id", paneID, "error", err)
-			continue
+			return nil, false
 		}
 		if cwd == "" {
 			continue
 		}
 		cwds = append(cwds, filepath.Clean(cwd))
 	}
-	return cwds
+	return cwds, true
 }
 
 // paneHoldsPath reports whether any live pane's recorded directory is the

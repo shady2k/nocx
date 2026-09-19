@@ -1,8 +1,8 @@
 # Backlog integration
 
 Maintained by `/shady2k-skills:setup-shady2k-skills`; last reconciled to the skill set
-0.10.0 on 2026-09-19 by its setup task, "The backlog gate runs on every commit here, with
-this project's vocabulary" (nocx-q8yjf.1). The protocol itself ships with the skills and is
+0.13.2 on 2026-09-19 by its setup task, "The backlog tooling here matches the current
+shady2k-skills and is proved from main" (nocx-q8yjf.3). The protocol itself ships with the skills and is
 not restated here. This file holds the project's facts and the commands that were run and
 seen to work. Changing choices — strength, milestone, budgets, execution settings, and
 whether the last setup is verified — live only in the config.
@@ -110,8 +110,8 @@ keeps every later change.
 - **Rules:** [`check.mjs`](../../.githooks/backlog-gate/check.mjs),
   [`check-commits.mjs`](../../.githooks/backlog-gate/check-commits.mjs) and
   [`check-docs.mjs`](../../.githooks/backlog-gate/check-docs.mjs) are byte-for-byte copies
-  of the shady2k-skills plugin's `skills/backlog/setup-shady2k-skills/` at 0.10.0, never
-  edited here. Proving it: `cmp` each against the plugin copy, `--version` prints `0.10.0`,
+  of the shady2k-skills plugin's `skills/backlog/setup-shady2k-skills/` at 0.13.2, never
+  edited here. Proving it: `cmp` each against the plugin copy, `--version` prints `0.13.2`,
   and the selftests run from the plugin directory because the fixtures live there:
   `node check.mjs --selftest --config <repo>/.githooks/backlog-gate/config.json`,
   `node check-commits.mjs --selftest`, `node check-docs.mjs --selftest`.
@@ -120,6 +120,17 @@ keeps every later change.
   Until it lands, document readiness is checked by reading, and every report says the
   automatic check did not run. No document policy, baseline, receipts or synchronization
   are wired, and nothing about documents is enforced by CI.
+- **Document evidence level: records** (owner, 2026-09-19). The owner may push to `main`
+  directly and CI cannot block that, so there is no protected CI to verify receipts
+  against. When the document gate lands, acceptance evidence is the stage's acceptance
+  record — each check's status with where its output is kept, and the owner's approval as
+  their recorded words — trusted, not verified. No runner, receipt signing or forgery
+  defences are built for it. Moving to `protected` later needs no document rewritten.
+- **Checks follow what a change can touch** (owner, 2026-09-19). A `supporting` change —
+  documents, `.beads/`, `.githooks/`, process tooling, nothing under product code — owes
+  review and the tests of the tooling it changes, not the product suites and not
+  `make ci-full`. In the document policy that is `appliesTo` on each required check.
+  AGENTS.md "Git authority" carries the same exception.
 - **Backlog gate**, `block-new`. The pre-commit hook (section 7) and CI both run it:
 
   ```bash

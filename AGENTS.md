@@ -896,7 +896,11 @@ image, packages, Go toolchain and command.
 the unit tests for the files it changed and stops there. It does not run `make ci-full`, the
 containerized jobs or the e2e suite — not as diligence, not "just to be sure". The
 coordinator runs all of them, **once, on the merged tree, before `git push` to `main`**,
-every time, including when every branch that went into it was green alone.
+every time, including when every branch that went into it was green alone. The one
+exception is a change that cannot touch product code — documents, `.beads/`, `.githooks/`,
+process tooling: it owes review and the tests of the tooling it changes, not the product
+suites. The owner's decision of 2026-09-19; a full run there buys nothing a diff with no
+product code in it could break.
 
 That is not a weakening: the failure that bought the rule was a push to `main`, and there it
 binds exactly as hard as before. What comes off is a cost it never bought. Branches that

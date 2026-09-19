@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const RULES_VERSION = '0.10.0';
+export const RULES_VERSION = '0.13.2';
 const here = dirname(fileURLToPath(import.meta.url));
 const object = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 const canonical = (x) => Array.isArray(x) ? x.map(canonical) : object(x)
@@ -19,6 +19,7 @@ const present = (s) => s.trim().length > 0 && !/\b(TODO|TBD|TKTK)\b|\[NEEDS CLAR
 const array = (of) => ({ array: of });
 const nullable = (of) => ({ nullable: of });
 const enumeration = (...values) => ({ enum: values });
+const optional = (of) => ({ optional: of });
 const scenario = { id: 'id', given: 'string', when: 'string', then: 'string' };
 const requirement = { id: 'id', title: 'string', statement: 'string', scenarios: array(scenario) };
 const capability = { id: 'id', title: 'string', requirements: array(requirement) };
@@ -43,7 +44,10 @@ const modelSchema = {
 };
 const policySchema = {
   schemaVersion: enumeration(1), requireApproval: 'boolean',
-  requiredChecks: array({ id: 'id', kind: enumeration('static', 'test', 'mutation', 'review', 'manual') }),
+  requiredChecks: array({
+    id: 'id', kind: enumeration('static', 'test', 'mutation', 'review', 'manual'),
+    appliesTo: optional(array(enumeration('behavior', 'no-behavior', 'supporting'))),
+  }),
 };
 const evidenceSchema = {
   schemaVersion: enumeration(1), revision: 'string', policyDigest: 'string',
@@ -68,8 +72,11 @@ function schema(x, rule, path) {
     if (!object(x)) fail('expected object');
     for (const k of Object.keys(x)) if (!Object.hasOwn(rule, k)) fail(`unknown field ${k}`);
     for (const [k, v] of Object.entries(rule)) {
-      if (!Object.hasOwn(x, k)) fail(`missing field ${k}`);
-      schema(x[k], v, `${path}.${k}`);
+      if (!Object.hasOwn(x, k)) {
+        if (v.optional) continue;
+        fail(`missing field ${k}`);
+      }
+      schema(x[k], v.optional || v, `${path}.${k}`);
     }
   }
 }
@@ -179,6 +186,11 @@ export function checkDocuments(model, policy, evidence = null) {
     check('uncovered-requirement', !coverage || coverage.checks.length === 0, key);
   }
 
+  // A check scoped to other kinds of change is not required of this one, but
+  // every change must still owe at least one check.
+  const applicable = policy.requiredChecks.filter((c) => !c.appliesTo || c.appliesTo.includes(change.kind));
+  check('empty-policy', applicable.length === 0, `policy/requiredChecks for ${change.kind}`);
+
   // Receipt verification belongs to the protected runner, not a field the author sets.
   if (policy.requireApproval) {
     check('missing-approval', !evidence?.approvals.some((a) => a.changeDigest === digest(change)
@@ -187,7 +199,7 @@ export function checkDocuments(model, policy, evidence = null) {
   if (model.phase === 'acceptance' || model.phase === 'close') {
     check('stale-evidence', !evidence || evidence.revision !== model.revision
       || evidence.policyDigest !== digest(policy), 'evidence');
-    const needed = new Set([...policy.requiredChecks.map((c) => c.id), ...change.coverage.flatMap((c) => c.checks)]);
+    const needed = new Set([...applicable.map((c) => c.id), ...change.coverage.flatMap((c) => c.checks)]);
     for (const id of needed) {
       const receipt = evidence?.checks.find((c) => c.id === id);
       check('unproved-check', !receipt || receipt.status !== 'passed' || !present(receipt.reference), id);

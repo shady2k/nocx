@@ -178,6 +178,16 @@ type settling struct {
 	// still refines it — reduce). Two admissions of one exit, one fact, one
 	// message.
 	told bool
+
+	// next is a DIFFERENT state read while this hold stands, and nextSince
+	// when it was first read (nocx-bwj3t). It replaces the hold only once it
+	// has itself been read continuously for the window; a reading of the held
+	// state in between withdraws it. Every transition waits the window, the
+	// one away from a state already told included — without that, one torn
+	// frame of an idle worker's repaint, read as working, ended the idle hold,
+	// and the idle reading after it was told to the coordinator a second time.
+	next      ObservedState
+	nextSince time.Time
 }
 
 // observedFacts is the settle machine: what each worker was last read as, and
@@ -460,8 +470,46 @@ func (r *Registrar) coordinatorLive(ctx context.Context, sessionID string) (int,
 // never a fact from a single reading — even with a zero window it takes a second
 // reading of the same state, which is what "held" means and what keeps a
 // zero-window caller a user of this rule rather than an exception to it.
+//
+// It RESERVES NOTHING, and it used to: it was claim, and a working hold that
+// reached the window took the reservation claim hands a writer — with no
+// writer behind it to settle or release it. The exit that followed then found
+// the reservation held and was never told (nocx-bwj3t, measured in the
+// real-helper journey).
 func (f *observedFacts) held(id ParticipantID, state ObservedState, now time.Time) bool {
-	return f.claim(id, state, now)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	held, first := f.advance(id, state, now)
+	return !first && held.state == state && now.Sub(held.since) >= f.window
+}
+
+// advance moves one worker's hold for one reading, under f.mu, and returns
+// the hold that now stands, and whether this reading is the first ever read
+// for the worker — which is never a fact, whatever the window. A reading of the held state withdraws any pending
+// transition; a different state becomes the pending transition, or replaces the
+// hold once it has been read continuously for the window — carrying the time it
+// was first read, so the window is not counted twice.
+func (f *observedFacts) advance(id ParticipantID, state ObservedState, now time.Time) (*settling, bool) {
+	held, ok := f.workers[id]
+	if !ok {
+		held = &settling{state: state, since: now}
+		f.workers[id] = held
+		return held, true
+	}
+	if held.state == state {
+		held.next = ""
+		return held, false
+	}
+	if held.next != state {
+		held.next, held.nextSince = state, now
+		return held, false
+	}
+	if now.Sub(held.nextSince) < f.window {
+		return held, false
+	}
+	held = &settling{state: state, since: held.nextSince}
+	f.workers[id] = held
+	return held, false
 }
 
 // settledFor answers whether this state has been continuously read for the
@@ -480,12 +528,8 @@ func (f *observedFacts) held(id ParticipantID, state ObservedState, now time.Tim
 func (f *observedFacts) settledFor(id ParticipantID, state ObservedState, now time.Time) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	held, ok := f.workers[id]
-	if !ok || held.state != state {
-		f.workers[id] = &settling{state: state, since: now}
-		return false
-	}
-	return now.Sub(held.since) >= f.window
+	held, first := f.advance(id, state, now)
+	return !first && held.state == state && now.Sub(held.since) >= f.window
 }
 
 // claim reserves the right to place one fact for this worker, and reports
@@ -500,9 +544,8 @@ func (f *observedFacts) settledFor(id ParticipantID, state ObservedState, now ti
 func (f *observedFacts) claim(id ParticipantID, state ObservedState, now time.Time) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	held, ok := f.workers[id]
-	if !ok || held.state != state {
-		f.workers[id] = &settling{state: state, since: now}
+	held, first := f.advance(id, state, now)
+	if first || held.state != state {
 		return false
 	}
 	if held.placed || held.inFlight || now.Sub(held.since) < f.window {

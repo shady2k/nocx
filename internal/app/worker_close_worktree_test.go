@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/content"
 	gitlocal "github.com/shady2k/nocx/internal/git/local"
@@ -218,5 +219,70 @@ func TestClosingAWorkerWithoutAWorktreeAsksGitNothing(t *testing.T) {
 	}
 	if opens := factory.opensSeen(); len(opens) != 0 {
 		t.Fatalf("the close opened git at %v, want nothing", opens)
+	}
+}
+
+// recordingToucher is the last-used record a close stamps: it keeps every
+// path it was touched with, and fails every touch when err is set.
+type recordingToucher struct {
+	touched []string
+	err     error
+}
+
+func (r *recordingToucher) Touch(_ context.Context, path string, _ time.Time) error {
+	r.touched = append(r.touched, path)
+	return r.err
+}
+
+// Criterion of nocx-xn63t.1.4 carried by the close: closing a worker moves
+// its checkout's last-used time, because the sweep of nocx-xn63t.1.6 reads
+// that time and a checkout a worker just left is not an unused one.
+func TestClosingAWorktreeWorkerMovesItsLastUsedTime(t *testing.T) {
+	repoDir, head := initRealRepo(t)
+	stand, wtPath := newCloseWorktreeStand(t, repoDir, head)
+	toucher := &recordingToucher{}
+	stand.closer.checkouts = toucher
+
+	if _, err := stand.closer.Close(context.Background(), stand.participant(wtPath, head)); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if len(toucher.touched) != 1 || toucher.touched[0] != wtPath {
+		t.Fatalf("touched = %v, want exactly [%s]", toucher.touched, wtPath)
+	}
+}
+
+// Paired failure: the record refusing the stamp does not fail a close whose
+// real work — the session and the tab — is already done, and the answer
+// about the checkout is still git's.
+func TestAFailedLastUsedStampDoesNotFailTheClose(t *testing.T) {
+	repoDir, head := initRealRepo(t)
+	stand, wtPath := newCloseWorktreeStand(t, repoDir, head)
+	stand.closer.checkouts = &recordingToucher{err: errors.New("database is locked")}
+
+	res, err := stand.closer.Close(context.Background(), stand.participant(wtPath, head))
+	if err != nil {
+		t.Fatalf("a failed stamp must not fail the close: %v", err)
+	}
+	if res.Worktree.State != workers.CheckoutRead {
+		t.Fatalf("worktree = %+v, want git's reading despite the failed stamp", res.Worktree)
+	}
+}
+
+// A worker with no checkout stamps nothing.
+func TestClosingAWorkerWithoutAWorktreeStampsNothing(t *testing.T) {
+	tabs := newWorkerTabs()
+	tabs.record("p-1", "tab-1")
+	_, lg := logtest.New(t)
+	toucher := &recordingToucher{}
+	closer := &workerCloser{sessions: goneSessions{}, layout: &closingTabs{}, tabs: tabs, checkouts: toucher, log: lg}
+
+	if _, err := closer.Close(context.Background(), workers.Participant{
+		ID: "p-1", Group: "worker-1", State: workers.StateLive,
+		Liveness: workers.Liveness{SessionID: "sess-gone"},
+	}); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if len(toucher.touched) != 0 {
+		t.Fatalf("touched = %v, want nothing", toucher.touched)
 	}
 }

@@ -2343,7 +2343,9 @@ func New(opts ...Option) (*App, error) {
 			// the same seats record — one owner of "which tab is this
 			// participant's", read from the close's rather than the spawn's
 			// end.
-			layout: contentDB.Layout(), tabs: workerSeats,
+			// The checkout record 1.4 keeps: a close moves its last-used stamp.
+			checkouts: checkouts,
+			layout:    contentDB.Layout(), tabs: workerSeats,
 			// tp a third time (nocx-xn63t.4.6): the notification that a
 			// participant's tab has LEFT the window rides the same broadcast
 			// its appearance did, so every connected window's strip follows

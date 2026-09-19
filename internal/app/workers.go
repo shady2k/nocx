@@ -1465,7 +1465,17 @@ type workerCloser struct {
 	// git seam into cannot read a checkout, and the result says the state
 	// is unknown rather than failing a close whose real work is done.
 	repos git.RepoFactory
-	log   log.Logger
+	// checkouts is the durable record whose last-used stamp a close moves
+	// (nocx-xn63t.1.4): the sweep of nocx-xn63t.1.6 reads that stamp, and a
+	// checkout a worker has just left is not an unused one. Nil is the
+	// absence case — nothing is stamped.
+	checkouts checkoutToucher
+	log       log.Logger
+}
+
+// checkoutToucher is the one call the close makes on the checkout record.
+type checkoutToucher interface {
+	Touch(ctx context.Context, path string, at time.Time) error
 }
 
 func (c *workerCloser) Close(ctx context.Context, p workers.Participant) (workers.CloseResult, error) {
@@ -1560,6 +1570,15 @@ func (c *workerCloser) Close(ctx context.Context, p workers.Participant) (worker
 func (c *workerCloser) leftover(ctx context.Context, p workers.Participant) workers.CloseResult {
 	if p.Worktree == (workers.Worktree{}) {
 		return workers.CloseResult{}
+	}
+	// STAMPED BEFORE THE READING, and never failing the close: the session
+	// and the tab are already gone, so a record that refuses the stamp is
+	// logged and the answer about the checkout is still git's.
+	if c.checkouts != nil {
+		if err := c.checkouts.Touch(ctx, p.Worktree.Path, time.Now()); err != nil {
+			log.From(ctx).Warn("worker close: could not move the checkout's last-used time",
+				"participant", string(p.ID), "path", p.Worktree.Path, "error", err)
+		}
 	}
 	left := workers.Leftover{
 		Path: p.Worktree.Path, Branch: p.Worktree.Branch, State: workers.CheckoutUnknown,

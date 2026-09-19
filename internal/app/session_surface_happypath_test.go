@@ -516,7 +516,7 @@ func newS14Stand(t *testing.T) *s14Stand {
 	auth.BindSessionKeys(keysImpl)
 	auth.BindSessionMessages(messagesImpl)
 
-	dispatcher, err := assistant.NewToolDispatcher(registry, record, content.EnvironmentIDFor(content.EnvLocal, ""))
+	dispatcher, err := assistant.NewToolDispatcher(registry, workerRecordForTools{record}, content.EnvironmentIDFor(content.EnvLocal, ""))
 	if err != nil {
 		t.Fatalf("new dispatcher: %v", err)
 	}

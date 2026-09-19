@@ -83,7 +83,7 @@ func admittedWorkerEndpoint(t *testing.T) (*agentApprovalService, *toolendpoint.
 		Owner:    workerAuthEndpointOwner{},
 		SelfUID:  1000,
 		Auth:     auth,
-		Dispatch: newSharedToolDispatcher(t, record),
+		Dispatch: newSharedToolDispatcher(t, workerRecordForTools{record}),
 		Logger:   logtest.Slog(t),
 	})
 	if err != nil {
@@ -292,7 +292,7 @@ func TestRevokingOneAgentLeavesAnotherAgentsSessionAdmitted(t *testing.T) {
 		Owner:    workerAuthEndpointOwner{},
 		SelfUID:  1000,
 		Auth:     auth,
-		Dispatch: newSharedToolDispatcher(t, emptyWorkerRecord()),
+		Dispatch: newSharedToolDispatcher(t, emptyWorkerRecordForTools()),
 		Logger:   logtest.Slog(t),
 	})
 	if err != nil {

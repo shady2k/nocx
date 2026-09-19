@@ -307,7 +307,13 @@ type workerSpawner struct {
 	// dev stand and a shipped build never share one). Empty with a nil
 	// repos is the same unwired case.
 	worktreeRoot string
-	log          log.Logger
+	// checkouts is the durable record of the checkouts a spawn creates
+	// (nocx-xn63t.1.4), written the moment the checkout exists. Nil is the
+	// absence case every seam here follows: the spawn proceeds, the
+	// checkout is listed by git regardless, and what is lost is only the
+	// name and task a later coordinator would have read beside it.
+	checkouts *workerCheckouts
+	log       log.Logger
 }
 
 // paneReadiness is the spawner's narrow view of the pane-observation watcher
@@ -803,6 +809,16 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 			return nil, err
 		}
 		paneCwd = undo.path
+		// THE RECORD, AT THE MOMENT THE CHECKOUT EXISTS (nocx-xn63t.1.4).
+		// A spawn that fails after this line removes the checkout through
+		// the undo, and the row it leaves behind is dropped by the first
+		// read that notices the checkout is gone — the same mechanism that
+		// forgets a checkout removed by hand. The write failing is a
+		// warning and not a refusal: the checkout is real whether or not
+		// its annotation landed.
+		if s.checkouts != nil {
+			s.checkouts.recordCreated(ctx, lg, undo, req.Group, req.Task)
+		}
 	}
 	madeTab, tabErr := s.layout.CreateTabAfter(ctx,
 		content.Tab{ID: tabID.String(), WorkspaceID: s.workspace, Layout: content.LayoutRow},
@@ -978,10 +994,18 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 // questions unanswered, and each answers its own absence in the way its own
 // caller can use — see coordinatorCwd and coordinatorTab.
 func (s *workerSpawner) coordinatorPane(coordinator string, lg log.Logger) string {
-	if coordinator == "" || s.sessions == nil {
+	return coordinatorPaneFor(s.sessions, coordinator, lg)
+}
+
+// coordinatorPaneFor is the walk's one implementation, a package function so
+// the checkouts service asks the SAME walk rather than deriving a second one
+// (nocx-xn63t.1.4): the directory a coordinator stands in and the pane that
+// holds it are this one row's facts.
+func coordinatorPaneFor(sessions sessionCloser, coordinator string, lg log.Logger) string {
+	if coordinator == "" || sessions == nil {
 		return ""
 	}
-	sess, err := s.sessions.Get(session.ID(coordinator))
+	sess, err := sessions.Get(session.ID(coordinator))
 	if err != nil {
 		lg.Debug("worker spawn: the coordinator's session is not held here, so its pane is unknown",
 			"coordinator_session", coordinator, "error", err)
@@ -1013,10 +1037,17 @@ func (s *workerSpawner) coordinatorPane(coordinator string, lg log.Logger) strin
 // $PWD — would be the second owner AGENTS.md's "look for the existing answer"
 // rule is about.
 func (s *workerSpawner) coordinatorCwd(ctx context.Context, paneID string, lg log.Logger) string {
-	if paneID == "" || s.layout == nil {
+	return coordinatorCwdFor(ctx, s.layout, paneID, lg)
+}
+
+// coordinatorCwdFor is the walk's second half, shared for the same reason
+// its caller above is: one owner of "which directory is this coordinator
+// standing in".
+func coordinatorCwdFor(ctx context.Context, layout paneMinter, paneID string, lg log.Logger) string {
+	if paneID == "" || layout == nil {
 		return ""
 	}
-	cwd, err := s.layout.PaneCwd(ctx, paneID)
+	cwd, err := layout.PaneCwd(ctx, paneID)
 	if err != nil {
 		lg.Debug("worker spawn: the coordinator's pane has no recorded directory",
 			"pane_id", paneID, "error", err)

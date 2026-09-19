@@ -128,6 +128,11 @@ type App struct {
 	// (nocx-6pz0); stopped at shutdown so no resolution child outlives
 	// the process.
 	gitFactory *gitlocal.Factory
+	// workerCheckouts is the durable record of the checkouts nocx's spawns
+	// create and the repository's leftovers answer (nocx-xn63t.1.4). Held
+	// here, like gitFactory beside it, so the composition root's ownership
+	// is explicit and a wiring test can see what New built.
+	workerCheckouts *workerCheckouts
 	// helperRegistry owns the live helper channels shared by git and the
 	// sessions inventory. Kept here so the composition root's ownership is
 	// explicit; the registry itself remains private to app.
@@ -1311,6 +1316,31 @@ func New(opts ...Option) (*App, error) {
 	// (nocx-6pz0).
 	gitFactory := gitlocal.NewFactory()
 
+	// THE DURABLE RECORD OF NOCX-MADE CHECKOUTS (nocx-xn63t.1.4): the join
+	// of the git seam's list, the record's annotations and the session walk,
+	// answering what this repository has standing that no live worker holds.
+	// Built here because every input it holds exists by this line except one
+	// — the worker record below, which is attached to it the moment it
+	// exists, before anything can ask a question.
+	//
+	// rows is wired ONLY for a store that actually opened. A store that
+	// failed to open is the stub, and a stub must never stand in for a
+	// reading record: it answers no rows and no error, so the survey would
+	// read as complete with nothing in it — exactly the "marked incomplete,
+	// not only in a log" failure the answer owes its reader. Nil rows is
+	// what makes the survey say incomplete instead.
+	var checkoutRows content.WorkerCheckoutRepository
+	if _, stubbed := contentDB.(*content.Stub); !stubbed {
+		checkoutRows = contentDB.WorkerCheckouts()
+	}
+	checkouts := &workerCheckouts{
+		repos:        gitFactory,
+		worktreeRoot: filepath.Join(paths.DataDir(), "worktrees"),
+		rows:         checkoutRows,
+		sessions:     sess,
+		layout:       contentDB.Layout(),
+	}
+
 	// The ONE global agent policy (ADR-0020 §7 as amended 2026-08-16,
 	// accepted): the matrix every run's grant is minted from. Persisted as a
 	// JSON document beside the settings; the run mint and the
@@ -1362,6 +1392,10 @@ func New(opts ...Option) (*App, error) {
 		transport.WithLiveEffects(agenttools.LiveEffects()),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithContentDB(contentDB),
+		// The pane-open half of the checkout stamp (nocx-xn63t.1.4): every
+		// pane nocx opens standing inside a recorded checkout moves its
+		// last-used forward, through the one note both open callers share.
+		transport.WithPaneOpenedNote(checkouts.notePaneOpened),
 		// Where skills.audit files what a model concluded, once it has
 		// answered (ws_skill_audit.go), and where skills.check reads it back
 		// for free (ws_skill_check.go) — one repository, one writer, one
@@ -2293,6 +2327,7 @@ func New(opts ...Option) (*App, error) {
 			// a shipped build never share a checkout.
 			repos:        gitFactory,
 			worktreeRoot: filepath.Join(paths.DataDir(), "worktrees"),
+			checkouts:    checkouts,
 			log:          logger,
 		},
 		workerEnrol,
@@ -2325,6 +2360,13 @@ func New(opts ...Option) (*App, error) {
 		// settings owner edits this line.
 		workers.WithSettleWindow(workers.DefaultSettleWindow),
 	)
+	// The record is the one answer the checkouts service could not hold
+	// above: which checkouts live workers hold. Attached here, before the
+	// app can serve a question, and the adapter below is what the assistant
+	// surface is handed — the registrar it already knew, plus the one
+	// answer the registrar cannot give.
+	checkouts.held = workerRecord
+	assistantWorkerRecord := &workerRecordWithCheckouts{Registrar: workerRecord, checkouts: checkouts}
 	// What nocx SEES, joined to what it records (nocx-luqz9.2, ADR-0070
 	// decision 2). Built here because this is the only place both halves exist:
 	// the watcher knows what a pane was classified as, the record knows what a
@@ -2366,7 +2408,7 @@ func New(opts ...Option) (*App, error) {
 	// app.New returns.
 	paneWatch.OnReading(workerObs.ObserveSession)
 	toolDispatcher, toolDispatcherErr := assistant.NewToolDispatcher(
-		agentToolRegistry, workerRecord, content.EnvironmentIDFor(content.EnvLocal, ""),
+		agentToolRegistry, assistantWorkerRecord, content.EnvironmentIDFor(content.EnvLocal, ""),
 	)
 	if toolDispatcherErr != nil {
 		return nil, fmt.Errorf("worker dispatcher: %w", toolDispatcherErr)
@@ -2473,7 +2515,7 @@ func New(opts ...Option) (*App, error) {
 	// The coordinator's own two calls reach the record through the transport
 	// (nocx-dkawo.8). Bound post-construction for the same reason the emitter
 	// is: the server is built above, and the record needs it.
-	tp.SetWorkerRecord(workerRecord)
+	tp.SetWorkerRecord(assistantWorkerRecord)
 	// THIS MACHINE IS ONE OF THE GENERATIONS ASKED (nocx-ie23r.2), and it is
 	// also where a session that is still there is TAKEN BACK (nocx-ie23r.5).
 	// The route is the local opener itself, which already owns every fact of
@@ -2518,6 +2560,7 @@ func New(opts ...Option) (*App, error) {
 		noteCloser:          noteCloser,
 		discoverySched:      discoverySched,
 		gitFactory:          gitFactory,
+		workerCheckouts:     checkouts,
 		helperRegistry:      helperReg,
 		helperArtifacts:     localHelperArtifacts(o),
 		localHelper:         localOpener,

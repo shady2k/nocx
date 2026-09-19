@@ -473,7 +473,7 @@ func newSharedToolDispatcher(t *testing.T, record assistant.WorkerRecord) dispat
 func TestGroupExternalCallerMutationIsTheInProcessCallersRow(t *testing.T) {
 	reg, sess, grid := prepareGroupCaller(t)
 	record, closer := newGroupTwoCallersRecord()
-	dispatcher := newSharedToolDispatcher(t, record)
+	dispatcher := newSharedToolDispatcher(t, workerRecordForTools{record})
 	socket := publishGroupEndpoint(t, reg, grid, record, dispatcher)
 
 	// The external caller starts the worker.
@@ -553,7 +553,7 @@ func TestGroupExternalCallerMutationIsTheInProcessCallersRow(t *testing.T) {
 func TestGroupExternalCallerCannotMoveARowItsCapabilityNeverHeld(t *testing.T) {
 	reg, _, grid := prepareGroupCaller(t)
 	record, _ := newGroupTwoCallersRecord()
-	dispatcher := newSharedToolDispatcher(t, record)
+	dispatcher := newSharedToolDispatcher(t, workerRecordForTools{record})
 	socket := publishGroupEndpoint(t, reg, grid, record, dispatcher)
 
 	// A worker in a DIFFERENT session's worker, registered directly on the
@@ -607,8 +607,8 @@ func TestGroupEndpointHasNoExecutionPathOfItsOwn(t *testing.T) {
 	reg, sess, grid := prepareGroupCaller(t)
 	endpointRecord, _ := newGroupTwoCallersRecord()
 	inProcessRecord, _ := newGroupTwoCallersRecord()
-	socket := publishGroupEndpoint(t, reg, grid, endpointRecord, newSharedToolDispatcher(t, endpointRecord))
-	inProcess := newSharedToolDispatcher(t, inProcessRecord)
+	socket := publishGroupEndpoint(t, reg, grid, endpointRecord, newSharedToolDispatcher(t, workerRecordForTools{endpointRecord}))
+	inProcess := newSharedToolDispatcher(t, workerRecordForTools{inProcessRecord})
 
 	spawn := callExternally(t, socket, "workers.spawn",
 		`{"command":"claude","task":"a row on the other record"}`)
@@ -693,7 +693,7 @@ func prepareGroupWorkerSetupWith(t *testing.T, opts ...workers.Option) workerWor
 	// ParticipantBySession resolves and therefore what makes the caller from
 	// that pane a participant rather than a coordinator.
 	record, _ := newGroupTwoCallersRecordInSession(string(worker.ID()), opts...)
-	dispatcher := newSharedToolDispatcher(t, record)
+	dispatcher := newSharedToolDispatcher(t, workerRecordForTools{record})
 	p, err := record.Register(context.Background(), workers.RegisterRequest{
 		CoordinatorSession: string(coordinator.ID()),
 		Role:               workers.RoleWorker,
@@ -807,7 +807,7 @@ func TestGroupWorkerIsOfferedNoCoordinatorCall(t *testing.T) {
 func TestWorkerCoordinatorReadsItsOwnMailboxAndNotAWorkers(t *testing.T) {
 	reg, sess, grid := prepareGroupCaller(t)
 	record, _ := newGroupTwoCallersRecord()
-	socket := publishGroupEndpoint(t, reg, grid, record, newSharedToolDispatcher(t, record))
+	socket := publishGroupEndpoint(t, reg, grid, record, newSharedToolDispatcher(t, workerRecordForTools{record}))
 
 	response := callExternally(t, socket, "workers.inbox", `{}`)
 	if response.Error != nil {
@@ -900,7 +900,7 @@ func TestGroupCatalogueUsesDisjointAuthorizerGrants(t *testing.T) {
 
 	reg, _, grid := prepareGroupCaller(t)
 	record, _ := newGroupTwoCallersRecord()
-	socket := publishGroupEndpoint(t, reg, grid, record, newSharedToolDispatcher(t, record))
+	socket := publishGroupEndpoint(t, reg, grid, record, newSharedToolDispatcher(t, workerRecordForTools{record}))
 	coordinatorResponse := callExternally(t, socket, "tools.catalogue", `{"name":"workers.inbox"}`)
 	if coordinatorResponse.Error != nil {
 		t.Fatalf("coordinator tools.catalogue: %+v", coordinatorResponse.Error)

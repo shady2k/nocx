@@ -228,35 +228,53 @@ func (s *s14RealStand) coordinatorTyped(t *testing.T) string {
 	return s.paneTyped(t, s.coordinatorSession())
 }
 
+// s14WakeOpen and s14WakeClose are where the wake's sentence begins and ends
+// on a pane's stream.
+const (
+	s14WakeOpen  = "nocx: you have "
+	s14WakeClose = "Call workers.inbox."
+)
+
 // s14WakeTexts is every wake sentence a pane's stream carries, in the order
 // the pane received them — each one cut at the sentence's own end, so an
 // assertion is on the product's whole line and not on a fragment a different
-// sentence would also satisfy.
+// sentence would also satisfy. A sentence still arriving is returned as far as
+// it has come, so an exact assertion sees it rather than a stream that looks
+// quieter than it is.
 func s14WakeTexts(typed string) []string {
-	const (
-		open  = "nocx: you have "
-		close = "Call workers.inbox."
-	)
 	var out []string
 	for {
-		at := strings.Index(typed, open)
+		at := strings.Index(typed, s14WakeOpen)
 		if at < 0 {
 			return out
 		}
 		typed = typed[at:]
-		end := strings.Index(typed, close)
+		end := strings.Index(typed, s14WakeClose)
 		if end < 0 {
 			out = append(out, typed)
 			return out
 		}
-		end += len(close)
+		end += len(s14WakeClose)
 		out = append(out, typed[:end])
 		typed = typed[end:]
 	}
 }
 
-// s14WakeLines is how many wake lines a pane's stream carries.
-func s14WakeLines(typed string) int { return len(s14WakeTexts(typed)) }
+// s14WakeLines is how many WHOLE wake lines a pane's stream carries, and it is
+// what every wait for a line counts. A line reaches the mock through the pty in
+// pieces, so a stream caught mid-line holds the start of a sentence and not yet
+// its end — and a wait that counted that fragment would let the assertion after
+// it compare a line the product has not finished typing (measured under a
+// loaded machine: a retype read back as "… Call workers.inbo").
+func s14WakeLines(typed string) int {
+	n := 0
+	for _, line := range s14WakeTexts(typed) {
+		if strings.HasSuffix(line, s14WakeClose) {
+			n++
+		}
+	}
+	return n
+}
 
 // s14WakeLine is the whole sentence the wake types for n waiting messages,
 // spelled out here so an assertion on it is an assertion on the product's own

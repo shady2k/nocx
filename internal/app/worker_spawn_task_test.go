@@ -195,6 +195,11 @@ func (hangingTabs) CreateTabAfter(_ context.Context, _ content.Tab, _ content.Pa
 	return content.Created[content.NewTab]{}, nil
 }
 
+// Panes satisfies the seam; nothing in this file asks a worktree question.
+func (hangingTabs) Panes(context.Context, string) ([]content.Pane, error) {
+	return nil, nil
+}
+
 // TabForPane answers nothing, which is the anchorless case: no tab is named,
 // so the participant's tab goes last and no second method can hang.
 func (hangingTabs) TabForPane(context.Context, string) (string, error) { return "", nil }

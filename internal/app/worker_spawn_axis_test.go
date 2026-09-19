@@ -120,6 +120,13 @@ func (f *fakeAxisTabs) PaneCwd(_ context.Context, paneID string) (string, error)
 	return f.cwds[paneID], nil
 }
 
+// Panes satisfies the seam a worktree spawn reads the coordinator pane's
+// kind through. These tests spawn without a worktree ask, so nothing calls
+// it; the worktree tests carry their own double that answers it.
+func (f *fakeAxisTabs) Panes(_ context.Context, tabID string) ([]content.Pane, error) {
+	return nil, nil
+}
+
 func (f *fakeAxisTabs) snapshot() (created, deleted []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -135,6 +135,10 @@ func (f *ctxSpyTabs) DeleteTab(ctx context.Context, id string, _ content.Replace
 // tests name no coordinator session, so the spawner never asks (nocx-ty5ks).
 func (f *ctxSpyTabs) PaneCwd(context.Context, string) (string, error) { return "", nil }
 
+func (f *ctxSpyTabs) Panes(_ context.Context, tabID string) ([]content.Pane, error) {
+	return nil, nil
+}
+
 func (f *ctxSpyTabs) snapshot() (created, deleted []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

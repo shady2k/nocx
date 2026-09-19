@@ -28,6 +28,7 @@ import (
 	"github.com/shady2k/nocx/internal/agenttyping"
 	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/paneobserve"
@@ -118,6 +119,12 @@ type paneMinter interface {
 	DeleteTab(ctx context.Context, id string, next content.Replacement) error
 	PaneCwd(ctx context.Context, paneID string) (string, error)
 	TabForPane(ctx context.Context, paneID string) (string, error)
+	// Panes reads one tab's panes, the layout's own listing. A spawn needs
+	// it for one fact only — the coordinator pane's KIND, which decides
+	// whether a worktree ask may be served on this machine at all — and
+	// reads it from the pane's own row rather than guessing from the cwd
+	// the same row holds (nocx-xn63t.1.2).
+	Panes(ctx context.Context, tabID string) ([]content.Pane, error)
 }
 
 // sessionCloser ends a session by id. The registry's own EndSession, named
@@ -286,7 +293,21 @@ type workerSpawner struct {
 	// describes: a spawner nobody wired a record into mints tabs a close
 	// cannot find, which is what every stand that never closes a worker means.
 	tabs *workerTabs
-	log  log.Logger
+	// repos opens the coordinator's repository when a spawn asks for a
+	// worktree (nocx-xn63t.1.2). It is the composition root's ONE local
+	// factory — the same one transport's git.open resolves with — and not a
+	// second construction of it. Nil is the absence case every other seam
+	// here follows, with one difference: a worktree ASK against an unwired
+	// spawner is REFUSED, not silently downgraded, because proceeding
+	// without the checkout the caller asked for would be the soft degrade
+	// AGENTS.md refuses.
+	repos git.RepoFactory
+	// worktreeRoot is where nocx-made checkouts live: the application data
+	// directory's worktrees/ (internal/storage's build-tagged profile, so a
+	// dev stand and a shipped build never share one). Empty with a nil
+	// repos is the same unwired case.
+	worktreeRoot string
+	log          log.Logger
 }
 
 // paneReadiness is the spawner's narrow view of the pane-observation watcher
@@ -503,11 +524,26 @@ type spawnedParticipant struct {
 	// delivery is what became of the task (nocx-f545a.3), set by Spawn and
 	// read once by the registration through workers.TaskDeliverer.
 	delivery workers.TaskDelivery
+	// worktree is the undo of the checkout this spawn created, or nil when
+	// it created none. It rides the participant for the same reason tabID
+	// does — Kill is the undo of a spawn, and the checkout is something the
+	// spawn built — and it is what WorktreeLocation answers for the record,
+	// which takes the facts at MarkLive, the moment it accepts the
+	// checkout's existence.
+	worktree *worktreeUndo
 }
 
 // TaskDelivery is how the registration that started this participant learns
 // what became of its task, without anybody writing it into the record.
 func (s spawnedParticipant) TaskDelivery() workers.TaskDelivery { return s.delivery }
+
+// WorktreeLocation is the record's answer to "what did this spawn create":
+// the resolved facts of the checkout it made, or the zero Worktree when it
+// made none — which is every spawn without a worktree ask, exactly the
+// "attempted nothing says nothing" reading TaskDelivery's own seam uses.
+func (s spawnedParticipant) WorktreeLocation() workers.Worktree {
+	return s.worktree.location()
+}
 
 func (s spawnedParticipant) Liveness() workers.Liveness {
 	ident := s.sess.Identity()
@@ -581,6 +617,22 @@ func (s spawnedParticipant) Kill(ctx context.Context) error {
 	if s.tabID != "" && s.layout != nil {
 		if delErr := s.layout.DeleteTab(ctx, s.tabID, closeReplacement()); delErr != nil {
 			errs = append(errs, fmt.Errorf("delete tab: %w", delErr))
+		}
+	}
+	// AND THE CHECKOUT, after the session it lives in is gone: a shell can
+	// hold no directory once its pty is closed, and the seam's own refusal
+	// (a worktree holding work) is preserved rather than forced past — the
+	// branch-and-checkout a spawn created comes down, a branch it merely
+	// checked out stays, and an undo that could not finish is a joined
+	// error, retried by the caller that treats compensation failure as
+	// non-terminal (internal/workers), never silence.
+	//
+	// It runs on Kill's own derived ctx, for the same reason the delete
+	// above does: by the time a compensation runs, the caller's own
+	// deadline is usually spent.
+	if s.worktree != nil {
+		if wtErr := s.worktree.run(ctx); wtErr != nil {
+			errs = append(errs, wtErr)
 		}
 	}
 	// AND THE RECORD OF WHERE THAT TAB WAS, unconditionally: whatever became
@@ -733,12 +785,32 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	// the coordinator's ONE layout row, so it is looked up once and asked
 	// its questions — a second walk could answer about a different row.
 	cwd := s.coordinatorCwd(ctx, coordPane, lg)
+	// THE CHECKOUT, before anything is minted (nocx-xn63t.1.2). A worktree
+	// ask is served or refused HERE, while the window is still untouched:
+	// no pane row, no tab, nothing for a refusal to compensate. Every
+	// refusal planWorktree answers is named — no recorded directory, a
+	// remote coordinator pane, no repository there, an occupied path, a
+	// branch held elsewhere — because a coordinator reading "no" cannot act
+	// on it. Once the plan succeeds the checkout EXISTS, and undo carries
+	// its removal to every compensating path below: from this line until
+	// the participant is live, the checkout's existence belongs to the
+	// failure handling, and the record accepts it only at MarkLive.
+	paneCwd := cwd
+	var undo *worktreeUndo
+	if req.Worktree != nil {
+		undo, err = s.planWorktree(ctx, lg, coordPane, cwd, req.Worktree)
+		if err != nil {
+			return nil, err
+		}
+		paneCwd = undo.path
+	}
 	madeTab, tabErr := s.layout.CreateTabAfter(ctx,
 		content.Tab{ID: tabID.String(), WorkspaceID: s.workspace, Layout: content.LayoutRow},
-		content.Pane{ID: paneID.String(), TabID: tabID.String(), Cwd: cwd, Kind: content.PaneLocal, SizeShare: 1},
+		content.Pane{ID: paneID.String(), TabID: tabID.String(), Cwd: paneCwd, Kind: content.PaneLocal, SizeShare: 1},
 		s.coordinatorTab(ctx, coordPane, lg),
 	)
 	if tabErr != nil {
+		s.compensateSpawn(ctx, req.Participant, tabID.String(), nil, undo)
 		return nil, fmt.Errorf("worker spawn: minting the participant's tab: %w", tabErr)
 	}
 	// WHERE THE TAB IS, RECORDED THE MOMENT IT EXISTS (nocx-xn63t.4.6). The
@@ -767,10 +839,10 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		PaneID: paneID.String(),
 		Cols:   participantCols,
 		Rows:   participantRows,
-		Cwd:    cwd,
+		Cwd:    paneCwd,
 	})
 	if err != nil {
-		s.compensateSpawn(ctx, req.Participant, tabID.String(), nil)
+		s.compensateSpawn(ctx, req.Participant, tabID.String(), nil, undo)
 		return nil, fmt.Errorf("worker spawn: opening the participant's session: %w", err)
 	}
 	lg = lg.With("session_id", string(opened.Session.ID()), "pane_id", paneID.String())
@@ -778,7 +850,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		"cols", participantCols, "rows", participantRows)
 	spawned := spawnedParticipant{
 		tabID: tabID.String(), sess: opened.Session, sessions: s.sessions, layout: s.layout,
-		participant: req.Participant, tabs: s.tabs,
+		participant: req.Participant, tabs: s.tabs, worktree: undo,
 	}
 
 	// THE GATE. Nothing is written into the session's queue — and so the
@@ -801,7 +873,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		// from answering `conventional`, because the two need different
 		// fixes: this one is worth retrying (a slow machine, a loaded
 		// helper), the other is not (the shell itself will never integrate).
-		s.compensateSpawn(ctx, req.Participant, tabID.String(), opened.Session)
+		s.compensateSpawn(ctx, req.Participant, tabID.String(), opened.Session, undo)
 		return nil, fmt.Errorf(
 			"worker spawn: the participant's shell never answered its integration handshake within the deadline; retrying may succeed if this was transient: %w",
 			awaitErr)
@@ -825,7 +897,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		// AGENTS.md's testing rules name as the failure to refuse rather than
 		// ship. Do not retry the same command unmodified: the shell itself is
 		// what did not integrate.
-		s.compensateSpawn(ctx, req.Participant, tabID.String(), opened.Session)
+		s.compensateSpawn(ctx, req.Participant, tabID.String(), opened.Session, undo)
 		return nil, fmt.Errorf(
 			"worker spawn: the participant's shell answered %q (%s): this pane cannot be watched, so it cannot be a participant; do not retry the same command until the shell-integration failure is fixed",
 			outcome.Status, outcome.Reason)
@@ -836,7 +908,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		// Compensate here rather than letting the enrolment deadline do it:
 		// the failure is known now, and waiting would spend the deadline
 		// learning what we already know.
-		s.compensateSpawn(ctx, req.Participant, tabID.String(), opened.Session)
+		s.compensateSpawn(ctx, req.Participant, tabID.String(), opened.Session, undo)
 		return nil, errors.New("worker spawn: the participant's session refused its first line")
 	}
 	// THE WRITE IS AN ATTEMPT AND NOT A START. What follows it is the
@@ -856,7 +928,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	if req.Task != "" {
 		delivery, deliverErr := s.deliverTask(ctx, string(opened.Session.ID()), req.Task)
 		if deliverErr != nil {
-			s.compensateSpawn(ctx, req.Participant, tabID.String(), opened.Session)
+			s.compensateSpawn(ctx, req.Participant, tabID.String(), opened.Session, undo)
 			return nil, fmt.Errorf("worker spawn: %w", deliverErr)
 		}
 		// A pane that asked a question keeps its tab, its session and its
@@ -1051,14 +1123,14 @@ func (s *workerSpawner) deliverTask(ctx context.Context, paneID, task string) (w
 // an absent participant), so calling it here even for the one existing
 // caller that had nothing armed yet (the mint-a-tab-id / mint-a-pane-id
 // failures return before this is ever reached) costs nothing.
-func (s *workerSpawner) compensateSpawn(ctx context.Context, participant workers.ParticipantID, tabID string, sess session.Session) {
+func (s *workerSpawner) compensateSpawn(ctx context.Context, participant workers.ParticipantID, tabID string, sess session.Session, undo *worktreeUndo) {
 	if err := s.enrolments.Withdraw(ctx, participant); err != nil {
 		s.log.Warn("worker spawn: could not withdraw a failed spawn's enrolment",
 			"participant", string(participant), "error", err)
 	}
 	sp := spawnedParticipant{
 		tabID: tabID, sess: sess, sessions: s.sessions, layout: s.layout,
-		participant: participant, tabs: s.tabs,
+		participant: participant, tabs: s.tabs, worktree: undo,
 	}
 	if err := sp.Kill(ctx); err != nil {
 		s.log.Warn("worker spawn: could not fully compensate a failed spawn",

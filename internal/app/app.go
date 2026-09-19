@@ -2285,7 +2285,15 @@ func New(opts ...Option) (*App, error) {
 			// opener already reach through.
 			announce: tp,
 			tabs:     workerSeats,
-			log:      logger,
+			// The ONE local factory the composition root already owns
+			// (gitFactory, above — the same instance transport's git.open
+			// resolves with), and the application data directory's
+			// worktrees/ as the root nocx-made checkouts live under
+			// (nocx-xn63t.1.2): the build-tagged profile, so a dev stand and
+			// a shipped build never share a checkout.
+			repos:        gitFactory,
+			worktreeRoot: filepath.Join(paths.DataDir(), "worktrees"),
+			log:          logger,
 		},
 		workerEnrol,
 		workerSup,

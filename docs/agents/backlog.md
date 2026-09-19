@@ -23,8 +23,8 @@ bug.
 - **Vision and roadmap:** [`docs/vision.md`](../vision.md); its §6 "Strategic roadmap" is the
   roadmap. Status comes from the tracker (`scripts/feature-status.sh <feature>`), never from
   either document.
-- **Milestone charters:** `docs/milestones/<milestone label>.md`. None is written yet;
-  `/shady2k-skills:to-milestone` writes the first.
+- **Milestone charters:** `docs/milestones/<milestone label>.md`, written by
+  `/shady2k-skills:to-milestone`. The first is [`v0-5`](../milestones/v0-5.md).
 - **Current specifications:** none yet in the capability format. The nearest current-state
   documents are [`docs/architecture.md`](../architecture.md) (binding invariants AD-1…AD-10)
   and [`contracts/`](../../contracts/) (every JSON-RPC result shape, checked over the wire).

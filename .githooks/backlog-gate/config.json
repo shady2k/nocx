@@ -37,7 +37,7 @@
   "ideaLabels": ["idea"],
   "ideaTitlePrefixes": ["Brainstorming:", "Brainstorm:"],
   "findingLabels": ["finding"],
-  "findingBudget": null,
+  "findingBudget": 20,
   "staleDays": 14,
   "holdDays": 2,
   "bulkCluster": 20,

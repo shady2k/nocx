@@ -136,11 +136,11 @@ func TestLocalPty_SignalForegroundReachesAChildNotOnlyTheShell(t *testing.T) {
 	lp := mustSpawn(t, 80, 24)
 	defer func() { _ = lp.Close() }()
 
-	// The execution spawns its own child and reveals it: sh -c writes the
-	// CHILD's pid (the backgrounded sleep, $!) and waits. The escalation
-	// must kill the child too — a signal that reached only the shell would
-	// leave the sleep alive. The pid file is the child's identity, written
-	// by the command itself, never guessed.
+	// The execution spawns its own child and reveals it: the backgrounded
+	// child writes its own pid and becomes the sleep, and sh -c waits. The
+	// escalation must kill the child too — a signal that reached only the
+	// shell would leave the sleep alive. The pid file is the child's identity,
+	// written by the command itself, never guessed.
 	//
 	// The child's receipt is a TERM trap that writes a marker file, and
 	// the trap's body WAITS — reaping the backgrounded sleep. That shape
@@ -155,7 +155,22 @@ func TestLocalPty_SignalForegroundReachesAChildNotOnlyTheShell(t *testing.T) {
 	dir := t.TempDir()
 	marker := dir + "/reached.marker"
 	pidFile := dir + "/child.pid"
-	cmd := "sh -c 'trap \"echo reached > " + marker + "; wait\" TERM; sleep 30 & echo $! > " + pidFile + "; wait'\n"
+	// EACH FILE APPEARS WHOLE OR NOT AT ALL: it is written beside its name and
+	// renamed into it. A redirect creates the file empty before it writes, so
+	// a waiter that read in between saw "" and failed on a file the next
+	// instant would have filled.
+	//
+	// THE CHILD REPORTS ITS OWN PID, FROM AFTER ITS OWN exec. `sleep 30 &` then
+	// `$!` names the child from the parent's side, as soon as it is forked —
+	// and a forked child carries the parent's TERM trap until it execs. A group
+	// signal landing in that window is taken by the inherited handler and
+	// consumed, the exec that follows starts a sleep that never saw it, and the
+	// trap's wait then outlives the test by thirty seconds. Under load that
+	// window is wide enough to hit. The inner shell writes $$ only once it is
+	// running as itself, with TERM at its default, and then execs the sleep
+	// under the same pid.
+	cmd := "sh -c 'trap \"echo reached > " + marker + ".part && mv " + marker + ".part " + marker + "; wait\" TERM; " +
+		"sh -c \"echo \\$\\$ > " + pidFile + ".part && mv " + pidFile + ".part " + pidFile + " && exec sleep 30\" & wait'\n"
 	if _, err := lp.Write([]byte(cmd)); err != nil {
 		t.Fatalf("Write: %v", err)
 	}

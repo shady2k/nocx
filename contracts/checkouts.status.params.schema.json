@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/checkouts.status.params.schema.json",
+  "title": "CheckoutsStatusParams",
+  "description": "Params for checkouts.status: whether the automatic sweep of nocx-made worker checkouts can run. It takes NOTHING — the sweep's state is the backend's own, decided once before the transport started, and there is nothing a caller could add to narrow it. Read it on every render of the Worktrees settings; it cannot change under a connected client, because the store never un-opens.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {}
+}

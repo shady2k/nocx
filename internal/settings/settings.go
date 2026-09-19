@@ -680,6 +680,24 @@ var SkillsIdleDays = MustRegisterNumber(NumberSpec{
 	ZeroLabel:   "Never switched off automatically",
 })
 
+// WorktreeIdleDays is how long a nocx-made worker checkout may go unused
+// before the sweep removes it (nocx-xn63t.1.6). Unused means nobody: no
+// worker's close, and no pane of nocx's opened in it. The removal takes the
+// checkout only — the branch and every commit on it stay, and a checkout
+// holding uncommitted work is never removed. Zero disables the removal.
+var WorktreeIdleDays = MustRegisterNumber(NumberSpec{
+	Key:         "worktrees.idleDays",
+	Section:     "Worktrees",
+	Label:       "Remove unused worker checkouts after",
+	Description: "A worker checkout nocx created that nothing has used for this long is removed by the daily sweep. Only the checkout goes — its branch and every commit on it stay — and one holding uncommitted work is never removed.",
+	DataClass:   PublicConfig,
+	Default:     30,
+	Min:         fp(0),
+	Max:         fp(3650),
+	Unit:        "days",
+	ZeroLabel:   "Never removed automatically",
+})
+
 // SkillsReadingMinutes bounds one reading of a skill: every per-file call and
 // the conclusion together.
 //
@@ -1145,6 +1163,7 @@ func init() {
 	// component page in settings.tsx, which renders its declarations itself
 	// and mints no rail row for them; a group mapping here would name a
 	// placement that nothing places. See settings-rail-pages.ts.
+	RegisterSectionGroup("Worktrees", "application")
 	// Test is the fixture section the test binaries declare settings in; it
 	// is grouped here so the rail shows it under Developer in every build
 	// that carries it (criterion 7).

@@ -199,6 +199,38 @@ func TestSkillsIdleDaysIsRegisteredWithAZeroThatMeansNever(t *testing.T) {
 	}
 }
 
+// The sweep period for nocx-made worker checkouts: default thirty days,
+// and a zero that a person can read as "never". The section is mapped to a
+// rail group, so the declaration renders on a page rather than nowhere.
+func TestWorktreeIdleDaysIsRegisteredWithAZeroThatMeansNever(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	var found settings.Declaration
+	for _, declaration := range reg.Declarations() {
+		if declaration.Key == "worktrees.idleDays" {
+			found = declaration
+			break
+		}
+	}
+	if found.Key == "" {
+		t.Fatal("worktrees.idleDays is not registered")
+	}
+	if found.Default != float64(30) {
+		t.Fatalf("default = %v, want 30", found.Default)
+	}
+	if found.ZeroLabel == "" {
+		t.Fatal("zero has no label: a person setting 0 must be told what it does")
+	}
+	if found.Unit != "days" {
+		t.Fatalf("unit = %q, want days", found.Unit)
+	}
+	if found.Min == nil || *found.Min != 0 {
+		t.Fatal("min is not 0: the never value must be settable")
+	}
+	if group, ok := reg.SectionGroups()["Worktrees"]; !ok || group != "application" {
+		t.Fatalf("section Worktrees maps to %q (present %v), want application", group, ok)
+	}
+}
+
 // The wire declaration carries the unit a number setting is measured in, and
 // the three History settings declare the units the owner reads (nocx-w7h.7).
 func TestNumberUnitOnTheWire(t *testing.T) {

@@ -52,6 +52,27 @@ type stdioDriver struct {
 
 func startStdio(t *testing.T, socket string) *stdioDriver {
 	t.Helper()
+	return startStdioServing(t, func(input io.Reader, output io.Writer) error {
+		return Serve(context.Background(), input, output, socket, discardLogger)
+	})
+}
+
+// startStdioDialing is startStdio with the adapter's own dialer in the test's
+// hands, for a test whose precondition is something only the ADAPTER's side of
+// the connection can see.
+func startStdioDialing(t *testing.T, socket string, dialer Dialer) *stdioDriver {
+	t.Helper()
+	server, err := New(Config{Socket: socket, Dialer: dialer, Logger: discardLogger})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return startStdioServing(t, func(input io.Reader, output io.Writer) error {
+		return server.Serve(context.Background(), input, output)
+	})
+}
+
+func startStdioServing(t *testing.T, serve func(io.Reader, io.Writer) error) *stdioDriver {
+	t.Helper()
 	input, inputWriter := io.Pipe()
 	output, outputWriter := io.Pipe()
 	driver := &stdioDriver{
@@ -61,7 +82,7 @@ func startStdio(t *testing.T, socket string) *stdioDriver {
 		ended: make(chan error, 1),
 	}
 	go func() {
-		err := Serve(context.Background(), input, outputWriter, socket, discardLogger)
+		err := serve(input, outputWriter)
 		_ = outputWriter.Close()
 		driver.ended <- err
 	}()
@@ -689,13 +710,25 @@ func TestACallCancelledWhileItWaitsForTheTurnSendsNothing(t *testing.T) {
 // away, and "endpoint unavailable" would put the failure in front of the one
 // caller who could not have caused it.
 //
-// The close is ORDERED against what the client does: the fake reports it, and
-// the next request is written only after that report. Without the ordering the
+// The close is ORDERED against what the client does, and the order is taken
+// from the ADAPTER's side: the next request is written only after the
+// adapter's own read of the connection has ended. Without the ordering the
 // test would accept a run in which the client's request went out before the
 // close landed — it would then be proving the retry, or nothing at all, rather
 // than that a closed connection is re-dialled.
+//
+// THE ENDPOINT'S OWN "I CLOSED IT" IS NOT THAT ORDER. Measured: the fake's
+// Close had returned and its read loop had ended, and the adapter's next frame
+// was still accepted whole — then its read failed with "connection reset by
+// peer". So a Go Close can return before the kernel releases the socket; the
+// likely holder is the runtime's own epoll, which since Linux 6.10 keeps a
+// reference to a file while it polls it. A request written in that window is
+// accepted and then reset — the ambiguous case the adapter deliberately does not
+// retry, since it cannot tell it from an endpoint that read the request and
+// died. It failed CI that way, and 3 runs in 9,000 under load. After the
+// adapter has read the end of the connection, the socket is gone on both
+// sides and no write can land in it.
 func TestTheNextCallRedialsWhenTheEndpointClosedTheIdleConnection(t *testing.T) {
-	closed := make(chan struct{}, 1)
 	endpoint := startScriptedEndpoint(t, func(conn net.Conn, request rpcEnvelope) {
 		if request.Method == "tools.catalogue" {
 			writeJSONLine(t, conn, rpcEnvelope{JSONRPC: "2.0", ID: request.ID, Result: json.RawMessage(twoTools)})
@@ -703,19 +736,15 @@ func TestTheNextCallRedialsWhenTheEndpointClosedTheIdleConnection(t *testing.T) 
 			return
 		}
 		writeJSONLine(t, conn, rpcEnvelope{JSONRPC: "2.0", ID: request.ID, Result: json.RawMessage(`{"after":true}`)})
-	}, withEndObserver(func(net.Conn) {
-		select {
-		case closed <- struct{}{}:
-		default:
-		}
-	}))
-	driver := startStdio(t, endpoint.socket())
+	})
+	dialer := &readEndObservingDialer{ended: make(chan struct{}, 1)}
+	driver := startStdioDialing(t, endpoint.socket(), dialer)
 	initialization(driver)
 
 	select {
-	case <-closed:
+	case <-dialer.ended:
 	case <-time.After(5 * time.Second):
-		t.Fatal("the endpoint never closed the idle connection")
+		t.Fatal("the adapter never read the end of the connection the endpoint closed")
 	}
 	driver.send(2, "tools/call", `{"name":"alpha.second"}`)
 	if text := toolText(t, driver.nextID(2)); text != `{"after":true}` {
@@ -724,6 +753,38 @@ func TestTheNextCallRedialsWhenTheEndpointClosedTheIdleConnection(t *testing.T) 
 	if got := endpoint.dialCount(); got != 2 {
 		t.Fatalf("endpoint connections = %d, want 2: the closed connection and the dial the next call made", got)
 	}
+}
+
+// readEndObservingDialer dials the real socket and reports the first time the
+// adapter's read of a connection it made comes back with an error — the
+// moment the adapter itself has learned the connection is over.
+type readEndObservingDialer struct {
+	dialer net.Dialer
+	ended  chan struct{}
+}
+
+func (d *readEndObservingDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	conn, err := d.dialer.DialContext(ctx, network, address)
+	if err != nil {
+		return nil, err
+	}
+	return &readEndObservingConn{Conn: conn, ended: d.ended}, nil
+}
+
+type readEndObservingConn struct {
+	net.Conn
+	ended chan struct{}
+}
+
+func (c *readEndObservingConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if err != nil {
+		select {
+		case c.ended <- struct{}{}:
+		default:
+		}
+	}
+	return n, err
 }
 
 // A DIAL THAT GENUINELY FAILS IS NAMED, and it is the same answer the wire has

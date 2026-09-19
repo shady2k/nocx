@@ -125,11 +125,13 @@ const (
 
 // derive projects the kernel's read model for one lane into a Fact. ok is
 // false when the lane does not exist — nothing to publish. The read model is
-// the kernel's snapshot after the mutation that triggered the call; the
-// derive runs in the caller's goroutine immediately after the mutation, and
-// per lane there is exactly one pump goroutine driving it today (the
-// lifecyclechannel adapter), so the projection cannot be overtaken by the
-// next transition before it is read.
+// the kernel's snapshot at the moment of the call. It is NOT true that only
+// one goroutine publishes a lane — the adapter's pump does, and so do the
+// replays (session open and attach, a Stop's settlement) and the submit and
+// recover handlers — so a derived fact can be stale by the time it is
+// emitted unless the emission is ordered with it. That ordering is the
+// lane's emission turn, and every caller that emits takes it (publishLane,
+// ReplayLane).
 func (p *Publisher) derive(lane lifecycle.LaneID) (Fact, bool) {
 	st, err := p.kernel.State(lane)
 	if err != nil {
@@ -425,14 +427,16 @@ type AttemptTransitionEmitter interface {
 
 // Publisher wraps the kernel, forwards every mutation, and projects the
 // affected lane into a Fact on each change. It is safe for concurrent use:
-// per-lane serialization comes from the kernel (and from the single adapter
-// pump per lane); the publisher's own lock protects its bookkeeping.
+// the kernel serializes mutations, each lane's emission turn serializes its
+// derive-record-emit (publishLane), and the publisher's own lock protects its
+// bookkeeping.
 type Publisher struct {
 	kernel Kernel
 
 	mu            sync.Mutex
 	emitter       Emitter
 	last          map[lifecycle.LaneID]Fact
+	emitting      map[lifecycle.LaneID]chan struct{} // each lane's emission turn (laneEmission)
 	known         map[lifecycle.LaneID]struct{}
 	dest          map[lifecycle.DomainID]Destination // ssh children's destinations (nocx-ax79)
 	grantBuilder  GrantBuilder
@@ -453,6 +457,7 @@ func New(k Kernel, opts ...Option) *Publisher {
 	return &Publisher{
 		kernel:        k,
 		last:          make(map[lifecycle.LaneID]Fact),
+		emitting:      make(map[lifecycle.LaneID]chan struct{}),
 		known:         make(map[lifecycle.LaneID]struct{}),
 		dest:          make(map[lifecycle.DomainID]Destination),
 		grantBuilder:  o.grantBuilder,
@@ -973,13 +978,40 @@ func (p *Publisher) AbandonAttempt(id lifecycle.AttemptID) error {
 	return nil
 }
 
+// laneEmission returns the lane's emission turn: a one-slot semaphore that
+// makes deriving a lane's fact, recording it as the dedupe baseline and
+// handing it to the emitter ONE step per lane (see publishLane).
+//
+// A channel rather than a sync.Mutex so a goroutine waiting for its turn is
+// durably blocked in the sense testing/synctest understands, which is what
+// lets the race this exists for be written as a deterministic test
+// (TestPublisherReplayCannotOvertakeTheFactItRaced).
+func (p *Publisher) laneEmission(lane lifecycle.LaneID) chan struct{} {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	turn, ok := p.emitting[lane]
+	if !ok {
+		turn = make(chan struct{}, 1)
+		p.emitting[lane] = turn
+	}
+	return turn
+}
+
 // ReplayLane re-emits the lane's current projection unconditionally —
 // bypassing the change-dedupe, which is exactly the point: a reattached
 // frontend (AD-9 reconnect, protocol §12) must receive the current state
 // even if no transition happened since its last view. The emission also
 // refreshes the dedupe baseline, so a replay cannot suppress a later real
 // change.
+//
+// It takes the lane's emission turn like publishLane does, because it is the
+// SECOND goroutine that publishes a lane: session.open replays from the
+// request handler while the lifecycle bridge it has just started ingests the
+// shell's hello from its own (transport's handleOpen).
 func (p *Publisher) ReplayLane(lane lifecycle.LaneID) {
+	turn := p.laneEmission(lane)
+	turn <- struct{}{}
+	defer func() { <-turn }()
 	f, ok := p.derive(lane)
 	if !ok {
 		return
@@ -993,8 +1025,8 @@ func (p *Publisher) ReplayLane(lane lifecycle.LaneID) {
 	}
 }
 
-// publishLane derives the lane's fact and emits it when it changed since the
-// last emission for that lane. Derivation runs in the caller's goroutine,
+// publishLaneProjection hands the lane's current fact to a ProjectionEmitter
+// only — server-owned projections, no renderer notification, no dedupe.
 func (p *Publisher) publishLaneProjection(lane lifecycle.LaneID) {
 	f, ok := p.derive(lane)
 	if !ok {
@@ -1008,10 +1040,32 @@ func (p *Publisher) publishLaneProjection(lane lifecycle.LaneID) {
 	}
 }
 
-// immediately after the mutation that triggered it; the emitter call happens
-// outside the publisher's lock so a slow WebSocket write cannot stall another
-// lane's bookkeeping.
+// publishLane derives the lane's fact and emits it when it changed since the
+// last emission for that lane. Derivation runs in the caller's goroutine,
+// immediately after the mutation that triggered it.
+//
+// DERIVE, RECORD AND EMIT ARE ONE STEP PER LANE, and they were not. The
+// baseline was recorded under the publisher's lock and the emitter called
+// after it was released, so two goroutines publishing one lane could hand the
+// emitter their facts in the opposite order to the one they derived them in.
+// That is not hypothetical: session.open's replay derived `native` a moment
+// before the bridge ingested the hello, the bridge then recorded and emitted
+// `prompt_ready`, and the replay's `native` reached the renderer LAST. The
+// baseline said prompt_ready, so the shell's own prompt_ready a second later
+// was deduped as "no change" — and the pane sat at `native` with its editor
+// hidden and nothing left to correct it (CI, 2026-09-19,
+// remote-coordinator-reclaim: `.nocx-editor-input` hidden for the whole
+// wait). Under the lane's turn, the last fact emitted is always the lane's
+// state at the last derive, which follows the last mutation.
+//
+// The turn is per LANE, so a slow emitter (a completed attempt's fact waits
+// for its Stop to settle, WSServer.signalDeliveryFor) still stalls no other
+// lane's bookkeeping — only a publisher of the same lane, which has to wait
+// for the earlier fact to be delivered before its own may be.
 func (p *Publisher) publishLane(lane lifecycle.LaneID) {
+	turn := p.laneEmission(lane)
+	turn <- struct{}{}
+	defer func() { <-turn }()
 	f, ok := p.derive(lane)
 	if !ok {
 		return

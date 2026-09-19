@@ -1,7 +1,18 @@
-import { test as base, expect as baseExpect, type Locator, type Page } from '@playwright/test'
+import {
+  test as base,
+  expect as baseExpect,
+  type Locator,
+  type Page,
+  type TestInfo,
+} from '@playwright/test'
 
 import { BASE_URL } from './base-url'
-import { attachFailureDiagnostics, registerBackendForTest } from './failure-context'
+import {
+  captureSnapshotsForTest,
+  registerBackendForTest,
+  reportFailureContext,
+  watchPageForTest,
+} from './failure-context'
 import { reportStandingModals } from './modal-report'
 import { readStand } from './stand'
 import { traceIdForTest, traceparentForTest } from './trace-context.mts'
@@ -187,7 +198,28 @@ async function injectWailsShim(page: Page, traceparent?: string): Promise<void> 
   )
 }
 
-export const test = base.extend<object, { appReady: void }>({
+/**
+ * The failure report, written once per test whichever fixtures it used
+ * (failure-context.ts). AUTO, which Playwright sets up before every non-auto
+ * fixture and so tears down after them — the `page` fixture has already taken
+ * its snapshot by then, and every backend and client the test registered is
+ * in.
+ */
+const failureContextFixture: [
+  (args: object, use: () => Promise<void>, info: TestInfo) => Promise<void>,
+  { auto: true },
+] = [
+  // Playwright reads a fixture's dependencies off its first parameter's
+  // destructuring pattern, so "none" has to be spelled as an empty one.
+  // eslint-disable-next-line no-empty-pattern
+  async ({}, use, info) => {
+    await use()
+    await reportFailureContext(info, traceIdForTest(info.testId))
+  },
+  { auto: true },
+]
+
+export const test = base.extend<{ failureContext: void }, { appReady: void }>({
   // The app answers on its port before it can serve a session, and the suite
   // used to treat those as the same moment.
   //
@@ -255,11 +287,14 @@ export const test = base.extend<object, { appReady: void }>({
     { scope: 'worker', auto: true, timeout: 120_000 },
   ],
 
+  failureContext: failureContextFixture,
+
   page: async ({ page }, use, info) => {
     // Attached before anything else touches the page, so a failure's printed
     // block (nocx-n14oo.11) misses nothing this test's page ever did — the
     // listeners are cheap and a passing test never prints what they collect.
-    const diagnostics = attachFailureDiagnostics(page)
+    // The fixture owns this page, so the harness must not close it.
+    const diagnostics = watchPageForTest(info.testId, page, 'page', { closeAfterReport: false })
     // One trace per Playwright test, derived from its own id — stable across
     // a retry, distinct from every other test's — so its own connection's
     // backend lines are findable by trace_id alone (e2e/trace-context.ts).
@@ -276,7 +311,9 @@ export const test = base.extend<object, { appReady: void }>({
     // failed: whichever modal was standing over the page, by name. See
     // modal-report.ts for why that is a report and not an assertion.
     await reportStandingModals(page, info)
-    await diagnostics.report(info, traceIdForTest(info.testId))
+    // The report itself is the auto fixture's, and it runs after this page
+    // is gone — so the snapshot is taken now, while there is one to take.
+    if (info.status !== info.expectedStatus) await diagnostics.captureSnapshot()
   },
 })
 
@@ -299,14 +336,40 @@ export const test = base.extend<object, { appReady: void }>({
  * what keeps this a one-line change per spec rather than a rename sweep across
  * files that also use `base` as a local for something else.
  */
-export const standalone = base.extend<object>({
+export const standalone = base.extend<{ failureContext: void }>({
+  failureContext: failureContextFixture,
+
   page: async ({ page }, use, info) => {
-    const diagnostics = attachFailureDiagnostics(page)
+    const diagnostics = watchPageForTest(info.testId, page, 'page', { closeAfterReport: false })
     await use(page)
     await reportStandingModals(page, info)
-    await diagnostics.report(info, traceIdForTest(info.testId))
+    if (info.status !== info.expectedStatus) await diagnostics.captureSnapshot()
   },
 })
+
+/**
+ * Put a client a spec built itself from `browser` on the failure report, and
+ * hand its context to the harness.
+ *
+ * The coordinator specs need a fresh browser context per coordinator, so they
+ * never use the `page` fixture — and until this existed, a failure in one of
+ * them printed no failure context at all (remote-coordinator-reclaim, CI
+ * 2026-09-19: a hidden editor, and nothing in the log to say why). Call it
+ * before navigating, so the console and frames are collected from the first
+ * byte. The harness snapshots and closes the context after it reports, so the
+ * spec must NOT close it in its `finally`; closing it on purpose mid-test, as
+ * part of the scenario, is still the spec's to do.
+ */
+export function watchClient(page: Page, label: string): void {
+  watchPageForTest(base.info().testId, page, label, { closeAfterReport: true })
+}
+
+/** Snapshot every watched client NOW — first thing in a `finally` that is
+ *  about to stop the backend, which would otherwise paint its reconnect
+ *  overlay over what the failure left on screen (captureSnapshotsForTest). */
+export async function snapshotWatchedClients(): Promise<void> {
+  await captureSnapshotsForTest(base.info().testId)
+}
 
 /**
  * Leave the backend holding exactly one undecorated tab, the UI state at its
@@ -1036,6 +1099,11 @@ export async function setDefaultModel(
 export class VaultBackend {
   private proc: ChildProcess | null = null
   private logPath = ''
+  /** Where preserveLog last copied the log — what logTail reads once the
+   *  disposable root is gone. */
+  private preservedLogPath = ''
+  /** How many times start() has run — names each incarnation's preserved log. */
+  private starts = 0
 
   /** Where this backend is writing. A spec that wants to read the log asks for
    *  it rather than rebuilding the name from a port it no longer chooses. */
@@ -1088,6 +1156,7 @@ export class VaultBackend {
    */
   async start(): Promise<BackendEndpoint> {
     if (this.proc) throw new Error('backend already running; call stop() first')
+    this.starts++
     this.logPath = resolve(this.disposable.root, 'nocx-server.log')
     const logFd = openSync(this.logPath, 'w')
 
@@ -1168,7 +1237,14 @@ export class VaultBackend {
         dir = resolve(process.cwd(), 'test-results', 'nocx-server')
       }
       mkdirSync(dir, { recursive: true })
-      copyFileSync(this.logPath, resolve(dir, basename(this.logPath)))
+      // One file per START. The live log is truncated by every start, so a
+      // single preserved name kept only the LAST incarnation: a spec that
+      // restarts its coordinator and then fails lost the first one's account
+      // entirely, which is the half that usually explains it.
+      const name = this.starts <= 1 ? basename(this.logPath) : `nocx-server.start${this.starts}.log`
+      const preserved = resolve(dir, name)
+      copyFileSync(this.logPath, preserved)
+      this.preservedLogPath = preserved
     } catch {
       /* the log is a courtesy; never fail a run over it */
     }
@@ -1178,7 +1254,13 @@ export class VaultBackend {
   logTail(maxBytes = 4000): string {
     if (!this.logPath) return '(backend never started)'
     try {
-      const all = readFileSync(this.logPath, 'utf8')
+      // The live file first; the preserved copy once the spec has removed its
+      // disposable root, which every spec does in its `finally` — BEFORE the
+      // failure report is written, so without the fallback the report could
+      // only ever say the log was unreadable.
+      const path =
+        existsSync(this.logPath) || !this.preservedLogPath ? this.logPath : this.preservedLogPath
+      const all = readFileSync(path, 'utf8')
       return all.length <= maxBytes ? all : `…${all.slice(-maxBytes)}`
     } catch (err) {
       return `(backend log unreadable: ${String(err)})`

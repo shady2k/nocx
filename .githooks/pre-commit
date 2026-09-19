@@ -135,7 +135,10 @@ host_gate() {
 #   make ci-full         the integrator, once, on the merged tree (AGENTS.md)
 #   ci.yml               every pull request, in the environment each job owns
 #
-# --- 2. gofumpt (always: one second, and it reads the whole module) ----------
+# --- 2. gofumpt (Go changes only, like every Go gate here) -----------------
+# It used to run always, as "one second". It is one second only where the
+# toolchain is present, and a commit with no Go in it owes no Go gate at all
+# (AGENTS.md "Git authority", the owner's decision of 2026-09-19; nocx-nz03o).
 # THE FILE LIST COMES FROM GIT, never from a walk of the directory tree.
 # `gofumpt -l .` descends into everything on the path, and agent worktrees are
 # ON the path: Claude Code's worktree isolation checks other branches out at
@@ -157,17 +160,25 @@ host_gate() {
 # worktree; the pathspec then says .claude is out however it got there. -z with
 # xargs -0 because a path with a space must not become two arguments, and -0 is
 # the one xargs flag both BSD and GNU spell the same way.
-UNFMT=$(git ls-files -zco --exclude-standard -- '*.go' ':(exclude).claude/**' \
-    | xargs -0 gofumpt -l 2>&1) || true
-if [ -n "$UNFMT" ]; then
-    warn "gofumpt — the following files need formatting:"
-    printf "%s\n" "$UNFMT"
-    printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"
-    exit 1
+if [ "$RUN_GO" = 1 ]; then
+    UNFMT=$(git ls-files -zco --exclude-standard -- '*.go' ':(exclude).claude/**' \
+        | xargs -0 gofumpt -l 2>&1) || true
+    if [ -n "$UNFMT" ]; then
+        warn "gofumpt — the following files need formatting:"
+        printf "%s\n" "$UNFMT"
+        printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"
+        exit 1
+    fi
+    ok "gofumpt"
+else
+    ok "gofumpt — skipped (no Go changes staged)"
 fi
-ok "gofumpt"
 
-# --- 3. golangci-lint (always: it is cached and effectively free) -----------
+# --- 3. golangci-lint (Go changes only) ---------------------------------------
+# It used to run always, as "cached and effectively free". In a fresh worktree
+# it is neither: it typechecks the cgo packages, which needs the libghostty-vt
+# archives built first, so committing a tracker change needed an emulator
+# build (nocx-nz03o).
 # The Wails v3 module compiles cgo against WebKitGTK, and v3 defaults to
 # GTK4/webkitgtk-6.0 which this machine class does not carry; the gtk3 tag
 # selects the 4.1 pkg-config path instead. Without it golangci-lint cannot
@@ -175,12 +186,16 @@ ok "gofumpt"
 # on cgo rather than on anything the author wrote. Computed the same way
 # the Makefile computes WAILS_PLATFORM_TAGS, and empty off Linux, where
 # the default path already resolves.
-GOLANGCI_TAGS=""
-if [ "$(go env GOOS)" = "linux" ] && pkg-config --exists webkit2gtk-4.1 2>/dev/null; then
-    GOLANGCI_TAGS="--build-tags=gtk3"
+if [ "$RUN_GO" = 1 ]; then
+    GOLANGCI_TAGS=""
+    if [ "$(go env GOOS)" = "linux" ] && pkg-config --exists webkit2gtk-4.1 2>/dev/null; then
+        GOLANGCI_TAGS="--build-tags=gtk3"
+    fi
+    # shellcheck disable=SC2086 # GOLANGCI_TAGS must word-split away when empty.
+    host_gate "golangci-lint" golangci-lint run $GOLANGCI_TAGS ./...
+else
+    ok "golangci-lint — skipped (no Go changes staged)"
 fi
-# shellcheck disable=SC2086 # GOLANGCI_TAGS must word-split away when empty.
-host_gate "golangci-lint" golangci-lint run $GOLANGCI_TAGS ./...
 
 # --- 3b. deadcode ratchet: RUNS IN CI, in ci.yml's ci-mac and ci-linux jobs
 # (nocx-re6gk) ----------------------------------------------------------------

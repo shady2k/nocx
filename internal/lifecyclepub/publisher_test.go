@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
@@ -447,6 +448,95 @@ func TestPublisherReplayLane(t *testing.T) {
 	if got := len(r.all()); got != 2 {
 		t.Fatalf("unchanged event after replay published %d facts, want 2", got)
 	}
+}
+
+// heldEmitter records facts like recorder, and HOLDS the first fact it is
+// handed after arm() inside PublishLifecycle until release is closed — the
+// moment between a publisher recording a fact and the fact being delivered.
+type heldEmitter struct {
+	recorder
+	release chan struct{}
+	armed   bool
+}
+
+func (h *heldEmitter) arm() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.armed = true
+}
+
+func (h *heldEmitter) PublishLifecycle(f lifecyclepub.Fact) {
+	h.mu.Lock()
+	hold := h.armed
+	h.armed = false
+	h.mu.Unlock()
+	if hold {
+		<-h.release
+	}
+	h.recorder.PublishLifecycle(f)
+}
+
+// TestPublisherReplayCannotOvertakeTheFactItRaced pins the ordering of a
+// lane's facts across the two goroutines that publish it at session open: the
+// open handler's replay, and the lifecycle bridge the handler has just
+// started, whose first act is to ingest the shell's hello.
+//
+// The replay derives the lane BEFORE the hello (native) and is held between
+// recording that fact and delivering it; the hello then lands. Whatever the
+// interleaving, the LAST fact the emitter receives must be the lane's current
+// state. It used to be the replay's stale `native`, delivered after the
+// bridge's `prompt_ready` — and because the dedupe baseline already read
+// prompt_ready, the shell's own prompt_ready a second later was swallowed as
+// "no change", leaving the renderer at native with its editor hidden for good
+// (CI 2026-09-19, remote-coordinator-reclaim).
+//
+// synctest, so "held" and "has done everything it can" are observed states,
+// not durations.
+func TestPublisherReplayCannotOvertakeTheFactItRaced(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		k := lifecycle.New(lifecycle.Options{})
+		pub := lifecyclepub.New(k)
+		em := &heldEmitter{release: make(chan struct{})}
+		pub.SetEmitter(em)
+		if err := pub.BindTransport("T", noopPort{}); err != nil {
+			t.Fatalf("BindTransport: %v", err)
+		}
+		h, err := pub.RequestDomain("L", nil, "T")
+		if err != nil {
+			t.Fatalf("RequestDomain: %v", err)
+		}
+
+		// The open handler's replay, held inside the emitter with a fact
+		// derived before the shell has said anything.
+		em.arm()
+		replayed := make(chan struct{})
+		go func() {
+			pub.ReplayLane("L")
+			close(replayed)
+		}()
+		synctest.Wait()
+
+		// The bridge ingests the hello, and goes as far as it can.
+		ingested := make(chan error, 1)
+		go func() { ingested <- pub.Ingest("T", env("L", h, 1, helloEvt())) }()
+		synctest.Wait()
+
+		close(em.release)
+		<-replayed
+		if err := <-ingested; err != nil {
+			t.Fatalf("Ingest hello: %v", err)
+		}
+
+		facts := em.all()
+		if len(facts) == 0 {
+			t.Fatal("nothing was published")
+		}
+		last := facts[len(facts)-1]
+		if last.Lifecycle != lifecyclepub.LifecyclePromptReady || last.Domain != string(h.Domain) {
+			t.Fatalf("the last fact delivered is %q (domain %q) while the lane is prompt_ready on %q; "+
+				"sequence %+v — a stale replay overtook the fact it raced", last.Lifecycle, last.Domain, h.Domain, facts)
+		}
+	})
 }
 
 // TestPublisherForwardsErrors proves the publisher returns the kernel's

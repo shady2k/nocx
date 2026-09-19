@@ -11,7 +11,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -79,6 +81,96 @@ func waitForeground(t testing.TB, lp *LocalPty) int {
 	return pgid
 }
 
+// recordPty keeps everything the pty prints, from now until it closes, and
+// returns a reader of it. A failure that says only "the file never appeared"
+// sends the next person to guess; the screen says whether the command was
+// typed, echoed, refused by the shell or never reached it.
+func recordPty(t testing.TB, lp *LocalPty) func() string {
+	t.Helper()
+	var mu sync.Mutex
+	var seen strings.Builder
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 4096)
+		for {
+			n, err := lp.Read(buf)
+			if n > 0 {
+				mu.Lock()
+				seen.Write(buf[:n])
+				mu.Unlock()
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() { <-done })
+	return func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return seen.String()
+	}
+}
+
+// failureContext is what a failed wait in the child-signal test prints: the
+// files the command left behind, with their contents, and the whole screen.
+func failureContext(dir string, screen func() string) string {
+	var b strings.Builder
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		fmt.Fprintf(&b, "\n  the test's directory could not be read: %v", err)
+	}
+	for _, entry := range entries {
+		content, _ := os.ReadFile(filepath.Join(dir, entry.Name())) //nolint:gosec // the test's own temp dir
+		fmt.Fprintf(&b, "\n  %s: %q", entry.Name(), content)
+	}
+	fmt.Fprintf(&b, "\n  the pty showed: %q", screen())
+	return b.String()
+}
+
+// groupContext is what a surviving process group looked like when the wait
+// gave up: every member, its state and command, and on Linux the signals it
+// was catching and ignoring — which is what says whether a signal was
+// delivered to a handler rather than to the default action.
+func groupContext(pgid int) string {
+	var b strings.Builder
+	out, err := exec.Command("ps", "-A", "-o", "pid=,pgid=,stat=,comm=").Output()
+	if err != nil {
+		return fmt.Sprintf("\n  ps failed: %v", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 || fields[1] != strconv.Itoa(pgid) {
+			continue
+		}
+		fmt.Fprintf(&b, "\n  member: %s", strings.Join(fields, " "))
+		if status, err := os.ReadFile("/proc/" + fields[0] + "/status"); err == nil {
+			for _, s := range strings.Split(string(status), "\n") {
+				if strings.HasPrefix(s, "SigCgt") || strings.HasPrefix(s, "SigIgn") || strings.HasPrefix(s, "SigBlk") || strings.HasPrefix(s, "SigPnd") || strings.HasPrefix(s, "ShdPnd") {
+					fmt.Fprintf(&b, " %s", strings.Join(strings.Fields(s), "="))
+				}
+			}
+		}
+	}
+	if b.Len() == 0 {
+		return "\n  no process is left in the group"
+	}
+	return b.String()
+}
+
+// isRunning reports whether pid is executing the program named — that its
+// exec has happened, which is the point after which a signal reaches that
+// program rather than the shell code that was about to start it. ps names it
+// by its basename on Linux and may give the path on macOS.
+func isRunning(pid int, program string) bool {
+	out, err := exec.Command("ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output() //nolint:gosec // a fixed program; the one argument is a pid
+	if err != nil {
+		return false
+	}
+	return filepath.Base(strings.TrimSpace(string(out))) == program
+}
+
 func TestLocalPty_SignalForegroundAtPromptIsNoop(t *testing.T) {
 	lp := mustSpawn(t, 80, 24)
 	defer func() { _ = lp.Close() }()
@@ -98,21 +190,38 @@ func TestLocalPty_SignalForegroundAtPromptIsNoop(t *testing.T) {
 func TestLocalPty_SignalForegroundReachesTheExecution(t *testing.T) {
 	lp := mustSpawn(t, 80, 24)
 	defer func() { _ = lp.Close() }()
+	screen := recordPty(t, lp)
 
-	// Run a long foreground job and wait for the observable transition: the
-	// foreground group leaves the shell's own (the job is running).
+	// Run a long foreground job and wait until the job IS the sleep — not
+	// merely until the foreground group has left the shell's own.
+	//
+	// The group changes before the job's child execs, and a SIGINT that
+	// lands before the exec is taken by the shell code still running in that
+	// child, not by the sleep. Measured: the survivor was the sleep, catching
+	// nothing, ignoring nothing, with nothing pending — the signal had been
+	// consumed before the sleep existed. The same window opens again in any
+	// shell step between "the job said its pid" and the exec, because a
+	// non-interactive bash that is interrupted while it waits for a child
+	// that then exits normally takes the interrupt as handled and carries on.
+	// So the test waits on the one thing that closes the window: the group's
+	// leader is running the sleep's own image.
 	if _, err := lp.Write([]byte("sleep 30\n")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	var jobPGID int
-	waittest.WaitFor(t, "the foreground group to leave the shell", func() bool {
-		pgid, err := lp.ForegroundProcessGroup()
-		if err == nil && pgid > 0 && pgid != lp.Pid() {
+	waittest.WaitForDetail(t, "the foreground job to be the sleep itself",
+		func() string {
+			return "the foreground group never became the sleep" + groupContext(jobPGID) +
+				fmt.Sprintf("\n  the pty showed: %q", screen())
+		},
+		func() bool {
+			pgid, err := lp.ForegroundProcessGroup()
+			if err != nil || pgid <= 0 || pgid == lp.Pid() {
+				return false
+			}
 			jobPGID = pgid
-			return true
-		}
-		return false
-	})
+			return isRunning(pgid, "sleep")
+		})
 
 	// The signal must reach the execution: SIGINT ends it, and the kernel
 	// returns the foreground to the shell.
@@ -121,7 +230,8 @@ func TestLocalPty_SignalForegroundReachesTheExecution(t *testing.T) {
 	}
 	waittest.WaitForDetail(t, "the execution group to end or foreground to return",
 		func() string {
-			return fmt.Sprintf("the execution's process group %d survived SIGINT (or the shell never resumed)", jobPGID)
+			return fmt.Sprintf("the execution's process group %d survived SIGINT (or the shell never resumed)", jobPGID) +
+				groupContext(jobPGID) + fmt.Sprintf("\n  the pty showed: %q", screen())
 		},
 		func() bool {
 			if err := unix.Kill(-jobPGID, 0); errors.Is(err, unix.ESRCH) {
@@ -135,12 +245,13 @@ func TestLocalPty_SignalForegroundReachesTheExecution(t *testing.T) {
 func TestLocalPty_SignalForegroundReachesAChildNotOnlyTheShell(t *testing.T) {
 	lp := mustSpawn(t, 80, 24)
 	defer func() { _ = lp.Close() }()
+	screen := recordPty(t, lp)
 
-	// The execution spawns its own child and reveals it: sh -c writes the
-	// CHILD's pid (the backgrounded sleep, $!) and waits. The escalation
-	// must kill the child too — a signal that reached only the shell would
-	// leave the sleep alive. The pid file is the child's identity, written
-	// by the command itself, never guessed.
+	// The execution spawns its own child and reveals it: the backgrounded
+	// child writes its own pid and becomes the sleep, and sh -c waits. The
+	// escalation must kill the child too — a signal that reached only the
+	// shell would leave the sleep alive. The pid file is the child's identity,
+	// written by the command itself, never guessed.
 	//
 	// The child's receipt is a TERM trap that writes a marker file, and
 	// the trap's body WAITS — reaping the backgrounded sleep. That shape
@@ -155,7 +266,32 @@ func TestLocalPty_SignalForegroundReachesAChildNotOnlyTheShell(t *testing.T) {
 	dir := t.TempDir()
 	marker := dir + "/reached.marker"
 	pidFile := dir + "/child.pid"
-	cmd := "sh -c 'trap \"echo reached > " + marker + "; wait\" TERM; sleep 30 & echo $! > " + pidFile + "; wait'\n"
+	// EACH FILE APPEARS WHOLE OR NOT AT ALL: it is written beside its name and
+	// renamed into it. A redirect creates the file empty before it writes, so
+	// a waiter that read in between saw "" and failed on a file the next
+	// instant would have filled.
+	//
+	// THE CHILD REPORTS ITS OWN PID, FROM AFTER ITS OWN exec. `sleep 30 &` then
+	// `$!` names the child from the parent's side, as soon as it is forked —
+	// and a forked child carries the parent's TERM trap until it execs. A group
+	// signal landing in that window is taken by the inherited handler and
+	// consumed, the exec that follows starts a sleep that never saw it, and the
+	// trap's wait then outlives the test by thirty seconds. Under load that
+	// window is wide enough to hit. The inner shell writes $$ only once it is
+	// running as itself, with TERM at its default, and then execs the sleep
+	// under the same pid.
+	//
+	// The command is a FILE, and the pty is handed only its name: quoting three
+	// shells deep on one typed line is a second thing to get right per
+	// platform, and the typed line is not what this test is about.
+	script := dir + "/run.sh"
+	body := "trap 'echo reached > " + marker + ".part && mv " + marker + ".part " + marker + "; wait' TERM\n" +
+		"sh -c 'echo $$ > " + pidFile + ".part && mv " + pidFile + ".part " + pidFile + " && exec sleep 30' &\n" +
+		"wait\n"
+	if err := os.WriteFile(script, []byte(body), 0o600); err != nil {
+		t.Fatalf("write the command's script: %v", err)
+	}
+	cmd := "sh " + script + "\n"
 	if _, err := lp.Write([]byte(cmd)); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -163,7 +299,7 @@ func TestLocalPty_SignalForegroundReachesAChildNotOnlyTheShell(t *testing.T) {
 	// Wait for the observable: the command's own child pid appears.
 	var pidText string
 	waittest.WaitForDetail(t, "the child pid file",
-		func() string { return fmt.Sprintf("the file %s never appeared", pidFile) },
+		func() string { return fmt.Sprintf("the file %s never appeared", pidFile) + failureContext(dir, screen) },
 		func() bool {
 			b, err := os.ReadFile(pidFile) //nolint:gosec // the path is this test's own temp file
 			if err != nil {
@@ -177,10 +313,17 @@ func TestLocalPty_SignalForegroundReachesAChildNotOnlyTheShell(t *testing.T) {
 		t.Fatalf("the command never wrote a child pid (file holds %q)", pidText)
 	}
 	// The child must be alive before the signal (it is the thing being
-	// bounded that does not cooperate).
+	// bounded that does not cooperate), and be the sleep itself — the same
+	// window as in the test above: a signal that lands in the shell steps
+	// before the exec is a signal the sleep never sees.
 	if err := unix.Kill(childPID, 0); err != nil {
 		t.Fatalf("child %d not running before the signal: %v", childPID, err)
 	}
+	waittest.WaitForDetail(t, "the child to be the sleep itself",
+		func() string {
+			return fmt.Sprintf("child %d never became the sleep", childPID) + failureContext(dir, screen)
+		},
+		func() bool { return isRunning(childPID, "sleep") })
 
 	if err := lp.SignalForeground(syscall.SIGTERM); err != nil {
 		t.Fatalf("SignalForeground(SIGTERM): %v", err)
@@ -190,7 +333,7 @@ func TestLocalPty_SignalForegroundReachesAChildNotOnlyTheShell(t *testing.T) {
 	// reached a process that is not the shell.
 	var markerText string
 	waittest.WaitForDetail(t, "the child's TERM receipt marker",
-		func() string { return fmt.Sprintf("the file %s never appeared", marker) },
+		func() string { return fmt.Sprintf("the file %s never appeared", marker) + failureContext(dir, screen) },
 		func() bool {
 			b, err := os.ReadFile(marker) //nolint:gosec // the path is this test's own temp file
 			if err != nil {
@@ -206,7 +349,7 @@ func TestLocalPty_SignalForegroundReachesAChildNotOnlyTheShell(t *testing.T) {
 	// pid it wrote is gone — zombie-free.
 	waittest.WaitForDetail(t, "the execution's child to be reaped",
 		func() string {
-			return fmt.Sprintf("the execution's child %d was not reaped after the group signal — cancellation reached only the shell", childPID)
+			return fmt.Sprintf("the execution's child %d was not reaped after the group signal — cancellation reached only the shell", childPID) + failureContext(dir, screen)
 		},
 		func() bool {
 			return errors.Is(unix.Kill(childPID, 0), unix.ESRCH)

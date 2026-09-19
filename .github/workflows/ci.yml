@@ -101,8 +101,57 @@ permissions:
   contents: read
 
 jobs:
+  # Which jobs a pull request owes is decided by what it changes (nocx-nz03o).
+  # A change with no product code in it -- the tracker's export, documents,
+  # specs, the backlog gate's own files, markdown at the root -- owes review and
+  # ci-backlog, not the product suites: the owner's decision of 2026-09-19
+  # (AGENTS.md "Git authority"). Anything else, and every event that is not a
+  # pull request (a release branch, a release calling this workflow), runs
+  # everything. The hooks and this workflow are NOT supporting here: they decide
+  # how everything else is checked, so a change to them runs every job.
+  # A skipped job reports as skipped, which no branch rule on main requires.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      product: ${{ steps.classify.outputs.product }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Does this change touch product code
+        id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          if [ "$EVENT" != pull_request ]; then
+            echo "product=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+          # An empty diff is not evidence of safety.
+          product=false
+          [ -n "$files" ] || product=true
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            case "$f" in
+              .beads/*|docs/*|.internal/*|.githooks/backlog-gate/*) ;;
+              */*) product=true ;;
+              *.md) ;;
+              *) product=true ;;
+            esac
+          done <<EOF_FILES
+          $files
+          EOF_FILES
+          printf '%s\n' "$files" | sed 's/^/changed: /'
+          echo "product=$product"
+          echo "product=$product" >> "$GITHUB_OUTPUT"
   ci-mac:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    needs: changes
+    if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -255,7 +304,8 @@ jobs:
   # the moment the first one failed — leaving exactly one of the two readings
   # the job was built to take.
   ci-backend:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    needs: changes
+    if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -396,7 +446,8 @@ jobs:
   # is a FIXTURE dimension that crosses the platform split rather than being
   # part of it: portable packages read through the keystore binding too.
   ci-linux:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    needs: changes
+    if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -536,7 +587,8 @@ jobs:
           go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
 
   ci-frontend:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    needs: changes
+    if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -739,7 +791,8 @@ jobs:
   # backend and home — the DocumentStore consumers rewrite whole documents, so
   # concurrency without that is a race (nocx-8rda).
   ci-e2e:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    needs: changes
+    if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     # ONE JOB PER BROWSER, and the split is about wall clock, not coverage:

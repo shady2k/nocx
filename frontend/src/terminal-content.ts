@@ -4275,7 +4275,22 @@ export class TerminalContent extends BasePaneContent {
       // `starting` shows no grid and drops keystrokes, so the window this
       // mechanism used to guard — a suppressed prompt with an editor not
       // yet ready — is now closed on the renderer's own side instead.
+      const before = this.lifecycle.state
       this.lifecycle.applyFact(fact)
+      // Said out loud, because the kernel refuses a fact in silence and the
+      // only other trace is an editor that never appears: a pane whose
+      // prompt_ready was dropped and one whose prompt_ready never arrived
+      // look identical on screen and in every screenshot.
+      log.debug('nocx: lifecycle fact', {
+        sid: this.session?.sessionId,
+        lane: fact.lane,
+        lifecycle: fact.lifecycle,
+        domain: fact.domain,
+        epoch: fact.epoch,
+        from: before.kind,
+        to: this.lifecycle.state.kind,
+        applied: this.lifecycle.state !== before,
+      })
     })
     this._lifecycleUnsub = lifecycleSubscription.unsubscribe
     const session = await this.openSessionWithHostKeyRecovery(signal)
@@ -7184,6 +7199,16 @@ export class TerminalContent extends BasePaneContent {
       (shouldShowEditor(this.lifecycle.state) || summoned) &&
       (summoned || this.lifecycle.buffer === 'normal') &&
       !this.nativeMode
+    // The one case in which an authenticated prompt still shows no editor is
+    // decided here, from two presentation inputs nothing else reports — so
+    // name them, or a hidden editor at PromptReady reads as a lost fact.
+    if (!show && shouldShowEditor(this.lifecycle.state)) {
+      log.debug('nocx: editor withheld at a ready prompt', {
+        sid: this.session?.sessionId,
+        buffer: this.lifecycle.buffer,
+        nativeMode: this.nativeMode,
+      })
+    }
     // The grid's writability follows ownership, not the visibility
     // transition: the editor hides ITSELF at submit (the atomic handoff),
     // so by the time the running fact lands `editor.isVisible` is already

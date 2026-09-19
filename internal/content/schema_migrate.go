@@ -156,7 +156,7 @@ var schemaLadder = []migrationStep{
 	{from: 15, to: 16, apply: migrateRetireTheAPIRunCounter15to16, preflight: refuseAPIRunTablesFromANewerBuild, schemaDigest: "4688f8fcbae121444ed4726726fc598737220fd4fd09bc428e3230c13cfe3cd9"},
 	{from: 16, to: 17, apply: migrateAddSkillChecks16to17, schemaDigest: "cc4c6529598c845b19936ee4c11c3adff9a66162ec56b70743f3188dc132092e"},
 	{from: 17, to: 18, apply: migrateTerminationReasons17to18, schemaDigest: "f9d5269cf07e28beb22facac42548dcaebf74c3559b65ebec1a73ba7d112f982"},
-	{from: 18, to: 19, apply: migrateAddWorkerCheckouts18to19, schemaDigest: "5fb49f5e6b84c8ac5ac800eb51e094bc351eef629c85fcdad2c58d2d1d170bf7"},
+	{from: 18, to: 19, apply: migrateAddWorkerCheckouts18to19, schemaDigest: "49f7ad77e616551bb1357970dd573a03d11ba29de0cd0cbfda52ce2ea4cd0ac1"},
 }
 
 // validateLadder validates the shipped ladder against the current schema.

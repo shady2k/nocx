@@ -123,6 +123,27 @@ func (contractWorkerRecord) Close(context.Context, string, workers.ParticipantID
 
 func (contractWorkerRecord) Undispatched() []workers.Fact { return nil }
 
+// LeftoverCheckouts answers a WHOLE row and an unreadable one, complete —
+// for the same reason Inbox above answers both shapes a mailbox holds: the
+// socket conformance cases below are the only place this endpoint's answers
+// are validated against their contracts, and a stub that returned an empty
+// survey would exercise neither the leftover item schema's fields nor the
+// unreadable row's no-answer shape.
+func (contractWorkerRecord) LeftoverCheckouts(context.Context, string) workers.CheckoutSurvey {
+	return workers.CheckoutSurvey{
+		Leftovers: []workers.LeftoverCheckout{
+			{
+				Path: "/wt/nocx-verify", Branch: "feat/verify",
+				Uncommitted: true, Ahead: 1, Readable: true,
+				LastUsed: time.Date(2026, 9, 18, 9, 30, 0, 0, time.UTC),
+				Name:     "worker-1", Task: "verify the wire",
+			},
+			{Path: "/wt/nocx-dark", Branch: "feat/dark", Readable: false},
+		},
+		Complete: true,
+	}
+}
+
 func contractWorkerParticipants() []workers.Participant {
 	return []workers.Participant{{
 		ID:    "worker-1",
@@ -130,6 +151,10 @@ func contractWorkerParticipants() []workers.Participant {
 		Role:  workers.RoleWorker,
 		State: workers.StateLive,
 		Task:  "verify the wire",
+		// The worker holds the checkout its spawn created, which is what
+		// makes the holdings answer name it BESIDE the worker and never in
+		// the leftover list beside it (nocx-xn63t.1.4).
+		Worktree: workers.Worktree{Path: "/wt/nocx-held", Branch: "feat/held"},
 	}}
 }
 

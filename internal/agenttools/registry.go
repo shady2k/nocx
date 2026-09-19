@@ -878,7 +878,7 @@ var declarations = []Declaration{
 	},
 	{
 		Name:        "workers.holdings",
-		Description: "Ask what workers your own session is responsible for, and what each of them is doing. It takes no arguments: the session is the one you are running in. Reach for it at the start of a turn when you have lost track of what you started — nocx has been watching them the whole time, including across a restart of yours.",
+		Description: "Ask what workers your own session is responsible for, and what each of them is doing — plus which checkouts of the repository you are standing in are left over from workers of yours that are gone (with what each was for, and whether it still holds work). It takes no arguments: the session is the one you are running in. Reach for it at the start of a turn when you have lost track of what you started — nocx has been watching them the whole time, including across a restart of yours — and when you want to know whether earlier work left checkouts standing that a person may want removed.",
 		// Reading a record nocx keeps about this session. It reaches no
 		// machine and changes nothing.
 		Effect: []content.Effect{content.EffectObserve},
@@ -904,7 +904,7 @@ var declarations = []Declaration{
 	},
 	{
 		Name:        "workers.spawn",
-		Description: "Start one worker in a terminal pane of its own and give it a task. Reach for this when a piece of work is genuinely separate and can run while you do something else — never to parallelise something you could just do. nocx watches the worker from the moment it starts, so you do not have to remember it: ask workers.holdings later and it will tell you what the worker is doing, and nocx wakes you when there is something new to read. nocx also hands the worker its own rules before your task — who its coordinator is, and that it reports through workers.report and reads your mail with workers.inbox — so the task only has to say what the work is.",
+		Description: "Start one worker in a terminal pane of its own and give it a task. Reach for this when a piece of work is genuinely separate and can run while you do something else — never to parallelise something you could just do. nocx watches the worker from the moment it starts, so you do not have to remember it: ask workers.holdings later and it will tell you what the worker is doing, and nocx wakes you when there is something new to read. nocx also hands the worker its own rules before your task — who its coordinator is, and that it reports through workers.report and reads your mail with workers.inbox — so the task only has to say what the work is. The result also counts how many of your repository's worktree checkouts no live worker uses any more, so checkouts left behind by earlier workers reach you even if you never ask workers.holdings.",
 		// DELEGATE, and no eighth effect. Handing work to another agent is
 		// exactly what the seventh member of the closed lattice already
 		// names — it is in the grant_effects CHECK, in the policy contract

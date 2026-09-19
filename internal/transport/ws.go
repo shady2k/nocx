@@ -685,6 +685,12 @@ type WSServer struct {
 	// tools refusing with a sentence rather than starting a worker into
 	// nothing.
 	workerStore assistant.WorkerRecord
+	// paneOpenedNote is told about every pane any open path successfully
+	// opened (nocx-xn63t.1.4) — the composition root's one hook for "nocx
+	// opened a pane standing HERE". Wired by WithPaneOpenedNote; nil is the
+	// ordinary shape for a server nobody wired one into, and the open path
+	// neither fails nor slows for its absence.
+	paneOpenedNote paneOpenedNote
 	// paneAccessBinder mints a run's DescendantPaneAccess/SessionReads
 	// (design §7.1, §7.3, Task 8) — the kernel's side of the binding
 	// worker_auth.go's Admit does for the tool endpoint. Wired by the
@@ -1409,6 +1415,16 @@ func WithGitRegistry(r *registry.Registry) WSServerOption {
 // sessions; the transport never constructs one itself (AD-8, D16 — the
 // factory IS the local/remote seam). When absent, git.open answers an
 // error.
+// WithPaneOpenedNote wires a note about every pane nocx opens — either
+// caller, renderer or backend, through the one open path (nocx-xn63t.1.4).
+// The note receives what was asked for and the session that resulted; it is
+// a note and not a callback, so nothing on the open path waits on it or
+// fails because of it, and the receiver owns whatever the fact is worth.
+// Passing nil is the same as not wiring one.
+func WithPaneOpenedNote(note func(spec OpenSpec, sid session.ID)) WSServerOption {
+	return func(s *WSServer) { s.paneOpenedNote = note }
+}
+
 func WithGitRepoFactory(f git.RepoFactory) WSServerOption {
 	return func(s *WSServer) { s.gitFactory = f }
 }

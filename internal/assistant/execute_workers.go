@@ -66,6 +66,15 @@ type WorkerRecord interface {
 	// afterwards would always answer nothing, which is a truthful answer to
 	// the wrong question.
 	Undispatched() []workers.Fact
+	// LeftoverCheckouts answers which nocx-made checkouts of the repository
+	// the coordinator stands in no live worker holds (nocx-xn63t.1.4), with
+	// the record's own honesty flag: Complete false says the list may be
+	// missing rows, and never reads as "there are none". The failure mode is
+	// deliberately IN the answer and not an error — a holdings answer marked
+	// incomplete is a usable answer, and an error would make the checkouts
+	// invisible exactly when they most need seeing. The repository is
+	// resolved from the coordinator's own session, never from an argument.
+	LeftoverCheckouts(ctx context.Context, coordinatorSession string) workers.CheckoutSurvey
 }
 
 // workerParticipantResult is one row of what a coordinator is told. It restates
@@ -86,6 +95,40 @@ type workerParticipantResult struct {
 	// whole of nocx-dkawo.4's table. Omitted rather than false, so a list
 	// where nothing needs deciding reads as nothing needing deciding.
 	NeedsJudgement bool `json:"needsJudgement,omitempty"`
+	// Worktree is present only when the worker lives in a checkout its
+	// spawn created (nocx-xn63t.1.4): where it is and the branch checked out
+	// in it. A worker named here is WHY the checkout is not in
+	// leftoverCheckouts — it is not abandoned, it is this worker's.
+	Worktree *workerParticipantWorktree `json:"worktree,omitempty"`
+}
+
+// workerParticipantWorktree names one worker's checkout. Base is the spawn
+// result's to carry; identifying the checkout needs only where it is and
+// what is checked out in it.
+type workerParticipantWorktree struct {
+	Path   string `json:"path"`
+	Branch string `json:"branch"`
+}
+
+// workerLeftoverCheckoutResult is one row of the repository's nocx-made
+// checkouts that no live worker holds. Readable false means Uncommitted and
+// Ahead carry NO answer — the state could not be read, which is a different
+// fact from clean, and the difference is the one that stops a coordinator
+// deleting a checkout whose state nobody read.
+type workerLeftoverCheckoutResult struct {
+	Path        string `json:"path"`
+	Branch      string `json:"branch"`
+	Uncommitted bool   `json:"uncommitted"`
+	Ahead       int    `json:"ahead"`
+	Readable    bool   `json:"readable"`
+	// LastUsed is when nocx last had a pane open in this checkout, UTC
+	// RFC 3339 — the encoding every other timestamp on this surface uses.
+	// Absent when no record of it exists.
+	LastUsed string `json:"lastUsed,omitempty"`
+	// Name and Task say which worker the spawn was for, when the record
+	// knows; a checkout older than the record lists with neither.
+	Name string `json:"name,omitempty"`
+	Task string `json:"task,omitempty"`
 }
 
 // workerMailResult is one message the coordinator is handed. It carries the
@@ -168,6 +211,18 @@ type workerHoldingsResult struct {
 	Cursor          int64                     `json:"cursor,omitempty"`
 	UndeliveredMail int                       `json:"undeliveredMail,omitempty"`
 	Participants    []workerParticipantResult `json:"participants"`
+	// LeftoverCheckouts is the repository's own answer, beneath the
+	// session's (nocx-xn63t.1.4): the checkouts spawns of this repository
+	// created that NO live worker holds — including ones other sessions
+	// started, because "left over" is a fact about the checkout and not
+	// about who is asking. A checkout named in a participant row above is
+	// deliberately absent from this list.
+	LeftoverCheckouts []workerLeftoverCheckoutResult `json:"leftoverCheckouts,omitempty"`
+	// CheckoutsComplete is the answer's honesty about itself. False says
+	// the durable record or git's listing could not be read and the list
+	// MAY be missing rows — it never reads as "there are none". Absent
+	// (true) only when every read behind the list succeeded.
+	CheckoutsComplete bool `json:"checkoutsComplete"`
 }
 
 type workerHoldingsParams struct {
@@ -286,6 +341,16 @@ type workerSpawnResult struct {
 	// which accepted the checkout at MarkLive — the executor copies, and
 	// does not re-derive, the one place that fact lives.
 	Worktree *workerSpawnWorktreeResult `json:"worktree,omitempty"`
+	// LeftoverCheckouts is how many of the repository's nocx-made checkouts
+	// NO live worker holds, after this spawn (nocx-xn63t.1.4) — the same
+	// list workers.holdings carries, counted, so a coordinator that never
+	// asks still hears that its repository has checkouts standing. The
+	// checkout this spawn just made is held by the worker it started and is
+	// never counted.
+	LeftoverCheckouts int `json:"leftoverCheckouts"`
+	// CheckoutsComplete is the count's honesty about itself, the same flag
+	// holdings carries: false says the true number may be higher.
+	CheckoutsComplete bool `json:"checkoutsComplete"`
 }
 
 type workerSpawnWorktreeResult struct {
@@ -359,6 +424,26 @@ func splitMailbox(messages []workers.Message) ([]workerMailResult, []workerObser
 		})
 	}
 	return text, observed
+}
+
+// renderLeftoverCheckouts maps the record's rows onto the result shape: the
+// one derivation is the timestamp's encoding, UTC RFC 3339 like every other
+// time on this surface, and a zero time — a checkout the record never wrote
+// a last-used stamp for — renders as absent rather than as a date in 1970.
+func renderLeftoverCheckouts(rows []workers.LeftoverCheckout) []workerLeftoverCheckoutResult {
+	out := make([]workerLeftoverCheckoutResult, 0, len(rows))
+	for _, r := range rows {
+		row := workerLeftoverCheckoutResult{
+			Path: r.Path, Branch: r.Branch,
+			Uncommitted: r.Uncommitted, Ahead: r.Ahead, Readable: r.Readable,
+			Name: r.Name, Task: r.Task,
+		}
+		if !r.LastUsed.IsZero() {
+			row.LastUsed = r.LastUsed.UTC().Format(time.RFC3339)
+		}
+		out = append(out, row)
+	}
+	return out
 }
 
 type workerInboxParams struct {
@@ -515,11 +600,21 @@ func workerAnswer(
 	}
 	out := workerHoldingsResult{Participants: make([]workerParticipantResult, 0, len(held))}
 	for _, p := range held {
-		out.Participants = append(out.Participants, workerParticipantResult{
+		row := workerParticipantResult{
 			ID: string(p.ID), State: string(p.State), Task: p.Task,
 			NeedsJudgement: owed[p.ID],
-		})
+		}
+		if p.Worktree.Path != "" {
+			row.Worktree = &workerParticipantWorktree{Path: p.Worktree.Path, Branch: p.Worktree.Branch}
+		}
+		out.Participants = append(out.Participants, row)
 	}
+	// The repository's own answer, beside the session's (nocx-xn63t.1.4).
+	// The survey's Complete flag rides verbatim: marking a failed read as
+	// "no leftovers" would be the lie this flag exists to prevent.
+	survey := seams.workerStore.LeftoverCheckouts(ctx, coordinator.Session())
+	out.LeftoverCheckouts = renderLeftoverCheckouts(survey.Leftovers)
+	out.CheckoutsComplete = survey.Complete
 	// The coordinator's own mailbox is named by its session, which is what
 	// makes a RESTARTED coordinator the same reader — the property D3
 	// already rests on. Asking is what hands the mail over: the cursor
@@ -824,6 +919,13 @@ func executeWorkerSpawn(ctx context.Context, cap agenttools.Capability, args jso
 			Base:   participant.Worktree.Base,
 		}
 	}
+	// HOW MANY ARE LEFT OVER (nocx-xn63t.1.4), after this spawn: the worker
+	// just started holds its own checkout, so the count never includes it.
+	// A read that failed answers zero-and-incomplete rather than a smaller
+	// number dressed as the truth.
+	survey := seams.workerStore.LeftoverCheckouts(ctx, coordinator.Session())
+	result.LeftoverCheckouts = len(survey.Leftovers)
+	result.CheckoutsComplete = survey.Complete
 	raw, err := json.Marshal(result)
 	if err != nil {
 		return "", fmt.Errorf("workers.spawn: result: %w", err)

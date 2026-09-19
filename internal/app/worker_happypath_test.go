@@ -856,7 +856,7 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 
 	registry := toolRegistry(t)
 	auth := mustToolAuthorizer(t, peerpin.SystemPinner{}, reg, grid, record, workerTestWorkspace, allowWorkerApproval{})
-	dispatcher, err := assistant.NewToolDispatcher(registry, record, content.EnvironmentIDFor(content.EnvLocal, ""))
+	dispatcher, err := assistant.NewToolDispatcher(registry, workerRecordForTools{record}, content.EnvironmentIDFor(content.EnvLocal, ""))
 	if err != nil {
 		t.Fatalf("new worker dispatcher: %v", err)
 	}

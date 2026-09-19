@@ -67,6 +67,22 @@ func emptyWorkerRecord() *workers.Registrar {
 	return workers.NewRegistrar(workers.NewMemoryStore(), nil, nil, nil)
 }
 
+// workerRecordForTools is a registrar as the assistant's tool surface takes
+// it: the registrar, plus the one answer the checkouts service adds in
+// production (nocx-xn63t.1.4). The double answers "nothing left over, and
+// nothing hidden", which is the only truth a test record with no checkout
+// service behind it can tell — a survey claiming rows it cannot see would
+// be the exact dishonesty the Complete flag exists to prevent.
+type workerRecordForTools struct{ *workers.Registrar }
+
+func (workerRecordForTools) LeftoverCheckouts(context.Context, string) workers.CheckoutSurvey {
+	return workers.CheckoutSurvey{Complete: true}
+}
+
+func emptyWorkerRecordForTools() workerRecordForTools {
+	return workerRecordForTools{Registrar: emptyWorkerRecord()}
+}
+
 // allowWorkerApproval is the answer seam at its most permissive: every session
 // is in an interval, and the interval never moves. It is what a test uses when
 // the approval is not the thing under test.
@@ -254,7 +270,7 @@ func TestToolAuthorizerAdmitsEnrolledOwnedTreeThroughRealWorkerRecord(t *testing
 		t.Fatalf("assemble tools: %v", err)
 	}
 	workerStore := workers.NewRegistrar(workers.NewMemoryStore(), nil, nil, nil)
-	dispatcher, err := assistant.NewToolDispatcher(registry, workerStore, localEnv)
+	dispatcher, err := assistant.NewToolDispatcher(registry, workerRecordForTools{workerStore}, localEnv)
 	if err != nil {
 		t.Fatalf("new worker dispatcher: %v", err)
 	}
@@ -369,7 +385,7 @@ func TestWorkerToolCallAfterLifecycleLossIsRefusedWithoutParticipant(t *testing.
 		t.Fatalf("assemble tools: %v", err)
 	}
 	dispatcher, err := assistant.NewToolDispatcher(
-		registry, record, content.EnvironmentIDFor(content.EnvLocal, ""),
+		registry, workerRecordForTools{record}, content.EnvironmentIDFor(content.EnvLocal, ""),
 	)
 	if err != nil {
 		t.Fatalf("new worker dispatcher: %v", err)
@@ -506,7 +522,7 @@ func TestToolDispatcherRefusesSpawnOutsideCoordinatorEnvironment(t *testing.T) {
 	)
 	dispatcher, err := assistant.NewToolDispatcher(
 		registry,
-		emptyWorkerRecord(),
+		emptyWorkerRecordForTools(),
 		availableEnvironment,
 	)
 	if err != nil {

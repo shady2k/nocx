@@ -474,8 +474,10 @@ func closeUnanchoredEntries(ctx context.Context, conn *sql.Conn, logger log.Logg
 // by folding the `api_run*` tables in and retiring the private counter they
 // used to carry (nocx-lmb6v.5). 17 added the skill_checks table
 // (nocx-e5f55); 18 widened the executions.termination_reason CHECK so a run
-// stopped by a revoked answer has a reason of its own (nocx-4yjwk.7).
-const schemaVersion = 18
+// stopped by a revoked answer has a reason of its own (nocx-4yjwk.7); 19
+// added the worker_checkouts table, the durable half of the checkouts
+// workers.spawn's worktree ask creates (nocx-xn63t.1.4).
+const schemaVersion = 19
 
 // schemaV1 is schema v1 of the one authoritative ledger (nocx-rtg0.2),
 // design §5.2 as amended by ADR-0019 and ADR-0020. It used to carry an
@@ -1067,6 +1069,27 @@ CREATE TABLE IF NOT EXISTS skill_checks (
   omitted     TEXT NOT NULL DEFAULT '[]',
   findings    TEXT NOT NULL DEFAULT '[]',
   max_bytes   INTEGER NOT NULL DEFAULT 0
+) STRICT;
+
+-- The durable half of the checkouts workers.spawn's worktree ask creates
+-- (nocx-xn63t.1.4). git's own worktree list — read through the seam when the
+-- question is asked — is the LIST of checkouts; this table holds only what
+-- git does not: which worker (name and task) the spawn was for, and when
+-- nocx last had a pane open in the checkout. The last-used stamp is the seed
+-- of a later sweep's age judgement, so it is written at creation and moved
+-- only forward. It is never a second list: a row whose checkout has left
+-- git's list is dropped by the reader, and a checkout with no row is still
+-- listed.
+CREATE TABLE IF NOT EXISTS worker_checkouts (
+  repo_key     TEXT NOT NULL,
+  path         TEXT NOT NULL,
+  branch       TEXT NOT NULL,
+  base         TEXT NOT NULL,
+  name         TEXT NOT NULL DEFAULT '',
+  task         TEXT NOT NULL DEFAULT '',
+  created_at   INTEGER NOT NULL,
+  last_used_at INTEGER NOT NULL,
+  PRIMARY KEY (repo_key, path)
 ) STRICT;
 `
 

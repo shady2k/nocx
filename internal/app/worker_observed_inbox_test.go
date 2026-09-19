@@ -80,7 +80,7 @@ func prepareCoordinatorInbox(t *testing.T) *coordinatorInboxStand {
 	t.Helper()
 	reg, sess, grid := prepareGroupCaller(t)
 	record, _ := newGroupTwoCallersRecordInSession("", workers.WithSettleWindow(0))
-	socket := publishGroupEndpoint(t, reg, grid, record, newSharedToolDispatcher(t, record))
+	socket := publishGroupEndpoint(t, reg, grid, record, newSharedToolDispatcher(t, workerRecordForTools{record}))
 
 	participant, err := record.Register(context.Background(), workers.RegisterRequest{
 		CoordinatorSession: string(sess.ID()),

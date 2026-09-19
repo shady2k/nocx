@@ -298,7 +298,7 @@ func TestAModelSpawnsThreeWorkersReadsItsHoldingsAndClosesThem(t *testing.T) {
 		// vault material. This stand has no vault, so nothing is known —
 		// which is a real answer and not a bypass.
 		KnownMaterial:     noKnownMaterial{},
-		Workers:           w.record,
+		Workers:           workerRecordForTools{w.record},
 		WorkerEnvironment: env,
 	}, func(assistant.AskEvent) error { return nil })
 	if askErr != nil {

@@ -197,7 +197,7 @@ func (s *sessionEndStand) assertIntervalEnded(t *testing.T, what string) {
 // THE SESSION'S OWN END. The pane's program exits, so nothing sends a
 // withdrawal and nobody closes a tab: the end has to come from the session.
 func TestASessionsExitClosesTheAdmittedToolConnection(t *testing.T) {
-	stand := newSessionEndStand(t, newSharedToolDispatcher(t, emptyWorkerRecord()))
+	stand := newSessionEndStand(t, newSharedToolDispatcher(t, emptyWorkerRecordForTools()))
 	stand.endedBySessionExit(t)
 	stand.assertIntervalEnded(t, "an exited session's connection")
 }
@@ -205,7 +205,7 @@ func TestASessionsExitClosesTheAdmittedToolConnection(t *testing.T) {
 // THE EXPLICIT CLOSE. The renderer asks for the session to be closed, which is
 // the same end reached deliberately rather than by the program finishing.
 func TestAnExplicitCloseClosesTheAdmittedToolConnection(t *testing.T) {
-	stand := newSessionEndStand(t, newSharedToolDispatcher(t, emptyWorkerRecord()))
+	stand := newSessionEndStand(t, newSharedToolDispatcher(t, emptyWorkerRecordForTools()))
 	stand.endedByExplicitClose(t)
 	stand.assertIntervalEnded(t, "a closed session's connection")
 }

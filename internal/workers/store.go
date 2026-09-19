@@ -146,6 +146,15 @@ type Store interface {
 	// spawned the worker has ended by the time the question is asked; that
 	// is the whole situation the question exists for.
 	HeldBy(ctx context.Context, coordinatorSession string) ([]Participant, error)
+
+	// HeldWorktrees answers which checkouts the record's non-terminal
+	// participants hold, whichever session spawned them (nocx-xn63t.1.4).
+	// The leftovers question is about a REPOSITORY, and a checkout is held
+	// even while its own coordinator's session is not the one asking, so
+	// the answer cannot be a HeldBy of one session. A participant without a
+	// worktree — every spawn that shared its coordinator's checkout —
+	// contributes nothing. Order is unspecified.
+	HeldWorktrees(ctx context.Context) ([]Worktree, error)
 }
 
 // SpawnRequest is what Register asks the spawner for, and the participant id

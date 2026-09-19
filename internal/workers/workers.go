@@ -230,6 +230,37 @@ type Worktree struct {
 	Base   string
 }
 
+// LeftoverCheckout is one checkout a spawn of this repository created that
+// NO live worker holds any more (nocx-xn63t.1.4). It is the answer's row and
+// nothing else: where the checkout is, what it holds, and the two facts git
+// cannot say — which worker the spawn was for, and when nocx last had a pane
+// open there. Uncommitted and Ahead mean what the git seam said they mean
+// when the row was read; Readable false means they could NOT be read and
+// carry no answer — never that the checkout was clean. LastUsed is zero for
+// a checkout whose row the record never wrote or has already dropped.
+type LeftoverCheckout struct {
+	Path        string
+	Branch      string
+	Uncommitted bool
+	Ahead       int
+	Readable    bool
+	LastUsed    time.Time
+	Name        string
+	Task        string
+}
+
+// CheckoutSurvey is what a caller asking about a repository's leftover
+// checkouts is told. Complete is the honesty flag: false says the list MAY
+// be missing rows — the durable record or git's own listing could not be
+// read — and no caller may treat it as "the repository has no leftovers".
+// A repository that could not be resolved at all (no pane, no directory, no
+// repository there) answers empty and Complete: nothing about any
+// repository was claimed, so nothing is being hidden.
+type CheckoutSurvey struct {
+	Leftovers []LeftoverCheckout
+	Complete  bool
+}
+
 // Participant is one node of a worker.
 type Participant struct {
 	ID       ParticipantID

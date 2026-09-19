@@ -32,8 +32,6 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -95,6 +93,7 @@ var (
 type worktreeUndo struct {
 	repos   git.RepoFactory
 	cwd     string
+	repoKey string
 	path    string
 	branch  string
 	base    string
@@ -202,9 +201,7 @@ func (s *workerSpawner) planWorktree(ctx context.Context, lg log.Logger, coordPa
 	if len(trees) == 0 || !trees[0].Main {
 		return nil, fmt.Errorf("worker spawn: the repository at %q reports no main checkout, which git never does; refusing rather than guessing the key", cwd)
 	}
-	commonDir := filepath.Join(trees[0].Path, ".git")
-	digest := sha256.Sum256([]byte(commonDir))
-	repoKey := filepath.Base(trees[0].Path) + "-" + hex.EncodeToString(digest[:4])
+	repoKey := nocxCheckoutRepoKey(trees[0].Path)
 
 	path := filepath.Join(s.worktreeRoot, repoKey, strings.ReplaceAll(ask.Branch, "/", "-"))
 	if _, statErr := os.Lstat(path); statErr == nil {
@@ -224,7 +221,7 @@ func (s *workerSpawner) planWorktree(ctx context.Context, lg log.Logger, coordPa
 	lg.Info("worker spawn: the participant's checkout exists",
 		"path", path, "branch", ask.Branch, "base", base, "created_branch", added.Created)
 	return &worktreeUndo{
-		repos: s.repos, cwd: cwd,
+		repos: s.repos, cwd: cwd, repoKey: repoKey,
 		path: path, branch: ask.Branch, base: base, created: added.Created,
 	}, nil
 }

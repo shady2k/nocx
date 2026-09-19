@@ -610,7 +610,7 @@ func newS14RealStand(t *testing.T, mockDir, stateDir string, opts ...s14RealOpti
 	auth.BindSessionKeys(keysImpl)
 	auth.BindSessionMessages(messagesImpl)
 
-	dispatcher, err := assistant.NewToolDispatcher(registry, record, content.EnvironmentIDFor(content.EnvLocal, ""))
+	dispatcher, err := assistant.NewToolDispatcher(registry, workerRecordForTools{record}, content.EnvironmentIDFor(content.EnvLocal, ""))
 	if err != nil {
 		t.Fatalf("new dispatcher: %v", err)
 	}

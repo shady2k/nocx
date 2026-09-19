@@ -50,6 +50,8 @@ func (f *fakeHistoryDB) Reconcile() content.SessionReconciler { return nil }
 // the interface must still compile. Unused by these tests.
 func (f *fakeHistoryDB) SkillChecks() content.SkillCheckRepository { return nil }
 
+func (f *fakeHistoryDB) WorkerCheckouts() content.WorkerCheckoutRepository { return nil }
+
 // RecordCompleted keeps no row: this fake is the STORE-FAILURE arm of the
 // write path (TestHistoryRecord_StoreErrorIsRPCError). The fake that actually
 // stores what it is handed is fakeRecordHistoryDB.

@@ -15,10 +15,10 @@ package app
 //   - a checkout a live worker holds is listed under that worker, never as
 //     left over (TestALiveWorkersCheckoutIsNotLeftOver);
 //   - the store failing to open marks the answer incomplete, in the answer
-//     and not only in a log (TestAFailingRecordMarksTheAnswerIncomplete and
-//     TestTheStubStoreIsAnsweredIncompleteAtTheCompositionRoot);
-//   - the service is constructed at the composition root
-//     (TestTheCheckoutsServiceIsWiredAtTheCompositionRoot).
+//     and not only in a log (TestAFailingRecordMarksTheAnswerIncomplete),
+//     and the composition root hands the service the store that actually
+//     opened (TestTheCheckoutsServiceReadsTheRealStoreAtTheCompositionRoot,
+//     TestTheCheckoutsServiceIsWiredAtTheCompositionRoot);
 
 import (
 	"context"
@@ -432,10 +432,16 @@ func (f failingCheckoutRows) All(context.Context) ([]content.WorkerCheckout, err
 }
 func (f failingCheckoutRows) Delete(context.Context, string, []string) error { return f.err }
 
-// Criterion 5, the composition root's half: a store that never opened is the
-// stub, the stub must never stand in for a reading record, and the service
-// the root builds answers incomplete — in the answer, not only in a log.
-func TestTheStubStoreIsAnsweredIncompleteAtTheCompositionRoot(t *testing.T) {
+// Criterion 5's wiring half, and criterion 7's: the composition root builds
+// the service over its REAL inputs, and when the store it wired actually
+// opened (the isolated test home derives a real content key, so it does),
+// the rows come from that store and an unresolvable session answers
+// complete-and-empty — every read behind the answer worked. The
+// store-could-not-open degrade itself is the service's nil-rows branch,
+// proven by TestAFailingRecordMarksTheAnswerIncomplete beside the failing
+// double; the composition root's job here is to hand the service the store
+// that opened and nothing that pretends to be one.
+func TestTheCheckoutsServiceReadsTheRealStoreAtTheCompositionRoot(t *testing.T) {
 	storagetest.Isolate(t)
 	a, err := newTestApp(t)
 	if err != nil {
@@ -444,8 +450,8 @@ func TestTheStubStoreIsAnsweredIncompleteAtTheCompositionRoot(t *testing.T) {
 	if a.workerCheckouts == nil {
 		t.Fatal("New built no checkouts service; the wiring is the criterion")
 	}
-	if a.workerCheckouts.rows != nil {
-		t.Fatal("the stub store was handed to the service as if it could read; a stub answers no rows and no error, which would read as complete")
+	if a.workerCheckouts.rows == nil {
+		t.Fatal("the content store opened and the service was wired without it")
 	}
 	if a.workerCheckouts.held == nil || a.workerCheckouts.repos == nil ||
 		a.workerCheckouts.sessions == nil || a.workerCheckouts.layout == nil {
@@ -453,8 +459,11 @@ func TestTheStubStoreIsAnsweredIncompleteAtTheCompositionRoot(t *testing.T) {
 			a.workerCheckouts.held, a.workerCheckouts.repos, a.workerCheckouts.sessions, a.workerCheckouts.layout)
 	}
 	survey := a.workerCheckouts.Leftovers(context.Background(), "no-such-session")
-	if survey.Complete {
-		t.Fatal("behind a store that never opened, the answer must be marked incomplete")
+	if !survey.Complete {
+		t.Fatalf("the survey answered incomplete behind a store that reads: %+v", survey)
+	}
+	if len(survey.Leftovers) != 0 {
+		t.Fatalf("leftovers = %+v, want none for a session standing nowhere", survey.Leftovers)
 	}
 }
 

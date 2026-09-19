@@ -1060,6 +1060,32 @@ var declarations = []Declaration{
 		Params:           "workers.close.schema.json",
 		Narrow:           narrowWorkers,
 	},
+	{
+		Name:        "workers.removeCheckout",
+		Description: "Remove one or more of nocx's own leftover worker checkouts of the repository your session stands in — the checkouts workers.spawn created that no live worker uses any more; workers.holdings lists them. This is deliberate cleanup, separate from workers.close: closing a worker never touches its checkout, and this call takes a left-over one away. Name each checkout by its path, its branch, or both. It refuses by name and leaves untouched any checkout that holds uncommitted work (commit or discard the work first), any checkout a live worker still holds (close the worker first), and anything that is not one of nocx's checkouts of your repository — your own worktrees and the main checkout are never touched. The branch always stays; only the checkout directory goes. There is no override: a person who wants the work gone has a shell.",
+		// MUTATE-DESTRUCTIVE, and workers.close's other half by the owner's
+		// decision of 2026-09-18: the close ends a worker and never touches
+		// its checkout; this removes a checkout a spawn left behind. What
+		// it deletes — the checkout directory and the ignored files in it
+		// — does not come back, and it refuses rather than force past
+		// uncommitted work, a live worker's hold, or anything that is not
+		// one of nocx's own checkouts of the caller's repository. There is
+		// no force parameter, on purpose: a person who wants the work gone
+		// has a shell.
+		Effect:       []content.Effect{content.EffectMutateDestructive},
+		OutputTrust:  OutputTrustUntrusted,
+		ResultBound:  ResultBound{MaxBytes: 4 << 10, Truncation: TruncationDropTail},
+		Deadline:     30 * time.Second,
+		Cancellation: CancellationReturnError,
+		// The session, for workers.holdings' reason: the repository the
+		// removal walks is the run's own session's, and the model has no
+		// way to name another.
+		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
+		ResolveResources: resourceSession,
+		Executes:         InGo,
+		Params:           "workers.removeCheckout.schema.json",
+		Narrow:           narrowWorkers,
+	},
 }
 
 // Assemble loads every declaration's params schema from fsys and builds the

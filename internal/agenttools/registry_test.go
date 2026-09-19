@@ -526,9 +526,16 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		// about, which every worker has over itself — so a spawn effect would
 		// be a name for an authority this call never exercises.
 		"workers.report": {content.EffectObserve},
+		// MUTATE-DESTRUCTIVE for the removal, workers.close's other half:
+		// the close ends a worker and never touches its checkout; this
+		// removes a leftover checkout, and what it deletes — the directory
+		// and the ignored files in it — does not come back. It refuses
+		// rather than forces past uncommitted work, a live worker's hold,
+		// or anything that is not one of nocx's own checkouts.
+		"workers.removeCheckout": {content.EffectMutateDestructive},
 	}
-	if len(declarations) != 32 {
-		t.Fatalf("declaration count = %d, want 32", len(declarations))
+	if len(declarations) != 33 {
+		t.Fatalf("declaration count = %d, want 33", len(declarations))
 	}
 	for _, declaration := range declarations {
 		effects, ok := want[declaration.Name]

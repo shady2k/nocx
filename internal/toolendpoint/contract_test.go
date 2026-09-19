@@ -144,6 +144,13 @@ func (contractWorkerRecord) LeftoverCheckouts(context.Context, string) workers.C
 	}
 }
 
+// RemoveCheckouts answers an empty removal: the socket conformance cases
+// below exercise the calls this endpoint's own surfaces serve, and none of
+// them removes a checkout — the stub needs only to satisfy the seam.
+func (contractWorkerRecord) RemoveCheckouts(context.Context, string, []workers.CheckoutRef) workers.CheckoutRemoval {
+	return workers.CheckoutRemoval{Items: []workers.RemovedCheckout{}}
+}
+
 func contractWorkerParticipants() []workers.Participant {
 	return []workers.Participant{{
 		ID:    "worker-1",

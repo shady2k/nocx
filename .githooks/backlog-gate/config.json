@@ -42,5 +42,9 @@
   "holdDays": 2,
   "bulkCluster": 20,
   "projectWords": ["nocx", "herdr"],
-  "trackerWords": ["beads", ".beads", "issues.jsonl"]
+  "trackerWords": ["beads", ".beads", "issues.jsonl"],
+  "setupStatus": "pending",
+  "setupVersion": null,
+  "setupVerifiedAt": null,
+  "setupTask": "nocx-q8yjf.1"
 }

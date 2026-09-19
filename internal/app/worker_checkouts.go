@@ -309,15 +309,28 @@ func (c *workerCheckouts) Touch(ctx context.Context, path string, at time.Time) 
 // notePaneOpened is the pane-open half of the stamp: every pane nocx opens
 // through the one open path is noted with the spec it was asked for, and a
 // pane standing inside a recorded checkout (at its root or below it) moves
-// that checkout's last-used forward. It is a NOTE — it never fails the
-// open, never blocks on anything but the store's own short write, and a
-// read failure is a warning a person can grep, not an error the open
-// answers.
+// that checkout's last-used forward. The directory a RENDERER open stands in
+// is never on the wire — open's params have never carried one — so the note
+// reads it from the pane's own layout row, the one owner of the fact (AD-5):
+// the row the renderer writes from a verified OSC 7, and the row the spawner
+// wrote at creation for its own panes. It is a NOTE — it never fails the
+// open, never blocks on anything but the store's own short write, and a read
+// failure is a warning a person can grep, not an error the open answers.
 func (c *workerCheckouts) notePaneOpened(spec transport.OpenSpec, _ session.ID) {
-	if c.rows == nil || spec.Cwd == "" || spec.Kind == "ssh" {
+	if c.rows == nil || spec.Kind == "ssh" {
 		// Kind "" is local — the zero value every plain open has always
 		// carried — and an ssh pane's cwd is a far machine's directory,
 		// which no local checkout prefix can honestly claim.
+		return
+	}
+	cwd := spec.Cwd
+	if cwd == "" && spec.PaneID != "" && c.layout != nil {
+		// A pane whose row holds no directory yet — the fresh pane whose
+		// shell has not answered an OSC 7 — has no directory to stand
+		// anywhere, and stamps nothing.
+		cwd, _ = c.layout.PaneCwd(context.Background(), spec.PaneID)
+	}
+	if cwd == "" {
 		return
 	}
 	ctx := context.Background()
@@ -326,7 +339,7 @@ func (c *workerCheckouts) notePaneOpened(spec transport.OpenSpec, _ session.ID) 
 		log.From(ctx).Warn("worker checkouts: list rows for a pane-open note", "error", err)
 		return
 	}
-	cwd := filepath.Clean(spec.Cwd)
+	cwd = filepath.Clean(cwd)
 	for _, row := range rows {
 		root := filepath.Clean(row.Path)
 		if cwd != root && !strings.HasPrefix(cwd, root+string(os.PathSeparator)) {

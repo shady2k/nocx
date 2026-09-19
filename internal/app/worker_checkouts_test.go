@@ -530,6 +530,48 @@ func TestAPaneOpenedInsideACheckoutMovesItsLastUsedForward(t *testing.T) {
 	}
 }
 
+// Criterion: a pane the RENDERER opens moves the stamp too. The open
+// request carries no directory on the wire — the pane's directory is the
+// layout row's fact — so the note reads the row for the pane it was told
+// about, and a pane whose row has no directory yet changes nothing.
+func TestAPaneTheRendererOpensStampsItsCheckoutLastUsed(t *testing.T) {
+	repoDir, _ := initRealRepo(t)
+	stand := newCheckoutStand(t)
+	t0 := time.Date(2026, 9, 18, 8, 0, 0, 0, time.UTC)
+	t1 := time.Date(2026, 9, 18, 9, 0, 0, 0, time.UTC)
+	stand.checkouts.now = func() time.Time { return t0 }
+	coordA := stand.openCoordinator(t, "pane-a", repoDir)
+	stand.spawnCheckoutWorker(t, coordA, "worker-1", "feat/one", "t")
+	checkout := expectedWorktreePath(stand.checkouts.worktreeRoot, repoDir, "feat/one")
+	key := nocxCheckoutRepoKey(repoDir)
+	stand.checkouts.now = func() time.Time { return t1 }
+
+	// The spec the wire actually builds for a renderer open: a pane id,
+	// kind local, and NO cwd — the wire never carried one.
+	stand.tabs.cwdOf["pane-renderer"] = filepath.Join(checkout, "pkg", "deep")
+	stand.checkouts.notePaneOpened(transport.OpenSpec{Kind: "", PaneID: "pane-renderer"}, "sess-x")
+	rows, err := stand.rows.List(context.Background(), key)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows = %+v, %v; want the one checkout", rows, err)
+	}
+	if rows[0].LastUsedAt != t1.UnixMilli() {
+		t.Fatalf("last_used = %d, want the renderer pane-open stamp %d (the note must read the layout row's directory)", rows[0].LastUsedAt, t1.UnixMilli())
+	}
+
+	// A renderer open whose pane has no recorded directory yet — the fresh
+	// pane whose shell has not answered an OSC 7 — stamps nothing, because
+	// there is no directory to stand anywhere.
+	stand.checkouts.now = func() time.Time { return t1.Add(time.Hour) }
+	stand.checkouts.notePaneOpened(transport.OpenSpec{Kind: "", PaneID: "pane-unrecorded"}, "sess-x")
+	rows, err = stand.rows.List(context.Background(), key)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows = %+v, %v; want the one checkout", rows, err)
+	}
+	if rows[0].LastUsedAt != t1.UnixMilli() {
+		t.Fatalf("last_used = %d, want it unmoved by a pane with no recorded directory", rows[0].LastUsedAt)
+	}
+}
+
 // Criterion: the spawn path records the checkout through the SAME service
 // the answer reads — a second construction would be two records that agree
 // until they don't.

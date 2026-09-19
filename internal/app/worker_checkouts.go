@@ -355,3 +355,10 @@ type workerRecordWithCheckouts struct {
 func (w *workerRecordWithCheckouts) LeftoverCheckouts(ctx context.Context, coordinatorSession string) workers.CheckoutSurvey {
 	return w.checkouts.Leftovers(ctx, coordinatorSession)
 }
+
+// RemoveCheckouts removes through the service. The session is the one the
+// coordinator capability already carries; nothing here can be asked about
+// another.
+func (w *workerRecordWithCheckouts) RemoveCheckouts(ctx context.Context, coordinatorSession string, refs []workers.CheckoutRef) workers.CheckoutRemoval {
+	return w.checkouts.RemoveCheckouts(ctx, coordinatorSession, refs)
+}

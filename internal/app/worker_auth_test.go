@@ -79,6 +79,10 @@ func (workerRecordForTools) LeftoverCheckouts(context.Context, string) workers.C
 	return workers.CheckoutSurvey{Complete: true}
 }
 
+func (workerRecordForTools) RemoveCheckouts(context.Context, string, []workers.CheckoutRef) workers.CheckoutRemoval {
+	return workers.CheckoutRemoval{Items: []workers.RemovedCheckout{}}
+}
+
 func emptyWorkerRecordForTools() workerRecordForTools {
 	return workerRecordForTools{Registrar: emptyWorkerRecord()}
 }

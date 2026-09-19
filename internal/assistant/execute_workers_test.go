@@ -58,11 +58,20 @@ type fakeWorkerRecord struct {
 	// not be caught asking about a different one.
 	survey       workers.CheckoutSurvey
 	leftoversFor []string
+	removal      workers.CheckoutRemoval
+	removedFor   []string
+	removedRefs  []workers.CheckoutRef
 }
 
 func (f *fakeWorkerRecord) LeftoverCheckouts(_ context.Context, coordinatorSession string) workers.CheckoutSurvey {
 	f.leftoversFor = append(f.leftoversFor, coordinatorSession)
 	return f.survey
+}
+
+func (f *fakeWorkerRecord) RemoveCheckouts(_ context.Context, coordinatorSession string, refs []workers.CheckoutRef) workers.CheckoutRemoval {
+	f.removedFor = append(f.removedFor, coordinatorSession)
+	f.removedRefs = refs
+	return f.removal
 }
 
 // reportedCall is one Report the double saw: which participant made it, and

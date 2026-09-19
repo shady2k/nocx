@@ -75,6 +75,16 @@ type WorkerRecord interface {
 	// invisible exactly when they most need seeing. The repository is
 	// resolved from the coordinator's own session, never from an argument.
 	LeftoverCheckouts(ctx context.Context, coordinatorSession string) workers.CheckoutSurvey
+	// RemoveCheckouts removes nocx-made checkouts of the coordinator's own
+	// repository (nocx-xn63t.1.5) through the same walk the leftovers
+	// answer reads, under the same refusals the automatic sweep will one
+	// day remove through: a checkout holding uncommitted work, a checkout
+	// a live worker holds, and anything that is not one of nocx's
+	// checkouts of this repository are all refused BY NAME, and a read the
+	// decision needed that failed answers unresolved — never a guess. The
+	// branch always stays. The repository is resolved from the
+	// coordinator's own session, never from an argument.
+	RemoveCheckouts(ctx context.Context, coordinatorSession string, refs []workers.CheckoutRef) workers.CheckoutRemoval
 }
 
 // workerParticipantResult is one row of what a coordinator is told. It restates
@@ -257,6 +267,40 @@ type workerCloseWorktreeResult struct {
 	State       string `json:"state"`
 	Uncommitted *bool  `json:"uncommitted,omitempty"`
 	Ahead       *int   `json:"ahead,omitempty"`
+}
+
+// workerRemoveRef is one checkout a removal ask names: by path, by branch,
+// or both — both must agree, which the service refuses rather than guesses
+// about.
+type workerRemoveRef struct {
+	Path   string `json:"path,omitempty"`
+	Branch string `json:"branch,omitempty"`
+}
+
+// workerRemoveCheckoutParams is what the removal ask carries: the
+// checkouts, in the order the answer keeps.
+type workerRemoveCheckoutParams struct {
+	Checkouts []workerRemoveRef `json:"checkouts"`
+}
+
+// workerRemoveItemResult is one asked checkout and what became of it. Path
+// and Branch are the checkout as nocx resolved it on disk — a branch-named
+// ask is answered with the path it resolved to — never merely the words of
+// the ask. Refusal and Detail ride only a row that was NOT removed, and a
+// removed row carries neither: nothing is claimed about a removed checkout
+// beyond its removal, and its branch is still in the repository.
+type workerRemoveItemResult struct {
+	Path    string `json:"path,omitempty"`
+	Branch  string `json:"branch,omitempty"`
+	Removed bool   `json:"removed"`
+	Refusal string `json:"refusal,omitempty"`
+	Detail  string `json:"detail,omitempty"`
+}
+
+// workerRemoveCheckoutResult is the answer: one row per asked checkout, in
+// the order asked.
+type workerRemoveCheckoutResult struct {
+	Checkouts []workerRemoveItemResult `json:"checkouts"`
 }
 
 type workerSayParams struct {
@@ -718,6 +762,60 @@ func executeWorkerClose(ctx context.Context, cap agenttools.Capability, args jso
 // even though a coordinator's first spawn does default the worker id to its
 // session: the record permits a named worker, and a helper that assumed the
 // default would be right until the day somebody used the field.
+// executeWorkerRemoveCheckout removes one or more of nocx's own leftover
+// checkouts of the coordinator's repository (nocx-xn63t.1.5).
+//
+// THE REPOSITORY IS THE SESSION'S, never an argument, exactly as for
+// holdings: the walk that decides which checkouts are nocx's starts at the
+// coordinator capability's own session. What the model names is only the
+// checkouts — by path, branch, or both — and the answer names what became
+// of each, in the order asked.
+//
+// THE REFUSALS ARE THE SERVICE'S, not re-decided here: uncommitted work, a
+// live worker's hold, not-ours and unresolved arrive named and detailed
+// from the same walk and under the same refusals the automatic sweep of
+// task 1.6 will remove through, and this executor's whole job is to carry
+// them to the caller verbatim — a refusal reworded here would be a second
+// account of the same disk.
+func executeWorkerRemoveCheckout(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	coordinator, err := workerCoordinatorFrom(cap, "workers.removeCheckout")
+	if err != nil {
+		return "", err
+	}
+	if seams.workerStore == nil {
+		return "", errors.New("workers.removeCheckout: this backend keeps no worker record")
+	}
+	var p workerRemoveCheckoutParams
+	if argErr := json.Unmarshal(args, &p); argErr != nil {
+		return "", fmt.Errorf("workers.removeCheckout: %w", argErr)
+	}
+	if len(p.Checkouts) == 0 {
+		return "", errors.New("workers.removeCheckout: name at least one checkout to remove, by path or by branch")
+	}
+	refs := make([]workers.CheckoutRef, 0, len(p.Checkouts))
+	for i, ask := range p.Checkouts {
+		if ask.Path == "" && ask.Branch == "" {
+			return "", fmt.Errorf("workers.removeCheckout: checkout %d names neither a path nor a branch", i+1)
+		}
+		refs = append(refs, workers.CheckoutRef{Path: ask.Path, Branch: ask.Branch})
+	}
+	removal := seams.workerStore.RemoveCheckouts(ctx, coordinator.Session(), refs)
+	items := make([]workerRemoveItemResult, 0, len(removal.Items))
+	for _, item := range removal.Items {
+		row := workerRemoveItemResult{Path: item.Path, Branch: item.Branch, Removed: item.Removed}
+		if !item.Removed {
+			row.Refusal = string(item.Refusal)
+			row.Detail = item.Detail
+		}
+		items = append(items, row)
+	}
+	raw, err := json.Marshal(workerRemoveCheckoutResult{Checkouts: items})
+	if err != nil {
+		return "", fmt.Errorf("workers.removeCheckout: result: %w", err)
+	}
+	return string(raw), nil
+}
+
 func workerOf(c *agenttools.WorkerCoordinator, held []workers.Participant) workers.ID {
 	for _, p := range held {
 		if p.Group != "" {

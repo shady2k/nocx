@@ -63,7 +63,8 @@
         "workers.say",
         "workers.inbox",
         "workers.report",
-        "workers.close"
+        "workers.close",
+        "workers.removeCheckout"
       ]
     },
     "callId": {

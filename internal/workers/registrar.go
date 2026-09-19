@@ -720,6 +720,18 @@ func (r *Registrar) HeldBy(ctx context.Context, coordinatorSession string) ([]Pa
 	return held, nil
 }
 
+// HeldWorktrees answers which checkouts the record's non-terminal
+// participants hold, across every session at once (nocx-xn63t.1.4). The
+// leftovers question is keyed to a REPOSITORY and not to a session, so the
+// checkout one coordinator's worker holds must be visible as held even when
+// a different coordinator asks what is left over — otherwise a live worker's
+// checkout would be offered up as abandoned, which is the one mistake the
+// answer must never make. It dispatches nothing: no wake, no cursor, no
+// fact changes state because somebody asked what is held.
+func (r *Registrar) HeldWorktrees(ctx context.Context) ([]Worktree, error) {
+	return r.store.HeldWorktrees(ctx)
+}
+
 // Cost is what the mechanism has spent so far — the number §12 of the design
 // says the whole thing is judged by. It is a read on the record rather than a
 // log line to grep, because "measured and reported, not assumed" is an

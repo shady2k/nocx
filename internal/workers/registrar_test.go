@@ -428,6 +428,18 @@ func (m *memStore) HeldBy(_ context.Context, coord string) ([]Participant, error
 	return out, nil
 }
 
+func (m *memStore) HeldWorktrees(_ context.Context) ([]Worktree, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Worktree
+	for _, p := range m.parts {
+		if !p.State.Terminal() && p.Worktree.Path != "" {
+			out = append(out, p.Worktree)
+		}
+	}
+	return out, nil
+}
+
 // read is the "freshly constructed reader over the same path" of the house
 // pattern, at the scope an in-memory store admits: it never consults what the
 // procedure believed it wrote.

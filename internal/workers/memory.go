@@ -291,6 +291,24 @@ func (s *MemoryStore) NonTerminal(_ context.Context, id ID) ([]Participant, erro
 	}), nil
 }
 
+// HeldWorktrees collects the worktrees of every participant that is neither
+// terminal nor worktree-less. It reads the same map HeldBy selects from,
+// under the same lock, and answers ACROSS sessions — a checkout of one
+// session's worker is held even while another session's coordinator asks
+// what is left over in the repository (nocx-xn63t.1.4).
+func (s *MemoryStore) HeldWorktrees(_ context.Context) ([]Worktree, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Worktree
+	for _, p := range s.parts {
+		if p.State.Terminal() || p.Worktree.Path == "" {
+			continue
+		}
+		out = append(out, p.Worktree)
+	}
+	return out, nil
+}
+
 // HeldBy answers D3 through the WORKER and never through the delegation, and
 // the difference is the point. A delegation is revocable and suspendable;
 // membership is not. A coordinator that has just restarted must be told about

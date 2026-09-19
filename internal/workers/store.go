@@ -270,16 +270,20 @@ type Enrolments interface {
 	Withdraw(ctx context.Context, p ParticipantID) error
 }
 
-// Closer ends a participant's process, and gives back the place it occupied.
-// It is the far end of Close, and it is deliberately narrow: what it is handed
-// is a participant the record has already decided may be ended, and what it
-// does is end the session behind it and take its tab out of the window — the
-// second half being what "closing a worker closes its tab" means for a
-// participant whose process is already gone (nocx-xn63t.4.6). It writes no
-// state IN THE RECORD and reports no verdict — the exit it causes arrives by
-// the ordinary path.
+// Closer ends a participant's process, and gives back the place it occupied
+// and what is left of it. It is the far end of Close, and it is deliberately
+// narrow: what it is handed is a participant the record has already decided
+// may be ended, and what it does is end the session behind it and take its
+// tab out of the window — the second half being what "closing a worker
+// closes its tab" means for a participant whose process is already gone
+// (nocx-xn63t.4.6). What it ANSWERS is the checkout that is still on disk
+// when the participant had one, read off the repository itself — a close
+// never removes the checkout (owner's decision, 2026-09-18), so the answer
+// is the only account of it a coordinator gets (nocx-xn63t.1.3). It writes
+// no state IN THE RECORD and reports no verdict — the exit it causes
+// arrives by the ordinary path.
 type Closer interface {
-	Close(ctx context.Context, p Participant) error
+	Close(ctx context.Context, p Participant) (CloseResult, error)
 }
 
 // TaskQueue hands a participant's BRIEFING — the rules it reports under, and

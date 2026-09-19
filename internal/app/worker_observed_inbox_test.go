@@ -522,7 +522,7 @@ func TestAWorkersEndReadsClosedOrExitedAndNeverAnOutcome(t *testing.T) {
 	}
 
 	// 3. The coordinator ENDS the other one, through the record's own close.
-	if err := s.record.Close(ctx, s.coordinator, closed.ID); err != nil {
+	if _, err := s.record.Close(ctx, s.coordinator, closed.ID); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 

@@ -2313,8 +2313,13 @@ func New(opts ...Option) (*App, error) {
 			// participant's tab has LEFT the window rides the same broadcast
 			// its appearance did, so every connected window's strip follows
 			// without a reload.
-			announce: tp,
-			log:      logger,
+			// The ONE local factory the composition root already owns — the
+			// same instance the spawner created any checkout with — so the
+			// close can answer what the checkout it leaves holds
+			// (nocx-xn63t.1.3). A read that fails is said in the result,
+			// never a failure and never a clean.
+			repos: gitFactory,
+			log:   logger,
 		}),
 		workers.WithBound(workerParticipantBound),
 		workers.WithEnrolmentDeadline(workerEnrolmentDeadline),

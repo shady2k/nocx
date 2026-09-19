@@ -216,14 +216,14 @@ type workerTwoCallersCloser struct {
 	ended  []workers.ParticipantID
 }
 
-func (c *workerTwoCallersCloser) Close(ctx context.Context, p workers.Participant) error {
+func (c *workerTwoCallersCloser) Close(ctx context.Context, p workers.Participant) (workers.CloseResult, error) {
 	c.mu.Lock()
 	c.ended = append(c.ended, p.ID)
 	c.mu.Unlock()
 	_, err := c.record.Exited(ctx, p.ID, p.Liveness, workers.Exit{
 		Cause: "exited", Code: 0, At: time.Now(),
 	})
-	return err
+	return workers.CloseResult{}, err
 }
 
 func (c *workerTwoCallersCloser) endedParticipants() []workers.ParticipantID {

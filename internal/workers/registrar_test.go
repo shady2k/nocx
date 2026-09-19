@@ -839,7 +839,7 @@ func TestTheRecordSaysWhatHappenedAndNeverHowItWent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("register: %v", err)
 		}
-		if closeErr := h.reg.Close(ctx, coordSession, p.ID); closeErr != nil {
+		if _, closeErr := h.reg.Close(ctx, coordSession, p.ID); closeErr != nil {
 			t.Fatalf("close: %v", closeErr)
 		}
 		stored, ok := h.store.read(t, p.ID)
@@ -870,7 +870,7 @@ func TestTheRecordSaysWhatHappenedAndNeverHowItWent(t *testing.T) {
 		if _, exitErr := h.reg.Exited(ctx, p.ID, testLiveness(), Exit{Cause: "exited", At: at}); exitErr != nil {
 			t.Fatalf("exit: %v", exitErr)
 		}
-		if closeErr := h.reg.Close(ctx, coordSession, p.ID); closeErr != nil {
+		if _, closeErr := h.reg.Close(ctx, coordSession, p.ID); closeErr != nil {
 			t.Fatalf("close of a participant whose process is already gone: %v", closeErr)
 		}
 		if got := closer.seen(); len(got) != 1 || got[0] != p.ID {
@@ -894,7 +894,7 @@ func TestTheRecordSaysWhatHappenedAndNeverHowItWent(t *testing.T) {
 			t.Fatalf("register: %v", err)
 		}
 		closer.err = errInjected
-		if closeErr := h.reg.Close(ctx, coordSession, p.ID); !errors.Is(closeErr, errInjected) {
+		if _, closeErr := h.reg.Close(ctx, coordSession, p.ID); !errors.Is(closeErr, errInjected) {
 			t.Fatalf("close = %v, want the closer's own failure", closeErr)
 		}
 		stored, _ := h.store.read(t, p.ID)

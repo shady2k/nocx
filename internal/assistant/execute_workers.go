@@ -56,8 +56,11 @@ type WorkerRecord interface {
 	// record reads `closed` (workers.StateClosed) rather than only the exit
 	// the close caused. What it also gives back is the participant's place —
 	// its tab leaves the window (nocx-xn63t.4.6), which is the layout chain's
-	// row rather than the record's.
-	Close(ctx context.Context, coordinatorSession string, id workers.ParticipantID) error
+	// row rather than the record's — and, when the participant had a checkout
+	// of its own, what is left of it: the close never removes the checkout
+	// (owner's decision, 2026-09-18), so the answer is the only account of
+	// the worker's work this call gives (nocx-xn63t.1.3).
+	Close(ctx context.Context, coordinatorSession string, id workers.ParticipantID) (workers.CloseResult, error)
 	// Undispatched is what the record still owes judgement on. It is read
 	// BEFORE HeldBy, because HeldBy is the fetch that clears it (D8): asking
 	// afterwards would always answer nothing, which is a truthful answer to
@@ -183,6 +186,22 @@ type workerCloseParams struct {
 type workerCloseResult struct {
 	ID    string `json:"id"`
 	Ended bool   `json:"ended"`
+	// Worktree is what is left of the worker's own checkout, present only
+	// when it had one: the close never removes the checkout, so this is the
+	// coordinator's only account of the work sitting there (nocx-xn63t.1.3).
+	Worktree *workerCloseWorktreeResult `json:"worktree,omitempty"`
+}
+
+// workerCloseWorktreeResult is the checkout's answer. Uncommitted and Ahead
+// are pointers because their ABSENCE is a value: they ride only state "read",
+// and a result that answered uncommitted:false over a read that failed would
+// claim a cleanliness nobody saw.
+type workerCloseWorktreeResult struct {
+	Path        string `json:"path"`
+	Branch      string `json:"branch"`
+	State       string `json:"state"`
+	Uncommitted *bool  `json:"uncommitted,omitempty"`
+	Ahead       *int   `json:"ahead,omitempty"`
 }
 
 type workerSayParams struct {
@@ -549,6 +568,13 @@ func workerAnswer(
 // finished: ending a process is a request, and how it ended is a fact nocx
 // observes for itself through the ordinary exit path. A result that claimed
 // the second would be the record's only claim it did not witness.
+//
+// What it answers BESIDE the ask is the checkout the close left (nocx-xn63t.1.3):
+// carried from the record's own close answer, never re-read here — this
+// package has no git seam and must not grow one. A worker with no checkout
+// answers nothing about one (the field is absent), and a reading the close
+// could not make arrives as unknown rather than as a clean that was never
+// seen.
 func executeWorkerClose(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
 	coordinator, err := workerCoordinatorFrom(cap, "workers.close")
 	if err != nil {
@@ -564,10 +590,27 @@ func executeWorkerClose(ctx context.Context, cap agenttools.Capability, args jso
 	if p.Worker == "" {
 		return "", errors.New("workers.close: name the worker to end")
 	}
-	if closeErr := seams.workerStore.Close(ctx, coordinator.Session(), workers.ParticipantID(p.Worker)); closeErr != nil {
+	res, closeErr := seams.workerStore.Close(ctx, coordinator.Session(), workers.ParticipantID(p.Worker))
+	if closeErr != nil {
 		return "", fmt.Errorf("workers.close: %w", closeErr)
 	}
-	raw, err := json.Marshal(workerCloseResult{ID: p.Worker, Ended: true})
+	out := workerCloseResult{ID: p.Worker, Ended: true}
+	if res.Worktree != (workers.Leftover{}) {
+		wt := &workerCloseWorktreeResult{
+			Path:   res.Worktree.Path,
+			Branch: res.Worktree.Branch,
+			State:  string(res.Worktree.State),
+		}
+		// The reading's two values ride ONLY a read: absent is what unknown
+		// looks like on the wire, because uncommitted:false would claim a
+		// cleanliness nobody saw.
+		if res.Worktree.State == workers.CheckoutRead {
+			wt.Uncommitted = &res.Worktree.Uncommitted
+			wt.Ahead = &res.Worktree.Ahead
+		}
+		out.Worktree = wt
+	}
+	raw, err := json.Marshal(out)
 	if err != nil {
 		return "", fmt.Errorf("workers.close: result: %w", err)
 	}

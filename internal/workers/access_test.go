@@ -209,7 +209,7 @@ func TestClosingAParticipantRevokesWhatItControls(t *testing.T) {
 	closer := &fakeCloser{}
 	h.reg.closer = closer
 
-	if err := h.reg.Close(ctx, "sess-C", w1.ID); err != nil {
+	if _, err := h.reg.Close(ctx, "sess-C", w1.ID); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 	if _, err := h.reg.Resolve(ctx, "sess-C", "sess-w2", EffectObserve); !errors.Is(err, ErrNotReachable) {

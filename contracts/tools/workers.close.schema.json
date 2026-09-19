@@ -16,7 +16,7 @@
   "$defs": {
     "result": {
       "title": "WorkersCloseResult",
-      "description": "What was asked of the worker. Note what this does NOT say: it does not say the worker has finished. Ending its process is a request, and how it ended is a fact nocx observes for itself — ask workers.holdings for that.",
+      "description": "What was asked of the worker, and what is left of it. Note what this does NOT say: it does not say the worker has finished. Ending its process is a request, and how it ended is a fact nocx observes for itself — ask workers.holdings for that. When the worker had a git checkout of its own, the close removed neither the checkout nor its branch, and worktree says where that checkout is and what it holds.",
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "ended"],
@@ -25,6 +25,43 @@
         "ended": {
           "type": "boolean",
           "description": "True when nocx asked the worker's process to stop, and true as well when it had already finished before you asked — tidying up should not have to win a race."
+        },
+        "worktree": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "branch", "state"],
+          "description": "Present only when the worker had a checkout of its own: where it is, which branch it holds, and what is in it. The close removed neither the checkout nor its branch and changed nothing in it — the work there, committed or not, is intact and is yours to keep, merge, or delete. Nothing about it is cleaned up for you.",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Where the checkout is on disk. It is still there: closing a worker never removes its checkout."
+            },
+            "branch": {
+              "type": "string",
+              "description": "The branch checked out in it, as git reports now — it may have moved since the worker was started. Empty when HEAD is detached or nothing could be read."
+            },
+            "state": {
+              "type": "string",
+              "enum": ["read", "unknown"],
+              "description": "read: nocx asked the repository what the checkout holds, and uncommitted and ahead are its answers. unknown: the repository could not be asked — the checkout may be gone, or git failed — and uncommitted and ahead are LEFT OUT. unknown does not mean clean, and it does not fail the close: no answer here means no answer."
+            },
+            "uncommitted": {
+              "type": "boolean",
+              "description": "True when the checkout holds work no commit keeps — a tracked change or an untracked file. False when the tree is clean. Present only when state is read."
+            },
+            "ahead": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "How many commits the branch holds beyond the commit the checkout started from — the worker's committed work, in count. Present only when state is read."
+            }
+          },
+          "allOf": [
+            {
+              "if": { "properties": { "state": { "const": "read" } } },
+              "then": { "required": ["uncommitted", "ahead"] },
+              "else": { "properties": { "uncommitted": false, "ahead": false } }
+            }
+          ]
         }
       }
     }

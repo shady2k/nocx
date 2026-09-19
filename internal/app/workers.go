@@ -1408,7 +1408,12 @@ func (e *workerEnrolments) hookInto(p *paneEnroller) *paneEnroller {
 // participant's state. The participant's PLACE is this layer's for the same
 // reason: a tab is a place in the window, the window is the app's, and only
 // the app holds the pairing between a participant and the seat its pane was
-// minted in (workerTabs).
+// minted in (workerTabs). What the close then ANSWERS — the checkout that is
+// still on disk and what it holds — is this layer's too, for the same
+// reason: only here do the record's worktree facts and the one git seam
+// meet, and the owner's decision of 2026-09-18 makes "leaves the checkout
+// alone, says what is in it" the close's whole account of a worker's work
+// (nocx-xn63t.1.3).
 type workerCloser struct {
 	sessions sessionCloser
 	// layout takes the participant's tab out of the window. Nil is the
@@ -1421,10 +1426,18 @@ type workerCloser struct {
 	// the spawn side's own announcer tells them one appeared. Nil is the
 	// absence case tabClosedAnnouncer's docs name.
 	announce tabClosedAnnouncer
-	log      log.Logger
+	// repos reads the checkout the close leaves behind, through the ONE
+	// factory the composition root already owns — the same instance the
+	// spawner created the checkout with, so the reading is the repository's
+	// own answer and never a second implementation of git. Nil is the
+	// absence case every seam in this file names: a closer nobody wired a
+	// git seam into cannot read a checkout, and the result says the state
+	// is unknown rather than failing a close whose real work is done.
+	repos git.RepoFactory
+	log   log.Logger
 }
 
-func (c *workerCloser) Close(ctx context.Context, p workers.Participant) error {
+func (c *workerCloser) Close(ctx context.Context, p workers.Participant) (workers.CloseResult, error) {
 	sid := session.ID(p.Liveness.SessionID)
 	// Asked FIRST, because the registry's Close reports a missing session as
 	// an ordinary error and a session that is already gone is not a failure
@@ -1443,7 +1456,7 @@ func (c *workerCloser) Close(ctx context.Context, p workers.Participant) error {
 	} else if err := c.sessions.EndSession(sid); err != nil {
 		// EndSession, not Close (nocx-isjh4): the same reasoning as Kill's —
 		// nobody will ever hold this participant's pane again.
-		return fmt.Errorf("worker close: %w", err)
+		return workers.CloseResult{}, fmt.Errorf("worker close: %w", err)
 	}
 
 	// THE TAB, AFTER THE SESSION AND NEVER BEFORE IT (nocx-xn63t.4.6). The
@@ -1460,7 +1473,7 @@ func (c *workerCloser) Close(ctx context.Context, p workers.Participant) error {
 	if c.tabs == nil || c.layout == nil {
 		c.log.Debug("worker close: this backend holds no tab for the participant",
 			"participant", string(p.ID))
-		return nil
+		return c.leftover(ctx, p), nil
 	}
 	tabID, known := c.tabs.lookup(p.ID)
 	if !known {
@@ -1470,7 +1483,7 @@ func (c *workerCloser) Close(ctx context.Context, p workers.Participant) error {
 		// the coordinator asked for a state that already holds.
 		c.log.Info("worker close: the participant's tab was already out of the window",
 			"participant", string(p.ID))
-		return nil
+		return c.leftover(ctx, p), nil
 	}
 	if err := c.layout.DeleteTab(ctx, tabID, closeReplacement()); err != nil {
 		// WHAT IS TRUE ON DISK when this returns, said in the error rather than
@@ -1482,7 +1495,7 @@ func (c *workerCloser) Close(ctx context.Context, p workers.Participant) error {
 		// retry a reported failure invites runs this same method again and
 		// completes the half that failed, instead of finding nothing to close
 		// and answering success over a tab that is still on the strip.
-		return fmt.Errorf(
+		return workers.CloseResult{}, fmt.Errorf(
 			"worker close: the participant's session is ended and its tab %q is still in the window: %w",
 			tabID, err)
 	}
@@ -1492,7 +1505,79 @@ func (c *workerCloser) Close(ctx context.Context, p workers.Participant) error {
 	}
 	c.log.Info("worker participant closed",
 		"participant", string(p.ID), "session_id", string(sid), "tab_id", tabID)
-	return nil
+	return c.leftover(ctx, p), nil
+}
+
+// leftover reads the checkout the record says this participant lived in and
+// answers what is in it (nocx-xn63t.1.3). It runs AFTER the session and the
+// tab are gone — by then the close's real work is either committed or has
+// already returned as an error — so a reading that fails is SAID
+// (workers.CheckoutUnknown) rather than returned as a failure, and never
+// reported as clean: "could not read" and "clean" are the two answers this
+// path must not confuse, because one of them invites deleting a worker's
+// work the owner's decision keeps this close from touching.
+//
+// The reading is the repository's own, through the same seam the spawn used
+// (git.RepoFactory.Worktrees, the listing task 1.1 put there for exactly
+// this kind of question): every working tree with its state, and the entry
+// at the record's path is this participant's. The repo is opened AT the
+// checkout, not at the coordinator's — the coordinator's pane may be closed
+// by the time its worker is, and the checkout is the subject. Uncommitted
+// and Ahead mean what they say only when the seam answered readable;
+// otherwise the record's path and branch are the account and the state is
+// what an unread checkout honestly is: unknown.
+func (c *workerCloser) leftover(ctx context.Context, p workers.Participant) workers.CloseResult {
+	if p.Worktree == (workers.Worktree{}) {
+		return workers.CloseResult{}
+	}
+	left := workers.Leftover{
+		Path: p.Worktree.Path, Branch: p.Worktree.Branch, State: workers.CheckoutUnknown,
+	}
+	answer := func() workers.CloseResult { return workers.CloseResult{Worktree: left} }
+	fail := func(why any) workers.CloseResult {
+		c.log.Warn("worker close: the checkout's state could not be read, so it stays unknown",
+			"participant", string(p.ID), "path", p.Worktree.Path, "reason", why)
+		return answer()
+	}
+
+	if c.repos == nil {
+		return fail("no git seam is wired into this closer")
+	}
+	repo, outcome, err := c.repos.Open(ctx, p.Worktree.Path)
+	if err != nil {
+		return fail(err)
+	}
+	if outcome.State != git.OpenOK {
+		// No repo to close: the seam answers a NIL repo beside every non-ok
+		// state (local/factory.go does, and worktreeUndo.run relies on it),
+		// so touching the value here would panic over a checkout that is
+		// gone — the exact case this branch is for.
+		return fail("the repository answers " + string(outcome.State))
+	}
+	defer func() { _ = repo.Close() }()
+	listing, err := repo.Worktrees(ctx, p.Worktree.Base)
+	if err != nil {
+		return fail(err)
+	}
+	for _, wt := range listing {
+		if wt.Path != p.Worktree.Path {
+			continue
+		}
+		// What git reports NOW is what is left, even where it differs from
+		// the record: a person could have moved the checkout's HEAD after
+		// the spawn. An unreadable state keeps the record's branch.
+		if wt.Branch != "" {
+			left.Branch = wt.Branch
+		}
+		if wt.State == git.WorktreeUnreadable {
+			return fail(wt.Reason)
+		}
+		left.State = workers.CheckoutRead
+		left.Uncommitted = wt.Uncommitted
+		left.Ahead = wt.Ahead
+		return answer()
+	}
+	return fail("git lists no worktree at the recorded path")
 }
 
 // ── the two routes out of the undispatched set (nocx-dkawo.3) ─────────────

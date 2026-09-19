@@ -332,7 +332,7 @@ func TestABriefingForAParticipantThatIsGoneIsRefusedRatherThanDelivered(t *testi
 		return ok && phase == assistant.PhaseQueued
 	})
 
-	if err := s.hub.registrar.Close(context.Background(), s.coordinatorSession, workers.ParticipantID(s.sessionID)); err != nil {
+	if _, err := s.hub.registrar.Close(context.Background(), s.coordinatorSession, workers.ParticipantID(s.sessionID)); err != nil {
 		t.Fatalf("close (simulate Kill/exit): %v", err)
 	}
 

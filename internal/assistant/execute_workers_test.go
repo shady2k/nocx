@@ -41,6 +41,9 @@ type fakeWorkerRecord struct {
 	acked    []int64
 	closed   []workers.ParticipantID
 	closeErr error
+	// closeResult is what Close answers on the success path — the
+	// checkout facts the closer read, for the result-shape tests.
+	closeResult workers.CloseResult
 	// readOrder records which of the two reads happened first, because the
 	// order is the whole correctness of the answer: the fetch is what clears
 	// the set, so asking after it always answers nothing.
@@ -134,12 +137,12 @@ func (f *fakeWorkerRecord) Report(_ context.Context, id workers.ParticipantID, r
 	}, nil
 }
 
-func (f *fakeWorkerRecord) Close(_ context.Context, _ string, id workers.ParticipantID) error {
+func (f *fakeWorkerRecord) Close(_ context.Context, _ string, id workers.ParticipantID) (workers.CloseResult, error) {
 	if f.closeErr != nil {
-		return f.closeErr
+		return workers.CloseResult{}, f.closeErr
 	}
 	f.closed = append(f.closed, id)
-	return nil
+	return f.closeResult, nil
 }
 
 func (f *fakeWorkerRecord) Acknowledge(_ context.Context, _, _ workers.ReaderID, through int64) error {

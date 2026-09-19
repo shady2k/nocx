@@ -26,16 +26,18 @@ type fakeCloser struct {
 	mu     sync.Mutex
 	closed []ParticipantID
 	err    error
+	// result is what the closer answers on every call, error or not —
+	// the registrar must forward it only on the success path.
+	result CloseResult
 }
 
-func (c *fakeCloser) Close(_ context.Context, p Participant) error {
+func (c *fakeCloser) Close(_ context.Context, p Participant) (CloseResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.err != nil {
-		return c.err
+	if c.err == nil {
+		c.closed = append(c.closed, p.ID)
 	}
-	c.closed = append(c.closed, p.ID)
-	return nil
+	return c.result, c.err
 }
 
 func (c *fakeCloser) seen() []ParticipantID {
@@ -65,7 +67,7 @@ func TestAClosedWorkerReadsClosed(t *testing.T) {
 	closer := withCloser(t, h)
 	p := mustRegister(t, h)
 
-	if err := h.reg.Close(ctx, coordSession, p.ID); err != nil {
+	if _, err := h.reg.Close(ctx, coordSession, p.ID); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 	if got := closer.seen(); len(got) != 1 || got[0] != p.ID {
@@ -95,10 +97,10 @@ func TestCloseIsRefusedWithoutADelegationThatCarriesIt(t *testing.T) {
 		p := mustRegister(t, h)
 		// ErrNotHeld and not ErrNotDelegated: ownership is its own fact, and
 		// the wire says a different sentence for it (nocx-e5e8q).
-		if err := h.reg.Close(ctx, "sess-somebody-else", p.ID); !errors.Is(err, ErrNotHeld) {
+		if _, err := h.reg.Close(ctx, "sess-somebody-else", p.ID); !errors.Is(err, ErrNotHeld) {
 			t.Fatalf("close by a stranger = %v, want ErrNotHeld", err)
 		}
-		if errors.Is(h.reg.Close(ctx, "sess-somebody-else", p.ID), ErrNotDelegated) {
+		if _, err := h.reg.Close(ctx, "sess-somebody-else", p.ID); errors.Is(err, ErrNotDelegated) {
 			t.Fatal("a stranger's close was reported as a delegation state, which is the caller's OWN participant's story")
 		}
 		if got := closer.seen(); len(got) != 0 {
@@ -116,7 +118,7 @@ func TestCloseIsRefusedWithoutADelegationThatCarriesIt(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("put delegation: %v", err)
 		}
-		if err := h.reg.Close(ctx, coordSession, p.ID); !errors.Is(err, ErrNotDelegated) {
+		if _, err := h.reg.Close(ctx, coordSession, p.ID); !errors.Is(err, ErrNotDelegated) {
 			t.Fatalf("close without the effect = %v, want ErrNotDelegated", err)
 		}
 		if got := closer.seen(); len(got) != 0 {
@@ -134,7 +136,7 @@ func TestCloseIsRefusedWithoutADelegationThatCarriesIt(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("put delegation: %v", err)
 		}
-		if err := h.reg.Close(ctx, coordSession, p.ID); !errors.Is(err, ErrNotDelegated) {
+		if _, err := h.reg.Close(ctx, coordSession, p.ID); !errors.Is(err, ErrNotDelegated) {
 			t.Fatalf("close under a revoked delegation = %v, want ErrNotDelegated", err)
 		}
 		if got := closer.seen(); len(got) != 0 {
@@ -159,7 +161,7 @@ func TestAHumanTakeoverDoesNotStopACoordinatorClosingItsOwnWorker(t *testing.T) 
 	}); err != nil {
 		t.Fatalf("put delegation: %v", err)
 	}
-	if err := h.reg.Close(ctx, coordSession, p.ID); err != nil {
+	if _, err := h.reg.Close(ctx, coordSession, p.ID); err != nil {
 		t.Fatalf("close under a takeover: %v", err)
 	}
 	if got := closer.seen(); len(got) != 1 {
@@ -187,7 +189,7 @@ func TestClosingAFinishedWorkerIsNotAnError(t *testing.T) {
 	p := mustRegister(t, h)
 	finish(t, h, p)
 
-	if err := h.reg.Close(ctx, coordSession, p.ID); err != nil {
+	if _, err := h.reg.Close(ctx, coordSession, p.ID); err != nil {
 		t.Fatalf("close of a finished worker: %v", err)
 	}
 	if got := closer.seen(); len(got) != 1 || got[0] != p.ID {
@@ -201,7 +203,7 @@ func TestClosingAFinishedWorkerIsNotAnError(t *testing.T) {
 func TestABackendWithNoCloserRefuses(t *testing.T) {
 	h := newHarnessBound(t, 5)
 	p := mustRegister(t, h)
-	if err := h.reg.Close(context.Background(), coordSession, p.ID); err == nil {
+	if _, err := h.reg.Close(context.Background(), coordSession, p.ID); err == nil {
 		t.Fatalf("a close with nothing wired to end anything was accepted")
 	}
 }
@@ -235,7 +237,7 @@ func TestAnEndedParticipantCanBeClosedUnderADelegationThatIsNoLongerActive(t *te
 		t.Fatalf("put delegation: %v", err)
 	}
 
-	if err := h.reg.Close(ctx, coordSession, p.ID); err != nil {
+	if _, err := h.reg.Close(ctx, coordSession, p.ID); err != nil {
 		t.Fatalf("a coordinator could not tidy up its own ended worker: %v", err)
 	}
 }
@@ -253,7 +255,7 @@ func TestALiveParticipantIsStillRefusedUnderARevokedDelegation(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("put delegation: %v", err)
 	}
-	if err := h.reg.Close(ctx, coordSession, p.ID); !errors.Is(err, ErrNotDelegated) {
+	if _, err := h.reg.Close(ctx, coordSession, p.ID); !errors.Is(err, ErrNotDelegated) {
 		t.Fatalf("close of a LIVE participant under a revoked delegation = %v, want ErrNotDelegated", err)
 	}
 	if got := closer.seen(); len(got) != 0 {

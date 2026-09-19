@@ -117,8 +117,8 @@ func (contractWorkerRecord) Acknowledge(context.Context, workers.ReaderID, worke
 	return nil
 }
 
-func (contractWorkerRecord) Close(context.Context, string, workers.ParticipantID) error {
-	return nil
+func (contractWorkerRecord) Close(context.Context, string, workers.ParticipantID) (workers.CloseResult, error) {
+	return workers.CloseResult{}, nil
 }
 
 func (contractWorkerRecord) Undispatched() []workers.Fact { return nil }

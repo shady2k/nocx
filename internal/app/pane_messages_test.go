@@ -1478,7 +1478,7 @@ func TestRevocationAfterPasteLeavesPartialAndTakesNoFurtherStep(t *testing.T) {
 	keys.onSend = func(req assistant.KeysRequest) {
 		if req.Text != nil {
 			reader.setBox(*req.Text)
-			if closeErr := registrar.Close(ctx, controller, w.Participant.ID); closeErr != nil {
+			if _, closeErr := registrar.Close(ctx, controller, w.Participant.ID); closeErr != nil {
 				t.Errorf("close (revoke) mid-delivery: %v", closeErr)
 			}
 		}
@@ -1597,7 +1597,7 @@ func TestNoDeadlockUnderConcurrentRevocation(t *testing.T) {
 			access := hub.Bind(controller, session.Identity{InstanceID: "backend-A", Epoch: 1}, EndpointAuthority{AdmissionEpoch: 1})
 			id := fmt.Sprintf("id-%d", i)
 			go func() { _, _ = pm.Send(ctx, access, sessionID, "hi", "now", id, "") }()
-			_ = registrar.Close(ctx, controller, w.Participant.ID)
+			_, _ = registrar.Close(ctx, controller, w.Participant.ID)
 		}
 	}()
 

@@ -919,20 +919,26 @@ func (r *Registrar) Undelivered(ctx context.Context, worker ID) ([]Message, erro
 // pane was minted in leaves the window, because "closing a worker closes its
 // tab" is what a close is FOR. That is the closer's own half — a tab is a row
 // of the layout chain and not a participant fact.
-func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id ParticipantID) error {
+//
+// WHAT IT ANSWERS is the closer's answer, passed through untouched: the
+// checkout the participant lived in is still on disk when it had one, and
+// what it holds is the fact the coordinator's close came for
+// (nocx-xn63t.1.3). A close that FAILED answers nothing but its error, in
+// both branches — the closer's result rides only a success.
+func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id ParticipantID) (CloseResult, error) {
 	if r.closer == nil {
-		return errors.New("worker: this backend cannot end a participant")
+		return CloseResult{}, errors.New("worker: this backend cannot end a participant")
 	}
 	del, err := r.store.Delegation(ctx, id)
 	if err != nil {
-		return err
+		return CloseResult{}, err
 	}
 	if del.ControllerSession != coordinatorSession {
-		return fmt.Errorf("worker: participant %q is held by another session: %w", id, ErrNotHeld)
+		return CloseResult{}, fmt.Errorf("worker: participant %q is held by another session: %w", id, ErrNotHeld)
 	}
 	p, err := r.store.Participant(ctx, id)
 	if err != nil {
-		return err
+		return CloseResult{}, err
 	}
 	// OWNERSHIP IS THE AUTHORITY QUESTION, AND IT IS ANSWERED ABOVE. The
 	// delegation's STATE is not a second authority to end something that is
@@ -946,7 +952,7 @@ func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id Par
 	// terminal needs no live delegation, because there is nothing left to
 	// act on.
 	if !p.State.Terminal() && !del.Permits(EffectClose) {
-		return fmt.Errorf("worker: participant %q, delegation is %s: %w", id, del.State, ErrNotDelegated)
+		return CloseResult{}, fmt.Errorf("worker: participant %q, delegation is %s: %w", id, del.State, ErrNotDelegated)
 	}
 	if p.State.Terminal() {
 		// Already finished. Not an error: a coordinator tidying up should
@@ -969,8 +975,9 @@ func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id Par
 		// so this remains the ordinary, non-error tidy-up it always was.
 		return r.closer.Close(ctx, p)
 	}
-	if err := r.closer.Close(ctx, p); err != nil {
-		return err
+	left, err := r.closer.Close(ctx, p)
+	if err != nil {
+		return CloseResult{}, err
 	}
 	// The state, and it is written only after the closer RETURNED: a close that
 	// failed ended nothing, and a record that said `closed` about a worker still
@@ -978,7 +985,7 @@ func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id Par
 	// would also leave unrevoked would make the participant look ended to the
 	// next close and unreachable to its coordinator.
 	if err := r.store.Closed(ctx, id); err != nil {
-		return fmt.Errorf("worker: record the close of %q: %w", id, err)
+		return CloseResult{}, fmt.Errorf("worker: record the close of %q: %w", id, err)
 	}
 	// §7.2's "controller closed" trigger. This revokes the AUTHORITY the
 	// instant the coordinator acts, rather than waiting for the process
@@ -993,5 +1000,5 @@ func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id Par
 		r.log.WithContext(ctx).Warn("worker: revoke after close",
 			"participant", string(id), "error", revokeErr)
 	}
-	return nil
+	return left, nil
 }

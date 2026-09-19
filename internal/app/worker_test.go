@@ -377,7 +377,7 @@ func TestTheRealSessionExitReachesTheRecord(t *testing.T) {
 		stand := newWorkerStand(t)
 		p := stand.registerWithEnrolment(t, "told to stop")
 
-		if err := stand.record.Close(ctx, "sess-coordinator", p.ID); err != nil {
+		if _, err := stand.record.Close(ctx, "sess-coordinator", p.ID); err != nil {
 			t.Fatalf("close: %v", err)
 		}
 		waittest.WaitFor(t, "the record to say why it ended", func() bool {
@@ -463,7 +463,7 @@ func TestOneCoordinatorStartsOneWorkerAndIsToldWhatHoldsIt(t *testing.T) {
 	}
 
 	// 4. The coordinator ends it.
-	if closeErr := stand.record.Close(ctx, "sess-coordinator", worker.ID); closeErr != nil {
+	if _, closeErr := stand.record.Close(ctx, "sess-coordinator", worker.ID); closeErr != nil {
 		t.Fatalf("close: %v", closeErr)
 	}
 	waittest.WaitFor(t, "the close to reach the record", func() bool {

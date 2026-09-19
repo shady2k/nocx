@@ -57,12 +57,14 @@ func TestThePaneOpenedNoteRidesEverySuccessfulOpen(t *testing.T) {
 		t.Fatalf("backend open: %v", err)
 	}
 
-	// The renderer's caller, over the wire.
+	// The renderer's caller, over the wire. The wire's open carries no cwd —
+	// a pane's directory is the layout row's fact, not a renderer argument —
+	// so the note here proves the CALLER heard about the open, and the cwd
+	// assertion stays on the backend case, whose spec carries one.
 	conn := connectWS(t, ws)
 	defer func() { _ = conn.Close() }()
-	const rendererCwd = "/repo/linked-checkout"
 	const pane = "0198f2b0-0000-7000-8000-0000000000c3"
-	raw := jsonrpcCall(t, conn, "open", map[string]any{"cols": 80, "rows": 24, "cwd": rendererCwd, "paneId": pane})
+	raw := jsonrpcCall(t, conn, "open", map[string]any{"cols": 80, "rows": 24, "paneId": pane})
 	var resp struct {
 		Error *struct {
 			Message string `json:"message"`
@@ -97,8 +99,8 @@ func TestThePaneOpenedNoteRidesEverySuccessfulOpen(t *testing.T) {
 	if notes[0].spec.Cwd != backendCwd || notes[0].sid != opened.Session.ID() {
 		t.Fatalf("backend note = %+v, want cwd %q and session %s", notes[0], backendCwd, opened.Session.ID())
 	}
-	if notes[1].spec.Cwd != rendererCwd {
-		t.Fatalf("renderer note = %+v, want cwd %q", notes[1], rendererCwd)
+	if notes[1].spec.PaneID != pane {
+		t.Fatalf("renderer note = %+v, want the pane the open named", notes[1])
 	}
 }
 

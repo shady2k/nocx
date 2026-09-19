@@ -66,7 +66,13 @@ func TestHeldWorktreesAnswersNonTerminalParticipantsAcrossSessions(t *testing.T)
 	}
 
 	// And the ended worker's checkout stops being held the moment the record
-	// knows it ended: a terminal participant holds nothing.
+	// knows it ended: a terminal participant holds nothing. The STATE is
+	// Terminalize's to write — RecordExit stores the process FACT and moves
+	// no state, which is why this fixture uses both, the way the registrar's
+	// own Exited does.
+	if termErr := s.Terminalize(ctx, held.ID, StateExited); termErr != nil {
+		t.Fatalf("terminalize: %v", termErr)
+	}
 	if _, exitErr := s.RecordExit(ctx, held.ID, Exit{Cause: "exited", Code: 0}); exitErr != nil {
 		t.Fatalf("exit: %v", exitErr)
 	}

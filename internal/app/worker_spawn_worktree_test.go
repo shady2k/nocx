@@ -578,6 +578,35 @@ func TestAWorktreeSpawnRefusesWhenAddWorktreeFails(t *testing.T) {
 	}
 }
 
+// Criterion: the coordinator standing INSIDE a linked worktree does not
+// move the key — the main checkout is the seam's Worktrees answer, and the
+// common git dir is the MAIN checkout's .git, never the linked worktree the
+// coordinator happens to be standing in.
+func TestAWorktreeSpawnFromALinkedWorktreeKeysOffTheMainCheckout(t *testing.T) {
+	repo := scriptedRepoWithMain("/main-repo", "head-hash-1", true)
+	// git lists the main checkout first even when this Repo is bound to a
+	// linked worktree — which is the whole reason the seam answers Main.
+	repo.trees = append([]git.Worktree{{
+		Path: "/main-repo-linked", Branch: "feat/linked", State: git.WorktreeReadable,
+	}}, repo.trees...)
+	stand := newWorktreeStand(t, repo)
+	coord := stand.openWorktreeCoordinator(t, "pane-coord", "/main-repo-linked", content.PaneLocal)
+
+	_, err := stand.spawner.Spawn(context.Background(), workers.SpawnRequest{
+		Participant: "p-linked", Group: "worker-1", Task: "t", Command: "run-agent",
+		CoordinatorSession: string(coord), Worktree: anAsk("feat/one"),
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	wantPath := expectedWorktreePath(stand.spawner.worktreeRoot, "/main-repo", "feat/one")
+	addCalls, _, _ := stand.repo.snapshot()
+	if len(addCalls) != 1 || addCalls[0] != "feat/one|head-hash-1|"+wantPath {
+		t.Fatalf("AddWorktree calls = %v, want the checkout keyed off the main checkout at %q",
+			addCalls, wantPath)
+	}
+}
+
 // Criterion: a repository with no commits has nothing to branch from.
 func TestAWorktreeSpawnRefusesARepositoryWithNoCommits(t *testing.T) {
 	stand := newWorktreeStand(t, scriptedRepoWithMain("/repo", "h", true))

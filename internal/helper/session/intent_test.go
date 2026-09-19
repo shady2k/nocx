@@ -28,10 +28,10 @@ import (
 // releases it (once). It is what makes a write OBSERVABLY still in flight:
 // a retry answering in_progress while genuinely blocked (tokenGate runs at
 // RECEIPT, tokens.go — never at an item's turn in the write queue), an
-// access-bump proving it waits for a queued sibling to become terminal
-// before it applies, and a commit-point commitBy check that only fires once
-// something else has occupied the writer long enough for a clock to move
-// past it.
+// access-bump proving it answers only once a queued sibling is terminal,
+// and without waiting for the write, and a commit-point commitBy check that
+// only fires once something else has occupied the writer long enough for a
+// clock to move past it.
 type blockingProcess struct {
 	*scriptedProcess
 	gate    chan struct{}
@@ -298,27 +298,36 @@ func TestABumpAcknowledgesOnlyAfterOlderIntentsAreTerminal(t *testing.T) {
 
 	bumpDone := submitBump(t, hs, 1)
 
-	// The bump cannot have resolved yet: applyAccessBump runs only on the
-	// owner's own goroutine, and that goroutine cannot reach it (or the
-	// victim behind it) while the writer is still busy with the blocked
-	// write — a structural guarantee (advance()'s own writerBusy guard),
-	// not a race against wall-clock time.
-	select {
-	case res := <-bumpDone:
-		t.Fatalf("the bump resolved (%+v) before the blocking write completed", res)
-	default:
-	}
-
-	proc.release()
-
-	victim := awaitResult(t, victimDone)
-	if victim.State != sessionruntime.IntentStateRefused || !errors.Is(victim.Err, errAccessRevoked) {
-		t.Fatalf("victim: got state=%v err=%v, want Refused/errAccessRevoked", victim.State, victim.Err)
-	}
+	// The bump answers while the blocker is STILL parked in its write — the
+	// writer is its own goroutine (runWriter, owner.go), so the owner's run
+	// loop keeps taking o.incoming during a blocked write, and a bump is
+	// applied the moment it comes off that channel (dispatchIncoming), never
+	// queued behind the writer. The blocker was committed before it reached
+	// the program, so it is not an "older uncommitted intent" and the bump
+	// does not wait for it (access.go: bounded by commitBy instead). Only
+	// proc.release, below, can let that write return.
 	bump := awaitResult(t, bumpDone)
 	if bump.Epoch != 2 {
 		t.Fatalf("bump epoch = %d, want 2", bump.Epoch)
 	}
+
+	// Acknowledged only after every older uncommitted intent is terminal:
+	// the victim's answer must ALREADY be there the instant the bump's is.
+	// This is a non-blocking receive, and not a race: both answers are sent
+	// by the owner's one goroutine into buffered channels, so a victim
+	// resolved before the bump happens-before the bump's receive above,
+	// and a victim resolved after it (or never) is absent here, always.
+	select {
+	case victim := <-victimDone:
+		if victim.State != sessionruntime.IntentStateRefused || !errors.Is(victim.Err, errAccessRevoked) {
+			t.Fatalf("victim: got state=%v err=%v, want Refused/errAccessRevoked", victim.State, victim.Err)
+		}
+	default:
+		t.Fatal("the bump was acknowledged while an older queued intent was not yet terminal")
+	}
+
+	proc.release()
+
 	blocker := awaitResult(t, blockerDone)
 	if blocker.State != sessionruntime.IntentStateExecuted {
 		t.Fatalf("blocker: got %v, err=%v, want Executed", blocker.State, blocker.Err)

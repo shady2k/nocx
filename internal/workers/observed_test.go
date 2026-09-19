@@ -151,6 +151,101 @@ func TestAFlickerShorterThanTheWindowLeavesNoFact(t *testing.T) {
 	}
 }
 
+// EVERY TRANSITION HOLDS FOR THE WINDOW, including the one AWAY from a state
+// already told (nocx-bwj3t). An idle worker's pane is repainted — text typed
+// into its box, a resize — and a sweep that reads between two pieces of the
+// paint sees a screen it cannot identify, which arrives here as working. One
+// such reading used to end the idle hold outright, so the next idle reading
+// began a new one and the coordinator was told a second time about a worker
+// that never stopped being idle: measured on ci-mac as "you have 3 new
+// messages" where two were waiting.
+func TestOneStrayReadingOfAnIdleWorkerIsNotASecondIdle(t *testing.T) {
+	const window = 3 * time.Second
+	s := newObservedStand(t, window)
+	p := mustRegister(t, s.harness)
+
+	s.mustReading(t, p, ObservedIdle)
+	s.clock.advance(window)
+	s.mustReading(t, p, ObservedIdle)
+	if got := s.mailbox(t); len(got) != 1 {
+		t.Fatalf("a settled idle pane produced %d messages, want 1: %+v", len(got), got)
+	}
+
+	// One torn frame, tens of milliseconds, then the pane is itself again.
+	s.clock.advance(50 * time.Millisecond)
+	s.mustReading(t, p, ObservedWorking)
+	s.clock.advance(50 * time.Millisecond)
+	s.mustReading(t, p, ObservedIdle)
+	s.clock.advance(10 * window)
+	s.mustReading(t, p, ObservedIdle)
+
+	if got := s.mailbox(t); len(got) != 1 {
+		t.Fatalf("one stray reading of an idle worker told the coordinator %d times, want once: %+v", len(got), got)
+	}
+}
+
+// And the paired case, so the rule above is not "idle is told once, ever": a
+// worker that really went to work — held for the window — and then settled idle
+// again is idle news twice (design §4.3).
+func TestAWorkerThatWorkedForTheWindowAndSettlesIdleIsToldAgain(t *testing.T) {
+	const window = 3 * time.Second
+	s := newObservedStand(t, window)
+	p := mustRegister(t, s.harness)
+
+	s.mustReading(t, p, ObservedIdle)
+	s.clock.advance(window)
+	s.mustReading(t, p, ObservedIdle)
+
+	s.mustReading(t, p, ObservedWorking)
+	s.clock.advance(window)
+	s.mustReading(t, p, ObservedWorking)
+
+	s.mustReading(t, p, ObservedIdle)
+	s.clock.advance(window - time.Millisecond)
+	s.mustReading(t, p, ObservedIdle)
+	if got := s.mailbox(t); len(got) != 1 {
+		t.Fatalf("the second idle was told before it had held for the window: %+v", got)
+	}
+	s.clock.advance(time.Millisecond)
+	s.mustReading(t, p, ObservedIdle)
+
+	got := s.mailbox(t)
+	if len(got) != 2 {
+		t.Fatalf("a worker that worked and settled idle again produced %d messages, want 2: %+v", len(got), got)
+	}
+	for i, m := range got {
+		if m.Observed == nil || m.Observed.State != ObservedIdle {
+			t.Fatalf("message %d is not an idle observation: %+v", i, m)
+		}
+	}
+}
+
+// A WORKING PANE RESERVES NOTHING. Working is the absence of news, so a
+// reading of it places no fact — and it must not hold the right to place one
+// either, or the exit that follows finds a reservation nobody will ever
+// settle or release, and the coordinator is never told its worker died.
+// Measured in the real-helper journey: a worker read working for the window,
+// then its process exited, and no exited row ever landed.
+func TestAWorkerReadWorkingForTheWindowStillHasItsExitTold(t *testing.T) {
+	const window = 3 * time.Second
+	s := newObservedStand(t, window)
+	p := mustRegister(t, s.harness)
+
+	s.mustReading(t, p, ObservedWorking)
+	s.clock.advance(window)
+	s.mustReading(t, p, ObservedWorking)
+	s.clock.advance(window)
+	s.mustReading(t, p, ObservedWorking)
+
+	if err := s.exit(t, p); err != nil {
+		t.Fatalf("exit: %v", err)
+	}
+	got := s.mailbox(t)
+	if len(got) != 1 || got[0].Observed == nil || got[0].Observed.State != ObservedExited {
+		t.Fatalf("a worker that was working when its process exited left %+v, want exactly the exited observation", got)
+	}
+}
+
 // ── blocked, and exited, which is not a screen reading at all ───────────────
 
 func TestAWorkerBlockedOnAMenuIsToldOnceWithTheStateTheMenuMeans(t *testing.T) {

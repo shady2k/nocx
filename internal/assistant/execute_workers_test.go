@@ -49,6 +49,17 @@ type fakeWorkerRecord struct {
 	// is what Report answers with when a case is about the failure path.
 	reported  []reportedCall
 	reportErr error
+	// survey is what LeftoverCheckouts answers, and leftoverFor records the
+	// session each ask named — the answer is about a REPOSITORY resolved
+	// from that session, and a carrier that never reported who asked could
+	// not be caught asking about a different one.
+	survey       workers.CheckoutSurvey
+	leftoversFor []string
+}
+
+func (f *fakeWorkerRecord) LeftoverCheckouts(_ context.Context, coordinatorSession string) workers.CheckoutSurvey {
+	f.leftoversFor = append(f.leftoversFor, coordinatorSession)
+	return f.survey
 }
 
 // reportedCall is one Report the double saw: which participant made it, and
@@ -483,9 +494,24 @@ func TestWorkerHoldingsResultConformsToItsContract(t *testing.T) {
 			{
 				ID: "p-1", Group: "worker-1", State: workers.StateExited, Task: "read AGENTS.md",
 			},
-			{ID: "p-2", Group: "worker-1", State: workers.StateLive, Task: "still working"},
+			{
+				ID: "p-2", Group: "worker-1", State: workers.StateLive, Task: "still working",
+				Worktree: workers.Worktree{Path: "/wt/nocx-feat", Branch: "feat/one", Base: "4f2a1c9"},
+			},
 		},
 		owed: []workers.Fact{{Participant: "p-1", Kind: workers.FactExited}},
+		// Leftovers both present and shaped, so additionalProperties: false
+		// validates every field the answer can now carry rather than a
+		// result that happens to omit them.
+		survey: workers.CheckoutSurvey{
+			Leftovers: []workers.LeftoverCheckout{{
+				Path: "/wt/nocx-gone", Branch: "feat/gone",
+				Uncommitted: true, Ahead: 2, Readable: true,
+				LastUsed: time.Date(2026, 9, 18, 10, 0, 0, 0, time.UTC),
+				Name:     "worker-9", Task: "the one that finished",
+			}},
+			Complete: true,
+		},
 		// Mail and undelivered mail both present, so additionalProperties:
 		// false is validating the shape it is actually asked about rather
 		// than a result that happens to omit the new fields.
@@ -531,6 +557,9 @@ func TestWorkerHoldingsResultConformsToItsContract(t *testing.T) {
 	}
 	if !strings.Contains(raw, `"mail"`) || !strings.Contains(raw, `"undeliveredMail"`) {
 		t.Fatalf("the result carries no mail, so the schema check proved nothing about it: %s", raw)
+	}
+	if !strings.Contains(raw, `"leftoverCheckouts"`) || !strings.Contains(raw, `"checkoutsComplete":true`) {
+		t.Fatalf("the result carries no checkout answer, so the schema check proved nothing about it: %s", raw)
 	}
 }
 
@@ -992,4 +1021,252 @@ func TestCloseRefusalsReachTheCoordinator(t *testing.T) {
 			t.Fatal("a close without a record was accepted")
 		}
 	})
+}
+
+// ── the checkouts the repository has left over (nocx-xn63t.1.4) ───────────
+
+// Criterion: the survey rides the answer whole — the rows as the record's
+// vocabulary spells them, the zero last-used as ABSENT rather than as a date
+// in 1970 — and a participant that holds a checkout is named as its holder,
+// which is why that checkout is not in the leftover list beside it.
+func TestWorkerHoldingsCarriesTheLeftoverCheckouts(t *testing.T) {
+	rec := &fakeWorkerRecord{
+		held: []workers.Participant{
+			{
+				ID: "p-1", State: workers.StateLive, Task: "working",
+				Worktree: workers.Worktree{Path: "/wt/nocx-held", Branch: "feat/held"},
+			},
+		},
+		survey: workers.CheckoutSurvey{
+			Leftovers: []workers.LeftoverCheckout{
+				{
+					Path: "/wt/nocx-gone", Branch: "feat/gone",
+					Uncommitted: true, Ahead: 2, Readable: true,
+					LastUsed: time.Date(2026, 9, 18, 10, 0, 0, 0, time.UTC),
+					Name:     "worker-9", Task: "the one that finished",
+				},
+				{Path: "/wt/nocx-dark", Branch: "feat/dark", Readable: false},
+			},
+			Complete: true,
+		},
+	}
+	out, err := executeWorkerHoldings(context.Background(),
+		testCoordinator("sess-coordinator", testWorkerEnv), nil, workerSeams(rec))
+	if err != nil {
+		t.Fatalf("holdings: %v", err)
+	}
+	// The ask named the run's OWN session — the repository is resolved from
+	// it and never from an argument, which is D3's rule at the new read too.
+	if len(rec.leftoversFor) != 1 || rec.leftoversFor[0] != "sess-coordinator" {
+		t.Fatalf("the survey was asked about %v, want the run's own session", rec.leftoversFor)
+	}
+	var got workerHoldingsResult
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("unmarshal: %v (%s)", err, out)
+	}
+	if !got.CheckoutsComplete {
+		t.Fatalf("checkoutsComplete = false for a survey that read whole")
+	}
+	if len(got.LeftoverCheckouts) != 2 {
+		t.Fatalf("leftovers = %+v, want both rows", got.LeftoverCheckouts)
+	}
+	first := got.LeftoverCheckouts[0]
+	if first.Path != "/wt/nocx-gone" || !first.Uncommitted || first.Ahead != 2 || !first.Readable {
+		t.Fatalf("first leftover = %+v, want the readable row's own facts", first)
+	}
+	if first.LastUsed != "2026-09-18T10:00:00Z" {
+		t.Fatalf("lastUsed = %q, want UTC RFC 3339", first.LastUsed)
+	}
+	if first.Name != "worker-9" || first.Task != "the one that finished" {
+		t.Fatalf("first leftover = %+v, want the worker it was for", first)
+	}
+	// "Could not read" is not "clean", and a zero last-used is not 1970.
+	second := got.LeftoverCheckouts[1]
+	if second.Readable || second.Uncommitted || second.Ahead != 0 || second.LastUsed != "" {
+		t.Fatalf("unreadable leftover = %+v, want no answer where none was read", second)
+	}
+	// The holder is named where it lives — beside its worker, never in the
+	// leftover list beside it.
+	if got.Participants[0].Worktree == nil || got.Participants[0].Worktree.Path != "/wt/nocx-held" {
+		t.Fatalf("participant worktree = %+v, want the held checkout named", got.Participants[0].Worktree)
+	}
+	for _, l := range got.LeftoverCheckouts {
+		if l.Path == "/wt/nocx-held" {
+			t.Fatalf("the held checkout %q appeared as left over", l.Path)
+		}
+	}
+}
+
+// Criterion: a read behind the list that FAILED is an answer marked
+// incomplete, not an error and not a short list standing as the truth — the
+// one answer this surface must never give is "no leftovers" when the record
+// could not be read at all.
+func TestWorkerHoldingsMarksTheListIncompleteWhenTheReadFailed(t *testing.T) {
+	rec := &fakeWorkerRecord{
+		survey: workers.CheckoutSurvey{Complete: false},
+	}
+	out, err := executeWorkerHoldings(context.Background(),
+		testCoordinator("sess-coordinator", testWorkerEnv), nil, workerSeams(rec))
+	if err != nil {
+		t.Fatalf("holdings: %v — an incomplete read is still an answer", err)
+	}
+	var got workerHoldingsResult
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("unmarshal: %v (%s)", err, out)
+	}
+	if got.CheckoutsComplete {
+		t.Fatalf("checkoutsComplete = true for a survey that could not read; %s", out)
+	}
+	if len(got.LeftoverCheckouts) != 0 {
+		t.Fatalf("leftovers = %+v, want the empty list the failed read earned", got.LeftoverCheckouts)
+	}
+}
+
+// Criterion: the spawn result counts what is left over, and the count's own
+// honesty flag rides with it — so a coordinator that never asks holdings
+// still hears that its repository has checkouts standing.
+func TestWorkerSpawnCarriesTheLeftoverCount(t *testing.T) {
+	rec := &fakeWorkerRecord{
+		registerFn: func(workers.RegisterRequest) (workers.Participant, error) {
+			return workers.Participant{
+				ID: "p-1", State: workers.StateLive,
+				Worktree: workers.Worktree{Path: "/wt/nocx-new", Branch: "feat/new", Base: "4f2a1c9"},
+			}, nil
+		},
+		survey: workers.CheckoutSurvey{
+			Leftovers: []workers.LeftoverCheckout{
+				{Path: "/wt/nocx-old", Branch: "feat/old", Readable: true},
+			},
+			Complete: true,
+		},
+	}
+	out, err := executeWorkerSpawn(context.Background(),
+		testCoordinator("sess-coordinator", testWorkerEnv),
+		json.RawMessage(`{"command":"claude","task":"read it","worktree":{"branch":"feat/new"}}`),
+		workerSeams(rec))
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if len(rec.leftoversFor) != 1 || rec.leftoversFor[0] != "sess-coordinator" {
+		t.Fatalf("the survey was asked about %v, want the run's own session", rec.leftoversFor)
+	}
+	var got workerSpawnResult
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("unmarshal: %v (%s)", err, out)
+	}
+	if got.LeftoverCheckouts != 1 {
+		t.Fatalf("leftoverCheckouts = %d, want 1 — the checkout this spawn made is held, not counted", got.LeftoverCheckouts)
+	}
+	if !got.CheckoutsComplete {
+		t.Fatal("checkoutsComplete = false for a survey that read whole")
+	}
+}
+
+// Criterion: the same is true off the REAL dispatcher — schema, narrow and
+// executor together — with a count the double answered, so the check is
+// about a shape that happened rather than an absence.
+func TestWorkerSpawnLeftoverCount_OverTheWireConformsToContract(t *testing.T) {
+	reg, err := agenttools.Assemble(toolsDirFS(t))
+	if err != nil {
+		t.Fatalf("assemble tools: %v", err)
+	}
+	rec := &fakeWorkerRecord{
+		survey: workers.CheckoutSurvey{Complete: true},
+	}
+	dispatcher, err := NewToolDispatcher(reg, rec, content.EnvironmentIDFor(content.EnvLocal, ""))
+	if err != nil {
+		t.Fatalf("new dispatcher: %v", err)
+	}
+	out, dispatchErr := dispatcher.Dispatch(ToolInvocation{
+		Context: context.Background(),
+		Method:  "workers.spawn",
+		RunContext: agenttools.RunContext{
+			RunID: "run-1", Session: "sess-coordinator",
+		},
+		Grant:     workerGrantForTest(),
+		RawParams: json.RawMessage(`{"command":"claude","task":"read it"}`),
+	})
+	if dispatchErr != nil {
+		t.Fatalf("dispatch workers.spawn: %v", dispatchErr)
+	}
+	var value any
+	if unmarshalErr := json.Unmarshal([]byte(out), &value); unmarshalErr != nil {
+		t.Fatalf("decode result: %v", unmarshalErr)
+	}
+	if validateErr := workerSpawnResultSchema(t).Validate(value); validateErr != nil {
+		t.Fatalf("workers.spawn result off the real dispatcher does not satisfy its contract: %v\npayload: %s", validateErr, out)
+	}
+	var got workerSpawnResult
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("unmarshal: %v (%s)", err, out)
+	}
+	if !got.CheckoutsComplete {
+		t.Fatalf("checkoutsComplete = false off the dispatcher for a survey that read whole: %s", out)
+	}
+}
+
+// Criterion: the holdings answer satisfies its contract off the REAL
+// dispatcher with a survey behind it — the third check, which no payload the
+// test built for itself can make.
+func TestWorkerHoldings_OverTheWireConformsToContract(t *testing.T) {
+	reg, err := agenttools.Assemble(toolsDirFS(t))
+	if err != nil {
+		t.Fatalf("assemble tools: %v", err)
+	}
+	rec := &fakeWorkerRecord{
+		survey: workers.CheckoutSurvey{
+			Leftovers: []workers.LeftoverCheckout{{
+				Path: "/wt/nocx-gone", Branch: "feat/gone", Readable: true,
+			}},
+			Complete: true,
+		},
+	}
+	dispatcher, err := NewToolDispatcher(reg, rec, content.EnvironmentIDFor(content.EnvLocal, ""))
+	if err != nil {
+		t.Fatalf("new dispatcher: %v", err)
+	}
+	// The session this invocation names is the one the grant scopes: the
+	// dispatcher resolves holdings' resource FROM the run context, and a
+	// session the grant does not name never reaches the executor at all.
+	out, dispatchErr := dispatcher.Dispatch(ToolInvocation{
+		Context: context.Background(),
+		Method:  "workers.holdings",
+		RunContext: agenttools.RunContext{
+			RunID: "run-1", Session: "session-1",
+		},
+		Grant:     workerGrantForTest(),
+		RawParams: json.RawMessage(`{}`),
+	})
+	if dispatchErr != nil {
+		t.Fatalf("dispatch workers.holdings: %v", dispatchErr)
+	}
+	var value any
+	if unmarshalErr := json.Unmarshal([]byte(out), &value); unmarshalErr != nil {
+		t.Fatalf("decode result: %v", unmarshalErr)
+	}
+	// The holdings schema, compiled the way the spawn schema's own test
+	// compiles it: the result definition out of the contract file itself.
+	c := jsonschema.NewCompiler()
+	doc, readErr := os.ReadFile("../../contracts/tools/workers.holdings.schema.json")
+	if readErr != nil {
+		t.Fatalf("read schema: %v", readErr)
+	}
+	parsed, parseErr := jsonschema.UnmarshalJSON(strings.NewReader(string(doc)))
+	if parseErr != nil {
+		t.Fatalf("parse schema: %v", parseErr)
+	}
+	const id = "https://nocx.local/contracts/tools/workers.holdings.schema.json"
+	if addErr := c.AddResource(id, parsed); addErr != nil {
+		t.Fatalf("add resource: %v", addErr)
+	}
+	schema, compileErr := c.Compile(id + "#/$defs/result")
+	if compileErr != nil {
+		t.Fatalf("compile: %v", compileErr)
+	}
+	if validateErr := schema.Validate(value); validateErr != nil {
+		t.Fatalf("workers.holdings result off the real dispatcher does not satisfy its contract: %v\npayload: %s", validateErr, out)
+	}
+	if !strings.Contains(out, `"checkoutsComplete":true`) {
+		t.Fatalf("the off-the-wire answer carries no complete flag: %s", out)
+	}
 }

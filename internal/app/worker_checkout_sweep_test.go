@@ -596,3 +596,36 @@ func TestTheSweepNeverAgesACheckoutWhoseLastUseIsUnknown(t *testing.T) {
 		t.Fatalf("rows = %+v, %v; want the unstamped row kept", rows, err)
 	}
 }
+
+// Criterion, the producer-mix shape on the sweep: a hold the record spells
+// through the symlinked ancestor must still hold — the pass answers
+// held-by-worker and keeps the checkout, never removes a live worker's
+// checkout because two producers spelled the path differently.
+func TestTheSweepHoldsACheckoutWhoseHoldIsSpelledThroughASymlink(t *testing.T) {
+	repoDir, _ := initRealRepo(t)
+	stand := newCheckoutStand(t)
+	root := symlinkedWorktreeRoot(t)
+	stand.checkouts.worktreeRoot = root
+	stand.spawner.worktreeRoot = root
+	repoLink := symlinkedDir(t, repoDir)
+	coordA := stand.openCoordinator(t, "pane-a", repoLink)
+	stand.spawnCheckoutWorker(t, coordA, "worker-1", "feat/one", "t")
+	checkout := expectedWorktreePath(root, repoLink, "feat/one")
+	key := nocxCheckoutRepoKey(repoLink)
+	ageCheckout(t, stand, key, checkout, sweepNow.Add(-31*24*time.Hour))
+
+	stand.holdCheckout(t, "worker-1", string(coordA), symlinkedDir(t, checkout), "feat/one")
+
+	newSweeper(stand, 30*24*time.Hour).RunOnce(context.Background())
+
+	if checkoutGone(t, checkout) {
+		t.Fatalf("the sweep removed the checkout at %q whose hold was recorded under the link spelling", checkout)
+	}
+	// A record-HELD checkout is not a leftover at all — Leftovers excludes
+	// it the way TestALiveWorkersCheckoutIsNotLeftOver pins — so the kept
+	// answer is "kept and not listed", and the pass's note stays internal.
+	survey := stand.checkouts.Leftovers(context.Background(), string(coordA))
+	if !survey.Complete || len(survey.Leftovers) != 0 {
+		t.Fatalf("holdings = %+v; want nothing left over: a checkout a live worker holds is not a leftover", survey)
+	}
+}

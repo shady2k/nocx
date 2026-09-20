@@ -173,9 +173,13 @@ func (s *checkoutSweeper) RunOnce(ctx context.Context) {
 			"error", err)
 		return
 	}
+	// The held paths are keyed CANONICAL: the record's held answer is a
+	// DIFFERENT PRODUCER from git's listing, and a raw-keyed miss here
+	// removes a checkout a live worker holds because two producers spelled
+	// the path differently (nocx-xn63t.1.6 audit).
 	heldPaths := make(map[string]bool, len(held))
 	for _, wt := range held {
-		heldPaths[wt.Path] = true
+		heldPaths[nocxCanonicalPath(wt.Path)] = true
 	}
 
 	now := s.clock()

@@ -292,7 +292,7 @@ var _ Process = (*ownerFakeProcess)(nil)
 // needs to inspect state before the first event can do so race-free.
 func newTestOwner(t *testing.T, proc Process) (*sessionOwner, *sessionruntime.Session) {
 	t.Helper()
-	rt, screen, err := newSessionRuntime(defaultScreen, proc, "owner-test-session", 80, 24)
+	rt, screen, err := newSessionRuntime(defaultScreen, proc, "owner-test-session", 80, 24, 0, nil)
 	if err != nil {
 		t.Fatalf("build the runtime under test: %v", err)
 	}

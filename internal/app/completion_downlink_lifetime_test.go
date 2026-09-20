@@ -13,6 +13,19 @@ package app
 // completed and the pane's own runtime agrees, instead of disk saying one
 // thing and helper memory waiting for an authentication that never comes.
 //
+// WHAT IS NOT JUDGED HERE, and why (2026-09-20, review round 2). The
+// downlink's own STOP — a completion observed after the session ended being
+// delivered nowhere — was asserted in this file and could never have been:
+// the mutation that removes the session's end from the downlink's lifetime
+// leaves the assertion green with two seconds to spare, because by then the
+// coordinator ingests nothing on that pane at all. The shell's write still
+// succeeds into a buffer nobody reads, so there is no edge on this side that
+// proves the guard was reached, and a negative asserted without one is a
+// test that cannot fail. The stop is judged where its input can actually
+// arrive, on the downlink's own seam: internal/helper/client's
+// TestADownlinkStoppedByItsContextReportsAndLeavesTheKernelState and
+// TestADeliveryOnTheWireFinishesAndTheNextOneNeverStarts.
+//
 // THE OBSERVABLE is the `lifecycle-complete` op arriving at the helper's
 // session service (the recording fronts below), the same seam
 // internal/helper/client's own tests record at — here it is reached over the
@@ -38,6 +51,10 @@ import (
 	helpersession "github.com/shady2k/nocx/internal/helper/session"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclecodec"
+	"github.com/shady2k/nocx/internal/lifecyclepub"
+	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage/storagetest"
 	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/waittest"
@@ -199,30 +216,6 @@ func (s *shellSide) sendRefusedEpoch(t *testing.T, evt lifecycle.Event, fence li
 	case <-time.After(10 * time.Second):
 		t.Fatalf("the shell's refused %s was never read by anything", evt.Kind)
 	}
-}
-
-// sendSoft writes like send but tolerates a channel that is already gone.
-func (s *shellSide) sendSoft(t *testing.T, evt lifecycle.Event) {
-	t.Helper()
-	var capability lifecycle.Capability
-	raw, err := hex.DecodeString(s.launch.Capability)
-	if err != nil || len(raw) != len(capability) {
-		t.Fatalf("the launch capability is not 32 hex bytes: %q", s.launch.Capability)
-	}
-	copy(capability[:], raw)
-	s.seq++
-	env := lifecycle.Envelope{
-		Version:    lifecycle.ProtocolVersion,
-		Lane:       lifecycle.LaneID(s.launch.Lane),
-		Domain:     lifecycle.DomainID(s.launch.Domain),
-		Epoch:      s.launch.Epoch,
-		Sequence:   s.seq,
-		Capability: capability,
-		Event:      evt,
-	}
-	go func() {
-		_, _ = lifecyclecodec.Encode(s.conn, env)
-	}()
 }
 
 // completeCommand is one full command the shell runs, in the two events the
@@ -412,71 +405,84 @@ func TestACompletionAfterAReadoptedRestartReachesTheHelperOnTheLocalRoute(t *tes
 
 // ── criterion 3: when the hosted session really ends, the downlink stops ──
 
-// TestACompletionAfterTheHostedSessionEndsDeliversNothingMore: while the
-// hosted session lives, a post-disconnect completion reaches the runtime
-// (criterion 1, again, so the stop below is proven against a downlink that
-// demonstrably works); when the session really ends — the detach a shutdown
-// performs — a completion after that is delivered nowhere. The report seam's
-// own answer to a stopped downlink is judged at the seam that owns it, in
-// internal/helper/client.
-func TestACompletionAfterTheHostedSessionEndsDeliversNothingMore(t *testing.T) {
-	home := storagetest.IsolateWithHome(t)
-	src := fakeArtifacts{payload: syntheticPayload}
-	ep := startLifecycleLocalEndpoint(t, endpoint.Dir(home), src.hash())
+// ── criterion 1, the other route a fresh pane can take ────────────────────
 
+// TestACompletionOnAFreshFarHelperPaneReachesTheHelperRuntime is the same
+// criterion on the REMOTE open: a pane opened on another machine's helper,
+// through the shipped composition (helperRegistry.OpenHosted →
+// openHoldingLease's DesiredHelper arm → openFarHelper), with the renderer
+// dropping exactly as it does locally.
+//
+// It is a separate test because it is a separate WIRING, and that is what
+// the local test cannot report: openFarHelper built its lifecycle stream
+// straight over the coordinator's kernel, with no downlink, no observing
+// wrapper and no bind — so a command completed on a far host was
+// authenticated here and never travelled down to the runtime that owns the
+// pane. The fence then sat in the far helper waiting for an authentication
+// that had already happened somewhere else.
+func TestACompletionOnAFreshFarHelperPaneReachesTheHelperRuntime(t *testing.T) {
+	spawner := &lifecycleSpawner{}
+	svc := helperWithIntegratedShells(t, spawner)
+	rec := &recordingCompletions{Service: svc, arrived: make(chan struct{}, 16)}
+	provider := &fakeLaneProvider{peer: sharedRecordingPeer(t, svc, rec)}
+
+	source := stubArtifacts(t)
+	store, installs := testConsentStores(t)
+	_, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	reg.registry = session.New(log.NewSlogAdapter(discardLogger(t)), nil)
+	pub := lifecyclepub.New(lifecycle.New(lifecycle.Options{}))
+	emitter := &recordingEmitter{}
+	pub.SetEmitter(emitter)
+	reg.lifecycle = pub
+
+	// THE REQUEST CONTEXT, as production holds it for a remote open too.
 	openCtx, disconnect := context.WithCancel(context.Background())
-	first := bootLocalAppOn(t, src)
-	opened, err := first.Transport.OpenSession(openCtx, transport.OpenSpec{Cols: 80, Rows: 24})
+	opened, selected, err := reg.OpenHosted(openCtx, session.Config{
+		Kind: session.KindRemote, Host: "host.example", Cwd: t.TempDir(),
+		PaneID: "pane-far-1", ProfileID: "profile-1",
+		Remote: &ssh.ConnectConfig{User: "u", DesiredMode: "helper"},
+	}, "")
 	if err != nil {
-		t.Fatalf("open a local pane through the shipped opener: %v", err)
+		t.Fatalf("opening a far-helper pane through the shipped opener: %v", err)
 	}
+	if !selected {
+		t.Fatal("the helper was not selected for a consented machine — the harness is not exercising the far route")
+	}
+	if opened.StartLifecycle == nil {
+		t.Fatal("the far open carried no lifecycle lane to start")
+	}
+	opened.StartLifecycle()
+	t.Cleanup(func() {
+		if opened.AbortLifecycle != nil {
+			opened.AbortLifecycle()
+		}
+	})
 	sid := opened.Session.ID()
+
+	// THE RENDERER'S CONNECTION DROPS; the far pane lives on (AD-9).
 	disconnect()
 
-	shell, _ := ep.spawner.theShell(t)
+	shell, _ := spawner.theShell(t)
 	shell.drain()
 	shell.send(t, lifecycle.Event{Kind: lifecycle.KindHello, Hello: &lifecycle.Hello{Shell: "bash"}})
-	completeCommand(t, shell, "while-alive", lifecycle.FenceNonce{1, 1, 1})
-	awaitArrival(t, ep.rec)
-
-	// THE HOSTED SESSION REALLY ENDS. Reg.Close is the detach a shutdown
-	// performs: the pane's pipe is released, the session's Done closes — the
-	// same edge the transport's own teardown owner waits on — while the
-	// daemon keeps the shell for a later coordinator.
-	if err := first.Session.Close(sid); err != nil {
-		t.Fatalf("end the hosted session: %v", err)
-	}
-	if _, err := first.Session.Get(sid); err == nil {
-		t.Fatal("the session outlived its own end in the registry")
-	}
-
-	// A COMPLETION AFTER THE END is delivered nowhere. The shell may still
-	// manage to hand the daemon a frame, or find its channel already gone —
-	// the session's end races nothing here, because both answers mean the
-	// same thing — but the session this downlink served is over and nothing
-	// may land.
-	completeCommandSoft(t, shell, "after-the-end", lifecycle.FenceNonce{2, 2, 2})
-	if got := ep.rec.received(); len(got) != 1 {
-		t.Fatalf("%d completions reached the helper session, want only the one delivered while it lived: %+v",
-			len(got), got)
-	}
-}
-
-// completeCommandSoft is completeCommand for a shell whose channel the
-// session's end may already have taken: the fact under test is that nothing
-// LANDS, not that the write succeeded.
-func completeCommandSoft(t *testing.T, shell *shellSide, id string, fence lifecycle.FenceNonce) {
-	t.Helper()
-	attempt := lifecycle.AttemptID(id)
-	shell.sendSoft(t, lifecycle.Event{
-		Kind: lifecycle.KindStart, Start: &lifecycle.Start{AttemptID: &attempt, Command: "make"},
+	waittest.WaitFor(t, "the far shell integrated with this coordinator", func() bool {
+		return len(emitter.any()) > 0
 	})
-	code := 0
-	shell.sendSoft(t, lifecycle.Event{
-		Kind: lifecycle.KindComplete,
-		Complete: &lifecycle.Complete{
-			ExitCode: &code,
-			Fence:    fence,
-		},
-	})
+
+	fence := lifecycle.FenceNonce{4, 5, 6}
+	completeCommand(t, shell, "after-far-open", fence)
+
+	got := awaitArrival(t, rec)
+	if len(rec.received()) != 1 {
+		t.Fatalf("%d completions reached the far daemon for one accepted finish, want exactly 1", len(rec.received()))
+	}
+	if got.Session.Session != string(sid) {
+		t.Fatalf("the completion named session %q, want the far pane's own %q", got.Session.Session, sid)
+	}
+	if got.Nonce != hex.EncodeToString(fence[:]) {
+		t.Fatalf("the completion's nonce was %q, want the accepted fence %x", got.Nonce, fence)
+	}
+	if got.ExitCode == nil || *got.ExitCode != 0 {
+		t.Fatalf("the completion's exit code was %v, want the shell's 0", got.ExitCode)
+	}
 }

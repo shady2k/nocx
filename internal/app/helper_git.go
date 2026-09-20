@@ -936,16 +936,46 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 	var lifecycleAdapter *lifecyclechannel.Adapter
 	var lifecyclePeer net.Conn
 	var lifecycleLaunch *proto.LifecycleLaunch
+	// THE COMPLETION DOWNLINK, on the remote route (helper_hosted.go carries
+	// the full reasoning). The lifecycle channel is authenticated HERE, in
+	// this coordinator's kernel, while the emulator and the rendezvous live
+	// in the helper — and on this route that helper is on ANOTHER MACHINE,
+	// which changes nothing about the obligation: each already-authenticated
+	// completion is carried down to the session that owns the pane, or the
+	// far runtime waits forever for an authentication that already happened
+	// here. The wrapper is built before the spawn and bound when the spawn
+	// RPC answers, because a shell that completes a command inside that
+	// window is accepted while the far session's identity is still unknown.
+	var downlink *client.CompletionDownlink
+	// stopDownlink ends the delivery context; nil with the downlink. Its two
+	// ends are endLifecycleLeg's rollback and the pane's own end.
+	var stopDownlink context.CancelFunc
 	if r.lifecycle != nil {
+		// THE DELIVERY CONTEXT IS THE PANE'S LIFETIME, not this request's:
+		// the request context dies with the renderer's socket while the PTY
+		// deliberately lives on (AD-9). WithoutCancel keeps its values and
+		// drops its cancellation.
+		sessionCtx, cancelSession := context.WithCancel(context.WithoutCancel(ctx))
+		stopDownlink = cancelSession
+		downlink = client.NewCompletionDownlink(c, sessionCtx, func(err error) {
+			// The kernel's execution state stands exactly as it set it; the
+			// report is the whole of a failed delivery's handling.
+			log.NewSlogAdapter(r.log).WithContext(ctx).Warn(
+				"far helper: the completion the kernel accepted did not reach the helper session",
+				"host", cfg.Host, "err", err)
+		})
+		driveKernel := client.NewCompletionObservingKernel(r.lifecycle, downlink)
+
 		coordinatorConn, peerConn := net.Pipe()
 		var lifecycleErr error
 		// The caller's exchange, for the reason helper_hosted.go gives.
 		lifecycleAdapter, lifecycleErr = lifecyclechannel.NewStream(
-			log.NewSlogAdapter(r.log).WithContext(ctx), r.lifecycle, coordinatorConn,
+			log.NewSlogAdapter(r.log).WithContext(ctx), driveKernel, coordinatorConn,
 			lifecyclechannel.WithLossReporter(r.reportLifecycleLoss),
 		)
 		if lifecycleErr != nil {
 			_ = peerConn.Close()
+			stopDownlink()
 			_ = c.Close()
 			return transport.HostedSessionOpen{}, true, lifecycleErr
 		}
@@ -954,6 +984,20 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		lifecycleLaunch = &proto.LifecycleLaunch{
 			Lane: string(launch.Lane), Domain: string(launch.Domain),
 			Epoch: launch.Epoch, Capability: launch.Capability, Recovery: launch.Recovery,
+		}
+	}
+	// endLifecycleLeg rolls back everything this open built for the lifecycle
+	// plane. The downlink ends WITH the adapter and never after it: an open
+	// that never became a pane has no session to deliver to, and a delivery
+	// context outliving its pane is the lifetime this package refuses to
+	// keep. One function, so no arm below can roll back half of it.
+	endLifecycleLeg := func() {
+		if lifecycleAdapter != nil {
+			_ = lifecycleAdapter.Close()
+			_ = lifecyclePeer.Close()
+		}
+		if stopDownlink != nil {
+			stopDownlink()
 		}
 	}
 	// THE PANE'S TOOL SURFACE IS RESOLVED BEFORE ITS SPAWN, because the launch
@@ -1002,12 +1046,14 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		AgentToolToken: toolToken,
 	})
 	if err != nil {
-		if lifecycleAdapter != nil {
-			_ = lifecycleAdapter.Close()
-			_ = lifecyclePeer.Close()
-		}
+		endLifecycleLeg()
 		_ = c.Close()
 		return transport.HostedSessionOpen{}, true, err
+	}
+	// THE SPAWN NAMED THE FAR SESSION: everything the kernel accepted while
+	// it was unknown is delivered now, in acceptance order.
+	if downlink != nil {
+		downlink.Bind(entry.HostSessionID)
 	}
 	attached, err := c.Attach(ctx, proto.AttachParams{
 		Subscriber: subscriber,
@@ -1019,10 +1065,7 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		LifecycleOffset: 0, LifecycleFresh: true, RequestWrite: true,
 	})
 	if err != nil {
-		if lifecycleAdapter != nil {
-			_ = lifecycleAdapter.Close()
-			_ = lifecyclePeer.Close()
-		}
+		endLifecycleLeg()
 		_ = c.CloseSession(ctx, entry.HostSessionID)
 		_ = c.Close()
 		return transport.HostedSessionOpen{}, true, err
@@ -1032,10 +1075,7 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 	sess, err := r.registry.Adopt(ctx, cfg, sid, attached)
 	if err != nil {
 		_ = attached.Close()
-		if lifecycleAdapter != nil {
-			_ = lifecycleAdapter.Close()
-			_ = lifecyclePeer.Close()
-		}
+		endLifecycleLeg()
 		_ = c.CloseSession(ctx, entry.HostSessionID)
 		_ = c.Close()
 		return transport.HostedSessionOpen{}, true, err
@@ -1138,11 +1178,14 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		}
 		var abortOnce sync.Once
 		abortLifecycle = func() {
-			abortOnce.Do(func() {
-				_ = lifecycleAdapter.Close()
-				_ = lifecyclePeer.Close()
-			})
+			abortOnce.Do(endLifecycleLeg)
 		}
+	}
+	// THE DOWNLINK'S OTHER END: the pane's own. sess.Done() is the edge the
+	// transport's teardown owner already waits on, so the delivery context
+	// hangs off it rather than owning a lifetime of its own.
+	if stopDownlink != nil {
+		bindDownlinkToSession(sess, stopDownlink)
 	}
 	return transport.HostedSessionOpen{
 		Session: sess, Host: cfg.Host, Account: f.account, Generation: installed.generation,

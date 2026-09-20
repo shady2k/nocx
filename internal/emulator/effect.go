@@ -43,13 +43,27 @@ const (
 	// the surface that has a filesystem to compare it against, which the
 	// emulator does not.
 	EffectCwdReport
+	// EffectFence is the shell's render fence (ADR-0024 §7 carve-out): OSC
+	// 1337 with the exact payload NOCX_FENCE;<64 lowercase hex>, written to
+	// the pty after a command's output. Body is the nonce exactly as the
+	// stream carried it (the 64 hex chars, undecoded — which bytes they are
+	// is the wire's, and decoding is the consumer's); Source is the text of
+	// the screen rows the fence was drawn over, captured at the moment the
+	// fence completed.
+	//
+	// A fence LOCATES an event that was authenticated elsewhere and authorises
+	// nothing: completing a command, closing a block and choosing an endpoint
+	// are decisions for the authenticated half of the handshake, and a fence
+	// with no authenticated event behind it does nothing (ADR-0024 decision
+	// 1). The content is pinned rather than a row number because later output
+	// can overwrite or scroll those rows before the authenticated half
+	// arrives, and the content must not change when it does.
+	EffectFence
 )
 
 // Effect is one non-visual effect the program asked for: a thing that
-// changes no cell. Body is the effect's argument, copied out of the
-// emulator: the title for a title, the clipboard payload for a clipboard
-// write, the reported directory for a cwd report, the message text for a
-// notification request. Kind is never EffectNone.
+// changes no cell. What each field carries is the kind's to say — see
+// [EffectKind] — and Kind is never EffectNone.
 //
 // # Why a list and not a callback
 //
@@ -61,11 +75,16 @@ const (
 // therefore accumulate and are DRAINED: the runtime reads the list when it is
 // ready to act, each effect once, oldest first.
 //
-// Body is copied before it is stored. The emulator's callbacks receive borrowed
-// memory that dies when the call returns, so an implementation that kept the
-// pointer would hand a caller a title that was freed a moment ago — and the
-// caller could not tell.
+// Body and Source are copied before they are stored. The emulator's callbacks
+// receive borrowed memory that dies when the call returns, so an
+// implementation that kept the pointer would hand a caller a title that was
+// freed a moment ago — and the caller could not tell.
 type Effect struct {
 	Kind EffectKind
 	Body []byte
+	// Source is the content an EffectFence was drawn over: the text of the
+	// screen rows at the fence, captured when the fence completed. Nil for
+	// every other kind, and never read except through Kind — a consumer
+	// branches on the kind first, exactly as it does for Body's meaning.
+	Source []byte
 }

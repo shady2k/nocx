@@ -208,6 +208,52 @@ func TestLedgerOpenBindClose_WalksThePhasesOverTheWire(t *testing.T) {
 	}
 }
 
+// Keep-history-off reaches the renderer's own wire path too: the projections
+// send ledger.bind for every editor submit (terminal-content.ts, fire-and-
+// forget with a warn log). A bind or close whose row the store refused is
+// REFUSED — the contract's success ack requires seq >= 1, the row's
+// ingest_seq, and no schema-legal ack describes a row that does not exist —
+// and nothing is started or finished, because StartExecution would refuse an
+// entry that does not exist. The renderer swallows the refusal by design, so
+// the command is unaffected.
+func TestLedgerBindAndClose_HistoryOffRefusesAndWritesNothing(t *testing.T) {
+	policy := content.NewPolicy()
+	policy.SetEnabled(false)
+	db := newLedgerStoreWithPolicy(t, policy)
+	ws, stop := newLedgerWSServer(t, log.NewSlogAdapter(nil), db)
+	defer stop()
+	conn := connectWS(t, ws)
+	sid := openLocalSession(t, conn)
+
+	// The renderer's own flow: a bind for an id the submit no longer opened.
+	_, errObj := ledgerCall(t, conn, "ledger.bind", map[string]any{
+		"envelope": ledgerBindEnv(sid, "entry-off-1", "deploy prod", 1),
+	}, 2)
+	if errObj == nil {
+		t.Fatal("ledger.bind with history off succeeded — no schema-legal ack exists for a row that was not written")
+	}
+	if errObj.Code != -32603 || !strings.Contains(errObj.Message, "history is off") {
+		t.Fatalf("bind error = %+v, want the history-off refusal", errObj)
+	}
+
+	// A close for an id nobody opened: refused the same way, nothing created.
+	_, errObj = ledgerCall(t, conn, "ledger.close", map[string]any{
+		"envelope":   ledgerEnv(sid, "entry-off-2", "deploy prod", 2),
+		"status":     "success",
+		"facts":      map[string]any{"terminationReason": "completed"},
+		"durationMs": 12,
+	}, 3)
+	if errObj == nil {
+		t.Fatal("ledger.close with history off succeeded")
+	}
+	if errObj.Code != -32603 || !strings.Contains(errObj.Message, "history is off") {
+		t.Fatalf("close error = %+v, want the history-off refusal", errObj)
+	}
+	if n := entryCount(t, db); n != 0 {
+		t.Fatalf("entry count with history off = %d, want zero", n)
+	}
+}
+
 // ── §6.3 rule 3: a close for an unknown id creates its row ────────────────
 
 // The open was lost (a socket that dropped between submit and ledger.open).

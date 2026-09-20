@@ -147,6 +147,15 @@ type terminal struct {
 	// same rule as replies — the goroutine holding mu is the only writer — and
 	// is drained whole by Effects.
 	effects []emulator.Effect
+	// fenceIdx is the render fence scanner's position in the fence sequence:
+	// how many bytes of it the stream has matched (0 is between sequences,
+	// which is why the zero value needs no initialisation), and fenceNonce
+	// holds the nonce bytes matched so far. The scanner is pure state — it
+	// never holds a byte back from the library, and nothing is fed twice; see
+	// fence.go for the shape it matches and why the match lives in this
+	// adapter at all.
+	fenceIdx   int
+	fenceNonce [64]byte
 }
 
 var (
@@ -290,10 +299,30 @@ func (t *terminal) Ingest(b []byte) ([]byte, error) {
 	if t.t == nil {
 		return nil, emulator.ErrClosed
 	}
-	if len(b) > 0 {
-		C.ghostty_terminal_vt_write(t.t, (*C.uint8_t)(unsafe.Pointer(&b[0])), C.size_t(len(b)))
-	}
+	t.ingestLocked(b)
 	return t.takeReplies(), nil
+}
+
+// ingestLocked feeds b to the library through the fence scanner. The
+// invariant is the feed, not the scan: every byte reaches vt_write exactly
+// once, in arrival order, whether or not a fence is in it. The only thing a
+// fence changes is WHERE the feed splits — the bytes up to and including the
+// fence's BEL go in, the fence is sighted against the screen as it stands at
+// that instant, and only then do the bytes after it go in. A chunk with no
+// fence costs exactly one vt_write, and a fence that straddles two chunks
+// costs nothing at all: the scanner's state is a byte position, not a buffer
+// of withheld input.
+func (t *terminal) ingestLocked(b []byte) {
+	for start := 0; start < len(b); {
+		n, fired := t.scanFence(b[start:])
+		if n > 0 {
+			C.ghostty_terminal_vt_write(t.t, (*C.uint8_t)(unsafe.Pointer(&b[start])), C.size_t(n))
+		}
+		if fired {
+			t.sightFence()
+		}
+		start += n
+	}
 }
 
 // takeReplies hands the accumulated replies to the caller and starts a fresh
@@ -351,6 +380,13 @@ func (t *terminal) Cursor() (emulator.Cursor, error) {
 	if t.t == nil {
 		return emulator.Cursor{}, emulator.ErrClosed
 	}
+	return t.cursorLocked()
+}
+
+// cursorLocked is Cursor's read without the lock: the caller holds mu, which
+// is what makes the three reads one moment. The fence sighting uses it to
+// read the caret from inside Ingest, where mu is already held.
+func (t *terminal) cursorLocked() (emulator.Cursor, error) {
 	var x, y C.uint16_t
 	if r := C.ghostty_terminal_get(t.t, C.GHOSTTY_TERMINAL_DATA_CURSOR_X,
 		unsafe.Pointer(&x)); r != C.GHOSTTY_SUCCESS {

@@ -91,6 +91,24 @@ const (
 	// the excess dropped and reported, and the work it spends is linear in the
 	// bytes it examined rather than in any count inside them.
 	ruleIngestIsBounded
+	// ruleOnlyAuthenticExpiryDegrades: only an AUTHENTICATED half expiring —
+	// a completion whose fence never arrived — says anything about the
+	// interval. A sighted fence with nothing authenticated behind it
+	// authorised nothing while it waited (ADR-0024 decision 1), so its
+	// expiry drops the pin and changes nothing else: not completeness, not
+	// write authority.
+	ruleOnlyAuthenticExpiryDegrades
+	// ruleMeetingsAreIndependent: the rendezvous is a set keyed by nonce,
+	// not one slot. The two channels are ordered independently (ADR-0024
+	// decision 7), so two commands can be pending at once, and one slot let
+	// the second command evict the first.
+	ruleMeetingsAreIndependent
+	// ruleRendezvousSetIsBounded: the set holds at most MaxPendingRendezvous
+	// meetings. At the bound a new fence sighting is refused
+	// (ErrRendezvousFull), an authenticated completion preempts the oldest
+	// unauthenticated slot, and a pending authenticated half is never
+	// evicted — a flood of forged fences cannot take a real meeting's place.
+	ruleRendezvousSetIsBounded
 )
 
 var ruleNames = map[rule]string{
@@ -112,6 +130,9 @@ var ruleNames = map[rule]string{
 	ruleDuplicateEffectIsSuppressed:         "duplicate-effect-is-suppressed",
 	ruleResendCarriesNoEffects:              "resend-carries-no-effects",
 	ruleIngestIsBounded:                     "ingest-is-bounded",
+	ruleOnlyAuthenticExpiryDegrades:         "only-authentic-expiry-degrades",
+	ruleMeetingsAreIndependent:              "meetings-are-independent",
+	ruleRendezvousSetIsBounded:              "rendezvous-set-is-bounded",
 }
 
 type ruleSet map[rule]bool
@@ -176,7 +197,15 @@ type model struct {
 	// have known which.
 	applicationCursorKeys bool
 
-	rendezvous   Rendezvous
+	// The rendezvous set: one entry per meeting keyed by nonce, insertion
+	// order for the bound's oldest-first evictions, and the most recent
+	// meeting for [model.Rendezvous]. The rules decide whether the set is
+	// honoured or the old single-slot defect is stated as code.
+	rendezvous       map[FenceNonce]*rendezvousEntry
+	rendezvousOrder  []FenceNonce
+	rendezvousLatest FenceNonce
+	hasLatest        bool
+
 	completeness Completeness
 
 	// --- delivery: the classes, and the bounds that keep them bounded ------
@@ -249,6 +278,7 @@ func newModelWithBudget(rules ruleSet, budget *deliveryBudget) *model {
 		avail:        AvailabilityAvailable,
 		rev:          1,
 		intents:      map[IntentID]*modelIntent{},
+		rendezvous:   map[FenceNonce]*rendezvousEntry{},
 		geom:         GeometryCommit{Geometry: Geometry{Cols: 80, Rows: 24}, Revision: 1},
 		completeness: CompletenessComplete,
 		budget:       budget,
@@ -278,10 +308,49 @@ func (m *model) Availability() Availability { return m.avail }
 func (m *model) Revision() Revision         { return m.rev }
 func (m *model) Control() Control           { return m.control }
 func (m *model) Geometry() GeometryCommit   { return m.geom }
-func (m *model) Rendezvous() Rendezvous     { return m.rendezvous }
+func (m *model) Rendezvous() Rendezvous {
+	if !m.hasLatest {
+		return Rendezvous{}
+	}
+	e := m.rendezvous[m.rendezvousLatest]
+	if e == nil {
+		return Rendezvous{}
+	}
+	return m.cloneRendezvous(e.Rendezvous)
+}
+
+func (m *model) RendezvousFor(nonce FenceNonce) Rendezvous {
+	e := m.rendezvous[nonce]
+	if e == nil {
+		return Rendezvous{}
+	}
+	return m.cloneRendezvous(e.Rendezvous)
+}
+
+// cloneRendezvous hands a record out with the pin copied, the same discipline
+// the real runtime keeps: a caller that wrote through the pin would be
+// editing the evidence the meeting is judged against.
+func (m *model) cloneRendezvous(r Rendezvous) Rendezvous {
+	r.PinnedSource = bytes.Clone(r.PinnedSource)
+	return r
+}
+
 func (m *model) Completeness() Completeness { return m.completeness }
-func (m *model) Terminal() Terminal         { return m.pty }
-func (m *model) Emulator() Emulator         { return m.emulator }
+
+// pendingRendezvous counts the meetings in flight, bounded by
+// MaxPendingRendezvous — the number Snapshot answers, so "bounded" is a
+// claim a schedule can check rather than a sentence.
+func (m *model) pendingRendezvous() int {
+	n := 0
+	for _, e := range m.rendezvous {
+		if e.pending() {
+			n++
+		}
+	}
+	return n
+}
+func (m *model) Terminal() Terminal { return m.pty }
+func (m *model) Emulator() Emulator { return m.emulator }
 
 // AuthenticatedEvents is the model itself: it collects the completion and does
 // nothing else with it, which is all the runtime is allowed to do (ADR-0024
@@ -934,69 +1003,197 @@ func (m *model) Completed(at Incarnation, nonce FenceNonce, _ int) {
 	if m.avail != AvailabilityAvailable || at != m.inc {
 		return
 	}
-	switch m.rendezvous.State {
-	case RendezvousAwaitingAuthenticated:
-		if m.rendezvous.Nonce != nonce {
+	if !m.rules.on(ruleMeetingsAreIndependent) {
+		// The defect, stated as code: ONE slot, so a second command's
+		// completion overwrites the first and the first's half is lost.
+		cur := m.singleSlot()
+		if cur != nil && cur.State == RendezvousAwaitingAuthenticated {
+			if cur.Nonce == nonce {
+				cur.State = RendezvousComplete
+				m.tick()
+			}
 			return
 		}
-		m.rendezvous.State = RendezvousComplete
+		m.singleSlotPut(&rendezvousEntry{Rendezvous: Rendezvous{
+			State: RendezvousAwaitingSighting, Nonce: nonce, At: at,
+		}})
 		m.tick()
-	default:
-		m.rendezvous = Rendezvous{State: RendezvousAwaitingSighting, Nonce: nonce, At: at}
-		m.tick()
+		return
 	}
+	if e := m.rendezvous[nonce]; e != nil {
+		// Only a parked sighting with THIS nonce is the half this completion
+		// closes; a duplicate or a late second half changes nothing.
+		if e.State == RendezvousAwaitingAuthenticated {
+			e.State = RendezvousComplete
+			m.rendezvousLatest, m.hasLatest = nonce, true
+			m.tick()
+		}
+		return
+	}
+	m.admitRendezvous(&rendezvousEntry{Rendezvous: Rendezvous{
+		State: RendezvousAwaitingSighting, Nonce: nonce, At: at,
+	}}, true)
 }
 
 func (m *model) SightFence(nonce FenceNonce, source []byte) error {
 	if err := m.live(); err != nil {
 		return err
 	}
-	switch m.rendezvous.State {
-	case RendezvousAwaitingSighting:
-		if m.rendezvous.Nonce != nonce {
-			return ErrNonceMismatch
+	if !m.rules.on(ruleMeetingsAreIndependent) {
+		// The defect, stated as code: ONE slot, so a fence sighted while
+		// another meeting waits overwrites it.
+		cur := m.singleSlot()
+		if cur != nil && cur.State == RendezvousAwaitingSighting {
+			if cur.Nonce != nonce {
+				return ErrRendezvousFull
+			}
+			cur.State = RendezvousComplete
+			cur.SightedAt = m.rev
+			cur.PinnedSource = append([]byte(nil), source...)
+			m.tick()
+			return nil
 		}
-		m.rendezvous.State = RendezvousComplete
-		m.rendezvous.SightedAt = m.rev
-		m.rendezvous.PinnedSource = append([]byte(nil), source...)
-		m.tick()
-		return nil
-	default:
-		// ruleSightingAuthorisesNothing. A sighted marker may only LOCATE an
-		// already-authenticated event (ADR-0024 decision 1), so arriving first
-		// it parks and grants nothing — a program printing a forged fence must
-		// not be able to close a block or choose a capture endpoint.
-		st := RendezvousAwaitingAuthenticated
-		if !m.rules.on(ruleSightingAuthorisesNothing) {
-			st = RendezvousComplete // the defect, stated as code
-		}
-		m.rendezvous = Rendezvous{State: st, Nonce: nonce, At: m.inc, SightedAt: m.rev}
-		if m.rules.on(rulePinSource) {
-			m.rendezvous.PinnedSource = append([]byte(nil), source...)
-		}
+		m.singleSlotPut(m.parkedSighting(nonce, source))
 		m.tick()
 		return nil
 	}
+	if e := m.rendezvous[nonce]; e != nil {
+		switch e.State {
+		case RendezvousAwaitingSighting:
+			e.State = RendezvousComplete
+			e.SightedAt = m.rev
+			e.PinnedSource = append([]byte(nil), source...)
+			m.rendezvousLatest, m.hasLatest = nonce, true
+			m.tick()
+			return nil
+		case RendezvousAwaitingAuthenticated:
+			// The same fence seen again refreshes the locate; the wait is
+			// not extended by it.
+			e.SightedAt = m.rev
+			e.PinnedSource = append([]byte(nil), source...)
+			m.rendezvousLatest, m.hasLatest = nonce, true
+			m.tick()
+			return nil
+		default:
+			// A settled meeting stays settled: a sighting locates, never
+			// reopens (ADR-0024 decision 1).
+			return nil
+		}
+	}
+	if !m.admitRendezvous(m.parkedSighting(nonce, source), false) {
+		return ErrRendezvousFull
+	}
+	return nil
 }
 
-func (m *model) ExpireRendezvous() error {
+// parkedSighting is the meeting a fence sighted with nothing authenticated
+// behind it parks as. ruleSightingAuthorisesNothing: a sighted marker may
+// only LOCATE an already-authenticated event (ADR-0024 decision 1), so
+// arriving first it parks and grants nothing — a program printing a forged
+// fence must not be able to close a block or choose a capture endpoint.
+func (m *model) parkedSighting(nonce FenceNonce, source []byte) *rendezvousEntry {
+	st := RendezvousAwaitingAuthenticated
+	if !m.rules.on(ruleSightingAuthorisesNothing) {
+		st = RendezvousComplete // the defect, stated as code
+	}
+	e := &rendezvousEntry{Rendezvous: Rendezvous{
+		State: st, Nonce: nonce, At: m.inc, SightedAt: m.rev,
+	}}
+	if m.rules.on(rulePinSource) {
+		e.PinnedSource = append([]byte(nil), source...)
+	}
+	return e
+}
+
+func (m *model) ExpireRendezvous(nonce FenceNonce) error {
 	if err := m.live(); err != nil {
 		return err
 	}
-	switch m.rendezvous.State {
-	case RendezvousAwaitingSighting, RendezvousAwaitingAuthenticated:
-		m.rendezvous.State = RendezvousExpired
-		m.rendezvous.PinnedSource = nil
-		// The body may still be worth keeping; it may not be described as the
-		// command's complete output.
-		if m.completeness == CompletenessComplete {
-			m.completeness = CompletenessNoFence
+	if !m.rules.on(ruleMeetingsAreIndependent) {
+		// The defect, stated as code: ONE slot, so any nonce expires it.
+		cur := m.singleSlot()
+		if cur == nil || !cur.pending() {
+			return ErrNoRendezvous
 		}
-		m.tick()
-		return nil
-	default:
+		return m.expire(cur)
+	}
+	e := m.rendezvous[nonce]
+	if e == nil || !e.pending() {
 		return ErrNoRendezvous
 	}
+	return m.expire(e)
+}
+
+// expire settles one pending meeting as expired. ruleOnlyAuthenticExpiryDegrades:
+// only an AUTHENTICATED half expiring says anything about the interval — a
+// sighted fence with nothing behind it authorised nothing, so its expiry
+// drops the pin and changes nothing else. With the rule off the old defect
+// stands: any expiry marks the capture no-fence, which is how unauthenticated
+// output revoked write authority for the life of the session.
+func (m *model) expire(e *rendezvousEntry) error {
+	awaitingSighting := e.State == RendezvousAwaitingSighting
+	e.State = RendezvousExpired
+	e.PinnedSource = nil
+	if (!m.rules.on(ruleOnlyAuthenticExpiryDegrades) || awaitingSighting) &&
+		m.completeness == CompletenessComplete {
+		m.completeness = CompletenessNoFence
+	}
+	m.rendezvousLatest, m.hasLatest = e.Nonce, true
+	m.tick()
+	return nil
+}
+
+// admitRendezvous mirrors the real runtime's bounded insert: at the bound the
+// oldest settled meeting gives up its slot first, then — for a completion
+// only — the oldest unauthenticated sighting; a sighting that finds no room
+// is refused. ruleRendezvousSetIsBounded off is the unbounded map stated as
+// code.
+func (m *model) admitRendezvous(e *rendezvousEntry, authenticated bool) bool {
+	if m.rules.on(ruleRendezvousSetIsBounded) && len(m.rendezvous) >= MaxPendingRendezvous {
+		if !m.evictRendezvous(func(e *rendezvousEntry) bool { return !e.pending() }) &&
+			!(authenticated && m.evictRendezvous(func(e *rendezvousEntry) bool {
+				return e.State == RendezvousAwaitingAuthenticated
+			})) {
+			return false
+		}
+	}
+	if _, ok := m.rendezvous[e.Nonce]; !ok {
+		m.rendezvousOrder = append(m.rendezvousOrder, e.Nonce)
+	}
+	m.rendezvous[e.Nonce] = e
+	m.rendezvousLatest, m.hasLatest = e.Nonce, true
+	m.tick()
+	return true
+}
+
+// evictRendezvous removes the oldest meeting satisfying keep and answers
+// whether one was found.
+func (m *model) evictRendezvous(keep func(*rendezvousEntry) bool) bool {
+	for i, nonce := range m.rendezvousOrder {
+		if e := m.rendezvous[nonce]; e != nil && keep(e) {
+			delete(m.rendezvous, nonce)
+			m.rendezvousOrder = append(m.rendezvousOrder[:i], m.rendezvousOrder[i+1:]...)
+			// Only admission evicts, and admission names the incoming
+			// meeting right after: the window never dangles here.
+			return true
+		}
+	}
+	return false
+}
+
+// singleSlotPut is the pre-set shape: the model holds exactly one meeting,
+// whatever arrives later overwrites it.
+func (m *model) singleSlotPut(e *rendezvousEntry) {
+	m.rendezvous = map[FenceNonce]*rendezvousEntry{e.Nonce: e}
+	m.rendezvousOrder = []FenceNonce{e.Nonce}
+	m.rendezvousLatest, m.hasLatest = e.Nonce, true
+}
+
+func (m *model) singleSlot() *rendezvousEntry {
+	if !m.hasLatest {
+		return nil
+	}
+	return m.rendezvous[m.rendezvousLatest]
 }
 
 // ---------------------------------------------------------------------------
@@ -1355,14 +1552,14 @@ func (m *model) observerLost() {
 
 func (m *model) Snapshot() Snapshot {
 	s := Snapshot{
-		Revision:     m.rev,
-		At:           m.inc,
-		Availability: m.avail,
-		Control:      m.control,
-		Geometry:     m.geom,
-		Screen:       append([]byte(nil), m.screen...),
-		Rendezvous:   m.rendezvous.State,
-		Completeness: m.completeness,
+		Revision:          m.rev,
+		At:                m.inc,
+		Availability:      m.avail,
+		Control:           m.control,
+		Geometry:          m.geom,
+		Screen:            append([]byte(nil), m.screen...),
+		PendingRendezvous: m.pendingRendezvous(),
+		Completeness:      m.completeness,
 	}
 	if !m.rules.on(ruleSnapshotIsPassive) {
 		// The defect: a read that moves the clock, so two observers

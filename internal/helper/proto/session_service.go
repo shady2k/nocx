@@ -95,7 +95,73 @@ const (
 	// and a bearer value that rides every listing is a bearer value with no
 	// bound on who has seen it. Hence a separate op, asked once, per session.
 	OpAdoptLifecycle = "adopt-lifecycle"
+	// OpLifecycleComplete carries one already-authenticated completion DOWN
+	// to the session that owns the pane (owner decision 2026-09-19). The
+	// coordinator's kernel has validated version, domain liveness, transport
+	// binding, epoch, capability and the sequence rule — authentication does
+	// not move — and this op is the carrier of the fact, not a second gate
+	// on any of it: the helper hands it to the session runtime's
+	// AuthenticatedEvents.Completed, whose own incarnation check is the only
+	// judging this side of the wire does. An older generation answers
+	// unknown_op, which is the sentence a coordinator already reads as "this
+	// machine's helper is older than this app".
+	OpLifecycleComplete = "lifecycle-complete"
 )
+
+// Incarnation is a session runtime's identity on the wire: the session the
+// PTY belongs to and which generation of it is live. It is
+// internal/sessionruntime.Incarnation's own pair, spelled the way the
+// one-shot token already spells it (tokenWire's atSession/atGeneration) —
+// and it is deliberately NOT HostSessionID, whose Generation is the
+// content-addressed INSTALL id: a string naming which build of the helper
+// minted the session, not a number counting the PTYs the session has had.
+// One field is a string install id, the other a numeric runtime generation,
+// and a wire that carried them as one value would parse the install name
+// into a generation count the first time a test read it back.
+type Incarnation struct {
+	Session    string `json:"session"`
+	Generation uint64 `json:"generation"`
+}
+
+// LifecycleCompleteParams carries one completed execution's authenticated
+// fact down to the session that owns the pane.
+//
+// It carries only facts the kernel has already accepted, and it accepts
+// nothing: the helper resolves the session, decodes the fence and hands all
+// three to the runtime. The runtime's incarnation check is what refuses
+// evidence naming a dead incarnation, and this op adds no second gate on
+// top of it — a refusal here could only refuse a delivery, never re-judge
+// the kernel's acceptance.
+type LifecycleCompleteParams struct {
+	// Session addresses the helper session, generation-qualified like every
+	// other op on this service: it is the lookup, not the identity the
+	// runtime judges.
+	Session HostSessionID `json:"session"`
+	// Incarnation is the runtime incarnation the sender believes is live.
+	// The legitimate sender echoes back what the helper's spawn told it —
+	// the runtime is created at generation 1 and never replaced inside one
+	// helper process — so a stale sender is refused by the runtime rather
+	// than applied late.
+	Incarnation Incarnation `json:"incarnation"`
+	// Nonce is the kernel's render fence for the completed execution, as 64
+	// lowercase hex characters — the same fixed-width spelling the launch's
+	// bearer values use. The rendezvous matches on it exactly; a decoder
+	// that truncated or tolerated another spelling would hand the runtime a
+	// nonce nothing sighted.
+	Nonce string `json:"nonce"`
+	// ExitCode is the exit status the kernel recorded, and null when the
+	// shell named none. Null is an ANSWER and is always present rather than
+	// omitted, like every other nullable field on this wire: "the kernel
+	// recorded no exit code" and "this generation does not say" are
+	// different bytes.
+	ExitCode *int `json:"exitCode"`
+}
+
+// LifecycleCompleteResult is deliberately empty, like AckResult and
+// ResizeResult: the answer to "did the completion land" is the absence of an
+// error. It exists so the op has a result type at all, the way every other
+// op does.
+type LifecycleCompleteResult struct{}
 
 // AdoptLifecycleParams names the session whose lifecycle identity the caller
 // intends to take over.

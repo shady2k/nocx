@@ -615,4 +615,166 @@ func TestAddHonorsDisabledHistory(t *testing.T) {
 	}
 }
 
+// newLedgerWithPolicy opens a fresh store over a caller-owned live History
+// policy: a test that flips the setting mid-run holds the same pointer the
+// store consults, which is how the settings layer wires it.
+func newLedgerWithPolicy(t *testing.T, policy *content.Policy) (content.ContentDB, content.LedgerRepository) {
+	t.Helper()
+	dir := t.TempDir()
+	db, err := content.Open(context.Background(), content.Config{
+		Path:   filepath.Join(dir, "content.db"),
+		Key:    testKey(),
+		Budget: testBudget,
+		Policy: policy,
+		Logger: log.NewSlogAdapter(nil),
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db, db.Ledger()
+}
+
+// Keep-history-off governs the lifecycle writers' command rows exactly as it
+// governs RecordCompleted's mint: a shell command submitted to the ledger
+// while the setting is off leaves no row and errors nothing — the zero
+// result is the caller's signal that there is no row to reference.
+func TestSubmitHonorsDisabledHistory(t *testing.T) {
+	ctx := context.Background()
+	policy := content.NewPolicy()
+	policy.SetEnabled(false)
+	_, led := newLedgerWithPolicy(t, policy)
+	envReady(t, led, "local")
+
+	res, err := led.Submit(ctx, content.SubmitEntry{
+		ID: "00000000-0000-7000-8000-000000000101", Client: "lifecycle-shell",
+		EnvironmentID: "local", Cwd: "/repo",
+		Kind: content.EntryShell, Source: content.SourceUser, Intent: "rm -rf ~/notes",
+	})
+	if err != nil {
+		t.Fatalf("Submit while history is off: %v", err)
+	}
+	if res.ID != "" || res.Replayed {
+		t.Fatalf("Submit result = %+v, want the zero result — there is no row to reference", res)
+	}
+	rows, err := led.ListEntries(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("history off but %d command row(s) appeared", len(rows))
+	}
+
+	// Live toggle: on again, the next command is recorded.
+	policy.SetEnabled(true)
+	if _, reenabledErr := led.Submit(ctx, content.SubmitEntry{
+		ID: "00000000-0000-7000-8000-000000000102", Client: "lifecycle-shell",
+		EnvironmentID: "local", Cwd: "/repo",
+		Kind: content.EntryShell, Source: content.SourceUser, Intent: "on-1",
+	}); reenabledErr != nil {
+		t.Fatalf("Submit after re-enable: %v", reenabledErr)
+	}
+	rows, err = led.ListEntries(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Intent != "on-1" {
+		t.Fatalf("after re-enable rows = %+v, want exactly the new command", rows)
+	}
+}
+
+// TestARowThatExistsStillReplaysWhenHistoryIsTurnedOff: turning history off
+// stops a command being RECORDED; it does not un-record one. Submit's
+// idempotency key is what the caller retries on, and a retry that answers
+// "no such row" about a row this store is holding is a lie the caller cannot
+// check. The gate belongs in front of MINTING a row, not in front of reading
+// one back — which is what the store's own comment already says about the
+// completion paths.
+func TestARowThatExistsStillReplaysWhenHistoryIsTurnedOff(t *testing.T) {
+	ctx := context.Background()
+	policy := content.NewPolicy()
+	policy.SetEnabled(true)
+	_, led := newLedgerWithPolicy(t, policy)
+	envReady(t, led, "local")
+
+	in := content.SubmitEntry{
+		ID: "00000000-0000-7000-8000-000000000131", Client: "lifecycle-shell",
+		EnvironmentID: "local", Cwd: "/repo",
+		Kind: content.EntryShell, Source: content.SourceUser, Intent: "make ci",
+	}
+	first, err := led.Submit(ctx, in)
+	if err != nil {
+		t.Fatalf("Submit with history on: %v", err)
+	}
+	if first.ID == "" || first.Replayed {
+		t.Fatalf("the first Submit = %+v, want a freshly minted row", first)
+	}
+
+	policy.SetEnabled(false)
+
+	again, err := led.Submit(ctx, in)
+	if err != nil {
+		t.Fatalf("replay after history was turned off: %v", err)
+	}
+	if again.ID != first.ID || !again.Replayed || again.IngestSeq != first.IngestSeq {
+		t.Fatalf("the replay = %+v, want the original row %+v back: the row exists and the caller may reference it", again, first)
+	}
+
+	// And nothing new was minted by that replay.
+	rows, err := led.ListEntries(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("after the replay rows = %d, want exactly the one row", len(rows))
+	}
+
+	// A DIFFERENT command, while history is off, is still refused a row.
+	fresh, err := led.Submit(ctx, content.SubmitEntry{
+		ID: "00000000-0000-7000-8000-000000000132", Client: "lifecycle-shell",
+		EnvironmentID: "local", Cwd: "/repo",
+		Kind: content.EntryShell, Source: content.SourceUser, Intent: "make ci-full",
+	})
+	if err != nil {
+		t.Fatalf("Submit of a new command while history is off: %v", err)
+	}
+	if fresh.ID != "" || fresh.Replayed {
+		t.Fatalf("a new command while history is off = %+v, want the zero result", fresh)
+	}
+}
+
+// History off does not erase the assistant's record: action and ask rows are
+// the turn's narrative and its authority record — not command history — and
+// the policy does not reach them. The gate's scope is the command kind, not
+// the store.
+func TestSubmitWithHistoryOffKeepsAssistantNarrativeRows(t *testing.T) {
+	ctx := context.Background()
+	policy := content.NewPolicy()
+	policy.SetEnabled(false)
+	_, led := newLedgerWithPolicy(t, policy)
+	envReady(t, led, "local")
+
+	if _, err := led.Submit(ctx, content.SubmitEntry{
+		ID: "00000000-0000-7000-8000-000000000201", Client: "agent",
+		EnvironmentID: "local", Cwd: "/",
+		Kind: content.EntryAction, Source: content.SourceAssistant, Intent: "run", Payload: "{}",
+	}); err != nil {
+		t.Fatalf("Submit action while history is off: %v", err)
+	}
+	if _, err := led.Submit(ctx, content.SubmitEntry{
+		ID: "00000000-0000-7000-8000-000000000202", Client: "agent",
+		EnvironmentID: "local", Cwd: "/",
+		Kind: content.EntryAsk, Source: content.SourceAssistant, Intent: "which fallback?",
+	}); err != nil {
+		t.Fatalf("Submit ask while history is off: %v", err)
+	}
+	rows, err := led.ListEntries(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %+v, want both narrative rows kept while history is off", rows)
+	}
+}
+
 // ── atomic private-content restore (the export restore operation's seam) ─

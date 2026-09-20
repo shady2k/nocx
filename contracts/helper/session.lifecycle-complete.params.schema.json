@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.lifecycle-complete.params.schema.json",
+  "title": "HelperSessionLifecycleCompleteParams",
+  "description": "One already-authenticated completion, carried DOWN by the coordinator to the session that owns the pane (owner decision 2026-09-19). The coordinator's kernel has validated protocol version, domain liveness, transport binding, epoch, capability and the sequence rule -- authentication does not move -- and this op is the carrier of the fact, not a second gate on it: the helper resolves the session, decodes the fence, and hands all three to the session runtime, whose own incarnation check is the only judging this side of the wire does.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session", "incarnation", "nonce", "exitCode"],
+  "properties": {
+    "session": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/hostSessionId"
+    },
+    "incarnation": {
+      "description": "The session runtime's own identity: the session the PTY belongs to and which generation of it is live. Deliberately NOT the outer session object, whose generation is the content-addressed helper INSTALL id (a string): one field is an install name, the other a numeric per-PTY generation. The sender derives it from facts with named owners: the session half from the spawn entry, the generation from the helper's stated level-1 invariant (one runtime per PTY, at generation 1 -- newSessionRuntime's own doc, pinned by TestTheRuntimeIncarnationIsTheSessionAtGenerationOne). A sender whose derivation is stale is refused by the runtime rather than applied late.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session", "generation"],
+      "properties": {
+        "session": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "generation": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "nonce": {
+      "description": "The kernel's render fence for the completed execution: exactly 64 lowercase hex characters, the same fixed-width spelling the launch's bearer values use. The rendezvous matches on it exactly; a decoder that truncated or tolerated another spelling would hand the runtime a rendezvous nothing sighted.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "exitCode": {
+      "description": "The exit status the kernel recorded, and null when the shell named none. Null is an ANSWER and is always present rather than omitted: the kernel recorded no exit code, and this generation does say so.",
+      "type": ["integer", "null"]
+    }
+  }
+}

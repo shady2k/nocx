@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/shady2k/nocx/internal/emulator"
 )
@@ -65,6 +67,19 @@ type Config struct {
 	// reply with none bound refuses loudly (see deliverReplyLocked) rather
 	// than discarding the program's answer.
 	Replies ReplySink
+	// RendezvousExpiry is the bounded missing-fence wait (design §6.4): how
+	// long a rendezvous left with one half missing stays pending before the
+	// runtime calls its own [Session.ExpireRendezvous]. The number is free
+	// to change; the POLICY is not, and zero means no timer — the contract
+	// drives [Session.ExpireRendezvous] itself, as a call, and the
+	// composition root (internal/helper/session) states the production
+	// interval out loud rather than a default assuming it.
+	RendezvousExpiry time.Duration
+	// ExpireAfter schedules the wait. Nil means time.AfterFunc; a test
+	// hands its own and fires the trigger itself, because a test may not
+	// depend on timing (AGENTS.md) — the wait must be observable as a
+	// STATE, never as a duration.
+	ExpireAfter func(d time.Duration, f func()) (stop func() bool)
 }
 
 // Allowance is the delivery allowance consumer queues draw on, keyed by the
@@ -158,8 +173,41 @@ type Session struct {
 	geom     GeometryCommit
 	reported Geometry
 
-	rendezvous   Rendezvous
+	// The rendezvous is a SET of meetings keyed by nonce, not one slot. The
+	// authenticated channel and the PTY are ordered independently (ADR-0024
+	// decision 7, design §6.4), so two commands can legitimately be pending
+	// at once, and one slot let the second command evict the first — losing
+	// its pinned source or closing it on a nonce mismatch while completeness
+	// still read complete. MaxPendingRendezvous bounds the set: an unbounded
+	// map fed by forged fences is the memory exhaustion the single slot
+	// accidentally prevented. All three fields are guarded by mu.
+	rendezvous map[FenceNonce]*rendezvousEntry
+	// rendezvousOrder is insertion order, so the bound's evictions and any
+	// scan have a deterministic oldest first.
+	rendezvousOrder []FenceNonce
+	// rendezvousLatest names the meeting [Session.Rendezvous] answers — the
+	// one most recently created, joined or expired. rendezvousHasLatest
+	// separates "none yet" from a legitimate all-zero nonce.
+	rendezvousLatest    FenceNonce
+	rendezvousHasLatest bool
+
 	completeness Completeness
+
+	// expireDur and expireAfter are the bounded rendezvous waits' wiring
+	// (Config.RendezvousExpiry): the seam a test injects its own trigger
+	// through, because a wait must be observable as a STATE, never a
+	// duration. Each pending meeting arms its OWN wait (rendezvousEntry.stop
+	// holds the cancel handle); both fields are guarded by mu, and a timer's
+	// callback takes mu again by entering [Session.expireBy].
+	expireDur   time.Duration
+	expireAfter func(d time.Duration, f func()) (stop func() bool)
+	// expireSeq is the generation space for every armed wait: it is bumped
+	// each time a timer is actually scheduled, and a callback whose
+	// generation its entry no longer carries does nothing. A one-shot timer
+	// can fire while its stop is being replaced — Stop returns false and the
+	// callback runs anyway — so the disarm alone cannot make this safe; the
+	// check must be under mu at the moment of transitioning.
+	expireSeq uint64
 
 	allowance *Allowance
 	// consumers are the subscribers attached to this session, in attach order.
@@ -222,17 +270,24 @@ func New(cfg Config) (*Session, error) {
 	if allowance == nil {
 		allowance = NewAllowance()
 	}
+	after := cfg.ExpireAfter
+	if after == nil {
+		after = defaultExpireAfter
+	}
 	return &Session{
 		inc:          cfg.Incarnation,
 		avail:        AvailabilityAvailable,
 		rev:          1,
 		intents:      map[IntentID]*intentRecord{},
+		rendezvous:   map[FenceNonce]*rendezvousEntry{},
 		terminal:     cfg.Terminal,
 		emulator:     cfg.Emulator,
 		geom:         GeometryCommit{Geometry: cfg.Geometry, Revision: 1},
 		completeness: cfg.Completeness,
 		allowance:    allowance,
 		replies:      cfg.Replies,
+		expireDur:    cfg.RendezvousExpiry,
+		expireAfter:  after,
 	}, nil
 }
 
@@ -283,15 +338,56 @@ func (s *Session) Geometry() GeometryCommit {
 	return s.geom
 }
 
+// Rendezvous answers the meeting most recently touched — created, joined or
+// expired — and the zero Rendezvous (idle) when nothing is tracked. It is a
+// window on the set for a caller that observed a fence or a completion and
+// knows nothing else about it; a caller that can name a nonce uses
+// [Session.RendezvousFor].
 func (s *Session) Rendezvous() Rendezvous {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := s.rendezvous
-	// The pin is the sighting's CONTENT and it is handed out as a copy: a
-	// caller that wrote through it would be editing the evidence a rendezvous
-	// is judged against, which is the one thing the pin exists to keep.
-	out.PinnedSource = bytes.Clone(s.rendezvous.PinnedSource)
-	return out
+	if !s.rendezvousHasLatest {
+		return Rendezvous{}
+	}
+	e := s.rendezvous[s.rendezvousLatest]
+	if e == nil {
+		return Rendezvous{}
+	}
+	return cloneRendezvous(e.Rendezvous)
+}
+
+// RendezvousFor answers one meeting by nonce, or the zero Rendezvous (idle)
+// when no meeting for that nonce is tracked. It is the keyed authority over
+// the set; [Session.Rendezvous] is a window on the same store.
+func (s *Session) RendezvousFor(nonce FenceNonce) Rendezvous {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e := s.rendezvous[nonce]
+	if e == nil {
+		return Rendezvous{}
+	}
+	return cloneRendezvous(e.Rendezvous)
+}
+
+// cloneRendezvous copies a meeting's record for handing out. The pin is the
+// sighting's CONTENT and it is handed out as a copy: a caller that wrote
+// through it would be editing the evidence a rendezvous is judged against,
+// which is the one thing the pin exists to keep.
+func cloneRendezvous(r Rendezvous) Rendezvous {
+	r.PinnedSource = bytes.Clone(r.PinnedSource)
+	return r
+}
+
+// pendingRendezvousLocked counts the meetings in flight — Snapshot's
+// PendingRendezvous, bounded by MaxPendingRendezvous and therefore checkable.
+func (s *Session) pendingRendezvousLocked() int {
+	n := 0
+	for _, e := range s.rendezvous {
+		if e.pending() {
+			n++
+		}
+	}
+	return n
 }
 
 func (s *Session) Completeness() Completeness {
@@ -385,17 +481,17 @@ func (s *Session) Snapshot() Snapshot {
 func (s *Session) snapshotLocked() Snapshot {
 	rows, cur, identity := s.screenStateLocked()
 	return Snapshot{
-		Revision:     s.rev,
-		At:           s.inc,
-		Availability: s.avail,
-		Control:      s.control,
-		Geometry:     s.geom,
-		Screen:       s.screenTextLocked(),
-		Rendezvous:   s.rendezvous.State,
-		Completeness: s.completeness,
-		Rows:         rows,
-		Cursor:       cur,
-		Identity:     identity,
+		Revision:          s.rev,
+		At:                s.inc,
+		Availability:      s.avail,
+		Control:           s.control,
+		Geometry:          s.geom,
+		Screen:            s.screenTextLocked(),
+		PendingRendezvous: s.pendingRendezvousLocked(),
+		Completeness:      s.completeness,
+		Rows:              rows,
+		Cursor:            cur,
+		Identity:          identity,
 	}
 }
 
@@ -933,6 +1029,16 @@ func (s *Session) Ingest(b []byte) error {
 	// delivered is a bell that rings nowhere and is never reported as lost.
 	replyErr := s.deliverReplyLocked(replies)
 	for _, e := range s.emulator.Effects() {
+		if e.Kind == emulator.EffectFence {
+			// The join: a fence the emulator drained LOCATES the
+			// authenticated half of the rendezvous (ADR-0024 decision 1)
+			// and is not a consumer payload, so it never reaches
+			// effectKindOf or the delivery path below — a kind the
+			// delivery vocabulary does not know is refused there, and a
+			// fenced command must not fail the ingest that carried it.
+			s.sightDrainedFenceLocked(e)
+			continue
+		}
 		s.nextEffect++
 		effect := Effect{
 			ID:   s.nextEffect,
@@ -996,6 +1102,25 @@ func (s *Session) ReportHole(lost uint64) error {
 
 // --------------------------------------------------------------- rendezvous
 
+// rendezvousEntry is one tracked meeting: its record, and the bounded wait
+// armed while it is pending. The wait is observable as a STATE (the entry's
+// own trigger through [Config.ExpireAfter], fired into [Session.expireBy]),
+// never as a duration; its generation ([Session.expireSeq]) is what makes a
+// stale trigger harmless.
+type rendezvousEntry struct {
+	Rendezvous
+	// stop cancels this entry's own wait. Nil once the entry is settled or
+	// when no expiry policy is configured.
+	stop func() bool
+	// seq is the generation the wait was armed under.
+	seq uint64
+}
+
+// pending reports whether the meeting is still waiting for one of its halves.
+func (e *rendezvousEntry) pending() bool {
+	return e.State == RendezvousAwaitingSighting || e.State == RendezvousAwaitingAuthenticated
+}
+
 // Completed is the authenticated half arriving. It authenticates nothing: the
 // caller has already validated the protocol version, the epoch, the capability
 // and the sequence rule (internal/lifecycle's), and this method does not
@@ -1006,17 +1131,94 @@ func (s *Session) Completed(at Incarnation, nonce FenceNonce, _ int) {
 	if s.avail != AvailabilityAvailable || at != s.inc {
 		return
 	}
-	switch s.rendezvous.State {
-	case RendezvousAwaitingAuthenticated:
-		if s.rendezvous.Nonce != nonce {
-			return
+	if e := s.rendezvous[nonce]; e != nil {
+		// The meeting is already tracked. Only a parked sighting with THIS
+		// nonce is the half this completion closes; a duplicate completion,
+		// or one arriving after the meeting settled, is the same event
+		// again and changes nothing — a sighting may authorise nothing, and
+		// neither may a late second half reopen what a bounded wait
+		// honestly closed.
+		if e.State == RendezvousAwaitingAuthenticated {
+			s.disarmEntryLocked(e)
+			e.State = RendezvousComplete
+			s.rendezvousLatest, s.rendezvousHasLatest = nonce, true
+			s.tick()
 		}
-		s.rendezvous.State = RendezvousComplete
-		s.tick()
-	default:
-		s.rendezvous = Rendezvous{State: RendezvousAwaitingSighting, Nonce: nonce, At: at}
-		s.tick()
+		return
 	}
+	s.admitRendezvousLocked(&rendezvousEntry{Rendezvous: Rendezvous{
+		State: RendezvousAwaitingSighting,
+		Nonce: nonce,
+		At:    at,
+	}}, true)
+}
+
+// admitRendezvousLocked inserts a new meeting into the set, keeping it within
+// [MaxPendingRendezvous], and answers whether it was admitted.
+//
+// authenticated says an authenticated half is behind the insert, and the
+// order the bound spends slots in is the order of what each one is worth.
+// The oldest SETTLED meeting goes first — it is record, not authority, and
+// evicting it costs nothing. Then, for a completion only, the oldest parked
+// SIGHTING: a fence with nothing authenticated behind it authorised nothing
+// (ADR-0024 decision 1), so a flood of them can never be the reason a real
+// completion is refused. A SIGHTING that finds no room is refused there, and
+// that refusal is free for the same reason.
+//
+// What is left is a set every slot of which holds an authenticated half
+// still waiting for its fence, and another authenticated half arriving —
+// nine commands completed before the emulator drew any of them. Something
+// must give, and the one thing that may not is silence: the newest
+// completion takes the OLDEST one's slot, because the oldest is the one
+// whose fence is least likely still coming, and the boundary that left
+// unmet makes completeness [CompletenessNoFence]. So an authenticated
+// insert is never refused, and an authenticated boundary is either tracked
+// or declared lost.
+func (s *Session) admitRendezvousLocked(e *rendezvousEntry, authenticated bool) bool {
+	if len(s.rendezvous) >= MaxPendingRendezvous {
+		switch {
+		case s.evictRendezvousLocked(func(e *rendezvousEntry) bool { return !e.pending() }):
+		case !authenticated:
+			return false
+		case s.evictRendezvousLocked(func(e *rendezvousEntry) bool {
+			return e.State == RendezvousAwaitingAuthenticated
+		}):
+		case s.evictRendezvousLocked(func(e *rendezvousEntry) bool {
+			return e.State == RendezvousAwaitingSighting
+		}):
+			if s.completeness == CompletenessComplete {
+				s.completeness = CompletenessNoFence
+			}
+		default:
+			return false
+		}
+	}
+	s.rendezvous[e.Nonce] = e
+	s.rendezvousOrder = append(s.rendezvousOrder, e.Nonce)
+	s.rendezvousLatest, s.rendezvousHasLatest = e.Nonce, true
+	s.armExpiryLocked(e)
+	s.tick()
+	return true
+}
+
+// evictRendezvousLocked removes the OLDEST meeting satisfying keep, stopping
+// its wait first, and answers whether one was found.
+//
+// It is called only from [Session.admitRendezvousLocked], and only to make
+// room for a meeting that is inserted immediately afterwards — so if the
+// evicted meeting was the one rendezvousLatest named, the insert re-points
+// the window before the lock is released. The window can never dangle here,
+// and Rendezvous can never answer idle about a set that is not empty.
+func (s *Session) evictRendezvousLocked(keep func(*rendezvousEntry) bool) bool {
+	for i, nonce := range s.rendezvousOrder {
+		if e := s.rendezvous[nonce]; e != nil && keep(e) {
+			s.disarmEntryLocked(e)
+			delete(s.rendezvous, nonce)
+			s.rendezvousOrder = append(s.rendezvousOrder[:i], s.rendezvousOrder[i+1:]...)
+			return true
+		}
+	}
+	return false
 }
 
 // SightFence reports that the emulator drew a fence, and pins the content it
@@ -1026,54 +1228,183 @@ func (s *Session) Completed(at Incarnation, nonce FenceNonce, _ int) {
 func (s *Session) SightFence(nonce FenceNonce, source []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.sightFenceLocked(nonce, source)
+}
+
+// sightFenceLocked is [Session.SightFence] with the lock already held: the
+// ingest path joins a drained fence to the rendezvous from inside its own
+// critical section, and a call to the exported form there would wait on the
+// mutex it is holding.
+func (s *Session) sightFenceLocked(nonce FenceNonce, source []byte) error {
 	if err := s.live(); err != nil {
 		return err
 	}
-	switch s.rendezvous.State {
-	case RendezvousAwaitingSighting:
-		if s.rendezvous.Nonce != nonce {
-			return ErrNonceMismatch
+	if e := s.rendezvous[nonce]; e != nil {
+		switch e.State {
+		case RendezvousAwaitingSighting:
+			// The matching sighting is the half that was missing.
+			s.disarmEntryLocked(e)
+			e.State = RendezvousComplete
+			e.SightedAt = s.rev
+			e.PinnedSource = append([]byte(nil), source...)
+			s.rendezvousLatest, s.rendezvousHasLatest = nonce, true
+			s.tick()
+			return nil
+		case RendezvousAwaitingAuthenticated:
+			// The same fence seen again refreshes the locate: the freshest
+			// content is the capture source. The wait is deliberately NOT
+			// re-armed — a flood of repeated fences must not extend a
+			// meeting's life without bound.
+			e.SightedAt = s.rev
+			e.PinnedSource = append([]byte(nil), source...)
+			s.rendezvousLatest, s.rendezvousHasLatest = nonce, true
+			s.tick()
+			return nil
+		default:
+			// A settled meeting stays settled. A sighting locates, never
+			// authorises or reopens (ADR-0024 decision 1), so this fence
+			// located nothing that was waiting and is dropped.
+			return nil
 		}
-		s.rendezvous.State = RendezvousComplete
-		s.rendezvous.SightedAt = s.rev
-		s.rendezvous.PinnedSource = append([]byte(nil), source...)
-		s.tick()
-		return nil
-	default:
-		s.rendezvous = Rendezvous{
-			State:        RendezvousAwaitingAuthenticated,
-			Nonce:        nonce,
-			At:           s.inc,
-			SightedAt:    s.rev,
-			PinnedSource: append([]byte(nil), source...),
-		}
-		s.tick()
-		return nil
+	}
+	// A fence with nothing authenticated behind it parks and grants nothing
+	// (ADR-0024 decision 1). At the bound it is REFUSED rather than evicting
+	// anybody: it authorises nothing, so refusing it costs nothing.
+	if !s.admitRendezvousLocked(&rendezvousEntry{Rendezvous: Rendezvous{
+		State:        RendezvousAwaitingAuthenticated,
+		Nonce:        nonce,
+		At:           s.inc,
+		SightedAt:    s.rev,
+		PinnedSource: append([]byte(nil), source...),
+	}}, false) {
+		return ErrRendezvousFull
+	}
+	return nil
+}
+
+// sightDrainedFenceLocked joins ONE fence effect the emulator drained to the
+// rendezvous: the join the design names (§6.4), exercised on a real pty by
+// realpty_rendezvous_test.go. The nonce the stream carried is 64 hex
+// characters the emulator passed through undecoded; decoding it is the
+// consumer's job, and a body that is not exactly a [FenceNonce] in hex cannot
+// match any completion — sighting it would be manufacturing a rendezvous
+// nobody authenticated, so the fence is dropped.
+//
+// A fence the set declines — undecodable, one for a meeting already settled,
+// or one refused at the bound ([ErrRendezvousFull]) — is dropped: it located
+// nothing and authorised nothing, the meetings already tracked keep waiting
+// untouched, and neither is a reason the INGEST failed — the bytes reached
+// the emulator and the screen moved, which is the account Ingest returns.
+func (s *Session) sightDrainedFenceLocked(e emulator.Effect) {
+	nonce, ok := fenceNonceOf(e.Body)
+	if !ok {
+		return
+	}
+	_ = s.sightFenceLocked(nonce, e.Source)
+}
+
+// fenceNonceOf decodes a fence body: exactly 64 hex characters. The
+// emulator's adapter only reports a fence whose stream bytes matched that
+// shape exactly (internal/emulator/ghostty/fence.go), so a mismatch here is
+// defensive, and refusing it is the safe answer — a zero-filled nonce could
+// otherwise MATCH a zero completion and close a meeting on bytes that never
+// carried a fence at all.
+func fenceNonceOf(body []byte) (FenceNonce, bool) {
+	var nonce FenceNonce
+	raw, err := hex.DecodeString(string(body))
+	if err != nil || len(raw) != len(nonce) {
+		return nonce, false
+	}
+	copy(nonce[:], raw)
+	return nonce, true
+}
+
+// defaultExpireAfter is the production scheduler: time.AfterFunc behind the
+// seam [Config.ExpireAfter] names.
+func defaultExpireAfter(d time.Duration, f func()) (stop func() bool) {
+	t := time.AfterFunc(d, f)
+	return t.Stop
+}
+
+// armExpiryLocked arms ONE entry's bounded wait: a timer exists exactly while
+// its meeting is pending, and the moment the meeting settles its own timer is
+// disarmed. It runs under mu; the trigger it schedules does NOT hold mu,
+// because its whole body is [Session.expireBy], which takes the lock itself.
+func (s *Session) armExpiryLocked(e *rendezvousEntry) {
+	if s.expireDur <= 0 || !e.pending() {
+		return
+	}
+	s.expireSeq++
+	e.seq = s.expireSeq
+	nonce, seq := e.Nonce, e.seq
+	e.stop = s.expireAfter(s.expireDur, func() { s.expireBy(nonce, seq) })
+}
+
+// disarmEntryLocked cancels one entry's wait, if one is armed.
+func (s *Session) disarmEntryLocked(e *rendezvousEntry) {
+	if e.stop != nil {
+		e.stop()
+		e.stop = nil
 	}
 }
 
-// ExpireRendezvous is the bounded wait elapsing with one half missing. It is a
-// call and not a timer, so the contract can exercise it without depending on a
-// duration. An interval with no authenticated boundary may still be worth
-// keeping; it may not be described as the command's complete output.
-func (s *Session) ExpireRendezvous() error {
+// expireBy is a timer callback's entry. Stop cannot retract a callback that
+// is already running or already dequeued, so the callback re-checks, under
+// mu, that the entry still exists and still carries the generation the wait
+// was armed under: a superseded or settled meeting expires nothing. (After
+// [Fail] the same guard holds through [live]: a session that is gone expires
+// nothing.)
+func (s *Session) expireBy(nonce FenceNonce, seq uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	e := s.rendezvous[nonce]
+	if e == nil || e.seq != seq {
+		return
+	}
+	_ = s.expireRendezvousLocked(nonce)
+}
+
+// ExpireRendezvous is the bounded wait elapsing for the meeting the nonce
+// names. It is a call and not a timer, so the contract can exercise it
+// without depending on a duration. An AUTHENTICATED interval whose fence
+// never arrived may still be worth keeping; it may not be described as the
+// command's complete output. A sighted fence with nothing authenticated
+// behind it expires into nothing at all.
+func (s *Session) ExpireRendezvous(nonce FenceNonce) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.expireRendezvousLocked(nonce)
+}
+
+// expireRendezvousLocked is [Session.ExpireRendezvous] with the lock held.
+//
+// The two pending states are not the same thing and do not expire the same
+// way. AwaitingSighting is an AUTHENTICATED completion whose fence never
+// arrived: the interval really has no trustworthy boundary, so completeness
+// becomes [CompletenessNoFence] and the write gate refuses. AwaitingAuthenticated
+// is a sighting with NOTHING authenticated behind it: it authorised nothing
+// while it waited (ADR-0024 decision 1), so expiring it drops the pinned
+// source and changes NOTHING ELSE — not completeness, not write authority.
+// Unauthenticated output can therefore never revoke the person's ability to
+// type, for however long the session lives.
+func (s *Session) expireRendezvousLocked(nonce FenceNonce) error {
 	if err := s.live(); err != nil {
 		return err
 	}
-	switch s.rendezvous.State {
-	case RendezvousAwaitingSighting, RendezvousAwaitingAuthenticated:
-		s.rendezvous.State = RendezvousExpired
-		s.rendezvous.PinnedSource = nil
-		if s.completeness == CompletenessComplete {
-			s.completeness = CompletenessNoFence
-		}
-		s.tick()
-		return nil
-	default:
+	e := s.rendezvous[nonce]
+	if e == nil || !e.pending() {
 		return ErrNoRendezvous
 	}
+	awaitingSighting := e.State == RendezvousAwaitingSighting
+	s.disarmEntryLocked(e)
+	e.State = RendezvousExpired
+	e.PinnedSource = nil
+	if awaitingSighting && s.completeness == CompletenessComplete {
+		s.completeness = CompletenessNoFence
+	}
+	s.rendezvousLatest, s.rendezvousHasLatest = nonce, true
+	s.tick()
+	return nil
 }
 
 // ------------------------------------------------------------------ failure
@@ -1097,6 +1428,9 @@ func (s *Session) Fail(cause string) error {
 	}
 	s.queue = nil
 	s.control = Control{Holder: Principal{}, Epoch: s.control.Epoch + 1}
+	for _, e := range s.rendezvous {
+		s.disarmEntryLocked(e)
+	}
 	s.tick()
 	return nil
 }

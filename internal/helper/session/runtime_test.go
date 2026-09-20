@@ -226,7 +226,7 @@ func callOp[T any](t *testing.T, svc *Service, op string, params any) T {
 // write a reply to.
 func pumpRuntime(t *testing.T, proc Process) *sessionruntime.Session {
 	t.Helper()
-	rt, screen, err := newSessionRuntime(defaultScreen, proc, "00000000000000000000000000000000", 80, 24)
+	rt, screen, err := newSessionRuntime(defaultScreen, proc, "00000000000000000000000000000000", 80, 24, 0, nil)
 	if err != nil {
 		t.Fatalf("build the session runtime: %v", err)
 	}

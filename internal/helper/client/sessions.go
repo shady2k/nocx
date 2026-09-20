@@ -1180,3 +1180,11 @@ func (a *AttachedSession) SignalForeground(sig syscall.Signal) error {
 	}
 	return a.SignalProcessGroup(pgid, sig)
 }
+
+// LifecycleComplete carries one already-authenticated completion DOWN to the
+// helper session it names (owner decision 2026-09-19). The kernel has
+// validated everything there is to validate; this is the carrier and not a
+// second gate, and the answer that matters is the absence of an error.
+func (c *Client) LifecycleComplete(ctx context.Context, params proto.LifecycleCompleteParams) error {
+	return c.Call(ctx, proto.ServiceSession, proto.OpLifecycleComplete, params, nil)
+}

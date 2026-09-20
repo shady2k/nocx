@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.lifecycle-complete.schema.json",
+  "title": "HelperSessionLifecycleCompleteResult",
+  "description": "Result of carrying one already-authenticated completion down to the session that owns the pane. Deliberately empty, like ack and resize: the answer to \"did the completion land\" is the absence of an error, and the op has a result type so no decoder special-cases a bare null.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {}
+}

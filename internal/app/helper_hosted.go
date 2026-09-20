@@ -128,7 +128,46 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 	// a params struct this function no longer owns: which struct carries it is
 	// the caller's business (see spawnFunc).
 	var life *proto.LifecycleLaunch
+	// THE COMPLETION DOWNLINK (owner decision 2026-09-19). The lifecycle
+	// channel is authenticated HERE, in the coordinator's kernel; the
+	// emulator and the rendezvous live in the helper. So the coordinator
+	// carries each already-authenticated completion DOWN to the helper
+	// session that owns the pane, over session.lifecycle-complete, and
+	// authentication does not move: the observing wrapper adds no gate — an
+	// err==nil from Ingest IS the kernel's acceptance, and a finish the
+	// kernel refused is observed by nothing. The wrapper is built BEFORE
+	// the spawn and the bind happens only when the spawn RPC has answered,
+	// because a shell that completes a command inside that window is
+	// accepted by the kernel while the helper session's identity is still
+	// unknown; the downlink buffers what it accepted in that window and
+	// delivers it, in acceptance order, the moment the bind names the
+	// session.
+	var downlink *helperclient.CompletionDownlink
+	// stopDownlink ends the delivery context; nil with the downlink. Its
+	// lifetime is the hosted session's, and the two ends are named below:
+	// AbortLifecycle's rollback arms, and the session's own end.
+	var stopDownlink context.CancelFunc
 	if h.lifecycle != nil {
+		// THE DELIVERY CONTEXT IS THE HOSTED SESSION'S LIFETIME, not the open
+		// request's. The request context is cancelled the moment the
+		// renderer's socket drops — while the PTY deliberately lives on
+		// (AD-9) — and a completion the kernel accepts after that would die
+		// with it instead of reaching the helper session that owns the pane.
+		// WithoutCancel detaches from the request's cancellation and keeps
+		// its values (the log fields); the cancel is hung off the session's
+		// own end — bindDownlinkToSession below, and the rollback arms —
+		// which is the lifetime's existing owner: the transport's teardown
+		// goroutine waits on the same Done.
+		sessionCtx, cancelSession := context.WithCancel(context.WithoutCancel(ctx))
+		stopDownlink = cancelSession
+		downlink = helperclient.NewCompletionDownlink(h.client, sessionCtx, func(err error) {
+			// The kernel's execution state stands exactly as it set it; the
+			// report is the whole of a failed delivery's handling.
+			log.NewSlogAdapter(h.log).WithContext(ctx).Warn(
+				"helper: the completion the kernel accepted did not reach the helper session", "err", err)
+		})
+		driveKernel := helperclient.NewCompletionObservingKernel(h.lifecycle, downlink)
+
 		coordinatorConn, peerConn := net.Pipe()
 		opts := []lifecyclechannel.Option{lifecyclechannel.WithLossReporter(h.loss)}
 		if h.helloTimeout > 0 {
@@ -141,9 +180,10 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		// exchange onto its logger HERE, where the identity exists, is what
 		// puts it beside the wait it explains instead of a timestamp away.
 		adapter, err := lifecyclechannel.NewStream(
-			log.NewSlogAdapter(h.log).WithContext(ctx), h.lifecycle, coordinatorConn, opts...)
+			log.NewSlogAdapter(h.log).WithContext(ctx), driveKernel, coordinatorConn, opts...)
 		if err != nil {
 			_ = peerConn.Close()
+			stopDownlink()
 			return hostedSpawnResult{}, err
 		}
 		lifecycleAdapter, lifecyclePeer = adapter, peerConn
@@ -153,10 +193,16 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 			Epoch: launch.Epoch, Capability: launch.Capability, Recovery: launch.Recovery,
 		}
 	}
+	// THE ROLLBACK ENDS THE DOWNLINK TOO: every arm below that aborts the
+	// lifecycle leg is an open that never became a pane, and a delivery
+	// context with no pane is exactly the lifetime this file refuses to keep.
 	abortLifecycleNow := func() {
 		if lifecycleAdapter != nil {
 			_ = lifecycleAdapter.Close()
 			_ = lifecyclePeer.Close()
+		}
+		if stopDownlink != nil {
+			stopDownlink()
 		}
 	}
 
@@ -164,6 +210,9 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 	if err != nil {
 		abortLifecycleNow()
 		return hostedSpawnResult{}, err
+	}
+	if downlink != nil {
+		downlink.Bind(entry.HostSessionID)
 	}
 
 	attached, err := h.client.Attach(ctx, proto.AttachParams{
@@ -206,6 +255,11 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		_ = h.client.CloseSession(ctx, entry.HostSessionID)
 		return hostedSpawnResult{}, err
 	}
+	if stopDownlink != nil {
+		// THE SESSION IS THE LIFETIME'S OWNER from here: the pane exists, and
+		// the delivery context ends when it does.
+		bindDownlinkToSession(sess, stopDownlink)
+	}
 
 	out := hostedSpawnResult{
 		Session: sess, Entry: entry,
@@ -225,4 +279,17 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		out.AbortLifecycle = func() { abortOnce.Do(abortLifecycleNow) }
 	}
 	return out, nil
+}
+
+// bindDownlinkToSession ends a completion downlink's delivery context when
+// the hosted session's own lifetime ends. sess.Done() is the signal the
+// transport's teardown owner already waits on (monitorExit), so the downlink
+// hangs off the existing edge rather than owning a lifetime of its own — two
+// owners of one lifetime being the defect whichever wins. One goroutine per
+// hosted pane, exactly like that monitor; it exits at the session's end.
+func bindDownlinkToSession(sess session.Session, stop context.CancelFunc) {
+	go func() {
+		<-sess.Done()
+		stop()
+	}()
 }

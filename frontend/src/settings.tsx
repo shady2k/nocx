@@ -327,7 +327,11 @@ export function SettingsComponent(props: SettingsComponentProps) {
       return
     }
     setCheckoutsStatus(store.status())
-    return store.subscribe(setCheckoutsStatus)
+    // onCleanup, exactly as the history subscription above: an unsubscribe
+    // RETURNED from a createEffect is not cleanup — Solid ignores the
+    // return value, so the store kept every listener the component ever
+    // registered and the mirror kept writing into a disposed scope.
+    onCleanup(store.subscribe(setCheckoutsStatus))
   })
   const checkoutsNotice = createMemo(() => checkoutsUnavailableSentence(checkoutsStatus()))
   /** And the other thing the History section may have to say: what these

@@ -683,6 +683,66 @@ func TestSubmitHonorsDisabledHistory(t *testing.T) {
 	}
 }
 
+// TestARowThatExistsStillReplaysWhenHistoryIsTurnedOff: turning history off
+// stops a command being RECORDED; it does not un-record one. Submit's
+// idempotency key is what the caller retries on, and a retry that answers
+// "no such row" about a row this store is holding is a lie the caller cannot
+// check. The gate belongs in front of MINTING a row, not in front of reading
+// one back — which is what the store's own comment already says about the
+// completion paths.
+func TestARowThatExistsStillReplaysWhenHistoryIsTurnedOff(t *testing.T) {
+	ctx := context.Background()
+	policy := content.NewPolicy()
+	policy.SetEnabled(true)
+	_, led := newLedgerWithPolicy(t, policy)
+	envReady(t, led, "local")
+
+	in := content.SubmitEntry{
+		ID: "00000000-0000-7000-8000-000000000131", Client: "lifecycle-shell",
+		EnvironmentID: "local", Cwd: "/repo",
+		Kind: content.EntryShell, Source: content.SourceUser, Intent: "make ci",
+	}
+	first, err := led.Submit(ctx, in)
+	if err != nil {
+		t.Fatalf("Submit with history on: %v", err)
+	}
+	if first.ID == "" || first.Replayed {
+		t.Fatalf("the first Submit = %+v, want a freshly minted row", first)
+	}
+
+	policy.SetEnabled(false)
+
+	again, err := led.Submit(ctx, in)
+	if err != nil {
+		t.Fatalf("replay after history was turned off: %v", err)
+	}
+	if again.ID != first.ID || !again.Replayed || again.IngestSeq != first.IngestSeq {
+		t.Fatalf("the replay = %+v, want the original row %+v back: the row exists and the caller may reference it", again, first)
+	}
+
+	// And nothing new was minted by that replay.
+	rows, err := led.ListEntries(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("after the replay rows = %d, want exactly the one row", len(rows))
+	}
+
+	// A DIFFERENT command, while history is off, is still refused a row.
+	fresh, err := led.Submit(ctx, content.SubmitEntry{
+		ID: "00000000-0000-7000-8000-000000000132", Client: "lifecycle-shell",
+		EnvironmentID: "local", Cwd: "/repo",
+		Kind: content.EntryShell, Source: content.SourceUser, Intent: "make ci-full",
+	})
+	if err != nil {
+		t.Fatalf("Submit of a new command while history is off: %v", err)
+	}
+	if fresh.ID != "" || fresh.Replayed {
+		t.Fatalf("a new command while history is off = %+v, want the zero result", fresh)
+	}
+}
+
 // History off does not erase the assistant's record: action and ask rows are
 // the turn's narrative and its authority record — not command history — and
 // the policy does not reach them. The gate's scope is the command kind, not

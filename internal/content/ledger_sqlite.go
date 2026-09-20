@@ -185,20 +185,6 @@ func (s *sqliteContent) Submit(ctx context.Context, in SubmitEntry) (SubmitResul
 	if in.Source == "" {
 		in.Source = SourceUser
 	}
-	// Keep-history-off: a COMMAND row is not written while the live policy
-	// has history off, and that is not an error — the zero result is the
-	// caller's signal that there is no row to reference, exactly as
-	// RecordCompleted's empty id is. This is the one check, at the one store:
-	// the transport's lifecycle writers and the ledger wire path all consult
-	// it and none can bypass it. The scope is the command kind alone —
-	// action, ask and text rows are the assistant's narrative and its
-	// authority record, not command history, and the policy does not reach
-	// them. A row that already exists finishes regardless (the completion
-	// paths), because refusing a close would leave a row claiming a command
-	// is still running.
-	if in.Kind == EntryShell && !s.policy.Enabled() {
-		return SubmitResult{}, nil
-	}
 	digest := entryDigest(in)
 	var out SubmitResult
 	err := s.run(ctx, func(ctx context.Context) error {
@@ -230,6 +216,28 @@ func (s *sqliteContent) Submit(ctx context.Context, in SubmitEntry) (SubmitResul
 			return tx.Commit()
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
+		}
+
+		// Keep-history-off: a COMMAND row is not MINTED while the live
+		// policy has history off, and that is not an error — the zero
+		// result is the caller's signal that there is no row to reference,
+		// exactly as RecordCompleted's empty id is. This is the one check,
+		// at the one store: the transport's lifecycle writers and the
+		// ledger wire path all consult it and none can bypass it. The scope
+		// is the command kind alone — action, ask and text rows are the
+		// assistant's narrative and its authority record, not command
+		// history, and the policy does not reach them.
+		//
+		// It sits BELOW the lookup above, and that position is the whole
+		// of its meaning: a row that already exists is read back regardless
+		// — the replay above, and RecordCompleted's close — because the id
+		// is an idempotency key the caller retries on, and answering "no
+		// such row" about a row this store is holding is a lie the caller
+		// cannot check. Turning history off stops a command being recorded;
+		// it does not un-record one.
+		if in.Kind == EntryShell && !s.policy.Enabled() {
+			out = SubmitResult{}
+			return nil
 		}
 
 		var next int64

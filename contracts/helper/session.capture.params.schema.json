@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.capture.params.schema.json",
+  "title": "HelperSessionCaptureParams",
+  "description": "One settled execution interval's capture record, pushed UP to the coordinator by the helper's session runtime (nocx-2v80t.2.2) -- a REVERSE op, the ssh service's credential asks' direction: the record is built at the authenticated render boundary, the instant the rendezvous completes, because only the runtime was there for the whole of it. The coordinator stores it against the command's entry through the content ledger's CaptureOutput and answers with the storage ack (session.capture.schema.json), which carries a legal nothing-was-kept-and-why outcome; a shape that could only express success is the defect this op exists to prevent.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "session",
+    "incarnation",
+    "nonce",
+    "revision",
+    "completeness",
+    "opening",
+    "departed",
+    "departedHole",
+    "closing"
+  ],
+  "properties": {
+    "session": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/hostSessionId"
+    },
+    "incarnation": {
+      "description": "The session runtime's own identity, the same spelling session.lifecycle-complete carries down: the session the PTY belongs to and the numeric per-PTY generation, never the install id the outer session object's generation names.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session", "generation"],
+      "properties": {
+        "session": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "generation": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "nonce": {
+      "description": "The settled meeting's fence: exactly 64 lowercase hex characters, the spelling lifecycle-complete carries down and the runtime matched on. The nonce names WHICH execution interval this record is, so the coordinator can bind it to the command's entry by the completion it already authenticated.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "revision": {
+      "description": "The session runtime's monotonic clock at the boundary: the instant the closing snapshot was read, provenance for everything in the record.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "completeness": {
+      "description": "What the runtime can claim about the interval's stream at the boundary, from the closed set it already spells on this service: complete | lostIngest | noFence | evicted | unknown. It is the runtime's OWN answer, never a default, and never silently presented as complete.",
+      "type": "string",
+      "enum": ["complete", "lostIngest", "noFence", "evicted", "unknown"]
+    },
+    "opening": { "$ref": "#/$defs/captureScreen" },
+    "departed": {
+      "description": "The rows that LEFT the screen during the interval, oldest first, each copied at the instant it left: a soft-wrapped line stays joinable (wrap/continuation), a hard newline stays a break. An interval whose output fit the screen may still have pushed rows off -- the prompt and the echoed command among them -- and these rows are the only place that content survives.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/captureRow" }
+    },
+    "departedHole": {
+      "description": "The departure report's own retention flag: true means the emulator could not read some of what left, so the list holds what was read and the rest is unknowable. False is a claim a reader may rely on; true is never presented as whole.",
+      "type": "boolean"
+    },
+    "closing": { "$ref": "#/$defs/captureScreen" }
+  },
+  "$defs": {
+    "captureScreen": {
+      "description": "One instant of a screen: the whole grid with style, the caret, and which buffer was active. Lines is exactly `rows` long and every row `cols` cells wide -- a rectangle, because a consumer that restores the record draws positions, not just text.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cols", "rows", "altScreen", "cursorX", "cursorY", "cursorVisible", "lines"],
+      "properties": {
+        "cols": { "type": "integer", "minimum": 1 },
+        "rows": { "type": "integer", "minimum": 1 },
+        "altScreen": { "type": "boolean" },
+        "cursorX": { "type": "integer", "minimum": 0 },
+        "cursorY": { "type": "integer", "minimum": 0 },
+        "cursorVisible": { "type": "boolean" },
+        "lines": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/captureRow" }
+        }
+      }
+    },
+    "captureRow": {
+      "description": "One physical row, with the wrap facts that let a serialiser join the physical lines of one logical line without losing a hard newline. Wrap and continuation are not each other's negation: the last row of a wrapped sequence has wrap false and continuation true.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wrap", "continuation", "cells"],
+      "properties": {
+        "wrap": { "type": "boolean" },
+        "continuation": { "type": "boolean" },
+        "cells": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/captureCell" }
+        }
+      }
+    },
+    "captureCell": {
+      "description": "One column, with the visual facts a restore needs: the grapheme, the columns it occupies, and its style. This is the capture RECORD's cell and not the live frame's: the record is the durable content the card's wire format derives views from, and style is load-bearing there. Attrs is the emulator's closed attribute bitset verbatim -- bold 1, italic 2, faint 4, blink 8, inverse 16, invisible 32, strikethrough 64, overline 128. Underline is the underline SHAPE, 0 (none) through 5 (dashed).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "width", "hasText", "attrs", "underline"],
+      "properties": {
+        "text": {
+          "description": "The grapheme the cell carries; empty when hasText is false. A cell can carry a background colour and no text, and a restore paints the first and not the second.",
+          "type": "string"
+        },
+        "width": {
+          "description": "0 (a continuation or spacer), 1 or 2: a double-width cluster occupies two columns and only the first carries it.",
+          "type": "integer",
+          "enum": [0, 1, 2]
+        },
+        "hasText": { "type": "boolean" },
+        "fg": { "$ref": "#/$defs/captureColor" },
+        "bg": { "$ref": "#/$defs/captureColor" },
+        "underlineColor": { "$ref": "#/$defs/captureColor" },
+        "attrs": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "underline": { "type": "integer", "minimum": 0, "maximum": 5 }
+      }
+    },
+    "captureColor": {
+      "description": "One colour, in the emulator's own vocabulary: the kinds kept apart because they mean different things and a flattened triple would not survive a theme. The helper holds what the emulator held; resolving a palette index into somebody's theme is the READER's act, never the wire's. Fields a kind does not name are absent.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["default", "palette", "rgb"] },
+        "palette": {
+          "description": "The index for kind palette.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "rgb": {
+          "description": "#rrggbb for kind rgb.",
+          "type": "string",
+          "pattern": "^#[0-9a-f]{6}$"
+        }
+      }
+    }
+  }
+}

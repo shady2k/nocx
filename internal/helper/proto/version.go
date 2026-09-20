@@ -231,4 +231,14 @@ package proto
 // older than this app" and keeps relaying the lifecycle bytes without the
 // downlink. Nothing shipped at 15 carries a session entry or a spawn result
 // the op changes, so no shape moved with it.
+// This is still 15, widened in place for the same reason: the `session`
+// service gained `capture`, the REVERSE op by which the helper's session
+// runtime pushes one settled interval's capture record UP to the
+// coordinator (nocx-2v80t.2.2), and the coordinator answers with the
+// storage ack — kept, or why nothing was kept. The op degrades by
+// generation the way lifecycle-complete does: an older coordinator answers
+// `unknown_service`/`unknown_op` to the ask, which the helper reads as
+// "this coordinator cannot store captures yet" and keeps rendering exactly
+// as before. Nothing shipped at 15 carries a shape the op changes.
+
 const Version = "15"

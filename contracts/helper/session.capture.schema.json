@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.capture.schema.json",
+  "title": "HelperSessionCaptureResult",
+  "description": "The coordinator's storage answer to one capture record. REFUSING TO STORE IS NOT AN ERROR, and the ack says which happened: output retention off, a sensitive entry, a critical pinned observation and an unrecorded command each keep the entry and keep no body, and each says so here rather than failing -- a shape that could only express success would leave the helper that built the record unable to say what became of it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kept"],
+  "properties": {
+    "kept": {
+      "description": "Whether the record's body was stored against the command's entry.",
+      "type": "boolean"
+    },
+    "reason": {
+      "description": "Why nothing was kept, from a closed set spelled like the store's own stance: outputOff (output retention off), sensitive (a sensitive entry), critical (a critical pinned observation), noEntry (the command's row was never recorded -- history off, or the bind never landed). Absent exactly when kept is true.",
+      "type": "string",
+      "enum": ["outputOff", "sensitive", "critical", "noEntry"]
+    }
+  }
+}

@@ -342,6 +342,41 @@ type Terminal interface {
 	// an effect is read exactly once and by one reader.
 	Effects() []Effect
 
+	// DepartedRows returns the rows that LEFT the screen since the previous
+	// call, oldest first, and starts a fresh list.
+	//
+	// A row departs when the program's output pushes it off the top of the
+	// active area into scrollback — the one leave the screen has. A row a
+	// scroll region moved within the screen never left it; a row an erase or
+	// a reset destroyed ceased rather than left; and a resize reflows the
+	// screen rather than scrolling it, so reflowed rows are not departures
+	// either — the report re-baselines across [Terminal.Resize].
+	//
+	// The alternate screen has no history, so nothing departs while a
+	// full-screen program owns the pane. A terminal reports scrollback per
+	// ACTIVE buffer, so a write that scrolls the primary and then switches
+	// buffers hands those rows to the next measurement of the primary screen
+	// rather than losing them; until then they are booked, not reported.
+	//
+	// Each row is copied at the instant it departs — its cells, and its wrap
+	// flags as the terminal carries them ([Row].Wrap and [Row].Continuation),
+	// never re-measured — so a later reflow or eviction cannot rewrite a row
+	// that was reported, and a soft-wrapped line's physical rows stay
+	// joinable after they have left.
+	//
+	// The list is the CALLER'S once it is returned, exactly as
+	// [Terminal.Effects]'s is: reading the report is what empties it, so a
+	// row is reported exactly once and by one reader. A nil error says the
+	// list is complete — every row that left since the previous call is in
+	// it. A non-nil error says the terminal could not read some of what left:
+	// the list holds what was read, in order, and what was not read is
+	// unknowable — a caller that cannot tolerate a gap must treat the whole
+	// interval as unread.
+	//
+	// A closed terminal has no report: this returns [ErrClosed] after
+	// [Terminal.Close], and a report that was never read dies with it.
+	DepartedRows() ([]Row, error)
+
 	// Paste hands the terminal a paste of text and returns the bytes the
 	// program is to be sent, framed per the TERMINAL'S OWN state: bracketed
 	// when the program enabled mode 2004 and passed through when it did not.

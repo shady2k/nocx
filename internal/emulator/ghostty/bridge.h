@@ -83,8 +83,8 @@ typedef struct {
 } nocxStyleFacts;
 
 GhosttyResult nocxInstall(GhosttyTerminal terminal, uintptr_t handle);
-GhosttyResult nocxGridRefAt(GhosttyTerminal terminal, uint16_t x, uint16_t y,
-                            GhosttyGridRef *out);
+GhosttyResult nocxGridRefAt(GhosttyTerminal terminal, GhosttyPointTag tag,
+                            uint32_t x, uint32_t y, GhosttyGridRef *out);
 GhosttyResult nocxStyleAt(const GhosttyGridRef *ref, nocxStyleFacts *out);
 GhosttyResult nocxKeyEncode(GhosttyKeyEncoder encoder, GhosttyKey key,
                             GhosttyMods mods, GhosttyKeyAction action,

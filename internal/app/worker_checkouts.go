@@ -118,13 +118,54 @@ func (c *workerCheckouts) clock() time.Time {
 	return c.now()
 }
 
+// nocxCanonicalPath is THE one canonical spelling of a path in the
+// checkouts logic — every comparison or join that touches two spellings of
+// one directory goes through it. It is absolute, cleaned, and has every
+// existing symlinked ancestor resolved: on macOS the temp directory is a
+// symlink (/var → /private/var), so git answers the resolved spelling of
+// the paths it reports while nocx's own worktrees root is the unresolved
+// one, and a naive comparison of the two is a wrong answer on the platform
+// nocx ships on (nocx-xn63t.1.5 evidence).
+//
+// A path that does not EXIST (or an ancestor of it) cannot be resolved by
+// filepath.EvalSymlinks; the deepest existing ancestor is resolved and the
+// missing tail carried over unchanged, so a path nocx is about to create
+// canonicalizes to where creating it will land, and a caller comparing a
+// missing checkout's two spellings still agrees. What a caller WANTS a
+// missing path to mean is its own decision: for the "is it ours" guard a
+// missing tail must never turn a checkout nocx made into a stranger, which
+// is why the guard canonicalizes both sides rather than refusing on the
+// resolution error.
+func nocxCanonicalPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return filepath.Clean(p)
+	}
+	resolved, linkErr := filepath.EvalSymlinks(abs)
+	if linkErr == nil {
+		return resolved
+	}
+	parent := filepath.Clean(filepath.Dir(abs))
+	if parent == abs {
+		return abs
+	}
+	return filepath.Join(nocxCanonicalPath(parent), filepath.Base(abs))
+}
+
 // nocxCheckoutRepoKey is the location formula's <repo key>: the main
 // checkout's basename plus "-" and the first 8 hex chars of sha256 over the
 // common git dir (the main checkout's .git), so two repositories that happen
 // to share a basename do not collide. It is THE one derivation — the spawn
 // path computes the same key through this function, and a second spelling of
-// it would be two answers that agree until the day they don't.
+// it would be two answers that agree until the day they don't. The input is
+// canonicalized (nocxCanonicalPath) first: git answers the resolved spelling
+// of the main checkout while a coordinator's pane records whatever spelling
+// it stood down through, and the two must hash to one key.
 func nocxCheckoutRepoKey(mainPath string) string {
+	mainPath = nocxCanonicalPath(mainPath)
 	digest := sha256.Sum256([]byte(filepath.Join(mainPath, ".git")))
 	return filepath.Base(mainPath) + "-" + hex.EncodeToString(digest[:4])
 }

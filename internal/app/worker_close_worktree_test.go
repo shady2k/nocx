@@ -253,8 +253,14 @@ func TestClosingAWorktreeWorkerMovesItsLastUsedTime(t *testing.T) {
 	if _, err := stand.closer.Close(context.Background(), stand.participant(wtPath, head)); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	if len(toucher.touched) != 1 || toucher.touched[0] != wtPath {
-		t.Fatalf("touched = %v, want exactly [%s]", toucher.touched, wtPath)
+	// THE CANONICAL SPELLING, not the one this test happened to hold: the
+	// close stamps through the same one owner every checkout comparison uses
+	// (nocx-xn63t.1.5's audit), so on a platform whose temp directory is a
+	// symlink — macOS — the recorded row and the stamp meet in one form. This
+	// assertion said wtPath and was red on macOS for exactly that reason.
+	wantTouched := nocxCanonicalPath(wtPath)
+	if len(toucher.touched) != 1 || toucher.touched[0] != wantTouched {
+		t.Fatalf("touched = %v, want exactly [%s]", toucher.touched, wantTouched)
 	}
 }
 

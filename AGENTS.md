@@ -395,6 +395,20 @@ artifact download needed. Read that block before forming a hypothesis; it is usu
 whole answer, and guessing from the DOM or re-running locally to reproduce what the block
 already said is the failure mode this exists to end.
 
+**On macOS a temporary directory is reached through a symlink, and git answers the
+RESOLVED spelling.** So a test that compares two paths puts the directory behind a symlink,
+or it agrees with the product on a machine where both spellings are the same and disagrees
+only on the platform we ship. Measured 2026-09-19/20 (`nocx-xn63t.1`, PR #208): six sites
+compared paths — the record's own boundary, the removal, the sweep, the close, the store's
+SQL keys and the tests' own expectations — and every one was green on Linux and wrong on
+macOS, where the removal refused every checkout as "not ours", the close answered "could
+not read this checkout" instead of "it holds uncommitted work", the sweep could remove a
+checkout a live pane was standing in, and a removal could answer removed while removing
+nothing. Four of that stage's five CI rounds were this one defect. The code half is settled
+— one canonical owner for the spelling, per "Look for the existing answer" below — and the
+half no assertion can carry is the test: **put the directory behind a symlink, and the
+Linux run fails too.**
+
 ## How we work
 
 1. Take the next task from `br ready` — see [What to work on next](#what-to-work-on-next).

@@ -617,9 +617,20 @@ how two agents ship two answers to one question.
 
    ```bash
    br list --label <area> --status all
-   br search <phrase>                    # then words, for the bead filed in other words
+   br search <phrase> --all              # then words, for the bead filed in other words
    deja "<keyword>"                      # what a past session already hit
    ```
+
+   **`br search` HIDES closed matches unless you pass `--all`**, and it says so in one
+   line under the results that is easy to read past. For "has this already been fixed"
+   the closed ones are the entire answer, so the bare form answers the opposite of the
+   question you are asking. Measured 2026-09-20: a concurrency defect recovered from an
+   abandoned worktree was filed as new, with a fix and a test, after a search that
+   printed `note: 8 closed match(es) hidden`. It had been fixed the day before — the
+   bead was closed, the commit was an ancestor of `main`, and the recovered file was
+   byte-identical to `main`'s. **Then confirm against the tree**, which settled it in
+   one command: `git merge-base --is-ancestor <commit> origin/main`, and a `git diff`
+   of the file against `origin/main`.
 
    A hit is not automatically your task — read it. It may be claimed, blocked, or record
    that the behaviour is deliberate. Work the existing bead rather than opening a second.

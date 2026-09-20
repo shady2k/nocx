@@ -245,6 +245,17 @@ type Options struct {
 	// duration — the interval is real wall-clock time, D5's own clock
 	// seam (Now) is what the sweep still measures a session's age against.
 	SweepInterval time.Duration
+	// RendezvousExpiry is the bounded missing-fence wait every spawned
+	// session's runtime runs its rendezvous under (design §6.4): how long
+	// either half arriving alone stays pending before the runtime calls
+	// its own ExpireRendezvous and marks the capture no-fence. Zero means
+	// the shipped default (rendezvousExpiryDefault); the number is free to
+	// change, stating it at the composition root is not.
+	RendezvousExpiry time.Duration
+	// RendezvousExpireAfter schedules that wait. Nil is time.AfterFunc; a
+	// test hands its own and fires the trigger itself, because the wait
+	// must be observable as a STATE, never as a duration (AGENTS.md).
+	RendezvousExpireAfter func(d time.Duration, f func()) (stop func() bool)
 }
 
 // defaultSweepInterval is how often production runs the scheduled sweep. It
@@ -254,6 +265,11 @@ type Options struct {
 // process's own liveness (see Service.Close's doc on why the helper cares)
 // outlive its TTL by up to a whole interval.
 const defaultSweepInterval = 10 * time.Minute
+
+// rendezvousExpiryDefault is the shipped bounded missing-fence wait (design
+// §6.4). The number is free to change; that a session runtime is BUILT with
+// one is not.
+const rendezvousExpiryDefault = 500 * time.Millisecond
 
 // Service is the helper's `session` service.
 type Service struct {
@@ -266,6 +282,11 @@ type Service struct {
 	limits     Limits
 	now        func() time.Time
 	newID      func() ([16]byte, error)
+	// rendezvousExpiry and rendezvousExpireAfter are the bounded
+	// missing-fence policy every spawned session's runtime is built under
+	// (Options.RendezvousExpiry).
+	rendezvousExpiry      time.Duration
+	rendezvousExpireAfter func(d time.Duration, f func()) (stop func() bool)
 	// sweepStop ends the scheduled sweep goroutine (nocx-isjh4); closed
 	// exactly once, by sweepStopOnce, from Close.
 	sweepStop     chan struct{}
@@ -316,23 +337,28 @@ var (
 // no PTY, and the first spawn is what makes this generation resident.
 func New(opts Options) *Service {
 	s := &Service{
-		generation: opts.Generation,
-		spawner:    opts.Spawner,
-		sshSpawner: opts.SSHSpawner,
-		inspector:  opts.Inspector,
-		screen:     opts.Screen,
-		log:        opts.Log,
-		limits:     opts.Limits.withDefaults(),
-		now:        opts.Now,
-		newID:      opts.NewID,
-		sessions:   make(map[string]*hostSession),
-		keys:       make(map[string]*keyClaim),
-		sinks:      make(map[Sink]struct{}),
-		sweepStop:  make(chan struct{}),
-		sweepDone:  make(chan struct{}),
+		generation:            opts.Generation,
+		spawner:               opts.Spawner,
+		sshSpawner:            opts.SSHSpawner,
+		inspector:             opts.Inspector,
+		screen:                opts.Screen,
+		log:                   opts.Log,
+		limits:                opts.Limits.withDefaults(),
+		now:                   opts.Now,
+		newID:                 opts.NewID,
+		rendezvousExpiry:      opts.RendezvousExpiry,
+		rendezvousExpireAfter: opts.RendezvousExpireAfter,
+		sessions:              make(map[string]*hostSession),
+		keys:                  make(map[string]*keyClaim),
+		sinks:                 make(map[Sink]struct{}),
+		sweepStop:             make(chan struct{}),
+		sweepDone:             make(chan struct{}),
 	}
 	if s.screen == nil {
 		s.screen = defaultScreen
+	}
+	if s.rendezvousExpiry == 0 {
+		s.rendezvousExpiry = rendezvousExpiryDefault
 	}
 	if s.log == nil {
 		s.log = slog.Default()
@@ -1175,7 +1201,7 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		s.budget -= shape.reserved
 		s.mu.Unlock()
 	}
-	rt, screen, err := newSessionRuntime(s.screen, proc, shape.sessionID, shape.cols, shape.rows)
+	rt, screen, err := newSessionRuntime(s.screen, proc, shape.sessionID, shape.cols, shape.rows, s.rendezvousExpiry, s.rendezvousExpireAfter)
 	if err != nil {
 		// Nothing has been read from this process and nothing has been
 		// registered, so the spawn has produced nothing: end it rather than

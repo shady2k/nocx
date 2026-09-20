@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/shady2k/nocx/internal/emulator"
 )
@@ -65,6 +67,19 @@ type Config struct {
 	// reply with none bound refuses loudly (see deliverReplyLocked) rather
 	// than discarding the program's answer.
 	Replies ReplySink
+	// RendezvousExpiry is the bounded missing-fence wait (design §6.4): how
+	// long a rendezvous left with one half missing stays pending before the
+	// runtime calls its own [Session.ExpireRendezvous]. The number is free
+	// to change; the POLICY is not, and zero means no timer — the contract
+	// drives [Session.ExpireRendezvous] itself, as a call, and the
+	// composition root (internal/helper/session) states the production
+	// interval out loud rather than a default assuming it.
+	RendezvousExpiry time.Duration
+	// ExpireAfter schedules the wait. Nil means time.AfterFunc; a test
+	// hands its own and fires the trigger itself, because a test may not
+	// depend on timing (AGENTS.md) — the wait must be observable as a
+	// STATE, never as a duration.
+	ExpireAfter func(d time.Duration, f func()) (stop func() bool)
 }
 
 // Allowance is the delivery allowance consumer queues draw on, keyed by the
@@ -161,6 +176,22 @@ type Session struct {
 	rendezvous   Rendezvous
 	completeness Completeness
 
+	// expireDur, expireAfter and expireStop are the bounded rendezvous
+	// wait's wiring (Config.RendezvousExpiry). expireStop is the handle
+	// that cancels the live timer, replaced on every rearm; all three are
+	// guarded by mu, and the timer's own callback takes mu again by
+	// entering [Session.expireBy].
+	expireDur   time.Duration
+	expireAfter func(d time.Duration, f func()) (stop func() bool)
+	expireStop  func() bool
+	// expireSeq is the wait's generation: it is bumped each time a timer
+	// is actually scheduled, and a callback whose generation is no longer
+	// the live one does nothing. A one-shot timer can fire while its stop
+	// is being replaced — Stop returns false and the callback runs anyway
+	// — so the rearm test alone cannot make this safe; the check must be
+	// under mu at the moment of transitioning.
+	expireSeq uint64
+
 	allowance *Allowance
 	// consumers are the subscribers attached to this session, in attach order.
 	consumers []*subscriber
@@ -222,6 +253,10 @@ func New(cfg Config) (*Session, error) {
 	if allowance == nil {
 		allowance = NewAllowance()
 	}
+	after := cfg.ExpireAfter
+	if after == nil {
+		after = defaultExpireAfter
+	}
 	return &Session{
 		inc:          cfg.Incarnation,
 		avail:        AvailabilityAvailable,
@@ -233,6 +268,8 @@ func New(cfg Config) (*Session, error) {
 		completeness: cfg.Completeness,
 		allowance:    allowance,
 		replies:      cfg.Replies,
+		expireDur:    cfg.RendezvousExpiry,
+		expireAfter:  after,
 	}, nil
 }
 
@@ -933,6 +970,16 @@ func (s *Session) Ingest(b []byte) error {
 	// delivered is a bell that rings nowhere and is never reported as lost.
 	replyErr := s.deliverReplyLocked(replies)
 	for _, e := range s.emulator.Effects() {
+		if e.Kind == emulator.EffectFence {
+			// The join: a fence the emulator drained LOCATES the
+			// authenticated half of the rendezvous (ADR-0024 decision 1)
+			// and is not a consumer payload, so it never reaches
+			// effectKindOf or the delivery path below — a kind the
+			// delivery vocabulary does not know is refused there, and a
+			// fenced command must not fail the ingest that carried it.
+			s.sightDrainedFenceLocked(e)
+			continue
+		}
 		s.nextEffect++
 		effect := Effect{
 			ID:   s.nextEffect,
@@ -1017,6 +1064,7 @@ func (s *Session) Completed(at Incarnation, nonce FenceNonce, _ int) {
 		s.rendezvous = Rendezvous{State: RendezvousAwaitingSighting, Nonce: nonce, At: at}
 		s.tick()
 	}
+	s.armExpiryLocked()
 }
 
 // SightFence reports that the emulator drew a fence, and pins the content it
@@ -1026,6 +1074,14 @@ func (s *Session) Completed(at Incarnation, nonce FenceNonce, _ int) {
 func (s *Session) SightFence(nonce FenceNonce, source []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.sightFenceLocked(nonce, source)
+}
+
+// sightFenceLocked is [Session.SightFence] with the lock already held: the
+// ingest path joins a drained fence to the rendezvous from inside its own
+// critical section, and a call to the exported form there would wait on the
+// mutex it is holding.
+func (s *Session) sightFenceLocked(nonce FenceNonce, source []byte) error {
 	if err := s.live(); err != nil {
 		return err
 	}
@@ -1038,7 +1094,6 @@ func (s *Session) SightFence(nonce FenceNonce, source []byte) error {
 		s.rendezvous.SightedAt = s.rev
 		s.rendezvous.PinnedSource = append([]byte(nil), source...)
 		s.tick()
-		return nil
 	default:
 		s.rendezvous = Rendezvous{
 			State:        RendezvousAwaitingAuthenticated,
@@ -1048,8 +1103,96 @@ func (s *Session) SightFence(nonce FenceNonce, source []byte) error {
 			PinnedSource: append([]byte(nil), source...),
 		}
 		s.tick()
-		return nil
 	}
+	s.armExpiryLocked()
+	return nil
+}
+
+// sightDrainedFenceLocked joins ONE fence effect the emulator drained to the
+// rendezvous: the join the design names (§6.4), exercised on a real pty by
+// realpty_rendezvous_test.go. The nonce the stream carried is 64 hex
+// characters the emulator passed through undecoded; decoding it is the
+// consumer's job, and a body that is not exactly a [FenceNonce] in hex cannot
+// match any completion — sighting it would be manufacturing a rendezvous
+// nobody authenticated, so the fence is dropped.
+//
+// An [ErrNonceMismatch] is the rendezvous declining to overwrite a pending
+// authenticated half with a fence that does not match it: the fence located
+// nothing and is dropped, the pending half keeps waiting, and neither is a
+// reason the INGEST failed — the bytes reached the emulator and the screen
+// moved, which is the account Ingest returns.
+func (s *Session) sightDrainedFenceLocked(e emulator.Effect) {
+	nonce, ok := fenceNonceOf(e.Body)
+	if !ok {
+		return
+	}
+	_ = s.sightFenceLocked(nonce, e.Source)
+}
+
+// fenceNonceOf decodes a fence body: exactly 64 hex characters. The
+// emulator's adapter only reports a fence whose stream bytes matched that
+// shape exactly (internal/emulator/ghostty/fence.go), so a mismatch here is
+// defensive, and refusing it is the safe answer — a zero-filled nonce could
+// otherwise MATCH a zero completion and close a meeting on bytes that never
+// carried a fence at all.
+func fenceNonceOf(body []byte) (FenceNonce, bool) {
+	var nonce FenceNonce
+	raw, err := hex.DecodeString(string(body))
+	if err != nil || len(raw) != len(nonce) {
+		return nonce, false
+	}
+	copy(nonce[:], raw)
+	return nonce, true
+}
+
+// defaultExpireAfter is the production scheduler: time.AfterFunc behind the
+// seam [Config.ExpireAfter] names.
+func defaultExpireAfter(d time.Duration, f func()) (stop func() bool) {
+	t := time.AfterFunc(d, f)
+	return t.Stop
+}
+
+// armExpiryLocked rearms the bounded wait after a rendezvous transition: a
+// timer exists exactly while a meeting is pending, and the moment the
+// rendezvous is not — complete, expired, or not in flight — there is none.
+// It runs under mu; the trigger it schedules does NOT hold mu, because its
+// whole body is [Session.ExpireRendezvous], which takes the lock itself.
+func (s *Session) armExpiryLocked() {
+	s.disarmExpiryLocked()
+	if s.expireDur <= 0 {
+		return
+	}
+	switch s.rendezvous.State {
+	case RendezvousAwaitingSighting, RendezvousAwaitingAuthenticated:
+	default:
+		return
+	}
+	s.expireSeq++
+	seq := s.expireSeq
+	s.expireStop = s.expireAfter(s.expireDur, func() { s.expireBy(seq) })
+}
+
+// disarmExpiryLocked cancels the live wait, if one is armed.
+func (s *Session) disarmExpiryLocked() {
+	if s.expireStop != nil {
+		s.expireStop()
+		s.expireStop = nil
+	}
+}
+
+// expireBy is a timer callback's entry. Stop cannot retract a callback that
+// is already running or already dequeued, so the callback re-checks the
+// wait's generation under mu: a superseded wait does nothing, and only the
+// wait the CURRENT pending rendezvous armed may expire it. (After [Fail]
+// the same guard holds through [live]: a session that is gone expires
+// nothing.)
+func (s *Session) expireBy(seq uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if seq != s.expireSeq {
+		return
+	}
+	_ = s.expireRendezvousLocked()
 }
 
 // ExpireRendezvous is the bounded wait elapsing with one half missing. It is a
@@ -1059,6 +1202,11 @@ func (s *Session) SightFence(nonce FenceNonce, source []byte) error {
 func (s *Session) ExpireRendezvous() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.expireRendezvousLocked()
+}
+
+// expireRendezvousLocked is [Session.ExpireRendezvous] with the lock held.
+func (s *Session) expireRendezvousLocked() error {
 	if err := s.live(); err != nil {
 		return err
 	}
@@ -1070,6 +1218,7 @@ func (s *Session) ExpireRendezvous() error {
 			s.completeness = CompletenessNoFence
 		}
 		s.tick()
+		s.armExpiryLocked()
 		return nil
 	default:
 		return ErrNoRendezvous
@@ -1097,6 +1246,7 @@ func (s *Session) Fail(cause string) error {
 	}
 	s.queue = nil
 	s.control = Control{Holder: Principal{}, Epoch: s.control.Epoch + 1}
+	s.disarmExpiryLocked()
 	s.tick()
 	return nil
 }

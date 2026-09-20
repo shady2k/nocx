@@ -109,7 +109,16 @@ func (s *lcSpawner) Spawn(SpawnRequest) (Process, error) {
 // launch so the session is exactly the shape a completion will arrive for.
 func spawnOne(t *testing.T) (*Service, proto.HostSessionID) {
 	t.Helper()
-	svc := New(Options{Generation: "gen-under-test", Spawner: &lcSpawner{}, Log: lcTestLog()})
+	svc := New(Options{
+		Generation: "gen-under-test",
+		Spawner:    &lcSpawner{},
+		Log:        lcTestLog(),
+		// These tests assert exact rendezvous states across seconds of
+		// test time; a real 500 ms wait under them would fire mid-test.
+		// The trigger exists here and nobody fires it — the production
+		// wiring of the wait is the wiring test's to prove.
+		RendezvousExpireAfter: (&expiryTrigger{}).afterFunc,
+	})
 	res, err := svc.spawn(context.Background(), proto.SpawnParams{
 		Cols: 80, Rows: 24,
 		Lifecycle: &proto.LifecycleLaunch{

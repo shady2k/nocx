@@ -574,13 +574,34 @@ func (h ledgerHandlers) apply(ctx context.Context, req jsonrpcRequest, cmd ledge
 	return out, true
 }
 
+// errHistoryOff is the refusal create answers when the store's History
+// policy kept no row for the event. It is an error and not a synthetic ack
+// because the contract leaves no honest success shape for a row that does
+// not exist (seq's minimum is 1); the renderer's bind path swallows it by
+// design, so the command is unaffected.
+var errHistoryOff = errors.New("history is off — the command ran and no row was recorded")
+
 // create writes a row that does not exist yet and walks it to the event's
 // phase in one go. Rule 3 lives here: the envelope carries everything the
 // four NOT NULL columns need, so a close whose open was lost still lands.
+// The History policy is rule 3's boundary: when the store refuses the row,
+// no row is created and the event is refused with errHistoryOff.
 func (h ledgerHandlers) create(ctx context.Context, svc capability.LedgerService, cmd ledgerCommand) (ledgerEventResponse, error) {
 	res, err := svc.Submit(ctx, cmd.entry)
 	if err != nil {
 		return ledgerEventResponse{}, err
+	}
+	// Keep-history-off: the store kept no command row, and the zero result
+	// is its signal (ledger_sqlite.go). The event is REFUSED, not faked:
+	// the contract's success ack requires seq >= 1 — the row's ingest_seq,
+	// "present on every ack" (ledger.bind.schema.json) — and no schema-legal
+	// ack describes a row that does not exist. Nothing is started or
+	// finished, because StartExecution would refuse an entry that does not
+	// exist. The renderer's bind caller is fire-and-forget with a warn log
+	// (terminal-content.ts), so the refusal costs the command nothing; a
+	// legal no-row ack shape would be a contract change, the owner's call.
+	if res.ID == "" {
+		return ledgerEventResponse{}, errHistoryOff
 	}
 	out := ledgerEventResponse{
 		ID:          res.ID,

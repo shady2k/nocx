@@ -278,12 +278,20 @@ const (
 	// RendezvousComplete means both halves arrived and their nonces matched.
 	RendezvousComplete
 	// RendezvousExpired means the bounded wait elapsed with one half missing.
-	// It is an outcome with a name, not a silent fall-through, and it forces
-	// CompletenessNoFence rather than letting a capture claim to be whole.
+	// It is an outcome with a name, not a silent fall-through. It forces
+	// CompletenessNoFence only when the AUTHENTICATED half was the one left
+	// waiting (ADR-0024 decision 1): a fence sighted with nothing
+	// authenticated behind it authorised nothing, so its expiry may revoke
+	// nothing either — completeness and write authority are untouched.
 	RendezvousExpired
 )
 
-// Rendezvous is one meeting in flight.
+// Rendezvous is one meeting's record. A session tracks a SET of them, keyed
+// by nonce: the two channels are ordered independently (decision 7), so two
+// commands can legitimately be pending at once and one slot would let the
+// second command evict the first. [Runtime.Rendezvous] answers the meeting
+// most recently touched and [Runtime.RendezvousFor] names one; a caller that
+// can name a nonce must use the keyed read.
 //
 // PinnedSource is what makes it survivable and is the reason a row number is
 // not enough: between the sighting and the authenticated event, output can
@@ -331,9 +339,12 @@ const (
 	// re-attachment reported a hole (internal/transport/ws_readopt.go:100). An
 	// emulator fed only the surviving suffix is not authoritative.
 	CompletenessLostIngest
-	// CompletenessNoFence means ingest was whole but the rendezvous expired,
-	// so the interval has no authenticated boundary. The body may still be
-	// worth keeping; it may not be described as the command's complete output.
+	// CompletenessNoFence means ingest was whole but an AUTHENTICATED
+	// completion's fence never arrived — its bounded wait elapsed — so the
+	// interval has no authenticated boundary. The body may still be worth
+	// keeping; it may not be described as the command's complete output. A
+	// fence sighted with nothing authenticated behind it can never cause
+	// this: it authorises nothing, so its expiry degrades nothing.
 	CompletenessNoFence
 	// CompletenessEvicted means retention deliberately kept less than the
 	// whole. It is a DIFFERENT available artifact, never an empty body and
@@ -517,6 +528,19 @@ const (
 	// reading slowly must not spend another session's, which is what per-session
 	// fairness in AD-10 means over frames.
 	MaxPendingFrames = 8
+	// MaxPendingRendezvous is the most meetings one session tracks at once,
+	// pending and recently settled alike. The set is keyed by nonce because
+	// two commands can legitimately be pending at once (ADR-0024 decision 7),
+	// and an unbounded map fed by forged fences is the memory exhaustion the
+	// old single slot accidentally prevented — so the set is bounded instead.
+	// At the bound a new FENCE SIGHTING is refused ([ErrRendezvousFull]): it
+	// authorises nothing, so refusing it costs nothing. An AUTHENTICATED
+	// completion is never refused while an unauthenticated sighting holds a
+	// slot — it preempts the oldest such slot, because evicting a forged
+	// fence spends nothing and a pending authenticated half is evicted by
+	// nothing but its own expiry. Settled meetings (complete, expired) give
+	// up their slot to the oldest first: they are record, not authority.
+	MaxPendingRendezvous = 8
 )
 
 // ---------------------------------------------------------------------------
@@ -800,12 +824,24 @@ type Runtime interface {
 	// SightFence reports that the emulator drew a fence, and pins the content
 	// it was drawn over.
 	SightFence(nonce FenceNonce, source []byte) error
-	// ExpireRendezvous is the bounded wait elapsing. It is a call rather than a
-	// timer so the contract can exercise it without depending on duration:
-	// a test may not depend on timing (AGENTS.md).
-	ExpireRendezvous() error
-	// Rendezvous is the meeting in flight.
+	// ExpireRendezvous is the bounded wait elapsing for ONE meeting, named by
+	// nonce. It is a call rather than a timer so the contract can exercise it
+	// without depending on duration: a test may not depend on timing
+	// (AGENTS.md). A nonce with no pending meeting answers [ErrNoRendezvous]
+	// and changes nothing.
+	ExpireRendezvous(nonce FenceNonce) error
+	// Rendezvous answers the meeting most recently touched — created, joined
+	// or expired — and the zero Rendezvous (idle) only when nothing is
+	// tracked at all: meetings leave the set only as room for a meeting
+	// being admitted, which itself becomes the window's answer. With several
+	// meetings in flight it answers the latest, so a caller that can name a
+	// nonce must use [Runtime.RendezvousFor]; this window exists for callers
+	// that observed a fence or a completion and know nothing else about it.
 	Rendezvous() Rendezvous
+	// RendezvousFor answers one meeting by nonce, or the zero Rendezvous
+	// (idle) when no meeting for that nonce is tracked. It is the authority;
+	// [Runtime.Rendezvous] is a window on the same store.
+	RendezvousFor(nonce FenceNonce) Rendezvous
 	// Completeness is what the capture may honestly claim.
 	Completeness() Completeness
 
@@ -872,8 +908,11 @@ type Snapshot struct {
 	Control      Control
 	Geometry     GeometryCommit
 	Screen       []byte
-	Rendezvous   RendezvousState
-	Completeness Completeness
+	// PendingRendezvous is how many meetings are in flight — either half
+	// arrived, neither settled. It is bounded by [MaxPendingRendezvous],
+	// which is what makes it checkable rather than asserted.
+	PendingRendezvous int
+	Completeness      Completeness
 	// Rows is every row of the active screen, WITH style — the source
 	// [Digest] reads, never trimmed or converted to text the way Screen is.
 	// Nil when the screen could not be read (a closed emulator), exactly the
@@ -910,11 +949,15 @@ var (
 	ErrPreconditionStale = errors.New("sessionruntime: the screen changed since the caller read it")
 	// ErrNothingAdmitted names Execute with an empty queue.
 	ErrNothingAdmitted = errors.New("sessionruntime: nothing is admitted")
-	// ErrNonceMismatch names two halves of a rendezvous that are not the same
-	// event.
-	ErrNonceMismatch = errors.New("sessionruntime: fence nonce does not match the pending rendezvous")
-	// ErrNoRendezvous names an expiry or a sighting with nothing in flight.
-	ErrNoRendezvous = errors.New("sessionruntime: no rendezvous is in flight")
+	// ErrNoRendezvous names an expiry naming a nonce with nothing pending
+	// behind it.
+	ErrNoRendezvous = errors.New("sessionruntime: no rendezvous is in flight for that nonce")
+	// ErrRendezvousFull names a fence sighting refused because the set is at
+	// [MaxPendingRendezvous] and nothing may be evicted for it. A sighting
+	// authorises nothing, so the refusal costs nothing; an authenticated
+	// completion is never answered with this while an unauthenticated
+	// sighting holds a slot.
+	ErrRendezvousFull = errors.New("sessionruntime: the rendezvous set is at its bound")
 	// ErrGeometryInvalid names a size no terminal can run at.
 	ErrGeometryInvalid = errors.New("sessionruntime: geometry is not valid")
 	// ErrIngestTooLarge is one ingest call over [MaxIngestBytes]. It is a

@@ -275,6 +275,16 @@ type Declaration struct {
 	// may be lowered from the declaration's worst case by the backend parser.
 	// Empty for tools with no command carrier.
 	CommandArg string
+	// InvocationRelation, when set, derives the shape THIS call reaches from
+	// its validated arguments — the argument-side counterpart of CommandArg,
+	// and with it the one registry-owned place arguments may change how the
+	// declaration's effect set is read (ADR-0053 as amended, nocx-ykjai).
+	// It returns the relation and the effect rows the call itself reaches,
+	// narrowed from the declared set; ok is false when the declared reading
+	// stands. prepare applies it once, arming both consumers — the kernel's
+	// verdict machinery and the tool endpoint's refusal gate — with one
+	// derivation. Nil for every tool whose arguments choose nothing.
+	InvocationRelation InvocationRelation
 	// Executes says where the tool's work happens: InGo or InRenderer.
 	Executes Executes
 	// Params is the tool's params schema path, relative to the ROOT of the
@@ -905,15 +915,27 @@ var declarations = []Declaration{
 	{
 		Name:        "workers.spawn",
 		Description: "Start one worker in a terminal pane of its own and give it a task. Reach for this when a piece of work is genuinely separate and can run while you do something else — never to parallelise something you could just do. nocx watches the worker from the moment it starts, so you do not have to remember it: ask workers.holdings later and it will tell you what the worker is doing, and nocx wakes you when there is something new to read. nocx also hands the worker its own rules before your task — who its coordinator is, and that it reports through workers.report and reads your mail with workers.inbox — so the task only has to say what the work is. The result also counts how many of your repository's worktree checkouts no live worker uses any more, so checkouts left behind by earlier workers reach you even if you never ask workers.holdings.",
-		// DELEGATE, and no eighth effect. Handing work to another agent is
-		// exactly what the seventh member of the closed lattice already
-		// names — it is in the grant_effects CHECK, in the policy contract
-		// and in the settings UI as "hand work to another agent". Adding a
-		// `spawn` member would cost eight coordinated edits to express what
-		// this one already expresses.
-		Effect:      []content.Effect{content.EffectDelegate},
-		OutputTrust: OutputTrustUntrusted,
-		ResultBound: ResultBound{MaxBytes: 4 << 10, Truncation: TruncationDropTail},
+		// DELEGATE for the spawn itself — handing work to another agent is
+		// what the seventh member of the closed lattice already names, and
+		// no eighth effect exists to say it again — and MUTATE-REVERSIBLE
+		// beside it for the worktree ask, which creates a branch and a
+		// linked checkout before any worker exists. The set reads as
+		// ALTERNATIVES (the zero relation): a plain spawn is pure
+		// delegation, so the offer-time filter keeps offering the tool to
+		// a grant that refuses filesystem mutation. The ask RAISES the
+		// call to the conjunction of the two rows at execution, where the
+		// arguments exist to tell the cases apart — InvocationRelation is
+		// that derivation, and the verdict it arms is the strictest across
+		// the rows, so a grant permitting delegation but refusing mutation
+		// refuses the checkout without losing the plain spawn (ADR-0053 as
+		// amended, nocx-ykjai).
+		Effect: []content.Effect{
+			content.EffectDelegate,
+			content.EffectMutateReversible,
+		},
+		InvocationRelation: spawnInvocationRelation,
+		OutputTrust:        OutputTrustUntrusted,
+		ResultBound:        ResultBound{MaxBytes: 4 << 10, Truncation: TruncationDropTail},
 		// Bounded by the enrolment interval rather than by the agent's work:
 		// this returns when the worker has STARTED, not when it has
 		// finished, and what happens after is the record's business.
@@ -1290,6 +1312,14 @@ func (r EffectRelation) String() string {
 	}
 	return "alternative"
 }
+
+// InvocationRelation derives one call's effect shape from its validated
+// arguments. A TYPE rather than a bare func, for EffectRelation's reason:
+// the shape is a fact a declaration states, not a boolean a call site
+// interprets. The relation names how to read the returned rows; ok is
+// false when the arguments choose nothing and the declaration's own
+// reading stands.
+type InvocationRelation func(args map[string]any) (EffectRelation, []content.Effect, bool)
 
 // effectsPermitted asks the offer-time question in the relation's own terms.
 // For alternatives it is ADR-0053's "is any class not refused", which lets a

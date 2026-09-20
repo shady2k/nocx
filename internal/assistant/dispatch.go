@@ -83,6 +83,13 @@ type preparedInvocation struct {
 	invocation          content.Invocation
 	resources           []agenttools.ResourceRef
 	resourceDeclaration bool
+	// invocationEffects is the effect set THIS call reaches, as the
+	// declaration's InvocationRelation derived it from the validated
+	// arguments — nil when the declaration derives nothing and the
+	// declared set stands. The relation half rides on decl.EffectRelation,
+	// already a per-call field; this carries the set half, so the endpoint
+	// gate reads one derivation instead of deriving again.
+	invocationEffects []content.Effect
 }
 
 type dispatchOutcome struct {
@@ -215,7 +222,7 @@ func isOrchestrationMethod(name string) bool {
 }
 
 func (d *dispatchOperation) Dispatch(invocation ToolInvocation) (string, error) {
-	outcome, err := d.dispatch(invocation, nil, nil, nil, nil)
+	outcome, err := d.dispatch(invocation, nil, d.endpointEffectGate, nil, nil)
 	if err != nil {
 		return "", err
 	}
@@ -226,6 +233,53 @@ func (d *dispatchOperation) Dispatch(invocation ToolInvocation) (string, error) 
 		return "", outcome.runErr
 	}
 	return outcome.output, nil
+}
+
+// endpointEffectGate is the tool endpoint's half of the per-call effect
+// question. The kernel's own dispatcher answers it through the verdict
+// machinery, where an ask can become a question to a person; this dispatcher
+// serves the product's minted coordinators, whose grants decide permit or
+// refuse and carry no ask machinery at all — so a row the grant refuses
+// refuses the call here, before any capability is constructed and before any
+// side effect exists. The relation's own question applies (ADR-0053 as
+// amended): one refusal refuses a conjunction whole, because there is nothing
+// to move to execution, while an alternative set survives on any row that is
+// not refused — its offer-time answer carried to execution. The declared set
+// stands when the declaration derives no per-call shape.
+func (d *dispatchOperation) endpointEffectGate(prepared *preparedInvocation) (bool, *modelResult, error) {
+	effects := prepared.invocationEffects
+	if effects == nil {
+		effects = prepared.decl.Declaration.Effect
+	}
+	if len(effects) == 0 {
+		return true, nil, nil
+	}
+	refused := make([]content.Effect, 0, len(effects))
+	for _, effect := range effects {
+		if prepared.request.Grant.Policy.DecisionFor(effect) == content.DecisionRefuse {
+			refused = append(refused, effect)
+		}
+	}
+	if len(refused) == 0 {
+		return true, nil, nil
+	}
+	if prepared.decl.EffectRelation != agenttools.EffectsConjunctive && len(refused) < len(effects) {
+		return true, nil, nil
+	}
+	return false, &modelResult{
+		text: fmt.Sprintf("%s reaches %s on this call, and this run's grant refuses %s — the call is refused before anything runs.",
+			prepared.decl.Name, effectNames(effects), effectNames(refused)),
+	}, nil
+}
+
+// effectNames renders an effect set for a refusal sentence: the row ids are
+// the words the policy's own surface uses ("delegate", "mutate-reversible").
+func effectNames(effects []content.Effect) string {
+	parts := make([]string, len(effects))
+	for i, effect := range effects {
+		parts[i] = string(effect)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // Catalogue returns the executable tools admitted by grant, filtered to the
@@ -349,6 +403,20 @@ func (d *dispatchOperation) prepare(invocation ToolInvocation, transform dispatc
 	if transform != nil {
 		if transformErr := transform(&prepared); transformErr != nil {
 			return preparedInvocation{}, transformErr
+		}
+	}
+	// The per-call shape (ADR-0053 as amended): arguments may raise a call
+	// past the declared reading — workers.spawn's worktree ask reaches
+	// delegate AND mutate-reversible where a plain spawn is delegation
+	// alone. Derived once, here, because two consumers read it: the
+	// kernel's verdict machinery, which the relation arms to take the
+	// conjunctive strictest-across-rows branch, and the tool endpoint's
+	// refusal gate below, which has no ask machinery and refuses what the
+	// grant refuses before any capability is constructed.
+	if prepared.decl.InvocationRelation != nil {
+		if relation, effects, ok := prepared.decl.InvocationRelation(prepared.args); ok {
+			prepared.decl.EffectRelation = relation
+			prepared.invocationEffects = effects
 		}
 	}
 	resources, resourceDeclaration, err := resolveToolResources(prepared.decl, prepared.args, invocation.RunContext)

@@ -500,10 +500,16 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		"skills.resolve":   {content.EffectCrossBoundary},
 		"skills.install":   {content.EffectMutateReversible, content.EffectCrossBoundary},
 		"workers.holdings": {content.EffectObserve},
-		// DELEGATE and nothing else. Handing work to another agent is what
-		// the seventh member of the closed lattice already names, so a
-		// `spawn` effect would be an eighth expressing the same thing.
-		"workers.spawn": {content.EffectDelegate},
+		// DELEGATE for the spawn itself, and MUTATE-REVERSIBLE beside it for
+		// the worktree ask, which creates a branch and a linked checkout
+		// before any worker exists. The set reads as ALTERNATIVES — a plain
+		// spawn is pure delegation and stays offered to a delegate-only
+		// grant — and the ask raises the call to the conjunction at
+		// execution, through the declaration's InvocationRelation
+		// (ADR-0053 as amended, nocx-ykjai). No eighth effect: handing work
+		// to another agent is what the seventh member of the closed lattice
+		// already names.
+		"workers.spawn": {content.EffectDelegate, content.EffectMutateReversible},
 		// OBSERVE and not SEND-INPUT, and the distinction is load-bearing.
 		// Send-input is typing into a pane and is what a human takeover
 		// suspends; leaving a message in a mailbox reaches nobody's

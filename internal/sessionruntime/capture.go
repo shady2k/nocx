@@ -153,6 +153,17 @@ func (s *Session) settleCaptureLocked(nonce FenceNonce) {
 		DepartedHole: err != nil,
 		Closing:      closing,
 	}
+	if err != nil {
+		// The departure report flagged this very interval: some of what
+		// left the screen could not be read, so the record's rows are not
+		// the whole of what departed even when the stream itself was
+		// clean. A record that kept the stream's "complete" beside a
+		// holed row list would present the interval as whole — the one
+		// lie this field exists to prevent. The stream's own claim can
+		// only be worse, never better; an interval already lost-ingest
+		// stays lost-ingest.
+		rec.Completeness = CompletenessLostIngest
+	}
 	s.capturePending = append(s.capturePending, rec)
 	// The interval that just closed opened the next one: what the boundary
 	// screen holds is exactly where the next record's story starts.

@@ -262,6 +262,13 @@ func (c *workerCheckouts) Leftovers(ctx context.Context, coordinatorSession stri
 		lg.Warn("worker checkouts: the repository reports no main checkout", "cwd", cwd)
 		return workers.CheckoutSurvey{Leftovers: empty.Leftovers, Complete: false}
 	}
+	// The listing and the rows below are read CANONICAL
+	// (nocxCanonicalPath): the join, the holds and the sweep notes are all
+	// path-keyed, and git's answer and the record's spelling must meet in
+	// the one canonical form (nocx-xn63t.1.6).
+	for i := range trees {
+		trees[i].Path = nocxCanonicalPath(trees[i].Path)
+	}
 	repoKey := nocxCheckoutRepoKey(trees[0].Path)
 
 	held, err := c.held.HeldWorktrees(ctx)
@@ -278,6 +285,9 @@ func (c *workerCheckouts) Leftovers(ctx context.Context, coordinatorSession stri
 	if rows, err = c.rows.List(ctx, repoKey); err != nil {
 		lg.Warn("worker checkouts: read the durable record", "error", err)
 		return workers.CheckoutSurvey{Leftovers: empty.Leftovers, Complete: false}
+	}
+	for i := range rows {
+		rows[i].Path = nocxCanonicalPath(rows[i].Path)
 	}
 	rowByPath := make(map[string]content.WorkerCheckout, len(rows))
 	for _, row := range rows {
@@ -442,9 +452,14 @@ func (c *workerCheckouts) notePaneOpened(spec transport.OpenSpec, _ session.ID) 
 		log.From(ctx).Warn("worker checkouts: list rows for a pane-open note", "error", err)
 		return
 	}
-	cwd = filepath.Clean(cwd)
+	// BOTH sides canonical (nocxCanonicalPath): the pane's row carries
+	// whatever spelling its shell answered an OSC 7 with — on macOS a
+	// symlinked ancestor makes that the unresolved one — and a note that
+	// missed on a spelling lets the sweep age a checkout somebody is
+	// working in (nocx-xn63t.1.6).
+	cwd = nocxCanonicalPath(cwd)
 	for _, row := range rows {
-		root := filepath.Clean(row.Path)
+		root := nocxCanonicalPath(row.Path)
 		if cwd != root && !strings.HasPrefix(cwd, root+string(os.PathSeparator)) {
 			continue
 		}

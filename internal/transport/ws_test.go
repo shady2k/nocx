@@ -1339,6 +1339,18 @@ func TestWSServer_AttachWithStaleOffsetReturnsReset(t *testing.T) {
 	})
 	_ = conn.WriteMessage(websocket.TextMessage, ackReq)
 
+	// WAIT FOR THE ACK TO HAVE BEEN PROCESSED, and wait on the protocol rather
+	// than on a duration (nocx-e33yc): the ack is a notification, so nothing
+	// answers it, and closing the socket straight after it raced the read loop
+	// — under load the connection went away with the trim unapplied, offset 0
+	// was not stale after all, and the reattach below answered no reset. The
+	// handler runs INLINE on that read loop (ackHandler's own doc), so a
+	// request sent after it and answered before the close proves the ack was
+	// seen: the loop cannot have reached this one without finishing that one.
+	_ = jsonrpcCallWithID(t, conn, "resize", map[string]any{
+		"sessionId": sid, "cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+	}, 3)
+
 	_ = conn.Close()
 
 	// Reattach requesting offset 0, which is now behind the ring's trimmed base.

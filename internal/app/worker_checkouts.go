@@ -276,9 +276,14 @@ func (c *workerCheckouts) Leftovers(ctx context.Context, coordinatorSession stri
 		lg.Warn("worker checkouts: read the record's held checkouts", "error", err)
 		return workers.CheckoutSurvey{Leftovers: empty.Leftovers, Complete: false}
 	}
+	// The held paths are keyed CANONICAL: the record's held answer is a
+	// DIFFERENT PRODUCER from git's listing — a hold recorded under the
+	// symlinked spelling on macOS must still be told from a leftover, and
+	// a raw-keyed miss here offers a live worker's checkout up as
+	// abandoned (nocx-xn63t.1.4).
 	heldPaths := make(map[string]bool, len(held))
 	for _, wt := range held {
-		heldPaths[wt.Path] = true
+		heldPaths[nocxCanonicalPath(wt.Path)] = true
 	}
 
 	var rows []content.WorkerCheckout
@@ -407,12 +412,16 @@ func (c *workerCheckouts) recordUntrusted() bool {
 // worker close path must make for a participant whose Worktree.Path is set
 // (the wiring is the composition root's to state, the close path's file is
 // another worker's). A pane opened in a directory that is not a recorded
-// checkout changes nothing, by the store's own WHERE clause.
+// checkout changes nothing, by the store's own WHERE clause. The path is
+// canonicalized here at the boundary: the store's WHERE is a raw string
+// equality, and a caller holding any other spelling of the checkout — the
+// close's participant record can carry the symlinked one on macOS — must
+// still reach the row the record holds (nocx-xn63t.1.4).
 func (c *workerCheckouts) Touch(ctx context.Context, path string, at time.Time) error {
 	if c.rows == nil || path == "" {
 		return nil
 	}
-	if err := c.rows.Touch(ctx, path, at.UnixMilli()); err != nil {
+	if err := c.rows.Touch(ctx, nocxCanonicalPath(path), at.UnixMilli()); err != nil {
 		c.markRecordUntrusted(err)
 		return err
 	}

@@ -312,6 +312,59 @@ func TestTheCheckoutRecordSurvivesAStoreReopen(t *testing.T) {
 	}
 }
 
+// Criterion, the macOS shape on the record's boundary: the close stamps the
+// checkout through whatever spelling the participant's record holds, and on
+// macOS that is the symlinked one while the row is canonical. A touch named
+// by the link spelling must still land on the row — the stamp is what
+// stands between an old checkout and the sweep.
+func TestATouchNamedByASymlinkedSpellingStillMovesTheStamp(t *testing.T) {
+	repoDir, _ := initRealRepo(t)
+	stand := newCheckoutStand(t)
+	root := symlinkedWorktreeRoot(t)
+	stand.checkouts.worktreeRoot = root
+	stand.spawner.worktreeRoot = root
+	repoLink := symlinkedDir(t, repoDir)
+	coordA := stand.openCoordinator(t, "pane-a", repoLink)
+	stand.spawnCheckoutWorker(t, coordA, "worker-1", "feat/one", "t")
+	checkout := expectedWorktreePath(root, repoLink, "feat/one")
+	key := nocxCheckoutRepoKey(repoLink)
+
+	if err := stand.checkouts.Touch(context.Background(), symlinkedDir(t, checkout), sweepNow); err != nil {
+		t.Fatalf("touch: %v", err)
+	}
+	rows, err := stand.rows.List(context.Background(), key)
+	if err != nil || len(rows) != 1 || rows[0].LastUsedAt != sweepNow.UnixMilli() {
+		t.Fatalf("rows = %+v, %v; want the stamp at the touch time", rows, err)
+	}
+}
+
+// Criterion, the producer-mix shape on holdings: the record's held answer
+// can carry any spelling of the checkout it holds while git's listing
+// answers the resolved one. A hold recorded under the link spelling must
+// still be told from a leftover — holdings must never offer a live worker's
+// checkout up as abandoned.
+func TestAHoldRecordedByASymlinkedSpellingIsNotALeftover(t *testing.T) {
+	repoDir, _ := initRealRepo(t)
+	stand := newCheckoutStand(t)
+	root := symlinkedWorktreeRoot(t)
+	stand.checkouts.worktreeRoot = root
+	stand.spawner.worktreeRoot = root
+	repoLink := symlinkedDir(t, repoDir)
+	coordA := stand.openCoordinator(t, "pane-a", repoLink)
+	stand.spawnCheckoutWorker(t, coordA, "worker-1", "feat/one", "t")
+	checkout := expectedWorktreePath(root, repoLink, "feat/one")
+
+	stand.holdCheckout(t, "worker-1", string(coordA), symlinkedDir(t, checkout), "feat/one")
+
+	survey := stand.checkouts.Leftovers(context.Background(), string(coordA))
+	if !survey.Complete {
+		t.Fatalf("the survey read whole and answered incomplete")
+	}
+	if len(survey.Leftovers) != 0 {
+		t.Fatalf("leftovers = %+v, want none: a checkout a live worker holds is not left over", survey.Leftovers)
+	}
+}
+
 // Criterion 3: a checkout removed by hand (`git worktree remove` in a shell)
 // is not listed, and its row is gone after the read.
 func TestACheckoutRemovedByHandIsDroppedOnRead(t *testing.T) {

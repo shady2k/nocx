@@ -36,6 +36,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
@@ -235,6 +236,75 @@ func TestTheSweepNeverRemovesACheckoutAPaneIsStandingIn(t *testing.T) {
 	if !survey.Complete || len(survey.Leftovers) != 1 || !survey.Leftovers[0].Expired ||
 		survey.Leftovers[0].HoldReason != "pane-open" {
 		t.Fatalf("holdings = %+v; want the checkout expired because a pane is open in it", survey)
+	}
+}
+
+// paneAppearsFactory wraps the real factory: the FIRST ground read of a
+// pass — the listing the removal judges against, read after the sweep has
+// already sampled its pane inventory — is where the pane opens. A wrap and
+// not a second stand, because the window the re-check closes is between
+// real git reads, and everything under the wrap stays the real binary.
+type paneAppearsFactory struct {
+	inner    git.RepoFactory
+	t        *testing.T
+	stand    *checkoutStand
+	checkout string
+	appeared bool
+}
+
+func (f *paneAppearsFactory) Open(ctx context.Context, cwd string) (git.Repo, git.OpenOutcome, error) {
+	repo, outcome, err := f.inner.Open(ctx, cwd)
+	if err != nil {
+		return repo, outcome, err
+	}
+	return &paneAppearsRepo{Repo: repo, f: f}, outcome, nil
+}
+
+type paneAppearsRepo struct {
+	git.Repo
+	f *paneAppearsFactory
+}
+
+func (r *paneAppearsRepo) Log(ctx context.Context, limit int) (git.Log, error) {
+	out, logErr := r.Repo.Log(ctx, limit)
+	if !r.f.appeared {
+		r.f.appeared = true
+		r.f.stand.tabs.cwdOf["pane-mid"] = r.f.checkout
+		if _, openErr := r.f.stand.reg.Open(context.Background(), session.Config{
+			Kind: session.KindLocal, Cols: 80, Rows: 24, PaneID: "pane-mid", Cwd: r.f.checkout,
+		}); openErr != nil {
+			r.f.t.Fatalf("open the mid-sweep pane: %v", openErr)
+		}
+	}
+	return out, logErr
+}
+
+// Criterion (nocx-xn63t.1 review, blocker 3): the pane inventory is a
+// snapshot, and a pane can open in an expired checkout AFTER it is taken and
+// BEFORE the removal runs — the checkout would come down under a running
+// shell. The removal step re-checks the live panes immediately before each
+// removal; this test opens the pane at exactly that moment — during the
+// ground read, after the snapshot — and holds the sweep to the pane-open
+// hold instead of the removal.
+func TestTheSweepRechecksAPaneThatOpensAfterItsSnapshot(t *testing.T) {
+	repoDir, _ := initRealRepo(t)
+	stand := newCheckoutStand(t)
+	coordA := stand.openCoordinator(t, "pane-a", repoDir)
+	stand.spawnCheckoutWorker(t, coordA, "worker-1", "feat/one", "t")
+	checkout := expectedWorktreePath(stand.checkouts.worktreeRoot, repoDir, "feat/one")
+	key := nocxCheckoutRepoKey(repoDir)
+	ageCheckout(t, stand, key, checkout, sweepNow.Add(-31*24*time.Hour))
+
+	stand.checkouts.repos = &paneAppearsFactory{inner: stand.factory, t: t, stand: stand, checkout: checkout}
+
+	newSweeper(stand, 30*24*time.Hour).RunOnce(context.Background())
+
+	if checkoutGone(t, checkout) {
+		t.Fatalf("the sweep removed %q after a pane opened in it mid-sweep", checkout)
+	}
+	survey := stand.checkouts.Leftovers(context.Background(), string(coordA))
+	if !survey.Complete || len(survey.Leftovers) != 1 || survey.Leftovers[0].HoldReason != "pane-open" {
+		t.Fatalf("holdings = %+v; want the checkout held because a pane opened in it after the snapshot", survey)
 	}
 }
 

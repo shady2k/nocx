@@ -139,7 +139,7 @@ func (c *workerCheckouts) RemoveCheckouts(ctx context.Context, coordinatorSessio
 		}
 	}
 
-	removal = c.removeResolved(ctx, lg, repoKey, repo, heldPaths, treeByPath, treeByBranch, refs)
+	removal, _ = c.removeResolved(ctx, lg, repoKey, repo, heldPaths, treeByPath, treeByBranch, refs, nil)
 	return removal
 }
 
@@ -189,11 +189,25 @@ func readRemovalGround(ctx context.Context, lg log.Logger, repo git.Repo) (remov
 	}, nil
 }
 
+// paneHoldCheck is the sweep's own last look at the live panes, run per
+// checkout immediately before that checkout's removal: the sweep's pane
+// inventory is a snapshot, and a pane can open in an expired checkout
+// after it was taken. A hit answers the sweep's note — the pane-open hold
+// is the sweep's vocabulary, never the removal's closed refusal set — and
+// the checkout is not removed. The explicit removal passes nil: its ask is
+// a coordinator's deliberate act about a repository it is looking at.
+type paneHoldCheck func(lg log.Logger, path string) *checkoutSweepNote
+
 // removeResolved asks the removal for each ref against a listing the caller
 // already read, and drops the removed rows from the durable record — THE
 // ROW GOES WITH THE CHECKOUT: the record must not go on naming a checkout
 // it no longer has. A failed drop leaves an invisible row, never a wrong
 // checkout — the same convenience the holdings read's drop-on-read provides.
+//
+// paneHold is the sweep's own last look, consulted per checkout immediately
+// before that checkout's removal; a hit answers the sweep's note for the
+// checkout, returned beside the removal so the sweep can record it in
+// place of a removal.
 func (c *workerCheckouts) removeResolved(
 	ctx context.Context,
 	lg log.Logger,
@@ -203,10 +217,21 @@ func (c *workerCheckouts) removeResolved(
 	treeByPath map[string]git.Worktree,
 	treeByBranch map[string]git.Worktree,
 	refs []workers.CheckoutRef,
-) workers.CheckoutRemoval {
+	paneHold paneHoldCheck,
+) (workers.CheckoutRemoval, map[string]checkoutSweepNote) {
 	removal := workers.CheckoutRemoval{Items: make([]workers.RemovedCheckout, 0, len(refs))}
+	var paneNotes map[string]checkoutSweepNote
 	removed := make([]string, 0, len(refs))
 	for _, ref := range refs {
+		if paneHold != nil {
+			if note := paneHold(lg, ref.Path); note != nil {
+				if paneNotes == nil {
+					paneNotes = make(map[string]checkoutSweepNote)
+				}
+				paneNotes[ref.Path] = *note
+				continue
+			}
+		}
 		item := c.removeOne(ctx, lg, repo, heldPaths, treeByPath, treeByBranch, ref)
 		if item.Removed {
 			removed = append(removed, item.Path)
@@ -218,7 +243,7 @@ func (c *workerCheckouts) removeResolved(
 			lg.Warn("worker checkouts: drop the removed checkouts' rows", "error", err)
 		}
 	}
-	return removal
+	return removal, paneNotes
 }
 
 // removeOne resolves one ask and removes what it names, refusing by name at

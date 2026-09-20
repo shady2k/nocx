@@ -170,6 +170,39 @@ func (s *checkoutSweeper) RunOnce(ctx context.Context) {
 	}
 	judged = true
 
+	// THE LAST LOOK (nocx-xn63t.1 review, blocker 3): paneCwds above is a
+	// snapshot, and a pane can open in an expired checkout after it was
+	// taken and before the removal runs — the checkout would come down
+	// under a running shell. The removal step therefore re-reads the live
+	// panes per checkout, immediately before taking that checkout away,
+	// and unreadable still answers held — the same rule the snapshot
+	// applies, because unreadable is never an answer of safe.
+	//
+	// WHAT REMAINS RACY, and why that is acceptable: the window is now one
+	// git invocation wide — a pane opening between the re-read and git's
+	// remove still loses its ground — and closing it entirely would need
+	// one exclusion both this sweep and the pane-open path take, which no
+	// seam between the session registry and the layout offers. The residue
+	// is the pane's shell standing in a directory that is gone, visible in
+	// the product and named by holdings, never a silent deletion of a
+	// checkout a worker still held; the old window was the whole pass.
+	paneGuard := func(lg log.Logger, path string) *checkoutSweepNote {
+		cwds, known := s.livePaneCwds(ctx, lg)
+		if !known {
+			return &checkoutSweepNote{
+				At: now, Reason: checkoutSweepHoldPaneOpen,
+				Detail: "the live-pane inventory could not be re-read at the removal",
+			}
+		}
+		if paneHoldsPath(cwds, path) {
+			return &checkoutSweepNote{
+				At: now, Reason: checkoutSweepHoldPaneOpen,
+				Detail: "a pane of nocx is open in it",
+			}
+		}
+		return nil
+	}
+
 	removed := 0
 	for repoKey, rows := range byRepo {
 		var refs []workers.CheckoutRef
@@ -227,8 +260,11 @@ func (s *checkoutSweeper) RunOnce(ctx context.Context) {
 				treeByBranch[tree.Branch] = tree
 			}
 		}
-		removal := c.removeResolved(ctx, lg, ground.repoKey, repo, heldPaths, treeByPath, treeByBranch, refs)
+		removal, paneNotes := c.removeResolved(ctx, lg, ground.repoKey, repo, heldPaths, treeByPath, treeByBranch, refs, paneGuard)
 		_ = repo.Close()
+		for path, note := range paneNotes {
+			notes[path] = note
+		}
 		for _, item := range removal.Items {
 			if item.Removed {
 				removed++

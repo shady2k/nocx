@@ -220,3 +220,47 @@ func TestTheFenceIsFoundAtEverySplitPosition(t *testing.T) {
 		}
 	}
 }
+
+// A second nonce is only ever seen by a test that uses one. The scanner keeps
+// the nonce it is matching in a field it reuses for the next candidate, so an
+// effect that carried a slice OF that field rather than a copy of it would be
+// rewritten by the next fence — silently, after the caller already holds it,
+// and invisibly to any test whose two fences share a nonce.
+//
+// This is a test the mutation asked for: replacing the copy in sightFence
+// with an alias leaves every other test in this file green, because they
+// drain between fences or repeat one nonce. It fires here and only here.
+const fenceNonceSecond = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+
+func TestEachFenceKeepsItsOwnNonceWhenAnotherFollows(t *testing.T) {
+	term := newTerminal(t, 20, 4)
+	// Both fences in ONE feed, drained together afterwards: the first
+	// effect is held across the second sighting, which is the only moment
+	// an aliased buffer could be rewritten under it.
+	ingest(t, term, "x"+fenceSeq(fenceNonce)+fenceSeq(fenceNonceSecond))
+
+	got := term.Effects()
+	if len(got) != 2 {
+		t.Fatalf("two fences produced %s, want exactly two effects", describeEffects(got))
+	}
+	if string(got[0].Body) != fenceNonce {
+		t.Errorf("the first fence carries nonce %q, want %q — the second fence rewrote it", got[0].Body, fenceNonce)
+	}
+	if string(got[1].Body) != fenceNonceSecond {
+		t.Errorf("the second fence carries nonce %q, want %q", got[1].Body, fenceNonceSecond)
+	}
+
+	// And across drains, which is how the helper actually reads them: the
+	// effect the caller took away stays its own after later output.
+	across := newTerminal(t, 20, 4)
+	ingest(t, across, "y"+fenceSeq(fenceNonce))
+	first := across.Effects()
+	if len(first) != 1 {
+		t.Fatalf("one fence produced %s, want exactly one effect", describeEffects(first))
+	}
+	held := first[0]
+	ingest(t, across, fenceSeq(fenceNonceSecond))
+	if string(held.Body) != fenceNonce {
+		t.Errorf("the drained fence's nonce became %q after a later fence, want %q", held.Body, fenceNonce)
+	}
+}

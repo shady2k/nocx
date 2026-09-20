@@ -837,10 +837,18 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		// removed and its removal failure is a warning, the same
 		// asymmetry every failure Spawn catches itself is held to.
 		if undo != nil {
-			if wtErr := undo.run(ctx); wtErr != nil {
+			// The common reason the mint failed is that the spawn's own
+			// deadline was cancelled, so the undo runs on the context Kill
+			// derives for its compensation (nocx-4gj5w): the caller's
+			// values, never its cancellation, bounded by killTimeout. On
+			// the raw ctx the removal failed with "context canceled" and
+			// the checkout survived a spawn no worker can ever join.
+			undoCtx, undoCancel := killContext(ctx)
+			if wtErr := undo.run(undoCtx); wtErr != nil {
 				lg.Warn("worker spawn: could not remove the checkout after a refused tab mint",
 					"error", wtErr)
 			}
+			undoCancel()
 		}
 		return nil, fmt.Errorf("worker spawn: minting the participant's tab: %w", tabErr)
 	}

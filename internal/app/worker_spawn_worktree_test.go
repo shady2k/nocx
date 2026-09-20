@@ -885,3 +885,79 @@ func TestANeverEnrolledWorkerLeavesNeitherCheckoutNorBranchBehind(t *testing.T) 
 		run("rev-parse", "--verify", "keep")
 	})
 }
+
+// deadlineTabs reproduces the reviewed defect's own trigger: the spawn's
+// deadline fires WHILE the tab mint is in flight, so the mint fails on a
+// context that is already cancelled. The double cancels the spawn's context
+// — an event, not a sleep — and then refuses the mint.
+type deadlineTabs struct {
+	*worktreeTabs
+	cancel    context.CancelFunc
+	createErr error
+}
+
+func (f *deadlineTabs) CreateTabAfter(_ context.Context, _ content.Tab, _ content.Pane, _ string) (content.Created[content.NewTab], error) {
+	f.cancel()
+	return content.Created[content.NewTab]{}, f.createErr
+}
+
+// Criterion (nocx-xn63t.1 review, blocker 2), over the REAL git binary and
+// the REAL local factory: when the tab mint fails because the spawn's
+// deadline was cancelled, the early rollback must still remove the checkout
+// and the branch it created. The undo used to run on the spawn's own
+// context — already cancelled, so the removal failed with it and the
+// checkout survived a spawn no worker can ever join. The later compensation
+// (Kill) derives its own detached, bounded context for exactly this reason;
+// the early rollback now derives the same answer, so the assertion below is
+// the interval's end — the checkout is gone — reached on real git.
+func TestARefusedTabMintRemovesTheCheckoutEvenOnACancelledDeadline(t *testing.T) {
+	repoDir, _ := initRealRepo(t)
+	factory := gitlocal.NewFactory()
+	t.Cleanup(factory.Stop)
+
+	logger := log.NewSlogAdapter(nil)
+	ptys := &workerTestPTYFactory{log: logger}
+	reg := session.New(logger, ptys)
+	t.Cleanup(func() {
+		for _, s := range reg.List() {
+			_ = reg.Close(s.ID())
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tabs := &deadlineTabs{
+		worktreeTabs: newWorktreeTabs(),
+		cancel:       cancel,
+		createErr:    errors.New("the deadline fired while the mint was in flight"),
+	}
+	spawner := &workerSpawner{
+		layout: tabs, opener: &fakeAxisOpener{reg: reg}, sessions: reg,
+		integration: &fakeAxisAwaiter{}, enrolments: newWorkerEnrolments(logger, reg),
+		workspace: "ws-test", repos: factory, worktreeRoot: t.TempDir(), log: logger,
+	}
+	tabs.cwdOf["pane-coord"] = repoDir
+	tabs.tabOf["pane-coord"] = "tab-coord"
+	tabs.panesOf["tab-coord"] = []content.Pane{{ID: "pane-coord", TabID: "tab-coord", Cwd: repoDir, Kind: content.PaneLocal}}
+	sess, err := reg.Open(context.Background(), session.Config{
+		Kind: session.KindLocal, Cols: 80, Rows: 24, PaneID: "pane-coord", Cwd: repoDir,
+	})
+	if err != nil {
+		t.Fatalf("open coordinator: %v", err)
+	}
+
+	_, spawnErr := spawner.Spawn(ctx, workers.SpawnRequest{
+		Participant: "p-cancel", Group: "worker-1", Task: "t", Command: "run-agent",
+		CoordinatorSession: string(sess.ID()), Worktree: anAsk("feat/deadline"),
+	})
+	if spawnErr == nil {
+		t.Fatal("a refused tab mint returned a Spawned")
+	}
+	wantPath := expectedWorktreePath(spawner.worktreeRoot, repoDir, "feat/deadline")
+	if _, statErr := os.Lstat(wantPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("the checkout at %q survived a refused mint on a cancelled context: %v", wantPath, statErr)
+	}
+	if out, branchErr := exec.Command("git", "-C", repoDir, "rev-parse", "--verify", "feat/deadline").CombinedOutput(); branchErr == nil { //nolint:gosec // repoDir is this test's temp repository
+		t.Fatalf("the branch the spawn created survived: %s", strings.TrimSpace(string(out)))
+	}
+}

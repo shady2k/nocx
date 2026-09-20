@@ -388,6 +388,39 @@ func TestASymlinkedWorktreesRootCheckoutIsStillNocxToRemove(t *testing.T) {
 	}
 }
 
+// Criterion, the producer-mix shape on the removal: a hold the record
+// spells through the symlinked ancestor must still be told from a
+// leftover — the removal answers held-by-worker and touches nothing, never
+// removes a checkout a live worker holds because two producers spelled the
+// path differently.
+func TestARemovalOfAHoldRecordedByASymlinkedSpellingIsRefusedHeld(t *testing.T) {
+	repoDir, _ := initRealRepo(t)
+	stand := newCheckoutStand(t)
+	root := symlinkedWorktreeRoot(t)
+	stand.checkouts.worktreeRoot = root
+	stand.spawner.worktreeRoot = root
+	repoLink := symlinkedDir(t, repoDir)
+	coordA := stand.openCoordinator(t, "pane-a", repoLink)
+	stand.spawnCheckoutWorker(t, coordA, "worker-1", "feat/one", "t")
+	checkout := expectedWorktreePath(root, repoLink, "feat/one")
+	stand.holdCheckout(t, "worker-1", string(coordA), symlinkedDir(t, checkout), "feat/one")
+
+	coordB := stand.openCoordinator(t, "pane-b", repoLink)
+	got := stand.checkouts.RemoveCheckouts(context.Background(), string(coordB),
+		[]workers.CheckoutRef{{Path: checkout}})
+
+	if len(got.Items) != 1 {
+		t.Fatalf("items = %+v, want one answer", got.Items)
+	}
+	item := got.Items[0]
+	if item.Removed || item.Refusal != workers.CheckoutRefusalHeldByWorker {
+		t.Fatalf("item = %+v, want the held-by-worker refusal and nothing removed", item)
+	}
+	if _, err := os.Stat(checkout); err != nil {
+		t.Fatalf("the checkout did not survive the refusal: %v", err)
+	}
+}
+
 // The service keeps satisfying the small surface other code removes through
 // (task 1.6's sweep): one method, the walk's own refusals.
 var _ checkoutRemover = (*workerCheckouts)(nil)

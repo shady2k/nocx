@@ -124,9 +124,13 @@ func (c *workerCheckouts) RemoveCheckouts(ctx context.Context, coordinatorSessio
 		return refuseAll(workers.CheckoutRefusalUnresolved,
 			"the record's held checkouts could not be read, so a live worker's checkout could not be told from a left-over one; nothing was removed")
 	}
+	// The held paths are keyed CANONICAL: the record's held answer is a
+	// DIFFERENT PRODUCER from git's listing, and a raw-keyed miss here
+	// removes a checkout a live worker holds because two producers spelled
+	// the path differently (nocx-xn63t.1.5 audit).
 	heldPaths := make(map[string]bool, len(held))
 	for _, wt := range held {
-		heldPaths[wt.Path] = true
+		heldPaths[nocxCanonicalPath(wt.Path)] = true
 	}
 
 	treeByPath := make(map[string]git.Worktree, len(trees))

@@ -109,6 +109,9 @@ func describeEffects(effects []emulator.Effect) string {
 		if len(e.Body) > 0 {
 			sb.WriteString(fmt.Sprintf(" %q", e.Body))
 		}
+		if len(e.Source) > 0 {
+			sb.WriteString(fmt.Sprintf(" over %q", e.Source))
+		}
 	}
 	sb.WriteString("]")
 	return sb.String()
@@ -126,6 +129,8 @@ func effectKindName(k emulator.EffectKind) string {
 		return "title"
 	case emulator.EffectCwdReport:
 		return "cwd"
+	case emulator.EffectFence:
+		return "fence"
 	default:
 		return fmt.Sprintf("none(%d)", k)
 	}

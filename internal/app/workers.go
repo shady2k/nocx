@@ -1593,7 +1593,11 @@ func (c *workerCloser) leftover(ctx context.Context, p workers.Participant) work
 	}
 	answer := func() workers.CloseResult { return workers.CloseResult{Worktree: left} }
 	fail := func(why any) workers.CloseResult {
-		c.log.Warn("worker close: the checkout's state could not be read, so it stays unknown",
+		// log.From(ctx), not the stored logger (nocx-xn63t.1 review,
+		// finding 7): the reading runs on the close request's context, so
+		// this line carries its trace and span — the stored logger would
+		// file it under no request at all.
+		log.From(ctx).Warn("worker close: the checkout's state could not be read, so it stays unknown",
 			"participant", string(p.ID), "path", p.Worktree.Path, "reason", why)
 		return answer()
 	}

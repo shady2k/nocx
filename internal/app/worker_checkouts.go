@@ -171,21 +171,18 @@ func nocxCheckoutRepoKey(mainPath string) string {
 }
 
 // underWorktreeRoot reports whether p is inside the nocx worktrees root —
-// the marker test. filepath.Clean both sides first: the seam's paths and a
-// pane's recorded directory are absolute already, but a trailing separator
-// or a "." component would turn the prefix test into a wrong answer.
+// the marker test. BOTH sides go through nocxCanonicalPath: git answers the
+// resolved spelling of the checkout while the root nocx holds is the
+// unresolved one (macOS /var → /private/var), and a trailing separator or a
+// "." component would turn the prefix test into a wrong answer anyway.
+// Canonicalizing both is what keeps a checkout nocx made from turning into
+// a stranger on the platform nocx ships on (nocx-xn63t.1.5).
 func (c *workerCheckouts) underWorktreeRoot(p string) bool {
 	if c.worktreeRoot == "" || p == "" {
 		return false
 	}
-	root, err := filepath.Abs(c.worktreeRoot)
-	if err != nil {
-		return false
-	}
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return false
-	}
+	root := nocxCanonicalPath(c.worktreeRoot)
+	abs := nocxCanonicalPath(p)
 	rel, err := filepath.Rel(root, abs)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return false

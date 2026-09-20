@@ -340,6 +340,54 @@ func TestARemovalForASessionStandingNowhereIsRefusedNotOurs(t *testing.T) {
 	}
 }
 
+// Criterion, the macOS shape (nocx-xn63t.1.5 evidence): the worktrees root
+// sits behind a symlinked ancestor, so git answers the resolved spelling of
+// the checkout while nocx's root is the link spelling — and the
+// coordinator's pane records the repository through its own symlinked
+// ancestor. The removal must still recognise the checkout as nocx's (the
+// location marker compares the two spellings canonically), remove it, leave
+// the branch, and drop the row, with the ask spelled the way nocx hands
+// paths out.
+func TestASymlinkedWorktreesRootCheckoutIsStillNocxToRemove(t *testing.T) {
+	repoDir, _ := initRealRepo(t)
+	stand := newCheckoutStand(t)
+	root := symlinkedWorktreeRoot(t)
+	stand.checkouts.worktreeRoot = root
+	stand.spawner.worktreeRoot = root
+
+	repoLink := symlinkedDir(t, repoDir)
+	coordA := stand.openCoordinator(t, "pane-a", repoLink)
+	stand.spawnCheckoutWorker(t, coordA, "worker-1", "feat/one", "the sweep task")
+	path := expectedWorktreePath(root, repoLink, "feat/one")
+
+	// A NEW coordinator session in the same repository — the one that
+	// inherited the leftover — does the removing.
+	coordB := stand.openCoordinator(t, "pane-b", repoLink)
+	got := stand.checkouts.RemoveCheckouts(context.Background(), string(coordB),
+		[]workers.CheckoutRef{{Path: path}})
+
+	if len(got.Items) != 1 {
+		t.Fatalf("items = %+v, want one answer", got.Items)
+	}
+	item := got.Items[0]
+	if !item.Removed || item.Refusal != "" {
+		t.Fatalf("item = %+v, want the checkout removed", item)
+	}
+	if item.Path != path || item.Branch != "feat/one" {
+		t.Fatalf("item = %+v, want the resolved path and branch", item)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("the checkout at %q is still on disk after the removal", path)
+	}
+	// THE BRANCH ALWAYS STAYS.
+	gitRun(t, repoDir, "rev-parse", "--verify", "refs/heads/feat/one")
+
+	rows, err := stand.rows.List(context.Background(), nocxCheckoutRepoKey(repoLink))
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("the record still holds %+v (%v) after the removal dropped it", rows, err)
+	}
+}
+
 // The service keeps satisfying the small surface other code removes through
 // (task 1.6's sweep): one method, the walk's own refusals.
 var _ checkoutRemover = (*workerCheckouts)(nil)

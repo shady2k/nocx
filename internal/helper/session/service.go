@@ -909,6 +909,7 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
 	}
 
+	asker := askerFromContext(ctx)
 	return s.finishSpawn(claim, proc, proto.LaunchRecord{
 		Kind: proto.LaunchKindLocal,
 		Local: &proto.LocalLaunchRecord{
@@ -923,7 +924,7 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 	}, spawnShape{
 		sessionID: proto.SessionHex(raw), raw: raw, workspace: p.Workspace, key: p.IdempotencyKey,
 		cols: cols, rows: rows, bound: bound, reserved: reserved, lifecycle: p.Lifecycle,
-	}, lg, &spawned)
+	}, lg, &spawned, asker)
 }
 
 // spawnSSH opens a session whose process is a shell channel on a FAR host
@@ -1082,6 +1083,7 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
 	}
 
+	asker := askerFromContext(ctx)
 	return s.finishSpawn(claim, proc, proto.LaunchRecord{
 		Kind: proto.LaunchKindSSH,
 		SSH: &proto.SSHLaunchRecord{
@@ -1100,7 +1102,7 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 	}, spawnShape{
 		sessionID: proto.SessionHex(raw), raw: raw, workspace: p.Workspace, key: p.IdempotencyKey,
 		cols: cols, rows: rows, bound: bound, reserved: reserved, lifecycle: p.Lifecycle,
-	}, lg, &spawned)
+	}, lg, &spawned, asker)
 }
 
 // validateSSHSpawn refuses a remote spawn the helper will not perform, before
@@ -1194,14 +1196,15 @@ type spawnShape struct {
 // releaseKey runs — there is no path on which a claim is resolved onto a
 // session that was never registered, and none on which a reserved window is
 // leaked by a spawn that produced nothing.
-func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.LaunchRecord, shape spawnShape, lg nocxlog.Logger, spawned *bool) (proto.SpawnResult, error) {
+func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.LaunchRecord, shape spawnShape, lg nocxlog.Logger, spawned *bool, asker CoordinatorAsker) (proto.SpawnResult, error) {
 	release := func() {
 		_ = proc.Close()
 		s.mu.Lock()
 		s.budget -= shape.reserved
 		s.mu.Unlock()
 	}
-	rt, screen, err := newSessionRuntime(s.screen, proc, shape.sessionID, shape.cols, shape.rows, s.rendezvousExpiry, s.rendezvousExpireAfter)
+	relay := newCaptureRelay()
+	rt, screen, err := newSessionRuntime(s.screen, proc, shape.sessionID, shape.cols, shape.rows, s.rendezvousExpiry, s.rendezvousExpireAfter, relay)
 	if err != nil {
 		// Nothing has been read from this process and nothing has been
 		// registered, so the spawn has produced nothing: end it rather than
@@ -1278,6 +1281,7 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		// and then hear nothing on (nocx-k6p18.31).
 		lifecycleLaunch: adoptableLaunch(shape.lifecycle, lifecycleWin),
 		log:             s.log,
+		captureAsk:      asker,
 		launch:          launch,
 		subs:            make(map[proto.SubscriberID]*subscriber),
 		attachments:     make(map[proto.AttachmentID]*attachment),
@@ -1285,6 +1289,10 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 	// The book's tokens report themselves under this session's id — minted
 	// one line above, so it could not be named at newTokenBook time.
 	tokens.bindSession(hs.id)
+	// Records the runtime settles from here on travel through this session:
+	// its identity, its log, and the coordinator connection the spawn rode
+	// in on (captureAsk was resolved at spawn's own request).
+	relay.bind(hs)
 
 	s.mu.Lock()
 	s.sessions[hs.id.Session] = hs

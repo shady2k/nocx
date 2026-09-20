@@ -44,12 +44,19 @@ func TestCheckoutsStatus_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "checkouts.status.schema.json")
 	reason := CheckoutSweepDegradeNoRecord
 	detail := "the content store is unavailable, so the checkout record cannot be read"
+	recordReason := CheckoutSweepDegradeRecordWrites
+	recordDetail := "the record refused the stamp"
 	cases := map[string]checkoutsStatusResponse{
 		"running": {Available: true},
 		"degraded with a detail": {
 			Available: false,
 			Reason:    &reason,
 			Detail:    &detail,
+		},
+		"degraded by a runtime record-write failure": {
+			Available: false,
+			Reason:    &recordReason,
+			Detail:    &recordDetail,
 		},
 	}
 	for name, resp := range cases {
@@ -106,6 +113,29 @@ func TestCheckoutsStatus_RaiseIsVisibleOverTheWire(t *testing.T) {
 		t.Fatalf("reason = %v, want %q", got.Reason, CheckoutSweepDegradeNoRecord)
 	}
 	if got.Detail == nil || *got.Detail != "the content store is unavailable, so the checkout record cannot be read" {
+		t.Fatalf("detail = %v, want the underlying failure", got.Detail)
+	}
+}
+
+// The runtime raise — a record write failing while the backend runs — is
+// the same wire answer the composition-time one is, under its own reason:
+// this is what the Settings notice reads after the record refused a write
+// (nocx-xn63t.1 review, blocker 4).
+func TestCheckoutsStatus_RecordWriteRaiseIsVisibleOverTheWire(t *testing.T) {
+	st := NewCheckoutSweepStatus()
+	st.RaiseUnavailable(CheckoutSweepDegradeRecordWrites, "the record refused the stamp")
+	ws, stop := newHistoryWSServer(t, nil, WithCheckoutSweepStatus(st))
+	defer stop()
+	conn := connectWS(t, ws)
+	got := decodeCheckoutsStatus(t, vaultCall(t, conn, "checkouts.status", map[string]any{}, 1))
+
+	if got.Available {
+		t.Fatal("available = true after a record-write raise, want false")
+	}
+	if got.Reason == nil || *got.Reason != string(CheckoutSweepDegradeRecordWrites) {
+		t.Fatalf("reason = %v, want %q", got.Reason, CheckoutSweepDegradeRecordWrites)
+	}
+	if got.Detail == nil || *got.Detail != "the record refused the stamp" {
 		t.Fatalf("detail = %v, want the underlying failure", got.Detail)
 	}
 }

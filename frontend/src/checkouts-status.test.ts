@@ -35,6 +35,17 @@ describe('checkoutsUnavailableSentence', () => {
     expect(sentence!.description).toContain('(the content store is unavailable)')
   })
 
+  it('says the stamps are untrusted when the record refused a write', () => {
+    const sentence = checkoutsUnavailableSentence({
+      available: false,
+      reason: 'recordWrites',
+      detail: 'disk full',
+    })
+    expect(sentence).not.toBeNull()
+    expect(sentence!.description).toContain('trusted')
+    expect(sentence!.description).toContain('(disk full)')
+  })
+
   it('does not invent a why for a reason this build does not know', () => {
     const unknown = {
       available: false,

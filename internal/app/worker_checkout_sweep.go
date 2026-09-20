@@ -119,6 +119,18 @@ func (s *checkoutSweeper) RunOnce(ctx context.Context) {
 		lg.Debug("checkout sweep: the idle period is zero, so nothing is ever removed")
 		return
 	}
+	// THE RECORD HAS REFUSED A WRITE (nocx-xn63t.1 review, blocker 4): a
+	// creation row that failed makes a checkout invisible to cleanup
+	// forever, and a last-used stamp that failed leaves an old time — so
+	// with a write outstanding, no stamp in the record can be trusted to
+	// age by. Nothing is judged this pass and the last notes stand; the
+	// status surface carries the degrade, and the hold is sticky for the
+	// life of the process, because the safe direction is never to remove
+	// on a stamp that may be stale.
+	if c.recordUntrusted() {
+		lg.Warn("checkout sweep: the checkout record has refused a write, so last-used stamps cannot be trusted and nothing is aged out")
+		return
+	}
 	all, err := c.rows.All(ctx)
 	if err != nil {
 		lg.Warn("checkout sweep: read the durable record", "error", err)

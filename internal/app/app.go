@@ -1359,6 +1359,10 @@ func New(opts ...Option) (*App, error) {
 		rows:         checkoutRows,
 		sessions:     sess,
 		layout:       contentDB.Layout(),
+		// A record write failing at runtime raises the SAME surface the
+		// stub raise above arms: the degrade is no longer only a
+		// composition-time fact (nocx-xn63t.1 review, blocker 4).
+		sweepStatus: sweepStatus,
 	}
 
 	// The ONE global agent policy (ADR-0020 §7 as amended 2026-08-16,

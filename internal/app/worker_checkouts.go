@@ -29,6 +29,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,6 +51,13 @@ import (
 // the registrar can do.
 type heldWorktreeSource interface {
 	HeldWorktrees(ctx context.Context) ([]workers.Worktree, error)
+}
+
+// recordStatus is the sweep-status seam a record write failing at runtime
+// is raised through — the one method of transport's *CheckoutSweepStatus
+// the record needs, narrow so a test can stand a double in (AD-8).
+type recordStatus interface {
+	RaiseUnavailable(reason transport.CheckoutSweepDegradeReason, detail string)
 }
 
 // workerCheckouts joins the seam's list, the record's annotations and the
@@ -82,6 +90,17 @@ type workerCheckouts struct {
 	// wrote it; production leaves it alone, and a nil field is the same as
 	// time.Now.
 	now func() time.Time
+	// sweepStatus is the product surface a record write failure is raised
+	// on — the same status the stub store raises at composition, so a
+	// mid-run refusal reaches the Settings notice and not only a log.
+	// Nil in tests that assert nothing about the surface.
+	sweepStatus recordStatus
+	// recordMu guards untrustedWrites: once the record has refused a
+	// write, every stamp it holds may be stale, so the sweep trusts none
+	// and ages nothing. The flag is sticky for the life of the process —
+	// the safe direction, never removing on a stamp that may be a lie.
+	recordMu        sync.Mutex
+	untrustedWrites bool
 	// sweepMu guards sweepNotes: the sweep's last completed judgement, by
 	// checkout path. The sweep (worker_checkout_sweep.go) writes it
 	// wholesale at the end of a pass; the holdings answer reads it to say
@@ -303,9 +322,37 @@ func (c *workerCheckouts) recordCreated(ctx context.Context, lg log.Logger, undo
 		LastUsedAt: now,
 	})
 	if err != nil {
+		c.markRecordUntrusted(err)
 		lg.Warn("worker spawn: could not record the checkout it created",
 			"path", undo.path, "error", err)
 	}
+}
+
+// markRecordUntrusted records that the durable record refused a write, and
+// raises the sweep's status for it — the product-visible half (nocx-xn63t.1
+// review, blocker 4): a soft degrade the Settings notice shows, not only a
+// log line. A creation row that fails makes a checkout invisible to cleanup
+// forever; a last-used stamp that fails leaves an old time the sweep would
+// age by. Both make the record untrustworthy, which is the one fact the
+// surface carries.
+func (c *workerCheckouts) markRecordUntrusted(err error) {
+	c.recordMu.Lock()
+	c.untrustedWrites = true
+	c.recordMu.Unlock()
+	if c.sweepStatus != nil {
+		// fmt.Sprint and not the error's own message method — this file's
+		// log ratchet reads that spelling as a log call site, and this is
+		// not one.
+		c.sweepStatus.RaiseUnavailable(transport.CheckoutSweepDegradeRecordWrites, fmt.Sprint(err))
+	}
+}
+
+// recordUntrusted answers whether the record has refused a write. See
+// markRecordUntrusted.
+func (c *workerCheckouts) recordUntrusted() bool {
+	c.recordMu.Lock()
+	defer c.recordMu.Unlock()
+	return c.untrustedWrites
 }
 
 // Touch moves a checkout's last-used stamp forward to at — THE ONE CALL the
@@ -317,7 +364,11 @@ func (c *workerCheckouts) Touch(ctx context.Context, path string, at time.Time) 
 	if c.rows == nil || path == "" {
 		return nil
 	}
-	return c.rows.Touch(ctx, path, at.UnixMilli())
+	if err := c.rows.Touch(ctx, path, at.UnixMilli()); err != nil {
+		c.markRecordUntrusted(err)
+		return err
+	}
+	return nil
 }
 
 // notePaneOpened is the pane-open half of the stamp: every pane nocx opens
@@ -360,6 +411,7 @@ func (c *workerCheckouts) notePaneOpened(spec transport.OpenSpec, _ session.ID) 
 			continue
 		}
 		if touchErr := c.rows.Touch(ctx, row.Path, c.clock().UnixMilli()); touchErr != nil {
+			c.markRecordUntrusted(touchErr)
 			log.From(ctx).Warn("worker checkouts: move last-used for a pane opened inside it",
 				"path", row.Path, "error", touchErr)
 		}

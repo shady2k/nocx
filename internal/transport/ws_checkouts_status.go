@@ -46,11 +46,22 @@ type CheckoutSweepDegradeReason string
 
 // CheckoutSweepDegradeNoRecord — the durable checkout record is not wired,
 // which is what the content store failing to open IS: nothing can be
-// judged, so nothing may be removed. The one member today; a runtime
-// inability to judge (a read that failed mid-pass) is a per-pass fact the
-// sweep logs and holdings' own Complete flag already carries, not a state
-// of the process.
-const CheckoutSweepDegradeNoRecord CheckoutSweepDegradeReason = "noRecord"
+// judged, so nothing may be removed. Raised by the composition root before
+// the transport starts.
+//
+// CheckoutSweepDegradeRecordWrites — the record refused a WRITE at runtime
+// (a creation row, or a last-used stamp): the stamps it holds may all be
+// stale, so the sweep trusts none and ages nothing. Raised by the record
+// service the first time a write fails, and sticky for the life of the
+// process — there is still no Clear, because the safe direction is never
+// to remove on a stamp that may be a lie. A client attached when the write
+// failed reads the degrade on its next read of this method; there is
+// deliberately no push notification, the same as for the composition-time
+// raise.
+const (
+	CheckoutSweepDegradeNoRecord     CheckoutSweepDegradeReason = "noRecord"
+	CheckoutSweepDegradeRecordWrites CheckoutSweepDegradeReason = "recordWrites"
+)
 
 // checkoutsStatusResponse is the wire shape of checkouts.status, pinned by
 // the DTO contract test. The pointers are null exactly as the schema says:

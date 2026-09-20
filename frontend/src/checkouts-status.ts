@@ -11,9 +11,10 @@
 // enum rather than on the backend's prose, so a reworded Go error never
 // changes what a user reads — the same rule history-status.ts states for
 // its own surface. There is deliberately no notification subscription: the
-// degrade is decided before the transport starts and a store never
-// un-opens, so the store re-reads on every reconnect and the section reads
-// it when it renders.
+// noRecord degrade is decided before the transport starts and never lifts;
+// recordWrites is raised at runtime when the record refuses a write and is
+// equally sticky. The store re-reads on every reconnect and the section
+// reads it when it renders, which is how a runtime raise arrives.
 
 import type { WSClient } from './ipc'
 
@@ -47,6 +48,10 @@ export function checkoutsUnavailableSentence(
       description =
         'The store that remembers nocx-made checkouts could not be opened, so no checkout is judged and none is ever removed.'
       break
+    case 'recordWrites':
+      description =
+        'The record of nocx-made checkouts refused a write, so the last-used times it holds cannot be trusted and nothing is aged out until the backend restarts.'
+      break
     default:
       // The enum is closed on the wire, and this is the honest fallback if a
       // newer backend names a reason this build does not know: say the fact
@@ -59,11 +64,10 @@ export function checkoutsUnavailableSentence(
     description: description + detail,
   }
 }
-
 /** Mirrors the backend's answer for the sections that render it. Reads once
  *  on start and again on every reconnect — there is no notification to
- *  subscribe to, because the degrade cannot change while a client is
- *  attached (the store never un-opens). */
+ *  subscribe to; a degrade raised after a client attached (recordWrites) is
+ *  read on the next refresh, which the section's next render drives. */
 export class CheckoutsStatusStore {
   private current: CheckoutsStatus | null = null
   private readonly listeners = new Set<(s: CheckoutsStatus | null) => void>()

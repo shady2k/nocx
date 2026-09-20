@@ -170,15 +170,15 @@ func (f *fakeLedger) finishCallRecords() []finishCallRecord {
 
 // captures is every body CaptureOutput was handed, in call order — what a
 // tool call recorded as its result (nocx-hp8p2.13).
-func (f *fakeLedger) CaptureOutput(_ context.Context, in content.CaptureOutput) (bool, error) {
+func (f *fakeLedger) CaptureOutput(_ context.Context, in content.CaptureOutput) (content.SessionOutputStance, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.log = append(f.log, "capture:"+in.EntryID)
 	if f.refuseCapture {
-		return false, nil
+		return content.SessionOutputRetentionOff, nil
 	}
 	f.captures = append(f.captures, in)
-	return true, nil
+	return content.SessionOutputKept, nil
 }
 
 func (f *fakeLedger) recordedCaptures() []content.CaptureOutput {

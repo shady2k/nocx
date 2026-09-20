@@ -202,12 +202,12 @@ func TestCaptureOutput_StoresNothingWhenOutputRetentionIsOff(t *testing.T) {
 	led := db.Ledger()
 
 	in := aCapture(recordOne(t, led, "ls"), "00000000-0000-7000-8000-0000000000a6")
-	stored, captureErr := led.CaptureOutput(ctx, in)
+	stance, captureErr := led.CaptureOutput(ctx, in)
 	if captureErr != nil {
 		t.Fatalf("CaptureOutput with output retention off: %v, want nil", captureErr)
 	}
-	if stored {
-		t.Fatal("stored = true while output retention is off")
+	if stance != content.SessionOutputRetentionOff {
+		t.Fatalf("stance = %q while output retention is off, want %q", stance, content.SessionOutputRetentionOff)
 	}
 	art, err := led.Artifact(ctx, in.ArtifactID)
 	if err != nil {
@@ -235,12 +235,12 @@ func TestCaptureOutput_StoresNothingForASensitiveEntry(t *testing.T) {
 	}
 
 	in := aCapture(entryID, "00000000-0000-7000-8000-0000000000a7")
-	stored, captureErr := led.CaptureOutput(ctx, in)
+	stance, captureErr := led.CaptureOutput(ctx, in)
 	if captureErr != nil {
 		t.Fatalf("CaptureOutput for a sensitive entry: %v, want nil", captureErr)
 	}
-	if stored {
-		t.Fatal("stored = true for a sensitive entry")
+	if stance != content.SessionOutputSensitive {
+		t.Fatalf("stance = %q for a sensitive entry, want %q", stance, content.SessionOutputSensitive)
 	}
 	art, _ := led.Artifact(ctx, in.ArtifactID)
 	if art != nil {
@@ -295,12 +295,12 @@ func TestCaptureOutput_StoresNothingForACriticalEnvironment(t *testing.T) {
 
 	entryID := recordOne(t, led, "kubectl apply -f prod.yaml")
 	in := aCapture(entryID, "00000000-0000-7000-8000-0000000000a9")
-	stored, err := led.CaptureOutput(ctx, in)
+	stance, err := led.CaptureOutput(ctx, in)
 	if err != nil {
 		t.Fatalf("CaptureOutput in a critical environment: %v, want nil", err)
 	}
-	if stored {
-		t.Fatal("stored = true in a critical environment")
+	if stance != content.SessionOutputCritical {
+		t.Fatalf("stance = %q in a critical environment, want %q", stance, content.SessionOutputCritical)
 	}
 	art, _ := led.Artifact(ctx, in.ArtifactID)
 	if art != nil {
@@ -348,12 +348,12 @@ func TestCaptureOutput_AnActionEntryKeepsItsToolResult(t *testing.T) {
 		Seq:            1,
 		Body:           []byte(result),
 	}
-	stored, err := led.CaptureOutput(ctx, in)
+	stance, err := led.CaptureOutput(ctx, in)
 	if err != nil {
 		t.Fatalf("CaptureOutput: %v", err)
 	}
-	if !stored {
-		t.Fatal("the tool result was not stored on a store that retains output")
+	if stance != content.SessionOutputKept {
+		t.Fatalf("stance = %q, want %q — the tool result was not stored on a store that retains output", stance, content.SessionOutputKept)
 	}
 	if got := bodyOf(t, led, in.ArtifactID); got != result {
 		t.Fatalf("body = %q, want %q", got, result)
@@ -373,5 +373,85 @@ func TestCaptureOutput_AnActionEntryKeepsItsToolResult(t *testing.T) {
 		art.CaptureMethod != content.CaptureRawOutput {
 		t.Fatalf("artifact = entry %q %q/%q, want the action entry's own text body",
 			art.EntryID, art.MediaType, art.CaptureMethod)
+	}
+}
+
+// The answer says WHICH happened — its own contract's promise ("the answer
+// says which happened", ledger.go). A caller that cannot tell output-off
+// from a sensitive entry from a critical environment can stop sending, but
+// never says why it stopped, which is the silent success this store refuses
+// to answer with. The stance is the one vocabulary the question "would
+// output produced right now be kept" has; these members extend it rather
+// than minting a second answer beside it.
+func TestCaptureOutput_AnswerNamesTheRefusal(t *testing.T) {
+	ctx := context.Background()
+	_, led := newLedger(t)
+	if err := led.EnsureEnvironment(ctx, content.Environment{ID: "local", Kind: content.EnvLocal}); err != nil {
+		t.Fatalf("EnsureEnvironment: %v", err)
+	}
+	if _, err := led.RecordObservation(ctx, content.Observation{
+		EnvironmentID: "local", Criticality: content.CriticalityCritical,
+	}); err != nil {
+		t.Fatalf("RecordObservation: %v", err)
+	}
+
+	critical := recordOne(t, led, "kubectl apply -f prod.yaml")
+	stance, err := led.CaptureOutput(ctx, aCapture(critical, "00000000-0000-7000-8000-0000000000d1"))
+	if err != nil || stance != content.SessionOutputCritical {
+		t.Fatalf("critical environment: stance = %q, err = %v; want %q, nil", stance, err, content.SessionOutputCritical)
+	}
+
+	sensitiveRec := aCompletedCommand("aws configure")
+	sensitiveRec.Sensitivity = content.SensitivitySensitive
+	sensitive, err := led.RecordCompleted(ctx, sensitiveRec)
+	if err != nil {
+		t.Fatalf("RecordCompleted: %v", err)
+	}
+	stance, err = led.CaptureOutput(ctx, aCapture(sensitive, "00000000-0000-7000-8000-0000000000d2"))
+	if err != nil || stance != content.SessionOutputSensitive {
+		t.Fatalf("sensitive entry: stance = %q, err = %v; want %q, nil", stance, err, content.SessionOutputSensitive)
+	}
+
+	// The paired positive lives in its OWN store: the critical observation
+	// above is pinned by every execution this store writes from now on, so
+	// an ordinary capture needs an environment nobody marked.
+	_, fresh := newLedger(t)
+	ordinary := recordOne(t, fresh, "ls -la")
+	in := aCapture(ordinary, "00000000-0000-7000-8000-0000000000d3")
+	stance, err = fresh.CaptureOutput(ctx, in)
+	if err != nil || stance != content.SessionOutputKept {
+		t.Fatalf("ordinary capture: stance = %q, err = %v; want %q, nil", stance, err, content.SessionOutputKept)
+	}
+	if got := bodyOf(t, fresh, in.ArtifactID); got != capturedBody {
+		t.Fatalf("body = %q, want %q", got, capturedBody)
+	}
+}
+
+// Output retention off names ITSELF, and the paired positive lives beside
+// it: the same capture on a store that retains output answers kept.
+func TestCaptureOutput_AnswerNamesOutputOff(t *testing.T) {
+	ctx := context.Background()
+	policy := content.NewPolicy()
+	policy.SetOutputEnabled(false)
+	db, err := content.Open(ctx, content.Config{
+		Path: t.TempDir() + "/content.db", Key: testKey(), Budget: testBudget, Policy: policy,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	led := db.Ledger()
+
+	in := aCapture(recordOne(t, led, "ls"), "00000000-0000-7000-8000-0000000000d4")
+	stance, captureErr := led.CaptureOutput(ctx, in)
+	if captureErr != nil || stance != content.SessionOutputRetentionOff {
+		t.Fatalf("output off: stance = %q, err = %v; want %q, nil", stance, captureErr, content.SessionOutputRetentionOff)
+	}
+	art, err := led.Artifact(ctx, in.ArtifactID)
+	if err != nil {
+		t.Fatalf("Artifact: %v", err)
+	}
+	if art != nil {
+		t.Fatal("an artifact was stored while output retention is off")
 	}
 }

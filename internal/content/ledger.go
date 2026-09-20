@@ -1842,14 +1842,17 @@ type LedgerRepository interface {
 	// is not there yet and the chunk at its seq, in one transaction against
 	// the entry's own execution. Idempotent on (artifact id, seq).
 	//
-	// REFUSING TO STORE IS NOT AN ERROR, and the answer says which happened.
-	// Output retention off, or an entry marked sensitive, returns
-	// (false, nil): the block keeps its row and keeps no body, the same shape
+	// REFUSING TO STORE IS NOT AN ERROR, and the answer says which happened:
+	// the stance is the one vocabulary for "would output produced right now
+	// be kept", so a caller can stop sending AND say why it stopped —
+	// output retention off, a sensitive entry, or a critical pinned
+	// observation each returns its own stance with a nil error. The block
+	// keeps its row and keeps no body in every one of them, the same shape
 	// RecordCompleted uses for history.enabled. An error there would surface
 	// in front of somebody who turned the setting off deliberately, and a
-	// bare nil would leave the caller sending the rest of a body nobody is
-	// storing.
-	CaptureOutput(ctx context.Context, in CaptureOutput) (bool, error)
+	// bare success would leave the caller sending the rest of a body nobody
+	// is storing.
+	CaptureOutput(ctx context.Context, in CaptureOutput) (SessionOutputStance, error)
 	// AppendChunk appends one chunk to an artifact and maintains its
 	// byte_len (logical content bytes — the retention budget's unit).
 	AppendChunk(ctx context.Context, artifactID string, seq int, body []byte) error

@@ -440,7 +440,8 @@ func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) {
 			return
 		}
 		if row == nil {
-			// The write failed and said so above; nothing to advance.
+			// The write was suppressed (history off — the store's policy
+			// decides) or failed and said so above; nothing to advance.
 			return
 		}
 	}
@@ -694,7 +695,8 @@ const lifecycleShellLedgerClient = "lifecycle-shell"
 // the masking receipt on entries.payload and the row shape cannot drift
 // between the two ways a command enters the ledger. Masking is the one owner
 // (maskLedgerCommand, ws_history_record.go); the store's own policy governs
-// output and sensitivity downstream.
+// whether a command row is written at all (history off: Submit records
+// nothing, no error — the zero result), output and sensitivity downstream.
 //
 // Every failure here is fail-open — one warning line, no row — because the
 // command has already run or is about to: refusing the record fails nothing

@@ -121,15 +121,6 @@ func (s *sqliteContent) RecordCompleted(ctx context.Context, in CompletedCommand
 		// where the message can say what the vocabulary is.
 		return "", fmt.Errorf("content: record: %q is not a command source; want user or assistant", in.Source)
 	}
-	// Keep-history-off: a command runs and no row appears, and that is not an
-	// error — the same rule the interim table's Add followed, moved here with
-	// the write path it belonged to. Decided before the writer is reached, so
-	// nothing is serialized for a record nobody wants. The empty id is the
-	// caller's signal that there is no row to reference.
-	if !s.policy.Enabled() {
-		return "", nil
-	}
-
 	var id string
 	err := s.run(ctx, func(ctx context.Context) error {
 		// BEGIN IMMEDIATE, for the reason Submit states: the write lock is
@@ -182,6 +173,22 @@ func (s *sqliteContent) RecordCompleted(ctx context.Context, in CompletedCommand
 			if lookupErr != sql.ErrNoRows {
 				return lookupErr
 			}
+		}
+
+		// Keep-history-off decides the MINT here, not the close above. A
+		// command runs and no row appears, and that is not an error — the
+		// same rule the interim table's Add followed. But an attempt row
+		// that already exists was opened while the setting was ON, and its
+		// completion carries no new command text: closing it retains
+		// nothing new, while refusing would leave a row claiming a command
+		// is still running — and would make this path disagree with the
+		// shell path's FinishExecution, which was never gated. A
+		// completed-only command names no existing row: the empty id is the
+		// caller's signal that there is nothing to reference. The same rule
+		// gates Submit's command rows (ledger_sqlite.go): one policy, the
+		// writers consult it.
+		if !s.policy.Enabled() {
+			return nil
 		}
 
 		// The anchor is RESOLVED before the write, never left to the foreign

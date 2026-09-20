@@ -133,6 +133,65 @@ func TestRecordCompleted_UpdatesLifecycleAttemptWithoutMintingRow(t *testing.T) 
 	}
 }
 
+// Criterion 4's store half: keep-history-off sits on the MINT path only. An
+// attempt row that already exists — its start recorded while the setting was
+// on — still closes with its real outcome: the completion carries no new
+// command text, so closing it retains nothing new, and refusing would leave a
+// row claiming a command is still running. A completed-only command while off
+// mints nothing and errors nothing, exactly as before.
+func TestRecordCompletedWithHistoryOffClosesAnOpenAttempt(t *testing.T) {
+	ctx := context.Background()
+	policy := content.NewPolicy()
+	_, led := newLedgerWithPolicy(t, policy)
+	envReady(t, led, "local")
+	const id = "att-0000000000000003"
+	if _, err := led.Submit(ctx, content.SubmitEntry{
+		ID: id, Client: "test-client", EnvironmentID: "local", Cwd: "/repo",
+		Kind: content.EntryShell, Source: content.SourceUser, Intent: "sleep 30", Payload: "{}",
+	}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if _, err := led.StartExecution(ctx, content.StartExecution{EntryID: id}); err != nil {
+		t.Fatalf("StartExecution: %v", err)
+	}
+
+	policy.SetEnabled(false)
+	in := aCompletedCommand("sleep 30")
+	in.AttemptID = id
+	gotID, err := led.RecordCompleted(ctx, in)
+	if err != nil {
+		t.Fatalf("RecordCompleted while history is off: %v", err)
+	}
+	if gotID != id {
+		t.Fatalf("RecordCompleted id = %q, want the existing attempt %q", gotID, id)
+	}
+	got, err := led.Entry(ctx, id)
+	if err != nil || got == nil {
+		t.Fatalf("Entry(%q) = %+v, %v", id, got, err)
+	}
+	if got.Phase != content.PhaseClosed || got.Status != content.EntrySuccess ||
+		len(got.Executions) != 1 || got.Executions[0].EndedAt == nil {
+		t.Fatalf("completed row = %+v, want closed/success with one ended execution", got)
+	}
+
+	// The mint path still refuses while off: a completed-only command names
+	// no row, gets the empty-id signal, and errors nothing.
+	offID, err := led.RecordCompleted(ctx, aCompletedCommand("written after the toggle"))
+	if err != nil {
+		t.Fatalf("RecordCompleted mint while history is off: %v", err)
+	}
+	if offID != "" {
+		t.Fatalf("mint while history is off returned %q, want the empty-id signal", offID)
+	}
+	page, err := led.QueryEntries(ctx, content.LedgerQuery{Scope: content.ScopeEverywhere, Limit: 10})
+	if err != nil {
+		t.Fatalf("QueryEntries: %v", err)
+	}
+	if len(page.Entries) != 1 || page.Entries[0].ID != id {
+		t.Fatalf("entries = %+v, want only the attempt row", page.Entries)
+	}
+}
+
 func TestRecordCompleted_RejectsLifecycleAttemptOwnedByAnotherClient(t *testing.T) {
 	ctx := context.Background()
 	_, led := newLedger(t)

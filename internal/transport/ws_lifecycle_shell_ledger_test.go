@@ -254,3 +254,170 @@ func TestShellOriginatedStart_EmptyCommandOpensNoEntry(t *testing.T) {
 		t.Fatalf("an empty command opened an entry: %+v", row)
 	}
 }
+
+// ── keep-history-off: the setting means no row, for every way a command
+// arrives ──────────────────────────────────────────────────────────────────
+
+// Criterion 1: with history disabled, a command typed into a shell-integrated
+// pane (the authenticated shell start path) creates NO ledger row and errors
+// nothing — the start and the completion are ingested exactly as always and
+// the execution path is untouched; nothing is recorded. With history ON the
+// paired behaviour is TestShellOriginatedStart_EntryWithNoWindowAttached.
+func TestShellOriginatedStart_HistoryOffOpensNoEntry(t *testing.T) {
+	policy := content.NewPolicy()
+	policy.SetEnabled(false)
+	db := newLedgerStoreWithPolicy(t, policy)
+	_, pub, lane, h, _, _ := newLifecycleLedgerEnvWithStore(t, db)
+
+	shellID := lifecycle.AttemptID("att-shell-6")
+	shellStartComplete(t, pub, lane, h, 2, shellID, "git push --force", 0)
+
+	if n := entryCount(t, db); n != 0 {
+		t.Fatalf("entry count with history off = %d, want zero — the command ran, no row appeared", n)
+	}
+	row, err := db.Ledger().Entry(context.Background(), string(shellID))
+	if err != nil {
+		t.Fatalf("Entry: %v", err)
+	}
+	if row != nil {
+		t.Fatalf("history off but the shell command opened a row: %+v", row)
+	}
+}
+
+// Criterion 2: with history disabled, a command submitted from nocx's input
+// line records nothing either — the submit still succeeds (the attempt is
+// live, the command still runs), the authenticated start advances nothing,
+// the later history.record ack still succeeds with the empty-id signal, and
+// no entry ever appears. With history ON the paired behaviour is
+// TestLifecycleSubmitAttempt_OpensLedgerEntryAtAttemptIDAndMasks and
+// TestLifecycleLedgerTransitions_ListAndReadByAttemptID.
+func TestSubmitAttemptAndHistoryRecord_HistoryOffRecordNothing(t *testing.T) {
+	policy := content.NewPolicy()
+	policy.SetEnabled(false)
+	db := newLedgerStoreWithPolicy(t, policy)
+	e, pub, lane, h, _, _ := newLifecycleLedgerEnvWithStore(t, db)
+
+	got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt", lifecycleSubmitParams(string(h.Domain), "deploy prod"), 41))
+	if got.ID == "" {
+		t.Fatal("history-off submit returned an empty attempt id — the command must still run")
+	}
+	if _, ok := pub.Attempt(lifecycle.AttemptID(got.ID)); !ok {
+		t.Fatal("history-off submit left no live kernel attempt")
+	}
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(nil, "deploy prod")))
+
+	recordResp := jsonrpcCallWithID(t, e.conn, "history.record", map[string]any{
+		"attemptId": got.ID,
+		"command":   "deploy prod",
+		"cwd":       "/repo",
+		"host":      "",
+		"source":    "user",
+		"status":    "success",
+		"exitCode":  0,
+		"startedAt": nil,
+		"endedAt":   nil,
+		"paneId":    "01930000-0000-7000-8000-0000000000a1",
+	}, 42)
+	var recordEnvelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(recordResp, &recordEnvelope); err != nil {
+		t.Fatalf("history.record response: %v", err)
+	}
+	if recordEnvelope.Error != nil {
+		t.Fatalf("history.record with history off: %+v", recordEnvelope.Error)
+	}
+	var ack historyRecordResponse
+	if err := json.Unmarshal(recordEnvelope.Result, &ack); err != nil {
+		t.Fatalf("history.record result: %v", err)
+	}
+	if ack.EntryID != "" {
+		t.Fatalf("history.record ack entry id = %q, want the empty-id signal", ack.EntryID)
+	}
+	if n := entryCount(t, db); n != 0 {
+		t.Fatalf("entry count with history off after submit + record = %d, want zero", n)
+	}
+}
+
+// Criterion 4, both completions: a row whose start was recorded while history
+// was ON closes with its real outcome even after the setting turns off. The
+// row exists because the person's setting allowed it; the completion carries
+// no new command text, so closing it retains nothing new — and the
+// alternative would leave a row claiming a command is still running while the
+// shell path (which was never gated) closed its own rows, making the two
+// completion paths disagree.
+func TestHistoryOffMidrun_AnOpenRowStillCloses(t *testing.T) {
+	t.Run("shell completion closes it", func(t *testing.T) {
+		policy := content.NewPolicy()
+		db := newLedgerStoreWithPolicy(t, policy)
+		_, pub, lane, h, _, _ := newLifecycleLedgerEnvWithStore(t, db)
+
+		shellID := lifecycle.AttemptID("att-shell-7")
+		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(&shellID, "sleep 30")))
+		if row := mustEntry(t, db, string(shellID)); row.Phase != content.PhaseBound {
+			t.Fatalf("row after the authenticated start = phase %q, want bound", row.Phase)
+		}
+
+		policy.SetEnabled(false)
+		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(shellID, 0, lifecycleFence(0x44))))
+
+		row := mustEntry(t, db, string(shellID))
+		if row.Phase != content.PhaseClosed || row.Status != content.EntrySuccess {
+			t.Fatalf("row completed after the toggle = phase=%q status=%q, want closed/success", row.Phase, row.Status)
+		}
+		if n := entryCount(t, db); n != 1 {
+			t.Fatalf("entry count = %d, want exactly the one open row, closed", n)
+		}
+	})
+
+	t.Run("history.record closes it", func(t *testing.T) {
+		policy := content.NewPolicy()
+		db := newLedgerStoreWithPolicy(t, policy)
+		e, pub, lane, h, _, _ := newLifecycleLedgerEnvWithStore(t, db)
+
+		got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt", lifecycleSubmitParams(string(h.Domain), "sleep 30"), 41))
+		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(nil, "sleep 30")))
+		if row := mustEntry(t, db, got.ID); row.Phase != content.PhaseBound {
+			t.Fatalf("row after the authenticated start = phase %q, want bound", row.Phase)
+		}
+
+		policy.SetEnabled(false)
+		recordResp := jsonrpcCallWithID(t, e.conn, "history.record", map[string]any{
+			"attemptId": got.ID,
+			"command":   "sleep 30",
+			"cwd":       "/repo",
+			"host":      "",
+			"source":    "user",
+			"status":    "success",
+			"exitCode":  0,
+			"startedAt": nil,
+			"endedAt":   nil,
+			"paneId":    "01930000-0000-7000-8000-0000000000a1",
+		}, 42)
+		var recordEnvelope struct {
+			Result json.RawMessage  `json:"result"`
+			Error  *jsonrpcErrorObj `json:"error"`
+		}
+		if err := json.Unmarshal(recordResp, &recordEnvelope); err != nil {
+			t.Fatalf("history.record response: %v", err)
+		}
+		if recordEnvelope.Error != nil {
+			t.Fatalf("history.record with history off midrun: %+v", recordEnvelope.Error)
+		}
+		var ack historyRecordResponse
+		if err := json.Unmarshal(recordEnvelope.Result, &ack); err != nil {
+			t.Fatalf("history.record result: %v", err)
+		}
+		if ack.EntryID != got.ID {
+			t.Fatalf("history.record ack entry id = %q, want the open attempt %q", ack.EntryID, got.ID)
+		}
+		row := mustEntry(t, db, got.ID)
+		if row.Phase != content.PhaseClosed || row.Status != content.EntrySuccess {
+			t.Fatalf("row after record = phase=%q status=%q, want closed/success", row.Phase, row.Status)
+		}
+		if n := entryCount(t, db); n != 1 {
+			t.Fatalf("entry count = %d, want exactly the one open row, closed", n)
+		}
+	})
+}

@@ -185,6 +185,20 @@ func (s *sqliteContent) Submit(ctx context.Context, in SubmitEntry) (SubmitResul
 	if in.Source == "" {
 		in.Source = SourceUser
 	}
+	// Keep-history-off: a COMMAND row is not written while the live policy
+	// has history off, and that is not an error — the zero result is the
+	// caller's signal that there is no row to reference, exactly as
+	// RecordCompleted's empty id is. This is the one check, at the one store:
+	// the transport's lifecycle writers and the ledger wire path all consult
+	// it and none can bypass it. The scope is the command kind alone —
+	// action, ask and text rows are the assistant's narrative and its
+	// authority record, not command history, and the policy does not reach
+	// them. A row that already exists finishes regardless (the completion
+	// paths), because refusing a close would leave a row claiming a command
+	// is still running.
+	if in.Kind == EntryShell && !s.policy.Enabled() {
+		return SubmitResult{}, nil
+	}
 	digest := entryDigest(in)
 	var out SubmitResult
 	err := s.run(ctx, func(ctx context.Context) error {

@@ -1583,7 +1583,7 @@ func (c *workerCloser) leftover(ctx context.Context, p workers.Participant) work
 	// and the tab are already gone, so a record that refuses the stamp is
 	// logged and the answer about the checkout is still git's.
 	if c.checkouts != nil {
-		if err := c.checkouts.Touch(ctx, p.Worktree.Path, time.Now()); err != nil {
+		if err := c.checkouts.Touch(ctx, nocxCanonicalPath(p.Worktree.Path), time.Now()); err != nil {
 			log.From(ctx).Warn("worker close: could not move the checkout's last-used time",
 				"participant", string(p.ID), "path", p.Worktree.Path, "error", err)
 		}
@@ -1621,8 +1621,14 @@ func (c *workerCloser) leftover(ctx context.Context, p workers.Participant) work
 	if err != nil {
 		return fail(err)
 	}
+	// THE MATCH IS CANONICAL on both sides (nocxCanonicalPath): git answers
+	// the resolved spelling of the listing while the record holds whatever
+	// spelling the spawn was handed — on macOS a symlinked ancestor makes
+	// those two differ — and a raw-equality miss answers unknown for a
+	// checkout that is right there and readable, which is the one answer
+	// that invites deleting a worker's work (nocx-xn63t.1.3).
 	for _, wt := range listing {
-		if wt.Path != p.Worktree.Path {
+		if nocxCanonicalPath(wt.Path) != nocxCanonicalPath(p.Worktree.Path) {
 			continue
 		}
 		// What git reports NOW is what is left, even where it differs from

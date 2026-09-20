@@ -81,9 +81,16 @@ type closeWorktreeStand struct {
 
 func newCloseWorktreeStand(t *testing.T, repoDir, head string) (*closeWorktreeStand, string) {
 	t.Helper()
+	return newCloseWorktreeStandAt(t, repoDir, head, filepath.Join(t.TempDir(), "wt-feat"))
+}
+
+// newCloseWorktreeStandAt is the stand at a checkout path the test picks —
+// the symlink stand hands a path through a symlinked ancestor, the macOS
+// shape: the record holds that spelling, and git answers the resolved one.
+func newCloseWorktreeStandAt(t *testing.T, repoDir, head, wtPath string) (*closeWorktreeStand, string) {
+	t.Helper()
 	factory := gitlocal.NewFactory()
 	t.Cleanup(factory.Stop)
-	wtPath := filepath.Join(t.TempDir(), "wt-feat")
 	gitIn(t, repoDir, "worktree", "add", "-b", "feat/x", wtPath, head)
 	tabs := newWorkerTabs()
 	tabs.record("p-1", "tab-1")
@@ -284,5 +291,44 @@ func TestClosingAWorkerWithoutAWorktreeStampsNothing(t *testing.T) {
 	}
 	if len(toucher.touched) != 0 {
 		t.Fatalf("touched = %v, want nothing", toucher.touched)
+	}
+}
+
+// Criterion, the macOS shape (nocx-xn63t.1.3 evidence): the checkout sits
+// behind a symlinked ancestor, so git answers the RESOLVED spelling of its
+// path while the record holds the spelling the spawn was handed. The close
+// must still find the checkout in git's listing and answer what it holds —
+// read, with its branch — never unknown for a checkout that is right there
+// and perfectly readable.
+func TestClosingAWorktreeBehindASymlinkedAncestorStillReadsTheCheckout(t *testing.T) {
+	repoDir, head := initRealRepo(t)
+	real := filepath.Join(t.TempDir(), "checkout-real")
+	if err := os.MkdirAll(real, 0o700); err != nil {
+		t.Fatalf("make the checkout's parent: %v", err)
+	}
+	link := symlinkedDir(t, real)
+	checkout := filepath.Join(link, "wt-feat")
+	stand, _ := newCloseWorktreeStandAt(t, repoDir, head, checkout)
+
+	// The worker's leftovers, spelled through the link like everything
+	// else: an unstaged edit no commit keeps, and two commits beyond the
+	// base — the close must read all three answers through the listing.
+	if err := os.WriteFile(filepath.Join(checkout, "README.md"), []byte("seed\nedited\n"), 0o600); err != nil {
+		t.Fatalf("leave an edit: %v", err)
+	}
+	gitIn(t, checkout, "commit", "--allow-empty", "-m", "one")
+	gitIn(t, checkout, "commit", "--allow-empty", "-m", "two")
+
+	res, err := stand.closer.Close(context.Background(), stand.participant(checkout, head))
+	if err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	want := workers.Leftover{
+		Path: checkout, Branch: "feat/x", State: workers.CheckoutRead,
+		Uncommitted: true, Ahead: 2,
+	}
+	if res.Worktree != want {
+		t.Fatalf("worktree = %+v, want %+v: the close must read a checkout the record names by its symlinked spelling",
+			res.Worktree, want)
 	}
 }

@@ -128,7 +128,30 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 	// a params struct this function no longer owns: which struct carries it is
 	// the caller's business (see spawnFunc).
 	var life *proto.LifecycleLaunch
+	// THE COMPLETION DOWNLINK (owner decision 2026-09-19). The lifecycle
+	// channel is authenticated HERE, in the coordinator's kernel; the
+	// emulator and the rendezvous live in the helper. So the coordinator
+	// carries each already-authenticated completion DOWN to the helper
+	// session that owns the pane, over session.lifecycle-complete, and
+	// authentication does not move: the observing wrapper adds no gate — an
+	// err==nil from Ingest IS the kernel's acceptance, and a finish the
+	// kernel refused is observed by nothing. The wrapper is built BEFORE
+	// the spawn and the bind happens only when the spawn RPC has answered,
+	// because a shell that completes a command inside that window is
+	// accepted by the kernel while the helper session's identity is still
+	// unknown; the downlink buffers what it accepted in that window and
+	// delivers it, in acceptance order, the moment the bind names the
+	// session.
+	var downlink *helperclient.CompletionDownlink
 	if h.lifecycle != nil {
+		downlink = helperclient.NewCompletionDownlink(h.client, ctx, func(err error) {
+			// The kernel's execution state stands exactly as it set it; the
+			// report is the whole of a failed delivery's handling.
+			log.NewSlogAdapter(h.log).WithContext(ctx).Warn(
+				"helper: the completion the kernel accepted did not reach the helper session", "err", err)
+		})
+		driveKernel := helperclient.NewCompletionObservingKernel(h.lifecycle, downlink)
+
 		coordinatorConn, peerConn := net.Pipe()
 		opts := []lifecyclechannel.Option{lifecyclechannel.WithLossReporter(h.loss)}
 		if h.helloTimeout > 0 {
@@ -141,7 +164,7 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		// exchange onto its logger HERE, where the identity exists, is what
 		// puts it beside the wait it explains instead of a timestamp away.
 		adapter, err := lifecyclechannel.NewStream(
-			log.NewSlogAdapter(h.log).WithContext(ctx), h.lifecycle, coordinatorConn, opts...)
+			log.NewSlogAdapter(h.log).WithContext(ctx), driveKernel, coordinatorConn, opts...)
 		if err != nil {
 			_ = peerConn.Close()
 			return hostedSpawnResult{}, err
@@ -164,6 +187,9 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 	if err != nil {
 		abortLifecycleNow()
 		return hostedSpawnResult{}, err
+	}
+	if downlink != nil {
+		downlink.Bind(entry.HostSessionID)
 	}
 
 	attached, err := h.client.Attach(ctx, proto.AttachParams{

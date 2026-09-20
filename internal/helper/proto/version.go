@@ -221,4 +221,14 @@ package proto
 // tell that apart from the far side hanging up with no status at all
 // (TestAChannelLostMidSessionEndsTheSessionWithAStatus), which stays exactly
 // as it was.
+
+// This is still 15, widened in place for the same reason: the `session`
+// service gained `lifecycle-complete`, the op by which the coordinator
+// carries an ALREADY-AUTHENTICATED completion down to the session that owns
+// the pane (owner decision 2026-09-19 — authentication does not move). The
+// op is the half that degrades by generation: an older generation answers
+// `unknown_op`, which the coordinator reads as "this machine's helper is
+// older than this app" and keeps relaying the lifecycle bytes without the
+// downlink. Nothing shipped at 15 carries a session entry or a spawn result
+// the op changes, so no shape moved with it.
 const Version = "15"

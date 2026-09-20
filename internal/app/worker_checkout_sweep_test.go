@@ -497,3 +497,31 @@ func TestStartRunsTheFirstPassAtStartAndStopsCleanly(t *testing.T) {
 		t.Fatalf("the first pass at start did not remove the expired checkout at %q", checkout)
 	}
 }
+
+// A ROW WITH NO STAMP IS NEVER AGED (found by a planted mutation at stage
+// acceptance, nocx-xn63t.1): dropping the zero guard from the ageing filter
+// left every test green while the sweep removed a checkout it knows nothing
+// about. Zero is not "used at the epoch" — it is a row nobody wrote through
+// the record's own paths, so the sweep has no evidence the checkout is idle,
+// and removing on no evidence is how a worker's uncommitted work is lost.
+func TestTheSweepNeverAgesACheckoutWhoseLastUseIsUnknown(t *testing.T) {
+	repoDir, _ := initRealRepo(t)
+	stand := newCheckoutStand(t)
+	coordA := stand.openCoordinator(t, "pane-a", repoDir)
+	stand.spawnCheckoutWorker(t, coordA, "worker-1", "feat/one", "t")
+	checkout := expectedWorktreePath(stand.checkouts.worktreeRoot, repoDir, "feat/one")
+	key := nocxCheckoutRepoKey(repoDir)
+
+	// The stamp is gone — a record write that never landed, which the sweep's
+	// own fix for the review's fourth blocker makes an ordinary state.
+	ageCheckout(t, stand, key, checkout, time.UnixMilli(0))
+	newSweeper(stand, 30*24*time.Hour).RunOnce(context.Background())
+
+	if checkoutGone(t, checkout) {
+		t.Fatalf("the checkout at %q was removed although nothing records when it was last used", checkout)
+	}
+	rows, err := stand.rows.List(context.Background(), key)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows = %+v, %v; want the unstamped row kept", rows, err)
+	}
+}

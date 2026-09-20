@@ -24,6 +24,17 @@ func newLifecycleLedgerEnv(t *testing.T, withStore bool) (*lifecycleTestEnv, *li
 	var db content.ContentDB
 	if withStore {
 		db = newLedgerStore(t)
+	}
+	return newLifecycleLedgerEnvWithStore(t, db)
+}
+
+// newLifecycleLedgerEnvWithStore is newLifecycleLedgerEnv with the store
+// handed in — the one thing a caller that needs a specific History policy
+// (output retention, for instance) controls. A nil db is the store-unavailable
+// env.
+func newLifecycleLedgerEnvWithStore(t *testing.T, db content.ContentDB) (*lifecycleTestEnv, *lifecyclepub.Publisher, lifecycle.LaneID, lifecycle.DomainHandle, string, content.ContentDB) {
+	t.Helper()
+	if db != nil {
 		if _, err := db.Layout().CreateWorkspace(context.Background(),
 			content.Workspace{ID: "ws-lifecycle", Name: "lifecycle"},
 			content.Tab{ID: "tab-lifecycle", WorkspaceID: "ws-lifecycle", Position: 0, Layout: content.LayoutRow},

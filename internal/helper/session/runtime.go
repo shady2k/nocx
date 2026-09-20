@@ -117,7 +117,7 @@ func ptyDimension(n int) (uint16, error) {
 // rendezvous runs under (design §6.4) — the service's Options threading,
 // handed down so the policy is stated at the composition root and a test's
 // trigger is the one the session actually arms.
-func newSessionRuntime(newScreen ScreenFactory, proc Process, id string, cols, rows uint16, expireIn time.Duration, expireAfter func(d time.Duration, f func()) (stop func() bool)) (*sessionruntime.Session, emulator.Terminal, error) {
+func newSessionRuntime(newScreen ScreenFactory, proc Process, id string, cols, rows uint16, expireIn time.Duration, expireAfter func(d time.Duration, f func()) (stop func() bool), captures sessionruntime.CaptureSink) (*sessionruntime.Session, emulator.Terminal, error) {
 	g := sessionruntime.Geometry{Cols: int(cols), Rows: int(rows)}
 	screen, err := newScreen(g)
 	if err != nil {
@@ -137,6 +137,10 @@ func newSessionRuntime(newScreen ScreenFactory, proc Process, id string, cols, r
 		Completeness:     sessionruntime.CompletenessComplete,
 		RendezvousExpiry: expireIn,
 		ExpireAfter:      expireAfter,
+		// The settled intervals' records leave through here: the relay is
+		// bound to the hostSession a moment after this returns, before the
+		// pump can produce anything a settle could capture.
+		Captures: captures,
 	})
 	if err != nil {
 		// The screen was built and the runtime refused it, so the screen is

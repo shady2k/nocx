@@ -65,10 +65,11 @@ type LedgerService interface {
 	// render as a hole rather than as silence (ADR-0019 §7).
 	Artifact(ctx context.Context, id string) (*content.Artifact, error)
 	// CaptureOutput serves ledger.capture: one body of a frozen block,
-	// against the entry's own execution. The bool is whether the body is
-	// kept — false when output retention is off or the entry is sensitive,
-	// which is an answer and not a failure.
-	CaptureOutput(ctx context.Context, in content.CaptureOutput) (bool, error)
+	// against the entry's own execution. The stance is WHICH answer the
+	// store gave — kept, or the refusal that kept nothing (output retention
+	// off, a sensitive entry, a critical pinned observation) — an answer and
+	// not a failure.
+	CaptureOutput(ctx context.Context, in content.CaptureOutput) (content.SessionOutputStance, error)
 }
 
 // LedgerOperation is the typed operation for the ledger domain. Its gate is
@@ -164,9 +165,9 @@ func (s *ledgerService) Artifact(ctx context.Context, id string) (*content.Artif
 	return s.ledger.Artifact(ctx, id)
 }
 
-func (s *ledgerService) CaptureOutput(ctx context.Context, in content.CaptureOutput) (bool, error) {
+func (s *ledgerService) CaptureOutput(ctx context.Context, in content.CaptureOutput) (content.SessionOutputStance, error) {
 	if err := s.guard.check(); err != nil {
-		return false, err
+		return "", err
 	}
 	return s.ledger.CaptureOutput(ctx, in)
 }

@@ -176,8 +176,8 @@ func (h ledgerCaptureHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 
 	stored := false
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.LedgerService) error {
-		kept, err := svc.CaptureOutput(ctx, in)
-		stored = kept
+		stance, err := svc.CaptureOutput(ctx, in)
+		stored = stance == content.SessionOutputKept
 		return err
 	})
 	if err != nil {

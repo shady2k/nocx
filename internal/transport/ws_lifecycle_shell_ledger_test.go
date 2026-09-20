@@ -202,8 +202,8 @@ func TestShellOriginatedEntry_OutputRetentionPair(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CaptureOutput with retention off: %v, want nil (a refusal, not a failure)", err)
 		}
-		if kept {
-			t.Fatal("output kept while retention is off")
+		if kept != content.SessionOutputRetentionOff {
+			t.Fatalf("output stance while retention is off = %q, want outputOff", kept)
 		}
 	})
 
@@ -226,7 +226,7 @@ func TestShellOriginatedEntry_OutputRetentionPair(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CaptureOutput with retention on: %v", err)
 		}
-		if !kept {
+		if kept != content.SessionOutputKept {
 			t.Fatal("output not kept while retention is on")
 		}
 		art, err := db.Ledger().Artifact(context.Background(), shellLedgerArtifact2)

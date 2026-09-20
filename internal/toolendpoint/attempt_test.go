@@ -65,8 +65,8 @@ func (l *endpointAttemptLedger) AddCause(context.Context, string, string) (int, 
 	return 0, nil
 }
 
-func (l *endpointAttemptLedger) CaptureOutput(context.Context, content.CaptureOutput) (bool, error) {
-	return true, nil
+func (l *endpointAttemptLedger) CaptureOutput(context.Context, content.CaptureOutput) (content.SessionOutputStance, error) {
+	return content.SessionOutputKept, nil
 }
 
 type endpointOutcomeDispatcher struct{}

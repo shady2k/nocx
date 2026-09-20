@@ -327,8 +327,14 @@ type hostSession struct {
 	// through runtime, and Close is this object's to call because a runtime
 	// does not own the pair it was handed ("a runtime does not create a
 	// terminal, it directs one").
-	screen          emulator.Terminal
-	log             *slog.Logger
+	screen emulator.Terminal
+	log    *slog.Logger
+	// captureAsk is the coordinator connection this session's capture
+	// records travel up on, resolved from the spawn request's own context:
+	// the connection that spawned the session is the one whose ledger
+	// stores it. Nil when this path had no connection (a test driving ops
+	// without a host behind it); records are then reported and dropped.
+	captureAsk      CoordinatorAsker
 	lifecycleBudget int64
 	// owner is this session's one I/O owner (nocx-6q1uh.3, spec §5): the
 	// goroutine that alone orders output ingest, runtime replies, client

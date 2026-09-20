@@ -425,7 +425,7 @@ type AttemptLedger interface {
 	// tool call gets its result this way (nocx-hp8p2.13) — ADR-0040's tree
 	// gives every other block kind a body and left `action` with none, so
 	// "what came back" had nowhere to be asked from.
-	CaptureOutput(ctx context.Context, in content.CaptureOutput) (bool, error)
+	CaptureOutput(ctx context.Context, in content.CaptureOutput) (content.SessionOutputStance, error)
 }
 
 // maxArgsBytes bounds the model's argument JSON — the ingress size bound of

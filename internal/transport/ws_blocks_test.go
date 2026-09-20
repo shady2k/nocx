@@ -63,8 +63,8 @@ func captureBody(t *testing.T, db content.ContentDB, entryID, artifactID, body s
 	if err != nil {
 		t.Fatalf("CaptureOutput(%s): %v", entryID, err)
 	}
-	if !kept {
-		t.Fatalf("CaptureOutput(%s) did not keep the body", entryID)
+	if kept != content.SessionOutputKept {
+		t.Fatalf("CaptureOutput(%s) did not keep the body: stance %q", entryID, kept)
 	}
 }
 

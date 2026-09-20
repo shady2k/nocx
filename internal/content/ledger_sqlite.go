@@ -1143,17 +1143,19 @@ func appendChunkAt(ctx context.Context, q execer, artifactID string, seq int, bo
 // opens, so nothing is written for a body nobody wants: output retention off
 // is the user's setting, and a sensitive entry is the store's own rule about
 // what a command's text says about its output.
-func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) (bool, error) {
+func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) (SessionOutputStance, error) {
 	if in.EntryID == "" || in.ArtifactID == "" {
-		return false, errors.New("content: capture: entry id and artifact id are required")
+		return "", errors.New("content: capture: entry id and artifact id are required")
 	}
 	if in.Seq < 1 {
-		return false, errors.New("content: capture: seq starts at 1")
+		return "", errors.New("content: capture: seq starts at 1")
 	}
 	if !s.policy.OutputEnabled() {
-		return false, nil
+		return SessionOutputRetentionOff, nil
 	}
-	stored := false
+	// The refusals inside the transaction are answers and not errors, so the
+	// closure records WHICH one fired and the answer carries it out.
+	stance := SessionOutputKept
 	err := s.run(ctx, func(ctx context.Context) error {
 		// BEGIN IMMEDIATE for the reason Submit and RecordCompleted state:
 		// the write lock is taken at BEGIN rather than at the first write, so
@@ -1173,6 +1175,7 @@ func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) (bo
 			return err
 		}
 		if Sensitivity(sensitivity) == SensitivitySensitive {
+			stance = SessionOutputSensitive
 			return nil
 		}
 
@@ -1203,6 +1206,7 @@ func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) (bo
 		// (design §7.4). The command is still recorded: criticality decides
 		// what is kept ABOUT a command, never whether it happened.
 		if Criticality(criticality) == CriticalityCritical {
+			stance = SessionOutputCritical
 			return nil
 		}
 
@@ -1252,10 +1256,12 @@ func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) (bo
 		if commitErr := tx.Commit(); commitErr != nil {
 			return commitErr
 		}
-		stored = true
 		return nil
 	})
-	return stored, err
+	if err != nil {
+		return "", err
+	}
+	return stance, nil
 }
 
 // AppendChunk appends one chunk to an artifact and maintains its byte_len —

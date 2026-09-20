@@ -106,6 +106,14 @@ const (
 	// SessionOutputRetentionOff — history is on but command output is not
 	// retained, which has the same consequence for the same reason.
 	SessionOutputRetentionOff SessionOutputStance = "outputOff"
+	// SessionOutputSensitive — the entry is marked sensitive: the row stays
+	// and no body is kept, the store's own rule about what a command's text
+	// says about its output (ledger_sqlite.go).
+	SessionOutputSensitive SessionOutputStance = "sensitive"
+	// SessionOutputCritical — the execution pinned a critical environment
+	// observation: a critical host contributes intent and metadata only
+	// (design §7.4).
+	SessionOutputCritical SessionOutputStance = "critical"
 )
 
 // SessionOutputAppend is one run of bytes at a known stream offset.

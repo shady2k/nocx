@@ -161,7 +161,7 @@ func startLiveHelperStand(t *testing.T, fx *liveSshd) (*remoteInstallerAdapter, 
 		Exec:        helperclient.NewSocketConn(coordEnd),
 		ExpectHash:  filesFixtureGenera,
 		SentinelTTL: 5 * time.Second,
-		Reverse:     helperReverseHandlers(rc, key, &helperPrompt{log: logger}, nil, logger),
+		Reverse:     helperReverseHandlers(rc, key, &helperPrompt{log: logger}, nil, logger, newCaptureSink()),
 		Log:         logger,
 	})
 	if err != nil {

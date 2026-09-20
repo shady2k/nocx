@@ -118,33 +118,71 @@ func (c *workerCheckouts) clock() time.Time {
 	return c.now()
 }
 
+// nocxCanonicalPath is THE one canonical spelling of a path in the
+// checkouts logic — every comparison or join that touches two spellings of
+// one directory goes through it. It is absolute, cleaned, and has every
+// existing symlinked ancestor resolved: on macOS the temp directory is a
+// symlink (/var → /private/var), so git answers the resolved spelling of
+// the paths it reports while nocx's own worktrees root is the unresolved
+// one, and a naive comparison of the two is a wrong answer on the platform
+// nocx ships on (nocx-xn63t.1.5 evidence).
+//
+// A path that does not EXIST (or an ancestor of it) cannot be resolved by
+// filepath.EvalSymlinks; the deepest existing ancestor is resolved and the
+// missing tail carried over unchanged, so a path nocx is about to create
+// canonicalizes to where creating it will land, and a caller comparing a
+// missing checkout's two spellings still agrees. What a caller WANTS a
+// missing path to mean is its own decision: for the "is it ours" guard a
+// missing tail must never turn a checkout nocx made into a stranger, which
+// is why the guard canonicalizes both sides rather than refusing on the
+// resolution error.
+func nocxCanonicalPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return filepath.Clean(p)
+	}
+	resolved, linkErr := filepath.EvalSymlinks(abs)
+	if linkErr == nil {
+		return resolved
+	}
+	parent := filepath.Clean(filepath.Dir(abs))
+	if parent == abs {
+		return abs
+	}
+	return filepath.Join(nocxCanonicalPath(parent), filepath.Base(abs))
+}
+
 // nocxCheckoutRepoKey is the location formula's <repo key>: the main
 // checkout's basename plus "-" and the first 8 hex chars of sha256 over the
 // common git dir (the main checkout's .git), so two repositories that happen
 // to share a basename do not collide. It is THE one derivation — the spawn
 // path computes the same key through this function, and a second spelling of
-// it would be two answers that agree until the day they don't.
+// it would be two answers that agree until the day they don't. The input is
+// canonicalized (nocxCanonicalPath) first: git answers the resolved spelling
+// of the main checkout while a coordinator's pane records whatever spelling
+// it stood down through, and the two must hash to one key.
 func nocxCheckoutRepoKey(mainPath string) string {
+	mainPath = nocxCanonicalPath(mainPath)
 	digest := sha256.Sum256([]byte(filepath.Join(mainPath, ".git")))
 	return filepath.Base(mainPath) + "-" + hex.EncodeToString(digest[:4])
 }
 
 // underWorktreeRoot reports whether p is inside the nocx worktrees root —
-// the marker test. filepath.Clean both sides first: the seam's paths and a
-// pane's recorded directory are absolute already, but a trailing separator
-// or a "." component would turn the prefix test into a wrong answer.
+// the marker test. BOTH sides go through nocxCanonicalPath: git answers the
+// resolved spelling of the checkout while the root nocx holds is the
+// unresolved one (macOS /var → /private/var), and a trailing separator or a
+// "." component would turn the prefix test into a wrong answer anyway.
+// Canonicalizing both is what keeps a checkout nocx made from turning into
+// a stranger on the platform nocx ships on (nocx-xn63t.1.5).
 func (c *workerCheckouts) underWorktreeRoot(p string) bool {
 	if c.worktreeRoot == "" || p == "" {
 		return false
 	}
-	root, err := filepath.Abs(c.worktreeRoot)
-	if err != nil {
-		return false
-	}
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return false
-	}
+	root := nocxCanonicalPath(c.worktreeRoot)
+	abs := nocxCanonicalPath(p)
 	rel, err := filepath.Rel(root, abs)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return false
@@ -224,6 +262,13 @@ func (c *workerCheckouts) Leftovers(ctx context.Context, coordinatorSession stri
 		lg.Warn("worker checkouts: the repository reports no main checkout", "cwd", cwd)
 		return workers.CheckoutSurvey{Leftovers: empty.Leftovers, Complete: false}
 	}
+	// The listing and the rows below are read CANONICAL
+	// (nocxCanonicalPath): the join, the holds and the sweep notes are all
+	// path-keyed, and git's answer and the record's spelling must meet in
+	// the one canonical form (nocx-xn63t.1.6).
+	for i := range trees {
+		trees[i].Path = nocxCanonicalPath(trees[i].Path)
+	}
 	repoKey := nocxCheckoutRepoKey(trees[0].Path)
 
 	held, err := c.held.HeldWorktrees(ctx)
@@ -240,6 +285,9 @@ func (c *workerCheckouts) Leftovers(ctx context.Context, coordinatorSession stri
 	if rows, err = c.rows.List(ctx, repoKey); err != nil {
 		lg.Warn("worker checkouts: read the durable record", "error", err)
 		return workers.CheckoutSurvey{Leftovers: empty.Leftovers, Complete: false}
+	}
+	for i := range rows {
+		rows[i].Path = nocxCanonicalPath(rows[i].Path)
 	}
 	rowByPath := make(map[string]content.WorkerCheckout, len(rows))
 	for _, row := range rows {
@@ -404,9 +452,14 @@ func (c *workerCheckouts) notePaneOpened(spec transport.OpenSpec, _ session.ID) 
 		log.From(ctx).Warn("worker checkouts: list rows for a pane-open note", "error", err)
 		return
 	}
-	cwd = filepath.Clean(cwd)
+	// BOTH sides canonical (nocxCanonicalPath): the pane's row carries
+	// whatever spelling its shell answered an OSC 7 with — on macOS a
+	// symlinked ancestor makes that the unresolved one — and a note that
+	// missed on a spelling lets the sweep age a checkout somebody is
+	// working in (nocx-xn63t.1.6).
+	cwd = nocxCanonicalPath(cwd)
 	for _, row := range rows {
-		root := filepath.Clean(row.Path)
+		root := nocxCanonicalPath(row.Path)
 		if cwd != root && !strings.HasPrefix(cwd, root+string(os.PathSeparator)) {
 			continue
 		}

@@ -157,6 +157,13 @@ func (s *checkoutSweeper) RunOnce(ctx context.Context) {
 		lg.Warn("checkout sweep: read the durable record", "error", err)
 		return
 	}
+	// The record's rows are read CANONICAL (nocxCanonicalPath): a row
+	// written in another spelling of the same directory must still meet
+	// the holds, the pane inventory and the listing it is judged against
+	// (nocx-xn63t.1.6).
+	for i := range all {
+		all[i].Path = nocxCanonicalPath(all[i].Path)
+	}
 	// The record's held answer: while it cannot be read, held and abandoned
 	// cannot be told apart, and nothing is judged — the last notes stand,
 	// which is the last honest judgement anybody made.
@@ -370,9 +377,14 @@ func paneHoldsPath(cwds []string, path string) bool {
 	if len(cwds) == 0 || path == "" {
 		return false
 	}
-	root := filepath.Clean(path)
+	// BOTH sides canonical (nocxCanonicalPath): a pane's recorded
+	// directory carries whatever spelling its shell answered an OSC 7
+	// with — on macOS a symlinked ancestor makes that the unresolved one —
+	// and a hold that missed on a spelling removes a directory somebody
+	// is standing in (nocx-xn63t.1.6).
+	root := nocxCanonicalPath(path)
 	for _, cwd := range cwds {
-		if cwd == root || strings.HasPrefix(cwd, root+string(os.PathSeparator)) {
+		if dir := nocxCanonicalPath(cwd); dir == root || strings.HasPrefix(dir, root+string(os.PathSeparator)) {
 			return true
 		}
 	}

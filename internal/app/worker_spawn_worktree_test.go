@@ -21,8 +21,6 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"os"
 	"os/exec"
@@ -44,11 +42,42 @@ import (
 // expectedWorktreePath is the documented location formula, spelled in the
 // test that pins it: <root>/<repo key>/<branch slug>, where <repo key> is
 // the main checkout's basename plus "-" and the first 8 hex chars of
-// sha256 over the common git dir (the main checkout's .git).
+// sha256 over the common git dir (the main checkout's .git). The root and
+// the key go through the product's own canonical derivations
+// (nocxCanonicalPath, nocxCheckoutRepoKey) — what this helper pins is the
+// join, not a second derivation of the parts.
 func expectedWorktreePath(root, mainCheckout, branch string) string {
-	digest := sha256.Sum256([]byte(filepath.Join(mainCheckout, ".git")))
-	key := filepath.Base(mainCheckout) + "-" + hex.EncodeToString(digest[:4])
-	return filepath.Join(root, key, strings.ReplaceAll(branch, "/", "-"))
+	return filepath.Join(nocxCanonicalPath(root),
+		nocxCheckoutRepoKey(mainCheckout),
+		strings.ReplaceAll(branch, "/", "-"))
+}
+
+// symlinkedWorktreeRoot builds the macOS shape on any host: a worktrees
+// root whose ancestor is a symlink (on macOS /var → /private/var), so the
+// spelling nocx holds — the link — differs from the spelling git answers —
+// the resolved target. The link spelling is what a stand hands nocx.
+func symlinkedWorktreeRoot(t *testing.T) string {
+	t.Helper()
+	real := filepath.Join(t.TempDir(), "storage-real")
+	if err := os.MkdirAll(real, 0o700); err != nil {
+		t.Fatalf("make the storage root: %v", err)
+	}
+	link := filepath.Join(t.TempDir(), "storage-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatalf("symlink the storage root: %v", err)
+	}
+	return filepath.Join(link, "worktrees")
+}
+
+// symlinkedDir answers a symlink to dir, for handing nocx the spelling of
+// a repository's ancestor a coordinator's pane records on macOS.
+func symlinkedDir(t *testing.T, dir string) string {
+	t.Helper()
+	link := filepath.Join(t.TempDir(), "repo-link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatalf("symlink %q: %v", dir, err)
+	}
+	return link
 }
 
 // ── the scripted git seam ────────────────────────────────────────────────
@@ -779,6 +808,53 @@ func TestAWorktreeSpawnOnARealRepositoryCreatesTheCheckout(t *testing.T) {
 	}
 	if got := stand.opener.lastSpec().Cwd; got != wantPath {
 		t.Fatalf("session cwd = %q, want the new checkout", got)
+	}
+}
+
+// Criterion, the macOS shape (nocx-xn63t.1.5 evidence): the worktrees root
+// sits behind a symlinked ancestor, so git answers the RESOLVED spelling of
+// every path it reports while nocx holds the link spelling — and the
+// coordinator's pane records the repository through its own symlinked
+// ancestor. The checkout must still land at the documented place, the spawn
+// must carry that place, and the record row must be readable under the key
+// the location formula derives from the spellings nocx was handed.
+func TestASymlinkedWorktreesRootSpawnsTheCheckoutAtTheDocumentedPlace(t *testing.T) {
+	repoDir, head := initRealRepo(t)
+	factory := gitlocal.NewFactory()
+	t.Cleanup(factory.Stop)
+
+	stand := newCheckoutStand(t)
+	root := symlinkedWorktreeRoot(t)
+	stand.checkouts.worktreeRoot = root
+	stand.spawner.worktreeRoot = root
+
+	// The coordinator stands in the repository through the link spelling:
+	// that is what its pane records, and git answers the resolved one.
+	repoLink := symlinkedDir(t, repoDir)
+	coord := stand.openCoordinator(t, "pane-a", repoLink)
+
+	spawned, err := stand.spawner.Spawn(context.Background(), workers.SpawnRequest{
+		Participant: "p-sym", Group: "worker-1", Task: "t", Command: "run-agent",
+		CoordinatorSession: string(coord), Worktree: anAsk("feat/sym"),
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+
+	wantPath := expectedWorktreePath(root, repoLink, "feat/sym")
+	info, statErr := os.Lstat(wantPath)
+	if statErr != nil || !info.IsDir() {
+		t.Fatalf("the checkout at %q: %v", wantPath, statErr)
+	}
+	if got := worktreeOf(t, spawned); got.Path != wantPath {
+		t.Fatalf("location path = %q, want the documented place %q", got.Path, wantPath)
+	}
+	rows, err := stand.rows.List(context.Background(), nocxCheckoutRepoKey(repoLink))
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows = %+v, %v; want the row the spawn wrote", rows, err)
+	}
+	if rows[0].Path != wantPath || rows[0].Branch != "feat/sym" || rows[0].Base != head {
+		t.Fatalf("row = %+v, want the checkout at %q on feat/sym from %q", rows[0], wantPath, head)
 	}
 }
 

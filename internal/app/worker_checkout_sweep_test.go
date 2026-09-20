@@ -239,6 +239,77 @@ func TestTheSweepNeverRemovesACheckoutAPaneIsStandingIn(t *testing.T) {
 	}
 }
 
+// Criterion, the macOS shape (nocx-xn63t.1.6 evidence): a LIVE pane stands
+// in the checkout through the symlinked ancestor — its layout row records
+// the unresolved spelling, while the record's row is the canonical one —
+// and the sweep's pane inventory must still hold the checkout, never
+// remove it out from under the shell.
+func TestTheSweepHoldsACheckoutALivePaneStandsInThroughASymlinkedSpelling(t *testing.T) {
+	repoDir, _ := initRealRepo(t)
+	stand := newCheckoutStand(t)
+	root := symlinkedWorktreeRoot(t)
+	stand.checkouts.worktreeRoot = root
+	stand.spawner.worktreeRoot = root
+	repoLink := symlinkedDir(t, repoDir)
+	coordA := stand.openCoordinator(t, "pane-a", repoLink)
+	stand.spawnCheckoutWorker(t, coordA, "worker-1", "feat/one", "t")
+	checkout := expectedWorktreePath(root, repoLink, "feat/one")
+	key := nocxCheckoutRepoKey(repoLink)
+	ageCheckout(t, stand, key, checkout, sweepNow.Add(-31*24*time.Hour))
+
+	// The shell got there through the link spelling; that is what the
+	// pane's row records.
+	throughLink := symlinkedDir(t, checkout)
+	stand.tabs.cwdOf["pane-live"] = throughLink
+	if _, err := stand.reg.Open(context.Background(), session.Config{
+		Kind: session.KindLocal, Cols: 80, Rows: 24, PaneID: "pane-live", Cwd: throughLink,
+	}); err != nil {
+		t.Fatalf("open the live pane's session: %v", err)
+	}
+	newSweeper(stand, 30*24*time.Hour).RunOnce(context.Background())
+
+	if checkoutGone(t, checkout) {
+		t.Fatalf("the sweep removed the checkout at %q out from under a live pane", checkout)
+	}
+	survey := stand.checkouts.Leftovers(context.Background(), string(coordA))
+	if !survey.Complete || len(survey.Leftovers) != 1 || !survey.Leftovers[0].Expired ||
+		survey.Leftovers[0].HoldReason != "pane-open" {
+		t.Fatalf("holdings = %+v; want the checkout expired because a pane is open in it", survey)
+	}
+}
+
+// Criterion, the other half of the same spelling: a person opens a pane in
+// the old checkout through the symlinked ancestor, and the pane-open note
+// must still match the row — the stamp is what stands between an old
+// checkout and the sweep — so the next sweep leaves the checkout alone.
+func TestAPaneOpenedThroughASymlinkedSpellingStillMovesItsStamp(t *testing.T) {
+	repoDir, _ := initRealRepo(t)
+	stand := newCheckoutStand(t)
+	root := symlinkedWorktreeRoot(t)
+	stand.checkouts.worktreeRoot = root
+	stand.spawner.worktreeRoot = root
+	repoLink := symlinkedDir(t, repoDir)
+	coordA := stand.openCoordinator(t, "pane-a", repoLink)
+	stand.spawnCheckoutWorker(t, coordA, "worker-1", "feat/one", "t")
+	checkout := expectedWorktreePath(root, repoLink, "feat/one")
+	key := nocxCheckoutRepoKey(repoLink)
+	ageCheckout(t, stand, key, checkout, sweepNow.Add(-31*24*time.Hour))
+
+	throughLink := symlinkedDir(t, checkout)
+	stand.checkouts.now = func() time.Time { return sweepNow }
+	stand.tabs.cwdOf["pane-person"] = throughLink
+	stand.checkouts.notePaneOpened(transport.OpenSpec{Kind: "", PaneID: "pane-person"}, "sess-x")
+
+	rows, err := stand.rows.List(context.Background(), key)
+	if err != nil || len(rows) != 1 || rows[0].LastUsedAt != sweepNow.UnixMilli() {
+		t.Fatalf("rows = %+v, %v; want the stamp at the pane-open time", rows, err)
+	}
+	newSweeper(stand, 30*24*time.Hour).RunOnce(context.Background())
+	if checkoutGone(t, checkout) {
+		t.Fatalf("the sweep removed the checkout at %q after a pane opened in it, which moved its last-used to now", checkout)
+	}
+}
+
 // paneAppearsFactory wraps the real factory: the FIRST ground read of a
 // pass — the listing the removal judges against, read after the sweep has
 // already sampled its pane inventory — is where the pane opens. A wrap and

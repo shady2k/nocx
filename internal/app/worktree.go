@@ -203,7 +203,12 @@ func (s *workerSpawner) planWorktree(ctx context.Context, lg log.Logger, coordPa
 	}
 	repoKey := nocxCheckoutRepoKey(trees[0].Path)
 
-	path := filepath.Join(s.worktreeRoot, repoKey, strings.ReplaceAll(ask.Branch, "/", "-"))
+	// The root goes in canonical (nocxCanonicalPath): the checkout, the
+	// record row and the spawn result are born with the one spelling every
+	// later comparison — the removal guard, the sweep, git's own answers —
+	// uses, so a symlinked ancestor (macOS /var → /private/var) cannot
+	// split the location from the people who look for it (nocx-xn63t.1.2).
+	path := filepath.Join(nocxCanonicalPath(s.worktreeRoot), repoKey, strings.ReplaceAll(ask.Branch, "/", "-"))
 	if _, statErr := os.Lstat(path); statErr == nil {
 		return nil, fmt.Errorf("%w: %q (a checkout nocx or somebody else put there is not replaced; pick another branch or remove it)", errSpawnWorktreePathExists, path)
 	} else if !errors.Is(statErr, fs.ErrNotExist) {

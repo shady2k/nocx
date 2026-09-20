@@ -35,7 +35,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/log"
@@ -182,6 +181,13 @@ func readRemovalGround(ctx context.Context, lg log.Logger, repo git.Repo) (remov
 			Detail:  "the repository reports no main checkout, which git never does; refusing rather than guessing",
 		}
 	}
+	// The listing is read CANONICAL (nocxCanonicalPath): git answers the
+	// resolved spelling of every path it reports, and every join on these
+	// paths — the ask resolution, the location marker, the record's rows —
+	// stands on the one spelling (nocx-xn63t.1.5).
+	for i := range trees {
+		trees[i].Path = nocxCanonicalPath(trees[i].Path)
+	}
 	return removalGround{
 		repoKey: nocxCheckoutRepoKey(trees[0].Path),
 		base:    base,
@@ -271,7 +277,11 @@ func (c *workerCheckouts) removeOne(
 	var tree git.Worktree
 	switch {
 	case ref.Path != "":
-		asked := filepath.Clean(ref.Path)
+		// The ask arrives in whatever spelling the caller holds — the
+		// spawn result's, an old row's, a person's own — and the listing
+		// is keyed canonically, so the ask is matched canonically
+		// (nocx-xn63t.1.5). asked is what the refusal names.
+		asked := nocxCanonicalPath(ref.Path)
 		found, ok := treeByPath[asked]
 		if !ok {
 			return refuse(asked, ref.Branch, workers.CheckoutRefusalNotOurs,

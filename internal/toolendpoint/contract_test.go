@@ -117,11 +117,39 @@ func (contractWorkerRecord) Acknowledge(context.Context, workers.ReaderID, worke
 	return nil
 }
 
-func (contractWorkerRecord) Close(context.Context, string, workers.ParticipantID) error {
-	return nil
+func (contractWorkerRecord) Close(context.Context, string, workers.ParticipantID) (workers.CloseResult, error) {
+	return workers.CloseResult{}, nil
 }
 
 func (contractWorkerRecord) Undispatched() []workers.Fact { return nil }
+
+// LeftoverCheckouts answers a WHOLE row and an unreadable one, complete —
+// for the same reason Inbox above answers both shapes a mailbox holds: the
+// socket conformance cases below are the only place this endpoint's answers
+// are validated against their contracts, and a stub that returned an empty
+// survey would exercise neither the leftover item schema's fields nor the
+// unreadable row's no-answer shape.
+func (contractWorkerRecord) LeftoverCheckouts(context.Context, string) workers.CheckoutSurvey {
+	return workers.CheckoutSurvey{
+		Leftovers: []workers.LeftoverCheckout{
+			{
+				Path: "/wt/nocx-verify", Branch: "feat/verify",
+				Uncommitted: true, Ahead: 1, Readable: true,
+				LastUsed: time.Date(2026, 9, 18, 9, 30, 0, 0, time.UTC),
+				Name:     "worker-1", Task: "verify the wire",
+			},
+			{Path: "/wt/nocx-dark", Branch: "feat/dark", Readable: false},
+		},
+		Complete: true,
+	}
+}
+
+// RemoveCheckouts answers an empty removal: the socket conformance cases
+// below exercise the calls this endpoint's own surfaces serve, and none of
+// them removes a checkout — the stub needs only to satisfy the seam.
+func (contractWorkerRecord) RemoveCheckouts(context.Context, string, []workers.CheckoutRef) workers.CheckoutRemoval {
+	return workers.CheckoutRemoval{Items: []workers.RemovedCheckout{}}
+}
 
 func contractWorkerParticipants() []workers.Participant {
 	return []workers.Participant{{
@@ -130,6 +158,10 @@ func contractWorkerParticipants() []workers.Participant {
 		Role:  workers.RoleWorker,
 		State: workers.StateLive,
 		Task:  "verify the wire",
+		// The worker holds the checkout its spawn created, which is what
+		// makes the holdings answer name it BESIDE the worker and never in
+		// the leftover list beside it (nocx-xn63t.1.4).
+		Worktree: workers.Worktree{Path: "/wt/nocx-held", Branch: "feat/held"},
 	}}
 }
 

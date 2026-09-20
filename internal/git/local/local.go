@@ -39,9 +39,15 @@ type Repo struct {
 	gitPath   string
 	pinnedEnv []string  // WithEnv's pinned environment; nil when resolving from the shell
 	resolver  *envCache // the shared resolution; nil with a pinned environment
-	toplevel  string    // the worktree root; every invocation runs here
+	toplevel  string    // the worktree this Repo is bound to; every invocation that is not about another worktree runs here
 	gitDir    string
-	ceilings  ceilings
+	// worktreeNUL says which encoding the worktree listing is read in: the
+	// NUL-terminated form git 2.36 added, or the line form every version from
+	// the 2.25 floor up can answer. Set once at open from the probed version
+	// (worktreeListHasNUL) — the operation PREFERS the path-safe form and
+	// does not require it.
+	worktreeNUL bool
+	ceilings    ceilings
 }
 
 type ceilings struct {
@@ -461,12 +467,30 @@ func (r *Repo) Status(ctx context.Context) (git.Status, error) {
 // statusWithEnv is Status with an explicit environment. The commit path runs
 // its preflight and post-commit reads with the SAME environment the commit
 // runs under: the state a commit checks and the state its hook sees cannot
-// disagree (D6, nocx-6pz0).
+// disagree (D6, nocx-6pz0). It is the status read the panel is shown, so it
+// carries the line counts; a worktree's cleanliness is not (statusIn).
 func (r *Repo) statusWithEnv(ctx context.Context, env []string) (git.Status, error) {
+	st, err := r.statusIn(ctx, r.toplevel, env)
+	if err != nil || st.Completeness == git.CompletenessCut {
+		return st, err
+	}
+	if err := r.attachCounts(ctx, &st); err != nil {
+		return git.Status{}, err
+	}
+	return st, nil
+}
+
+// statusIn runs the status read in ONE working directory — this Repo's own
+// toplevel for Status, a linked worktree of the same repository for the
+// worktree operations (brief nocx-xn63t.1.1) — and answers without the line
+// counts. It is the one owner of "what changed in this working tree": the
+// counts are the panel's rows' enrichment and cost two more invocations,
+// and no decision about a worktree's cleanliness is taken on them.
+func (r *Repo) statusIn(ctx context.Context, dir string, env []string) (git.Status, error) {
 	p := spawn.NewParser(r.ceilings.statusEntries)
 	res := run(ctx, spec{
 		argv:     append([]string{r.gitPath}, spawn.StatusArgs()...),
-		dir:      r.toplevel,
+		dir:      dir,
 		env:      env,
 		sink:     &statusSink{p: p, maxBytes: r.ceilings.statusBytes},
 		deadline: time.Now().Add(r.ceilings.statusWall),
@@ -504,9 +528,6 @@ func (r *Repo) statusWithEnv(ctx context.Context, env []string) (git.Status, err
 	st.Completeness = git.CompletenessComplete
 	if st.Total > r.ceilings.statusEntries {
 		st.Completeness = git.CompletenessCapped
-	}
-	if err := r.attachCounts(ctx, &st); err != nil {
-		return git.Status{}, err
 	}
 	return st, nil
 }

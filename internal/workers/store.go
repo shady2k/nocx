@@ -42,8 +42,12 @@ type Store interface {
 
 	// MarkLive moves a prepared participant to live. It is called only on the
 	// strength of an enrolment that arrived, never because a dispatch
-	// returned.
-	MarkLive(ctx context.Context, id ParticipantID, l Liveness) error
+	// returned. wt is the checkout the spawn made and the record now accepts:
+	// from here on, the participant's worktree is the record's fact and its
+	// undo is nobody's, because the compensation that would have removed it
+	// is discharged the moment this write lands. Zero wt is the ordinary
+	// spawn that shares its coordinator's checkout.
+	MarkLive(ctx context.Context, id ParticipantID, l Liveness, wt Worktree) error
 
 	// Terminalize writes a terminal state over a non-terminal one. A
 	// compensation that itself fails leaves the record non-terminal and is
@@ -142,6 +146,15 @@ type Store interface {
 	// spawned the worker has ended by the time the question is asked; that
 	// is the whole situation the question exists for.
 	HeldBy(ctx context.Context, coordinatorSession string) ([]Participant, error)
+
+	// HeldWorktrees answers which checkouts the record's non-terminal
+	// participants hold, whichever session spawned them (nocx-xn63t.1.4).
+	// The leftovers question is about a REPOSITORY, and a checkout is held
+	// even while its own coordinator's session is not the one asking, so
+	// the answer cannot be a HeldBy of one session. A participant without a
+	// worktree — every spawn that shared its coordinator's checkout —
+	// contributes nothing. Order is unspecified.
+	HeldWorktrees(ctx context.Context) ([]Worktree, error)
 }
 
 // SpawnRequest is what Register asks the spawner for, and the participant id
@@ -171,6 +184,12 @@ type SpawnRequest struct {
 	// over the resource environment, permitted only into an environment the
 	// run's own fence already names — reaching further is scope expansion.
 	Environment string
+	// Worktree is the checkout this spawn was asked to create, or nil when
+	// the participant will share its coordinator's checkout. It is carried
+	// as asked — Branch required, Base optional — and never resolved here:
+	// resolving a base is a git-seam question, and the spawner owns that
+	// seam.
+	Worktree *WorktreeAsk
 }
 
 // Spawned is a launcher that has been forked. It is not yet a participant:
@@ -232,6 +251,15 @@ type TaskDeliverer interface {
 	TaskDelivery() TaskDelivery
 }
 
+// WorktreeSource is the other optional half of Spawned: a launcher that
+// created a checkout answers where it is — the resolved facts, never the ask.
+// A Spawned that does not implement it created nothing, which is the zero
+// Worktree. The record takes the answer at MarkLive, the moment it accepts
+// the checkout's continued existence.
+type WorktreeSource interface {
+	WorktreeLocation() Worktree
+}
+
 // Spawner creates the session and starts the launcher inside it.
 type Spawner interface {
 	Spawn(ctx context.Context, req SpawnRequest) (Spawned, error)
@@ -251,16 +279,20 @@ type Enrolments interface {
 	Withdraw(ctx context.Context, p ParticipantID) error
 }
 
-// Closer ends a participant's process, and gives back the place it occupied.
-// It is the far end of Close, and it is deliberately narrow: what it is handed
-// is a participant the record has already decided may be ended, and what it
-// does is end the session behind it and take its tab out of the window — the
-// second half being what "closing a worker closes its tab" means for a
-// participant whose process is already gone (nocx-xn63t.4.6). It writes no
-// state IN THE RECORD and reports no verdict — the exit it causes arrives by
-// the ordinary path.
+// Closer ends a participant's process, and gives back the place it occupied
+// and what is left of it. It is the far end of Close, and it is deliberately
+// narrow: what it is handed is a participant the record has already decided
+// may be ended, and what it does is end the session behind it and take its
+// tab out of the window — the second half being what "closing a worker
+// closes its tab" means for a participant whose process is already gone
+// (nocx-xn63t.4.6). What it ANSWERS is the checkout that is still on disk
+// when the participant had one, read off the repository itself — a close
+// never removes the checkout (owner's decision, 2026-09-18), so the answer
+// is the only account of it a coordinator gets (nocx-xn63t.1.3). It writes
+// no state IN THE RECORD and reports no verdict — the exit it causes
+// arrives by the ordinary path.
 type Closer interface {
-	Close(ctx context.Context, p Participant) error
+	Close(ctx context.Context, p Participant) (CloseResult, error)
 }
 
 // TaskQueue hands a participant's BRIEFING — the rules it reports under, and

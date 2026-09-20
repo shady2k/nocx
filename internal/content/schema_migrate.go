@@ -156,6 +156,7 @@ var schemaLadder = []migrationStep{
 	{from: 15, to: 16, apply: migrateRetireTheAPIRunCounter15to16, preflight: refuseAPIRunTablesFromANewerBuild, schemaDigest: "4688f8fcbae121444ed4726726fc598737220fd4fd09bc428e3230c13cfe3cd9"},
 	{from: 16, to: 17, apply: migrateAddSkillChecks16to17, schemaDigest: "cc4c6529598c845b19936ee4c11c3adff9a66162ec56b70743f3188dc132092e"},
 	{from: 17, to: 18, apply: migrateTerminationReasons17to18, schemaDigest: "f9d5269cf07e28beb22facac42548dcaebf74c3559b65ebec1a73ba7d112f982"},
+	{from: 18, to: 19, apply: migrateAddWorkerCheckouts18to19, schemaDigest: "49f7ad77e616551bb1357970dd573a03d11ba29de0cd0cbfda52ce2ea4cd0ac1"},
 }
 
 // validateLadder validates the shipped ladder against the current schema.
@@ -308,6 +309,11 @@ var schemaShapeDigests = map[int]string{
 	// testdata/schema_v17.sql, which is 16 plus skill_checks and is where
 	// executions.termination_reason still refused `answer-revoked`.
 	17: "623ffa936faf719fe2fad36b9a0e1393c0bfeabac4358a95f972559c92f5169a",
+	// 18 is pinned in the commit that dethroned it, from
+	// testdata/schema_v18.sql — the schemaV1 constant lifted verbatim out of
+	// the tree where `const schemaVersion` held 18. 19 adds worker_checkouts
+	// on top of exactly that shape (nocx-xn63t.1.4).
+	18: "76e33ea9af9fdd50931180239ad2b9501650b13a161d27aabff77e1760d93bc4",
 }
 
 var historicalSchemaObjectNames = map[int]map[string]struct{}{
@@ -315,6 +321,7 @@ var historicalSchemaObjectNames = map[int]map[string]struct{}{
 	15: schema15ObjectNames(),
 	16: schema16ObjectNames(),
 	17: schema17ObjectNames(),
+	18: schema18ObjectNames(),
 }
 
 func schema14ObjectNames() map[string]struct{} {
@@ -382,10 +389,21 @@ func schema16ObjectNames() map[string]struct{} {
 // the one line that differs. The 17→18 rung rebuilds `executions` to widen a
 // CHECK, which changes that table's DDL and not the set of names — which is
 // exactly why the digest and the names are pinned separately.
+// schema17ObjectNames adds skill_checks and the autoindex its TEXT primary
+// key creates. The table went in without the index at nocx-e5f55; the shape
+// run over testdata/schema_v17.sql names both rows, so both belong here.
 func schema17ObjectNames() map[string]struct{} {
 	result := schema16ObjectNames()
 	result["table:skill_checks"] = struct{}{}
+	result["index:sqlite_autoindex_skill_checks_1"] = struct{}{}
 	return result
+}
+
+// schema18ObjectNames is schema17's set unchanged: the 17→18 edge widens
+// executions.termination_reason's CHECK, which changes that table's DDL and
+// no name — the same division of labour the digest pins above keep.
+func schema18ObjectNames() map[string]struct{} {
+	return schema17ObjectNames()
 }
 
 type sqliteSchemaObject struct {
@@ -827,6 +845,29 @@ func migrateRetireTheAPIRunCounter15to16(ctx context.Context, tx *sql.Tx) error 
 // migrateAddSkillChecks16to17 adds the skill_checks table (design §6). Purely
 // additive: a database written by a build that predates it simply has no such
 // table, and no row anywhere else refers to one.
+// migrateAddWorkerCheckouts18to19 adds the worker_checkouts table
+// (nocx-xn63t.1.4). Purely additive, exactly as the 16→17 rung above is: a
+// database written by a build that predates it has no such table, and no row
+// anywhere else refers to one — the DDL itself lives in schemaV1, which
+// `Open` applies right after this walk, so the rung's job is only to exist
+// and to carry the stamp across the edge.
+func migrateAddWorkerCheckouts18to19(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS worker_checkouts (
+  repo_key     TEXT NOT NULL,
+  path         TEXT NOT NULL,
+  branch       TEXT NOT NULL,
+  base         TEXT NOT NULL,
+  name         TEXT NOT NULL DEFAULT '',
+  task         TEXT NOT NULL DEFAULT '',
+  created_at   INTEGER NOT NULL,
+  last_used_at INTEGER NOT NULL,
+  PRIMARY KEY (repo_key, path)
+) STRICT`); err != nil {
+		return fmt.Errorf("add worker_checkouts table: %w", err)
+	}
+	return nil
+}
+
 func migrateAddSkillChecks16to17(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS skill_checks (
   name        TEXT PRIMARY KEY,

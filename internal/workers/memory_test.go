@@ -41,7 +41,7 @@ func TestAParticipantIsReadBackAsItWasWritten(t *testing.T) {
 	if err := s.CommitPrepared(ctx, p); err != nil {
 		t.Fatalf("commit prepared: %v", err)
 	}
-	if err := s.MarkLive(ctx, p.ID, testLiveness()); err != nil {
+	if err := s.MarkLive(ctx, p.ID, testLiveness(), Worktree{}); err != nil {
 		t.Fatalf("mark live: %v", err)
 	}
 
@@ -149,7 +149,7 @@ func TestMarkLiveRefusesARecordSomethingElseClosed(t *testing.T) {
 	if err := s.Terminalize(ctx, p.ID, StateInterrupted); err != nil {
 		t.Fatalf("terminalize: %v", err)
 	}
-	if err := s.MarkLive(ctx, p.ID, testLiveness()); !errors.Is(err, ErrNoSuchParticipant) {
+	if err := s.MarkLive(ctx, p.ID, testLiveness(), Worktree{}); !errors.Is(err, ErrNoSuchParticipant) {
 		t.Fatalf("mark live err = %v, want ErrNoSuchParticipant", err)
 	}
 	got, err := s.Participant(ctx, p.ID)
@@ -236,7 +236,7 @@ func TestOnlyOpenParticipantsAreListed(t *testing.T) {
 		}
 		switch tc.state {
 		case StateLive:
-			if err := s.MarkLive(ctx, tc.id, testLiveness()); err != nil {
+			if err := s.MarkLive(ctx, tc.id, testLiveness(), Worktree{}); err != nil {
 				t.Fatalf("mark live %q: %v", tc.id, err)
 			}
 		case StateExited, StateClosed:
@@ -529,7 +529,7 @@ func TestTheRecordIsSafeUnderConcurrentUse(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := s.MarkLive(ctx, id, testLiveness()); err != nil {
+			if err := s.MarkLive(ctx, id, testLiveness(), Worktree{}); err != nil {
 				t.Errorf("mark live %q: %v", id, err)
 			}
 			if _, err := s.RecordExit(ctx, id, Exit{Cause: "exited"}); err != nil {

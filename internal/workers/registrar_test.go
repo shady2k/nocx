@@ -159,7 +159,7 @@ func (m *memStore) CommitPrepared(_ context.Context, p Participant) error {
 	return nil
 }
 
-func (m *memStore) MarkLive(_ context.Context, id ParticipantID, l Liveness) error {
+func (m *memStore) MarkLive(_ context.Context, id ParticipantID, l Liveness, wt Worktree) error {
 	if err := m.hit("marklive"); err != nil {
 		return err
 	}
@@ -171,6 +171,7 @@ func (m *memStore) MarkLive(_ context.Context, id ParticipantID, l Liveness) err
 	}
 	p.State = StateLive
 	p.Liveness = l
+	p.Worktree = wt
 	m.parts[id] = p
 	return nil
 }
@@ -427,6 +428,18 @@ func (m *memStore) HeldBy(_ context.Context, coord string) ([]Participant, error
 	return out, nil
 }
 
+func (m *memStore) HeldWorktrees(_ context.Context) ([]Worktree, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Worktree
+	for _, p := range m.parts {
+		if !p.State.Terminal() && p.Worktree.Path != "" {
+			out = append(out, p.Worktree)
+		}
+	}
+	return out, nil
+}
+
 // read is the "freshly constructed reader over the same path" of the house
 // pattern, at the scope an in-memory store admits: it never consults what the
 // procedure believed it wrote.
@@ -450,11 +463,18 @@ func (m *memStore) mailbox(t *testing.T, box ReaderID) []Message {
 
 type fakeSpawned struct {
 	live   Liveness
+	wt     Worktree
 	killed *bool
 	mu     *sync.Mutex
 }
 
 func (f fakeSpawned) Liveness() Liveness { return f.live }
+
+// WorktreeLocation makes every fakeSpawned a WorktreeSource, answering the
+// spawner's wt — zero for the tests that are not about worktrees, which is
+// exactly the "created nothing" answer.
+func (f fakeSpawned) WorktreeLocation() Worktree { return f.wt }
+
 func (f fakeSpawned) Kill(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -468,6 +488,8 @@ type fakeSpawner struct {
 	failOn int
 	killed bool
 	live   Liveness
+	// wt is what this spawner's Spawned answers as the checkout it made.
+	wt Worktree
 	// before is called with the request before the fork is reported, so a
 	// test can ask what the record already held at the moment of the fork.
 	before func(SpawnRequest)
@@ -485,7 +507,7 @@ func (f *fakeSpawner) Spawn(_ context.Context, req SpawnRequest) (Spawned, error
 	if f.failOn == n {
 		return nil, fmt.Errorf("spawn: %w", errInjected)
 	}
-	return fakeSpawned{live: f.live, killed: &f.killed, mu: &f.mu}, nil
+	return fakeSpawned{live: f.live, wt: f.wt, killed: &f.killed, mu: &f.mu}, nil
 }
 
 func (f *fakeSpawner) wasKilled() bool {
@@ -829,7 +851,7 @@ func TestTheRecordSaysWhatHappenedAndNeverHowItWent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("register: %v", err)
 		}
-		if closeErr := h.reg.Close(ctx, coordSession, p.ID); closeErr != nil {
+		if _, closeErr := h.reg.Close(ctx, coordSession, p.ID); closeErr != nil {
 			t.Fatalf("close: %v", closeErr)
 		}
 		stored, ok := h.store.read(t, p.ID)
@@ -860,7 +882,7 @@ func TestTheRecordSaysWhatHappenedAndNeverHowItWent(t *testing.T) {
 		if _, exitErr := h.reg.Exited(ctx, p.ID, testLiveness(), Exit{Cause: "exited", At: at}); exitErr != nil {
 			t.Fatalf("exit: %v", exitErr)
 		}
-		if closeErr := h.reg.Close(ctx, coordSession, p.ID); closeErr != nil {
+		if _, closeErr := h.reg.Close(ctx, coordSession, p.ID); closeErr != nil {
 			t.Fatalf("close of a participant whose process is already gone: %v", closeErr)
 		}
 		if got := closer.seen(); len(got) != 1 || got[0] != p.ID {
@@ -884,7 +906,7 @@ func TestTheRecordSaysWhatHappenedAndNeverHowItWent(t *testing.T) {
 			t.Fatalf("register: %v", err)
 		}
 		closer.err = errInjected
-		if closeErr := h.reg.Close(ctx, coordSession, p.ID); !errors.Is(closeErr, errInjected) {
+		if _, closeErr := h.reg.Close(ctx, coordSession, p.ID); !errors.Is(closeErr, errInjected) {
 			t.Fatalf("close = %v, want the closer's own failure", closeErr)
 		}
 		stored, _ := h.store.read(t, p.ID)

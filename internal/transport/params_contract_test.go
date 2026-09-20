@@ -192,6 +192,13 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"history.status": {
 			[]byte(`{}`),
 		},
+		// The checkout sweep's status asks nothing: the degrade was decided
+		// before the transport started and cannot change under a connected
+		// client, so `{}` is the only shape worth probing for a noParams()
+		// method.
+		"checkouts.status": {
+			[]byte(`{}`),
+		},
 		"ledger.artifact": {
 			[]byte(`{"id":"artifact-1"}`),
 		},

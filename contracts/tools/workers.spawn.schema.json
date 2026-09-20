@@ -18,6 +18,25 @@
       "minLength": 1,
       "maxLength": 4096,
       "description": "What this worker is for, in your own words. nocx queues this for delivery into the worker's own pane and delivers it as soon as the pane is free — this is how the worker is told what to do, not only a record of it — and it is also recorded, so a later workers.holdings can tell you what you started even if you have lost the context you started it from. A pane that stops on a question of its agent's own before it is ready — a folder-trust question, an approval — does not fail the call: the worker is live, the task has not reached it yet, and the result says so in taskTyped and waitingOn. It is already queued, though, and nocx delivers it the moment the pane frees up — whichever way that happens, whether you answer the question yourself (session.read to see it, session.keys to answer) or a person at that pane's keyboard does — so do not call workers.spawn again or send the task any other way. A pane that never becomes ready for any other reason fails the whole call rather than leaving a worker nobody told anything; workers.say can hand a worker something more once it is running, but this is how its first task arrives.\n\nNOCX TELLS THE WORKER HOW TO REPORT, in the rules it hands it before this task — who its coordinator is, and that it reports through workers.report (done, question, progress) and reads your mail with workers.inbox. So this field is the WORK, and only the work: write the reporting rules here too and the worker is told them twice, in two voices, in the same pane. A worker that reports nothing is still visible to you — its pane is observed, so its idle, blocked and exited states reach your mailbox whether it calls anything or not — and what its words mean is yours to judge, never nocx's."
+    },
+    "worktree": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["branch"],
+      "description": "Give the worker its own git checkout instead of sharing yours. nocx creates a linked worktree of the repository YOU are standing in, on its own path under nocx's application directory, and opens the worker's pane there — so the worker can hold a different branch, or uncommitted experiments, without touching the files you are working in. Only works when your own pane is local (on the machine nocx runs on) and standing inside a git repository; anything else — no recorded directory, a remote pane, no repository, a branch another worktree already holds, a path nocx already used — is refused with an error that names exactly what stood in the way, and nothing is created.",
+      "properties": {
+        "branch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "The git branch the new checkout holds. A branch that does not exist is created for you; a branch that exists and is checked out nowhere is checked out as it is; a branch another worktree already holds is refused, naming where."
+        },
+        "base": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "Optional commit the new branch starts from — a hash or any revision the repository resolves. Defaults to the HEAD commit of your own checkout, resolved at the moment you call. Ignored when the branch already exists."
+        }
+      }
     }
   },
   "$defs": {
@@ -26,7 +45,14 @@
       "description": "The worker that now exists. It is live: its enrolment arrived, which is what proves the agent started — never that this call returned. Live is not the same as told: briefingQueued says whether the worker was told anything at all, and taskTyped whether the task had reached its pane by the time this call returned.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "state", "taskTyped", "briefingQueued"],
+      "required": [
+        "id",
+        "state",
+        "taskTyped",
+        "briefingQueued",
+        "leftoverCheckouts",
+        "checkoutsComplete"
+      ],
       "properties": {
         "id": {
           "type": "string",
@@ -49,6 +75,34 @@
         "briefingQueued": {
           "type": "boolean",
           "description": "True when nocx handed this worker its briefing — ONE message to the queue that types it into the worker's own pane, carrying the rules it reports under first (who its coordinator is, that it has workers.report and workers.inbox, and that a question is asked by ending its turn rather than by waiting) and then your task. False when it could not: the worker is running and has been told NOTHING, neither its rules nor its task, and nothing further will be delivered to it. taskTyped and waitingOn say nothing useful in that case, because there is no queued task to wait on — close the worker with workers.close and spawn another. A spawn that answers false is still a live worker rather than an error: nocx started the process it was asked to start and then could not brief it, which is a fact to act on rather than a call to repeat blindly."
+        },
+        "leftoverCheckouts": {
+          "type": "integer",
+          "description": "How many checkouts your repository has standing that NO live worker uses \u2014 checkouts earlier workers.spawn calls with a worktree ask created and left behind. Counted after this spawn, so the checkout this worker just received is never in the number. Ask workers.holdings for the list itself: where each one is, what it was for, and whether it holds work."
+        },
+        "checkoutsComplete": {
+          "type": "boolean",
+          "description": "Whether leftoverCheckouts is the whole truth. False means a read behind the count failed and the true number MAY be higher; it never means the number is exact. True means every read succeeded."
+        },
+        "worktree": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "branch", "base"],
+          "description": "Present only when you asked for a worktree and nocx created it: the checkout the worker's pane runs in. The worker's own files live here, not in your checkout.",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Where the checkout is on disk — under nocx's application directory, not inside your repository. A later workers.close removes the tab; it leaves the checkout in place, so nothing the worker committed or wrote is lost without a person choosing to remove it."
+            },
+            "branch": {
+              "type": "string",
+              "description": "The branch checked out in the new checkout — the one you asked for."
+            },
+            "base": {
+              "type": "string",
+              "description": "The commit the branch starts from: the HEAD commit of your own checkout at the moment you called, or the base you named. Compare your current HEAD against it later to see what the worker changed."
+            }
+          }
         }
       }
     }

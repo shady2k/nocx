@@ -61,7 +61,7 @@ func (f *failableStore) PutDelegation(ctx context.Context, d workers.Delegation)
 	return f.Store.PutDelegation(ctx, d)
 }
 
-func (f *failableStore) MarkLive(ctx context.Context, id workers.ParticipantID, l workers.Liveness) error {
+func (f *failableStore) MarkLive(ctx context.Context, id workers.ParticipantID, l workers.Liveness, wt workers.Worktree) error {
 	f.mu.Lock()
 	fail := f.failMarkLive
 	hook := f.beforeMarkLiveFailure
@@ -72,7 +72,7 @@ func (f *failableStore) MarkLive(ctx context.Context, id workers.ParticipantID, 
 		}
 		return errors.New("injected: the mark-live store refused this write")
 	}
-	return f.Store.MarkLive(ctx, id, l)
+	return f.Store.MarkLive(ctx, id, l, wt)
 }
 
 // failableSupervisor wraps a real workers.Supervisor and lets a test refuse
@@ -134,6 +134,10 @@ func (f *ctxSpyTabs) DeleteTab(ctx context.Context, id string, _ content.Replace
 // PaneCwd is the seam's third method and nothing here is about it: these
 // tests name no coordinator session, so the spawner never asks (nocx-ty5ks).
 func (f *ctxSpyTabs) PaneCwd(context.Context, string) (string, error) { return "", nil }
+
+func (f *ctxSpyTabs) Panes(_ context.Context, tabID string) ([]content.Pane, error) {
+	return nil, nil
+}
 
 func (f *ctxSpyTabs) snapshot() (created, deleted []string) {
 	f.mu.Lock()

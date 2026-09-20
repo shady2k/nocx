@@ -816,7 +816,7 @@ func TestACloseEndsEveryWorkerTheCoordinatorNames(t *testing.T) {
 	}
 
 	for _, p := range participants {
-		if err := w.record.Close(ctx, string(w.coordinator), p.ID); err != nil {
+		if _, err := w.record.Close(ctx, string(w.coordinator), p.ID); err != nil {
 			t.Fatalf("close %s: %v", p.ID, err)
 		}
 		waittest.WaitFor(t, "the closed worker's end to reach the record", func() bool {
@@ -834,7 +834,7 @@ func TestACoordinatorCannotCloseAWorkerItDoesNotHold(t *testing.T) {
 	w.driveTo(t, 11000, agentdriver.StateFreeText)
 	p := w.register(t, "belongs to this coordinator")
 
-	if err := w.record.Close(ctx, "sess-somebody-else", p.ID); !errors.Is(err, workers.ErrNotHeld) {
+	if _, err := w.record.Close(ctx, "sess-somebody-else", p.ID); !errors.Is(err, workers.ErrNotHeld) {
 		t.Fatalf("close by a stranger = %v, want ErrNotHeld", err)
 	}
 	if _, err := w.reg.Get(session.ID(p.Liveness.SessionID)); err != nil {

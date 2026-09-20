@@ -162,6 +162,10 @@ func (f *Factory) Open(ctx context.Context, cwd string) (git.Repo, git.OpenOutco
 		toplevel:  toplevel,
 		gitDir:    gitDir,
 		ceilings:  f.ceilings,
+		// Which worktree-list encoding this git can answer (2.36 added the
+		// NUL form; the floor is 2.25). Decided once, here, where the version
+		// is known — the same place the floor itself is decided.
+		worktreeNUL: worktreeListHasNUL(version),
 	}
 	return repo, outcome, nil
 }

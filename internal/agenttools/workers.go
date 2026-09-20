@@ -329,3 +329,22 @@ func resourceLocalEnvironment(map[string]any, RunContext) ([]ResourceRef, error)
 		ID:   content.EnvironmentIDFor(content.EnvLocal, ""),
 	}}, nil
 }
+
+// spawnInvocationRelation is workers.spawn's InvocationRelation: the validated
+// arguments choose between two shapes, and this function is the one place
+// that reading is stated.
+// A plain spawn is delegation and nothing else, so the shape it returns is
+// the singleton delegate row — the narrowing that keeps a grant refusing
+// mutation from refusing it, and keeps a grant refusing DELEGATION from
+// letting the tool's mutation row speak for a spawn that never mutates. A
+// worktree ask creates a branch and a linked checkout before any worker
+// exists — a reversible mutation the same call performs — so its shape is
+// the CONJUNCTION of delegate and mutate-reversible: the verdict takes the
+// strictest of the two rows, and a grant refusing either refuses the call
+// before a checkout exists (ADR-0053 as amended, nocx-ykjai).
+func spawnInvocationRelation(args map[string]any) (EffectRelation, []content.Effect, bool) {
+	if _, ok := args["worktree"].(map[string]any); !ok {
+		return EffectsAlternative, []content.Effect{content.EffectDelegate}, true
+	}
+	return EffectsConjunctive, []content.Effect{content.EffectDelegate, content.EffectMutateReversible}, true
+}

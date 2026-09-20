@@ -309,7 +309,7 @@ func participantRowInStand(t *testing.T, w workerWorkerSetup) workers.Participan
 func TestACoordinatorIsRefusedAWorkersOwnReportWithASentenceItCanActOn(t *testing.T) {
 	reg, _, grid := prepareGroupCaller(t)
 	record, _ := newGroupTwoCallersRecord()
-	socket := publishGroupEndpoint(t, reg, grid, record, newSharedToolDispatcher(t, record))
+	socket := publishGroupEndpoint(t, reg, grid, record, newSharedToolDispatcher(t, workerRecordForTools{record}))
 
 	response := callExternally(t, socket, "workers.report", `{"kind":"done","text":"from a coordinator"}`)
 	if response.Error == nil {

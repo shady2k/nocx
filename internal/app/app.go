@@ -128,6 +128,21 @@ type App struct {
 	// (nocx-6pz0); stopped at shutdown so no resolution child outlives
 	// the process.
 	gitFactory *gitlocal.Factory
+	// workerCheckouts is the durable record of the checkouts nocx's spawns
+	// create and the repository's leftovers answer (nocx-xn63t.1.4). Held
+	// here, like gitFactory beside it, so the composition root's ownership
+	// is explicit and a wiring test can see what New built.
+	workerCheckouts *workerCheckouts
+	// checkoutSweeper removes the checkouts the record shows nobody has
+	// used past the idle period (nocx-xn63t.1.6). Held here, like the
+	// service it sweeps through, so the composition root's ownership is
+	// explicit: Start runs the first pass and the daily cadence, Shutdown
+	// stops the cadence.
+	checkoutSweeper *checkoutSweeper
+	// stopCheckoutSweep ends the sweep's cadence; nil until Start began it,
+	// and safe to call twice.
+	stopCheckoutSweep func()
+
 	// helperRegistry owns the live helper channels shared by git and the
 	// sessions inventory. Kept here so the composition root's ownership is
 	// explicit; the registry itself remains private to app.
@@ -1311,6 +1326,45 @@ func New(opts ...Option) (*App, error) {
 	// (nocx-6pz0).
 	gitFactory := gitlocal.NewFactory()
 
+	// THE DURABLE RECORD OF NOCX-MADE CHECKOUTS (nocx-xn63t.1.4): the join
+	// of the git seam's list, the record's annotations and the session walk,
+	// answering what this repository has standing that no live worker holds.
+	// Built here because every input it holds exists by this line except one
+	// — the worker record below, which is attached to it the moment it
+	// exists, before anything can ask a question.
+	//
+	// rows is wired ONLY for a store that actually opened. A store that
+	// failed to open is the stub, and a stub must never stand in for a
+	// reading record: it answers no rows and no error, so the survey would
+	// read as complete with nothing in it — exactly the "marked incomplete,
+	// not only in a log" failure the answer owes its reader. Nil rows is
+	// what makes the survey say incomplete instead.
+	var checkoutRows content.WorkerCheckoutRepository
+	// THE SWEEP'S OWN STATUS (nocx-xn63t.1.6): the stub store is the one
+	// state in which the sweep can never run — no record, nothing judged,
+	// nothing removed — and a Settings screen that went on offering the
+	// period would be the silent degrade AGENTS.md condemns. Raised HERE,
+	// before the transport starts, the way the history status raises beside
+	// it; there is no clear, because a store never un-opens.
+	sweepStatus := transport.NewCheckoutSweepStatus()
+	if _, stubbed := contentDB.(*content.Stub); !stubbed {
+		checkoutRows = contentDB.WorkerCheckouts()
+	} else {
+		sweepStatus.RaiseUnavailable(transport.CheckoutSweepDegradeNoRecord,
+			"the content store is unavailable, so the checkout record cannot be read")
+	}
+	checkouts := &workerCheckouts{
+		repos:        gitFactory,
+		worktreeRoot: filepath.Join(paths.DataDir(), "worktrees"),
+		rows:         checkoutRows,
+		sessions:     sess,
+		layout:       contentDB.Layout(),
+		// A record write failing at runtime raises the SAME surface the
+		// stub raise above arms: the degrade is no longer only a
+		// composition-time fact (nocx-xn63t.1 review, blocker 4).
+		sweepStatus: sweepStatus,
+	}
+
 	// The ONE global agent policy (ADR-0020 §7 as amended 2026-08-16,
 	// accepted): the matrix every run's grant is minted from. Persisted as a
 	// JSON document beside the settings; the run mint and the
@@ -1362,6 +1416,10 @@ func New(opts ...Option) (*App, error) {
 		transport.WithLiveEffects(agenttools.LiveEffects()),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithContentDB(contentDB),
+		// The pane-open half of the checkout stamp (nocx-xn63t.1.4): every
+		// pane nocx opens standing inside a recorded checkout moves its
+		// last-used forward, through the one note both open callers share.
+		transport.WithPaneOpenedNote(checkouts.notePaneOpened),
 		// Where skills.audit files what a model concluded, once it has
 		// answered (ws_skill_audit.go), and where skills.check reads it back
 		// for free (ws_skill_check.go) — one repository, one writer, one
@@ -1379,6 +1437,9 @@ func New(opts ...Option) (*App, error) {
 		// nothing and says so, and history.status carries the consequence.
 		transport.WithSessionOutputRecorder(contentDB.SessionOutput()),
 		transport.WithHistoryStatus(historyStatus),
+		// checkouts.status (nocx-xn63t.1.6): whether the checkout sweep can
+		// run, raised above on the one path that decides it.
+		transport.WithCheckoutSweepStatus(sweepStatus),
 		transport.WithProber(&proberAdapter{helper: overHelper, client: sshClient}),
 		transport.WithProfileService(profileSvc),
 		transport.WithSnippets(snippetSvc),
@@ -2285,7 +2346,16 @@ func New(opts ...Option) (*App, error) {
 			// opener already reach through.
 			announce: tp,
 			tabs:     workerSeats,
-			log:      logger,
+			// The ONE local factory the composition root already owns
+			// (gitFactory, above — the same instance transport's git.open
+			// resolves with), and the application data directory's
+			// worktrees/ as the root nocx-made checkouts live under
+			// (nocx-xn63t.1.2): the build-tagged profile, so a dev stand and
+			// a shipped build never share a checkout.
+			repos:        gitFactory,
+			worktreeRoot: filepath.Join(paths.DataDir(), "worktrees"),
+			checkouts:    checkouts,
+			log:          logger,
 		},
 		workerEnrol,
 		workerSup,
@@ -2300,13 +2370,20 @@ func New(opts ...Option) (*App, error) {
 			// the same seats record — one owner of "which tab is this
 			// participant's", read from the close's rather than the spawn's
 			// end.
-			layout: contentDB.Layout(), tabs: workerSeats,
+			// The checkout record 1.4 keeps: a close moves its last-used stamp.
+			checkouts: checkouts,
+			layout:    contentDB.Layout(), tabs: workerSeats,
 			// tp a third time (nocx-xn63t.4.6): the notification that a
 			// participant's tab has LEFT the window rides the same broadcast
 			// its appearance did, so every connected window's strip follows
 			// without a reload.
-			announce: tp,
-			log:      logger,
+			// The ONE local factory the composition root already owns — the
+			// same instance the spawner created any checkout with — so the
+			// close can answer what the checkout it leaves holds
+			// (nocx-xn63t.1.3). A read that fails is said in the result,
+			// never a failure and never a clean.
+			repos: gitFactory,
+			log:   logger,
 		}),
 		workers.WithBound(workerParticipantBound),
 		workers.WithEnrolmentDeadline(workerEnrolmentDeadline),
@@ -2317,6 +2394,28 @@ func New(opts ...Option) (*App, error) {
 		// settings owner edits this line.
 		workers.WithSettleWindow(workers.DefaultSettleWindow),
 	)
+	// The record is the one answer the checkouts service could not hold
+	// above: which checkouts live workers hold. Attached here, before the
+	// app can serve a question, and the adapter below is what the assistant
+	// surface is handed — the registrar it already knew, plus the one
+	// answer the registrar cannot give.
+	checkouts.held = workerRecord
+	assistantWorkerRecord := &workerRecordWithCheckouts{Registrar: workerRecord, checkouts: checkouts}
+
+	// THE SWEEP (nocx-xn63t.1.6): the same service, asked on a schedule
+	// instead of by a coordinator, under the same removal refusals. The
+	// period is read fresh on every pass — the registry stays the one owner
+	// of the number (the debounce window's rule), so a person's change in
+	// Settings governs the next sweep with no restart. An unreadable
+	// setting degrades to the DECLARED default and never to zero: zero
+	// means never, and a read failure must not quietly disable the cleanup
+	// the owner asked for by default.
+	checkoutSweeper := &checkoutSweeper{
+		checkouts: checkouts,
+		sessions:  sess,
+		period:    checkoutIdlePeriod(settingsRegistry),
+	}
+
 	// What nocx SEES, joined to what it records (nocx-luqz9.2, ADR-0070
 	// decision 2). Built here because this is the only place both halves exist:
 	// the watcher knows what a pane was classified as, the record knows what a
@@ -2358,7 +2457,7 @@ func New(opts ...Option) (*App, error) {
 	// app.New returns.
 	paneWatch.OnReading(workerObs.ObserveSession)
 	toolDispatcher, toolDispatcherErr := assistant.NewToolDispatcher(
-		agentToolRegistry, workerRecord, content.EnvironmentIDFor(content.EnvLocal, ""),
+		agentToolRegistry, assistantWorkerRecord, content.EnvironmentIDFor(content.EnvLocal, ""),
 	)
 	if toolDispatcherErr != nil {
 		return nil, fmt.Errorf("worker dispatcher: %w", toolDispatcherErr)
@@ -2465,7 +2564,7 @@ func New(opts ...Option) (*App, error) {
 	// The coordinator's own two calls reach the record through the transport
 	// (nocx-dkawo.8). Bound post-construction for the same reason the emitter
 	// is: the server is built above, and the record needs it.
-	tp.SetWorkerRecord(workerRecord)
+	tp.SetWorkerRecord(assistantWorkerRecord)
 	// THIS MACHINE IS ONE OF THE GENERATIONS ASKED (nocx-ie23r.2), and it is
 	// also where a session that is still there is TAKEN BACK (nocx-ie23r.5).
 	// The route is the local opener itself, which already owns every fact of
@@ -2503,13 +2602,14 @@ func New(opts ...Option) (*App, error) {
 		toolSurfaceCloser:   toolSurface,
 		UploadSources:       tp.UploadSources(),
 		ShellIntegration:    shint,
-		Profiles:            profileStore,
 		Credentials:         v,
 		skills:              skills,
 		vaultCloser:         v,
 		noteCloser:          noteCloser,
 		discoverySched:      discoverySched,
 		gitFactory:          gitFactory,
+		workerCheckouts:     checkouts,
+		checkoutSweeper:     checkoutSweeper,
 		helperRegistry:      helperReg,
 		helperArtifacts:     localHelperArtifacts(o),
 		localHelper:         localOpener,
@@ -2904,13 +3004,23 @@ func (a *App) Start(ctx context.Context) error {
 	// cause on this list that a person clears in one gesture"
 	// (content/reconcile.go) — gets exactly that gesture a chance to answer.
 	// The id set is captured HERE, once, right after this pass returns —
-	// see retryReconciler's own comment for why it must be fixed rather than
-	// re-filtered by cause on every later poll. Every OTHER cause (an
+	// see retryReconciler's own comment for why it must be fixed rather
+	// than re-filtered by cause on every later poll. Every OTHER cause (an
 	// unreachable host, a timeout) is unchanged by a client attaching, so it
 	// is left for the pass above. See retryVaultSealedSessions for why the
 	// retry itself is a poll and not one suspended attempt.
 	if ids := vaultSealedSessionIDs(ctx, a.sessionReconciler, a.slogger); len(ids) > 0 {
 		go a.retryVaultSealedSessions(ctx, ids)
+	}
+
+	// THE CHECKOUT SWEEP's first pass and cadence (nocx-xn63t.1.6), after
+	// Transport.Start: the sweep removes through the one removal path — the
+	// same refusals a coordinator's explicit ask meets — so nothing it can
+	// honestly remove is lost by waiting a few lines, and the first pass is
+	// still the backend's own start, before a coordinator has had to ask
+	// for anything.
+	if a.checkoutSweeper != nil {
+		a.stopCheckoutSweep = a.checkoutSweeper.start(a.Logger)
 	}
 
 	return nil
@@ -3113,6 +3223,12 @@ func (a *App) Shutdown(ctx context.Context) {
 	// stopped, so no probe can outlive the process.
 	if a.discoverySched != nil {
 		_ = a.discoverySched.Close()
+	}
+	// The checkout sweep's cadence (nocx-xn63t.1.6) stops beside the other
+	// background owners: no daily pass may wake after the stores it reads
+	// are gone.
+	if a.stopCheckoutSweep != nil {
+		a.stopCheckoutSweep()
 	}
 	// The git environment resolution (nocx-6pz0) runs in the background
 	// from factory construction; cancel it so no resolution child can

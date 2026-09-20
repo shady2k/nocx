@@ -249,6 +249,11 @@ type RegisterRequest struct {
 	// spawner untouched.
 	Command     string
 	Environment string
+	// Worktree is the checkout this spawn was asked to create, passed
+	// through to the spawner as asked. The record resolves nothing here:
+	// the spawner owns the git seam that answers where the checkout is and
+	// what commit its branch starts from.
+	Worktree *WorktreeAsk
 	// CreatedByRunID is provenance and nothing else. It records which run
 	// asked; it never decides whether an operation is allowed.
 	CreatedByRunID string
@@ -345,9 +350,22 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Regist
 		Task:               req.Task,
 		Command:            req.Command,
 		Environment:        req.Environment,
+		Worktree:           req.Worktree,
 	})
 	if spawnErr != nil {
 		return Registration{Participant: p}, r.compensate(ctx, p, nil, false, fmt.Errorf("worker: spawn: %w", spawnErr))
+	}
+	// THE CHECKOUT THE SPAWN MADE, if it made one. It is read here, before
+	// anything can fail, because it is what a later compensation has to
+	// remove: from this line until the record goes live, the checkout's
+	// existence belongs to the compensation that follows every failure, and
+	// a spawn whose launcher never enrols must leave neither the pane nor
+	// the checkout behind. WorktreeSource is optional beside TaskDeliverer
+	// for the same reason — a launcher that created nothing says nothing,
+	// which is the zero Worktree.
+	var made Worktree
+	if src, ok := spawned.(WorktreeSource); ok {
+		made = src.WorktreeLocation()
 	}
 
 	// Step 4. The bound closes the interval; it does not decide anything
@@ -398,11 +416,12 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Regist
 	}
 
 	// Step 6, and the order inside it is the point.
-	if err := r.store.MarkLive(ctx, p.ID, live); err != nil {
+	if err := r.store.MarkLive(ctx, p.ID, live, made); err != nil {
 		return Registration{Participant: p}, r.compensate(ctx, p, spawned, true, fmt.Errorf("worker: mark live: %w", err))
 	}
 	p.State = StateLive
 	p.Liveness = live
+	p.Worktree = made
 	if err := r.sup.Attach(ctx, p); err != nil {
 		return Registration{Participant: p}, r.compensate(ctx, p, spawned, true, fmt.Errorf("worker: attach supervision: %w", err))
 	}
@@ -701,6 +720,18 @@ func (r *Registrar) HeldBy(ctx context.Context, coordinatorSession string) ([]Pa
 	return held, nil
 }
 
+// HeldWorktrees answers which checkouts the record's non-terminal
+// participants hold, across every session at once (nocx-xn63t.1.4). The
+// leftovers question is keyed to a REPOSITORY and not to a session, so the
+// checkout one coordinator's worker holds must be visible as held even when
+// a different coordinator asks what is left over — otherwise a live worker's
+// checkout would be offered up as abandoned, which is the one mistake the
+// answer must never make. It dispatches nothing: no wake, no cursor, no
+// fact changes state because somebody asked what is held.
+func (r *Registrar) HeldWorktrees(ctx context.Context) ([]Worktree, error) {
+	return r.store.HeldWorktrees(ctx)
+}
+
 // Cost is what the mechanism has spent so far — the number §12 of the design
 // says the whole thing is judged by. It is a read on the record rather than a
 // log line to grep, because "measured and reported, not assumed" is an
@@ -900,20 +931,26 @@ func (r *Registrar) Undelivered(ctx context.Context, worker ID) ([]Message, erro
 // pane was minted in leaves the window, because "closing a worker closes its
 // tab" is what a close is FOR. That is the closer's own half — a tab is a row
 // of the layout chain and not a participant fact.
-func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id ParticipantID) error {
+//
+// WHAT IT ANSWERS is the closer's answer, passed through untouched: the
+// checkout the participant lived in is still on disk when it had one, and
+// what it holds is the fact the coordinator's close came for
+// (nocx-xn63t.1.3). A close that FAILED answers nothing but its error, in
+// both branches — the closer's result rides only a success.
+func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id ParticipantID) (CloseResult, error) {
 	if r.closer == nil {
-		return errors.New("worker: this backend cannot end a participant")
+		return CloseResult{}, errors.New("worker: this backend cannot end a participant")
 	}
 	del, err := r.store.Delegation(ctx, id)
 	if err != nil {
-		return err
+		return CloseResult{}, err
 	}
 	if del.ControllerSession != coordinatorSession {
-		return fmt.Errorf("worker: participant %q is held by another session: %w", id, ErrNotHeld)
+		return CloseResult{}, fmt.Errorf("worker: participant %q is held by another session: %w", id, ErrNotHeld)
 	}
 	p, err := r.store.Participant(ctx, id)
 	if err != nil {
-		return err
+		return CloseResult{}, err
 	}
 	// OWNERSHIP IS THE AUTHORITY QUESTION, AND IT IS ANSWERED ABOVE. The
 	// delegation's STATE is not a second authority to end something that is
@@ -927,7 +964,7 @@ func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id Par
 	// terminal needs no live delegation, because there is nothing left to
 	// act on.
 	if !p.State.Terminal() && !del.Permits(EffectClose) {
-		return fmt.Errorf("worker: participant %q, delegation is %s: %w", id, del.State, ErrNotDelegated)
+		return CloseResult{}, fmt.Errorf("worker: participant %q, delegation is %s: %w", id, del.State, ErrNotDelegated)
 	}
 	if p.State.Terminal() {
 		// Already finished. Not an error: a coordinator tidying up should
@@ -950,8 +987,9 @@ func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id Par
 		// so this remains the ordinary, non-error tidy-up it always was.
 		return r.closer.Close(ctx, p)
 	}
-	if err := r.closer.Close(ctx, p); err != nil {
-		return err
+	left, err := r.closer.Close(ctx, p)
+	if err != nil {
+		return CloseResult{}, err
 	}
 	// The state, and it is written only after the closer RETURNED: a close that
 	// failed ended nothing, and a record that said `closed` about a worker still
@@ -959,7 +997,7 @@ func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id Par
 	// would also leave unrevoked would make the participant look ended to the
 	// next close and unreachable to its coordinator.
 	if err := r.store.Closed(ctx, id); err != nil {
-		return fmt.Errorf("worker: record the close of %q: %w", id, err)
+		return CloseResult{}, fmt.Errorf("worker: record the close of %q: %w", id, err)
 	}
 	// §7.2's "controller closed" trigger. This revokes the AUTHORITY the
 	// instant the coordinator acts, rather than waiting for the process
@@ -974,5 +1012,5 @@ func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id Par
 		r.log.WithContext(ctx).Warn("worker: revoke after close",
 			"participant", string(id), "error", revokeErr)
 	}
-	return nil
+	return left, nil
 }

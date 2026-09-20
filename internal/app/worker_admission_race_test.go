@@ -130,7 +130,7 @@ func newRaceStand(t *testing.T, participants workerAuthParticipants) *raceStand 
 		member: map[int]bool{9001: true},
 	}
 	auth := mustToolAuthorizer(t, pinner, reg, grid, participants, workerTestWorkspace, approval)
-	dispatch := &countingDispatcher{inner: newSharedToolDispatcher(t, emptyWorkerRecord())}
+	dispatch := &countingDispatcher{inner: newSharedToolDispatcher(t, emptyWorkerRecordForTools())}
 	endpoint, err := toolendpoint.New(toolendpoint.Config{
 		Dir:      shortWorkerSocketDir(t),
 		Peers:    workerAuthEndpointPeers{},

@@ -99,8 +99,9 @@ func (s *MemoryStore) CommitPrepared(_ context.Context, p Participant) error {
 // MarkLive moves a prepared participant to live, and only a prepared one: a
 // participant that is no longer prepared has been terminalized by a
 // compensation, and marking it live would resurrect a record something else
-// already closed.
-func (s *MemoryStore) MarkLive(_ context.Context, id ParticipantID, l Liveness) error {
+// already closed. wt is stamped with the state in the same write, so a live
+// record is never missing the checkout its pane stands in.
+func (s *MemoryStore) MarkLive(_ context.Context, id ParticipantID, l Liveness, wt Worktree) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p, ok := s.parts[id]
@@ -109,6 +110,7 @@ func (s *MemoryStore) MarkLive(_ context.Context, id ParticipantID, l Liveness) 
 	}
 	p.State = StateLive
 	p.Liveness = l
+	p.Worktree = wt
 	s.parts[id] = p
 	return nil
 }
@@ -287,6 +289,24 @@ func (s *MemoryStore) NonTerminal(_ context.Context, id ID) ([]Participant, erro
 	return s.selectParticipants(func(p Participant) bool {
 		return p.Group == id && !p.State.Terminal()
 	}), nil
+}
+
+// HeldWorktrees collects the worktrees of every participant that is neither
+// terminal nor worktree-less. It reads the same map HeldBy selects from,
+// under the same lock, and answers ACROSS sessions — a checkout of one
+// session's worker is held even while another session's coordinator asks
+// what is left over in the repository (nocx-xn63t.1.4).
+func (s *MemoryStore) HeldWorktrees(_ context.Context) ([]Worktree, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Worktree
+	for _, p := range s.parts {
+		if p.State.Terminal() || p.Worktree.Path == "" {
+			continue
+		}
+		out = append(out, p.Worktree)
+	}
+	return out, nil
 }
 
 // HeldBy answers D3 through the WORKER and never through the delegation, and

@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/workers.removeCheckout.schema.json",
+  "title": "WorkersRemoveCheckoutParams",
+  "description": "Parameters for the workers.removeCheckout agent tool: remove one or more of nocx's own leftover worker checkouts of the repository your session stands in. Removal is explicit and separate from closing a worker — a close never touches its checkout, and this is the call that takes a left-over one away. Name each checkout by its path, by its branch, or both; both must agree. A checkout holding uncommitted work, a checkout a live worker still holds, and anything that is not one of nocx's checkouts of your repository are all refused by name and left exactly as they were. The branch always stays. There is no override: a person who wants the work gone has a shell.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["checkouts"],
+  "properties": {
+    "checkouts": {
+      "type": "array",
+      "minItems": 1,
+      "description": "The checkouts to remove, in the order you name them; the answer keeps that order, one row per ask. Take paths and branches from workers.holdings' leftover checkouts — those are the ones this call exists to remove.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "One checkout to remove, named by path, by branch, or both. Naming both is safer: the ask is answered only when the two names agree on the same checkout.",
+        "anyOf": [{ "required": ["path"] }, { "required": ["branch"] }],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Where the checkout sits on disk, exactly as workers.holdings or the spawn result gave it."
+          },
+          "branch": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The branch checked out in the checkout. It resolves to the one working tree of the repository that holds it — and it STAYS in the repository after the removal either way."
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "result": {
+      "title": "WorkersRemoveCheckoutResult",
+      "description": "One row per asked checkout, in the order asked: what was removed, and — for everything that was not — which refusal names it and what is true on disk. Removed means the checkout directory is gone and its branch is still in the repository.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["checkouts"],
+      "properties": {
+        "checkouts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["removed"],
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "The checkout this row is about: the path you named, or — when you named only a branch — the path that branch resolved to. Absent when nothing could be resolved from the ask."
+              },
+              "branch": {
+                "type": "string",
+                "description": "The branch the checkout holds, as git reports it — the branch you asked about, or the one found at the path you asked about. The branch survives every row of this answer, removals included."
+              },
+              "removed": {
+                "type": "boolean",
+                "description": "True when the checkout directory was removed; its branch is still in the repository. False means nothing was touched and refusal says why."
+              },
+              "refusal": {
+                "type": "string",
+                "enum": ["uncommitted", "held", "not-ours", "unresolved"],
+                "description": "Present only when removed is false. uncommitted: work no commit keeps sits in the checkout — nothing was removed, the work is where it was. held: a live worker holds it — close the worker first. not-ours: it is not one of nocx's checkouts of your repository — the main checkout, your own linked worktree, or no such working tree at all. unresolved: a read the decision needed could not be made, so nothing is claimed — not dirty, and NOT clean."
+              },
+              "detail": {
+                "type": "string",
+                "description": "Present only when removed is false: what is true on disk, so a partial removal can be acted on without guessing."
+              }
+            },
+            "allOf": [
+              {
+                "if": { "properties": { "removed": { "const": false } } },
+                "then": { "required": ["refusal", "detail"] },
+                "else": { "properties": { "refusal": false, "detail": false } }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

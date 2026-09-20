@@ -97,6 +97,14 @@ type ContentDB interface {
 	// directory (bytes a hostile bundle controls, so it could vouch for
 	// itself) — see the skill_checks table comment in sqlite.go.
 	SkillChecks() SkillCheckRepository
+	// WorkerCheckouts returns the durable record of the checkouts
+	// workers.spawn's worktree ask creates (nocx-xn63t.1.4). git's worktree
+	// list, read through the seam, is the list; this repository holds only
+	// what git does not — the worker the spawn was for, and when nocx last
+	// had a pane open in the checkout. It is never a second list of
+	// checkouts: a reader joins it against git's answer and drops the rows
+	// whose checkout has gone.
+	WorkerCheckouts() WorkerCheckoutRepository
 }
 
 // SkillCheck is one model's verdict on one skill, keyed by name. Digest is
@@ -148,6 +156,54 @@ type SkillCheckRepository interface {
 	// Delete removes the check for one skill name. Deleting a check that
 	// does not exist is not an error.
 	Delete(ctx context.Context, name string) error
+}
+
+// WorkerCheckout is the durable half of one checkout a worker spawn created:
+// what git's worktree list does not carry about it. RepoKey groups the rows
+// of one repository (the key the spawner derives from the main checkout's
+// common git dir); Path is the checkout itself and, with the key, the row's
+// whole identity. Name and Task say which worker the spawn was for, so a
+// coordinator in a later session can tell what a leftover checkout was.
+// CreatedAt and LastUsedAt are backend wall-clock unix millis; LastUsedAt is
+// the seed of the sweep's age judgement, which is why Touch moves it forward
+// and never back.
+type WorkerCheckout struct {
+	RepoKey    string
+	Path       string
+	Branch     string
+	Base       string
+	Name       string
+	Task       string
+	CreatedAt  int64
+	LastUsedAt int64
+}
+
+// WorkerCheckoutRepository is the typed repository for the durable half of
+// nocx-made checkouts. It deliberately has no "list all checkouts" answer
+// that could drift from git's: the reader always asks git for the list and
+// this store for the annotations beside it.
+type WorkerCheckoutRepository interface {
+	// Put records a checkout at the moment its spawn created it. The key
+	// is (RepoKey, Path): putting again for a checkout that is already
+	// there rewrites the row — a spawn that re-created a checkout at the
+	// same path after the old one left is a new fact, not a conflict.
+	Put(ctx context.Context, co WorkerCheckout) error
+	// Touch moves the checkout's last-used time forward to at — never
+	// backward, and never for a path no row carries: a pane opened
+	// somewhere that is not a recorded checkout changes nothing. A
+	// Touch that moved the time back could age a checkout the sweep is
+	// about to judge, so the row wins over the clock.
+	Touch(ctx context.Context, path string, at int64) error
+	// List returns every row of one repository's key. Order is not part
+	// of the answer; the caller joins against git's own listing.
+	List(ctx context.Context, repoKey string) ([]WorkerCheckout, error)
+	// All returns every row regardless of repository — the one read the
+	// pane-open note needs, which knows a cwd and not a key.
+	All(ctx context.Context) ([]WorkerCheckout, error)
+	// Delete drops the named rows of one repository. Idempotent: the rows
+	// whose checkout has left git's list, dropped by the reader that
+	// noticed, may already be gone.
+	Delete(ctx context.Context, repoKey string, paths []string) error
 }
 
 // Redaction is one structured redaction segment on a history row. Offsets

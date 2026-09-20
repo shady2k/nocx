@@ -28,6 +28,7 @@ import (
 	"github.com/shady2k/nocx/internal/agenttyping"
 	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/paneobserve"
@@ -118,6 +119,12 @@ type paneMinter interface {
 	DeleteTab(ctx context.Context, id string, next content.Replacement) error
 	PaneCwd(ctx context.Context, paneID string) (string, error)
 	TabForPane(ctx context.Context, paneID string) (string, error)
+	// Panes reads one tab's panes, the layout's own listing. A spawn needs
+	// it for one fact only — the coordinator pane's KIND, which decides
+	// whether a worktree ask may be served on this machine at all — and
+	// reads it from the pane's own row rather than guessing from the cwd
+	// the same row holds (nocx-xn63t.1.2).
+	Panes(ctx context.Context, tabID string) ([]content.Pane, error)
 }
 
 // sessionCloser ends a session by id. The registry's own EndSession, named
@@ -286,7 +293,27 @@ type workerSpawner struct {
 	// describes: a spawner nobody wired a record into mints tabs a close
 	// cannot find, which is what every stand that never closes a worker means.
 	tabs *workerTabs
-	log  log.Logger
+	// repos opens the coordinator's repository when a spawn asks for a
+	// worktree (nocx-xn63t.1.2). It is the composition root's ONE local
+	// factory — the same one transport's git.open resolves with — and not a
+	// second construction of it. Nil is the absence case every other seam
+	// here follows, with one difference: a worktree ASK against an unwired
+	// spawner is REFUSED, not silently downgraded, because proceeding
+	// without the checkout the caller asked for would be the soft degrade
+	// AGENTS.md refuses.
+	repos git.RepoFactory
+	// worktreeRoot is where nocx-made checkouts live: the application data
+	// directory's worktrees/ (internal/storage's build-tagged profile, so a
+	// dev stand and a shipped build never share one). Empty with a nil
+	// repos is the same unwired case.
+	worktreeRoot string
+	// checkouts is the durable record of the checkouts a spawn creates
+	// (nocx-xn63t.1.4), written the moment the checkout exists. Nil is the
+	// absence case every seam here follows: the spawn proceeds, the
+	// checkout is listed by git regardless, and what is lost is only the
+	// name and task a later coordinator would have read beside it.
+	checkouts *workerCheckouts
+	log       log.Logger
 }
 
 // paneReadiness is the spawner's narrow view of the pane-observation watcher
@@ -503,11 +530,26 @@ type spawnedParticipant struct {
 	// delivery is what became of the task (nocx-f545a.3), set by Spawn and
 	// read once by the registration through workers.TaskDeliverer.
 	delivery workers.TaskDelivery
+	// worktree is the undo of the checkout this spawn created, or nil when
+	// it created none. It rides the participant for the same reason tabID
+	// does — Kill is the undo of a spawn, and the checkout is something the
+	// spawn built — and it is what WorktreeLocation answers for the record,
+	// which takes the facts at MarkLive, the moment it accepts the
+	// checkout's existence.
+	worktree *worktreeUndo
 }
 
 // TaskDelivery is how the registration that started this participant learns
 // what became of its task, without anybody writing it into the record.
 func (s spawnedParticipant) TaskDelivery() workers.TaskDelivery { return s.delivery }
+
+// WorktreeLocation is the record's answer to "what did this spawn create":
+// the resolved facts of the checkout it made, or the zero Worktree when it
+// made none — which is every spawn without a worktree ask, exactly the
+// "attempted nothing says nothing" reading TaskDelivery's own seam uses.
+func (s spawnedParticipant) WorktreeLocation() workers.Worktree {
+	return s.worktree.location()
+}
 
 func (s spawnedParticipant) Liveness() workers.Liveness {
 	ident := s.sess.Identity()
@@ -581,6 +623,22 @@ func (s spawnedParticipant) Kill(ctx context.Context) error {
 	if s.tabID != "" && s.layout != nil {
 		if delErr := s.layout.DeleteTab(ctx, s.tabID, closeReplacement()); delErr != nil {
 			errs = append(errs, fmt.Errorf("delete tab: %w", delErr))
+		}
+	}
+	// AND THE CHECKOUT, after the session it lives in is gone: a shell can
+	// hold no directory once its pty is closed, and the seam's own refusal
+	// (a worktree holding work) is preserved rather than forced past — the
+	// branch-and-checkout a spawn created comes down, a branch it merely
+	// checked out stays, and an undo that could not finish is a joined
+	// error, retried by the caller that treats compensation failure as
+	// non-terminal (internal/workers), never silence.
+	//
+	// It runs on Kill's own derived ctx, for the same reason the delete
+	// above does: by the time a compensation runs, the caller's own
+	// deadline is usually spent.
+	if s.worktree != nil {
+		if wtErr := s.worktree.run(ctx); wtErr != nil {
+			errs = append(errs, wtErr)
 		}
 	}
 	// AND THE RECORD OF WHERE THAT TAB WAS, unconditionally: whatever became
@@ -733,12 +791,65 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	// the coordinator's ONE layout row, so it is looked up once and asked
 	// its questions — a second walk could answer about a different row.
 	cwd := s.coordinatorCwd(ctx, coordPane, lg)
+	// THE CHECKOUT, before anything is minted (nocx-xn63t.1.2). A worktree
+	// ask is served or refused HERE, while the window is still untouched:
+	// no pane row, no tab, nothing for a refusal to compensate. Every
+	// refusal planWorktree answers is named — no recorded directory, a
+	// remote coordinator pane, no repository there, an occupied path, a
+	// branch held elsewhere — because a coordinator reading "no" cannot act
+	// on it. Once the plan succeeds the checkout EXISTS, and undo carries
+	// its removal to every compensating path below: from this line until
+	// the participant is live, the checkout's existence belongs to the
+	// failure handling, and the record accepts it only at MarkLive.
+	paneCwd := cwd
+	var undo *worktreeUndo
+	if req.Worktree != nil {
+		undo, err = s.planWorktree(ctx, lg, coordPane, cwd, req.Worktree)
+		if err != nil {
+			return nil, err
+		}
+		paneCwd = undo.path
+		// THE RECORD, AT THE MOMENT THE CHECKOUT EXISTS (nocx-xn63t.1.4).
+		// A spawn that fails after this line removes the checkout through
+		// the undo, and the row it leaves behind is dropped by the first
+		// read that notices the checkout is gone — the same mechanism that
+		// forgets a checkout removed by hand. The write failing is a
+		// warning and not a refusal: the checkout is real whether or not
+		// its annotation landed.
+		if s.checkouts != nil {
+			s.checkouts.recordCreated(ctx, lg, undo, req.Group, req.Task)
+		}
+	}
 	madeTab, tabErr := s.layout.CreateTabAfter(ctx,
 		content.Tab{ID: tabID.String(), WorkspaceID: s.workspace, Layout: content.LayoutRow},
-		content.Pane{ID: paneID.String(), TabID: tabID.String(), Cwd: cwd, Kind: content.PaneLocal, SizeShare: 1},
+		content.Pane{ID: paneID.String(), TabID: tabID.String(), Cwd: paneCwd, Kind: content.PaneLocal, SizeShare: 1},
 		s.coordinatorTab(ctx, coordPane, lg),
 	)
 	if tabErr != nil {
+		// NOTHING TO COMPENSATE BUT THE CHECKOUT (nocx-xn63t.1.2): no tab
+		// was minted, so no DeleteTab — aiming a deletion at a tab that
+		// does not exist is exactly what the refused-placement test
+		// forbids; no session exists; and the enrolment rendezvous is
+		// armed only after a successful mint, so there is nothing to
+		// withdraw either. But a worktree ask whose plan already succeeded
+		// DID write something, and the interval gives its undo one
+		// legitimate end: no pane will ever open here, so the checkout is
+		// removed and its removal failure is a warning, the same
+		// asymmetry every failure Spawn catches itself is held to.
+		if undo != nil {
+			// The common reason the mint failed is that the spawn's own
+			// deadline was cancelled, so the undo runs on the context Kill
+			// derives for its compensation (nocx-4gj5w): the caller's
+			// values, never its cancellation, bounded by killTimeout. On
+			// the raw ctx the removal failed with "context canceled" and
+			// the checkout survived a spawn no worker can ever join.
+			undoCtx, undoCancel := killContext(ctx)
+			if wtErr := undo.run(undoCtx); wtErr != nil {
+				lg.Warn("worker spawn: could not remove the checkout after a refused tab mint",
+					"error", wtErr)
+			}
+			undoCancel()
+		}
 		return nil, fmt.Errorf("worker spawn: minting the participant's tab: %w", tabErr)
 	}
 	// WHERE THE TAB IS, RECORDED THE MOMENT IT EXISTS (nocx-xn63t.4.6). The
@@ -767,10 +878,10 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		PaneID: paneID.String(),
 		Cols:   participantCols,
 		Rows:   participantRows,
-		Cwd:    cwd,
+		Cwd:    paneCwd,
 	})
 	if err != nil {
-		s.compensateSpawn(ctx, req.Participant, tabID.String(), nil)
+		s.compensateSpawn(ctx, req.Participant, tabID.String(), nil, undo)
 		return nil, fmt.Errorf("worker spawn: opening the participant's session: %w", err)
 	}
 	lg = lg.With("session_id", string(opened.Session.ID()), "pane_id", paneID.String())
@@ -778,7 +889,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		"cols", participantCols, "rows", participantRows)
 	spawned := spawnedParticipant{
 		tabID: tabID.String(), sess: opened.Session, sessions: s.sessions, layout: s.layout,
-		participant: req.Participant, tabs: s.tabs,
+		participant: req.Participant, tabs: s.tabs, worktree: undo,
 	}
 
 	// THE GATE. Nothing is written into the session's queue — and so the
@@ -801,7 +912,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		// from answering `conventional`, because the two need different
 		// fixes: this one is worth retrying (a slow machine, a loaded
 		// helper), the other is not (the shell itself will never integrate).
-		s.compensateSpawn(ctx, req.Participant, tabID.String(), opened.Session)
+		s.compensateSpawn(ctx, req.Participant, tabID.String(), opened.Session, undo)
 		return nil, fmt.Errorf(
 			"worker spawn: the participant's shell never answered its integration handshake within the deadline; retrying may succeed if this was transient: %w",
 			awaitErr)
@@ -825,7 +936,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		// AGENTS.md's testing rules name as the failure to refuse rather than
 		// ship. Do not retry the same command unmodified: the shell itself is
 		// what did not integrate.
-		s.compensateSpawn(ctx, req.Participant, tabID.String(), opened.Session)
+		s.compensateSpawn(ctx, req.Participant, tabID.String(), opened.Session, undo)
 		return nil, fmt.Errorf(
 			"worker spawn: the participant's shell answered %q (%s): this pane cannot be watched, so it cannot be a participant; do not retry the same command until the shell-integration failure is fixed",
 			outcome.Status, outcome.Reason)
@@ -836,7 +947,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		// Compensate here rather than letting the enrolment deadline do it:
 		// the failure is known now, and waiting would spend the deadline
 		// learning what we already know.
-		s.compensateSpawn(ctx, req.Participant, tabID.String(), opened.Session)
+		s.compensateSpawn(ctx, req.Participant, tabID.String(), opened.Session, undo)
 		return nil, errors.New("worker spawn: the participant's session refused its first line")
 	}
 	// THE WRITE IS AN ATTEMPT AND NOT A START. What follows it is the
@@ -856,7 +967,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	if req.Task != "" {
 		delivery, deliverErr := s.deliverTask(ctx, string(opened.Session.ID()), req.Task)
 		if deliverErr != nil {
-			s.compensateSpawn(ctx, req.Participant, tabID.String(), opened.Session)
+			s.compensateSpawn(ctx, req.Participant, tabID.String(), opened.Session, undo)
 			return nil, fmt.Errorf("worker spawn: %w", deliverErr)
 		}
 		// A pane that asked a question keeps its tab, its session and its
@@ -891,10 +1002,18 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 // questions unanswered, and each answers its own absence in the way its own
 // caller can use — see coordinatorCwd and coordinatorTab.
 func (s *workerSpawner) coordinatorPane(coordinator string, lg log.Logger) string {
-	if coordinator == "" || s.sessions == nil {
+	return coordinatorPaneFor(s.sessions, coordinator, lg)
+}
+
+// coordinatorPaneFor is the walk's one implementation, a package function so
+// the checkouts service asks the SAME walk rather than deriving a second one
+// (nocx-xn63t.1.4): the directory a coordinator stands in and the pane that
+// holds it are this one row's facts.
+func coordinatorPaneFor(sessions sessionCloser, coordinator string, lg log.Logger) string {
+	if coordinator == "" || sessions == nil {
 		return ""
 	}
-	sess, err := s.sessions.Get(session.ID(coordinator))
+	sess, err := sessions.Get(session.ID(coordinator))
 	if err != nil {
 		lg.Debug("worker spawn: the coordinator's session is not held here, so its pane is unknown",
 			"coordinator_session", coordinator, "error", err)
@@ -926,10 +1045,17 @@ func (s *workerSpawner) coordinatorPane(coordinator string, lg log.Logger) strin
 // $PWD — would be the second owner AGENTS.md's "look for the existing answer"
 // rule is about.
 func (s *workerSpawner) coordinatorCwd(ctx context.Context, paneID string, lg log.Logger) string {
-	if paneID == "" || s.layout == nil {
+	return coordinatorCwdFor(ctx, s.layout, paneID, lg)
+}
+
+// coordinatorCwdFor is the walk's second half, shared for the same reason
+// its caller above is: one owner of "which directory is this coordinator
+// standing in".
+func coordinatorCwdFor(ctx context.Context, layout paneMinter, paneID string, lg log.Logger) string {
+	if paneID == "" || layout == nil {
 		return ""
 	}
-	cwd, err := s.layout.PaneCwd(ctx, paneID)
+	cwd, err := layout.PaneCwd(ctx, paneID)
 	if err != nil {
 		lg.Debug("worker spawn: the coordinator's pane has no recorded directory",
 			"pane_id", paneID, "error", err)
@@ -1051,14 +1177,14 @@ func (s *workerSpawner) deliverTask(ctx context.Context, paneID, task string) (w
 // an absent participant), so calling it here even for the one existing
 // caller that had nothing armed yet (the mint-a-tab-id / mint-a-pane-id
 // failures return before this is ever reached) costs nothing.
-func (s *workerSpawner) compensateSpawn(ctx context.Context, participant workers.ParticipantID, tabID string, sess session.Session) {
+func (s *workerSpawner) compensateSpawn(ctx context.Context, participant workers.ParticipantID, tabID string, sess session.Session, undo *worktreeUndo) {
 	if err := s.enrolments.Withdraw(ctx, participant); err != nil {
 		s.log.Warn("worker spawn: could not withdraw a failed spawn's enrolment",
 			"participant", string(participant), "error", err)
 	}
 	sp := spawnedParticipant{
 		tabID: tabID, sess: sess, sessions: s.sessions, layout: s.layout,
-		participant: participant, tabs: s.tabs,
+		participant: participant, tabs: s.tabs, worktree: undo,
 	}
 	if err := sp.Kill(ctx); err != nil {
 		s.log.Warn("worker spawn: could not fully compensate a failed spawn",
@@ -1321,7 +1447,12 @@ func (e *workerEnrolments) hookInto(p *paneEnroller) *paneEnroller {
 // participant's state. The participant's PLACE is this layer's for the same
 // reason: a tab is a place in the window, the window is the app's, and only
 // the app holds the pairing between a participant and the seat its pane was
-// minted in (workerTabs).
+// minted in (workerTabs). What the close then ANSWERS — the checkout that is
+// still on disk and what it holds — is this layer's too, for the same
+// reason: only here do the record's worktree facts and the one git seam
+// meet, and the owner's decision of 2026-09-18 makes "leaves the checkout
+// alone, says what is in it" the close's whole account of a worker's work
+// (nocx-xn63t.1.3).
 type workerCloser struct {
 	sessions sessionCloser
 	// layout takes the participant's tab out of the window. Nil is the
@@ -1334,10 +1465,28 @@ type workerCloser struct {
 	// the spawn side's own announcer tells them one appeared. Nil is the
 	// absence case tabClosedAnnouncer's docs name.
 	announce tabClosedAnnouncer
-	log      log.Logger
+	// repos reads the checkout the close leaves behind, through the ONE
+	// factory the composition root already owns — the same instance the
+	// spawner created the checkout with, so the reading is the repository's
+	// own answer and never a second implementation of git. Nil is the
+	// absence case every seam in this file names: a closer nobody wired a
+	// git seam into cannot read a checkout, and the result says the state
+	// is unknown rather than failing a close whose real work is done.
+	repos git.RepoFactory
+	// checkouts is the durable record whose last-used stamp a close moves
+	// (nocx-xn63t.1.4): the sweep of nocx-xn63t.1.6 reads that stamp, and a
+	// checkout a worker has just left is not an unused one. Nil is the
+	// absence case — nothing is stamped.
+	checkouts checkoutToucher
+	log       log.Logger
 }
 
-func (c *workerCloser) Close(ctx context.Context, p workers.Participant) error {
+// checkoutToucher is the one call the close makes on the checkout record.
+type checkoutToucher interface {
+	Touch(ctx context.Context, path string, at time.Time) error
+}
+
+func (c *workerCloser) Close(ctx context.Context, p workers.Participant) (workers.CloseResult, error) {
 	sid := session.ID(p.Liveness.SessionID)
 	// Asked FIRST, because the registry's Close reports a missing session as
 	// an ordinary error and a session that is already gone is not a failure
@@ -1356,7 +1505,7 @@ func (c *workerCloser) Close(ctx context.Context, p workers.Participant) error {
 	} else if err := c.sessions.EndSession(sid); err != nil {
 		// EndSession, not Close (nocx-isjh4): the same reasoning as Kill's —
 		// nobody will ever hold this participant's pane again.
-		return fmt.Errorf("worker close: %w", err)
+		return workers.CloseResult{}, fmt.Errorf("worker close: %w", err)
 	}
 
 	// THE TAB, AFTER THE SESSION AND NEVER BEFORE IT (nocx-xn63t.4.6). The
@@ -1373,7 +1522,7 @@ func (c *workerCloser) Close(ctx context.Context, p workers.Participant) error {
 	if c.tabs == nil || c.layout == nil {
 		c.log.Debug("worker close: this backend holds no tab for the participant",
 			"participant", string(p.ID))
-		return nil
+		return c.leftover(ctx, p), nil
 	}
 	tabID, known := c.tabs.lookup(p.ID)
 	if !known {
@@ -1383,7 +1532,7 @@ func (c *workerCloser) Close(ctx context.Context, p workers.Participant) error {
 		// the coordinator asked for a state that already holds.
 		c.log.Info("worker close: the participant's tab was already out of the window",
 			"participant", string(p.ID))
-		return nil
+		return c.leftover(ctx, p), nil
 	}
 	if err := c.layout.DeleteTab(ctx, tabID, closeReplacement()); err != nil {
 		// WHAT IS TRUE ON DISK when this returns, said in the error rather than
@@ -1395,7 +1544,7 @@ func (c *workerCloser) Close(ctx context.Context, p workers.Participant) error {
 		// retry a reported failure invites runs this same method again and
 		// completes the half that failed, instead of finding nothing to close
 		// and answering success over a tab that is still on the strip.
-		return fmt.Errorf(
+		return workers.CloseResult{}, fmt.Errorf(
 			"worker close: the participant's session is ended and its tab %q is still in the window: %w",
 			tabID, err)
 	}
@@ -1405,7 +1554,98 @@ func (c *workerCloser) Close(ctx context.Context, p workers.Participant) error {
 	}
 	c.log.Info("worker participant closed",
 		"participant", string(p.ID), "session_id", string(sid), "tab_id", tabID)
-	return nil
+	return c.leftover(ctx, p), nil
+}
+
+// leftover reads the checkout the record says this participant lived in and
+// answers what is in it (nocx-xn63t.1.3). It runs AFTER the session and the
+// tab are gone — by then the close's real work is either committed or has
+// already returned as an error — so a reading that fails is SAID
+// (workers.CheckoutUnknown) rather than returned as a failure, and never
+// reported as clean: "could not read" and "clean" are the two answers this
+// path must not confuse, because one of them invites deleting a worker's
+// work the owner's decision keeps this close from touching.
+//
+// The reading is the repository's own, through the same seam the spawn used
+// (git.RepoFactory.Worktrees, the listing task 1.1 put there for exactly
+// this kind of question): every working tree with its state, and the entry
+// at the record's path is this participant's. The repo is opened AT the
+// checkout, not at the coordinator's — the coordinator's pane may be closed
+// by the time its worker is, and the checkout is the subject. Uncommitted
+// and Ahead mean what they say only when the seam answered readable;
+// otherwise the record's path and branch are the account and the state is
+// what an unread checkout honestly is: unknown.
+func (c *workerCloser) leftover(ctx context.Context, p workers.Participant) workers.CloseResult {
+	if p.Worktree == (workers.Worktree{}) {
+		return workers.CloseResult{}
+	}
+	// STAMPED BEFORE THE READING, and never failing the close: the session
+	// and the tab are already gone, so a record that refuses the stamp is
+	// logged and the answer about the checkout is still git's.
+	if c.checkouts != nil {
+		if err := c.checkouts.Touch(ctx, nocxCanonicalPath(p.Worktree.Path), time.Now()); err != nil {
+			log.From(ctx).Warn("worker close: could not move the checkout's last-used time",
+				"participant", string(p.ID), "path", p.Worktree.Path, "error", err)
+		}
+	}
+	left := workers.Leftover{
+		Path: p.Worktree.Path, Branch: p.Worktree.Branch, State: workers.CheckoutUnknown,
+	}
+	answer := func() workers.CloseResult { return workers.CloseResult{Worktree: left} }
+	fail := func(why any) workers.CloseResult {
+		// log.From(ctx), not the stored logger (nocx-xn63t.1 review,
+		// finding 7): the reading runs on the close request's context, so
+		// this line carries its trace and span — the stored logger would
+		// file it under no request at all.
+		log.From(ctx).Warn("worker close: the checkout's state could not be read, so it stays unknown",
+			"participant", string(p.ID), "path", p.Worktree.Path, "reason", why)
+		return answer()
+	}
+
+	if c.repos == nil {
+		return fail("no git seam is wired into this closer")
+	}
+	repo, outcome, err := c.repos.Open(ctx, p.Worktree.Path)
+	if err != nil {
+		return fail(err)
+	}
+	if outcome.State != git.OpenOK {
+		// No repo to close: the seam answers a NIL repo beside every non-ok
+		// state (local/factory.go does, and worktreeUndo.run relies on it),
+		// so touching the value here would panic over a checkout that is
+		// gone — the exact case this branch is for.
+		return fail("the repository answers " + string(outcome.State))
+	}
+	defer func() { _ = repo.Close() }()
+	listing, err := repo.Worktrees(ctx, p.Worktree.Base)
+	if err != nil {
+		return fail(err)
+	}
+	// THE MATCH IS CANONICAL on both sides (nocxCanonicalPath): git answers
+	// the resolved spelling of the listing while the record holds whatever
+	// spelling the spawn was handed — on macOS a symlinked ancestor makes
+	// those two differ — and a raw-equality miss answers unknown for a
+	// checkout that is right there and readable, which is the one answer
+	// that invites deleting a worker's work (nocx-xn63t.1.3).
+	for _, wt := range listing {
+		if nocxCanonicalPath(wt.Path) != nocxCanonicalPath(p.Worktree.Path) {
+			continue
+		}
+		// What git reports NOW is what is left, even where it differs from
+		// the record: a person could have moved the checkout's HEAD after
+		// the spawn. An unreadable state keeps the record's branch.
+		if wt.Branch != "" {
+			left.Branch = wt.Branch
+		}
+		if wt.State == git.WorktreeUnreadable {
+			return fail(wt.Reason)
+		}
+		left.State = workers.CheckoutRead
+		left.Uncommitted = wt.Uncommitted
+		left.Ahead = wt.Ahead
+		return answer()
+	}
+	return fail("git lists no worktree at the recorded path")
 }
 
 // ── the two routes out of the undispatched set (nocx-dkawo.3) ─────────────

@@ -59,6 +59,8 @@ func (f *captureFakeDB) Reconcile() content.SessionReconciler { return nil }
 // the interface must still compile. Unused by these tests.
 func (f *captureFakeDB) SkillChecks() content.SkillCheckRepository { return nil }
 
+func (f *captureFakeDB) WorkerCheckouts() content.WorkerCheckoutRepository { return nil }
+
 func (f *captureFakeDB) RecordCompleted(_ context.Context, in content.CompletedCommand) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

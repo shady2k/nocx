@@ -207,6 +207,72 @@ type Exit struct {
 	At time.Time
 }
 
+// WorktreeAsk is a spawn's request for the checkout its pane will live in:
+// the branch it will hold and — optionally — the commit that branch starts
+// from. An empty Base means the coordinator checkout's HEAD commit, resolved
+// at spawn time by whoever owns the git seam; this package carries the ask
+// and never resolves it.
+type WorktreeAsk struct {
+	Branch string
+	Base   string
+}
+
+// Worktree is the checkout a participant's pane lives in, as the spawn
+// actually made it: where it is, the branch checked out in it, and the commit
+// the branch starts from. Base is the RESOLVED commit, never the bare
+// revision the ask may have named — a compensation that must delete a branch
+// "with no commits beyond base" cannot mean whatever HEAD has grown into by
+// the time it runs. Zero means the participant shares its coordinator's
+// checkout, which is every spawn that did not ask for one.
+type Worktree struct {
+	Path   string
+	Branch string
+	Base   string
+}
+
+// LeftoverCheckout is one checkout a spawn of this repository created that
+// NO live worker holds any more (nocx-xn63t.1.4). It is the answer's row and
+// nothing else: where the checkout is, what it holds, and the two facts git
+// cannot say — which worker the spawn was for, and when nocx last had a pane
+// open there. Uncommitted and Ahead mean what the git seam said they mean
+// when the row was read; Readable false means they could NOT be read and
+// carry no answer — never that the checkout was clean. LastUsed is zero for
+// a checkout whose row the record never wrote or has already dropped.
+type LeftoverCheckout struct {
+	Path        string
+	Branch      string
+	Uncommitted bool
+	Ahead       int
+	Readable    bool
+	LastUsed    time.Time
+	Name        string
+	Task        string
+	// Expired is the sweep's judgement (nocx-xn63t.1.6): true when a sweep
+	// found this checkout past the idle period and could not remove it.
+	// False — and HoldReason and HoldDetail empty — when no sweep has judged
+	// the checkout, which is the ordinary state before the first pass runs.
+	Expired bool
+	// HoldReason is WHY the expired checkout is still here, from the sweep's
+	// closed vocabulary: a removal refusal's name — uncommitted, held,
+	// not-ours, unresolved — or "pane-open", the sweep's own, for a checkout
+	// a live pane of nocx stands in. Empty unless Expired.
+	HoldReason string
+	// HoldDetail is what is true on disk, in the removal answer's own words.
+	HoldDetail string
+}
+
+// CheckoutSurvey is what a caller asking about a repository's leftover
+// checkouts is told. Complete is the honesty flag: false says the list MAY
+// be missing rows — the durable record or git's own listing could not be
+// read — and no caller may treat it as "the repository has no leftovers".
+// A repository that could not be resolved at all (no pane, no directory, no
+// repository there) answers empty and Complete: nothing about any
+// repository was claimed, so nothing is being hidden.
+type CheckoutSurvey struct {
+	Leftovers []LeftoverCheckout
+	Complete  bool
+}
+
 // Participant is one node of a worker.
 type Participant struct {
 	ID       ParticipantID
@@ -223,6 +289,14 @@ type Participant struct {
 	// RegisteredAt is when the record was committed — before any fork
 	// attributable to it.
 	RegisteredAt time.Time
+	// Worktree is the checkout this participant's pane lives in, when its
+	// spawn made one: where it is, the branch checked out in it, and the
+	// commit that branch starts from. It is written by MarkLive, at the
+	// moment the participant goes live — the moment the record accepts a
+	// checkout whose existence until then belonged to the spawn's own
+	// compensation. Zero when the participant shares its coordinator's
+	// checkout.
+	Worktree Worktree
 }
 
 // Effect is one thing a delegation permits its holder to do to a participant.

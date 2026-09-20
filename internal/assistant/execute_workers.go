@@ -56,13 +56,35 @@ type WorkerRecord interface {
 	// record reads `closed` (workers.StateClosed) rather than only the exit
 	// the close caused. What it also gives back is the participant's place —
 	// its tab leaves the window (nocx-xn63t.4.6), which is the layout chain's
-	// row rather than the record's.
-	Close(ctx context.Context, coordinatorSession string, id workers.ParticipantID) error
+	// row rather than the record's — and, when the participant had a checkout
+	// of its own, what is left of it: the close never removes the checkout
+	// (owner's decision, 2026-09-18), so the answer is the only account of
+	// the worker's work this call gives (nocx-xn63t.1.3).
+	Close(ctx context.Context, coordinatorSession string, id workers.ParticipantID) (workers.CloseResult, error)
 	// Undispatched is what the record still owes judgement on. It is read
 	// BEFORE HeldBy, because HeldBy is the fetch that clears it (D8): asking
 	// afterwards would always answer nothing, which is a truthful answer to
 	// the wrong question.
 	Undispatched() []workers.Fact
+	// LeftoverCheckouts answers which nocx-made checkouts of the repository
+	// the coordinator stands in no live worker holds (nocx-xn63t.1.4), with
+	// the record's own honesty flag: Complete false says the list may be
+	// missing rows, and never reads as "there are none". The failure mode is
+	// deliberately IN the answer and not an error — a holdings answer marked
+	// incomplete is a usable answer, and an error would make the checkouts
+	// invisible exactly when they most need seeing. The repository is
+	// resolved from the coordinator's own session, never from an argument.
+	LeftoverCheckouts(ctx context.Context, coordinatorSession string) workers.CheckoutSurvey
+	// RemoveCheckouts removes nocx-made checkouts of the coordinator's own
+	// repository (nocx-xn63t.1.5) through the same walk the leftovers
+	// answer reads, under the same refusals the automatic sweep will one
+	// day remove through: a checkout holding uncommitted work, a checkout
+	// a live worker holds, and anything that is not one of nocx's
+	// checkouts of this repository are all refused BY NAME, and a read the
+	// decision needed that failed answers unresolved — never a guess. The
+	// branch always stays. The repository is resolved from the
+	// coordinator's own session, never from an argument.
+	RemoveCheckouts(ctx context.Context, coordinatorSession string, refs []workers.CheckoutRef) workers.CheckoutRemoval
 }
 
 // workerParticipantResult is one row of what a coordinator is told. It restates
@@ -83,6 +105,50 @@ type workerParticipantResult struct {
 	// whole of nocx-dkawo.4's table. Omitted rather than false, so a list
 	// where nothing needs deciding reads as nothing needing deciding.
 	NeedsJudgement bool `json:"needsJudgement,omitempty"`
+	// Worktree is present only when the worker lives in a checkout its
+	// spawn created (nocx-xn63t.1.4): where it is and the branch checked out
+	// in it. A worker named here is WHY the checkout is not in
+	// leftoverCheckouts — it is not abandoned, it is this worker's.
+	Worktree *workerParticipantWorktree `json:"worktree,omitempty"`
+}
+
+// workerParticipantWorktree names one worker's checkout. Base is the spawn
+// result's to carry; identifying the checkout needs only where it is and
+// what is checked out in it.
+type workerParticipantWorktree struct {
+	Path   string `json:"path"`
+	Branch string `json:"branch"`
+}
+
+// workerLeftoverCheckoutResult is one row of the repository's nocx-made
+// checkouts that no live worker holds. Readable false means Uncommitted and
+// Ahead carry NO answer — the state could not be read, which is a different
+// fact from clean, and the difference is the one that stops a coordinator
+// deleting a checkout whose state nobody read.
+type workerLeftoverCheckoutResult struct {
+	Path        string `json:"path"`
+	Branch      string `json:"branch"`
+	Uncommitted bool   `json:"uncommitted"`
+	Ahead       int    `json:"ahead"`
+	Readable    bool   `json:"readable"`
+	// LastUsed is when nocx last had a pane open in this checkout, UTC
+	// RFC 3339 — the encoding every other timestamp on this surface uses.
+	// Absent when no record of it exists.
+	LastUsed string `json:"lastUsed,omitempty"`
+	// Name and Task say which worker the spawn was for, when the record
+	// knows; a checkout older than the record lists with neither.
+	Name string `json:"name,omitempty"`
+	Task string `json:"task,omitempty"`
+	// Expired, HoldReason and HoldDetail are the SWEEP's verdict on the
+	// checkout (nocx-xn63t.1.6): expired means a sweep found it past the
+	// idle period and could not remove it, HoldReason names why from a
+	// closed set — the removal refusals, or "pane-open" for a checkout a
+	// live pane of nocx stands in — and HoldDetail says what is true on
+	// disk. Absent entirely for a checkout no sweep has judged, which is
+	// every checkout before the first pass runs.
+	Expired    bool   `json:"expired,omitempty"`
+	HoldReason string `json:"holdReason,omitempty"`
+	HoldDetail string `json:"holdDetail,omitempty"`
 }
 
 // workerMailResult is one message the coordinator is handed. It carries the
@@ -165,6 +231,18 @@ type workerHoldingsResult struct {
 	Cursor          int64                     `json:"cursor,omitempty"`
 	UndeliveredMail int                       `json:"undeliveredMail,omitempty"`
 	Participants    []workerParticipantResult `json:"participants"`
+	// LeftoverCheckouts is the repository's own answer, beneath the
+	// session's (nocx-xn63t.1.4): the checkouts spawns of this repository
+	// created that NO live worker holds — including ones other sessions
+	// started, because "left over" is a fact about the checkout and not
+	// about who is asking. A checkout named in a participant row above is
+	// deliberately absent from this list.
+	LeftoverCheckouts []workerLeftoverCheckoutResult `json:"leftoverCheckouts,omitempty"`
+	// CheckoutsComplete is the answer's honesty about itself. False says
+	// the durable record or git's listing could not be read and the list
+	// MAY be missing rows — it never reads as "there are none". Absent
+	// (true) only when every read behind the list succeeded.
+	CheckoutsComplete bool `json:"checkoutsComplete"`
 }
 
 type workerHoldingsParams struct {
@@ -183,6 +261,56 @@ type workerCloseParams struct {
 type workerCloseResult struct {
 	ID    string `json:"id"`
 	Ended bool   `json:"ended"`
+	// Worktree is what is left of the worker's own checkout, present only
+	// when it had one: the close never removes the checkout, so this is the
+	// coordinator's only account of the work sitting there (nocx-xn63t.1.3).
+	Worktree *workerCloseWorktreeResult `json:"worktree,omitempty"`
+}
+
+// workerCloseWorktreeResult is the checkout's answer. Uncommitted and Ahead
+// are pointers because their ABSENCE is a value: they ride only state "read",
+// and a result that answered uncommitted:false over a read that failed would
+// claim a cleanliness nobody saw.
+type workerCloseWorktreeResult struct {
+	Path        string `json:"path"`
+	Branch      string `json:"branch"`
+	State       string `json:"state"`
+	Uncommitted *bool  `json:"uncommitted,omitempty"`
+	Ahead       *int   `json:"ahead,omitempty"`
+}
+
+// workerRemoveRef is one checkout a removal ask names: by path, by branch,
+// or both — both must agree, which the service refuses rather than guesses
+// about.
+type workerRemoveRef struct {
+	Path   string `json:"path,omitempty"`
+	Branch string `json:"branch,omitempty"`
+}
+
+// workerRemoveCheckoutParams is what the removal ask carries: the
+// checkouts, in the order the answer keeps.
+type workerRemoveCheckoutParams struct {
+	Checkouts []workerRemoveRef `json:"checkouts"`
+}
+
+// workerRemoveItemResult is one asked checkout and what became of it. Path
+// and Branch are the checkout as nocx resolved it on disk — a branch-named
+// ask is answered with the path it resolved to — never merely the words of
+// the ask. Refusal and Detail ride only a row that was NOT removed, and a
+// removed row carries neither: nothing is claimed about a removed checkout
+// beyond its removal, and its branch is still in the repository.
+type workerRemoveItemResult struct {
+	Path    string `json:"path,omitempty"`
+	Branch  string `json:"branch,omitempty"`
+	Removed bool   `json:"removed"`
+	Refusal string `json:"refusal,omitempty"`
+	Detail  string `json:"detail,omitempty"`
+}
+
+// workerRemoveCheckoutResult is the answer: one row per asked checkout, in
+// the order asked.
+type workerRemoveCheckoutResult struct {
+	Checkouts []workerRemoveItemResult `json:"checkouts"`
 }
 
 type workerSayParams struct {
@@ -222,6 +350,17 @@ type workerReportResult struct {
 type workerSpawnParams struct {
 	Command string `json:"command"`
 	Task    string `json:"task"`
+	// Worktree is the ask for a fresh checkout the worker's pane will live
+	// in. The executor validates only what the schema cannot — a branch
+	// with no name — and carries the rest as asked: where the checkout is
+	// and what commit it starts from are the spawner's (the git seam's)
+	// answers, read back from the record, never decided here.
+	Worktree *workerSpawnWorktreeParams `json:"worktree,omitempty"`
+}
+
+type workerSpawnWorktreeParams struct {
+	Branch string `json:"branch"`
+	Base   string `json:"base,omitempty"`
 }
 
 type workerSpawnResult struct {
@@ -250,6 +389,28 @@ type workerSpawnResult struct {
 	// the only party that knows whether the queue took the briefing: no
 	// derivation, no second opinion about the same fact.
 	BriefingQueued bool `json:"briefingQueued"`
+	// Worktree is present only when the spawn actually created a checkout:
+	// where it is, the branch checked out in it, and the resolved commit it
+	// starts from. It comes from the record (workers.Participant.Worktree),
+	// which accepted the checkout at MarkLive — the executor copies, and
+	// does not re-derive, the one place that fact lives.
+	Worktree *workerSpawnWorktreeResult `json:"worktree,omitempty"`
+	// LeftoverCheckouts is how many of the repository's nocx-made checkouts
+	// NO live worker holds, after this spawn (nocx-xn63t.1.4) — the same
+	// list workers.holdings carries, counted, so a coordinator that never
+	// asks still hears that its repository has checkouts standing. The
+	// checkout this spawn just made is held by the worker it started and is
+	// never counted.
+	LeftoverCheckouts int `json:"leftoverCheckouts"`
+	// CheckoutsComplete is the count's honesty about itself, the same flag
+	// holdings carries: false says the true number may be higher.
+	CheckoutsComplete bool `json:"checkoutsComplete"`
+}
+
+type workerSpawnWorktreeResult struct {
+	Path   string `json:"path"`
+	Branch string `json:"branch"`
+	Base   string `json:"base"`
 }
 
 // workerCoordinatorFrom is the ONE assertion of a concrete worker capability,
@@ -317,6 +478,29 @@ func splitMailbox(messages []workers.Message) ([]workerMailResult, []workerObser
 		})
 	}
 	return text, observed
+}
+
+// renderLeftoverCheckouts maps the record's rows onto the result shape: the
+// one derivation is the timestamp's encoding, UTC RFC 3339 like every other
+// time on this surface, and a zero time — a checkout the record never wrote
+// a last-used stamp for — renders as absent rather than as a date in 1970.
+func renderLeftoverCheckouts(rows []workers.LeftoverCheckout) []workerLeftoverCheckoutResult {
+	out := make([]workerLeftoverCheckoutResult, 0, len(rows))
+	for _, r := range rows {
+		row := workerLeftoverCheckoutResult{
+			Path: r.Path, Branch: r.Branch,
+			Uncommitted: r.Uncommitted, Ahead: r.Ahead, Readable: r.Readable,
+			Name: r.Name, Task: r.Task,
+			Expired:    r.Expired,
+			HoldReason: r.HoldReason,
+			HoldDetail: r.HoldDetail,
+		}
+		if !r.LastUsed.IsZero() {
+			row.LastUsed = r.LastUsed.UTC().Format(time.RFC3339)
+		}
+		out = append(out, row)
+	}
+	return out
 }
 
 type workerInboxParams struct {
@@ -473,11 +657,21 @@ func workerAnswer(
 	}
 	out := workerHoldingsResult{Participants: make([]workerParticipantResult, 0, len(held))}
 	for _, p := range held {
-		out.Participants = append(out.Participants, workerParticipantResult{
+		row := workerParticipantResult{
 			ID: string(p.ID), State: string(p.State), Task: p.Task,
 			NeedsJudgement: owed[p.ID],
-		})
+		}
+		if p.Worktree.Path != "" {
+			row.Worktree = &workerParticipantWorktree{Path: p.Worktree.Path, Branch: p.Worktree.Branch}
+		}
+		out.Participants = append(out.Participants, row)
 	}
+	// The repository's own answer, beside the session's (nocx-xn63t.1.4).
+	// The survey's Complete flag rides verbatim: marking a failed read as
+	// "no leftovers" would be the lie this flag exists to prevent.
+	survey := seams.workerStore.LeftoverCheckouts(ctx, coordinator.Session())
+	out.LeftoverCheckouts = renderLeftoverCheckouts(survey.Leftovers)
+	out.CheckoutsComplete = survey.Complete
 	// The coordinator's own mailbox is named by its session, which is what
 	// makes a RESTARTED coordinator the same reader — the property D3
 	// already rests on. Asking is what hands the mail over: the cursor
@@ -526,6 +720,13 @@ func workerAnswer(
 // finished: ending a process is a request, and how it ended is a fact nocx
 // observes for itself through the ordinary exit path. A result that claimed
 // the second would be the record's only claim it did not witness.
+//
+// What it answers BESIDE the ask is the checkout the close left (nocx-xn63t.1.3):
+// carried from the record's own close answer, never re-read here — this
+// package has no git seam and must not grow one. A worker with no checkout
+// answers nothing about one (the field is absent), and a reading the close
+// could not make arrives as unknown rather than as a clean that was never
+// seen.
 func executeWorkerClose(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
 	coordinator, err := workerCoordinatorFrom(cap, "workers.close")
 	if err != nil {
@@ -541,10 +742,27 @@ func executeWorkerClose(ctx context.Context, cap agenttools.Capability, args jso
 	if p.Worker == "" {
 		return "", errors.New("workers.close: name the worker to end")
 	}
-	if closeErr := seams.workerStore.Close(ctx, coordinator.Session(), workers.ParticipantID(p.Worker)); closeErr != nil {
+	res, closeErr := seams.workerStore.Close(ctx, coordinator.Session(), workers.ParticipantID(p.Worker))
+	if closeErr != nil {
 		return "", fmt.Errorf("workers.close: %w", closeErr)
 	}
-	raw, err := json.Marshal(workerCloseResult{ID: p.Worker, Ended: true})
+	out := workerCloseResult{ID: p.Worker, Ended: true}
+	if res.Worktree != (workers.Leftover{}) {
+		wt := &workerCloseWorktreeResult{
+			Path:   res.Worktree.Path,
+			Branch: res.Worktree.Branch,
+			State:  string(res.Worktree.State),
+		}
+		// The reading's two values ride ONLY a read: absent is what unknown
+		// looks like on the wire, because uncommitted:false would claim a
+		// cleanliness nobody saw.
+		if res.Worktree.State == workers.CheckoutRead {
+			wt.Uncommitted = &res.Worktree.Uncommitted
+			wt.Ahead = &res.Worktree.Ahead
+		}
+		out.Worktree = wt
+	}
+	raw, err := json.Marshal(out)
 	if err != nil {
 		return "", fmt.Errorf("workers.close: result: %w", err)
 	}
@@ -557,6 +775,60 @@ func executeWorkerClose(ctx context.Context, cap agenttools.Capability, args jso
 // even though a coordinator's first spawn does default the worker id to its
 // session: the record permits a named worker, and a helper that assumed the
 // default would be right until the day somebody used the field.
+// executeWorkerRemoveCheckout removes one or more of nocx's own leftover
+// checkouts of the coordinator's repository (nocx-xn63t.1.5).
+//
+// THE REPOSITORY IS THE SESSION'S, never an argument, exactly as for
+// holdings: the walk that decides which checkouts are nocx's starts at the
+// coordinator capability's own session. What the model names is only the
+// checkouts — by path, branch, or both — and the answer names what became
+// of each, in the order asked.
+//
+// THE REFUSALS ARE THE SERVICE'S, not re-decided here: uncommitted work, a
+// live worker's hold, not-ours and unresolved arrive named and detailed
+// from the same walk and under the same refusals the automatic sweep of
+// task 1.6 will remove through, and this executor's whole job is to carry
+// them to the caller verbatim — a refusal reworded here would be a second
+// account of the same disk.
+func executeWorkerRemoveCheckout(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	coordinator, err := workerCoordinatorFrom(cap, "workers.removeCheckout")
+	if err != nil {
+		return "", err
+	}
+	if seams.workerStore == nil {
+		return "", errors.New("workers.removeCheckout: this backend keeps no worker record")
+	}
+	var p workerRemoveCheckoutParams
+	if argErr := json.Unmarshal(args, &p); argErr != nil {
+		return "", fmt.Errorf("workers.removeCheckout: %w", argErr)
+	}
+	if len(p.Checkouts) == 0 {
+		return "", errors.New("workers.removeCheckout: name at least one checkout to remove, by path or by branch")
+	}
+	refs := make([]workers.CheckoutRef, 0, len(p.Checkouts))
+	for i, ask := range p.Checkouts {
+		if ask.Path == "" && ask.Branch == "" {
+			return "", fmt.Errorf("workers.removeCheckout: checkout %d names neither a path nor a branch", i+1)
+		}
+		refs = append(refs, workers.CheckoutRef{Path: ask.Path, Branch: ask.Branch})
+	}
+	removal := seams.workerStore.RemoveCheckouts(ctx, coordinator.Session(), refs)
+	items := make([]workerRemoveItemResult, 0, len(removal.Items))
+	for _, item := range removal.Items {
+		row := workerRemoveItemResult{Path: item.Path, Branch: item.Branch, Removed: item.Removed}
+		if !item.Removed {
+			row.Refusal = string(item.Refusal)
+			row.Detail = item.Detail
+		}
+		items = append(items, row)
+	}
+	raw, err := json.Marshal(workerRemoveCheckoutResult{Checkouts: items})
+	if err != nil {
+		return "", fmt.Errorf("workers.removeCheckout: result: %w", err)
+	}
+	return string(raw), nil
+}
+
 func workerOf(c *agenttools.WorkerCoordinator, held []workers.Participant) workers.ID {
 	for _, p := range held {
 		if p.Group != "" {
@@ -704,6 +976,13 @@ func executeWorkerSpawn(ctx context.Context, cap agenttools.Capability, args jso
 	if p.Command == "" || p.Task == "" {
 		return "", errors.New("workers.spawn: a worker needs both a command to start it and a task to do")
 	}
+	// The worktree ask's own shape, repeated here for a caller that bypassed
+	// the schema it was shown. Everything else about a checkout — where it
+	// can go, whether the branch is free, what it starts from — is the git
+	// seam's refusal to answer, with its own names, far from here.
+	if p.Worktree != nil && p.Worktree.Branch == "" {
+		return "", errors.New("workers.spawn: a worktree needs the branch to check out in it")
+	}
 	// The environment is checked against the CAPABILITY, which holds only
 	// what the run's grant named. A spawn outside it is refused and the
 	// refusal names what was available; escalating instead is a property of a
@@ -713,7 +992,7 @@ func executeWorkerSpawn(ctx context.Context, cap agenttools.Capability, args jso
 		return "", fmt.Errorf("workers.spawn: this run may not start a worker in %q; it may start one in %v",
 			environment, coordinator.Environments())
 	}
-	participant, err := seams.workerStore.Register(ctx, workers.RegisterRequest{
+	req := workers.RegisterRequest{
 		CoordinatorSession: coordinator.Session(),
 		// The coordinator's OWN incarnation, never the spawned participant's
 		// liveness epoch: Delegation.ControllerIdentity is what a
@@ -725,17 +1004,40 @@ func executeWorkerSpawn(ctx context.Context, cap agenttools.Capability, args jso
 		Command:             p.Command,
 		Environment:         environment,
 		CreatedByRunID:      seams.runID,
-	})
+	}
+	// The worktree ask travels AS ASKED: branch required, base optional.
+	// Resolving it — where the checkout goes, what commit it starts from —
+	// is the spawner's answer, and the result reads it back from the record
+	// below rather than from anything decided here.
+	if p.Worktree != nil {
+		req.Worktree = &workers.WorktreeAsk{Branch: p.Worktree.Branch, Base: p.Worktree.Base}
+	}
+	participant, err := seams.workerStore.Register(ctx, req)
 	if err != nil {
 		return "", fmt.Errorf("workers.spawn: %w", err)
 	}
-	raw, err := json.Marshal(workerSpawnResult{
+	result := workerSpawnResult{
 		ID:             string(participant.ID),
 		State:          string(participant.State),
 		TaskTyped:      participant.Delivery.Typed,
 		WaitingOn:      participant.Delivery.WaitingOn,
 		BriefingQueued: participant.Delivery.BriefingQueued,
-	})
+	}
+	if participant.Worktree.Path != "" {
+		result.Worktree = &workerSpawnWorktreeResult{
+			Path:   participant.Worktree.Path,
+			Branch: participant.Worktree.Branch,
+			Base:   participant.Worktree.Base,
+		}
+	}
+	// HOW MANY ARE LEFT OVER (nocx-xn63t.1.4), after this spawn: the worker
+	// just started holds its own checkout, so the count never includes it.
+	// A read that failed answers zero-and-incomplete rather than a smaller
+	// number dressed as the truth.
+	survey := seams.workerStore.LeftoverCheckouts(ctx, coordinator.Session())
+	result.LeftoverCheckouts = len(survey.Leftovers)
+	result.CheckoutsComplete = survey.Complete
+	raw, err := json.Marshal(result)
 	if err != nil {
 		return "", fmt.Errorf("workers.spawn: result: %w", err)
 	}

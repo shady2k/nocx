@@ -216,7 +216,7 @@ func TestClosingAWorkerClosesItsTab(t *testing.T) {
 		t.Fatalf("the participant's tab is not in the strip before the close: %v", ids)
 	}
 
-	if err := stand.record.Close(ctx, "sess-coordinator", p.ID); err != nil {
+	if _, err := stand.record.Close(ctx, "sess-coordinator", p.ID); err != nil {
 		t.Fatalf("workers.close: %v", err)
 	}
 
@@ -271,7 +271,7 @@ func TestClosingAFinishedWorkerClosesItsTab(t *testing.T) {
 		t.Fatalf("the tab left the window when the worker's process ended; the screen it printed goes with it: %v", ids)
 	}
 
-	if err := stand.record.Close(ctx, "sess-coordinator", p.ID); err != nil {
+	if _, err := stand.record.Close(ctx, "sess-coordinator", p.ID); err != nil {
 		t.Fatalf("closing a finished worker: %v", err)
 	}
 
@@ -309,7 +309,7 @@ func TestClosingAWorkerWhoseTabIsAlreadyClosedIsNotAnError(t *testing.T) {
 		t.Fatalf("the person closes the tab: %v", err)
 	}
 
-	if err := stand.record.Close(ctx, "sess-coordinator", p.ID); err != nil {
+	if _, err := stand.record.Close(ctx, "sess-coordinator", p.ID); err != nil {
 		t.Fatalf("closing a worker whose tab was already closed: %v", err)
 	}
 }
@@ -339,7 +339,7 @@ func TestAFailedTabCloseIsReportedNotSwallowed(t *testing.T) {
 		log:      stand.log,
 	})
 
-	err := record.Close(ctx, "sess-coordinator", p.ID)
+	_, err := record.Close(ctx, "sess-coordinator", p.ID)
 	if err == nil {
 		t.Fatal("a close whose tab write failed was reported to the coordinator as done")
 	}

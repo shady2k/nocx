@@ -19,7 +19,7 @@
       "description": "The workers this session is responsible for. An empty list is honest and ordinary: it means you have started none, or every one you started has finished.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["participants"],
+      "required": ["participants", "checkoutsComplete"],
       "properties": {
         "mail": {
           "type": "array",
@@ -93,6 +93,66 @@
           "type": "integer",
           "description": "How many messages YOU have left for your workers that they have not taken yet. A worker that never looks is a worker that never got what you said, and this is the only place that difference is visible."
         },
+        "leftoverCheckouts": {
+          "type": "array",
+          "description": "The checkouts your repository has left standing: workspaces workers.spawn created in its own worktrees directory that NO live worker is using any more \u2014 including ones other sessions of yours started and finished with, because left over is a fact about the checkout, not about who is asking. Each one says whether it holds work (uncommitted, ahead) and what it was for (name, task), so you can decide to have a person remove it or leave it be. A checkout named in a participant's own worktree above is deliberately NOT here: that one is still somebody's. This list is about the repository you are standing in and nobody else's.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "branch", "uncommitted", "ahead", "readable"],
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Where the checkout is on disk \u2014 under nocx's application directory, never inside your repository."
+              },
+              "branch": {
+                "type": "string",
+                "description": "The branch checked out in it. Detached checkouts answer with the branch they were created for."
+              },
+              "uncommitted": {
+                "type": "boolean",
+                "description": "True when the checkout holds tracked or untracked changes nobody committed. Meaningful only when readable is true."
+              },
+              "ahead": {
+                "type": "integer",
+                "description": "How many commits this checkout's HEAD has that the checkout you are standing in does not \u2014 roughly, how much work is in it that removing it would lose. Meaningful only when readable is true."
+              },
+              "readable": {
+                "type": "boolean",
+                "description": "False when nocx could not read the checkout's state at all. uncommitted and ahead then carry NO answer \u2014 treat the checkout as holding unknown work, never as clean."
+              },
+              "lastUsed": {
+                "type": "string",
+                "description": "When nocx last had a pane open in this checkout, UTC RFC 3339. Absent when nocx has no record of it."
+              },
+              "name": {
+                "type": "string",
+                "description": "The worker the spawn that created this checkout was starting, when nocx knows. Absent when the checkout is older than nocx's record."
+              },
+              "expired": {
+                "type": "boolean",
+                "description": "True when nocx's sweep has found this checkout past the idle period (worktrees.idleDays, default 30 days) and COULD NOT remove it. It is still on disk exactly as it was, and holdReason says why. Absent for a checkout no sweep has judged."
+              },
+              "holdReason": {
+                "type": "string",
+                "enum": ["uncommitted", "held", "not-ours", "unresolved", "pane-open"],
+                "description": "Why an expired checkout is still here. uncommitted: it holds work no commit keeps — remove it yourself if you want it gone, nocx never will. held: a live worker holds it; close the worker first. pane-open: a pane of nocx is open in it. not-ours / unresolved: nocx could not establish the checkout as removable and claims nothing. Only present with expired."
+              },
+              "holdDetail": {
+                "type": "string",
+                "description": "What nocx found on disk when it judged, in the removal answer's own words. Only present with expired."
+              },
+              "task": {
+                "type": "string",
+                "description": "What that worker was given to do, as its coordinator phrased it. Absent when nocx does not know."
+              }
+            }
+          }
+        },
+        "checkoutsComplete": {
+          "type": "boolean",
+          "description": "Whether leftoverCheckouts is the whole truth. False means a read behind the list failed and rows MAY be missing \u2014 never treat a short or empty list as proof there is nothing left over when this is false. True means every read behind the list succeeded."
+        },
         "participants": {
           "type": "array",
           "description": "One entry per worker, oldest first.",
@@ -117,6 +177,22 @@
               "needsJudgement": {
                 "type": "boolean",
                 "description": "True when something happened to this worker that NEEDS YOUR DECISION and you have not been told about it yet. Absent covers two ordinary cases: nothing has happened, or what happened was routine \u2014 a worker finishing successfully while others are still running does not need you, and is not marked. Reading this list is what clears it, so what you see here you will not be shown twice."
+              },
+              "worktree": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path", "branch"],
+                "description": "Present only when this worker lives in a checkout its spawn created: where the checkout is and the branch checked out in it. A worker named here is WHY that checkout is not in leftoverCheckouts \u2014 it is not abandoned, it is this worker's.",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "description": "Where the checkout is on disk \u2014 under nocx's application directory, not inside your repository."
+                  },
+                  "branch": {
+                    "type": "string",
+                    "description": "The branch checked out in it \u2014 the one the spawn was asked for."
+                  }
+                }
               }
             }
           }

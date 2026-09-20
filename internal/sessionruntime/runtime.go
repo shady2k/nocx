@@ -80,6 +80,11 @@ type Config struct {
 	// depend on timing (AGENTS.md) — the wait must be observable as a
 	// STATE, never as a duration.
 	ExpireAfter func(d time.Duration, f func()) (stop func() bool)
+	// Captures receives one capture record per settled execution interval
+	// (nocx-2v80t.2.2). Nil is a real configuration: a runtime with nobody
+	// to receive records settles exactly as before and keeps them for
+	// nobody. See [CaptureSink] for the delivery contract.
+	Captures CaptureSink
 }
 
 // Allowance is the delivery allowance consumer queues draw on, keyed by the
@@ -235,6 +240,21 @@ type Session struct {
 	bufferInstance uint64
 	bufferActive   bool
 	bufferSeen     bool
+
+	// captures is the sink settled intervals' records are handed to
+	// (Config.Captures). Nil keeps every record this runtime builds from
+	// reaching anyone, which is exactly what a composition root that wired
+	// no consumer asked for.
+	captures CaptureSink
+	// captureOpening is the next interval's opening snapshot, taken at the
+	// first ingest and refreshed at every settle; captureOpeningValid says
+	// a usable one was actually read (a screen nobody could read is not an
+	// opening somebody can claim). capturePending holds the records built
+	// under mu and handed over after it is released. All three are guarded
+	// by mu.
+	captureOpening      CaptureScreen
+	captureOpeningValid bool
+	capturePending      []CaptureRecord
 }
 
 // intentRecord is one admitted intent and where it got to. The record outlives
@@ -281,6 +301,7 @@ func New(cfg Config) (*Session, error) {
 		intents:      map[IntentID]*intentRecord{},
 		rendezvous:   map[FenceNonce]*rendezvousEntry{},
 		terminal:     cfg.Terminal,
+		captures:     cfg.Captures,
 		emulator:     cfg.Emulator,
 		geom:         GeometryCommit{Geometry: cfg.Geometry, Revision: 1},
 		completeness: cfg.Completeness,
@@ -1001,6 +1022,10 @@ func (s *Session) repairLocked() error {
 // costs what its sixteen bytes cost here, and the expansion (and its clamp) is
 // the emulator's (ADR-0065).
 func (s *Session) Ingest(b []byte) error {
+	var pending []CaptureRecord
+	// Registered BEFORE the lock's defer, so it runs AFTER the unlock:
+	// records are handed out outside the critical section, every time.
+	defer func() { s.flushCaptures(pending) }()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.live(); err != nil {
@@ -1011,6 +1036,10 @@ func (s *Session) Ingest(b []byte) error {
 		// charged, and the caller still holds every byte.
 		return ErrIngestTooLarge
 	}
+	// The session's first ACCEPTED byte opens the first capture interval:
+	// what is on the screen NOW, before these bytes draw, is where its
+	// story starts.
+	s.openCaptureIntervalLocked()
 	s.ingestWork += uint64(len(b))
 
 	replies, err := s.emulator.Ingest(b)
@@ -1036,7 +1065,10 @@ func (s *Session) Ingest(b []byte) error {
 			// effectKindOf or the delivery path below — a kind the
 			// delivery vocabulary does not know is refused there, and a
 			// fenced command must not fail the ingest that carried it.
+			// A settle here built a record: it leaves with this ingest,
+			// after the unlock.
 			s.sightDrainedFenceLocked(e)
+			pending = append(pending, s.takePendingCapturesLocked()...)
 			continue
 		}
 		s.nextEffect++
@@ -1126,6 +1158,9 @@ func (e *rendezvousEntry) pending() bool {
 // and the sequence rule (internal/lifecycle's), and this method does not
 // become a second gate on any of it.
 func (s *Session) Completed(at Incarnation, nonce FenceNonce, _ int) {
+	var pending []CaptureRecord
+	// Registered BEFORE the lock's defer, so it runs AFTER the unlock.
+	defer func() { s.flushCaptures(pending) }()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.avail != AvailabilityAvailable || at != s.inc {
@@ -1143,6 +1178,11 @@ func (s *Session) Completed(at Incarnation, nonce FenceNonce, _ int) {
 			e.State = RendezvousComplete
 			s.rendezvousLatest, s.rendezvousHasLatest = nonce, true
 			s.tick()
+			// The authenticated render boundary: the interval this
+			// completion closes becomes one record, and what the screen
+			// held at this instant is its closing snapshot.
+			s.settleCaptureLocked(nonce)
+			pending = s.takePendingCapturesLocked()
 		}
 		return
 	}
@@ -1226,9 +1266,18 @@ func (s *Session) evictRendezvousLocked(keep func(*rendezvousEntry) bool) bool {
 // never authorises one (ADR-0024 decision 1), so a fence the program printed
 // itself parks and grants nothing.
 func (s *Session) SightFence(nonce FenceNonce, source []byte) error {
+	var pending []CaptureRecord
+	// Registered BEFORE the lock's defer, so it runs AFTER the unlock.
+	defer func() { s.flushCaptures(pending) }()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.sightFenceLocked(nonce, source)
+	if err := s.sightFenceLocked(nonce, source); err != nil {
+		return err
+	}
+	// A settle under this call built a record: it leaves with the caller,
+	// after the unlock.
+	pending = s.takePendingCapturesLocked()
+	return nil
 }
 
 // sightFenceLocked is [Session.SightFence] with the lock already held: the
@@ -1249,6 +1298,10 @@ func (s *Session) sightFenceLocked(nonce FenceNonce, source []byte) error {
 			e.PinnedSource = append([]byte(nil), source...)
 			s.rendezvousLatest, s.rendezvousHasLatest = nonce, true
 			s.tick()
+			// The authenticated render boundary, fence-half arriving
+			// second: the interval closes here, and the screen as it
+			// stands at this instant is its closing snapshot.
+			s.settleCaptureLocked(nonce)
 			return nil
 		case RendezvousAwaitingAuthenticated:
 			// The same fence seen again refreshes the locate: the freshest

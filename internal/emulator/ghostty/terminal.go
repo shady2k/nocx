@@ -92,6 +92,15 @@ const (
 	modeBracketedPaste = 2004
 )
 
+// The grid reference's coordinate spaces, named once because every call
+// site reads better as the space it means than as the enum it passes. The
+// numbers are the pinned ABI's (include/ghostty/vt/point.h): a tag is an
+// enum value, not a guess.
+const (
+	pointActive  = C.GHOSTTY_POINT_TAG_ACTIVE
+	pointHistory = C.GHOSTTY_POINT_TAG_HISTORY
+)
+
 // terminal is one libghostty-vt terminal. It is the only implementation of
 // emulator.Terminal in the tree, and it owns the upstream handle for its whole
 // life: nothing outside this package can name, copy or free it.
@@ -156,6 +165,34 @@ type terminal struct {
 	// adapter at all.
 	fenceIdx   int
 	fenceNonce [64]byte
+	// departed holds the rows that left the screen, captured at the instant
+	// of their departure during Ingest and drained whole by DepartedRows. It
+	// follows the replies/effects rule: the goroutine holding mu is the only
+	// writer, and everything in it was already copied out of the library.
+	departed []emulator.Row
+	// departedErr is the first read failure a capture hit, handed to the
+	// caller with the rows that were read: a report with a hole in it is the
+	// caller's to judge, not this adapter's to pass off as whole.
+	departedErr error
+	// sb is the scrollback baseline of each buffer, indexed by
+	// emulator.Screen: how many history rows that buffer had when last
+	// measured, and whether it has been measured at all. Departures are the
+	// growth of a buffer's own baseline, so an alternate-screen excursion
+	// never mistakes the primary's restored history for new rows, and rows
+	// that left during the excursion itself are reported at the buffer's
+	// next measurement. New seeds the primary's baseline, because a fresh
+	// terminal's zero history is a real measurement; the alternate screen's
+	// stays invalid until first read.
+	sb [2]sbBaseline
+}
+
+// sbBaseline is one buffer's scrollback at its last measurement. valid is
+// false exactly when the count is not a measurement — before the first read,
+// or after a reflow this adapter could not observe (a resize of the buffer
+// the resize did not leave active, whose history it cannot read).
+type sbBaseline struct {
+	rows  int
+	valid bool
 }
 
 var (
@@ -206,6 +243,11 @@ func New(g emulator.Geometry) (emulator.Terminal, error) {
 		return nil, resultError("terminal_new", r)
 	}
 	t := &terminal{t: handle, geom: g}
+	// A fresh terminal is on the primary screen with no history, and both
+	// facts are measured rather than assumed: seeding the baseline here is
+	// what lets the FIRST feed report its departures instead of silently
+	// becoming one.
+	t.sb[0] = sbBaseline{valid: true}
 	t.id = register(t)
 	if err := t.install(g); err != nil {
 		// release and not a hand-rolled free: install owns three handles by the
@@ -290,6 +332,10 @@ func (t *terminal) Resize(g emulator.Geometry) ([]byte, error) {
 		return nil, resultError("terminal_resize", r)
 	}
 	t.geom = g
+	// A resize reflows, and reflow rewrites history's line breaks: the rows
+	// it reshapes did not leave the screen, so the departure baseline is
+	// taken again rather than let a reflowed count read as departures.
+	t.rebaselineLocked()
 	return t.takeReplies(), nil
 }
 
@@ -317,12 +363,158 @@ func (t *terminal) ingestLocked(b []byte) {
 		n, fired := t.scanFence(b[start:])
 		if n > 0 {
 			C.ghostty_terminal_vt_write(t.t, (*C.uint8_t)(unsafe.Pointer(&b[start])), C.size_t(n))
+			t.noteDepartedLocked()
 		}
 		if fired {
 			t.sightFence()
 		}
 		start += n
 	}
+}
+
+// The departure capture. Rows leave one at a time, off the top, and the
+// library raises no event for it: what it does give is each buffer's
+// scrollback depth, and the depth grows by exactly the rows that left while
+// THAT buffer was active. So the depth is read after every feed and compared
+// against the buffer's own baseline — per buffer, because the depth is
+// answered for the active screen (zero while the alternate screen holds the
+// pane), and a comparison across buffers would read the primary's restored
+// history as a departure. This is also why the check rides the feed and
+// nothing else: vt_write is the only call that scrolls, and a write that
+// ends on the other buffer books its rows against the buffer that lost them,
+// reporting them at that buffer's next measurement.
+
+// scrollbackLocked reads the active screen's scrollback depth: how many
+// history rows sit above the active area right now.
+func (t *terminal) scrollbackLocked() (int, error) {
+	var n C.size_t
+	if r := C.ghostty_terminal_get(t.t, C.GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS,
+		unsafe.Pointer(&n)); r != C.GHOSTTY_SUCCESS {
+		return 0, resultError("scrollback_rows", r)
+	}
+	return int(n), nil
+}
+
+// noteDepartedLocked runs after every vt_write. The rows that left in that
+// feed are history rows [h-d, h) — the NEWEST history — and they are read
+// now, before anything else can move. Capture at departure is load-bearing
+// twice over: eviction cannot beat the report, because the rows eviction
+// takes are always older than the ones being read; and a later reflow cannot
+// rewrite a row that was reported, because the copy was made while the row
+// was still the terminal's own.
+// What capture at departure cannot survive is the library pruning retention
+// inside a feed: the feed's own departures and the pruned pages land in one
+// depth reading, and that interval is flagged incomplete rather than
+// reported whole.
+func (t *terminal) noteDepartedLocked() {
+	screen, err := t.screenLocked()
+	h := 0
+	if err == nil {
+		h, err = t.scrollbackLocked()
+	}
+	base := &t.sb[sbIndex(screen)]
+	if err != nil {
+		// The buffer's depth is unknown, so no delta can be taken: mark the
+		// gap in the report rather than guess, and let the next feed
+		// re-baseline from a fresh measurement.
+		base.valid = false
+		t.failDeparted(fmt.Errorf("ghostty: departed rows unmeasured: %w", err))
+		return
+	}
+	if base.valid {
+		if d := h - base.rows; d > 0 {
+			t.captureDepartedLocked(h-d, h)
+		} else if d < 0 && h > 0 {
+			// The depth shrank while rows were still retained: the
+			// library's retention budget pruned whole pages inside this
+			// feed (a 10,000-byte budget applies by default, pruned at
+			// page granularity). The feed's own departures are mixed with
+			// pages the count lost, and no scalar says which rows left —
+			// so the interval is reported incomplete, never as an empty
+			// success. A consumer can carry "output was lost"; it cannot
+			// carry a lie.
+			t.failDeparted(fmt.Errorf(
+				"ghostty: scrollback retention pruned during one feed (depth %d -> %d): the rows that left in that feed cannot be read",
+				base.rows, h))
+		}
+		// d < 0 at zero depth is a reset or an erase-saved-lines: the
+		// history was DESTROYED, and destroyed rows did not leave the
+		// screen — they ceased. The baseline follows the buffer down
+		// without a report, exactly as it does for d == 0, the feed that
+		// scrolls nothing.
+	}
+	base.rows, base.valid = h, true
+}
+
+// captureDepartedLocked copies history rows [from, to) — the rows that just
+// left — out of the terminal, in order. A read failure stops the capture:
+// rows after it are ordered after it, and reading past a hole would report
+// the rest as though the hole were not there.
+func (t *terminal) captureDepartedLocked(from, to int) {
+	for y := from; y < to; y++ {
+		row, err := t.rowAt(pointHistory, y)
+		if err != nil {
+			t.failDeparted(fmt.Errorf("ghostty: departed row %d of %d..%d: %w", y, from, to, err))
+			return
+		}
+		t.departed = append(t.departed, row)
+	}
+}
+
+// failDeparted records the interval's first hole; the report is handed out
+// with it.
+func (t *terminal) failDeparted(err error) {
+	if t.departedErr == nil {
+		t.departedErr = err
+	}
+}
+
+// rowAt is the one row read: the line's soft-wrap flags and its cells,
+// copied, from the coordinate space tag names — the active area for the
+// port's Row, the scrollback history for a departed row. Bounds belong to
+// the caller, because the two spaces are bounded differently: the active
+// area by the geometry, history by what has not been evicted.
+func (t *terminal) rowAt(tag C.GhosttyPointTag, y int) (emulator.Row, error) {
+	wrapped, continuation, err := t.rowFlags(tag, y)
+	if err != nil {
+		return emulator.Row{}, err
+	}
+	cells := make([]emulator.Cell, 0, t.geom.Cols)
+	for x := range t.geom.Cols {
+		cell, err := t.readCell(tag, x, y)
+		if err != nil {
+			return emulator.Row{}, err
+		}
+		cells = append(cells, cell)
+	}
+	return emulator.Row{Cells: cells, Wrap: wrapped, Continuation: continuation}, nil
+}
+
+// rebaselineLocked takes fresh baselines after a mutation that reflows
+// rather than scrolls. The active buffer is measured; the hidden one cannot
+// be, so its next measurement starts a fresh baseline instead of a delta —
+// which is also why the check rides the feed and nothing else.
+func (t *terminal) rebaselineLocked() {
+	screen, err := t.screenLocked()
+	if err != nil {
+		t.sb[0], t.sb[1] = sbBaseline{}, sbBaseline{}
+		return
+	}
+	h, err := t.scrollbackLocked()
+	if err != nil {
+		t.sb[0], t.sb[1] = sbBaseline{}, sbBaseline{}
+		return
+	}
+	t.sb = [2]sbBaseline{}
+	t.sb[sbIndex(screen)] = sbBaseline{rows: h, valid: true}
+}
+
+// sbIndex maps a screen to its baseline slot.
+func sbIndex(s emulator.Screen) int {
+	if s == emulator.ScreenAlternate {
+		return 1
+	}
+	return 0
 }
 
 // takeReplies hands the accumulated replies to the caller and starts a fresh
@@ -337,12 +529,37 @@ func (t *terminal) takeReplies() []byte {
 	return out
 }
 
+// DepartedRows hands the caller the rows that left the screen since its
+// previous call and starts a fresh report, with the interval's error
+// alongside: the rows that were read go out even when the interval had a
+// hole, because the caller is the one that must decide what an unread
+// interval is worth. The drain follows takeReplies exactly — one reader,
+// one copy, emptied by being read.
+func (t *terminal) DepartedRows() ([]emulator.Row, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.t == nil {
+		return nil, emulator.ErrClosed
+	}
+	out := t.departed
+	t.departed = nil
+	err := t.departedErr
+	t.departedErr = nil
+	return out, err
+}
+
 func (t *terminal) Screen() (emulator.Screen, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.t == nil {
 		return emulator.ScreenPrimary, emulator.ErrClosed
 	}
+	return t.screenLocked()
+}
+
+// screenLocked is Screen's read without the lock: the departure capture runs
+// where mu is already held and needs the same answer, taken the same way.
+func (t *terminal) screenLocked() (emulator.Screen, error) {
 	var screen C.GhosttyTerminalScreen
 	if r := C.ghostty_terminal_get(t.t, C.GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN,
 		unsafe.Pointer(&screen)); r != C.GHOSTTY_SUCCESS {
@@ -413,19 +630,7 @@ func (t *terminal) Row(y int) (emulator.Row, error) {
 	if y < 0 || y >= t.geom.Rows {
 		return emulator.Row{}, fmt.Errorf("ghostty: row %d of %d: %w", y, t.geom.Rows, emulator.ErrOutOfRange)
 	}
-	wrapped, continuation, err := t.rowFlags(y)
-	if err != nil {
-		return emulator.Row{}, err
-	}
-	cells := make([]emulator.Cell, 0, t.geom.Cols)
-	for x := range t.geom.Cols {
-		cell, err := t.readCell(x, y)
-		if err != nil {
-			return emulator.Row{}, err
-		}
-		cells = append(cells, cell)
-	}
-	return emulator.Row{Cells: cells, Wrap: wrapped, Continuation: continuation}, nil
+	return t.rowAt(pointActive, y)
 }
 
 func (t *terminal) Cell(x, y int) (emulator.Cell, error) {
@@ -438,15 +643,18 @@ func (t *terminal) Cell(x, y int) (emulator.Cell, error) {
 		return emulator.Cell{}, fmt.Errorf("ghostty: cell %d,%d of %dx%d: %w",
 			x, y, t.geom.Cols, t.geom.Rows, emulator.ErrOutOfRange)
 	}
-	return t.readCell(x, y)
+	return t.readCell(pointActive, x, y)
 }
 
 // rowFlags reads a line's soft-wrap state. The row is read through a
 // reference at column 0 because the wrap flags live on the line and not on a
-// cell, and any cell of the line yields the same line.
-func (t *terminal) rowFlags(y int) (wrapped, continuation bool, err error) {
+// cell, and any cell of the line yields the same line. Tag names the
+// coordinate space — the active area for the port's Row, the scrollback
+// history for a departed row — and the flags are the line's own either way:
+// carried by the terminal across the wrap, never re-measured from widths.
+func (t *terminal) rowFlags(tag C.GhosttyPointTag, y int) (wrapped, continuation bool, err error) {
 	var ref C.GhosttyGridRef
-	if r := C.nocxGridRefAt(t.t, 0, C.uint16_t(y), &ref); r != C.GHOSTTY_SUCCESS {
+	if r := C.nocxGridRefAt(t.t, tag, 0, C.uint32_t(y), &ref); r != C.GHOSTTY_SUCCESS {
 		return false, false, resultError("grid_ref", r)
 	}
 	var row C.GhosttyRow
@@ -474,9 +682,11 @@ func (t *terminal) rowFlags(y int) (wrapped, continuation bool, err error) {
 // frame path: the library's incremental render-state API (render.h) is the one
 // built for per-frame work, a Row here is O(columns) references, and this port
 // does not carry the render state at all (see the port's package doc).
-func (t *terminal) readCell(x, y int) (emulator.Cell, error) {
+// Tag names the coordinate space the position is read in: the active area
+// for the port's own reads, the scrollback history for a departed row.
+func (t *terminal) readCell(tag C.GhosttyPointTag, x, y int) (emulator.Cell, error) {
 	var ref C.GhosttyGridRef
-	if r := C.nocxGridRefAt(t.t, C.uint16_t(x), C.uint16_t(y), &ref); r != C.GHOSTTY_SUCCESS {
+	if r := C.nocxGridRefAt(t.t, tag, C.uint32_t(x), C.uint32_t(y), &ref); r != C.GHOSTTY_SUCCESS {
 		return emulator.Cell{}, resultError("grid_ref", r)
 	}
 	var cell C.GhosttyCell

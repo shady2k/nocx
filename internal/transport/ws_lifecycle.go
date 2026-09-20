@@ -373,6 +373,33 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 		"lifecycle", f.Lifecycle, "domain", f.Domain, "epoch", f.Epoch)
 }
 
+// CaptureBindings is the fence→entry memory the completed-fact projection
+// records (nocx-2v80t.2.2). A helper's capture record arrives keyed by the
+// fence nonce whose rendezvous settled, and the entry it must be stored
+// against is the one this projection closes; the completed fact is the only
+// moment both identities are named together, so the binding is written
+// THERE — by the same synchronous emitter turn that closes the entry, and
+// strictly before the completion is carried down to the helper session that
+// could ever settle a record under that nonce. The identity it binds is the
+// KERNEL's attempt id as the published fact carries it: entries are keyed by
+// that id by both writers (the submit handler and the shell-originated
+// projection below), and an anonymous completion binds the attempt the
+// kernel itself resolved, never a string the wire named.
+type CaptureBindings interface {
+	// Bind remembers which entry one settled fence belongs to. The write is
+	// once per accepted completion; implementations bound the memory and
+	// treat a repeated nonce as the same fact, not a second one.
+	Bind(nonce, entryID string)
+}
+
+// WithCaptureBindings attaches the fence→entry memory. Without it the
+// projection binds nothing and every capture record a helper sends is
+// answered noEntry — which is the honest answer, and the one the result's
+// contract names for exactly this state.
+func WithCaptureBindings(b CaptureBindings) WSServerOption {
+	return func(s *WSServer) { s.captureBindings = b }
+}
+
 // syncLifecycleLedger projects authenticated attempt facts onto the same
 // entry the submit handler opened. It runs synchronously in the publisher's
 // emitter callback, so a lifecycle fact cannot outrun its store transition.
@@ -477,6 +504,15 @@ func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) {
 	}
 	if f.Attempt.State != lifecyclepub.AttemptCompleted && f.Attempt.State != lifecyclepub.AttemptUnknown {
 		return
+	}
+	// THE BINDING, at the only moment both identities are named together:
+	// the fence the completion carried and the entry this projection is
+	// about to close. It is written whether the entry is already closed or
+	// not (a replayed completion binds the same value), and before the
+	// finish write — a failed finish leaves the row open but still the
+	// entry a capture stores against.
+	if f.Attempt.State == lifecyclepub.AttemptCompleted && f.Attempt.Fence != "" && s.captureBindings != nil {
+		s.captureBindings.Bind(f.Attempt.Fence, row.ID)
 	}
 	if row.Phase == content.PhaseClosed {
 		return

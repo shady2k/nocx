@@ -138,7 +138,7 @@ func startPaneJourney(t *testing.T, srv *pwSSHServer) *paneJourney {
 		ExpectHash:  filesFixtureGenera,
 		SentinelTTL: 5 * time.Second,
 		Reverse: helperReverseHandlers(
-			rc, &askRecorder{value: openPasswordFixturePassword}, prompts, nil, logger),
+			rc, &askRecorder{value: openPasswordFixturePassword}, prompts, nil, logger, newCaptureSink()),
 		Log: logger,
 	})
 	if err != nil {

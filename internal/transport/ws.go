@@ -620,6 +620,12 @@ type WSServer struct {
 	// fills — which the History settings section states rather than only a
 	// log line.
 	sessionRecorder SessionOutputRecorder
+	// captureBindings is the fence→entry memory the completed-fact
+	// projection records (ws_lifecycle.go). Nil binds nothing, and every
+	// capture record a helper sends is answered noEntry — the composition
+	// root wires it beside the content store, whose ledger the entries
+	// live in.
+	captureBindings CaptureBindings
 	// contentDB is the durable content store backing history.query. When
 	// nil, the method answers source=unavailable — the overlay then says
 	// durable history is not running instead of presenting the in-memory

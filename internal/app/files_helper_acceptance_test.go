@@ -201,7 +201,7 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 		Exec:        helperclient.NewSocketConn(coordEnd),
 		ExpectHash:  filesFixtureGenera,
 		SentinelTTL: 5 * time.Second,
-		Reverse:     helperReverseHandlers(rc, secrets, &helperPrompt{log: logger}, nil, logger),
+		Reverse:     helperReverseHandlers(rc, secrets, &helperPrompt{log: logger}, nil, logger, newCaptureSink()),
 		Log:         logger,
 	})
 	if err != nil {

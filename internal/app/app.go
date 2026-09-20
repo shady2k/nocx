@@ -1073,7 +1073,14 @@ func New(opts ...Option) (*App, error) {
 	// that raises the question is built: this root builds the transport late,
 	// so the holder is what lets one registry be complete either way.
 	helperPrompts := &helperPrompt{log: slogger}
-	localOpener.setReverseHandlers(helperReverseHandlers(sshClient, credResolver, helperPrompts, hostKeys, slogger))
+	// The capture sink (nocx-2v80t.2.2) is the same kind of holder: the
+	// registry is built before the content store is, so the ledger it
+	// stores through arrives below, beside that store, and until then a
+	// capture is answered noEntry — the truth, not a kept nobody stored.
+	// The binding memory inside it is what the transport's lifecycle
+	// projection writes; both halves come from this one sink.
+	captures := newCaptureSink()
+	localOpener.setReverseHandlers(helperReverseHandlers(sshClient, credResolver, helperPrompts, hostKeys, slogger, captures))
 	// The destination half of the same client (nocx-50w7p.5): an ssh pane is
 	// hosted by THIS machine's helper, so the opener must resolve the address and
 	// the credential's authorization before the daemon is asked to dial — the
@@ -1250,6 +1257,13 @@ func New(opts ...Option) (*App, error) {
 		// argument this file already makes about `Open` — judge nothing until
 		// the thing that can ask has been built.
 	}
+	// The capture sink's ledger arrives here, beside the store it names
+	// (nocx-2v80t.2.2): a stub store records no rows, so the sink stays
+	// unwired and every capture is answered noEntry — never a kept that
+	// would store nothing.
+	if _, stubbed := contentDB.(*content.Stub); !stubbed {
+		captures.set(contentDB.Ledger())
+	}
 
 	// Live History policy: a Settings toggle applies without a restart. The
 	// transport's own notifier broadcasts settings.changed to the renderer;
@@ -1416,6 +1430,11 @@ func New(opts ...Option) (*App, error) {
 		transport.WithLiveEffects(agenttools.LiveEffects()),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithContentDB(contentDB),
+		// The fence→entry memory the lifecycle projection writes on every
+		// authenticated completion (nocx-2v80t.2.2): the same memory the
+		// capture sink above reads, so a record the helper sends up finds
+		// the entry it belongs to.
+		transport.WithCaptureBindings(captures.binds),
 		// The pane-open half of the checkout stamp (nocx-xn63t.1.4): every
 		// pane nocx opens standing inside a recorded checkout moves its
 		// last-used forward, through the one note both open callers share.

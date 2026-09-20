@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,8 +32,9 @@ func newLifecycleLedgerEnv(t *testing.T, withStore bool) (*lifecycleTestEnv, *li
 // newLifecycleLedgerEnvWithStore is newLifecycleLedgerEnv with the store
 // handed in — the one thing a caller that needs a specific History policy
 // (output retention, for instance) controls. A nil db is the store-unavailable
-// env.
-func newLifecycleLedgerEnvWithStore(t *testing.T, db content.ContentDB) (*lifecycleTestEnv, *lifecyclepub.Publisher, lifecycle.LaneID, lifecycle.DomainHandle, string, content.ContentDB) {
+// env. Extra server options ride along for the callers that wire one more
+// seam (the capture binding memory, for one) into the same stand.
+func newLifecycleLedgerEnvWithStore(t *testing.T, db content.ContentDB, extra ...WSServerOption) (*lifecycleTestEnv, *lifecyclepub.Publisher, lifecycle.LaneID, lifecycle.DomainHandle, string, content.ContentDB) {
 	t.Helper()
 	if db != nil {
 		if _, err := db.Layout().CreateWorkspace(context.Background(),
@@ -44,7 +46,7 @@ func newLifecycleLedgerEnvWithStore(t *testing.T, db content.ContentDB) (*lifecy
 	}
 	kernel := lifecycle.New(lifecycle.Options{})
 	pub := lifecyclepub.New(kernel)
-	e := newLifecycleTestEnv(t, WithContentDB(db), WithLifecyclePublisher(pub))
+	e := newLifecycleTestEnv(t, append([]WSServerOption{WithContentDB(db), WithLifecyclePublisher(pub)}, extra...)...)
 	pub.SetEmitter(e.ws)
 	sid := openLifecycleLedgerSession(t, e, "01930000-0000-7000-8000-0000000000a1")
 	const lane = lifecycle.LaneID("lane-lifecycle")
@@ -701,5 +703,157 @@ func TestLifecycleSubmitAttempt_RefusesASourceOutsideTheVocabulary(t *testing.T)
 				t.Fatalf("error message = %q, want it to name source", errObj.Message)
 			}
 		})
+	}
+}
+
+// ── the fence→entry binding (nocx-2v80t.2.2) ─────────────────────────────
+//
+// The capture record a helper sends up is keyed by the fence nonce whose
+// rendezvous settled; the entry it must be stored against is the one the
+// lifecycle projection wrote under the kernel's attempt id. The transport
+// is the one place both facts meet: syncLifecycleLedger closes the entry
+// from the completed fact, and the completed fact carries the fence. These
+// tests pin that the meeting is recorded — and that it is recorded from
+// the KERNEL's resolution of the completion, never from a string the wire
+// happened to carry.
+
+// recordingBindings is the binding memory the tests hand the server. It
+// records every Bind exactly as the capture handler later reads them.
+type recordingBindings struct {
+	mu    sync.Mutex
+	bound map[string]string
+	order []string
+}
+
+func newRecordingBindings() *recordingBindings {
+	return &recordingBindings{bound: make(map[string]string)}
+}
+
+func (r *recordingBindings) Bind(nonce, entryID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.bound[nonce] = entryID
+	r.order = append(r.order, nonce)
+}
+
+func (r *recordingBindings) entryFor(nonce string) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	id, ok := r.bound[nonce]
+	return id, ok
+}
+
+func (r *recordingBindings) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.order)
+}
+
+// TestCaptureBinding_TheCompletedFenceRemembersItsEntry is the spine: a
+// submitted command whose authenticated completion carries a fence leaves
+// the nonce bound to the entry the submit opened — the pairing the capture
+// handler resolves when the helper's record arrives.
+func TestCaptureBinding_TheCompletedFenceRemembersItsEntry(t *testing.T) {
+	binds := newRecordingBindings()
+	e, pub, lane, h, _, db := newLifecycleLedgerEnvWithStore(t, newLedgerStore(t), WithCaptureBindings(binds))
+
+	got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
+		lifecycleSubmitParams(string(h.Domain), "make watch"), 41))
+	fence := lifecycleFence(0x2C)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(nil, "make watch")))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(got.ID), 0, fence)))
+
+	nonce := hex.EncodeToString(fence[:])
+	id, ok := binds.entryFor(nonce)
+	if !ok {
+		t.Fatalf("the completed fence %s bound nothing — a capture record arriving under it could not be stored against its entry", nonce)
+	}
+	if id != got.ID {
+		t.Fatalf("the fence bound to entry %q, want the submit's own entry %q", id, got.ID)
+	}
+	if row := mustEntry(t, db, id); row.Phase != content.PhaseClosed {
+		t.Fatalf("the bound entry is phase %q, want closed — the binding and the close land on the same fact", row.Phase)
+	}
+}
+
+// TestCaptureBinding_AnAnonymousCompletionBindsTheKernelResolvedAttempt is
+// the identity question settled at the wire: a completion that names NO
+// attempt id — the shell-attached shape, protocol §8 — is resolved by the
+// kernel to the domain's single open attempt, and the binding records THAT
+// attempt's entry. A binding taken from a string the wire carried would
+// have nothing to take here.
+func TestCaptureBinding_AnAnonymousCompletionBindsTheKernelResolvedAttempt(t *testing.T) {
+	binds := newRecordingBindings()
+	_, pub, lane, h, _, _ := newLifecycleLedgerEnvWithStore(t, newLedgerStore(t), WithCaptureBindings(binds))
+
+	shellID := lifecycle.AttemptID("att-shell-binding-1")
+	fence := lifecycleFence(0x3D)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(&shellID, "git push")))
+	code := 0
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycle.Event{
+		Kind: lifecycle.KindComplete,
+		Complete: &lifecycle.Complete{
+			ExitCode: &code,
+			Fence:    fence,
+		},
+	}))
+
+	nonce := hex.EncodeToString(fence[:])
+	id, ok := binds.entryFor(nonce)
+	if !ok {
+		t.Fatalf("the anonymous completion's fence %s bound nothing", nonce)
+	}
+	if id != string(shellID) {
+		t.Fatalf("the fence bound to %q, want the kernel's own attempt %q — the one whose start opened the entry", id, string(shellID))
+	}
+}
+
+// TestCaptureBinding_HistoryOffBindsNothing is the noEntry half: with
+// history off the command still runs and the attempt still completes, but
+// no row was ever recorded — so the fence must bind nothing, and the
+// capture the helper later sends is answered "noEntry" rather than stored
+// against a row that does not exist.
+func TestCaptureBinding_HistoryOffBindsNothing(t *testing.T) {
+	policy := content.NewPolicy()
+	policy.SetEnabled(false)
+	binds := newRecordingBindings()
+	_, pub, lane, h, _, _ := newLifecycleLedgerEnvWithStore(t, newLedgerStoreWithPolicy(t, policy), WithCaptureBindings(binds))
+
+	fence := lifecycleFence(0x4E)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(nil, "deploy prod")))
+	code := 0
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycle.Event{
+		Kind: lifecycle.KindComplete,
+		Complete: &lifecycle.Complete{
+			ExitCode: &code,
+			Fence:    fence,
+		},
+	}))
+
+	if n := binds.count(); n != 0 {
+		t.Fatalf("history off left %d binding(s); a capture under one would be stored against no row", n)
+	}
+}
+
+// TestCaptureBinding_TransportLossBindsNothing covers the other no-fence
+// terminal state: an attempt the projection closed as unknown never settled
+// a rendezvous (its completion was never accepted), so there is no nonce a
+// capture record could arrive under and none may be bound.
+func TestCaptureBinding_TransportLossBindsNothing(t *testing.T) {
+	binds := newRecordingBindings()
+	e, pub, lane, h, _, db := newLifecycleLedgerEnvWithStore(t, newLedgerStore(t), WithCaptureBindings(binds))
+
+	got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
+		lifecycleSubmitParams(string(h.Domain), "sleep 1000"), 41))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(nil, "sleep 1000")))
+	if err := pub.TransportLost("T"); err != nil {
+		t.Fatalf("TransportLost: %v", err)
+	}
+
+	if n := binds.count(); n != 0 {
+		t.Fatalf("a lost transport bound %d nonce(s) — the attempt closed unknown, never completed", n)
+	}
+	if row := mustEntry(t, db, got.ID); row.Phase != content.PhaseClosed {
+		t.Fatalf("the lost attempt's row is phase %q, want closed", row.Phase)
 	}
 }

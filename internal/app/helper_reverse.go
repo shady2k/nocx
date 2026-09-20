@@ -66,7 +66,13 @@ import (
 // helperReverseHandlers builds the registry a helper's questions are answered
 // through. It is constructed once, at the composition root, and handed to
 // every connection this coordinator opens to its helper.
-func helperReverseHandlers(client *ssh.RealClient, secrets credential.Resolver, prompts *helperPrompt, hostKeys *hostKeyObserver, log *slog.Logger) *helperclient.ReverseRegistry {
+//
+// The capture sink is a holder, not a store: the registry is built before
+// the content store exists, and the sink's ledger is set beside that store
+// (helper_capture.go). Registering it here is what makes the op real — an
+// op nobody registered is answered unknown_op, which is a helper waiting
+// forever for an answer nobody owns.
+func helperReverseHandlers(client *ssh.RealClient, secrets credential.Resolver, prompts *helperPrompt, hostKeys *hostKeyObserver, log *slog.Logger, captures *captureSink) *helperclient.ReverseRegistry {
 	h := &helperReverse{client: client, secrets: secrets, prompts: prompts, hostKeys: hostKeys, log: log}
 	r := helperclient.NewReverseRegistry()
 	r.Register(proto.ServiceSSH, proto.OpSecret, h.secret)
@@ -75,6 +81,7 @@ func helperReverseHandlers(client *ssh.RealClient, secrets credential.Resolver, 
 	r.Register(proto.ServiceSSH, proto.OpPasswordPrompt, h.passwordPrompt)
 	r.Register(proto.ServiceSSH, proto.OpVerifyHostKey, h.verifyHostKey)
 	r.Register(proto.ServiceSSH, proto.OpTrustHostKey, h.trustHostKey)
+	r.Register(proto.ServiceSession, proto.OpCapture, captures.capture)
 	return r
 }
 

@@ -267,6 +267,13 @@ func (r *countingLocalRoute) AdoptLifecycle(context.Context, client.HostSessionI
 	panic("the local carrier was asked for a lifecycle identity for a binding that is not this machine's")
 }
 
+// LifecycleComplete is the carrier's third property (hostedCarrier); like
+// its neighbours it is unreachable in these tests, and a call to it is the
+// same bug rather than a degenerate case.
+func (r *countingLocalRoute) LifecycleComplete(context.Context, proto.LifecycleCompleteParams) error {
+	panic("the local carrier was asked to deliver a completion for a binding that is not this machine's")
+}
+
 func (r *countingLocalRoute) Release(string) {
 	panic("the local carrier was asked to release a connection for a binding that is not this machine's")
 }

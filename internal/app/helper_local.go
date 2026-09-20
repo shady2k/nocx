@@ -1441,6 +1441,19 @@ func (o *localHelperOpener) AdoptLifecycle(ctx context.Context, id helperclient.
 	return c.AdoptLifecycle(ctx, id)
 }
 
+// LifecycleComplete carries one already-authenticated completion DOWN over
+// the SAME connection the re-attachment rides (hostedCarrier): the replacing
+// coordinator's kernel authenticates the shell's completions, and the helper
+// session that owns the pane is addressed on the connection that holds it —
+// sessionConn's own pairing, for the reason AdoptLifecycle above gives.
+func (o *localHelperOpener) LifecycleComplete(ctx context.Context, params proto.LifecycleCompleteParams) error {
+	c, err := o.sessionConn(ctx, params.Session.Generation, params.Session.Session)
+	if err != nil {
+		return err
+	}
+	return c.LifecycleComplete(ctx, params)
+}
+
 // localSessionConn is one re-attached session's connection: the client, and the
 // generation its endpoint is named for — carried together because the screen
 // read needs both, and a handle addressed to the wrong generation names nothing.

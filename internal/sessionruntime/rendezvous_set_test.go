@@ -460,3 +460,62 @@ func fenceHexByte(b byte) string {
 	}
 	return string(out)
 }
+
+// TestAFullSetOfAuthenticatedMeetingsNeverLosesOneSilently is the bound's
+// other end, and the half the forged-flood test above cannot reach: every
+// slot held by an AUTHENTICATED completion still waiting for its fence — a
+// shell that ran nine commands faster than the emulator drew any of them.
+//
+// The set is bounded on purpose, so something must give. What may not happen
+// is what did: the ninth completion refused, its return discarded, and the
+// session still answering CompletenessComplete about an interval whose
+// authenticated boundary it threw away. An authenticated boundary is either
+// tracked or it is declared missing (ADR-0024 decision 1 cuts the other way
+// only for a SIGHTING, which authorises nothing). So the newest completion —
+// the one whose fence is still to come — takes the oldest one's slot, and
+// completeness says a boundary was lost.
+func TestAFullSetOfAuthenticatedMeetingsNeverLosesOneSilently(t *testing.T) {
+	s, _, _ := realRuntime(t)
+
+	// Fill every slot with a real, authenticated completion whose fence has
+	// not been drawn yet.
+	nonces := make([]FenceNonce, 0, MaxPendingRendezvous)
+	for i := 0; i < MaxPendingRendezvous; i++ {
+		nonce := fenceNonceFromString(t, fenceHexByte(byte(0xa0+i)))
+		s.Completed(s.Incarnation(), nonce, 0)
+		if got := s.RendezvousFor(nonce).State; got != RendezvousAwaitingSighting {
+			t.Fatalf("completion %d parked %s, want awaiting-sighting", i, rendezvousStateName(got))
+		}
+		nonces = append(nonces, nonce)
+	}
+	if got := s.Completeness(); got != CompletenessComplete {
+		t.Fatalf("a full set of pending meetings reads %v, want complete: nothing has been lost yet", got)
+	}
+
+	// The ninth authenticated completion arrives. There is nothing settled
+	// and no unbacked sighting to spend.
+	ninth := fenceNonceFromString(t, setBNonceHex)
+	s.Completed(s.Incarnation(), ninth, 0)
+
+	if got := s.RendezvousFor(ninth).State; got != RendezvousAwaitingSighting {
+		t.Fatalf("the ninth completion is %s, want awaiting-sighting: the authenticated half that is still to meet its fence is the one worth the slot", rendezvousStateName(got))
+	}
+	if got := s.RendezvousFor(nonces[0]).State; got != RendezvousIdle {
+		t.Fatalf("the oldest completion is %s, want gone: it is the one whose fence is least likely still coming", rendezvousStateName(got))
+	}
+	if got := s.RendezvousFor(nonces[len(nonces)-1]).State; got != RendezvousAwaitingSighting {
+		t.Fatalf("the newest incumbent is %s, want still waiting: only ONE slot was needed", rendezvousStateName(got))
+	}
+	if got := s.Completeness(); got != CompletenessNoFence {
+		t.Fatalf("after an authenticated boundary was dropped completeness reads %v, want no-fence: a boundary the session cannot place may not be described as complete", got)
+	}
+
+	// And the fence of the meeting that survived still closes it: degrading
+	// completeness is a statement about the LOST boundary, not a wedge.
+	if err := s.SightFence(ninth, []byte("$ nine")); err != nil {
+		t.Fatalf("sight the ninth meeting's fence: %v", err)
+	}
+	if got := s.RendezvousFor(ninth).State; got != RendezvousComplete {
+		t.Fatalf("the ninth meeting is %s after its fence, want complete", rendezvousStateName(got))
+	}
+}

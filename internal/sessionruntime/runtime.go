@@ -1156,19 +1156,40 @@ func (s *Session) Completed(at Incarnation, nonce FenceNonce, _ int) {
 // admitRendezvousLocked inserts a new meeting into the set, keeping it within
 // [MaxPendingRendezvous], and answers whether it was admitted.
 //
-// authenticated says an authenticated half is behind the insert. At the bound
-// the oldest SETTLED meeting gives up its slot first — it is record, not
-// authority — and then, for a completion only, the oldest parked SIGHTING:
-// a fence with nothing authenticated behind it authorised nothing, so
-// evicting one spends nothing, while a pending authenticated half is evicted
-// by nothing but its own expiry or its completion. A sighting that finds no
-// room is refused.
+// authenticated says an authenticated half is behind the insert, and the
+// order the bound spends slots in is the order of what each one is worth.
+// The oldest SETTLED meeting goes first — it is record, not authority, and
+// evicting it costs nothing. Then, for a completion only, the oldest parked
+// SIGHTING: a fence with nothing authenticated behind it authorised nothing
+// (ADR-0024 decision 1), so a flood of them can never be the reason a real
+// completion is refused. A SIGHTING that finds no room is refused there, and
+// that refusal is free for the same reason.
+//
+// What is left is a set every slot of which holds an authenticated half
+// still waiting for its fence, and another authenticated half arriving —
+// nine commands completed before the emulator drew any of them. Something
+// must give, and the one thing that may not is silence: the newest
+// completion takes the OLDEST one's slot, because the oldest is the one
+// whose fence is least likely still coming, and the boundary that left
+// unmet makes completeness [CompletenessNoFence]. So an authenticated
+// insert is never refused, and an authenticated boundary is either tracked
+// or declared lost.
 func (s *Session) admitRendezvousLocked(e *rendezvousEntry, authenticated bool) bool {
 	if len(s.rendezvous) >= MaxPendingRendezvous {
-		if !s.evictRendezvousLocked(func(e *rendezvousEntry) bool { return !e.pending() }) &&
-			!(authenticated && s.evictRendezvousLocked(func(e *rendezvousEntry) bool {
-				return e.State == RendezvousAwaitingAuthenticated
-			})) {
+		switch {
+		case s.evictRendezvousLocked(func(e *rendezvousEntry) bool { return !e.pending() }):
+		case !authenticated:
+			return false
+		case s.evictRendezvousLocked(func(e *rendezvousEntry) bool {
+			return e.State == RendezvousAwaitingAuthenticated
+		}):
+		case s.evictRendezvousLocked(func(e *rendezvousEntry) bool {
+			return e.State == RendezvousAwaitingSighting
+		}):
+			if s.completeness == CompletenessComplete {
+				s.completeness = CompletenessNoFence
+			}
+		default:
 			return false
 		}
 	}

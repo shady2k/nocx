@@ -373,12 +373,12 @@ func TestThePinOutlivesTheScreenItWasTakenFrom(t *testing.T) {
 	if bytes.Contains(s.Snapshot().Screen, source) {
 		t.Fatalf("the screen still holds the sighted row, so the trim this test is about did not happen")
 	}
-	if got := s.Rendezvous().PinnedSource; !bytes.Equal(got, source) {
+	if got := s.RendezvousFor(nonceOf(0x66)).PinnedSource; !bytes.Equal(got, source) {
 		t.Fatalf("the pin is %q after the screen moved past it, want %q", got, source)
 	}
 
 	s.AuthenticatedEvents().Completed(s.Incarnation(), nonceOf(0x66), 0)
-	if got := s.Rendezvous().State; got != RendezvousComplete {
+	if got := s.RendezvousFor(nonceOf(0x66)).State; got != RendezvousComplete {
 		t.Fatalf("the matching completion left the rendezvous %s, want complete", rendezvousName(got))
 	}
 }

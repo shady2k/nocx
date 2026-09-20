@@ -87,14 +87,15 @@ func TestACompletionWhoseFenceNeverArrivesEndsExpired(t *testing.T) {
 	sched := &expiryScheduler{}
 	s, _, _ := realRuntime(t, withExpiry(sched))
 
-	s.Completed(s.Incarnation(), fenceNonceFromString(t, fenceNonceHex), 0)
-	if rv := rendezvousOf(s); rv.State != RendezvousAwaitingSighting {
+	nonce := fenceNonceFromString(t, fenceNonceHex)
+	s.Completed(s.Incarnation(), nonce, 0)
+	if rv := rendezvousOf(s, nonce); rv.State != RendezvousAwaitingSighting {
 		t.Fatalf("after the completion the rendezvous is %s, want awaiting-sighting", rendezvousStateName(rv.State))
 	}
 
 	sched.fire()
 
-	rv := rendezvousOf(s)
+	rv := rendezvousOf(s, nonce)
 	if rv.State != RendezvousExpired {
 		t.Fatalf("after the wait elapsed the rendezvous is %s, want expired", rendezvousStateName(rv.State))
 	}
@@ -126,7 +127,7 @@ func TestTheWaitRearmsForTheNextRendezvous(t *testing.T) {
 		t.Fatalf("a completed rendezvous stopped the wait %d times, want exactly one", stopped)
 	}
 	sched.fire() // the stopped trigger must be inert
-	if rv := rendezvousOf(s); rv.State != RendezvousComplete {
+	if rv := rendezvousOf(s, fenceNonceFromString(t, fenceNonceHex)); rv.State != RendezvousComplete {
 		t.Fatalf("firing a stopped trigger left the rendezvous %s, want complete", rendezvousStateName(rv.State))
 	}
 
@@ -139,7 +140,7 @@ func TestTheWaitRearmsForTheNextRendezvous(t *testing.T) {
 		t.Fatalf("the second rendezvous re-armed the wait (armed=%d), want two", armed)
 	}
 	sched.fire()
-	if rv := rendezvousOf(s); rv.State != RendezvousExpired {
+	if rv := rendezvousOf(s, fenceNonceFromString(t, second)); rv.State != RendezvousExpired {
 		t.Fatalf("the second rendezvous is %s after its wait elapsed, want expired", rendezvousStateName(rv.State))
 	}
 }
@@ -171,26 +172,28 @@ func TestAStaleWaitDoesNotExpireTheNextRendezvous(t *testing.T) {
 	if err := s.Ingest([]byte("out" + fenceSeq(fenceNonceHex))); err != nil {
 		t.Fatalf("ingest the first fenced output: %v", err)
 	}
-	s.Completed(s.Incarnation(), fenceNonceFromString(t, fenceNonceHex), 0)
-	if rv := rendezvousOf(s); rv.State != RendezvousComplete {
+	first := fenceNonceFromString(t, fenceNonceHex)
+	s.Completed(s.Incarnation(), first, 0)
+	if rv := rendezvousOf(s, first); rv.State != RendezvousComplete {
 		t.Fatalf("the first rendezvous is %s, want complete", rendezvousStateName(rv.State))
 	}
 
 	const stale = "ef03ef03ef03ef03ef03ef03ef03ef03ef03ef03ef03ef03ef03ef03ef03ef03"
+	second := fenceNonceFromString(t, stale)
 	if err := s.Ingest([]byte("more" + fenceSeq(stale))); err != nil {
 		t.Fatalf("ingest the second fenced output: %v", err)
 	}
-	if rv := rendezvousOf(s); rv.State != RendezvousAwaitingAuthenticated {
+	if rv := rendezvousOf(s, second); rv.State != RendezvousAwaitingAuthenticated {
 		t.Fatalf("the second rendezvous is %s, want awaiting-authenticated", rendezvousStateName(rv.State))
 	}
 
-	sched.fireAt(0) // the FIRST wait: superseded by the rearm, already stopped
-	if rv := rendezvousOf(s); rv.State != RendezvousAwaitingAuthenticated {
+	sched.fireAt(0) // the FIRST wait: disarmed when its meeting completed
+	if rv := rendezvousOf(s, second); rv.State != RendezvousAwaitingAuthenticated {
 		t.Fatalf("a stale wait expired the second rendezvous (%s), want it still parked: its interval belongs to its own wait", rendezvousStateName(rv.State))
 	}
 
 	sched.fireAt(1) // the second wait: the one this rendezvous armed
-	if rv := rendezvousOf(s); rv.State != RendezvousExpired {
+	if rv := rendezvousOf(s, second); rv.State != RendezvousExpired {
 		t.Fatalf("the second rendezvous is %s after ITS wait fired, want expired", rendezvousStateName(rv.State))
 	}
 }

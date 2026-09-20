@@ -33,24 +33,24 @@ func fenceSeq(nonceHex string) string {
 	return "\x1b]1337;NOCX_FENCE;" + nonceHex + "\x07"
 }
 
-// rendezvousOf reads one session's rendezvous. The white-box read is the same
-// one lifecycle_complete_internal_test.go takes on the helper side: the
-// rendezvous is the observable a joined pair of halves lands in.
-func rendezvousOf(s *Session) Rendezvous {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.rendezvous
+// rendezvousOf reads one session's meeting by nonce — the keyed read, since
+// the rendezvous is a set: two commands can be pending at once, and "the"
+// rendezvous is not a thing a caller can name. The white-box shape is the
+// same one lifecycle_complete_internal_test.go takes on the helper side: the
+// meeting is the observable a joined pair of halves lands in.
+func rendezvousOf(s *Session, nonce FenceNonce) Rendezvous {
+	return s.RendezvousFor(nonce)
 }
 
-// waitForRendezvous waits until the session's rendezvous reaches want and
-// returns it. Like waitForScreen, the condition is an observable state change
-// re-read after each report from the pump; the hang limit only ends a wait
-// that can no longer be satisfied, and a pump that has ended says so.
-func waitForRendezvous(t *testing.T, s *Session, changed <-chan struct{}, done <-chan error, want RendezvousState) Rendezvous {
+// waitForRendezvous waits until the session's meeting for nonce reaches want
+// and returns it. Like waitForScreen, the condition is an observable state
+// change re-read after each report from the pump; the hang limit only ends a
+// wait that can no longer be satisfied, and a pump that has ended says so.
+func waitForRendezvous(t *testing.T, s *Session, changed <-chan struct{}, done <-chan error, nonce FenceNonce, want RendezvousState) Rendezvous {
 	t.Helper()
 	deadline := time.After(hangLimit)
 	for {
-		rv := rendezvousOf(s)
+		rv := rendezvousOf(s, nonce)
 		if rv.State == want {
 			return rv
 		}
@@ -123,8 +123,9 @@ func TestACompletionBeforeItsFenceStillEndsCompleteOnARealPTY(t *testing.T) {
 	p := startProgram(t, completionFirstProgram, harnessGeometry(80, 24))
 	p.wait("WAIT-FOR-COMPLETE")
 
-	p.s.Completed(p.s.Incarnation(), fenceNonceFromString(t, fenceNonceHex), 3)
-	if rv := rendezvousOf(p.s); rv.State != RendezvousAwaitingSighting {
+	nonce := fenceNonceFromString(t, fenceNonceHex)
+	p.s.Completed(p.s.Incarnation(), nonce, 3)
+	if rv := rendezvousOf(p.s, nonce); rv.State != RendezvousAwaitingSighting {
 		t.Fatalf("after the authenticated completion the rendezvous is %s, want awaiting-sighting",
 			rendezvousStateName(rv.State))
 	}
@@ -134,7 +135,7 @@ func TestACompletionBeforeItsFenceStillEndsCompleteOnARealPTY(t *testing.T) {
 	// have closed.
 	p.typed("go")
 	p.wait("FENCE-WRITTEN")
-	rv := waitForRendezvous(t, p.s, p.changed, p.done, RendezvousComplete)
+	rv := waitForRendezvous(t, p.s, p.changed, p.done, nonce, RendezvousComplete)
 	if string(rv.PinnedSource) != "WAIT-FOR-COMPLETE" {
 		t.Fatalf("the completed rendezvous pinned %q, want the row the fence was drawn over", rv.PinnedSource)
 	}
@@ -152,14 +153,15 @@ printf 'AFTER-FENCE\n'
 
 func TestAFenceBeforeItsCompletionStillEndsCompleteOnARealPTY(t *testing.T) {
 	p := startProgram(t, fenceFirstProgram, harnessGeometry(80, 24))
+	nonce := fenceNonceFromString(t, fenceNonceHex)
 
-	rv := waitForRendezvous(t, p.s, p.changed, p.done, RendezvousAwaitingAuthenticated)
+	rv := waitForRendezvous(t, p.s, p.changed, p.done, nonce, RendezvousAwaitingAuthenticated)
 	if string(rv.PinnedSource) != "fence-source-row" {
 		t.Fatalf("the sighting pinned %q, want the content the fence was drawn over", rv.PinnedSource)
 	}
 
-	p.s.Completed(p.s.Incarnation(), fenceNonceFromString(t, fenceNonceHex), 0)
-	waitForRendezvous(t, p.s, p.changed, p.done, RendezvousComplete)
+	p.s.Completed(p.s.Incarnation(), nonce, 0)
+	waitForRendezvous(t, p.s, p.changed, p.done, nonce, RendezvousComplete)
 }
 
 // ---------------------------------------------------------------------------
@@ -183,8 +185,9 @@ printf 'OVERWRITE-DONE\n'
 
 func TestAnOverwrittenFenceStillYieldsTheContentItWasDrawnOver(t *testing.T) {
 	p := startProgram(t, fenceThenOverwriteProgram, harnessGeometry(80, 24))
+	nonce := fenceNonceFromString(t, fenceNonceHex)
 
-	rv := waitForRendezvous(t, p.s, p.changed, p.done, RendezvousAwaitingAuthenticated)
+	rv := waitForRendezvous(t, p.s, p.changed, p.done, nonce, RendezvousAwaitingAuthenticated)
 	if string(rv.PinnedSource) != "fence-source-row" {
 		t.Fatalf("the sighting pinned %q, want the content at the fence", rv.PinnedSource)
 	}
@@ -195,9 +198,9 @@ func TestAnOverwrittenFenceStillYieldsTheContentItWasDrawnOver(t *testing.T) {
 	p.wait("OVERWRITE-DONE")
 	waitForScreenGone(t, p.s, p.changed, p.done, "fence-source-row")
 
-	p.s.Completed(p.s.Incarnation(), fenceNonceFromString(t, fenceNonceHex), 0)
-	waitForRendezvous(t, p.s, p.changed, p.done, RendezvousComplete)
-	if got := rendezvousOf(p.s); string(got.PinnedSource) != "fence-source-row" {
+	p.s.Completed(p.s.Incarnation(), nonce, 0)
+	waitForRendezvous(t, p.s, p.changed, p.done, nonce, RendezvousComplete)
+	if got := rendezvousOf(p.s, nonce); string(got.PinnedSource) != "fence-source-row" {
 		t.Fatalf("after the rows were overwritten the rendezvous pins %q, want the content at the fence", got.PinnedSource)
 	}
 }
@@ -220,7 +223,7 @@ func TestAForgedOSC133MarkerCompletesNothingOnARealPTY(t *testing.T) {
 	p := startProgram(t, forgedMarkerProgram, harnessGeometry(80, 24))
 	p.wait("FORGED-DONE")
 
-	rv := rendezvousOf(p.s)
+	rv := rendezvousOf(p.s, fenceNonceFromString(t, fenceNonceHex))
 	if rv.State != RendezvousIdle {
 		t.Fatalf("a forged OSC 133 D left the rendezvous %s, want idle: a stream marker may locate nothing and complete nothing",
 			rendezvousStateName(rv.State))
@@ -235,17 +238,41 @@ func TestAForgedOSC133MarkerCompletesNothingOnARealPTY(t *testing.T) {
 
 func TestAFenceWithNoCompletionCompletesNothingOnARealPTY(t *testing.T) {
 	p := startProgram(t, fenceFirstProgram, harnessGeometry(80, 24))
+	nonce := fenceNonceFromString(t, fenceNonceHex)
 
 	// The sighting happens — that is the fence's whole licence — but the
 	// meeting never closes: the state parks, completeness keeps the value
 	// the authenticated half alone may change, and nothing is complete.
-	rv := waitForRendezvous(t, p.s, p.changed, p.done, RendezvousAwaitingAuthenticated)
+	rv := waitForRendezvous(t, p.s, p.changed, p.done, nonce, RendezvousAwaitingAuthenticated)
 	if len(rv.PinnedSource) == 0 {
 		t.Fatalf("the sighted fence pinned nothing, want the content it was drawn over: a sighting locates")
 	}
 	if got := p.s.Completeness(); got != CompletenessComplete {
 		t.Fatalf("a fence alone moved completeness to %v, want unchanged complete: no authenticated boundary was drawn", got)
 	}
+
+	// BEFORE the expiry, write authority is intact: an intent commits.
+	p.mustSend(IntentKindText, []byte("x"))
+
+	// AT the expiry, the bounded wait elapses with nothing authenticated
+	// behind the sighting: the meeting ends, the pin is dropped, and
+	// completeness and write authority are UNTOUCHED — the expiry this test
+	// once read only as a moment (nocx fix-rendezvous-8W4D: this read, taken
+	// in a runtime with no expiry configured, is how blocker 1 got through).
+	if err := p.s.ExpireRendezvous(nonce); err != nil {
+		t.Fatalf("expire the unbacked sighting: %v", err)
+	}
+	if got := rendezvousOf(p.s, nonce).State; got != RendezvousExpired {
+		t.Fatalf("the unbacked meeting is %s after its wait elapsed, want expired", rendezvousStateName(got))
+	}
+	if got := p.s.Completeness(); got != CompletenessComplete {
+		t.Fatalf("expiring an unbacked sighting moved completeness to %v, want unchanged complete: a fence that authorised nothing may degrade nothing", got)
+	}
+
+	// AFTER the expiry, write authority is STILL intact — unauthenticated
+	// output must never revoke the person's ability to type, for however
+	// long the session lives.
+	p.mustSend(IntentKindText, []byte("y"))
 }
 
 func fenceNonceFromString(t *testing.T, hexed string) FenceNonce {

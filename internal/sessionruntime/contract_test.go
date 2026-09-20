@@ -481,7 +481,7 @@ func (f fingerprint) diff(g fingerprint) string {
 	add("geometry", f.Geometry != g.Geometry)
 	add("reported geometry", f.Reported != g.Reported)
 	add("screen", !bytes.Equal(f.Screen, g.Screen))
-	add("rendezvous", f.Rendezvous != g.Rendezvous)
+	add("pending-rendezvous", f.PendingRendezvous != g.PendingRendezvous)
 	add("completeness", f.Completeness != g.Completeness)
 	add("intents", !slices.Equal(f.Intents, g.Intents))
 	add("executed bytes", !reflect.DeepEqual(f.Executed, g.Executed))
@@ -519,31 +519,37 @@ func scheduleFenceAuthenticatedFirst(m Runtime) error {
 	source := []byte("$ \x1b]133;D;0\x07")
 
 	m.AuthenticatedEvents().Completed(inc, nonce, 0)
-	if got := m.Rendezvous().State; got != RendezvousAwaitingSighting {
+	if got := m.RendezvousFor(nonce).State; got != RendezvousAwaitingSighting {
 		return failed("fence/authenticated-first-parks",
 			"the authenticated half left the rendezvous %s, want awaiting-sighting and therefore not complete", rendezvousName(got))
 	}
 	observe(kindRendezvous, int(RendezvousAwaitingSighting))
 
-	// A sighting carrying a different nonce is a different event.
-	if err := m.SightFence(nonceOf(0x22), source); !errors.Is(err, ErrNonceMismatch) {
-		return failed("fence/foreign-nonce-refused",
-			"a sighting carrying a nonce the completion did not carry returned %v, want %v", err, ErrNonceMismatch)
+	// A sighting carrying another nonce is another event. A set keyed by
+	// nonce has no half for it to overwrite, so it parks its OWN meeting —
+	// authorising nothing, as every sighting does — and the meeting that is
+	// waiting keeps waiting.
+	if err := m.SightFence(nonceOf(0x22), source); err != nil {
+		return failed("fence/foreign-nonce-parks", "sighting a fence whose nonce nothing authenticated carried: %v", err)
 	}
-	if got := m.Rendezvous().State; got != RendezvousAwaitingSighting {
-		return failed("fence/refused-sighting-leaves-the-state-alone",
-			"a refused sighting moved the rendezvous to %s", rendezvousName(got))
+	if got := m.RendezvousFor(nonceOf(0x22)).State; got != RendezvousAwaitingAuthenticated {
+		return failed("fence/foreign-nonce-parks-its-own-meeting",
+			"a foreign sighting left its own meeting %s, want parked with nothing authorised", rendezvousName(got))
+	}
+	if got := m.RendezvousFor(nonce).State; got != RendezvousAwaitingSighting {
+		return failed("fence/foreign-sighting-leaves-the-pending-half-alone",
+			"a foreign sighting moved the waiting meeting to %s", rendezvousName(got))
 	}
 
 	// The matching sighting is the half that was missing.
 	if err := m.SightFence(nonce, source); err != nil {
 		return failed("fence/matching-sighting-completes", "sighting the awaited nonce: %v", err)
 	}
-	if got := m.Rendezvous().State; got != RendezvousComplete {
+	if got := m.RendezvousFor(nonce).State; got != RendezvousComplete {
 		return failed("fence/authenticated-first-completes",
 			"both halves arrived and the rendezvous is %s, want complete", rendezvousName(got))
 	}
-	if got := m.Rendezvous().PinnedSource; !bytes.Equal(got, source) {
+	if got := m.RendezvousFor(nonce).PinnedSource; !bytes.Equal(got, source) {
 		return failed("fence/completed-rendezvous-pins-the-content", "the rendezvous pinned %q, want %q", got, source)
 	}
 	observe(kindRendezvous, int(RendezvousComplete))
@@ -557,11 +563,11 @@ func scheduleFenceAuthenticatedFirst(m Runtime) error {
 	if err := m.SightFence(nonceOf(0x33), []byte("a fence nobody authenticated")); err != nil {
 		return failed("fence/unmatched-sighting-parks", "sighting with nothing authenticated in flight: %v", err)
 	}
-	if got := m.Rendezvous().State; got != RendezvousAwaitingAuthenticated {
+	if got := m.RendezvousFor(nonceOf(0x33)).State; got != RendezvousAwaitingAuthenticated {
 		return failed("fence/sighting-authorises-nothing",
 			"a sighted fence with no authenticated event waiting for it left the rendezvous %s, want awaiting-authenticated", rendezvousName(got))
 	}
-	observe(kindRendezvous, int(m.Rendezvous().State))
+	observe(kindRendezvous, int(m.RendezvousFor(nonceOf(0x33)).State))
 	return nil
 }
 
@@ -577,7 +583,7 @@ func scheduleFenceSightedFirst(m Runtime) error {
 	if err := m.SightFence(nonce, source); err != nil {
 		return failed("fence/sighted-first-parks", "sighting the fence before its authenticated event: %v", err)
 	}
-	if got := m.Rendezvous().State; got != RendezvousAwaitingAuthenticated {
+	if got := m.RendezvousFor(nonce).State; got != RendezvousAwaitingAuthenticated {
 		return failed("fence/sighting-authorises-nothing",
 			"a fence sighted first left the rendezvous %s, want awaiting-authenticated", rendezvousName(got))
 	}
@@ -586,13 +592,13 @@ func scheduleFenceSightedFirst(m Runtime) error {
 	// It authorises nothing: a completion carrying another nonce is another
 	// event, and must not close what the sighting parked.
 	m.AuthenticatedEvents().Completed(m.Incarnation(), nonceOf(0x55), 0)
-	if got := m.Rendezvous().State; got != RendezvousAwaitingAuthenticated {
+	if got := m.RendezvousFor(nonce).State; got != RendezvousAwaitingAuthenticated {
 		return failed("fence/parked-sighting-closes-nothing",
 			"a completion with a foreign nonce closed the parked rendezvous: %s", rendezvousName(got))
 	}
 
 	m.AuthenticatedEvents().Completed(m.Incarnation(), nonce, 0)
-	if got := m.Rendezvous().State; got != RendezvousComplete {
+	if got := m.RendezvousFor(nonce).State; got != RendezvousComplete {
 		return failed("fence/sighted-first-completes",
 			"the matching completion left the rendezvous %s, want complete", rendezvousName(got))
 	}
@@ -613,7 +619,7 @@ func scheduleFenceSightedFirstSurvivesScreenTrim(m Runtime) error {
 	if err := m.SightFence(nonce, source); err != nil {
 		return failed("fence/trim-sighting-parks", "sighting the fence before its authenticated event: %v", err)
 	}
-	if got := m.Rendezvous().PinnedSource; !bytes.Equal(got, source) {
+	if got := m.RendezvousFor(nonce).PinnedSource; !bytes.Equal(got, source) {
 		return failed("fence/sighted-first-pins-source",
 			"the sighting pinned %q, want the content it was seen over, %q", got, source)
 	}
@@ -637,7 +643,7 @@ func scheduleFenceSightedFirstSurvivesScreenTrim(m Runtime) error {
 	}
 
 	m.AuthenticatedEvents().Completed(m.Incarnation(), nonce, 0)
-	if got := m.Rendezvous().State; got != RendezvousComplete {
+	if got := m.RendezvousFor(nonce).State; got != RendezvousComplete {
 		return failed("fence/pinned-sighting-completes",
 			"the matching completion left the rendezvous %s, want complete", rendezvousName(got))
 	}
@@ -921,8 +927,8 @@ func scheduleObserverResync(m Runtime) error {
 	// cards through R and the live frame at R, then the changes after R"
 	// expressible at all.
 	if snap.At != m.Incarnation() || snap.Availability != m.Availability() || snap.Control != m.Control() ||
-		snap.Geometry != m.Geometry() || snap.Rendezvous != m.Rendezvous().State ||
-		snap.Completeness != m.Completeness() || !bytes.Equal(snap.Screen, m.Snapshot().Screen) {
+		snap.Geometry != m.Geometry() || snap.Completeness != m.Completeness() ||
+		!bytes.Equal(snap.Screen, m.Snapshot().Screen) {
 		return failed("snapshot/every-field-at-that-revision",
 			"the snapshot's fields do not all describe revision %d", snap.Revision)
 	}
@@ -1005,38 +1011,268 @@ func scheduleKeyEncodedAgainstModes(m Runtime) error {
 }
 
 // ---------------------------------------------------------------------------
-// 10. The bounded wait elapsing with one half missing.
-//
-// No rule guards this one, so it has no removal variant: the transition IS the
-// call, which is why ExpireRendezvous is a call rather than a timer.
+// 10. The bounded wait elapsing, in the two states a pending meeting can be
+// in. They are not the same thing and do not expire the same way: an
+// AUTHENTICATED completion whose fence never arrived marks the capture
+// no-fence (the schedule below; no rule guards it — the transition IS the
+// call, which is why ExpireRendezvous is a call rather than a timer), while a
+// fence sighted with nothing authenticated behind it authorised nothing and
+// its expiry may revoke nothing (the schedule after it, paired with
+// ruleOnlyAuthenticExpiryDegrades).
 // ---------------------------------------------------------------------------
 
 func scheduleRendezvousExpiresUnjoined(m Runtime) error {
-	if err := m.SightFence(nonceOf(0x77), []byte("$ \x1b]133;D;0\x07")); err != nil {
-		return failed("rendezvous/expiry-sighting", "sighting the fence: %v", err)
-	}
+	nonce := nonceOf(0x77)
 
-	// The authenticated half never arrives, and the bounded wait elapses.
-	if err := m.ExpireRendezvous(); err != nil {
+	// The authenticated half arrives, and its fence never does. This — not a
+	// fence sighted with nothing behind it — is the expiry that says
+	// something about the interval: an AUTHENTICATED completion whose
+	// boundary never arrived is the only one that can honestly mark a
+	// capture no-fence.
+	m.AuthenticatedEvents().Completed(m.Incarnation(), nonce, 0)
+	if got := m.RendezvousFor(nonce).State; got != RendezvousAwaitingSighting {
+		return failed("rendezvous/expiry-completion-parks",
+			"the authenticated half left the meeting %s, want awaiting-sighting", rendezvousName(got))
+	}
+	observe(kindRendezvous, int(RendezvousAwaitingSighting))
+
+	// The bounded wait elapses with the sighting half missing.
+	if err := m.ExpireRendezvous(nonce); err != nil {
 		return failed("rendezvous/expiry-is-an-outcome", "expiring a half-joined rendezvous: %v", err)
 	}
-	if got := m.Rendezvous().State; got != RendezvousExpired {
+	if got := m.RendezvousFor(nonce).State; got != RendezvousExpired {
 		return failed("rendezvous/expiry-is-named",
 			"the rendezvous is %s after the bounded wait elapsed, want expired", rendezvousName(got))
 	}
 	observe(kindRendezvous, int(RendezvousExpired))
-	if got := m.Rendezvous().PinnedSource; got != nil {
+	if got := m.RendezvousFor(nonce).PinnedSource; got != nil {
 		return failed("rendezvous/expiry-releases-the-pin",
 			"the expired rendezvous still pins %q; the pin lives only while the rendezvous is pending", got)
 	}
 
-	// An interval with no authenticated boundary may still be worth keeping; it
-	// may not be described as the command's complete output.
+	// An interval with no authenticated boundary may still be worth keeping;
+	// it may not be described as the command's complete output.
 	if got := m.Completeness(); got != CompletenessNoFence {
 		return failed("rendezvous/expiry-forces-no-fence",
 			"completeness is %s after the rendezvous expired, want no-fence", completenessName(got))
 	}
 	observe(kindCompleteness, int(CompletenessNoFence))
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// 10b. A fence sighted with NOTHING authenticated behind it expires into
+// nothing at all: it authorised nothing while it waited, so its expiry drops
+// the pin and changes nothing else — not completeness, not write authority.
+// Unauthenticated output must never revoke the person's ability to type.
+// Paired with ruleOnlyAuthenticExpiryDegrades.
+// ---------------------------------------------------------------------------
+
+func scheduleForgedFenceExpiryKeepsAuthority(m Runtime) error {
+	nonce := nonceOf(0x88)
+	if err := m.SightFence(nonce, []byte("a fence nobody authenticated")); err != nil {
+		return failed("rendezvous/forged-sighting-parks", "sighting a fence with nothing authenticated behind it: %v", err)
+	}
+	if got := m.RendezvousFor(nonce).State; got != RendezvousAwaitingAuthenticated {
+		return failed("rendezvous/forged-sighting-parks",
+			"an unbacked sighting left its meeting %s, want awaiting-authenticated", rendezvousName(got))
+	}
+	observe(kindRendezvous, int(RendezvousAwaitingAuthenticated))
+
+	// The write gate is open while it waits: a sighting never touched
+	// authority, so committing still works with it pending.
+	ctrl, err := grant(m, person())
+	if err != nil {
+		return err
+	}
+	first, err := admitKey(m, ctrl, []byte("l"))
+	if err != nil {
+		return err
+	}
+	if id, state, execErr := commitAndWrite(m, first); execErr != nil || state != IntentStateExecuted {
+		return failed("rendezvous/forged-sighting-keeps-write-authority",
+			"committing while an unbacked sighting waits: id=%d state=%s err=%v", id, intentStateName(state), execErr)
+	}
+
+	// The bounded wait elapses. The pin is dropped; nothing else moves.
+	if expiryErr := m.ExpireRendezvous(nonce); expiryErr != nil {
+		return failed("rendezvous/forged-expiry-is-an-outcome", "expiring the unbacked sighting: %v", expiryErr)
+	}
+	observe(kindRendezvous, int(RendezvousExpired))
+	if got := m.RendezvousFor(nonce).State; got != RendezvousExpired {
+		return failed("rendezvous/forged-expiry-is-named",
+			"the unbacked meeting is %s after its wait elapsed, want expired", rendezvousName(got))
+	}
+	if got := m.RendezvousFor(nonce).PinnedSource; got != nil {
+		return failed("rendezvous/forged-expiry-releases-the-pin",
+			"the expired sighting still pins %q", got)
+	}
+
+	// The interval, not the moment: completeness is untouched...
+	if got := m.Completeness(); got != CompletenessComplete {
+		return failed("rendezvous/forged-expiry-keeps-completeness",
+			"completeness is %s after an unbacked sighting expired, want unchanged: a fence that authorised nothing may degrade nothing",
+			completenessName(got))
+	}
+	observe(kindCompleteness, int(CompletenessComplete))
+
+	// ...and a SECOND intent still commits — write authority survived
+	// unauthenticated output for the whole interval.
+	second, err := admitKey(m, ctrl, []byte("s"))
+	if err != nil {
+		return err
+	}
+	if id, state, execErr := commitAndWrite(m, second); execErr != nil || state != IntentStateExecuted {
+		return failed("rendezvous/forged-expiry-keeps-write-authority",
+			"committing after an unbacked sighting expired: id=%d state=%s err=%v — forged fences must not revoke write authority",
+			id, intentStateName(state), execErr)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// 10c. Two commands pending at once: the rendezvous is a set keyed by nonce,
+// so neither meeting can evict the other, whatever order the halves arrive
+// in. Paired with ruleMeetingsAreIndependent (ADR-0024 decision 7: the two
+// channels are ordered independently, so two commands can legitimately be
+// pending at once).
+// ---------------------------------------------------------------------------
+
+func scheduleTwoCompletionsBeforeTheirFences(m Runtime) error {
+	nonceA, nonceB := nonceOf(0x91), nonceOf(0x92)
+	sourceA := []byte("output of command A")
+	sourceB := []byte("output of command B")
+	inc := m.Incarnation()
+
+	// Two authenticated completions arrive before either fence.
+	m.AuthenticatedEvents().Completed(inc, nonceA, 0)
+	m.AuthenticatedEvents().Completed(inc, nonceB, 0)
+	for _, n := range []FenceNonce{nonceA, nonceB} {
+		if got := m.RendezvousFor(n).State; got != RendezvousAwaitingSighting {
+			return failed("rendezvous/second-completion-does-not-evict-the-first",
+				"a second authenticated completion left a meeting %s, want it still awaiting its own sighting", rendezvousName(got))
+		}
+	}
+	observe(kindRendezvous, int(RendezvousAwaitingSighting))
+
+	// Their fences arrive in the OTHER order: B first, then A.
+	if err := m.SightFence(nonceB, sourceB); err != nil {
+		return failed("rendezvous/second-meeting-closes", "sighting the second fence: %v", err)
+	}
+	if err := m.SightFence(nonceA, sourceA); err != nil {
+		return failed("rendezvous/first-meeting-closes", "sighting the first fence: %v", err)
+	}
+	for _, n := range []FenceNonce{nonceA, nonceB} {
+		if got := m.RendezvousFor(n).State; got != RendezvousComplete {
+			return failed("rendezvous/meetings-end-independently",
+				"the meeting for one command is %s after both fences arrived, want complete", rendezvousName(got))
+		}
+	}
+	observe(kindRendezvous, int(RendezvousComplete))
+
+	// Each meeting pinned its OWN source: a join is per nonce, and nothing
+	// was evicted on the way.
+	if got := m.RendezvousFor(nonceA).PinnedSource; !bytes.Equal(got, sourceA) {
+		return failed("rendezvous/each-meeting-pins-its-own-source",
+			"command A's meeting pinned %q, want %q", got, sourceA)
+	}
+	if got := m.RendezvousFor(nonceB).PinnedSource; !bytes.Equal(got, sourceB) {
+		return failed("rendezvous/each-meeting-pins-its-own-source",
+			"command B's meeting pinned %q, want %q", got, sourceB)
+	}
+	return nil
+}
+
+func scheduleTwoFencesBeforeTheirCompletions(m Runtime) error {
+	nonceA, nonceB := nonceOf(0x93), nonceOf(0x94)
+	sourceA := []byte("fence A was drawn over this")
+	sourceB := []byte("fence B was drawn over this")
+	inc := m.Incarnation()
+
+	// Two fences are sighted before either completion exists. Neither
+	// authorises anything; each parks its own meeting with its own pin.
+	if err := m.SightFence(nonceA, sourceA); err != nil {
+		return failed("rendezvous/first-sighting-parks", "sighting the first fence: %v", err)
+	}
+	if err := m.SightFence(nonceB, sourceB); err != nil {
+		return failed("rendezvous/second-sighting-parks", "sighting the second fence: %v", err)
+	}
+	for _, n := range []FenceNonce{nonceA, nonceB} {
+		e := m.RendezvousFor(n)
+		if e.State != RendezvousAwaitingAuthenticated {
+			return failed("rendezvous/second-sighting-does-not-evict-the-first",
+				"a second sighted fence left a meeting %s, want both parked with their own pins", rendezvousName(e.State))
+		}
+	}
+	observe(kindRendezvous, int(RendezvousAwaitingAuthenticated))
+
+	// The completions arrive in the other order: B first, then A.
+	m.AuthenticatedEvents().Completed(inc, nonceB, 0)
+	m.AuthenticatedEvents().Completed(inc, nonceA, 0)
+	for _, n := range []FenceNonce{nonceA, nonceB} {
+		if got := m.RendezvousFor(n).State; got != RendezvousComplete {
+			return failed("rendezvous/parked-meetings-complete-independently",
+				"the meeting is %s after both completions arrived, want complete", rendezvousName(got))
+		}
+	}
+	observe(kindRendezvous, int(RendezvousComplete))
+	if got := m.RendezvousFor(nonceA).PinnedSource; !bytes.Equal(got, sourceA) {
+		return failed("rendezvous/each-meeting-pins-its-own-source",
+			"command A's meeting pinned %q, want %q", got, sourceA)
+	}
+	if got := m.RendezvousFor(nonceB).PinnedSource; !bytes.Equal(got, sourceB) {
+		return failed("rendezvous/each-meeting-pins-its-own-source",
+			"command B's meeting pinned %q, want %q", got, sourceB)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// 10d. The set is bounded, and the bound protects the authenticated channel.
+// Paired with ruleRendezvousSetIsBounded.
+// ---------------------------------------------------------------------------
+func scheduleRendezvousSetIsBounded(m Runtime) error {
+	// Fill the set to its bound with fences nobody authenticated.
+	forged := make([]FenceNonce, 0, MaxPendingRendezvous)
+	for i := 0; i < MaxPendingRendezvous; i++ {
+		nonce := nonceOf(byte(i + 1))
+		if err := m.SightFence(nonce, []byte("forged")); err != nil {
+			return failed("rendezvous/bound-admits-to-the-bound", "sighting forged fence %d: %v", i+1, err)
+		}
+		forged = append(forged, nonce)
+	}
+
+	// At the bound the next forged fence is refused and changes nothing: the
+	// set is a memory bound, not a queue a hostile writer may deepen.
+	before := fingerprintOf(m)
+	if err := m.SightFence(nonceOf(0xFE), []byte("one forged fence too many")); !errors.Is(err, ErrRendezvousFull) {
+		return failed("rendezvous/at-the-bound-a-forged-fence-is-refused",
+			"a sighting at the bound returned %v, want %v", err, ErrRendezvousFull)
+	}
+	if d := before.diff(fingerprintOf(m)); d != "" {
+		return failed("rendezvous/refused-sighting-changes-nothing",
+			"a sighting refused at the bound changed the runtime (%s)", d)
+	}
+
+	// An AUTHENTICATED completion is never refused while a mere sighting
+	// holds a slot: it preempts the oldest unbacked one, and the meeting it
+	// starts is safe from the flood behind it.
+	m.AuthenticatedEvents().Completed(m.Incarnation(), nonceOf(0xFF), 0)
+	if got := m.RendezvousFor(nonceOf(0xFF)).State; got != RendezvousAwaitingSighting {
+		return failed("rendezvous/completion-is-never-refused-while-a-sighting-holds-a-slot",
+			"an authenticated completion at the bound left its meeting %s, want awaiting-sighting", rendezvousName(got))
+	}
+	observe(kindRendezvous, int(RendezvousAwaitingSighting))
+	if got := m.RendezvousFor(forged[0]).State; got != RendezvousIdle {
+		return failed("rendezvous/preemption-takes-the-oldest-unbacked-sighting",
+			"the oldest forged fence's meeting is %s after the preemption, want gone", rendezvousName(got))
+	}
+	for _, n := range forged[1:] {
+		if got := m.RendezvousFor(n).State; got != RendezvousAwaitingAuthenticated {
+			return failed("rendezvous/the-flood-cannot-evict-what-it-did-not-bring",
+				"a forged fence's meeting is %s after the preemption, want still parked", rendezvousName(got))
+		}
+	}
 	return nil
 }
 
@@ -1618,7 +1854,10 @@ func TestSchedule_FenceAuthenticatedFirst_FailsWhenItsRuleIsRemoved(t *testing.T
 	if err == nil {
 		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[ruleSightingAuthorisesNothing])
 	}
-	assertionFailed(t, err, "fence/sighting-authorises-nothing")
+	// With the rule off the model completes the FIRST sighting it cannot
+	// authenticate — the foreign-nonce one, whose assertion names the same
+	// sentence: a sighting parks with nothing authorised.
+	assertionFailed(t, err, "fence/foreign-nonce-parks-its-own-meeting")
 }
 
 func TestSchedule_FenceSightedFirst(t *testing.T) {
@@ -1734,6 +1973,34 @@ func TestKeyIsEncodedAgainstTheModeTheProgramSet_FailsWhenItsRuleIsRemoved(t *te
 func TestSchedule_RendezvousExpiresUnjoined(t *testing.T) {
 	if err := scheduleRendezvousExpiresUnjoined(newModel(allRules())); err != nil {
 		t.Fatalf("with every rule on the schedule must pass: %v", err)
+	}
+}
+
+func TestSchedule_ForgedFenceExpiryKeepsAuthority_FailsWhenItsRuleIsRemoved(t *testing.T) {
+	err := scheduleForgedFenceExpiryKeepsAuthority(newModel(without(ruleOnlyAuthenticExpiryDegrades)))
+	if err == nil {
+		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[ruleOnlyAuthenticExpiryDegrades])
+	}
+}
+
+func TestSchedule_TwoCompletionsBeforeTheirFences_FailsWhenItsRuleIsRemoved(t *testing.T) {
+	err := scheduleTwoCompletionsBeforeTheirFences(newModel(without(ruleMeetingsAreIndependent)))
+	if err == nil {
+		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[ruleMeetingsAreIndependent])
+	}
+}
+
+func TestSchedule_TwoFencesBeforeTheirCompletions_FailsWhenItsRuleIsRemoved(t *testing.T) {
+	err := scheduleTwoFencesBeforeTheirCompletions(newModel(without(ruleMeetingsAreIndependent)))
+	if err == nil {
+		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[ruleMeetingsAreIndependent])
+	}
+}
+
+func TestSchedule_RendezvousSetIsBounded_FailsWhenItsRuleIsRemoved(t *testing.T) {
+	err := scheduleRendezvousSetIsBounded(newModel(without(ruleRendezvousSetIsBounded)))
+	if err == nil {
+		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[ruleRendezvousSetIsBounded])
 	}
 }
 
@@ -2040,12 +2307,12 @@ func invalidEvents() []invalidEvent {
 			},
 		},
 		{
-			name: "ExpireRendezvous with nothing in flight",
+			name: "ExpireRendezvous for a nonce nothing is waiting on",
 			drive: func(m Runtime) error {
 				before := fingerprintOf(m)
-				if err := m.ExpireRendezvous(); !errors.Is(err, ErrNoRendezvous) {
+				if err := m.ExpireRendezvous(nonceOf(0x01)); !errors.Is(err, ErrNoRendezvous) {
 					return failed("invalid/expiry-without-a-rendezvous-refused",
-						"ExpireRendezvous with an idle rendezvous returned %v, want %v", err, ErrNoRendezvous)
+						"ExpireRendezvous for an untracked nonce returned %v, want %v", err, ErrNoRendezvous)
 				}
 				return mustBeUnchanged(m, before, "invalid/expiry-without-a-rendezvous-changes-nothing")
 			},

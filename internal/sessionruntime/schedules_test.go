@@ -120,6 +120,34 @@ func realSchedules() []realSchedule {
 			},
 		},
 		{
+			name: "scheduleForgedFenceExpiryKeepsAuthority",
+			run: func(t *testing.T) error {
+				s, _, _ := realRuntime(t)
+				return scheduleForgedFenceExpiryKeepsAuthority(s)
+			},
+		},
+		{
+			name: "scheduleTwoCompletionsBeforeTheirFences",
+			run: func(t *testing.T) error {
+				s, _, _ := realRuntime(t)
+				return scheduleTwoCompletionsBeforeTheirFences(s)
+			},
+		},
+		{
+			name: "scheduleTwoFencesBeforeTheirCompletions",
+			run: func(t *testing.T) error {
+				s, _, _ := realRuntime(t)
+				return scheduleTwoFencesBeforeTheirCompletions(s)
+			},
+		},
+		{
+			name: "scheduleRendezvousSetIsBounded",
+			run: func(t *testing.T) error {
+				s, _, _ := realRuntime(t)
+				return scheduleRendezvousSetIsBounded(s)
+			},
+		},
+		{
 			name: "schedulePreconditionStaleAtExecution",
 			run: func(t *testing.T) error {
 				s, _, _ := realRuntime(t)

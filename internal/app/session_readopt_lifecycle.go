@@ -64,6 +64,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport"
 )
@@ -89,6 +90,12 @@ type lifecycleAdoption struct {
 	// reached for at attachTo, which runs on the transport's goroutine with
 	// no registry in scope.
 	log log.Logger
+	// stopDownlink ends the completion downlink's delivery context — the
+	// hosted session's lifetime, detached from this attempt's bound (the
+	// attempt context ends when the pass returns; the pane does not). Its
+	// two ends: abort, for an adoption whose session never came to exist,
+	// and endWithSession, for the one that did.
+	stopDownlink context.CancelFunc
 }
 
 // adoptLifecycle asks the helper for the identity this session's shell is
@@ -123,9 +130,27 @@ func (rp *readoptPass) adoptLifecycle(ctx context.Context, carrier hostedCarrier
 		// "conventional by design" and this session genuinely is.
 		return lifecycleAdoption{}
 	}
+	// THE COMPLETION DOWNLINK RIDES THE ADOPTION TOO. The replacement kernel
+	// authenticates the shell's completions exactly as the coordinator that
+	// opened the pane did; without the wrapper and the carrier below, the
+	// authenticated half went nowhere — the ledger closed the command and the
+	// helper's runtime waited for an authentication that never came. The
+	// delivery context is the hosted session's lifetime, detached from this
+	// attempt's bound: the pass's context ends when the pass returns, and the
+	// pane does not.
+	sessionCtx, stopDownlink := context.WithCancel(context.WithoutCancel(ctx))
+	downlink := client.NewCompletionDownlink(carrier, sessionCtx, func(err error) {
+		log.NewSlogAdapter(rp.registry.log).Warn(
+			"helper: the completion the kernel accepted did not reach the helper session", "err", err)
+	})
+	// The identity is known HERE — the helper handed it back — so the
+	// downlink binds at construction and carries no pending window at all.
+	downlink.Bind(entry.HostSessionID)
+	driveKernel := client.NewCompletionObservingAdoptingKernel(kernel, downlink)
+
 	coordinatorConn, peerConn := net.Pipe()
 	adapter, err := lifecyclechannel.NewAdoptedStream(
-		log.NewSlogAdapter(rp.registry.log), kernel, coordinatorConn,
+		log.NewSlogAdapter(rp.registry.log), driveKernel, coordinatorConn,
 		lifecyclechannel.Launch{
 			Lane:       lifecycle.LaneID(launch.Lane),
 			Domain:     lifecycle.DomainID(launch.Domain),
@@ -136,6 +161,7 @@ func (rp *readoptPass) adoptLifecycle(ctx context.Context, carrier hostedCarrier
 		lifecyclechannel.WithLossReporter(rp.registry.reportLifecycleLoss))
 	if err != nil {
 		_ = peerConn.Close()
+		stopDownlink()
 		rp.registry.log.Warn("the lifecycle identity a helper handed back was refused; the pane will not produce blocks",
 			"session_id", entry.HostSessionID.Session, "error", err)
 		return lifecycleAdoption{
@@ -156,6 +182,8 @@ func (rp *readoptPass) adoptLifecycle(ctx context.Context, carrier hostedCarrier
 		peer:    peerConn,
 		lane:    adapter.Lane(),
 		log:     log.NewSlogAdapter(rp.registry.log),
+
+		stopDownlink: stopDownlink,
 	}
 }
 
@@ -179,8 +207,22 @@ func (a lifecycleAdoption) attachTo(open *transport.HostedSessionOpen, attached 
 		abortOnce.Do(func() {
 			_ = adapter.Close()
 			_ = peer.Close()
+			// An adoption the transport refuses never became a pane; its
+			// downlink's lifetime ends with the rollback, not at some
+			// session end that will never arrive.
+			a.stopDownlink()
 		})
 	}
+}
+
+// endWithSession ends the downlink when the adopted session's own lifetime
+// ends — the success path's cancel, hung off the same Done the transport's
+// teardown owner waits on (bindDownlinkToSession). Safe on the zero value.
+func (a lifecycleAdoption) endWithSession(sess session.Session) {
+	if a.stopDownlink == nil {
+		return
+	}
+	bindDownlinkToSession(sess, a.stopDownlink)
 }
 
 // abort disposes an adoption whose session never came to exist. Safe on the
@@ -191,6 +233,7 @@ func (a lifecycleAdoption) abort() {
 	}
 	_ = a.adapter.Close()
 	_ = a.peer.Close()
+	a.stopDownlink()
 }
 
 // lifecycleCarrierSource is the attachment's lifecycle half, named as the one

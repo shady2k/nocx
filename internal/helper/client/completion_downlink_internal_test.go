@@ -4,6 +4,19 @@ package client
 // spawn-answer race (an accepted completion can predate the helper session's
 // identity) and the exactly-once rule are THIS type's behaviour, and no wire
 // is needed to judge them.
+//
+// WHAT PRODUCTION CAN REACH, stated because the review asked. The pre-bind
+// window these buffering tests exercise — a completion accepted before the
+// bind names the session — is one production CANNOT CURRENTLY REACH: on a
+// fresh open the bind runs inside hostedSpawn.run the moment the spawn
+// answers, while the bridge that can carry an Observe starts only after the
+// open returns (the transport's StartLifecycle); on a re-adoption the
+// identity is known before the downlink is built, so it binds at
+// construction. The tests stay because the buffer is the carrier's own
+// contract — bounded, ordered, exactly-once — and the wedge-detector for the
+// window the type was built for; making production reach the window would
+// mean bridging a lifecycle channel for a session that may never exist,
+// which reorders the open's rollback for a test's benefit.
 
 import (
 	"context"
@@ -11,6 +24,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
 )
@@ -182,5 +196,41 @@ func TestTheBindDrainHoldsTheDispatch(t *testing.T) {
 	<-bindDone
 	if len(spy.fence) != 1 || spy.fence[0] != buffered {
 		t.Fatalf("the drained backlog delivered %v, want the buffered fence exactly once", spy.fence)
+	}
+}
+
+// TestTheDownlinkDeliversUnderItsOwnContext pins the delivery SEAM the
+// lifetime fix hangs the downlink off: deliver runs under the context the
+// downlink was built with — the hosted session's lifetime, per the
+// composition — and not under a fresh or detached one. The session's end
+// cancels exactly that context, and the dispatch-time stop acts on it, so a
+// deliver that swapped it away would make the stop unreachable from the
+// wire: the composition cancels a context nobody reads. Over a real
+// transport a swapped context is unobservable until the stop misfires, so
+// the pin is here, where the send is a spy: the context handed to the send
+// is the downlink's own, asserted by identity, no clock involved.
+func TestTheDownlinkDeliversUnderItsOwnContext(t *testing.T) {
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+
+	seen := make(chan context.Context, 1)
+	dl := &CompletionDownlink{
+		ctx: ctx,
+		send: func(ctx context.Context, _ proto.LifecycleCompleteParams) error {
+			seen <- ctx
+			return nil
+		},
+		report: nil,
+	}
+	dl.Bind(HostSessionID{Generation: "gen-under-test", Session: "0123456789abcdef0123456789abcdef"})
+	dl.Observe([32]byte{1}, nil)
+
+	select {
+	case got := <-seen:
+		if got != ctx {
+			t.Fatal("deliver ran under a context other than the downlink's own: the composition's cancellation would never reach the send")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("deliver never reached the send")
 	}
 }

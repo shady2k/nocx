@@ -129,6 +129,15 @@ type localHelperRoute interface {
 type hostedCarrier interface {
 	Attach(ctx context.Context, params proto.AttachParams) (*client.AttachedSession, error)
 	AdoptLifecycle(ctx context.Context, id client.HostSessionID) (*proto.LifecycleLaunch, error)
+	// LifecycleComplete carries one already-authenticated completion DOWN to
+	// the helper session it names (owner decision 2026-09-19) — the third
+	// property of the ONE connection a re-attachment is made over. The
+	// replacement kernel authenticates the shell's completions exactly as the
+	// coordinator that opened the pane did, and the authenticated half has to
+	// travel down the same connection the adoption was made on; a carrier
+	// that could not say this would re-adopt a pane whose blocks stop
+	// reaching the runtime that owns it.
+	LifecycleComplete(ctx context.Context, params proto.LifecycleCompleteParams) error
 }
 
 // sessionAdopter installs the transport-owned half of a re-adopted session:
@@ -691,6 +700,9 @@ func (rp *readoptPass) readopt(
 			adoption.abort()
 			return transport.HostedSessionOpen{}, fmt.Errorf("adopt the re-attached session: %w", err)
 		}
+		// THE SESSION IS THE LIFETIME'S OWNER from here: the pane exists
+		// again, and the downlink the adoption built ends when it does.
+		adoption.endWithSession(sess)
 		// THE FINGERPRINT IS RECORDED HERE TOO, exactly as a fresh open
 		// records it (helper_git.go's openFarHelper, helper_local.go's
 		// OpenHosted) — and it must be, because a re-adopted session's own

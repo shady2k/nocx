@@ -59,11 +59,23 @@ type CompletionDownlink struct {
 // and a silent unbounded buffer would hide exactly that.
 const maxPendingCompletions = 16
 
+// CompletionSender is the one op the downlink needs from the pane's client:
+// the carrier op the already-authenticated completion travels down on.
+// *Client is it; so is any carrier that forwards the session service — the
+// re-adoption path's hostedCarrier, which is a connection and not always
+// this client.
+type CompletionSender interface {
+	LifecycleComplete(ctx context.Context, params proto.LifecycleCompleteParams) error
+}
+
 // NewCompletionDownlink builds the downlink over this pane's client. The
-// context is the open path's own — the same one StartLifecycle's bridge
-// runs under — so a delivery does not outlive the session open it belongs
-// to. report may be nil.
-func NewCompletionDownlink(c *Client, ctx context.Context, report func(error)) *CompletionDownlink {
+// context is THE HOSTED SESSION'S LIFETIME — the caller's statement of when
+// the pane this downlink serves is over — and never the request that
+// happened to be running when the pane was opened: the open request's
+// context is cancelled when the renderer's connection drops, while the PTY
+// deliberately lives on (AD-9), and a completion the kernel accepts after
+// that must still reach the helper session. report may be nil.
+func NewCompletionDownlink(c CompletionSender, ctx context.Context, report func(error)) *CompletionDownlink {
 	return &CompletionDownlink{
 		send: func(ctx context.Context, params proto.LifecycleCompleteParams) error {
 			return c.LifecycleComplete(ctx, params)
@@ -135,6 +147,18 @@ func (d *CompletionDownlink) Observe(fence [32]byte, exit *int) {
 // a string, and parsing it as the runtime's numeric generation is the defect
 // the separate spelling exists to make impossible.
 func (d *CompletionDownlink) deliver(c pendingCompletion) {
+	// THE STOP, CHECKED AT DISPATCH. The context is the hosted session's
+	// lifetime; when it is done the downlink is over, and a pane whose
+	// session has ended has no runtime left that matches the nonce. Sending
+	// anyway would put the op on a wire the session's end has already
+	// condemned — and ask the helper to cancel an exchange nobody wants —
+	// so the stop is decided HERE rather than left to the transport's
+	// post-write handling of an already-cancelled context: the completion is
+	// reported, and the kernel's execution state stands as it set it.
+	if err := d.ctx.Err(); err != nil {
+		d.reportf("the completion the kernel accepted did not reach the helper session: %v", err)
+		return
+	}
 	var exit *int
 	if c.exitCode != nil {
 		e := *c.exitCode
@@ -175,6 +199,35 @@ func (d *CompletionDownlink) reportf(format string, args ...any) {
 type CompletionObservingKernel struct {
 	lifecyclechannel.Kernel
 	downlink *CompletionDownlink
+}
+
+// CompletionObservingAdoptingKernel is the adopting form of the observing
+// wrapper: the seam a re-adopted pane's adapter drives (AdoptingKernel),
+// which needs the adoption the wrapped kernel already had — forwarded
+// un-gated, because an adoption is not a completion and the wrapper adds no
+// gate on it either — with every frame the adapter ingests still observed by
+// the ordinary wrapper it embeds. It exists because AdoptingKernel is a
+// separate interface on purpose: a kernel that only ever mints must not gain
+// an adopt by being wrapped, so the adopt is taken from the kernel, not
+// minted by the wrapper.
+type CompletionObservingAdoptingKernel struct {
+	CompletionObservingKernel
+	adopting lifecyclechannel.AdoptingKernel
+}
+
+// NewCompletionObservingAdoptingKernel wraps an adopting kernel for a
+// re-adopted pane's adapter. The adapter cannot tell it apart from the
+// kernel it wrapped.
+func NewCompletionObservingAdoptingKernel(k lifecyclechannel.AdoptingKernel, d *CompletionDownlink) *CompletionObservingAdoptingKernel {
+	return &CompletionObservingAdoptingKernel{
+		CompletionObservingKernel: CompletionObservingKernel{Kernel: k, downlink: d},
+		adopting:                  k,
+	}
+}
+
+// AdoptDomain forwards the wrapped kernel's own adoption.
+func (k *CompletionObservingAdoptingKernel) AdoptDomain(lane lifecycle.LaneID, domain lifecycle.DomainID, epoch uint64, capability lifecycle.Capability, recovery lifecycle.FenceNonce, t lifecycle.TransportID) (lifecycle.DomainHandle, error) {
+	return k.adopting.AdoptDomain(lane, domain, epoch, capability, recovery, t)
 }
 
 // NewCompletionObservingKernel wraps k. The wrapper satisfies the same

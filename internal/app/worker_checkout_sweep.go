@@ -37,6 +37,7 @@ import (
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/workers"
 )
 
@@ -67,6 +68,26 @@ type checkoutSweepNote struct {
 // checkout under a running shell.
 type sessionLister interface {
 	List() []session.Session
+}
+
+// checkoutIdlePeriod is the period closure the composition root hands the
+// sweep: the registry is read fresh on every call, an unreadable setting
+// degrades to the DECLARED default (never to zero — zero is "never", and a
+// read failure must not quietly disable the cleanup), and a fractional day
+// is a fraction of a day. The conversion multiplies in float BEFORE the
+// Duration cast: converting days to a Duration first truncated 0.5 to zero
+// — the "never" setting — so a person who asked for half a day of retention
+// got none (nocx-xn63t.1 review, finding 5).
+func checkoutIdlePeriod(registry *settings.Registry) func() time.Duration {
+	return func() time.Duration {
+		days, err := registry.GetNumber(settings.WorktreeIdleDays)
+		if err != nil {
+			log.From(context.Background()).Warn("checkout sweep: the idle period is unreadable; falling back to the declared default",
+				"key", settings.WorktreeIdleDays.Key(), "error", err)
+			days = settings.WorktreeIdleDays.DefaultValue()
+		}
+		return time.Duration(days * float64(24*time.Hour))
+	}
 }
 
 // checkoutSweeper removes the checkouts the record says nobody has used

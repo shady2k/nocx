@@ -317,13 +317,7 @@ func TestTheSweepReadsThePeriodThroughTheSettingsRegistry(t *testing.T) {
 	key := nocxCheckoutRepoKey(repoDir)
 
 	reg := settings.New(&appFakeDoc{}, nil)
-	period := func() time.Duration {
-		days, err := reg.GetNumber(settings.WorktreeIdleDays)
-		if err != nil {
-			t.Fatalf("read the period the way the composition root does: %v", err)
-		}
-		return time.Duration(days * float64(24*time.Hour))
-	}
+	period := checkoutIdlePeriod(reg)
 	sweeper := &checkoutSweeper{
 		checkouts: stand.checkouts,
 		sessions:  stand.reg,
@@ -349,6 +343,47 @@ func TestTheSweepReadsThePeriodThroughTheSettingsRegistry(t *testing.T) {
 	sweeper.RunOnce(context.Background())
 	if !checkoutGone(t, checkout) {
 		t.Fatal("the sweep left the checkout with the period at 1 day set through the registry")
+	}
+}
+
+// Criterion (nocx-xn63t.1 review, finding 5): the setting is a number, and a
+// fractional day is a FRACTION of a day — 0.5 is twelve hours, honoured
+// rather than truncated. The old arithmetic converted days to a Duration
+// before multiplying, which turned 0.5 into zero, and zero is the "never"
+// setting: a person who asked for half a day of retention got none. The
+// period read here is the production closure (checkoutIdlePeriod), not a
+// second conversion beside it — a second conversion is exactly what let the
+// truncation hide while this file's own test passed.
+func TestTheSweepHonoursAFractionalDay(t *testing.T) {
+	repoDir, _ := initRealRepo(t)
+	stand := newCheckoutStand(t)
+	coordA := stand.openCoordinator(t, "pane-a", repoDir)
+	stand.spawnCheckoutWorker(t, coordA, "worker-1", "feat/one", "t")
+	checkout := expectedWorktreePath(stand.checkouts.worktreeRoot, repoDir, "feat/one")
+	key := nocxCheckoutRepoKey(repoDir)
+
+	reg := settings.New(&appFakeDoc{}, nil)
+	period := checkoutIdlePeriod(reg)
+	sweeper := &checkoutSweeper{
+		checkouts: stand.checkouts,
+		sessions:  stand.reg,
+		period:    period,
+		now:       func() time.Time { return sweepNow },
+	}
+
+	ageCheckout(t, stand, key, checkout, sweepNow.Add(-11*time.Hour))
+	if err := reg.SetNumber(settings.WorktreeIdleDays, 0.5); err != nil {
+		t.Fatalf("set the period to half a day: %v", err)
+	}
+	sweeper.RunOnce(context.Background())
+	if checkoutGone(t, checkout) {
+		t.Fatal("the sweep removed a checkout 11 hours old under a half-day period")
+	}
+
+	ageCheckout(t, stand, key, checkout, sweepNow.Add(-13*time.Hour))
+	sweeper.RunOnce(context.Background())
+	if !checkoutGone(t, checkout) {
+		t.Fatal("the sweep left a checkout 13 hours old under a half-day period")
 	}
 }
 

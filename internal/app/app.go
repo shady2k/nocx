@@ -2413,15 +2413,7 @@ func New(opts ...Option) (*App, error) {
 	checkoutSweeper := &checkoutSweeper{
 		checkouts: checkouts,
 		sessions:  sess,
-		period: func() time.Duration {
-			days, err := settingsRegistry.GetNumber(settings.WorktreeIdleDays)
-			if err != nil {
-				log.From(context.Background()).Warn("checkout sweep: the idle period is unreadable; falling back to the declared default",
-					"key", settings.WorktreeIdleDays.Key(), "error", err)
-				days = settings.WorktreeIdleDays.DefaultValue()
-			}
-			return time.Duration(days) * 24 * time.Hour
-		},
+		period:    checkoutIdlePeriod(settingsRegistry),
 	}
 
 	// What nocx SEES, joined to what it records (nocx-luqz9.2, ADR-0070

@@ -23,12 +23,14 @@ package session
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -36,6 +38,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	nocxlog "github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/sessionruntime"
 	"github.com/shady2k/nocx/internal/shellintegration"
 )
 
@@ -476,7 +479,7 @@ func (s *Service) Ops() []string {
 	return []string{
 		proto.OpSpawn, proto.OpSpawnSSH, proto.OpSessions, proto.OpAttach, proto.OpAck,
 		proto.OpDetach, proto.OpResize, proto.OpCloseSession, proto.OpSignal,
-		proto.OpAdoptLifecycle, proto.OpScreen, proto.OpReplay,
+		proto.OpAdoptLifecycle, proto.OpLifecycleComplete, proto.OpScreen, proto.OpReplay,
 		proto.OpSnapshot, proto.OpTarget, proto.OpIntent, proto.OpIntentStatus, proto.OpAccessBump,
 	}
 }
@@ -517,6 +520,8 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.IntentStatusParams{})
 	case proto.OpAccessBump:
 		return host.SchemaFor(proto.AccessBumpParams{})
+	case proto.OpLifecycleComplete:
+		return host.SchemaFor(proto.LifecycleCompleteParams{})
 	}
 	return nil
 }
@@ -577,7 +582,7 @@ func (s *Service) Refusal(err error) (string, json.RawMessage) {
 		return proto.ErrCodeSpawnFailed, nil
 	case errors.Is(err, ErrNoSSHSpawner):
 		return proto.ErrCodeNoSSHClient, nil
-	case errors.Is(err, ErrCwdUnsupported), errors.Is(err, ErrRemotePgid), errors.Is(err, ErrBadSSHParams):
+	case errors.Is(err, ErrCwdUnsupported), errors.Is(err, ErrRemotePgid), errors.Is(err, ErrBadSSHParams), errors.Is(err, errBadFence):
 		return proto.ErrCodeBadParams, nil
 	case errors.Is(err, errBadTargetKind):
 		return proto.ErrCodeBadParams, nil
@@ -680,6 +685,12 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			return nil, err
 		}
 		return s.accessBump(p)
+	case proto.OpLifecycleComplete:
+		var p proto.LifecycleCompleteParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.lifecycleComplete(p)
 	case proto.OpDetach:
 		var p proto.DetachParams
 		if err := decode(params, &p); err != nil {
@@ -1750,6 +1761,58 @@ func (s *Service) LifecycleData(ctx context.Context, f proto.SessionFrame) {
 	}
 }
 
+// lifecycleComplete hands one already-authenticated completion to the session
+// runtime that owns the pane (owner decision 2026-09-19). This side adds no
+// gate: the coordinator's kernel has validated version, domain liveness,
+// transport binding, epoch, capability and the sequence rule, and the
+// runtime's own incarnation check is the only judging the fact receives
+// here. What this op does is resolve WHICH runtime — the generation-qualified
+// handle every other op addresses sessions by — decode the fence's fixed
+// wire spelling, and deliver all three untouched. A session this generation
+// does not hold is ErrNoSuchSession, the answer the coordinator's
+// reconciliation already reads; a nonce that is not 64 lowercase hex
+// characters never came from an accepted completion, so it is refused as
+// malformed rather than zero-filled into a rendezvous nothing sighted.
+func (s *Service) lifecycleComplete(p proto.LifecycleCompleteParams) (proto.LifecycleCompleteResult, error) {
+	hs, err := s.find(p.Session)
+	if err != nil {
+		return proto.LifecycleCompleteResult{}, err
+	}
+	nonce, err := fenceNonceFromWire(p.Nonce)
+	if err != nil {
+		return proto.LifecycleCompleteResult{}, err
+	}
+	hs.runtime.Completed(sessionruntime.Incarnation{
+		Session:    sessionruntime.SessionID(p.Incarnation.Session),
+		Generation: sessionruntime.Generation(p.Incarnation.Generation),
+	}, nonce, exitCodeFromWire(p.ExitCode))
+	return proto.LifecycleCompleteResult{}, nil
+}
+
+// fenceNonceFromWire decodes the completion's fence: exactly 64 LOWERCASE
+// hex characters, the same fixed-width spelling the launch's bearer values
+// use. Anything else is errBadFence.
+func fenceNonceFromWire(spelling string) (sessionruntime.FenceNonce, error) {
+	var nonce sessionruntime.FenceNonce
+	raw, err := hex.DecodeString(spelling)
+	if err != nil || len(raw) != len(nonce) || spelling != strings.ToLower(spelling) {
+		return nonce, errBadFence
+	}
+	copy(nonce[:], raw)
+	return nonce, nil
+}
+
+// exitCodeFromWire unwraps the exit status. Null means the shell named none;
+// the runtime consumes the completion's exit code as an int today, and a
+// completion without one carries zero there — the value is never read back
+// as a fact, so this is a spelling conversion and not a fabrication.
+func exitCodeFromWire(exit *int) int {
+	if exit == nil {
+		return 0
+	}
+	return *exit
+}
+
 // resolvedCwd records where the shell actually started. An empty request is
 // answered with the ANSWER rather than with the blank the caller sent, because
 // a launch record repeating the request would be a record of the request.
@@ -1793,3 +1856,11 @@ func adoptableLaunch(launch *proto.LifecycleLaunch, win *window) *proto.Lifecycl
 	}
 	return launch
 }
+
+// errBadFence refuses a completion op whose nonce is not the kernel fence's
+// fixed wire spelling — 64 lowercase hex characters, 32 bytes. This is wire
+// decoding, not a gate: a fence the kernel accepted is exactly 32 bytes, so a
+// value that does not decode never came from an accepted completion, and
+// zero-filling it instead would hand the runtime a rendezvous nothing
+// sighted.
+var errBadFence = errors.New("session: the completion's nonce is not a 64-character hex fence")

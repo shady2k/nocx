@@ -1063,6 +1063,13 @@ func TestTheServiceIsNamedAfterTheReservedNameAndTakesNoArgv(t *testing.T) {
 		// of them "undeclared" rather than reporting an actual gap.
 		proto.OpSnapshot: true, proto.OpTarget: true, proto.OpIntent: true,
 		proto.OpIntentStatus: true, proto.OpAccessBump: true,
+		// The completion downlink (owner decision 2026-09-19): the
+		// coordinator carries an already-authenticated completion DOWN to
+		// the session that owns the pane. Its params are a session handle,
+		// the runtime incarnation (a string and a number), a fixed-width
+		// hex nonce and a nullable number — scalars all, and no free-form
+		// []string, which is the rule this list exists to hold.
+		proto.OpLifecycleComplete: true,
 	}
 	for _, op := range svc.Ops() {
 		if !want[op] {

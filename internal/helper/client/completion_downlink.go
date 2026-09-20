@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/lifecycle"
@@ -58,6 +59,17 @@ type CompletionDownlink struct {
 // already generous; running past it means the open path itself is wedged,
 // and a silent unbounded buffer would hide exactly that.
 const maxPendingCompletions = 16
+
+// completionDeliveryTimeout bounds ONE delivery, and the reason is the
+// caller: deliver runs on the adapter's ingest goroutine, synchronously
+// under the kernel's Ingest, so a helper that holds its connection open and
+// never answers would park that goroutine — and with it every later
+// lifecycle event for this pane — until the session itself ended. A
+// completion is a small op on a connection the pane is already using; five
+// seconds is this package's existing scale for exactly that shape
+// (signalTimeout), and anything past it is a wedge to report rather than a
+// slow answer to wait for.
+const completionDeliveryTimeout = 5 * time.Second
 
 // CompletionSender is the one op the downlink needs from the pane's client:
 // the carrier op the already-authenticated completion travels down on.
@@ -155,6 +167,13 @@ func (d *CompletionDownlink) deliver(c pendingCompletion) {
 	// so the stop is decided HERE rather than left to the transport's
 	// post-write handling of an already-cancelled context: the completion is
 	// reported, and the kernel's execution state stands as it set it.
+	//
+	// WHERE THE BOUNDARY IS, exactly: a delivery may BEGIN only while the
+	// session's context is live, and one already on the wire when the
+	// session ends finishes there. It is not tightened past that on
+	// purpose — serialising the write against the cancellation would hold a
+	// lock across a network call to buy a helper answering "no such
+	// session" to an op nobody is waiting for.
 	if err := d.ctx.Err(); err != nil {
 		d.reportf("the completion the kernel accepted did not reach the helper session: %v", err)
 		return
@@ -173,7 +192,11 @@ func (d *CompletionDownlink) deliver(c pendingCompletion) {
 		Nonce:       hex.EncodeToString(c.fence[:]),
 		ExitCode:    exit,
 	}
-	if err := d.send(d.ctx, params); err != nil {
+	// ONE DELIVERY, BOUNDED. The deadline hangs off the session's own
+	// context, so the pane's end still ends the wait first.
+	ctx, cancel := context.WithTimeout(d.ctx, completionDeliveryTimeout)
+	defer cancel()
+	if err := d.send(ctx, params); err != nil {
 		// The kernel's execution state is what it set when it accepted this
 		// completion, and nothing here can or should change it: the report
 		// is the whole of this failure's handling (criterion 3).

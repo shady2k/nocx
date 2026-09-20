@@ -207,29 +207,54 @@ func TestTheBindDrainHoldsTheDispatch(t *testing.T) {
 // deliver that swapped it away would make the stop unreachable from the
 // wire: the composition cancels a context nobody reads. Over a real
 // transport a swapped context is unobservable until the stop misfires, so
-// the pin is here, where the send is a spy: the context handed to the send
-// is the downlink's own, asserted by identity, no clock involved.
+// the pin is here, where the send is a spy.
+//
+// The send's context is a CHILD of the downlink's — every delivery is
+// bounded by its own deadline (completionDeliveryTimeout) — so what is
+// asserted is the property that matters and that identity was standing in
+// for: the composition's cancellation reaches the context the send is
+// holding. A deliver that built a fresh or detached context fails here, and
+// no clock is involved: cancel propagates to children before it returns.
 func TestTheDownlinkDeliversUnderItsOwnContext(t *testing.T) {
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 
+	// The context is inspected while the send still HOLDS it: a delivery's
+	// context ends with the delivery, so one read after the call has
+	// returned says nothing about what the send was given.
 	seen := make(chan context.Context, 1)
+	release := make(chan struct{})
 	dl := &CompletionDownlink{
 		ctx: ctx,
 		send: func(ctx context.Context, _ proto.LifecycleCompleteParams) error {
 			seen <- ctx
+			<-release
 			return nil
 		},
 		report: nil,
 	}
 	dl.Bind(HostSessionID{Generation: "gen-under-test", Session: "0123456789abcdef0123456789abcdef"})
-	dl.Observe([32]byte{1}, nil)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		dl.Observe([32]byte{1}, nil)
+	}()
 
 	select {
 	case got := <-seen:
-		if got != ctx {
-			t.Fatal("deliver ran under a context other than the downlink's own: the composition's cancellation would never reach the send")
+		if got.Err() != nil {
+			t.Fatalf("the send's context was already done on arrival: %v", got.Err())
 		}
+		if _, ok := got.Deadline(); !ok {
+			t.Fatal("the send's context carries no deadline: a helper that never answers would park the ingest goroutine")
+		}
+		// THE SESSION ENDS. The context the send is holding must end with it.
+		stop()
+		if got.Err() == nil {
+			t.Fatal("deliver ran under a context the downlink's own cancellation does not reach: the composition would cancel a context nobody reads")
+		}
+		close(release)
+		<-done
 	case <-time.After(5 * time.Second):
 		t.Fatal("deliver never reached the send")
 	}

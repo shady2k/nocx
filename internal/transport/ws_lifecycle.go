@@ -393,10 +393,56 @@ func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) {
 		return
 	}
 	if row == nil {
-		// Shell-originated attempts have no app-opened row. Only the
-		// submit path has the authenticated app identity this projection
-		// is allowed to carry.
-		return
+		// Shell-originated attempts have no app-opened row — and since the
+		// owner's decision of 2026-09-19 they OPEN ONE HERE: every command
+		// that arrives through the authenticated shell channel gets an
+		// entry, under the shell's own attempt id, through the same writer
+		// and the same masking pass the submit path uses. A command typed
+		// straight into the shell, an agent's line written to the pane, a
+		// pane nobody is watching: all of them authenticated their start,
+		// and all of them leave a row the finish below can land on.
+		//
+		// An APP-originated attempt is deliberately not opened here: its
+		// row is the submit handler's write, and this projection runs in
+		// the emitter the publisher notifies BEFORE that insert is durable
+		// — opening here would make the ordinary submitted command a row
+		// twice. The handler reconciles the kernel's state itself once its
+		// row is durable (handleLifecycleSubmitAttempt).
+		//
+		// A start naming no command is a bare newline, not an execution —
+		// the submit path's own refusal — and a snapshot-declared attempt
+		// whose text never reached the backend has nothing to record.
+		if f.Attempt.Origin != lifecyclepub.OriginShell || strings.TrimSpace(f.Attempt.Command) == "" {
+			return
+		}
+		// The row names the pipe it ran in (nocx-ie23r.6), from the session
+		// the lane is registered to. A lane that is not registered has no
+		// session identity to carry, and a session the registry does not
+		// hold is gone — neither records a row.
+		// Under lifecycleMu, like every other reader: registration moves on
+		// the session spawn and teardown paths, which run on other
+		// goroutines than the publisher's emission turn.
+		s.lifecycleMu.Lock()
+		sid, ok := s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
+		s.lifecycleMu.Unlock()
+		if !ok {
+			return
+		}
+		sess, sessErr := s.registry.Get(sid)
+		if sessErr != nil {
+			return
+		}
+		s.recordAttemptEntry(ctx, f.Attempt.ID, f.Attempt.Command, "",
+			lifecycleShellLedgerClient, sess, f.Attempt.StartedAt, content.SourceUser)
+		row, err = ledger.Entry(ctx, f.Attempt.ID)
+		if err != nil {
+			s.log.Warn("lifecycle ledger read failed", "attempt", f.Attempt.ID, "error", err)
+			return
+		}
+		if row == nil {
+			// The write failed and said so above; nothing to advance.
+			return
+		}
 	}
 	start := func() (int64, error) {
 		execID, startErr := ledger.StartExecution(ctx, content.StartExecution{EntryID: row.ID})
@@ -609,61 +655,8 @@ func (s *WSServer) handleLifecycleSubmitAttempt(ctx context.Context, wconn *wsCo
 		}
 	}
 	if s.contentDB != nil {
-		masked, maskErr := maskLedgerCommand(params.Command)
-		if maskErr != nil {
-			s.log.Warn("lifecycle ledger masking failed; command remains executable", "attempt", att.ID, "error", maskErr)
-		} else {
-			ledger := s.contentDB.Ledger()
-			env := environmentForSession(sess)
-			if envErr := ledger.EnsureEnvironment(ctx, env); envErr != nil {
-				s.log.Warn("lifecycle ledger environment unavailable; command remains executable", "attempt", att.ID, "error", envErr)
-			} else {
-				startedAt := att.StartedAt.UnixMilli()
-				payload, payloadErr := content.WithEntryMasking("{}", content.EntryMasking{
-					MaskedCount: len(masked.findings),
-					MaskedKinds: maskedKindsOf(masked.findings),
-					Redactions:  redactionsOf(masked.findings, masked.segments),
-				})
-				if payloadErr != nil {
-					s.log.Warn("lifecycle ledger masking receipt failed; command remains executable", "attempt", att.ID, "error", payloadErr)
-				} else if _, submitErr := ledger.Submit(ctx, content.SubmitEntry{
-					ID:            string(att.ID),
-					Client:        fmt.Sprintf("%d", wconn.id),
-					EnvironmentID: env.ID,
-					PaneID:        panePtr(sess.PaneID()),
-					// THE SESSION THIS COMMAND RAN IN (nocx-ie23r.6), from the
-					// same owner the pane above comes from: this handler
-					// already resolved `sess` from the connection's own state
-					// (state.get(sid)), so the column is the backend's fact and
-					// not the request's claim.
-					//
-					// This is the writer that matters most, because it is the
-					// one that CREATES the row for an ordinary command: the
-					// renderer sends this at Enter, ledger.bind then ADVANCES
-					// the row it created, and history.record closes it. A row
-					// created here with no session would keep no session for
-					// the rest of its life, and content's unreconciledCause
-					// reads exactly this column to decide whether a restored
-					// block can be told nobody was asked about its pipe.
-					SessionID: sessionPtr(sess.ID()),
-					Cwd:       att.Cwd,
-					Kind:      content.EntryShell,
-					// The submitting target's own word, never derived here
-					// from the lane or the run state (design §3.1): a person
-					// typing while the assistant works is the person's
-					// command, and the assistant's is the assistant's. This
-					// row is the only place the fact is written, so a
-					// derivation here is one nothing downstream can repair.
-					Source:      content.Source(params.Source),
-					Intent:      masked.text,
-					StartedAt:   &startedAt,
-					Sensitivity: content.SensitivityNormal,
-					Payload:     payload,
-				}); submitErr != nil {
-					s.log.Warn("lifecycle ledger submit failed; command remains executable", "attempt", att.ID, "error", submitErr)
-				}
-			}
-		}
+		s.recordAttemptEntry(ctx, string(att.ID), params.Command, params.Cwd,
+			fmt.Sprintf("%d", wconn.id), sess, att.StartedAt, content.Source(params.Source))
 	}
 	if current, ok := s.lifecyclePub.Attempt(att.ID); ok && current.Started {
 		// The shell can authenticate its Start concurrently with the
@@ -685,6 +678,75 @@ func (s *WSServer) handleLifecycleSubmitAttempt(ctx context.Context, wconn *wsCo
 		SubmitID:  att.SubmitID,
 		StartedAt: att.StartedAt,
 	}))
+}
+
+// lifecycleShellLedgerClient is the client identity a shell-originated row
+// carries. A renderer's row names the connection that wrote it (the numeric
+// connection id) and the assistant's name "agent"; this row's writer is the
+// transport's own lifecycle projection, and the identity must be stable — it
+// binds the idempotency key the attempt id rides (content.SubmitEntry).
+const lifecycleShellLedgerClient = "lifecycle-shell"
+
+// recordAttemptEntry opens the durable ledger row for one authenticated
+// attempt, under the attempt's own id. It is the ONE writer both open paths
+// share — the renderer's submit (handleLifecycleSubmitAttempt) and the
+// shell-originated projection (syncLifecycleLedger) — so the masking pass,
+// the masking receipt on entries.payload and the row shape cannot drift
+// between the two ways a command enters the ledger. Masking is the one owner
+// (maskLedgerCommand, ws_history_record.go); the store's own policy governs
+// output and sensitivity downstream.
+//
+// Every failure here is fail-open — one warning line, no row — because the
+// command has already run or is about to: refusing the record fails nothing
+// the person did, exactly as history.record's masking rule states.
+func (s *WSServer) recordAttemptEntry(ctx context.Context, attemptID, command, cwd, client string, sess session.Session, startedAt time.Time, source content.Source) {
+	masked, maskErr := maskLedgerCommand(command)
+	if maskErr != nil {
+		s.log.Warn("lifecycle ledger masking failed; command remains executable", "attempt", attemptID, "error", maskErr)
+		return
+	}
+	ledger := s.contentDB.Ledger()
+	env := environmentForSession(sess)
+	if envErr := ledger.EnsureEnvironment(ctx, env); envErr != nil {
+		s.log.Warn("lifecycle ledger environment unavailable; command remains executable", "attempt", attemptID, "error", envErr)
+		return
+	}
+	started := startedAt.UnixMilli()
+	payload, payloadErr := content.WithEntryMasking("{}", content.EntryMasking{
+		MaskedCount: len(masked.findings),
+		MaskedKinds: maskedKindsOf(masked.findings),
+		Redactions:  redactionsOf(masked.findings, masked.segments),
+	})
+	if payloadErr != nil {
+		s.log.Warn("lifecycle ledger masking receipt failed; command remains executable", "attempt", attemptID, "error", payloadErr)
+		return
+	}
+	if _, submitErr := ledger.Submit(ctx, content.SubmitEntry{
+		ID:            attemptID,
+		Client:        client,
+		EnvironmentID: env.ID,
+		PaneID:        panePtr(sess.PaneID()),
+		// THE SESSION THIS COMMAND RAN IN (nocx-ie23r.6), from the session
+		// the caller resolved — the connection's own state for a submit,
+		// the registry for a shell-originated projection — so the column
+		// is a backend fact and not a request's claim. This is the writer
+		// that CREATES the row for an ordinary command, and a row created
+		// with no session would keep none for the rest of its life.
+		SessionID: sessionPtr(sess.ID()),
+		Cwd:       cwd,
+		Kind:      content.EntryShell,
+		// The submitting target's own word for a submit (design §3.1); the
+		// shell channel names no author, and the person at the keyboard is
+		// what a typed line is — the store's own normalization for an
+		// unnamed source (ledger_sqlite.go) says the same.
+		Source:      source,
+		Intent:      masked.text,
+		StartedAt:   &started,
+		Sensitivity: content.SensitivityNormal,
+		Payload:     payload,
+	}); submitErr != nil {
+		s.log.Warn("lifecycle ledger submit failed; command remains executable", "attempt", attemptID, "error", submitErr)
+	}
 }
 
 // lifecycleSubmitErrorCode maps a lifecycle.SubmitAttempt refusal to a

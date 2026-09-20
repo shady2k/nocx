@@ -402,6 +402,10 @@ func (t *terminal) scrollbackLocked() (int, error) {
 // takes are always older than the ones being read; and a later reflow cannot
 // rewrite a row that was reported, because the copy was made while the row
 // was still the terminal's own.
+// What capture at departure cannot survive is the library pruning retention
+// inside a feed: the feed's own departures and the pruned pages land in one
+// depth reading, and that interval is flagged incomplete rather than
+// reported whole.
 func (t *terminal) noteDepartedLocked() {
 	screen, err := t.screenLocked()
 	h := 0
@@ -420,10 +424,24 @@ func (t *terminal) noteDepartedLocked() {
 	if base.valid {
 		if d := h - base.rows; d > 0 {
 			t.captureDepartedLocked(h-d, h)
+		} else if d < 0 && h > 0 {
+			// The depth shrank while rows were still retained: the
+			// library's retention budget pruned whole pages inside this
+			// feed (a 10,000-byte budget applies by default, pruned at
+			// page granularity). The feed's own departures are mixed with
+			// pages the count lost, and no scalar says which rows left —
+			// so the interval is reported incomplete, never as an empty
+			// success. A consumer can carry "output was lost"; it cannot
+			// carry a lie.
+			t.failDeparted(fmt.Errorf(
+				"ghostty: scrollback retention pruned during one feed (depth %d -> %d): the rows that left in that feed cannot be read",
+				base.rows, h))
 		}
-		// d < 0 is history shrinking — an erase or a reset. Destroyed rows
-		// did not leave the screen; they ceased, and the baseline follows
-		// the buffer down without a report.
+		// d < 0 at zero depth is a reset or an erase-saved-lines: the
+		// history was DESTROYED, and destroyed rows did not leave the
+		// screen — they ceased. The baseline follows the buffer down
+		// without a report, exactly as it does for d == 0, the feed that
+		// scrolls nothing.
 	}
 	base.rows, base.valid = h, true
 }

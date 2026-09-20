@@ -263,3 +263,71 @@ func TestDepartedRowsRefuseAClosedTerminal(t *testing.T) {
 		t.Fatalf("departed rows after close: %v, want ErrClosed", err)
 	}
 }
+
+// The retention boundary: deep enough into scrollback, the library prunes
+// whole pages and the depth count can shrink inside one feed — the rows that
+// left in that feed become unreadable. What the port owes the caller then is
+// the truth, an interval flagged incomplete, never an empty success: a
+// consumer can carry "output was lost" honestly, but it cannot carry a lie.
+// This test feeds past the boundary and demands that accounting.
+func TestDepartedRowsFlagRetentionLossPastTheBoundary(t *testing.T) {
+	term := departedTerm(t, 10, 5)
+
+	const chunkLines = 1000
+	const chunks = 60 // measured: pruning begins near 47k retained rows
+
+	flagged := 0
+	reported := 0
+	for c := range chunks {
+		var sb strings.Builder
+		for i := range chunkLines {
+			fmt.Fprintf(&sb, "X%06d\r\n", c*chunkLines+i)
+		}
+		departedFeed(t, term, sb.String())
+		rows, err := term.DepartedRows()
+		if err != nil {
+			flagged++
+			continue
+		}
+		// Every chunk of this stream scrolls chunkLines rows off the screen,
+		// so an unflagged empty interval claims nothing left — the lie this
+		// test exists to kill.
+		if len(rows) == 0 {
+			t.Fatalf("chunk %d: 0 rows, nil error — the interval is silent while the feed scrolled %d rows", c, chunkLines)
+		}
+		reported += len(rows)
+	}
+
+	t.Logf("fed %d lines: %d rows reported, %d intervals flagged incomplete",
+		chunks*chunkLines, reported, flagged)
+
+	// The boundary was reached and honestly reported at least once — and the
+	// fix is not "flag everything": capture still works below the boundary,
+	// and a floor here kills an implementation that reports nothing but
+	// errors.
+	if flagged == 0 {
+		t.Fatalf("no interval was flagged: the feed never learned about the retention boundary")
+	}
+	if reported < 30_000 {
+		t.Fatalf("only %d rows reported across the run: capture stopped working well before the boundary", reported)
+	}
+}
+
+// A reset and an erase-saved-lines DESTROY history: the rows they take
+// ceased rather than left, so they are not departures and the interval is
+// not flagged — silence, and capture continues from the empty buffer.
+func TestDepartedRowsTreatADestroyedHistoryAsSilence(t *testing.T) {
+	term := departedTerm(t, 10, 5)
+	departedFeed(t, term, numbered(8))
+	departedAssertEqual(t, departedDrain(t, term), numberedWant(8))
+	// RIS — full reset. The scrollback goes to zero.
+	departedFeed(t, term, "\x1bc")
+	if rows, err := term.DepartedRows(); err != nil || len(rows) != 0 {
+		t.Fatalf("after reset: %d rows, err %v; want silence", len(rows), err)
+	}
+
+	// And the report continues from the empty buffer exactly as at New:
+	// the next departures are the first rows of the next output.
+	departedFeed(t, term, numbered(8))
+	departedAssertEqual(t, departedDrain(t, term), numberedWant(8))
+}

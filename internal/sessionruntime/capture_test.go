@@ -110,6 +110,49 @@ func TestASettledRendezvousHandsTheSinkOneCaptureRecord(t *testing.T) {
 	}
 }
 
+// The interval state advances at every settle: the SECOND record's opening
+// is the first record's closing snapshot — the screen the second interval
+// really began on — and its closing content is its own. A runtime whose
+// opening froze at session start would hand every later record the same
+// story twice.
+func TestTheSecondIntervalsOpeningIsTheFirstRecordsClosing(t *testing.T) {
+	sink := &recordingCaptures{}
+	s, _, _ := realRuntime(t, func(c *Config) { c.Captures = sink })
+
+	if err := s.Ingest([]byte("first command\r\n")); err != nil {
+		t.Fatalf("ingest the first command: %v", err)
+	}
+	nonceA := fenceNonceFromString(t, setANoncedHex)
+	s.AuthenticatedEvents().Completed(s.Incarnation(), nonceA, 0)
+	if err := s.SightFence(nonceA, []byte("$ ")); err != nil {
+		t.Fatalf("settle the first interval: %v", err)
+	}
+
+	if err := s.Ingest([]byte("second command output\r\n")); err != nil {
+		t.Fatalf("ingest the second command: %v", err)
+	}
+	nonceB := fenceNonceFromString(t, "0b2b0b2b0b2b0b2b0b2b0b2b0b2b0b2b0b2b0b2b0b2b0b2b0b2b0b2b0b2b0b2b")
+	s.AuthenticatedEvents().Completed(s.Incarnation(), nonceB, 0)
+	if err := s.SightFence(nonceB, []byte("$ ")); err != nil {
+		t.Fatalf("settle the second interval: %v", err)
+	}
+
+	recs := sink.records()
+	if len(recs) != 2 {
+		t.Fatalf("the sink holds %d records, want one per interval", len(recs))
+	}
+	first, second := recs[0], recs[1]
+	if got, want := renderRows(second.Opening.Lines), renderRows(first.Closing.Lines); got != want {
+		t.Fatalf("the second interval opened on %q, want the first record's closing %q", got, want)
+	}
+	if got := renderRows(second.Closing.Lines); !strings.Contains(got, "second command output") {
+		t.Fatalf("the second closing reads %q, want the second interval's own content", got)
+	}
+	if got := renderRows(second.Opening.Lines); strings.Contains(got, "second command output") {
+		t.Fatalf("the second opening already holds %q: the boundary read is not where the record starts", got)
+	}
+}
+
 // The two channels are ordered independently, so the record is produced once
 // whatever order the halves arrive in, and a late duplicate half produces
 // nothing more: the settle is the trigger, not the arrival.

@@ -1093,21 +1093,17 @@ export class ScrollbackController {
   }
 
   /** The attempt-driven freeze (ADR-0024 §7 projection, bead nocx-u7uh.8):
-   *  the LOGICAL freeze — the block's status, exit code and attempt
-   *  binding — lands on the authenticated completion event alone (history
-   *  and the ledger have already landed); only the VISUAL boundary (which
-   *  rows belong to the block) waits for the matching render fence. When
-   *  the fence bytes have not arrived, this returns false and the live
-   *  region stays up — the manager's onDeferredFreeze settles it on the
-   *  sighting, or after the manager's deferral window, at the current
-   *  output end. The
+   *  the LOGICAL freeze (status, exit code) has already landed on the
+   *  authenticated event; only the VISUAL boundary (which rows belong to
+   *  the block) waits for the matching render fence. When the fence bytes
+   *  have not arrived, this returns false and the live region stays up —
+   *  the manager's onDeferredFreeze settles it on the sighting, and on
+   *  nothing else (nocx-2v80t.3.2). The
    *  authority check (kernel freezeBlock) is the caller's. */
   freezeFromAttempt(attempt: ExecutionAttempt, endLine: number): boolean {
     const followIntent = this._followIntent()
     const getLine = (y: number) => this._renderer.getBufferLine(y)
-    const rec = this._blockManager.freezeFromAttempt(attempt, getLine, endLine, () =>
-      this._renderer.cursorLine(),
-    )
+    const rec = this._blockManager.freezeFromAttempt(attempt, getLine, endLine)
     if (rec) {
       this._settleFrozen(rec, followIntent)
       return true

@@ -8072,9 +8072,9 @@ export class TerminalContent extends BasePaneContent {
     if (block.status === 'running') return
     // FINISHED, BUT NOT YET REDRAWN. This used to read the DOM class, which
     // is a different question and the wrong one: the logical freeze lands on
-    // the authenticated completion while the visual freeze waits up to the
-    // manager's fence-deferral window for the fence bytes, and until it
-    // runs the element
+    // the authenticated completion while the visual freeze waits for the
+    // fence bytes — nothing bounds that wait (nocx-2v80t.3.2) — and until
+    // the sighting arrives the element
     // still says cmd-block-running. So a block that had finished perfectly
     // well was refused, and the receipt was dropped in silence — no retry,
     // nothing in the UI, nothing in the log. For a user: run a command

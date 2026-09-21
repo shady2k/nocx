@@ -4166,8 +4166,8 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
-  it('no submit-time open or fence timer survives in the owned sources (nocx-2v80t.3.2)', () => {
-    for (const rel of ['scrollback/controller.ts', 'terminal-content.ts']) {
+  it('no submit-time open or fence timer survives in the boundary sources (nocx-2v80t.3.2)', () => {
+    for (const rel of ['scrollback/controller.ts', 'scrollback/blocks.ts', 'terminal-content.ts']) {
       const src = readFileSync(resolve(srcDir, rel), 'utf8')
       expect(src, `${rel}: beginBlockNow`).not.toMatch(/beginBlockNow/)
       expect(src, `${rel}: FENCE_DEFER_MS`).not.toMatch(/FENCE_DEFER_MS/)
@@ -4270,6 +4270,9 @@ describe('the projections consume the kernel through the composition root (ADR-0
         },
       })
 
+      // The shell's fence lands after the output — the sighting the visual
+      // boundary resolves on, and the only thing that cuts it (nocx-2v80t.3.2).
+      rendererOf(content)._fireRenderFence({ hex: 'a'.repeat(64), line: 2, buffer: 'normal' })
       const run = await pending
       // THE ENTRY ID IS THE STORE'S, and it is the one history.record's ack
       // named (nocx-9sqii). It used to be `String(rec.id)` — the renderer's
@@ -4361,6 +4364,9 @@ describe('the projections consume the kernel through the composition root (ADR-0
           completedAt: '2026-08-08T12:00:02Z',
         },
       })
+      // The shell's fence lands after the output — the sighting the visual
+      // boundary resolves on, and the only thing that cuts it (nocx-2v80t.3.2).
+      rendererOf(content)._fireRenderFence({ hex: 'a'.repeat(64), line: 2, buffer: 'normal' })
       const run = await pending
       expect(run.entryId).toBe('')
       // And the command's own outcome is unaffected: a missing row costs
@@ -4422,6 +4428,9 @@ describe('the projections consume the kernel through the composition root (ADR-0
           completedAt: '2026-08-08T12:00:02Z',
         },
       })
+      // The shell's fence lands after the output — the sighting the visual
+      // boundary resolves on, and the only thing that cuts it (nocx-2v80t.3.2).
+      rendererOf(content)._fireRenderFence({ hex: 'a'.repeat(64), line: 2, buffer: 'normal' })
       await pendingAgent
 
       // The human's command, through the same content's editor: still the
@@ -4603,6 +4612,9 @@ describe('the projections consume the kernel through the composition root (ADR-0
           completedAt: '2026-08-09T00:00:02Z',
         },
       })
+      // The shell's fence lands after the output — the sighting the visual
+      // boundary resolves on, and the only thing that cuts it (nocx-2v80t.3.2).
+      rendererOf(content)._fireRenderFence({ hex: 'b'.repeat(64), line: 2, buffer: 'normal' })
       const frozen = withScrollback.scrollback.blockManager.blocks[0]
       expect(frozen.status).toBe('failure')
       expect(frozen.exitCode).toBe(1)
@@ -6822,38 +6834,19 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       // A general question sends an explicit empty grant list.
       expect(ask.attachedContent).toEqual([])
       // ledger record — the shell's history is unchanged by a question.
-      // (The running block from the earlier `echo hi` is untouched — the
-      // ask neither opened one of its own nor disturbed the shell's.)
+      // THE SUBMIT opened exactly one record and NO card (nocx-2v80t.3.2):
+      // the card is the projection of the runtime's authenticated start,
+      // and this harness delivers no lifecycle facts. The ask neither
+      // opened a record nor a card of its own, and the shell's record is
+      // untouched.
       expect(sessionOf(content).send.mock.calls.length).toBe(sentAfterShell)
       expect(dispatcherCalls.find((c) => c.method === 'lifecycle.submitAttempt')).toBeUndefined()
       expect(dispatcherCalls.find((c) => c.method === 'history.record')).toBeUndefined()
-      // The shell's card opened on its authenticated start and closed on
-      // its completion (nocx-2v80t.3.2); the question neither opened one of
-      // its own nor disturbed the shell's.
-      const lifecycle = lifecycleHandler(client)
-      lifecycle({
-        lane: 'lane-1',
-        lifecycle: 'running',
-        domain: 'd1',
-        epoch: 1,
-        attempt: { id: 'att-echo', state: 'open', origin: 'shell', command: 'echo hi' },
-      })
-      lifecycle({
-        lane: 'lane-1',
-        lifecycle: 'running',
-        domain: 'd1',
-        epoch: 1,
-        attempt: {
-          id: 'att-echo',
-          state: 'completed',
-          exitCode: 0,
-          fence: 'c'.repeat(64),
-          completedAt: '2026-08-08T12:00:02Z',
-        },
-      })
-      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      const ledger = (content as unknown as { ledger: CommandLedger }).ledger
+      expect(ledger?.records().map((r) => r.command)).toEqual(['echo hi'])
+      expect(ledger?.records()[0].author).toBe('shell')
       const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
-      expect(scrollback.blockManager.blockForAttempt('att-echo')?.command).toBe('echo hi')
+      expect(scrollback.blockManager.blocks).toHaveLength(0)
       // A question is not a handoff: the editor stays on screen for the
       // next one. And Enter still goes to Ask — the person moved it, and
       // nothing but the person moves it back; the indicator says so.
@@ -11761,10 +11754,9 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       // omitting it here left `freezeFromAttempt` never called and
       // `rec.status` stuck at 'running'. A real authenticated completion
       // always carries one (contracts/lifecycle.changed.schema.json:
-      // "Present exactly when state is completed"); this is unsighted here
-      // on purpose, so the deferral window (FENCE_DEFER_MS) is what settles
-      // the visual freeze, exactly as a fence still in flight over the pty
-      // would — `rec.status` does not wait for it either way.
+      // "Present exactly when state is completed"). The completion event
+      // lands first and the fence bytes right behind it — the sighting
+      // settles the visual boundary, and nothing else does (nocx-2v80t.3.2).
       handler({
         lane: 'lane-1',
         lifecycle: 'running',
@@ -11778,6 +11770,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           fence: '9'.repeat(64),
         },
       })
+      rendererOf(content)._fireRenderFence({ hex: '9'.repeat(64), line: 2, buffer: 'normal' })
       expect(rec.status).toBe('cancelled')
 
       await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
@@ -11859,6 +11852,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           fence: '7'.repeat(64),
         },
       })
+      rendererOf(content)._fireRenderFence({ hex: '7'.repeat(64), line: 2, buffer: 'normal' })
       expect(rec.status).toBe('cancelled')
 
       await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
@@ -11936,6 +11930,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           fence: '5'.repeat(64),
         },
       })
+      rendererOf(content)._fireRenderFence({ hex: '5'.repeat(64), line: 2, buffer: 'normal' })
       expect(rec.status).toBe('failure')
 
       await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
@@ -12077,6 +12072,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           fence: '3'.repeat(64),
         },
       })
+      rendererOf(content)._fireRenderFence({ hex: '3'.repeat(64), line: 2, buffer: 'normal' })
       expect(rec.status).toBe('failure')
 
       await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
@@ -12136,6 +12132,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           fence: '4'.repeat(64),
         },
       })
+      rendererOf(content)._fireRenderFence({ hex: '4'.repeat(64), line: 2, buffer: 'normal' })
       expect(rec.status).toBe('cancelled')
 
       await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
@@ -12208,6 +12205,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           fence: '6'.repeat(64),
         },
       })
+      rendererOf(content)._fireRenderFence({ hex: '6'.repeat(64), line: 2, buffer: 'normal' })
       expect(rec.status).toBe('cancelled')
       await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
       expect(rec.el.dataset.outcome).toBe('cancelled')
@@ -12271,6 +12269,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           fence: '1'.repeat(64),
         },
       })
+      rendererOf(content)._fireRenderFence({ hex: '1'.repeat(64), line: 2, buffer: 'normal' })
       expect(rec.status).toBe('failure')
 
       await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))

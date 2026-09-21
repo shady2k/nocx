@@ -16,7 +16,6 @@ import {
   blockOutputText,
   blockCommandText,
   blockKindRules,
-  FENCE_DEFER_MS,
   settleBlockOutcome,
   setBlockWhere,
   type BlockKind,
@@ -1724,12 +1723,7 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     // The fence landed before the completion: the rendezvous is complete
     // and the freeze lands at the fence's line.
     manager.sightFence(FENCE, 8)
-    const frozen = manager.freezeFromAttempt(
-      attempt({ exitCode: 0 }),
-      () => undefined,
-      8,
-      () => 9,
-    )
+    const frozen = manager.freezeFromAttempt(attempt({ exitCode: 0 }), () => undefined, 8)
     expect(frozen).not.toBeNull()
     expect(frozen!.status).toBe('success')
     expect(frozen!.exitCode).toBe(0)
@@ -1750,12 +1744,7 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     const rec = manager.startBlock('make deploy', '~', 0)
     manager.bindAttempt('att-1')
     manager.sightFence(FENCE, 8)
-    const frozen = manager.freezeFromAttempt(
-      attempt({ exitCode: 1 }),
-      () => undefined,
-      8,
-      () => 9,
-    )
+    const frozen = manager.freezeFromAttempt(attempt({ exitCode: 1 }), () => undefined, 8)
     expect(frozen).toBe(rec)
     expect(rec.el.dataset.recorded).toBeUndefined()
 
@@ -1791,12 +1780,7 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     manager.bindAttempt('att-1')
     rec.stopRequested = true
     manager.sightFence(FENCE, 8)
-    const frozen = manager.freezeFromAttempt(
-      attempt({ exitCode: 130 }),
-      () => undefined,
-      8,
-      () => 9,
-    )
+    const frozen = manager.freezeFromAttempt(attempt({ exitCode: 130 }), () => undefined, 8)
     expect(frozen).not.toBeNull()
     expect(frozen!.status).toBe('cancelled')
     expect(frozen!.exitCode).toBe(130)
@@ -1814,12 +1798,7 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     manager.bindAttempt('att-1')
     expect(rec.stopRequested).toBe(false)
     manager.sightFence(FENCE, 8)
-    const frozen = manager.freezeFromAttempt(
-      attempt({ exitCode: 130 }),
-      () => undefined,
-      8,
-      () => 9,
-    )
+    const frozen = manager.freezeFromAttempt(attempt({ exitCode: 130 }), () => undefined, 8)
     expect(frozen).not.toBeNull()
     expect(frozen!.status).toBe('failure')
     expect(frozen!.el.dataset.outcome).toBe('failure')
@@ -1833,28 +1812,14 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
   it('freezeFromAttempt refuses a non-completed attempt — an open attempt cannot freeze a block', () => {
     manager.startBlock('make', '~', 0)
     manager.bindAttempt('att-1')
-    expect(
-      manager.freezeFromAttempt(
-        attempt({ state: 'open' }),
-        () => undefined,
-        8,
-        () => 9,
-      ),
-    ).toBeNull()
+    expect(manager.freezeFromAttempt(attempt({ state: 'open' }), () => undefined, 8)).toBeNull()
     expect(manager.runningBlock?.status).toBe('running')
   })
 
   it('freezeFromAttempt refuses when the running block is bound to a different attempt', () => {
     manager.startBlock('make', '~', 0)
     manager.bindAttempt('att-1')
-    expect(
-      manager.freezeFromAttempt(
-        attempt({ id: 'att-other' }),
-        () => undefined,
-        8,
-        () => 9,
-      ),
-    ).toBeNull()
+    expect(manager.freezeFromAttempt(attempt({ id: 'att-other' }), () => undefined, 8)).toBeNull()
     expect(manager.runningBlock?.status).toBe('running')
   })
 
@@ -1955,7 +1920,7 @@ describe('the render fence rendezvous (ADR-0024 §7 carve-out, bead nocx-u7uh.8)
     // NOW, on the authenticated event alone: the status flips and the running
     // slot is freed. (The deferred return means the caller keeps the live
     // region up — the boundary is still in flight.)
-    const frozen = manager.freezeFromAttempt(attempt(), getLine, 1, () => 3)
+    const frozen = manager.freezeFromAttempt(attempt(), getLine, 1)
     expect(frozen).toBeNull()
     expect(manager.runningBlock).toBeNull()
     const block = manager.blockForAttempt('att-1')
@@ -2002,12 +1967,7 @@ describe('the render fence rendezvous (ADR-0024 §7 carve-out, bead nocx-u7uh.8)
     // replay and does nothing (the line is not even overwritten).
     manager.sightFence(FENCE_A, 3)
     manager.sightFence(FENCE_A, 9)
-    const frozen = manager.freezeFromAttempt(
-      attempt(),
-      () => undefined,
-      0,
-      () => 9,
-    )
+    const frozen = manager.freezeFromAttempt(attempt(), () => undefined, 0)
     expect(frozen).not.toBeNull()
     expect(frozen!.endLine).toBe(3) // the ORIGINAL sighting's line, not the replay's
 
@@ -2019,80 +1979,74 @@ describe('the render fence rendezvous (ADR-0024 §7 carve-out, bead nocx-u7uh.8)
     expect(manager.blockForAttempt('att-1')!.endLine).toBe(3)
   })
 
-  it('a completion whose fence never arrives defers the boundary, then settles at the current output end', () => {
+  it('a completion whose fence never arrives defers the boundary — no timer settles it, only the sighting (nocx-2v80t.3.2)', () => {
     vi.useFakeTimers()
     try {
       manager.startBlock('cmd', '~', 0)
       manager.bindAttempt('att-1')
 
-      // Completion at endLine 0 with the fence still in flight: the STATUS
-      // flips now on the event alone; the boundary defers — the block is
-      // NOT serialized at the truncated event-time end.
-      const frozen = manager.freezeFromAttempt(
-        attempt(),
-        () => undefined,
-        0,
-        () => 10,
-      )
+      // Completion with the fence still in flight: the STATUS flips now on
+      // the event alone; the boundary defers — the block is NOT serialized
+      // at the truncated event-time end.
+      const frozen = manager.freezeFromAttempt(attempt(), () => undefined, 0)
       expect(frozen).toBeNull()
       expect(manager.runningBlock).toBeNull()
       expect(manager.blockForAttempt('att-1')!.status).toBe('success')
 
-      // The whole deferral window passes with no fence: the freeze settles
-      // at the CURRENT output end (10), where the in-flight tail has landed.
-      vi.advanceTimersByTime(FENCE_DEFER_MS)
-      expect(manager.runningBlock).toBeNull()
-      const block = manager.blockForAttempt('att-1')
-      expect(block).not.toBeNull()
-      expect(block!.status).toBe('success')
-      expect(block!.endLine).toBe(10)
+      // NO CLOCK SETTLES THE BOUNDARY. However long the pane waits, the
+      // fence's sighting is the only thing that cuts it — a timer here
+      // would be the client deciding a boundary a second time.
+      vi.advanceTimersByTime(60_000)
+      expect(manager.blockForAttempt('att-1')!.endLine).toBe(0)
+      expect(manager.visualFreezePending).toBe(true)
+
+      // The sighting lands: the boundary is the fence's line, in full.
+      manager.sightFence(FENCE_A, 2)
+      expect(manager.visualFreezePending).toBe(false)
+      const block = manager.blockForAttempt('att-1')!
+      expect(block.endLine).toBe(2)
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('a completion that carries NO fence at all still defers — the boundary is never cut on the event alone', () => {
-    vi.useFakeTimers()
-    try {
-      manager.startBlock('cmd', '~', 0)
-      manager.bindAttempt('att-1')
+  it('two completions with both fences in flight each resolve on their own sighting', () => {
+    manager.startBlock('first', '~', 0)
+    manager.bindAttempt('att-1')
+    expect(manager.freezeFromAttempt(attempt({ id: 'att-1' }), () => undefined, 0)).toBeNull()
+    manager.startBlock('second', '~', 3)
+    manager.bindAttempt('att-2')
+    expect(
+      manager.freezeFromAttempt(attempt({ id: 'att-2', fence: FENCE_B }), () => undefined, 3),
+    ).toBeNull()
+    expect(manager.visualFreezePending).toBe(true)
 
-      // No fence on the attempt (unreachable from the kernel, which
-      // requires the nonce on completed attempts, but the manager guards
-      // callers that bypass it): the status flips now; the boundary defers
-      // instead of truncating at the event-time output end.
-      const frozen = manager.freezeFromAttempt(
-        attempt({ fence: undefined }),
-        () => undefined,
-        0,
-        () => 10,
-      )
-      expect(frozen).toBeNull()
-      expect(manager.runningBlock).toBeNull()
-      expect(manager.blockForAttempt('att-1')!.status).toBe('success')
+    // The older fence lands first (pty order): only the first block's
+    // boundary settles; the second's stays pending on its own sighting.
+    manager.sightFence(FENCE_A, 2)
+    expect(manager.blockForAttempt('att-1')!.endLine).toBe(2)
+    expect(manager.blockForAttempt('att-2')!.endLine).toBe(3)
+    expect(manager.visualFreezePending).toBe(true)
 
-      // No sighting can match a null-hex pending — a stray fence lands in
-      // the sighting ring and changes nothing.
-      manager.sightFence('ff'.repeat(32), 5)
-      expect(manager.runningBlock).toBeNull()
-      expect(manager.blockForAttempt('att-1')!.status).toBe('success')
-
-      // The deferral window settles it at the CURRENT output end, where the
-      // in-flight tail has landed — the same degrade as a fence that never
-      // arrives, never a truncation.
-      vi.advanceTimersByTime(FENCE_DEFER_MS)
-      expect(manager.runningBlock).toBeNull()
-      const block = manager.blockForAttempt('att-1')
-      expect(block).not.toBeNull()
-      expect(block!.status).toBe('success')
-      expect(block!.endLine).toBe(10)
-    } finally {
-      vi.useRealTimers()
-    }
+    manager.sightFence(FENCE_B, 5)
+    expect(manager.blockForAttempt('att-2')!.endLine).toBe(5)
+    expect(manager.visualFreezePending).toBe(false)
   })
 
-  it('the deferral window is a named policy — FENCE_DEFER_MS — not a magic number', () => {
-    expect(FENCE_DEFER_MS).toBeGreaterThan(0)
+  it('a completion that carries no fence freezes visually at the event-time end — the runtime\u2019s word, not a clock (nocx-2v80t.3.2)', () => {
+    manager.startBlock('cmd', '~', 0)
+    manager.bindAttempt('att-1')
+
+    // No fence on the attempt (unreachable from the kernel, which requires
+    // the nonce on completed attempts, but the manager guards callers that
+    // bypass it): no sighting could ever match a boundary like this, so
+    // there is no deferral to strand — the runtime's word alone cuts the
+    // boundary, at the event-time end. Approximate, never timed.
+    const frozen = manager.freezeFromAttempt(attempt({ fence: undefined }), () => undefined, 0)
+    expect(frozen).not.toBeNull()
+    expect(frozen!.endLine).toBe(0)
+    expect(frozen!.status).toBe('success')
+    expect(manager.visualFreezePending).toBe(false)
   })
 
   it('onDeferredFreeze fires when the sighting resolves the pending freeze', () => {
@@ -2104,35 +2058,21 @@ describe('the render fence rendezvous (ADR-0024 §7 carve-out, bead nocx-u7uh.8)
     })
     manager.startBlock('cmd', '~', 0)
     manager.bindAttempt('att-1')
-    manager.freezeFromAttempt(
-      attempt(),
-      () => undefined,
-      0,
-      () => 9,
-    )
+    manager.freezeFromAttempt(attempt(), () => undefined, 0)
     expect(onDeferredFreeze).not.toHaveBeenCalled()
     manager.sightFence(FENCE_A, 4)
     expect(onDeferredFreeze).toHaveBeenCalledTimes(1)
   })
 
-  it('clearAll cancels a pending deferral — the block is gone, the timer fires into nothing', () => {
-    vi.useFakeTimers()
-    try {
-      manager.startBlock('cmd', '~', 0)
-      manager.bindAttempt('att-1')
-      manager.freezeFromAttempt(
-        attempt(),
-        () => undefined,
-        0,
-        () => 9,
-      )
-      manager.clearAll()
-      vi.advanceTimersByTime(FENCE_DEFER_MS)
-      expect(manager.blocks).toHaveLength(0)
-      expect(manager.runningBlock).toBeNull()
-    } finally {
-      vi.useRealTimers()
-    }
+  it('clearAll drops a pending boundary — the block is gone, its sighting freezes nothing', () => {
+    manager.startBlock('cmd', '~', 0)
+    manager.bindAttempt('att-1')
+    manager.freezeFromAttempt(attempt(), () => undefined, 0)
+    manager.clearAll()
+    manager.sightFence(FENCE_A, 9)
+    expect(manager.blocks).toHaveLength(0)
+    expect(manager.runningBlock).toBeNull()
+    expect(manager.visualFreezePending).toBe(false)
   })
 })
 

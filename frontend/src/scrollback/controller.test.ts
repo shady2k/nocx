@@ -377,7 +377,7 @@ describe('finished command landing', () => {
       configurable: true,
       value: 500,
     })
-    controller.beginBlockNow('printf output', '~', 0, 0)
+    controller.beginBlock('printf output', '~', 0, 0)
     controller.onCommandEnd(() => new BufferLine('output'), 2, 0)
     const block = controller.scrollbackInner.querySelector<HTMLElement>('.cmd-block')
     expect(block).not.toBeNull()
@@ -414,7 +414,7 @@ describe('finished command landing', () => {
     })
     const scrollIntoView = vi.fn<ScrollIntoViewSpy>()
     setFollowing(controller, false)
-    controller.beginBlockNow('printf output', '~', 0, 0)
+    controller.beginBlock('printf output', '~', 0, 0)
     controller.onCommandEnd(() => new BufferLine('output'), 2, 0)
     const block = controller.scrollbackInner.querySelector<HTMLElement>('.cmd-block')
     expect(block).not.toBeNull()
@@ -1513,13 +1513,13 @@ describe('ScrollbackController tells the pet a command has started', () => {
 
   it('tells it when a command of yours begins', () => {
     const { controller, heard } = petController()
-    controller.beginBlockNow('go build ./...', '~', 0)
+    controller.beginBlock('go build ./...', '~', 0)
     expect(heard).toHaveBeenCalledWith('shell')
   })
 
   it('tells it whose lane the command is in', () => {
     const { controller, heard } = petController()
-    controller.beginBlockNow('go test ./...', '~', 0, undefined, 'agent')
+    controller.beginBlock('go test ./...', '~', 0, undefined, 'agent')
     expect(heard).toHaveBeenCalledWith('agent')
   })
 
@@ -1532,7 +1532,7 @@ describe('ScrollbackController tells the pet a command has started', () => {
       snapshotStore: new CommandSnapshotStore(),
     })
     controller.scrollbackArea.scrollTo = vi.fn()
-    controller.beginBlockNow('ls', '~', 0)
+    controller.beginBlock('ls', '~', 0)
     expect(heard).not.toHaveBeenCalled()
   })
 })

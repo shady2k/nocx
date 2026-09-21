@@ -1184,7 +1184,7 @@ describe('XtermRenderer frame capture surface (nocx-3j9b)', () => {
     r.dispose()
   })
 
-  it('fires onClear after clearViewport and onReset after reset — the explicit mutations', async () => {
+  it('fires onReset after reset — the backend-ordered explicit mutation', async () => {
     stubBrowser()
     const r = new XtermRenderer()
     const container = document.createElement('div')
@@ -1192,12 +1192,8 @@ describe('XtermRenderer frame capture surface (nocx-3j9b)', () => {
     Object.defineProperty(container, 'clientHeight', { value: 600 })
     await r.mount(container)
 
-    const cleared = vi.fn()
     const reset = vi.fn()
-    r.onClear(cleared)
     r.onReset(reset)
-    r.clearViewport()
-    expect(cleared).toHaveBeenCalledTimes(1)
     r.reset()
     expect(reset).toHaveBeenCalledTimes(1)
     r.dispose()

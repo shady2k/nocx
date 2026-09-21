@@ -3,18 +3,8 @@
 // Flat warp-style design (P0-1): no card borders, dividers between blocks,
 // subtle background tint on hover/select.
 
-import {
-  serializeRange,
-  serializeRangeSGR,
-  serializeRangeText,
-  fromITheme,
-  collectFitCandidates,
-} from './serializer'
-import { createCellFit, type CellFit, type FitCandidate } from './cell-fit'
-import type { RunMetric } from './run-geometry'
-import { isEnabled as driftEnabled, recordFrozenBlock } from './cell-drift'
+import { serializeRangeSGR, serializeRangeText } from './serializer'
 import type { CapturedBody } from '../capture-client'
-import { getCurrentTheme } from '../renderers/theme-adapter'
 import type { CommandSnapshotStore } from '../command-snapshot'
 import type { IBufferLine } from '@xterm/xterm'
 import { wordRangeIn } from '../word-selection'
@@ -1159,6 +1149,7 @@ function buildOverflowMenu(
   answerText?: AnswerTextSource,
   dump?: DumpSource,
   running?: RunningBlockActions,
+  outputText?: string,
 ): HTMLElement {
   /** Disposes the open menu's Solid root, or null while closed. The menu is a
    *  render island: mounted on open, disposed on close (spec 2026-09-14 §6.3). */
@@ -1319,18 +1310,25 @@ function buildOverflowMenu(
         },
       )
     } else {
+      // ONE owner of "what did this block print": the DOM body when the
+      // block carries one, else the capture the freeze took at the
+      // boundary — never a second derivation of the two.
+      const outputAsText = (): string => {
+        const dom = blockOutputText(blockEl)
+        return dom !== '' ? dom : (outputText ?? '')
+      }
       list.push(
         {
           id: 'copy-output',
           label: 'Copy output',
           icon: CopyIcon,
-          onSelect: () => clipboardFallback(blockOutputText(blockEl)),
+          onSelect: () => clipboardFallback(outputAsText()),
         },
         {
           id: 'copy-all',
           label: 'Copy all',
           icon: CopyIcon,
-          onSelect: () => clipboardFallback(`${intent()}\n${blockOutputText(blockEl)}`),
+          onSelect: () => clipboardFallback(`${intent()}\n${outputAsText()}`),
         },
       )
     }
@@ -1487,6 +1485,11 @@ export function createCommandBlock(
    *  selection ids remain internal and never cross this DOM seam. */
   entryId?: string,
   dump?: DumpSource,
+  /** The output AS TEXT, fixed at the freeze boundary. The card body is
+   *  what the backend sent (nocx-2v80t.3.4) and is empty until then; the
+   *  copy menu copies this capture rather than an empty body. Blocks that
+   *  carry a DOM body — answers, restored records — never reach for it. */
+  outputText?: string,
 ): HTMLElement {
   const wrapper = document.createElement('div')
   wrapper.className = 'cmd-block'
@@ -1541,7 +1544,7 @@ export function createCommandBlock(
     // Overflow menu (P2-9) — always the LAST element of the header-right
     // group (owner directive: ⋮ never shifts position). It reads the block's
     // copyable text from the BLOCK, at click time (nocx-ex636).
-    const overflow = buildOverflowMenu(wrapper, command, answerText, dump, menuActions)
+    const overflow = buildOverflowMenu(wrapper, command, answerText, dump, menuActions, outputText)
     const right = header.querySelector('.cmd-header-right')
     if (right) right.appendChild(overflow)
     wrapper.appendChild(header)
@@ -1746,6 +1749,7 @@ export function freezeBlock(
   author: CommandAuthor = 'shell',
   menuActions?: RunningBlockActions,
   entryId?: string,
+  outputText?: string,
 ): HTMLElement {
   const newEl = createCommandBlock(
     'command',
@@ -1764,6 +1768,8 @@ export function freezeBlock(
     undefined,
     menuActions,
     entryId,
+    undefined,
+    outputText,
   )
   if (el.parentNode) {
     el.parentNode.replaceChild(newEl, el)
@@ -2260,10 +2266,6 @@ export class BlockManager {
   /** Lazy container supplier bound to this manager's scrollback inner. */
   private _getContainer = (): HTMLElement => this._scrollbackInner
 
-  /** Кто решает, какой ячейке нужна коробка. Живёт при блоках, потому что
-   *  меряет в ИХ контейнере: там опубликован --term-cell-width. */
-  private _cellFit: CellFit = createCellFit(() => this._scrollbackInner)
-
   /**
    * Deselect the currently selected block without clearing the block list.
    * Safe to call from keyboard handlers (P0-4: Escape deselects).
@@ -2557,7 +2559,7 @@ export class BlockManager {
     const rec = this._runningBlock
     if (!rec) return null
     const status = this._logicalFreeze(rec, exitCode, exitCode === 0 ? 'success' : 'failure')
-    this._freezeVisual(rec, getLine, endLine, status)
+    this._freezeCard(rec, getLine, endLine, status)
     return rec
   }
 
@@ -2572,7 +2574,7 @@ export class BlockManager {
     const rec = this._runningBlock
     if (!rec) return null
     const status = this._logicalFreeze(rec, null, 'entered')
-    this._freezeVisual(rec, getLine, endLine, status)
+    this._freezeCard(rec, getLine, endLine, status)
     return rec
   }
 
@@ -2600,59 +2602,21 @@ export class BlockManager {
     return status
   }
 
-  /** The VISUAL freeze: serialize the block's output region up to a boundary
-   *  line and replace its running element with the frozen one. The boundary
-   *  is the render fence's sighted line; until that sighting runs, the
-   *  block's rows are not yet fixed. */
-  private _freezeVisual(
+  /** The VISUAL freeze: fix the block's boundary and replace its running
+   *  element with the frozen one. The CARD no longer carries the output:
+   *  its body is what the backend sent (nocx-2v80t.3.4), and until that
+   *  lands the card is its header alone — the rows stay in the terminal,
+   *  which nothing clears or rebases (nocx-2v80t.3.3). The DURABLE bodies
+   *  still come from the rows the boundary fixes, from the same walk the
+   *  history capture has always taken: what the record stores is what the
+   *  buffer held at the boundary, not a second reading taken later. */
+  private _freezeCard(
     rec: BlockRecord,
     getLine: GetLineFn,
     endLine: number,
     status: FrozenStatus,
   ): void {
     rec.endLine = endLine
-    const snapshot = fromITheme(getCurrentTheme())
-    // The drift instrument (nocx-4n6sj) is the only reader of the column
-    // counts, and it ships switched off: no array, no accounting, and the
-    // serializer's hot path is what it was.
-    const driftCols = driftEnabled() ? [] : undefined
-    // ДВА ПРОХОДА, ОДНА РАСКЛАДКА. Первый называет ячейки и греет кэш одним
-    // пакетным замером; второй сериализует, и там boxOf уже чистое
-    // чтение Map. Поштучный замер во время сериализации был бы N
-    // принудительных раскладок в тот самый момент, когда блок подменяет
-    // живую область.
-    let metric: RunMetric | undefined
-    if (this._cellFit.begin()) {
-      const candidates: FitCandidate[] = []
-      collectFitCandidates(getLine, rec.outputStart, endLine, (chars, width, attrs) =>
-        candidates.push({ chars, width, face: { bold: attrs.bold, italic: attrs.italic } }),
-      )
-      this._cellFit.warm(candidates)
-      // Run geometry is run-geometry's verdict (its owner, ADR-0009 rules
-      // 1-3); the freeze hands it MEASUREMENTS only: the published cell
-      // width, the published row correction, and cell-fit's cache of
-      // measured advances with their box verdicts.
-      const geometry = this._cellFit.geometry()
-      if (geometry !== null) {
-        metric = {
-          cellWidth: geometry.cellWidth,
-          defaultSpacing: geometry.rowDelta,
-          advanceOf: (chars, cols, face) => this._cellFit.advanceOf(chars, cols, face),
-          boxOf: (chars, cols, face) => this._cellFit.boxOf(chars, cols, face),
-        }
-      }
-    }
-    const outputHtml = serializeRange(
-      snapshot,
-      getLine,
-      rec.outputStart,
-      endLine,
-      driftCols,
-      metric,
-    )
-    // The DURABLE bodies, from the same rows and the same walk the frozen
-    // block on screen is made of — so what comes back after a restart is
-    // what was there, not a second reading of the buffer taken later.
     const dims = this._dimensions?.()
     if (dims) {
       rec.captured = {
@@ -2669,7 +2633,7 @@ export class BlockManager {
       rec.command,
       rec.cwd,
       this._location,
-      outputHtml,
+      '',
       rec.durationMs ?? 0,
       rec.exitCode,
       this._getContainer,
@@ -2682,14 +2646,11 @@ export class BlockManager {
       rec.author,
       this._runningActions,
       rec.attemptId,
+      rec.captured?.text,
     )
 
     this._reown(rec.el, newEl)
     rec.el = newEl
-    // BEFORE decoration: terminal-links rewrites ranges over the text nodes
-    // of these very rows, so a measurement taken after it would be reading
-    // a DOM the serializer did not produce.
-    if (driftCols) recordFrozenBlock(newEl, driftCols)
     // Anything that wanted to decorate this block had to wait for THIS
     // moment, because the line above threw the running element away. One
     // shot, cleared before it runs so a callback that re-enters cannot loop.
@@ -2698,11 +2659,10 @@ export class BlockManager {
       rec.afterVisualFreeze = undefined
       after()
     }
-    // The visual freeze is complete: the frozen element is in the DOM with
-    // its output rows fixed. Observers (the run tool's completion wait,
-    // nocx-tjppv) read the block's output window from THIS element. Fires
-    // after afterVisualFreeze, so a waiter that sets that slot and an
-    // observer here never race.
+    // The visual freeze is complete: the frozen element is in the DOM.
+    // Observers (the run tool's completion wait, nocx-tjppv) read the
+    // block's completion from THIS moment. Fires after afterVisualFreeze,
+    // so a waiter that sets that slot and an observer here never race.
     this._onBlockFrozen?.(rec)
   }
 
@@ -2770,7 +2730,7 @@ export class BlockManager {
       // Its line IS the output end — serialize now, boundary included.
       this._fences.delete(fence)
       this._consumedFence = fence
-      this._freezeVisual(rec, getLine, sighted, terminal)
+      this._freezeCard(rec, getLine, sighted, terminal)
       return rec
     }
 
@@ -2778,7 +2738,7 @@ export class BlockManager {
       // No fence, no sighting that could ever match: the boundary is cut
       // on the runtime's word alone, at the event-time end. Reached only
       // by callers bypassing the kernel's own fence gate.
-      this._freezeVisual(rec, getLine, endLine, terminal)
+      this._freezeCard(rec, getLine, endLine, terminal)
       return rec
     }
 
@@ -2807,7 +2767,7 @@ export class BlockManager {
       // has since been cleared changes nothing.
       const pending = this._pendingBoundaries.splice(at, 1)[0]
       if (!this._blocks.includes(pending.rec)) return
-      this._freezeVisual(pending.rec, pending.getLine, line, pending.status)
+      this._freezeCard(pending.rec, pending.getLine, line, pending.status)
       this._consumedFence = hex
       // Settle the live region only if no newer command owns the running
       if (this._runningBlock === null) this._onDeferredFreeze?.(pending.rec)
@@ -2838,7 +2798,7 @@ export class BlockManager {
     // older, already logically frozen block (its sighting may still be in
     // flight), never to the running block being abandoned.
     const status = this._logicalFreeze(rec, null, 'unknown')
-    this._freezeVisual(rec, getLine, endLine, status)
+    this._freezeCard(rec, getLine, endLine, status)
     this._attemptId = null
     return rec
   }
@@ -2855,7 +2815,7 @@ export class BlockManager {
     const rec = this._runningBlock
     if (!rec) return null
     const status = this._logicalFreeze(rec, null, 'unknown')
-    this._freezeVisual(rec, getLine, endLine, status)
+    this._freezeCard(rec, getLine, endLine, status)
     return rec
   }
 
@@ -3251,7 +3211,6 @@ export class BlockManager {
     // The cell-fit probe leaves with the blocks: `_own()` is the only way into
     // `.scrollback-inner`, and `clearAll()` removes only what it owns, so a probe
     // left behind would be a stray direct child for good.
-    this._cellFit.dispose()
     // Only when THIS manager created its own instance (BlockManagerOpts.
     // appVisibility absent): a caller-supplied one — the application's
     // shared instance (sidebar.tsx) — outlives any one manager and is not

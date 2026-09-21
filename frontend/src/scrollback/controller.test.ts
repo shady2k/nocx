@@ -9,6 +9,7 @@ import { mintDomain, type IntegrationDomain } from '../lifecycle/domains'
 import { BufferLine } from './test-helpers'
 import { PetOverlay } from '../pets/overlay'
 import { mountWindowPet, unmountWindowPet } from '../pets/window-pet'
+import { XtermRenderer } from '../renderers/xterm'
 
 function makeRenderer(): TerminalRenderer {
   return {
@@ -23,7 +24,6 @@ function makeRenderer(): TerminalRenderer {
     setReadOnly: vi.fn(),
     registerMarker: vi.fn(() => undefined),
     paste: vi.fn(),
-    clearViewport: vi.fn(),
     fitViewport: vi.fn(),
     // 0 = "cannot measure", which the frozen-block metric publisher treats
     // as "publish nothing" — existing tests are unaffected by the metric.
@@ -67,10 +67,6 @@ function stopFollowing(controller: ScrollbackController): void {
     Object.defineProperty(area, 'scrollHeight', { configurable: true, value: 4000 })
   }
   tailOf(controller).observe(area, false)
-}
-
-function followLiveEnd(controller: ScrollbackController): void {
-  tailOf(controller).observe(controller.scrollbackArea, true)
 }
 
 function tailOf(controller: ScrollbackController): {
@@ -340,96 +336,6 @@ describe('the live region follows the pane it fills (nocx-liveheight)', () => {
   })
 })
 
-describe('finished command landing', () => {
-  let pendingFrames: FrameRequestCallback[]
-
-  beforeEach(() => {
-    pendingFrames = []
-    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
-      pendingFrames.push(callback)
-      return pendingFrames.length
-    })
-  })
-
-  afterEach(() => {
-    vi.unstubAllGlobals()
-  })
-
-  function flushFrames(): void {
-    while (pendingFrames.length > 0) {
-      pendingFrames.shift()!(performance.now())
-    }
-  }
-
-  type ScrollIntoViewSpy = (arg?: ScrollIntoViewOptions | boolean) => void
-
-  function setFollowing(controller: ScrollbackController, following: boolean): void {
-    if (following) followLiveEnd(controller)
-    else stopFollowing(controller)
-  }
-
-  function finishWithMeasuredBlock(
-    height: number,
-    scrollIntoView: Mock<ScrollIntoViewSpy>,
-  ): ScrollbackController {
-    const { controller } = makeController()
-    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
-      configurable: true,
-      value: 500,
-    })
-    controller.beginBlock('printf output', '~', 0, 0)
-    controller.onCommandEnd(() => new BufferLine('output'), 2, 0)
-    const block = controller.scrollbackInner.querySelector<HTMLElement>('.cmd-block')
-    expect(block).not.toBeNull()
-    Object.defineProperty(block!, 'getBoundingClientRect', {
-      configurable: true,
-      value: () => ({ height }),
-    })
-    block!.scrollIntoView = scrollIntoView
-    flushFrames()
-    return controller
-  }
-
-  it('lands a block taller than the viewport at its end', () => {
-    const scrollIntoView = vi.fn<ScrollIntoViewSpy>()
-    const controller = finishWithMeasuredBlock(720, scrollIntoView)
-
-    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'end', behavior: 'instant' })
-    controller.blockManager.clearAll()
-  })
-
-  it('does not scroll a block that fits the viewport', () => {
-    const scrollIntoView = vi.fn<ScrollIntoViewSpy>()
-    const controller = finishWithMeasuredBlock(300, scrollIntoView)
-
-    expect(scrollIntoView).not.toHaveBeenCalled()
-    controller.blockManager.clearAll()
-  })
-
-  it('does not move a person who scrolled away from the live end', () => {
-    const { controller } = makeController()
-    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
-      configurable: true,
-      value: 500,
-    })
-    const scrollIntoView = vi.fn<ScrollIntoViewSpy>()
-    setFollowing(controller, false)
-    controller.beginBlock('printf output', '~', 0, 0)
-    controller.onCommandEnd(() => new BufferLine('output'), 2, 0)
-    const block = controller.scrollbackInner.querySelector<HTMLElement>('.cmd-block')
-    expect(block).not.toBeNull()
-    Object.defineProperty(block!, 'getBoundingClientRect', {
-      configurable: true,
-      value: () => ({ height: 720 }),
-    })
-    block!.scrollIntoView = scrollIntoView
-    flushFrames()
-
-    expect(scrollIntoView).not.toHaveBeenCalled()
-    controller.blockManager.clearAll()
-  })
-})
-
 describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
   const FENCE = 'ab'.repeat(32)
   const domain = mintDomain({
@@ -501,12 +407,14 @@ describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
     expect(controller.mode).toBe('running')
 
     // The fence bytes land (via the renderer's OSC 1337 handler): the block
-    // serializes at the fence's line and the live region settles.
+    // serializes at the fence's line and the boundary settles — without a
+    // clear and without collapsing the live region, which stays the whole
+    // terminal (nocx-2v80t.3.3).
     sight({ hex: FENCE, line: 5, buffer: 'normal' })
     expect(controller.blockManager.runningBlock).toBeNull()
     expect(controller.blockManager.blockForAttempt('att-1')?.status).toBe('success')
     expect(controller.blockManager.blockForAttempt('att-1')?.endLine).toBe(5)
-    expect(controller.mode).toBe('idle')
+    expect(controller.mode).toBe('running')
   })
 
   it('a fence in the alternate buffer is ignored — it has no scrollback line to serialize', () => {
@@ -582,133 +490,126 @@ describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
   })
 })
 
-describe('the frozen block\u2019s rows leave the grid (nocx-m87n live-region window)', () => {
-  // The live region is the xterm grid clipped to the box `setLiveHeight`
-  // sizes. A block's rows are serialized into its DOM element at freeze,
-  // but they STAY in the grid — unless the viewport is cleared at the
-  // freeze boundary. On a grid that has not scrolled, the box then
-  // re-displays those rows inside the running command: `ls`, its output,
-  // `pwd`, its output, and only then the running command's own rows, each
-  // row on screen twice (once frozen, once live). This describe block
-  // pins the seam that prevents it: every freeze hands the rows to the DOM
-  // and clears them from the grid, and the clear never fires while a newer
-  // command owns the running slot (its rows share the buffer below the
-  // frozen ones — wiping the grid would wipe its serialization window).
-  const FENCE = 'ab'.repeat(32)
-  const FENCE2 = 'cd'.repeat(32)
-  // The fence-rendezvous describe above scopes its own renderer factory,
-  // domain and attempt helper — this sibling describe needs its own.
-  function rendererWithFence(): {
-    renderer: TerminalRenderer
-    sight: (ev: RenderFenceEvent) => void
-  } {
-    const renderer = makeRenderer()
-    let fenceCb: ((ev: RenderFenceEvent) => void) | null = null
-    renderer.onRenderFence = (cb: (ev: RenderFenceEvent) => void) => {
-      fenceCb = cb
-    }
-    return {
-      renderer,
-      sight: (ev) => fenceCb?.(ev),
-    }
-  }
+describe('nothing clears or rebases the grid (nocx-2v80t.3.3)', () => {
+  // The old contract handed a frozen block the rows and cleared the grid so
+  // they would not show twice (nocx-m87n). The backend diffs against a frame
+  // it holds: a client-side clear desynchronises the two, and nothing
+  // anywhere reports it — the screen simply goes wrong. So no freeze path
+  // may clear or rebase the buffer. The rows a command printed stay on the
+  // live surface, and the saved-cursor state a program holds across the
+  // freeze stays true — the savedY hazard the clear carried.
   const domain = mintDomain({
     lane: 'l',
     lifecycle: 'prompt_ready',
     domain: 'd1',
     epoch: 1,
   }) as IntegrationDomain
-  function completedAttempt(fence: string): ExecutionAttempt {
+  function completedAttempt(fence?: string): ExecutionAttempt {
     return {
       id: 'att-1',
       domain,
       state: 'completed',
       exitCode: 0,
-      fence,
+      ...(fence === undefined ? {} : { fence }),
+    }
+  }
+  const FENCE = 'a'.repeat(64)
+  const stubBrowser = () => {
+    window.matchMedia = (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })
+    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  }
+  async function mounted(): Promise<{
+    controller: ScrollbackController
+    renderer: XtermRenderer
+    done: () => void
+  }> {
+    stubBrowser()
+    const renderer = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await renderer.mount(container)
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+    return {
+      controller,
+      renderer,
+      done: () => {
+        controller.dispose()
+        renderer.dispose()
+      },
     }
   }
 
-  it('clears the grid when a block freezes, so the live region never re-displays rows the DOM block owns', () => {
-    const { renderer, sight } = rendererWithFence()
-    const pane = document.createElement('div')
-    const controller = new ScrollbackController({
-      pane,
-      renderer,
-      snapshotStore: new CommandSnapshotStore(),
-    })
-    /* eslint-disable @typescript-eslint/unbound-method */
-    const clearViewport = renderer.clearViewport
-    /* eslint-enable @typescript-eslint/unbound-method */
-    controller.scrollbackArea.scrollTo = vi.fn()
+  it('a finished command leaves its rows on the live surface', async () => {
+    const { controller, renderer, done } = await mounted()
+    try {
+      controller.beginBlock('seq 3', '~', 0)
+      controller.blockManager.bindAttempt('att-1')
+      renderer.write('out 1\r\nout 2\r\nout 3')
+      // The render fence is the ordinary freeze's other half: the shell
+      // writes it after the output, and the sighting settles the boundary.
+      renderer.write('\x1b]1337;NOCX_FENCE;' + FENCE + '\x07')
+      await vi.waitFor(() => expect(renderer.hasUnsettledWrite()).toBe(false))
+      const endLine: number = renderer.cursorLine()
 
-    // `ls` runs and finishes: the block freezes at the sighted fence line
-    // and its rows leave the grid.
-    controller.beginBlock('ls', '~', 0)
-    controller.blockManager.bindAttempt('att-1')
-    expect(controller.mode).toBe('running')
-    sight({ hex: FENCE, line: 2, buffer: 'normal' })
-    expect(controller.freezeFromAttempt(completedAttempt(FENCE), 2)).toBe(true)
-    expect(controller.mode).toBe('idle')
-    expect(clearViewport).toHaveBeenCalledTimes(1)
+      expect(controller.freezeFromAttempt(completedAttempt(FENCE), endLine)).toBe(true)
 
-    // `pwd` runs and finishes the same way — a second freeze, a second clear.
-    controller.beginBlock('pwd', '~', 3)
-    controller.blockManager.bindAttempt('att-2')
-    sight({ hex: FENCE2, line: 4, buffer: 'normal' })
-    expect(controller.freezeFromAttempt({ ...completedAttempt(FENCE2), id: 'att-2' }, 4)).toBe(true)
-    expect(clearViewport).toHaveBeenCalledTimes(2)
-
-    // `codex` runs: its rows are the ONLY rows in the grid (both earlier
-    // blocks were cleared at their freezes), and nothing clears mid-run.
-    controller.beginBlock('codex', '~', 5)
-    controller.blockManager.bindAttempt('att-3')
-    expect(controller.mode).toBe('running')
-    expect(clearViewport).toHaveBeenCalledTimes(2)
-    controller.blockManager.clearAll()
+      const row = (y: number): string => renderer.getBufferLine(y)?.translateToString(true) ?? ''
+      expect(row(0)).toBe('out 1')
+      expect(row(1)).toBe('out 2')
+      expect(row(2)).toBe('out 3')
+    } finally {
+      done()
+    }
   })
 
-  it('a deferred freeze clears the grid only when no newer command owns the running slot', () => {
-    const { renderer, sight } = rendererWithFence()
-    const pane = document.createElement('div')
-    const controller = new ScrollbackController({
-      pane,
-      renderer,
-      snapshotStore: new CommandSnapshotStore(),
-    })
-    /* eslint-disable @typescript-eslint/unbound-method */
-    const clearViewport = renderer.clearViewport
-    /* eslint-enable @typescript-eslint/unbound-method */
-    controller.scrollbackArea.scrollTo = vi.fn()
+  it('saved-cursor state stays true across a freeze — the savedY hazard is gone', async () => {
+    const { controller, renderer, done } = await mounted()
+    try {
+      const rows = Array.from({ length: 12 }, (_, i) => `before ${i}`)
+      renderer.write(rows.join('\r\n') + '\u001b7')
+      await vi.waitFor(() => expect(renderer.hasUnsettledWrite()).toBe(false))
+      renderer.write('\x1b]1337;NOCX_FENCE;' + FENCE + '\x07')
+      await vi.waitFor(() => expect(renderer.hasUnsettledWrite()).toBe(false))
+      const savedRow = renderer.cursorLine()
+      expect(savedRow).toBe(11)
 
-    // The first command completes with its fence still in flight: the
-    // VISUAL freeze defers and the grid is untouched.
-    controller.beginBlock('codex', '~', 0)
-    controller.blockManager.bindAttempt('att-1')
-    expect(controller.freezeFromAttempt(completedAttempt(FENCE), 2)).toBe(false)
-    expect(clearViewport).not.toHaveBeenCalled()
+      controller.beginBlock('true', '~', 0)
+      controller.blockManager.bindAttempt('att-1')
+      expect(controller.freezeFromAttempt(completedAttempt(FENCE), renderer.cursorLine())).toBe(
+        true,
+      )
 
-    // A second command starts while the first's boundary is pending: its
-    // rows sit BELOW the first block's rows in the buffer. The first
-    // fence landing must serialize the first block WITHOUT clearing —
-    // clearing would wipe the second command's still-unserialized rows.
-    controller.beginBlock('codex', '~', 4)
-    controller.blockManager.bindAttempt('att-2')
-    sight({ hex: FENCE, line: 3, buffer: 'normal' })
-    expect(
-      controller.blockManager.blockForAttempt('att-1')?.el.classList.contains('cmd-block-running'),
-    ).toBe(false)
-    expect(controller.blockManager.runningBlock).toBe(
-      controller.blockManager.blockForAttempt('att-2'),
-    )
-    expect(clearViewport).not.toHaveBeenCalled()
-
-    // The second command completes and its fence is already sighted: the
-    // rec path freezes it and NOW the grid clears — its rows were the last
-    // in the buffer.
-    sight({ hex: FENCE2, line: 7, buffer: 'normal' })
-    expect(controller.freezeFromAttempt({ ...completedAttempt(FENCE2), id: 'att-2' }, 7)).toBe(true)
-    expect(clearViewport).toHaveBeenCalledTimes(1)
-    controller.blockManager.clearAll()
+      // The program restores its cursor and repaints the row it saved. The
+      // restore must land on the row it saved — the row still holding its
+      // own content — not on a grid the freeze wiped underneath it.
+      renderer.write('\u001b8\rMARK')
+      await vi.waitFor(() => expect(renderer.hasUnsettledWrite()).toBe(false))
+      const row = (y: number): string => renderer.getBufferLine(y)?.translateToString(true) ?? ''
+      expect(row(3)).toBe('before 3')
+      expect(row(savedRow)).toBe('MARKre 11')
+    } finally {
+      done()
+    }
   })
 })
 
@@ -798,9 +699,6 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
   it('hides the echo row from the running block and releases it once the grid scrolls past', () => {
     const { renderer, sight, setViewportTop } = rendererWithGeometry()
 
-    /* eslint-disable @typescript-eslint/unbound-method */
-    const clearViewport = renderer.clearViewport
-    /* eslint-enable @typescript-eslint/unbound-method */
     const pane = document.createElement('div')
     const controller = new ScrollbackController({
       pane,
@@ -852,14 +750,15 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     expect(controller.xtermLiveViewport.style.height).toBe('32px')
     expect(controller.xtermLiveContainer.style.height).toBe('32px')
 
-    // Freeze hands the rows to the DOM and the live region settles: the
-    // shift is gone at idle, exactly like the box's height.
+    // The freeze paints the verdict and the live region STAYS UP — the
+    // whole terminal is the session's surface now, and nothing clears it
+    // (nocx-2v80t.3.3). With no running block the echo shift is moot, so
+    // the grid sits untransformed beneath the frozen card.
     controller.blockManager.bindAttempt('att-1')
     sight({ hex: FENCE, line: 3, buffer: 'normal' })
     expect(controller.freezeFromAttempt(completedAttempt(FENCE), 3)).toBe(true)
-    expect(controller.mode).toBe('idle')
+    expect(controller.mode).toBe('running')
     expect(controller.xtermInner.style.transform).toBe('')
-    expect(clearViewport).toHaveBeenCalledTimes(1)
     controller.blockManager.clearAll()
   })
 

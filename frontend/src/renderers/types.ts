@@ -362,10 +362,10 @@ export interface TerminalRenderer {
   // fence is awaitWriteBarrier().
   onWriteParsed(cb: () => void): void
 
-  // onClear/onReset fire AFTER the renderer executed a full clear
-  // (clearViewport) or a full reset — the explicit state-changing
-  // operations that advance the frame generation alongside onWriteParsed.
-  onClear(cb: () => void): void
+  // onReset fires AFTER the renderer executed a full reset — the backend
+  // ordered a resync (the frame contract re-declares the screen), and that
+  // explicit state change advances the frame generation alongside
+  // onWriteParsed.
   onReset(cb: () => void): void
 
   /** True while bytes queued via write() have not finished parsing, tracked
@@ -404,17 +404,6 @@ export interface TerminalRenderer {
   cursorLine(): number
   /** Column of the cursor — the column the next write lands on. */
   cursorCol(): number
-
-  /**
-   * Clear the visible xterm viewport. Used after freezing a block, so the
-   * rows the block's DOM element now owns do not stay in the grid and get
-   * re-displayed by the live region (nocx-m87n). The underlying
-   * `Terminal.clear()` clears the whole buffer — "making the prompt line
-   * the new first line" — which is exactly what the DOM block model
-   * wants: the DOM owns the scrollback now, and the grid only ever holds
-   * the running command's rows.
-   */
-  clearViewport(): void
 }
 
 /** Adapter over an xterm IMarker, exposing only what the gutter needs. */

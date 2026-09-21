@@ -318,7 +318,6 @@ export function createRendererMock(): RendererMock {
     paneElement: document.createElement('div'),
     getBufferLine: vi.fn().mockReturnValue(undefined),
     cursorLine: vi.fn().mockReturnValue(0),
-    clearViewport: vi.fn(),
     // NULL means "cannot measure", which the caller treats as "keep the current
     // height" — so a fixture that does not care about live-region sizing gets
     // the same behaviour as before this method existed. Zero would be a

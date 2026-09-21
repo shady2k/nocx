@@ -113,7 +113,6 @@ export class CaptureIdentityTracker {
     _source.onWriteParsed(() => this._onWriteParsed())
     _source.onBufferChange((type) => this._onBufferChange(type))
     _source.onResize(() => this._onExplicitMutation())
-    _source.onClear(() => this._onExplicitMutation())
     _source.onReset(() => this._onExplicitMutation())
     // The fence's closing event: disposal must settle (reject) a capture
     // parked on a barrier whose callback went away with the terminal. A

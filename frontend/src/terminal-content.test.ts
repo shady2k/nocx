@@ -75,12 +75,13 @@ import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
 import type { SessionHandle, SessionRecovery, WSClient } from './ipc'
-import { blockOutputText, createCommandBlock } from './scrollback/blocks'
+import { blockOutputText, createCommandBlock, type RunningBlockActions } from './scrollback/blocks'
 import { mountReadScreenHandler } from './read-screen'
 import { CommandSnapshotStore } from './command-snapshot'
 import type { ActionFacts, DesiredMode } from './capability'
 import type * as Capability from './capability'
 import type { ScrollbackController } from './scrollback/controller'
+import type { TerminalRenderer } from './renderers/types'
 import { pushOverlay, popOverlay } from './ui/overlay/stack'
 import { _resetThemeState } from './renderers/theme-adapter'
 import { showToast } from './ui/toast'
@@ -4097,7 +4098,12 @@ describe('the projections consume the kernel through the composition root (ADR-0
       const frozen = withScrollback.scrollback.blockManager.blocks[0]
       expect(frozen.status).toBe('success')
       expect(frozen.exitCode).toBe(0)
-      expect(blockOutputText(frozen.el)).toContain('hello world')
+      // The card body is what the backend sent (nocx-2v80t.3.4) and is
+      // empty until then; the output itself stays on the live surface,
+      // which nothing clears (nocx-2v80t.3.3). What the freeze fixes is
+      // the durable capture of the rows the boundary names.
+      expect(blockOutputText(frozen.el)).toBe('')
+      expect(frozen.captured?.text).toContain('hello world')
       expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull()
     } finally {
       Element.prototype.scrollTo = protoScrollTo
@@ -4171,6 +4177,156 @@ describe('the projections consume the kernel through the composition root (ADR-0
       const src = readFileSync(resolve(srcDir, rel), 'utf8')
       expect(src, `${rel}: beginBlockNow`).not.toMatch(/beginBlockNow/)
       expect(src, `${rel}: FENCE_DEFER_MS`).not.toMatch(/FENCE_DEFER_MS/)
+    }
+  })
+
+  it('no clear or rebase of the buffer survives in the boundary sources (nocx-2v80t.3.3)', () => {
+    for (const rel of [
+      'scrollback/controller.ts',
+      'scrollback/blocks.ts',
+      'terminal-content.ts',
+      'renderers/xterm.ts',
+      'renderers/types.ts',
+    ]) {
+      const src = readFileSync(resolve(srcDir, rel), 'utf8')
+      expect(src, `${rel}: clearViewport`).not.toMatch(/clearViewport/)
+      expect(src, `${rel}: _settleFrozen`).not.toMatch(/_settleFrozen/)
+      expect(src, `${rel}: _freezeVisual`).not.toMatch(/_freezeVisual/)
+      expect(src, `${rel}: _clearFrozenRows`).not.toMatch(/_clearFrozenRows/)
+    }
+    // And the renderer carries no raw clear of its own: the only writer of
+    // the grid is the program's byte stream.
+    expect(
+      readFileSync(resolve(srcDir, 'renderers/xterm.ts'), 'utf8'),
+      'renderers/xterm.ts: t.clear()',
+    ).not.toMatch(/\bt\.clear\(\)/)
+  })
+
+  it('a finished command leaves its rows on the live surface (nocx-2v80t.3.3)', async () => {
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'history.record') {
+        return Promise.resolve({
+          maskedCount: 0,
+          maskedKinds: [],
+          entryId: 'e1',
+          source: 'assistant',
+          redactions: [],
+          captures: [],
+          maskedCommand: 'seq',
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    // A REAL renderer, injected through this file's mock seam: the rows
+    // this criterion is about live in the actual grid, which the shared
+    // mock does not model.
+    window.matchMedia = (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })
+    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    // The dynamic import is the point: the mock seam replaced the class, and
+    // the real implementation is reachable only at runtime here. Through the
+    // mock, the actual module's types are unresolvable to the linter — the
+    // runtime object is the real class this file's tests assert against.
+    const raw: unknown = await vi.importActual('./renderers/xterm')
+    const RealXterm = (raw as { XtermRenderer: new () => TerminalRenderer }).XtermRenderer
+    const realRenderer = new RealXterm()
+    const { XtermRenderer } = await import('./renderers/xterm')
+    vi.mocked(XtermRenderer).mockImplementationOnce(
+      () => realRenderer as unknown as InstanceType<typeof XtermRenderer>,
+    )
+    const { ed, view, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+
+      ed.insertText('seq 3')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // The authenticated start opens the card; the command's bytes land on
+      // the grid while it runs.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'seq 3',
+        },
+      })
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+      rendererOf(content).write('out 1\r\nout 2\r\nout 3')
+      // The shell writes the render fence AFTER the command's output; the
+      // sighting is the ordinary freeze's boundary half.
+      rendererOf(content).write('\x1b]1337;NOCX_FENCE;' + 'a'.repeat(64) + '\x07')
+      // The sighting must have LANDED before the completion fact fires, or
+      // the freeze defers and this test reasons about a boundary that never
+      // settled. Wait on the renderer's own write fence, never a duration.
+      const real = rendererOf(content) as unknown as { hasUnsettledWrite(): boolean }
+      await vi.waitFor(() => expect(real.hasUnsettledWrite()).toBe(false))
+
+      // The command completes and its boundary is sighted — the ordinary
+      // freeze every finished command takes.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'a'.repeat(64),
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('success')
+
+      // AND THE ROWS ARE STILL ON THE LIVE SURFACE. A freeze that cleared
+      // the buffer would make this a lie: the grid is the frame the backend
+      // diffs against, and the rows a command printed belong to it.
+      const row = (y: number): string =>
+        rendererOf(content).getBufferLine(y)?.translateToString(true) ?? ''
+      expect(row(0)).toBe('out 1')
+      expect(row(1)).toBe('out 2')
+      expect(row(2)).toBe('out 3')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
     }
   })
 
@@ -6688,19 +6844,49 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
   }
 
   /** A frozen command block through the REAL manager chain. */
+  let fixtureEntrySeq = 0
   function frozenBlockOf(
     content: TerminalContent,
     command = 'ls',
     output = ['total 12', 'docs'],
   ): HTMLElement {
+    // A card that CARRIES rows, built the way a restored record is built:
+    // the body is the record's stored text, rendered as term-line rows. The
+    // freeze no longer cuts a body from the grid — nothing clears it
+    // (nocx-2v80t.3.3), and the backend's own body is nocx-2v80t.3.4 — so
+    // the gesture under test uses the shape that still has rows.
     const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
-    const manager = scrollback.blockManager
-    manager.startBlock(command, '~', 0)
-    manager.bindAttempt(`att-fixture-${manager.blocks.length}`)
-    const lines = output.map((t) => new BufferLine(t))
-    const frozen = manager.freezeBlock((y) => lines[y], lines.length - 1, 0)
-    expect(frozen).not.toBeNull()
-    return frozen!.el
+    const manager = scrollback.blockManager as unknown as {
+      _onBlockSelected(id: number): void
+      _onBlockDeselected(id: number): void
+      _runningActions?: RunningBlockActions
+    }
+    const outputHtml = output.map((t) => `<span class="term-line">${t}</span>`).join('')
+    const el = createCommandBlock(
+      'command',
+      10_000 + fixtureEntrySeq + 1,
+      command,
+      '~',
+      '',
+      outputHtml,
+      12,
+      0,
+      'success',
+      () => scrollback.scrollbackInner,
+      (bid, sel) => {
+        if (sel) manager._onBlockSelected(bid)
+        else manager._onBlockDeselected(bid)
+      },
+      new CommandSnapshotStore(),
+      'shell',
+      undefined,
+      manager._runningActions,
+    )
+    // A grant names the block's ledger entry: the fixture mints a UNIQUE
+    // one, the way the history ack does for a real block.
+    el.dataset.entryId = `entry-fixture-${++fixtureEntrySeq}`
+    scrollback.restorePast([el])
+    return el
   }
 
   /** The registry's active label — the truth the indicator must render. */

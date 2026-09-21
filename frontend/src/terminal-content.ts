@@ -1208,7 +1208,7 @@ export class TerminalContent extends BasePaneContent {
    *  the pane knew when the command was submitted and never updates it
    *  afterwards"). Keyed by id rather than a DOM attribute on `rec.el`
    *  because the freeze that settles a block REPLACES that element with
-   *  a freshly built one (BlockManager._freezeVisual) that carries no
+   *  a freshly built one (BlockManager._freezeCard) that carries no
    *  attribute of ours forward — `_onBlockFrozen` reads this map to
    *  restate the branch on the new element. */
   private readonly _blockBranch = new Map<number, string | undefined>()
@@ -8084,7 +8084,7 @@ export class TerminalContent extends BasePaneContent {
     // land inside it (nocx-ggha).
     //
     // Parked rather than applied, because the visual freeze REPLACES el and
-    // would discard anything written now. `_freezeVisual` runs this the
+    // would discard anything written now. The card freeze runs this the
     // instant the boundary lands, and the re-entry passes the check above.
     if (blockEl.classList.contains('cmd-block-running')) {
       block.afterVisualFreeze = () => this.attachRecordedAck(_recId, block, ack)

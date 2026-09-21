@@ -331,8 +331,7 @@ export class XtermRenderer implements TerminalRenderer {
   /** Frame capture (nocx-3j9b): subscribers to the parse-settle event. */
   private writeParsedSubs: Array<() => void> = []
   private writeParsedDisposable?: { dispose(): void }
-  /** Subscribers to the explicit clear/reset operations. */
-  private clearSubs: Array<() => void> = []
+  /** Subscribers to the explicit reset operation. */
   private resetSubs: Array<() => void> = []
   /** Writes queued via write() whose bytes have not finished parsing — the
    *  capture fence's pending count. Settled via the per-write callback, so
@@ -1263,7 +1262,6 @@ export class XtermRenderer implements TerminalRenderer {
     this.writeParsedDisposable?.dispose()
     this.writeParsedDisposable = undefined
     this.writeParsedSubs = []
-    this.clearSubs = []
     this.resetSubs = []
     for (const d of this.programQueryHandlers) d.dispose()
     this.programQueryHandlers = []
@@ -1424,11 +1422,6 @@ export class XtermRenderer implements TerminalRenderer {
     })
   }
 
-  /** Subscribe to explicit clears — fired after clearViewport() executed. */
-  onClear(cb: () => void): void {
-    this.clearSubs.push(cb)
-  }
-
   /** Subscribe to explicit resets — fired after reset() executed. */
   onReset(cb: () => void): void {
     this.resetSubs.push(cb)
@@ -1487,19 +1480,6 @@ export class XtermRenderer implements TerminalRenderer {
   /** Column of the cursor — the column the next write lands on. */
   cursorCol(): number {
     return this.term?.buffer.active.cursorX ?? 0
-  }
-
-  /** Clear the whole buffer — "making the prompt line the new first
-   *  line" (xterm's own contract). Called at a block freeze so the rows
-   *  the DOM block now owns leave the grid; the grid only ever holds the
-   *  running command's rows, and the DOM owns the scrollback (nocx-m87n). */
-  clearViewport(): void {
-    const t = this.term
-    if (!t) return
-    t.clear()
-    // Report the explicit clear AFTER it executed, so a subscriber reading
-    // state (e.g. the frame generation) observes the post-clear buffer.
-    for (const sub of this.clearSubs) sub()
   }
 
   /** Capture the live frame of the current buffer (nocx-ljfwz): fence the

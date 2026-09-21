@@ -24,8 +24,8 @@ import { clampMenuPosition } from '../ui/menu-geometry'
 import { shellHighlightReady } from '../shell-highlight'
 import { applyReasoningExpanded } from '../reasoning-expanded'
 import { clearToasts, toasts } from '../ui/toast'
-import { BufferLine, lineWith } from './test-helpers'
-import { setCurrentTheme, _resetThemeState } from '../renderers/theme-adapter'
+import { BufferLine } from './test-helpers'
+import { _resetThemeState } from '../renderers/theme-adapter'
 import { CommandSnapshotStore } from '../command-snapshot'
 import { mintDomain, type IntegrationDomain } from '../lifecycle/domains'
 import type { ExecutionAttempt } from '../lifecycle/state'
@@ -1042,88 +1042,6 @@ describe('BlockManager', () => {
     expect(manager.selectedBlockId).toBeNull()
     expect(rec.el.classList.contains('cmd-block-selected')).toBe(false)
   })
-
-  it('freezeBlock captures theme snapshot at freeze time', () => {
-    const themeA = {
-      foreground: '#111111',
-      background: '#000000',
-      black: '#000000',
-      red: '#aa0000',
-      green: '#00aa00',
-      yellow: '#aaaa00',
-      blue: '#0000aa',
-      magenta: '#aa00aa',
-      cyan: '#00aaaa',
-      white: '#aaaaaa',
-      brightBlack: '#555555',
-      brightRed: '#ff5555',
-      brightGreen: '#55ff55',
-      brightYellow: '#ffff55',
-      brightBlue: '#5555ff',
-      brightMagenta: '#ff55ff',
-      brightCyan: '#55ffff',
-      brightWhite: '#ffffff',
-      cursor: '#ffffff',
-      cursorAccent: '#000000',
-      selectionBackground: '#335577',
-    }
-    const themeB = {
-      foreground: '#cccccc',
-      background: '#222222',
-      black: '#222222',
-      red: '#cc0000',
-      green: '#00cc00',
-      yellow: '#cccc00',
-      blue: '#0000cc',
-      magenta: '#cc00cc',
-      cyan: '#00cccc',
-      white: '#cccccc',
-      brightBlack: '#666666',
-      brightRed: '#ff6666',
-      brightGreen: '#66ff66',
-      brightYellow: '#ffff66',
-      brightBlue: '#6666ff',
-      brightMagenta: '#ff66ff',
-      brightCyan: '#66ffff',
-      brightWhite: '#eeeeee',
-      cursor: '#eeeeee',
-      cursorAccent: '#222222',
-      selectionBackground: '#446688',
-    }
-
-    // First block with theme A
-    setCurrentTheme(themeA)
-    manager.startBlock('cmd1', '~', 0)
-    const linesA = [new BufferLine('hello', false)]
-    const recA = manager.freezeBlock((y) => linesA[y] ?? undefined, 0, 0)
-    expect(recA).not.toBeNull()
-    // Defaults are no longer baked in — plain text follows the app's colours —
-    // so what this asserts is that the block exists and carries its text, with
-    // the palette question moved to serializer.test.ts where a cell actually
-    // sets an ANSI colour (nocx-6w4z).
-    const outputA = recA!.el.querySelector('.cmd-output')
-    expect(outputA?.innerHTML).toContain('hello')
-    expect(outputA?.innerHTML).not.toContain('#111111')
-
-    // Second block with theme B
-    setCurrentTheme(themeB)
-    manager.startBlock('cmd2', '~', 0)
-    const linesB = [new BufferLine('world', false)]
-    const recB = manager.freezeBlock((y) => linesB[y] ?? undefined, 0, 0)
-    expect(recB).not.toBeNull()
-    const outputB = recB!.el.querySelector('.cmd-output')
-    expect(outputB?.innerHTML).toContain('world')
-    expect(outputB?.innerHTML).not.toContain('#cccccc')
-    expect(outputB?.innerHTML).not.toContain('#111111')
-
-    // And the first block is still untouched by theme B — which is the property
-    // this test is really about. It is asserted by absence now: neither block
-    // carries a default colour at all, so a theme change cannot reach into an
-    // old block's plain text. Frozen ANSI colours are covered in
-    // serializer.test.ts, where a cell actually sets one (nocx-6w4z).
-    expect(outputA?.innerHTML).toContain('hello')
-    expect(outputA?.innerHTML).not.toContain('#cccccc')
-  })
 })
 
 describe('overflow menu (P1-6)', () => {
@@ -1884,6 +1802,7 @@ describe('the render fence rendezvous (ADR-0024 §7 carve-out, bead nocx-u7uh.8)
     manager = new BlockManager(inner, xtermContainer, {
       now: () => 1000,
       snapshotStore: freshStore(),
+      dimensions: () => ({ cols: 100, rows: 30 }),
     })
   })
 
@@ -1939,10 +1858,14 @@ describe('the render fence rendezvous (ADR-0024 §7 carve-out, bead nocx-u7uh.8)
     manager.sightFence(FENCE_A, 2)
     expect(manager.runningBlock).toBeNull()
     expect(block!.endLine).toBe(2)
-    const text = blockOutputText(block!.el)
-    expect(text).toContain('first')
-    expect(text).toContain('second')
-    expect(text).toContain('the tail')
+    // The CARD carries no body — the rows stay in the terminal, which
+    // nothing clears or rebases (nocx-2v80t.3.3). The boundary's product
+    // is the durable capture: every line up to the fence, in full.
+    expect(blockOutputText(block!.el)).toBe('')
+    const captured = block!.captured
+    expect(captured?.text).toContain('first')
+    expect(captured?.text).toContain('second')
+    expect(captured?.text).toContain('the tail')
   })
 
   it('a fence with no authenticated event behind it changes nothing at all', () => {
@@ -2096,6 +2019,7 @@ describe('the serialized output range vs the block creation line (nocx-4yhi)', (
     document.body.appendChild(inner)
     manager = new BlockManager(inner, xtermContainer, {
       snapshotStore: freshStore(),
+      dimensions: () => ({ cols: 100, rows: 30 }),
     })
   })
 
@@ -2112,7 +2036,8 @@ describe('the serialized output range vs the block creation line (nocx-4yhi)', (
     const getLine = (y: number) => lines[y - 5]
     const frozen = manager.freezeBlock(getLine, 8, 0)
     expect(frozen).not.toBeNull()
-    const text = blockOutputText(frozen!.el)
+    expect(blockOutputText(frozen!.el)).toBe('')
+    const text = frozen!.captured?.text ?? ''
     expect(text).toContain('file1')
     expect(text).toContain('file2')
     expect(text).not.toContain('$ ls')
@@ -2127,8 +2052,8 @@ describe('the serialized output range vs the block creation line (nocx-4yhi)', (
     const getLine = (y: number) => (y === 7 ? new BufferLine('out1') : undefined)
     const frozen = manager.freezeBlock(getLine, 7, 0)
     expect(frozen).not.toBeNull()
-    const text = blockOutputText(frozen!.el)
-    expect(text).toContain('out1')
+    expect(blockOutputText(frozen!.el)).toBe('')
+    expect(frozen!.captured?.text).toContain('out1')
   })
 })
 
@@ -2836,6 +2761,7 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
       snapshotStore: freshStore(),
       sessionName,
       answerText,
+      dimensions: () => ({ cols: 100, rows: 30 }),
     })
     return { inner, manager }
   }
@@ -4529,68 +4455,5 @@ describe('setBlockWhere', () => {
     const el = document.createElement('div')
     el.className = 'cmd-block'
     expect(() => setBlockWhere(el, { branch: 'main' })).not.toThrow()
-  })
-})
-
-// ── the frozen block's runs are run-geometry's (nocx-zg3k3.7) ──────────────
-//
-// Criterion 1, end to end: the freeze path hands cell-fit's measurements to
-// run-geometry, and the letter-spacing the rule puts on a run is visible in
-// the frozen block itself — in the SAME innerHTML a person's pane shows.
-
-describe('the frozen block carries per-run geometry', () => {
-  it('freezes a measured cluster onto its own spacing, through the real freeze path', () => {
-    const inner = document.createElement('div')
-    const xtermContainer = document.createElement('div')
-    inner.appendChild(xtermContainer)
-    // The metric the renderer would have published.
-    inner.style.setProperty('--term-cell-width', '8px')
-    inner.style.setProperty('--term-cell-delta', '-0.5px')
-    document.body.appendChild(inner)
-    const manager = new BlockManager(inner, xtermContainer, {
-      now: () => 1000,
-      snapshotStore: freshStore(),
-      dimensions: () => ({ cols: 100, rows: 30 }),
-    })
-    // jsdom lays nothing out, and cell-fit measures by writing probe spans
-    // and reading their rects — answer it here: あ lands exactly on its two
-    // columns (16px); single-column ASCII is never measured (calibrated).
-    const rects = vi
-      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
-      .mockImplementation(function (this: HTMLElement) {
-        const width = this.textContent === 'あ' ? 16 : 8
-        return {
-          width,
-          height: 20,
-          top: 0,
-          left: 0,
-          right: width,
-          bottom: 20,
-          x: 0,
-          y: 0,
-          toJSON: () => ({}),
-        }
-      })
-    try {
-      manager.startBlock('printf あ', '~', 0)
-      const lines = [
-        lineWith(
-          { chars: 'a', fg: 0, fgMode: 0 },
-          { chars: 'あ', width: 2, fg: 0, fgMode: 0 },
-          { chars: '', width: 0, fg: 0, fgMode: 0 },
-        ),
-      ]
-      const rec = manager.freezeBlock((y) => lines[y] ?? undefined, 0, 0)
-      expect(rec).not.toBeNull()
-      // あ measured onto 2 × 8px exactly: its spacing is 0 — not the row
-      // default −0.5px — so the rule splits it out and declares it
-      // (ADR-0009 rules 2 and 3). The ASCII around it stays bare text
-      // inheriting the row correction, today's markup byte for byte.
-      expect(rec!.el.querySelector('.cmd-output')?.innerHTML).toBe(
-        '<span class="term-line">a<span style="letter-spacing:0px">あ</span></span>',
-      )
-    } finally {
-      rects.mockRestore()
-    }
   })
 })

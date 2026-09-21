@@ -420,19 +420,6 @@ export function measureFrozenBlock(
   return true
 }
 
-/** The freeze-time entry point: measure the block that just replaced the
- *  live region. Reads the cell width from the custom property the metric
- *  publisher already puts on the scrollback container, so the instrument
- *  and the layout it is checking agree on the grid by construction. */
-export function recordFrozenBlock(blockEl: HTMLElement, cols: readonly number[]): void {
-  if (!isEnabled()) return
-  const out = blockEl.querySelector<HTMLElement>('.cmd-output')
-  if (!out) return
-  const cellWidth = Number.parseFloat(getComputedStyle(out).getPropertyValue('--term-cell-width'))
-  if (!Number.isFinite(cellWidth) || cellWidth <= 0) return
-  measureFrozenBlock(out, cols, cellWidth)
-}
-
 // ── The console surface ────────────────────────────────────────────────────
 //
 // A window global rather than a Settings control: this is a bead-scoped

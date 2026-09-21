@@ -33,7 +33,6 @@ export class FakeSource implements CaptureEventSource {
   private writeParsedSubs: Array<() => void> = []
   private bufferChangeSubs: Array<(t: 'normal' | 'alternate') => void> = []
   private resizeSubs: Array<(c: number, r: number) => void> = []
-  private clearSubs: Array<() => void> = []
   private resetSubs: Array<() => void> = []
   private disposeSubs: Array<() => void> = []
   private disposed = false
@@ -46,9 +45,6 @@ export class FakeSource implements CaptureEventSource {
   }
   onResize(cb: (c: number, r: number) => void): void {
     this.resizeSubs.push(cb)
-  }
-  onClear(cb: () => void): void {
-    this.clearSubs.push(cb)
   }
   onReset(cb: () => void): void {
     this.resetSubs.push(cb)
@@ -173,11 +169,6 @@ export class FakeSource implements CaptureEventSource {
     this.cols = cols
     this.rows = rows
     for (const sub of this.resizeSubs) sub(cols, rows)
-  }
-  clear(): void {
-    this.cells.clear()
-    this.styled.clear()
-    for (const sub of this.clearSubs) sub()
   }
   reset(): void {
     this.cells.clear()

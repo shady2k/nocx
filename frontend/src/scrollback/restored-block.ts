@@ -84,10 +84,23 @@ export interface RestoredBlockFacts {
    * Meaningless on a non-ask block.
    */
   proseEvicted?: boolean
+  /**
+   * Whether the store REFUSED this command's capture outright
+   * (nocx-2v80t.2.6): output retention off, a sensitive entry, a critical
+   * environment — the zero-byte suppressed marker's own word, read off the
+   * capture read. Nothing was ever kept, so the block says THAT instead of
+   * eviction's sentence: nothing was lost, because there was nothing to
+   * lose. `body` is null beside it. Meaningless on a non-command block.
+   */
+  captureSuppressed?: boolean
 }
 
 /** The sentence a block shows where its output used to be. */
 const EVICTED = 'Output is no longer kept'
+
+/** The sentence a block shows when its capture was REFUSED — output that
+ *  was never stored, rather than output stored and since gone. */
+const SUPPRESSED = 'Output was not kept'
 
 /** Render a stored body as the rows the live path produces: one term-line
  *  per logical row, its runs styled through the serializer's own mapping. */
@@ -137,17 +150,22 @@ export function restoredBlock(
   // never one sentence per hole. A text child whose body is null therefore
   // draws an empty block where its rows used to be, and a command whose
   // terminal body was evicted says its own sentence on its own block.
+  // A SUPPRESSED capture is decided HERE, once, because both of the
+  // command's render paths below must name it rather than eviction: the
+  // capture was refused outright, so nothing was lost — there was nothing
+  // to lose (nocx-2v80t.2.6).
+  const suppressed = facts.kind === 'command' && facts.captureSuppressed === true
   const proseKind = facts.kind === 'ask' || facts.kind === 'text'
   // A COMMAND's body is an SGR grid — rendered here from the stored bytes,
   // exactly as the live path paints a frozen block (the theme is current,
   // which is why the durable body keeps SGR). A TURN or `text` child has no
   // grid: its prose goes through the answer body's own renderer below.
+  // The NOTICE below is the ONE render of either sentence: `html` stays
+  // empty for a body that is not there, so a suppressed or evicted command
+  // carries its sentence exactly once (a span in the grid AND a notice was
+  // the same words twice).
   const html =
-    facts.kind === 'command'
-      ? facts.body === null
-        ? `<span class="term-line cmd-output-evicted">${EVICTED}</span>`
-        : bodyToHTML(snapshot, facts.body)
-      : ''
+    facts.kind === 'command' ? (facts.body === null ? '' : bodyToHTML(snapshot, facts.body)) : ''
   const el = createCommandBlock(
     facts.kind,
     facts.id,
@@ -184,7 +202,14 @@ export function restoredBlock(
     facts.kind === 'ask'
       ? facts.proseEvicted === true
       : facts.body === null && facts.kind !== 'text'
-  if (evicted) {
+  if (suppressed) {
+    el.dataset.captureSuppressed = 'true'
+    const notice = document.createElement('div')
+    notice.className = 'cmd-output cmd-output-evicted'
+    notice.dataset.captureSuppressed = 'true'
+    notice.textContent = SUPPRESSED
+    el.appendChild(notice)
+  } else if (evicted) {
     el.dataset.outputEvicted = 'true'
     const notice = document.createElement('div')
     notice.className =

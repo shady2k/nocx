@@ -147,31 +147,33 @@ export async function blocksForPane(client: WSClient, paneId: string): Promise<R
  * the ONLY thing that varies between the two callers below, which is exactly
  * why they share this and do not each own a fetch: a second path would agree
  * with this one until the day the artifact list changed shape.
- *
  * NULL IS TWO DIFFERENT FACTS: retention evicted the artifact, or the store
- * could not be reached. They are collapsed here on purpose — every caller
- * has to say the same thing for both ("this is not here"), and a caller that
- * could tell them apart would still have nothing different to do.
+ * could not be reached. They are collapsed here on purpose — a caller that
+ * could tell them apart would still have nothing different to do. The THIRD
+ * fact is not collapsed: a refusal the store recorded at this id
+ * (nocx-2v80t.2.6, `truncated: "suppressed"`) comes back as `suppressed`
+ * with a null body, because there was never an output to draw and the block
+ * has a sentence of its own to say.
  */
 async function artifactBody(
   client: WSClient,
   entryId: string,
   mediaType: string,
-): Promise<string | null> {
+): Promise<{ body: string | null; suppressed: boolean }> {
   try {
     const entry = await client.call<LedgerGet>('ledger.get', { id: entryId })
     const artifact = entry.artifacts.find((a) => a.mediaType === mediaType)
-    if (!artifact) return null
+    if (!artifact) return { body: null, suppressed: false }
     const body = await client.call<LedgerArtifact>('ledger.artifact', { id: artifact.id })
-    return body.body
+    if (body.truncated === 'suppressed') return { body: null, suppressed: true }
+    return { body: body.body, suppressed: false }
   } catch {
     // Quiet by design: a pane restoring fifty blocks would otherwise log
     // fifty times for one store that is down, and the caller already says
     // once, in the product, that history is unavailable.
-    return null
+    return { body: null, suppressed: false }
   }
 }
-
 /**
  * The body one block printed, or null when there is none to show.
  *
@@ -201,11 +203,14 @@ export async function toolResultForEntry(
   client: WSClient,
   actionEntryId: string,
 ): Promise<string | null> {
-  return artifactBody(client, actionEntryId, 'text/plain')
+  // A suppressed marker collapses to null here exactly as eviction does —
+  // there is no record to show — while restoredBody is the caller that
+  // needs the fact itself and reads it off its own fetch.
+  return (await artifactBody(client, actionEntryId, 'text/plain')).body
 }
 
 export async function bodyForBlock(client: WSClient, entryId: string): Promise<string | null> {
-  return artifactBody(client, entryId, 'application/vt')
+  return (await artifactBody(client, entryId, 'application/vt')).body
 }
 
 /**
@@ -228,7 +233,7 @@ export async function answerTextForEntry(
   client: WSClient,
   entryId: string,
 ): Promise<string | null> {
-  return artifactBody(client, entryId, 'text/plain')
+  return (await artifactBody(client, entryId, 'text/plain')).body
 }
 
 /**
@@ -299,6 +304,18 @@ export interface RestoredBody {
    */
   proseEvicted: boolean
   /**
+   * Whether the store REFUSED this command's capture outright (nocx-2v80t.2.6):
+   * output retention was off, the entry was sensitive, or the environment was
+   * critical — the zero-byte marker the store recorded reads back as
+   * `truncated: "suppressed"`, and there was never an output to draw. The
+   * block says its own sentence for it, distinct from eviction: nothing was
+   * lost, because nothing was ever kept. `body` is null beside it.
+   *
+   * Meaningful only when `kind` is 'command'; a turn's refusal-of-prose fact
+   * is `proseEvicted`, not this.
+   */
+  captureSuppressed: boolean
+  /**
    * What this entry CAUSED, in the causal order the turn assigned.
    *
    * EMPTY IS THE DEGRADE AND IT IS THE ONLY ONE: an entry that caused
@@ -366,6 +383,7 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
         body: null,
         caused,
         proseEvicted: !!entry.proseEvicted,
+        captureSuppressed: false,
       }
     }
     const body = await client.call<LedgerArtifact>('ledger.artifact', { id: chosen.id })
@@ -374,7 +392,8 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
     // which artifact is the BODY to draw with, not what the block is.
     return {
       kind: entry.entry.kind === 'ask' ? 'ask' : 'command',
-      body: body.body,
+      body: body.truncated === 'suppressed' ? null : body.body,
+      captureSuppressed: body.truncated === 'suppressed',
       caused,
       proseEvicted: !!entry.proseEvicted,
     }
@@ -382,7 +401,13 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
     // Quiet for the same reason bodyForBlock is: fifty restoring blocks
     // would otherwise log fifty times for one dead socket, and the pane
     // already says its past could not be read.
-    return { kind: 'command', body: null, caused: [], proseEvicted: false }
+    return {
+      kind: 'command',
+      body: null,
+      caused: [],
+      proseEvicted: false,
+      captureSuppressed: false,
+    }
   }
 }
 

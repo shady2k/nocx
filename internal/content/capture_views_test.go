@@ -129,3 +129,46 @@ func TestCaptureViews_RefuseAnUnknownEntry(t *testing.T) {
 		t.Fatal("a view hung on an entry nobody recorded was accepted")
 	}
 }
+
+// One call is one record's views on one entry: the execution provenance is
+// resolved once for the batch, so a batch mixing entries or records would
+// hang a view on a run that did not produce it. Refusal is the WHOLE batch —
+// a mixed ask must leave nothing behind, not half a view set.
+func TestCaptureViews_RejectAMixedBatchAndPersistNothing(t *testing.T) {
+	ctx := context.Background()
+	_, led := newLedger(t)
+	entryA := recordOne(t, led, "make")
+	entryB := recordOne(t, led, "make again")
+	recordID := "00000000-0000-7000-8000-0000000000b6"
+	storeRecordForViews(t, led, entryA, recordID)
+
+	good := aView(entryA, recordID, recordID, content.MediaVT)
+	good.ID = recordID + "-vt"
+	stranger := aView(entryB, recordID, good.ID, content.MediaText)
+	stranger.ID = recordID + "-text"
+	if err := led.CaptureViews(ctx, []content.CaptureView{good, stranger}); err == nil {
+		t.Fatal("a batch mixing two entries was accepted")
+	}
+	if art, _ := led.Artifact(ctx, good.ID); art != nil {
+		t.Fatalf("the refused batch left %s behind — refusal is not half a write", good.ID)
+	}
+
+	// The same entry, a second record: the batch still names two derivations,
+	// and the guard refuses it for the same reason.
+	other := aView(entryA, "00000000-0000-7000-8000-0000000000b7", good.ID, content.MediaText)
+	other.ID = recordID + "-other"
+	if err := led.CaptureViews(ctx, []content.CaptureView{good, other}); err == nil {
+		t.Fatal("a batch mixing two records was accepted")
+	}
+	if art, _ := led.Artifact(ctx, good.ID); art != nil {
+		t.Fatalf("the refused batch left %s behind — refusal is not half a write", good.ID)
+	}
+
+	// The un-mixed batch the handler actually sends goes through.
+	if err := led.CaptureViews(ctx, []content.CaptureView{good}); err != nil {
+		t.Fatalf("CaptureViews: %v", err)
+	}
+	if art, _ := led.Artifact(ctx, good.ID); art == nil {
+		t.Fatalf("the clean batch stored nothing at %s", good.ID)
+	}
+}

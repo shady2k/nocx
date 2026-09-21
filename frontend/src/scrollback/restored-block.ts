@@ -93,6 +93,15 @@ export interface RestoredBlockFacts {
    * lose. `body` is null beside it. Meaningless on a non-command block.
    */
   captureSuppressed?: boolean
+  /**
+   * Whether retention kept only a SUMMARY of this command's output
+   * (nocx-2v80t.2.5): the stored capture was capped at the producer, both
+   * views of it are views of that summary, and the block says so BESIDE
+   * the capped rows — they are what was kept, so they draw; the sentence
+   * is what keeps the cut from passing as the whole. Meaningless on a
+   * non-command block.
+   */
+  captureSummary?: boolean
 }
 
 /** The sentence a block shows where its output used to be. */
@@ -101,6 +110,13 @@ const EVICTED = 'Output is no longer kept'
 /** The sentence a block shows when its capture was REFUSED — output that
  *  was never stored, rather than output stored and since gone. */
 const SUPPRESSED = 'Output was not kept'
+
+/** The sentence a block shows when retention kept only a SUMMARY of the
+ *  output (nocx-2v80t.2.5): the stored capture was capped at the producer,
+ *  so both views of it are views of a summary. The capped rows beside this
+ *  sentence are real — they are what was kept — so the sentence sits
+ *  BESIDE the body, never instead of one. */
+const SUMMARY = 'Output kept as a summary'
 
 /** Render a stored body as the rows the live path produces: one term-line
  *  per logical row, its runs styled through the serializer's own mapping. */
@@ -153,8 +169,12 @@ export function restoredBlock(
   // A SUPPRESSED capture is decided HERE, once, because both of the
   // command's render paths below must name it rather than eviction: the
   // capture was refused outright, so nothing was lost — there was nothing
-  // to lose (nocx-2v80t.2.6).
+  // to lose (nocx-2v80t.2.6). A SUMMARY capture names itself the same
+  // once-over: the stored capture was capped, the rows are what was kept,
+  // and the block says so beside them instead of passing the cut off as
+  // the whole of what ran (nocx-2v80t.2.5).
   const suppressed = facts.kind === 'command' && facts.captureSuppressed === true
+  const summary = facts.kind === 'command' && facts.captureSummary === true && !suppressed
   const proseKind = facts.kind === 'ask' || facts.kind === 'text'
   // A COMMAND's body is an SGR grid — rendered here from the stored bytes,
   // exactly as the live path paints a frozen block (the theme is current,
@@ -208,6 +228,13 @@ export function restoredBlock(
     notice.className = 'cmd-output cmd-output-suppressed'
     notice.dataset.captureSuppressed = 'true'
     notice.textContent = SUPPRESSED
+    el.appendChild(notice)
+  } else if (summary) {
+    el.dataset.captureSummary = 'true'
+    const notice = document.createElement('div')
+    notice.className = 'cmd-output cmd-output-summary'
+    notice.dataset.captureSummary = 'true'
+    notice.textContent = SUMMARY
     el.appendChild(notice)
   } else if (evicted) {
     el.dataset.outputEvicted = 'true'

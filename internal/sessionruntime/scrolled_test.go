@@ -57,10 +57,13 @@ func TestThreeScreensOfNumberedLinesReadBackWhole(t *testing.T) {
 	}
 
 	recs := sink.records()
-	if len(recs) != 1 {
-		t.Fatalf("the sink holds %d records, want exactly one per settled interval", len(recs))
+	if len(recs) != 2 {
+		t.Fatalf("the sink holds %d records, want the unfinished one plus the settled one", len(recs))
 	}
-	rec := recs[0]
+	if recs[0].State != CaptureUnfinished {
+		t.Fatalf("the first record reads %q, want the unfinished interval's", recs[0].State)
+	}
+	rec := recs[1]
 	if rec.DepartedHole {
 		t.Fatalf("the interval's departure report has a hole: three screens fit the budget whole")
 	}
@@ -96,10 +99,10 @@ func TestASoftWrappedLineReadsBackAsOneLineAndAHardNewlineAsTwo(t *testing.T) {
 		}
 
 		recs := sink.records()
-		if len(recs) != 1 {
-			t.Fatalf("the sink holds %d records, want one", len(recs))
+		if len(recs) != 2 {
+			t.Fatalf("the sink holds %d records, want the unfinished one plus the settled one", len(recs))
 		}
-		got := renderRows(recs[0].Departed)
+		got := renderRows(recs[1].Departed)
 		if !strings.HasPrefix(got, long+"\n") {
 			t.Fatalf("the soft-wrapped line reads back as:\n%q\nwant ONE logical line of %d a's first", got, len(long))
 		}
@@ -122,10 +125,10 @@ func TestASoftWrappedLineReadsBackAsOneLineAndAHardNewlineAsTwo(t *testing.T) {
 		}
 
 		recs := sink.records()
-		if len(recs) != 1 {
-			t.Fatalf("the sink holds %d records, want one", len(recs))
+		if len(recs) != 2 {
+			t.Fatalf("the sink holds %d records, want the unfinished one plus the settled one", len(recs))
 		}
-		got := renderRows(recs[0].Departed)
+		got := renderRows(recs[1].Departed)
 		if !strings.HasPrefix(got, "alpha\nbeta\n") {
 			t.Fatalf("the hard-newlined pair reads back as:\n%q\nwant TWO logical lines, alpha then beta", got)
 		}
@@ -158,10 +161,16 @@ func TestAHoledDepartureReportMarksTheRecordLostIngest(t *testing.T) {
 	}
 
 	recs := sink.records()
-	if len(recs) != 1 {
-		t.Fatalf("the sink holds %d records, want one", len(recs))
+	if len(recs) != 2 {
+		t.Fatalf("the sink holds %d records, want the unfinished one plus the settled one", len(recs))
 	}
-	rec := recs[0]
+	// The peek answered whole where the injected drain refuses: the two
+	// reads of the report are independent, and the unfinished record's
+	// honesty is its own.
+	if recs[0].State != CaptureUnfinished || recs[0].DepartedHole {
+		t.Fatalf("the unfinished record reads %+v, want a whole peek", recs[0])
+	}
+	rec := recs[1]
 	if !rec.DepartedHole {
 		t.Fatalf("DepartedHole = false, want the departure report's own flag carried")
 	}

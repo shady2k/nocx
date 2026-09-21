@@ -585,6 +585,27 @@ func (t *terminal) DepartedRows() ([]emulator.Row, error) {
 	return out, err
 }
 
+// PeekDepartedRows hands the caller a copy of the report DepartedRows would
+// drain and leaves the report where it is: the drain stays the report's one
+// owner, and a reader that only needs to SEE what left — the unfinished
+// capture record, before the settle — reads without spending. The rows are
+// fresh copies (the caller's own cells, exactly as the drain hands out), the
+// interval error rides along for the same reason it rides the drain, and a
+// closed terminal has no report here either.
+func (t *terminal) PeekDepartedRows() ([]emulator.Row, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.t == nil {
+		return nil, emulator.ErrClosed
+	}
+	out := make([]emulator.Row, len(t.departed))
+	for i, row := range t.departed {
+		out[i] = row
+		out[i].Cells = append([]emulator.Cell(nil), row.Cells...)
+	}
+	return out, t.departedErr
+}
+
 func (t *terminal) Screen() (emulator.Screen, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

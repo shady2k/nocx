@@ -513,6 +513,16 @@ Step 6 cannot precede step 7: a server diff against frame F plus a surviving `cl
 (`frontend/src/scrollback/controller.ts:722`) means the next diff assumes cells the client
 has erased.
 
+**Superseded 2026-09-21
+([ADR-0072](../../docs/decisions/0072-xterm-is-removed-first-and-the-interval-record-follows-the-cell-model.md),
+nocx-zg3k3.6): the record is no longer coupled to the cell-model step.** xterm.js is
+removed first (`nocx-zg3k3.2`), and the interval record is built ON the cell model
+afterwards (`nocx-zg3k3.5`, successor to `nocx-2v80t.2`, retired unaccepted the same day
+for building a second cell representation of the screen beside the one the removal
+builds). The paragraph above stands for what it actually governs: the live display and
+interaction still cut over in one coordinated step (`nocx-zg3k3.2.5`). What is decoupled
+is the cards and the record.
+
 **`nocx-6q1uh` gets no early permission, and needs none.** The third revision tried to give
 it one by declaring the backend authoritative while the frontend still cleared its own buffer
 and still answered the program's questions. That was withdrawn — it does not repair the

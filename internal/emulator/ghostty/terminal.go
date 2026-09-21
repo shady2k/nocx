@@ -171,9 +171,9 @@ type terminal struct {
 	// follows the replies/effects rule: the goroutine holding mu is the only
 	// writer, and everything in it was already copied out of the library.
 	// From its first row until a drain empties it the report holds at most
-	// departedBoundRows rows — a session where no boundary ever settles
-	// drains nothing, and the bound is what keeps such a session's report
-	// from growing with the flood — and rows an overflow pushed out ride
+	// departedBoundRows(t.geom.Cols) rows — a session where no boundary ever
+	// settles drains nothing, and the bound is what keeps such a session's
+	// report from growing with the flood — and rows an overflow pushed out ride
 	// departedErr as the hole they are.
 	departed []emulator.Row
 	// departedErr is the first read failure a capture hit, handed to the
@@ -540,7 +540,12 @@ func (t *terminal) boundDepartedLocked(incoming int) {
 		return
 	}
 	if over > len(t.departed) {
-		over = len(t.departed)
+		// A single feed outruns the whole bound and the report holds
+		// nothing this call could push out: the rows that overflow are
+		// not in the report yet, and naming them here would count zero.
+		// The capture loop's per-row cap drops them as they are read
+		// and flags each drop with its own honest count.
+		return
 	}
 	copy(t.departed, t.departed[over:])
 	t.departed = t.departed[:len(t.departed)-over]

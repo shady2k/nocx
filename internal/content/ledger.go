@@ -1202,6 +1202,36 @@ type CaptureOutput struct {
 	Body []byte
 }
 
+// CaptureView is one DERIVED view of a stored capture record
+// (nocx-2v80t.2.5): a metadata row beside the record that names it through
+// DerivedFrom and whose BODY is produced at the read, never stored. The
+// record stays the one bytes-of-truth — a view stored as bytes would be a
+// fourth copy, drifting the first time its source moved — so a view row
+// carries its provenance and the record's retention state and no content.
+type CaptureView struct {
+	// EntryID is the owner: the command entry the record hangs on.
+	EntryID string
+	// RecordID is the settled record artifact the view is derived from.
+	RecordID string
+	// ID is the view's own address, derived from the record's id by the
+	// caller (captureview.ViewID) — deterministic, so a retried ask is the
+	// store's replay no-op.
+	ID string
+	// MediaType is the view's: application/vt for the card's grid,
+	// text/plain for the searchable text.
+	MediaType MediaType
+	// DerivedFrom names the source: the record for the vt view, the vt view
+	// for the text one — the provenance chain ADR-0019 §6 requires.
+	DerivedFrom string
+	// Truncated is the RECORD's own retention state, inherited: a summary
+	// record's views say summary, whatever their derived bodies hold.
+	Truncated *Truncation
+	// TerminalCols/Rows are the screen the record's reads were taken
+	// against — the same geometry the record row carries.
+	TerminalCols *int
+	TerminalRows *int
+}
+
 // AppendArtifact creates one artifact of a BLOCK, with its capture
 // provenance (ADR-0019 §6). Content arrives via AppendChunk; an artifact is
 // never one BLOB.
@@ -1853,6 +1883,17 @@ type LedgerRepository interface {
 	// bare success would leave the caller sending the rest of a body nobody
 	// is storing.
 	CaptureOutput(ctx context.Context, in CaptureOutput) (SessionOutputStance, error)
+	// CaptureViews records the METADATA rows of one settled record's
+	// derived views (nocx-2v80t.2.5): rows that name the record through
+	// DerivedFrom and whose bodies are derived at the read, never stored.
+	// The record stays the one bytes-of-truth; a view row is an address and
+	// a provenance chain, so it carries no chunks. The record itself must
+	// already be stored — a view beside nothing is refused. The chain is
+	// record ← vt ← text: the plain body names the SGR body, exactly as
+	// the brief words it, and the idempotency is the view id: a retried
+	// ask is the replay no-op, and a known id naming another artifact is
+	// ErrIDConflict.
+	CaptureViews(ctx context.Context, views []CaptureView) error
 	// AppendChunk appends one chunk to an artifact and maintains its
 	// byte_len (logical content bytes — the retention budget's unit).
 	AppendChunk(ctx context.Context, artifactID string, seq int, body []byte) error

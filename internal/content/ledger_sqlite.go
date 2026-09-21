@@ -1289,6 +1289,108 @@ func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) (Se
 	return stance, nil
 }
 
+// CaptureViews records the metadata rows of a settled record's derived
+// views (nocx-2v80t.2.5). A view is an ADDRESS and a provenance chain, not
+// a copy: the row names the record through derived_from, inherits the
+// record's retention state, and carries NO chunks — the body is derived
+// from the record's stored bytes at the read, so a changed record changes
+// every view of it and nothing can drift. One method for both views in one
+// transaction: a card that could find the grid but not the text beside it
+// would be half a view set, and the half that fails must be the whole
+// write.
+//
+// The record must already be stored — the views are written by the same
+// capture ask, right after it, and a view beside nothing is a chain to a
+// missing link. Idempotent on the view id: a retried ask finds its own row
+// and writes nothing; a known id naming another artifact is ErrIDConflict,
+// the store's one rule for identity.
+func (s *sqliteContent) CaptureViews(ctx context.Context, views []CaptureView) error {
+	if len(views) == 0 {
+		return nil
+	}
+	for _, v := range views {
+		if v.EntryID == "" || v.RecordID == "" || v.ID == "" {
+			return errors.New("content: capture views: entry, record and view ids are required")
+		}
+		if v.DerivedFrom == "" {
+			return errors.New("content: capture views: a view without derived_from is a copy, not a view")
+		}
+	}
+	return s.run(ctx, func(ctx context.Context) error {
+		tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		if txErr != nil {
+			return txErr
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		// The entry's own execution, resolved exactly as CaptureOutput
+		// resolves it: the views are provenance of the run that produced
+		// the record they derive from.
+		first := views[0]
+		var execID int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT e.id
+			   FROM executions e
+			  WHERE e.entry_id = ?
+			  ORDER BY e.attempt DESC LIMIT 1`,
+			first.EntryID).Scan(&execID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNoSuchEntry
+			}
+			return err
+		}
+
+		for _, v := range views {
+			// The record the view names must be on the same entry: a view
+			// row is a chain, and the chain's two ends must agree about
+			// what they hang on.
+			var recordEntry string
+			if err := tx.QueryRowContext(ctx,
+				`SELECT entry_id FROM artifacts WHERE id = ?`, v.RecordID,
+			).Scan(&recordEntry); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("content: capture views: the record %s is not stored", v.RecordID)
+				}
+				return err
+			}
+			if recordEntry != v.EntryID {
+				return fmt.Errorf("content: capture views: the record %s hangs on %q, not %q",
+					v.RecordID, recordEntry, v.EntryID)
+			}
+
+			var existingMedia, existingEntry, existingDerived sql.NullString
+			lookupErr := tx.QueryRowContext(ctx,
+				`SELECT media_type, entry_id, derived_from FROM artifacts WHERE id = ?`, v.ID,
+			).Scan(&existingMedia, &existingEntry, &existingDerived)
+			switch {
+			case errors.Is(lookupErr, sql.ErrNoRows):
+				derived := v.DerivedFrom
+				if insertErr := insertArtifact(ctx, tx, AppendArtifact{
+					EntryID: v.EntryID, ExecutionID: &execID,
+					ID: v.ID, MediaType: v.MediaType,
+					DerivedFrom: &derived, Truncated: v.Truncated,
+					CaptureMethod: CaptureNone,
+					TerminalCols:  v.TerminalCols, TerminalRows: v.TerminalRows,
+				}); insertErr != nil {
+					return insertErr
+				}
+			case lookupErr != nil:
+				return lookupErr
+			default:
+				// The replay: the same view under the same id wrote
+				// itself already. Anything else under the id is a
+				// different object — the store never overwrites.
+				if existingMedia.String != string(v.MediaType) ||
+					existingEntry.String != v.EntryID ||
+					existingDerived.String != v.DerivedFrom {
+					return ErrIDConflict
+				}
+			}
+		}
+		return tx.Commit()
+	})
+}
+
 // recordCaptureRefusal writes the read half of a refusal (nocx-2v80t.2.6): a
 // zero-byte artifact at the capture's own id whose truncated is "suppressed" —
 // the read vocabulary's existing word for "capture was refused by policy" —

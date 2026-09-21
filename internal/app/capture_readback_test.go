@@ -62,7 +62,7 @@ func joinCaptureRows(t *testing.T, rows []proto.CaptureRow) string {
 func TestTheStoredRecordReadsBackAsLogicalLines(t *testing.T) {
 	db := captureTestStore(t, content.CriticalityRoutine, nil)
 	entryID := recordOneCommand(t, db, "cat long.log")
-	sink := captureSinkFor(db)
+	sink := captureSinkFor(db, nil)
 	nonce := fenceHex(0xC3)
 	sink.binds.Bind(nonce, entryID)
 
@@ -120,7 +120,7 @@ func TestTheSameRecordStoresNothingWithRetentionOffAndEverythingWithItOn(t *test
 		t.Helper()
 		db := captureTestStore(t, content.CriticalityRoutine, policy)
 		entryID := recordOneCommand(t, db, "cat report.txt")
-		sink := captureSinkFor(db)
+		sink := captureSinkFor(db, nil)
 		sink.binds.Bind(nonce, entryID)
 		raw, err := json.Marshal(aCaptureRecord(nonce))
 		if err != nil {

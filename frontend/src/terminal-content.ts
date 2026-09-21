@@ -11,6 +11,7 @@ import {
   LifecycleKernel,
   shouldShowEditor,
   freezeBlock as kernelFreezeBlock,
+  type ExecutionAttempt,
 } from './lifecycle/state'
 import { LifecycleProjections } from './lifecycle/projections'
 import type { UnattributedCommand } from './lifecycle/projections'
@@ -907,6 +908,19 @@ export class TerminalContent extends BasePaneContent {
    *  the completed run body. */
   private readonly agentRuns = new Map<
     BlockRecord,
+    {
+      ledgerId: number
+      stopped: boolean
+      resolve: (run: AgentRunCompletion) => void
+      reject: (reason: unknown) => void
+    }
+  >()
+  /** Agent run waits minted at submit, before the runtime has named the
+   *  attempt (nocx-2v80t.3.2): the submit opens no card, so the waiter is
+   *  parked under the submit token and transfers to the block when the
+   *  authenticated start opens it (_openAuthenticatedBlock). */
+  private readonly pendingAgentRuns = new Map<
+    string,
     {
       ledgerId: number
       stopped: boolean
@@ -2783,20 +2797,17 @@ export class TerminalContent extends BasePaneContent {
             // read them.
             // The ONE shell submit orchestration (submitShellCommand):
             // the keyboard handoff (a person's submit takes the grid; the
-            // agent's never does — ADR-0020 decision 1), the ledger record,
-            // the running block and the lifecycle attempt all run in one
-            // place, and this call differs from the agent's by exactly the
-            // author, the handoff and the byte route (nocx-tjppv).
+            // agent's never does — ADR-0020 decision 1), the ledger record
+            // and the lifecycle attempt all run in one place, and this call
+            // differs from the agent's by exactly the author, the handoff
+            // and the byte route (nocx-tjppv). Neither opens a card: the
+            // block is the projection of the runtime's authenticated start
+            // (nocx-2v80t.3.2).
             this.submitShellCommand({
               doc,
               recordLine: plan?.recordLine ?? doc,
               author: active.author,
               takeKeys: true,
-              // The editor's commit already opened a settle around this
-              // whole transition, so the block must open WITHOUT a glide of
-              // its own — a nested one would leave two animations on one
-              // element (see beginBlockNow).
-              callerOwnsGlide: true,
               sendLine: (d) => void active.submit(d, { targetId: active.id }),
             })
           },
@@ -3283,32 +3294,21 @@ export class TerminalContent extends BasePaneContent {
         // one that exists from the moment the port does.
         {
           bindBlock: (attempt) => {
-            // The running block opened at the app-owned submit binds to the
-            // published attempt (ADR-0024 §5 attachment semantics).
-            this.scrollback?.blockManager.bindAttempt(attempt.id)
+            // The authenticated start opens the card (nocx-2v80t.3.2): the
+            // submit opened only the ledger record and wrote the bytes. The
+            // fact precedes the RPC response on the wire, so the shell's
+            // echo is not out yet — the OUTPUT range starts one row below
+            // the creation line, the rule the submit-time open followed
+            // (nocx-4yhi), now cut on the runtime's word.
+            this._openAuthenticatedBlock(renderer, attempt, renderer.cursorLine() + 1)
           },
           openBlock: (attempt) => {
             // A shell-originated attempt: the block gives a native-mode
             // command structure; its text is already on the terminal and
-            // never persists (the command-text decision).
-            if (!this.scrollback) return
-            // No outputStart override here — unlike the app-owned submit,
-            // this block opens at the cursor line at fact time, AFTER the
-            // echo: the user typed the command at the shell and it was
-            // echoed as they typed, and the running fact (which the shell
-            // emits as the command starts) lands on or past the echo line.
-            // outputStart therefore defaults to startLine (nocx-4yhi).
-            this.scrollback.beginBlock(
-              attempt.command || '(empty)',
-              this._cwd,
-              renderer.cursorLine(),
-            )
-            this.scrollback.blockManager.bindAttempt(attempt.id)
-            // The block just opened — give it the where-facts known right
-            // now and remember the branch it recorded (nocx-9bpeq.16,
-            // spec §3).
-            const opened = this.scrollback.blockManager.runningBlock
-            if (opened) this._recordBlockWhere(opened)
+            // never persists (the command-text decision). No outputStart
+            // override — the fact lands on or past the echo line, so the
+            // range defaults to the creation line (nocx-4yhi).
+            this._openAuthenticatedBlock(renderer, attempt, undefined)
           },
           freezeBlock: (attempt) => {
             // ADR-0024 §7: the visual freeze is authorized only by the
@@ -7590,24 +7590,22 @@ export class TerminalContent extends BasePaneContent {
    *  takes the grid; the agent's never does — ADR-0020 decision 1: the
    *  agent never takes the user's keys), and how the bytes are sent (the
    *  active shell target vs the lane's own paste+CR). Everything else —
-   *  the ledger record, the running block, the lifecycle attempt, the
-   *  fail-open write — is one implementation, never two.
+   *  the ledger record, the lifecycle attempt, the fail-open write — is one
+   *  implementation, never two.
    *
-   *  Returns the block the submission opened (the same object the freeze
-   *  mutates in place) and the ledger record id, both minted at submit by
-   *  the ordinary path — the agent-run wait keys on the block object. */
+   *  The submission opens NO card (nocx-2v80t.3.2): the block is the
+   *  projection of the runtime's authenticated start, not of the client's
+   *  guess at submit time. It opens only the ledger record and writes the
+   *  bytes; _openAuthenticatedBlock opens the card when the fact arrives.
+   *
+   *  Returns the ledger record id and the submit token minted here — the
+   *  agent-run wait parks under the token and transfers to the block at
+   *  the authenticated start. */
   private submitShellCommand(opts: {
     doc: string
     recordLine: string
     author: CommandAuthor
     takeKeys: boolean
-    /** True when the caller's own glide already owns the whole transition,
-     *  so the running block must open WITHOUT one of its own: the editor's
-     *  commit is that caller, and a nested glide leaves two animations on
-     *  one element (scrollback/controller.ts, beginBlockNow). False for a
-     *  submission that arrives on its own — the agent's — which gets the
-     *  ordinary settle. */
-    callerOwnsGlide: boolean
     sendLine: (d: string) => void
     /** The broker request that caused this assistant submission. */
     requestId?: string
@@ -7615,8 +7613,8 @@ export class TerminalContent extends BasePaneContent {
      *  is in flight. The write gate is checked after that round trip and
      *  immediately before the bytes are handed to the renderer. */
     beforeWrite?: () => boolean
-  }): { block: BlockRecord | null; ledgerId: number | null } {
-    const { doc, recordLine, author, takeKeys, callerOwnsGlide, sendLine, beforeWrite } = opts
+  }): { ledgerId: number | null; submitId: string | null } {
+    const { doc, recordLine, author, takeKeys, sendLine, beforeWrite } = opts
     // The window this submission ARMS — null for the agent lane, whose bytes
     // never hold the grid's queue (takeKeys). Held by reference, not
     // re-read from the field later: see holdRawUntilSubmitted.
@@ -7636,7 +7634,7 @@ export class TerminalContent extends BasePaneContent {
     // record (CommandLedger.open refuses empty commands) and no block. The
     // shell still gets its newline — a conventional terminal stays
     // conventional.
-    const write = (block: BlockRecord | null): void => {
+    const write = (): void => {
       // This is deliberately after lifecycle.submitAttempt resolved: the
       // broker can withdraw the request during that round trip, and a
       // check at submit entry would miss the only unsafe window.
@@ -7664,7 +7662,10 @@ export class TerminalContent extends BasePaneContent {
         // taken it is not this window — and reading the cancellation from
         // there would resurrect exactly the line the person withdrew.
         if (heldWindow?.cancelled === true) {
-          this.withdrawSubmit(block)
+          // No card to withdraw (nocx-2v80t.3.2): the submit opened none,
+          // and the bytes below were never written. The ledger record stays
+          // unbound and running, persisting nothing — the same residue the
+          // agent lane's withdrawal leaves.
           return
         }
         submitCommand(doc, {
@@ -7684,15 +7685,16 @@ export class TerminalContent extends BasePaneContent {
       }
     }
     if (recordLine === '') {
-      write(null)
-      return { block: null, ledgerId: null }
+      write()
+      return { ledgerId: null, submitId: null }
     }
     // SEVERED (ADR-0024): the ssh attempt binding (expected passport id,
     // tagged A→B entry, local-D completion) and the environment-entry
     // heuristic (docker, su, …) are deleted with the marker cycle — nothing
     // stream-derived may activate an environment, and without a completion
     // there is nothing to restore. The submitted line still opens a ledger
-    // record and a running block (the app-owned ordering ADR-0024 §5 keeps).
+    // record (the app-owned ordering ADR-0024 §5 keeps); the card waits for
+    // the runtime's authenticated start (nocx-2v80t.3.2).
     let ledgerId: number | null = null
     // The correlation token this submit minted, carried on the record it just
     // opened and sent with the attempt request below, so the published
@@ -7720,35 +7722,19 @@ export class TerminalContent extends BasePaneContent {
     // may never send one.
     this.pushTitle()
     this.scrollback?.maybeClear(recordLine)
-    // The running block opens at the app-owned submit — before any bytes
-    // and before any fact can arrive — so the published running fact (which
-    // the backend emits BEFORE the RPC response, inside SubmitAttempt)
-    // always finds the block it binds to (ADR-0024 §5, §7). That ordering
-    // is why the block's CREATION line is the prompt line, and why its
-    // OUTPUT range starts one row later (nocx-4yhi): the bytes go out after
-    // this call, and the shell's echo of the typed command lands on the
-    // creation line itself. The header already shows the command; a body
-    // that repeats it is the defect — so the range and the creation time
-    // are two different things, and the record carries both.
-    let block: BlockRecord | null = null
-    if (this.scrollback && this.renderer) {
-      const startLine = this.renderer.cursorLine()
-      if (callerOwnsGlide) {
-        this.scrollback.beginBlockNow(recordLine, submitCwd, startLine, startLine + 1, author)
-      } else {
-        this.scrollback.beginBlock(recordLine, submitCwd, startLine, startLine + 1, author)
-      }
-      block = this.scrollback.blockManager.runningBlock
-      // The block just opened — give it the where-facts known right now
-      // and remember the branch it recorded (nocx-9bpeq.16, spec §3).
-      if (block) this._recordBlockWhere(block)
-    }
+    // NO CARD OPENS HERE (nocx-2v80t.3.2). The submit is the client's
+    // guess that a command is about to run; the card's boundaries are what
+    // the backend sent. The published running fact (which the backend
+    // emits BEFORE the RPC response, inside SubmitAttempt) opens the block
+    // through the projections' bindBlock, one row below the cursor line
+    // for the shell's echo (nocx-4yhi) — the geometry rule the old
+    // submit-time open carried, now cut on the runtime's word.
     const st = this.lifecycle.state
     if (st.kind !== 'prompt_ready') {
       // No live domain: nothing to attach the app-owned text to. The
-      // shell's own start (if any) opens a shell-originated attempt and the
-      // block binds to it — a conventional terminal stays conventional, and
-      // the privacy rule holds either way.
+      // shell's own start (if any) opens a shell-originated attempt and
+      // its block through the same projection — a conventional terminal
+      // stays conventional, and the privacy rule holds either way.
       //
       // NOT orphaned, deliberately, though no attempt will echo its token
       // here either. Orphaning invites the next unattributed attempt to
@@ -7759,8 +7745,8 @@ export class TerminalContent extends BasePaneContent {
       // the attempt that eventually arrives may belong to a different
       // command entirely, and binding it here would store one command's exit
       // status under another's text — the defect nocx-td6d4.10 removed.
-      write(block)
-      return { block, ledgerId }
+      write()
+      return { ledgerId, submitId }
     }
     // ADR-0024 decision 5: the app-owned attempt opens BEFORE the bytes
     // that can cause the shell's own start are written to the pty; the
@@ -7782,7 +7768,7 @@ export class TerminalContent extends BasePaneContent {
         ...(opts.requestId ? { requestId: opts.requestId } : {}),
       })
       .then(
-        () => write(block),
+        () => write(),
         (err: unknown) => {
           // STILL fail-open — the bytes go out either way, and swallowing a
           // command because the control plane was busy is the worse failure.
@@ -7796,38 +7782,46 @@ export class TerminalContent extends BasePaneContent {
             ledgerId,
             error: err instanceof Error ? err.message : String(err),
           })
-          write(block)
+          write()
         },
       )
-    return { block, ledgerId }
+    return { ledgerId, submitId }
   }
 
-  /** Withdraw a submission whose bytes will never be written: the app-owned
-   *  block opened at its submit has no attempt that can complete it, so it is
-   *  frozen as abandoned — unknown, never successful — and the running slot
-   *  is freed.
-   *
-   *  ONE owner, reached by two triggers: the broker withdrawing its request
-   *  mid-round-trip (submitAgentCommand's AbortSignal) and a Ctrl-C arriving
-   *  while the command is still on its way to the pty (nocx-xn63t.6.12).
-   *  The second trigger is why this is a method rather than a line in the
-   *  agent path: two copies of "freeze it as abandoned" would agree
-   *  everywhere anyone looked and disagree in the one case nobody looked.
-   *
-   *  Nothing goes on the wire, deliberately. docs/lifecycle-protocol.md §14's
-   *  AbandonAttempt is the kernel's own call, with no outbound envelope of
-   *  its own, and the app-owned attempt the submitAttempt RPC already opened
-   *  is left exactly as the agent lane's withdrawal leaves one — the
-   *  withdrawal is the renderer declining to write, and the ledger record
-   *  stays unbound and running like that path's (it persists nothing: only a
-   *  completed record does, and its marker's disposal reclaims it). */
-  private withdrawSubmit(block: BlockRecord | null): void {
-    if (block === null) return
-    // Only while this submission still owns the running slot. A later
-    // command's block is not this submission's to abandon, and freezing it
-    // here would show a cancelled line as the one that ran.
-    if (this.scrollback?.blockManager.runningBlock !== block) return
-    this.scrollback.abandonUnbound(this.renderer?.cursorLine() ?? 0)
+  /** Open the running block an authenticated start names (nocx-2v80t.3.2).
+   *  Both origins arrive here: the shell's own start event and the published
+   *  app-owned attempt. The block is the projection of the fact — its text
+   *  comes from the attempt, its author from the ledger record the submit
+   *  opened, its geometry from the cursor at fact time — never from a client
+   *  guess made before the runtime had spoken. An agent lane's parked run
+   *  wait transfers to the block here, keyed by the submit token the
+   *  attempt echoes. */
+  private _openAuthenticatedBlock(
+    renderer: TerminalRenderer,
+    attempt: ExecutionAttempt,
+    outputStart: number | undefined,
+  ): void {
+    if (!this.scrollback) return
+    const author =
+      (attempt.submitId ? this.ledger?.recordForAttempt(attempt.id)?.author : undefined) ?? 'shell'
+    this.scrollback.beginBlock(
+      attempt.command || '(empty)',
+      this._cwd,
+      renderer.cursorLine(),
+      outputStart,
+      author,
+    )
+    this.scrollback.blockManager.bindAttempt(attempt.id)
+    const opened = this.scrollback.blockManager.runningBlock
+    if (!opened) return
+    // The block just opened — give it the where-facts known right now and
+    // remember the branch it recorded (nocx-9bpeq.16, spec §3).
+    this._recordBlockWhere(opened)
+    const waiter = attempt.submitId ? this.pendingAgentRuns.get(attempt.submitId) : undefined
+    if (attempt.submitId !== undefined && waiter !== undefined) {
+      this.pendingAgentRuns.delete(attempt.submitId)
+      this.agentRuns.set(opened, waiter)
+    }
   }
 
   /** The run tool's renderer half (nocx-tjppv): submit a command through
@@ -7837,10 +7831,11 @@ export class TerminalContent extends BasePaneContent {
    *  the agent never takes the user's keys; the lane is a session of its
    *  own). The backend never writes to the PTY (design §2.1): the bytes go
    *  out the same route a person's line takes, never a direct
-   *  session.write from the backend. Resolves when the block this
-   *  submission opened freezes, with the completed run body: the entry id
-   *  (the app-owned ledger record id, minted at submit by the ordinary
-   *  path), the exit status and a window of the output.
+   *  session.write from the backend. Resolves when the block the runtime's
+   *  authenticated start opened — keyed to this submission by its submit
+   *  token — freezes, with the completed run body: the entry id (the
+   *  app-owned ledger record id, minted at submit by the ordinary path),
+   *  the exit status and a window of the output.
    *
    *  THE BLOCK STAYS, AND IT IS NOT A SECOND COPY OF THE ANSWER'S TOOL-CALL
    *  LINE (nocx-shxv0). Two surfaces now show that this command happened,
@@ -7878,16 +7873,17 @@ export class TerminalContent extends BasePaneContent {
       resolve = done
       reject = fail
     })
-    let openedBlock: BlockRecord | null = null
+    let openedSubmitId: string | null = null
     let openedLedgerId: number | null = null
     let writeStarted = false
     let cancellationHandled = false
     const cleanupCancelled = (): void => {
-      if (openedBlock !== null) this.agentRuns.delete(openedBlock)
-      // The app-owned block has no attempt to complete it after a
-      // pre-execution withdrawal — the ONE owner of that withdrawal, shared
-      // with the Ctrl-C that cancels a person's submission (nocx-xn63t.6.12).
-      this.withdrawSubmit(openedBlock)
+      // The waiter is still parked: the transfer to agentRuns happens at
+      // the authenticated start, which cannot precede the write, and a
+      // cancel never fires once the write has begun. The ledger record
+      // stays unbound and running — persisting nothing, the same residue
+      // the Ctrl-C-withheld submission leaves (nocx-xn63t.6.12).
+      if (openedSubmitId !== null) this.pendingAgentRuns.delete(openedSubmitId)
       if (openedLedgerId !== null) this.runEntryIds.delete(openedLedgerId)
     }
     const cancel = (): void => {
@@ -7896,13 +7892,12 @@ export class TerminalContent extends BasePaneContent {
       cleanupCancelled()
       reject(new Error('submission expired before execution'))
     }
-    const { block, ledgerId } = this.submitShellCommand({
+    const { ledgerId, submitId } = this.submitShellCommand({
       doc: command,
       recordLine: command,
       author: 'agent',
       requestId,
       takeKeys: false,
-      callerOwnsGlide: false,
       beforeWrite: () => {
         if (signal?.aborted) {
           cancel()
@@ -7916,13 +7911,15 @@ export class TerminalContent extends BasePaneContent {
         this.session?.send('\r')
       },
     })
-    openedBlock = block
+    openedSubmitId = submitId
     openedLedgerId = ledgerId
-    if (block === null || ledgerId === null) {
-      reject(new Error('run: the submission could not open a block — the agent lane is not usable'))
+    if (ledgerId === null || submitId === null) {
+      reject(
+        new Error('run: the submission could not open a record — the agent lane is not usable'),
+      )
       return promise
     }
-    this.agentRuns.set(block, { ledgerId, stopped: false, resolve, reject })
+    this.pendingAgentRuns.set(submitId, { ledgerId, stopped: false, resolve, reject })
     // The slot the store's answer lands in. Opened HERE, at the submit,
     // because the ack can arrive before the block finishes freezing and a
     // slot created at the freeze would miss it.
@@ -8075,8 +8072,9 @@ export class TerminalContent extends BasePaneContent {
     if (block.status === 'running') return
     // FINISHED, BUT NOT YET REDRAWN. This used to read the DOM class, which
     // is a different question and the wrong one: the logical freeze lands on
-    // the authenticated completion while the visual freeze waits up to
-    // FENCE_DEFER_MS for the fence bytes, and until it runs the element
+    // the authenticated completion while the visual freeze waits up to the
+    // manager's fence-deferral window for the fence bytes, and until it
+    // runs the element
     // still says cmd-block-running. So a block that had finished perfectly
     // well was refused, and the receipt was dropped in silence — no retry,
     // nothing in the UI, nothing in the log. For a user: run a command

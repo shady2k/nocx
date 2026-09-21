@@ -75,7 +75,7 @@ import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
 import type { SessionHandle, SessionRecovery, WSClient } from './ipc'
-import { createCommandBlock } from './scrollback/blocks'
+import { blockOutputText, createCommandBlock } from './scrollback/blocks'
 import { mountReadScreenHandler } from './read-screen'
 import { CommandSnapshotStore } from './command-snapshot'
 import type { ActionFacts, DesiredMode } from './capability'
@@ -3286,6 +3286,21 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
+      // The card opens on the runtime's authenticated start, not at the
+      // submit (nocx-2v80t.3.2).
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-home',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'ls',
+        },
+      })
       const block = withScrollback.scrollback.blockManager.runningBlock
       expect(block).not.toBeNull()
       expect(partText(block!.el, 'path')).toBe('~/project')
@@ -3314,6 +3329,21 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
+      // The card opens on the runtime's authenticated start, not at the
+      // submit (nocx-2v80t.3.2).
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-branch',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'git status',
+        },
+      })
       const block = withScrollback.scrollback.blockManager.runningBlock
       expect(block).not.toBeNull()
       const blockTitle = () => block!.el.querySelector('.ui-prompt-context')?.getAttribute('title')
@@ -3910,9 +3940,9 @@ describe('the projections consume the kernel through the composition root (ADR-0
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
-      // The app-owned submit opened a ledger record and a running block.
-      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
-      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('running')
+      // The app-owned submit opened a ledger record. It opens NO card: the
+      // card waits for the runtime's authenticated start (nocx-2v80t.3.2).
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(0)
 
       // The published attempt: the shell start attaches, then completes.
       handler({
@@ -3977,6 +4007,172 @@ describe('the projections consume the kernel through the composition root (ADR-0
       teardown()
     }
   })
+  it('a card is opened and closed only by what the backend sent (nocx-2v80t.3.2)', async () => {
+    const client = makeClient()
+    const callMock = client.call
+    callMock.mockImplementation((method: string) => {
+      if (method === 'history.record') {
+        return Promise.resolve({
+          maskedCount: 0,
+          maskedKinds: [],
+          entryId: 'e1',
+          source: 'user',
+          redactions: [],
+          captures: [],
+          maskedCommand: 'make',
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const renderer = rendererOf(content)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      // One row of output for the freeze to serialize into the card's body.
+      /* eslint-disable @typescript-eslint/unbound-method */
+      vi.mocked(renderer.getBufferLine).mockImplementation((y: number) =>
+        y === 1 ? new BufferLine('hello world', false) : undefined,
+      )
+      /* eslint-enable @typescript-eslint/unbound-method */
+
+      ed.insertText('make')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+
+      // THE BACKEND HAS AUTHENTICATED NOTHING YET — no card. The submit
+      // opens a ledger record and writes bytes; it does not decide a block
+      // boundary, and the card waits for the runtime's word.
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(0)
+      expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull()
+
+      // The authenticated start opens the card, with the submitting author.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'make',
+        },
+      })
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+      expect(withScrollback.scrollback.blockManager.runningBlock?.status).toBe('running')
+      expect(withScrollback.scrollback.blockManager.runningBlock?.command).toBe('make')
+      expect(withScrollback.scrollback.blockManager.runningBlock?.author).toBe('shell')
+
+      // The shell's fence lands after the output (the nonce row), then the
+      // authenticated completion closes the card — with its body.
+      renderer._fireRenderFence({ hex: 'a'.repeat(64), line: 2, buffer: 'normal' })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'a'.repeat(64),
+          completedAt: '2026-09-21T12:00:02Z',
+        },
+      })
+      const frozen = withScrollback.scrollback.blockManager.blocks[0]
+      expect(frozen.status).toBe('success')
+      expect(frozen.exitCode).toBe(0)
+      expect(blockOutputText(frozen.el)).toContain('hello world')
+      expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull()
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('no timer decides a block boundary — the card waits for the runtime (nocx-2v80t.3.2)', async () => {
+    const client = makeClient()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      vi.useFakeTimers()
+
+      ed.insertText('sleep 300')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // Nothing authenticated: no card now, and no timer opens one later.
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(0)
+      vi.advanceTimersByTime(60_000)
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(0)
+
+      // The authenticated start opens the card; with no completion, no timer
+      // closes it either — it is still running a minute later.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-run',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'sleep 300',
+        },
+      })
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+      vi.advanceTimersByTime(60_000)
+      expect(withScrollback.scrollback.blockManager.runningBlock).not.toBeNull()
+      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('running')
+    } finally {
+      vi.useRealTimers()
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('no submit-time open or fence timer survives in the owned sources (nocx-2v80t.3.2)', () => {
+    for (const rel of ['scrollback/controller.ts', 'terminal-content.ts']) {
+      const src = readFileSync(resolve(srcDir, rel), 'utf8')
+      expect(src, `${rel}: beginBlockNow`).not.toMatch(/beginBlockNow/)
+      expect(src, `${rel}: FENCE_DEFER_MS`).not.toMatch(/FENCE_DEFER_MS/)
+    }
+  })
 
   it('submitAgentCommand runs the command through the ordinary path with the agent author and resolves with the completed run body (nocx-tjppv)', async () => {
     const client = makeClient()
@@ -4015,17 +4211,16 @@ describe('the projections consume the kernel through the composition root (ADR-0
 
       const pending = content.submitAgentCommand('make')
 
-      // The ordinary path ran: the ledger record and the running block were
-      // BOTH minted at submit with the agent's author (design §3.1) — the
-      // command exists as a command, not as bytes (criterion 3: asserted on
-      // the ledger, not the DOM).
+      // The ordinary path ran: the ledger record was minted at submit with
+      // the agent's author (design §3.1) — the command exists as a command,
+      // not as bytes (criterion 3: asserted on the ledger, not the DOM).
+      // The submit opens NO card: the block is the projection of the
+      // runtime's authenticated start (nocx-2v80t.3.2).
       expect(ledger.records()).toHaveLength(1)
       expect(ledger.records()[0].author).toBe('agent')
       expect(ledger.records()[0].command).toBe('make')
       expect(ledger.records()[0].status).toBe('running')
-      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
-      expect(withScrollback.scrollback.blockManager.blocks[0].author).toBe('agent')
-      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('running')
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(0)
       // The attempt: the app-owned lifecycle submit ran with the agent's
       // command — the command exists as an attempt, not only as bytes
       // (criterion 3). The attempt goes through the DISPATCHER (the
@@ -4057,6 +4252,10 @@ describe('the projections consume the kernel through the composition root (ADR-0
           command: 'make',
         },
       })
+      // The authenticated start opened the card, with the agent's author.
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+      expect(withScrollback.scrollback.blockManager.blocks[0].author).toBe('agent')
+      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('running')
       handler({
         lane: 'lane-1',
         lifecycle: 'running',
@@ -4232,6 +4431,23 @@ describe('the projections consume the kernel through the composition root (ADR-0
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
 
+      // The human's card opens on its own authenticated start, the way the
+      // agent's did.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-2',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'human-command',
+        },
+      })
+
       const records = ledger.records()
       expect(records[0].author).toBe('agent')
       expect(records[1].author).toBe('shell')
@@ -4331,13 +4547,14 @@ describe('the projections consume the kernel through the composition root (ADR-0
       expect(ed.isVisible).toBe(true)
 
       // 2. The user submits; the command reaches the shell BEFORE any
-      //    published start, and the app-owned attempt opens a running block.
+      //    published start. The submit opens the ledger record and the
+      //    attempt — NO card: the card waits for the runtime's word
+      //    (nocx-2v80t.3.2).
       ed.insertText('echo hello')
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
-      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
-      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('running')
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(0)
       // The app-owned attempt opens BEFORE the pty write; the write itself
       // lands in the microtask after the submit RPC settles.
       await vi.waitFor(() => expect(pasteSpy).toHaveBeenCalledWith('echo hello'))
@@ -4358,6 +4575,10 @@ describe('the projections consume the kernel through the composition root (ADR-0
           command: 'echo hello',
         },
       })
+      // The authenticated start opened the card, running in the visible
+      // layout (nocx-u7uh.25).
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('running')
       expect(withScrollback.scrollback.mode).toBe('running')
       expect(
         withScrollback.scrollback.scrollbackInner.classList.contains('inner-fullscreen-mode'),
@@ -4407,6 +4628,21 @@ describe('the projections consume the kernel through the composition root (ADR-0
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
       await vi.waitFor(() => expect(pasteSpy).toHaveBeenLastCalledWith('echo again'))
+      // The second command's card opens on its own authenticated start.
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-2',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'echo again',
+        },
+      })
       expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(2)
       expect(withScrollback.scrollback.blockManager.blocks[1].status).toBe('running')
     } finally {
@@ -4645,13 +4881,14 @@ describe('the projections consume the kernel through the composition root (ADR-0
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
       // The round trip is in flight: the attempt was opened with the
-      // app-owned text, the block opened at submit is the running one, and
-      // not one byte has reached the pty.
+      // app-owned text, and not one byte has reached the pty. NO card
+      // exists yet — the submit opens none, and the runtime has said
+      // nothing (nocx-2v80t.3.2).
       expect(submitAttempt).toHaveBeenCalledWith(
         'lifecycle.submitAttempt',
         expect.objectContaining({ command: 'echo RACE' }),
       )
-      expect(withScrollback.scrollback.blockManager.runningBlock).not.toBeNull()
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(0)
       expect(session.send).not.toHaveBeenCalled()
 
       // Ctrl-C inside that window, which is the one path that turns bash
@@ -4674,14 +4911,18 @@ describe('the projections consume the kernel through the composition root (ADR-0
         submitId: submitToken(client),
         startedAt: '2026-08-08T12:00:00Z',
       })
-
-      // Waited on through the withdrawal's own observable, never on a
-      // duration: the running slot is free and the block it held is closed
-      // as abandoned — never successful. That is exactly what a submission
-      // withdrawn before its bytes leaves behind in the agent lane.
-      await vi.waitFor(() => expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull())
-      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
-      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('unknown')
+      // Waited on through the submission's own write path, never on a
+      // duration: the RPC settled, the write was declined — the command's
+      // bytes never reached the renderer's paste — and no card ever
+      // existed for the person to watch close. The ledger record stays
+      // unbound and running (it persists nothing). A card frozen `unknown`
+      // for a line that never ran would be the client inventing a boundary
+      // again (nocx-2v80t.3.2).
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(rendererOf(content).paste).not.toHaveBeenCalledWith('echo RACE')
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(0)
       // Neither the command nor the 0x03. The cancel is served by the
       // withdrawal itself: nothing is running at the shell to interrupt, and
       // a byte written here would be an interrupt the person never asked
@@ -4891,7 +5132,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     }
   })
 
-  it('the app-owned submit opens the block before the bytes and marks the echo line outside the output range (nocx-4yhi)', async () => {
+  it('the app-owned attempt opens the block before the bytes and marks the echo line outside the output range (nocx-4yhi)', async () => {
     const client = makeClient()
     const { view, ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -4908,10 +5149,25 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
-      // The block opened at submit — BEFORE the bytes — on the prompt line
-      // (fixture cursorLine is 0). The shell's echo of `ls` will land on
-      // that same line, so the block's OUTPUT range starts one row later;
-      // the creation line and the output range are two different things.
+      // The authenticated start opens the block — and it arrives BEFORE the
+      // bytes (the fact precedes the RPC response on the wire), on the
+      // prompt line (fixture cursorLine is 0). The shell's echo of `ls`
+      // will land on that same line, so the block's OUTPUT range starts one
+      // row later; the creation line and the output range are two different
+      // things (nocx-4yhi, nocx-2v80t.3.2).
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'ls',
+        },
+      })
       const block = withScrollback.scrollback.blockManager.runningBlock
       expect(block).not.toBeNull()
       expect(block!.startLine).toBe(0)
@@ -5734,9 +5990,9 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
         submitId: token,
       })
       expect(session.send).not.toHaveBeenCalled()
-      // The running block opened at submit, before any fact could arrive —
-      // the published running fact always finds the block it binds to.
-      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+      // The submit opens NO card — the published running fact opens it
+      // through the projections (nocx-2v80t.3.2), still before the bytes.
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(0)
 
       // The backend answers: only now do the bytes go out.
       resolveAttempt({
@@ -5766,6 +6022,8 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
           command: 'make deploy',
         },
       })
+      // The authenticated start opened the card.
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
       expect(client.call).toHaveBeenCalledWith('ledger.bind', {
         envelope: {
           id: 'att-9',
@@ -6569,8 +6827,33 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(sessionOf(content).send.mock.calls.length).toBe(sentAfterShell)
       expect(dispatcherCalls.find((c) => c.method === 'lifecycle.submitAttempt')).toBeUndefined()
       expect(dispatcherCalls.find((c) => c.method === 'history.record')).toBeUndefined()
+      // The shell's card opened on its authenticated start and closed on
+      // its completion (nocx-2v80t.3.2); the question neither opened one of
+      // its own nor disturbed the shell's.
+      const lifecycle = lifecycleHandler(client)
+      lifecycle({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-echo', state: 'open', origin: 'shell', command: 'echo hi' },
+      })
+      lifecycle({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-echo',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'c'.repeat(64),
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
-      expect(scrollback.blockManager.runningBlock?.command).toBe('echo hi')
+      expect(scrollback.blockManager.blockForAttempt('att-echo')?.command).toBe('echo hi')
       // A question is not a handoff: the editor stays on screen for the
       // next one. And Enter still goes to Ask — the person moved it, and
       // nothing but the person moves it back; the indicator says so.
@@ -6728,9 +7011,27 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       const ledger = (content as unknown as { ledger: CommandLedger }).ledger
       expect(ledger?.records().length).toBe(1)
       expect(ledger?.records()[0].author).toBe('agent')
-      // The block that opened at the same submit carries the badge — the
-      // whole happy path, driven through the real orchestration, never a
-      // manufactured block.
+
+      // The card opens on the runtime's authenticated start (nocx-2v80t.3.2)
+      // and binds to the record by the echoed submit token.
+      const lifecycle = lifecycleHandler(client)
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      lifecycle({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-agent',
+          state: 'open',
+          origin: 'app',
+          submitId: ledger?.records()[0].submitId,
+          command: 'echo agent-run',
+        },
+      })
+
+      // The block carries the badge — the whole happy path, driven through
+      // the real orchestration, never a manufactured block.
       const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
       const running = scrollback.blockManager.runningBlock
       expect(running?.author).toBe('agent')
@@ -9837,7 +10138,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       content.setVisible(true)
       startCommand(client, 'top')
       const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
-      scrollback.beginBlockNow('top', '~', 0)
+      scrollback.beginBlock('top', '~', 0)
       scrollback.blockManager.bindAttempt('att-run')
       scrollback.blockManager.freezeBlock(() => undefined, 0, 0)
       const renderer = rendererOf(content)
@@ -9867,7 +10168,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       content.setVisible(true)
       startCommand(client, 'top')
       const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
-      scrollback.beginBlockNow('top', '~', 0)
+      scrollback.beginBlock('top', '~', 0)
       scrollback.blockManager.bindAttempt('att-run')
       const renderer = rendererOf(content)
       renderer._fireBufferChange('alternate')
@@ -9899,7 +10200,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       content.setVisible(true)
       startCommand(client, 'top')
       const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
-      scrollback.beginBlockNow('top', '~', 0)
+      scrollback.beginBlock('top', '~', 0)
       scrollback.blockManager.bindAttempt('att-run')
       rendererOf(content)._fireWriteParsed()
 
@@ -9930,7 +10231,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       content.setVisible(true)
       startCommand(client, 'top')
       const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
-      scrollback.beginBlockNow('top', '~', 0)
+      scrollback.beginBlock('top', '~', 0)
       scrollback.blockManager.bindAttempt('att-run')
       rendererOf(content)._fireWriteParsed()
 
@@ -11213,20 +11514,41 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     }
   })
 
-  it('Stop remains available for an assistant command before lifecycle facts arrive', async () => {
+  it('an assistant command offers Stop once the runtime names it running', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(
       makeClipboard(),
       { attachToDocument: true },
       client,
     )
+    const handler = lifecycleHandler(client)
     const restore = stubScrolling()
     try {
       content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       void content.submitAgentCommand('sleep 300')
       await Promise.resolve()
+      // The submit opened no card (nocx-2v80t.3.2): nothing is drawn, and
+      // nothing is offered — the command's bytes are not even out yet.
+      expect(scrollbackFor(content).blockManager.runningBlock).toBeNull()
+
+      // The runtime names the attempt running: the card opens WITH the
+      // kernel's word, so its Stop is there the moment the card is.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-run',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'sleep 300',
+        },
+      })
       const stop = itemNamed(runningBlockMenu(content), 'stop')
-      expect(stop, 'an assistant command has no Stop before lifecycle facts').toBeDefined()
+      expect(stop, 'the card the runtime opened offers no Stop').toBeDefined()
       stop!.click()
       expect(signalsSent(content)).toEqual(['stop'])
     } finally {
@@ -11328,19 +11650,16 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
 
   // ── the window between the block and the kernel (2026-09-16) ─────────────
   //
-  // The block manager draws the running block — and its Stop — the moment the
-  // submit is answered. The lifecycle kernel is told the attempt is open a
-  // beat LATER, over its own channel. Both doors to the stop handler used to
-  // ask the KERNEL first, so a click inside that window did nothing and said
-  // nothing: the person's gesture disappeared. Measured on the e2e stand
-  // (webkit, 2026-09-16): 5 failures in 66 runs of
-  // terminal-screen-register-mockup-pass.spec.ts's Stop test, each with the
-  // keydown, the keypress and the click all reaching the button and no
-  // message anywhere — and a second press 1.5s later cancelled the command,
-  // which is what a dropped gesture looks like and what a dead button does
-  // not.
+  // The block manager used to draw the running block — and its Stop — the
+  // moment the submit was answered, while the lifecycle kernel learned of the
+  // attempt a beat LATER, over its own channel. Both doors to the stop
+  // handler used to ask the KERNEL first, so a click inside that window did
+  // nothing and said nothing. nocx-2v80t.3.2 closed the window structurally:
+  // the submit opens no card, and the card the runtime's authenticated start
+  // opens carries the kernel's word with it — block and kernel state can no
+  // longer disagree about whether a command is running.
 
-  it('a Stop pressed before the running fact lands still reaches session.signal', async () => {
+  it('the running card offers both doors to the stop handler the moment it opens', async () => {
     const client = makeClient()
     const { view, ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -11356,20 +11675,31 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
-      expect(scrollbackFor(content).blockManager.runningBlock).not.toBeNull()
-
-      // Deliberately NO `lifecycle: 'running'` fact: the kernel still reads
-      // idle while the pane is drawing a running command, which is the window.
+      // No fact, no card (nocx-2v80t.3.2) — and no Stop to press.
+      expect(scrollbackFor(content).blockManager.runningBlock).toBeNull()
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-run-2',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'sleep 30',
+        },
+      })
+      // The card the runtime opened carries both doors to the stop handler:
+      // the block's own control and the ⋮ menu. They reach session.signal
+      // without consulting the kernel first — the rule the 2026-09-16 window
+      // bought, which outlives the window itself.
       const stop = paneOf(content).querySelector<HTMLElement>(
         '.cmd-block-running [data-block-control]',
       )
       expect(stop, 'the running block has no Stop control').not.toBeNull()
       stop!.click()
       expect(signalsSent(content)).toEqual(['stop'])
-
-      // The ⋮ menu is the second door to the same handler, and it is listed in
-      // that same window rather than hidden because the kernel had not caught
-      // up.
       expect(itemNamed(runningBlockMenu(content), 'stop')).not.toBeUndefined()
     } finally {
       restore()

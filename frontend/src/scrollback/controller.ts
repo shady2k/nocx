@@ -184,7 +184,7 @@ export class ScrollbackController {
       now,
       snapshotStore: opts.snapshotStore,
       // A DEFERRED freeze landed inside the manager (the fence arrived, or
-      // the FENCE_DEFER_MS window elapsed): hand the block's rows to the
+      // the manager's deferral window elapsed): hand the block's rows to the
       // DOM and settle the live region exactly like a direct freeze, since
       // freezeFromAttempt already returned.
       onDeferredFreeze: (rec) => this._settleFrozen(rec),
@@ -670,13 +670,15 @@ export class ScrollbackController {
   }
 
   /**
-   * Called at editor submit time (nocx-atyf.4): start a running block
-   * from the app-owned half of the lifecycle. The block is marked as
-   * running immediately; when C arrives later the cReceived flag is set.
-   * `outputStart` is the block's OUTPUT range start — the first row
-   * serialized at freeze — which the app-owned submit sets to
-   * startLine + 1 because the shell's echo lands on the creation line
-   * (nocx-4yhi). It defaults to startLine for shell-originated blocks.
+   * Open a running block for an authenticated start (nocx-2v80t.3.2): the
+   * block is the projection of what the backend sent, so both the shell's
+   * own start event and the published app-owned attempt open it — the
+   * submit itself opens nothing. `outputStart` is the block's OUTPUT range
+   * start — the first row serialized at freeze. The shell-originated fact
+   * lands on or past the echo line, so it omits the argument and the range
+   * defaults to startLine (nocx-4yhi); the app-owned attempt arrives before
+   * its bytes are written, so its caller passes startLine + 1 for the
+   * shell's echo of the typed command.
    */
   beginBlock(
     command: string,
@@ -689,37 +691,15 @@ export class ScrollbackController {
      *  shell and defaults to 'shell'. */
     author: CommandAuthor = 'shell',
   ): void {
-    this._glide(() => this.beginBlockNow(command, cwd, startLine, outputStart, author))
-  }
-
-  /**
-   * The same mutation WITHOUT the settle, for a caller whose own glide already
-   * owns the whole transition.
-   *
-   * The app-owned submit is that caller: clearing the draft, releasing the
-   * composer's box and opening the block are one movement to the eye, and they
-   * all run in the keydown task with no paint between them. Nesting `_glide`
-   * inside `_glide` does not compose — the inner call starts an animation on
-   * `scrollbackInner` that the outer one then replaces in `_settleAnimations`
-   * without cancelling, so the element carries two, and `_cancelGlides` at the
-   * top of the inner call kills whatever the outer was retargeting. One
-   * user-visible transition gets one glide, owned by whoever knows every
-   * synchronous mutation in it.
-   */
-  beginBlockNow(
-    command: string,
-    cwd: string,
-    startLine: number,
-    outputStart?: number,
-    author: CommandAuthor = 'shell',
-  ): void {
     const cmd = command || '(empty)'
-    this._blockManager.startBlock(cmd, cwd, startLine, outputStart, author)
-    // The pet learned only about endings before this, so during the minute a
-    // build takes — the minute somebody is actually watching the terminal —
-    // it wandered about as though nothing were happening.
-    windowPet()?.attendTo(author)
-    this.setRunning()
+    this._glide(() => {
+      this._blockManager.startBlock(cmd, cwd, startLine, outputStart, author)
+      // The pet learned only about endings before this, so during the minute a
+      // build takes — the minute somebody is actually watching the terminal —
+      // it wandered about as though nothing were happening.
+      windowPet()?.attendTo(author)
+      this.setRunning()
+    })
   }
 
   /**
@@ -1119,7 +1099,8 @@ export class ScrollbackController {
    *  rows belong to the block) waits for the matching render fence. When
    *  the fence bytes have not arrived, this returns false and the live
    *  region stays up — the manager's onDeferredFreeze settles it on the
-   *  sighting, or after FENCE_DEFER_MS at the current output end. The
+   *  sighting, or after the manager's deferral window, at the current
+   *  output end. The
    *  authority check (kernel freezeBlock) is the caller's. */
   freezeFromAttempt(attempt: ExecutionAttempt, endLine: number): boolean {
     const followIntent = this._followIntent()

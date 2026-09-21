@@ -26,7 +26,7 @@ import type { WSClient } from './ipc'
 /** A ledger that answers `ledger.get` with one entry's artifact list and
  *  `ledger.artifact` with the bytes of whichever id was asked for. */
 function fakeLedger(
-  artifacts: Array<{ id: string; mediaType: string; body: string }>,
+  artifacts: Array<{ id: string; mediaType: string; body: string; truncated?: string | null }>,
   kind = 'shell',
   proseEvicted = false,
 ) {
@@ -43,7 +43,7 @@ function fakeLedger(
         })
       }
       const found = artifacts.find((a) => a.id === (params as { id: string }).id)
-      return Promise.resolve({ body: found?.body ?? '' })
+      return Promise.resolve({ body: found?.body ?? '', truncated: found?.truncated ?? null })
     }),
   } as unknown as WSClient
   return { client, calls }
@@ -109,6 +109,7 @@ describe('restore-client — a block says what it is by its kind, and a turn own
       body: SGR_BODY,
       caused: [],
       proseEvicted: false,
+      captureSuppressed: false,
     })
   })
 
@@ -123,17 +124,26 @@ describe('restore-client — a block says what it is by its kind, and a turn own
       body: null,
       caused: [],
       proseEvicted: false,
+      captureSuppressed: false,
     })
   })
 
-  // THE DEFECT THIS EPIC'S END-TO-END CHECK FOUND (nocx-dc2fr.8).
-  //
-  // A command the assistant ran used to be recorded as `kind=agent`, because
-  // that column carried WHO submitted it as well as WHAT the row is. Once
-  // ADR-0040 took the turn's own artifact away and the grammar started being
-  // read from the kind, that command came back drawn as PROSE: reflowing
-  // text where a terminal grid belongs, with the grid's alignment gone.
-  //
+  it('a REFUSED capture names itself: no body, and the fact the block says (nocx-2v80t.2.6)', async () => {
+    // The store recorded the refusal as a zero-byte suppressed marker; the
+    // read answers that named state, and restoredBody carries it as a fact
+    // beside a null body — the block renders the sentence, never silence.
+    const { client } = fakeLedger([
+      { id: 'art-vt', mediaType: 'application/vt', body: '', truncated: 'suppressed' },
+    ])
+    expect(await restoredBody(client, 'entry-1')).toEqual({
+      kind: 'command',
+      body: null,
+      caused: [],
+      proseEvicted: false,
+      captureSuppressed: true,
+    })
+  })
+
   // So: `shell` decides the grammar and `assistant` says nothing about it.
   // The two columns are read independently or this comes straight back.
   //
@@ -148,6 +158,7 @@ describe('restore-client — a block says what it is by its kind, and a turn own
       body: SGR_BODY,
       caused: [],
       proseEvicted: false,
+      captureSuppressed: false,
     })
   })
 
@@ -161,6 +172,7 @@ describe('restore-client — a block says what it is by its kind, and a turn own
       body: null,
       caused: [],
       proseEvicted: false,
+      captureSuppressed: false,
     })
   })
   it('a turn whose answer is gone is still an ask — the kind does not follow the loss', async () => {
@@ -173,6 +185,7 @@ describe('restore-client — a block says what it is by its kind, and a turn own
       body: null,
       caused: [],
       proseEvicted: true,
+      captureSuppressed: false,
     })
   })
 
@@ -185,6 +198,7 @@ describe('restore-client — a block says what it is by its kind, and a turn own
       body: null,
       caused: [],
       proseEvicted: false,
+      captureSuppressed: false,
     })
   })
 })
@@ -376,6 +390,7 @@ describe('restore-client — the causal flow of a restored turn', () => {
       body: null,
       caused: [],
       proseEvicted: false,
+      captureSuppressed: false,
     })
   })
 

@@ -5251,6 +5251,9 @@ export class TerminalContent extends BasePaneContent {
       status: b.status,
       body: bodies.get(b.entryId)?.body ?? null,
       kind: bodies.get(b.entryId)?.kind ?? ('command' as const),
+      // A capture the store REFUSED (nocx-2v80t.2.6): the block says its
+      // own sentence instead of drawing silence where output never was.
+      captureSuppressed: bodies.get(b.entryId)?.captureSuppressed ?? false,
       entryId: b.entryId,
       // Who ran it, carried from the entry's OWN source column
       // (nocx-dc2fr; restore-client maps entries.source to the display

@@ -1260,9 +1260,12 @@ func New(opts ...Option) (*App, error) {
 	// The capture sink's ledger arrives here, beside the store it names
 	// (nocx-2v80t.2.2): a stub store records no rows, so the sink stays
 	// unwired and every capture is answered noEntry — never a kept that
-	// would store nothing.
+	// would store nothing. The LIVE History policy rides along
+	// (nocx-2v80t.2.6): it is the same instance the store consults, so the
+	// sink cuts a record to the per-command cap the user set, not to a
+	// snapshot taken at startup.
 	if _, stubbed := contentDB.(*content.Stub); !stubbed {
-		captures.set(contentDB.Ledger())
+		captures.set(contentDB.Ledger(), historyPolicy)
 	}
 
 	// Live History policy: a Settings toggle applies without a restart. The

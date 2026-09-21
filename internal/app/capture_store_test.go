@@ -187,12 +187,13 @@ func aCaptureRecord(nonce string) proto.CaptureParams {
 }
 
 // captureSinkFor wires a sink the way the composition root does: the ledger
-// arrives only when the store is real (a stub store leaves the sink
-// unwired), and the binding memory is the sink's own.
-func captureSinkFor(db content.ContentDB) *captureSink {
+// and the live policy arrive only when the store is real (a stub store
+// leaves the sink unwired), and the binding memory is the sink's own. A nil
+// policy is the test spelling of the defaults.
+func captureSinkFor(db content.ContentDB, policy *content.Policy) *captureSink {
 	s := newCaptureSink()
 	if db != nil {
-		s.set(db.Ledger())
+		s.set(db.Ledger(), policy)
 	}
 	return s
 }
@@ -204,7 +205,7 @@ func captureSinkFor(db content.ContentDB) *captureSink {
 func TestTheCaptureHandlerStoresTheRecordAgainstItsEntry(t *testing.T) {
 	db := captureTestStore(t, content.CriticalityRoutine, nil)
 	entryID := recordOneCommand(t, db, "ls -la")
-	sink := captureSinkFor(db)
+	sink := captureSinkFor(db, nil)
 
 	nonce := fenceHex(0xA1)
 	sink.binds.Bind(nonce, entryID)
@@ -266,8 +267,9 @@ func TestTheCaptureHandlerStoresTheRecordAgainstItsEntry(t *testing.T) {
 }
 
 // assertRefusal is the shape every refusal path asserts: the handler
-// ANSWERS, the answer names why nothing was kept, and nothing was stored —
-// checked at the artifact id a stored body would have created.
+// ANSWERS, the answer names why nothing was kept, and what the store
+// recorded at the capture's id is the refusal itself — the zero-byte marker
+// whose truncated is "suppressed" (nocx-2v80t.2.6) — never a body.
 func assertRefusal(t *testing.T, db content.ContentDB, out any, err error, nonce, wantReason string) {
 	t.Helper()
 	if err != nil {
@@ -283,9 +285,19 @@ func assertRefusal(t *testing.T, db content.ContentDB, out any, err error, nonce
 	if result.Reason != wantReason {
 		t.Fatalf("reason = %q, want %q", result.Reason, wantReason)
 	}
-	if db != nil {
+	if db != nil && nonce != "" {
+		// The check needs the id, and the id is the fence's own name; an
+		// unfinished ask carries no fence, so its subtests check the
+		// unfinished id themselves.
 		if art, _ := db.Ledger().Artifact(context.Background(), captureArtifactID(nonce)); art != nil {
-			t.Fatalf("a %q refusal stored a body", wantReason)
+			if art.ByteLen != 0 || len(art.Chunks) != 0 {
+				t.Fatalf("a %q refusal stored a body (%d bytes)", wantReason, art.ByteLen)
+			}
+			if art.Truncated == nil || *art.Truncated != content.TruncSuppressed {
+				t.Fatalf("a %q refusal left truncated = %v, want the marker's %q", wantReason, art.Truncated, content.TruncSuppressed)
+			}
+		} else if wantReason != "noEntry" {
+			t.Fatalf("a %q refusal recorded no marker — a read of the capture would answer unknown-id, not the state", wantReason)
 		}
 	}
 }
@@ -302,7 +314,7 @@ func TestTheCaptureHandlerCarriesTheStoreSRefusals(t *testing.T) {
 		policy.SetOutputEnabled(false)
 		db := captureTestStore(t, content.CriticalityRoutine, policy)
 		entryID := recordOneCommand(t, db, "cat report.txt")
-		sink := captureSinkFor(db)
+		sink := captureSinkFor(db, nil)
 		nonce := fenceHex(0xB2)
 		sink.binds.Bind(nonce, entryID)
 		raw, err := json.Marshal(aCaptureRecord(nonce))
@@ -329,7 +341,7 @@ func TestTheCaptureHandlerCarriesTheStoreSRefusals(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RecordCompleted(sensitive): %v", err)
 		}
-		sink := captureSinkFor(db)
+		sink := captureSinkFor(db, nil)
 		nonce := fenceHex(0xD6)
 		sink.binds.Bind(nonce, entryID)
 		raw, err := json.Marshal(aCaptureRecord(nonce))
@@ -343,7 +355,7 @@ func TestTheCaptureHandlerCarriesTheStoreSRefusals(t *testing.T) {
 	t.Run("critical environment", func(t *testing.T) {
 		db := captureTestStore(t, content.CriticalityCritical, nil)
 		entryID := recordOneCommand(t, db, "kubectl apply -f prod.yaml")
-		sink := captureSinkFor(db)
+		sink := captureSinkFor(db, nil)
 		nonce := fenceHex(0xD7)
 		sink.binds.Bind(nonce, entryID)
 		raw, err := json.Marshal(aCaptureRecord(nonce))
@@ -358,7 +370,7 @@ func TestTheCaptureHandlerCarriesTheStoreSRefusals(t *testing.T) {
 		// The stub-store path: the composition root leaves the sink
 		// unwired, no row was ever recorded, and noEntry is the honest
 		// answer rather than a kept that would be a lie.
-		sink := captureSinkFor(nil)
+		sink := captureSinkFor(nil, nil)
 		raw, err := json.Marshal(aCaptureRecord(fenceHex(0xD4)))
 		if err != nil {
 			t.Fatalf("marshal the record: %v", err)
@@ -370,7 +382,7 @@ func TestTheCaptureHandlerCarriesTheStoreSRefusals(t *testing.T) {
 	t.Run("unbound nonce", func(t *testing.T) {
 		db := captureTestStore(t, content.CriticalityRoutine, nil)
 		recordOneCommand(t, db, "echo hi")
-		sink := captureSinkFor(db)
+		sink := captureSinkFor(db, nil)
 		raw, err := json.Marshal(aCaptureRecord(fenceHex(0xD5)))
 		if err != nil {
 			t.Fatalf("marshal the record: %v", err)
@@ -385,7 +397,7 @@ func TestTheCaptureHandlerCarriesTheStoreSRefusals(t *testing.T) {
 // it stands, with the same code every other reverse op refuses by.
 func TestTheCaptureHandlerRefusesAMalformedNonce(t *testing.T) {
 	db := captureTestStore(t, content.CriticalityRoutine, nil)
-	sink := captureSinkFor(db)
+	sink := captureSinkFor(db, nil)
 	rec := aCaptureRecord(fenceHex(0xD8))
 	rec.Nonce = "NOT-A-FENCE"
 	raw, err := json.Marshal(rec)
@@ -505,7 +517,7 @@ func loadCaptureResultSchema(t *testing.T) *jsonschema.Schema {
 func TestTheCaptureResultOffTheRealSocketConformsToItsContract(t *testing.T) {
 	db := captureTestStore(t, content.CriticalityRoutine, nil)
 	entryID := recordOneCommand(t, db, "make deploy")
-	sink := captureSinkFor(db)
+	sink := captureSinkFor(db, nil)
 	nonce := fenceHex(0xC3)
 	sink.binds.Bind(nonce, entryID)
 
@@ -661,7 +673,7 @@ func TestCaptureBindings_TheOpenAttemptEntryIsReadableUntilTheBoundary(t *testin
 func TestTheCaptureHandlerStoresAnUnfinishedRecordAgainstItsOpenEntry(t *testing.T) {
 	db := captureTestStore(t, content.CriticalityRoutine, nil)
 	entryID := recordOneCommand(t, db, "make deploy")
-	sink := captureSinkFor(db)
+	sink := captureSinkFor(db, nil)
 	sink.binds.BindOpen("6e6f63782d7465737431", entryID)
 
 	raw, err := json.Marshal(anUnfinishedCapture())
@@ -742,7 +754,7 @@ func TestTheUnfinishedRecordIsStillUnfinishedAfterAStoreReopen(t *testing.T) {
 		t.Fatalf("RecordObservation: %v", observeErr)
 	}
 	entryID := recordOneCommand(t, db, "yes")
-	sink := captureSinkFor(db)
+	sink := captureSinkFor(db, nil)
 	sink.binds.BindOpen("6e6f63782d7465737431", entryID)
 	raw, err := json.Marshal(anUnfinishedCapture())
 	if err != nil {
@@ -785,7 +797,7 @@ func TestTheUnfinishedAskRefusesAFenceAndAnswersNoEntryWithoutABinding(t *testin
 	t.Run("a nonce on an unfinished ask is refused", func(t *testing.T) {
 		db := captureTestStore(t, content.CriticalityRoutine, nil)
 		entryID := recordOneCommand(t, db, "make")
-		sink := captureSinkFor(db)
+		sink := captureSinkFor(db, nil)
 		sink.binds.BindOpen("6e6f63782d7465737431", entryID)
 		p := anUnfinishedCapture()
 		p.Nonce = fenceHex(0xC3)
@@ -804,7 +816,7 @@ func TestTheUnfinishedAskRefusesAFenceAndAnswersNoEntryWithoutABinding(t *testin
 	t.Run("no open attempt answers noEntry", func(t *testing.T) {
 		db := captureTestStore(t, content.CriticalityRoutine, nil)
 		entryID := recordOneCommand(t, db, "make")
-		sink := captureSinkFor(db)
+		sink := captureSinkFor(db, nil)
 		raw, err := json.Marshal(anUnfinishedCapture())
 		if err != nil {
 			t.Fatalf("marshal the record: %v", err)
@@ -821,7 +833,7 @@ func TestTheUnfinishedAskRefusesAFenceAndAnswersNoEntryWithoutABinding(t *testin
 		policy.SetOutputEnabled(false)
 		db := captureTestStore(t, content.CriticalityRoutine, policy)
 		entryID := recordOneCommand(t, db, "make")
-		sink := captureSinkFor(db)
+		sink := captureSinkFor(db, nil)
 		sink.binds.BindOpen("6e6f63782d7465737431", entryID)
 		raw, err := json.Marshal(anUnfinishedCapture())
 		if err != nil {
@@ -829,8 +841,9 @@ func TestTheUnfinishedAskRefusesAFenceAndAnswersNoEntryWithoutABinding(t *testin
 		}
 		out, captureErr := sink.capture(context.Background(), raw)
 		assertRefusal(t, db, out, captureErr, "", "outputOff")
-		if art, _ := db.Ledger().Artifact(context.Background(), unfinishedArtifactID(entryID)); art != nil {
-			t.Fatal("an outputOff answer stored a body")
+		marker, _ := db.Ledger().Artifact(context.Background(), unfinishedArtifactID(entryID))
+		if marker == nil || marker.ByteLen != 0 || marker.Truncated == nil || *marker.Truncated != content.TruncSuppressed {
+			t.Fatalf("an outputOff answer recorded %+v, want the zero-byte suppressed marker at the unfinished id", marker)
 		}
 	})
 }

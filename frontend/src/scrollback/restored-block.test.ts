@@ -122,6 +122,33 @@ describe('a block built from the store', () => {
     expect(red.outerHTML).toContain(String(S.palette[1]))
   })
 
+  it('a REFUSED capture says output was NOT kept — once, and never eviction’s word', () => {
+    // The third state beside evicted and empty (nocx-2v80t.2.6): the store
+    // refused the capture outright, so nothing was ever stored. The block
+    // says that, says it once, and does not claim output was LOST — it
+    // never existed to lose.
+    const el = restoredBlock(
+      facts({ body: null, captureSuppressed: true }),
+      S,
+      container,
+      () => {},
+      store(),
+    )
+    expect(el.dataset.captureSuppressed).toBe('true')
+    expect(el.querySelector('.cmd-output-suppressed')?.textContent).toBe('Output was not kept')
+    // Exactly once: the sentence must not also ride the grid html.
+    expect(el.textContent?.match(/Output was not kept/g)).toHaveLength(1)
+    expect(el.textContent).not.toContain('Output is no longer kept')
+  })
+
+  it('says nothing of refusal for an ordinary command', () => {
+    // The paired positive: without the fact the sentence could be one that
+    // is always shown.
+    const el = restoredBlock(facts({ body: null }), S, container, () => {}, store())
+    expect(el.dataset.captureSuppressed).toBeUndefined()
+    expect(el.textContent).not.toContain('Output was not kept')
+  })
+
   // The badge half of nocx-4em1z, asserted through the seam a person reaches
   // it by: the entry says the assistant submitted the command, so the
   // restored block says so too. Before this, restoredBlock omitted the

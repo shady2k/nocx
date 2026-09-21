@@ -22,7 +22,7 @@ export interface LedgerArtifact {
    */
   mediaType: string
   /**
-   * The chunks joined in seq order. Empty is a real answer and means the command printed nothing — it is NOT the same as an artifact that is not there, which is a body retention has evicted and which this method reports by refusing the id (ADR-0019 §7).
+   * The chunks joined in seq order. Empty has TWO meanings, told apart by truncated: with truncated null it means the command printed nothing; with truncated "suppressed" it means retention refused the capture and nothing was kept — the read half of the store's refusal answer (nocx-2v80t.2.6). An id that neither an artifact nor a refusal marker carries is refused as invalid params (ADR-0019 §7).
    */
   body: string
   /**

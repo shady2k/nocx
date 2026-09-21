@@ -167,6 +167,7 @@ func (b *captureBindings) openSize() int {
 type captureSink struct {
 	mu     sync.RWMutex
 	ledger content.LedgerRepository
+	policy *content.Policy
 	binds  *captureBindings
 }
 
@@ -174,18 +175,33 @@ func newCaptureSink() *captureSink {
 	return &captureSink{binds: newCaptureBindings()}
 }
 
-// set records the ledger once the content store exists. It is the
-// composition root's one call, beside the store it names.
-func (s *captureSink) set(ledger content.LedgerRepository) {
+// set records the ledger once the content store exists, beside the live
+// policy that governs it. It is the composition root's one call: the policy
+// is the same live instance the store consults, so a Settings change to the
+// per-command cap reaches the next capture without a restart.
+func (s *captureSink) set(ledger content.LedgerRepository, policy *content.Policy) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ledger = ledger
+	s.policy = policy
 }
 
 func (s *captureSink) ledgerOf() content.LedgerRepository {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.ledger
+}
+
+// capOf is the per-command cap this sink cuts records to: the live policy's
+// own number, or the default when no policy was wired (a test sink). The
+// same knob the renderer's capBody and the store's live recording take.
+func (s *captureSink) capOf() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.policy == nil {
+		return content.DefaultOutputCapBytes
+	}
+	return s.policy.OutputCapBytes()
 }
 
 // capture answers one session.capture ask. Every outcome that is an ANSWER
@@ -235,6 +251,19 @@ func (s *captureSink) capture(ctx context.Context, raw json.RawMessage) (any, er
 		// unwired answer is the same noEntry either way.
 		return proto.CaptureResult{Kept: false, Reason: captureReasonNoEntry}, nil
 	}
+	// The per-command cap cuts ROWS on the record path, never bytes
+	// (nocx-2v80t.2.6): byte-cutting the JSON record would concatenate to
+	// undecodable bytes, and the summary a cap leaves must still be a
+	// readable record. The store's existing TruncCap rides along, so a read
+	// of the capture answers the summary AND says it is one. A record under
+	// the cap is stored byte for byte, unnamed.
+	body := []byte(raw)
+	truncated := (*content.Truncation)(nil)
+	if cappedBody, cut := capRecordForStorage(p, body, s.capOf()); cut {
+		body = cappedBody
+		capMark := content.TruncCap
+		truncated = &capMark
+	}
 	// The geometry names the screen the record's reads were taken against:
 	// the boundary screen for a settled record, the opening for an
 	// unfinished one, which has no boundary screen at all.
@@ -249,10 +278,11 @@ func (s *captureSink) capture(ctx context.Context, raw json.RawMessage) (any, er
 		MediaType:      content.MediaJSON,
 		CaptureMethod:  content.CaptureTerminalCells,
 		CaptureVersion: 1,
+		Truncated:      truncated,
 		TerminalCols:   &cols,
 		TerminalRows:   &rows,
 		Seq:            1,
-		Body:           []byte(raw),
+		Body:           body,
 	})
 	if errors.Is(err, content.ErrNoSuchEntry) {
 		// The bind named a row the store does not hold — history was
@@ -272,6 +302,80 @@ func (s *captureSink) capture(ctx context.Context, raw json.RawMessage) (any, er
 		return nil, fmt.Errorf("capture: the store answered %q", stance)
 	}
 	return result, nil
+}
+
+// capRecordForStorage answers the body to store for a record and whether a
+// cut happened. A record at or under limit is the wire bytes, untouched. A
+// record over it has DEPARTED ROWS cut — head and tail kept, middle dropped,
+// the same cut the renderer's capBody and the store's live recording make on
+// their own surfaces (content/policy.go) — and the cut record re-marshaled,
+// so the stored summary stays a decodable record whose opening and closing
+// screens are whole. The cut keeps as many rows as the limit allows: the
+// largest keep that fits, found by binary search over one monotone fact
+// (fewer rows, fewer bytes), never a byte count. Departed rows are the only
+// unbounded part of a record; when even cutting all of them cannot fit the
+// limit — screens alone bigger than the knob — the record is stored as cut
+// as it can be, and the store's own MaxArtifactBytes remains the hard
+// backstop.
+func capRecordForStorage(p proto.CaptureParams, raw []byte, limit int) (body []byte, cut bool) {
+	if len(raw) <= limit || len(p.Departed) == 0 {
+		return raw, false
+	}
+	n := len(p.Departed)
+	fits := func(keep int) bool {
+		q := p
+		q.Departed = keepDepartedRows(p.Departed, keep)
+		b, err := json.Marshal(q)
+		return err == nil && len(b) <= limit
+	}
+	// fits is true for small keeps and false past the limit; the search
+	// keeps every fitting keep as a candidate and climbs to keep more, so
+	// best ends at the LARGEST keep that fits.
+	lo, hi, best := 0, n, -1
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		if fits(mid) {
+			best = mid
+			lo = mid + 1
+		} else {
+			hi = mid - 1
+		}
+	}
+	if best >= n {
+		// The re-marshal fits without losing a row: nothing was cut, so
+		// nothing is named.
+		return raw, false
+	}
+	if best < 0 {
+		best = 0
+	}
+	q := p
+	q.Departed = keepDepartedRows(p.Departed, best)
+	b, err := json.Marshal(q)
+	if err != nil {
+		// Unreachable for a record the wire just decoded, but a derive that
+		// cannot run must not corrupt the body: store the original.
+		return raw, false
+	}
+	return b, true
+}
+
+// keepDepartedRows keeps the first head and the last tail of the rows so
+// that head+tail = keep — the middle is what the cap drops. keep >= len is
+// the rows unchanged; keep <= 0 is none.
+func keepDepartedRows(rows []proto.CaptureRow, keep int) []proto.CaptureRow {
+	if keep >= len(rows) {
+		return rows
+	}
+	if keep <= 0 {
+		return nil
+	}
+	head := (keep + 1) / 2
+	tail := keep - head
+	kept := make([]proto.CaptureRow, 0, keep)
+	kept = append(kept, rows[:head]...)
+	kept = append(kept, rows[len(rows)-tail:]...)
+	return kept
 }
 
 // captureResultOf maps the store's stance onto the result's wire vocabulary.

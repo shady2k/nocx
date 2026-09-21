@@ -1139,19 +1139,21 @@ func appendChunkAt(ctx context.Context, q execer, artifactID string, seq int, bo
 // the artifact if it is not there yet, then the chunk at its seq, in ONE
 // transaction against the entry's own execution.
 //
-// The two refusals-that-are-not-errors are decided before the transaction
-// opens, so nothing is written for a body nobody wants: output retention off
-// is the user's setting, and a sensitive entry is the store's own rule about
-// what a command's text says about its output.
+// The refusals-that-are-not-errors — output retention off, a sensitive entry,
+// a critical environment — are ANSWERS, and since nocx-2v80t.2.6 they are
+// also ROWS: each records a zero-byte marker at the capture's artifact id
+// whose truncated is "suppressed", so reading the capture later answers
+// "nothing is kept" as the named state it is instead of an unknown-id error.
+// The entry and its execution are resolved BEFORE the stance is decided, so
+// the marker carries the same provenance a body would have; an entry that is
+// not there is ErrNoSuchEntry whatever the switches say. Nothing is written
+// for a body nobody wants — the marker is the refusal, never a body.
 func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) (SessionOutputStance, error) {
 	if in.EntryID == "" || in.ArtifactID == "" {
 		return "", errors.New("content: capture: entry id and artifact id are required")
 	}
 	if in.Seq < 1 {
 		return "", errors.New("content: capture: seq starts at 1")
-	}
-	if !s.policy.OutputEnabled() {
-		return SessionOutputRetentionOff, nil
 	}
 	// The refusals inside the transaction are answers and not errors, so the
 	// closure records WHICH one fired and the answer carries it out.
@@ -1174,11 +1176,6 @@ func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) (Se
 			}
 			return err
 		}
-		if Sensitivity(sensitivity) == SensitivitySensitive {
-			stance = SessionOutputSensitive
-			return nil
-		}
-
 		// The entry's own execution — the one RecordCompleted wrote in the
 		// same transaction as the entry. Ordered by attempt so a re-run's
 		// output lands on the run that produced it rather than on the first.
@@ -1202,18 +1199,38 @@ func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) (Se
 			}
 			return err
 		}
-		// A critical environment contributes intent and metadata only
-		// (design §7.4). The command is still recorded: criticality decides
-		// what is kept ABOUT a command, never whether it happened.
-		if Criticality(criticality) == CriticalityCritical {
+
+		// The stance is decided AFTER the entry and its execution are
+		// resolved, so a refusal's marker carries the same provenance a body
+		// would have — and in the same precedence the early return used to
+		// set: the user's switch, then the entry's sensitivity, then the
+		// pinned criticality.
+		switch {
+		case !s.policy.OutputEnabled():
+			stance = SessionOutputRetentionOff
+		case Sensitivity(sensitivity) == SensitivitySensitive:
+			stance = SessionOutputSensitive
+		case Criticality(criticality) == CriticalityCritical:
+			// A critical environment contributes intent and metadata only
+			// (design §7.4). The command is still recorded: criticality
+			// decides what is kept ABOUT a command, never whether it
+			// happened.
 			stance = SessionOutputCritical
-			return nil
+		}
+		if stance != SessionOutputKept {
+			if markerErr := recordCaptureRefusal(ctx, tx, in, execID); markerErr != nil {
+				return markerErr
+			}
+			// The marker is a write like any other: without the commit the
+			// deferred rollback above would discard the very answer the
+			// refusal just recorded.
+			return tx.Commit()
 		}
 
-		var existingMedia, existingEntry sql.NullString
+		var existingMedia, existingEntry, existingTruncated, existingMethod sql.NullString
 		lookupErr := tx.QueryRowContext(ctx,
-			`SELECT media_type, entry_id FROM artifacts WHERE id = ?`,
-			in.ArtifactID).Scan(&existingMedia, &existingEntry)
+			`SELECT media_type, entry_id, truncated, capture_method FROM artifacts WHERE id = ?`,
+			in.ArtifactID).Scan(&existingMedia, &existingEntry, &existingTruncated, &existingMethod)
 		switch {
 		case errors.Is(lookupErr, sql.ErrNoRows):
 			if insertErr := insertArtifact(ctx, tx, AppendArtifact{
@@ -1236,6 +1253,14 @@ func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) (Se
 			// it is a body of whatever attempt wrote it.
 			if existingMedia.String != string(in.MediaType) ||
 				existingEntry.String != in.EntryID {
+				return ErrIDConflict
+			}
+			// A body can never land on a refusal marker's id: the reachable
+			// flip is a retried ask under a policy that changed between the
+			// tries, and silently appending a body under truncated=suppressed
+			// would be a row that lies both ways about what it holds.
+			if existingTruncated.String == string(TruncSuppressed) &&
+				existingMethod.String == string(CaptureNone) {
 				return ErrIDConflict
 			}
 		}
@@ -1262,6 +1287,44 @@ func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) (Se
 		return "", err
 	}
 	return stance, nil
+}
+
+// recordCaptureRefusal writes the read half of a refusal (nocx-2v80t.2.6): a
+// zero-byte artifact at the capture's own id whose truncated is "suppressed" —
+// the read vocabulary's existing word for "capture was refused by policy" —
+// so a later read of this capture ANSWERS "nothing is kept" as a named state
+// instead of an unknown-id error. The row carries the real entry and execution
+// provenance and the caller's declared media type, and nothing else: no
+// chunks, no body, no terminal geometry, because no screen was stored.
+//
+// Idempotent exactly like the body path: a retried ask finds its own marker
+// under the same id and writes nothing; the id naming a different owner is
+// ErrIDConflict, the same rule a body replays under.
+func recordCaptureRefusal(ctx context.Context, tx *sql.Tx, in CaptureOutput, execID int64) error {
+	var existingMedia, existingEntry sql.NullString
+	lookupErr := tx.QueryRowContext(ctx,
+		`SELECT media_type, entry_id FROM artifacts WHERE id = ?`,
+		in.ArtifactID).Scan(&existingMedia, &existingEntry)
+	switch {
+	case errors.Is(lookupErr, sql.ErrNoRows):
+		suppressed := TruncSuppressed
+		return insertArtifact(ctx, tx, AppendArtifact{
+			EntryID:       in.EntryID,
+			ExecutionID:   &execID,
+			ID:            in.ArtifactID,
+			MediaType:     in.MediaType,
+			Truncated:     &suppressed,
+			CaptureMethod: CaptureNone,
+		})
+	case lookupErr != nil:
+		return lookupErr
+	default:
+		if existingMedia.String != string(in.MediaType) ||
+			existingEntry.String != in.EntryID {
+			return ErrIDConflict
+		}
+		return nil
+	}
 }
 
 // AppendChunk appends one chunk to an artifact and maintains its byte_len —

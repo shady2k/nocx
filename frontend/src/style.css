@@ -958,12 +958,15 @@
   border-top: 1px solid var(--color-border);
 }
 
-.cmd-output-evicted {
+.cmd-output-evicted,
+.cmd-output-suppressed {
   /* Where a body used to be. Retention removes an artifact while its entry
      stays (ADR-0019 §7), and a reconstruction has to state its own horizon:
      a block whose output was evicted must not read like a command that
      printed nothing. Dimmed and italic, because it is our sentence and not
-     the program's — the one line in a block's body that nocx wrote. */
+     the program's — the one line in a block's body that nocx wrote.
+     `.cmd-output-suppressed` is the refusal state (nocx-2v80t.2.6): the
+     capture was never kept, so the block says THAT rather than eviction. */
   color: var(--color-text-muted);
   font-style: italic;
 }

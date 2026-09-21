@@ -205,7 +205,7 @@ export function restoredBlock(
   if (suppressed) {
     el.dataset.captureSuppressed = 'true'
     const notice = document.createElement('div')
-    notice.className = 'cmd-output cmd-output-evicted'
+    notice.className = 'cmd-output cmd-output-suppressed'
     notice.dataset.captureSuppressed = 'true'
     notice.textContent = SUPPRESSED
     el.appendChild(notice)

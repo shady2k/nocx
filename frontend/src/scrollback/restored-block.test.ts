@@ -135,7 +135,9 @@ describe('a block built from the store', () => {
       store(),
     )
     expect(el.dataset.captureSuppressed).toBe('true')
-    expect(el.textContent).toContain('Output was not kept')
+    expect(el.querySelector('.cmd-output-suppressed')?.textContent).toBe('Output was not kept')
+    // Exactly once: the sentence must not also ride the grid html.
+    expect(el.textContent?.match(/Output was not kept/g)).toHaveLength(1)
     expect(el.textContent).not.toContain('Output is no longer kept')
   })
 

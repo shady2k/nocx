@@ -2,19 +2,28 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/helper/session.capture.params.schema.json",
   "title": "HelperSessionCaptureParams",
-  "description": "One settled execution interval's capture record, pushed UP to the coordinator by the helper's session runtime (nocx-2v80t.2.2) -- a REVERSE op, the ssh service's credential asks' direction: the record is built at the authenticated render boundary, the instant the rendezvous completes, because only the runtime was there for the whole of it. The coordinator stores it against the command's entry through the content ledger's CaptureOutput and answers with the storage ack (session.capture.schema.json), which carries a legal nothing-was-kept-and-why outcome; a shape that could only express success is the defect this op exists to prevent.",
+  "description": "One execution interval's capture record, pushed UP to the coordinator by the helper's session runtime (nocx-2v80t.2.2, nocx-2v80t.2.4) -- a REVERSE op, the ssh service's credential asks' direction: state discriminates the two records: settled is the record built at the authenticated render boundary, the instant the rendezvous completes; unfinished is the open interval of a command still running, taken once at its first departure -- it names no nonce and closes nothing, and only the authenticated boundary ever produces a finished record. The coordinator stores it against the command's entry through the content ledger's CaptureOutput and answers with the storage ack (session.capture.schema.json), which carries a legal nothing-was-kept-and-why outcome; a shape that could only express success is the defect this op exists to prevent.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "session",
     "incarnation",
-    "nonce",
+    "state",
     "revision",
     "completeness",
     "opening",
     "departed",
-    "departedHole",
-    "closing"
+    "departedHole"
+  ],
+  "allOf": [
+    {
+      "if": { "properties": { "state": { "const": "settled" } }, "required": ["state"] },
+      "then": { "required": ["nonce", "closing"] }
+    },
+    {
+      "if": { "properties": { "state": { "const": "unfinished" } }, "required": ["state"] },
+      "then": { "not": { "anyOf": [{ "required": ["nonce"] }, { "required": ["closing"] }] } }
+    }
   ],
   "properties": {
     "session": {
@@ -30,13 +39,18 @@
         "generation": { "type": "integer", "minimum": 1 }
       }
     },
+    "state": {
+      "description": "Which kind of interval the record is: settled (the authenticated boundary closed it; the record carries its nonce and closing screen) or unfinished (the command still runs; the record is the open interval's known-so-far, taken once at its first departure, naming no nonce and closing nothing). A reader that cannot tell the two apart is reading a defect.",
+      "type": "string",
+      "enum": ["settled", "unfinished"]
+    },
     "nonce": {
-      "description": "The settled meeting's fence: exactly 64 lowercase hex characters, the spelling lifecycle-complete carries down and the runtime matched on. The nonce names WHICH execution interval this record is, so the coordinator can bind it to the command's entry by the completion it already authenticated.",
+      "description": "The settled meeting's fence: exactly 64 lowercase hex characters, the spelling lifecycle-complete carries down and the runtime matched on. The nonce names WHICH execution interval this settled record is, so the coordinator can bind it to the command's entry by the completion it already authenticated. A settled record requires it; an unfinished record must NOT carry it -- no authenticated boundary has closed anything.",
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
     "revision": {
-      "description": "The session runtime's monotonic clock at the boundary: the instant the closing snapshot was read, provenance for everything in the record.",
+      "description": "The session runtime's monotonic clock when the record's reads were taken: the closing instant for a settled record, the snapshot instant for an unfinished one. Provenance for everything in the record.",
       "type": "integer",
       "minimum": 0
     },

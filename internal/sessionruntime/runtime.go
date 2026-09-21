@@ -250,11 +250,14 @@ type Session struct {
 	// first ingest and refreshed at every settle; captureOpeningValid says
 	// a usable one was actually read (a screen nobody could read is not an
 	// opening somebody can claim). capturePending holds the records built
-	// under mu and handed over after it is released. All three are guarded
-	// by mu.
-	captureOpening      CaptureScreen
-	captureOpeningValid bool
-	capturePending      []CaptureRecord
+	// under mu and handed over after it is released.
+	// captureUnfinishedSent says the OPEN interval has already made its
+	// one unfinished record (nocx-2v80t.2.4); the settle clears it with
+	// the interval. All four are guarded by mu.
+	captureOpening        CaptureScreen
+	captureOpeningValid   bool
+	capturePending        []CaptureRecord
+	captureUnfinishedSent bool
 }
 
 // intentRecord is one admitted intent and where it got to. The record outlives
@@ -1082,6 +1085,11 @@ func (s *Session) Ingest(b []byte) error {
 			return err
 		}
 	}
+	// The open interval's record (nocx-2v80t.2.4): a command still running
+	// whose rows have left the screen reads back as an unfinished record
+	// taken once, from a peek that spends nothing the settle will drain.
+	s.snapshotUnfinishedLocked()
+	pending = append(pending, s.takePendingCapturesLocked()...)
 	if err := s.deliverLocked(frameDelivery(s.tick())); err != nil {
 		return err
 	}

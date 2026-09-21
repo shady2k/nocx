@@ -85,11 +85,18 @@ func TestASettledRendezvousHandsTheSinkOneCaptureRecord(t *testing.T) {
 		t.Fatalf("sight the fence: %v", err)
 	}
 
+	// Two records: the open interval's unfinished one, taken at its first
+	// departure (nocx-2v80t.2.4), and the boundary's settled one. This
+	// test's subject is the settled record; the unfinished shape is
+	// pinned in unfinished_test.go.
 	recs := sink.records()
-	if len(recs) != 1 {
-		t.Fatalf("the sink holds %d records, want exactly one per settled interval", len(recs))
+	if len(recs) != 2 {
+		t.Fatalf("the sink holds %d records, want the unfinished one plus the settled one", len(recs))
 	}
-	rec := recs[0]
+	if recs[0].State != CaptureUnfinished {
+		t.Fatalf("the first record reads %q, want the unfinished interval's", recs[0].State)
+	}
+	rec := recs[1]
 	if rec.Nonce != nonce {
 		t.Fatalf("the record names nonce %v, want the settled meeting's %v", rec.Nonce, nonce)
 	}

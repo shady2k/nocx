@@ -24,13 +24,33 @@ package sessionruntime
 //     a default: a record whose stream lost bytes before the emulator saw
 //     them says so rather than looking whole.
 //
-// Deliberately not here: a rendezvous whose bounded wait EXPIRED produces no
-// record at all. CompletenessNoFence marks an interval with no authenticated
-// boundary, and this slice captures only intervals that have one; the
-// long-running command and its retention summaries are the next task's.
+// Deliberately not here, unchanged: a rendezvous whose bounded wait EXPIRED
+// produces no settled record. CompletenessNoFence marks an interval with no
+// authenticated boundary, and only the authenticated boundary closes one —
+// an interval that ran out to its expiry reads back as the unfinished
+// record its first departure stored, never as a finished one
+// (nocx-2v80t.2.4).
 
 import (
 	"github.com/shady2k/nocx/internal/emulator"
+)
+
+// CaptureState says which kind of interval a record is: a settled execution
+// interval the authenticated boundary closed, or the open interval of a
+// command still running (nocx-2v80t.2.4). The zero value is CaptureSettled
+// because that is the shape every producer set before the unfinished one
+// existed; both build sites name their state explicitly, and a reader may
+// never have to guess which kind it is holding.
+type CaptureState string
+
+const (
+	// CaptureSettled — the authenticated render boundary closed the
+	// interval; the record carries its nonce and its closing screen.
+	CaptureSettled CaptureState = "settled"
+	// CaptureUnfinished — the command still runs; the record is the open
+	// interval's known-so-far, taken once at its first departure. It
+	// names no nonce and closes nothing.
+	CaptureUnfinished CaptureState = "unfinished"
 )
 
 // CaptureSink receives one capture record per settled execution interval.
@@ -60,10 +80,16 @@ type CaptureScreen struct {
 	Lines []emulator.Row
 }
 
-// CaptureRecord is one settled execution interval. Nonce names the meeting
-// whose completion closed it; At and Revision pin the record to the
-// incarnation and the clock it was taken at.
+// CaptureRecord is one execution interval's record. State says which kind
+// of interval it is — a record a reader cannot tell apart from a finished
+// one is the defect the unfinished state exists to prevent; both build
+// sites name their state explicitly, never a default. Nonce names the
+// meeting whose completion closed a settled interval — the zero fence is a
+// REAL answer on an unfinished record, where no authenticated boundary has
+// closed anything; At and Revision pin the record to the incarnation and
+// the clock it was taken at.
 type CaptureRecord struct {
+	State        CaptureState
 	Nonce        FenceNonce
 	At           Incarnation
 	Revision     Revision
@@ -144,6 +170,7 @@ func (s *Session) settleCaptureLocked(nonce FenceNonce) {
 	}
 	departed, err := s.emulator.DepartedRows()
 	rec := CaptureRecord{
+		State:        CaptureSettled,
 		Nonce:        nonce,
 		At:           s.inc,
 		Revision:     s.rev,
@@ -166,8 +193,49 @@ func (s *Session) settleCaptureLocked(nonce FenceNonce) {
 	}
 	s.capturePending = append(s.capturePending, rec)
 	// The interval that just closed opened the next one: what the boundary
-	// screen holds is exactly where the next record's story starts.
+	// screen holds is exactly where the next record's story starts, and
+	// the new interval has made no record of its own yet.
 	s.captureOpening, s.captureOpeningValid = closing, true
+	s.captureUnfinishedSent = false
+}
+
+// snapshotUnfinishedLocked takes the open interval's record — the one fact
+// a long unfinished command leaves behind while it still runs
+// (nocx-2v80t.2.4): the opening, and a PEEK of the departure report, the
+// rows the command has pushed off the screen so far. The peek spends
+// nothing: the settle-time drain remains the report's one owner, and the
+// record the authenticated boundary later builds still covers the whole
+// interval. One record per interval, at the first departure that carries
+// rows — a later byte produces no second ask, and only a boundary closes
+// the interval, so only a boundary can produce the next record. A reader
+// that cannot tell this record from a finished one is reading a defect:
+// State names it unfinished, the nonce is the zero fence, and no closing
+// screen exists. It appends to the pending list for the caller to hand out
+// with [Session.takePendingCapturesLocked], exactly as the settle does.
+func (s *Session) snapshotUnfinishedLocked() {
+	if !s.captureOpeningValid || s.captureUnfinishedSent {
+		return
+	}
+	departed, err := s.emulator.PeekDepartedRows()
+	if len(departed) == 0 {
+		return
+	}
+	rec := CaptureRecord{
+		State:        CaptureUnfinished,
+		At:           s.inc,
+		Revision:     s.rev,
+		Completeness: CompletenessNoFence,
+		Opening:      s.captureOpening,
+		Departed:     departed,
+		DepartedHole: err != nil,
+	}
+	if s.completeness == CompletenessLostIngest || s.completeness == CompletenessEvicted {
+		// The stream's own claim can only be worse than the missing
+		// boundary, never better — the same rule the settle applies.
+		rec.Completeness = s.completeness
+	}
+	s.capturePending = append(s.capturePending, rec)
+	s.captureUnfinishedSent = true
 }
 
 // takePendingCapturesLocked hands the built records out and clears the

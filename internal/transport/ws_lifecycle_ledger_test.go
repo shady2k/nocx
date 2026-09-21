@@ -720,13 +720,39 @@ func TestLifecycleSubmitAttempt_RefusesASourceOutsideTheVocabulary(t *testing.T)
 // recordingBindings is the binding memory the tests hand the server. It
 // records every Bind exactly as the capture handler later reads them.
 type recordingBindings struct {
-	mu    sync.Mutex
-	bound map[string]string
-	order []string
+	mu        sync.Mutex
+	bound     map[string]string
+	order     []string
+	open      map[string]string
+	openOrder []string
 }
 
 func newRecordingBindings() *recordingBindings {
-	return &recordingBindings{bound: make(map[string]string)}
+	return &recordingBindings{
+		bound: make(map[string]string),
+		open:  make(map[string]string),
+	}
+}
+
+func (r *recordingBindings) BindOpen(sessionID, entryID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.open[sessionID]; !exists {
+		r.openOrder = append(r.openOrder, sessionID)
+	}
+	r.open[sessionID] = entryID
+}
+
+func (r *recordingBindings) UnbindOpen(sessionID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.open, sessionID)
+	for i, s := range r.openOrder {
+		if s == sessionID {
+			r.openOrder = append(r.openOrder[:i:i], r.openOrder[i+1:]...)
+			break
+		}
+	}
 }
 
 func (r *recordingBindings) Bind(nonce, entryID string) {
@@ -747,6 +773,18 @@ func (r *recordingBindings) count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.order)
+}
+
+// openBinding answers the one open-attempt binding the projection has
+// recorded, for the tests that assert what the capture ask will resolve.
+func (r *recordingBindings) openBinding() (session, entry string, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.openOrder) == 0 {
+		return "", "", false
+	}
+	session = r.openOrder[0]
+	return session, r.open[session], true
 }
 
 // TestCaptureBinding_TheCompletedFenceRemembersItsEntry is the spine: a
@@ -855,5 +893,79 @@ func TestCaptureBinding_TransportLossBindsNothing(t *testing.T) {
 	}
 	if row := mustEntry(t, db, got.ID); row.Phase != content.PhaseClosed {
 		t.Fatalf("the lost attempt's row is phase %q, want closed", row.Phase)
+	}
+}
+
+// TestCaptureBinding_TheOpenAttemptIsAddressableUntilTheBoundary is the
+// unfinished record's addressing (nocx-2v80t.2.4): the entry an OPEN
+// attempt already has — recordAttemptEntry's own write, keyed by the
+// attempt id — is bound to the session it runs in, so a capture ask that
+// names no fence can still be stored; and the authenticated boundary clears
+// that binding, so a finished entry can never catch a stray unfinished ask.
+// Only the fence→entry memory answers after it.
+func TestCaptureBinding_TheOpenAttemptIsAddressableUntilTheBoundary(t *testing.T) {
+	binds := newRecordingBindings()
+	e, pub, lane, h, _, db := newLifecycleLedgerEnvWithStore(t, newLedgerStore(t), WithCaptureBindings(binds))
+
+	got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
+		lifecycleSubmitParams(string(h.Domain), "make watch"), 41))
+
+	// While the command still runs — no completion, no fence — its entry
+	// is addressable by the session, and the entry is the attempt's own.
+	sessionID, entryID, ok := binds.openBinding()
+	if !ok {
+		t.Fatal("the open attempt's entry is not addressable — an unfinished record would be answered noEntry while the command runs")
+	}
+	if entryID != got.ID {
+		t.Fatalf("the open binding names entry %q, want the attempt's own %q", entryID, got.ID)
+	}
+	if sessionID == "" {
+		t.Fatal("the open binding names no session — the ask keys on the session the attempt runs in")
+	}
+	if row := mustEntry(t, db, entryID); row.Phase != content.PhaseOpen {
+		t.Fatalf("the bound entry is phase %q, want open — nothing has closed it", row.Phase)
+	}
+
+	// The authenticated boundary: the fence binds the entry AND the open
+	// binding clears, in the one projection turn.
+	fence := lifecycleFence(0x5F)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(nil, "make watch")))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(got.ID), 0, fence)))
+
+	if _, _, ok := binds.openBinding(); ok {
+		t.Fatal("the open binding survived the authenticated boundary — a stray unfinished ask could land on a finished entry")
+	}
+	nonce := hex.EncodeToString(fence[:])
+	if id, ok := binds.entryFor(nonce); !ok || id != got.ID {
+		t.Fatalf("after the boundary the fence binds %q, %v; want the entry", id, ok)
+	}
+}
+
+// TestCaptureBinding_ATransportGoneCloseUnbindsTheOpenAttempt is the next-
+// start half: when the projection closes an attempt whose transport is gone
+// (the restart shape), the open binding clears with it — the execution is
+// over for this projection, and the binding must not outlive what it
+// addresses. The unfinished record already stored stays untouched by this:
+// it is data, not the binding.
+func TestCaptureBinding_ATransportGoneCloseUnbindsTheOpenAttempt(t *testing.T) {
+	binds := newRecordingBindings()
+	e, _, lane, h, _, _ := newLifecycleLedgerEnvWithStore(t, newLedgerStore(t), WithCaptureBindings(binds))
+
+	got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
+		lifecycleSubmitParams(string(h.Domain), "sleep 100"), 41))
+	if _, _, ok := binds.openBinding(); !ok {
+		t.Fatal("the submitted attempt left no open binding to clear")
+	}
+
+	e.ws.syncLifecycleLedger(lifecyclepub.Fact{
+		Lane:    string(lane),
+		Attempt: &lifecyclepub.Attempt{ID: got.ID, State: lifecyclepub.AttemptUnknown},
+	})
+
+	if _, _, ok := binds.openBinding(); ok {
+		t.Fatal("the open binding survived a transport-gone close")
+	}
+	if n := binds.count(); n != 0 {
+		t.Fatalf("a transport-gone close bound %d fences, want none — no authenticated boundary existed", n)
 	}
 }

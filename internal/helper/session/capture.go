@@ -95,18 +95,25 @@ func (r *captureRelay) Capture(rec sessionruntime.CaptureRecord) {
 // own goroutine. The mapping is the helper's ONE conversion in this
 // direction, and it is total: every style fact the record carries crosses,
 // because the record is the durable content the card's wire format derives
-// views from.
+// views from. State crosses as the discriminator it is, and only a settled
+// record carries the fence and the closing screen.
 func (hs *hostSession) deliverCapture(rec sessionruntime.CaptureRecord) {
 	params := proto.CaptureParams{
 		Session:      hs.id,
 		Incarnation:  proto.Incarnation{Session: string(rec.At.Session), Generation: uint64(rec.At.Generation)},
-		Nonce:        hex.EncodeToString(rec.Nonce[:]),
+		State:        proto.CaptureState(rec.State),
 		Revision:     uint64(rec.Revision),
 		Completeness: completenessName(rec.Completeness),
 		Opening:      captureScreenOf(rec.Opening),
 		Departed:     captureRowsOf(rec.Departed),
 		DepartedHole: rec.DepartedHole,
-		Closing:      captureScreenOf(rec.Closing),
+	}
+	if rec.State == sessionruntime.CaptureSettled {
+		// Only the authenticated boundary names a fence and a closing
+		// screen; an unfinished record carries neither, as its absence on
+		// the wire says.
+		params.Nonce = hex.EncodeToString(rec.Nonce[:])
+		params.Closing = captureScreenOf(rec.Closing)
 	}
 	go hs.sendCapture(params)
 }
@@ -130,16 +137,16 @@ func (hs *hostSession) sendCapture(params proto.CaptureParams) {
 	var result proto.CaptureResult
 	if err := asker.Ask(ctx, proto.ServiceSession, proto.OpCapture, params, &result); err != nil {
 		hs.log.Warn("helper: the capture record did not reach the coordinator",
-			"session", hs.id.Session, "nonce", params.Nonce, "error", err)
+			"session", hs.id.Session, "state", string(params.State), "nonce", params.Nonce, "error", err)
 		return
 	}
 	if result.Kept {
 		hs.log.Info("helper: the capture record was stored",
-			"session", hs.id.Session, "nonce", params.Nonce)
+			"session", hs.id.Session, "state", string(params.State), "nonce", params.Nonce)
 		return
 	}
 	hs.log.Info("helper: the capture record was not kept",
-		"session", hs.id.Session, "nonce", params.Nonce, "reason", result.Reason)
+		"session", hs.id.Session, "state", string(params.State), "nonce", params.Nonce, "reason", result.Reason)
 }
 
 // captureScreenOf maps one instant of a screen onto the wire.

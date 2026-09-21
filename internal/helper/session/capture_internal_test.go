@@ -9,18 +9,67 @@ package session
 // same way the host stamps the real connection.
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/santhosh-tekuri/jsonschema/v6"
+
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/sessionruntime"
 )
+
+// captureContract compiles the frozen session.capture.params contract. The
+// package's other contract tests (and their schema loaders) live behind the
+// nocx_local_ssh tag in an external test package, so the unfinished ask's
+// wire proof carries its own copy here — the schema file on disk is the one
+// authority either way.
+func captureContract(t *testing.T) *jsonschema.Schema {
+	t.Helper()
+	c := jsonschema.NewCompiler()
+	entries, err := os.ReadDir("../../../contracts/helper")
+	if err != nil {
+		t.Fatalf("read the helper contracts: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		raw, readErr := os.ReadFile("../../../contracts/helper/" + e.Name())
+		if readErr != nil {
+			t.Fatalf("read %s: %v", e.Name(), readErr)
+		}
+		doc, unmarshalErr := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
+		if unmarshalErr != nil {
+			t.Fatalf("unmarshal %s: %v", e.Name(), unmarshalErr)
+		}
+		id := "https://nocx.local/contracts/helper/" + e.Name()
+		if addErr := c.AddResource(id, doc); addErr != nil {
+			t.Fatalf("register %s: %v", e.Name(), addErr)
+		}
+	}
+	s, err := c.Compile("https://nocx.local/contracts/helper/session.capture.params.schema.json")
+	if err != nil {
+		t.Fatalf("compile the capture contract: %v", err)
+	}
+	return s
+}
+
+// validateCaptureFrame checks one raw ask against the compiled contract.
+func validateCaptureFrame(s *jsonschema.Schema, raw []byte) error {
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	return s.Validate(doc)
+}
 
 // recordingAsker is the coordinator side of the reverse channel, scripted.
 // It records every ask and answers with the ack the test names.
@@ -253,4 +302,78 @@ func captureScreenText(t *testing.T, s proto.CaptureScreen) string {
 		sb.WriteByte('\n')
 	}
 	return sb.String()
+}
+
+// The unfinished ask (nocx-2v80t.2.4): an open interval's first departure
+// produces exactly one ask that DECLARES itself unfinished — state names
+// it, and the raw frame carries neither a nonce nor a closing screen, the
+// two things a settled record has and an open interval must not. The frame
+// validates against the frozen params contract, so the discriminated
+// addition is the wire's, not only the struct's.
+func TestAnOpenIntervalAsksTheCoordinatorToCaptureItsKnownSoFar(t *testing.T) {
+	asker := newRecordingAsker(true)
+	svc := New(Options{
+		Generation:            "gen-under-test",
+		Spawner:               &lcSpawner{},
+		Log:                   lcTestLog(),
+		RendezvousExpireAfter: (&expiryTrigger{}).afterFunc,
+	})
+	t.Cleanup(svc.Close)
+
+	ctx := host.WithConnection(context.Background(), asker)
+	res, err := svc.spawn(ctx, proto.SpawnParams{
+		Cols: 80, Rows: 24,
+		Lifecycle: &proto.LifecycleLaunch{
+			Lane: "lane-under-test", Domain: "dom-under-test", Epoch: 7,
+			Capability: strings.Repeat("ab", 32),
+		},
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	id := res.Entry.Session
+	hs, err := svc.find(id)
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	// The command still runs; no completion and no fence exist. Its output
+	// pushes rows off the screen, and that alone is the trigger.
+	if ingestErr := hs.runtime.Ingest([]byte(strings.Repeat("still running\r\n", 30))); ingestErr != nil {
+		t.Fatalf("ingest: %v", ingestErr)
+	}
+
+	asker.awaitAsk(t)
+	n, raws := asker.captureAsks()
+	if n != 1 {
+		t.Fatalf("the coordinator connection saw %d capture asks, want exactly one", n)
+	}
+	// The raw frame's own keys, not the struct's defaults: an unfinished
+	// ask may not CARRY a nonce or a closing screen at all.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(raws[0], &raw); err != nil {
+		t.Fatalf("decode the capture frame: %v", err)
+	}
+	if _, ok := raw["nonce"]; ok {
+		t.Fatalf("the unfinished ask carries a nonce: %s", raws[0])
+	}
+	if _, ok := raw["closing"]; ok {
+		t.Fatalf("the unfinished ask carries a closing screen: %s", raws[0])
+	}
+	if string(raw["state"]) != `"unfinished"` {
+		t.Fatalf("the ask's state is %s, want \"unfinished\" — a frame indistinguishable from a settled one is the defect", raw["state"])
+	}
+
+	var params proto.CaptureParams
+	if err := json.Unmarshal(raws[0], &params); err != nil {
+		t.Fatalf("decode the capture params: %v", err)
+	}
+	if len(params.Departed) == 0 {
+		t.Fatalf("the unfinished ask carries %d departed rows, want what had left the screen so far", len(params.Departed))
+	}
+	if params.Completeness != proto.CompletenessNoFence {
+		t.Fatalf("completeness = %q, want noFence: no authenticated boundary exists", params.Completeness)
+	}
+	if err := validateCaptureFrame(captureContract(t), raws[0]); err != nil {
+		t.Fatalf("the unfinished ask does not satisfy the frozen contract: %v", err)
+	}
 }

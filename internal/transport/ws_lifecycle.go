@@ -390,6 +390,19 @@ type CaptureBindings interface {
 	// once per accepted completion; implementations bound the memory and
 	// treat a repeated nonce as the same fact, not a second one.
 	Bind(nonce, entryID string)
+
+	// BindOpen remembers which open attempt's entry one session is
+	// running (nocx-2v80t.2.4): the entry recordAttemptEntry opens at
+	// submit time, keyed by the attempt id. A capture record that names
+	// no fence — the open interval of a command still running — is stored
+	// against it. A session's next attempt replaces the binding.
+	BindOpen(sessionID, entryID string)
+
+	// UnbindOpen clears a session's open binding. The projection calls it
+	// when the attempt leaves the open state — the authenticated
+	// completion, or the transport-gone close — because from there the
+	// entry is addressed by the fence's own memory, or by nothing.
+	UnbindOpen(sessionID string)
 }
 
 // WithCaptureBindings attaches the fence→entry memory. Without it the
@@ -513,6 +526,21 @@ func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) {
 	// entry a capture stores against.
 	if f.Attempt.State == lifecyclepub.AttemptCompleted && f.Attempt.Fence != "" && s.captureBindings != nil {
 		s.captureBindings.Bind(f.Attempt.Fence, row.ID)
+	}
+	// The open attempt has left the open state — completed here, or closed
+	// transport-gone by the finish below — and its session's open binding
+	// clears with it: from here the entry is addressed by the fence's own
+	// memory, or by nothing (nocx-2v80t.2.4). A finished entry must never
+	// catch a stray unfinished ask. The key is the lane's registered
+	// session — the exact value both recordAttemptEntry callers bound
+	// with — taken from the projection's own memory, never from the row.
+	if s.captureBindings != nil && f.Lane != "" {
+		s.lifecycleMu.Lock()
+		sid, registered := s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
+		s.lifecycleMu.Unlock()
+		if registered {
+			s.captureBindings.UnbindOpen(string(sid))
+		}
 	}
 	if row.Phase == content.PhaseClosed {
 		return
@@ -784,6 +812,13 @@ func (s *WSServer) recordAttemptEntry(ctx context.Context, attemptID, command, c
 		Payload:     payload,
 	}); submitErr != nil {
 		s.log.Warn("lifecycle ledger submit failed; command remains executable", "attempt", attemptID, "error", submitErr)
+	} else if s.captureBindings != nil {
+		// The row exists: the attempt's entry is addressable while it is
+		// open, which is what the unfinished capture record — the open
+		// interval of a command still running — is stored against
+		// (nocx-2v80t.2.4). The entry already exists, keyed by the
+		// attempt id; nothing is invented here.
+		s.captureBindings.BindOpen(string(sess.ID()), attemptID)
 	}
 }
 

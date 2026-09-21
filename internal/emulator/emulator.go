@@ -391,6 +391,23 @@ type Terminal interface {
 	// [Terminal.Close], and a report that was never read dies with it.
 	DepartedRows() ([]Row, error)
 
+	// PeekDepartedRows returns a copy of the report [Terminal.DepartedRows]
+	// would drain, and empties nothing: a second peek reads the same rows,
+	// and the drain afterwards still carries every row exactly once. It
+	// exists for a reader that must SEE what has left the screen without
+	// being the report's one owner — the unfinished capture record reads
+	// the rows before the settle, and the settle-time drain stays the
+	// authority over what the interval as a whole departed.
+	//
+	// The rows are the caller's in the same sense DepartedRows' are — each
+	// was copied out of the emulator's borrowed memory at the instant it
+	// departed, and the copy is fresh — but the REPORT stays the
+	// emulator's, so a caller that kept the peek and read again sees the
+	// report move under the drain, never under another peek. The interval
+	// error rides along exactly as it would on the drain: the same
+	// non-nil answer reaches both readers.
+	PeekDepartedRows() ([]Row, error)
+
 	// Paste hands the terminal a paste of text and returns the bytes the
 	// program is to be sent, framed per the TERMINAL'S OWN state: bracketed
 	// when the program enabled mode 2004 and passed through when it did not.

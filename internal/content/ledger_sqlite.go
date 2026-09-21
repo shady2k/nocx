@@ -1315,6 +1315,9 @@ func (s *sqliteContent) CaptureViews(ctx context.Context, views []CaptureView) e
 		if v.DerivedFrom == "" {
 			return errors.New("content: capture views: a view without derived_from is a copy, not a view")
 		}
+		if v.EntryID != views[0].EntryID || v.RecordID != views[0].RecordID {
+			return errors.New("content: capture views: one call writes one record's views on one entry")
+		}
 	}
 	return s.run(ctx, func(ctx context.Context) error {
 		tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})

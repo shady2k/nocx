@@ -543,10 +543,15 @@ func (h ledgerReadHandlers) handleArtifact(ctx context.Context, req jsonrpcReque
 			if recErr != nil {
 				return fmt.Errorf("ledger.artifact: the stored record %s does not decode: %w", source.ID, recErr)
 			}
-			if art.MediaType == content.MediaVT {
+			switch art.MediaType {
+			case content.MediaVT:
 				body = captureview.VTBody(rec)
-			} else {
+			case content.MediaText:
 				body = captureview.TextBody(rec)
+			default:
+				// A derived view of an unknown media type is a decision
+				// nobody made; rendering it as text would guess.
+				return fmt.Errorf("ledger.artifact: the view %s carries the unsupported media type %q", art.ID, art.MediaType)
 			}
 			byteLen = int64(len(body))
 		}

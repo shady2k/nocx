@@ -222,3 +222,38 @@ func TestLedgerArtifact_AViewOfNoRecordIsInvalidParams(t *testing.T) {
 		t.Fatal("a view of a record nobody stored answered a result, want invalid params")
 	}
 }
+
+// A stored record whose bytes do not decode is corruption, and a view read
+// that met it answers a named fault — never an empty success, which would
+// say the command printed nothing, and never a guess at a rendering.
+func TestLedgerArtifact_ACorruptRecordFaultsTheViewRead(t *testing.T) {
+	db := newLedgerStoreWithPolicy(t, nil)
+	ws, stop := newLedgerWSServer(t, log.NewSlogAdapter(nil), db)
+	defer stop()
+	conn := connectWS(t, ws)
+	entryID := aRecordedCommand(t, db, "make")
+
+	recordID := captureview.ViewID("corrupt", "record")
+	cols, rows := 40, 2
+	garbage := []byte(`{"state":"settled","closing":`)
+	if _, err := db.Ledger().CaptureOutput(t.Context(), content.CaptureOutput{
+		EntryID: entryID, ArtifactID: recordID,
+		MediaType: content.MediaJSON, CaptureMethod: content.CaptureTerminalCells,
+		CaptureVersion: 1, TerminalCols: &cols, TerminalRows: &rows, Seq: 1, Body: garbage,
+	}); err != nil {
+		t.Fatalf("CaptureOutput: %v", err)
+	}
+	views := []content.CaptureView{{
+		EntryID: entryID, RecordID: recordID,
+		ID:        captureview.ViewID(recordID, captureview.KindVT),
+		MediaType: content.MediaVT, DerivedFrom: recordID,
+		TerminalCols: &cols, TerminalRows: &rows,
+	}}
+	if err := db.Ledger().CaptureViews(t.Context(), views); err != nil {
+		t.Fatalf("CaptureViews: %v", err)
+	}
+
+	if _, rpcErr := artifactCall(t, conn, captureview.ViewID(recordID, captureview.KindVT), 1); rpcErr == nil {
+		t.Fatal("a view over a corrupt record answered a result, want a named fault")
+	}
+}

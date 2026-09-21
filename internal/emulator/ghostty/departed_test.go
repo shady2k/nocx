@@ -331,3 +331,73 @@ func TestDepartedRowsTreatADestroyedHistoryAsSilence(t *testing.T) {
 	departedFeed(t, term, numbered(8))
 	departedAssertEqual(t, departedDrain(t, term), numberedWant(8))
 }
+
+// span feeds the lines "L<from>".."L<to-1>", each ended by a hard newline,
+// numbered wide enough to parse back out of a report.
+func span(from, to int) string {
+	var sb strings.Builder
+	for i := from; i < to; i++ {
+		fmt.Fprintf(&sb, "L%05d\r\n", i)
+	}
+	return sb.String()
+}
+
+// The defect this bound exists for (nocx-2v80t.2.7): a program that floods
+// its pane in a session where no command lifecycle ever settles — a
+// detached session, a pane without shell integration — never sees the
+// settle-time drain, so the report grew without limit for as long as the
+// flood ran, and the helper's memory with it. The report holds at most
+// one retention page's worth of rows from its first row until a drain
+// empties it, and what an overflow pushed out is flagged through the same
+// hole mechanism as an unreadable row: never a silent drop, never an
+// empty-and-fine answer.
+func TestDepartedRowsStayBoundedWhenNothingDrainsThem(t *testing.T) {
+	term := departedTerm(t, 10, 10)
+	bound := departedBoundRows(10)
+	// Forty unsettled feeds of five hundred lines each: far more rows
+	// than the bound names, fed the way a flooding program arrives —
+	// many feeds, no drain between any of them.
+	for chunk := range 40 {
+		departedFeed(t, term, span(chunk*500, (chunk+1)*500))
+	}
+	rows, err := term.DepartedRows()
+	if len(rows) > bound {
+		t.Fatalf("unsettled flood: report holds %d rows, bound is %d — the report grew without limit", len(rows), bound)
+	}
+	if len(rows) != bound {
+		t.Fatalf("unsettled flood: report holds %d rows, want exactly the bound %d", len(rows), bound)
+	}
+	if err == nil {
+		t.Fatal("unsettled flood past the bound reports no hole: an overflow went silent")
+	}
+	// The drain spent the report: the next interval starts empty, at
+	// the bound's other end.
+	if rows, err := term.DepartedRows(); len(rows) != 0 || err != nil {
+		t.Fatalf("after drain: %d rows, err %v; want an empty report", len(rows), err)
+	}
+}
+
+// The paired ordinary-machine case: an interval whose departures fit the
+// bound — several feeds, still no settle, the regime the flood test runs —
+// reads back whole, in order, with no hole. The bound may never make an
+// ordinary interval dishonest to make a flooding one bounded.
+func TestDepartedRowsCarryAWholeIntervalThatFitsTheBound(t *testing.T) {
+	term := departedTerm(t, 10, 10)
+	for chunk := range 6 {
+		departedFeed(t, term, span(chunk*500, (chunk+1)*500))
+	}
+	rows, err := term.DepartedRows()
+	if err != nil {
+		t.Fatalf("an interval that fits the bound reported a hole: %v", err)
+	}
+	// Six feeds of five hundred lines on a ten-row screen: the first
+	// ten fill it, and every following line — the last line's own
+	// newline included — scrolls one off: 2,991 departures, first line
+	// first, last line last.
+	if len(rows) != 2991 {
+		t.Fatalf("report holds %d rows, want 2991", len(rows))
+	}
+	if first, last := departedText(rows[0]), departedText(rows[len(rows)-1]); first != "L00000" || last != "L02990" {
+		t.Fatalf("report runs %q..%q, want L00000..L02990", first, last)
+	}
+}

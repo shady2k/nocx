@@ -170,6 +170,11 @@ type terminal struct {
 	// of their departure during Ingest and drained whole by DepartedRows. It
 	// follows the replies/effects rule: the goroutine holding mu is the only
 	// writer, and everything in it was already copied out of the library.
+	// From its first row until a drain empties it the report holds at most
+	// departedBoundRows(t.geom.Cols) rows — a session where no boundary ever
+	// settles drains nothing, and the bound is what keeps such a session's
+	// report from growing with the flood — and rows an overflow pushed out ride
+	// departedErr as the hole they are.
 	departed []emulator.Row
 	// departedErr is the first read failure a capture hit, handed to the
 	// caller with the rows that were read: a report with a hole in it is the
@@ -486,16 +491,65 @@ func (t *terminal) noteDepartedLocked() {
 // captureDepartedLocked copies history rows [from, to) — the rows that just
 // left — out of the terminal, in order. A read failure stops the capture:
 // rows after it are ordered after it, and reading past a hole would report
-// the rest as though the hole were not there.
+// the rest as though the hole were not there. The report the rows join is
+// bounded: boundDepartedLocked runs before the first read, so a feed that
+// outruns departedBoundRows pushes the OLDEST rows out once, in one piece,
+// and the loss rides departedErr through the same hole mechanism as an
+// unreadable row — an overflow is flagged, never silently shortened. A
+// session where no boundary ever settles drains nothing; the bound is what
+// keeps its report from growing with the flood for as long as the flood
+// runs.
 func (t *terminal) captureDepartedLocked(from, to int) {
+	t.boundDepartedLocked(to - from)
 	for y := from; y < to; y++ {
 		row, err := t.rowAt(pointHistory, y)
 		if err != nil {
 			t.failDeparted(fmt.Errorf("ghostty: departed row %d of %d..%d: %w", y, from, to, err))
 			return
 		}
+		if len(t.departed) >= departedBoundRows(t.geom.Cols) {
+			// A single feed outran the whole bound — impossible at
+			// the shipped budget, where one feed's delta is bounded
+			// by the depth retention keeps — and the bulk make-room
+			// could not see it coming. The cap holds the invariant
+			// at every instant: the oldest row goes, the loss is
+			// flagged, exactly as the bulk path flags its own.
+			bound := departedBoundRows(t.geom.Cols)
+			copy(t.departed, t.departed[1:])
+			t.departed = t.departed[:len(t.departed)-1]
+			t.failDeparted(fmt.Errorf("ghostty: departure report overflowed its bound of %d rows: the %d oldest rows in it are lost", bound, 1))
+		}
 		t.departed = append(t.departed, row)
 	}
+}
+
+// boundDepartedLocked makes room in the report for one feed's departures
+// before they are read: whatever will not fit past departedBoundRows
+// pushes the report's oldest rows out now, one memmove for the whole
+// feed, and flags the loss. The newest departures are the ones kept —
+// they are the ones the screen's own direction still tells. At the
+// shipped budget one feed cannot offer more rows than the bound (its
+// delta is bounded by the depth retention keeps, one page); a budget
+// raised past a page multiple could, and the capture loop's own per-row
+// cap holds the bound through such a feed — the report never exceeds
+// departedBoundRows at any instant, whatever a feed offers.
+func (t *terminal) boundDepartedLocked(incoming int) {
+	bound := departedBoundRows(t.geom.Cols)
+	over := len(t.departed) + incoming - bound
+	if over <= 0 {
+		return
+	}
+	if over > len(t.departed) {
+		// A single feed outruns the whole bound and the report holds
+		// nothing this call could push out: the rows that overflow are
+		// not in the report yet, and naming them here would count zero.
+		// The capture loop's per-row cap drops them as they are read
+		// and flags each drop with its own honest count.
+		return
+	}
+	copy(t.departed, t.departed[over:])
+	t.departed = t.departed[:len(t.departed)-over]
+	t.failDeparted(fmt.Errorf("ghostty: departure report overflowed its bound of %d rows: the %d oldest rows in it are lost", bound, over))
 }
 
 // failDeparted records the interval's first hole; the report is handed out
@@ -504,6 +558,31 @@ func (t *terminal) failDeparted(err error) {
 	if t.departedErr == nil {
 		t.departedErr = err
 	}
+}
+
+// departedPageCells is one retention page of the library's own history
+// grid, in cells: the unit the shipped scrollback budget actually buys.
+// MEASURED at pin 1f225ebb5894, 2026-09-21 — the same measurement the
+// scrollback budget's install comment records — one page is ~870 KB of
+// grid, ~1,130 rows at 80 columns, ~9.6 bytes of grid per cell; the page's
+// cell count is what stays fixed while its row count follows the width.
+const departedPageCells = 90_400
+
+// departedBoundRows is the most rows the departure report holds between
+// drains. The bound is the scrollback budget's own worth of history
+// (outputcap.PerCommandBytes, which install sets as the library's
+// retention budget), because a capture can never need more than history
+// is willing to keep. The budget is BYTES of the library's grid and the
+// report is ROWS, and no existing scalar converts one into the other —
+// the conversion here is the measured page that budget retains, so the
+// report holds at most one full retention page: exactly what a single
+// feed can ever offer without a hole, and every row past it is an
+// accumulation no drain ever came for.
+func departedBoundRows(cols int) int {
+	if cols < 1 {
+		cols = 1
+	}
+	return departedPageCells / cols
 }
 
 // rowAt is the one row read: the line's soft-wrap flags and its cells,
@@ -571,7 +650,9 @@ func (t *terminal) takeReplies() []byte {
 // alongside: the rows that were read go out even when the interval had a
 // hole, because the caller is the one that must decide what an unread
 // interval is worth. The drain follows takeReplies exactly — one reader,
-// one copy, emptied by being read.
+// one copy, emptied by being read. The report drained is bounded
+// (departedBoundRows): an interval that outran the bound says so through
+// the error, with the newest rows it held.
 func (t *terminal) DepartedRows() ([]emulator.Row, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

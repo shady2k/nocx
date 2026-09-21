@@ -72,6 +72,16 @@ export interface CellFit {
   warm(candidates: Iterable<FitCandidate>): void
   /** Чистое чтение кэша. */
   boxOf(chars: string, width: number, face: FitFace): CellBox | null
+  /** The measured advance of a cluster — the same cache entry boxOf
+   *  derives its verdict from (nocx-zg3k3.7: a run carries its spacing,
+   *  and spacing is derived from the advance). null means not measured.
+   *  Calibrated ASCII always answers null: its advance is naturalAdvance,
+   *  which the published row correction already accounts for. */
+  advanceOf(chars: string, width: number, face: FitFace): number | null
+  /** The row context begin() took: the cell width and the published
+   *  correction (--term-cell-delta) — the default spacing for runs whose
+   *  ink nobody measured. null — there is nowhere to measure. */
+  geometry(): { cellWidth: number; rowDelta: number } | null
   /** Убрать зонд из DOM. */
   dispose(): void
   /** Размер кэша. Для тестов границы. */
@@ -207,6 +217,7 @@ export function createCellFit(
   let probe: HTMLElement | null = null
   let signature = ''
   let cellWidth = 0
+  let rowDelta = 0
 
   // ЗАГРУЗКА ШРИФТА НЕ МЕНЯЕТ НИ ОДНОЙ СТРОКИ ВЫЧИСЛЕННОГО СТИЛЯ: то же
   // семейство, тот же размер, другой файл. xterm ждёт document.fonts.ready
@@ -244,6 +255,10 @@ export function createCellFit(
       }
       probe = makeProbe(element)
       signature = signatureOf(signatureWitness(probe), cellWidth, fontEpoch)
+      const published = Number.parseFloat(
+        getComputedStyle(signatureWitness(probe)).getPropertyValue('--term-cell-delta'),
+      )
+      rowDelta = Number.isFinite(published) ? published : 0
       // ВЫТЕСНЕНИЕ ЗДЕСЬ, А НЕ В warm(). Иначе очень пёстрый блок способен
       // вытеснить то, что warm() положил для него же несколькими строками
       // выше, и коробка не появится молча. Между заморозками кэш может
@@ -297,6 +312,16 @@ export function createCellFit(
       return { cols: width, fit: Math.min(1, round4(target / advance)) }
     },
 
+    advanceOf(chars, width, face) {
+      if (signature === '' || isCalibratedAscii(chars, width)) return null
+      return touch(keyOf(chars, width, face)) ?? null
+    },
+
+    geometry() {
+      if (signature === '' || cellWidth === 0) return null
+      return { cellWidth, rowDelta }
+    },
+
     dispose() {
       // Слушатель снимается ИМЕНОВАННЫМ, иначе при каждом пересоздании
       // контроллера на документе оседает ещё один анонимный callback.
@@ -304,6 +329,7 @@ export function createCellFit(
       probe?.remove()
       probe = null
       signature = ''
+      rowDelta = 0
       cache.clear()
     },
 

@@ -1,8 +1,10 @@
 // DOM scrollback: xterm buffer → HTML serializer.
-// Iterates IBufferLine cells, maps 256-color + RGB + attributes into inline
-// styles, and merges adjacent cells with identical attributes into a single
-// run. Output is an HTML fragment string — assigned via innerHTML on the
-// frozen block output element.
+// Iterates IBufferLine cells and maps 256-color + RGB + attributes into
+// inline styles. WHICH cells merge into a run, and what spacing that run
+// carries, is run-geometry's verdict (the one owner of run geometry,
+// nocx-zg3k3.7); this file walks the cells and draws the runs. Output is an
+// HTML fragment string — assigned via innerHTML on the frozen block output
+// element.
 //
 // THEME SNAPSHOT: all colour decisions flow through a TerminalSnapshot that
 // is captured once at block-freeze time. This ensures frozen output is never
@@ -12,11 +14,15 @@
 
 import type { IBufferLine, ITheme } from '@xterm/xterm'
 import { cellSGRAttrs, sgrParams, sgrEqual, emptySGR, type SGRAttrs } from './sgr'
-// ТОЛЬКО ТИП, и он берётся у владельца вопроса, а не переобъявляется здесь:
-// форма ответа классификатора одна, и вторая её копия разошлась бы с первой
-// молча. Зависимости на модуль это не создаёт — сериализатор по-прежнему не
-// знает, кто классифицирует, и вызывается с любым замыканием этой формы.
-import type { CellBox } from './cell-fit'
+// TYPES ONLY, and taken from their owners rather than redeclared here:
+// FitFace is the face the measuring authority measures with, and its answer
+// has one shape; a second copy would drift from the first silently. No
+// dependency on the module is created — the serializer still does not know
+// who measures, or how.
+import type { FitFace } from './cell-fit'
+// The ONE owner of run geometry (nocx-zg3k3.7): where run boundaries fall
+// and what spacing each run carries is decided only there.
+import { runsOf, type GeometryRun, type GridCell, type RunMetric } from './run-geometry'
 
 /** Version of the serializer's row-transform contract. Bump when the
  *  transforms that shape a frozen block's text change: wrapped lines joined,
@@ -310,33 +316,17 @@ export function attrsToStyle(snapshot: TerminalSnapshot, a: CellAttrs): string {
   return parts.join(';')
 }
 
-// ── Run merging ────────────────────────────────────────────────────────────
+// ── The cell walk, and the runs built from it ──────────────────────────────
 
-/**
- * Collects consecutive cells with identical attributes into runs.
- * Handles wide characters (CJK) by their cell width.
- * keepTrailingSpace: a soft-wrapped line is FULL by definition (that is why
- * it wrapped), so its trailing chars are real content, not xterm padding —
- * the caller passes true for every physical line that has a continuation.
- */
-interface GenericRun<A> {
-  chars: string
-  attrs: A
-  /** Коробка ячейки, либо undefined — ран течёт потоком. Ран с этим полем
-   *  НЕ склеивается ни с чем: он и есть одна ячейка, а слитая пара заняла
-   *  бы одну колонку на двоих. */
-  box?: CellBox
-}
-
-/** What one cell walk yields: the merged runs, and the COLUMNS they occupy
- *  on the grid. The walk has always stepped by getWidth(); it threw the
- *  number away, and `nocx-ec18` is what that costs — a frozen line whose
- *  true width nothing downstream can state. Kept beside the runs rather
- *  than recomputed from `chars`, because a character is not a column: a
- *  CJK cell is one character over two columns and an astral glyph is two
- *  code units over one. */
+/** What one cell walk yields: the cells in order, and the COLUMNS they
+ *  occupy on the grid. The walk has always stepped by getWidth(); it threw
+ *  the number away, and `nocx-ec18` is what that costs — a frozen line whose
+ *  true width nothing downstream can state. Kept beside the cells rather
+ *  than recomputed from `chars`, because a character is not a column: a CJK
+ *  cell is one character over two columns and an astral glyph is two code
+ *  units over one. */
 interface Walked<A> {
-  runs: GenericRun<A>[]
+  cells: GridCell<A>[]
   cols: number
 }
 
@@ -353,19 +343,22 @@ interface Walked<A> {
  * `escape` is the one genuinely HTML-only step and stays a parameter rather
  * than a caller's post-pass: it must happen per cell, before runs are merged,
  * or a `<` in the middle of a run escapes differently from one at its edge.
+ *
+ * The walk yields cells and merges nothing: WHERE a run starts and ends, and
+ * what spacing it carries, is run-geometry's verdict (nocx-zg3k3.7) — a
+ * second copy of that rule beside its owner is the defect the owner exists
+ * to prevent.
  */
-function collectRunsOf<A>(
+function collectCellsOf<A>(
   line: IBufferLine,
   attrsOf: (line: IBufferLine, i: number) => A,
-  equal: (a: A, b: A) => boolean,
   escape: boolean,
   keepTrailingSpace: boolean,
-  boxOf?: (chars: string, width: number, attrs: A) => CellBox | null,
 ): Walked<A> {
   const len = line.length
-  if (len === 0) return { runs: [], cols: 0 }
+  if (len === 0) return { cells: [], cols: 0 }
 
-  const runs: GenericRun<A>[] = []
+  const cells: GridCell<A>[] = []
   let cols = 0
   let i = 0
 
@@ -377,72 +370,107 @@ function collectRunsOf<A>(
     }
 
     const width = cell.getWidth()
-    const chars = cell.getChars()
+    const columns = Math.max(1, width)
     const attrs = attrsOf(line, i)
 
-    if (chars.length === 0) {
-      const last = runs.length > 0 ? runs[runs.length - 1] : undefined
-      if (last !== undefined && last.box === undefined && equal(last.attrs, attrs)) {
-        last.chars += ' '
-      } else {
-        runs.push({ chars: ' ', attrs })
-      }
-      cols += Math.max(1, width)
-      i += Math.max(1, width)
-      continue
-    }
-
-    const text = escape
-      ? chars.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      : chars
-
-    // Коробка принимается ТОЛЬКО на колонки самой ячейки. «Одна колонка»
-    // для ячейки шириной две — это сдвиг, которого в сетке нет; лучше
-    // сегодняшний поток, чем выдуманная геометрия.
-    const columns = Math.max(1, width)
-    const claimed = boxOf?.(chars, columns, attrs) ?? null
-    const box = claimed?.cols === columns ? claimed : null
-    const last = runs.length > 0 ? runs[runs.length - 1] : undefined
-    if (box !== null) {
-      runs.push({ chars: text, attrs, box })
-    } else if (last !== undefined && last.box === undefined && equal(last.attrs, attrs)) {
-      last.chars += text
+    if (cell.getChars().length === 0) {
+      // An empty cell is a space: the grid's own filler, with no ink. The
+      // measurer is not asked about one (blank) — it never was.
+      cells.push({ chars: ' ', cols: columns, attrs, blank: true })
     } else {
-      runs.push({ chars: text, attrs })
+      const chars = cell.getChars()
+      const text = escape
+        ? chars.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        : chars
+      cells.push({ chars: text, cols: columns, attrs })
     }
-    cols += Math.max(1, width)
-    i += Math.max(1, width)
+    cols += columns
+    i += columns
   }
 
-  if (!keepTrailingSpace && runs.length > 0) {
-    const last = runs[runs.length - 1]
-    if (last.box === undefined) {
-      const trimmed = last.chars.replace(/ +$/, '')
-      // Every trimmed character is a single-column pad cell, so the columns
-      // come off one for one. Counting them would report drift on every
-      // padded row in the buffer, which is most of them.
-      cols -= last.chars.length - trimmed.length
-      last.chars = trimmed
+  if (!keepTrailingSpace && cells.length > 0) {
+    // Trailing pad is single-column space cells, popped one for one —
+    // counting them would report drift on every padded row in the buffer,
+    // which is most of them. Popping stops at the first cell that is not
+    // that, so an inked cell — a box among them included — ends the trim
+    // exactly where the run-level trim ended it.
+    while (cells.length > 0) {
+      const last = cells[cells.length - 1]
+      if (last.cols !== 1 || last.chars !== ' ') break
+      cells.pop()
+      cols -= 1
     }
   }
 
-  return { runs, cols }
+  return { cells, cols }
+}
+
+/** The face a cell's ink is drawn with — the only thing the measuring
+ *  authority needs from an attribute set, whichever shape an attribute has. */
+function faceOfAttrs(a: CellAttrs): FitFace {
+  return { bold: a.bold, italic: a.italic }
+}
+
+function faceOfSGR(a: SGRAttrs): FitFace {
+  return { bold: a.bold, italic: a.italic }
 }
 
 function collectRuns(
   snapshot: TerminalSnapshot,
   line: IBufferLine,
+  metric: RunMetric | undefined,
   keepTrailingSpace = false,
-  boxOf?: (chars: string, width: number, attrs: CellAttrs) => CellBox | null,
-): Walked<CellAttrs> {
-  return collectRunsOf(
+): { runs: GeometryRun<CellAttrs>[]; cols: number } {
+  const { cells, cols } = collectCellsOf(
     line,
     (l, i) => cellAttrs(snapshot, l, i),
-    attrsEqual,
     true,
     keepTrailingSpace,
-    boxOf,
   )
+  return { runs: runsOf(cells, attrsEqual, faceOfAttrs, metric), cols }
+}
+
+/**
+ * One run as the surface sees it.
+ *
+ * Spacing reaches the markup only when it DIFFERS from the row default: a
+ * run carrying the row's own correction inherits it — bare text stays bare
+ * and today's markup survives byte for byte — while a run whose cells
+ * measured onto their own spacing declares it inline, and that declaration
+ * is rule 3's letter-spacing.
+ *
+ * A box never receives spacing: its advance is set by its width, and
+ * .term-cell silences tracking (style.css).
+ */
+function emitRun(
+  snapshot: TerminalSnapshot,
+  run: GeometryRun<CellAttrs>,
+  defaultSpacing: number,
+): string {
+  const style = attrsToStyle(snapshot, run.attrs)
+  if (run.box !== undefined) {
+    const styleAttr = style ? ` style="${style}"` : ''
+    // АТРИБУТЫ ЯЧЕЙКИ — НА КОРОБКЕ, МАСШТАБ — НА ОБЁРТКЕ ВНУТРИ, и это
+    // не вкусовщина. attrsToStyle вешает background-color именно на
+    // коробку; трансформация, поставленная на неё же, ужала бы вместе
+    // с краской и фон, и цветная ячейка стала бы вдвое у́же соседних —
+    // ровно та дыра в строке, которую вся эта работа закрывает.
+    // Масштабируется только краска, поэтому обёртка отдельная.
+    // При fit === 1 обёртки нет вовсе: лишний узел на каждую коробку
+    // ради `scale(1)`.
+    const ink =
+      run.box.fit < 1
+        ? `<span class="term-cell-ink" style="--cell-fit:${run.box.fit}">${run.chars}</span>`
+        : run.chars
+    return `<span class="term-cell" data-cols="${run.box.cols}"${styleAttr}>${ink}</span>`
+  }
+  if (run.spacing === defaultSpacing) {
+    return style ? `<span style="${style}">${run.chars}</span>` : run.chars
+  }
+  const full = style
+    ? `${style};letter-spacing:${run.spacing}px`
+    : `letter-spacing:${run.spacing}px`
+  return `<span style="${full}">${run.chars}</span>`
 }
 
 // ── Serialization ──────────────────────────────────────────────────────────
@@ -451,10 +479,14 @@ function collectRuns(
  * Serialize a single buffer line to an HTML string (a <span class="term-line">
  * containing run-merged <span> elements).
  */
-export function serializeLine(snapshot: TerminalSnapshot, line: IBufferLine | undefined): string {
+export function serializeLine(
+  snapshot: TerminalSnapshot,
+  line: IBufferLine | undefined,
+  metric?: RunMetric,
+): string {
   if (!line) return '<span class="term-line"></span>'
 
-  const { runs } = collectRuns(snapshot, line)
+  const { runs } = collectRuns(snapshot, line, metric)
 
   if (runs.length === 0) {
     return '<span class="term-line"></span>'
@@ -468,12 +500,7 @@ export function serializeLine(snapshot: TerminalSnapshot, line: IBufferLine | un
   let html = '<span class="term-line">'
   for (const run of runs) {
     if (run.chars.length === 0) continue
-    const style = attrsToStyle(snapshot, run.attrs)
-    if (style) {
-      html += `<span style="${style}">${run.chars}</span>`
-    } else {
-      html += run.chars
-    }
+    html += emitRun(snapshot, run, metric?.defaultSpacing ?? 0)
   }
   html += '</span>'
   return html
@@ -565,32 +592,14 @@ export function serializeRange(
   startLine: number,
   endLine: number,
   colsOut?: number[],
-  boxOf?: (chars: string, width: number, attrs: CellAttrs) => CellBox | null,
+  metric?: RunMetric,
 ): string {
   const groups = walkRange(getLine, startLine, endLine, (line, keepTrailingSpace) => {
-    const { runs, cols } = collectRuns(snapshot, line, keepTrailingSpace, boxOf)
+    const { runs, cols } = collectRuns(snapshot, line, metric, keepTrailingSpace)
     let content = ''
     for (const run of runs) {
       if (run.chars.length === 0) continue
-      const style = attrsToStyle(snapshot, run.attrs)
-      if (run.box !== undefined) {
-        const styleAttr = style ? ` style="${style}"` : ''
-        // АТРИБУТЫ ЯЧЕЙКИ — НА КОРОБКЕ, МАСШТАБ — НА ОБЁРТКЕ ВНУТРИ, и это
-        // не вкусовщина. attrsToStyle вешает background-color именно на
-        // коробку; трансформация, поставленная на неё же, ужала бы вместе
-        // с краской и фон, и цветная ячейка стала бы вдвое у́же соседних —
-        // ровно та дыра в строке, которую вся эта работа закрывает.
-        // Масштабируется только краска, поэтому обёртка отдельная.
-        // При fit === 1 обёртки нет вовсе: лишний узел на каждую коробку
-        // ради `scale(1)`.
-        const ink =
-          run.box.fit < 1
-            ? `<span class="term-cell-ink" style="--cell-fit:${run.box.fit}">${run.chars}</span>`
-            : run.chars
-        content += `<span class="term-cell" data-cols="${run.box.cols}"${styleAttr}>${ink}</span>`
-      } else {
-        content += style ? `<span style="${style}">${run.chars}</span>` : run.chars
-      }
+      content += emitRun(snapshot, run, metric?.defaultSpacing ?? 0)
     }
     return { content, cols }
   })
@@ -614,7 +623,7 @@ export function serializeRange(
  * раскладку, и поштучно это N раскладок в тот самый момент, когда блок
  * подменяет живую область. Значит кандидатов надо знать ДО сериализации.
  *
- * Это тот же collectRunsOf, а не второй обход в смысле AD-8: функция,
+ * Это тот же обход ячеек (collectCellsOf), а не второй обход в смысле AD-8: функция,
  * знающая, как ходить по ячейкам и как считать колонки, по-прежнему одна.
  * Здесь она вызывается с пустыми атрибутами — как это уже делает
  * serializeRangeText, — поэтому проход дешёвый: ни вывода цвета, ни
@@ -631,17 +640,15 @@ export function collectFitCandidates(
   sink: (chars: string, width: number, attrs: CellAttrs) => void,
 ): void {
   walkRange(getLine, startLine, endLine, (line, keepTrailingSpace) => {
-    const { cols } = collectRunsOf<CellAttrs>(
+    const { cells, cols } = collectCellsOf(
       line,
       (l, i) => cellAttrs(DEFAULT_SNAPSHOT, l, i),
-      attrsEqual,
       false,
       keepTrailingSpace,
-      (chars, width, attrs) => {
-        sink(chars, width, attrs)
-        return null
-      },
     )
+    for (const cell of cells) {
+      if (!cell.blank) sink(cell.chars, cell.cols, cell.attrs)
+    }
     return { content: '', cols }
   })
 }
@@ -663,13 +670,8 @@ export function serializeRangeSGR(
 ): string {
   const empty = emptySGR()
   const groups = walkRange(getLine, startLine, endLine, (line, keepTrailingSpace) => {
-    const { runs, cols } = collectRunsOf<SGRAttrs>(
-      line,
-      cellSGRAttrs,
-      sgrEqual,
-      false,
-      keepTrailingSpace,
-    )
+    const { cells, cols } = collectCellsOf(line, cellSGRAttrs, false, keepTrailingSpace)
+    const runs = runsOf(cells, sgrEqual, faceOfSGR)
     let content = ''
     let current = empty
     for (const run of runs) {
@@ -695,12 +697,11 @@ export function serializeRangeText(
   endLine: number,
 ): string {
   const groups = walkRange(getLine, startLine, endLine, (line, keepTrailingSpace) => {
-    const { runs, cols } = collectRunsOf<null>(
-      line,
-      () => null,
+    const { cells, cols } = collectCellsOf<null>(line, () => null, false, keepTrailingSpace)
+    const runs = runsOf<null>(
+      cells,
       () => true,
-      false,
-      keepTrailingSpace,
+      () => ({ bold: false, italic: false }),
     )
     return { content: runs.map((r) => r.chars).join(''), cols }
   })

@@ -16,6 +16,7 @@ import {
   DEFAULT_SNAPSHOT,
   fromITheme,
 } from './serializer'
+import type { RunMetric } from './run-geometry'
 import { BufferLine, lineWith, XTERM_CM_P16, XTERM_CM_P256, XTERM_CM_RGB } from './test-helpers'
 
 // ── Minimal mock of xterm's IBufferLine ────────────────────────────────────
@@ -23,6 +24,16 @@ import { BufferLine, lineWith, XTERM_CM_P16, XTERM_CM_P256, XTERM_CM_RGB } from 
 function makeLine(s: string): BufferLine {
   return new BufferLine(s)
 }
+
+/** The metric geometry tests run under: cellWidth 0 and no advances, so
+ *  every spacing is 0 and runs merge by attributes alone — exactly the
+ *  shape the box tests were written against — with box verdicts injected. */
+const metricWith = (boxOf: RunMetric['boxOf']): RunMetric => ({
+  cellWidth: 0,
+  defaultSpacing: 0,
+  advanceOf: () => null,
+  boxOf,
+})
 
 describe('DEFAULT_SNAPSHOT', () => {
   it('derives canonical values from DEFAULT_TERMINAL_THEME', async () => {
@@ -690,8 +701,8 @@ describe('serializeRange column accounting', () => {
 // назначить её текстовому кластеру без layout-объекта вокруг него. Здесь
 // проверяется РАЗМЕТКА; что она даёт нужную ширину — в e2e.
 describe('serializeRange cell boxes', () => {
-  const boxEverything = () => ({ cols: 1, fit: 1 })
-  const boxNothing = () => null
+  const boxEverything = metricWith(() => ({ cols: 1, fit: 1 }))
+  const boxNothing = metricWith(() => null)
 
   it('оборачивает ячейку, которую классификатор не пропустил', () => {
     const lines = [makeLine('a\u{1F5D1}b')]
@@ -701,7 +712,7 @@ describe('serializeRange cell boxes', () => {
       0,
       0,
       undefined,
-      (chars) => (chars === '\u{1F5D1}' ? { cols: 1, fit: 1 } : null),
+      metricWith((chars) => (chars === '\u{1F5D1}' ? { cols: 1, fit: 1 } : null)),
     )
     expect(html).toBe(
       '<span class="term-line">a<span class="term-cell" data-cols="1">\u{1F5D1}</span>b</span>',
@@ -720,10 +731,10 @@ describe('serializeRange cell boxes', () => {
       0,
       0,
       cols,
-      (chars, width) => {
+      metricWith((chars, width) => {
         seen.push([chars, width])
         return width === 2 ? { cols: 2, fit: 1 } : null
-      },
+      }),
     )
     expect(seen).toEqual([
       ['漢', 2],
@@ -743,7 +754,7 @@ describe('serializeRange cell boxes', () => {
         0,
         0,
         undefined,
-        () => ({ cols: 1, fit: 1 }),
+        metricWith(() => ({ cols: 1, fit: 1 })),
       ),
     ).not.toContain('term-cell')
     expect(
@@ -753,7 +764,7 @@ describe('serializeRange cell boxes', () => {
         0,
         0,
         undefined,
-        () => ({ cols: 3, fit: 1 }),
+        metricWith(() => ({ cols: 3, fit: 1 })),
       ),
     ).not.toContain('term-cell')
     expect(
@@ -763,7 +774,7 @@ describe('serializeRange cell boxes', () => {
         0,
         0,
         undefined,
-        () => ({ cols: 2, fit: 1 }),
+        metricWith(() => ({ cols: 2, fit: 1 })),
       ),
       // lineWith ставит явный fg (палитра 7), поэтому коробка несёт style —
       // как и в тесте про атрибуты ниже. Проверяется data-cols и содержимое.
@@ -789,7 +800,7 @@ describe('serializeRange cell boxes', () => {
       0,
       0,
       undefined,
-      (chars) => (chars === '⬢' ? { cols: 1, fit: 1 } : null),
+      metricWith((chars) => (chars === '⬢' ? { cols: 1, fit: 1 } : null)),
     )
     expect(html).toBe(
       '<span class="term-line"><span class="term-cell" data-cols="1">⬢</span>abc</span>',
@@ -805,7 +816,7 @@ describe('serializeRange cell boxes', () => {
       0,
       0,
       cols,
-      (chars) => (chars === '⬢' ? { cols: 1, fit: 1 } : null),
+      metricWith((chars) => (chars === '⬢' ? { cols: 1, fit: 1 } : null)),
     )
     expect(html).toBe(
       '<span class="term-line"><span class="term-cell" data-cols="1">⬢</span></span>',
@@ -822,10 +833,10 @@ describe('serializeRange cell boxes', () => {
       0,
       0,
       undefined,
-      (_c, _w, attrs) => {
-        faces.push(attrs.bold)
+      metricWith((_c, _w, face) => {
+        faces.push(face.bold)
         return { cols: 1, fit: 1 }
-      },
+      }),
     )
     expect(faces).toEqual([true])
     expect(html).toContain('class="term-cell" data-cols="1" style="')
@@ -849,7 +860,7 @@ describe('serializeRange cell boxes', () => {
       0,
       0,
       undefined,
-      (chars) => (chars === '\u{1F5D1}' ? { cols: 1, fit: 1 } : null),
+      metricWith((chars) => (chars === '\u{1F5D1}' ? { cols: 1, fit: 1 } : null)),
     )
     expect(html).toBe(
       '<span class="term-line">a<span class="term-cell" data-cols="1">\u{1F5D1}</span>b</span>',
@@ -865,7 +876,7 @@ describe('serializeRange cell boxes', () => {
       0,
       0,
       undefined,
-      (chars) => (chars === '\u{1F5D1}' ? { cols: 1, fit: 0.5714 } : null),
+      metricWith((chars) => (chars === '\u{1F5D1}' ? { cols: 1, fit: 0.5714 } : null)),
     )
     expect(html).toBe(
       '<span class="term-line">a<span class="term-cell" data-cols="1">' +
@@ -886,10 +897,10 @@ describe('serializeRange cell boxes', () => {
       0,
       0,
       undefined,
-      () => ({
+      metricWith(() => ({
         cols: 1,
         fit: 0.5714,
-      }),
+      })),
     )
     expect(html).toContain('<span class="term-cell" data-cols="1" style="')
     expect(html).toMatch(/<span class="term-cell" data-cols="1" style="[^"]*background:[^"]*"/)
@@ -906,10 +917,10 @@ describe('serializeRange cell boxes', () => {
       0,
       0,
       undefined,
-      () => ({
+      metricWith(() => ({
         cols: 1,
         fit: 0.5,
-      }),
+      })),
     )
     expect(html).toContain(
       '<span class="term-cell" data-cols="1">' +
@@ -952,11 +963,82 @@ describe('collectFitCandidates', () => {
       0,
       1,
       undefined,
-      (chars, width) => {
+      metricWith((chars, width) => {
         asked.push([chars, width])
         return null
-      },
+      }),
     )
     expect(collected).toEqual(asked)
+  })
+})
+
+// ── Runs carry the geometry run-geometry built (nocx-zg3k3.7) ──────────────
+//
+// Param 6 is no longer a bare classifier closure: it is the RunMetric the
+// freeze builds from cell-fit, and both the run boundaries AND the
+// letter-spacings in the shipped HTML are run-geometry's verdicts. These
+// tests hold at the surface: change the rule in one place — the metric —
+// and the markup follows.
+
+describe('serializeRange runs carry the geometry run-geometry built', () => {
+  const lines = [
+    lineWith({ chars: 'a', fg: 0, fgMode: 0 }, { chars: 'あ', width: 2, fg: 0, fgMode: 0 }),
+  ]
+  const metricOf = (advanceOf: (chars: string) => number | null) => ({
+    cellWidth: 8,
+    defaultSpacing: 0.5714,
+    advanceOf: (chars: string) => advanceOf(chars),
+  })
+
+  it("ships today's markup for a row whose cells all carry the row default", () => {
+    const html = serializeRange(
+      DEFAULT_SNAPSHOT,
+      (y) => lines[y],
+      0,
+      0,
+      undefined,
+      metricOf(() => null),
+    )
+    expect(html).toBe('<span class="term-line">aあ</span>')
+  })
+
+  it('declares letter-spacing on a run whose cells measured onto their own spacing', () => {
+    const html = serializeRange(
+      DEFAULT_SNAPSHOT,
+      (y) => lines[y],
+      0,
+      0,
+      undefined,
+      metricOf((c) => (c === 'あ' ? 16 : null)),
+    )
+    expect(html).toBe('<span class="term-line">a<span style="letter-spacing:0px">あ</span></span>')
+  })
+
+  it("moves the merge boundary and the spacing when the rule's measurement moves", () => {
+    // Criterion 1, at the surface: the rule lives in ONE place. Three
+    // verdicts from the measuring authority, three surfaces.
+    const run = (advance: number | null) =>
+      serializeRange(
+        DEFAULT_SNAPSHOT,
+        (y) => lines[y],
+        0,
+        0,
+        undefined,
+        metricOf((c) => (c === 'あ' ? advance : null)),
+      )
+    // Measured onto its two columns: spacing 0, its own run against the
+    // row default 0.5714.
+    expect(run(16)).toBe(
+      '<span class="term-line">a<span style="letter-spacing:0px">あ</span></span>',
+    )
+    // A pixel short: spacing 1, still its own run.
+    expect(run(15)).toBe(
+      '<span class="term-line">a<span style="letter-spacing:1px">あ</span></span>',
+    )
+    // Short by exactly the row default: the spacing now AGREES — the rule
+    // merges the row back into one bare run.
+    expect(run(15.4286)).toBe('<span class="term-line">aあ</span>')
+    // Nobody measured: the row default, bare.
+    expect(run(null)).toBe('<span class="term-line">aあ</span>')
   })
 })

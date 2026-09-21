@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const RULES_VERSION = '0.18.0';
+export const RULES_VERSION = '0.19.0';
 const here = dirname(fileURLToPath(import.meta.url));
 const object = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 const canonical = (x) => Array.isArray(x) ? x.map(canonical) : object(x)
@@ -81,13 +81,36 @@ function schema(x, rule, path) {
   }
 }
 
+// A check that can refuse can describe green. Each verdict carries the shape
+// the author has to reach, so a refusal is not a research task of its own.
+const WHY = {
+  'duplicate-id': 'two items share an identifier in one scope: give each its own',
+  'unfinished-content': 'the text is empty or still a placeholder (TODO, TBD, angle brackets)',
+  'missing-scenario': 'every requirement carries at least one scenario, with given, when and then',
+  'empty-capability': 'a capability names at least one requirement',
+  'empty-policy': 'the policy must require at least one check that applies to this kind of change',
+  'missing-outcome': 'the milestone names at least one outcome',
+  'missing-change': 'this phase needs a change record; only the product phase runs without one',
+  'open-question': 'blocking questions are answered, or moved out of this change, before admission',
+  'untracked-change': 'a change names existing leaf tasks: file or split the task first',
+  'change-kind': 'behavior needs at least one delta; no-behavior needs preserved references and a rationale and no deltas; supporting needs a rationale and nothing else',
+  'invalid-delta': 'a delta adds, removes or replaces one requirement: never both null, never a no-op, never a different id',
+  'stale-base': 'the delta\'s before is the requirement as the target holds it now: read the baseline from the target, not from the proposal',
+  'unknown-requirement': 'the reference names a requirement this baseline scope does not hold',
+  'unsynced-current': 'current equals the accepted baseline before closure, and the replayed change at closure',
+  'uncovered-requirement': 'every changed or preserved requirement names at least one check that proves it',
+  'missing-approval': 'this change digest needs an approval carrying a reference',
+  'stale-evidence': 'receipts must be for this revision and this policy: run the checks again on the current revision',
+  'unproved-check': 'this check needs a receipt with status passed and a reference',
+};
+
 export function checkDocuments(model, policy, evidence = null) {
   schema(model, modelSchema, 'model');
   schema(policy, policySchema, 'policy');
   if (evidence !== null) schema(evidence, evidenceSchema, 'evidence');
   const violations = [];
   const check = (id, condition, at) => {
-    if (condition) violations.push({ id, at });
+    if (condition) violations.push({ id, at, why: WHY[id] ?? null });
   };
   const unique = (items, at) => {
     const seen = new Set();
@@ -231,14 +254,23 @@ export function fixtureCases() {
 
 export function selftest() {
   let failures = 0;
+  const unexplained = new Set();
   for (const c of fixtureCases()) {
     let actual;
-    try { actual = [...new Set(checkDocuments(c.model, c.policy, c.evidence).map((v) => v.id))].sort(); }
-    catch { actual = ['invalid-input']; }
+    try {
+      const found = checkDocuments(c.model, c.policy, c.evidence);
+      for (const v of found) if (!v.why) unexplained.add(v.id);
+      actual = [...new Set(found.map((v) => v.id))].sort();
+    } catch { actual = ['invalid-input']; }
     const ok = same(actual, [...c.expected].sort());
     console.log(`${ok ? 'PASS' : 'FAIL'}  documents/${c.name}: ${JSON.stringify(actual)}`);
     if (!ok) failures++;
   }
+  // A refusal that names no remedy sends its reader to read the rules instead.
+  const explained = unexplained.size === 0;
+  console.log(`${explained ? 'PASS' : 'FAIL'}  documents/every verdict says what green looks like` +
+    `${explained ? '' : `: ${[...unexplained].sort().join(', ')}`}`);
+  if (!explained) failures++;
   return failures ? 1 : 0;
 }
 
@@ -262,9 +294,17 @@ function main(args) {
   }
   if (!options['--input'] || !options['--policy']) throw new Error('--input and --policy are required');
   const read = (p) => JSON.parse(readFileSync(p, 'utf8'));
-  const violations = checkDocuments(read(options['--input']), read(options['--policy']), options['--evidence'] ? read(options['--evidence']) : null);
+  const model = read(options['--input']);
+  const violations = checkDocuments(model, read(options['--policy']), options['--evidence'] ? read(options['--evidence']) : null);
+  const c = model.change;
+  const context = c
+    ? `Change ${c.id}, kind ${c.kind}: ${c.deltas.length} delta(s), ${c.preserves.length} preserved, ` +
+      `${c.coverage.length} covered; capabilities in the baseline: ${model.baseline.map((x) => x.id).join(', ') || 'none yet'}`
+    : `Phase ${model.phase}, no change record`;
   console.log(options['--json'] ? JSON.stringify({ version: RULES_VERSION, violations })
-    : violations.length ? violations.map((v) => `${v.id}: ${v.at}`).join('\n') : 'Document gate: clean');
+    : violations.length
+      ? [context, ...violations.map((v) => `${v.id}: ${v.at}${v.why ? ` \u2014 ${v.why}` : ''}`)].join('\n')
+      : 'Document gate: clean');
   return violations.length ? 1 : 0;
 }
 

@@ -1,23 +1,25 @@
 package proto
 
-// The capture half of the session service: ONE record of a settled execution
-// interval, pushed UP to the coordinator when the rendezvous completes.
+// The capture half of the session service: ONE record of an execution
+// interval, pushed UP to the coordinator.
 //
 // # Why this op is a REVERSE one
 //
-// The record is built by the session runtime at the authenticated render
-// boundary — the instant the meeting completes — because only the runtime
-// was there for the whole of it. The op therefore travels helper →
-// coordinator (host.Ask), like the ssh service's credential asks, and its
-// RESULT is the coordinator's storage answer, which the helper's caller
-// reads: kept, or the reason nothing was kept. A coordinator-pulled op would
-// have to build the record on request rather than at the boundary and could
-// not carry that answer at all. The two dispatchers stay disjoint by op
-// name: the session service's forward ops never spell `capture`, exactly as
-// the ssh service's forward and reverse halves share one service name with
-// disjoint op names.
+// The record is built by the session runtime — the settled record at the
+// authenticated render boundary (the instant the meeting completes) and the
+// unfinished record of a still-running command at its interval's first
+// departure (nocx-2v80t.2.4) — because only the runtime was there for the
+// whole of it. The op therefore travels helper → coordinator (host.Ask),
+// like the ssh service's credential asks, and its RESULT is the
+// coordinator's storage answer, which the helper's caller reads: kept, or
+// the reason nothing was kept. A coordinator-pulled op would have to build
+// the record on request rather than at the boundary and could not carry
+// that answer at all. The two dispatchers stay disjoint by op name: the
+// session service's forward ops never spell `capture`, exactly as the ssh
+// service's forward and reverse halves share one service name with disjoint
+// op names.
 
-// OpCapture carries one settled interval's capture record up to the
+// OpCapture carries one execution interval's capture record up to the
 // coordinator, which stores it against the command's entry.
 const OpCapture = "capture"
 
@@ -91,30 +93,47 @@ type CaptureScreen struct {
 	Lines         []CaptureRow `json:"lines"`
 }
 
+// CaptureState says which kind of interval a record is, and it is the
+// wire's discriminator: a reader that cannot tell a finished record from an
+// open interval's is reading a defect (nocx-2v80t.2.4).
+type CaptureState string
+
+const (
+	// CaptureSettled — the authenticated render boundary closed the
+	// interval; the record carries Nonce and Closing.
+	CaptureSettled CaptureState = "settled"
+	// CaptureUnfinished — the command still runs; the record is the open
+	// interval's known-so-far, and Nonce and Closing are ABSENT, not
+	// empty: no authenticated boundary has closed anything.
+	CaptureUnfinished CaptureState = "unfinished"
+)
+
 // CaptureParams is the record, addressed like every op on this service: the
 // generation-qualified session is the lookup, the incarnation is the identity
-// the runtime judges, and the nonce names the meeting whose completion closed
-// the interval.
+// the runtime judges, and State says which kind of interval it is.
 type CaptureParams struct {
 	Session     HostSessionID `json:"session"`
 	Incarnation Incarnation   `json:"incarnation"`
+	State       CaptureState  `json:"state"`
 	// Nonce is the settled meeting's fence, 64 lowercase hex characters —
-	// the spelling session.lifecycle-complete carries down.
-	Nonce string `json:"nonce"`
-	// Revision is the runtime's clock at the boundary; Completeness is the
-	// runtime's own answer there, never a default.
+	// the spelling session.lifecycle-complete carries down. It is present
+	// on a settled record only: an unfinished interval has no fence.
+	Nonce string `json:"nonce,omitempty"`
+	// Revision is the runtime's clock when the record's reads were taken;
+	// Completeness is the runtime's own answer there, never a default.
 	Revision     uint64       `json:"revision"`
 	Completeness Completeness `json:"completeness"`
 
 	// Opening is the screen as the interval opened; Departed the rows the
 	// interval pushed off it, oldest first; Closing the screen at the
-	// boundary. DepartedHole is the departure report's own retention flag:
-	// true means some of what left could not be read, so the list holds
-	// what was read and the rest is unknowable — never presented as whole.
+	// boundary, present on a settled record only. DepartedHole is the
+	// departure report's own retention flag: true means some of what left
+	// could not be read, so the list holds what was read and the rest is
+	// unknowable — never presented as whole.
 	Opening      CaptureScreen `json:"opening"`
 	Departed     []CaptureRow  `json:"departed"`
 	DepartedHole bool          `json:"departedHole"`
-	Closing      CaptureScreen `json:"closing"`
+	Closing      CaptureScreen `json:"closing,omitzero"`
 }
 
 // CaptureResult is the coordinator's storage answer, and it carries a legal

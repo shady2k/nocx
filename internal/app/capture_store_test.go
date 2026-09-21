@@ -166,6 +166,7 @@ func aCaptureRecord(nonce string) proto.CaptureParams {
 	return proto.CaptureParams{
 		Session:      proto.HostSessionID{Generation: "gentest", Session: "6e6f63782d7465737431"},
 		Incarnation:  proto.Incarnation{Generation: 1, Session: "6e6f63782d7465737431"},
+		State:        proto.CaptureSettled,
 		Nonce:        nonce,
 		Revision:     41,
 		Completeness: proto.CompletenessComplete,

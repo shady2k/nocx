@@ -30,6 +30,7 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -59,13 +60,18 @@ const captureBindingsBound = 256
 // the projection writes inside its emission turn, the reverse handler reads
 // on the client's answer goroutine.
 type captureBindings struct {
-	mu      sync.Mutex
-	entries map[string]string
-	order   []string
+	mu        sync.Mutex
+	entries   map[string]string
+	order     []string
+	open      map[string]string
+	openOrder []string
 }
 
 func newCaptureBindings() *captureBindings {
-	return &captureBindings{entries: make(map[string]string)}
+	return &captureBindings{
+		entries: make(map[string]string),
+		open:    make(map[string]string),
+	}
 }
 
 // Bind remembers which entry one settled fence belongs to. A nonce bound
@@ -98,6 +104,55 @@ func (b *captureBindings) size() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return len(b.entries)
+}
+
+// BindOpen remembers which OPEN attempt's entry a session is running —
+// the memory recordAttemptEntry feeds and the unfinished capture ask
+// resolves against (nocx-2v80t.2.4). The entry already exists, keyed by
+// the attempt id; nothing is invented here. A session's next attempt
+// replaces the binding: one open attempt per session.
+func (b *captureBindings) BindOpen(sessionID, entryID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, exists := b.open[sessionID]; !exists {
+		if len(b.openOrder) >= captureBindingsBound {
+			delete(b.open, b.openOrder[0])
+			b.openOrder = b.openOrder[1:]
+		}
+		b.openOrder = append(b.openOrder, sessionID)
+	}
+	b.open[sessionID] = entryID
+}
+
+// UnbindOpen removes a session's open binding. The authenticated boundary
+// calls it: from the completion on, the entry is addressed by the fence's
+// own memory, and a finished entry must never catch a stray unfinished ask.
+func (b *captureBindings) UnbindOpen(sessionID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.open, sessionID)
+	for i, s := range b.openOrder {
+		if s == sessionID {
+			b.openOrder = append(b.openOrder[:i:i], b.openOrder[i+1:]...)
+			break
+		}
+	}
+}
+
+// openEntryFor answers the entry of the attempt a session still has open,
+// or false — the unfinished ask's cue for noEntry, never an error.
+func (b *captureBindings) openEntryFor(sessionID string) (string, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	id, ok := b.open[sessionID]
+	return id, ok
+}
+
+// openSize is how many sessions the open memory answers for.
+func (b *captureBindings) openSize() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.open)
 }
 
 // captureSink is the coordinator's answer to a helper's settled record: the
@@ -143,12 +198,34 @@ func (s *captureSink) capture(ctx context.Context, raw json.RawMessage) (any, er
 	if err := decodeReverseParams(raw, &p); err != nil {
 		return nil, err
 	}
-	if !isFenceNonce(p.Nonce) {
-		return nil, badReverseParams("capture: nonce must be 64 lowercase hex characters")
-	}
-	entryID, ok := s.binds.entryFor(p.Nonce)
-	if !ok {
-		return proto.CaptureResult{Kept: false, Reason: captureReasonNoEntry}, nil
+	// The state is the address: a settled record is bound by the fence the
+	// completion authenticated; an unfinished record is bound by the entry
+	// recordAttemptEntry already opened for the attempt (nocx-2v80t.2.4) —
+	// the identity was never missing, only the fence.
+	var entryID, artifactID string
+	switch p.State {
+	case proto.CaptureSettled:
+		if !isFenceNonce(p.Nonce) {
+			return nil, badReverseParams("capture: nonce must be 64 lowercase hex characters")
+		}
+		id, ok := s.binds.entryFor(p.Nonce)
+		if !ok {
+			return proto.CaptureResult{Kept: false, Reason: captureReasonNoEntry}, nil
+		}
+		entryID, artifactID = id, captureArtifactID(p.Nonce)
+	case proto.CaptureUnfinished:
+		// No fence may ride an unfinished ask: carrying one would claim an
+		// authenticated boundary that has not happened.
+		if p.Nonce != "" {
+			return nil, badReverseParams("capture: an unfinished record names no fence")
+		}
+		id, ok := s.binds.openEntryFor(p.Session.Session)
+		if !ok {
+			return proto.CaptureResult{Kept: false, Reason: captureReasonNoEntry}, nil
+		}
+		entryID, artifactID = id, unfinishedArtifactID(id)
+	default:
+		return nil, badReverseParams("capture: unknown record state")
 	}
 	ledger := s.ledgerOf()
 	if ledger == nil {
@@ -158,10 +235,17 @@ func (s *captureSink) capture(ctx context.Context, raw json.RawMessage) (any, er
 		// unwired answer is the same noEntry either way.
 		return proto.CaptureResult{Kept: false, Reason: captureReasonNoEntry}, nil
 	}
-	cols, rows := p.Closing.Cols, p.Closing.Rows
+	// The geometry names the screen the record's reads were taken against:
+	// the boundary screen for a settled record, the opening for an
+	// unfinished one, which has no boundary screen at all.
+	screen := p.Closing
+	if p.State == proto.CaptureUnfinished {
+		screen = p.Opening
+	}
+	cols, rows := screen.Cols, screen.Rows
 	stance, err := ledger.CaptureOutput(ctx, content.CaptureOutput{
 		EntryID:        entryID,
-		ArtifactID:     captureArtifactID(p.Nonce),
+		ArtifactID:     artifactID,
 		MediaType:      content.MediaJSON,
 		CaptureMethod:  content.CaptureTerminalCells,
 		CaptureVersion: 1,
@@ -229,6 +313,21 @@ func isFenceNonce(nonce string) bool {
 // idempotency key — an ack lost after a successful store makes the retried
 // ask the store's own replay no-op, and the body of one command is stored
 // exactly once whatever the wire does.
+// unfinishedArtifactID derives the artifact id of an open interval's
+// record from the ENTRY'S own name: the entry already exists — the one
+// identity the open interval has — and the id must be deterministic, so a
+// retried ask is the store's replay no-op exactly as it is for a fence's
+// id. The digest is stamped into the artifact-id vocabulary's UUID shape
+// (version 4, because the bytes are a digest and not a timestamp).
+func unfinishedArtifactID(entryID string) string {
+	sum := sha256.Sum256([]byte(entryID))
+	var u [16]byte
+	copy(u[:], sum[:16])
+	u[6] = (u[6] & 0x0f) | 0x40 // version 4
+	u[8] = (u[8] & 0x3f) | 0x80 // RFC 9562 variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", u[0:4], u[4:6], u[6:8], u[8:10], u[10:16])
+}
+
 func captureArtifactID(nonce string) string {
 	raw, err := hex.DecodeString(nonce)
 	if err != nil || len(raw) < 16 {

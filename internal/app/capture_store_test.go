@@ -581,3 +581,256 @@ func TestTheCaptureResultOffTheRealSocketConformsToItsContract(t *testing.T) {
 		t.Fatal("no capture answer was found on the recorded wire")
 	}
 }
+
+// ── the open interval (nocx-2v80t.2.4) ───────────────────────────────────
+
+// anUnfinishedCapture builds the record an open interval carries: the
+// session an ask arrives keyed by, state naming it unfinished, and neither
+// a nonce nor a closing screen — the two absences that make it readable as
+// unfinished and not as a broken settled record.
+func anUnfinishedCapture() proto.CaptureParams {
+	cols, rows := 20, 3
+	return proto.CaptureParams{
+		Session:      proto.HostSessionID{Generation: "gentest", Session: "6e6f63782d7465737431"},
+		Incarnation:  proto.Incarnation{Generation: 1, Session: "6e6f63782d7465737431"},
+		State:        proto.CaptureUnfinished,
+		Revision:     47,
+		Completeness: proto.CompletenessNoFence,
+		Opening:      proto.CaptureScreen{Cols: cols, Rows: rows},
+		Departed: []proto.CaptureRow{{
+			Cells: []proto.CaptureCell{
+				{Text: "m", Width: 1, HasText: true},
+				{Text: "a", Width: 1, HasText: true},
+				{Text: "k", Width: 1, HasText: true},
+				{Text: "e", Width: 1, HasText: true},
+			},
+		}},
+	}
+}
+
+// TestCaptureBindings_TheOpenAttemptEntryIsReadableUntilTheBoundary walks
+// the open-attempt half of the memory: recordAttemptEntry's entry reads
+// back for the session it was opened in, a new attempt on the same session
+// replaces it, and the authenticated boundary's unbind removes it — so a
+// finished entry can never catch a stray unfinished ask.
+func TestCaptureBindings_TheOpenAttemptEntryIsReadableUntilTheBoundary(t *testing.T) {
+	b := newCaptureBindings()
+
+	b.BindOpen("session-1", "entry-open-1")
+	if got, ok := b.openEntryFor("session-1"); !ok || got != "entry-open-1" {
+		t.Fatalf("openEntryFor = %q, %v; want entry-open-1, true", got, ok)
+	}
+
+	// The session's NEXT attempt replaces the binding — one open attempt
+	// per session, never two rows.
+	b.BindOpen("session-1", "entry-open-2")
+	if got, _ := b.openEntryFor("session-1"); got != "entry-open-2" {
+		t.Fatalf("a rebound session reads %q, want the newest entry", got)
+	}
+
+	// The boundary unbinds; after it only the fence→entry memory answers.
+	b.UnbindOpen("session-1")
+	if got, ok := b.openEntryFor("session-1"); ok || got != "" {
+		t.Fatalf("an unbound session read back %q, %v; want empty, false", got, ok)
+	}
+	if _, ok := b.openEntryFor("session-never-bound"); ok {
+		t.Fatal("an unknown session answered with an entry")
+	}
+
+	// The memory is bounded like the fence memory is: a coordinator that
+	// never gets asked still cannot grow it without end, and eviction runs
+	// oldest first.
+	for i := 0; i < captureBindingsBound+10; i++ {
+		b.BindOpen(fmt.Sprintf("session-%d", i), fmt.Sprintf("entry-%d", i))
+	}
+	if b.openSize() != captureBindingsBound {
+		t.Fatalf("the open memory holds %d sessions, want its bound of %d", b.openSize(), captureBindingsBound)
+	}
+	if _, ok := b.openEntryFor("session-0"); ok {
+		t.Fatal("the first-bound session survived a full bound of eviction")
+	}
+	if got, ok := b.openEntryFor(fmt.Sprintf("session-%d", captureBindingsBound+9)); !ok || got == "" {
+		t.Fatalf("the newest bound session reads %q, %v; eviction is not oldest-first", got, ok)
+	}
+}
+
+// TestTheCaptureHandlerStoresAnUnfinishedRecordAgainstItsOpenEntry is
+// criterion 1's storage leg: while the command still runs — no fence, no
+// completion, no nonce anywhere — the ask lands as ONE readable body on the
+// entry recordAttemptEntry opened, and the body is what crossed the wire.
+func TestTheCaptureHandlerStoresAnUnfinishedRecordAgainstItsOpenEntry(t *testing.T) {
+	db := captureTestStore(t, content.CriticalityRoutine, nil)
+	entryID := recordOneCommand(t, db, "make deploy")
+	sink := captureSinkFor(db)
+	sink.binds.BindOpen("6e6f63782d7465737431", entryID)
+
+	raw, err := json.Marshal(anUnfinishedCapture())
+	if err != nil {
+		t.Fatalf("marshal the record: %v", err)
+	}
+	out, captureErr := sink.capture(context.Background(), raw)
+	if captureErr != nil {
+		t.Fatalf("capture: %v", captureErr)
+	}
+	result, ok := out.(proto.CaptureResult)
+	if !ok || !result.Kept || result.Reason != "" {
+		t.Fatalf("capture answered %+v (%T), want kept with no reason", out, out)
+	}
+
+	art, err := db.Ledger().Artifact(context.Background(), unfinishedArtifactID(entryID))
+	if err != nil {
+		t.Fatalf("Artifact: %v", err)
+	}
+	if art == nil {
+		t.Fatal("the unfinished record was not stored against the open entry")
+	}
+	if art.EntryID != entryID {
+		t.Fatalf("the body hung on entry %q, want %q", art.EntryID, entryID)
+	}
+	var body bytes.Buffer
+	for _, chunk := range art.Chunks {
+		body.Write(chunk)
+	}
+	if !bytes.Equal(body.Bytes(), raw) {
+		t.Fatalf("the stored body is not the record that crossed:\n stored: %s\n sent:   %s", body.String(), raw)
+	}
+
+	// THE ASSERTION THAT MAKES IT READABLE AS UNFINISHED: the body decodes
+	// to a record that names its state and carries neither a nonce nor a
+	// closing screen — not a settled record, not a live cell.
+	var stored proto.CaptureParams
+	if err := json.Unmarshal(body.Bytes(), &stored); err != nil {
+		t.Fatalf("decode the stored body: %v", err)
+	}
+	if stored.State != proto.CaptureUnfinished {
+		t.Fatalf("the stored record reads state %q, want %q", stored.State, proto.CaptureUnfinished)
+	}
+	if stored.Nonce != "" {
+		t.Fatalf("the stored record carries nonce %q, want none", stored.Nonce)
+	}
+	if len(stored.Closing.Lines) != 0 || stored.Closing.Cols != 0 || stored.Closing.Rows != 0 {
+		t.Fatalf("the stored record carries closing %+v, want none", stored.Closing)
+	}
+}
+
+// TestTheUnfinishedRecordIsStillUnfinishedAfterAStoreReopen is criterion
+// 2's storage leg: the record is DURABLE, and the next start finds it
+// exactly unfinished — a restart invents no boundary. No finished record
+// exists for the entry, because only an authenticated capture produces one.
+func TestTheUnfinishedRecordIsStillUnfinishedAfterAStoreReopen(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir() + "/content.db"
+	cfg := content.Config{
+		Path: path, Key: make([]byte, 32),
+		Budget: content.Budget{
+			RetentionBytes:   1 << 30,
+			DiskCeilingBytes: 2 << 30,
+			CompactionFloor:  0.8,
+		},
+	}
+	db, err := content.Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("content.Open: %v", err)
+	}
+	led := db.Ledger()
+	if ensureErr := led.EnsureEnvironment(ctx, content.Environment{ID: "local", Kind: content.EnvLocal}); ensureErr != nil {
+		t.Fatalf("EnsureEnvironment: %v", ensureErr)
+	}
+	if _, observeErr := led.RecordObservation(ctx, content.Observation{
+		EnvironmentID: "local", Criticality: content.CriticalityRoutine, Payload: "{}",
+	}); observeErr != nil {
+		t.Fatalf("RecordObservation: %v", observeErr)
+	}
+	entryID := recordOneCommand(t, db, "yes")
+	sink := captureSinkFor(db)
+	sink.binds.BindOpen("6e6f63782d7465737431", entryID)
+	raw, err := json.Marshal(anUnfinishedCapture())
+	if err != nil {
+		t.Fatalf("marshal the record: %v", err)
+	}
+	if out, captureErr := sink.capture(ctx, raw); captureErr != nil {
+		t.Fatalf("capture: %v", captureErr)
+	} else if result, ok := out.(proto.CaptureResult); !ok || !result.Kept {
+		t.Fatalf("capture answered %+v, want kept", out)
+	}
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("close the store: %v", closeErr)
+	}
+
+	// THE RESTART: the same store, next start.
+	reopened, err := content.Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reopen the store: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	art, err := reopened.Ledger().Artifact(ctx, unfinishedArtifactID(entryID))
+	if err != nil {
+		t.Fatalf("Artifact after reopen: %v", err)
+	}
+	if art == nil || art.ChunkCount != 1 {
+		t.Fatalf("the unfinished record did not survive the restart: %+v", art)
+	}
+	// And the restart did not FINISH it: no fence-derived record exists.
+	if done, _ := reopened.Ledger().Artifact(ctx, captureArtifactID(fenceHex(0x01))); done != nil {
+		t.Fatal("the restart produced a finished record: only the authenticated boundary may")
+	}
+}
+
+// TestTheUnfinishedAskRefusesAFenceAndAnswersNoEntryWithoutABinding pairs
+// the unfinished path's refusals: a fence on an unfinished ask is a broken
+// frame and is refused outright; a session with no open attempt answers
+// noEntry; a store with output retention off answers outputOff — each
+// storing nothing.
+func TestTheUnfinishedAskRefusesAFenceAndAnswersNoEntryWithoutABinding(t *testing.T) {
+	t.Run("a nonce on an unfinished ask is refused", func(t *testing.T) {
+		db := captureTestStore(t, content.CriticalityRoutine, nil)
+		entryID := recordOneCommand(t, db, "make")
+		sink := captureSinkFor(db)
+		sink.binds.BindOpen("6e6f63782d7465737431", entryID)
+		p := anUnfinishedCapture()
+		p.Nonce = fenceHex(0xC3)
+		raw, err := json.Marshal(p)
+		if err != nil {
+			t.Fatalf("marshal the record: %v", err)
+		}
+		if _, captureErr := sink.capture(context.Background(), raw); captureErr == nil {
+			t.Fatal("an unfinished ask carrying a fence was answered, want a refusal")
+		}
+		if art, _ := db.Ledger().Artifact(context.Background(), unfinishedArtifactID(entryID)); art != nil {
+			t.Fatal("a refused frame stored a body")
+		}
+	})
+
+	t.Run("no open attempt answers noEntry", func(t *testing.T) {
+		db := captureTestStore(t, content.CriticalityRoutine, nil)
+		entryID := recordOneCommand(t, db, "make")
+		sink := captureSinkFor(db)
+		raw, err := json.Marshal(anUnfinishedCapture())
+		if err != nil {
+			t.Fatalf("marshal the record: %v", err)
+		}
+		out, captureErr := sink.capture(context.Background(), raw)
+		assertRefusal(t, db, out, captureErr, "", "noEntry")
+		if art, _ := db.Ledger().Artifact(context.Background(), unfinishedArtifactID(entryID)); art != nil {
+			t.Fatal("a noEntry answer stored a body")
+		}
+	})
+
+	t.Run("output retention off", func(t *testing.T) {
+		policy := content.NewPolicy()
+		policy.SetOutputEnabled(false)
+		db := captureTestStore(t, content.CriticalityRoutine, policy)
+		entryID := recordOneCommand(t, db, "make")
+		sink := captureSinkFor(db)
+		sink.binds.BindOpen("6e6f63782d7465737431", entryID)
+		raw, err := json.Marshal(anUnfinishedCapture())
+		if err != nil {
+			t.Fatalf("marshal the record: %v", err)
+		}
+		out, captureErr := sink.capture(context.Background(), raw)
+		assertRefusal(t, db, out, captureErr, "", "outputOff")
+		if art, _ := db.Ledger().Artifact(context.Background(), unfinishedArtifactID(entryID)); art != nil {
+			t.Fatal("an outputOff answer stored a body")
+		}
+	})
+}

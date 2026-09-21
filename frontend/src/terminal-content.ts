@@ -128,7 +128,6 @@ import {
   type CommandStatus,
 } from './command-ledger'
 import { recordCommand, queryHistory } from './history-client'
-import { captureBlock } from './capture-client'
 import {
   answerTextForEntry,
   answerTextForTurn,
@@ -5254,6 +5253,9 @@ export class TerminalContent extends BasePaneContent {
       // A capture the store REFUSED (nocx-2v80t.2.6): the block says its
       // own sentence instead of drawing silence where output never was.
       captureSuppressed: bodies.get(b.entryId)?.captureSuppressed ?? false,
+      // A capture the cap cut to a SUMMARY (nocx-2v80t.2.5): the kept rows
+      // draw and the block says so beside them.
+      captureSummary: bodies.get(b.entryId)?.captureSummary ?? false,
       entryId: b.entryId,
       // Who ran it, carried from the entry's OWN source column
       // (nocx-dc2fr; restore-client maps entries.source to the display
@@ -8095,21 +8097,13 @@ export class TerminalContent extends BasePaneContent {
       block.afterVisualFreeze = () => this.attachRecordedAck(_recId, block, ack)
       return
     }
-    // THE BODY GOES NOW, against the entry the ack has just named
-    // (nocx-2f0f). This is past the parking check above, so the visual
-    // freeze has run and `captured` is filled; when the ack raced the fence
-    // the parked re-entry brings it back here the instant the block settles,
-    // which is the same mechanism the receipt already relies on.
-    //
-    // The field is cleared before the send, so a second entry into this
-    // method — a re-recorded block, a replayed ack — cannot capture the same
-    // block twice. Fire-and-forget by design: a capture that fails costs the
-    // body and never the block (capture-client.ts).
-    if (ack.entryId !== '' && block.captured !== undefined) {
-      const body = block.captured
-      block.captured = undefined
-      void captureBlock(this.client, ack.entryId, body)
-    }
+    // THE BODY went with the record while the command ran: the session
+    // runtime captures the settled interval at the authenticated boundary
+    // and the coordinator stores it against this entry (nocx-2v80t.2.2),
+    // where the card's grid and the searchable text are DERIVED VIEWS of
+    // it (nocx-2v80t.2.5). Nothing is serialized from the block here — a
+    // second reading of the terminal after the fact was the drift this
+    // slice retired.
     if (ack.redactions.length > 0) {
       renderRecordedCommand(blockEl, ack.maskedCommand, ack.redactions)
       this.refreshGrant(blockEl)

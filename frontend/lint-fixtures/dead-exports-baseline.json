@@ -190,6 +190,11 @@
     },
     {
       "kind": "files",
+      "file": "src/generated/ledger.capture.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
       "file": "src/generated/ledger.bind.ts",
       "symbol": ""
     },

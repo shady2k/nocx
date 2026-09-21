@@ -37,6 +37,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/shady2k/nocx/internal/captureview"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	nocxlog "github.com/shady2k/nocx/internal/log"
@@ -300,6 +301,37 @@ func (s *captureSink) capture(ctx context.Context, raw json.RawMessage) (any, er
 		nocxlog.From(ctx).Warn("helper capture: the store answered an unknown stance",
 			"stance", string(stance), "entry", entryID)
 		return nil, fmt.Errorf("capture: the store answered %q", stance)
+	}
+	// THE RECORD'S VIEWS (nocx-2v80t.2.5). A kept SETTLED record carries
+	// its two views beside it: metadata rows that name it through
+	// DerivedFrom — the card's SGR grid and the searchable plain text — and
+	// whose bodies are derived from the record's stored bytes at the read.
+	// The views are addresses, not copies: nothing here renders, and an
+	// unfinished interval gets none (a running command's card has no body,
+	// exactly as before). A view write that fails never fails the ask —
+	// the record is the canonical body and it is already stored — but the
+	// card will fall back to its hole sentence, so the store hears about
+	// it.
+	if result.Kept && p.State == proto.CaptureSettled {
+		recordID := artifactID
+		views := []content.CaptureView{
+			{
+				EntryID: entryID, RecordID: recordID,
+				ID:        captureview.ViewID(recordID, captureview.KindVT),
+				MediaType: content.MediaVT, DerivedFrom: recordID,
+				Truncated: truncated, TerminalCols: &cols, TerminalRows: &rows,
+			},
+			{
+				EntryID: entryID, RecordID: recordID,
+				ID:        captureview.ViewID(recordID, captureview.KindText),
+				MediaType: content.MediaText, DerivedFrom: captureview.ViewID(recordID, captureview.KindVT),
+				Truncated: truncated, TerminalCols: &cols, TerminalRows: &rows,
+			},
+		}
+		if viewErr := ledger.CaptureViews(ctx, views); viewErr != nil {
+			nocxlog.From(ctx).Warn("helper capture: the record's views could not be stored",
+				"entry", entryID, "record", recordID, "error", viewErr)
+		}
 	}
 	return result, nil
 }

@@ -316,6 +316,19 @@ export interface RestoredBody {
    */
   captureSuppressed: boolean
   /**
+   * Whether retention kept only a SUMMARY of this command's output
+   * (nocx-2v80t.2.5): the per-command cap cut the stored capture's rows at
+   * the producer, so both views of it — the card's grid and the searchable
+   * text — are views of a summary, and the block says so instead of
+   * reading as the whole of what ran. The body beside it is real (the cut
+   * rows are what was kept), which is why this is a sentence BESIDE the
+   * body, not instead of one.
+   *
+   * Meaningful only when `kind` is 'command'; a turn's prose fact is
+   * `proseEvicted`, never this.
+   */
+  captureSummary: boolean
+  /**
    * What this entry CAUSED, in the causal order the turn assigned.
    *
    * EMPTY IS THE DEGRADE AND IT IS THE ONLY ONE: an entry that caused
@@ -384,6 +397,7 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
         caused,
         proseEvicted: !!entry.proseEvicted,
         captureSuppressed: false,
+        captureSummary: false,
       }
     }
     const body = await client.call<LedgerArtifact>('ledger.artifact', { id: chosen.id })
@@ -394,6 +408,7 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
       kind: entry.entry.kind === 'ask' ? 'ask' : 'command',
       body: body.truncated === 'suppressed' ? null : body.body,
       captureSuppressed: body.truncated === 'suppressed',
+      captureSummary: body.truncated === 'cap',
       caused,
       proseEvicted: !!entry.proseEvicted,
     }
@@ -407,6 +422,7 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
       caused: [],
       proseEvicted: false,
       captureSuppressed: false,
+      captureSummary: false,
     }
   }
 }

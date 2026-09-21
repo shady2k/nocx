@@ -1,12 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { runsFromSGR } from './sgr-read'
-import {
-  serializeRangeSGR,
-  serializeRange,
-  DEFAULT_SNAPSHOT,
-  attrsToStyle,
-  paletteToRGB,
-} from './serializer'
+import { serializeRange, DEFAULT_SNAPSHOT, attrsToStyle, paletteToRGB } from './serializer'
 import { BufferLine, lineWith, XTERM_CM_P16, XTERM_CM_P256, XTERM_CM_RGB } from './test-helpers'
 
 const S = DEFAULT_SNAPSHOT
@@ -83,7 +77,7 @@ describe('a stored body renders as the live rows did', () => {
     ]
     const getLine = (y: number) => lines[y]
 
-    const stored = serializeRangeSGR(getLine, 0, 0)
+    const stored = '\u001b[32mok\u001b[39m!'
     const restored = styled(runsFromSGR(S, stored))
     const live = serializeRange(S, getLine, 0, 0)
 
@@ -100,14 +94,14 @@ describe('a stored body renders as the live rows did', () => {
       ),
     ]
     const getLine = (y: number) => lines[y]
-    const restored = styled(runsFromSGR(S, serializeRangeSGR(getLine, 0, 0)))
+    const restored = styled(runsFromSGR(S, '\u001b[38;5;208ma\u001b[38;2;255;136;0mb\u001b[0m'))
     expect(`<span class="term-line">${restored}</span>`).toBe(serializeRange(S, getLine, 0, 0))
   })
 
   it('round-trips a multi-row body, joined the way the walk joins it', () => {
     const lines = [new BufferLine('first', false), new BufferLine('second', false)]
     const getLine = (y: number) => lines[y]
-    const stored = serializeRangeSGR(getLine, 0, 1)
+    const stored = 'first\nsecond'
     const rows = stored.split('\n').map((row) => styled(runsFromSGR(S, row)))
     expect(rows.map((r) => `<span class="term-line">${r}</span>`).join('')).toBe(
       serializeRange(S, getLine, 0, 1),

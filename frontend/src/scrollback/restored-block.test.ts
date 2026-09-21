@@ -9,7 +9,7 @@ import {
   type RestoredTurnFacts,
 } from './restored-block'
 import type { RunningBlockActions } from './blocks'
-import { DEFAULT_SNAPSHOT, serializeRange, serializeRangeSGR } from './serializer'
+import { DEFAULT_SNAPSHOT, serializeRange } from './serializer'
 import { BufferLine, lineWith, XTERM_CM_P16 } from './test-helpers'
 import { CommandSnapshotStore } from '../command-snapshot'
 
@@ -42,7 +42,7 @@ describe('a block built from the store', () => {
       new BufferLine('second', false),
     ]
     const getLine = (y: number) => lines[y]
-    expect(bodyToHTML(S, serializeRangeSGR(getLine, 0, 1))).toBe(serializeRange(S, getLine, 0, 1))
+    expect(bodyToHTML(S, '\u001b[32mok\u001b[0m\nsecond')).toBe(serializeRange(S, getLine, 0, 1))
   })
 
   it('says it is restored, in the DOM a gate can read', () => {
@@ -147,6 +147,34 @@ describe('a block built from the store', () => {
     const el = restoredBlock(facts({ body: null }), S, container, () => {}, store())
     expect(el.dataset.captureSuppressed).toBeUndefined()
     expect(el.textContent).not.toContain('Output was not kept')
+  })
+
+  it('a SUMMARY capture says so BESIDE the kept rows — once', () => {
+    // The fourth state (nocx-2v80t.2.5): the cap kept head and tail of the
+    // stored capture, so the capped rows are real and DRAW — the sentence
+    // is what keeps the cut from passing as the whole of what ran.
+    const el = restoredBlock(
+      facts({ body: 'capped rows', captureSummary: true }),
+      S,
+      container,
+      () => {},
+      store(),
+    )
+    expect(el.dataset.captureSummary).toBe('true')
+    expect(el.querySelector('.cmd-output-summary')?.textContent).toBe('Output kept as a summary')
+    // Exactly once, and BESIDE a body — a summary is not a hole.
+    expect(el.textContent?.match(/Output kept as a summary/g)).toHaveLength(1)
+    expect(el.querySelector('.term-line')?.textContent).toContain('capped rows')
+    expect(el.textContent).not.toContain('Output was not kept')
+    expect(el.textContent).not.toContain('Output is no longer kept')
+  })
+
+  it('says nothing of a summary for an ordinary command', () => {
+    // The paired positive: without the fact the sentence could be one that
+    // is always shown.
+    const el = restoredBlock(facts({ body: 'whole output' }), S, container, () => {}, store())
+    expect(el.dataset.captureSummary).toBeUndefined()
+    expect(el.textContent).not.toContain('Output kept as a summary')
   })
 
   // The badge half of nocx-4em1z, asserted through the seam a person reaches

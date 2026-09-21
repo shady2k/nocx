@@ -357,6 +357,15 @@ func (s *ledgerStub) CaptureOutput(_ context.Context, in CaptureOutput) (Session
 	return SessionOutputKept, nil
 }
 
+func (s *ledgerStub) CaptureViews(_ context.Context, views []CaptureView) error {
+	ids := make([]string, len(views))
+	for i, v := range views {
+		ids[i] = v.ID
+	}
+	s.log.Info("content stub: LedgerRepository.CaptureViews", "views", ids)
+	return ErrNotImplemented
+}
+
 func (s *ledgerStub) AppendChunk(_ context.Context, artifactID string, seq int, body []byte) error {
 	s.log.Info("content stub: LedgerRepository.AppendChunk",
 		"artifact", artifactID, "seq", seq, "bytes", len(body))

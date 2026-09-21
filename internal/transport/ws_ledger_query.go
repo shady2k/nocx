@@ -40,6 +40,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/captureview"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/secrets"
 )
@@ -506,14 +507,62 @@ func (h ledgerReadHandlers) handleArtifact(ctx context.Context, req jsonrpcReque
 		for _, c := range art.Chunks {
 			sb.Write(c)
 		}
+		body := sb.String()
+		byteLen := art.ByteLen
+		// THE DERIVED VIEWS (nocx-2v80t.2.5). A row that names a source
+		// through DerivedFrom and carries no chunks is a VIEW: its body is
+		// not stored anywhere — it is the record's stored bytes, rendered
+		// at this read. That is what makes the record the one body of
+		// truth: change the stored capture and every view of it changes
+		// with it, on the next read, with no second copy to drift. The
+		// provenance chain is walked to the record (the text view names
+		// the vt view, which names the record), bounded, and a chain whose
+		// far end is gone or undecodable is a named fault, never an empty
+		// success — an empty body would say the command printed nothing.
+		if art.DerivedFrom != nil && len(art.Chunks) == 0 {
+			const maxViewChain = 4
+			source := art
+			for i := 0; source.DerivedFrom != nil && len(source.Chunks) == 0; i++ {
+				if i >= maxViewChain {
+					return fmt.Errorf("ledger.artifact: the view chain at %s does not reach a stored record", p.ID)
+				}
+				next, nextErr := svc.Artifact(ctx, *source.DerivedFrom)
+				if nextErr != nil {
+					return nextErr
+				}
+				if next == nil {
+					return fmt.Errorf("ledger.artifact: the record %s this view derives from is no longer stored", *source.DerivedFrom)
+				}
+				source = next
+			}
+			var srcBody strings.Builder
+			for _, c := range source.Chunks {
+				srcBody.Write(c)
+			}
+			rec, recErr := captureview.ParseRecord([]byte(srcBody.String()))
+			if recErr != nil {
+				return fmt.Errorf("ledger.artifact: the stored record %s does not decode: %w", source.ID, recErr)
+			}
+			switch art.MediaType {
+			case content.MediaVT:
+				body = captureview.VTBody(rec)
+			case content.MediaText:
+				body = captureview.TextBody(rec)
+			default:
+				// A derived view of an unknown media type is a decision
+				// nobody made; rendering it as text would guess.
+				return fmt.Errorf("ledger.artifact: the view %s carries the unsupported media type %q", art.ID, art.MediaType)
+			}
+			byteLen = int64(len(body))
+		}
 		var truncated *string
 		if art.Truncated != nil {
 			v := string(*art.Truncated)
 			truncated = &v
 		}
 		out = ledgerArtifactResponse{
-			ID: art.ID, MediaType: string(art.MediaType), Body: sb.String(),
-			Truncated: truncated, ByteLen: art.ByteLen,
+			ID: art.ID, MediaType: string(art.MediaType), Body: body,
+			Truncated: truncated, ByteLen: byteLen,
 		}
 		return nil
 	})

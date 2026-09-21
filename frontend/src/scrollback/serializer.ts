@@ -11,7 +11,6 @@
 // cells — critical for correct inverse-video fallback.
 
 import type { IBufferLine, ITheme } from '@xterm/xterm'
-import { cellSGRAttrs, sgrParams, sgrEqual, emptySGR, type SGRAttrs } from './sgr'
 // ТОЛЬКО ТИП, и он берётся у владельца вопроса, а не переобъявляется здесь:
 // форма ответа классификатора одна, и вторая её копия разошлась бы с первой
 // молча. Зависимости на модуль это не создаёт — сериализатор по-прежнему не
@@ -616,9 +615,8 @@ export function serializeRange(
  *
  * Это тот же collectRunsOf, а не второй обход в смысле AD-8: функция,
  * знающая, как ходить по ячейкам и как считать колонки, по-прежнему одна.
- * Здесь она вызывается с пустыми атрибутами — как это уже делает
- * serializeRangeText, — поэтому проход дешёвый: ни вывода цвета, ни
- * экранирования, ни склейки строк.
+ * Здесь она вызывается с пустыми атрибутами, поэтому проход дешёвый:
+ * ни вывода цвета, ни экранирования, ни склейки строк.
  *
  * ПОРЯДОК И СОСТАВ ОБЯЗАНЫ СОВПАДАТЬ с тем, что увидит классификатор при
  * сериализации, иначе кэш окажется холодным ровно там, где нужен, и коробка
@@ -644,65 +642,4 @@ export function collectFitCandidates(
     )
     return { content: '', cols }
   })
-}
-
-/**
- * The DURABLE body of a block: the same rows, carrying colour as SGR and no
- * markup at all (nocx-2f0f, design §3). A row closes whatever it opened, so a
- * reader that starts mid-body — a restore drawing one block — is never left
- * wearing the previous row's colour.
- *
- * No theme snapshot is taken and none may be: resolving a palette index to a
- * hex colour here is what would freeze a restored block in the palette that
- * was current when it ran.
- */
-export function serializeRangeSGR(
-  getLine: (y: number) => IBufferLine | undefined,
-  startLine: number,
-  endLine: number,
-): string {
-  const empty = emptySGR()
-  const groups = walkRange(getLine, startLine, endLine, (line, keepTrailingSpace) => {
-    const { runs, cols } = collectRunsOf<SGRAttrs>(
-      line,
-      cellSGRAttrs,
-      sgrEqual,
-      false,
-      keepTrailingSpace,
-    )
-    let content = ''
-    let current = empty
-    for (const run of runs) {
-      if (run.chars.length === 0) continue
-      content += sgrParams(current, run.attrs)
-      current = run.attrs
-      content += run.chars
-    }
-    if (!sgrEqual(current, empty)) content += '\u001b[0m'
-    return { content, cols }
-  })
-  return groups.map((g) => g.content).join('\n')
-}
-
-/**
- * The DERIVED body: the same rows as characters. What search, copy and the
- * agent read — none of them wants an escape-sequence stream, and a needle
- * spanning a colour change would stop matching in one.
- */
-export function serializeRangeText(
-  getLine: (y: number) => IBufferLine | undefined,
-  startLine: number,
-  endLine: number,
-): string {
-  const groups = walkRange(getLine, startLine, endLine, (line, keepTrailingSpace) => {
-    const { runs, cols } = collectRunsOf<null>(
-      line,
-      () => null,
-      () => true,
-      false,
-      keepTrailingSpace,
-    )
-    return { content: runs.map((r) => r.chars).join(''), cols }
-  })
-  return groups.map((g) => g.content).join('\n')
 }

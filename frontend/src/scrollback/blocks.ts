@@ -3,16 +3,9 @@
 // Flat warp-style design (P0-1): no card borders, dividers between blocks,
 // subtle background tint on hover/select.
 
-import {
-  serializeRange,
-  serializeRangeSGR,
-  serializeRangeText,
-  fromITheme,
-  collectFitCandidates,
-} from './serializer'
+import { serializeRange, fromITheme, collectFitCandidates } from './serializer'
 import { createCellFit, type CellFit, type FitCandidate } from './cell-fit'
 import { isEnabled as driftEnabled, recordFrozenBlock } from './cell-drift'
-import type { CapturedBody } from '../capture-client'
 import { getCurrentTheme } from '../renderers/theme-adapter'
 import type { CommandSnapshotStore } from '../command-snapshot'
 import type { IBufferLine } from '@xterm/xterm'
@@ -655,17 +648,6 @@ export interface BlockRecord {
    *  refused for looking unfinished, and was gone for good — a captured
    *  secret with nothing offering to save it (nocx-ggha). */
   afterVisualFreeze?: () => void
-  /** What the VISUAL freeze produced for the store (nocx-2f0f): the block's
-   *  rows as SGR and as characters, with the grid the serializer saw.
-   *
-   *  PARKED HERE rather than sent, because the artifact hangs on an ENTRY
-   *  and the entry id arrives with the history.record ack — a different
-   *  event that may land before or after this freeze. Whoever sends it
-   *  clears the field, so a block cannot be captured twice.
-   *
-   *  Undefined until the visual freeze runs, and after the capture has been
-   *  handed over. */
-  captured?: CapturedBody
   /** The authenticated attempt this block is bound to (ADR-0024 §7
    *  projection): set when the running block binds to the published
    *  attempt, kept when the block freezes. Absent only for a block that
@@ -2653,18 +2635,6 @@ export class BlockManager {
         this._cellFit.boxOf(chars, width, { bold: attrs.bold, italic: attrs.italic })
     }
     const outputHtml = serializeRange(snapshot, getLine, rec.outputStart, endLine, driftCols, boxOf)
-    // The DURABLE bodies, from the same rows and the same walk the frozen
-    // block on screen is made of — so what comes back after a restart is
-    // what was there, not a second reading of the buffer taken later.
-    const dims = this._dimensions?.()
-    if (dims) {
-      rec.captured = {
-        sgr: serializeRangeSGR(getLine, rec.outputStart, endLine),
-        text: serializeRangeText(getLine, rec.outputStart, endLine),
-        cols: dims.cols,
-        rows: dims.rows,
-      }
-    }
 
     const newEl = freezeBlock(
       rec.el,

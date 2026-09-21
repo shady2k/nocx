@@ -110,6 +110,7 @@ describe('restore-client — a block says what it is by its kind, and a turn own
       caused: [],
       proseEvicted: false,
       captureSuppressed: false,
+      captureSummary: false,
     })
   })
 
@@ -125,6 +126,7 @@ describe('restore-client — a block says what it is by its kind, and a turn own
       caused: [],
       proseEvicted: false,
       captureSuppressed: false,
+      captureSummary: false,
     })
   })
 
@@ -141,6 +143,7 @@ describe('restore-client — a block says what it is by its kind, and a turn own
       caused: [],
       proseEvicted: false,
       captureSuppressed: true,
+      captureSummary: false,
     })
   })
 
@@ -159,6 +162,7 @@ describe('restore-client — a block says what it is by its kind, and a turn own
       caused: [],
       proseEvicted: false,
       captureSuppressed: false,
+      captureSummary: false,
     })
   })
 
@@ -173,6 +177,7 @@ describe('restore-client — a block says what it is by its kind, and a turn own
       caused: [],
       proseEvicted: false,
       captureSuppressed: false,
+      captureSummary: false,
     })
   })
   it('a turn whose answer is gone is still an ask — the kind does not follow the loss', async () => {
@@ -186,6 +191,7 @@ describe('restore-client — a block says what it is by its kind, and a turn own
       caused: [],
       proseEvicted: true,
       captureSuppressed: false,
+      captureSummary: false,
     })
   })
 
@@ -199,6 +205,7 @@ describe('restore-client — a block says what it is by its kind, and a turn own
       caused: [],
       proseEvicted: false,
       captureSuppressed: false,
+      captureSummary: false,
     })
   })
 })
@@ -391,6 +398,7 @@ describe('restore-client — the causal flow of a restored turn', () => {
       caused: [],
       proseEvicted: false,
       captureSuppressed: false,
+      captureSummary: false,
     })
   })
 

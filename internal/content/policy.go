@@ -1,6 +1,10 @@
 package content
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/shady2k/nocx/internal/outputcap"
+)
 
 // Policy is the live, mutable set of History decisions the user made in
 // Settings (design §5.4, brief 2026-08-01). The store consults it per
@@ -29,8 +33,11 @@ func NewPolicy() *Policy {
 // DefaultOutputCapBytes is what one command's body may be worth until the
 // user says otherwise: 256 KiB of head and tail together, which is the
 // default of settings.HistoryOutputCapKB expressed in the unit the code
-// works in.
-const DefaultOutputCapBytes = 256 << 10
+// works in. It is the POLICY-facing name; the value itself is defined once
+// in internal/outputcap, because the emulator's scrollback budget is the
+// same number by the owner's decision on nocx-2v80t.2.3 and the emulator
+// cannot import this package's SQLite stack to read it.
+const DefaultOutputCapBytes = outputcap.PerCommandBytes
 
 // SetEnabled flips "keep history at all". When off, Add records nothing.
 func (p *Policy) SetEnabled(v bool) {

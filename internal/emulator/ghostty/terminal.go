@@ -47,6 +47,7 @@ import (
 	"unsafe"
 
 	"github.com/shady2k/nocx/internal/emulator"
+	"github.com/shady2k/nocx/internal/outputcap"
 )
 
 // maxGraphemeCodepoints bounds the stack buffer a grapheme cluster is read
@@ -265,6 +266,32 @@ func New(g emulator.Geometry) (emulator.Terminal, error) {
 // it — release — rather than four that must each remember what was allocated
 // before them.
 func (t *terminal) install(g emulator.Geometry) error {
+	// The scrollback budget, at allocation and before the first byte. The
+	// owner's decision on nocx-2v80t.2.3 sets it to the per-command output
+	// cap the content policy already owns (outputcap.PerCommandBytes): a
+	// capture can never need more than history is willing to keep, so one
+	// number governs both, and the library's implicit default becomes an
+	// explicit, policy-bound number. The value is read by the library at
+	// this call — a NULL value pointer is how the limit is REMOVED — and
+	// reads back through GHOSTTY_TERMINAL_DATA_SCROLLBACK_MAX_BYTES.
+	//
+	// MEASURED at pin 1f225ebb5894, 2026-09-21: the library prunes at PAGE
+	// granularity, one page ≈ 870 KB of grid — ~1,130 retained rows at 80
+	// columns, ~2,285 at 40, ~8,525 at 10 — and every byte budget from the
+	// old 10,000-byte default through 1 MiB retains exactly that one page
+	// (first retention-flag at line 1,155 of a one-line-per-feed stream at
+	// 80 columns, whatever the budget); 2.5 MiB retains three pages; 0
+	// disables scrollback outright. This number therefore PINS the budget
+	// to the policy without yet moving the boundary the default already
+	// had: the owner was told the raise would make the retention flag
+	// rarer, and at 256 KiB it cannot — a boundary move is a page-multiple
+	// decision (≥ ~1.75 MiB at 80 columns) and goes back to the owner with
+	// this task's report.
+	budget := C.size_t(outputcap.PerCommandBytes)
+	if r := C.ghostty_terminal_set(t.t, C.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+		unsafe.Pointer(&budget)); r != C.GHOSTTY_SUCCESS {
+		return resultError("scrollback_max_bytes", r)
+	}
 	// The pixel size is part of the geometry a program can ask about (XTWINOPS,
 	// and mode 2048's in-band reports), and ghostty_terminal_new takes only the
 	// cell grid. A resize that does not change the grid still applies it — the
@@ -423,6 +450,16 @@ func (t *terminal) noteDepartedLocked() {
 	}
 	if base.valid {
 		if d := h - base.rows; d > 0 {
+			// Residual hole, known and accepted (nocx-2v80t.2.3): when
+			// retention prunes INSIDE this same feed, d counts only the
+			// rows the depth still shows — pages the feed lost are
+			// missing from both ends and no flag fires. Measured at the
+			// shipped budget: 20,000 short lines in ONE write reported
+			// 903 rows and no flag. No budget fixes this, because the
+			// library answers no scalar that says which rows one feed
+			// lost; the d < 0 branch below is the case this report CAN
+			// see, and the one-write case is why a caller that can feed
+			// whole screens in one write still owes the honest flag.
 			t.captureDepartedLocked(h-d, h)
 		} else if d < 0 && h > 0 {
 			// The depth shrank while rows were still retained: the

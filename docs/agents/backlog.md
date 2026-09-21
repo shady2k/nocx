@@ -65,7 +65,11 @@ Writing one: `br comments add <id> "submitted: 1a2b3c4 -- go build ./... and go 
 When a worker submits, the coordinator takes the assignee (`br update <id> --actor <coordinator>
 --assignee <coordinator>`), so the result is held for merging and no worker holds it.
 Without both halves — a revision, `--`, then evidence — the gate reports
-`submitted-without-evidence` / `implemented-without-evidence`. Proved 2026-09-19 on a
+`submitted-without-evidence` / `implemented-without-evidence`. It reports the same
+rule when the marker sits on a leaf that is **not under a stage**: measured 2026-09-21
+on the setup task, which hangs under a chore, so its proof record is a plain comment.
+A setup, grooming or charter task outside any stage therefore records its evidence
+plainly and never as a marker. Proved 2026-09-19 on a
 scratch tracker through claim → submitted → implemented → reopened → implemented → close.
 
 ### Commit task links

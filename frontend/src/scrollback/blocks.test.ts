@@ -25,7 +25,7 @@ import { clampMenuPosition } from '../ui/menu-geometry'
 import { shellHighlightReady } from '../shell-highlight'
 import { applyReasoningExpanded } from '../reasoning-expanded'
 import { clearToasts, toasts } from '../ui/toast'
-import { BufferLine } from './test-helpers'
+import { BufferLine, lineWith } from './test-helpers'
 import { setCurrentTheme, _resetThemeState } from '../renderers/theme-adapter'
 import { CommandSnapshotStore } from '../command-snapshot'
 import { mintDomain, type IntegrationDomain } from '../lifecycle/domains'
@@ -4589,5 +4589,68 @@ describe('setBlockWhere', () => {
     const el = document.createElement('div')
     el.className = 'cmd-block'
     expect(() => setBlockWhere(el, { branch: 'main' })).not.toThrow()
+  })
+})
+
+// ── the frozen block's runs are run-geometry's (nocx-zg3k3.7) ──────────────
+//
+// Criterion 1, end to end: the freeze path hands cell-fit's measurements to
+// run-geometry, and the letter-spacing the rule puts on a run is visible in
+// the frozen block itself — in the SAME innerHTML a person's pane shows.
+
+describe('the frozen block carries per-run geometry', () => {
+  it('freezes a measured cluster onto its own spacing, through the real freeze path', () => {
+    const inner = document.createElement('div')
+    const xtermContainer = document.createElement('div')
+    inner.appendChild(xtermContainer)
+    // The metric the renderer would have published.
+    inner.style.setProperty('--term-cell-width', '8px')
+    inner.style.setProperty('--term-cell-delta', '-0.5px')
+    document.body.appendChild(inner)
+    const manager = new BlockManager(inner, xtermContainer, {
+      now: () => 1000,
+      snapshotStore: freshStore(),
+      dimensions: () => ({ cols: 100, rows: 30 }),
+    })
+    // jsdom lays nothing out, and cell-fit measures by writing probe spans
+    // and reading their rects — answer it here: あ lands exactly on its two
+    // columns (16px); single-column ASCII is never measured (calibrated).
+    const rects = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        const width = this.textContent === 'あ' ? 16 : 8
+        return {
+          width,
+          height: 20,
+          top: 0,
+          left: 0,
+          right: width,
+          bottom: 20,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        }
+      })
+    try {
+      manager.startBlock('printf あ', '~', 0)
+      const lines = [
+        lineWith(
+          { chars: 'a', fg: 0, fgMode: 0 },
+          { chars: 'あ', width: 2, fg: 0, fgMode: 0 },
+          { chars: '', width: 0, fg: 0, fgMode: 0 },
+        ),
+      ]
+      const rec = manager.freezeBlock((y) => lines[y] ?? undefined, 0, 0)
+      expect(rec).not.toBeNull()
+      // あ measured onto 2 × 8px exactly: its spacing is 0 — not the row
+      // default −0.5px — so the rule splits it out and declares it
+      // (ADR-0009 rules 2 and 3). The ASCII around it stays bare text
+      // inheriting the row correction, today's markup byte for byte.
+      expect(rec!.el.querySelector('.cmd-output')?.innerHTML).toBe(
+        '<span class="term-line">a<span style="letter-spacing:0px">あ</span></span>',
+      )
+    } finally {
+      rects.mockRestore()
+    }
   })
 })

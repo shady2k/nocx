@@ -355,3 +355,46 @@ describe('createCellFit', () => {
     expect(fit.boxOf('⬢', 1, REGULAR)?.cols).toBe(1)
   })
 })
+
+// ── What the freeze hands the run-geometry owner (nocx-zg3k3.7) ────────────
+// Runs carry their own spacing now (ADR-0009 rules 1–3), so the measuring
+// authority must answer the measured advance itself, not only the box
+// verdict derived from it — and the row context begin() took.
+
+describe('CellFit measurement handoff', () => {
+  it('answers the measured advance from the same cache the verdict comes from', () => {
+    const fit = createCellFit(
+      () => containerWith(8),
+      batch(() => 13.572),
+    )
+    expect(fit.advanceOf('🗑', 1, REGULAR)).toBeNull()
+    expect(fit.geometry()).toBeNull()
+    fit.begin()
+    // Not measured yet: no advance — the absence must stay distinguishable
+    // from a measurement, or a cold cache would read as "on the grid".
+    expect(fit.advanceOf('🗑', 1, REGULAR)).toBeNull()
+    fit.warm([
+      { chars: '🗑', width: 1, face: REGULAR },
+      { chars: 'a', width: 1, face: REGULAR },
+    ])
+    expect(fit.advanceOf('🗑', 1, REGULAR)).toBe(13.572)
+    // Calibrated ASCII is never measured: its spacing IS the row default.
+    expect(fit.advanceOf('a', 1, REGULAR)).toBeNull()
+    // No delta published: the row default is 0.
+    expect(fit.geometry()).toEqual({ cellWidth: 8, rowDelta: 0 })
+  })
+
+  it('hands out the row context begin() took, and nothing after dispose', () => {
+    const el = containerWith(8)
+    el.style.setProperty('--term-cell-delta', '-0.5px')
+    const fit = createCellFit(
+      () => el,
+      batch(() => 13.572),
+    )
+    fit.begin()
+    expect(fit.geometry()).toEqual({ cellWidth: 8, rowDelta: -0.5 })
+    fit.dispose()
+    expect(fit.geometry()).toBeNull()
+    expect(fit.advanceOf('🗑', 1, REGULAR)).toBeNull()
+  })
+})

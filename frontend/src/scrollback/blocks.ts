@@ -11,6 +11,7 @@ import {
   collectFitCandidates,
 } from './serializer'
 import { createCellFit, type CellFit, type FitCandidate } from './cell-fit'
+import type { RunMetric } from './run-geometry'
 import { isEnabled as driftEnabled, recordFrozenBlock } from './cell-drift'
 import type { CapturedBody } from '../capture-client'
 import { getCurrentTheme } from '../renderers/theme-adapter'
@@ -2642,17 +2643,35 @@ export class BlockManager {
     // чтение Map. Поштучный замер во время сериализации был бы N
     // принудительных раскладок в тот самый момент, когда блок подменяет
     // живую область.
-    let boxOf: Parameters<typeof serializeRange>[5]
+    let metric: RunMetric | undefined
     if (this._cellFit.begin()) {
       const candidates: FitCandidate[] = []
       collectFitCandidates(getLine, rec.outputStart, endLine, (chars, width, attrs) =>
         candidates.push({ chars, width, face: { bold: attrs.bold, italic: attrs.italic } }),
       )
       this._cellFit.warm(candidates)
-      boxOf = (chars, width, attrs) =>
-        this._cellFit.boxOf(chars, width, { bold: attrs.bold, italic: attrs.italic })
+      // Run geometry is run-geometry's verdict (its owner, ADR-0009 rules
+      // 1-3); the freeze hands it MEASUREMENTS only: the published cell
+      // width, the published row correction, and cell-fit's cache of
+      // measured advances with their box verdicts.
+      const geometry = this._cellFit.geometry()
+      if (geometry !== null) {
+        metric = {
+          cellWidth: geometry.cellWidth,
+          defaultSpacing: geometry.rowDelta,
+          advanceOf: (chars, cols, face) => this._cellFit.advanceOf(chars, cols, face),
+          boxOf: (chars, cols, face) => this._cellFit.boxOf(chars, cols, face),
+        }
+      }
     }
-    const outputHtml = serializeRange(snapshot, getLine, rec.outputStart, endLine, driftCols, boxOf)
+    const outputHtml = serializeRange(
+      snapshot,
+      getLine,
+      rec.outputStart,
+      endLine,
+      driftCols,
+      metric,
+    )
     // The DURABLE bodies, from the same rows and the same walk the frozen
     // block on screen is made of — so what comes back after a restart is
     // what was there, not a second reading of the buffer taken later.

@@ -2580,7 +2580,8 @@ export class BlockManager {
    *  state — status, exit code and duration land on the authenticated event
    *  alone; the running slot is freed and the ticker stops. The DOM is
    *  untouched: which rows belong to the block is the VISUAL freeze's
-   *  question, and it waits for the render fence or the deferral window. */
+   *  question, and it waits for the render fence's sighting — nothing
+   *  else (nocx-2v80t.3.2). */
   private _logicalFreeze(
     rec: BlockRecord,
     exitCode: number | null,
@@ -2601,9 +2602,8 @@ export class BlockManager {
 
   /** The VISUAL freeze: serialize the block's output region up to a boundary
    *  line and replace its running element with the frozen one. The boundary
-   *  is the render fence's line when it was sighted, or the current output
-   *  end when the deferral window settles; until this runs the block's rows
-   *  are not yet fixed. */
+   *  is the render fence's sighted line; until that sighting runs, the
+   *  block's rows are not yet fixed. */
   private _freezeVisual(
     rec: BlockRecord,
     getLine: GetLineFn,

@@ -183,8 +183,8 @@ export class ScrollbackController {
     this._blockManager = new BlockManager(this.scrollbackInner, this.xtermLiveContainer, {
       now,
       snapshotStore: opts.snapshotStore,
-      // A DEFERRED freeze landed inside the manager (the fence arrived, or
-      // the manager's deferral window elapsed): hand the block's rows to the
+      // A DEFERRED freeze landed inside the manager (the fence's sighting
+      // arrived): hand the block's rows to the
       // DOM and settle the live region exactly like a direct freeze, since
       // freezeFromAttempt already returned.
       onDeferredFreeze: (rec) => this._settleFrozen(rec),

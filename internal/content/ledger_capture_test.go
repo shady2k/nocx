@@ -184,10 +184,14 @@ func TestCaptureOutput_RefusesAnUnknownEntry(t *testing.T) {
 	}
 }
 
-// Output retention off: the command keeps its row and keeps no body, and the
+// Output retention off: the command keeps its row and keeps no BODY, and the
 // call SUCCEEDS. An error here would surface in front of a person who turned
-// the setting off on purpose.
-func TestCaptureOutput_StoresNothingWhenOutputRetentionIsOff(t *testing.T) {
+// the setting off on purpose. What the store records instead is the refusal
+// itself — a zero-byte artifact whose truncated says "suppressed" — so that
+// reading the capture later answers "nothing is kept" as the named state it
+// is, rather than an error about an id that does not exist. The read half of
+// the write answer (nocx-2v80t.2.6).
+func TestCaptureOutput_RecordsTheRefusalWhenOutputRetentionIsOff(t *testing.T) {
 	ctx := context.Background()
 	policy := content.NewPolicy()
 	policy.SetOutputEnabled(false)
@@ -201,7 +205,8 @@ func TestCaptureOutput_StoresNothingWhenOutputRetentionIsOff(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	led := db.Ledger()
 
-	in := aCapture(recordOne(t, led, "ls"), "00000000-0000-7000-8000-0000000000a6")
+	entryID := recordOne(t, led, "ls")
+	in := aCapture(entryID, "00000000-0000-7000-8000-0000000000a6")
 	stance, captureErr := led.CaptureOutput(ctx, in)
 	if captureErr != nil {
 		t.Fatalf("CaptureOutput with output retention off: %v, want nil", captureErr)
@@ -209,21 +214,17 @@ func TestCaptureOutput_StoresNothingWhenOutputRetentionIsOff(t *testing.T) {
 	if stance != content.SessionOutputRetentionOff {
 		t.Fatalf("stance = %q while output retention is off, want %q", stance, content.SessionOutputRetentionOff)
 	}
-	art, err := led.Artifact(ctx, in.ArtifactID)
-	if err != nil {
-		t.Fatalf("Artifact: %v", err)
-	}
-	if art != nil {
-		t.Fatal("an artifact was stored while output retention is off")
-	}
+	refusalMarkerOf(t, led, in, entryID)
 }
 
-// A sensitive entry keeps no body either, by the same shape. Nothing sets
-// that column today — RecordCompleted defaults every entry to normal — so
-// this check is currently unreachable through the product, and it is written
-// now because the alternative is remembering it on the day sensitivity
-// becomes settable.
-func TestCaptureOutput_StoresNothingForASensitiveEntry(t *testing.T) {
+// A sensitive entry keeps no body either, by the same shape — and the refusal
+// is recorded the same way, so a later read names it instead of answering an
+// error about an id that never was. Nothing sets that column today —
+// RecordCompleted defaults every entry to normal — so the marker half of this
+// check is currently unreachable through the product, and it is written now
+// because the alternative is remembering it on the day sensitivity becomes
+// settable.
+func TestCaptureOutput_RecordsTheRefusalForASensitiveEntry(t *testing.T) {
 	ctx := context.Background()
 	_, led := newLedger(t)
 
@@ -242,10 +243,7 @@ func TestCaptureOutput_StoresNothingForASensitiveEntry(t *testing.T) {
 	if stance != content.SessionOutputSensitive {
 		t.Fatalf("stance = %q for a sensitive entry, want %q", stance, content.SessionOutputSensitive)
 	}
-	art, _ := led.Artifact(ctx, in.ArtifactID)
-	if art != nil {
-		t.Fatal("a sensitive command's output was stored")
-	}
+	refusalMarkerOf(t, led, in, entryID)
 }
 
 // The ceiling on ONE artifact, checked inside the transaction against what
@@ -279,7 +277,7 @@ func TestCaptureOutput_RefusesAnArtifactPastTheCeiling(t *testing.T) {
 // an error, and it is read from the observation the execution PINNED rather
 // than from the environment's latest: what matters is what was true when the
 // command ran, not what somebody marked afterwards.
-func TestCaptureOutput_StoresNothingForACriticalEnvironment(t *testing.T) {
+func TestCaptureOutput_RecordsTheRefusalForACriticalEnvironment(t *testing.T) {
 	ctx := context.Background()
 	_, led := newLedger(t)
 	if err := led.EnsureEnvironment(ctx, content.Environment{
@@ -302,10 +300,7 @@ func TestCaptureOutput_StoresNothingForACriticalEnvironment(t *testing.T) {
 	if stance != content.SessionOutputCritical {
 		t.Fatalf("stance = %q in a critical environment, want %q", stance, content.SessionOutputCritical)
 	}
-	art, _ := led.Artifact(ctx, in.ArtifactID)
-	if art != nil {
-		t.Fatal("a critical environment's output was stored")
-	}
+	refusalMarkerOf(t, led, in, entryID)
 	// The command itself is still recorded: criticality decides what is kept
 	// ABOUT a command, never whether it happened.
 	if e, _ := led.Entry(ctx, entryID); e == nil {
@@ -442,16 +437,150 @@ func TestCaptureOutput_AnswerNamesOutputOff(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	led := db.Ledger()
 
-	in := aCapture(recordOne(t, led, "ls"), "00000000-0000-7000-8000-0000000000d4")
+	entryID := recordOne(t, led, "ls")
+	in := aCapture(entryID, "00000000-0000-7000-8000-0000000000d4")
 	stance, captureErr := led.CaptureOutput(ctx, in)
 	if captureErr != nil || stance != content.SessionOutputRetentionOff {
 		t.Fatalf("output off: stance = %q, err = %v; want %q, nil", stance, captureErr, content.SessionOutputRetentionOff)
 	}
-	art, err := led.Artifact(ctx, in.ArtifactID)
+	refusalMarkerOf(t, led, in, entryID)
+}
+
+// refusalMarkerOf is the shape every refusal records, asserted once: the
+// answer is DATA, not a body — a zero-byte artifact whose truncated says
+// "suppressed" (the store's own word for "capture was refused by policy"),
+// carrying the real entry and execution provenance so the read that answers
+// it is the read of THIS command's capture. The marker is what makes
+// ledger.artifact answer "nothing is kept" instead of an error about an id
+// that does not exist.
+func refusalMarkerOf(t *testing.T, led content.LedgerRepository, in content.CaptureOutput, entryID string) {
+	t.Helper()
+	art, err := led.Artifact(context.Background(), in.ArtifactID)
 	if err != nil {
-		t.Fatalf("Artifact: %v", err)
+		t.Fatalf("Artifact(%q): %v", in.ArtifactID, err)
 	}
-	if art != nil {
-		t.Fatal("an artifact was stored while output retention is off")
+	if art == nil {
+		t.Fatalf("the refusal recorded no marker at %q — a read of the capture would answer unknown-id, not the state", in.ArtifactID)
 	}
+	if art.ByteLen != 0 || len(art.Chunks) != 0 {
+		t.Fatalf("the marker at %q carries a body (%d bytes, %d chunks) — a refusal keeps no body", art.ID, art.ByteLen, len(art.Chunks))
+	}
+	if art.Truncated == nil || *art.Truncated != content.TruncSuppressed {
+		t.Fatalf("marker truncated = %v, want %q", art.Truncated, content.TruncSuppressed)
+	}
+	if art.CaptureMethod != content.CaptureNone {
+		t.Fatalf("marker capture method = %q, want %q — nothing was captured", art.CaptureMethod, content.CaptureNone)
+	}
+	if art.MediaType != in.MediaType {
+		t.Fatalf("marker media type = %q, want the asked-for %q", art.MediaType, in.MediaType)
+	}
+	if art.EntryID != entryID {
+		t.Fatalf("marker belongs to block %q, want %q", art.EntryID, entryID)
+	}
+	entry, _ := led.Entry(context.Background(), entryID)
+	if entry == nil {
+		t.Fatalf("Entry(%q) is nil", entryID)
+	}
+	if len(entry.Executions) != 1 || art.ExecutionID == nil || *art.ExecutionID != entry.Executions[0].ID {
+		t.Fatalf("marker names execution %v, want the entry's own", art.ExecutionID)
+	}
+}
+
+// The marker is idempotent the way a body is: the same refused capture
+// asking again (a retried ask whose first ack was lost) writes nothing the
+// second time.
+func TestCaptureOutput_TheRefusalMarkerIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	policy := content.NewPolicy()
+	policy.SetOutputEnabled(false)
+	db, err := content.Open(ctx, content.Config{
+		Path: t.TempDir() + "/content.db", Key: testKey(), Budget: testBudget, Policy: policy,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	led := db.Ledger()
+
+	in := aCapture(recordOne(t, led, "ls"), "00000000-0000-7000-8000-0000000000e1")
+	if _, capErr := led.CaptureOutput(ctx, in); capErr != nil {
+		t.Fatalf("first capture: %v", capErr)
+	}
+	if _, replayErr := led.CaptureOutput(ctx, in); replayErr != nil {
+		t.Fatalf("replayed capture: %v, want the replay to stay an answer", replayErr)
+	}
+	refusalMarkerOf(t, led, in, mustEntryIDOf(t, led, in.EntryID))
+}
+
+// A body can never land on a refusal marker's id. The reachable flip is a
+// retried ask under a policy that changed between the tries: the first ask
+// was refused (the marker), the retry arrives with retention back on. A
+// marker and a body are different objects, and this store never overwrites
+// one id with another — silently appending a body under truncated=suppressed
+// would be a row that lies both ways.
+func TestCaptureOutput_ABodyCannotLandOnARefusalMarker(t *testing.T) {
+	ctx := context.Background()
+	policy := content.NewPolicy()
+	policy.SetOutputEnabled(false)
+	db, err := content.Open(ctx, content.Config{
+		Path: t.TempDir() + "/content.db", Key: testKey(), Budget: testBudget, Policy: policy,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	led := db.Ledger()
+
+	in := aCapture(recordOne(t, led, "ls"), "00000000-0000-7000-8000-0000000000e2")
+	if _, capErr := led.CaptureOutput(ctx, in); capErr != nil {
+		t.Fatalf("refused capture: %v", capErr)
+	}
+	policy.SetOutputEnabled(true)
+	if _, err := led.CaptureOutput(ctx, in); !errors.Is(err, content.ErrIDConflict) {
+		t.Fatalf("body onto a marker: err = %v, want ErrIDConflict", err)
+	}
+	refusalMarkerOf(t, led, in, mustEntryIDOf(t, led, in.EntryID))
+}
+
+// And the mirror: a body stored while retention was on stays a body when a
+// later ask for the same id is refused — the marker never overwrites it, and
+// the read still answers the body that exists.
+func TestCaptureOutput_ARefusalNeverOverwritesAStoredBody(t *testing.T) {
+	ctx := context.Background()
+	policy := content.NewPolicy()
+	db, err := content.Open(ctx, content.Config{
+		Path: t.TempDir() + "/content.db", Key: testKey(), Budget: testBudget, Policy: policy,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	led := db.Ledger()
+
+	in := aCapture(recordOne(t, led, "ls"), "00000000-0000-7000-8000-0000000000e3")
+	if _, capErr := led.CaptureOutput(ctx, in); capErr != nil {
+		t.Fatalf("kept capture: %v", capErr)
+	}
+	policy.SetOutputEnabled(false)
+	stance, err := led.CaptureOutput(ctx, in)
+	if err != nil {
+		t.Fatalf("refused replay: %v, want nil (a refusal, not a failure)", err)
+	}
+	if stance != content.SessionOutputRetentionOff {
+		t.Fatalf("stance = %q, want outputOff", stance)
+	}
+	if got := bodyOf(t, led, in.ArtifactID); got != capturedBody {
+		t.Fatalf("body = %q, want %q — the refusal must not have touched it", got, capturedBody)
+	}
+}
+
+// mustEntryIDOf re-answers the entry an input names, so the marker assertion
+// can check provenance without the caller threading the id twice.
+func mustEntryIDOf(t *testing.T, led content.LedgerRepository, entryID string) string {
+	t.Helper()
+	entry, err := led.Entry(context.Background(), entryID)
+	if err != nil || entry == nil {
+		t.Fatalf("Entry(%q) = %v, %v", entryID, entry, err)
+	}
+	return entry.ID
 }

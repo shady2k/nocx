@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/emulator"
+	"github.com/shady2k/nocx/internal/emulator/ghostty/ghosttytest"
 )
 
 // The tests below drive the PORT — emulator.Terminal — like every other test
@@ -380,9 +381,9 @@ func TestHistoryRowsCostOneGridResolutionPerRow(t *testing.T) {
 
 	// 16 rows of history, 80 columns each: 1280 positions from 16 resolutions.
 	const rows = 16
-	before := gridResolutions()
+	before := ghosttytest.GridResolutions()
 	page := histPage(t, term, 0, rows)
-	after := gridResolutions()
+	after := ghosttytest.GridResolutions()
 	if len(page.Rows) != rows {
 		t.Fatalf("rows returned: %d, want %d", len(page.Rows), rows)
 	}

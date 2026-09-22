@@ -329,6 +329,10 @@ type localHelperOpener struct {
 	// same machine. What is watched changed owner; who watches did not.
 	procs               procwatch.Watcher
 	reportShellReplaced func(sid, observed string)
+	// publishScreen is the screen plane's transport half, bound late by the
+	// composition root once the transport exists (the opener itself is built
+	// before it). Nil is a legitimate wiring and registers no observer.
+	publishScreen func(sid session.ID, revision uint64, doc []byte) bool
 	// noteChildDomainParent records the two facts a nested sudo/su needs
 	// about the pane it is opened inside: which transport its parent's
 	// lifecycle lane rides, and which session that lane speaks for
@@ -638,6 +642,7 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 	spawn := hostedSpawn{
 		client: c, registry: o.registry,
 		lifecycle: o.kernel, loss: o.lifecycleLoss,
+		publishScreen: o.publishScreen,
 		// The handshake bound, stated here rather than left to the adapter:
 		// how long a shell may take to prove itself before the pane falls
 		// back to a conventional terminal is a product decision, and this is

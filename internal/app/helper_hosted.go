@@ -65,7 +65,13 @@ type hostedSpawn struct {
 	// same adapter. Zero keeps the adapter's default, which is what the
 	// remote hosted route has always used.
 	helloTimeout time.Duration
-	log          *slog.Logger
+	// publishScreen is the screen plane's transport half: one reassembled
+	// session.frame document, published to the pane's subscriber on the
+	// data plane's reserved seat. Nil is a legitimate wiring — a server
+	// built without a transport — and registers no observer rather than
+	// dropping frames nobody asked for.
+	publishScreen func(sid session.ID, revision uint64, doc []byte) bool
+	log           *slog.Logger
 }
 
 // hostedSpawnResult is what the three acts produced, as facts rather than as a
@@ -245,6 +251,23 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 				Responsive: responsive,
 				RoundTrip:  time.Duration(roundTripMS) * time.Millisecond,
 			})
+		})
+	}
+
+	// THE SCREEN DRAIN'S PUBLISH (nocx-zg3k3.2.2): every full snapshot the
+	// runtime publishes for this subscriber goes to the transport's screen
+	// plane, named by the session the pane is adopted under — which is this
+	// helper session's own id, the one the adoption carries. The carrier's
+	// own losses are not silent either: they are logged here, with the
+	// assembler's named reason, at the one place that knows both ends.
+	if h.publishScreen != nil {
+		screenSid := session.ID(entry.HostSessionID.Session)
+		attached.OnScreenFrame(func(revision uint64, doc []byte) {
+			h.publishScreen(screenSid, revision, doc)
+		})
+		attached.OnScreenLost(func(reason string) {
+			log.From(ctx).Warn("screen assembly lost on the carrier",
+				"session", string(screenSid), "reason", reason)
 		})
 	}
 

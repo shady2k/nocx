@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/spawn"
@@ -595,4 +596,38 @@ func domainRefusal(err error) string {
 		return "ErrNotAWorktree"
 	}
 	return ""
+}
+
+// TestAddWorktreeRemovesTheBranchItCreatedWhenTheCallersDeadlineIsSpent is the
+// failure this pair was missing, and it is the one that reached a user's
+// repository (nocx-tlfoj).
+//
+// The cleanup above runs on the CALLER'S context, and the most common reason
+// the add failed at all is that that context ran out: the registrar gives the
+// spawn and the enrolment one budget together (internal/workers/registrar.go,
+// "covers spawn and enrolment"), and on a machine where `git worktree add`
+// does not fit inside it, git creates the branch and then the add is killed.
+// Every call discardBranch makes is then refused by the same spent context, so
+// the branch the call is returning an error about stays in the repository.
+//
+// It is asserted through the ERROR's text rather than through git, because the
+// fake is where a spent deadline can be arranged without a race: what the
+// caller must never see is the cleanup reporting that it could not run.
+func TestAddWorktreeRemovesTheBranchItCreatedWhenTheCallersDeadlineIsSpent(t *testing.T) {
+	env, wtPath := withFakeWorktree(t, map[string]string{
+		"FAKE_BRANCH_TIP": "absent_then_present",
+		"FAKE_WORKTREE":   "slow",
+	})
+	repo := openRepo(t, env, t.TempDir())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err := repo.AddWorktree(ctx, "worker-1", "master", wtPath)
+	if err == nil {
+		t.Fatal("AddWorktree succeeded with an add that outlived the caller's budget")
+	}
+	if strings.Contains(err.Error(), "could not be removed") {
+		t.Fatalf("err = %v\nwant the branch removed anyway: a cleanup bounded by the deadline that killed the work it cleans up can never run, and leaves the branch in the repository", err)
+	}
 }

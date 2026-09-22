@@ -795,27 +795,50 @@ jobs:
     if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    # ONE JOB PER BROWSER, and the split is about wall clock, not coverage:
-    # both projects still run, they run at the same time. The suite is 314
-    # tests on ONE worker (playwright.config.ts explains why one: the default
-    # must assume the process is not alone on the machine), which measured
-    # 21 minutes of test time inside a 23-minute job — and half of it is the
-    # second browser repeating the first browser's walk.
+    # ONE JOB PER BROWSER PER SHARD, and the split is about wall clock, not
+    # coverage: every project still runs and every test still runs, they run at
+    # the same time. The suite is one Playwright worker per job
+    # (playwright.config.ts explains why one: the default must assume the
+    # process is not alone on the machine), and one worker is what makes wall
+    # clock grow with the test count alone.
     #
-    # Splitting by PROJECT rather than raising the worker count is the safe
-    # half of the same idea. The stand is one nocx-server plus one vite per
-    # run, and specs share it: two workers would put two browsers on one
-    # backend, one profile store and one settings document, which is a
-    # different bug hunt. Two runners each bring up their own stand and
-    # cannot see each other at all.
+    # WHY THIS GREW A SECOND AXIS (nocx-j247a). The per-browser split above was
+    # measured at 21 minutes of test time in a 23-minute job. It is no longer:
+    # #224, #220 and #219 each ran 33–37 minutes green against the 40 above,
+    # and #226 was cut at 40m34s with no summary at all. Three minutes of
+    # headroom is not a margin, it is a coin toss, and a job that ends on the
+    # clock reports nothing a reader can act on.
+    #
+    # AND THERE IS NO SLOW TEST TO REMOVE INSTEAD. Measured on #226's chromium
+    # log: 285 tests, 31.3 minutes of test time, MEDIAN TEST 3.9 SECONDS, the
+    # twelve slowest together 23% of it. The suite is ~300 tests at four to six
+    # seconds each; deleting the two worst buys three minutes of thirty-seven.
+    # Running them at once is the only lever with the size of the problem.
+    #
+    # SHARDING RATHER THAN RAISING THE WORKER COUNT, for the reason this job
+    # already gave for splitting by project. The stand is one nocx-server plus
+    # one vite per run, and specs share it: two workers would put two browsers
+    # on one backend, one profile store and one settings document, which is a
+    # different bug hunt. Two runners each bring up their own stand and cannot
+    # see each other at all — and a shard is another runner, so it inherits
+    # that isolation whole rather than needing its own argument.
     #
     # `matrix.project` is the name playwright.config.ts resolves through
-    # PW_PROJECTS, so the local runner is unchanged: e2e/run-in-container.sh
-    # with no variable still runs both, exactly as this job did before.
+    # PW_PROJECTS, and `--shard` is Playwright's own, passed through by
+    # e2e/run-in-container.sh, which forwards everything after the script name
+    # to `playwright test`. THE LOCAL RUNNER IS UNCHANGED — the owner's
+    # decision of 2026-09-22: e2e/run-in-container.sh with no variables and no
+    # arguments still runs both browsers, the whole suite, in one worker.
+    #
+    # Both lists' lengths are written again in the run step's env, because
+    # GitHub gives no expression for a matrix leg's own length. They are not
+    # trusted to stay in step: the run step multiplies them and fails the job
+    # when the product stops matching the matrix.
     strategy:
       fail-fast: false
       matrix:
         project: [chromium, webkit]
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v7
 
@@ -911,19 +934,48 @@ jobs:
       #
       # The image is the one built above, and the caches are on the host; the
       # container reaches both through the two variables here.
+      #
+      # `--shard` rides through as an argument because the script forwards
+      # everything after its name to `playwright test`; it is not an env var
+      # and deliberately has no default, so a run that names no shard runs the
+      # whole suite. The guard is the first line: SHARD_TOTAL is duplicated
+      # between the matrix list and this flag, and a mismatch would silently
+      # drop or repeat tests rather than fail, so it is checked out loud.
       - name: e2e (container)
-        run: e2e/run-in-container.sh
+        run: |
+          set -euo pipefail
+          legs=${{ strategy.job-total }}
+          if [ "$legs" -ne "$(( PROJECT_TOTAL * SHARD_TOTAL ))" ]; then
+            echo "The matrix has $legs legs, but PROJECT_TOTAL=$PROJECT_TOTAL and SHARD_TOTAL=$SHARD_TOTAL multiply to $(( PROJECT_TOTAL * SHARD_TOTAL ))." >&2
+            echo "A list and its total disagree in .github/workflows/ci.yml — fix both. Left alone, the shards no longer cover the suite and the tests in the missing shard simply never run." >&2
+            exit 1
+          fi
+          e2e/run-in-container.sh --shard="${{ matrix.shard }}/$SHARD_TOTAL"
         env:
+          # The two totals are the matrix lists' lengths, written again because
+          # GitHub has no expression for a matrix leg's own length. Keeping them
+          # here, side by side and next to the guard that multiplies them, is
+          # what makes the duplication survivable: the guard fails the run when
+          # either list is edited and its total is not. It is checked at all
+          # because the dangerous direction is silent — raise SHARD_TOTAL
+          # without adding the shard to the list and nothing errors, the last
+          # shard's tests are simply never run, and the suite goes green having
+          # skipped them.
+          PROJECT_TOTAL: 2
+          SHARD_TOTAL: 2
           PW_PROJECTS: ${{ matrix.project }}
           NOCX_E2E_IMAGE: nocx-e2e:local
           NOCX_E2E_CACHE_ROOT: ${{ runner.temp }}/nocx-e2e-cache
 
-      # Named per project: two jobs uploading one name is a collision, and
-      # the trace you want is the one from the browser that failed.
+      # Named per project AND per shard: two jobs uploading one name is a
+      # collision, and the trace you want is the one from the browser and the
+      # shard that failed. The shard belongs in the name for the same reason
+      # the project did — without it the four legs are two pairs fighting over
+      # two names.
       - name: Upload traces
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: playwright-traces-${{ matrix.project }}
+          name: playwright-traces-${{ matrix.project }}-${{ matrix.shard }}
           path: test-results/
           retention-days: 7

@@ -31,7 +31,9 @@ import (
 //	                  (the base does not name a commit); default "ok"
 //	FAKE_REVLIST      "fail" makes rev-list exit 128; default answers
 //	FAKE_REVLIST_COUNT the integer rev-list --count prints (default 0)
-//	FAKE_WORKTREE      "fail" makes worktree add/remove exit 128; default ok
+//	FAKE_WORKTREE      "fail" makes worktree add/remove exit 128; "slow" makes
+//	                  add print its first line and then hang, so a caller's
+//	                  deadline expires mid-add; default ok
 //	FAKE_WORKTREE_MAIN the main checkout the listing prints (default /tmp/fake)
 //	FAKE_WORKTREE_PATH the linked worktree the listing prints
 //	                  (default /tmp/fake/wt)
@@ -350,6 +352,12 @@ case "$1" in
       add|remove|lock|unlock)
         case "${FAKE_WORKTREE:-ok}" in
           fail) echo "fatal: '${FAKE_WORKTREE_PATH:-/tmp/fake/wt}' already exists" >&2; exit 128 ;;
+          # slow is the add that outlives its caller's budget: git has
+          # already made the branch ("Preparing worktree" is printed before
+          # the checkout it names) and is still working when the context
+          # kills it. It is the only way to arrange that sequence without a
+          # race, and the sequence is the one a real slow machine produces.
+          slow) echo "Preparing worktree" >&2; sleep 1000 ;;
           *) echo "Preparing worktree" >&2; exit 0 ;;
         esac ;;
     esac

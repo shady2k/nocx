@@ -72,6 +72,24 @@ describe('pixel to cell and back at two zoom levels', () => {
     expect(m.pixelToCell(p.x + 15.5, 5)?.col).toBe(1)
   })
 
+  it('resolves a spacerHead column forward to the wide cluster that follows it', () => {
+    // The head spacer (wire width 4) stands BEFORE its cluster: 漢 at
+    // cols 1-2, its head at col 0, plain z at col 3.
+    const HEAD_ROW: CellSpec[] = [
+      ['', 4, false],
+      ['漢', 2, true],
+      ['', 3, false],
+      ['z', 1, true],
+    ]
+    const { painter, mapping } = mounted(8)
+    painter.apply(snapshotOf(frameOf(1, [HEAD_ROW], undefined, ZOOM1)))
+    const m = mapping()
+    if (m === null) throw new Error('no mapping after apply')
+
+    expect(m.pixelToCell(4, 5)).toEqual({ col: 1, row: 0 })
+    expect(m.pixelToCell(19, 5)?.col).toBe(1)
+  })
+
   it('round-trips a boxed cell by its rectangle, not its scaled ink', () => {
     const { painter, mapping } = mounted(8)
     painter.apply(snapshotOf(frameOf(1, [INKY_ROW], undefined, ZOOM1)))

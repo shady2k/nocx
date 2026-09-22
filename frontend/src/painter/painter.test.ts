@@ -196,9 +196,15 @@ describe('the cursor overlay', () => {
     const cursor = surface.querySelector('.term-grid-cursor')
     if (!(cursor instanceof HTMLElement)) throw new Error('no cursor overlay')
     expect(cursor.hidden).toBe(false)
-    // cellToPixel(1, 2) on the committed geometry: x = 1 × 8, y = 2 × 20.
-    expect(cursor.style.left).toBe('8px')
-    expect(cursor.style.top).toBe('40px')
+    // The overlay's position IS the mapping's answer for the runtime's
+    // cell — asserted as an agreement with painter.mapping(), not as
+    // numbers the test recomputed.
+    const m = painter.mapping()
+    if (m === null) throw new Error('no mapping after apply')
+    const p = m.cellToPixel(1, 2)
+    if (p === null) throw new Error('cellToPixel refused the cursor cell')
+    expect(cursor.style.left).toBe(`${p.x}px`)
+    expect(cursor.style.top).toBe(`${p.y}px`)
     expect(cursor.style.width).toBe('8px')
     expect(cursor.style.height).toBe('20px')
   })

@@ -679,6 +679,14 @@ type Consumers interface {
 	// Lost reports a consumer going away. It cancels no admitted input and
 	// revokes no control — losing a watcher is not losing the terminal.
 	Lost()
+	// Detach removes a consumer that has gone away. The payloads the runtime
+	// still held for it are released and their allowance refunded to the
+	// session's account, because a departed reader must never keep spending
+	// what a live one needs: MaxPendingFrames is the bound of what the
+	// runtime holds for consumers that EXIST. Effects it held are dropped
+	// unreported — at-most-once permits zero deliveries, and there is no
+	// reader left to tell.
+	Detach(c Consumer)
 }
 
 // IntentRecord is one intent this incarnation admitted and where it got to. The

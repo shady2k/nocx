@@ -1468,6 +1468,34 @@ func (m *model) Resend() error { return m.resendState() }
 // what ruleObserverLossIsNotControlLoss refuses.
 func (m *model) Lost() { m.observerLost() }
 
+// Detach removes a consumer that has gone away, mirroring the runtime: the
+// frames it held are refunded to the account when
+// ruleTakeRefundsTheAllowance is on — the same rule, because a departed
+// reader's held frames are exactly what a take would have refunded — and the
+// effects it held are dropped unreported, which at-most-once permits.
+func (m *model) Detach(c Consumer) {
+	con, ok := c.(*consumer)
+	if !ok {
+		return
+	}
+	for i, held := range m.consumers {
+		if held == con {
+			m.consumers = append(m.consumers[:i], m.consumers[i+1:]...)
+			break
+		}
+	}
+	// Everything it held is released — frames and effects alike — and the
+	// account is refunded for all of it when the refund rule is on: these
+	// are exactly the payloads a take would have released, held now by
+	// nobody.
+	held := len(con.queue)
+	if held > 0 && con.refund {
+		con.budget.give(con.account, held)
+	}
+	con.queue = nil
+	con.stale = false
+}
+
 // attach adds a consumer to this session, naming the account its queue will
 // draw on and whether a take refunds it — both fixed here because the rules
 // and the incarnation are.

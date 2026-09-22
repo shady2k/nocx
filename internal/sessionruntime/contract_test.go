@@ -2288,6 +2288,71 @@ func TestSchedule_ConsumerThatKeepsUp_FailsWhenItsRefundRuleIsRemoved(t *testing
 	assertionFailed(t, err, "take/the-allowance-is-refunded")
 }
 
+func TestDetachedConsumerStopsSpendingTheAllowance(t *testing.T) {
+	m := newModel(allRules())
+	wedged := m.Consumers().Attach()
+	for range MaxPendingFrames {
+		if err := m.Ingest([]byte("fill the queue\r\n")); err != nil {
+			t.Fatalf("ingest: %v", err)
+		}
+	}
+	m.Consumers().Detach(wedged)
+
+	// The drain's owed assertion, at the contract's level: a departed
+	// reader stops spending the session's allowance, so the reader that
+	// stays is never capped by payloads nobody will ever take away.
+	reader := m.Consumers().Attach()
+	for range MaxPendingFrames {
+		if err := m.Ingest([]byte("the reader stays\r\n")); err != nil {
+			t.Fatalf("ingest: %v", err)
+		}
+	}
+	if got := reader.Take(); len(got) != MaxPendingFrames {
+		t.Fatalf("a fresh reader after a detach received %d of %d revisions: a departed consumer must not starve a live one", len(got), MaxPendingFrames)
+	}
+}
+
+func TestDetachedConsumerReleasesHeldEffectsToo(t *testing.T) {
+	m := newModel(allRules())
+	wedged := m.Consumers().Attach()
+	// A mixed queue: effects first, then frames up to the account's bound.
+	for id := EffectID(1); id <= 3; id++ {
+		if err := m.Consumers().Offer(Effect{ID: id, At: m.Incarnation(), Kind: EffectNotification, Body: []byte("note")}); err != nil {
+			t.Fatalf("offer %d: %v", id, err)
+		}
+	}
+	for range MaxPendingFrames - 3 {
+		if err := m.Ingest([]byte("frame line\r\n")); err != nil {
+			t.Fatalf("ingest: %v", err)
+		}
+	}
+	if wedged.Pending() != MaxPendingFrames {
+		t.Fatalf("setup: the wedged consumer holds %d payloads, want %d", wedged.Pending(), MaxPendingFrames)
+	}
+	m.Consumers().Detach(wedged)
+
+	// The account is whole again: a fresh reader takes every revision with
+	// nothing shed and nothing lost — the departed reader's effects and
+	// frames released every payload they spent.
+	reader := m.Consumers().Attach()
+	for range MaxPendingFrames {
+		if err := m.Ingest([]byte("the reader stays\r\n")); err != nil {
+			t.Fatalf("ingest: %v", err)
+		}
+	}
+	got := reader.Take()
+	// The one shed payload is the reader's OWN baseline — the snapshot its
+	// mid-session attach handed it, superseded by the full snapshots that
+	// followed. It is not a cap the departed consumer left behind: every
+	// revision published after the attach arrived, and the newest one is
+	// what the take ends on.
+	last := got[len(got)-1]
+	if len(got) != MaxPendingFrames || reader.Coalesced() != 1 || reader.EffectsLost() != 0 || last.Revision != m.Revision() {
+		t.Fatalf("a fresh reader after a mixed-queue detach took %d frames (coalesced=%d effectsLost=%d lastRev=%d wantRev=%d): the departed reader must release everything it held",
+			len(got), reader.Coalesced(), reader.EffectsLost(), last.Revision, m.Revision())
+	}
+}
+
 func TestReadyIsSignalledWhenAPayloadArrives(t *testing.T) {
 	m := newModel(allRules())
 	c := m.Consumers().Attach()

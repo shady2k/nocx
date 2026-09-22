@@ -324,6 +324,15 @@ func (h *Host) SendSessionData(f proto.SessionFrame) error {
 	return h.write(proto.TypeSessionData, proto.EncodeSessionFrame(f))
 }
 
+// SendScreenFrame writes one screen-plane frame to the wire: one part of one
+// full snapshot the session's runtime published, for the subscriber the frame
+// names. It lives on the host for the reason SendSessionData does — the wire
+// and its writer mutex are the host's, and a second writer would interleave
+// mid-frame.
+func (h *Host) SendScreenFrame(f proto.ScreenDataFrame) error {
+	return h.write(proto.TypeScreenFrame, proto.EncodeScreenDataFrame(f))
+}
+
 // SendLifecycleData writes raw lifecycle bytes on their dedicated carrier tag.
 // The helper never decodes the payload; the coordinator's lifecycle adapter
 // remains the sole semantic owner.

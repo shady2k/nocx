@@ -207,6 +207,7 @@ type recordingSink struct {
 	mu              sync.Mutex
 	frames          []proto.SessionFrame
 	lifecycleFrames []proto.SessionFrame
+	screenFrames    []proto.ScreenDataFrame
 	notes           []proto.Notification
 	err             error
 	// arrived is a generation channel — closed and replaced on every
@@ -261,6 +262,17 @@ func (s *recordingSink) SendLifecycleData(f proto.SessionFrame) error {
 		return s.err
 	}
 	s.lifecycleFrames = append(s.lifecycleFrames, f)
+	s.wake()
+	return nil
+}
+
+func (s *recordingSink) SendScreenFrame(f proto.ScreenDataFrame) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return s.err
+	}
+	s.screenFrames = append(s.screenFrames, f)
 	s.wake()
 	return nil
 }

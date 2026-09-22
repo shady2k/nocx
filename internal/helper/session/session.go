@@ -11,6 +11,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	nocxlog "github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/sessionruntime"
 )
 
@@ -229,6 +230,11 @@ type Sink interface {
 	SendSessionData(proto.SessionFrame) error
 	SendLifecycleData(proto.SessionFrame) error
 	SendNotification(proto.Notification) error
+	// SendScreenFrame writes one screen-plane frame: one part of one full
+	// snapshot the session's runtime published, for the subscriber the
+	// frame names. The drain that parks on the runtime's Ready is its only
+	// caller.
+	SendScreenFrame(proto.ScreenDataFrame) error
 }
 
 // push. It is AD-10's own constant and the same value internal/transport uses,
@@ -250,6 +256,14 @@ const creditLimit = 64 * 1024
 type subscriber struct {
 	id  proto.SubscriberID
 	raw [16]byte
+
+	// screenCons is this subscriber's own consumer of the session runtime's
+	// screen deliveries, and screenDone closes when its drain ends. One per
+	// subscriber, because what each reader of the screen is owed differs:
+	// a mid-session attacher is owed one snapshot at the current revision
+	// while an established reader is owed the stream.
+	screenCons sessionruntime.Consumer
+	screenDone chan struct{}
 
 	// sent is where this reader's pump has pushed to; acked is what the
 	// reader confirmed receiving. sent − max(acked, base) is what is in
@@ -595,7 +609,8 @@ func (s *hostSession) attach(p proto.AttachParams, sink Sink, mintAttachment fun
 		lifecycleSent: lifecycleResume.From, lifecycleAcked: lifecycleResume.From,
 		wake: newGate(), lifecycleWake: newGate(),
 		stop: stop, done: make(chan struct{}), lifecycleDone: make(chan struct{}),
-		sink: sink, attachment: att,
+		screenDone: make(chan struct{}),
+		sink:       sink, attachment: att,
 	}
 	s.subs[p.Subscriber] = sub
 	s.attachments[att] = &attachment{id: att, subscriber: p.Subscriber, sink: sink}
@@ -620,6 +635,17 @@ func (s *hostSession) attach(p proto.AttachParams, sink Sink, mintAttachment fun
 	s.mu.Unlock()
 	s.stopSubscriber(old)
 	go s.serve(ctx, sub, log)
+	if s.runtime != nil {
+		// The screen drain: one consumer per subscriber, because the
+		// runtime owes each reader its own stream. It ends with the
+		// attachment, and stopSubscriber releases the consumer — its held
+		// payloads refunded — so a departed reader never spends the
+		// session's allowance.
+		sub.screenCons = s.runtime.Consumers().Attach()
+		go s.serveScreen(ctx, sub, sub.screenCons)
+	} else {
+		close(sub.screenDone)
+	}
 	if s.lifecycleWin != nil {
 		go s.serveLifecycle(ctx, sub, log)
 	} else {
@@ -713,6 +739,47 @@ func (s *hostSession) serve(ctx context.Context, sub *subscriber, log *slog.Logg
 		case <-acked:
 		case <-ctx.Done():
 			return
+		}
+	}
+}
+
+// serveScreen is one subscriber's screen drain: it parks on the runtime's
+// Ready, Takes the full snapshots the runtime owes it, splits each for the
+// carrier and sends the parts. Take refunds the allowance, so a reader that
+// keeps up is never capped by what it has already taken away; a reader that
+// stops reading is capped, coalesced and told — the runtime's own bound, not
+// this pump's. The pump ends with its attachment; stopSubscriber then
+// detaches the consumer, which releases whatever was still held.
+func (s *hostSession) serveScreen(ctx context.Context, sub *subscriber, cons sessionruntime.Consumer) {
+	// The attachment context is the drain's: the logger it carries is the
+	// one the connection bound, with module and trace already on it.
+	log := nocxlog.From(ctx)
+	defer close(sub.screenDone)
+	for {
+		select {
+		case <-cons.Ready():
+		case <-ctx.Done():
+			return
+		}
+		for _, frame := range cons.Take() {
+			parts, err := proto.SplitScreenDataFrame(s.raw, sub.raw, uint64(frame.Revision), frame.Bytes)
+			if err != nil {
+				// The sender half of the carrier's named refusal: a
+				// document the carrier cannot assemble is a screen the
+				// subscriber is TOLD it lost, never a silent drop.
+				log.Warn("screen frame not carriable", "session", s.id.Session,
+					"subscriber", sub.id, "revision", uint64(frame.Revision), "err", err)
+				continue
+			}
+			for _, p := range parts {
+				if err := sub.sink.SendScreenFrame(p); err != nil {
+					// The wire died. The attachment goes; the session, the
+					// window, the process and the runtime do not (D2).
+					log.Warn("screen frame not delivered", "session", s.id.Session,
+						"subscriber", sub.id, "revision", uint64(frame.Revision), "err", err)
+					return
+				}
+			}
 		}
 	}
 }
@@ -891,6 +958,17 @@ func (s *hostSession) stopSubscriber(sub *subscriber) {
 	sub.lifecycleWake.signal()
 	<-sub.done
 	<-sub.lifecycleDone
+	if sub.screenDone != nil {
+		<-sub.screenDone
+	}
+	// The drain has ended, so nothing holds the consumer but the session:
+	// detaching releases whatever it still held, refunded to the session's
+	// account. A departed reader never keeps spending a live one's
+	// allowance.
+	if sub.screenCons != nil && s.runtime != nil {
+		s.runtime.Consumers().Detach(sub.screenCons)
+		sub.screenCons = nil
+	}
 }
 
 // So do the attachments of every other connection, which is what makes this

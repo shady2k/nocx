@@ -483,3 +483,63 @@ func TestAWedgedConsumerCostsBoundedMemory(t *testing.T) {
 		t.Fatalf("the flood was shed for a consumer that never reads and reported as coalesced=%d stale=%v, want a reported loss", wedged.Coalesced(), wedged.Stale())
 	}
 }
+
+// The real twin of the model's detach assertion: a consumer that goes away
+// releases the payloads it held and stops spending the session's allowance,
+// so the subscriber that attaches next is served from a full account.
+func TestADetachedConsumerReleasesTheAllowance(t *testing.T) {
+	s, _, _ := realRuntime(t)
+	wedged := s.Consumers().Attach()
+	for range MaxPendingFrames {
+		if err := s.Ingest([]byte("fill the queue\r\n")); err != nil {
+			t.Fatalf("ingest: %v", err)
+		}
+	}
+	s.Consumers().Detach(wedged)
+
+	reader := s.Consumers().Attach()
+	for range MaxPendingFrames {
+		if err := s.Ingest([]byte("the reader stays\r\n")); err != nil {
+			t.Fatalf("ingest: %v", err)
+		}
+	}
+	if got := reader.Take(); len(got) != MaxPendingFrames {
+		t.Fatalf("a fresh reader after a detach received %d of %d revisions", len(got), MaxPendingFrames)
+	}
+}
+
+// The real twin: a mixed queue of effects and frames detaches whole, and the
+// account it returns to serves a fresh reader without a single shed.
+func TestADetachedConsumerReleasesHeldEffectsToo(t *testing.T) {
+	s, _, _ := realRuntime(t)
+	wedged := s.Consumers().Attach()
+	for id := EffectID(1); id <= 3; id++ {
+		if err := s.Consumers().Offer(Effect{ID: id, At: s.Incarnation(), Kind: EffectNotification, Body: []byte("note")}); err != nil {
+			t.Fatalf("offer %d: %v", id, err)
+		}
+	}
+	for range MaxPendingFrames - 3 {
+		if err := s.Ingest([]byte("frame line\r\n")); err != nil {
+			t.Fatalf("ingest: %v", err)
+		}
+	}
+	s.Consumers().Detach(wedged)
+
+	reader := s.Consumers().Attach()
+	for range MaxPendingFrames {
+		if err := s.Ingest([]byte("the reader stays\r\n")); err != nil {
+			t.Fatalf("ingest: %v", err)
+		}
+	}
+	got := reader.Take()
+	// The one shed payload is the reader's OWN baseline — the snapshot its
+	// mid-session attach handed it, superseded by the full snapshots that
+	// followed. It is not a cap the departed consumer left behind: every
+	// revision published after the attach arrived, and the newest one is
+	// what the take ends on.
+	last := got[len(got)-1]
+	if len(got) != MaxPendingFrames || reader.Coalesced() != 1 || reader.EffectsLost() != 0 || last.Revision != s.Revision() {
+		t.Fatalf("a fresh reader after a mixed-queue detach took %d frames (coalesced=%d effectsLost=%d lastRev=%d wantRev=%d): the departed reader must release everything it held",
+			len(got), reader.Coalesced(), reader.EffectsLost(), last.Revision, s.Revision())
+	}
+}

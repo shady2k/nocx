@@ -1734,6 +1734,36 @@ func (s *Session) Resend() error {
 // control: losing a watcher is not losing the terminal.
 func (s *Session) Lost() {}
 
+// Detach removes a consumer that has gone away — a subscriber whose pump
+// ended, whose wire died, whose reader is gone. The queue it held is drained
+// under the same lock the enqueue path holds, and what it held is refunded
+// to the session's account: a departed reader never keeps spending the
+// allowance a live one needs. The hand-over that Take performs is not
+// performed — there is no reader to hand to — so this is Take's refund
+// without Take's delivery, and a consumer's staleness dies with it.
+func (s *Session) Detach(c Consumer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sub, ok := c.(*subscriber)
+	if !ok {
+		return
+	}
+	for i, held := range s.consumers {
+		if held == sub {
+			s.consumers = append(s.consumers[:i], s.consumers[i+1:]...)
+			break
+		}
+	}
+	// Effects the departed reader held go with it: at-most-once permits zero
+	// deliveries, and there is nobody left to tell. The refund counts every
+	// payload released — the allowance counts payloads held, and these are
+	// held by nobody now.
+	removed := len(sub.queue)
+	sub.queue = nil
+	sub.stale = false
+	s.allowance.give(sub.account, removed)
+}
+
 // publishedFrame is one encoded frame the runtime remembers: the revision
 // its cells were read at, and the session.frame bytes that describe them.
 // The bytes are shared with every queue they were delivered to and are never

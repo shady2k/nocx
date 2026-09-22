@@ -70,6 +70,15 @@ const (
 	// type would resync through a live sftp stream rather than dropping one
 	// frame. Recognising it is what makes that one dropped stream.
 	TypeChannelData FrameType = 12
+	// TypeScreenFrame carries the session's screen — the full snapshot the
+	// session runtime publishes per revision — keyed by the host session id
+	// and the subscriber it is for, the revision in its header, on its own
+	// plane rather than as a second meaning for TypeSessionData: JSON screen
+	// frames fed into the raw PTY carrier would corrupt the byte stream
+	// every downstream consumer reads, and the two are routed by different
+	// services off different fields. See screen_frame.go for the layout and
+	// the carrier-side reassembly of an oversize frame's parts.
+	TypeScreenFrame FrameType = 13
 )
 
 // valid reports whether the type belongs to the closed set above. A byte
@@ -77,7 +86,7 @@ const (
 // trusting anything after it.
 func (t FrameType) valid() bool {
 	switch t {
-	case TypeHello, TypeHelloOK, TypeRequest, TypeResponse, TypeNotify, TypeCancel, TypeChunk, TypeKeepAlive, TypeSessionData, TypeLifecycleData, TypeChannelData:
+	case TypeHello, TypeHelloOK, TypeRequest, TypeResponse, TypeNotify, TypeCancel, TypeChunk, TypeKeepAlive, TypeSessionData, TypeLifecycleData, TypeChannelData, TypeScreenFrame:
 		return true
 	}
 	return false

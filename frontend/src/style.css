@@ -802,7 +802,14 @@
   -webkit-user-select: text;
 }
 
-.term-line {
+/* The grid row shares the TYPE CONTEXT — font, pitch, the published
+   delta, the ligature/kerning shutdown — because the live painter's rows
+   must measure exactly what cell-fit's probe measures (cell-fit.ts takes
+   its signature from a .term-line). Per ADR-0009 the LIVE GRID ROW is a
+   class of its own: .term-line is also the assistant prose's class, and
+   the grid-only rules below never land on wrapping text. */
+.term-line,
+.term-grid-row {
   display: block;
   font-size: var(--font-size-terminal);
   /* ONE FROZEN ROW IS ONE GRID ROW. The pitch is the renderer's measured cell
@@ -894,6 +901,29 @@
   /* От левого края своей колонки, по вертикали посередине строки: глиф
      начинается там, где начинается ячейка, и не съезжает вниз. */
   transform-origin: 0 50%;
+}
+
+/* THE LIVE CELL GRID (nocx-zg3k3.2.4) — the painter's surface and cursor.
+   The rows are .term-grid-row, a class of its own per ADR-0009 (the
+   shared rule above gives them the frozen rows' type context, and nothing
+   else is shared). The surface carries the mono family the probe assumes
+   and positions the cursor overlay, which is placed by THE mapping
+   (frontend/src/painter/mapping.ts) in pixels of the committed geometry —
+   never a glyph in the text flow. */
+.term-grid {
+  position: relative;
+  font-family: var(--font-family-mono);
+}
+
+.term-grid-row {
+  white-space: pre;
+}
+
+.term-grid-cursor {
+  position: absolute;
+  pointer-events: none;
+  box-sizing: border-box;
+  background: color-mix(in srgb, currentColor, transparent 75%);
 }
 
 /* A whole-block grant fills the block; a row grant fills only its selected

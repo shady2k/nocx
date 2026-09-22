@@ -1443,18 +1443,21 @@ func scheduleConsumerThatNeverReads(m Runtime) error {
 	observe(kindDelivery, int(DeliveryCoalescable))
 	observe(kindDelivery, int(DeliveryLossless))
 
-	// The bound the vocabulary states, and the memory it implies: the payloads
-	// held for this consumer, and the bytes those payloads are.
+	// The bound the vocabulary states: the payloads held for this consumer.
 	if got := wedged.Pending(); got > MaxPendingFrames {
 		return failed("delivery/the-queue-is-at-its-bound",
 			"the runtime holds %d payloads for a consumer read none of the %d it was sent, want at most MaxPendingFrames (%d)",
 			got, ingests, MaxPendingFrames)
 	}
-	if got := wedged.HeldBytes(); got > MaxPendingFrames*modelScreenBytes {
-		return failed("delivery/the-queue-is-at-its-bound",
-			"the runtime holds %d bytes for a consumer that never reads, want at most MaxPendingFrames*modelScreenBytes (%d)",
-			got, MaxPendingFrames*modelScreenBytes)
-	}
+	// The memory those payloads are is judged on the real runtime, in the
+	// units of the frames THAT runtime publishes
+	// (TestAWedgedConsumerCostsBoundedMemory). A bytes bound written in one
+	// implementation's own units is the shape of schedule the real-runtime
+	// judging refuses: it passed a real frame at eight bytes and fails one
+	// at full size, and a bound that changes with the reader is no bound.
+	// What the contract states here is the count, and the count is what a
+	// schedule shared by every implementation can hold every implementation
+	// to.
 
 	// The LOSSLESS class lost nothing. The flood was coalesced FOR THE
 	// CONSUMER; the runtime's own ingest saw every byte of it, and the output
@@ -1607,6 +1610,71 @@ func scheduleConsumerThatKeepsUp(m Runtime) error {
 	if after[0].Revision <= last.Revision {
 		return failed("take/the-clock-moves-on",
 			"the frame after the take carries revision %d, want one past %d", after[0].Revision, last.Revision)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// 16. A consumer attaching mid-session is handed the current screen.
+//
+// The per-client baseline of design step 6: a client that joins after the
+// program has drawn is handed one full snapshot at the revision the screen
+// was last read at, BEFORE any later frame — and a client that joins a
+// session that has shown nothing is handed nothing, because its first frame
+// is the first revision. Paired with ruleAttachHandsTheCurrentScreen.
+// ---------------------------------------------------------------------------
+
+func scheduleBaselineOnMidSessionAttach(m Runtime) error {
+	// A consumer that attaches before anything was drawn is handed nothing.
+	fresh := m.Consumers().Attach()
+	if frames := fresh.Take(); len(frames) != 0 {
+		return failed("baseline/a-fresh-attach-is-handed-nothing",
+			"a consumer attaching to a session that has drawn nothing was handed %d frames, want none: the first revision is its baseline", len(frames))
+	}
+
+	if err := m.Ingest([]byte("drawn before the attach\r\n")); err != nil {
+		return failed("baseline/ingest", "ingesting output before the attach: %v", err)
+	}
+	before := m.Revision()
+
+	late := m.Consumers().Attach()
+	select {
+	case <-late.Ready():
+	default:
+		return failed("baseline/the-baseline-is-signalled",
+			"a baseline was owed to the mid-session attacher and Ready carries no signal")
+	}
+	frames := late.Take()
+	if len(frames) != 1 {
+		return failed("baseline/the-attach-is-handed-the-screen",
+			"a consumer attaching after %d revisions of output was handed %d frames, want exactly the one baseline snapshot", before, len(frames))
+	}
+	if frames[0].Revision != before {
+		return failed("baseline/the-baseline-is-at-the-current-revision",
+			"the baseline carries revision %d, want the current revision %d: a baseline at an older revision is a screen the session has moved past", frames[0].Revision, before)
+	}
+	if len(frames[0].Bytes) == 0 {
+		return failed("baseline/the-baseline-carries-the-screen",
+			"the baseline carries no bytes; it is a full snapshot, never a placeholder")
+	}
+	if late.Stale() {
+		return failed("baseline/the-baseline-is-current",
+			"the attacher that just took the current screen is marked stale")
+	}
+
+	// And the baseline is BEFORE any later frame: the next revision arrives
+	// after it and past it, never instead of it.
+	if err := m.Ingest([]byte("drawn after the attach\r\n")); err != nil {
+		return failed("baseline/ingest-after", "ingesting output after the attach: %v", err)
+	}
+	later := late.Take()
+	if len(later) != 1 {
+		return failed("baseline/the-next-frame-arrives",
+			"the revision after the baseline arrived as %d frames, want exactly 1", len(later))
+	}
+	if later[0].Revision <= frames[0].Revision {
+		return failed("baseline/the-clock-moves-past-the-baseline",
+			"the frame after the baseline carries revision %d, want one past %d", later[0].Revision, frames[0].Revision)
 	}
 	return nil
 }
@@ -2241,6 +2309,22 @@ func TestReadyIsSignalledWhenAPayloadArrives(t *testing.T) {
 	}
 }
 
+func TestSchedule_AttachHandsTheCurrentScreen(t *testing.T) {
+	if err := scheduleBaselineOnMidSessionAttach(newModel(allRules())); err != nil {
+		t.Fatalf("with every rule on the schedule must pass: %v", err)
+	}
+}
+
+func TestSchedule_AttachHandsTheCurrentScreen_FailsWhenItsRuleIsRemoved(t *testing.T) {
+	err := scheduleBaselineOnMidSessionAttach(newModel(without(ruleAttachHandsTheCurrentScreen)))
+	if err == nil {
+		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[ruleAttachHandsTheCurrentScreen])
+	}
+	// No baseline, no signal: the removal is noticed by the park the
+	// attacher makes before it drains anything.
+	assertionFailed(t, err, "baseline/the-baseline-is-signalled")
+}
+
 func TestSchedule_OneSessionCannotSpendAnothersAllowance(t *testing.T) {
 	busy, other := sessionsOverOneBudget(allRules())
 	if err := scheduleOneSessionCannotSpendAnothersAllowance(busy, other); err != nil {
@@ -2668,6 +2752,7 @@ func TestEveryStateIsReachableOrNamedUnreachable(t *testing.T) {
 		// list takes closures: the arrangement is the harness's.
 		{"ConsumerThatNeverReads", func() error { return scheduleConsumerThatNeverReads(newModel(allRules())) }},
 		{"ConsumerThatKeepsUp", func() error { return scheduleConsumerThatKeepsUp(newModel(allRules())) }},
+		{"AttachHandsTheCurrentScreen", func() error { return scheduleBaselineOnMidSessionAttach(newModel(allRules())) }},
 		{"OneSessionCannotSpendAnothersAllowance", func() error {
 			busy, other := sessionsOverOneBudget(allRules())
 			return scheduleOneSessionCannotSpendAnothersAllowance(busy, other)

@@ -418,3 +418,68 @@ func TestAWedgedConsumerCostsNoIngest(t *testing.T) {
 		t.Fatalf("the output ingested after the flood did not reach the screen, which reads %q", got)
 	}
 }
+
+// The runtime publishes the wire frame, not a stand-in: what Take hands over
+// off a real runtime is the session.frame contract's shape, judged by the
+// same machinery the DTO conformance test uses. frame_test.go pins the
+// encoder; this pins that the publish path USES it.
+func TestTheRuntimePublishesTheWireFrame(t *testing.T) {
+	schema := loadFrameContractSchema(t)
+	s, _, _ := realRuntime(t)
+	c := s.Consumers().Attach()
+	if err := s.Ingest([]byte("hello\r\n")); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	frames := c.Take()
+	if len(frames) != 1 {
+		t.Fatalf("one ingest is one revision, got %d frames", len(frames))
+	}
+	if frames[0].Revision != s.Revision() {
+		t.Fatalf("frame carries revision %d, want the revision the ingest moved to, %d", frames[0].Revision, s.Revision())
+	}
+	validateFrameContract(t, schema, frames[0].Bytes, "frame the runtime published")
+}
+
+// The memory a wedged consumer costs is the count bound times what a frame
+// WEIGHS on this runtime: at most MaxPendingFrames payloads, each whatever
+// the session.frame encoding of this geometry costs. The gauge takes the
+// same deliveries once, to name that weight; this is a real-runtime
+// judgement and not a contract schedule because the unit it is stated in is
+// the frame this runtime publishes, which is exactly what a schedule the
+// model must also honour cannot be written in.
+func TestAWedgedConsumerCostsBoundedMemory(t *testing.T) {
+	s, _, _ := realRuntime(t)
+	wedged := s.Consumers().Attach()
+	gauge := s.Consumers().Attach()
+
+	for range 4 * MaxPendingFrames {
+		if err := s.Ingest([]byte("a line of output arrived\r\n")); err != nil {
+			t.Fatalf("ingest: %v", err)
+		}
+	}
+
+	if got := wedged.Pending(); got > MaxPendingFrames {
+		t.Fatalf("the runtime holds %d payloads for a consumer that never reads, want at most MaxPendingFrames (%d)", got, MaxPendingFrames)
+	}
+	handover := gauge.Take()
+	if len(handover) == 0 {
+		t.Fatalf("the gauge was sent the same flood wedged was sent and holds no frames to weigh them with")
+	}
+	perFrame := 0
+	for _, frame := range handover {
+		if len(frame.Bytes) > perFrame {
+			perFrame = len(frame.Bytes)
+		}
+	}
+	if perFrame == 0 {
+		t.Fatalf("a frame carries no bytes; it is a full snapshot, never a placeholder")
+	}
+	if got := wedged.HeldBytes(); got == 0 {
+		t.Fatalf("a consumer holding %d payloads holds no bytes", wedged.Pending())
+	} else if got > MaxPendingFrames*perFrame {
+		t.Fatalf("the wedged consumer holds %d bytes, want at most MaxPendingFrames frames at this runtime's own frame size (%d x %d)", got, MaxPendingFrames, perFrame)
+	}
+	if wedged.Coalesced() == 0 || !wedged.Stale() {
+		t.Fatalf("the flood was shed for a consumer that never reads and reported as coalesced=%d stale=%v, want a reported loss", wedged.Coalesced(), wedged.Stale())
+	}
+}

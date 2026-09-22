@@ -658,9 +658,12 @@ type Consumer interface {
 // the runtime keeps for one consumer is exactly what the delivery bounds are
 // about.
 type Consumers interface {
-	// Attach joins a consumer. It is handed nothing until the runtime emits
-	// something, which is why a schedule that never reads from one is the case
-	// the bounds below are stated against.
+	// Attach joins a consumer. What it is handed at attach is the screen the
+	// session has already shown: a session that has published a frame hands
+	// the attacher that frame as its baseline, at the revision the cells were
+	// read at, before anything later — the per-client baseline of design step
+	// 6. A session that has published nothing hands nothing. A consumer that
+	// never reads is still the case the bounds below are stated against.
 	Attach() Consumer
 	// Attached is every joined consumer, in attach order.
 	Attached() []Consumer

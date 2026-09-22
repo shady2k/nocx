@@ -115,6 +115,14 @@ const (
 	// already taken away. The bound (MaxPendingFrames) is for a consumer the
 	// runtime cannot count on to read; reading is the way out of it.
 	ruleTakeRefundsTheAllowance
+	// ruleAttachHandsTheCurrentScreen: a consumer that attaches once the
+	// session has shown something is handed one full snapshot at the
+	// revision the screen was last read at, before any later frame — the
+	// per-client baseline of design step 6. An attacher to a session that
+	// has shown nothing is handed nothing: its first frame is the first
+	// revision, and a blank baseline is an allowance spent on a screen
+	// nobody needed painted.
+	ruleAttachHandsTheCurrentScreen
 )
 
 var ruleNames = map[rule]string{
@@ -140,6 +148,7 @@ var ruleNames = map[rule]string{
 	ruleMeetingsAreIndependent:              "meetings-are-independent",
 	ruleRendezvousSetIsBounded:              "rendezvous-set-is-bounded",
 	ruleTakeRefundsTheAllowance:             "take-refunds-the-allowance",
+	ruleAttachHandsTheCurrentScreen:         "attach-hands-the-current-screen",
 }
 
 type ruleSet map[rule]bool
@@ -231,6 +240,13 @@ type model struct {
 	// lastEffect is what the stream produced last, which is what a resend must
 	// NOT repeat.
 	lastEffect *Effect
+	// published and lastFrameRev are the frame side of delivery: whether any
+	// revision has published a frame — which is what makes an attacher's
+	// baseline exist — and the revision that frame carries, the revision the
+	// screen was read at. A later tick that moves no cell may have moved the
+	// clock past it; the baseline is still the screen as read.
+	published    bool
+	lastFrameRev Revision
 
 	// pending is the part of an escape sequence the runtime is still holding
 	// because it has not terminated. It is the runtime's own memory for a
@@ -636,12 +652,14 @@ func (m *model) CommitGeometry(g Geometry) (GeometryCommit, error) {
 		}
 		m.geom = GeometryCommit{Geometry: g, Revision: m.tick()}
 		if _, err := m.emulator.Resize(g); err != nil {
-			return m.geom, err
+			return m.geom, errors.Join(err, m.publishFrame(m.geom.Revision))
 		}
-		return m.geom, nil
+		return m.geom, m.publishFrame(m.geom.Revision)
 	}
 	m.geom = GeometryCommit{Geometry: g, Revision: m.tick()}
-	return m.geom, nil
+	// A resize moved the screen, so it publishes: a reflow the consumers
+	// never hear about is a screen held stale until the next byte arrives.
+	return m.geom, m.publishFrame(m.geom.Revision)
 }
 
 // --- output, fence, completeness -------------------------------------------
@@ -723,6 +741,16 @@ func (m *model) Ingest(b []byte) error {
 	// is what makes a consumer's queue fill, and its body is a snapshot of the
 	// screen. The real frame format is epic nocx-zg3k3's and is not declared
 	// here.
+	return m.publishFrame(rev)
+}
+
+// publishFrame is the model's one frame producer: it records that a frame
+// exists — so a later attach has a baseline to hand — and delivers it to
+// every consumer through the bounded path. rev is the revision the screen
+// was read at, which is the revision the frame carries even if a later
+// non-screen tick moves the clock past it.
+func (m *model) publishFrame(rev Revision) error {
+	m.published, m.lastFrameRev = true, rev
 	return m.deliver(framePayload(rev, m.screen))
 }
 
@@ -1449,6 +1477,13 @@ func (m *model) attach() *consumer {
 		budget:  m.budget,
 		refund:  m.rules.on(ruleTakeRefundsTheAllowance),
 		ready:   make(chan struct{}, 1),
+	}
+	if m.published && m.rules.on(ruleAttachHandsTheCurrentScreen) {
+		// The baseline: the mid-session attacher is handed the screen at
+		// the revision it was last read, through the bounded path like any
+		// frame, before anything later. An attacher to a session that has
+		// published nothing is handed nothing.
+		m.enqueue(c, framePayload(m.lastFrameRev, m.screen))
 	}
 	m.consumers = append(m.consumers, c)
 	return c

@@ -3,7 +3,6 @@ package sessionruntime
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -227,6 +226,13 @@ type Session struct {
 	allowance *Allowance
 	// consumers are the subscribers attached to this session, in attach order.
 	consumers []*subscriber
+	// latest is the frame the runtime last published: the bytes a
+	// mid-session attacher is handed as its baseline and a resync is served
+	// from. It is the screen AS READ at publishedFrame.rev — a later tick
+	// that moves no cell (a rendezvous expiring, a control epoch turning
+	// over) leaves it exact, and one that draws or reflows publishes a new
+	// one. Guarded by mu, like everything else here.
+	latest *publishedFrame
 	// nextEffect mints the identity an effect's duplicate policy is stated
 	// over. The runtime mints it, never the consumer.
 	nextEffect EffectID
@@ -977,6 +983,12 @@ func (s *Session) CommitGeometry(g Geometry) (GeometryCommit, error) {
 		return s.geom, errors.Join(writeErr, s.repairLocked())
 	}
 	s.geom = GeometryCommit{Geometry: g, Revision: s.tick()}
+	// A resize moved the screen, so it publishes at the revision the commit
+	// opened: consumers are painting, and a reflow they never hear about is
+	// a screen held stale until the next byte arrives.
+	if err := s.publishFrameLocked(); err != nil {
+		return s.geom, err
+	}
 	return s.geom, nil
 }
 
@@ -1065,7 +1077,8 @@ func (s *Session) Ingest(b []byte) error {
 			return err
 		}
 	}
-	if err := s.deliverLocked(frameDelivery(s.tick())); err != nil {
+	s.tick()
+	if err := s.publishFrameLocked(); err != nil {
 		return err
 	}
 	return replyErr
@@ -1474,17 +1487,6 @@ func effectDelivery(e Effect) queued {
 	return queued{class: deliveryClassOf(e.Kind), effect: e}
 }
 
-// frameDelivery is one coalescable frame: the revision of the cells a consumer
-// is owed, and NOT a copy of them. A frame supersedes the one before it, the
-// consumer reads the cells at the revision it last saw, and a queue holding
-// eight copies of an 80x24 screen would be the one kind of memory the bounds
-// exist to refuse. The frame protocol itself is the client epic's (nocx-zg3k3).
-func frameDelivery(rev Revision) queued {
-	var encoded [8]byte
-	binary.BigEndian.PutUint64(encoded[:], uint64(rev))
-	return queued{class: DeliveryCoalescable, rev: rev, bytes: encoded[:]}
-}
-
 // deliveryClassOf is the ONE place an effect's class is decided, exhaustively:
 // a kind added to the vocabulary without being named here falls to
 // [DeliveryUnclassified] and is REFUSED rather than delivered under a guess.
@@ -1663,9 +1665,13 @@ func (c *subscriber) hasEffectLocked(e Effect) bool {
 	return false
 }
 
-// Attach joins a consumer. It is handed nothing until the runtime emits
-// something, which is why a consumer that never reads is the ordinary case and
-// not the hostile one.
+// Attach joins a consumer. What it is handed at attach is the screen the
+// session has already shown: a session that has published a frame hands the
+// attacher that frame as its baseline, before anything later (design step 6),
+// and a session that has published nothing hands nothing, because its first
+// revision is the attacher's baseline whenever it comes. A consumer that
+// never reads is the ordinary case and not the hostile one, which is why the
+// queue is bounded whether or not anyone drains it.
 func (s *Session) Attach() Consumer {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1680,6 +1686,14 @@ func (s *Session) attachLocked() *subscriber {
 		ready:     make(chan struct{}, 1),
 	}
 	s.consumers = append(s.consumers, c)
+	if s.latest != nil {
+		// The baseline: the mid-session attacher is handed the screen as
+		// last read, before anything later, through the same bounded path
+		// every frame takes. An attacher to a session that has published
+		// nothing is handed nothing — its first frame is the first
+		// revision.
+		s.enqueueLocked(c, queued{class: DeliveryCoalescable, rev: s.latest.rev, bytes: s.latest.bytes})
+	}
 	return c
 }
 
@@ -1707,12 +1721,48 @@ func (s *Session) Offer(e Effect) error {
 func (s *Session) Resend() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.deliverLocked(frameDelivery(s.rev))
+	if s.latest != nil {
+		return s.deliverLocked(queued{class: DeliveryCoalescable, rev: s.latest.rev, bytes: s.latest.bytes})
+	}
+	// Nothing has been published yet, and the resync asked for state: the
+	// current screen — blank or not — is the state. No tick here: a resend
+	// is not a transition (contract, Consumers).
+	return s.publishFrameLocked()
 }
 
 // Lost is a consumer going away. It cancels no admitted input and revokes no
 // control: losing a watcher is not losing the terminal.
 func (s *Session) Lost() {}
+
+// publishedFrame is one encoded frame the runtime remembers: the revision
+// its cells were read at, and the session.frame bytes that describe them.
+// The bytes are shared with every queue they were delivered to and are never
+// written again — a frame is content, and content does not change under a
+// reader.
+type publishedFrame struct {
+	rev   Revision
+	bytes []byte
+}
+
+// publishFrameLocked encodes the active screen at the current revision,
+// hands it to every attached consumer, and remembers it as the frame an
+// attacher or a resync is owed. The snapshot is taken HERE, at publication,
+// under the lock the caller holds — never re-read from the mutable screen at
+// some older queued revision. A screen that cannot be read publishes
+// nothing ([ErrNoScreen]): skipping a revision is the honest answer, a frame
+// nobody could paint is not.
+func (s *Session) publishFrameLocked() error {
+	snap := s.snapshotLocked()
+	encoded, err := EncodeFrame(snap)
+	if errors.Is(err, ErrNoScreen) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	s.latest = &publishedFrame{rev: snap.Revision, bytes: encoded}
+	return s.deliverLocked(queued{class: DeliveryCoalescable, rev: snap.Revision, bytes: encoded})
+}
 
 // deliverLocked routes one payload to whatever its class says may hold it.
 func (s *Session) deliverLocked(p queued) error {

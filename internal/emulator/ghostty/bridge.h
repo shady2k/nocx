@@ -86,6 +86,50 @@ GhosttyResult nocxInstall(GhosttyTerminal terminal, uintptr_t handle);
 GhosttyResult nocxGridRefAt(GhosttyTerminal terminal, GhosttyPointTag tag,
                             uint32_t x, uint32_t y, GhosttyGridRef *out);
 GhosttyResult nocxStyleAt(const GhosttyGridRef *ref, nocxStyleFacts *out);
+
+/*
+ * One row of the scrollback history, resolved ONCE and traversed HERE. A
+ * grid reference's resolution walks the page list the point's tag names —
+ * for history, potentially the whole of scrollback — so reading a row cell
+ * by cell would pay that walk once per column. nocxHistoryRow resolves the
+ * row's reference at column 0 and then moves the SAME reference across the
+ * row, reading every cell off the page node it already holds: one resolution
+ * per row, whatever the column count. nocxGridResolveCount reports the
+ * shim's running total of resolutions, so that cost stays measured rather
+ * than assumed.
+ *
+ * Per cell it writes a nocxRowCellFacts: has_text and the width class, the
+ * style facts only when the cell HAS styling — a cell without any reads as
+ * the default style downstream, which skips materialising a style for the
+ * blank cells that fill most rows — and the grapheme cluster as UTF-8,
+ * appended to the caller's row-wide buffer with the offset and length
+ * recorded on the cell. GHOSTTY_OUT_OF_SPACE means the row overflowed that
+ * buffer; the caller retries the whole call on a larger one, because the
+ * traversal writes no partial state.
+ *
+ * The soft-wrap pair travels with the row: the flags live on the line, and
+ * the reference at column 0 is the line.
+ */
+typedef struct {
+  nocxStyleFacts style; /* valid only when styled */
+  bool styled;
+  bool has_text;
+  GhosttyCellWide wide;
+  uint32_t grapheme_off;
+  uint16_t grapheme_len;
+} nocxRowCellFacts;
+
+GhosttyResult nocxHistoryRow(GhosttyTerminal terminal, uint32_t y,
+                             uint16_t cols, nocxRowCellFacts *out_cells,
+                             uint8_t *graphemes, size_t graphemes_cap,
+                             bool *out_wrap, bool *out_continuation);
+
+/*
+ * The running total of grid references this shim has resolved, across every
+ * terminal in the process. It exists so a test can measure the one-per-row
+ * cost of a history range; it is not a statistic anyone else should read.
+ */
+uint64_t nocxGridResolveCount(void);
 GhosttyResult nocxKeyEncode(GhosttyKeyEncoder encoder, GhosttyKey key,
                             GhosttyMods mods, GhosttyKeyAction action,
                             const char *utf8, size_t utf8_len, char *out,

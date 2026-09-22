@@ -169,6 +169,13 @@ func realSchedules() []realSchedule {
 			},
 		},
 		{
+			name: "scheduleConsumerThatKeepsUp",
+			run: func(t *testing.T) error {
+				s, _, _ := realRuntime(t)
+				return scheduleConsumerThatKeepsUp(s)
+			},
+		},
+		{
 			name: "scheduleOneSessionCannotSpendAnothersAllowance",
 			run: func(t *testing.T) error {
 				// Two SESSIONS over ONE allowance, which is a piece of

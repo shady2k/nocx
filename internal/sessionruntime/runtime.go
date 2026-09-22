@@ -114,6 +114,21 @@ func (a *Allowance) take(account SessionID) bool {
 	return true
 }
 
+// give refunds what n payloads spent, the hand-over side of take: a queue the
+// consumer has drained is memory the session is no longer spending on it. It
+// is called with the SESSION's lock held, the same order take is called under
+// from the enqueue path, and only ever with a count take spent — the two stay
+// symmetric, so an account never holds more than [MaxPendingFrames] worth of
+// refunds it did not earn.
+func (a *Allowance) give(account SessionID, n int) {
+	if n <= 0 {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.remaining[account] += n
+}
+
 // Session is the session runtime: an implementation of [Runtime] over a real
 // terminal and a real emulator (nocx-ygxjv.9).
 //
@@ -1502,6 +1517,20 @@ func deliveryClassOf(k EffectKind) DeliveryClass {
 type subscriber struct {
 	owner *sync.Mutex
 
+	// account and allowance are the delivery budget this queue draws on,
+	// named at attach because [Session.enqueueLocked] spends from the
+	// session's account and [Take] must refund the very same one. The
+	// session's incarnation does not change while a subscriber is attached.
+	account   SessionID
+	allowance *Allowance
+
+	// ready is the hand-over signal: sent, never blocking, whenever a
+	// payload lands in the queue. Buffered to one because the signal is a
+	// LEVEL and not a count — a consumer that parks after the payload
+	// landed must not miss it, and a consumer that drains in one Take must
+	// not find two payloads worth of token waiting for one drain.
+	ready chan struct{}
+
 	queue       []queued
 	coalesced   uint64
 	effectsLost uint64
@@ -1565,6 +1594,61 @@ func (c *subscriber) Effects() []Effect {
 	return held
 }
 
+// Ready is the receive half of the hand-over. The channel never changes over
+// a subscriber's life, so the read takes no lock.
+func (c *subscriber) Ready() <-chan struct{} {
+	return c.ready
+}
+
+// Take hands over every frame the runtime is holding for this consumer,
+// oldest first, and empties them from the queue. Three things ride along:
+//
+//   - The allowance the held frames were spending is refunded, so a consumer
+//     that reads is never capped by what it has already taken away. The
+//     refund names the account the enqueue spent, and it runs under the
+//     session lock — the same order the spend runs under — so a take and a
+//     concurrent enqueue cannot interleave an account into a state neither
+//     of them wrote.
+//   - Staleness is cleared: what the take hands over is the newest state at
+//     each revision, and the frames are full snapshots, so what the consumer
+//     now holds is current until the runtime moves past it. The revisions
+//     the class coalesced on the way were reported through [Consumer.
+//     Coalesced] when they were shed and are not unsaid here.
+//   - Effects are not frames: they stay in the queue, and [Consumer.Effects]
+//     remains the way to read them. A take over a queue holding only
+//     effects hands over nothing, refunds nothing and unsets nothing.
+func (c *subscriber) Take() []FrameDelivery {
+	c.owner.Lock()
+	frames := make([]FrameDelivery, 0, len(c.queue))
+	kept := c.queue[:0]
+	for _, p := range c.queue {
+		if p.class == DeliveryCoalescable {
+			frames = append(frames, FrameDelivery{Revision: p.rev, Bytes: p.bytes})
+		} else {
+			kept = append(kept, p)
+		}
+	}
+	if len(frames) > 0 {
+		c.queue = kept
+		c.stale = false
+		c.allowance.give(c.account, len(frames))
+	}
+	c.owner.Unlock()
+	return frames
+}
+
+// signal wakes whoever parks on [subscriber.Ready], if anyone is parked or
+// parks before the next payload lands. It never blocks: the channel is
+// buffered to one and the signal is a level, so a second payload before the
+// first is read changes nothing the reader would otherwise see — Take always
+// hands over everything held.
+func (c *subscriber) signal() {
+	select {
+	case c.ready <- struct{}{}:
+	default:
+	}
+}
+
 // hasEffectLocked reports whether this consumer already holds THIS effect. It
 // assumes the session lock, like the rest of the delivery path. Identity is
 // the pair and not the number: an EffectID names an effect for as long as its
@@ -1589,7 +1673,12 @@ func (s *Session) Attach() Consumer {
 }
 
 func (s *Session) attachLocked() *subscriber {
-	c := &subscriber{owner: &s.mu}
+	c := &subscriber{
+		owner:     &s.mu,
+		account:   s.inc.Session,
+		allowance: s.allowance,
+		ready:     make(chan struct{}, 1),
+	}
 	s.consumers = append(s.consumers, c)
 	return c
 }
@@ -1652,6 +1741,7 @@ func (s *Session) enqueueLocked(c *subscriber, p queued) {
 		return
 	}
 	c.queue = append(c.queue, p)
+	c.signal()
 }
 
 // shedLocked makes room in a queue whose session has spent its allowance. The
@@ -1666,6 +1756,7 @@ func (s *Session) shedLocked(c *subscriber, p queued) {
 		c.queue = append(c.queue[:i], c.queue[i+1:]...)
 		s.reportLoss(c, held)
 		c.queue = append(c.queue, p)
+		c.signal()
 		return
 	}
 	if len(c.queue) == 0 {
@@ -1676,6 +1767,7 @@ func (s *Session) shedLocked(c *subscriber, p queued) {
 	c.queue = c.queue[1:]
 	s.reportLoss(c, oldest)
 	c.queue = append(c.queue, p)
+	c.signal()
 }
 
 // reportLoss tells the consumer what it lost. Without this the payload is gone

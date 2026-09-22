@@ -109,6 +109,12 @@ const (
 	// unauthenticated slot, and a pending authenticated half is never
 	// evicted — a flood of forged fences cannot take a real meeting's place.
 	ruleRendezvousSetIsBounded
+	// ruleTakeRefundsTheAllowance: a Take hands over what the runtime held
+	// for the consumer AND refunds the allowance those payloads were
+	// spending, so a consumer that reads is never capped by what it has
+	// already taken away. The bound (MaxPendingFrames) is for a consumer the
+	// runtime cannot count on to read; reading is the way out of it.
+	ruleTakeRefundsTheAllowance
 )
 
 var ruleNames = map[rule]string{
@@ -133,6 +139,7 @@ var ruleNames = map[rule]string{
 	ruleOnlyAuthenticExpiryDegrades:         "only-authentic-expiry-degrades",
 	ruleMeetingsAreIndependent:              "meetings-are-independent",
 	ruleRendezvousSetIsBounded:              "rendezvous-set-is-bounded",
+	ruleTakeRefundsTheAllowance:             "take-refunds-the-allowance",
 }
 
 type ruleSet map[rule]bool
@@ -1256,6 +1263,19 @@ func classOfEffect(k EffectKind) DeliveryClass {
 // contract's Consumer — the reads below are what a schedule sees of it, and the
 // queue itself is nobody's but the runtime's.
 type consumer struct {
+	// account and budget are the allowance this queue draws on, named at
+	// attach because the model's enqueue spends from the session's account
+	// and Take must refund the very same one. refund carries the rule: with
+	// ruleTakeRefundsTheAllowance off, a take empties the queue but leaves
+	// the allowance spent — the defect the keeps-up schedule names.
+	account SessionID
+	budget  *deliveryBudget
+	refund  bool
+	// ready is the hand-over signal, sent whenever a payload lands. The
+	// same buffered-to-one level the contract describes: an enqueue before
+	// a park is not lost, and one drain consumes one token.
+	ready chan struct{}
+
 	queue []payload
 	// coalesced and effectsLost are what the runtime DROPPED for this consumer,
 	// by class. They are the report: a consumer is TOLD what it lost, and that
@@ -1292,6 +1312,48 @@ func (c *consumer) Effects() []Effect {
 		}
 	}
 	return held
+}
+
+// Ready is the receive half of the hand-over, the model's statement of the
+// buffered level the contract describes.
+func (c *consumer) Ready() <-chan struct{} {
+	return c.ready
+}
+
+// Take hands over every frame the model held for this consumer, oldest
+// first, and empties them from the queue. Effects are not frames: they stay.
+// What the take hands over is the newest state at each revision, so
+// staleness clears with it; and when ruleTakeRefundsTheAllowance is on, the
+// allowance the held frames spent comes back with them.
+func (c *consumer) Take() []FrameDelivery {
+	frames := make([]FrameDelivery, 0, len(c.queue))
+	kept := c.queue[:0]
+	for _, p := range c.queue {
+		if p.class == DeliveryCoalescable {
+			frames = append(frames, FrameDelivery{Revision: p.rev, Bytes: p.bytes})
+		} else {
+			kept = append(kept, p)
+		}
+	}
+	if len(frames) > 0 {
+		c.queue = kept
+		c.stale = false
+		if c.refund {
+			c.budget.give(c.account, len(frames))
+		}
+	}
+	return frames
+}
+
+// signal wakes whoever parks on Ready, if anyone parks before the next
+// payload lands. Never blocks: the token is a level, and Take always hands
+// over everything held, so a second payload before the first is read adds
+// nothing a reader would otherwise see.
+func (c *consumer) signal() {
+	select {
+	case c.ready <- struct{}{}:
+	default:
+	}
 }
 
 // hasEffect reports whether the consumer already holds THIS effect. Identity is
@@ -1378,9 +1440,16 @@ func (m *model) Resend() error { return m.resendState() }
 // what ruleObserverLossIsNotControlLoss refuses.
 func (m *model) Lost() { m.observerLost() }
 
-// attach adds a consumer to this session.
+// attach adds a consumer to this session, naming the account its queue will
+// draw on and whether a take refunds it — both fixed here because the rules
+// and the incarnation are.
 func (m *model) attach() *consumer {
-	c := &consumer{}
+	c := &consumer{
+		account: m.account(),
+		budget:  m.budget,
+		refund:  m.rules.on(ruleTakeRefundsTheAllowance),
+		ready:   make(chan struct{}, 1),
+	}
 	m.consumers = append(m.consumers, c)
 	return c
 }
@@ -1438,6 +1507,7 @@ func (m *model) enqueue(c *consumer, p payload) {
 		// The defect, stated as code: the queue grows without bound, which is
 		// what one unwatched session does to the process holding it.
 		c.queue = append(c.queue, p)
+		c.signal()
 		return
 	}
 	if !m.budget.take(m.account()) {
@@ -1445,6 +1515,7 @@ func (m *model) enqueue(c *consumer, p payload) {
 		return
 	}
 	c.queue = append(c.queue, p)
+	c.signal()
 }
 
 // shed makes room in a queue whose session has spent its allowance. The OLDEST
@@ -1459,6 +1530,7 @@ func (m *model) shed(c *consumer, p payload) {
 		c.queue = append(c.queue[:i], c.queue[i+1:]...)
 		m.reportLoss(c, queued)
 		c.queue = append(c.queue, p)
+		c.signal()
 		return
 	}
 	if len(c.queue) == 0 {
@@ -1471,6 +1543,16 @@ func (m *model) shed(c *consumer, p payload) {
 	c.queue = c.queue[1:]
 	m.reportLoss(c, oldest)
 	c.queue = append(c.queue, p)
+	c.signal()
+}
+
+// give refunds what n payloads spent — the model's statement of the hand-over
+// side of the allowance, the twin of the budget's take.
+func (b *deliveryBudget) give(account SessionID, n int) {
+	if n <= 0 {
+		return
+	}
+	b.remaining[account] += n
 }
 
 // reportLoss is ruleConsumerLossIsReported: the consumer is told. Without it

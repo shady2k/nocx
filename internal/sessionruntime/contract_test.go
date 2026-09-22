@@ -1507,6 +1507,111 @@ func scheduleConsumerThatNeverReads(m Runtime) error {
 }
 
 // ---------------------------------------------------------------------------
+// 15. A consumer that keeps up receives every revision, in order.
+//
+// The take side of the delivery contract. The never-reads schedule above is
+// the bound a wedged consumer is held to; this one is the paired promise to a
+// consumer that does read: nothing it reads is dropped, what it is handed is
+// ordered by the runtime's clock, and the hand-over itself refunds the
+// allowance so reading is never capped the way not reading is.
+// ---------------------------------------------------------------------------
+
+func scheduleConsumerThatKeepsUp(m Runtime) error {
+	keepingUp := m.Consumers().Attach()
+
+	// Half the bound: every revision must arrive, none may be shed.
+	const firstBatch = MaxPendingFrames / 2
+	for i := range firstBatch {
+		if err := m.Ingest([]byte(fmt.Sprintf("line %d of the keeping-up batch\r\n", i))); err != nil {
+			return failed("take/ingest", "ingesting output for a consumer that keeps up: %v", err)
+		}
+	}
+	observe(kindDelivery, int(DeliveryCoalescable))
+
+	// The hand-over is signalled, not polled: Ready fires because the
+	// runtime handed something over, and what Take returns is every
+	// revision that exists, in the order the runtime minted them.
+	<-keepingUp.Ready()
+	frames := keepingUp.Take()
+	if len(frames) != firstBatch {
+		return failed("take/every-revision-arrives",
+			"a consumer that read in time was handed %d frames for %d revisions, want every one of them",
+			len(frames), firstBatch)
+	}
+	for i, frame := range frames {
+		if i > 0 && frame.Revision <= frames[i-1].Revision {
+			return failed("take/in-order",
+				"frame %d carries revision %d after frame %d carried %d; revisions must be strictly increasing",
+				i, frame.Revision, i-1, frames[i-1].Revision)
+		}
+		if len(frame.Bytes) == 0 {
+			return failed("take/a-frame-carries-the-screen",
+				"frame %d carries no bytes; a frame is a full snapshot, never an empty placeholder", i)
+		}
+	}
+	if keepingUp.Coalesced() != 0 {
+		return failed("take/nothing-a-reader-loses",
+			"a consumer that took every revision in time was told %d of them were coalesced, want none", keepingUp.Coalesced())
+	}
+	if keepingUp.Stale() {
+		return failed("take/current-after-take",
+			"a consumer that just took what the runtime held is stale; what a take hands over is the newest state")
+	}
+	if got := keepingUp.Pending(); got != 0 {
+		return failed("take/the-queue-empties", "after a take the runtime still holds %d payloads, want none", got)
+	}
+
+	// Flood PAST the bound without reading: the queue sheds and reports, as
+	// the never-reads schedule judges. Then take: what is handed is bounded
+	// by MaxPendingFrames, the survivor is the newest state, and the take
+	// refunds the allowance — which the ingest right after proves, because a
+	// consumer whose allowance stayed spent would shed that revision too.
+	const flood = 4 * MaxPendingFrames
+	for i := range flood {
+		if err := m.Ingest([]byte(fmt.Sprintf("flood line %d\r\n", i))); err != nil {
+			return failed("take/ingest-flood", "ingesting the flood: %v", err)
+		}
+	}
+	if keepingUp.Coalesced() == 0 {
+		return failed("take/the-flood-is-reported",
+			"the flood shed nothing for a consumer that did not read it, want a reported coalescing")
+	}
+	held := keepingUp.Take()
+	if len(held) > MaxPendingFrames {
+		return failed("take/the-hand-over-is-bounded",
+			"the take handed over %d frames, want at most MaxPendingFrames (%d)", len(held), MaxPendingFrames)
+	}
+	if len(held) == 0 {
+		return failed("take/the-flood-leaves-a-frame",
+			"the take after the flood handed nothing; the newest frame must survive the shed")
+	}
+	last := held[len(held)-1]
+	for _, frame := range held[:len(held)-1] {
+		if frame.Revision >= last.Revision {
+			return failed("take/the-survivor-is-the-newest",
+				"the take handed a frame at revision %d that is not below the last frame's %d; the point of coalescing is that what survives is the newest state",
+				frame.Revision, last.Revision)
+		}
+	}
+
+	// The refund, stated as behaviour: had the allowance stayed spent, this
+	// revision would shed for want of budget. It must arrive whole.
+	if err := m.Ingest([]byte("after the take\r\n")); err != nil {
+		return failed("take/ingest-after-take", "ingesting after the take: %v", err)
+	}
+	after := keepingUp.Take()
+	if len(after) != 1 {
+		return failed("take/the-allowance-is-refunded",
+			"after the take refunded it, the next revision arrived as %d frames, want exactly 1", len(after))
+	}
+	if after[0].Revision <= last.Revision {
+		return failed("take/the-clock-moves-on",
+			"the frame after the take carries revision %d, want one past %d", after[0].Revision, last.Revision)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // 14. One session may not spend another session's allowance.
 //
 // AD-10's per-session fairness, over frames. The two models share ONE budget on
@@ -2068,6 +2173,74 @@ func TestSchedule_ConsumerThatNeverReads_FailsWhenItsLosslessRuleIsRemoved(t *te
 	assertionFailed(t, err, "delivery/a-wedged-consumer-costs-no-ingest")
 }
 
+func TestSchedule_ConsumerThatKeepsUp(t *testing.T) {
+	if err := scheduleConsumerThatKeepsUp(newModel(allRules())); err != nil {
+		t.Fatalf("with every rule on the schedule must pass: %v", err)
+	}
+}
+
+func TestSchedule_ConsumerThatKeepsUp_FailsWhenItsQueueRuleIsRemoved(t *testing.T) {
+	err := scheduleConsumerThatKeepsUp(newModel(without(ruleConsumerQueueIsBounded)))
+	if err == nil {
+		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[ruleConsumerQueueIsBounded])
+	}
+	// Unbounded, the flood is never shed, so nothing is reported either: the
+	// schedule fails the moment it asks what the consumer was told.
+	assertionFailed(t, err, "take/the-flood-is-reported")
+}
+
+func TestSchedule_ConsumerThatKeepsUp_FailsWhenItsReportingRuleIsRemoved(t *testing.T) {
+	err := scheduleConsumerThatKeepsUp(newModel(without(ruleConsumerLossIsReported)))
+	if err == nil {
+		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[ruleConsumerLossIsReported])
+	}
+	// The shed still happens; it is just silent, which is the same defect
+	// seen from the consumer's side of the queue.
+	assertionFailed(t, err, "take/the-flood-is-reported")
+}
+
+func TestSchedule_ConsumerThatKeepsUp_FailsWhenItsLosslessRuleIsRemoved(t *testing.T) {
+	err := scheduleConsumerThatKeepsUp(newModel(without(ruleLosslessIngestSurvivesASlowConsumer)))
+	if err == nil {
+		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[ruleLosslessIngestSurvivesASlowConsumer])
+	}
+	// With the stream itself shedding once a queue is full, no frame lands
+	// and no loss is counted: the flood is reported as nothing.
+	assertionFailed(t, err, "take/the-flood-is-reported")
+}
+
+func TestSchedule_ConsumerThatKeepsUp_FailsWhenItsRefundRuleIsRemoved(t *testing.T) {
+	err := scheduleConsumerThatKeepsUp(newModel(without(ruleTakeRefundsTheAllowance)))
+	if err == nil {
+		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[ruleTakeRefundsTheAllowance])
+	}
+	// The take emptied the queue but left the allowance spent, so the next
+	// revision finds a full account over an empty queue and is dropped
+	// whole — the reader is capped by what it already read.
+	assertionFailed(t, err, "take/the-allowance-is-refunded")
+}
+
+func TestReadyIsSignalledWhenAPayloadArrives(t *testing.T) {
+	m := newModel(allRules())
+	c := m.Consumers().Attach()
+	select {
+	case <-c.Ready():
+		t.Fatal("a consumer just attached, before anything was delivered, must not be signalled")
+	default:
+	}
+	if err := m.Ingest([]byte("one line\r\n")); err != nil {
+		t.Fatalf("ingest a line: %v", err)
+	}
+	// The signal is a buffered level, checked without parking: if the
+	// enqueue stopped signalling, this fails here rather than hanging a
+	// schedule parked on a channel nothing ever sends to.
+	select {
+	case <-c.Ready():
+	default:
+		t.Fatal("a payload was delivered to the consumer and no signal is waiting on Ready")
+	}
+}
+
 func TestSchedule_OneSessionCannotSpendAnothersAllowance(t *testing.T) {
 	busy, other := sessionsOverOneBudget(allRules())
 	if err := scheduleOneSessionCannotSpendAnothersAllowance(busy, other); err != nil {
@@ -2494,6 +2667,7 @@ func TestEveryStateIsReachableOrNamedUnreachable(t *testing.T) {
 		// over the two runtimes sessionsOverOneBudget wires, which is why this
 		// list takes closures: the arrangement is the harness's.
 		{"ConsumerThatNeverReads", func() error { return scheduleConsumerThatNeverReads(newModel(allRules())) }},
+		{"ConsumerThatKeepsUp", func() error { return scheduleConsumerThatKeepsUp(newModel(allRules())) }},
 		{"OneSessionCannotSpendAnothersAllowance", func() error {
 			busy, other := sessionsOverOneBudget(allRules())
 			return scheduleOneSessionCannotSpendAnothersAllowance(busy, other)

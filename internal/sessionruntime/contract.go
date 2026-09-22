@@ -593,11 +593,29 @@ type Emulator interface {
 	Resize(g Geometry) (replies []byte, err error)
 }
 
+// FrameDelivery is one full snapshot handed from the runtime to a consumer:
+// the revision the cells were read at and the encoded frame that belongs to
+// it. The bytes are the session.frame wire shape (contracts/
+// session.frame.schema.json) for the real runtime; the contract judges them
+// as opaque content — count, order and wholeness — and leaves the wire shape
+// to the conformance test that pins the encoder.
+type FrameDelivery struct {
+	Revision Revision
+	Bytes    []byte
+}
+
 // Consumer is one subscriber of a session's output, as the runtime holds it:
-// the payloads it is owed, what the runtime dropped for it, and whether what it
-// still holds is stale. Every method is a READ, because the runtime decides what
-// a consumer may hold and what it must be told — a consumer that never reads is
-// the ordinary case, not the hostile one.
+// the payloads it is owed, what the runtime dropped for it, and whether what
+// it still holds is stale. Every method but the last two is a READ, because
+// the runtime decides what a consumer may hold and what it must be told — a
+// consumer that never reads is the ordinary case, not the hostile one.
+//
+// Ready and Take are the hand-over the delivery side always lacked: a
+// consumer that WANTS the frames it is owed — rather than the counts that
+// describe them — parks on Ready and drains with Take. Take empties what the
+// runtime was holding for it and refunds the allowance the held frames were
+// spending, so a consumer that reads is never capped by what it has already
+// taken away, the way one that never reads is capped by [MaxPendingFrames].
 type Consumer interface {
 	// Pending is how many payloads the runtime is holding for it.
 	Pending() int
@@ -619,6 +637,18 @@ type Consumer interface {
 	// identity a reader needs here and not a count of cells that did not
 	// change.
 	Effects() []Effect
+	// Ready is signalled — buffered, so an enqueue before a park is not
+	// lost — whenever the runtime hands it a payload. A consumer that
+	// drains on Ready never polls a count.
+	Ready() <-chan struct{}
+	// Take hands over every frame the runtime is holding for it, oldest
+	// first, and empties them from the queue. What it is handed is the
+	// newest state at each revision it missed nothing of: the class
+	// coalesced what it did not read in time and reported the loss through
+	// [Consumer.Coalesced]. After a Take the queue it holds is current, so
+	// [Consumer.Stale] reads false until the runtime moves past what the
+	// take handed over.
+	Take() []FrameDelivery
 }
 
 // Consumers is the delivery side of a runtime: the subscribers its frames,

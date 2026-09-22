@@ -126,7 +126,7 @@ func (t *terminal) fenceSource() []byte {
 	}
 	y := cur.Y
 	for y > 0 {
-		_, cont, err := t.rowFlags(y)
+		_, cont, err := t.rowFlags(pointActive, y)
 		if err != nil || !cont {
 			break
 		}
@@ -134,7 +134,7 @@ func (t *terminal) fenceSource() []byte {
 	}
 	var text []byte
 	for {
-		wrapped, _, err := t.rowFlags(y)
+		wrapped, _, err := t.rowFlags(pointActive, y)
 		if err != nil {
 			return text
 		}
@@ -157,7 +157,7 @@ func (t *terminal) fenceSource() []byte {
 // far, for the same reason fenceSource is best effort.
 func (t *terminal) rowText(y int, into []byte) []byte {
 	for x := range t.geom.Cols {
-		cell, err := t.readCell(x, y)
+		cell, err := t.readCell(pointActive, x, y)
 		if err != nil {
 			return into
 		}

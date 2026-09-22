@@ -593,11 +593,29 @@ type Emulator interface {
 	Resize(g Geometry) (replies []byte, err error)
 }
 
+// FrameDelivery is one full snapshot handed from the runtime to a consumer:
+// the revision the cells were read at and the encoded frame that belongs to
+// it. The bytes are the session.frame wire shape (contracts/
+// session.frame.schema.json) for the real runtime; the contract judges them
+// as opaque content — count, order and wholeness — and leaves the wire shape
+// to the conformance test that pins the encoder.
+type FrameDelivery struct {
+	Revision Revision
+	Bytes    []byte
+}
+
 // Consumer is one subscriber of a session's output, as the runtime holds it:
-// the payloads it is owed, what the runtime dropped for it, and whether what it
-// still holds is stale. Every method is a READ, because the runtime decides what
-// a consumer may hold and what it must be told — a consumer that never reads is
-// the ordinary case, not the hostile one.
+// the payloads it is owed, what the runtime dropped for it, and whether what
+// it still holds is stale. Every method but the last two is a READ, because
+// the runtime decides what a consumer may hold and what it must be told — a
+// consumer that never reads is the ordinary case, not the hostile one.
+//
+// Ready and Take are the hand-over the delivery side always lacked: a
+// consumer that WANTS the frames it is owed — rather than the counts that
+// describe them — parks on Ready and drains with Take. Take empties what the
+// runtime was holding for it and refunds the allowance the held frames were
+// spending, so a consumer that reads is never capped by what it has already
+// taken away, the way one that never reads is capped by [MaxPendingFrames].
 type Consumer interface {
 	// Pending is how many payloads the runtime is holding for it.
 	Pending() int
@@ -619,6 +637,18 @@ type Consumer interface {
 	// identity a reader needs here and not a count of cells that did not
 	// change.
 	Effects() []Effect
+	// Ready is signalled — buffered, so an enqueue before a park is not
+	// lost — whenever the runtime hands it a payload. A consumer that
+	// drains on Ready never polls a count.
+	Ready() <-chan struct{}
+	// Take hands over every frame the runtime is holding for it, oldest
+	// first, and empties them from the queue. What it is handed is the
+	// newest state at each revision it missed nothing of: the class
+	// coalesced what it did not read in time and reported the loss through
+	// [Consumer.Coalesced]. After a Take the queue it holds is current, so
+	// [Consumer.Stale] reads false until the runtime moves past what the
+	// take handed over.
+	Take() []FrameDelivery
 }
 
 // Consumers is the delivery side of a runtime: the subscribers its frames,
@@ -628,9 +658,12 @@ type Consumer interface {
 // the runtime keeps for one consumer is exactly what the delivery bounds are
 // about.
 type Consumers interface {
-	// Attach joins a consumer. It is handed nothing until the runtime emits
-	// something, which is why a schedule that never reads from one is the case
-	// the bounds below are stated against.
+	// Attach joins a consumer. What it is handed at attach is the screen the
+	// session has already shown: a session that has published a frame hands
+	// the attacher that frame as its baseline, at the revision the cells were
+	// read at, before anything later — the per-client baseline of design step
+	// 6. A session that has published nothing hands nothing. A consumer that
+	// never reads is still the case the bounds below are stated against.
 	Attach() Consumer
 	// Attached is every joined consumer, in attach order.
 	Attached() []Consumer
@@ -646,6 +679,14 @@ type Consumers interface {
 	// Lost reports a consumer going away. It cancels no admitted input and
 	// revokes no control — losing a watcher is not losing the terminal.
 	Lost()
+	// Detach removes a consumer that has gone away. The payloads the runtime
+	// still held for it are released and their allowance refunded to the
+	// session's account, because a departed reader must never keep spending
+	// what a live one needs: MaxPendingFrames is the bound of what the
+	// runtime holds for consumers that EXIST. Effects it held are dropped
+	// unreported — at-most-once permits zero deliveries, and there is no
+	// reader left to tell.
+	Detach(c Consumer)
 }
 
 // IntentRecord is one intent this incarnation admitted and where it got to. The

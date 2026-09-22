@@ -3,7 +3,6 @@ package sessionruntime
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -114,6 +113,21 @@ func (a *Allowance) take(account SessionID) bool {
 	return true
 }
 
+// give refunds what n payloads spent, the hand-over side of take: a queue the
+// consumer has drained is memory the session is no longer spending on it. It
+// is called with the SESSION's lock held, the same order take is called under
+// from the enqueue path, and only ever with a count take spent — the two stay
+// symmetric, so an account never holds more than [MaxPendingFrames] worth of
+// refunds it did not earn.
+func (a *Allowance) give(account SessionID, n int) {
+	if n <= 0 {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.remaining[account] += n
+}
+
 // Session is the session runtime: an implementation of [Runtime] over a real
 // terminal and a real emulator (nocx-ygxjv.9).
 //
@@ -212,6 +226,13 @@ type Session struct {
 	allowance *Allowance
 	// consumers are the subscribers attached to this session, in attach order.
 	consumers []*subscriber
+	// latest is the frame the runtime last published: the bytes a
+	// mid-session attacher is handed as its baseline and a resync is served
+	// from. It is the screen AS READ at publishedFrame.rev — a later tick
+	// that moves no cell (a rendezvous expiring, a control epoch turning
+	// over) leaves it exact, and one that draws or reflows publishes a new
+	// one. Guarded by mu, like everything else here.
+	latest *publishedFrame
 	// nextEffect mints the identity an effect's duplicate policy is stated
 	// over. The runtime mints it, never the consumer.
 	nextEffect EffectID
@@ -962,6 +983,12 @@ func (s *Session) CommitGeometry(g Geometry) (GeometryCommit, error) {
 		return s.geom, errors.Join(writeErr, s.repairLocked())
 	}
 	s.geom = GeometryCommit{Geometry: g, Revision: s.tick()}
+	// A resize moved the screen, so it publishes at the revision the commit
+	// opened: consumers are painting, and a reflow they never hear about is
+	// a screen held stale until the next byte arrives.
+	if err := s.publishFrameLocked(); err != nil {
+		return s.geom, err
+	}
 	return s.geom, nil
 }
 
@@ -1050,7 +1077,8 @@ func (s *Session) Ingest(b []byte) error {
 			return err
 		}
 	}
-	if err := s.deliverLocked(frameDelivery(s.tick())); err != nil {
+	s.tick()
+	if err := s.publishFrameLocked(); err != nil {
 		return err
 	}
 	return replyErr
@@ -1459,17 +1487,6 @@ func effectDelivery(e Effect) queued {
 	return queued{class: deliveryClassOf(e.Kind), effect: e}
 }
 
-// frameDelivery is one coalescable frame: the revision of the cells a consumer
-// is owed, and NOT a copy of them. A frame supersedes the one before it, the
-// consumer reads the cells at the revision it last saw, and a queue holding
-// eight copies of an 80x24 screen would be the one kind of memory the bounds
-// exist to refuse. The frame protocol itself is the client epic's (nocx-zg3k3).
-func frameDelivery(rev Revision) queued {
-	var encoded [8]byte
-	binary.BigEndian.PutUint64(encoded[:], uint64(rev))
-	return queued{class: DeliveryCoalescable, rev: rev, bytes: encoded[:]}
-}
-
 // deliveryClassOf is the ONE place an effect's class is decided, exhaustively:
 // a kind added to the vocabulary without being named here falls to
 // [DeliveryUnclassified] and is REFUSED rather than delivered under a guess.
@@ -1501,6 +1518,20 @@ func deliveryClassOf(k EffectKind) DeliveryClass {
 // session, so nothing can invert it.
 type subscriber struct {
 	owner *sync.Mutex
+
+	// account and allowance are the delivery budget this queue draws on,
+	// named at attach because [Session.enqueueLocked] spends from the
+	// session's account and [Take] must refund the very same one. The
+	// session's incarnation does not change while a subscriber is attached.
+	account   SessionID
+	allowance *Allowance
+
+	// ready is the hand-over signal: sent, never blocking, whenever a
+	// payload lands in the queue. Buffered to one because the signal is a
+	// LEVEL and not a count — a consumer that parks after the payload
+	// landed must not miss it, and a consumer that drains in one Take must
+	// not find two payloads worth of token waiting for one drain.
+	ready chan struct{}
 
 	queue       []queued
 	coalesced   uint64
@@ -1565,6 +1596,61 @@ func (c *subscriber) Effects() []Effect {
 	return held
 }
 
+// Ready is the receive half of the hand-over. The channel never changes over
+// a subscriber's life, so the read takes no lock.
+func (c *subscriber) Ready() <-chan struct{} {
+	return c.ready
+}
+
+// Take hands over every frame the runtime is holding for this consumer,
+// oldest first, and empties them from the queue. Three things ride along:
+//
+//   - The allowance the held frames were spending is refunded, so a consumer
+//     that reads is never capped by what it has already taken away. The
+//     refund names the account the enqueue spent, and it runs under the
+//     session lock — the same order the spend runs under — so a take and a
+//     concurrent enqueue cannot interleave an account into a state neither
+//     of them wrote.
+//   - Staleness is cleared: what the take hands over is the newest state at
+//     each revision, and the frames are full snapshots, so what the consumer
+//     now holds is current until the runtime moves past it. The revisions
+//     the class coalesced on the way were reported through [Consumer.
+//     Coalesced] when they were shed and are not unsaid here.
+//   - Effects are not frames: they stay in the queue, and [Consumer.Effects]
+//     remains the way to read them. A take over a queue holding only
+//     effects hands over nothing, refunds nothing and unsets nothing.
+func (c *subscriber) Take() []FrameDelivery {
+	c.owner.Lock()
+	frames := make([]FrameDelivery, 0, len(c.queue))
+	kept := c.queue[:0]
+	for _, p := range c.queue {
+		if p.class == DeliveryCoalescable {
+			frames = append(frames, FrameDelivery{Revision: p.rev, Bytes: p.bytes})
+		} else {
+			kept = append(kept, p)
+		}
+	}
+	if len(frames) > 0 {
+		c.queue = kept
+		c.stale = false
+		c.allowance.give(c.account, len(frames))
+	}
+	c.owner.Unlock()
+	return frames
+}
+
+// signal wakes whoever parks on [subscriber.Ready], if anyone is parked or
+// parks before the next payload lands. It never blocks: the channel is
+// buffered to one and the signal is a level, so a second payload before the
+// first is read changes nothing the reader would otherwise see — Take always
+// hands over everything held.
+func (c *subscriber) signal() {
+	select {
+	case c.ready <- struct{}{}:
+	default:
+	}
+}
+
 // hasEffectLocked reports whether this consumer already holds THIS effect. It
 // assumes the session lock, like the rest of the delivery path. Identity is
 // the pair and not the number: an EffectID names an effect for as long as its
@@ -1579,9 +1665,13 @@ func (c *subscriber) hasEffectLocked(e Effect) bool {
 	return false
 }
 
-// Attach joins a consumer. It is handed nothing until the runtime emits
-// something, which is why a consumer that never reads is the ordinary case and
-// not the hostile one.
+// Attach joins a consumer. What it is handed at attach is the screen the
+// session has already shown: a session that has published a frame hands the
+// attacher that frame as its baseline, before anything later (design step 6),
+// and a session that has published nothing hands nothing, because its first
+// revision is the attacher's baseline whenever it comes. A consumer that
+// never reads is the ordinary case and not the hostile one, which is why the
+// queue is bounded whether or not anyone drains it.
 func (s *Session) Attach() Consumer {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1589,8 +1679,21 @@ func (s *Session) Attach() Consumer {
 }
 
 func (s *Session) attachLocked() *subscriber {
-	c := &subscriber{owner: &s.mu}
+	c := &subscriber{
+		owner:     &s.mu,
+		account:   s.inc.Session,
+		allowance: s.allowance,
+		ready:     make(chan struct{}, 1),
+	}
 	s.consumers = append(s.consumers, c)
+	if s.latest != nil {
+		// The baseline: the mid-session attacher is handed the screen as
+		// last read, before anything later, through the same bounded path
+		// every frame takes. An attacher to a session that has published
+		// nothing is handed nothing — its first frame is the first
+		// revision.
+		s.enqueueLocked(c, queued{class: DeliveryCoalescable, rev: s.latest.rev, bytes: s.latest.bytes})
+	}
 	return c
 }
 
@@ -1618,12 +1721,78 @@ func (s *Session) Offer(e Effect) error {
 func (s *Session) Resend() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.deliverLocked(frameDelivery(s.rev))
+	if s.latest != nil {
+		return s.deliverLocked(queued{class: DeliveryCoalescable, rev: s.latest.rev, bytes: s.latest.bytes})
+	}
+	// Nothing has been published yet, and the resync asked for state: the
+	// current screen — blank or not — is the state. No tick here: a resend
+	// is not a transition (contract, Consumers).
+	return s.publishFrameLocked()
 }
 
 // Lost is a consumer going away. It cancels no admitted input and revokes no
 // control: losing a watcher is not losing the terminal.
 func (s *Session) Lost() {}
+
+// Detach removes a consumer that has gone away — a subscriber whose pump
+// ended, whose wire died, whose reader is gone. The queue it held is drained
+// under the same lock the enqueue path holds, and what it held is refunded
+// to the session's account: a departed reader never keeps spending the
+// allowance a live one needs. The hand-over that Take performs is not
+// performed — there is no reader to hand to — so this is Take's refund
+// without Take's delivery, and a consumer's staleness dies with it.
+func (s *Session) Detach(c Consumer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sub, ok := c.(*subscriber)
+	if !ok {
+		return
+	}
+	for i, held := range s.consumers {
+		if held == sub {
+			s.consumers = append(s.consumers[:i], s.consumers[i+1:]...)
+			break
+		}
+	}
+	// Effects the departed reader held go with it: at-most-once permits zero
+	// deliveries, and there is nobody left to tell. The refund counts every
+	// payload released — the allowance counts payloads held, and these are
+	// held by nobody now.
+	removed := len(sub.queue)
+	sub.queue = nil
+	sub.stale = false
+	s.allowance.give(sub.account, removed)
+}
+
+// publishedFrame is one encoded frame the runtime remembers: the revision
+// its cells were read at, and the session.frame bytes that describe them.
+// The bytes are shared with every queue they were delivered to and are never
+// written again — a frame is content, and content does not change under a
+// reader.
+type publishedFrame struct {
+	rev   Revision
+	bytes []byte
+}
+
+// publishFrameLocked encodes the active screen at the current revision,
+// hands it to every attached consumer, and remembers it as the frame an
+// attacher or a resync is owed. The snapshot is taken HERE, at publication,
+// under the lock the caller holds — never re-read from the mutable screen at
+// some older queued revision. A screen that cannot be read publishes
+// nothing ([ErrNoScreen]): skipping a revision is the honest answer, a frame
+// nobody could paint is not.
+func (s *Session) publishFrameLocked() error {
+	snap := s.snapshotLocked()
+	encoded, err := EncodeFrame(snap)
+	if errors.Is(err, ErrNoScreen) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	s.latest = &publishedFrame{rev: snap.Revision, bytes: encoded}
+	return s.deliverLocked(queued{class: DeliveryCoalescable, rev: snap.Revision, bytes: encoded})
+}
 
 // deliverLocked routes one payload to whatever its class says may hold it.
 func (s *Session) deliverLocked(p queued) error {
@@ -1652,6 +1821,7 @@ func (s *Session) enqueueLocked(c *subscriber, p queued) {
 		return
 	}
 	c.queue = append(c.queue, p)
+	c.signal()
 }
 
 // shedLocked makes room in a queue whose session has spent its allowance. The
@@ -1666,6 +1836,7 @@ func (s *Session) shedLocked(c *subscriber, p queued) {
 		c.queue = append(c.queue[:i], c.queue[i+1:]...)
 		s.reportLoss(c, held)
 		c.queue = append(c.queue, p)
+		c.signal()
 		return
 	}
 	if len(c.queue) == 0 {
@@ -1676,6 +1847,7 @@ func (s *Session) shedLocked(c *subscriber, p queued) {
 	c.queue = c.queue[1:]
 	s.reportLoss(c, oldest)
 	c.queue = append(c.queue, p)
+	c.signal()
 }
 
 // reportLoss tells the consumer what it lost. Without this the payload is gone

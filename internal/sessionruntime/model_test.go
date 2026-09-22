@@ -109,6 +109,20 @@ const (
 	// unauthenticated slot, and a pending authenticated half is never
 	// evicted — a flood of forged fences cannot take a real meeting's place.
 	ruleRendezvousSetIsBounded
+	// ruleTakeRefundsTheAllowance: a Take hands over what the runtime held
+	// for the consumer AND refunds the allowance those payloads were
+	// spending, so a consumer that reads is never capped by what it has
+	// already taken away. The bound (MaxPendingFrames) is for a consumer the
+	// runtime cannot count on to read; reading is the way out of it.
+	ruleTakeRefundsTheAllowance
+	// ruleAttachHandsTheCurrentScreen: a consumer that attaches once the
+	// session has shown something is handed one full snapshot at the
+	// revision the screen was last read at, before any later frame — the
+	// per-client baseline of design step 6. An attacher to a session that
+	// has shown nothing is handed nothing: its first frame is the first
+	// revision, and a blank baseline is an allowance spent on a screen
+	// nobody needed painted.
+	ruleAttachHandsTheCurrentScreen
 )
 
 var ruleNames = map[rule]string{
@@ -133,6 +147,8 @@ var ruleNames = map[rule]string{
 	ruleOnlyAuthenticExpiryDegrades:         "only-authentic-expiry-degrades",
 	ruleMeetingsAreIndependent:              "meetings-are-independent",
 	ruleRendezvousSetIsBounded:              "rendezvous-set-is-bounded",
+	ruleTakeRefundsTheAllowance:             "take-refunds-the-allowance",
+	ruleAttachHandsTheCurrentScreen:         "attach-hands-the-current-screen",
 }
 
 type ruleSet map[rule]bool
@@ -224,6 +240,13 @@ type model struct {
 	// lastEffect is what the stream produced last, which is what a resend must
 	// NOT repeat.
 	lastEffect *Effect
+	// published and lastFrameRev are the frame side of delivery: whether any
+	// revision has published a frame — which is what makes an attacher's
+	// baseline exist — and the revision that frame carries, the revision the
+	// screen was read at. A later tick that moves no cell may have moved the
+	// clock past it; the baseline is still the screen as read.
+	published    bool
+	lastFrameRev Revision
 
 	// pending is the part of an escape sequence the runtime is still holding
 	// because it has not terminated. It is the runtime's own memory for a
@@ -629,12 +652,14 @@ func (m *model) CommitGeometry(g Geometry) (GeometryCommit, error) {
 		}
 		m.geom = GeometryCommit{Geometry: g, Revision: m.tick()}
 		if _, err := m.emulator.Resize(g); err != nil {
-			return m.geom, err
+			return m.geom, errors.Join(err, m.publishFrame(m.geom.Revision))
 		}
-		return m.geom, nil
+		return m.geom, m.publishFrame(m.geom.Revision)
 	}
 	m.geom = GeometryCommit{Geometry: g, Revision: m.tick()}
-	return m.geom, nil
+	// A resize moved the screen, so it publishes: a reflow the consumers
+	// never hear about is a screen held stale until the next byte arrives.
+	return m.geom, m.publishFrame(m.geom.Revision)
 }
 
 // --- output, fence, completeness -------------------------------------------
@@ -716,6 +741,16 @@ func (m *model) Ingest(b []byte) error {
 	// is what makes a consumer's queue fill, and its body is a snapshot of the
 	// screen. The real frame format is epic nocx-zg3k3's and is not declared
 	// here.
+	return m.publishFrame(rev)
+}
+
+// publishFrame is the model's one frame producer: it records that a frame
+// exists — so a later attach has a baseline to hand — and delivers it to
+// every consumer through the bounded path. rev is the revision the screen
+// was read at, which is the revision the frame carries even if a later
+// non-screen tick moves the clock past it.
+func (m *model) publishFrame(rev Revision) error {
+	m.published, m.lastFrameRev = true, rev
 	return m.deliver(framePayload(rev, m.screen))
 }
 
@@ -1256,6 +1291,19 @@ func classOfEffect(k EffectKind) DeliveryClass {
 // contract's Consumer — the reads below are what a schedule sees of it, and the
 // queue itself is nobody's but the runtime's.
 type consumer struct {
+	// account and budget are the allowance this queue draws on, named at
+	// attach because the model's enqueue spends from the session's account
+	// and Take must refund the very same one. refund carries the rule: with
+	// ruleTakeRefundsTheAllowance off, a take empties the queue but leaves
+	// the allowance spent — the defect the keeps-up schedule names.
+	account SessionID
+	budget  *deliveryBudget
+	refund  bool
+	// ready is the hand-over signal, sent whenever a payload lands. The
+	// same buffered-to-one level the contract describes: an enqueue before
+	// a park is not lost, and one drain consumes one token.
+	ready chan struct{}
+
 	queue []payload
 	// coalesced and effectsLost are what the runtime DROPPED for this consumer,
 	// by class. They are the report: a consumer is TOLD what it lost, and that
@@ -1292,6 +1340,48 @@ func (c *consumer) Effects() []Effect {
 		}
 	}
 	return held
+}
+
+// Ready is the receive half of the hand-over, the model's statement of the
+// buffered level the contract describes.
+func (c *consumer) Ready() <-chan struct{} {
+	return c.ready
+}
+
+// Take hands over every frame the model held for this consumer, oldest
+// first, and empties them from the queue. Effects are not frames: they stay.
+// What the take hands over is the newest state at each revision, so
+// staleness clears with it; and when ruleTakeRefundsTheAllowance is on, the
+// allowance the held frames spent comes back with them.
+func (c *consumer) Take() []FrameDelivery {
+	frames := make([]FrameDelivery, 0, len(c.queue))
+	kept := c.queue[:0]
+	for _, p := range c.queue {
+		if p.class == DeliveryCoalescable {
+			frames = append(frames, FrameDelivery{Revision: p.rev, Bytes: p.bytes})
+		} else {
+			kept = append(kept, p)
+		}
+	}
+	if len(frames) > 0 {
+		c.queue = kept
+		c.stale = false
+		if c.refund {
+			c.budget.give(c.account, len(frames))
+		}
+	}
+	return frames
+}
+
+// signal wakes whoever parks on Ready, if anyone parks before the next
+// payload lands. Never blocks: the token is a level, and Take always hands
+// over everything held, so a second payload before the first is read adds
+// nothing a reader would otherwise see.
+func (c *consumer) signal() {
+	select {
+	case c.ready <- struct{}{}:
+	default:
+	}
 }
 
 // hasEffect reports whether the consumer already holds THIS effect. Identity is
@@ -1378,9 +1468,51 @@ func (m *model) Resend() error { return m.resendState() }
 // what ruleObserverLossIsNotControlLoss refuses.
 func (m *model) Lost() { m.observerLost() }
 
-// attach adds a consumer to this session.
+// Detach removes a consumer that has gone away, mirroring the runtime: the
+// frames it held are refunded to the account when
+// ruleTakeRefundsTheAllowance is on — the same rule, because a departed
+// reader's held frames are exactly what a take would have refunded — and the
+// effects it held are dropped unreported, which at-most-once permits.
+func (m *model) Detach(c Consumer) {
+	con, ok := c.(*consumer)
+	if !ok {
+		return
+	}
+	for i, held := range m.consumers {
+		if held == con {
+			m.consumers = append(m.consumers[:i], m.consumers[i+1:]...)
+			break
+		}
+	}
+	// Everything it held is released — frames and effects alike — and the
+	// account is refunded for all of it when the refund rule is on: these
+	// are exactly the payloads a take would have released, held now by
+	// nobody.
+	held := len(con.queue)
+	if held > 0 && con.refund {
+		con.budget.give(con.account, held)
+	}
+	con.queue = nil
+	con.stale = false
+}
+
+// attach adds a consumer to this session, naming the account its queue will
+// draw on and whether a take refunds it — both fixed here because the rules
+// and the incarnation are.
 func (m *model) attach() *consumer {
-	c := &consumer{}
+	c := &consumer{
+		account: m.account(),
+		budget:  m.budget,
+		refund:  m.rules.on(ruleTakeRefundsTheAllowance),
+		ready:   make(chan struct{}, 1),
+	}
+	if m.published && m.rules.on(ruleAttachHandsTheCurrentScreen) {
+		// The baseline: the mid-session attacher is handed the screen at
+		// the revision it was last read, through the bounded path like any
+		// frame, before anything later. An attacher to a session that has
+		// published nothing is handed nothing.
+		m.enqueue(c, framePayload(m.lastFrameRev, m.screen))
+	}
 	m.consumers = append(m.consumers, c)
 	return c
 }
@@ -1438,6 +1570,7 @@ func (m *model) enqueue(c *consumer, p payload) {
 		// The defect, stated as code: the queue grows without bound, which is
 		// what one unwatched session does to the process holding it.
 		c.queue = append(c.queue, p)
+		c.signal()
 		return
 	}
 	if !m.budget.take(m.account()) {
@@ -1445,6 +1578,7 @@ func (m *model) enqueue(c *consumer, p payload) {
 		return
 	}
 	c.queue = append(c.queue, p)
+	c.signal()
 }
 
 // shed makes room in a queue whose session has spent its allowance. The OLDEST
@@ -1459,6 +1593,7 @@ func (m *model) shed(c *consumer, p payload) {
 		c.queue = append(c.queue[:i], c.queue[i+1:]...)
 		m.reportLoss(c, queued)
 		c.queue = append(c.queue, p)
+		c.signal()
 		return
 	}
 	if len(c.queue) == 0 {
@@ -1471,6 +1606,16 @@ func (m *model) shed(c *consumer, p payload) {
 	c.queue = c.queue[1:]
 	m.reportLoss(c, oldest)
 	c.queue = append(c.queue, p)
+	c.signal()
+}
+
+// give refunds what n payloads spent — the model's statement of the hand-over
+// side of the allowance, the twin of the budget's take.
+func (b *deliveryBudget) give(account SessionID, n int) {
+	if n <= 0 {
+		return
+	}
+	b.remaining[account] += n
 }
 
 // reportLoss is ruleConsumerLossIsReported: the consumer is told. Without it

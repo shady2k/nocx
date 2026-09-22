@@ -40,6 +40,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	nocxlog "github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -169,6 +170,11 @@ type readoptPass struct {
 	// field rather than only a constant so the bound can be DRIVEN — a guard
 	// whose failure path no test can reach is a guard nobody has seen work.
 	timeout time.Duration
+	// publishScreen is the screen plane's transport half, the same seam the
+	// fresh-open path carries: a restored pane's runtime is still publishing
+	// snapshots, and without this registration they would land at a client
+	// that forwards them nowhere. Nil is a legitimate wiring.
+	publishScreen func(sid session.ID, revision uint64, doc []byte) bool
 }
 
 var _ sessionReadopter = (*readoptPass)(nil)
@@ -672,6 +678,20 @@ func (rp *readoptPass) readopt(
 		// "was interrupted" about a build whose real status the helper has
 		// been holding all along (nocx-k6p18.23). Carried BEFORE the adopt so
 		// the session can never be observed without it.
+		// THE SCREEN DRAIN'S PUBLISH, restored-pane half (nocx-zg3k3.2.2):
+		// the runtime behind this attachment never stopped publishing while
+		// the coordinator was away, and the subscriber it names is THIS
+		// attach. The carrier's losses are logged with their named reasons,
+		// the same telling the fresh-open path gives.
+		if rp.publishScreen != nil {
+			attached.OnScreenFrame(func(revision uint64, doc []byte) {
+				rp.publishScreen(sid, revision, doc)
+			})
+			attached.OnScreenLost(func(reason string) {
+				nocxlog.From(ctx).Warn("screen assembly lost on the carrier",
+					"session", string(sid), "reason", reason)
+			})
+		}
 		if entry.Exit != nil {
 			// The window frontier travels WITH the exit status (nocx-isjh4):
 			// entry.Window.Written is the offset this stream can never

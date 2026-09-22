@@ -257,6 +257,8 @@ func (h *Host) frame(ctx context.Context, ty proto.FrameType, payload []byte) {
 		h.lifecycleData(ctx, payload)
 	case proto.TypeChannelData:
 		h.channelData(ctx, payload)
+	case proto.TypeScreenFrame:
+		h.screenData(ctx, payload)
 	default:
 		h.log.Warn("unexpected frame", "type", ty)
 	}
@@ -322,6 +324,33 @@ func (h *Host) lifecycleData(ctx context.Context, payload []byte) {
 // session, the window and the process survive it.
 func (h *Host) SendSessionData(f proto.SessionFrame) error {
 	return h.write(proto.TypeSessionData, proto.EncodeSessionFrame(f))
+}
+
+// screenData handles an inbound screen frame. Screens flow HELPER to
+// coordinator and nothing on this side consumes one; a host receives them
+// only from a confused peer, and recognising the type — rather than letting
+// the decoder resync through a byte at a time — turns what would be garbage
+// scanning into one dropped, logged frame. The drop is not a loss anyone is
+// owed a report for: the sender of a screen frame to a helper has already
+// violated the wire's direction.
+func (h *Host) screenData(ctx context.Context, payload []byte) {
+	f, err := proto.DecodeScreenDataFrame(payload)
+	if err != nil {
+		h.log.Warn("malformed screen frame", "err", err, "bytes", len(payload))
+		return
+	}
+	h.log.Warn("screen frame dropped: the helper does not consume screens",
+		"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber),
+		"revision", f.Revision, "bytes", len(f.Payload))
+}
+
+// SendScreenFrame writes one screen-plane frame to the wire: one part of one
+// full snapshot the session's runtime published, for the subscriber the frame
+// names. It lives on the host for the reason SendSessionData does — the wire
+// and its writer mutex are the host's, and a second writer would interleave
+// mid-frame.
+func (h *Host) SendScreenFrame(f proto.ScreenDataFrame) error {
+	return h.write(proto.TypeScreenFrame, proto.EncodeScreenDataFrame(f))
 }
 
 // SendLifecycleData writes raw lifecycle bytes on their dedicated carrier tag.

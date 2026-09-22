@@ -77,6 +77,11 @@ type Client struct {
 	// identities and routed to different services; one map would make a
 	// channel id a possible key for a session lookup.
 	channels map[proto.ChannelID]*ChannelStream
+	// screenAssembler reassembles the screen plane's parts on THIS
+	// connection, keyed by session and subscriber inside. It is the third
+	// plane's bounded reassembly state — per connection, which is the unit
+	// its bounds are stated in (proto.ScreenAssembler).
+	screenAssembler *proto.ScreenAssembler
 	// parkedChannels parks the frames of a channel whose open has not returned
 	// yet, so the first bytes of a stream are not lost to the round trip that
 	// names it. Bounded (channels.go), and emptied by the claim or by the
@@ -413,6 +418,8 @@ func (c *Client) onFrame(ty proto.FrameType, payload []byte) {
 		c.lifecycleData(payload)
 	case proto.TypeChannelData:
 		c.channelData(payload)
+	case proto.TypeScreenFrame:
+		c.screenFrame(payload)
 	default:
 		c.log.Warn("unexpected frame", "type", ty)
 	}
@@ -576,6 +583,44 @@ func (c *Client) lifecycleData(payload []byte) {
 	c.log.Debug("lifecycle data frame arrived",
 		"session", fmt.Sprintf("%x", f.Session), "bytes", len(f.Payload))
 	a.deliverLifecycle(f.Payload)
+}
+
+// screenFrame routes one screen-plane frame: the full snapshot a session's
+// runtime published, split by the drain that sent it. Parts reassemble here
+// — before anything parses the document they carry — against the attachment
+// the frame names, for the same reason sessionData routes by subscriber: a
+// displaced attachment must never be fed by the connection that displaced
+// it. The assembler's drops are NAMED, and each one is reported to the
+// attachment's screen-lost observer, because the invariant with both ends is
+// that the reader holds the whole frame at that revision or has been told it
+// lost it.
+func (c *Client) screenFrame(payload []byte) {
+	f, err := proto.DecodeScreenDataFrame(payload)
+	if err != nil {
+		c.log.Warn("malformed screen frame", "err", err, "bytes", len(payload))
+		return
+	}
+	c.mu.Lock()
+	a := c.attachments[f.Subscriber]
+	c.mu.Unlock()
+	if a == nil || a.session != f.Session {
+		c.log.Warn("screen frame dropped: no matching attachment",
+			"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber),
+			"revision", f.Revision, "part", f.PartIndex, "bytes", len(f.Payload))
+		return
+	}
+	assembled, err := c.screenAssembler.Feed(f)
+	if err != nil {
+		c.log.Warn("screen assembly dropped", "session", fmt.Sprintf("%x", f.Session),
+			"subscriber", fmt.Sprintf("%x", f.Subscriber), "revision", f.Revision, "err", err)
+		// fmt.Sprint, not the error's own method: this line is not a log
+		// call, and the context ratchet is a regex over source text.
+		a.reportScreenLost(fmt.Sprint(err))
+		return
+	}
+	if assembled != nil {
+		a.deliverScreen(assembled)
+	}
 }
 
 // deliverResponse routes one response frame. A response whose result is a

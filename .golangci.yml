@@ -1,5 +1,12 @@
 run:
-  timeout: 5m
+  # A bound on a HUNG linter, not on a slow machine (nocx-7nf4o). It was 5m,
+  # and 5m decided runs rather than bounding them: the same tree linted in
+  # 4m22s on one macOS runner and was killed at the limit on another ninety
+  # minutes later, its true time unknown and above 6m23s. ci-mac carries no
+  # timeout-minutes of its own, so this is the only bound on that step —
+  # which is why it stays, and why it is now far enough above every healthy
+  # measurement that only a hang can reach it.
+  timeout: 20m
   modules-download-mode: readonly
 
 linters:

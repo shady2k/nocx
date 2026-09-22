@@ -220,15 +220,16 @@ GhosttyResult nocxModeValue(GhosttyTerminal terminal, uint16_t mode,
 /* -------------------------------------------------------------------- reads */
 
 /*
- * A grid reference at (x, y) of the ACTIVE AREA — the grid the cursor moves in,
- * not the scrollback and not a viewport somebody has scrolled. The reference is
- * a snapshot and dies at the next mutating call, so every read copies what it
- * needs before returning.
+ * A grid reference at (x, y) in the COORDINATE SPACE tag names — the active
+ * area the cursor moves in, or the scrollback history rows that left it.
+ * GhosttyPoint is a tagged union cgo cannot build, which is why the shim
+ * exists. The reference is a snapshot and dies at the next mutating call, so
+ * every read copies what it needs before returning.
  */
-GhosttyResult nocxGridRefAt(GhosttyTerminal terminal, uint16_t x, uint16_t y,
-                            GhosttyGridRef *out) {
+GhosttyResult nocxGridRefAt(GhosttyTerminal terminal, GhosttyPointTag tag,
+                            uint32_t x, uint32_t y, GhosttyGridRef *out) {
   GhosttyPoint pt = {0};
-  pt.tag = GHOSTTY_POINT_TAG_ACTIVE;
+  pt.tag = tag;
   pt.value.coordinate.x = x;
   pt.value.coordinate.y = y;
   *out = GHOSTTY_INIT_SIZED(GhosttyGridRef);

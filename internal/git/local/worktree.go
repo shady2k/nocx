@@ -14,6 +14,15 @@ import (
 	"github.com/shady2k/nocx/internal/git/spawn"
 )
 
+// branchCleanupTimeout bounds the one cleanup this file runs on a context the
+// caller's cancellation cannot reach: the removal of a branch git created for
+// an add that then failed (nocx-tlfoj). It is a bound on a HUNG git, not a
+// budget for the work — the work is three short reads and one guarded delete
+// against a repository the caller was already using — so it is generous, and
+// its only job is to stop a cleanup that will never finish from holding the
+// call that is already returning an error.
+const branchCleanupTimeout = 30 * time.Second
+
 // The linked-worktree operations (brief nocx-xn63t.1.1). Everything about
 // spawning a child stays in this package (spec D16) and the argv comes from
 // internal/git/spawn; what is here is the ORDER of the invocations and the
@@ -98,7 +107,23 @@ func (r *Repo) AddWorktree(ctx context.Context, branch, base, path string) (git.
 		// and in the same code, the caller's compensation drives. Leaving it
 		// would put a ref in the repository that only this call knows about,
 		// and the call is returning an error.
-		if cleanupErr := r.discardBranch(ctx, env, branch, base, baseOID); cleanupErr != nil {
+		//
+		// ON A CONTEXT THE CALLER'S CANCELLATION CANNOT REACH (nocx-tlfoj).
+		// The commonest reason the add above failed is that ctx ran out: the
+		// registrar gives a spawn and its enrolment ONE budget together
+		// (internal/workers/registrar.go, "covers spawn and enrolment"), so on
+		// a machine where `git worktree add` does not fit inside it, git makes
+		// the branch and is then killed. Every invocation discardBranch makes
+		// is refused by that same spent context, and the branch this call is
+		// returning an error ABOUT stays in the repository — which is a ref in
+		// a person's repo that only a dead call ever knew of. The same shape
+		// is already settled one layer up, where a spawn's undo runs on
+		// killContext (internal/app/workers.go, nocx-4gj5w): a cleanup may not
+		// be bounded by the clock whose expiry is what it cleans up after.
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), branchCleanupTimeout)
+		cleanupErr := r.discardBranch(cleanupCtx, env, branch, base, baseOID)
+		cancelCleanup()
+		if cleanupErr != nil {
 			return git.WorktreeAdded{}, fmt.Errorf("%w; and the branch %q it created could not be removed: %w", err, branch, cleanupErr)
 		}
 		return git.WorktreeAdded{}, err

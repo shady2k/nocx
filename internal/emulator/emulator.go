@@ -233,6 +233,23 @@ type Cursor struct {
 	Visible bool
 }
 
+// HistoryPage is one [Terminal.HistoryRows] read: what exists of the range
+// that was asked for, and the facts that say where the read stopped.
+//
+// Start is the history index of Rows[0] — the first row of the range that
+// was requested, whether or not any of it exists. Rows holds what exists of
+// the range, oldest first. Total is how many history rows the terminal
+// retained at the instant of the read, so the arithmetic is always
+// available: a page whose rows end before the requested range did, with
+// Total standing beyond them, was truncated by retention — and a page that
+// ends at Total ran into the beginning of the buffer's lifetime. A short
+// list is never an answer on its own.
+type HistoryPage struct {
+	Start int
+	Rows  []Row
+	Total int
+}
+
 // Terminal is the port: one terminal instance, and everything a session runtime
 // does to it and reads from it.
 //
@@ -279,7 +296,9 @@ type Terminal interface {
 	// has scrolled: scrollback is a different reading with a different
 	// retention question (design §6.3), and this port neither scrolls a
 	// viewport nor reads one. A row outside the active area is
-	// [ErrOutOfRange].
+	// [ErrOutOfRange]. The reading by position over the scrollback itself is
+	// [Terminal.HistoryRows], a method of its own for the retention question
+	// that comes with it.
 	Row(y int) (Row, error)
 
 	// Cell returns one position of the active screen, copied.
@@ -390,6 +409,40 @@ type Terminal interface {
 	// A closed terminal has no report: this returns [ErrClosed] after
 	// [Terminal.Close], and a report that was never read dies with it.
 	DepartedRows() ([]Row, error)
+
+	// HistoryRows reads a RANGE of scrollback rows by position and returns
+	// what exists of it, copied, oldest first. It is the reading scrolling
+	// up needs: [Terminal.DepartedRows] is a producer of the rows that left
+	// — once each, at the moment they leave — and cannot answer "what sits
+	// at history rows 40 to 70" after the fact.
+	//
+	// This is deliberately a method of its own and not an extension of
+	// [Terminal.Row]: a row of the ACTIVE AREA and a row of history are
+	// different readings with different bounds and a different retention
+	// question (design §6.3), and Row's contract — counted from the top of
+	// the active area, [ErrOutOfRange] outside it — stays exactly as it is.
+	//
+	// History row 0 is the OLDEST row the terminal still retains; Total-1 is
+	// the newest, the row directly above the active area. A range that
+	// reaches past Total returns the rows that exist, from Start to Total-1,
+	// with Total in the page: what exists and where it stopped, never a bare
+	// short list a caller cannot tell from a short history. A start at or
+	// past Total, a count of zero and an empty history all return the empty
+	// page with the total alongside — they are answers, not failures. A
+	// negative start or count is malformed and reports [ErrOutOfRange].
+	//
+	// History is per ACTIVE buffer, exactly as the departure report is:
+	// while the alternate screen owns the pane, a read answers its own
+	// (empty) history and never the primary's rows, and the primary's rows
+	// are readable again once it is restored.
+	//
+	// The rows are the CALLER'S once returned, copied at the instant of the
+	// read; a read is one instant, because the port serialises access — an
+	// ingest concurrent with a read lands before or after it whole.
+	//
+	// A closed terminal has no history: this returns [ErrClosed] after
+	// [Terminal.Close], exactly as every other read does.
+	HistoryRows(start, count int) (HistoryPage, error)
 
 	// Paste hands the terminal a paste of text and returns the bytes the
 	// program is to be sent, framed per the TERMINAL'S OWN state: bracketed

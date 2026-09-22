@@ -548,6 +548,44 @@ func (t *terminal) DepartedRows() ([]emulator.Row, error) {
 	return out, err
 }
 
+// HistoryRows reads a range of the active buffer's scrollback by position:
+// what exists of the range, with the retention total alongside. The bounds
+// are the method's own, stated on the port; the lock spans the whole read,
+// so the page's total and its rows describe one instant of the buffer even
+// though the walk is per row.
+func (t *terminal) HistoryRows(start, count int) (emulator.HistoryPage, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.t == nil {
+		return emulator.HistoryPage{}, emulator.ErrClosed
+	}
+	if start < 0 || count < 0 {
+		return emulator.HistoryPage{}, fmt.Errorf("ghostty: history range start %d count %d: %w",
+			start, count, emulator.ErrOutOfRange)
+	}
+	total, err := t.scrollbackLocked()
+	if err != nil {
+		return emulator.HistoryPage{}, err
+	}
+	end := total
+	if count < total-start {
+		end = start + count
+	}
+	rows := make([]emulator.Row, 0, max(end-start, 0))
+	for y := start; y < end; y++ {
+		row, err := t.historyRow(y)
+		if err != nil {
+			// The rows read so far go out with the failure, exactly as a
+			// departure report does: what was read is ordered, and the
+			// caller judges what the rest is worth.
+			return emulator.HistoryPage{Start: start, Rows: rows, Total: total},
+				fmt.Errorf("ghostty: history row %d of %d..%d: %w", y, start, end, err)
+		}
+		rows = append(rows, row)
+	}
+	return emulator.HistoryPage{Start: start, Rows: rows, Total: total}, nil
+}
+
 func (t *terminal) Screen() (emulator.Screen, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -755,6 +793,73 @@ func (t *terminal) readGrapheme(ref *C.GhosttyGridRef) (string, error) {
 		sb.WriteRune(rune(cp))
 	}
 	return sb.String(), nil
+}
+
+// historyRow reads one row of the active buffer's scrollback through the
+// bridge's row traversal. The bridge resolves the row ONCE — the page-list
+// walk a history lookup pays — and reads every cell of the row off the
+// resolved reference, so a row of N columns costs one grid-reference
+// resolution and not N. Bounds belong to the caller, as rowAt's do: history
+// is bounded by what has not been evicted, and only the caller knows the
+// range it asked for.
+func (t *terminal) historyRow(y int) (emulator.Row, error) {
+	cols := t.geom.Cols
+	cells := make([]C.nocxRowCellFacts, cols)
+	var wrap, cont C.bool
+	// Clusters ride one row-wide UTF-8 buffer. The first budget is what a
+	// full row of the port's largest clusters costs; a row of clusters past
+	// even that re-runs the whole traversal on a fourfold budget rather than
+	// truncating — the bridge holds no state between attempts, and each
+	// attempt pays its own one resolution.
+	graphemes := make([]C.uint8_t, cols*maxGraphemeCodepoints*4)
+	for {
+		r := C.nocxHistoryRow(t.t, C.uint32_t(y), C.uint16_t(cols), &cells[0],
+			&graphemes[0], C.size_t(len(graphemes)), &wrap, &cont)
+		if r == C.GHOSTTY_OUT_OF_SPACE {
+			if len(graphemes) >= cols*maxGraphemeCodepoints*64 {
+				return emulator.Row{}, fmt.Errorf("ghostty: history row %d utf8 budget %d: %w",
+					y, len(graphemes), emulator.ErrExhausted)
+			}
+			graphemes = make([]C.uint8_t, len(graphemes)*4)
+			continue
+		}
+		if r != C.GHOSTTY_SUCCESS {
+			return emulator.Row{}, resultError("history_row", r)
+		}
+		break
+	}
+	out := make([]emulator.Cell, cols)
+	for x := range cols {
+		f := &cells[x]
+		cell := emulator.Cell{
+			Width:   cellWidth(f.wide),
+			HasText: bool(f.has_text),
+		}
+		// A cell the terminal carries unstyled reads as the default style —
+		// the value a full style read produces for it — so the style is
+		// materialised only for the cells that have one.
+		if f.styled {
+			style, err := styleOf(f.style)
+			if err != nil {
+				return emulator.Row{}, err
+			}
+			cell.Style = style
+		}
+		if cell.HasText {
+			off, n := int(f.grapheme_off), int(f.grapheme_len)
+			cell.Grapheme = string(C.GoBytes(unsafe.Pointer(&graphemes[off]), C.int(n)))
+		}
+		out[x] = cell
+	}
+	return emulator.Row{Cells: out, Wrap: bool(wrap), Continuation: bool(cont)}, nil
+}
+
+// gridResolutions reports the bridge's running total of grid-reference
+// resolutions — every ghostty_terminal_grid_ref this shim has issued. Tests
+// read it: the one-per-row cost of a history range is a property no reading
+// of the code can establish, so the count is the evidence.
+func gridResolutions() uint64 {
+	return uint64(C.nocxGridResolveCount())
 }
 
 func (t *terminal) EncodeKey(ev emulator.KeyEvent) ([]byte, error) {

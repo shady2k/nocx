@@ -1,5 +1,9 @@
 #include "bridge.h"
 
+#include <stdatomic.h>
+#include <stdlib.h>
+#include <string.h>
+
 /* ------------------------------------------------------------------ effects */
 
 /*
@@ -220,6 +224,14 @@ GhosttyResult nocxModeValue(GhosttyTerminal terminal, uint16_t mode,
 /* -------------------------------------------------------------------- reads */
 
 /*
+ * The running total of grid references this shim has resolved. Resolving is
+ * the expensive step — for history it may walk the whole page list — and the
+ * count is how the one-resolution-per-row promise of nocxHistoryRow is kept
+ * checkable instead of folklore.
+ */
+static _Atomic unsigned long long nocx_resolve_count = 0;
+
+/*
  * A grid reference at (x, y) in the COORDINATE SPACE tag names — the active
  * area the cursor moves in, or the scrollback history rows that left it.
  * GhosttyPoint is a tagged union cgo cannot build, which is why the shim
@@ -228,6 +240,7 @@ GhosttyResult nocxModeValue(GhosttyTerminal terminal, uint16_t mode,
  */
 GhosttyResult nocxGridRefAt(GhosttyTerminal terminal, GhosttyPointTag tag,
                             uint32_t x, uint32_t y, GhosttyGridRef *out) {
+  atomic_fetch_add(&nocx_resolve_count, 1);
   GhosttyPoint pt = {0};
   pt.tag = tag;
   pt.value.coordinate.x = x;
@@ -269,6 +282,114 @@ GhosttyResult nocxStyleAt(const GhosttyGridRef *ref, nocxStyleFacts *out) {
   out->strikethrough = style.strikethrough;
   out->overline = style.overline;
   return GHOSTTY_SUCCESS;
+}
+
+/*
+ * Appends one cell's grapheme codepoints to the row's UTF-8 buffer as UTF-8.
+ * The offset and length land on the cell; GHOSTTY_OUT_OF_SPACE means the row
+ * overflowed the caller's buffer, and the caller retries the whole row.
+ */
+static GhosttyResult nocxUtf8Append(const uint32_t *cps, size_t n,
+                                    uint8_t *buf, size_t cap, size_t *used,
+                                    uint32_t *out_off, uint16_t *out_len) {
+  size_t start = *used;
+  for (size_t i = 0; i < n; i++) {
+    uint32_t cp = cps[i];
+    uint8_t enc[4];
+    size_t k = 0;
+    if (cp < 0x80) {
+      enc[k++] = (uint8_t)cp;
+    } else if (cp < 0x800) {
+      enc[k++] = (uint8_t)(0xC0 | (cp >> 6));
+      enc[k++] = (uint8_t)(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+      enc[k++] = (uint8_t)(0xE0 | (cp >> 12));
+      enc[k++] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
+      enc[k++] = (uint8_t)(0x80 | (cp & 0x3F));
+    } else {
+      enc[k++] = (uint8_t)(0xF0 | (cp >> 18));
+      enc[k++] = (uint8_t)(0x80 | ((cp >> 12) & 0x3F));
+      enc[k++] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
+      enc[k++] = (uint8_t)(0x80 | (cp & 0x3F));
+    }
+    if (*used + k > cap) return GHOSTTY_OUT_OF_SPACE;
+    memcpy(buf + *used, enc, k);
+    *used += k;
+  }
+  if (*used - start > UINT16_MAX) return GHOSTTY_OUT_OF_SPACE;
+  *out_off = (uint32_t)start;
+  *out_len = (uint16_t)(*used - start);
+  return GHOSTTY_SUCCESS;
+}
+
+GhosttyResult nocxHistoryRow(GhosttyTerminal terminal, uint32_t y,
+                             uint16_t cols, nocxRowCellFacts *out_cells,
+                             uint8_t *graphemes, size_t graphemes_cap,
+                             bool *out_wrap, bool *out_continuation) {
+  /* THE resolution: one walk of the history page list for the whole row. */
+  GhosttyGridRef ref;
+  GhosttyResult r =
+      nocxGridRefAt(terminal, GHOSTTY_POINT_TAG_HISTORY, 0, y, &ref);
+  if (r != GHOSTTY_SUCCESS) return r;
+  GhosttyRow row;
+  r = ghostty_grid_ref_row(&ref, &row);
+  if (r != GHOSTTY_SUCCESS) return r;
+  r = ghostty_row_get(row, GHOSTTY_ROW_DATA_WRAP, out_wrap);
+  if (r != GHOSTTY_SUCCESS) return r;
+  r = ghostty_row_get(row, GHOSTTY_ROW_DATA_WRAP_CONTINUATION,
+                      out_continuation);
+  if (r != GHOSTTY_SUCCESS) return r;
+
+  size_t used = 0;
+  for (uint16_t x = 0; x < cols; x++) {
+    /* The traversal: the same page node, the same row, the next column. The
+       reference is a snapshot of (node, x, y), valid until the next mutating
+       call — which cannot happen mid-call, because the caller holds its own
+       lock across the read. */
+    ref.x = x;
+    nocxRowCellFacts *out = &out_cells[x];
+    memset(out, 0, sizeof *out);
+    GhosttyCell cell;
+    r = ghostty_grid_ref_cell(&ref, &cell);
+    if (r != GHOSTTY_SUCCESS) return r;
+    r = ghostty_cell_get(cell, GHOSTTY_CELL_DATA_HAS_TEXT, &out->has_text);
+    if (r != GHOSTTY_SUCCESS) return r;
+    r = ghostty_cell_get(cell, GHOSTTY_CELL_DATA_WIDE, &out->wide);
+    if (r != GHOSTTY_SUCCESS) return r;
+    r = ghostty_cell_get(cell, GHOSTTY_CELL_DATA_HAS_STYLING, &out->styled);
+    if (r != GHOSTTY_SUCCESS) return r;
+    if (out->styled) {
+      r = nocxStyleAt(&ref, &out->style);
+      if (r != GHOSTTY_SUCCESS) return r;
+    }
+    if (out->has_text) {
+      uint32_t cps[16];
+      size_t n = sizeof cps / sizeof cps[0];
+      r = ghostty_grid_ref_graphemes(&ref, cps, n, &n);
+      if (r == GHOSTTY_OUT_OF_SPACE) {
+        /* A cluster longer than the stack buffer: the library reports the
+           size it wants rather than truncating, so one exact allocation and
+           one re-read, the same shape the Go side's own grapheme read uses. */
+        uint32_t *big = malloc(n * sizeof *big);
+        if (big == NULL) return GHOSTTY_OUT_OF_MEMORY;
+        size_t bn = n;
+        r = ghostty_grid_ref_graphemes(&ref, big, bn, &bn);
+        if (r == GHOSTTY_SUCCESS)
+          r = nocxUtf8Append(big, bn, graphemes, graphemes_cap, &used,
+                             &out->grapheme_off, &out->grapheme_len);
+        free(big);
+      } else if (r == GHOSTTY_SUCCESS) {
+        r = nocxUtf8Append(cps, n, graphemes, graphemes_cap, &used,
+                           &out->grapheme_off, &out->grapheme_len);
+      }
+      if (r != GHOSTTY_SUCCESS) return r;
+    }
+  }
+  return GHOSTTY_SUCCESS;
+}
+
+uint64_t nocxGridResolveCount(void) {
+  return atomic_load(&nocx_resolve_count);
 }
 
 /* -------------------------------------------------------------------- input */

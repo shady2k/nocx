@@ -341,6 +341,13 @@ type AttachedSession struct {
 	// keepalive prober (nocx-y6fh7 item 6) — see OnLiveness. Guarded by mu;
 	// fired outside it, on the same terms holeObs already is.
 	livenessObs func(responsive bool, roundTripMS int64)
+	// screenObs is the coordinator's consumer for this session's published
+	// screen: one full session.frame document per revision, reassembled by
+	// the connection's assembler before it reaches here. screenLostObs is
+	// told, by name, when the carrier dropped an assembly — the invariant's
+	// "or has been told it lost it". Both guarded by mu; fired outside it.
+	screenObs     func(revision uint64, payload []byte)
+	screenLostObs func(reason string)
 }
 
 // inbound is one item in an attachment's delivery order: bytes the wire
@@ -645,6 +652,47 @@ func (a *AttachedSession) OnLiveness(f func(responsive bool, roundTripMS int64))
 	a.mu.Lock()
 	a.livenessObs = f
 	a.mu.Unlock()
+}
+
+// OnScreenFrame registers the coordinator's consumer for this session's
+// published screen. Nil means nobody is watching: assembled frames are then
+// dropped at this door, and the transport that wants them registers first
+// (see OnScreenLost for what happens to the ones the carrier itself lost).
+func (a *AttachedSession) OnScreenFrame(f func(revision uint64, payload []byte)) {
+	a.mu.Lock()
+	a.screenObs = f
+	a.mu.Unlock()
+}
+
+// OnScreenLost registers the coordinator's observer for a screen the carrier
+// dropped — a superseded assembly, a bound refused. The reason is the
+// assembler's own named error, carried through untranslated.
+func (a *AttachedSession) OnScreenLost(f func(reason string)) {
+	a.mu.Lock()
+	a.screenLostObs = f
+	a.mu.Unlock()
+}
+
+// deliverScreen hands one whole reassembled document to the observer, with
+// the revision it was read at.
+func (a *AttachedSession) deliverScreen(assembled *proto.AssembledScreenFrame) {
+	a.mu.Lock()
+	obs := a.screenObs
+	a.mu.Unlock()
+	if obs == nil {
+		return
+	}
+	obs(assembled.Revision, assembled.Payload)
+}
+
+// reportScreenLost tells the observer what the carrier dropped and why.
+func (a *AttachedSession) reportScreenLost(reason string) {
+	a.mu.Lock()
+	obs := a.screenLostObs
+	a.mu.Unlock()
+	if obs != nil {
+		obs(reason)
+	}
 }
 
 // reportLiveness tells the observer what a liveness notification said.

@@ -232,16 +232,10 @@ package proto
 // downlink. Nothing shipped at 15 carries a session entry or a spawn result
 // the op changes, so no shape moved with it.
 // This is still 15, widened in place for the same reason: the wire grew the
-// SCREEN plane, `TypeScreenFrame` — the full snapshot a session's runtime
-// publishes per revision, keyed by the host session id and the subscriber it
-// is for, with the revision in its own header so a receiver can order, drop
-// and reassemble without parsing the payload. It carries no lease epoch,
-// where its session-plane sibling carries one, because it only ever flows
-// helper→coordinator and authorises nothing — the sibling's own header says
-// its epoch is zero on exactly those frames. A frame too large for one wire
-// frame travels as parts the carrier reassembles before any JSON is parsed:
-// the contract the payload carries never learns that parts exist. A
-// generation that does not know the type byte would resync THROUGH a live
+// SCREEN plane, `TypeScreenFrame` — its identity, header and continuation
+// are decided in ADR-0073
+// (docs/decisions/0073-the-screen-frame-is-keyed-by-its-session-and-its-reader-and-continues-on-its-own-carrier.md).
+// A generation that does not know the type byte would resync THROUGH a live
 // screen stream rather than drop one frame, which is why the byte is
 // announced here even widened in place.
 const Version = "15"

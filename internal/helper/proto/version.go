@@ -238,6 +238,13 @@ package proto
 // A generation that does not know the type byte would resync THROUGH a live
 // screen stream rather than drop one frame, which is why the byte is
 // announced here even widened in place.
+// This is still 15, widened in place for the same reason: the wire grew the
+// ROW STREAM plane, `TypeOutputRows` and `TypeIntervalEnd` — the rows a
+// session's runtime hands over as they leave the screen, and the interval
+// end markers that close them (nocx-2v80t.3.6). Their identity and header
+// follow the screen frame's own (ADR-0073), and the bytes announce here for
+// the reason the screen byte did: a generation that did not know the type
+// bytes would resync through a live row stream rather than drop one frame.
 // This is still 15, widened in place for the same reason: `session.resize
 // .params` and both spawn shapes gained `xpixel` and `ypixel` — the client's
 // cell metrics in TIOCSWINSZ's whole-text-area DEVICE pixels, which the

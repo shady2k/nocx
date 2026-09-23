@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.confirm-rows.params.schema.json",
+  "title": "HelperSessionConfirmRowsParams",
+  "description": "Params of the helper session service's confirm-rows op: advance the session's confirmed-written mark, the one mark the helper keeps of what the coordinator holds (nocx-2v80t.3.6). It is the acknowledgement half of the streamed block output: the helper streams rows the moment they leave the screen and keeps no copy, so the mark — not a queue — is what a later resend reads the scrollback against. Keyed by subscriber and session like every reader-keyed op. The op has no result shape rather than an invented one; the answer to \"did the mark land\" is the absence of an error.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["subscriber", "session", "upToRow"],
+  "properties": {
+    "subscriber": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/subscriberId"
+    },
+    "session": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/hostSessionId"
+    },
+    "upToRow": {
+      "description": "The absolute row index through which the coordinator has written every streamed row and end marker it received — one PAST the last confirmed row, the same exclusive spelling the end marker's EndRow uses. A mark ahead of what the session ever departed is refused by name: confirming rows that were never sent would make the next resend skip output nobody holds.",
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

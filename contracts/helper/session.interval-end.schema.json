@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.interval-end.schema.json",
+  "title": "HelperSessionIntervalEnd",
+  "description": "The end marker of one authenticated execution interval, sent on the same ordered carrier as the interval's rows and AFTER the last of them (nocx-2v80t.3.6). The nonce is what makes the marker a boundary and not just a line in a stream: the coordinator authenticates it against the meeting its own kernel recorded, exactly as it authenticated the completion, so an interval nobody ran can close nobody's block. Rows that departed after the interval's boundary was taken — while the authenticated half was still on its way — stream after this marker and belong to the interval that follows; EndRow is what tells the two apart.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["nonce", "endRow", "closing"],
+  "properties": {
+    "nonce": {
+      "description": "The boundary's meeting, as 64 lowercase hex characters — the fixed spelling the lifecycle downlink's nonce already uses. The rendezvous matched on it exactly; a decoder that tolerated another spelling would attribute rows to a boundary nobody authenticated.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "endRow": {
+      "description": "The absolute row index one PAST the interval's last departed row — the exclusive end of the rows this interval owns. Rows whose index is below it and streamed since the previous end marker belong to this interval; rows at it and above belong to the interval that follows, which is exactly how a fence split keeps a post-sighting row out of the fenced command.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "closing": {
+      "description": "The screen as the boundary sat on it, in the frame contract's row shape — the rows a block closes with, and never a later read of a screen the stream has since moved past. Null when the screen could not be read: a screen nobody read is not a screen nobody may be told about, and null is an answer rather than an absence.",
+      "$ref": "#/$defs/rowsOrNull"
+    }
+  },
+  "$defs": {
+    "rowsOrNull": {
+      "type": ["array", "null"],
+      "items": {
+        "$ref": "https://nocx.local/contracts/session.frame.schema.json#/$defs/row"
+      }
+    }
+  }
+}

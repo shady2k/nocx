@@ -243,6 +243,24 @@ type Session struct {
 	ingestWork uint64
 	ingestLost uint64
 
+	// The observation record (nocx-zg3k3.5.2): observation is the interval
+	// in flight — its opening screen, the departures drained into it at
+	// every ingest, the losses it has counted; observations are the records
+	// authenticated boundaries have sealed, oldest first, bounded by
+	// [MaxObservations] with the evictions counted in observationsEvicted.
+	// All three are guarded by mu, like everything else here, and the reads
+	// that hand records out live in observation.go.
+	observation         *observationOpen
+	observations        []ObservationRecord
+	observationsEvicted uint64
+	// obsCarried is how much of ingestLost some observation record already
+	// carries: a hole reported before the first ingest, or in the gap
+	// between one sealed interval and the next output, reaches no record at
+	// the moment it is reported, and this is the marker that seeds it into
+	// the record that opens next instead of letting the count die between
+	// intervals (observation.go).
+	obsCarried uint64
+
 	// bufferInstance, bufferActive and bufferSeen are ScreenIdentity's own
 	// bookkeeping (nocx-6q1uh.4, digest.go's ScreenIdentity doc): the
 	// emulator's [emulator.Terminal.Screen] answers only which buffer is
@@ -1039,6 +1057,10 @@ func (s *Session) Ingest(b []byte) error {
 		return ErrIngestTooLarge
 	}
 	s.ingestWork += uint64(len(b))
+	// The interval in flight opens BEFORE the feed that triggered it is
+	// applied, so its opening screen is the screen the interval began on and
+	// carries none of the output that opened it (observation.go).
+	s.openObservationLocked()
 
 	replies, err := s.emulator.Ingest(b)
 	if err != nil {
@@ -1055,6 +1077,10 @@ func (s *Session) Ingest(b []byte) error {
 	// consumer either way. An effect dropped because a reply could not be
 	// delivered is a bell that rings nowhere and is never reported as lost.
 	replyErr := s.deliverReplyLocked(replies)
+	// The departure report is drained BEFORE the effects are read, because
+	// one of them may carry the fence that seals this record: a feed's own
+	// departures belong to the interval that feed belongs to (observation.go).
+	s.drainObservationLocked(len(b))
 	for _, e := range s.emulator.Effects() {
 		if e.Kind == emulator.EffectFence {
 			// The join: a fence the emulator drained LOCATES the
@@ -1123,6 +1149,14 @@ func (s *Session) ReportHole(lost uint64) error {
 	// hole the carrier reported is output this session never saw: it belongs
 	// in the same number for the same reason.
 	s.ingestLost += lost
+	// The record in flight counts the hole beside the session: bytes that
+	// never reached the emulator never became rows, so bytes are the honest
+	// unit here and the session's completeness above is what the record's own
+	// claim will fold down from (observation.go).
+	if s.observation != nil {
+		s.observation.Loss.IngestLostBytes += lost
+		s.obsCarried += lost
+	}
 	s.completeness = CompletenessLostIngest
 	s.tick()
 	return nil
@@ -1142,6 +1176,17 @@ type rendezvousEntry struct {
 	stop func() bool
 	// seq is the generation the wait was armed under.
 	seq uint64
+	// captured is what a PARKING sighting took at the fence's instant: the
+	// interval record's content up to the fence, and the screen as the fence
+	// sat on it. The boundary is where the fence sits in the byte stream, so
+	// the capture detaches from the interval in flight — the output that
+	// follows the fence starts the next record's content — and the join at
+	// [Session.Completed] seals the capture rather than re-reading a screen
+	// the stream has moved past. A sighting nobody authenticated returns its
+	// capture to the interval in flight (observation.go). Nil on every other
+	// entry; bounded by [MaxPendingRendezvous] with the set, since it lives
+	// on the entry.
+	captured *observationCapture
 }
 
 // pending reports whether the meeting is still waiting for one of its halves.
@@ -1171,6 +1216,17 @@ func (s *Session) Completed(at Incarnation, nonce FenceNonce, _ int) {
 			e.State = RendezvousComplete
 			s.rendezvousLatest, s.rendezvousHasLatest = nonce, true
 			s.tick()
+			// The authenticated boundary just closed. In the fence-first
+			// order the sighting captured the record AT the fence — the
+			// boundary this completion is authenticating — so the capture
+			// seals, and the interval in flight, rebased at the fence, is
+			// already the next record. Under the same lock the join holds.
+			if e.captured != nil {
+				s.sealObservationFromCaptureLocked(nonce, e.captured)
+				e.captured = nil
+			} else {
+				s.sealObservationLocked(nonce)
+			}
 		}
 		return
 	}
@@ -1241,6 +1297,12 @@ func (s *Session) evictRendezvousLocked(keep func(*rendezvousEntry) bool) bool {
 	for i, nonce := range s.rendezvousOrder {
 		if e := s.rendezvous[nonce]; e != nil && keep(e) {
 			s.disarmEntryLocked(e)
+			if e.captured != nil {
+				// Evicted before it authenticated: its capture was never a
+				// boundary either, and goes back the same way (observation.go).
+				s.returnObservationCaptureLocked(e.captured)
+				e.captured = nil
+			}
 			delete(s.rendezvous, nonce)
 			s.rendezvousOrder = append(s.rendezvousOrder[:i], s.rendezvousOrder[i+1:]...)
 			return true
@@ -1277,6 +1339,9 @@ func (s *Session) sightFenceLocked(nonce FenceNonce, source []byte) error {
 			e.PinnedSource = append([]byte(nil), source...)
 			s.rendezvousLatest, s.rendezvousHasLatest = nonce, true
 			s.tick()
+			// The join at the sighting: same boundary, same seal, whichever
+			// half arrived last (observation.go).
+			s.sealObservationLocked(nonce)
 			return nil
 		case RendezvousAwaitingAuthenticated:
 			// The same fence seen again refreshes the locate: the freshest
@@ -1297,16 +1362,23 @@ func (s *Session) sightFenceLocked(nonce FenceNonce, source []byte) error {
 	}
 	// A fence with nothing authenticated behind it parks and grants nothing
 	// (ADR-0024 decision 1). At the bound it is REFUSED rather than evicting
-	// anybody: it authorises nothing, so refusing it costs nothing.
-	if !s.admitRendezvousLocked(&rendezvousEntry{Rendezvous: Rendezvous{
+	// anybody: it authorises nothing, so refusing it costs nothing. Once it
+	// is admitted, the sighting takes the boundary's capture — the record
+	// content up to here, the screen as the fence sits on it — and the
+	// interval in flight is rebased to start its next record here, so the
+	// output that follows the fence never lands in the record this boundary
+	// will seal (observation.go).
+	entry := &rendezvousEntry{Rendezvous: Rendezvous{
 		State:        RendezvousAwaitingAuthenticated,
 		Nonce:        nonce,
 		At:           s.inc,
 		SightedAt:    s.rev,
 		PinnedSource: append([]byte(nil), source...),
-	}}, false) {
+	}}
+	if !s.admitRendezvousLocked(entry, false) {
 		return ErrRendezvousFull
 	}
+	entry.captured = s.splitObservationAtFenceLocked()
 	return nil
 }
 
@@ -1331,12 +1403,6 @@ func (s *Session) sightDrainedFenceLocked(e emulator.Effect) {
 	_ = s.sightFenceLocked(nonce, e.Source)
 }
 
-// fenceNonceOf decodes a fence body: exactly 64 hex characters. The
-// emulator's adapter only reports a fence whose stream bytes matched that
-// shape exactly (internal/emulator/ghostty/fence.go), so a mismatch here is
-// defensive, and refusing it is the safe answer — a zero-filled nonce could
-// otherwise MATCH a zero completion and close a meeting on bytes that never
-// carried a fence at all.
 func fenceNonceOf(body []byte) (FenceNonce, bool) {
 	var nonce FenceNonce
 	raw, err := hex.DecodeString(string(body))
@@ -1427,6 +1493,13 @@ func (s *Session) expireRendezvousLocked(nonce FenceNonce) error {
 	s.disarmEntryLocked(e)
 	e.State = RendezvousExpired
 	e.PinnedSource = nil
+	if e.captured != nil {
+		// The sighting nobody authenticated was never a boundary: the
+		// output it fenced returns to the interval in flight and the split
+		// un-does itself (observation.go).
+		s.returnObservationCaptureLocked(e.captured)
+		e.captured = nil
+	}
 	if awaitingSighting && s.completeness == CompletenessComplete {
 		s.completeness = CompletenessNoFence
 	}

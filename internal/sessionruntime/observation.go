@@ -168,6 +168,18 @@ func (s *Session) openObservationLocked() {
 	if scr, ok := s.takeObservationScreenLocked(); ok {
 		o.Opening = scr
 	}
+	// A hole reported before the first ingest, or in the gap after one
+	// sealed interval and before the next output, reached no record when it
+	// was reported ([Session.ReportHole] could only add to a record in
+	// flight). The bytes are the interval's nonetheless — they are output
+	// this record's stream is short — so the record that opens now carries
+	// everything the session has lost and no record has yet carried. The
+	// session marks the amount carried, so the same bytes are never counted
+	// into a second record.
+	if gap := s.ingestLost - s.obsCarried; gap > 0 {
+		o.Loss.IngestLostBytes = gap
+		s.obsCarried = s.ingestLost
+	}
 	s.observation = o
 }
 

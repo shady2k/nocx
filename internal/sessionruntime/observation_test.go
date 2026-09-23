@@ -169,6 +169,40 @@ func TestLostIngestIsCountedOnTheRecordInBytes(t *testing.T) {
 // let go.
 // ---------------------------------------------------------------------------
 
+// A hole reported before the interval opened — the attach-time hole, before
+// any byte of it was ever ingested — reaches the record that opens next: the
+// count does not die in the gap, and the cause is named on the record, not
+// only in the session's own state.
+func TestAHoleBeforeTheFirstIngestIsCountedOnTheFirstRecord(t *testing.T) {
+	s := obsSession(t, harnessGeometry(80, 24))
+	if err := s.ReportHole(777); err != nil {
+		t.Fatalf("report the attach-time hole: %v", err)
+	}
+
+	obsFeed(t, s, 0, 40)
+	obsSeal(t, s, obsNonce(4))
+	rec, ok := s.ObservationFor(obsNonce(4))
+	if !ok {
+		t.Fatal("the interval sealed no record")
+	}
+	if rec.Loss.IngestLostBytes != 777 {
+		t.Fatalf("the first record carries %d lost bytes, want the 777 reported before it opened", rec.Loss.IngestLostBytes)
+	}
+	if rec.Completeness != CompletenessLostIngest {
+		t.Fatalf("a record whose stream was short before it began reads back %v, want lost-ingest", rec.Completeness)
+	}
+	// The gap is carried once: the next record inherits nothing of it.
+	obsFeed(t, s, 100, 40)
+	obsSeal(t, s, obsNonce(5))
+	second, ok := s.ObservationFor(obsNonce(5))
+	if !ok {
+		t.Fatal("the second interval sealed no record")
+	}
+	if second.Loss.IngestLostBytes != 0 {
+		t.Fatalf("the second record carries %d lost bytes, want 0 — the gap was already counted", second.Loss.IngestLostBytes)
+	}
+}
+
 func TestTheRecordBoundEvictsTheOldestRowsAndCountsThem(t *testing.T) {
 	s := obsSession(t, harnessGeometry(80, 24))
 

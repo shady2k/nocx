@@ -253,6 +253,13 @@ type Session struct {
 	observation         *observationOpen
 	observations        []ObservationRecord
 	observationsEvicted uint64
+	// obsCarried is how much of ingestLost some observation record already
+	// carries: a hole reported before the first ingest, or in the gap
+	// between one sealed interval and the next output, reaches no record at
+	// the moment it is reported, and this is the marker that seeds it into
+	// the record that opens next instead of letting the count die between
+	// intervals (observation.go).
+	obsCarried uint64
 
 	// bufferInstance, bufferActive and bufferSeen are ScreenIdentity's own
 	// bookkeeping (nocx-6q1uh.4, digest.go's ScreenIdentity doc): the
@@ -1148,6 +1155,7 @@ func (s *Session) ReportHole(lost uint64) error {
 	// claim will fold down from (observation.go).
 	if s.observation != nil {
 		s.observation.Loss.IngestLostBytes += lost
+		s.obsCarried += lost
 	}
 	s.completeness = CompletenessLostIngest
 	s.tick()

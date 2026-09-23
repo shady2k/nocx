@@ -280,14 +280,116 @@ func (s *Session) sealObservationLocked(nonce FenceNonce) {
 	// The next interval opens on the boundary screen, at the boundary
 	// revision.
 	s.observation = &observationOpen{Opened: rec.Sealed, Opening: rec.Closing}
+	s.storeSealedObservationLocked(rec)
+}
+
+// storeSealedObservationLocked appends one sealed record to the session's
+// store: bounded by [MaxObservations], the oldest going first, counted —
+// exactly as the rows inside one record are.
+func (s *Session) storeSealedObservationLocked(rec ObservationRecord) {
 	s.observations = append(s.observations, rec)
-	// The session's store of sealed records is bounded ([MaxObservations]):
-	// the oldest go first, counted, exactly as the rows inside one record do.
 	if excess := len(s.observations) - MaxObservations; excess > 0 {
 		s.observationsEvicted += uint64(excess)
 		kept := make([]ObservationRecord, len(s.observations)-excess)
 		copy(kept, s.observations[excess:])
 		s.observations = kept
+	}
+}
+
+// observationCapture is what a parking sighting took at the fence's instant:
+// the interval's content up to the fence, and the screen as the fence sat on
+// it. The boundary is where the fence sits in the byte stream, so the
+// [Session.Completed] that joins the sighting seals THIS — the screen as it
+// was at the fence — and never a fresh read of a screen the stream has since
+// moved past.
+type observationCapture struct {
+	Opened       Revision
+	SightRev     Revision
+	Opening      ObservationScreen
+	Departed     []emulator.Row
+	Loss         ObservationLoss
+	Closing      ObservationScreen
+	Completeness Completeness
+}
+
+// splitObservationAtFenceLocked takes the boundary capture at a parking
+// sighting and rebases the interval in flight to start here: the capture
+// carries the record content up to the fence and the screen at it; the
+// record in flight keeps collecting the output that FOLLOWS the fence, as
+// the next record, opened at the fence's revision on the fence's screen.
+// The fence itself is painted by nothing, so the closing screen ends where
+// the command's visible output ended.
+func (s *Session) splitObservationAtFenceLocked() *observationCapture {
+	o := s.observation
+	if o == nil {
+		o = &observationOpen{Opened: s.rev}
+	}
+	cap := &observationCapture{
+		Opened:       o.Opened,
+		SightRev:     s.rev,
+		Opening:      o.Opening,
+		Departed:     o.Departed,
+		Loss:         o.Loss,
+		Completeness: s.completeness,
+	}
+	if scr, ok := s.takeObservationScreenLocked(); ok {
+		cap.Closing = scr
+	}
+	s.observation = &observationOpen{Opened: s.rev, Opening: cap.Closing}
+	return cap
+}
+
+// sealObservationFromCaptureLocked seals the record a parking sighting
+// captured: the content was taken AT the fence, so Sealed is the sighting's
+// revision and nothing is re-read. The interval in flight already IS the
+// next record — the split rebased it at the fence — so this seals the
+// capture and stores it, and touches nothing else.
+func (s *Session) sealObservationFromCaptureLocked(nonce FenceNonce, cap *observationCapture) {
+	rec := ObservationRecord{
+		Nonce:        nonce,
+		At:           s.inc,
+		Opened:       cap.Opened,
+		Sealed:       cap.SightRev,
+		Completeness: observationCompleteness(cap.Completeness, cap.Loss),
+		Opening:      cap.Opening,
+		Departed:     cap.Departed,
+		Closing:      cap.Closing,
+		Loss:         cap.Loss,
+	}
+	s.storeSealedObservationLocked(rec)
+}
+
+// returnObservationCaptureLocked hands a capture nobody authenticated back
+// to the interval in flight. An expired sighting, or one evicted at the
+// bound, was never a boundary — the output it fenced is nobody's but the
+// session's own stream — so the split un-does itself: the record in flight
+// resumes its ORIGINAL opening, the captured departures ahead of the rows
+// that came after the fence, the losses summed, and the whole bounded and
+// counted as any interval's content is.
+func (s *Session) returnObservationCaptureLocked(cap *observationCapture) {
+	o := s.observation
+	if o == nil {
+		s.observation = &observationOpen{
+			Opened:   cap.Opened,
+			Opening:  cap.Opening,
+			Departed: cap.Departed,
+			Loss:     cap.Loss,
+		}
+		return
+	}
+	merged := make([]emulator.Row, 0, len(cap.Departed)+len(o.Departed))
+	merged = append(merged, cap.Departed...)
+	merged = append(merged, o.Departed...)
+	o.Departed = merged
+	o.Loss.RetentionFeeds += cap.Loss.RetentionFeeds
+	o.Loss.RetentionFeedBytes += cap.Loss.RetentionFeedBytes
+	o.Loss.IngestLostBytes += cap.Loss.IngestLostBytes
+	o.Loss.EvictedRows += cap.Loss.EvictedRows
+	o.Opened, o.Opening = cap.Opened, cap.Opening
+	if excess := len(o.Departed) - MaxObservationRows; excess > 0 {
+		o.Loss.EvictedRows += uint64(excess)
+		kept := copy(o.Departed, o.Departed[excess:])
+		o.Departed = o.Departed[:kept]
 	}
 }
 

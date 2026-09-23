@@ -67,9 +67,14 @@ func obsWaitSeal(t *testing.T, p *programSession, nonce FenceNonce) {
 // obsWatchedProgram prints a hundred numbered lines — far more than a screen —
 // and then writes the fence, so every early row has LEFT the live rectangle by
 // the time the authenticated boundary arrives.
+// The post-fence line is written only after the runtime sends a byte: the
+// sighting therefore always parks with nothing but the flood behind it, and
+// the line demonstrably arrives AFTER the capture — the race the record's
+// boundary used to lose, pinned on the passing side by construction.
 var obsWatchedProgram = rawPreamble + `
 printf '` + obsLines(0, 100) + `'
 ` + obsFence + `
+readhex 1 >/dev/null
 printf 'OBS-DONE\n'
 `
 
@@ -79,6 +84,13 @@ func TestACommandNobodyWatchedReadsBackWithItsOutput(t *testing.T) {
 
 	// Fence first: the sighting parks waiting for the authenticated half.
 	waitForRendezvous(t, p.s, p.changed, p.done, nonce, RendezvousAwaitingAuthenticated)
+	// The capture is taken at the sighting; the runtime's byte now makes the
+	// program print its post-fence line, and the wait ends on the observable
+	// that the line has been INGESTED — after the capture, before the
+	// authenticated half. Whatever the record seals, it cannot honestly
+	// contain this line.
+	p.typed("x")
+	p.wait("OBS-DONE")
 	p.s.AuthenticatedEvents().Completed(p.s.Incarnation(), nonce, 0)
 	obsWaitSeal(t, p, nonce)
 
@@ -104,30 +116,35 @@ func TestACommandNobodyWatchedReadsBackWithItsOutput(t *testing.T) {
 		t.Fatalf("the record's revisions run opened=%d sealed=%d: the boundary did not move the clock the frames carry", rec.Opened, rec.Sealed)
 	}
 
-	// A hundred lines on twenty-four rows: the first twenty-four fill the
-	// screen, and every line after — the hundredth's own newline included —
-	// scrolls one off. Seventy-seven departures, first line first, last line
-	// last.
-	if len(rec.Departed) != 78 {
-		t.Fatalf("the record holds %d departed rows, want 78 (100 lines on a 24-row screen, plus the sentinel line's own newline)", len(rec.Departed))
+	// The boundary is where the fence sits in the byte stream. A hundred
+	// lines on twenty-four rows: the first twenty-four fill the screen and
+	// every line after scrolls one off — seventy-seven departures,
+	// L000000..L000076, the flood whole and NOTHING of what came after the
+	// fence. The sentinel line and its newline belong to the next interval.
+	if len(rec.Departed) != 77 {
+		t.Fatalf("the record holds %d departed rows, want 77 (the flood to the fence, not the post-fence line)", len(rec.Departed))
 	}
-	if first, last := obsRowText(rec.Departed[0]), obsRowText(rec.Departed[len(rec.Departed)-1]); first != "L000000" || last != "L000077" {
-		t.Fatalf("the departed rows run %q..%q, want L000000..L000077, oldest first", first, last)
+	if first, last := obsRowText(rec.Departed[0]), obsRowText(rec.Departed[len(rec.Departed)-1]); first != "L000000" || last != "L000076" {
+		t.Fatalf("the departed rows run %q..%q, want L000000..L000076, oldest first", first, last)
 	}
 
-	// And the closing screen is the screen AT the boundary — the tail the
-	// person could see, not the output the command printed.
+	// And the closing screen is the screen AT the fence — the flood's tail,
+	// ending at L000099, with the post-fence line nowhere in it.
 	if len(rec.Closing.Lines) != 24 {
 		t.Fatalf("the closing screen is %d rows, want the 24 the interval ran at", len(rec.Closing.Lines))
 	}
-	closing := false
+	lastText := ""
 	for _, r := range rec.Closing.Lines {
-		if strings.Contains(obsRowText(r), "OBS-DONE") {
-			closing = true
+		txt := obsRowText(r)
+		if txt != "" {
+			lastText = txt
+		}
+		if strings.Contains(txt, "OBS-DONE") {
+			t.Fatalf("the closing screen holds post-fence output %q: the record closed after the boundary", txt)
 		}
 	}
-	if !closing {
-		t.Fatal("the closing screen does not hold the program's last line")
+	if lastText != "L000099" {
+		t.Fatalf("the closing screen ends at %q, want L000099 — the flood's last line at the fence", lastText)
 	}
 }
 
@@ -165,11 +182,13 @@ func TestACommandWithNoOutputStillLeavesARecord(t *testing.T) {
 // anywhere in the stream — the ordering holds by construction, not by timing.
 // ---------------------------------------------------------------------------
 
+// Nothing follows the fence in this program: the record it produces is the
+// same whichever way the chunking lands, so the paired order is judged on
+// the record's content and never on where a read split the bytes.
 var obsCompletionFirstProgram = rawPreamble + `
 printf '` + obsLines(0, 100) + `'
 readhex 1 >/dev/null
 ` + obsFence + `
-printf 'OBS-DONE\n'
 `
 
 func TestACompletionBeforeItsFenceSealsTheSameRecord(t *testing.T) {
@@ -191,8 +210,11 @@ func TestACompletionBeforeItsFenceSealsTheSameRecord(t *testing.T) {
 	if !ok {
 		t.Fatal("completion-first order sealed no record")
 	}
-	if len(rec.Departed) != 78 {
-		t.Fatalf("completion-first order holds %d departed rows, want the same 78", len(rec.Departed))
+	// The fence ends the stream in this program: seventy-seven departures,
+	// the flood to the fence and nothing else, whichever way the pump
+	// chunked it.
+	if len(rec.Departed) != 77 {
+		t.Fatalf("completion-first order holds %d departed rows, want the same 77", len(rec.Departed))
 	}
 	if rec.Completeness != CompletenessComplete {
 		t.Fatalf("completion-first order reads back %v, want complete", rec.Completeness)
@@ -205,13 +227,16 @@ func TestACompletionBeforeItsFenceSealsTheSameRecord(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // obsRunningProgram prints sixty lines, parks on a byte the test will send
-// only after the so-far read, then prints thirty more and the fence: one
-// command, read in the middle.
+// only after the so-far read, then prints thirty more and the fence. The
+// sentinel AFTER the fence waits for a further byte, so it can never ride
+// the fence's own chunk into the capture: what the record seals is decided
+// by the stream's order, never by where a read split it.
 var obsRunningProgram = rawPreamble + `
 printf '` + obsLines(0, 60) + `'
 readhex 1 >/dev/null
 printf '` + obsLines(60, 30) + `'
 ` + obsFence + `
+readhex 1 >/dev/null
 printf 'OBS-DONE\n'
 `
 
@@ -244,10 +269,13 @@ func TestACommandStillRunningReadsBackWhatItHasPrintedSoFar(t *testing.T) {
 	}
 
 	// The command finishes: the fence parks the sighting (observable), the
-	// authenticated half arrives, and the SAME record closes with the whole
-	// output — one record per interval, not one per read.
+	// sentinel line is then printed and INGESTED — an observable — and the
+	// authenticated half arrives last. The record closes at the fence: the
+	// ninety flood lines whole, and none of the post-fence sentinel.
 	p.typed("x")
 	waitForRendezvous(t, p.s, p.changed, p.done, nonce, RendezvousAwaitingAuthenticated)
+	p.typed("y")
+	p.wait("OBS-DONE")
 	p.s.AuthenticatedEvents().Completed(p.s.Incarnation(), nonce, 0)
 	obsWaitSeal(t, p, nonce)
 
@@ -255,13 +283,14 @@ func TestACommandStillRunningReadsBackWhatItHasPrintedSoFar(t *testing.T) {
 	if !ok {
 		t.Fatal("the finished command sealed no record")
 	}
-	// Thirty more lines ran after the read: sixty-plus-thirty minus
-	// twenty-four, plus one — sixty-seven.
-	if len(sealed.Departed) != 68 {
-		t.Fatalf("the sealed record holds %d departed rows, want the whole 68", len(sealed.Departed))
+	// Thirty more lines ran after the read, to the fence: ninety lines on
+	// twenty-four rows — sixty-seven departures, L000000..L000066 — and the
+	// post-fence sentinel's departure is the NEXT record's first.
+	if len(sealed.Departed) != 67 {
+		t.Fatalf("the sealed record holds %d departed rows, want the whole 67 to the fence", len(sealed.Departed))
 	}
-	if last := obsRowText(sealed.Departed[len(sealed.Departed)-1]); last != "L000067" {
-		t.Fatalf("the sealed record's last departure is %q, want L000067", last)
+	if last := obsRowText(sealed.Departed[len(sealed.Departed)-1]); last != "L000066" {
+		t.Fatalf("the sealed record's last departure is %q, want L000066", last)
 	}
 	if sealed.Opened != rec.Opened {
 		t.Fatalf("the record changed identity across the boundary: opened %d became %d", rec.Opened, sealed.Opened)

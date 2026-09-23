@@ -14,9 +14,18 @@
 
 import { test, expect, promptReady } from './harness'
 
+interface PaneGeometry {
+  cols: number
+  rows: number
+  cellWidthPx: number
+  cellHeightPx: number
+}
+
 interface PaneScreenReading {
   revision: number | null
   rows: string[]
+  geometry: PaneGeometry | null
+  reported: { cols: number; rows: number; xpixel: number; ypixel: number } | null
 }
 
 declare global {
@@ -77,4 +86,29 @@ test('a command’s output reaches the pane’s cell model over the screen plane
       },
     )
     .toBe(true)
+
+  // THE CELL METRIC IS REAL (nocx-zg3k3.2.9). The frame's committed geometry
+  // carries non-zero per-cell pixels, and they are exactly the decode of
+  // what this client reported: the report rides in TIOCSWINSZ's whole-text-
+  // area units, so whole-area pixels over the grid it named is the per-cell
+  // figure the frame must carry — on both axes. Waits on the model's own
+  // state, never on a duration.
+  await expect
+    .poll(
+      async () => {
+        const reading = await page.evaluate(() => window.__nocxPaneScreen?.() ?? null)
+        return reading?.geometry?.cellWidthPx ?? 0
+      },
+      { timeout: 15_000, message: 'the frame never carried a non-zero cell width' },
+    )
+    .toBeGreaterThan(0)
+
+  const reading = await page.evaluate(() => window.__nocxPaneScreen?.() ?? null)
+  expect(reading?.geometry).not.toBeNull()
+  expect(reading?.reported).not.toBeNull()
+  const geometry = reading!.geometry!
+  const reported = reading!.reported!
+  expect(geometry.cellHeightPx).toBeGreaterThan(0)
+  expect(geometry.cellWidthPx).toBe(Math.round(reported.xpixel / reported.cols))
+  expect(geometry.cellHeightPx).toBe(Math.round(reported.ypixel / reported.rows))
 })

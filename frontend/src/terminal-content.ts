@@ -204,6 +204,18 @@ import type { SessionFrame } from './generated/session.frame'
 export interface PaneScreenReading {
   revision: number | null
   rows: string[]
+  /** The frame's committed geometry — the per-cell metric the client's own
+   *  pixel-to-cell mapping reads. Null while no revision is installed. */
+  geometry: {
+    cols: number
+    rows: number
+    cellWidthPx: number
+    cellHeightPx: number
+  } | null
+  /** What THIS client last reported for this session, or null before its
+   *  first send. The e2e compares the frame's committed metric against the
+   *  decode of the report that produced it (nocx-zg3k3.2.9). */
+  reported: SessionSize | null
 }
 
 const paneScreenReaders = new Map<string, () => PaneScreenReading>()
@@ -222,14 +234,22 @@ function installPaneScreenSeam(): void {
   if (!host.__nocxPaneScreen) host.__nocxPaneScreen = readActivePaneScreen
 }
 
-/** Flatten one model snapshot to the seam's reading. A model with no
- *  installed revision reads as nulls, never as an empty lie. */
-function readPaneScreen(model: CellModel): PaneScreenReading {
+/** Flatten one model snapshot to the seam's reading, beside what this
+ *  window last reported. A model with no installed revision reads as
+ *  nulls, never as an empty lie. */
+function readPaneScreen(model: CellModel, reported: SessionSize | null): PaneScreenReading {
   const snapshot = model.current()
-  if (snapshot === null) return { revision: null, rows: [] }
+  if (snapshot === null) return { revision: null, rows: [], geometry: null, reported }
   return {
     revision: snapshot.revision,
     rows: snapshot.rows.map((row) => row.cells.map((cell) => cell.grapheme).join('')),
+    geometry: {
+      cols: snapshot.geometry.cols,
+      rows: snapshot.geometry.rows,
+      cellWidthPx: snapshot.geometry.cellWidthPx,
+      cellHeightPx: snapshot.geometry.cellHeightPx,
+    },
+    reported,
   }
 }
 
@@ -4537,7 +4557,7 @@ export class TerminalContent extends BasePaneContent {
     const cellModel = createCellModel()
     this._cellModel = cellModel
     installPaneScreenSeam()
-    paneScreenReaders.set(session.sessionId, () => readPaneScreen(cellModel))
+    paneScreenReaders.set(session.sessionId, () => readPaneScreen(cellModel, this._lastReport))
     session.onScreenFrame((frame: SessionFrame) => {
       const model = this._cellModel
       if (model === null) return
@@ -4934,16 +4954,25 @@ export class TerminalContent extends BasePaneContent {
    * every pane sent before nocx-zg3k3.2.9, and still the honest one before
    * first layout — an unmeasured session stays unmeasured rather than
    * inventing a metric.
+   *
+   * Every send door (the open, the settle timer) computes the report HERE,
+   * at the moment it sends, so what this window last produced for sending
+   * is what this method last returned — the fact the pane-screen seam
+   * publishes as `reported`.
    */
+  private _lastReport: SessionSize | null = null
+
   private _reportedSize(): SessionSize {
     const w = this.renderer?.cellWidth ?? 0
     const h = this.renderer?.cellHeight ?? 0
-    return {
+    const report = {
       cols: this.cols,
       rows: this.rows,
       xpixel: w > 0 ? Math.round(this.cols * w) : 0,
       ypixel: h > 0 ? Math.round(this.rows * h) : 0,
     }
+    this._lastReport = report
+    return report
   }
 
   /**

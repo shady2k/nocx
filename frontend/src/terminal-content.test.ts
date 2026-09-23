@@ -15484,7 +15484,15 @@ describe('the pane receives the screen plane into its cell model (nocx-zg3k3.2.8
       const session: SessionFake = client._sessions[0]
 
       // Before any frame: the model holds no revision and names no rows.
-      expect(paneScreen()).toEqual({ revision: null, rows: [] })
+      // jsdom performs no layout, so the renderer has no cell metric yet:
+      // the open carried zeros for both pixel fields, exactly the degrade
+      // the report promises for an unmeasured pane.
+      expect(paneScreen()).toEqual({
+        revision: null,
+        rows: [],
+        geometry: null,
+        reported: { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
+      })
 
       session.fireScreenFrame(screenFrame(3, ['PROMPT$ ls', 'NOCX-MARKER-1']))
       const reading = paneScreen()

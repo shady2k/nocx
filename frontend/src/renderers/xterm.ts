@@ -692,6 +692,32 @@ export class XtermRenderer implements TerminalRenderer {
     return null
   }
 
+  /**
+   * The cell this renderer rasterises at, in DEVICE pixels — the integer
+   * cell xterm builds its CSS cell FROM (css = device / dpr; xterm's own
+   * Viewport divides exactly this way). The committed cell metric travels
+   * in this unit (review round 1, nocx-zg3k3.2.9): it is the one where the
+   * cell is an integer without rounding anything, so the frame's metric
+   * and the cells the GPU actually drew never disagree by a rounding step.
+   * Null while the render service cannot measure — the same honest
+   * degrade as cellWidth's 0, never a guess.
+   */
+  deviceCellDims(): { width: number; height: number } | null {
+    const t = this.term
+    if (!t) return null
+    const internal = t as unknown as { _core: unknown }
+    const core = internal._core as
+      | {
+          _renderService?: {
+            dimensions?: { device?: { cell?: { width: number; height: number } } }
+          }
+        }
+      | undefined
+    const cell = core?._renderService?.dimensions?.device?.cell
+    if (cell && cell.width > 0 && cell.height > 0) return cell
+    return null
+  }
+
   /** CSS-pixel width of one grid cell — xterm's real cell advance, snapped
    *  to whole device pixels (nocx-yy9g). 0 when the render service cannot
    *  measure yet (not mounted, no layout) — the frozen block layout treats

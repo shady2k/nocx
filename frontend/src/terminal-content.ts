@@ -2254,18 +2254,22 @@ export class TerminalContent extends BasePaneContent {
    * resolves false (no layout store, or a create the backend refused) and
    * the open goes out exactly as it did before this bead, unanchored.
    */
-  private async openRequestedSession(): Promise<SessionHandle> {
+  private async openRequestedSession(renderer: TerminalRenderer): Promise<SessionHandle> {
     const adopted = await this.adoptLiveSession()
     if (adopted !== null) return adopted
     const anchor: OpenAnchor = (await this.pane.registered) ? { paneId: this.pane.paneId } : {}
     if (!this.sshOpts) {
-      return this.client.openSession(this._reportedSize(), anchor)
+      return this.client.openSession(this._reportedSize(renderer), anchor)
     }
     if (this.sshOpts.profileId) {
-      return this.client.openSSHSession(this._reportedSize(), this.sshOpts.profileId, anchor)
+      return this.client.openSSHSession(
+        this._reportedSize(renderer),
+        this.sshOpts.profileId,
+        anchor,
+      )
     }
     return this.client.openSSHSessionByHost(
-      this._reportedSize(),
+      this._reportedSize(renderer),
       this.sshOpts.host,
       this.sshOpts.user,
       anchor,
@@ -2311,10 +2315,13 @@ export class TerminalContent extends BasePaneContent {
     }
   }
 
-  private async openSessionWithHostKeyRecovery(signal: AbortSignal): Promise<SessionHandle> {
+  private async openSessionWithHostKeyRecovery(
+    signal: AbortSignal,
+    renderer: TerminalRenderer,
+  ): Promise<SessionHandle> {
     for (;;) {
       try {
-        return await this.openRequestedSession()
+        return await this.openRequestedSession(renderer)
       } catch (err) {
         // The connect-time ask (ADR-0069) is checked FIRST: its shape is a
         // superset of the plain host-key failure — it carries the same
@@ -4361,7 +4368,7 @@ export class TerminalContent extends BasePaneContent {
       })
     })
     this._lifecycleUnsub = lifecycleSubscription.unsubscribe
-    const session = await this.openSessionWithHostKeyRecovery(signal)
+    const session = await this.openSessionWithHostKeyRecovery(signal, renderer)
 
     if (signal.aborted) {
       session.close()
@@ -4946,9 +4953,19 @@ export class TerminalContent extends BasePaneContent {
   /**
    * The size report this window would send now: the grid the renderer last
    * fitted, plus the cell metric in the wire's own unit — the WHOLE text
-   * area in pixels, cols × cellWidth (TIOCSWINSZ; internal/session/size.go
-   * states the unit, the helper's cellGeometry decodes it, and nothing else
-   * converts). One shape at every door — open, attach, resize (SessionSize).
+   * area in DEVICE pixels, cols × the renderer's device cell
+   * (TIOCSWINSZ's ws_xpixel/ws_ypixel; internal/session/size.go states the
+   * unit, the helper's cellGeometry decodes it, and nothing else converts).
+   * DEVICE pixels because xterm builds its CSS cell FROM an integer device
+   * cell — it is the unit where the metric is exact, and the one a
+   * rounding step cannot drift (review round 1). One shape at every door —
+   * open, attach, resize (SessionSize).
+   *
+   * The renderer is a parameter because the OPEN reports before this
+   * window's renderer field exists: _bindSession runs while `renderer` is
+   * still a local, and the report it sends must come from THAT renderer,
+   * not from a field that is null for another hundred lines. Everything
+   * after the bind reads the field.
    *
    * Zeros while the renderer has not measured the cell yet: the report
    * every pane sent before nocx-zg3k3.2.9, and still the honest one before
@@ -4962,14 +4979,13 @@ export class TerminalContent extends BasePaneContent {
    */
   private _lastReport: SessionSize | null = null
 
-  private _reportedSize(): SessionSize {
-    const w = this.renderer?.cellWidth ?? 0
-    const h = this.renderer?.cellHeight ?? 0
+  private _reportedSize(renderer: TerminalRenderer | null = this.renderer): SessionSize {
+    const dims = renderer?.deviceCellDims() ?? null
     const report = {
       cols: this.cols,
       rows: this.rows,
-      xpixel: w > 0 ? Math.round(this.cols * w) : 0,
-      ypixel: h > 0 ? Math.round(this.rows * h) : 0,
+      xpixel: dims !== null ? this.cols * dims.width : 0,
+      ypixel: dims !== null ? this.rows * dims.height : 0,
     }
     this._lastReport = report
     return report

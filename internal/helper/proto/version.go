@@ -240,9 +240,9 @@ package proto
 // announced here even widened in place.
 // This is still 15, widened in place for the same reason: `session.resize
 // .params` and both spawn shapes gained `xpixel` and `ypixel` — the client's
-// cell metrics in TIOCSWINSZ's whole-text-area units, which the helper
-// decodes into the per-cell metric the runtime commits and every published
-// frame carries (nocx-zg3k3.2.9). Zero means unmeasured and is the shape
+// cell metrics in TIOCSWINSZ's whole-text-area DEVICE pixels, which the
+// helper decodes into the per-cell metric the runtime commits and every
+// published frame carries (nocx-zg3k3.2.9, review round 1). Zero means unmeasured and is the shape
 // every older caller already sent. Nothing has shipped at 15, so the round
 // that follows widens it rather than bumping again.
 const Version = "15"

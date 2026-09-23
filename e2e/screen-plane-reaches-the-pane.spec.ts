@@ -87,12 +87,13 @@ test('a command’s output reaches the pane’s cell model over the screen plane
     )
     .toBe(true)
 
-  // THE CELL METRIC IS REAL (nocx-zg3k3.2.9). The frame's committed geometry
-  // carries non-zero per-cell pixels, and they are exactly the decode of
-  // what this client reported: the report rides in TIOCSWINSZ's whole-text-
-  // area units, so whole-area pixels over the grid it named is the per-cell
-  // figure the frame must carry — on both axes. Waits on the model's own
-  // state, never on a duration.
+  // THE CELL METRIC IS REAL, AND IT IS DEVICE PIXELS (nocx-zg3k3.2.9,
+  // review round 1). The frame's committed geometry carries non-zero
+  // per-cell pixels — the renderer's integer device cell — and they are
+  // EXACTLY the decode of what this client reported: cell x count
+  // reproduces the whole-area report with no rounding, because device
+  // pixels are the unit the report was formed in. Every wait is on the
+  // model's own state, never on a duration.
   await expect
     .poll(
       async () => {
@@ -109,6 +110,6 @@ test('a command’s output reaches the pane’s cell model over the screen plane
   const geometry = reading!.geometry!
   const reported = reading!.reported!
   expect(geometry.cellHeightPx).toBeGreaterThan(0)
-  expect(geometry.cellWidthPx).toBe(Math.round(reported.xpixel / reported.cols))
-  expect(geometry.cellHeightPx).toBe(Math.round(reported.ypixel / reported.rows))
+  expect(geometry.cellWidthPx * reported.cols).toBe(reported.xpixel)
+  expect(geometry.cellHeightPx * reported.rows).toBe(reported.ypixel)
 })

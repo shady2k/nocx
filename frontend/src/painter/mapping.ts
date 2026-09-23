@@ -16,6 +16,7 @@
 // zoom levels of the acceptance test exercise.
 
 import type { ScreenSnapshot } from '../cell-model'
+import { devicePxToCssPx, displayDpr } from './committed-metric'
 
 interface PixelPoint {
   readonly x: number
@@ -37,8 +38,11 @@ export interface PixelMapping {
 }
 
 export function createMapping(snapshot: ScreenSnapshot): PixelMapping {
-  const cellWidth = snapshot.geometry.cellWidthPx
-  const pitch = snapshot.geometry.cellHeightPx
+  // The committed geometry is DEVICE pixels (review round 1); the mapping
+  // answers in CSS pixels, what hit-testing and the cursor paint in.
+  const dpr = displayDpr()
+  const cellWidth = devicePxToCssPx(snapshot.geometry.cellWidthPx, dpr)
+  const pitch = devicePxToCssPx(snapshot.geometry.cellHeightPx, dpr)
   const cols = snapshot.geometry.cols
   const rows = snapshot.geometry.rows
   return {

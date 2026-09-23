@@ -27,6 +27,7 @@ import { DEFAULT_SNAPSHOT, type TerminalSnapshot } from '../scrollback/serialize
 import { createMapping, type PixelMapping } from './mapping'
 import { paintRow } from './paint-row'
 import { styleEquals } from './style'
+import { devicePxToCssPx, displayDpr } from './committed-metric'
 
 /** The measuring authority, in the shape run-geometry's metric needs. A
  *  CellFit satisfies it structurally; tests inject tables. `geometry()`'
@@ -139,8 +140,8 @@ export function createCellPainter(opts: CellPainterOptions): CellPainter {
     cursor.hidden = false
     cursor.style.left = `${position.x}px`
     cursor.style.top = `${position.y}px`
-    cursor.style.width = `${snapshot.geometry.cellWidthPx}px`
-    cursor.style.height = `${snapshot.geometry.cellHeightPx}px`
+    cursor.style.width = `${devicePxToCssPx(snapshot.geometry.cellWidthPx, displayDpr())}px`
+    cursor.style.height = `${devicePxToCssPx(snapshot.geometry.cellHeightPx, displayDpr())}px`
   }
 
   return {

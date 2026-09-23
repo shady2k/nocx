@@ -334,6 +334,18 @@ export interface TerminalRenderer {
   readonly cellWidth: number
 
   /**
+   * The cell the renderer rasterises at, in DEVICE pixels — the integer
+   * cell xterm builds its CSS cell FROM (css = device / dpr; xterm's own
+   * Viewport divides exactly this way). The committed cell metric travels
+   * in this unit (review round 1, nocx-zg3k3.2.9): device pixels are where
+   * the cell is an integer without rounding anything, and a program asking
+   * its size gets physical pixels, as native terminals report on
+   * high-density screens. Null while the renderer cannot measure — the
+   * same honest degrade as cellWidth's 0.
+   */
+  deviceCellDims(): { width: number; height: number } | null
+
+  /**
    * Subscribe to "the cell dimensions MAY have changed" — fired at mount
    *  (after the fonts load), on grid resize and on device-pixel-ratio
    *  change, the three places xterm re-measures its char size. The

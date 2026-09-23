@@ -27,6 +27,20 @@ func TestCellGeometryRoundsToTheNearestWholePixel(t *testing.T) {
 	}
 }
 
+// The client's real report (review round 1, nocx-zg3k3.2.9): the renderer's
+// INTEGER device cell times the grid count. The decode of such a report is
+// exact — whole ÷ count is the device cell again — so the frame's metric
+// and the cells the client actually drew never disagree by a rounding step.
+func TestCellGeometryDecodesAnIntegerDeviceReportExactly(t *testing.T) {
+	// 80 columns of a 17-px-wide device cell, 24 rows of a 34-px-tall one:
+	// the dpr-2 shape (css 8.5x17), which a CSS-rounded report would lose.
+	g := cellGeometry(80, 24, 1360, 816)
+	if g.CellWidthPx != 17 || g.CellHeightPx != 34 {
+		t.Fatalf("cellGeometry decoded 1360x816 over 80x24 as %dx%d px per cell, want 17x34",
+			g.CellWidthPx, g.CellHeightPx)
+	}
+}
+
 func TestCellGeometryKeepsAnUnmeasuredSessionUnmeasured(t *testing.T) {
 	// Zeros are a report of "not measured yet", and decoding them into an
 	// invented metric would be the runtime guessing what a client never said.

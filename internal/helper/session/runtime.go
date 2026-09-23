@@ -118,13 +118,14 @@ func ptyDimension(n int) (uint16, error) {
 // the emulator's own size answers, the published frames, the client's
 // pixel-to-cell mapping — speaks per cell.
 //
-// The decode rounds to the nearest whole pixel per cell, so the frame never
-// carries a fraction the wire could not have meant: a report of
-// cols × c pixels decodes back to c for a whole c, and to within half a
-// pixel for anything else — which is all a uint16 report ever carried.
-// Zeros decode to zeros and are legitimate: a client that has not measured
-// itself reports no metric, and the session keeps running with none rather
-// than inventing one.
+// The pixels that arrive are DEVICE pixels (review round 1, nocx-zg3k3.2.9):
+// the client multiplies its renderer's integer device cell by the grid
+// count, so a well-formed report decodes EXACTLY — whole ÷ count is the
+// device cell again, no rounding. The round below remains for honesty about
+// degenerate reports (a fraction the uint16 wire could only have carried
+// rounded), never because a well-formed one needs it. Zeros decode to zeros
+// and are legitimate: a client that has not measured itself reports no
+// metric, and the session keeps running with none rather than inventing one.
 func cellGeometry(cols, rows, xpixel, ypixel uint16) sessionruntime.Geometry {
 	g := sessionruntime.Geometry{Cols: int(cols), Rows: int(rows)}
 	if cols > 0 && xpixel > 0 {

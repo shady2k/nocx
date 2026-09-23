@@ -15427,7 +15427,11 @@ const SCREEN_ROWS = 4
 /** One valid frame at `revision` whose first rows carry `lines`, padded to
  *  a full rectangle — the shape the backend publishes and the model's
  *  intake accepts. */
-function screenFrame(revision: number, lines: string[]): SessionFrame {
+function screenFrame(
+  revision: number,
+  lines: string[],
+  geometry: Partial<SessionFrame['geometry']> = {},
+): SessionFrame {
   const style: Style = {
     foreground: { ...SCREEN_COLOR, kind: 1 as const, palette: 7 },
     background: SCREEN_COLOR,
@@ -15459,6 +15463,7 @@ function screenFrame(revision: number, lines: string[]): SessionFrame {
       cellWidthPx: 8,
       cellHeightPx: 16,
       revision,
+      ...geometry,
     },
     cursor: { x: 0, y: 0, visible: true },
     rows,
@@ -15482,18 +15487,16 @@ describe('the pane receives the screen plane into its cell model (nocx-zg3k3.2.8
     try {
       tab.pane.classList.add('active')
       const session: SessionFake = client._sessions[0]
-
       // Before any frame: the model holds no revision and names no rows.
-      // jsdom performs no layout, so the renderer has no cell metric yet:
-      // the open carried zeros for both pixel fields, exactly the degrade
-      // the report promises for an unmeasured pane.
+      // The open reported THIS renderer's device cell (the fixture's dpr-1
+      // identity, 8x16) over its grid — the report thread carries the
+      // renderer even before the window's own field exists.
       expect(paneScreen()).toEqual({
         revision: null,
         rows: [],
         geometry: null,
-        reported: { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
+        reported: { cols: 80, rows: 24, xpixel: 640, ypixel: 384 },
       })
-
       session.fireScreenFrame(screenFrame(3, ['PROMPT$ ls', 'NOCX-MARKER-1']))
       const reading = paneScreen()
       expect(reading?.revision).toBe(3)
@@ -15515,6 +15518,66 @@ describe('the pane receives the screen plane into its cell model (nocx-zg3k3.2.8
       tab.pane.classList.remove('active')
       expect(paneScreen()).toBeNull()
     } finally {
+      debug.mockRestore()
+      teardown()
+    }
+  })
+
+  // THE COMMITTED METRIC IS DEVICE PIXELS (review round 1, nocx-zg3k3.2.9).
+  // xterm builds its CSS cell FROM an integer device cell (css = device /
+  // dpr), so device pixels are the unit where the metric is exact: at dpr 2
+  // a 17x34 device cell is a fractional 8.5x17 CSS cell, and rounding CSS
+  // would drift the painter's grid off xterm's by up to half a pixel per
+  // cell. The report carries the DEVICE cell — cols x device width exactly,
+  // no rounding anywhere — and the committed geometry decodes back to it,
+  // so committed px / dpr IS the CSS cell. A dims change at the same
+  // cols/rows (this display move, a zoom) reaches the report through the
+  // same settle door, and a REPEATED metric sends nothing (the ipc dedupe).
+  it('reports and commits the device cell: committed px / dpr is the CSS cell', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      tab.pane.classList.add('active')
+      const session: SessionFake = client._sessions[0]
+      const renderer = rendererOf(content)
+      // A dense display: dpr 2, device cell 17x34 — CSS 8.5x17.
+      vi.stubGlobal('devicePixelRatio', 2)
+      vi.spyOn(renderer, 'deviceCellDims').mockReturnValue({ width: 17, height: 34 })
+
+      session.fireScreenFrame(
+        screenFrame(4, ['NOCX-MARKER-1'], { cellWidthPx: 17, cellHeightPx: 34 }),
+      )
+      // The display moved: fire the dims-change subscription the pane
+      // registered, exactly what a dpr change or a zoom fires.
+      const fireDimsChange = (
+        renderer.onCellDimsChange as unknown as Mock<(cb: () => void) => void>
+      ).mock.calls.slice(-1)[0][0]
+      fireDimsChange()
+
+      await vi.waitFor(() => {
+        expect(paneScreen()?.reported).toEqual({ cols: 80, rows: 24, xpixel: 1360, ypixel: 816 })
+      })
+      // THE ROUND TRIP, exact on both axes: the frame's committed device px
+      // over the grid the client named is the client's report per cell, and
+      // committed px / dpr is the CSS cell — no rounding step anywhere.
+      const reading = paneScreen()
+      expect(reading?.geometry?.cellWidthPx).toBe(17)
+      expect(reading?.geometry?.cellHeightPx).toBe(34)
+      expect(reading!.geometry!.cellWidthPx * reading!.reported!.cols).toBe(
+        reading!.reported!.xpixel,
+      )
+      expect(reading!.geometry!.cellHeightPx * reading!.reported!.rows).toBe(
+        reading!.reported!.ypixel,
+      )
+      expect(reading!.geometry!.cellWidthPx / 2).toBe(8.5)
+      expect(reading!.geometry!.cellHeightPx / 2).toBe(17)
+    } finally {
+      vi.unstubAllGlobals()
       debug.mockRestore()
       teardown()
     }

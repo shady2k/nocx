@@ -48,13 +48,13 @@
     "cols": { "type": "integer", "minimum": 0, "maximum": 65535 },
     "rows": { "type": "integer", "minimum": 0, "maximum": 65535 },
     "xpixel": {
-      "description": "The client's cell metric in TIOCSWINSZ's own units: the WHOLE text area's width in pixels (cols × cell width). 0 means the client has not measured itself yet. It reaches the helper's runtime geometry — what the published frames carry — and not the far pty, whose window-change carries no pixel fields at all.",
+      "description": "The client's cell metric in TIOCSWINSZ's own units: the WHOLE text area's width in DEVICE pixels (cols × the renderer's integer device cell — the unit where the metric is exact, css = device / dpr; review round 1). 0 means the client has not measured itself yet. It reaches the helper's runtime geometry — what the published frames carry — and not the far pty, whose window-change carries no pixel fields at all.",
       "type": "integer",
       "minimum": 0,
       "maximum": 65535
     },
     "ypixel": {
-      "description": "The whole text area's height in pixels (rows × cell height), or 0 when unmeasured. Same decode rule as xpixel.",
+      "description": "The whole text area's height in DEVICE pixels (rows × cell height), or 0 when unmeasured. Same decode rule as xpixel.",
       "type": "integer",
       "minimum": 0,
       "maximum": 65535

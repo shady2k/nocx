@@ -477,8 +477,8 @@ export class SessionHandle {
 
   /**
    * Report this pane's geometry: the grid plus the WHOLE text area in
-   * pixels (TIOCSWINSZ's units; the helper decodes it into the per-cell
-   * metric the frames carry, nocx-zg3k3.2.9).
+   * DEVICE pixels (TIOCSWINSZ's units; the helper decodes it into the
+   * per-cell metric the frames carry, nocx-zg3k3.2.9, review round 1).
    *
    * False when the client deduped it — the same report the backend already
    * holds — so the caller marks the resize-echo window only around a

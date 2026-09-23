@@ -45,11 +45,11 @@ export interface SessionFrame {
      */
     rows: number
     /**
-     * One cell's width in pixels.
+     * One cell's width in DEVICE pixels — the integer cell the client's renderer rasterises at, and the unit in which the metric is exact (css = device / dpr, the derivation xterm itself uses). A CSS-pixel consumer divides by its display's ratio; a program asking its terminal's size is answered in physical pixels, as native terminals report on high-density screens (review round 1, nocx-zg3k3.2.9).
      */
     cellWidthPx: number
     /**
-     * One cell's height in pixels.
+     * One cell's height in DEVICE pixels, same unit rule as cellWidthPx.
      */
     cellHeightPx: number
     /**

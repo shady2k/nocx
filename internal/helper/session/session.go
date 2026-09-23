@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -242,6 +243,15 @@ type Sink interface {
 	// frame names. The drain that parks on the runtime's Ready is its only
 	// caller.
 	SendScreenFrame(proto.ScreenDataFrame) error
+	// SendOutputRows writes one rows-plane frame: one batch of the rows the
+	// session's runtime handed over as they left the screen (nocx-2v80t.3.6),
+	// for the subscriber the frame names. The pump that drains the session's
+	// row bridge is the only sender; the payload is the document bytes and
+	// the frame's own encoding happens here, at the carrier.
+	SendOutputRows(proto.OutputRowsFrame) error
+	// SendIntervalEnd writes one end marker: one interval's boundary, after
+	// every row that belongs to it, on the same ordered carrier.
+	SendIntervalEnd(proto.IntervalEndFrame) error
 }
 
 // push. It is AD-10's own constant and the same value internal/transport uses,
@@ -303,6 +313,16 @@ type subscriber struct {
 	// the one it was attached on.
 	sink       Sink
 	attachment proto.AttachmentID
+}
+
+// subscribersLocked snapshots the bound subscribers under s.mu, the read the
+// row pump's fan-out starts from.
+func (s *hostSession) subscribersLocked() []*subscriber {
+	out := make([]*subscriber, 0, len(s.subs))
+	for _, sub := range s.subs {
+		out = append(out, sub)
+	}
+	return out
 }
 
 type attachment struct {
@@ -378,10 +398,21 @@ type hostSession struct {
 	mu          sync.Mutex
 	subs        map[proto.SubscriberID]*subscriber
 	attachments map[proto.AttachmentID]*attachment
-	writer      *proto.SubscriberID
-	writerAtt   proto.AttachmentID
-	epoch       proto.LeaseEpoch
-	exit        *proto.SessionExitStatus
+	// rowCh is the row bridge's hand-off: the runtime's RowStream pushes
+	// one emission per drained feed, the pump below writes them to the wire.
+	// Bounded, because a bridge that kept every emission would be the copy
+	// of departed rows the owner's decision forbids (rows.go).
+	rowCh chan rowEmission
+	// rowsDone ends the pump; rowsConfirmed is the coordinator's
+	// acknowledged "written up to here" mark and rowsDropped counts what
+	// the bridge could not carry (rows.go).
+	rowsDone      chan struct{}
+	rowsConfirmed uint64
+	rowsDropped   atomic.Uint64
+	writer        *proto.SubscriberID
+	writerAtt     proto.AttachmentID
+	epoch         proto.LeaseEpoch
+	exit          *proto.SessionExitStatus
 	// exitedAt is when watchExit recorded exit, on the Service's clock seam
 	// (s.now, never wall time directly) — what the unclaimed-session TTL and
 	// eviction-under-pressure measure age against (nocx-isjh4). Zero while
@@ -1147,6 +1178,11 @@ func (s *hostSession) stop() {
 	}
 	s.stopped = true
 	s.mu.Unlock()
+	// The row pump first: the runtime is about to be failed, and a pump
+	// draining a closed channel delivers nothing. Residual queued emissions
+	// die with the session — it is over, and nothing it streams can be
+	// attributed to anything any more.
+	close(s.rowsDone)
 	s.releaseConnection(nil)
 	if tailLost := s.owner.stop(true, time.Time{}); tailLost {
 		s.log.Warn("session owner: the drain did not reach EOF before shutdown", "session", s.id.Session)

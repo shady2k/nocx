@@ -35,9 +35,11 @@ func (s *drainSink) waiter() <-chan struct{} {
 	return s.arrived
 }
 
-func (s *drainSink) SendSessionData(proto.SessionFrame) error   { return nil }
-func (s *drainSink) SendLifecycleData(proto.SessionFrame) error { return nil }
-func (s *drainSink) SendNotification(proto.Notification) error  { return nil }
+func (s *drainSink) SendSessionData(proto.SessionFrame) error     { return nil }
+func (s *drainSink) SendLifecycleData(proto.SessionFrame) error   { return nil }
+func (s *drainSink) SendOutputRows(proto.OutputRowsFrame) error   { return nil }
+func (s *drainSink) SendIntervalEnd(proto.IntervalEndFrame) error { return nil }
+func (s *drainSink) SendNotification(proto.Notification) error    { return nil }
 
 func (s *drainSink) SendScreenFrame(f proto.ScreenDataFrame) error {
 	s.mu.Lock()

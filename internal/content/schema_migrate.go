@@ -157,6 +157,7 @@ var schemaLadder = []migrationStep{
 	{from: 16, to: 17, apply: migrateAddSkillChecks16to17, schemaDigest: "cc4c6529598c845b19936ee4c11c3adff9a66162ec56b70743f3188dc132092e"},
 	{from: 17, to: 18, apply: migrateTerminationReasons17to18, schemaDigest: "f9d5269cf07e28beb22facac42548dcaebf74c3559b65ebec1a73ba7d112f982"},
 	{from: 18, to: 19, apply: migrateAddWorkerCheckouts18to19, schemaDigest: "49f7ad77e616551bb1357970dd573a03d11ba29de0cd0cbfda52ce2ea4cd0ac1"},
+	{from: 19, to: 20, apply: migrateBlockRowsMediaTypes19to20, schemaDigest: "149d516a467ac06f2dabb4222634c668024edb9a672300def32f480631dd2dea"},
 }
 
 // validateLadder validates the shipped ladder against the current schema.
@@ -314,6 +315,12 @@ var schemaShapeDigests = map[int]string{
 	// the tree where `const schemaVersion` held 18. 19 adds worker_checkouts
 	// on top of exactly that shape (nocx-xn63t.1.4).
 	18: "76e33ea9af9fdd50931180239ad2b9501650b13a161d27aabff77e1760d93bc4",
+	// 19 is pinned in the commit that dethroned it, from
+	// testdata/schema_v19.sql — the schemaV1 constant lifted verbatim out of
+	// the tree where `const schemaVersion` held 19. 20 widens
+	// artifacts.media_type's CHECK for application/x-nocx-rows on top of
+	// exactly that shape (nocx-2v80t.3.7).
+	19: "fc842a885ae4009a928c0d099a9be047b71bb6f3710f2407139a9290ccb67eef",
 }
 
 var historicalSchemaObjectNames = map[int]map[string]struct{}{
@@ -322,6 +329,7 @@ var historicalSchemaObjectNames = map[int]map[string]struct{}{
 	16: schema16ObjectNames(),
 	17: schema17ObjectNames(),
 	18: schema18ObjectNames(),
+	19: schema19ObjectNames(),
 }
 
 func schema14ObjectNames() map[string]struct{} {
@@ -404,6 +412,16 @@ func schema17ObjectNames() map[string]struct{} {
 // no name — the same division of labour the digest pins above keep.
 func schema18ObjectNames() map[string]struct{} {
 	return schema17ObjectNames()
+}
+
+// schema19ObjectNames is schema18's set plus the worker_checkouts table and
+// the internal index its composite primary key creates — the 18→19 edge was
+// additive, so the names changed and nothing else.
+func schema19ObjectNames() map[string]struct{} {
+	result := schema18ObjectNames()
+	result["table:worker_checkouts"] = struct{}{}
+	result["index:sqlite_autoindex_worker_checkouts_1"] = struct{}{}
+	return result
 }
 
 type sqliteSchemaObject struct {
@@ -994,4 +1012,98 @@ func migrateTerminationReasons17to18(ctx context.Context, tx *sql.Tx) error {
 		}
 	}
 	return nil
+}
+
+// migrateBlockRowsMediaTypes19to20 widens artifacts.media_type's CHECK for
+// `application/x-nocx-rows` (nocx-2v80t.3.7): the streamed block rows are an
+// artifact like any other body, and the vocabulary is closed by the database,
+// so carrying them in a type the CHECK refuses would fail at the first real
+// append and never in a test.
+//
+// The table rebuilds, and the rebuild is the self-referential case the other
+// rungs are not: derived_from REFERENCES artifacts(id) — the table's own
+// primary key. With foreign_keys=ON a plain copy-then-drop has two traps. A
+// multi-row INSERT ... SELECT enforces its immediate self-references at
+// statement end, so a copied row may point at a row the same statement has
+// not inserted yet; and DROP TABLE runs an implicit DELETE whose row order is
+// not ours to choose, so a dropped parent can precede a child that still
+// names it. Both are real states of a capture (a derived text artifact
+// references the vt artifact beside it), not test furniture.
+//
+// The answer is deferment, not ordering: PRAGMA defer_foreign_keys=ON is
+// legal INSIDE this transaction and holds every check to the commit, by
+// which point the rebuilt table holds exactly the rows the old one did and
+// every reference resolves inside it. foreign_key_check runs at the end of
+// the step so a step that would commit an inconsistent schema fails HERE,
+// inside its own transaction, rather than at the stamp.
+func migrateBlockRowsMediaTypes19to20(ctx context.Context, tx *sql.Tx) error {
+	var present int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT count(*) FROM sqlite_master WHERE type='table' AND name='artifacts'").Scan(&present); err != nil {
+		return fmt.Errorf("probe artifacts: %w", err)
+	}
+	if present == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, "PRAGMA defer_foreign_keys = ON"); err != nil {
+		return fmt.Errorf("defer foreign keys: %w", err)
+	}
+	statements := []string{
+		`CREATE TABLE artifacts_migrating (
+  id              TEXT PRIMARY KEY,
+  entry_id        TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  execution_id    INTEGER REFERENCES executions(id) ON DELETE SET NULL,
+  media_type      TEXT NOT NULL CHECK (media_type IN
+                  ('application/vt','text/plain','text/markdown','application/json',
+                   'application/x-nocx-rows')),
+  derived_from    TEXT REFERENCES artifacts(id) ON DELETE SET NULL,
+  state           TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','sealed')),
+  byte_len        INTEGER NOT NULL DEFAULT 0,
+  pinned          INTEGER NOT NULL DEFAULT 0,
+  truncated       TEXT CHECK (truncated IN ('cap','gap','suppressed')),
+  capture_method  TEXT NOT NULL DEFAULT 'none'
+                  CHECK (capture_method IN ('terminal-cells','raw-output','serialized-html','none')),
+  capture_version INTEGER NOT NULL DEFAULT 1,
+  terminal_cols   INTEGER,
+  terminal_rows   INTEGER,
+  stream          TEXT CHECK (stream IN ('stdout','stderr','combined')),
+  byte_offset     INTEGER,
+  byte_end        INTEGER,
+  encoding        TEXT NOT NULL DEFAULT 'utf-8',
+  gaps            TEXT NOT NULL DEFAULT '[]',
+  payload         TEXT NOT NULL DEFAULT '{}'
+) STRICT`,
+		`INSERT INTO artifacts_migrating
+			(id, entry_id, execution_id, media_type, derived_from, state, byte_len,
+			 pinned, truncated, capture_method, capture_version, terminal_cols,
+			 terminal_rows, stream, byte_offset, byte_end, encoding, gaps, payload)
+			SELECT id, entry_id, execution_id, media_type, derived_from, state, byte_len,
+			 pinned, truncated, capture_method, capture_version, terminal_cols,
+			 terminal_rows, stream, byte_offset, byte_end, encoding, gaps, payload
+			FROM artifacts`,
+		`DROP TABLE artifacts`,
+		`ALTER TABLE artifacts_migrating RENAME TO artifacts`,
+		// The rebuild drops the table and takes its indexes with it. schemaV1
+		// re-creates these after the walk, but only because they are `IF NOT
+		// EXISTS` against a table that no longer has them — recreating them
+		// here keeps the shape whole INSIDE the transaction, so
+		// foreign_key_check and the stamp commit over a database that is
+		// already schema 20 and not one waiting for schemaV1 to finish it.
+		`CREATE INDEX artifacts_by_entry ON artifacts(entry_id)`,
+		`CREATE INDEX artifacts_by_execution ON artifacts(execution_id) WHERE execution_id IS NOT NULL`,
+	}
+	for i, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("widen artifacts.media_type, statement %d: %w", i+1, err)
+		}
+	}
+	rows, err := tx.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		return fmt.Errorf("foreign_key_check: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	if rows.Next() {
+		return errors.New("widen artifacts.media_type: the rebuilt schema fails foreign_key_check")
+	}
+	return rows.Err()
 }

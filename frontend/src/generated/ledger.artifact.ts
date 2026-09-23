@@ -18,7 +18,7 @@ export interface LedgerArtifact {
    */
   id: string
   /**
-   * What the body is: application/vt carries the SGR a restored block draws, text/plain the derived text search and copy read.
+   * What the body is: application/vt carries the SGR a restored block draws, text/plain the derived text search and copy read, and application/x-nocx-rows is a streamed block's output — JSON Lines whose line shape ledger.blockRows.schema.json declares, one row of the screen frame's cell vocabulary per line.
    */
   mediaType: string
   /**

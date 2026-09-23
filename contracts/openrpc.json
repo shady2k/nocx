@@ -10915,6 +10915,12 @@
       "$ref": "https://nocx.local/contracts/backup.saveToFile.schema.json"
     },
     {
+      "$ref": "https://nocx.local/contracts/block.closed.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/block.grew.schema.json"
+    },
+    {
       "$ref": "https://nocx.local/contracts/checkouts.status.schema.json"
     },
     {
@@ -11093,6 +11099,9 @@
     },
     {
       "$ref": "https://nocx.local/contracts/ledger.bind.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/ledger.blockRows.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/ledger.capture.schema.json"

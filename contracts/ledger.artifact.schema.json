@@ -12,7 +12,7 @@
       "type": "string"
     },
     "mediaType": {
-      "description": "What the body is: application/vt carries the SGR a restored block draws, text/plain the derived text search and copy read.",
+      "description": "What the body is: application/vt carries the SGR a restored block draws, text/plain the derived text search and copy read, and application/x-nocx-rows is a streamed block's output \u2014 JSON Lines whose line shape ledger.blockRows.schema.json declares, one row of the screen frame's cell vocabulary per line.",
       "type": "string"
     },
     "body": {

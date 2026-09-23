@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/block.grew.schema.json",
+  "title": "BlockGrew",
+  "description": "Params of the block.grew server-to-client notification (nocx-2v80t.3.7): rows arrived from the helper and are now IN a command's block in history — appended, capped, and durable, not merely painted. It is how an attached client follows a running command's block as it grows without re-asking ledger.get; a client that arrives later reads history and never needs it. Sent to the session's subscriber only, after the store's append commits; a block the keep decision refused sends nothing, because nothing grows.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["entryId", "from", "count"],
+  "properties": {
+    "entryId": {
+      "description": "The block's entry — the same id ledger.get and ledger.artifact answer for. The command's authenticated start bound it; for a lifecycle attempt it IS the attempt id.",
+      "type": "string",
+      "minLength": 1
+    },
+    "from": {
+      "description": "The absolute row index the delivery started at — rows ever departed in the session, the same coordinate a stored line's `from` carries (ledger.blockRows.schema.json).",
+      "type": "integer",
+      "minimum": 0
+    },
+    "count": {
+      "description": "How many rows this delivery appended. At least one: a delivery that carried no rows is not an event, and a block that is done growing is said so by block.closed, not by a zero here.",
+      "type": "integer",
+      "minimum": 1
+    }
+  }
+}

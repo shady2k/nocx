@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/block.closed.schema.json",
+  "title": "BlockClosed",
+  "description": "Params of the block.closed server-to-client notification (nocx-2v80t.3.7): the command's interval ended — its end marker was authenticated, the last rows are in, and the block is sealed in history. It is the companion of block.grew and the moment an attached client can treat the block as whole: whatever a later read returns is final. It is NOT block.finished — that one raises a banner at the entry's close with the outcome; this one says the BLOCK's rows are complete, and the two are raised by different owners at different moments (the end marker and the completion race in both orders), so a renderer that conflated them would draw a running command's output as finished, or the reverse.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["entryId"],
+  "properties": {
+    "entryId": {
+      "description": "The block's entry — the same id ledger.get and ledger.artifact answer for.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

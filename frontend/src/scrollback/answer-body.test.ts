@@ -7,6 +7,45 @@ import { CommandSnapshotStore } from '../command-snapshot'
 import { createAnswerBody } from './answer-body'
 import { blockOutputText } from './blocks'
 
+/** Top-level rules of the shipped stylesheet, comments stripped — the shape
+ *  live-clip.test.ts and cmd-output-wrap.test.ts pin CSS with. The row rule
+ *  is shared with the painter's grid rows (`.term-line, .term-grid-row`), so
+ *  the matcher finds it wherever the selector list declares it instead of
+ *  pinning the list's formatting. */
+type Rule = { selectors: string[]; body: string }
+
+/** Top-level rules only, comments stripped. An at-rule block is skipped whole:
+ *  a declaration that only holds at some viewport width does not hold. */
+function topLevelRules(css: string): Rule[] {
+  const rules: Rule[] = []
+  const source = css.replace(/\/\*[\s\S]*?\*\//g, '')
+  let depth = 0
+  let head = ''
+  let body = ''
+  for (const ch of source) {
+    if (ch === '{') {
+      depth++
+      if (depth === 1) {
+        body = ''
+        continue
+      }
+    } else if (ch === '}') {
+      depth--
+      if (depth === 0) {
+        const selector = head.trim()
+        if (!selector.startsWith('@')) {
+          rules.push({ selectors: selector.split(',').map((s) => s.trim()), body })
+        }
+        head = ''
+        continue
+      }
+    }
+    if (depth === 0) head += ch
+    else body += ch
+  }
+  return rules
+}
+
 function renderRows(chunks: string[]): string[] {
   const output = document.createElement('div')
   const body = createAnswerBody(output, { store: new CommandSnapshotStore() })
@@ -168,7 +207,8 @@ describe('createAnswerBody leading rows', () => {
     // jsdom cannot lay out boxes, so pin the shipped row-pitch contract and
     // assert that the body has exactly one flow row for each written line.
     const css = readFileSync(resolve(import.meta.dirname ?? '.', '..', 'style.css'), 'utf8')
-    const rowRule = css.match(/\.term-line\s*\{([^}]*)\}/)
+    const found = topLevelRules(css).find((rule) => rule.selectors.includes('.term-line'))
+    const rowRule = found ? [found.selectors, found.body] : null
     expect(rowRule).not.toBeNull()
     expect(rowRule![1]).toContain('min-height: var(--term-cell-height, 1.2em)')
     expect(rowRule![1]).toContain('line-height: var(--term-cell-height, 1.2em)')

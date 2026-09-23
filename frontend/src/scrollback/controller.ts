@@ -12,6 +12,7 @@ import type { CommandAuthor } from '../command-ledger'
 import type { TerminalRenderer } from '../renderers/types'
 import { BlockManager, type BlockRecord, type GetLineFn, type RunningBlockActions } from './blocks'
 import type { CommandSnapshotStore } from '../command-snapshot'
+import type { StoredBlockRows } from './block-rows'
 import { publishCellMetric, publishRowPitch } from './cell-metric'
 import type { ExecutionAttempt } from '../lifecycle/state'
 import type { AgentDump } from '../generated/agent.dump'
@@ -44,6 +45,8 @@ export interface ScrollbackControllerOpts {
    *  fixed in the DOM (nocx-tjppv: the run tool's completion wait reads the
    *  output window from the frozen block). */
   onBlockFrozen?: (rec: BlockRecord) => void
+  /** Paints backend-owned rows through the shared row painter. */
+  paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows) => void
   /** What a session is called to a person — passed straight to the block
    *  manager, which hands it to every tool-call line it draws (nocx-vnzek).
    *  This controller neither derives nor caches it. */
@@ -189,10 +192,7 @@ export class ScrollbackController {
       // backend diffs against (nocx-2v80t.3.3).
       onDeferredFreeze: (rec) => this._finishFreeze(rec),
       onBlockFrozen: opts.onBlockFrozen,
-      // Read at freeze time rather than captured at construction: a pane is
-      // resized, and the provenance must say what the serializer actually
-      // saw.
-      dimensions: () => ({ cols: this._renderer.cols, rows: this._renderer.rows }),
+      paintStoredRows: opts.paintStoredRows,
       sessionName: opts.sessionName,
       answerText: opts.answerText,
       dump: opts.dump,

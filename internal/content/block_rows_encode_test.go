@@ -213,6 +213,107 @@ func TestBlockRowsEncoder_MatchesTheFrameEncoderOnTheSameRows(t *testing.T) {
 	}
 }
 
+// Stored rows are sparse at the right edge: a short line does not pay for the
+// untouched terminal rectangle, but a styled blank remains because it paints.
+func TestBlockRowsEncoder_TrimsDefaultTrailingCellsButKeepsStyledBlank(t *testing.T) {
+	row := aTextRowForEncoder("hello")
+	plainTail := make([]emulator.Cell, 145)
+	for i := range plainTail {
+		plainTail[i].Width = emulator.WidthNarrow
+	}
+	row.Cells = append(row.Cells, plainTail...)
+	line, err := encodeBlockRowsLine(0, row)
+	if err != nil {
+		t.Fatalf("encode plain tail: %v", err)
+	}
+	var parsed blockRowsLine
+	if decodeErr := json.Unmarshal(line, &parsed); decodeErr != nil {
+		t.Fatalf("decode plain tail: %v", decodeErr)
+	}
+	if got := len(parsed.Row.Cells); got != 5 {
+		t.Fatalf("plain row stored %d cells, want 5", got)
+	}
+	if got := parsed.Row.Runs[0][1]; got != float64(5) {
+		t.Fatalf("plain row run length = %v, want 5", got)
+	}
+	styled := emulator.Cell{
+		Width: emulator.WidthNarrow,
+		Style: emulator.Style{
+			Background: emulator.Color{
+				Kind: emulator.ColorRGB,
+				RGB:  emulator.RGB{R: 1, G: 2, B: 3},
+			},
+		},
+	}
+	styledTail := make([]emulator.Cell, 144)
+	for i := range styledTail {
+		styledTail[i].Width = emulator.WidthNarrow
+	}
+	row.Cells = append(aTextRowForEncoder("hello").Cells, styledTail...)
+	row.Cells = append(row.Cells, styled)
+	line, err = encodeBlockRowsLine(0, row)
+	if err != nil {
+		t.Fatalf("encode styled tail: %v", err)
+	}
+	parsed = blockRowsLine{}
+	if decodeErr := json.Unmarshal(line, &parsed); decodeErr != nil {
+		t.Fatalf("decode styled tail: %v", decodeErr)
+	}
+	if got := len(parsed.Row.Cells); got != 150 {
+		t.Fatalf("styled row stored %d cells, want 150", got)
+	}
+	if got := parsed.Row.Runs[len(parsed.Row.Runs)-1][1]; got != float64(1) {
+		t.Fatalf("styled trailing run length = %v, want 1", got)
+	}
+
+	var styledWire struct {
+		Row struct {
+			Runs [][2]json.RawMessage `json:"runs"`
+		} `json:"row"`
+	}
+	if decodeErr := json.Unmarshal(line, &styledWire); decodeErr != nil {
+		t.Fatalf("decode styled runs: %v", decodeErr)
+	}
+	var gotStyle blockStyle
+	if decodeErr := json.Unmarshal(styledWire.Row.Runs[len(styledWire.Row.Runs)-1][0], &gotStyle); decodeErr != nil {
+		t.Fatalf("decode styled run style: %v", decodeErr)
+	}
+	if gotStyle.Background.RGB != (blockRGB{R: 1, G: 2, B: 3}) {
+		t.Fatalf("styled trailing cell background = %+v, want RGB(1,2,3)", gotStyle.Background.RGB)
+	}
+
+	blank := emulator.Row{Cells: make([]emulator.Cell, 150)}
+	for i := range blank.Cells {
+		blank.Cells[i].Width = emulator.WidthNarrow
+	}
+	line, err = encodeBlockRowsLine(0, blank)
+	if err != nil {
+		t.Fatalf("encode all-blank row: %v", err)
+	}
+	parsed = blockRowsLine{}
+	if decodeErr := json.Unmarshal(line, &parsed); decodeErr != nil {
+		t.Fatalf("decode all-blank row: %v", decodeErr)
+	}
+	if got := len(parsed.Row.Cells); got != 1 {
+		t.Fatalf("all-blank row stored %d cells, want 1", got)
+	}
+	if got := len(parsed.Row.Runs); got != 1 || parsed.Row.Runs[0][1] != float64(1) {
+		t.Fatalf("all-blank row runs = %v, want one run of length 1", parsed.Row.Runs)
+	}
+
+	line, err = encodeBlockRowsLine(0, emulator.Row{})
+	if err != nil {
+		t.Fatalf("encode empty row: %v", err)
+	}
+	parsed = blockRowsLine{}
+	if decodeErr := json.Unmarshal(line, &parsed); decodeErr != nil {
+		t.Fatalf("decode empty row: %v", decodeErr)
+	}
+	if got := len(parsed.Row.Cells); got != 1 {
+		t.Fatalf("empty row stored %d cells, want 1", got)
+	}
+}
+
 func aTextRowForEncoder(text string) emulator.Row {
 	row := emulator.Row{Cells: make([]emulator.Cell, 0, len(text))}
 	for _, r := range text {

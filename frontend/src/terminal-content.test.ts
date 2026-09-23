@@ -4104,12 +4104,9 @@ describe('the projections consume the kernel through the composition root (ADR-0
       const frozen = withScrollback.scrollback.blockManager.blocks[0]
       expect(frozen.status).toBe('success')
       expect(frozen.exitCode).toBe(0)
-      // The card body is what the backend sent (nocx-2v80t.3.4) and is
-      // empty until then; the output itself stays on the live surface,
-      // which nothing clears (nocx-2v80t.3.3). What the freeze fixes is
-      // the durable capture of the rows the boundary names.
+      // The frontend does not serialize the terminal buffer into a frozen
+      // block. Backend row artifacts are painted through block.grew/closed.
       expect(blockOutputText(frozen.el)).toBe('')
-      expect(frozen.captured?.text).toContain('hello world')
       expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull()
     } finally {
       Element.prototype.scrollTo = protoScrollTo
@@ -8643,120 +8640,6 @@ describe('the session waits for its pane row (nocx-rtg0.29)', () => {
     try {
       expect(client.openSSHSessionByHost.mock.calls[0][3]).toEqual({ paneId: PANE })
     } finally {
-      teardown()
-    }
-  })
-})
-
-// ═══════════════════════════════════════════════════════════════════════════
-// A frozen block sends what it printed (nocx-2f0f)
-// ═══════════════════════════════════════════════════════════════════════════
-describe('a frozen block sends what it printed (nocx-2f0f)', () => {
-  // The whole feature, through the seam a person reaches: they type a command,
-  // it finishes, and the text it printed leaves for the store. Everything
-  // below the assertion is the ordinary path — the app-owned submit, the
-  // authenticated completion, the render fence, the history.record ack — and
-  // none of it is stubbed past the socket.
-  it('takes the entry from the record ack and sends the body against it', async () => {
-    const FENCE = 'd'.repeat(64)
-    const client = makeClient()
-    client.call.mockImplementation((method: string) => {
-      if (method === 'history.record') {
-        return Promise.resolve({
-          maskedCount: 0,
-          maskedKinds: [],
-          entryId: 'e-capture',
-          // Required by the contract, and load-bearing: the renderer refuses
-          // an ack whose source is not the one it minted (design §3.1), so a
-          // fixture without it is a backend that dropped the fact.
-          source: 'user',
-          redactions: [],
-          maskedCommand: 'echo hello',
-          captures: [],
-        })
-      }
-      if (method === 'ledger.capture') {
-        return Promise.resolve({ artifactId: 'a-1', stored: true })
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
-    const { view, ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    // The lifecycle fact handler the content registered on the fake
-    // dispatcher — the seam authenticated facts arrive through.
-    const handler = lifecycleHandler(client)
-    const renderer = rendererOf(content)
-    /* eslint-disable @typescript-eslint/unbound-method */
-    const protoScrollTo = Element.prototype.scrollTo
-    const protoScrollIntoView = Element.prototype.scrollIntoView
-    /* eslint-enable @typescript-eslint/unbound-method */
-    Element.prototype.scrollTo = () => {}
-    Element.prototype.scrollIntoView = () => {}
-    try {
-      content.setVisible(true)
-      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-      ed.insertText('echo hello')
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-      )
-      handler({
-        lane: 'lane-1',
-        lifecycle: 'running',
-        domain: 'd1',
-        epoch: 1,
-        attempt: {
-          id: 'att-c',
-          state: 'open',
-          origin: 'app',
-          submitId: submitToken(client),
-          command: 'echo hello',
-        },
-      })
-      handler({
-        lane: 'lane-1',
-        lifecycle: 'running',
-        domain: 'd1',
-        epoch: 1,
-        attempt: {
-          id: 'att-c',
-          state: 'completed',
-          exitCode: 0,
-          fence: FENCE,
-          completedAt: '2026-08-08T12:00:02Z',
-        },
-      })
-      await vi.waitFor(() =>
-        expect(client.call.mock.calls.some((c) => c[0] === 'history.record')).toBe(true),
-      )
-      // The visual freeze is what produces the bodies, and it waits for the
-      // fence. Until it runs there is nothing to send — which is why the ack
-      // parks rather than being dropped.
-      renderer._fireRenderFence({ hex: FENCE, line: 3, buffer: 'normal' })
-
-      await vi.waitFor(() =>
-        expect(client.call.mock.calls.some((c) => c[0] === 'ledger.capture')).toBe(true),
-      )
-      const sent = client.call.mock.calls
-        .filter((c) => c[0] === 'ledger.capture')
-        .map((c) => c[1] as { entryId: string; mediaType: string; seq: number })
-      expect(sent[0].entryId).toBe('e-capture')
-      expect(sent[0].mediaType).toBe('application/vt')
-      expect(sent[0].seq).toBe(1)
-      // Both bodies: the durable one and the derived text the second names it
-      // from. One without the other is half the artifact pair.
-      await vi.waitFor(() =>
-        expect(
-          client.call.mock.calls
-            .filter((c) => c[0] === 'ledger.capture')
-            .some((c) => (c[1] as { mediaType: string }).mediaType === 'text/plain'),
-        ).toBe(true),
-      )
-    } finally {
-      Element.prototype.scrollTo = protoScrollTo
-      Element.prototype.scrollIntoView = protoScrollIntoView
       teardown()
     }
   })

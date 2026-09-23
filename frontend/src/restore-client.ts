@@ -15,6 +15,7 @@ import type { LedgerQuery } from './generated/ledger.query'
 import type { UnreconciledCause } from './unreconciled-notice'
 import type { LedgerArtifact } from './generated/ledger.artifact'
 import type { Caused, LedgerGet } from './generated/ledger.get'
+import { parseStoredBlockRows, type StoredBlockRows } from './scrollback/block-rows'
 
 /** How many blocks a pane comes back with.
  *
@@ -153,21 +154,44 @@ export async function blocksForPane(client: WSClient, paneId: string): Promise<R
  * has to say the same thing for both ("this is not here"), and a caller that
  * could tell them apart would still have nothing different to do.
  */
+interface FetchedArtifact {
+  readonly metadata: LedgerGet['artifacts'][number]
+  readonly body: string
+}
+
+async function readArtifact(
+  client: WSClient,
+  entryId: string,
+  mediaType: string,
+): Promise<FetchedArtifact | null> {
+  try {
+    const entry = await client.call<LedgerGet>('ledger.get', { id: entryId })
+    const metadata = entry.artifacts.find((a) => a.mediaType === mediaType)
+    if (!metadata) return null
+    const artifact = await client.call<LedgerArtifact>('ledger.artifact', { id: metadata.id })
+    return { metadata, body: artifact.body }
+  } catch {
+    return null
+  }
+}
+
 async function artifactBody(
   client: WSClient,
   entryId: string,
   mediaType: string,
 ): Promise<string | null> {
+  return (await readArtifact(client, entryId, mediaType))?.body ?? null
+}
+
+export async function blockRowsForEntry(
+  client: WSClient,
+  entryId: string,
+): Promise<StoredBlockRows | null> {
+  const artifact = await readArtifact(client, entryId, 'application/x-nocx-rows')
+  if (!artifact) return null
   try {
-    const entry = await client.call<LedgerGet>('ledger.get', { id: entryId })
-    const artifact = entry.artifacts.find((a) => a.mediaType === mediaType)
-    if (!artifact) return null
-    const body = await client.call<LedgerArtifact>('ledger.artifact', { id: artifact.id })
-    return body.body
+    return parseStoredBlockRows(artifact.body, artifact.metadata)
   } catch {
-    // Quiet by design: a pane restoring fifty blocks would otherwise log
-    // fifty times for one store that is down, and the caller already says
-    // once, in the product, that history is unavailable.
     return null
   }
 }
@@ -286,6 +310,8 @@ export type RestoredCause = Caused
 export interface RestoredBody {
   kind: 'command' | 'ask'
   body: string | null
+  /** Stored terminal rows, when the backend captured the block-row artifact. */
+  rows?: StoredBlockRows
   /**
    * Whether the prose of THIS RUN is no longer kept (ADR-0040's retention
    * rule, ADR-0019 §7): retention took the bodies of the turn's `text`
@@ -338,29 +364,21 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
   try {
     const entry = await client.call<LedgerGet>('ledger.get', { id: entryId })
     const caused = entry.caused ?? []
+    const rows = entry.artifacts.find((a) => a.mediaType === 'application/x-nocx-rows')
+    if (entry.entry.kind !== 'ask' && rows) {
+      const artifact = await client.call<LedgerArtifact>('ledger.artifact', { id: rows.id })
+      return {
+        kind: 'command',
+        body: null,
+        rows: parseStoredBlockRows(artifact.body, rows),
+        caused,
+        proseEvicted: !!entry.proseEvicted,
+      }
+    }
     const vt = entry.artifacts.find((a) => a.mediaType === 'application/vt')
     const text = entry.artifacts.find((a) => a.mediaType === 'text/plain')
-    // What the block DRAWS with: a command's grid is the vt, and its plain
-    // copy beside it is the fallback when retention took the grid.
-    //
-    // A TURN DRAWS WITH NOTHING OF ITS OWN. Since ADR-0040 its prose is
-    // `text` children with seats, so an ask entry has no body artifact —
-    // and the artifacts it DOES carry are the provider wiretap captures
-    // (internal/app/assistant_wire_capture.go: the raw request and the raw
-    // response, both text/plain). Picking a turn's body by media type
-    // therefore drew the chat-completions request — system prompt, every
-    // tool schema, stream_options — above the real prose, on restore only,
-    // because the live path never reads artifacts (nocx-3dteo).
-    //
-    // Not filtered by capture method, but not chosen at all: a filter would
-    // still be asking an entry for a body it does not have, and the next
-    // artifact hung on a turn would arrive as the next wrong answer.
     const chosen = entry.entry.kind === 'ask' ? undefined : (vt ?? text)
     if (!chosen) {
-      // The BLOCK'S KIND is the ENTRY's kind, never a guess from which
-      // artifact survived: since ADR-0040 a turn carries NO artifact of its
-      // own (its prose is a `text` child), so an empty artifact list is the
-      // ordinary shape of a whole turn, not evidence it was a command.
       return {
         kind: entry.entry.kind === 'ask' ? 'ask' : 'command',
         body: null,
@@ -369,9 +387,6 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
       }
     }
     const body = await client.call<LedgerArtifact>('ledger.artifact', { id: chosen.id })
-    // The kind is the ENTRY's, whatever artifact survived: an ask entry
-    // is a turn, everything else is a command. The VT choice above decided
-    // which artifact is the BODY to draw with, not what the block is.
     return {
       kind: entry.entry.kind === 'ask' ? 'ask' : 'command',
       body: body.body,
@@ -379,9 +394,6 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
       proseEvicted: !!entry.proseEvicted,
     }
   } catch {
-    // Quiet for the same reason bodyForBlock is: fifty restoring blocks
-    // would otherwise log fifty times for one dead socket, and the pane
-    // already says its past could not be read.
     return { kind: 'command', body: null, caused: [], proseEvicted: false }
   }
 }

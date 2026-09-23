@@ -64,6 +64,11 @@
       "symbol": ""
     },
     {
+      "kind": "files",
+      "file": "src/generated/ledger.capture.ts",
+      "symbol": ""
+    },
+    {
       "kind": "types",
       "file": "src/generated/fs.complete.ts",
       "symbol": "FsEntry"
@@ -139,9 +144,29 @@
       "symbol": ""
     },
     {
-      "kind": "files",
+      "kind": "types",
       "file": "src/generated/ledger.blockRows.ts",
-      "symbol": ""
+      "symbol": "Cell"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/ledger.blockRows.ts",
+      "symbol": "Color"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/ledger.blockRows.ts",
+      "symbol": "Row"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/ledger.blockRows.ts",
+      "symbol": "Run"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/ledger.blockRows.ts",
+      "symbol": "Style"
     },
     {
       "kind": "files",

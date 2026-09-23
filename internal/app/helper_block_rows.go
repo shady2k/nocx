@@ -36,6 +36,9 @@ type blockRowsSink interface {
 	BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows []emulator.Row) (writtenUpTo uint64, confirm bool)
 	BlockIntervalEnded(sid session.ID, nonce [32]byte, endRow uint64, closing []emulator.Row)
 }
+type blockRowsConfirmationSink interface {
+	AttachBlockRowsWithConfirmation(sid session.ID, confirm func(uint64))
+}
 
 // confirmer is the helper-facing half of one attachment's rows stream.
 type confirmer interface {
@@ -63,8 +66,11 @@ type rowsSource interface {
 func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, src rowsSource, conf confirmer) func() {
 	ctx, cancel := context.WithCancel(ctx)
 	marks := newMarkSlot()
-	sink.AttachBlockRows(sid)
-
+	if withConfirmation, ok := sink.(blockRowsConfirmationSink); ok {
+		withConfirmation.AttachBlockRowsWithConfirmation(sid, marks.offer)
+	} else {
+		sink.AttachBlockRows(sid)
+	}
 	go func() {
 		for {
 			mark, ok := marks.next(ctx)

@@ -30,11 +30,11 @@ import (
 	"fmt"
 )
 
-// blockRowsChunkBytes bounds one chunk row, and is the eviction granularity
-// as well as the row size: the cap is enforced by dropping whole chunks, cut
-// at line boundaries so a stored line is never split across the head
-// boundary or an eviction. 16 KiB for the same reason session_output chose
-// it — the default 256 KiB cap sits at sixteen rows and the error under 7%.
+// blockRowsChunkBytes bounds one chunk and is the eviction granularity: the
+// cap is enforced by dropping whole chunks, cut at line boundaries so a
+// stored line is never split across the head boundary or an eviction. The
+// 16 KiB chunk keeps transactions bounded without making row encoding depend
+// on the cap.
 const blockRowsChunkBytes = 16 << 10
 
 // blockRowsPayload is the rows artifact's payload sidecar. While the block

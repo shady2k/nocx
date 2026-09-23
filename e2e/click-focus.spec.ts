@@ -48,14 +48,17 @@ test('a click into the pane leaves the terminal taking keystrokes', async ({ pag
 
   await expect(page.locator(INPUT)).toBeFocused()
 
-  // Emit a value that is not present verbatim in the command text. Completed
-  // command output is frozen into a DOM scrollback block, so observing it
-  // proves the click-to-keystroke-to-PTY round trip without racing the shell's
-  // prompt title update.
+  // Emit a value that is not present verbatim in the command text, so the
+  // observable can only be the program's RESPONSE — the prompt echo spells
+  // the marker split. Since the cutover (nocx-zg3k3.2.5) that response is
+  // read where the person sees it: a painted term-grid-row in the live
+  // region, not a frozen card, whose body is a later task.
   const marker = 'NOCX-D1F-CLICK'
   await page.keyboard.type("printf 'NOCX-D1F-%s\\n' CLICK")
   await page.keyboard.press('Enter')
-  await expect(page.locator('.cmd-block', { hasText: marker }).first()).toBeVisible({
+  await expect(
+    page.locator('.pane.active .xterm-live-container .term-grid-row', { hasText: marker }),
+  ).toBeVisible({
     timeout: 5000,
   })
 })

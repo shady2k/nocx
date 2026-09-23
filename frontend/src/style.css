@@ -638,11 +638,42 @@
   min-height: 140px;
   height: 100%;
   width: 100%;
+  /* The painter surface is positioned against THIS box: absolute (next
+     rule) so it overlays the grid instead of taking flow space — an
+     in-flow surface doubled the box the echo shift and the viewport
+     sizing were computed from, and pushed xterm's own root below the
+     pane (measured: the click point hit the container, never a cell). */
+  position: relative;
+}
+
+/* THE PAINTER'S SURFACE IN THE LIVE REGION (nocx-zg3k3.2.5). It paints
+   the committed grid at xterm-inner's origin — the same origin xterm's
+   own screen had — so the painted rows and the echo-shift transform move
+   as one, and the input layer above them keeps its hit-test area. */
+.xterm-inner > .term-grid {
+  position: absolute;
+  top: 0;
+  left: 0;
 }
 
 /* Fullscreen: override min-height so xterm fills the viewport. */
 .xterm-inner.inner-fullscreen {
   min-height: auto;
+}
+
+/* THE OCCLUDED INPUT LAYER (nocx-zg3k3.2.5). The cutover's interim: xterm
+   stays in the live region to receive what the person does and the bytes
+   that set the program's modes, and draws NOTHING — the cell painter
+   (.term-grid) draws the screen. The mark is on xterm's own root (renderers/
+   xterm.ts), set only when the renderer was built occluded, so no renderer
+   a person can see ever carries it. `opacity` and not `display`/`visibility`:
+   the layer must keep receiving pointer events (focus, mouse reporting) and
+   keep its helper textarea focusable for IME — hidden-but-hit-testable is
+   the whole point. Its DOM renderer still maintains its viewport-sized row
+   set underneath; that bounded cost is the interim's, paid until xterm is
+   removed (ADR-0072's order). */
+.xterm.xterm-occluded {
+  opacity: 0;
 }
 
 /* Alt-screen: the pane belongs to the program, so everything the block layer

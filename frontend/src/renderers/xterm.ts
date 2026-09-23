@@ -259,12 +259,26 @@ export interface AcceleratedAddon extends ITerminalAddon {
 /** Construction seam. The default is production; tests inject a double. */
 export interface XtermRendererOptions {
   createWebglAddon?: () => AcceleratedAddon
+  /** THE CUTOVER'S INTERIM (nocx-zg3k3.2.5): mount as the live region's
+   *  INVISIBLE input layer. The screen arrives as frames and the cell
+   *  painter draws them; xterm keeps the byte path — the program's modes
+   *  live in its parser — and every key, IME composition, paste and pointer
+   *  event, and draws NOTHING. Drawing nothing starts with what it draws
+   *  WITH: no visual renderer is ever constructed (the WebGL factory is
+   *  never asked, the canvas fallback never attaches, and the Linux
+   *  forced-repaint pump — which exists only to push a picture to screen —
+   *  never arms), and the root is marked `xterm-occluded` for the
+   *  stylesheet's opacity rule. The mark lands on xterm's OWN root, not the
+   *  mount container: the scrollback controller rewrites the container's
+   *  class on every live-region mode change. */
+  occluded?: boolean
 }
 
 export class XtermRenderer implements TerminalRenderer {
   private term: Terminal | null = null
   private webgl?: AcceleratedAddon
   private readonly _createWebglAddon: () => AcceleratedAddon
+  private readonly _occluded: boolean
   /** The live subscription to the accelerated addon's atlas-page event, held
    *  so it dies with the addon it belongs to (context-loss recovery installs
    *  a new addon, and with it a new atlas). */
@@ -365,6 +379,7 @@ export class XtermRenderer implements TerminalRenderer {
 
   constructor(options: XtermRendererOptions = {}) {
     this._createWebglAddon = options.createWebglAddon ?? ((): AcceleratedAddon => new WebglAddon())
+    this._occluded = options.occluded ?? false
   }
 
   async mount(container: HTMLElement): Promise<void> {
@@ -428,6 +443,10 @@ export class XtermRenderer implements TerminalRenderer {
     term.unicode.activeVersion = '11'
 
     term.open(container)
+    // The occlusion mark rides xterm's OWN root (see XtermRendererOptions):
+    // only the occluded input layer carries it, never a renderer a person
+    // can see.
+    if (this._occluded) term.element?.classList.add('xterm-occluded')
 
     // Attach the frame-identity listeners now: a subscriber registered
     // before mount (the frame tracker constructs with the renderer) must
@@ -478,11 +497,17 @@ export class XtermRenderer implements TerminalRenderer {
     })
 
     await document.fonts?.ready
-    this.attachWebGL()
+    // The occluded input layer loads no visual renderer: WebGL is never
+    // asked for, and its canvas fallback with it. What remains is xterm's
+    // own DOM renderer, which the stylesheet's occlusion rule hides — the
+    // interim's accepted cost, bounded by xterm's viewport-sized row set.
+    if (!this._occluded) this.attachWebGL()
 
     // Linux/WebKitGTK: re-mark every row dirty on a timer so a render is
-    // always pending. No-op on macOS/browsers where the compositor is healthy.
-    if (isLinuxWebKit()) {
+    // always pending. No-op on macOS/browsers where the compositor is
+    // healthy. The pump exists to push a PICTURE to screen; the occluded
+    // layer has none, so it never arms.
+    if (!this._occluded && isLinuxWebKit()) {
       this.refreshTimer = setInterval(() => {
         this._repaintViewport()
       }, FORCED_REFRESH_MS)

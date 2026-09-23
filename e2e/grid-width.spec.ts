@@ -22,13 +22,19 @@
  * moved into the rows, so the scroller's clientWidth is the grid width plus
  * that inset, and the fit — and this spec — must measure the box the inset
  * leaves rather than the scroller itself.
+ *
+ * SINCE THE CUTOVER (nocx-zg3k3.2.5) the grid a person sees is the cell
+ * painter's, so what is measured is the PAINTED width: the first painted
+ * row's inline content, through a Range. A block element spans its container,
+ * but the range over the row's runs is exactly the columns the painter drew,
+ * each contributing its published cell width (ADR-0009 rule 3).
  */
 
 import { test, expect } from './harness'
 
 test('the grid is not wider than the scroller it is drawn in', async ({ page }) => {
   await page.goto('/')
-  await page.waitForSelector('.pane.active .xterm-screen')
+  await page.waitForSelector('.pane.active .term-grid')
 
   // BOTH HALVES ARE WAITED FOR TOGETHER, and separating them is what made this
   // spec flaky (nocx-sx4sg). The wait used to be on the overhang alone — "the
@@ -49,14 +55,19 @@ test('the grid is not wider than the scroller it is drawn in', async ({ page }) 
     page.evaluate(() => {
       const pane = document.querySelector('.pane.active')
       const live = pane?.querySelector('.xterm-live-container') as HTMLElement | null
-      const screen = pane?.querySelector('.xterm-screen') as HTMLElement | null
-      if (!live || !screen) return { overhang: 1, fill: 0, settled: false }
+      const row = pane?.querySelector('.term-grid-row') as HTMLElement | null
+      if (!live || !row) return { overhang: 1, fill: 0, settled: false }
       // THE GRID'S BOX IS THE LIVE ROW'S CONTENT BOX (nocx-9bpeq.8): rows
       // carry the pane gutter, so the scroller's clientWidth is the grid width
       // plus that inset on both sides.
       const cs = getComputedStyle(live)
       const box = live.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)
-      const width = screen.getBoundingClientRect().width
+      // THE PAINTED WIDTH IS THE ROW'S INLINE CONTENT: every row of the
+      // committed grid is a full rectangle (one entry per column), so any
+      // painted row measures the whole grid's width.
+      const range = document.createRange()
+      range.selectNodeContents(row)
+      const width = range.getBoundingClientRect().width
       const overhang = Math.round(width - box)
       const fill = width / box
       // At most zero overhang: whole cells rarely tile the box exactly, so the

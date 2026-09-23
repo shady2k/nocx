@@ -2163,3 +2163,72 @@ describe('the browser answers no query of the program (nocx-ygxjv.12)', () => {
     r.dispose()
   })
 })
+// ── The occluded input layer (nocx-zg3k3.2.5) ──────────────────────────────
+//
+// The cutover's interim, by the owner's decision: xterm stays in the live
+// region as an INVISIBLE input layer — it keeps the session's bytes (the
+// program's modes live in its parser) and every keyboard, IME, paste and
+// pointer event, and nothing it draws is visible. Nothing it draws is
+// visible starts with what it draws WITH: no WebGL addon and no canvas addon
+// is ever constructed, and the root it paints into is marked, so the
+// stylesheet can hold the rest. The composition root chooses this; the
+// default keeps today's behaviour.
+
+describe('the occluded input layer (nocx-zg3k3.2.5)', () => {
+  /** The addon the factory is asked for. The renderer's only use of it here
+   *  is construction, so an empty class records the fact a test needs: was
+   *  it built at all. */
+  class FakeWebglAddon {
+    activate(): void {}
+    dispose(): void {}
+    // Never fired by an addon that is never built; the AcceleratedAddon
+    // type still demands the members, and their disposables must exist.
+    onContextLoss(): { dispose(): void } {
+      return { dispose(): void {} }
+    }
+    onAddTextureAtlasCanvas(): { dispose(): void } {
+      return { dispose(): void {} }
+    }
+  }
+
+  async function mountOccluded(
+    occluded: boolean,
+  ): Promise<{ r: XtermRenderer; built: number; container: HTMLElement }> {
+    stubBrowser()
+    let built = 0
+    const r = new XtermRenderer({
+      occluded,
+      createWebglAddon: () => {
+        built++
+        return new FakeWebglAddon()
+      },
+    })
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+    return { r, built, container }
+  }
+
+  it('mounts no visual renderer and marks the xterm root occluded', async () => {
+    const { r, built, container } = await mountOccluded(true)
+    // Nothing accelerated, and nothing fell back either: the factory was
+    // never asked for an addon, so no canvas exists to paint with.
+    expect(built).toBe(0)
+    expect(r.diagnostics().accelerated).toBe(false)
+    expect(container.querySelectorAll('canvas').length).toBe(0)
+    // The mark the stylesheet's occlusion rule reads — on the root xterm
+    // created, not the container, because the scrollback controller rewrites
+    // the container's class on every live-region mode change.
+    const root = container.querySelector('.xterm')
+    expect(root).not.toBeNull()
+    expect(root!.classList.contains('xterm-occluded')).toBe(true)
+    r.dispose()
+  })
+
+  it('the paired default: an ordinary renderer still mounts its visual renderer', async () => {
+    const { r, built } = await mountOccluded(false)
+    expect(built).toBe(1)
+    r.dispose()
+  })
+})

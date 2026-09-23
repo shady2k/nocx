@@ -242,6 +242,11 @@ func (s *WSServer) signalDeliveryFor(f lifecyclepub.Fact) string {
 // emitting a duplicate lifecycle notification to the renderer.
 func (s *WSServer) PublishLifecycleProjection(f lifecyclepub.Fact) {
 	s.syncLifecycleLedger(f)
+	// The streamed block's half of the same fact: an authenticated start
+	// opens (and answers the keep decision for) the command's block, a
+	// completed attempt publishes the fence its interval end waits for.
+	// Inert without a rows source; see ws_block_rows.go.
+	s.blockStream.attemptFact(s, f)
 }
 
 // THE TWO TRANSITIONS THE FACT STREAM CANNOT CARRY are delivered through the
@@ -268,6 +273,11 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 		return
 	}
 	s.syncLifecycleLedger(f)
+	// The streamed block's half of the same fact (ws_block_rows.go): an
+	// authenticated start opens — and answers the keep decision for — the
+	// command's block; a completed attempt publishes the fence its interval
+	// end waits for. Inert without a rows source.
+	s.blockStream.attemptFact(s, f)
 	// Session death wins, and it wins BEFORE the wire (protocol §12.1).
 	// When the pty/SSH channel's Done() has closed, the session's whole
 	// remaining contract is `exit`: "emit exit, cancel any pending
@@ -659,6 +669,10 @@ func (s *WSServer) handleLifecycleSubmitAttempt(ctx context.Context, wconn *wsCo
 		s.recordAttemptEntry(ctx, string(att.ID), params.Command, params.Cwd,
 			fmt.Sprintf("%d", wconn.id), sess, att.StartedAt, content.Source(params.Source))
 	}
+	// The submit IS this command's authenticated start: the block stream
+	// answers the keep decision here, once per command, before any row
+	// exists. Inert without a rows source (ws_block_rows.go).
+	s.blockStream.openAttemptFor(s, sid, string(att.ID))
 	if current, ok := s.lifecyclePub.Attempt(att.ID); ok && current.Started {
 		// The shell can authenticate its Start concurrently with the
 		// store insert. The publisher emitted that fact before this row

@@ -210,7 +210,12 @@ export interface Artifact {
   /**
    * What the content is.
    */
-  mediaType: 'application/vt' | 'text/plain' | 'text/markdown' | 'application/json'
+  mediaType:
+    | 'application/vt'
+    | 'text/plain'
+    | 'text/markdown'
+    | 'application/json'
+    | 'application/x-nocx-rows'
   /**
    * The artifact this one was derived from, or null when it is the original capture.
    */

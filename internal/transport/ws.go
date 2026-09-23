@@ -813,6 +813,10 @@ type WSServer struct {
 	lifecyclePub   *lifecyclepub.Publisher
 	lifecycleMu    sync.Mutex
 	lifecycleLanes map[lifecycle.LaneID]session.ID
+	// blockStream is the streamed block output's coordinator half
+	// (nocx-2v80t.3.7, ws_block_rows.go). Constructed always; inert until a
+	// rows source is attached.
+	blockStream *blockStream
 	// heldMu guards heldStops, and the lock ORDER is heldMu → lifecycleMu →
 	// the kernel's own lock, because the one read that both arms a hold and
 	// answers what it is for (sessionProtectedForeground.StopTarget) runs
@@ -1667,6 +1671,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		gitBindings:                make(map[string]*gitBinding),
 		gitBySession:               make(map[session.ID]map[string]struct{}),
 		paneObserverSweep:          DefaultPaneObserverSweep,
+		blockStream:                &blockStream{},
 	}
 	// The mint's emitter is this server: a drop is told to the renderer
 	// over this socket. Constructed here so there is exactly one store per

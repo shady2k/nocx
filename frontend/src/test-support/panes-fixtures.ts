@@ -8,6 +8,7 @@
 // open. The fake must carry both.
 import type { PaneIdentity } from '../terminal-content'
 import { vi, type Mock } from 'vitest'
+import type { SessionFrame } from '../generated/session.frame'
 import type {
   CommandMarkerCallback,
   CwdCallback,
@@ -436,6 +437,11 @@ export interface SessionFake {
   /** What an enrolled pane's driver says its screen is inviting
    *  (nocx-szb40.3). */
   onObservation: ReturnType<typeof vi.fn>
+  /** The screen plane (nocx-zg3k3.2.8): one parsed session.frame document
+   *  per metadata frame the backend publishes. */
+  onScreenFrame: ReturnType<typeof vi.fn>
+  /** Fire the registered screen-frame callback with one document. */
+  fireScreenFrame(frame: SessionFrame): void
   /** What a reclaim recovered before it attached (ipc.SessionRecovery), or
    *  undefined for a handle that was opened rather than taken back. `size` is
    *  the grid the BACKEND says the session runs at — the one the recovered
@@ -469,6 +475,7 @@ export interface SessionFake {
  */
 export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
   let dataCb: ((data: string) => void) | null = null
+  let screenCb: ((frame: SessionFrame) => void) | null = null
   let livenessCb: ((l: SessionLiveness) => void) | null = null
   let observationCb: ((o: SessionObservationChanged) => void) | null = null
   const sessionId = `mock-sid-${++sessionCounter}`
@@ -503,6 +510,9 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     onObservation: vi.fn((cb: (o: SessionObservationChanged) => void) => {
       observationCb = cb
     }),
+    onScreenFrame: vi.fn((cb: (frame: SessionFrame) => void) => {
+      screenCb = cb
+    }),
     fireData: (data: string) => {
       dataCb?.(data)
     },
@@ -515,6 +525,9 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
         state,
         progress: 'moving',
       })
+    },
+    fireScreenFrame: (frame: SessionFrame) => {
+      screenCb?.(frame)
     },
     fireLiveness: (liveness: 'alive' | 'unknown', livenessEpoch = 2) => {
       livenessCb?.({

@@ -185,6 +185,53 @@ import {
   type InputPresentation,
   type DesiredMode,
 } from './capability'
+import { createCellModel, type CellModel } from './cell-model'
+import type { SessionFrame } from './generated/session.frame'
+
+// ── The pane's screen-plane test seam (nocx-zg3k3.2.8) ─────────────────────
+// An e2e spec reads the ACTIVE pane's cell model through
+// window.__nocxPaneScreen() — never xterm's DOM, which is the byte path's
+// surface, and never the model object itself, which the pane owns. The
+// registry maps session id → reader; the hook resolves "active" by the one
+// class the layout chain owns (.pane.active) together with the session id
+// the pane already publishes (data-session-id), so activity has a single
+// derivation everywhere. Read-only: it mounts nothing, mutates nothing and
+// is installed once, on the first pane that binds a session.
+
+/** What the seam answers for the active pane: the model's installed
+ *  revision and each row's text (cells joined), or nulls when the pane has
+ *  no frame yet. */
+export interface PaneScreenReading {
+  revision: number | null
+  rows: string[]
+}
+
+const paneScreenReaders = new Map<string, () => PaneScreenReading>()
+
+function readActivePaneScreen(): PaneScreenReading | null {
+  const pane = document.querySelector('.pane.active[data-session-id]')
+  if (!(pane instanceof HTMLElement)) return null
+  const sessionId = pane.getAttribute('data-session-id')
+  if (sessionId === null) return null
+  const read = paneScreenReaders.get(sessionId)
+  return read ? read() : null
+}
+
+function installPaneScreenSeam(): void {
+  const host = window as unknown as { __nocxPaneScreen?: () => PaneScreenReading | null }
+  if (!host.__nocxPaneScreen) host.__nocxPaneScreen = readActivePaneScreen
+}
+
+/** Flatten one model snapshot to the seam's reading. A model with no
+ *  installed revision reads as nulls, never as an empty lie. */
+function readPaneScreen(model: CellModel): PaneScreenReading {
+  const snapshot = model.current()
+  if (snapshot === null) return { revision: null, rows: [] }
+  return {
+    revision: snapshot.revision,
+    rows: snapshot.rows.map((row) => row.cells.map((cell) => cell.grapheme).join('')),
+  }
+}
 
 // How long the grid must hold still before the PTY is told about it.
 /** The assistant's floor when the seam is dragged down: a question and one
@@ -1296,6 +1343,11 @@ export class TerminalContent extends BasePaneContent {
   private _unreconciledNoticeDispose: (() => void) | null = null
   /** The pane the card mounts over. */
   private _paneTarget: HTMLElement | null = null
+  /** The pane's cell model (nocx-zg3k3.2.8): the client's picture of the
+   *  screen, fed by the session's screen frames — one per pane, created
+   *  when the pane binds a session, fed by nothing else. Nothing paints
+   *  from it yet; the byte path and xterm are untouched. */
+  private _cellModel: CellModel | null = null
   // The last thing the backend said about REACHING this pane's host, and the
   // corner mark drawn from it. Null liveness is the ordinary state of a local
   // pane: this machine is never probed, so there is nothing to say about
@@ -4134,6 +4186,10 @@ export class TerminalContent extends BasePaneContent {
       this._toolSurfaceUnsub = null
       this._dropToolSurfaceNotice()
       this._toolSurface = null
+      // The old session's seam reader goes with it: the new bind registers
+      // its own under the new session id, and a stale one would read the
+      // pane's CURRENT model for a session that no longer exists.
+      if (this.session) paneScreenReaders.delete(this.session.sessionId)
       this.session?.close()
       this.session = null
 
@@ -4477,6 +4533,37 @@ export class TerminalContent extends BasePaneContent {
       renderer.write(data)
       if (this._bufferType === 'normal' && Date.now() >= this.echoUntil) {
         host.requestAttention()
+      }
+    })
+    // THE PANE'S CELL MODEL (nocx-zg3k3.2.8). One per pane, created here —
+    // the bind is where a pane gains the session whose screen the frames
+    // describe, and every attach is owed a baseline full snapshot, so a
+    // fresh model misses nothing and a backend restart's revision reset
+    // needs no special case. The reader joins the test seam under the
+    // session id the pane publishes; nothing paints from the model — xterm
+    // keeps the byte path exactly as it was.
+    const cellModel = createCellModel()
+    this._cellModel = cellModel
+    installPaneScreenSeam()
+    paneScreenReaders.set(session.sessionId, () => readPaneScreen(cellModel))
+    session.onScreenFrame((frame: SessionFrame) => {
+      const model = this._cellModel
+      if (model === null) return
+      try {
+        const result = model.apply(frame)
+        if (!result.ok) {
+          log.debug('nocx: screen frame refused', {
+            pane: this.pane.paneId,
+            refusal: result.refusal,
+          })
+        }
+      } catch (err) {
+        // apply refuses malformed shapes, but a document hostile enough to
+        // throw inside it must not throw out of the socket handler either.
+        log.debug('nocx: screen frame could not be applied', {
+          pane: this.pane.paneId,
+          error: err instanceof Error ? err.message : String(err),
+        })
       }
     })
     if (this._replayCapture) {
@@ -7426,6 +7513,10 @@ export class TerminalContent extends BasePaneContent {
     }
     this._endSummon(true)
     this.session?.detach()
+    // The pane stops answering the seam with its death: a dead pane's
+    // reader has no model worth reading and no session to be found under.
+    if (this.session) paneScreenReaders.delete(this.session.sessionId)
+    this._cellModel = null
     this._connectionMark?.dispose()
     this._connectionMark = null
     this._reconnectAbort?.abort()

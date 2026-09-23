@@ -19,7 +19,13 @@ async function measure(page: Page) {
     const area = pane.querySelector<HTMLElement>('.scrollback-area')!
     const inner = pane.querySelector<HTMLElement>('.scrollback-inner')!
     const live = pane.querySelector<HTMLElement>('.xterm-live-container')!
-    const screen = pane.querySelector<HTMLElement>('.xterm-screen')!
+    // THE LIVE COLUMN IS THE PAINTED GRID since the cutover (nocx-zg3k3.2.5):
+    // the first painted row's inline content is exactly the grid's columns —
+    // every row is a full rectangle — read through a Range because a block
+    // element spans its container while its content is the paint.
+    const row = pane.querySelector<HTMLElement>('.term-grid-row')!
+    const rowRange = document.createRange()
+    rowRange.selectNodeContents(row)
     const blocks = pane.querySelectorAll<HTMLElement>('.scrollback-inner > .cmd-block')
     const block = blocks[blocks.length - 1] ?? null
     const line = block?.querySelector<HTMLElement>('.cmd-output .term-line') ?? null
@@ -29,8 +35,8 @@ async function measure(page: Page) {
     const areaRect = area.getBoundingClientRect()
     return {
       frozenLeft: line ? line.getBoundingClientRect().left : null,
-      liveLeft: screen.getBoundingClientRect().left,
-      cols: Math.round(screen.getBoundingClientRect().width / cellWidth),
+      liveLeft: rowRange.getBoundingClientRect().left,
+      cols: Math.round(rowRange.getBoundingClientRect().width / cellWidth),
       expectedCols: Math.floor(liveContent / cellWidth),
       cellWidth,
       blockWidth: block ? block.getBoundingClientRect().width : null,

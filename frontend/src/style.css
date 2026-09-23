@@ -638,6 +638,22 @@
   min-height: 140px;
   height: 100%;
   width: 100%;
+  /* The painter surface is positioned against THIS box: absolute (next
+     rule) so it overlays the grid instead of taking flow space — an
+     in-flow surface doubled the box the echo shift and the viewport
+     sizing were computed from, and pushed xterm's own root below the
+     pane (measured: the click point hit the container, never a cell). */
+  position: relative;
+}
+
+/* THE PAINTER'S SURFACE IN THE LIVE REGION (nocx-zg3k3.2.5). It paints
+   the committed grid at xterm-inner's origin — the same origin xterm's
+   own screen had — so the painted rows and the echo-shift transform move
+   as one, and the input layer above them keeps its hit-test area. */
+.xterm-inner > .term-grid {
+  position: absolute;
+  top: 0;
+  left: 0;
 }
 
 /* Fullscreen: override min-height so xterm fills the viewport. */

@@ -4,11 +4,14 @@
 // sides.
 //
 //	byte 0      version    = 0x01
-//	byte 1      msg-type   0x01 = data
+//	byte 1      msg-type   0x01 = data (raw PTY bytes)
+//	                       0x02 = metadata (the screen plane, one whole
+//	                       session.frame document — internal/transport/screen.go)
 //	bytes 2..17 session-id 16 raw bytes
-//	bytes 18..  payload    raw PTY bytes
+//	bytes 18..  payload    raw bytes, meaning set by the msg-type
 export const FRAME_VERSION = 0x01
 export const MSG_TYPE_DATA = 0x01
+export const MSG_TYPE_METADATA = 0x02
 export const FRAME_HEADER_SIZE = 18
 
 const SESSION_ID_RE = /^[0-9a-f]{32}$/
@@ -28,12 +31,16 @@ export function hexToBytes(hex: string): Uint8Array {
   return bytes
 }
 
-export function encodeFrame(sessionIDHex: string, payload: Uint8Array): ArrayBuffer {
+export function encodeFrame(
+  sessionIDHex: string,
+  payload: Uint8Array,
+  msgType: number = MSG_TYPE_DATA,
+): ArrayBuffer {
   const sidBytes = hexToBytes(sessionIDHex)
   const buf = new ArrayBuffer(FRAME_HEADER_SIZE + payload.byteLength)
   const view = new Uint8Array(buf)
   view[0] = FRAME_VERSION
-  view[1] = MSG_TYPE_DATA
+  view[1] = msgType
   view.set(sidBytes, 2)
   view.set(payload, FRAME_HEADER_SIZE)
   return buf
@@ -41,12 +48,17 @@ export function encodeFrame(sessionIDHex: string, payload: Uint8Array): ArrayBuf
 
 export interface DecodedFrame {
   sessionId: string
+  /** Which plane the payload belongs to — data bytes or a metadata
+   *  document. The demux routes on this; decodeFrame only reports it. */
+  msgType: number
   payload: ArrayBuffer
 }
 
 // decodeFrame mirrors the server's drop-and-warn contract: a frame that is
-// short, of an unknown version, or of an unexpected msg-type is dropped, never
-// thrown on — a malformed frame must not tear down the connection.
+// short, of an unknown version, or of a msg-type neither side has agreed on
+// is dropped, never thrown on — a malformed frame must not tear down the
+// connection. Known msg-types come back whole, msg-type included; choosing
+// what a payload means is the demux's decision, not the codec's.
 export function decodeFrame(data: ArrayBuffer): DecodedFrame | null {
   if (data.byteLength < FRAME_HEADER_SIZE) {
     console.warn('nocx: frame too short:', data.byteLength)
@@ -57,12 +69,13 @@ export function decodeFrame(data: ArrayBuffer): DecodedFrame | null {
     console.warn('nocx: unknown frame version:', view[0])
     return null
   }
-  if (view[1] !== MSG_TYPE_DATA) {
-    console.warn('nocx: unexpected msg-type:', view[1])
+  const msgType = view[1]
+  if (msgType !== MSG_TYPE_DATA && msgType !== MSG_TYPE_METADATA) {
+    console.warn('nocx: unexpected msg-type:', msgType)
     return null
   }
   const sessionId = Array.from(view.slice(2, FRAME_HEADER_SIZE))
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('')
-  return { sessionId, payload: data.slice(FRAME_HEADER_SIZE) }
+  return { sessionId, msgType, payload: data.slice(FRAME_HEADER_SIZE) }
 }

@@ -1,4 +1,5 @@
-import { decodeFrame, encodeFrame, isSessionID } from './frame'
+import { decodeFrame, encodeFrame, isSessionID, MSG_TYPE_METADATA } from './frame'
+import type { DecodedFrame } from './frame'
 import { Dispatcher } from './dispatcher'
 import { historyOutbox } from './history-client'
 import type { AttachResult } from './generated/attach'
@@ -14,7 +15,9 @@ import type {
 } from './generated/session.output'
 import type { SessionDisplaced } from './generated/session.displaced'
 import type { SessionLiveness } from './generated/session.liveness'
+import type { SessionFrame } from './generated/session.frame'
 import type { SessionObservationChanged } from './generated/session.observationChanged'
+import { log } from './log'
 import { isDriverState, isPaneProgress, readPaneChildren } from './pane-observation'
 import type { SessionSignal } from './generated/session.signal'
 import type { SecretsPaneClosed } from './generated/secrets.paneClosed'
@@ -349,6 +352,17 @@ interface SessionState {
   // response, so the initial shell prompt can race the caller's
   // session.onData() — without this buffer the prompt is silently lost.
   pendingData: string
+
+  // screenFrameCallback receives one parsed session.frame document per
+  // metadata frame (msg-type 0x02, the screen plane) for this session. It is
+  // the byte path's sibling, not its part: a frame is a full snapshot, so it
+  // never touches offset, pendingData or acks (AD-9 counts PTY bytes only),
+  // and a frame that lands in the window before registration is dropped —
+  // the next revision repaints whole, which is the same policy the
+  // backend's own queue-full drop answers to. There is no pendingData
+  // equivalent on purpose: buffering would only move the same superseded
+  // snapshot one hop.
+  screenFrameCallback: ((frame: SessionFrame) => void) | null
   // exitCallback receives the wire Exit (contracts/exit.schema.json): the
   // closed-set cause separating an authoritative shell exit (with its
   // status) from a loss. The failed-reattach path delivers a loss with the
@@ -507,6 +521,14 @@ export class SessionHandle {
   onLiveness(cb: (liveness: SessionLiveness) => void): void {
     this.client.onSessionLiveness(this.sessionId, cb)
   }
+
+  /** Registers a callback for the session's screen plane: one parsed
+   *  session.frame document per metadata frame the backend publishes
+   *  (nocx-zg3k3.2.8). Full snapshots, never bytes — the model on the other
+   *  side refuses what it cannot install, and nothing here counts or acks. */
+  onScreenFrame(cb: (frame: SessionFrame) => void): void {
+    this.client.onSessionScreenFrame(this.sessionId, cb)
+  }
 }
 
 export class WSClient {
@@ -549,6 +571,13 @@ export class WSClient {
         if (event.data instanceof ArrayBuffer) {
           const frame = decodeFrame(event.data)
           if (frame) {
+            // THE SCREEN PLANE routes before any byte accounting: a
+            // metadata frame is not PTY bytes — counting it would corrupt
+            // the replay offset (AD-9) and ack bytes nobody wrote.
+            if (frame.msgType === MSG_TYPE_METADATA) {
+              this._routeScreenFrame(frame)
+              return
+            }
             const state = this.sessions.get(frame.sessionId)
             if (state) {
               // Count payload bytes for the per-session offset (AD-9
@@ -892,6 +921,34 @@ export class WSClient {
     this.dispatcher.notify('secrets.paneClosed', params)
   }
 
+  // The screen plane's demux (msg-type 0x02), the one place a session.frame
+  // document is parsed on this client. A frame for a session this client
+  // does not hold, or a payload that is not a frame document, is dropped
+  // with one debug line: neither is an error, and neither may throw out of
+  // the socket handler. Shape validation is the model's intake job — the
+  // document is handed over as parsed, refusals and all.
+  private _routeScreenFrame(frame: DecodedFrame): void {
+    const state = this.sessions.get(frame.sessionId)
+    if (!state) {
+      log.debug('nocx: screen frame dropped: unknown session', {
+        sessionId: frame.sessionId,
+      })
+      return
+    }
+    let doc: SessionFrame
+    try {
+      // Boundary assertion: the payload is wire JSON the model validates on
+      // intake; the parse here is the only shape this layer judges.
+      doc = JSON.parse(new TextDecoder().decode(new Uint8Array(frame.payload))) as SessionFrame
+    } catch {
+      log.debug('nocx: screen frame dropped: payload is not a frame document', {
+        sessionId: frame.sessionId,
+      })
+      return
+    }
+    state.screenFrameCallback?.(doc)
+  }
+
   // --- ack plumbing -------------------------------------------------------
 
   // _scheduleAck posts a throttled ack for the session. If an ack is already
@@ -1052,6 +1109,7 @@ export class WSClient {
       offset,
       reported,
       dataCallback: null,
+      screenFrameCallback: null,
       pendingData: '',
       exitCallback: null,
       resetCallback: null,
@@ -1438,6 +1496,13 @@ export class WSClient {
     const state = this.sessions.get(sessionId)
     if (state) {
       state.inputStalledCallback = cb
+    }
+  }
+
+  onSessionScreenFrame(sessionId: string, cb: (frame: SessionFrame) => void): void {
+    const state = this.sessions.get(sessionId)
+    if (state) {
+      state.screenFrameCallback = cb
     }
   }
 

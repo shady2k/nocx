@@ -41,6 +41,18 @@ type RowStream interface {
 	IntervalEnd(nonce FenceNonce, endRow uint64, closing []emulator.Row)
 }
 
+// DepartedRowCount is how many departed rows this session has read off the
+// emulator's report — the absolute index space the stream's FromRow and an
+// end marker's EndRow answer to. It is what the helper checks a
+// coordinator's confirmed-written mark against: a mark naming rows the
+// session never departed would make the next resend skip output nobody
+// holds.
+func (s *Session) DepartedRowCount() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.departedRows
+}
+
 // SetRowStream binds the session's row stream, exactly as [SetReplies] binds
 // the reply sink and for the same shape: internal/helper/session's spawn
 // builds the runtime before the host session that bridges the stream to the

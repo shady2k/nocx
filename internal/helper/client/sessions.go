@@ -348,6 +348,14 @@ type AttachedSession struct {
 	// "or has been told it lost it". Both guarded by mu; fired outside it.
 	screenObs     func(revision uint64, payload []byte)
 	screenLostObs func(reason string)
+	// outputRowsObs and intervalEndObs are the coordinator's consumers for
+	// this session's streamed rows and end markers (nocx-2v80t.3.6) — see
+	// OnOutputRows and OnIntervalEnd. Both fire from the connection's read
+	// loop in wire order, which is what makes the order between a row and
+	// the end marker that closes its interval observable. Guarded by mu;
+	// fired outside it.
+	outputRowsObs  func(OutputRows)
+	intervalEndObs func(IntervalEnd)
 }
 
 // inbound is one item in an attachment's delivery order: bytes the wire

@@ -259,6 +259,10 @@ func (h *Host) frame(ctx context.Context, ty proto.FrameType, payload []byte) {
 		h.channelData(ctx, payload)
 	case proto.TypeScreenFrame:
 		h.screenData(ctx, payload)
+	case proto.TypeOutputRows:
+		h.rowsData(ctx, payload)
+	case proto.TypeIntervalEnd:
+		h.intervalEndData(ctx, payload)
 	default:
 		h.log.Warn("unexpected frame", "type", ty)
 	}
@@ -351,6 +355,58 @@ func (h *Host) screenData(ctx context.Context, payload []byte) {
 // mid-frame.
 func (h *Host) SendScreenFrame(f proto.ScreenDataFrame) error {
 	return h.write(proto.TypeScreenFrame, proto.EncodeScreenDataFrame(f))
+}
+
+// SendOutputRows writes one rows-plane frame: one batch of the rows the
+// session's runtime handed over as they left the screen (nocx-2v80t.3.6),
+// for the subscriber the frame names. The wire and its writer mutex are the
+// host's, so the frame's own encoding happens here — a second writer would
+// interleave mid-frame.
+func (h *Host) SendOutputRows(f proto.OutputRowsFrame) error {
+	raw, err := proto.EncodeOutputRowsFrame(f)
+	if err != nil {
+		return err
+	}
+	return h.write(proto.TypeOutputRows, raw)
+}
+
+// SendIntervalEnd writes one end marker: one interval's boundary, after
+// every row that belongs to it, on the same ordered carrier as the rows.
+func (h *Host) SendIntervalEnd(f proto.IntervalEndFrame) error {
+	raw, err := proto.EncodeIntervalEndFrame(f)
+	if err != nil {
+		return err
+	}
+	return h.write(proto.TypeIntervalEnd, raw)
+}
+
+// rowsData handles an inbound rows-plane frame. Rows flow HELPER to
+// coordinator and nothing on this side consumes one; a host receives them
+// only from a confused peer, and recognising the type — for the reason
+// screenData spells out — turns what would be garbage scanning into one
+// dropped, logged frame.
+func (h *Host) rowsData(ctx context.Context, payload []byte) {
+	f, err := proto.DecodeOutputRowsFrame(payload)
+	if err != nil {
+		h.log.Warn("malformed rows frame", "err", err, "bytes", len(payload))
+		return
+	}
+	h.log.Warn("rows frame dropped: the helper does not consume rows",
+		"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber),
+		"fromRow", f.FromRow, "bytes", len(f.Payload))
+}
+
+// intervalEndData handles an inbound end marker, for the reason rowsData
+// does: the wire's direction runs the other way.
+func (h *Host) intervalEndData(ctx context.Context, payload []byte) {
+	f, err := proto.DecodeIntervalEndFrame(payload)
+	if err != nil {
+		h.log.Warn("malformed interval end frame", "err", err, "bytes", len(payload))
+		return
+	}
+	h.log.Warn("interval end dropped: the helper does not consume end markers",
+		"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber),
+		"endRow", f.EndRow, "bytes", len(f.Payload))
 }
 
 // SendLifecycleData writes raw lifecycle bytes on their dedicated carrier tag.

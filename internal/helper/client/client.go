@@ -420,6 +420,10 @@ func (c *Client) onFrame(ty proto.FrameType, payload []byte) {
 		c.channelData(payload)
 	case proto.TypeScreenFrame:
 		c.screenFrame(payload)
+	case proto.TypeOutputRows:
+		c.outputRows(payload)
+	case proto.TypeIntervalEnd:
+		c.intervalEnd(payload)
 	default:
 		c.log.Warn("unexpected frame", "type", ty)
 	}

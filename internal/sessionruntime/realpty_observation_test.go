@@ -57,6 +57,50 @@ func obsWaitSeal(t *testing.T, p *programSession, nonce FenceNonce) {
 	waitForRendezvous(t, p.s, p.changed, p.done, nonce, RendezvousComplete)
 }
 
+// streamedTexts reads every row the stream has carried so far, in order —
+// the read of a running interval, whose end marker has not come.
+func streamedTexts(rs *recordingRowStream) []string {
+	var out []string
+	for _, e := range rs.snapshot() {
+		if e.kind != "rows" {
+			continue
+		}
+		for _, r := range e.rows {
+			out = append(out, streamRowText(r))
+		}
+	}
+	return out
+}
+
+// streamedInterval reads the stream up to its first end marker and answers
+// the texts of the rows that interval owned (FromRow < the end marker's
+// EndRow), the end marker itself, and the texts streamed after it — the rows
+// that departed once the boundary had already been taken, which belong to
+// the interval that follows.
+func streamedInterval(rs *recordingRowStream) (in []string, end rowEvent, after []string, ok bool) {
+	events := rs.snapshot()
+	for i, e := range events {
+		if e.kind != "end" {
+			continue
+		}
+		for _, prev := range events[:i] {
+			if prev.kind != "rows" {
+				continue
+			}
+			for j, r := range prev.rows {
+				idx := prev.from + uint64(j) // #nosec G115 -- j is a slice index, never negative
+				if txt := streamRowText(r); idx < e.endRow {
+					in = append(in, txt)
+				} else {
+					after = append(after, txt)
+				}
+			}
+		}
+		return in, e, after, true
+	}
+	return nil, rowEvent{}, nil, false
+}
+
 // ---------------------------------------------------------------------------
 // Criterion two: a command nobody watched reads back with its output. This is
 // the fence-first order: the sighting parks (an observable state), the
@@ -79,7 +123,8 @@ printf 'OBS-DONE\n'
 `
 
 func TestACommandNobodyWatchedReadsBackWithItsOutput(t *testing.T) {
-	p := startProgram(t, obsWatchedProgram, harnessGeometry(80, 24))
+	rs := &recordingRowStream{}
+	p := startProgramRows(t, obsWatchedProgram, harnessGeometry(80, 24), rs)
 	nonce := fenceNonceFromString(t, fenceNonceHex)
 
 	// Fence first: the sighting parks waiting for the authenticated half.
@@ -121,11 +166,25 @@ func TestACommandNobodyWatchedReadsBackWithItsOutput(t *testing.T) {
 	// every line after scrolls one off — seventy-seven departures,
 	// L000000..L000076, the flood whole and NOTHING of what came after the
 	// fence. The sentinel line and its newline belong to the next interval.
-	if len(rec.Departed) != 77 {
-		t.Fatalf("the record holds %d departed rows, want 77 (the flood to the fence, not the post-fence line)", len(rec.Departed))
+	// The rows the flood departed streamed once each, in order, and the
+	// interval's end marker followed them stopping at row 77. The rows that
+	// departed after the capture (the sentinel's) stream after the end
+	// marker: they are the next interval's.
+	in, end, after, streamed := streamedInterval(rs)
+	if !streamed {
+		t.Fatal("no end marker ever streamed: the interval closed with nothing on the stream")
 	}
-	if first, last := obsRowText(rec.Departed[0]), obsRowText(rec.Departed[len(rec.Departed)-1]); first != "L000000" || last != "L000076" {
-		t.Fatalf("the departed rows run %q..%q, want L000000..L000076, oldest first", first, last)
+	if len(in) != 77 || in[0] != "L000000" || in[len(in)-1] != "L000076" {
+		t.Fatalf("the stream carried %d rows %q..%q for the interval, want 77 rows L000000..L000076, oldest first", len(in), in[0], in[len(in)-1])
+	}
+	if end.endRow != 77 {
+		t.Fatalf("the end marker stops at row %d, want 77 — everything the flood departed", end.endRow)
+	}
+	if end.nonce != nonce {
+		t.Fatalf("the end marker names nonce %v, want the sealed boundary's", end.nonce)
+	}
+	if len(after) == 0 {
+		t.Fatal("the sentinel's departure never streamed after the end marker: the stream's order lies about which interval rows belong to")
 	}
 
 	// And the closing screen is the screen AT the fence — the flood's tail,
@@ -156,7 +215,8 @@ printf 'OBS-DONE'
 `
 
 func TestACommandWithNoOutputStillLeavesARecord(t *testing.T) {
-	p := startProgram(t, obsSilentProgram, harnessGeometry(80, 24))
+	rs := &recordingRowStream{}
+	p := startProgramRows(t, obsSilentProgram, harnessGeometry(80, 24), rs)
 	nonce := fenceNonceFromString(t, fenceNonceHex)
 	waitForRendezvous(t, p.s, p.changed, p.done, nonce, RendezvousAwaitingAuthenticated)
 	p.s.AuthenticatedEvents().Completed(p.s.Incarnation(), nonce, 0)
@@ -166,8 +226,12 @@ func TestACommandWithNoOutputStillLeavesARecord(t *testing.T) {
 	if !ok {
 		t.Fatal("an interval ran and sealed no record: the record is per interval, not per departure")
 	}
-	if len(rec.Departed) != 0 {
-		t.Fatalf("a silent command's record holds %d departed rows", len(rec.Departed))
+	in, end, after, streamed := streamedInterval(rs)
+	if !streamed {
+		t.Fatal("a silent command's interval streamed no end marker")
+	}
+	if len(in) != 0 || end.endRow != 0 || len(after) != 0 {
+		t.Fatalf("a silent command streamed %d rows and stopped at %d with %d after, want none anywhere", len(in), end.endRow, len(after))
 	}
 	if rec.Completeness != CompletenessComplete {
 		t.Fatalf("a silent command reads back %v, want complete: no output is not lost output", rec.Completeness)
@@ -192,7 +256,8 @@ readhex 1 >/dev/null
 `
 
 func TestACompletionBeforeItsFenceSealsTheSameRecord(t *testing.T) {
-	p := startProgram(t, obsCompletionFirstProgram, harnessGeometry(80, 24))
+	rs := &recordingRowStream{}
+	p := startProgramRows(t, obsCompletionFirstProgram, harnessGeometry(80, 24), rs)
 	nonce := fenceNonceFromString(t, fenceNonceHex)
 
 	// The program is parked before its fence: the output is in — its last
@@ -213,8 +278,15 @@ func TestACompletionBeforeItsFenceSealsTheSameRecord(t *testing.T) {
 	// The fence ends the stream in this program: seventy-seven departures,
 	// the flood to the fence and nothing else, whichever way the pump
 	// chunked it.
-	if len(rec.Departed) != 77 {
-		t.Fatalf("completion-first order holds %d departed rows, want the same 77", len(rec.Departed))
+	in, end, _, streamed := streamedInterval(rs)
+	if !streamed {
+		t.Fatal("completion-first order streamed no end marker")
+	}
+	if len(in) != 77 || in[0] != "L000000" || in[len(in)-1] != "L000076" {
+		t.Fatalf("completion-first order streamed %d rows %q..%q, want the same 77 L000000..L000076", len(in), in[0], in[len(in)-1])
+	}
+	if end.endRow != 77 {
+		t.Fatalf("completion-first order's end marker stops at %d, want 77", end.endRow)
 	}
 	if rec.Completeness != CompletenessComplete {
 		t.Fatalf("completion-first order reads back %v, want complete", rec.Completeness)
@@ -241,7 +313,8 @@ printf 'OBS-DONE\n'
 `
 
 func TestACommandStillRunningReadsBackWhatItHasPrintedSoFar(t *testing.T) {
-	p := startProgram(t, obsRunningProgram, harnessGeometry(80, 24))
+	rs := &recordingRowStream{}
+	p := startProgramRows(t, obsRunningProgram, harnessGeometry(80, 24), rs)
 	nonce := fenceNonceFromString(t, fenceNonceHex)
 
 	// The program is parked mid-command: sixty lines printed, no boundary in
@@ -261,11 +334,9 @@ func TestACommandStillRunningReadsBackWhatItHasPrintedSoFar(t *testing.T) {
 	}
 	// Sixty lines on twenty-four rows: sixty minus twenty-four plus the last
 	// line's own newline — thirty-seven departed so far, first line first.
-	if len(rec.Departed) != 37 {
-		t.Fatalf("the open record holds %d departed rows, want the 37 printed so far", len(rec.Departed))
-	}
-	if first, last := obsRowText(rec.Departed[0]), obsRowText(rec.Departed[len(rec.Departed)-1]); first != "L000000" || last != "L000036" {
-		t.Fatalf("the open record's departures run %q..%q, want L000000..L000036", first, last)
+	soFar := streamedTexts(rs)
+	if len(soFar) != 37 || soFar[0] != "L000000" || soFar[len(soFar)-1] != "L000036" {
+		t.Fatalf("the running command has streamed %d rows %q..%q, want the 37 L000000..L000036", len(soFar), soFar[0], soFar[len(soFar)-1])
 	}
 
 	// The command finishes: the fence parks the sighting (observable), the
@@ -286,11 +357,15 @@ func TestACommandStillRunningReadsBackWhatItHasPrintedSoFar(t *testing.T) {
 	// Thirty more lines ran after the read, to the fence: ninety lines on
 	// twenty-four rows — sixty-seven departures, L000000..L000066 — and the
 	// post-fence sentinel's departure is the NEXT record's first.
-	if len(sealed.Departed) != 67 {
-		t.Fatalf("the sealed record holds %d departed rows, want the whole 67 to the fence", len(sealed.Departed))
+	in, end, _, streamed := streamedInterval(rs)
+	if !streamed {
+		t.Fatal("the finished command streamed no end marker")
 	}
-	if last := obsRowText(sealed.Departed[len(sealed.Departed)-1]); last != "L000066" {
-		t.Fatalf("the sealed record's last departure is %q, want L000066", last)
+	if len(in) != 67 || in[len(in)-1] != "L000066" {
+		t.Fatalf("the interval streamed %d rows ending %q, want the whole 67 to the fence ending L000066", len(in), in[len(in)-1])
+	}
+	if end.endRow != 67 {
+		t.Fatalf("the end marker stops at row %d, want 67", end.endRow)
 	}
 	if sealed.Opened != rec.Opened {
 		t.Fatalf("the record changed identity across the boundary: opened %d became %d", rec.Opened, sealed.Opened)

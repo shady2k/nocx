@@ -4,22 +4,22 @@ import "github.com/shady2k/nocx/internal/emulator"
 
 // The observation record (nocx-zg3k3.5.2; ADR-0072, design §6.3): ONE record
 // per authenticated execution interval, owned by the runtime and built ON the
-// cell model. A card in the transcript is one command — the interval between
+// cell model. A block in the transcript is one command — the interval between
 // its authenticated start and its authenticated completion — and only the
 // runtime was there for the whole of it: the screen as the interval opened,
-// the rows the output pushed off the live rectangle while it ran, the screen
-// at the authenticated boundary. A caller that reconstructed the interval
-// after the fact would be guessing at exactly the rows that were no longer
-// visible, and every one of those guesses would be wrong when the output did
-// not fit the screen.
+// and the screen at the authenticated boundary. The rows the output pushed
+// off the live rectangle while it ran are NOT here: since nocx-2v80t.3.6
+// they leave through [Session.SetRowStream] the moment they leave the screen,
+// because the owner's decision gives the helper no copy of them — ghostty's
+// own scrollback is the buffer, and the record keeps boundaries, counts and
+// the two screens only.
 //
 // The record shares the cell vocabulary and the revision identity with the
 // live model and is NOT one object with it (ADR-0072): the live model answers
 // which cells exist at revision R; the record answers what was observed
-// during interval I, including rows no longer in the live rectangle. Its rows
-// are [emulator.Row] — the same cells the frames carry — and it names no
-// wire type of its own; what crosses the wire later is another task's
-// (nocx-2v80t.3.4), and nothing reads these records over any transport yet.
+// during interval I, at its two ends. Its screens are [emulator.Row] — the
+// same cells the frames carry — and it names no wire type of its own; what
+// crosses the wire later is another task's (nocx-2v80t.3.4).
 //
 // A record's interval is a boundary-to-boundary span of the session's one
 // output stream. The first interval opens at the session's first ingest; a
@@ -29,8 +29,8 @@ import "github.com/shady2k/nocx/internal/emulator"
 // output stream cannot tell their bytes apart — the boundaries are what the
 // runtime can honestly see.
 //
-// Nothing here is a wire shape. Opening, Closing and Departed are reads of
-// the emulator's own rows at instants the runtime's lock makes one instant
+// Nothing here is a wire shape. Opening and Closing are reads of the
+// emulator's own rows at instants the runtime's lock makes one instant
 // rather than a span.
 
 // ObservationScreen is one instant of a screen: the whole grid as
@@ -46,8 +46,8 @@ type ObservationScreen struct {
 	Lines     []emulator.Row
 }
 
-// ObservationLoss is what the interval could not hand the record. Each field
-// is one CAUSE — the three the evidence names, not one boolean — and each is
+// ObservationLoss is what the interval could not hand anyone. Each field
+// is one CAUSE — the two the evidence names, not one boolean — and each is
 // a COUNT, because "bounded" and "lost" are claims a reader checks against
 // numbers:
 //
@@ -60,25 +60,31 @@ type ObservationScreen struct {
 //     departures — so the honest count is the FEEDS struck and the bytes
 //     those feeds carried, which is the most output the lost rows could have
 //     been. Attribution is exact: the runtime drains the report after every
-//     ingest, so a hole names the feed that produced it.
+//     ingest, so a hole names the feed that produced it — and the stream
+//     carries the same struck-feed marker on the row batch that follows the
+//     hole (rowstream.go).
 //   - [ObservationLoss.IngestLostBytes]: output lost BEFORE the emulator saw
 //     it — [Session.ReportHole]'s count, exact in bytes, because bytes that
 //     never reached the emulator never became rows to count.
-//   - [ObservationLoss.EvictedRows]: rows the RECORD's own bound pushed out,
-//     oldest first, exactly as many as were dropped, because the record held
-//     them and counted what it let go.
+//
+// There is no eviction cause: the record holds no rows, so nothing is ever
+// pushed out of one.
 type ObservationLoss struct {
 	RetentionFeeds     uint64
 	RetentionFeedBytes uint64
 	IngestLostBytes    uint64
-	EvictedRows        uint64
 }
 
 // ObservationRecord is one authenticated execution interval: the screen the
-// interval opened on, the rows that left the live rectangle while it ran,
-// oldest first, and the screen at the authenticated boundary. While the
-// interval is still running the record is what a reader can honestly claim so
-// far — [ObservationRecord.Open] — and Closing names nothing.
+// interval opened on and the screen at the authenticated boundary, with the
+// losses the interval counted. The rows that departed in between streamed
+// out as they left (rowstream.go); this record is the interval's boundaries,
+// counts and screens — the helper's keyed evidence that the interval ran,
+// not a copy of its output.
+//
+// While the interval is still running the record is what a reader can
+// honestly claim so far — [ObservationRecord.Open] — and Closing names
+// nothing.
 //
 // Opened is the revision the interval's opening screen was read at; Sealed is
 // the revision the authenticated boundary closed it at — the same clock the
@@ -86,9 +92,8 @@ type ObservationLoss struct {
 // interval observed. Nonce is the boundary's meeting; zero while the interval
 // runs. Completeness is what the record may honestly claim, computed at the
 // boundary and never defaulted: the session's own completeness, degraded —
-// never upgraded — by the losses the record carries (retention holes and
-// evictions make [CompletenessEvicted] of a claim that read
-// [CompletenessComplete]).
+// never upgraded — by the losses the record carries (a retention hole makes
+// [CompletenessEvicted] of a claim that read [CompletenessComplete]).
 type ObservationRecord struct {
 	Nonce        FenceNonce
 	At           Incarnation
@@ -96,7 +101,6 @@ type ObservationRecord struct {
 	Sealed       Revision
 	Completeness Completeness
 	Opening      ObservationScreen
-	Departed     []emulator.Row
 	Closing      ObservationScreen
 	Loss         ObservationLoss
 }
@@ -107,14 +111,13 @@ type ObservationRecord struct {
 func (r ObservationRecord) Open() bool { return r.Sealed == 0 }
 
 // observationOpen is the runtime's builder for the interval in flight — the
-// record as it stands, without the boundary that would seal it. It exists so
-// the runtime can drain departures into something at every ingest and hand a
-// so-far read out without manufacturing a boundary.
+// record as it stands, without the boundary that would seal it. The rows
+// that depart during it stream straight out; what accumulates here is the
+// loss counts the stream's markers are folded into.
 type observationOpen struct {
-	Opened   Revision
-	Opening  ObservationScreen
-	Departed []emulator.Row
-	Loss     ObservationLoss
+	Opened  Revision
+	Opening ObservationScreen
+	Loss    ObservationLoss
 }
 
 // takeObservationScreenLocked reads one instant of the emulator. It assumes
@@ -183,20 +186,26 @@ func (s *Session) openObservationLocked() {
 	s.observation = o
 }
 
-// drainObservationLocked moves the emulator's departure report into the open
-// record. It runs under the session lock after every ingest, before the
-// effects that may carry the fence that seals the record — so a feed's own
-// departures belong to the interval that feed belongs to, and a boundary
-// arriving in the same feed seals a record that already holds them.
+// drainObservationLocked moves the emulator's departure report OUT, to the
+// session's row stream (nocx-2v80t.3.6). It runs under the session lock
+// after every ingest, before the effects that may carry the fence that seals
+// the record — so a feed's own departures stream before the end marker of
+// the interval that feed belongs to, and a boundary arriving in the same
+// feed follows every row the feed departed.
 //
 // The runtime is the report's one reader ("a row is reported exactly once
-// and by one reader"): draining at every ingest is what keeps the
-// emulator's own accumulation empty and the record the place the interval's
-// rows live, bounded where the record's bound can count them.
+// and by one reader"): draining at every ingest is what keeps the emulator's
+// own accumulation empty. The rows handed out are the caller's — freshly
+// copied by the port — and nothing of them is kept here; with no stream
+// bound they are read and released, because the report must be emptied
+// either way and ghostty's scrollback is the buffer the owner's decision
+// names.
 //
-// A holed report is recorded as the loss it is, attributed to THIS feed:
-// the rows the emulator could not read are gone, the feeds struck and the
-// bytes they carried are the count the record can honestly state.
+// A holed report is both a loss on the record and a marker on the stream:
+// the feeds struck and the bytes they carried are counted here, and the row
+// batch that follows the hole carries lost=1 (rowstream.go). A feed that
+// departed nothing but was struck still carries its marker, so a hole at the
+// very end of an interval is never silently dropped.
 func (s *Session) drainObservationLocked(feedBytes int) {
 	if s.observation == nil {
 		// No interval is in flight; nothing may claim the report's rows, so
@@ -204,36 +213,32 @@ func (s *Session) drainObservationLocked(feedBytes int) {
 		return
 	}
 	rows, err := s.emulator.DepartedRows()
+	lost := uint64(0)
 	if err != nil {
 		s.observation.Loss.RetentionFeeds++
 		s.observation.Loss.RetentionFeedBytes += uint64(feedBytes) // #nosec G115 -- a feed is len(bytes), never negative
+		lost = 1
 	}
-	if len(rows) == 0 {
+	if len(rows) == 0 && lost == 0 {
 		return
 	}
-	o := s.observation
-	o.Departed = append(o.Departed, rows...)
-	// The record's own bound: past [MaxObservationRows] the OLDEST rows go,
-	// counted, because the newest are the ones a reader of a running or a
-	// finished command still wants and a bound that kept nothing would keep
-	// nothing honestly either.
-	if excess := len(o.Departed) - MaxObservationRows; excess > 0 {
-		o.Loss.EvictedRows += uint64(excess)
-		kept := copy(o.Departed, o.Departed[excess:])
-		o.Departed = o.Departed[:kept]
+	from := s.departedRows
+	s.departedRows += uint64(len(rows)) // #nosec G115 -- len is never negative
+	if rs := s.rowStream; rs != nil {
+		rs.OutputRows(from, rows, lost)
 	}
 }
 
 // observationCompleteness folds a record's losses into the claim it may
 // honestly make. It starts from the session's own completeness — the claim
 // about the stream the runtime has established — and only ever goes DOWN:
-// the two retention causes (the emulator's pruning, the record's own bound)
-// turn a complete claim into [CompletenessEvicted], the enum's name for
-// "retention deliberately kept less than the whole", and nothing here ever
-// raises one or manufactures specificity.
+// the emulator's pruning turns a complete claim into
+// [CompletenessEvicted], the enum's name for "retention deliberately kept
+// less than the whole", and nothing here ever raises one or manufactures
+// specificity.
 func observationCompleteness(session Completeness, loss ObservationLoss) Completeness {
 	c := session
-	if loss.RetentionFeeds > 0 || loss.EvictedRows > 0 {
+	if loss.RetentionFeeds > 0 {
 		// Only a COMPLETE claim degrades to Evicted. LostIngest and NoFence
 		// are already below it and say so; Unknown says nothing about the
 		// stream, and a loss does not make it say more — an eviction is a
@@ -248,13 +253,13 @@ func observationCompleteness(session Completeness, loss ObservationLoss) Complet
 
 // sealObservationLocked closes the interval at an authenticated boundary: the
 // meeting whose two halves JUST joined. The closing screen is read under the
-// same lock the join holds, so the record's two ends are instants and its
-// departed rows are everything the interval pushed off in between. The record
-// that closes opens the next one on the screen it closed on — what the
-// boundary holds is exactly where the next record's story starts — and a
-// command that produced no output at all still leaves a record: the interval
-// ran, the boundary arrived, and the record opens and closes on the same
-// screen with nothing departed.
+// same lock the join holds, so the record's two ends are instants. The end
+// marker follows every row the interval streamed, carrying the screen at the
+// boundary; the record that closes opens the next one on the screen it
+// closed on — what the boundary holds is exactly where the next record's
+// story starts — and a command that produced no output at all still leaves a
+// record: the interval ran, the boundary arrived, and the record opens and
+// closes on the same screen with nothing departed.
 func (s *Session) sealObservationLocked(nonce FenceNonce) {
 	o := s.observation
 	if o == nil {
@@ -270,22 +275,35 @@ func (s *Session) sealObservationLocked(nonce FenceNonce) {
 		Sealed:       s.rev,
 		Completeness: observationCompleteness(s.completeness, o.Loss),
 		Opening:      o.Opening,
-		Departed:     o.Departed,
 		Closing:      ObservationScreen{},
 		Loss:         o.Loss,
 	}
 	if closing, ok := s.takeObservationScreenLocked(); ok {
 		rec.Closing = closing
 	}
+	s.emitIntervalEndLocked(nonce, s.departedRows, rec.Closing.Lines)
 	// The next interval opens on the boundary screen, at the boundary
 	// revision.
 	s.observation = &observationOpen{Opened: rec.Sealed, Opening: rec.Closing}
 	s.storeSealedObservationLocked(rec)
 }
 
+// emitIntervalEndLocked hands the row stream one interval's end marker: the
+// nonce, the absolute row index one past the interval's last departed row,
+// and the closing screen's rows. It is called with the session lock held,
+// after the rows — the emission order is the stream's order (rowstream.go).
+func (s *Session) emitIntervalEndLocked(nonce FenceNonce, endRow uint64, closing []emulator.Row) {
+	if rs := s.rowStream; rs != nil {
+		rs.IntervalEnd(nonce, endRow, closing)
+	}
+}
+
 // storeSealedObservationLocked appends one sealed record to the session's
-// store: bounded by [MaxObservations], the oldest going first, counted —
-// exactly as the rows inside one record are.
+// store: bounded by [MaxObservations], the oldest going first, counted.
+// A record holds boundaries, counts and two screens — no rows — so the
+// bound is the record of a session's intervals at a cost somebody can check,
+// the way every bound in this file is a number rather than a policy
+// statement.
 func (s *Session) storeSealedObservationLocked(rec ObservationRecord) {
 	s.observations = append(s.observations, rec)
 	if excess := len(s.observations) - MaxObservations; excess > 0 {
@@ -297,16 +315,18 @@ func (s *Session) storeSealedObservationLocked(rec ObservationRecord) {
 }
 
 // observationCapture is what a parking sighting took at the fence's instant:
-// the interval's content up to the fence, and the screen as the fence sat on
-// it. The boundary is where the fence sits in the byte stream, so the
-// [Session.Completed] that joins the sighting seals THIS — the screen as it
-// was at the fence — and never a fresh read of a screen the stream has since
-// moved past.
+// the interval's boundaries up to the fence, the losses it had counted, the
+// absolute row index one past its last departed row, and the screen as the
+// fence sat on it. The boundary is where the fence sits in the byte stream,
+// so the [Session.Completed] that joins the sighting seals THIS — the screen
+// as it was at the fence — and never a fresh read of a screen the stream has
+// since moved past. The rows up to the fence are not here either: they
+// streamed when they left; EndRow is what tells the stream where they stop.
 type observationCapture struct {
 	Opened       Revision
 	SightRev     Revision
+	EndRow       uint64
 	Opening      ObservationScreen
-	Departed     []emulator.Row
 	Loss         ObservationLoss
 	Closing      ObservationScreen
 	Completeness Completeness
@@ -314,11 +334,12 @@ type observationCapture struct {
 
 // splitObservationAtFenceLocked takes the boundary capture at a parking
 // sighting and rebases the interval in flight to start here: the capture
-// carries the record content up to the fence and the screen at it; the
-// record in flight keeps collecting the output that FOLLOWS the fence, as
-// the next record, opened at the fence's revision on the fence's screen.
-// The fence itself is painted by nothing, so the closing screen ends where
-// the command's visible output ended.
+// carries the record's boundaries up to the fence, its losses, the row index
+// it had departed to, and the screen at it; the record in flight keeps
+// collecting the output that FOLLOWS the fence, as the next record, opened
+// at the fence's revision on the fence's screen. The fence itself is painted
+// by nothing, so the closing screen ends where the command's visible output
+// ended.
 func (s *Session) splitObservationAtFenceLocked() *observationCapture {
 	o := s.observation
 	if o == nil {
@@ -327,8 +348,8 @@ func (s *Session) splitObservationAtFenceLocked() *observationCapture {
 	cap := &observationCapture{
 		Opened:       o.Opened,
 		SightRev:     s.rev,
+		EndRow:       s.departedRows,
 		Opening:      o.Opening,
-		Departed:     o.Departed,
 		Loss:         o.Loss,
 		Completeness: s.completeness,
 	}
@@ -341,9 +362,12 @@ func (s *Session) splitObservationAtFenceLocked() *observationCapture {
 
 // sealObservationFromCaptureLocked seals the record a parking sighting
 // captured: the content was taken AT the fence, so Sealed is the sighting's
-// revision and nothing is re-read. The interval in flight already IS the
-// next record — the split rebased it at the fence — so this seals the
-// capture and stores it, and touches nothing else.
+// revision and nothing is re-read, and the end marker stops the interval at
+// the row index the sighting measured — the rows that streamed while the
+// authenticated half was on its way belong to the interval that follows.
+// The interval in flight already IS the next record — the split rebased it
+// at the fence — so this seals the capture and stores it, and touches
+// nothing else.
 func (s *Session) sealObservationFromCaptureLocked(nonce FenceNonce, cap *observationCapture) {
 	rec := ObservationRecord{
 		Nonce:        nonce,
@@ -352,10 +376,10 @@ func (s *Session) sealObservationFromCaptureLocked(nonce FenceNonce, cap *observ
 		Sealed:       cap.SightRev,
 		Completeness: observationCompleteness(cap.Completeness, cap.Loss),
 		Opening:      cap.Opening,
-		Departed:     cap.Departed,
 		Closing:      cap.Closing,
 		Loss:         cap.Loss,
 	}
+	s.emitIntervalEndLocked(nonce, cap.EndRow, cap.Closing.Lines)
 	s.storeSealedObservationLocked(rec)
 }
 
@@ -363,34 +387,24 @@ func (s *Session) sealObservationFromCaptureLocked(nonce FenceNonce, cap *observ
 // to the interval in flight. An expired sighting, or one evicted at the
 // bound, was never a boundary — the output it fenced is nobody's but the
 // session's own stream — so the split un-does itself: the record in flight
-// resumes its ORIGINAL opening, the captured departures ahead of the rows
-// that came after the fence, the losses summed, and the whole bounded and
-// counted as any interval's content is.
+// resumes its ORIGINAL opening and the losses summed. The rows need no
+// un-doing: they streamed when they left and their indices never moved, and
+// the interval's end marker will stop at whatever the session has departed
+// to when that boundary finally arrives.
 func (s *Session) returnObservationCaptureLocked(cap *observationCapture) {
 	o := s.observation
 	if o == nil {
 		s.observation = &observationOpen{
-			Opened:   cap.Opened,
-			Opening:  cap.Opening,
-			Departed: cap.Departed,
-			Loss:     cap.Loss,
+			Opened:  cap.Opened,
+			Opening: cap.Opening,
+			Loss:    cap.Loss,
 		}
 		return
 	}
-	merged := make([]emulator.Row, 0, len(cap.Departed)+len(o.Departed))
-	merged = append(merged, cap.Departed...)
-	merged = append(merged, o.Departed...)
-	o.Departed = merged
 	o.Loss.RetentionFeeds += cap.Loss.RetentionFeeds
 	o.Loss.RetentionFeedBytes += cap.Loss.RetentionFeedBytes
 	o.Loss.IngestLostBytes += cap.Loss.IngestLostBytes
-	o.Loss.EvictedRows += cap.Loss.EvictedRows
 	o.Opened, o.Opening = cap.Opened, cap.Opening
-	if excess := len(o.Departed) - MaxObservationRows; excess > 0 {
-		o.Loss.EvictedRows += uint64(excess)
-		kept := copy(o.Departed, o.Departed[excess:])
-		o.Departed = o.Departed[:kept]
-	}
 }
 
 // Observations is every sealed record the session retains, oldest first. The
@@ -433,10 +447,10 @@ func (s *Session) ObservationFor(nonce FenceNonce) (ObservationRecord, bool) {
 	return ObservationRecord{}, false
 }
 
-// OpenObservation answers the interval still running — the record as it
-// stands, its departures drained so far and the screen NOW as its so-far
-// Closing — or false when no interval is in flight. It changes nothing: the
-// read takes the same lock every read takes, and what it hands out is a copy.
+// OpenObservation answers the interval still running — its boundaries, its
+// losses and the screen NOW as its so-far Closing — or false when no
+// interval is in flight. It changes nothing: the read takes the same lock
+// every read takes, and what it hands out is a copy.
 func (s *Session) OpenObservation() (ObservationRecord, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -445,11 +459,11 @@ func (s *Session) OpenObservation() (ObservationRecord, bool) {
 		return ObservationRecord{}, false
 	}
 	rec := ObservationRecord{
-		At:       s.inc,
-		Opened:   o.Opened,
-		Opening:  o.Opening,
-		Departed: o.Departed,
-		Loss:     o.Loss,
+		At:      s.inc,
+		Opened:  o.Opened,
+		Opening: o.Opening,
+		Loss:    o.Loss,
+		Closing: ObservationScreen{},
 	}
 	if scr, ok := s.takeObservationScreenLocked(); ok {
 		rec.Closing = scr
@@ -465,7 +479,6 @@ func (s *Session) OpenObservation() (ObservationRecord, bool) {
 func cloneObservationRecord(r ObservationRecord) ObservationRecord {
 	r.Opening.Lines = cloneObservationRows(r.Opening.Lines)
 	r.Closing.Lines = cloneObservationRows(r.Closing.Lines)
-	r.Departed = cloneObservationRows(r.Departed)
 	return r
 }
 

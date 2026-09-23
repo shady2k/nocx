@@ -58,6 +58,7 @@ var (
 	ErrNotAttached   = errors.New("session: subscriber is not attached")
 	ErrBadSubscriber = errors.New("session: subscriber id is not 32 hex characters")
 	ErrAckAhead      = errors.New("session: ack is ahead of what was produced")
+	ErrConfirmAhead  = errors.New("session: the confirmed-written mark is ahead of what departed")
 	ErrAckBehind     = errors.New("session: ack is behind the current cursor")
 	ErrNoWriter      = errors.New("session: no attachment holds the write capability")
 	ErrNotTheWriter  = errors.New("session: this subscriber does not hold the write capability")
@@ -504,6 +505,7 @@ func (s *Service) Name() string { return proto.ServiceSession }
 func (s *Service) Ops() []string {
 	return []string{
 		proto.OpSpawn, proto.OpSpawnSSH, proto.OpSessions, proto.OpAttach, proto.OpAck,
+		proto.OpConfirmRows,
 		proto.OpDetach, proto.OpResize, proto.OpCloseSession, proto.OpSignal,
 		proto.OpAdoptLifecycle, proto.OpLifecycleComplete, proto.OpScreen, proto.OpReplay,
 		proto.OpSnapshot, proto.OpTarget, proto.OpIntent, proto.OpIntentStatus, proto.OpAccessBump,
@@ -522,6 +524,8 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.AttachParams{})
 	case proto.OpAck:
 		return host.SchemaFor(proto.AckParams{})
+	case proto.OpConfirmRows:
+		return host.SchemaFor(proto.ConfirmRowsParams{})
 	case proto.OpDetach:
 		return host.SchemaFor(proto.DetachParams{})
 	case proto.OpResize:
@@ -669,6 +673,20 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			}
 		}
 		return proto.AckResult{}, nil
+	case proto.OpConfirmRows:
+		var p proto.ConfirmRowsParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		hs, err := s.find(p.Session)
+		if err != nil {
+			return nil, err
+		}
+		sink, _ := host.ConnectionFrom(ctx).(Sink)
+		if err := hs.confirmRows(sink, p.Subscriber, p.UpToRow); err != nil {
+			return nil, err
+		}
+		return proto.ConfirmRowsResult{}, nil
 	case proto.OpScreen:
 		var p proto.ScreenParams
 		if err := decode(params, &p); err != nil {
@@ -1288,10 +1306,16 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		launch:          launch,
 		subs:            make(map[proto.SubscriberID]*subscriber),
 		attachments:     make(map[proto.AttachmentID]*attachment),
+		rowCh:           make(chan rowEmission, 256),
+		rowsDone:        make(chan struct{}),
 	}
 	// The book's tokens report themselves under this session's id — minted
 	// one line above, so it could not be named at newTokenBook time.
 	tokens.bindSession(hs.id)
+	// The row stream bridge (nocx-2v80t.3.6), bound like SetReplies before
+	// anything can read the process: the pump starts before owner.run does,
+	// so the first feed's departures already have somewhere to go.
+	rt.SetRowStream(&rowBridge{hs: hs})
 
 	s.mu.Lock()
 	s.sessions[hs.id.Session] = hs
@@ -1302,6 +1326,7 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 	*spawned = true
 	s.mu.Unlock()
 	go owner.run()
+	go hs.serveRows()
 	if lifecycleCarrier != nil {
 		go hs.lifecyclePump(lifecycleCarrier)
 	}

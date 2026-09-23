@@ -244,15 +244,27 @@ type Session struct {
 	ingestLost uint64
 
 	// The observation record (nocx-zg3k3.5.2): observation is the interval
-	// in flight — its opening screen, the departures drained into it at
-	// every ingest, the losses it has counted; observations are the records
-	// authenticated boundaries have sealed, oldest first, bounded by
-	// [MaxObservations] with the evictions counted in observationsEvicted.
-	// All three are guarded by mu, like everything else here, and the reads
-	// that hand records out live in observation.go.
+	// in flight — its opening screen and the losses it has counted (the
+	// departed rows themselves leave through rowStream, nocx-2v80t.3.6;
+	// the helper keeps no copy); observations are the records authenticated
+	// boundaries have sealed, oldest first, bounded by [MaxObservations]
+	// with the evictions counted in observationsEvicted. All three are
+	// guarded by mu, like everything else here, and the reads that hand
+	// records out live in observation.go.
 	observation         *observationOpen
 	observations        []ObservationRecord
 	observationsEvicted uint64
+	// rowStream is where departed rows leave the session as they leave the
+	// screen, and IntervalEnd joins them. Nil is ordinary — nobody is
+	// watching — and never loses the indices: departedRows keeps counting
+	// (rowstream.go).
+	rowStream RowStream
+	// departedRows is how many departed rows this session has READ off the
+	// emulator's report, in the order it read them. It is the absolute
+	// index space the stream's FromRow and endRow name rows by — the
+	// session's, not any consumer's, so it advances whether or not a row
+	// stream is bound.
+	departedRows uint64
 	// obsCarried is how much of ingestLost some observation record already
 	// carries: a hole reported before the first ingest, or in the gap
 	// between one sealed interval and the next output, reaches no record at

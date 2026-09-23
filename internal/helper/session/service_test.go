@@ -255,6 +255,9 @@ func (s *recordingSink) SendNotification(n proto.Notification) error {
 	return nil
 }
 
+func (s *recordingSink) SendOutputRows(proto.OutputRowsFrame) error   { return nil }
+func (s *recordingSink) SendIntervalEnd(proto.IntervalEndFrame) error { return nil }
+
 func (s *recordingSink) SendLifecycleData(f proto.SessionFrame) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1082,6 +1085,12 @@ func TestTheServiceIsNamedAfterTheReservedNameAndTakesNoArgv(t *testing.T) {
 		// hex nonce and a nullable number — scalars all, and no free-form
 		// []string, which is the rule this list exists to hold.
 		proto.OpLifecycleComplete: true,
+		// The confirmed-written mark's acknowledgement (nocx-2v80t.3.6):
+		// the coordinator advances the helper's one record of what it
+		// holds. Its params are a session handle, a subscriber id and a
+		// row index — scalars all, and no free-form []string, which is
+		// the rule this list exists to hold.
+		proto.OpConfirmRows: true,
 	}
 	for _, op := range svc.Ops() {
 		if !want[op] {

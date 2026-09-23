@@ -156,6 +156,28 @@ func encodeRow(row emulator.Row) (frameRow, error) {
 	return out, nil
 }
 
+// EncodeRows renders departed rows as the frame contract's rows array —
+// the same cells-as-tuples, styles-as-runs encoding EncodeFrame gives a
+// snapshot, against the same $defs the contract declares (nocx-2v80t.3.6).
+// The rows that stream to a coordinator ride in this shape, so the block a
+// coordinator stores from the stream and the live frame it paints from are
+// ONE vocabulary, encoded by ONE encoder.
+func EncodeRows(rows []emulator.Row) ([]byte, error) {
+	out := make([]frameRow, 0, len(rows))
+	for _, row := range rows {
+		encoded, err := encodeRow(row)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, encoded)
+	}
+	raw, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("sessionruntime: marshal rows: %w", err)
+	}
+	return raw, nil
+}
+
 func encodeStyle(style emulator.Style) frameStyle {
 	return frameStyle{
 		Foreground:     encodeColor(style.Foreground),

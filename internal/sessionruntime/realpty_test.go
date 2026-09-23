@@ -221,6 +221,14 @@ type programSession struct {
 // output in. The script is expected to begin with rawPreamble (or do the
 // equivalent), because each of these programs is driven with bytes.
 func startProgram(t *testing.T, script string, g Geometry) *programSession {
+	return startProgramRows(t, script, g, nil)
+}
+
+// startProgramRows is startProgram with the session's row stream bound
+// between the runtime's construction and the first byte of output — the
+// only window in which no row can have departed unwitnessed. The streaming
+// acceptance (nocx-2v80t.3.6) is judged on a real command's rows this way.
+func startProgramRows(t *testing.T, script string, g Geometry, rs RowStream) *programSession {
 	t.Helper()
 	cols, rows, xPixels, yPixels, err := ptySize(g)
 	if err != nil {
@@ -260,6 +268,9 @@ func startProgram(t *testing.T, script string, g Geometry) *programSession {
 	})
 	if err != nil {
 		t.Fatalf("build the runtime over the real pair: %v", err)
+	}
+	if rs != nil {
+		s.SetRowStream(rs)
 	}
 	done, changed := feedFrom(t, lp, s)
 	return &programSession{t: t, s: s, ctrl: sessionControl(t, s), done: done, changed: changed}

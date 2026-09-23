@@ -185,8 +185,10 @@ import {
   type InputPresentation,
   type DesiredMode,
 } from './capability'
-import { createCellModel, type CellModel } from './cell-model'
+import { createCellModel, type CellModel, type ScreenSnapshot } from './cell-model'
 import type { SessionFrame } from './generated/session.frame'
+import { createCellPainter, metricOf, type CellPainter } from './painter/painter'
+import { createCellFit, type CellFit } from './scrollback/cell-fit'
 
 // ── The pane's screen-plane test seam (nocx-zg3k3.2.8) ─────────────────────
 // An e2e spec reads the ACTIVE pane's cell model through
@@ -1365,9 +1367,23 @@ export class TerminalContent extends BasePaneContent {
   private _paneTarget: HTMLElement | null = null
   /** The pane's cell model (nocx-zg3k3.2.8): the client's picture of the
    *  screen, fed by the session's screen frames — one per pane, created
-   *  when the pane binds a session, fed by nothing else. Nothing paints
-   *  from it yet; the byte path and xterm are untouched. */
+   *  when the pane binds a session, fed by nothing else. */
   private _cellModel: CellModel | null = null
+  /** The live region's painter (nocx-zg3k3.2.5): what a person SEES of the
+   *  screen, drawing the model's revisions. Created at mount — the pane has
+   *  a live region before it has a session — and fed by the one frame
+   *  handler below. */
+  private _painter: CellPainter | null = null
+  /** The surface element the painter paints into, held for disposal. */
+  private _painterSurface: HTMLElement | null = null
+  /** THE measuring authority the frozen blocks publish for (cell-fit.ts):
+   *  one probe, one signature, shared with the freeze path. */
+  private _cellFit: CellFit | null = null
+  /** The frame batch: revisions can land several to a tick, and the DOM
+   *  work is bounded to one painted state per animation frame — the latest
+   *  revision, never an intermediate one nobody could have seen. */
+  private _pendingPaint: ScreenSnapshot | null = null
+  private _paintFrameHandle = 0
   // The last thing the backend said about REACHING this pane's host, and the
   // corner mark drawn from it. Null liveness is the ordinary state of a local
   // pane: this machine is never probed, so there is nothing to say about
@@ -2394,7 +2410,16 @@ export class TerminalContent extends BasePaneContent {
       }
 
       log.info('nocx: creating renderer')
-      const renderer = new XtermRenderer()
+      // THE CUTOVER'S INTERIM (nocx-zg3k3.2.5): xterm is the live region's
+      // INVISIBLE input layer. The screen arrives as frames and the painter
+      // below draws them; xterm keeps the byte path — the program's modes
+      // (bracketed paste, mouse reporting, application cursor keys) live in
+      // its parser — and every keyboard, IME, paste and pointer event. It
+      // draws nothing: no visual renderer is constructed, and whatever its
+      // built-in DOM renderer still maintains is hidden by the stylesheet's
+      // occlusion rule. Removed with xterm itself when input becomes intent
+      // and selection gets its own model; nothing new builds on it.
+      const renderer = new XtermRenderer({ occluded: true })
       const agentClient = new AgentClient(this.client.dispatcher)
       this.dumpSource = (entryId) => agentClient.dump(entryId)
       // The snippet palette chord (⌥⌘P) at the xterm boundary: the renderer
@@ -2440,6 +2465,36 @@ export class TerminalContent extends BasePaneContent {
         // bytes (nocx-hp8p2.13).
         toolResult: (actionEntryId) => toolResultForEntry(this.client, actionEntryId),
         runningActions: this.runningActions,
+      })
+
+      // ── THE LIVE REGION'S PAINTER (nocx-zg3k3.2.5) ─────────────────────
+      // What a person SEES in the live region is the cell painter drawing
+      // the model's revisions (the backend's frames). The surface is the
+      // FIRST child of the grid wrapper the echo shift translates
+      // (controller._applyEchoShift owns that transform), so the painted
+      // rows move with the grid; renderer.mount below appends xterm's root
+      // AFTER it, which puts the invisible input layer on top — the painter
+      // shows through it, and pointer events (focus, mouse reporting)
+      // reach xterm exactly as they did before the cutover.
+      const painterSurface = document.createElement('div')
+      const mountTarget = this.scrollback.mountTarget
+      mountTarget.insertBefore(painterSurface, mountTarget.firstChild)
+      this._painterSurface = painterSurface
+      // THE measuring authority, shared with the frozen blocks: the probe
+      // lives on the scrollback stack, where cell-metric publishes
+      // --term-cell-width / --term-cell-delta, and takes its signature from
+      // a .term-line — one owner of "does this cell land on the grid", per
+      // the design's measurement seam. begin() runs per apply: mount, font
+      // loads, zoom and dpr changes move the published numbers, and a
+      // verdict must never outlive the numbers it was measured with.
+      this._cellFit = createCellFit(() => this.scrollback?.scrollbackInner ?? null)
+      this._painter = createCellPainter({
+        surface: painterSurface,
+        metric: () => {
+          const fit = this._cellFit
+          if (fit === null || !fit.begin()) return null
+          return metricOf(fit)
+        },
       })
 
       // ── Pane context strip (decision 2026-09-15-terminal-screen-mockup-
@@ -3992,6 +4047,13 @@ export class TerminalContent extends BasePaneContent {
       // so a dims change that produced no new report sends nothing.
       renderer.onCellDimsChange(() => {
         this._scheduleResizeReport()
+        // AND THE PAINTED SPACING FOLLOWS THE METRIC: a changed cell metric
+        // re-verdicts every run's spacing (rule 1's output is painted
+        // output), so the installed revision is repainted under the new
+        // numbers without waiting for the runtime's next frame to re-bind
+        // the mapping.
+        const installed = this._cellModel?.current() ?? null
+        if (installed !== null) this._paintFrame(installed)
       })
 
       this.renderer = renderer
@@ -4575,6 +4637,11 @@ export class TerminalContent extends BasePaneContent {
             pane: this.pane.paneId,
             refusal: result.refusal,
           })
+        } else {
+          // THE PAINTER'S ONLY FEED: one accepted revision joins the
+          // animation-frame batch. A refused frame changes nothing, here
+          // as in the model — the installed revision stays what is painted.
+          this._paintFrame(result.snapshot)
         }
       } catch (err) {
         // apply refuses malformed shapes, but a document hostile enough to
@@ -4801,6 +4868,30 @@ export class TerminalContent extends BasePaneContent {
       // itself several seconds after the program started.
       this.scrollback.setLiveHeight(this.renderer.liveContentHeight())
       this.refitIfResized()
+    })
+  }
+
+  /**
+   * The painter's one feed: join a revision to the batch, paint the LATEST
+   * one per animation frame.
+   *
+   * Frames arrive coalesced per revision (AD-10's delivery classes), but
+   * several can still land in one tick — a program repainting at full speed
+   * publishes faster than frames come. Painting each revision as it arrives
+   * would spend DOM work on states nobody could have seen; painting only
+   * the latest bounds the work to one pass per frame, which is the acceptance
+   * criterion's "changes batched into animation frames". The row-level diff
+   * inside the painter makes the pass cheap: an unchanged row keeps its DOM.
+   */
+  private _paintFrame(snapshot: ScreenSnapshot): void {
+    this._pendingPaint = snapshot
+    if (this._paintFrameHandle !== 0) return
+    this._paintFrameHandle = requestAnimationFrame(() => {
+      this._paintFrameHandle = 0
+      const pending = this._pendingPaint
+      this._pendingPaint = null
+      if (pending === null || this._disposed) return
+      this._painter?.apply(pending)
     })
   }
 
@@ -7607,6 +7698,21 @@ export class TerminalContent extends BasePaneContent {
     this._reconnectAbort?.abort()
     this._offer?.dispose()
     this._offer = null
+    // The painter dies before the input layer that sits above it: the
+    // batch's pending frame is cancelled (a callback landing on a disposed
+    // pane is a leak, not a paint), the fit's probe and font listener leave
+    // the DOM and the document, and the surface goes with the pane.
+    if (this._paintFrameHandle !== 0) {
+      cancelAnimationFrame(this._paintFrameHandle)
+      this._paintFrameHandle = 0
+    }
+    this._pendingPaint = null
+    this._painter?.dispose()
+    this._painter = null
+    this._painterSurface?.remove()
+    this._painterSurface = null
+    this._cellFit?.dispose()
+    this._cellFit = null
     this.renderer?.dispose()
     this.editor?.dispose()
     this.recall?.destroy()

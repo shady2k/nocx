@@ -15610,3 +15610,144 @@ describe('the pane receives the screen plane into its cell model (nocx-zg3k3.2.8
     }
   })
 })
+// ═══════════════════════════════════════════════════════════════════════════
+// The live region is the painter picture (nocx-zg3k3.2.5)
+// ═══════════════════════════════════════════════════════════════════════════
+// The cutover: what a person sees in the live region is the cell painter
+// drawing the backend frames, and xterm paints nothing. These tests read the
+// DOM a person eyes reach — the painted grid inside the live container, the
+// cursor overlay placed by THE mapping over the committed geometry, and the
+// occluded xterm root that must not draw. Every wait is on painted DOM
+// state, never on a duration.
+
+describe('the live region is the painter picture (nocx-zg3k3.2.5)', () => {
+  const liveRegionOf = (pane: HTMLElement): HTMLElement =>
+    pane.querySelector('.xterm-live-container') as HTMLElement
+
+  it('paints frame rows into the live region with the cursor on the committed geometry', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      tab.pane.classList.add('active')
+      const session: SessionFake = client._sessions[0]
+      const live = liveRegionOf(tab.pane)
+      // Before any frame nothing is PAINTED: the painter's surface exists
+      // from mount (it is the live region's picture plane), but it holds
+      // only the cursor overlay — no rows, no xterm canvas.
+      expect(live.querySelectorAll('.term-grid-row').length).toBe(0)
+      session.fireScreenFrame(screenFrame(7, ['PROMPT$ ls', 'NOCX-PAINTED-1']))
+      // The wait is on the PAINTED state: the grid surface exists from
+      // mount, so the rows are the thing that can only be there once a
+      // frame has been applied.
+      const rows = await vi.waitFor(() => {
+        const painted = [...live.querySelectorAll('.term-grid-row')]
+        expect(painted.length).toBe(SCREEN_ROWS)
+        return painted
+      })
+      expect(rows[0].textContent?.startsWith('PROMPT$ ls')).toBe(true)
+      expect(rows[1].textContent?.includes('NOCX-PAINTED-1')).toBe(true)
+
+      // The grid is the painter's surface, inside the live container.
+      const grid = live.querySelector<HTMLElement>('.term-grid')!
+      expect(grid).not.toBeNull()
+
+      // THE CURSOR RIDES THE COMMITTED GEOMETRY: cell (0, 0) of an 8x16
+      // device-pixel frame at the fixture dpr-1 identity is a zero offset,
+      // and the overlay is exactly one CSS cell.
+      const cursor = grid.querySelector<HTMLElement>('.term-grid-cursor')
+      expect(cursor).not.toBeNull()
+      expect(cursor!.hidden).toBe(false)
+      expect(cursor!.style.left).toBe('0px')
+      expect(cursor!.style.width).toBe('8px')
+      expect(cursor!.style.height).toBe('16px')
+
+      // AND THE INPUT LAYER IS THE OCCLUDED ONE: the composition constructs
+      // xterm WITH occluded. What that option buys — no visual renderer
+      // constructed, the root marked — is asserted against the real class
+      // in renderers/xterm.test.ts; this file's renderer is the shared
+      // mock, which records how it was constructed and builds no DOM.
+      // Dynamic import because vi.mock replaces the module before static
+      // imports resolve — the file's established way to reach the mock.
+      const { XtermRenderer } = await import('./renderers/xterm')
+      expect(vi.mocked(XtermRenderer)).toHaveBeenCalledWith(
+        expect.objectContaining({ occluded: true }),
+      )
+    } finally {
+      debug.mockRestore()
+      teardown()
+    }
+  })
+
+  it('repaints only the rows that changed and reuses the rest', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      tab.pane.classList.add('active')
+      const session: SessionFake = client._sessions[0]
+      const live = liveRegionOf(tab.pane)
+      session.fireScreenFrame(screenFrame(7, ['PROMPT$ ls', 'NOCX-REUSE-1']))
+      await vi.waitFor(() => {
+        expect(live.querySelectorAll('.term-grid-row').length).toBe(SCREEN_ROWS)
+      })
+      const before = [...live.querySelectorAll('.term-grid-row')]
+
+      // One row changed. The changed row is rebuilt; every unchanged row
+      // keeps its DOM — the node reuse the frame budget is measured on.
+      session.fireScreenFrame(screenFrame(8, ['PROMPT$ ls', 'NOCX-REUSE-2']))
+      await vi.waitFor(() => {
+        const second = live.querySelectorAll('.term-grid-row')[1]
+        expect(second.textContent).toContain('NOCX-REUSE-2')
+      })
+      const after = [...live.querySelectorAll('.term-grid-row')]
+      expect(after.length).toBe(SCREEN_ROWS)
+      expect(after[0]).toBe(before[0])
+      expect(after[1]).not.toBe(before[1])
+      expect(after[3]).toBe(before[3])
+    } finally {
+      debug.mockRestore()
+      teardown()
+    }
+  })
+
+  it('batches a same-tick burst of frames into one painted state', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      tab.pane.classList.add('active')
+      const session: SessionFake = client._sessions[0]
+      const live = liveRegionOf(tab.pane)
+      session.fireScreenFrame(screenFrame(7, ['BURST-BASE-0']))
+      await vi.waitFor(() => {
+        expect(live.textContent).toContain('BURST-BASE-0')
+      })
+
+      // Two frames in one tick: nothing paints synchronously, and what
+      // lands is the LATEST revision only.
+      session.fireScreenFrame(screenFrame(8, ['BURST-MID-8']))
+      session.fireScreenFrame(screenFrame(9, ['BURST-LAST-9']))
+      expect(live.textContent).not.toContain('BURST-LAST-9')
+      await vi.waitFor(() => {
+        expect(live.textContent).toContain('BURST-LAST-9')
+      })
+      expect(live.textContent).not.toContain('BURST-MID-8')
+    } finally {
+      debug.mockRestore()
+      teardown()
+    }
+  })
+})

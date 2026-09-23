@@ -645,6 +645,21 @@
   min-height: auto;
 }
 
+/* THE OCCLUDED INPUT LAYER (nocx-zg3k3.2.5). The cutover's interim: xterm
+   stays in the live region to receive what the person does and the bytes
+   that set the program's modes, and draws NOTHING — the cell painter
+   (.term-grid) draws the screen. The mark is on xterm's own root (renderers/
+   xterm.ts), set only when the renderer was built occluded, so no renderer
+   a person can see ever carries it. `opacity` and not `display`/`visibility`:
+   the layer must keep receiving pointer events (focus, mouse reporting) and
+   keep its helper textarea focusable for IME — hidden-but-hit-testable is
+   the whole point. Its DOM renderer still maintains its viewport-sized row
+   set underneath; that bounded cost is the interim's, paid until xterm is
+   removed (ADR-0072's order). */
+.xterm.xterm-occluded {
+  opacity: 0;
+}
+
 /* Alt-screen: the pane belongs to the program, so everything the block layer
    draws steps aside and only the live region is left.
 
